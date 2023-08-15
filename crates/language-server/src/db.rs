@@ -22,25 +22,14 @@ pub struct Jar(crate::diagnostics::file_line_starts);
 
 pub trait LanguageServerDb:
     salsa::DbWithJar<Jar> + HirAnalysisDb + HirDb + LowerHirDb + SpannedHirDb + InputDb
-{
-    // fn as_spanned_hir_db(&self) -> &dyn SpannedHirDb
-    // where
-    //     Self: Sized,
-    // {
-    //     self
-    // }
-}
+{ }
 
 impl<DB> LanguageServerDb for DB where
     DB: Sized + salsa::DbWithJar<Jar> + HirAnalysisDb + HirDb + LowerHirDb + SpannedHirDb + InputDb
-{
-    // fn as_spanned_hir_db(&self) -> &dyn SpannedHirDb {
-    //     self
-    // }
-}
+{ }
 
 
-#[salsa::db(common::Jar, hir::Jar, hir_analysis::Jar, Jar)]
+#[salsa::db(common::Jar, hir::Jar, hir::LowerJar, hir::SpannedJar, hir_analysis::Jar, Jar)]
 pub struct LanguageServerDatabase {
     storage: salsa::Storage<Self>,
     diags: Vec<Box<dyn DiagnosticVoucher>>,
@@ -116,9 +105,9 @@ impl LanguageServerDatabase {
     }
 }
 
-impl HirDb for LanguageServerDatabase {}
-impl SpannedHirDb for LanguageServerDatabase {}
-impl LowerHirDb for LanguageServerDatabase {}
+// impl HirDb for LanguageServerDatabase {}
+// impl SpannedHirDb for LanguageServerDatabase {}
+// impl LowerHirDb for LanguageServerDatabase {}
 impl salsa::Database for LanguageServerDatabase {
     fn salsa_event(&self, _: salsa::Event) {}
 }

@@ -6,7 +6,7 @@ use hir::{
 };
 // use hir_analysis::{name_resolution::EarlyResolvedPath, HirAnalysisDb};
 
-use crate::db::LanguageServerDatabase;
+use crate::db::{LanguageServerDatabase, LanguageServerDb};
 use common::diagnostics::Span;
 use hir::span::LazySpan;
 
@@ -16,7 +16,7 @@ pub(crate) type GotoPathMap = FxHashMap<Span, GotoEnclosingPath>;
 pub struct PathSpanCollector<'db> {
     // You don't need to collect scope id basically.
     path_map: GotoPathMap,
-    db: &'db LanguageServerDatabase,
+    db: &'db dyn LanguageServerDb,
 }
 
 impl<'db> PathSpanCollector<'db> {
