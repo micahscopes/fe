@@ -1,5 +1,6 @@
 use std::io::BufRead;
 
+use hir_analysis::name_resolution::EarlyResolvedPath;
 use lsp_server::Response;
 use serde::Deserialize;
 
@@ -32,9 +33,20 @@ pub(crate) fn handle_hover(
     let file_path = std::path::Path::new(file_path);
     let top_mod = state.db.top_mod_from_file(file_path, file_text.as_str());
     let goto_info = goto_enclosing_path(&mut state.db, top_mod, cursor);
-    let (path_id, scope_id) = goto_info.map_or((None, None),
-        |(path_id, scope_id)| (Some(path_id), Some(scope_id))
-    );
+    
+    let goto_info = match goto_info {
+        Some(EarlyResolvedPath::Full(bucket)) => {
+            bucket.iter().map(|x| x.pretty_path(&state.db).unwrap()).collect::<Vec<_>>()
+            .join("\n")
+            
+        },
+        Some(EarlyResolvedPath::Partial { res, unresolved_from }) => {
+            res.pretty_path(&state.db).unwrap()
+        },
+        None => {
+            String::from("\n\nNo goto info available")
+        }
+    };
 
     let result = lsp_types::Hover {
         contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent::from(
@@ -44,8 +56,7 @@ pub(crate) fn handle_hover(
                     "### Hovering over:\n```{}```\n\n{}\n\n### Goto Info: {}\n",
                     &line,
                     serde_json::to_string_pretty(&params).unwrap(),
-                    // scope_id
-                    format!("\npath_id: {:?}\nscope_id: {:?}", path_id, scope_id)
+                    goto_info,
                 ),
             },
         )),

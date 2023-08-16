@@ -1,0 +1,6 @@
+struct Foo {}
+struct Bar {}
+
+let x: Foo
+//      ^
+let y: Bar
