@@ -4,9 +4,7 @@ use hir_analysis::name_resolution::EarlyResolvedPath;
 use lsp_server::Response;
 use serde::Deserialize;
 
-use hir::HirDb;
-
-use crate::{state::ServerState, goto::{goto_enclosing_path, self, Cursor}};
+use crate::{state::ServerState, goto::{goto_enclosing_path, Cursor}, util::position_to_offset};
 
 pub(crate) fn handle_hover(
     state: &mut ServerState,
@@ -29,7 +27,8 @@ pub(crate) fn handle_hover(
 
     let file_text = std::fs::read_to_string(file_path)?;
 
-    let cursor: Cursor = params.text_document_position_params.position.character.into();
+    // let cursor: Cursor = params.text_document_position_params.position.into();
+    let cursor: Cursor = position_to_offset(params.text_document_position_params.position, file_text.as_str());
     let file_path = std::path::Path::new(file_path);
     let top_mod = state.db.top_mod_from_file(file_path, file_text.as_str());
     let goto_info = goto_enclosing_path(&mut state.db, top_mod, cursor);
@@ -44,7 +43,7 @@ pub(crate) fn handle_hover(
             res.pretty_path(&state.db).unwrap()
         },
         None => {
-            String::from("\n\nNo goto info available")
+            String::from("No goto info available")
         }
     };
 
@@ -53,7 +52,7 @@ pub(crate) fn handle_hover(
             lsp_types::MarkupContent {
                 kind: lsp_types::MarkupKind::Markdown,
                 value: format!(
-                    "### Hovering over:\n```{}```\n\n{}\n\n### Goto Info: {}\n",
+                    "### Hovering over:\n```{}```\n\n{}\n\n### Goto Info: \n\n{}",
                     &line,
                     serde_json::to_string_pretty(&params).unwrap(),
                     goto_info,

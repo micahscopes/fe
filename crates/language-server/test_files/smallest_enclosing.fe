@@ -3,6 +3,5 @@ struct Bar {}
 
 fn main() {
     let x: Foo
-//      ^
     let y: Bar
 }

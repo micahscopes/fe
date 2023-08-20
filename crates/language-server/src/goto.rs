@@ -52,10 +52,9 @@ fn smallest_enclosing_path(cursor: Cursor, path_map: &GotoPathMap) -> Option<Got
     let mut smallest_range_size = None;
 
     for (span, enclosing_path) in path_map {
-        // print the span and enclosing path
         if span.range.contains(cursor) {
             let range_size = span.range.end() - span.range.start();
-            if range_size < smallest_range_size.unwrap() {
+            if smallest_range_size.is_none() || range_size < smallest_range_size.unwrap() {
                 smallest_enclosing_path = Some(*enclosing_path);
                 smallest_range_size = Some(range_size);
             }
@@ -78,10 +77,10 @@ pub fn goto_enclosing_path(db: &mut LanguageServerDatabase, top_mod: TopLevelMod
     // Find the path that encloses the cursor.
     let goto_path = smallest_enclosing_path(cursor, &path_map)?;
 
-    let (path_id, scope) = goto_path;
+    let (path_id, scope_id) = goto_path;
 
     // Resolve path.
-    let resolved_path = hir_analysis::name_resolution::resolve_path_early(db, path_id, scope);
+    let resolved_path = hir_analysis::name_resolution::resolve_path_early(db, path_id, scope_id);
 
     Some(resolved_path)
 }
@@ -93,22 +92,21 @@ mod tests {
     use dir_test::{dir_test, Fixture};
     use std::path::Path;
 
-    fn extract_multiple_cursor_positions_from_comments(content: &str) -> Vec<rowan::TextSize> {
-        let lines: Vec<&str> = content.lines().collect();
-        let mut cursor_positions = Vec::new();
+    fn extract_multiple_cursor_positions_from_spans(db: &mut LanguageServerDatabase, top_mod: TopLevelMod) -> Vec<rowan::TextSize> {
+        let mut visitor_ctxt = VisitorCtxt::with_top_mod(db.as_hir_db(), top_mod);
+        let mut path_collector = PathSpanCollector::new(&db);
+        path_collector.visit_top_mod(&mut visitor_ctxt, top_mod);
 
-        // Find the indices of the lines with the cursor marker
-        let cursor_line_indices: Vec<usize> = lines.iter().enumerate()
-            .filter_map(|(i, &line)| if line.trim() == "^" { Some(i) } else { None })
-            .collect();
+        let path_map = path_collector.path_map;
 
-        for &cursor_line_index in cursor_line_indices.iter() {
-            let actual_line = lines[cursor_line_index - 1];
-            let cursor_index = lines[cursor_line_index].chars().position(|ch| ch == '^').unwrap();
-            cursor_positions.push(rowan::TextSize::from((actual_line.len() + cursor_index) as u32));
+        let mut cursors = Vec::new();
+        for (span, _) in path_map {
+            let cursor = span.range.start();
+            // println!("cursor from span: {:?}, {:?}", span, cursor);
+            cursors.push(cursor);
         }
 
-        cursor_positions
+        cursors
     }
 
     
@@ -122,26 +120,36 @@ mod tests {
         let path = Path::new(fixture.path());
         let top_mod = db.top_mod_from_file(path, fixture.content());
 
-        let cursor = extract_multiple_cursor_positions_from_comments(fixture.content());
+        let cursors = extract_multiple_cursor_positions_from_spans(&mut db, top_mod);
         
-        let result = cursor.iter().map(|cursor| {
+        let mut cursor_path_map: FxHashMap<Cursor, String> = FxHashMap::default();
+
+        cursors.iter().for_each(|cursor| {
             let resolved_path = goto_enclosing_path(&mut db, top_mod, *cursor);
 
-            let res = match resolved_path {
+            match resolved_path {
                 Some(path) => match path {
                     EarlyResolvedPath::Full(bucket) => {
-                        bucket.iter().map(|x| x.pretty_path(&db).unwrap()).collect::<Vec<_>>()
-                        .join("\n")
+                        let path = bucket.iter().map(|x| x.pretty_path(&db).unwrap()).collect::<Vec<_>>()
+                        .join("\n");
+                        cursor_path_map.insert(*cursor, path);
                     },
                     EarlyResolvedPath::Partial { res, unresolved_from } => {
-                        res.pretty_path(&db).unwrap()
+                        let path = res.pretty_path(&db).unwrap();
+                        cursor_path_map.insert(*cursor, path);
                     },
-                }
-                None => String::from("No path found"),
+                },
+                None => {},
             };
-            res
-        }).collect::<Vec<_>>().join("\n");
+        });
 
+        let result = format!(
+            "{}\n---\n{}",
+            fixture.content(),
+            cursor_path_map.iter().map(|(cursor, path)| {
+                format!("cursor position: {:?}, path: {}", cursor, path)
+            }).collect::<Vec<_>>().join("\n")
+        );
         snap_test!(result, fixture.path());
     }
 
@@ -154,23 +162,39 @@ mod tests {
         let path = Path::new(fixture.path());
         let top_mod = db.top_mod_from_file(path, fixture.content());
 
-        let cursors = extract_multiple_cursor_positions_from_comments(fixture.content());
+        let cursors = extract_multiple_cursor_positions_from_spans(&mut db, top_mod);
+        
+        let mut cursor_path_map: FxHashMap<Cursor, String> = FxHashMap::default();
 
-        let result = cursors.iter().map(|cursor| {
+        cursors.iter().for_each(|cursor| {
             let mut visitor_ctxt = VisitorCtxt::with_top_mod(db.as_hir_db(), top_mod);
             let mut path_collector = PathSpanCollector::new(&db);
             path_collector.visit_top_mod(&mut visitor_ctxt, top_mod);
 
             let path_map = path_collector.path_map;
             let enclosing_path = smallest_enclosing_path(*cursor, &path_map);
-
-            let res = match enclosing_path {
-                Some(path) => format!("{:?}", path),
-                None => String::from("No path found"),
+            
+            let resolved_enclosing_path = hir_analysis::name_resolution::resolve_path_early(&mut db, enclosing_path.unwrap().0, enclosing_path.unwrap().1);
+            
+            let res = match resolved_enclosing_path {
+                EarlyResolvedPath::Full(bucket) => {
+                    bucket.iter().map(|x| x.pretty_path(&db).unwrap()).collect::<Vec<_>>()
+                    .join("\n")
+                },
+                EarlyResolvedPath::Partial { res, unresolved_from } => {
+                    res.pretty_path(&db).unwrap()
+                },
             };
-            res
-        }).collect::<Vec<_>>().join("\n");
+            cursor_path_map.insert(*cursor, res);
+        });
 
+        let result = format!(
+            "{}\n---\n{}",
+            fixture.content(),
+            cursor_path_map.iter().map(|(cursor, path)| {
+                format!("cursor position: {:?}, path: {}", cursor, path)
+            }).collect::<Vec<_>>().join("\n")
+        );
         snap_test!(result, fixture.path());
     }
 }
