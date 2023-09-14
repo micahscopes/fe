@@ -51,7 +51,7 @@ pub fn run_server() -> Result<()> {
 
     let mut state = ServerState::new(connection.sender);
     let _ = state.init_logger(log::Level::Info);
-    state.workspace.set_workspace_root(
+    state.db.workspace.set_workspace_root(
         &mut state.db,
         initialize_params
             .root_uri

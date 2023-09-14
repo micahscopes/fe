@@ -17,7 +17,6 @@ use crate::handlers::{notifications::handle_document_did_open, request::handle_h
 pub struct ServerState {
     pub(crate) sender: Arc<Mutex<Sender<Message>>>,
     pub(crate) db: LanguageServerDatabase,
-    pub(crate) workspace: Workspace,
 }
 
 impl ServerState {
@@ -27,7 +26,6 @@ impl ServerState {
         Self {
             sender,
             db: LanguageServerDatabase::default(),
-            workspace: Workspace::default(),
         }
     }
 

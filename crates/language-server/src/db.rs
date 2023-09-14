@@ -11,7 +11,7 @@ use hir_analysis::{
     HirAnalysisDb,
 };
 
-use crate::goto::Cursor;
+use crate::{goto::Cursor, workspace::Workspace};
 
 #[salsa::jar(db = LanguageServerDb)]
 pub struct Jar(crate::diagnostics::file_line_starts);
@@ -37,6 +37,7 @@ impl<DB> LanguageServerDb for DB where
 pub struct LanguageServerDatabase {
     storage: salsa::Storage<Self>,
     diags: Vec<Box<dyn DiagnosticVoucher>>,
+    pub(crate) workspace: Workspace,
 }
 
 impl LanguageServerDatabase {
@@ -104,6 +105,7 @@ impl Default for LanguageServerDatabase {
         let db = Self {
             storage: Default::default(),
             diags: Vec::new(),
+            workspace: Workspace::default(),
         };
         db.prefill();
         db

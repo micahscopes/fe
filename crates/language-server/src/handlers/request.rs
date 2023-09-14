@@ -42,6 +42,7 @@ pub fn handle_hover(
     let file_path = std::path::Path::new(file_path);
     info!("getting hover info for file_path: {:?}", file_path);
     let ingot = state
+        .db
         .workspace
         .input_from_file_path(&mut state.db, file_path.to_str().unwrap())
         .map(|input| input.ingot(&state.db));
@@ -62,7 +63,7 @@ pub fn handle_hover(
         let ingot_path = ingot
             .unwrap()
             .path(&mut state.db)
-            .strip_prefix(&state.workspace.root_path.clone().unwrap_or("".into()))
+            .strip_prefix(&state.db.workspace.root_path.clone().unwrap_or("".into()))
             .ok();
 
         ingot_type.map(|ingot_type| {
@@ -72,6 +73,7 @@ pub fn handle_hover(
 
     let top_mod =
         state
+            .db
             .workspace
             .top_mod_from_file(&mut state.db, file_path, Some(file_text.as_str()));
     let early_resolution = goto_enclosing_path(&mut state.db, top_mod, cursor);
@@ -129,6 +131,7 @@ pub fn handle_goto_definition(
     let file_path = std::path::Path::new(params.text_document.uri.path());
     let top_mod =
         state
+            .db
             .workspace
             .top_mod_from_file(&mut state.db, file_path, Some(file_text.as_str()));
     let goto_info = goto_enclosing_path(&mut state.db, top_mod, cursor);
