@@ -138,6 +138,10 @@ fn run_diagnostics(
     db.finalize_diags()
 }
 
+
+#[cfg(target_arch = "wasm32")]
+use crate::util::DummyFilePathConversion;
+
 pub fn get_diagnostics(
     db: &mut LanguageServerDatabase,
     workspace: &mut Workspace,

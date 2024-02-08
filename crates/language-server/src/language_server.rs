@@ -14,6 +14,9 @@ use crate::{
     workspace::{IngotFileContext, SyncableIngotFileContext, SyncableInputFile},
 };
 
+#[cfg(target_arch = "wasm32")]
+use crate::util::DummyFilePathConversion;
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, initialize_params: InitializeParams) -> Result<InitializeResult> {
