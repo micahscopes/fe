@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use async_lsp::client_monitor::ClientProcessMonitorLayer;
+// use async_lsp::client_monitor::ClientProcessMonitorLayer;
 use async_lsp::concurrency::ConcurrencyLayer;
 use async_lsp::panic::CatchUnwindLayer;
 use async_lsp::router::Router;
@@ -14,7 +14,6 @@ use async_lsp::lsp_types::{
     HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
     MarkedString, MessageType, OneOf, ServerCapabilities, ShowMessageParams,
 };
-// use tokio::io::Stdout;
 use tower::ServiceBuilder;
 use tracing::{info, Level};
 
@@ -48,8 +47,7 @@ impl LanguageServer for ServerState {
         let mut client = self.client.clone();
         let counter = self.counter;
         Box::pin(async move {
-            let never = async_std::future::pending::<()>();
-            let _ = async_std::future::timeout(Duration::from_secs(1), never).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             client
                 .show_message(ShowMessageParams {
                     typ: MessageType::INFO,
@@ -99,7 +97,7 @@ impl ServerState {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
-        async_std::task::spawn({
+        tokio::spawn({
             let client = client.clone();
             async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -117,7 +115,7 @@ async fn main() {
             .layer(LifecycleLayer::default())
             .layer(CatchUnwindLayer::default())
             .layer(ConcurrencyLayer::default())
-            .layer(ClientProcessMonitorLayer::new(client.clone()))
+            // .layer(ClientProcessMonitorLayer::new(client.clone()))
             .service(ServerState::new_router(client))
     });
 
