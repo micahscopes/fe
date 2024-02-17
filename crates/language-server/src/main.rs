@@ -1,28 +1,213 @@
-mod backend;
-mod capabilities;
-mod db;
-mod diagnostics;
-mod globals;
-mod goto;
-mod language_server;
-mod logger;
-mod util;
-mod workspace;
+use std::ops::ControlFlow;
+use std::time::Duration;
 
-use backend::Backend;
-use db::Jar;
-mod handlers {
-    pub mod notifications;
-    pub mod request;
+use async_lsp::client_monitor::ClientProcessMonitorLayer;
+use async_lsp::concurrency::ConcurrencyLayer;
+use async_lsp::panic::CatchUnwindLayer;
+use async_lsp::router::Router;
+use async_lsp::server::LifecycleLayer;
+use async_lsp::tracing::TracingLayer;
+use async_lsp::{ClientSocket, LanguageClient, LanguageServer, ResponseError};
+use futures::future::BoxFuture;
+use async_lsp::lsp_types::{
+    DidChangeConfigurationParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    MarkedString, MessageType, OneOf, ServerCapabilities, ShowMessageParams,
+};
+// use tokio::io::Stdout;
+use tower::ServiceBuilder;
+use tracing::{info, Level};
+
+struct ServerState {
+    client: ClientSocket,
+    counter: i32,
 }
 
-#[tokio_macros::main]
-async fn main() {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
+impl LanguageServer for ServerState {
+    type Error = ResponseError;
+    type NotifyResult = ControlFlow<async_lsp::Result<()>>;
 
-    let (service, socket) = tower_lsp::LspService::build(Backend::new).finish();
-    tower_lsp::Server::new(stdin, stdout, socket)
-        .serve(service)
-        .await;
+    fn initialize(
+        &mut self,
+        params: InitializeParams,
+    ) -> BoxFuture<'static, Result<InitializeResult, Self::Error>> {
+        eprintln!("Initialize with {params:?}");
+        Box::pin(async move {
+            Ok(InitializeResult {
+                capabilities: ServerCapabilities {
+                    hover_provider: Some(HoverProviderCapability::Simple(true)),
+                    definition_provider: Some(OneOf::Left(true)),
+                    ..ServerCapabilities::default()
+                },
+                server_info: None,
+            })
+        })
+    }
+
+    fn hover(&mut self, _: HoverParams) -> BoxFuture<'static, Result<Option<Hover>, Self::Error>> {
+        let mut client = self.client.clone();
+        let counter = self.counter;
+        Box::pin(async move {
+            let never = async_std::future::pending::<()>();
+            let _ = async_std::future::timeout(Duration::from_secs(1), never).await;
+            client
+                .show_message(ShowMessageParams {
+                    typ: MessageType::INFO,
+                    message: "Hello LSP".into(),
+                })
+                .unwrap();
+            Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(format!(
+                    "I am a hover text {counter}!"
+                ))),
+                range: None,
+            }))
+        })
+    }
+
+    fn definition(
+        &mut self,
+        _: GotoDefinitionParams,
+    ) -> BoxFuture<'static, Result<Option<GotoDefinitionResponse>, ResponseError>> {
+        unimplemented!("Not yet implemented!");
+    }
+
+    fn did_change_configuration(
+        &mut self,
+        _: DidChangeConfigurationParams,
+    ) -> ControlFlow<async_lsp::Result<()>> {
+        ControlFlow::Continue(())
+    }
+}
+
+struct TickEvent;
+
+impl ServerState {
+    fn new_router(client: ClientSocket) -> Router<Self> {
+        let mut router = Router::from_language_server(Self { client, counter: 0 });
+        router.event(Self::on_tick);
+        router
+    }
+
+    fn on_tick(&mut self, _: TickEvent) -> ControlFlow<async_lsp::Result<()>> {
+        info!("tick");
+        self.counter += 1;
+        ControlFlow::Continue(())
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let (server, _) = async_lsp::MainLoop::new_server(|client| {
+        async_std::task::spawn({
+            let client = client.clone();
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    if client.emit(TickEvent).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        ServiceBuilder::new()
+            .layer(TracingLayer::default())
+            .layer(LifecycleLayer::default())
+            .layer(CatchUnwindLayer::default())
+            .layer(ConcurrencyLayer::default())
+            .layer(ClientProcessMonitorLayer::new(client.clone()))
+            .service(ServerState::new_router(client))
+    });
+
+    // tracing_subscriber::fmt()
+    //     .with_max_level(Level::INFO)
+    //     .with_ansi(false)
+    //     .with_writer(std::io::stderr)
+    //     .init();
+
+    // Prefer truly asynchronous piped stdin/stdout without blocking tasks.
+    #[cfg(not(target_arch = "wasm32"))]
+    let (stdin, stdout) = (
+        async_std::io::stdin(),
+        async_std::io::stdout(),
+    );
+
+    #[cfg(target_arch = "wasm32")]
+    let (stdin, stdout) = (
+        Box::new(DummyAsyncRead),
+        Box::new(DummyAsyncWrite),
+    );
+
+    server.run_buffered(stdin, stdout).await.unwrap();
+}
+// mod backend;
+// mod capabilities;
+// mod db;
+// mod diagnostics;
+// mod globals;
+// mod goto;
+// mod language_server;
+// mod logger;
+// mod util;
+// mod workspace;
+
+// use backend::Backend;
+// use db::Jar;
+// mod handlers {
+//     pub mod notifications;
+//     pub mod request;
+// }
+
+// #[tokio_macros::main]
+// async fn main() {
+//     let stdin = tokio::io::stdin();
+//     let stdout = tokio::io::stdout();
+
+//     let (service, socket) = tower_lsp::LspService::build(Backend::new).finish();
+//     tower_lsp::Server::new(stdin, stdout, socket)
+//         .serve(service)
+//         .await;
+// }
+#[cfg(target_arch = "wasm32")]
+struct DummyAsyncRead;
+
+#[cfg(target_arch = "wasm32")]
+impl futures::io::AsyncRead for DummyAsyncRead {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Ok(0))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct DummyAsyncWrite;
+
+#[cfg(target_arch = "wasm32")]
+impl futures::io::AsyncWrite for DummyAsyncWrite {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Ok(0))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
 }
