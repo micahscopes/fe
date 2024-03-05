@@ -31,6 +31,9 @@ impl Backend {
         let db = LanguageServerDatabase::default();
         let workspace = Workspace::default();
 
+        let db_locked = Arc::new(std::sync::Mutex::new(db));
+        let workspace_locked = Arc::new(std::sync::Mutex::new(workspace));
+
         Self {
             messaging,
             client,
@@ -43,6 +46,9 @@ impl Backend {
         info!("what's next");
         let workspace = &mut self.workspace;
         let db = &mut self.db;
+        // let db_ = Arc::new(std::sync::Mutex::new(self.db));
+        // let db = &mut self.db;
+        // let db = &mut *db_.lock().unwrap();
 
         let client_wrapped = self.client.clone();
         let messaging = self.messaging.clone();
@@ -117,7 +123,7 @@ impl Backend {
                 }
                 Some(Ok(doc)) = change_stream.next() => {
                     info!("change detected: {:?}", doc.uri);
-                    on_change(client_wrapped.clone(), workspace, db, doc).await;
+                    on_change(client_wrapped.clone(), workspace, self.db, doc).await;
                 }
                 Some(Ok(params)) = did_close_stream.next() => {
                     let _client = &mut client_wrapped.lock().await;
@@ -170,7 +176,7 @@ impl Backend {
                             on_change(
                                 self.client.clone(),
                                 workspace,
-                                db,
+                                self.db.clone(),
                                 TextDocumentItem {
                                     uri: uri.clone(),
                                     language_id: LANGUAGE_ID.to_string(),
@@ -198,26 +204,33 @@ impl Backend {
 async fn on_change(
     client: Arc<Mutex<Client>>,
     workspace: &mut Workspace,
-    db: &mut LanguageServerDatabase,
+    db: LanguageServerDatabase,
     params: TextDocumentItem,
 ) {
-    let client = &mut client.lock().await;
-    let diagnostics = {
+    // let workspace_ = Arc::new(std::sync::Mutex::new(&mut *workspace));
+    {
+        // let db = db.clone();
+        // let db = &mut db.lock().unwrap();
         let input = workspace
-            .input_from_file_path(
-                db,
-                params
-                    .uri
-                    .to_file_path()
-                    .expect("Failed to convert URI to file path")
-                    .to_str()
-                    .expect("Failed to convert file path to string"),
-            )
-            .unwrap();
-        let _ = input.sync(db, Some(params.text));
-        get_diagnostics(db, workspace, params.uri.clone())
+        .input_from_file_path(
+            &mut db,
+            params
+                .uri
+                .to_file_path()
+                .expect("Failed to convert URI to file path")
+                .to_str()
+                .expect("Failed to convert file path to string"),
+        )
+        .unwrap();
+        let _ = input.sync(&mut db, Some(params.text));
     };
+    
+    // let workspace = &mut workspace_.lock().unwrap();
+    info!("awaiting diagnostics...");
+    let diagnostics = get_diagnostics(&mut db, workspace, params.uri.clone()).await;
+    info!("got diagnostics {:?}", diagnostics);
 
+    let client = &mut client.lock().await;
     let diagnostics = diagnostics
         .unwrap()
         .into_iter()

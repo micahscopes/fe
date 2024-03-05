@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::{Deref, Range}, sync::Arc};
 
 use camino::Utf8Path;
 use clap::Error;
@@ -11,6 +11,7 @@ use common::{
 };
 use fxhash::FxHashMap;
 use hir::diagnostics::DiagnosticVoucher;
+use salsa::ParallelDatabase;
 
 use crate::{
     db::{LanguageServerDatabase, LanguageServerDb},
@@ -127,23 +128,28 @@ impl<'a> cs_files::Files<'a> for LanguageServerDatabase {
     }
 }
 
-fn run_diagnostics(
+async fn run_diagnostics(
     db: &mut LanguageServerDatabase,
     workspace: &mut Workspace,
     path: &str,
 ) -> Vec<common::diagnostics::CompleteDiagnostic> {
     let file_path = path;
-    let top_mod = workspace.top_mod_from_file_path(db, file_path).unwrap();
+    // let top_mod = workspace.top_mod_from_file_path(db, file_path).unwrap();
+
+    let top_mod = workspace.top_mod_from_file_path(db, file_path).unwrap().clone();
     db.analyze_top_mod(top_mod);
-    db.finalize_diags()
+    let db = db.snapshot();
+    tokio_rayon::spawn(move || {
+        db.finalize_diags()
+    }).await
 }
 
-pub fn get_diagnostics(
+pub async fn get_diagnostics(
     db: &mut LanguageServerDatabase,
     workspace: &mut Workspace,
     uri: lsp_types::Url,
 ) -> Result<FxHashMap<lsp_types::Url, Vec<lsp_types::Diagnostic>>, Error> {
-    let diags = run_diagnostics(db, workspace, uri.to_file_path().unwrap().to_str().unwrap());
+    let diags = run_diagnostics(db, workspace, uri.to_file_path().unwrap().to_str().unwrap()).await;
 
     let diagnostics = diags
         .into_iter()

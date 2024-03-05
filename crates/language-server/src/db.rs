@@ -10,6 +10,7 @@ use hir_analysis::{
     name_resolution::{DefConflictAnalysisPass, ImportAnalysisPass, PathAnalysisPass},
     HirAnalysisDb,
 };
+use salsa::{ParallelDatabase, Snapshot};
 
 use crate::goto::Cursor;
 
@@ -86,7 +87,7 @@ impl LanguageServerDatabase {
     }
 
     pub fn finalize_diags(&self) -> Vec<CompleteDiagnostic> {
-        let mut diags: Vec<_> = self.diags.iter().map(|d| d.to_complete(self)).collect();
+        let mut diags: Vec<_> = self.diags.iter().map(|d| d.to_complete(self).clone()).collect();
         diags.sort_by(|lhs, rhs| match lhs.error_code.cmp(&rhs.error_code) {
             std::cmp::Ordering::Equal => lhs.primary_span().cmp(&rhs.primary_span()),
             ord => ord,
@@ -107,6 +108,15 @@ impl Default for LanguageServerDatabase {
         };
         db.prefill();
         db
+    }
+}
+
+impl ParallelDatabase for LanguageServerDatabase {
+    fn snapshot(&self) -> Snapshot<Self> {
+        Snapshot::new(LanguageServerDatabase {
+            storage: self.storage.snapshot(),
+            diags: self.diags
+        })
     }
 }
 
