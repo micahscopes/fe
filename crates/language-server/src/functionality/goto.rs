@@ -165,9 +165,9 @@ use crate::backend::workspace::IngotFileContext;
 impl Backend {
     pub(super) async fn handle_goto_definition(
         &self,
-        params: lsp_types::GotoDefinitionParams,
+        params: async_lsp::lsp_types::GotoDefinitionParams,
         responder: tokio::sync::oneshot::Sender<
-            Result<Option<lsp_types::GotoDefinitionResponse>, tower_lsp::jsonrpc::Error>,
+            Result<Option<async_lsp::lsp_types::GotoDefinitionResponse>, tower_lsp::jsonrpc::Error>,
         >,
     ) {
         // Convert the position to an offset in the file
@@ -190,8 +190,8 @@ impl Backend {
             .map(|scope| to_lsp_location_from_scope(*scope, self.db.as_spanned_hir_db()))
             .collect::<Vec<_>>();
 
-        let result: Result<Option<lsp_types::GotoDefinitionResponse>, ()> =
-            Ok(Some(lsp_types::GotoDefinitionResponse::Array(
+        let result: Result<Option<async_lsp::lsp_types::GotoDefinitionResponse>, ()> =
+            Ok(Some(async_lsp::lsp_types::GotoDefinitionResponse::Array(
                 locations
                     .into_iter()
                     .filter_map(std::result::Result::ok)

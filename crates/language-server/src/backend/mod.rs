@@ -1,19 +1,20 @@
 pub(crate) mod db;
 pub(crate) mod workspace;
+use async_lsp::ClientSocket;
 use db::LanguageServerDatabase;
 use workspace::Workspace;
 
-use tower_lsp::Client;
+// use tower_lsp::Client;
 
 pub struct Backend {
-    pub(super) client: Client,
+    // pub(super) client: ClientSocket,
     pub(super) db: LanguageServerDatabase,
     pub(super) workspace: Workspace,
     pub(super) workers: tokio::runtime::Runtime,
 }
 
 impl Backend {
-    pub fn new(client: Client) -> Self {
+    pub fn new() -> Self {
         let db = LanguageServerDatabase::default();
         let workspace = Workspace::default();
 
@@ -23,7 +24,7 @@ impl Backend {
             .build()
             .unwrap();
         Self {
-            client,
+            // client,
             db,
             workspace,
             workers,

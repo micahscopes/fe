@@ -2,6 +2,7 @@ use crate::backend::Backend;
 
 use crate::backend::workspace::SyncableIngotFileContext;
 
+use async_lsp::{ClientSocket, Error, LanguageClient, ResponseError};
 use common::InputDb;
 use futures::TryFutureExt;
 use fxhash::FxHashSet;
@@ -19,13 +20,10 @@ use crate::backend::workspace::IngotFileContext;
 use tracing::{error, info};
 
 impl Backend {
-    pub(super) async fn handle_initialized(
+    pub(crate) fn handle_initialized(
         &mut self,
-        params: lsp_types::InitializeParams,
-        responder: tokio::sync::oneshot::Sender<
-            Result<lsp_types::InitializeResult, tower_lsp::jsonrpc::Error>,
-        >,
-    ) {
+        params: async_lsp::lsp_types::InitializeParams,
+    ) -> Result<async_lsp::lsp_types::InitializeResult, ResponseError> {
         info!("initializing language server!");
 
         let root = params.root_uri.unwrap().to_file_path().ok().unwrap();
@@ -35,14 +33,14 @@ impl Backend {
         let _ = self.workspace.sync(&mut self.db);
 
         let capabilities = server_capabilities();
-        let initialize_result = lsp_types::InitializeResult {
+        let initialize_result = async_lsp::lsp_types::InitializeResult {
             capabilities,
-            server_info: Some(lsp_types::ServerInfo {
+            server_info: Some(async_lsp::lsp_types::ServerInfo {
                 name: String::from("fe-language-server"),
                 version: Some(String::from(env!("CARGO_PKG_VERSION"))),
             }),
         };
-        let _ = responder.send(Ok(initialize_result));
+        Ok(initialize_result)
     }
 
     pub(super) async fn handle_shutdown(
@@ -102,7 +100,7 @@ impl Backend {
         input.set_text(&mut self.db).to(contents);
     }
 
-    pub(super) async fn handle_diagnostics(&mut self, files_need_diagnostics: Vec<String>) {
+    pub(super) async fn handle_diagnostics(&mut self, client: ClientSocket, files_need_diagnostics: Vec<String>) {
         let ingot_files_need_diagnostics: FxHashSet<_> = files_need_diagnostics
             .into_iter()
             .filter_map(|file| self.workspace.get_ingot_for_file_path(&file))
@@ -111,7 +109,6 @@ impl Backend {
             .collect();
 
         let db = self.db.snapshot();
-        let client = self.client.clone();
         let compute_and_send_diagnostics = self
             .workers
             .spawn_blocking(move || {
@@ -120,7 +117,9 @@ impl Backend {
             .and_then(|diagnostics| async move {
                 futures::future::join_all(diagnostics.into_iter().map(|(path, diagnostic)| {
                     let client = client.clone();
-                    async move { client.publish_diagnostics(path, diagnostic, None).await }
+                    async move { 
+                        // client.publish_diagnostics(path, diagnostic, None).await
+                    }
                 }))
                 .await;
                 Ok(())
@@ -130,9 +129,9 @@ impl Backend {
 
     pub(super) async fn handle_hover(
         &mut self,
-        params: lsp_types::HoverParams,
+        params: async_lsp::lsp_types::HoverParams,
         responder: tokio::sync::oneshot::Sender<
-            Result<Option<lsp_types::Hover>, tower_lsp::jsonrpc::Error>,
+            Result<Option<async_lsp::lsp_types::Hover>, tower_lsp::jsonrpc::Error>,
         >,
     ) {
         // let db = self.db.snapshot();
