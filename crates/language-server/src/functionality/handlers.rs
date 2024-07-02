@@ -2,7 +2,7 @@ use crate::backend::Backend;
 
 use crate::backend::workspace::SyncableIngotFileContext;
 
-use async_lsp::{ClientSocket, Error, LanguageClient, ResponseError};
+use async_lsp::{lsp_types::{notification::Exit, Diagnostic, InitializeParams, InitializeResult}, ClientSocket, Error, LanguageClient, ResponseError};
 use common::InputDb;
 use futures::TryFutureExt;
 use fxhash::FxHashSet;
@@ -19,21 +19,40 @@ use crate::backend::workspace::IngotFileContext;
 
 use tracing::{error, info};
 
+// impl Backend {
+
 impl Backend {
-    pub(crate) fn handle_initialized(
-        &mut self,
-        params: async_lsp::lsp_types::InitializeParams,
-    ) -> Result<async_lsp::lsp_types::InitializeResult, ResponseError> {
+    fn update_input_file_text(&mut self, path: &str, contents: String) {
+        let input = self
+            .workspace
+            .touch_input_for_file_path(&mut self.db, path)
+            .unwrap();
+        input.set_text(&mut self.db).to(contents);
+    }
+}
+
+use kameo::Actor;
+use kameo::message::{Context, Message};
+
+// Define the actor state
+impl Actor for Backend {
+    type Mailbox = kameo::actor::BoundedMailbox<Self>;
+}
+
+impl Message<InitializeParams> for Backend {
+    type Reply = Result<InitializeResult, ResponseError>;
+
+    async fn handle(&mut self, message: InitializeParams, _ctx: Context<'_, Self, Self::Reply>) -> Self::Reply {
         info!("initializing language server!");
 
-        let root = params.root_uri.unwrap().to_file_path().ok().unwrap();
+        let root = message.root_uri.unwrap().to_file_path().ok().unwrap();
 
         let _ = self.workspace.set_workspace_root(&mut self.db, &root);
         let _ = self.workspace.load_std_lib(&mut self.db, &root);
         let _ = self.workspace.sync(&mut self.db);
 
         let capabilities = server_capabilities();
-        let initialize_result = async_lsp::lsp_types::InitializeResult {
+        let initialize_result = InitializeResult {
             capabilities,
             server_info: Some(async_lsp::lsp_types::ServerInfo {
                 name: String::from("fe-language-server"),
@@ -42,28 +61,28 @@ impl Backend {
         };
         Ok(initialize_result)
     }
+}
 
-    pub(super) async fn handle_shutdown(
-        &mut self,
-        responder: tokio::sync::oneshot::Sender<Result<(), tower_lsp::jsonrpc::Error>>,
-    ) {
+impl Message<Exit> for Backend {
+    type Reply = ();
+
+    async fn handle(&mut self, _message: Exit, _ctx: Context<'_, Self, Self::Reply>) -> Self::Reply {
         info!("shutting down language server");
-        let _ = responder.send(Ok(()));
     }
+}
 
-    pub(super) async fn handle_change(
-        &mut self,
-        change: FileChange,
-        tx_needs_diagnostics: tokio::sync::mpsc::UnboundedSender<String>,
-    ) {
-        let path = change
+impl Message<FileChange> for Backend {
+    type Reply = ();
+
+    async fn handle(&mut self, message: FileChange, _ctx: Context<'_, Self, Self::Reply>) -> Self::Reply {
+        let path = message
             .uri
             .to_file_path()
-            .unwrap_or_else(|_| panic!("Failed to convert URI to path: {:?}", change.uri));
+            .unwrap_or_else(|_| panic!("Failed to convert URI to path: {:?}", message.uri));
 
         let path = path.to_str().unwrap();
 
-        match change.kind {
+        match message.kind {
             ChangeKind::Open(contents) => {
                 info!("file opened: {:?}", &path);
                 self.update_input_file_text(path, contents);
@@ -89,19 +108,17 @@ impl Backend {
                     .unwrap();
             }
         }
-        tx_needs_diagnostics.send(path.to_string()).unwrap();
+        // self.tx_needs_diagnostics.send(path.to_string()).unwrap();
     }
+}
 
-    fn update_input_file_text(&mut self, path: &str, contents: String) {
-        let input = self
-            .workspace
-            .touch_input_for_file_path(&mut self.db, path)
-            .unwrap();
-        input.set_text(&mut self.db).to(contents);
-    }
+pub type FilesNeedDiagnostics = Vec<String>;
+impl Message<FilesNeedDiagnostics> for Backend {
+    type Reply = ();
 
-    pub(super) async fn handle_diagnostics(&mut self, client: ClientSocket, files_need_diagnostics: Vec<String>) {
-        let ingot_files_need_diagnostics: FxHashSet<_> = files_need_diagnostics
+    async fn handle(&mut self, message: FilesNeedDiagnostics, _ctx: Context<'_, Self, Self::Reply>) -> Self::Reply {
+        let client = self.client.clone();
+        let ingot_files_need_diagnostics: FxHashSet<_> = message
             .into_iter()
             .filter_map(|file| self.workspace.get_ingot_for_file_path(&file))
             .flat_map(|ingot| ingot.files(self.db.as_input_db()))
@@ -116,9 +133,14 @@ impl Backend {
             })
             .and_then(|diagnostics| async move {
                 futures::future::join_all(diagnostics.into_iter().map(|(path, diagnostic)| {
-                    let client = client.clone();
-                    async move { 
-                        // client.publish_diagnostics(path, diagnostic, None).await
+                    let diagnostics_params = async_lsp::lsp_types::PublishDiagnosticsParams {
+                        uri: path,
+                        diagnostics: diagnostic,
+                        version: None,
+                    };
+                    let mut client = client.clone();
+                    async move {
+                        client.publish_diagnostics(diagnostics_params)
                     }
                 }))
                 .await;
@@ -126,17 +148,14 @@ impl Backend {
             });
         tokio::spawn(compute_and_send_diagnostics);
     }
+}
 
-    pub(super) async fn handle_hover(
-        &mut self,
-        params: async_lsp::lsp_types::HoverParams,
-        responder: tokio::sync::oneshot::Sender<
-            Result<Option<async_lsp::lsp_types::Hover>, tower_lsp::jsonrpc::Error>,
-        >,
-    ) {
-        // let db = self.db.snapshot();
+impl Message<async_lsp::lsp_types::HoverParams> for Backend {
+    type Reply = Result<Option<async_lsp::lsp_types::Hover>, ResponseError>;
+
+    async fn handle(&mut self, message: async_lsp::lsp_types::HoverParams, _ctx: Context<'_, Self, Self::Reply>) -> Self::Reply {
         let file = self.workspace.get_input_for_file_path(
-            params
+            message
                 .text_document_position_params
                 .text_document
                 .uri
@@ -144,12 +163,12 @@ impl Backend {
         );
 
         let response = file.and_then(|file| {
-            hover_helper(&self.db, file, params).unwrap_or_else(|e| {
+            hover_helper(&self.db, file, message).unwrap_or_else(|e| {
                 error!("Error handling hover: {:?}", e);
                 None
             })
         });
 
-        let _ = responder.send(Ok(response));
+        Ok(response)
     }
 }
