@@ -1,17 +1,16 @@
 mod backend;
 mod functionality;
 // mod logger;
+mod lsp_streams;
 mod server;
 mod util;
-mod lsp_streams;
-mod lsp_kameo;
+// mod lsp_kameo;
 
 use std::{ops::ControlFlow, time::Duration};
 
 use async_lsp::{router::Router, ClientSocket};
 use backend::{db::Jar, Backend};
-use functionality::streams::{setup_streams, StreamHandler};
-use kameo::{actor::{spawn_in_thread, spawn_unsync, spawn_with}, Actor};
+// use functionality::streams::{setup_streams, StreamHandler};
 use tower::ServiceBuilder;
 // use functionality::streams::handle_lsp_events;
 struct TickEvent;
@@ -23,9 +22,8 @@ async fn main() {
     // let rx = setup_logger(Level::INFO).unwrap();
 
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
-        let backend = spawn_unsync(Backend::new(client.clone()));
-        let router = Router::new(backend.clone()); 
-        
+        // let backend = spawn_unsync(Backend::new(client.clone()));
+        // let router = Router::new(backend.clone());
 
         // let backend = Backend::new(client.clone());
 
@@ -74,12 +72,12 @@ async fn main() {
     // backend_runtime.spawn(backend.handle_streams());
 
     // tokio::select! {
-        // setup logging
-        // _ = handle_log_messages(rx, server.client.clone()) => {},
-        // start the server
-        // _ = tower_lsp::Server::new(stdin, stdout, socket)
-        //     .serve(service) => {}
-        // backend
-        // _ = functionality::streams::setup_streams(&mut backend, message_receivers) => {}
+    // setup logging
+    // _ = handle_log_messages(rx, server.client.clone()) => {},
+    // start the server
+    // _ = tower_lsp::Server::new(stdin, stdout, socket)
+    //     .serve(service) => {}
+    // backend
+    // _ = functionality::streams::setup_streams(&mut backend, message_receivers) => {}
     // }
 }

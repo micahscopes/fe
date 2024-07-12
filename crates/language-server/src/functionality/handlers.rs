@@ -35,14 +35,16 @@ impl Backend {
     }
 }
 
-use super::actor::{Actor, Message};
+use super::actor::{Actor, Handler, Message};
 
 impl Actor for Backend {}
 
-impl Message<InitializeParams> for Backend {
+impl Message for InitializeParams {
     type Reply = Result<InitializeResult, ResponseError>;
+}
 
-    fn handle(&mut self, message: InitializeParams) -> Self::Reply {
+impl Handler<InitializeParams> for Backend {
+    async fn handle(&mut self, message: InitializeParams) -> Self::Reply {
         info!("initializing language server!");
 
         let root = message.root_uri.unwrap().to_file_path().ok().unwrap();
@@ -75,46 +77,46 @@ impl Message<InitializeParams> for Backend {
 //     }
 // }
 
-impl Message<FileChange> for Backend {
-    type Reply = ();
+// impl Message<FileChange> for Backend {
+//     type Reply = ();
 
-    async fn handle(&mut self, message: FileChange) -> Self::Reply {
-        let path = message
-            .uri
-            .to_file_path()
-            .unwrap_or_else(|_| panic!("Failed to convert URI to path: {:?}", message.uri));
+//     async fn handle(&mut self, message: FileChange) -> Self::Reply {
+//         let path = message
+//             .uri
+//             .to_file_path()
+//             .unwrap_or_else(|_| panic!("Failed to convert URI to path: {:?}", message.uri));
 
-        let path = path.to_str().unwrap();
+//         let path = path.to_str().unwrap();
 
-        match message.kind {
-            ChangeKind::Open(contents) => {
-                info!("file opened: {:?}", &path);
-                self.update_input_file_text(path, contents);
-            }
-            ChangeKind::Create => {
-                info!("file created: {:?}", &path);
-                let contents = tokio::fs::read_to_string(&path).await.unwrap();
-                self.update_input_file_text(path, contents)
-            }
-            ChangeKind::Edit(contents) => {
-                info!("file edited: {:?}", &path);
-                let contents = if let Some(text) = contents {
-                    text
-                } else {
-                    tokio::fs::read_to_string(&path).await.unwrap()
-                };
-                self.update_input_file_text(path, contents);
-            }
-            ChangeKind::Delete => {
-                info!("file deleted: {:?}", path);
-                self.workspace
-                    .remove_input_for_file_path(&mut self.db, path)
-                    .unwrap();
-            }
-        }
-        // self.tx_needs_diagnostics.send(path.to_string()).unwrap();
-    }
-}
+//         match message.kind {
+//             ChangeKind::Open(contents) => {
+//                 info!("file opened: {:?}", &path);
+//                 self.update_input_file_text(path, contents);
+//             }
+//             ChangeKind::Create => {
+//                 info!("file created: {:?}", &path);
+//                 let contents = tokio::fs::read_to_string(&path).await.unwrap();
+//                 self.update_input_file_text(path, contents)
+//             }
+//             ChangeKind::Edit(contents) => {
+//                 info!("file edited: {:?}", &path);
+//                 let contents = if let Some(text) = contents {
+//                     text
+//                 } else {
+//                     tokio::fs::read_to_string(&path).await.unwrap()
+//                 };
+//                 self.update_input_file_text(path, contents);
+//             }
+//             ChangeKind::Delete => {
+//                 info!("file deleted: {:?}", path);
+//                 self.workspace
+//                     .remove_input_for_file_path(&mut self.db, path)
+//                     .unwrap();
+//             }
+//         }
+//         // self.tx_needs_diagnostics.send(path.to_string()).unwrap();
+//     }
+// }
 
 // pub type FilesNeedDiagnostics = Vec<String>;
 // impl Message<FilesNeedDiagnostics> for Backend {

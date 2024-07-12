@@ -18,6 +18,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use tracing::info;
 
+use super::actor::ActorRef;
+
 pub struct FileChange {
     pub uri: url::Url,
     pub kind: ChangeKind,
@@ -133,72 +135,72 @@ pub async fn setup_streams(
     //     diagnostics_handler,
     // ]);
 
-    info!("streams set up, looping on them now");
-    loop {
-        tokio::select! {
-            Some(change) = change_stream.next() => {
-                let uri = change.uri.to_string();
-                backend.send(change);
-                tx_needs_diagnostics.send(uri).unwrap();
-            },
-            Some(files_need_diagnostics) = diagnostics_stream.next() => {
-                backend.ask(files_need_diagnostics).send();
-            },
-        }
-        tokio::task::yield_now().await;
-    }
+    // info!("streams set up, looping on them now");
+    // loop {
+    //     tokio::select! {
+    //         Some(change) = change_stream.next() => {
+    //             let uri = change.uri.to_string();
+    //             backend.send(change);
+    //             tx_needs_diagnostics.send(uri).unwrap();
+    //         },
+    //         Some(files_need_diagnostics) = diagnostics_stream.next() => {
+    //             backend.ask(files_need_diagnostics).send();
+    //         },
+    //     }
+    //     tokio::task::yield_now().await;
+    // }
 }
 
-trait IntoResponseError {
-    fn into_response_error(self) -> ResponseError;
-}
+// trait IntoResponseError {
+//     fn into_response_error(self) -> ResponseError;
+// }
 
-// Implement the trait for SendError
-impl<T> IntoResponseError for SendError<T, ResponseError>
-where
-    T: Send + 'static,
-{
-    fn into_response_error(self) -> ResponseError {
-        ResponseError::new(async_lsp::ErrorCode::INTERNAL_ERROR, self.to_string())
-    }
-}
+// // Implement the trait for SendError
+// impl<T> IntoResponseError for SendError<T, ResponseError>
+// where
+//     T: Send + 'static,
+// {
+//     fn into_response_error(self) -> ResponseError {
+//         ResponseError::new(async_lsp::ErrorCode::INTERNAL_ERROR, self.to_string())
+//     }
+// }
 
-// Helper function to flatten nested Results
-fn flatten_result<T, E>(result: Result<T, E>) -> Result<T, ResponseError>
-where
-    E: IntoResponseError,
-{
-    result.map_err(|e| e.into_response_error())
-}
+// // Helper function to flatten nested Results
+// fn flatten_result<T, E>(result: Result<T, E>) -> Result<T, ResponseError>
+// where
+//     E: IntoResponseError,
+// {
+//     result.map_err(|e| e.into_response_error())
+// }
 
-// backend stream handling
-use futures::Stream;
-// use std::pin::Pin;
-use tokio::task::JoinHandle;
+// // backend stream handling
+// use futures::Stream;
+// // use std::pin::Pin;
+// use tokio::task::JoinHandle;
 
-use super::actor::ActorRef;
+// use super::actor::ActorRef;
 
-pub trait StreamHandler {
-    fn add_stream<S, F, Fut>(&mut self, stream: S, handler: F) -> JoinHandle<()>
-    where
-        S: Stream + Send + 'static,
-        F: FnMut(S::Item) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static;
-}
+// pub trait StreamHandler {
+//     fn add_stream<S, F, Fut>(&mut self, stream: S, handler: F) -> JoinHandle<()>
+//     where
+//         S: Stream + Send + 'static,
+//         F: FnMut(S::Item) -> Fut + Send + 'static,
+//         Fut: std::future::Future<Output = ()> + Send + 'static;
+// }
 
-impl StreamHandler for Backend {
-    fn add_stream<S, F, Fut>(&mut self, stream: S, mut handler: F) -> JoinHandle<()>
-    where
-        S: Stream + Send + 'static,
-        F: FnMut(S::Item) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        tokio::spawn(async move {
-            // use futures::StreamExt;
-            let mut pinned = Box::pin(stream);
-            while let Some(item) = pinned.next().await {
-                handler(item).await;
-            }
-        })
-    }
-}
+// impl StreamHandler for Backend {
+//     fn add_stream<S, F, Fut>(&mut self, stream: S, mut handler: F) -> JoinHandle<()>
+//     where
+//         S: Stream + Send + 'static,
+//         F: FnMut(S::Item) -> Fut + Send + 'static,
+//         Fut: std::future::Future<Output = ()> + Send + 'static,
+//     {
+//         tokio::spawn(async move {
+//             // use futures::StreamExt;
+//             let mut pinned = Box::pin(stream);
+//             while let Some(item) = pinned.next().await {
+//                 handler(item).await;
+//             }
+//         })
+//     }
+// }
