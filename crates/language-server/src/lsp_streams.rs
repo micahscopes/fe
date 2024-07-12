@@ -11,18 +11,12 @@ use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 
 /// A stream of LSP request messages with their response channels.
-pub struct RequestStream<Params, Result> {
-    receiver: mpsc::Receiver<(
-        Params,
-        oneshot::Sender<std::result::Result<Result, ResponseError>>,
-    )>,
+pub struct RequestStream<Params> {
+    receiver: mpsc::Receiver<Params>,
 }
 
-impl<Params, Result> Stream for RequestStream<Params, Result> {
-    type Item = (
-        Params,
-        oneshot::Sender<std::result::Result<Result, ResponseError>>,
-    );
+impl<Params> Stream for RequestStream<Params> {
+    type Item = Params;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.receiver.poll_recv(cx)
@@ -45,7 +39,7 @@ impl<N: notification::Notification> Stream for NotificationStream<N> {
 /// An extension trait for `RouterBuilder` to add stream-based handlers.
 pub trait RouterStreams {
     /// Creates a stream for handling a specific LSP request.
-    fn request_stream<R>(&mut self) -> RequestStream<R::Params, R::Result>
+    fn request_stream<R>(&mut self) -> RequestStream<R::Params>
     where
         R: request::Request;
 
@@ -56,7 +50,7 @@ pub trait RouterStreams {
 }
 
 impl<State> RouterStreams for Router<State> {
-    fn request_stream<R>(&mut self) -> RequestStream<R::Params, R::Result>
+    fn request_stream<R>(&mut self) -> RequestStream<R::Params>
     where
         R: request::Request,
     {
@@ -89,36 +83,6 @@ impl<State> RouterStreams for Router<State> {
 }
 
 /// A helper function to spawn a task for handling a request stream.
-pub fn spawn_request_handler<R, F, Fut>(mut stream: RequestStream<R::Params, R::Result>, f: F)
-where
-    R: request::Request,
-    F: Fn(R::Params) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = std::result::Result<R::Result, ResponseError>>
-        + Send
-        + 'static,
-{
-    tokio::spawn(async move {
-        while let Some((params, response_tx)) = stream.receiver.recv().await {
-            let result = f(params).await;
-            let _ = response_tx.send(result);
-        }
-    });
-}
-
-/// A helper function to spawn a task for handling a notification stream.
-pub fn spawn_notification_handler<N, F, Fut>(mut stream: NotificationStream<N>, f: F)
-where
-    N: notification::Notification,
-    F: Fn(<N as notification::Notification>::Params) -> Fut + Send + 'static, // Change here
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(async move {
-        while let Some(params) = stream.receiver.recv().await {
-            f(params).await;
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,8 +120,7 @@ mod tests {
             let mut router = Router::new(()); // Create a router
             let stream = router.notification_stream::<notification::DidOpenTextDocument>();
 
-            let service = ServiceBuilder::new()
-                .service(router); // Add the router to the service
+            let service = ServiceBuilder::new().service(router); // Add the router to the service
 
             spawn_notification_handler::<notification::DidOpenTextDocument, _, _>(
                 stream,

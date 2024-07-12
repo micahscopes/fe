@@ -3,16 +3,16 @@ use std::ops::ControlFlow;
 use crate::functionality::handlers::FilesNeedDiagnostics;
 use crate::lsp_kameo::RouterActors;
 use crate::{backend::Backend, lsp_streams::RouterStreams};
-use async_lsp::router::Router;
 use async_lsp::lsp_types::{notification, request};
+use async_lsp::router::Router;
 use async_lsp::{lsp_types, ClientSocket, ResponseError};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::{join, StreamExt};
 use futures_batch::ChunksTimeoutStreamExt;
 use futures_concurrency::prelude::*;
-use kameo::actor::ActorRef;
-use kameo::error::SendError;
+// use kameo::actor::ActorRef;
+// use kameo::error::SendError;
 use lsp_types::FileChangeType;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -29,13 +29,26 @@ pub enum ChangeKind {
     Delete,
 }
 
-pub async fn setup_streams(backend: &mut ActorRef<Backend>, router: &mut Router<ActorRef<Backend>>) {
+pub async fn setup_streams(
+    backend: &mut ActorRef<Backend>,
+    router: &mut Router<ActorRef<Backend>>,
+) {
     info!("setting up streams");
 
-    let did_change_watched_files_stream = router.notification_stream::<notification::DidChangeWatchedFiles>().fuse();
-    let did_open_stream = router.notification_stream::<notification::DidOpenTextDocument>().fuse();
-    let did_change_stream = router.notification_stream::<notification::DidChangeTextDocument>().fuse();
-    let (tx_needs_diagnostics, rx_needs_diagnostics) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let did_change_watched_files_stream = router
+        .notification_stream::<notification::DidChangeWatchedFiles>()
+        .fuse();
+
+    // backend.attach_stream(did_change_watched_files_stream, (), ());
+
+    let did_open_stream = router
+        .notification_stream::<notification::DidOpenTextDocument>()
+        .fuse();
+    let did_change_stream = router
+        .notification_stream::<notification::DidChangeTextDocument>()
+        .fuse();
+    let (tx_needs_diagnostics, rx_needs_diagnostics) =
+        tokio::sync::mpsc::unbounded_channel::<String>();
     let mut diagnostics_stream = UnboundedReceiverStream::from(rx_needs_diagnostics)
         .chunks_timeout(500, std::time::Duration::from_millis(30))
         .fuse();
@@ -77,27 +90,28 @@ pub async fn setup_streams(backend: &mut ActorRef<Backend>, router: &mut Router<
     //             flatten_result(result)
     //         }
     //     });
-    router.request_to_actor::<request::Initialize>(backend.clone());
+    // router.request_to_actor::<request::Initialize>(backend.clone());
 
-    let initialize_stream = router.request_stream::<request::Initialize>().fuse()
-        .for_each(|(params, response_tx)| {
-            let backend = backend.clone();
-            async move {
-                let result = backend.ask(params).send().await;
-                let _ = response_tx.send(flatten_result(result));
-            }
-        });
+    let initialize_stream = router.request_stream::<request::Initialize>().fuse();
+    // .for_each(|(params, response_tx)| {
+    //     let backend = backend.clone();
+    //     async move {
+    //         let result = backend.ask(params).send().await;
+    //         let _ = response_tx.send(flatten_result(result));
+    //     }
+    // });
 
-    let hover_stream = router.request_stream::<request::HoverRequest>().fuse()
-        .for_each(|(params, response_tx)| {
-            let backend = backend.clone();
-            async move {
-                let result = backend.ask(params).send().await;
-                let _ = response_tx.send(flatten_result(result));
-            }
-        });
-        
-    
+    // backend.attach_stream(initialize_stream, (), ());
+
+    let hover_stream = router.request_stream::<request::HoverRequest>().fuse();
+    // .for_each(|(params, response_tx)| {
+    //     let backend = backend.clone();
+    //     async move {
+    //         let result = backend.ask(params).send().await;
+    //         let _ = response_tx.send(flatten_result(result));
+    //     }
+    // });
+
     // let change_handler = change_stream
     //     .for_each(|change| {
     //         let uri = change.uri.to_string();
@@ -119,13 +133,12 @@ pub async fn setup_streams(backend: &mut ActorRef<Backend>, router: &mut Router<
     //     diagnostics_handler,
     // ]);
 
-
     info!("streams set up, looping on them now");
     loop {
         tokio::select! {
             Some(change) = change_stream.next() => {
                 let uri = change.uri.to_string();
-                backend.ask(change).send();
+                backend.send(change);
                 tx_needs_diagnostics.send(uri).unwrap();
             },
             Some(files_need_diagnostics) = diagnostics_stream.next() => {
@@ -162,6 +175,8 @@ where
 use futures::Stream;
 // use std::pin::Pin;
 use tokio::task::JoinHandle;
+
+use super::actor::ActorRef;
 
 pub trait StreamHandler {
     fn add_stream<S, F, Fut>(&mut self, stream: S, handler: F) -> JoinHandle<()>
