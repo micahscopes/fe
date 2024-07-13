@@ -9,9 +9,14 @@ mod util;
 
 use std::{ops::ControlFlow, time::Duration};
 
-use async_lsp::{lsp_types::request::Initialize, router::Router, ClientSocket};
+use async_lsp::{
+    lsp_types::{request::Initialize, InitializeParams},
+    router::Router,
+    ClientSocket,
+};
 use backend::{db::Jar, Backend};
 use functionality::{actor::Actor, streams::setup_streams};
+use lsp_actor::LspResult;
 // use functionality::streams::{setup_streams, StreamHandler};
 use tower::ServiceBuilder;
 // use functionality::streams::handle_lsp_events;
@@ -27,7 +32,7 @@ async fn main() {
         let mut backend = Backend::new(client.clone());
         let (mut actor, actor_ref) = Actor::new(backend);
 
-        actor.register_request_handler::<Initialize>();
+        actor.register_request_handler::<InitializeParams, LspResult<Initialize>>();
 
         let mut router = Router::new(actor_ref.clone());
 

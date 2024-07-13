@@ -7,21 +7,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-pub trait Message {
-    type Contents: 'static + Send;
+pub trait MessageHandler<M: Send>: 'static {
+    async fn handle(&mut self, message: M);
 }
 
-pub trait Request {
-    type Contents: 'static + Send;
-    type Reply: 'static + Send;
-}
-
-pub trait MessageReceiver<N: Message>: 'static {
-    async fn handle(&mut self, params: N::Contents);
-}
-
-pub trait RequestHandler<R: Request>: 'static {
-    async fn handle(&mut self, params: R::Contents) -> R::Reply;
+pub trait RequestHandler<M: Send, R: Send>: 'static {
+    async fn handle(&mut self, message: M) -> R;
 }
 
 enum ActorMessage {
@@ -35,7 +26,7 @@ enum ActorMessage {
 pub struct Actor<S: 'static> {
     state: Rc<RefCell<S>>,
     receiver: mpsc::UnboundedReceiver<ActorMessage>,
-    notification_handlers: HashMap<
+    message_handlers: HashMap<
         std::any::TypeId,
         Rc<dyn Fn(Rc<RefCell<S>>, Box<dyn Any + Send>) -> LocalBoxFuture<'static, ()>>,
     >,
@@ -61,7 +52,7 @@ impl<S: 'static> Actor<S> {
             Self {
                 state: Rc::new(RefCell::new(state)),
                 receiver,
-                notification_handlers: HashMap::new(),
+                message_handlers: HashMap::new(),
                 request_handlers: HashMap::new(),
             },
             ActorRef { sender },
@@ -73,7 +64,7 @@ impl<S: 'static> Actor<S> {
             match message {
                 ActorMessage::Notification(params) => {
                     let type_id = (*params).type_id();
-                    if let Some(handler) = self.notification_handlers.get(&type_id) {
+                    if let Some(handler) = self.message_handlers.get(&type_id) {
                         handler(self.state.clone(), params).await;
                     }
                 }
@@ -88,14 +79,14 @@ impl<S: 'static> Actor<S> {
         }
     }
 
-    pub fn register_message_receiver<M: Message>(&mut self)
+    pub fn register_message_handler<M: Send + 'static>(&mut self)
     where
-        S: MessageReceiver<M>,
+        S: MessageHandler<M>,
     {
-        self.notification_handlers.insert(
-            std::any::TypeId::of::<M::Contents>(),
+        self.message_handlers.insert(
+            std::any::TypeId::of::<M>(),
             Rc::new(move |state: Rc<RefCell<S>>, params: Box<dyn Any + Send>| {
-                let params = params.downcast::<M::Contents>().unwrap();
+                let params = params.downcast::<M>().unwrap();
                 async move {
                     state.borrow_mut().handle(*params).await;
                 }
@@ -104,14 +95,14 @@ impl<S: 'static> Actor<S> {
         );
     }
 
-    pub fn register_request_handler<R: Request>(&mut self)
+    pub fn register_request_handler<C: Send + 'static, R: Send + 'static>(&mut self)
     where
-        S: RequestHandler<R>,
+        S: RequestHandler<C, R>,
     {
         self.request_handlers.insert(
-            std::any::TypeId::of::<R::Contents>(),
+            std::any::TypeId::of::<C>(),
             Rc::new(move |state: Rc<RefCell<S>>, params: Box<dyn Any + Send>| {
-                let params = params.downcast::<R::Contents>().unwrap();
+                let params = params.downcast::<C>().unwrap();
                 async move {
                     let result = state.borrow_mut().handle(*params).await;
                     Box::new(result) as Box<dyn Any + Send>
@@ -123,16 +114,19 @@ impl<S: 'static> Actor<S> {
 }
 
 impl ActorRef {
-    pub async fn ask<R: Request>(&self, params: R::Contents) -> R::Reply {
+    pub async fn ask<Message: Send + 'static, Reply: Send + 'static>(
+        &self,
+        message: Message,
+    ) -> Reply {
         let (responder, receiver) = futures::channel::oneshot::channel();
-        let message = ActorMessage::Request(Box::new(params), responder);
+        let message = ActorMessage::Request(Box::new(message), responder);
         self.sender.unbounded_send(message).unwrap();
         let result = receiver.await.unwrap();
         *result.downcast().unwrap()
     }
 
-    pub fn tell<N: Message>(&self, params: N::Contents) {
-        let message = ActorMessage::Notification(Box::new(params));
+    pub fn tell<Message: Send + 'static>(&self, message: Message) {
+        let message = ActorMessage::Notification(Box::new(message));
         self.sender.unbounded_send(message).unwrap();
     }
 }

@@ -18,7 +18,7 @@ use salsa::ParallelDatabase;
 
 use super::{
     // actor::Message,
-    actor::{Message, MessageReceiver, RequestHandler},
+    actor::{MessageHandler, RequestHandler},
     capabilities::server_capabilities,
     hover::hover_helper,
     streams::{ChangeKind, FileChange},
@@ -43,8 +43,8 @@ impl Backend {
     }
 }
 
-// #[async_trait::async_trait(?Send)]
-impl RequestHandler<Initialize> for Backend {
+// // #[async_trait::async_trait(?Send)]
+impl RequestHandler<InitializeParams, LspResult<Initialize>> for Backend {
     async fn handle(
         &mut self,
         message: InitializeParams,
@@ -69,110 +69,110 @@ impl RequestHandler<Initialize> for Backend {
     }
 }
 
-// #[async_trait::async_trait(?Send)]
-impl MessageReceiver<Exit> for Backend {
-    async fn handle(&mut self, _message: ()) {
-        info!("shutting down language server");
-    }
-}
+// // #[async_trait::async_trait(?Send)]
+// impl MessageHandler<Exit> for Backend {
+//     async fn handle(&mut self, _message: ()) {
+//         info!("shutting down language server");
+//     }
+// }
 
-impl Message for FileChange {
-    type Contents = FileChange;
-}
+// impl Message for FileChange {
+//     type Contents = FileChange;
+// }
 
-// #[async_trait::async_trait(?Send)]
-impl MessageReceiver<FileChange> for Backend {
-    async fn handle(&mut self, message: FileChange) {
-        let path = message
-            .uri
-            .to_file_path()
-            .unwrap_or_else(|_| panic!("Failed to convert URI to path: {:?}", message.uri));
+// // #[async_trait::async_trait(?Send)]
+// impl MessageHandler<FileChange> for Backend {
+//     async fn handle(&mut self, message: FileChange) {
+//         let path = message
+//             .uri
+//             .to_file_path()
+//             .unwrap_or_else(|_| panic!("Failed to convert URI to path: {:?}", message.uri));
 
-        let path = path.to_str().unwrap();
+//         let path = path.to_str().unwrap();
 
-        match message.kind {
-            ChangeKind::Open(contents) => {
-                info!("file opened: {:?}", &path);
-                self.update_input_file_text(path, contents);
-            }
-            ChangeKind::Create => {
-                info!("file created: {:?}", &path);
-                let contents = tokio::fs::read_to_string(&path).await.unwrap();
-                self.update_input_file_text(path, contents)
-            }
-            ChangeKind::Edit(contents) => {
-                info!("file edited: {:?}", &path);
-                let contents = if let Some(text) = contents {
-                    text
-                } else {
-                    tokio::fs::read_to_string(&path).await.unwrap()
-                };
-                self.update_input_file_text(path, contents);
-            }
-            ChangeKind::Delete => {
-                info!("file deleted: {:?}", path);
-                self.workspace
-                    .remove_input_for_file_path(&mut self.db, path)
-                    .unwrap();
-            }
-        }
-    }
-}
+//         match message.kind {
+//             ChangeKind::Open(contents) => {
+//                 info!("file opened: {:?}", &path);
+//                 self.update_input_file_text(path, contents);
+//             }
+//             ChangeKind::Create => {
+//                 info!("file created: {:?}", &path);
+//                 let contents = tokio::fs::read_to_string(&path).await.unwrap();
+//                 self.update_input_file_text(path, contents)
+//             }
+//             ChangeKind::Edit(contents) => {
+//                 info!("file edited: {:?}", &path);
+//                 let contents = if let Some(text) = contents {
+//                     text
+//                 } else {
+//                     tokio::fs::read_to_string(&path).await.unwrap()
+//                 };
+//                 self.update_input_file_text(path, contents);
+//             }
+//             ChangeKind::Delete => {
+//                 info!("file deleted: {:?}", path);
+//                 self.workspace
+//                     .remove_input_for_file_path(&mut self.db, path)
+//                     .unwrap();
+//             }
+//         }
+//     }
+// }
 
-pub type FilesNeedDiagnostics = Vec<String>;
-impl Message for FilesNeedDiagnostics {
-    type Contents = FilesNeedDiagnostics;
-}
-impl MessageReceiver<FilesNeedDiagnostics> for Backend {
-    async fn handle(&mut self, message: FilesNeedDiagnostics) {
-        let client = self.client.clone();
-        let ingot_files_need_diagnostics: FxHashSet<_> = message
-            .into_iter()
-            .filter_map(|file| self.workspace.get_ingot_for_file_path(&file))
-            .flat_map(|ingot| ingot.files(self.db.as_input_db()))
-            .cloned()
-            .collect();
+// pub type FilesNeedDiagnostics = Vec<String>;
+// impl Message for FilesNeedDiagnostics {
+//     type Contents = FilesNeedDiagnostics;
+// }
+// impl MessageHandler<FilesNeedDiagnostics> for Backend {
+//     async fn handle(&mut self, message: FilesNeedDiagnostics) {
+//         let client = self.client.clone();
+//         let ingot_files_need_diagnostics: FxHashSet<_> = message
+//             .into_iter()
+//             .filter_map(|file| self.workspace.get_ingot_for_file_path(&file))
+//             .flat_map(|ingot| ingot.files(self.db.as_input_db()))
+//             .cloned()
+//             .collect();
 
-        let db = self.db.snapshot();
-        let compute_and_send_diagnostics = self
-            .workers
-            .spawn_blocking(move || {
-                db.get_lsp_diagnostics(ingot_files_need_diagnostics.into_iter().collect())
-            })
-            .and_then(|diagnostics| async move {
-                futures::future::join_all(diagnostics.into_iter().map(|(path, diagnostic)| {
-                    let diagnostics_params = async_lsp::lsp_types::PublishDiagnosticsParams {
-                        uri: path,
-                        diagnostics: diagnostic,
-                        version: None,
-                    };
-                    let mut client = client.clone();
-                    async move { client.publish_diagnostics(diagnostics_params) }
-                }))
-                .await;
-                Ok(())
-            });
-        tokio::spawn(compute_and_send_diagnostics);
-    }
-}
+//         let db = self.db.snapshot();
+//         let compute_and_send_diagnostics = self
+//             .workers
+//             .spawn_blocking(move || {
+//                 db.get_lsp_diagnostics(ingot_files_need_diagnostics.into_iter().collect())
+//             })
+//             .and_then(|diagnostics| async move {
+//                 futures::future::join_all(diagnostics.into_iter().map(|(path, diagnostic)| {
+//                     let diagnostics_params = async_lsp::lsp_types::PublishDiagnosticsParams {
+//                         uri: path,
+//                         diagnostics: diagnostic,
+//                         version: None,
+//                     };
+//                     let mut client = client.clone();
+//                     async move { client.publish_diagnostics(diagnostics_params) }
+//                 }))
+//                 .await;
+//                 Ok(())
+//             });
+//         tokio::spawn(compute_and_send_diagnostics);
+//     }
+// }
 
-impl RequestHandler<HoverRequest> for Backend {
-    async fn handle(&mut self, message: HoverParams) -> Result<Option<Hover>, ResponseError> {
-        let file = self.workspace.get_input_for_file_path(
-            message
-                .text_document_position_params
-                .text_document
-                .uri
-                .path(),
-        );
+// impl RequestHandler<HoverRequest> for Backend {
+//     async fn handle(&mut self, message: HoverParams) -> Result<Option<Hover>, ResponseError> {
+//         let file = self.workspace.get_input_for_file_path(
+//             message
+//                 .text_document_position_params
+//                 .text_document
+//                 .uri
+//                 .path(),
+//         );
 
-        let response = file.and_then(|file| {
-            hover_helper(&self.db, file, message).unwrap_or_else(|e| {
-                error!("Error handling hover: {:?}", e);
-                None
-            })
-        });
+//         let response = file.and_then(|file| {
+//             hover_helper(&self.db, file, message).unwrap_or_else(|e| {
+//                 error!("Error handling hover: {:?}", e);
+//                 None
+//             })
+//         });
 
-        Ok(response)
-    }
-}
+//         Ok(response)
+//     }
+// }
