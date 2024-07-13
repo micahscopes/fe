@@ -1,6 +1,7 @@
 mod backend;
 mod functionality;
 // mod logger;
+mod lsp_actor;
 mod lsp_streams;
 mod server;
 mod util;
@@ -8,8 +9,9 @@ mod util;
 
 use std::{ops::ControlFlow, time::Duration};
 
-use async_lsp::{router::Router, ClientSocket};
+use async_lsp::{lsp_types::request::Initialize, router::Router, ClientSocket};
 use backend::{db::Jar, Backend};
+use functionality::{actor::Actor, streams::setup_streams};
 // use functionality::streams::{setup_streams, StreamHandler};
 use tower::ServiceBuilder;
 // use functionality::streams::handle_lsp_events;
@@ -22,34 +24,38 @@ async fn main() {
     // let rx = setup_logger(Level::INFO).unwrap();
 
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
-        // let backend = spawn_unsync(Backend::new(client.clone()));
-        // let router = Router::new(backend.clone());
+        let mut backend = Backend::new(client.clone());
+        let (mut actor, actor_ref) = Actor::new(backend);
+
+        actor.register_request_handler::<Initialize>();
+
+        let mut router = Router::new(actor_ref.clone());
 
         // let backend = Backend::new(client.clone());
 
-        // tokio::spawn({
-        //     let client = client.clone();
-        //     async move {
-        //         let mut nterval = tokio::time::interval(Duration::from_secs(1));
-        //         loop {
-        //             interval.tick().await;
-        //             if client.emit(TickEvent).is_err() {
-        //                 break;
-        //             }
-        //         }
-        //     }
-        // });
+        tokio::spawn({
+            let client = client.clone();
+            async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    // interval.tick().await;
+                    if client.emit(TickEvent).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
 
-        // router
-        //     .request::<async_lsp::lsp_types::request::Initialize, _>(|st, params| async move {
-        //         st.ask(params).send()
-        //     })
-        //     .event::<TickEvent>(|st, _| {
-        //         // info!("tick");
-        //         // st.counter += 1;
-        //         ControlFlow::Continue(())
-        //     });
-        setup_streams(&mut backend, &mut router, client.clone());
+        router
+            // .request::<async_lsp::lsp_types::request::Initialize, _>(|st, params| async move {
+            //     st.ask(params).send()
+            // })
+            .event::<TickEvent>(|st, _| {
+                // info!("tick");
+                // st.counter += 1;
+                ControlFlow::Continue(())
+            });
+        setup_streams(&mut router, actor_ref.clone());
         let service = ServiceBuilder::new().service(router);
         service
     });

@@ -1,9 +1,11 @@
 use std::ops::ControlFlow;
 
 use crate::functionality::handlers::FilesNeedDiagnostics;
-use crate::lsp_kameo::RouterActors;
+use crate::lsp_actor::{ActOnNotification, ActOnRequest};
+// use crate::lsp_kameo::RouterActors;
 use crate::{backend::Backend, lsp_streams::RouterStreams};
-use async_lsp::lsp_types::{notification, request};
+use async_lsp::lsp_types::request::Initialize;
+use async_lsp::lsp_types::{notification, request, InitializeParams, InitializeResult};
 use async_lsp::router::Router;
 use async_lsp::{lsp_types, ClientSocket, ResponseError};
 use futures::future::join_all;
@@ -32,8 +34,9 @@ pub enum ChangeKind {
 }
 
 pub async fn setup_streams(
-    backend: &mut ActorRef<Backend>,
-    router: &mut Router<ActorRef<Backend>>,
+    // backend: &mut Backend,
+    router: &mut Router<ActorRef>,
+    actor: ActorRef,
 ) {
     info!("setting up streams");
 
@@ -84,14 +87,14 @@ pub async fn setup_streams(
         .merge()
         .fuse();
 
-    // router
-    //     .request::<request::Initialize, _>(|st, params| {
-    //         let st = st.clone();
-    //         async move {
-    //             let result = st.ask(params).send().await;
-    //             flatten_result(result)
-    //         }
-    //     });
+    // We can't do this because there's no way of returning a local future from a closure
+    // router.request::<request::Initialize, _>(|st: &mut Backend, params: InitializeParams| {
+    //     async move {
+    //         // I want to use the backend here, but I can't because it's not `Sync` or `Send` and I don't want it to be or to use locks...
+    //         st.db;
+    //         Ok(InitializeResult::default())
+    //     }
+    // });
     // router.request_to_actor::<request::Initialize>(backend.clone());
 
     let initialize_stream = router.request_stream::<request::Initialize>().fuse();
@@ -104,6 +107,8 @@ pub async fn setup_streams(
     // });
 
     // backend.attach_stream(initialize_stream, (), ());
+    router.act_on_request::<Initialize>(&actor);
+    router.act_on_notification::<async_lsp::lsp_types::notification::DidChangeWatchedFiles>(&actor);
 
     let hover_stream = router.request_stream::<request::HoverRequest>().fuse();
     // .for_each(|(params, response_tx)| {

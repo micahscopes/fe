@@ -1,10 +1,9 @@
+use anyhow::Error;
 use common::InputFile;
 use hir::lower::map_file_to_mod;
 
 use async_lsp::lsp_types::Hover;
 use tracing::info;
-
-use tower_lsp::jsonrpc::Result;
 
 use crate::backend::db::LanguageServerDb;
 use crate::util::to_offset_from_position;
@@ -16,7 +15,7 @@ pub fn hover_helper(
     db: &dyn LanguageServerDb,
     input: InputFile,
     params: async_lsp::lsp_types::HoverParams,
-) -> Result<Option<Hover>> {
+) -> Result<Option<Hover>, Error> {
     info!("handling hover");
     let file_text = input.text(db.as_input_db());
 
@@ -50,10 +49,12 @@ pub fn hover_helper(
     let info = scopes_info.join("\n---\n");
 
     let result = async_lsp::lsp_types::Hover {
-        contents: async_lsp::lsp_types::HoverContents::Markup(async_lsp::lsp_types::MarkupContent {
-            kind: async_lsp::lsp_types::MarkupKind::Markdown,
-            value: info,
-        }),
+        contents: async_lsp::lsp_types::HoverContents::Markup(
+            async_lsp::lsp_types::MarkupContent {
+                kind: async_lsp::lsp_types::MarkupKind::Markdown,
+                value: info,
+            },
+        ),
         range: None,
     };
     Ok(Some(result))

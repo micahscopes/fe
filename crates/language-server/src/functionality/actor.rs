@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
@@ -8,26 +7,46 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-pub trait Message: 'static {
-    type Reply: 'static;
+pub trait Message {
+    type Contents: 'static + Send;
 }
 
-#[async_trait(?Send)]
-pub trait Handler<M: Message>: 'static {
-    async fn handle(&mut self, message: M) -> M::Reply;
+pub trait Request {
+    type Contents: 'static + Send;
+    type Reply: 'static + Send;
 }
 
-struct ActorMessage {
-    message: Box<dyn Any>,
-    responder: futures::channel::oneshot::Sender<Box<dyn Any>>,
+pub trait MessageReceiver<N: Message>: 'static {
+    async fn handle(&mut self, params: N::Contents);
+}
+
+pub trait RequestHandler<R: Request>: 'static {
+    async fn handle(&mut self, params: R::Contents) -> R::Reply;
+}
+
+enum ActorMessage {
+    Notification(Box<dyn Any + Send>),
+    Request(
+        Box<dyn Any + Send>,
+        futures::channel::oneshot::Sender<Box<dyn Any + Send>>,
+    ),
 }
 
 pub struct Actor<S: 'static> {
-    state: S,
+    state: Rc<RefCell<S>>,
     receiver: mpsc::UnboundedReceiver<ActorMessage>,
-    handlers: HashMap<
+    notification_handlers: HashMap<
         std::any::TypeId,
-        Rc<RefCell<dyn Fn(&mut S, Box<dyn Any>) -> LocalBoxFuture<'static, Box<dyn Any>>>>,
+        Rc<dyn Fn(Rc<RefCell<S>>, Box<dyn Any + Send>) -> LocalBoxFuture<'static, ()>>,
+    >,
+    request_handlers: HashMap<
+        std::any::TypeId,
+        Rc<
+            dyn Fn(
+                Rc<RefCell<S>>,
+                Box<dyn Any + Send>,
+            ) -> LocalBoxFuture<'static, Box<dyn Any + Send>>,
+        >,
     >,
 }
 
@@ -40,66 +59,88 @@ impl<S: 'static> Actor<S> {
         let (sender, receiver) = mpsc::unbounded();
         (
             Self {
-                state,
+                state: Rc::new(RefCell::new(state)),
                 receiver,
-                handlers: HashMap::new(),
+                notification_handlers: HashMap::new(),
+                request_handlers: HashMap::new(),
             },
             ActorRef { sender },
         )
     }
 
     pub async fn run(&mut self) {
-        while let Some(ActorMessage { message, responder }) = self.receiver.next().await {
-            let reply = self.handle_any(message).await;
-            let _ = responder.send(reply);
-        }
-    }
-
-    async fn handle_any(&mut self, message: Box<dyn Any>) -> Box<dyn Any> {
-        let type_id = (*message).type_id();
-        if let Some(handler) = self.handlers.get(&type_id) {
-            handler.borrow()(&mut self.state, message).await
-        } else {
-            Box::new(())
-        }
-    }
-
-    pub fn register<M, H>(&mut self, handler: H)
-    where
-        M: Message + 'static,
-        H: Handler<M> + 'static,
-    {
-        let handler = Rc::new(RefCell::new(handler));
-        self.handlers.insert(
-            std::any::TypeId::of::<M>(),
-            Rc::new(RefCell::new(move |state: &mut S, message: Box<dyn Any>| {
-                let handler = handler.clone();
-                async move {
-                    if let Ok(message) = message.downcast::<M>() {
-                        let reply = handler.borrow_mut().handle(*message).await;
-                        Box::new(reply) as Box<dyn Any>
-                    } else {
-                        Box::new(())
+        while let Some(message) = self.receiver.next().await {
+            match message {
+                ActorMessage::Notification(params) => {
+                    let type_id = (*params).type_id();
+                    if let Some(handler) = self.notification_handlers.get(&type_id) {
+                        handler(self.state.clone(), params).await;
                     }
                 }
+                ActorMessage::Request(params, responder) => {
+                    let type_id = (*params).type_id();
+                    if let Some(handler) = self.request_handlers.get(&type_id) {
+                        let result = handler(self.state.clone(), params).await;
+                        let _ = responder.send(result);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn register_message_receiver<M: Message>(&mut self)
+    where
+        S: MessageReceiver<M>,
+    {
+        self.notification_handlers.insert(
+            std::any::TypeId::of::<M::Contents>(),
+            Rc::new(move |state: Rc<RefCell<S>>, params: Box<dyn Any + Send>| {
+                let params = params.downcast::<M::Contents>().unwrap();
+                async move {
+                    state.borrow_mut().handle(*params).await;
+                }
                 .boxed_local()
-            })),
+            }),
+        );
+    }
+
+    pub fn register_request_handler<R: Request>(&mut self)
+    where
+        S: RequestHandler<R>,
+    {
+        self.request_handlers.insert(
+            std::any::TypeId::of::<R::Contents>(),
+            Rc::new(move |state: Rc<RefCell<S>>, params: Box<dyn Any + Send>| {
+                let params = params.downcast::<R::Contents>().unwrap();
+                async move {
+                    let result = state.borrow_mut().handle(*params).await;
+                    Box::new(result) as Box<dyn Any + Send>
+                }
+                .boxed_local()
+            }),
         );
     }
 }
 
 impl ActorRef {
-    pub async fn send<M: Message + 'static>(&self, message: M) -> M::Reply
-    where
-        M::Reply: 'static,
-    {
+    pub async fn ask<R: Request>(&self, params: R::Contents) -> R::Reply {
         let (responder, receiver) = futures::channel::oneshot::channel();
-        let actor_message = ActorMessage {
-            message: Box::new(message),
-            responder,
-        };
-        self.sender.unbounded_send(actor_message).unwrap();
-        let reply = receiver.await.unwrap();
-        *reply.downcast().unwrap()
+        let message = ActorMessage::Request(Box::new(params), responder);
+        self.sender.unbounded_send(message).unwrap();
+        let result = receiver.await.unwrap();
+        *result.downcast().unwrap()
+    }
+
+    pub fn tell<N: Message>(&self, params: N::Contents) {
+        let message = ActorMessage::Notification(Box::new(params));
+        self.sender.unbounded_send(message).unwrap();
+    }
+}
+
+impl Clone for ActorRef {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
     }
 }

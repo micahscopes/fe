@@ -2,7 +2,6 @@ pub(crate) mod db;
 pub(crate) mod workspace;
 use async_lsp::ClientSocket;
 use db::LanguageServerDatabase;
-use kameo::Actor;
 use workspace::Workspace;
 
 // use tower_lsp::Client;
