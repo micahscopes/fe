@@ -35,16 +35,18 @@ impl Backend {
     }
 }
 
-use super::actor::{Actor, Handler, Message};
-
-impl Actor for Backend {}
+use super::actor::{Handler, Message};
 
 impl Message for InitializeParams {
     type Reply = Result<InitializeResult, ResponseError>;
 }
 
+#[async_trait::async_trait(?Send)]
 impl Handler<InitializeParams> for Backend {
-    async fn handle(&mut self, message: InitializeParams) -> Self::Reply {
+    async fn handle(
+        &mut self,
+        message: InitializeParams,
+    ) -> Result<InitializeResult, ResponseError> {
         info!("initializing language server!");
 
         let root = message.root_uri.unwrap().to_file_path().ok().unwrap();

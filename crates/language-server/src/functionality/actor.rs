@@ -1,74 +1,105 @@
-use futures::Future;
+use async_trait::async_trait;
+use futures::channel::mpsc;
+use futures::future::LocalBoxFuture;
+use futures::FutureExt;
+use futures::StreamExt;
 use std::any::Any;
-use std::pin::Pin;
-use tokio::sync::{mpsc, oneshot};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
-pub trait Message: Send + Sync + 'static {
-    type Reply: Send + 'static;
+pub trait Message: 'static {
+    type Reply: 'static;
 }
 
-pub trait Handler<M: Message> {
-    fn handle(&mut self, message: M) -> Pin<Box<dyn Future<Output = M::Reply> + Send + '_>>;
+#[async_trait(?Send)]
+pub trait Handler<M: Message>: 'static {
+    async fn handle(&mut self, message: M) -> M::Reply;
 }
 
-pub(crate) trait DynMessage<A>: Send + 'static {
-    async fn handle_dyn(self: Box<Self>, state: &mut A) -> Box<dyn Any + Send>;
+struct ActorMessage {
+    message: Box<dyn Any>,
+    responder: futures::channel::oneshot::Sender<Box<dyn Any>>,
 }
 
-impl<A, M> DynMessage<A> for M
-where
-    A: Actor + Handler<M>,
-    M: Message,
-{
-    fn handle_dyn(
-        self: Box<Self>,
-        state: &mut A,
-    ) -> Pin<Box<dyn Future<Output = Box<dyn Any + Send>> + Send + '_>> {
-        Box::pin(async move {
-            let reply = state.handle(*self).await;
-            Box::new(reply) as Box<dyn Any + Send>
-        })
+pub struct Actor<S: 'static> {
+    state: S,
+    receiver: mpsc::UnboundedReceiver<ActorMessage>,
+    handlers: HashMap<
+        std::any::TypeId,
+        Rc<RefCell<dyn Fn(&mut S, Box<dyn Any>) -> LocalBoxFuture<'static, Box<dyn Any>>>>,
+    >,
+}
+
+pub struct ActorRef {
+    sender: mpsc::UnboundedSender<ActorMessage>,
+}
+
+impl<S: 'static> Actor<S> {
+    pub fn new(state: S) -> (Self, ActorRef) {
+        let (sender, receiver) = mpsc::unbounded();
+        (
+            Self {
+                state,
+                receiver,
+                handlers: HashMap::new(),
+            },
+            ActorRef { sender },
+        )
     }
-}
 
-pub trait Actor: Sized + Send + 'static {
-    fn start<'a>(&'a mut self) -> (ActorRef<Self>, impl Future<Output = ()> + Send + 'a) {
-        let (tx, mut rx) = mpsc::channel::<(
-            Box<dyn DynMessage<Self>>,
-            oneshot::Sender<Box<dyn Any + Send>>,
-        )>(100);
-
-        let tx_clone = tx.clone();
-
-        let fut = async move {
-            while let Some((msg, reply_tx)) = rx.recv().await {
-                let reply = msg.handle_dyn(self).await;
-                let _ = reply_tx.send(reply);
-            }
-        };
-
-        (ActorRef { sender: tx_clone }, fut)
+    pub async fn run(&mut self) {
+        while let Some(ActorMessage { message, responder }) = self.receiver.next().await {
+            let reply = self.handle_any(message).await;
+            let _ = responder.send(reply);
+        }
     }
-}
 
-pub struct ActorRef<A> {
-    sender: mpsc::Sender<(Box<dyn DynMessage<A>>, oneshot::Sender<Box<dyn Any + Send>>)>,
-}
+    async fn handle_any(&mut self, message: Box<dyn Any>) -> Box<dyn Any> {
+        let type_id = (*message).type_id();
+        if let Some(handler) = self.handlers.get(&type_id) {
+            handler.borrow()(&mut self.state, message).await
+        } else {
+            Box::new(())
+        }
+    }
 
-impl<A: Actor> ActorRef<A> {
-    pub async fn send<M>(&self, msg: M) -> Result<M::Reply, Box<dyn std::error::Error>>
+    pub fn register<M, H>(&mut self, handler: H)
     where
-        M: Message,
-        A: Handler<M>,
+        M: Message + 'static,
+        H: Handler<M> + 'static,
     {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.sender
-            .send((Box::new(msg) as Box<dyn DynMessage<A>>, reply_tx))
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        let reply = reply_rx
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        Ok(*reply.downcast().unwrap())
+        let handler = Rc::new(RefCell::new(handler));
+        self.handlers.insert(
+            std::any::TypeId::of::<M>(),
+            Rc::new(RefCell::new(move |state: &mut S, message: Box<dyn Any>| {
+                let handler = handler.clone();
+                async move {
+                    if let Ok(message) = message.downcast::<M>() {
+                        let reply = handler.borrow_mut().handle(*message).await;
+                        Box::new(reply) as Box<dyn Any>
+                    } else {
+                        Box::new(())
+                    }
+                }
+                .boxed_local()
+            })),
+        );
+    }
+}
+
+impl ActorRef {
+    pub async fn send<M: Message + 'static>(&self, message: M) -> M::Reply
+    where
+        M::Reply: 'static,
+    {
+        let (responder, receiver) = futures::channel::oneshot::channel();
+        let actor_message = ActorMessage {
+            message: Box::new(message),
+            responder,
+        };
+        self.sender.unbounded_send(actor_message).unwrap();
+        let reply = receiver.await.unwrap();
+        *reply.downcast().unwrap()
     }
 }
