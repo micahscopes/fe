@@ -1,6 +1,8 @@
+mod actor;
 mod backend;
 mod functionality;
 // mod logger;
+mod attach_stream_to_actor;
 mod lsp_actor;
 mod lsp_streams;
 mod server;
@@ -9,14 +11,15 @@ mod util;
 
 use std::{ops::ControlFlow, time::Duration};
 
+use actor::Actor;
 use async_lsp::{
-    lsp_types::{request::Initialize, InitializeParams},
+    lsp_types::{notification::Initialized, request::Initialize, InitializeParams},
     router::Router,
     ClientSocket,
 };
 use backend::{db::Jar, Backend};
-use functionality::{actor::Actor, streams::setup_streams};
-use lsp_actor::LspResult;
+use functionality::streams::setup_streams;
+use lsp_actor::{ActOnNotification, ActOnRequest};
 // use functionality::streams::{setup_streams, StreamHandler};
 use tower::ServiceBuilder;
 // use functionality::streams::handle_lsp_events;
@@ -31,10 +34,10 @@ async fn main() {
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
         let mut backend = Backend::new(client.clone());
         let (mut actor, actor_ref) = Actor::new(backend);
-
-        actor.register_request_handler::<InitializeParams, LspResult<Initialize>>();
-
         let mut router = Router::new(actor_ref.clone());
+
+        router.act_on_request::<Initialize>(&actor_ref);
+        router.act_on_notification::<Initialized>(&actor_ref);
 
         // let backend = Backend::new(client.clone());
 

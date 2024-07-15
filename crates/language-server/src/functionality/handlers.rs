@@ -16,9 +16,10 @@ use fxhash::FxHashSet;
 
 use salsa::ParallelDatabase;
 
+use crate::actor::Message;
+
 use super::{
     // actor::Message,
-    actor::{MessageHandler, RequestHandler},
     capabilities::server_capabilities,
     hover::hover_helper,
     streams::{ChangeKind, FileChange},
@@ -31,6 +32,7 @@ use crate::backend::workspace::IngotFileContext;
 use async_lsp::lsp_types::{notification::Notification, request::Request};
 use tracing::{error, info};
 
+pub type FilesNeedDiagnostics = Vec<String>;
 // impl Backend {
 
 impl Backend {
@@ -44,30 +46,30 @@ impl Backend {
 }
 
 // // #[async_trait::async_trait(?Send)]
-impl RequestHandler<InitializeParams, LspResult<Initialize>> for Backend {
-    async fn handle(
-        &mut self,
-        message: InitializeParams,
-    ) -> Result<InitializeResult, ResponseError> {
-        info!("initializing language server!");
+// impl RequestHandler<InitializeParams, LspResult<Initialize>> for Backend {
+//     async fn handle(
+//         &mut self,
+//         message: InitializeParams,
+//     ) -> Result<InitializeResult, ResponseError> {
+//         info!("initializing language server!");
 
-        let root = message.root_uri.unwrap().to_file_path().ok().unwrap();
+//         let root = message.root_uri.unwrap().to_file_path().ok().unwrap();
 
-        let _ = self.workspace.set_workspace_root(&mut self.db, &root);
-        let _ = self.workspace.load_std_lib(&mut self.db, &root);
-        let _ = self.workspace.sync(&mut self.db);
+//         let _ = self.workspace.set_workspace_root(&mut self.db, &root);
+//         let _ = self.workspace.load_std_lib(&mut self.db, &root);
+//         let _ = self.workspace.sync(&mut self.db);
 
-        let capabilities = server_capabilities();
-        let initialize_result = InitializeResult {
-            capabilities,
-            server_info: Some(async_lsp::lsp_types::ServerInfo {
-                name: String::from("fe-language-server"),
-                version: Some(String::from(env!("CARGO_PKG_VERSION"))),
-            }),
-        };
-        Ok(initialize_result)
-    }
-}
+//         let capabilities = server_capabilities();
+//         let initialize_result = InitializeResult {
+//             capabilities,
+//             server_info: Some(async_lsp::lsp_types::ServerInfo {
+//                 name: String::from("fe-language-server"),
+//                 version: Some(String::from(env!("CARGO_PKG_VERSION"))),
+//             }),
+//         };
+//         Ok(initialize_result)
+//     }
+// }
 
 // // #[async_trait::async_trait(?Send)]
 // impl MessageHandler<Exit> for Backend {
@@ -119,7 +121,6 @@ impl RequestHandler<InitializeParams, LspResult<Initialize>> for Backend {
 //     }
 // }
 
-// pub type FilesNeedDiagnostics = Vec<String>;
 // impl Message for FilesNeedDiagnostics {
 //     type Contents = FilesNeedDiagnostics;
 // }

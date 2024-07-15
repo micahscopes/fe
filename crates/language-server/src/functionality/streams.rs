@@ -2,8 +2,8 @@ use std::ops::ControlFlow;
 
 use crate::functionality::handlers::FilesNeedDiagnostics;
 use crate::lsp_actor::{ActOnNotification, ActOnRequest};
+use crate::lsp_streams::RouterStreams;
 // use crate::lsp_kameo::RouterActors;
-use crate::{backend::Backend, lsp_streams::RouterStreams};
 use async_lsp::lsp_types::request::Initialize;
 use async_lsp::lsp_types::{notification, request, InitializeParams, InitializeResult};
 use async_lsp::router::Router;
@@ -20,7 +20,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use tracing::info;
 
-use super::actor::ActorRef;
+use crate::actor::ActorRef;
 
 pub struct FileChange {
     pub uri: url::Url,

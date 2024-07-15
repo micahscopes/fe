@@ -1,4 +1,3 @@
-pub(super) mod actor;
 mod capabilities;
 pub(super) mod diagnostics;
 pub(super) mod goto;
