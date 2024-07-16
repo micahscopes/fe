@@ -10,6 +10,7 @@ mod util;
 // mod lsp_kameo;
 mod lsp_actor_service;
 mod lsp_streaming_layer;
+mod router_layer;
 
 use futures::stream::StreamExt;
 use std::{ops::ControlFlow, time::Duration};
