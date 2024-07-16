@@ -30,12 +30,12 @@ impl<Params, Result> Stream for RequestStream<Params, Result> {
 }
 
 /// A stream of LSP notification messages.
-pub struct NotificationStream<N: notification::Notification> {
-    receiver: mpsc::Receiver<N::Params>,
+pub struct NotificationStream<Params> {
+    receiver: mpsc::Receiver<Params>,
 }
 
-impl<N: notification::Notification> Stream for NotificationStream<N> {
-    type Item = N::Params;
+impl<Params> Stream for NotificationStream<Params> {
+    type Item = Params;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.receiver.poll_recv(cx)
@@ -50,7 +50,7 @@ pub trait RouterStreams {
         R: request::Request;
 
     /// Creates a stream for handling a specific LSP notification.
-    fn notification_stream<N>(&mut self) -> NotificationStream<N>
+    fn notification_stream<N>(&mut self) -> NotificationStream<N::Params>
     where
         N: notification::Notification;
 }
@@ -72,7 +72,7 @@ impl<State> RouterStreams for Router<State> {
         RequestStream { receiver: rx }
     }
 
-    fn notification_stream<N>(&mut self) -> NotificationStream<N>
+    fn notification_stream<N>(&mut self) -> NotificationStream<N::Params>
     where
         N: notification::Notification,
     {

@@ -8,12 +8,19 @@ mod lsp_streams;
 mod server;
 mod util;
 // mod lsp_kameo;
+mod lsp_actor_service;
+mod lsp_streaming_layer;
 
+use futures::stream::StreamExt;
 use std::{ops::ControlFlow, time::Duration};
 
 use actor::Actor;
 use async_lsp::{
-    lsp_types::{notification::Initialized, request::Initialize, InitializeParams},
+    lsp_types::{
+        notification::Initialized,
+        request::{HoverRequest, Initialize},
+        Hover, InitializeParams,
+    },
     router::Router,
     ClientSocket,
 };
@@ -33,39 +40,20 @@ async fn main() {
 
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
         let mut backend = Backend::new(client.clone());
-        let (mut actor, actor_ref) = Actor::new(backend);
-        let mut router = Router::new(actor_ref.clone());
+        let (actor, actor_ref) = Actor::new(backend);
+        let streaming_layer = lsp_streaming_layer::StreamingLayer::new();
+        let initialized_stream = streaming_layer.notification::<Initialized>().fuse();
+        let initialize_stream = streaming_layer.request::<Initialize>().fuse();
+        let hover_stream = streaming_layer.request::<HoverRequest>().fuse();
 
-        router.act_on_request::<Initialize>(&actor_ref);
-        router.act_on_notification::<Initialized>(&actor_ref);
+        let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
 
-        // let backend = Backend::new(client.clone());
+        // let router = Router::new(actor_ref.clone());
 
-        tokio::spawn({
-            let client = client.clone();
-            async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(1));
-                loop {
-                    // interval.tick().await;
-                    if client.emit(TickEvent).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-
-        router
-            // .request::<async_lsp::lsp_types::request::Initialize, _>(|st, params| async move {
-            //     st.ask(params).send()
-            // })
-            .event::<TickEvent>(|st, _| {
-                // info!("tick");
-                // st.counter += 1;
-                ControlFlow::Continue(())
-            });
-        setup_streams(&mut router, actor_ref.clone());
-        let service = ServiceBuilder::new().service(router);
-        service
+        ServiceBuilder::new()
+            .layer(streaming_layer)
+            .service(actor_service)
+        // ServiceBuilder::new().layer(streaming_layer).service(router)
     });
 
     // let (message_senders, message_receivers) = server::setup_message_channels();
