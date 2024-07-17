@@ -1,29 +1,20 @@
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-
-use async_lsp::lsp_types::{notification, request};
-use async_lsp::{AnyNotification, AnyRequest, LspService, ResponseError};
-use futures::{Future, Stream, StreamExt};
+use async_lsp::router::{BoxReqFuture, Router};
+use async_lsp::{
+    lsp_types::{notification, request},
+    AnyNotification, AnyRequest, LspService, ResponseError,
+};
+use futures::{Future, Stream};
 use serde_json::Value as JsonValue;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
 use tower::{Layer, Service};
 
-type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
-
 pub struct RequestStream<Params, Result> {
-    receiver: Pin<
-        Box<
-            dyn Stream<
-                    Item = (
-                        Params,
-                        oneshot::Sender<std::result::Result<Result, ResponseError>>,
-                    ),
-                > + Send,
-        >,
-    >,
+    receiver: mpsc::Receiver<(
+        Params,
+        oneshot::Sender<std::result::Result<Result, ResponseError>>,
+    )>,
 }
 
 impl<Params, Result> Stream for RequestStream<Params, Result> {
@@ -33,222 +24,88 @@ impl<Params, Result> Stream for RequestStream<Params, Result> {
     );
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.as_mut().poll_next(cx)
+        self.receiver.poll_recv(cx)
     }
 }
 
 pub struct NotificationStream<Params> {
-    receiver: Pin<Box<dyn Stream<Item = Params> + Send>>,
+    receiver: mpsc::Receiver<Params>,
 }
 
 impl<Params> Stream for NotificationStream<Params> {
     type Item = Params;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.as_mut().poll_next(cx)
+        self.receiver.poll_recv(cx)
     }
 }
 
-pub struct StreamingRouter<Inner> {
-    inner: Inner,
-    req_handlers: HashMap<
-        &'static str,
-        (
-            Box<dyn Fn(AnyRequest) -> BoxFuture<Result<JsonValue, ResponseError>> + Send + Sync>,
-            mpsc::Sender<(JsonValue, oneshot::Sender<Result<JsonValue, ResponseError>>)>,
-        ),
-    >,
-    notif_handlers: HashMap<
-        &'static str,
-        (
-            Box<dyn Fn(AnyNotification) -> BoxFuture<()> + Send + Sync>,
-            mpsc::Sender<JsonValue>,
-        ),
-    >,
+pub trait RouterStreams {
+    fn request_stream<R>(&mut self) -> RequestStream<R::Params, R::Result>
+    where
+        R: request::Request;
+
+    fn notification_stream<N>(&mut self) -> NotificationStream<N::Params>
+    where
+        N: notification::Notification;
 }
 
-impl<Inner> StreamingRouter<Inner> {
-    pub fn new(
-        inner: Inner,
-        req_streams: HashMap<
-            &'static str,
-            mpsc::Sender<(JsonValue, oneshot::Sender<Result<JsonValue, ResponseError>>)>,
-        >,
-        notif_streams: HashMap<&'static str, mpsc::Sender<JsonValue>>,
-    ) -> Self {
-        let req_handlers = req_streams
-            .into_iter()
-            .map(|(method, tx)| {
-                let handler = Arc::new(move |req: AnyRequest| {
-                    let tx = tx.clone();
-                    let tx_return = tx.clone();
-                    Box::pin(async move {
-                        let (response_tx, response_rx) = oneshot::channel();
-                        tx.send((req.params, response_tx)).await.map_err(|_| {
-                            ResponseError::new(
-                                async_lsp::ErrorCode::INTERNAL_ERROR,
-                                "Failed to send request".to_string(),
-                            )
-                        })?;
-                        response_rx.await.map_err(|_| {
-                            ResponseError::new(
-                                async_lsp::ErrorCode::INTERNAL_ERROR,
-                                "Failed to receive response".to_string(),
-                            )
-                        })?
-                    }) as BoxFuture<Result<JsonValue, ResponseError>>
-                });
-                (
-                    method,
-                    (
-                        Box::new(move |req| handler(req))
-                            as Box<
-                                dyn Fn(AnyRequest) -> BoxFuture<Result<JsonValue, ResponseError>>
-                                    + Send
-                                    + Sync,
-                            >,
-                        tx_handler,
-                    ),
-                )
-            })
-            .collect();
-
-        let notif_handlers = notif_streams
-            .into_iter()
-            .map(|(method, tx)| {
-                let handler = Arc::new(move |notif: AnyNotification| {
-                    let tx = tx.clone();
-                    Box::pin(async move {
-                        if let Err(e) = tx.send(notif.params).await {
-                            eprintln!("Failed to send notification: {}", e);
-                        }
-                    }) as BoxFuture<()>
-                });
-                (
-                    method,
-                    (
-                        Box::new(move |notif| handler(notif))
-                            as Box<dyn Fn(AnyNotification) -> BoxFuture<()> + Send + Sync>,
-                        tx,
-                    ),
-                )
-            })
-            .collect();
-
-        Self {
-            inner,
-            req_handlers,
-            notif_handlers,
-        }
-    }
-}
-
-impl<Inner> Service<AnyRequest> for StreamingRouter<Inner>
-where
-    Inner: Service<AnyRequest, Response = JsonValue, Error = ResponseError>,
-    Inner::Future: Send + 'static,
-{
-    type Response = JsonValue;
-    type Error = ResponseError;
-    type Future = BoxFuture<Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
+impl<State> RouterStreams for Router<State> {
+    fn request_stream<R>(&mut self) -> RequestStream<R::Params, R::Result>
+    where
+        R: request::Request,
+    {
+        let (tx, rx) = mpsc::channel(100);
+        self.request::<R, _>(move |_, params| {
+            let tx = tx.clone();
+            async move {
+                let (response_tx, response_rx) = oneshot::channel();
+                tx.send((params, response_tx)).await.unwrap();
+                response_rx.await.unwrap()
+            }
+        });
+        RequestStream { receiver: rx }
     }
 
-    fn call(&mut self, req: AnyRequest) -> Self::Future {
-        if let Some((handler, _)) = self.req_handlers.get(&*req.method) {
-            handler(req)
-        } else {
-            Box::pin(self.inner.call(req))
-        }
-    }
-}
-
-impl<Inner> LspService for StreamingRouter<Inner>
-where
-    Inner: LspService + Service<AnyRequest, Response = JsonValue, Error = ResponseError>,
-    Inner::Future: Send + 'static,
-{
-    fn notify(&mut self, notif: AnyNotification) -> std::ops::ControlFlow<async_lsp::Result<()>> {
-        if let Some((handler, _)) = self.notif_handlers.get(&*notif.method) {
-            tokio::spawn(handler(notif));
+    fn notification_stream<N>(&mut self) -> NotificationStream<N::Params>
+    where
+        N: notification::Notification,
+    {
+        let (tx, rx) = mpsc::channel(100);
+        self.notification::<N>(move |_, params| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                tx.send(params).await.unwrap();
+            });
             std::ops::ControlFlow::Continue(())
-        } else {
-            self.inner.notify(notif)
-        }
-    }
-
-    fn emit(&mut self, event: async_lsp::AnyEvent) -> std::ops::ControlFlow<async_lsp::Result<()>> {
-        self.inner.emit(event)
+        });
+        NotificationStream { receiver: rx }
     }
 }
 
-pub struct StreamingLayer {
-    req_streams: Arc<
-        Mutex<
-            HashMap<
-                &'static str,
-                mpsc::Sender<(JsonValue, oneshot::Sender<Result<JsonValue, ResponseError>>)>,
-            >,
-        >,
-    >,
-    notif_streams: Arc<Mutex<HashMap<&'static str, mpsc::Sender<JsonValue>>>>,
-}
+pub struct StreamingLayer;
 
 impl StreamingLayer {
     pub fn new() -> Self {
-        Self {
-            req_streams: Arc::new(Mutex::new(HashMap::new())),
-            notif_streams: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub fn request<R: request::Request>(&self) -> RequestStream<R::Params, R::Result>
-    where
-        R::Params: serde::de::DeserializeOwned + Send + 'static,
-        R::Result: serde::Serialize + Send + 'static,
-    {
-        let (tx, rx) = mpsc::channel(100);
-        self.req_streams.lock().unwrap().insert(R::METHOD, tx);
-
-        RequestStream {
-            receiver: Box::pin(ReceiverStream::new(rx).map(|(params, sender)| {
-                let params = serde_json::from_value(params).unwrap();
-                let sender =
-                    oneshot::Sender::new(|res| res.map(|v| serde_json::from_value(v).unwrap()));
-                (params, sender)
-            })),
-        }
-    }
-
-    pub fn notification<N: notification::Notification>(&self) -> NotificationStream<N::Params>
-    where
-        N::Params: serde::de::DeserializeOwned + Send + 'static,
-    {
-        let (tx, rx) = mpsc::channel(100);
-        self.notif_streams.lock().unwrap().insert(N::METHOD, tx);
-
-        NotificationStream {
-            receiver: Box::pin(
-                ReceiverStream::new(rx).map(|params| serde_json::from_value(params).unwrap()),
-            ),
-        }
+        Self
     }
 }
+// use async_lsp::router::BoxReqFuture;
 
 impl<S> Layer<S> for StreamingLayer
 where
-    S: Service<AnyRequest, Response = JsonValue, Error = ResponseError> + LspService,
-    S::Future: Send + 'static,
+    S: LspService + Clone + Send + 'static,
+    S: Service<
+        AnyRequest,
+        Response = JsonValue,
+        Error = ResponseError,
+        Future = BoxReqFuture<ResponseError>,
+    >,
+    // S::Future: BoxReqFuture<ResponseError> + Send + 'static,
 {
-    type Service = StreamingRouter<S>;
+    type Service = Router<(), ResponseError, S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        StreamingRouter::new(
-            inner,
-            self.req_streams.lock().unwrap().clone(),
-            self.notif_streams.lock().unwrap().clone(),
-        )
+        Router::with_fallback((), inner)
     }
 }

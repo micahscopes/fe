@@ -43,9 +43,9 @@ async fn main() {
         let mut backend = Backend::new(client.clone());
         let (actor, actor_ref) = Actor::new(backend);
         let streaming_layer = lsp_streaming_layer::StreamingLayer::new();
-        let initialized_stream = streaming_layer.notification::<Initialized>().fuse();
-        let initialize_stream = streaming_layer.request::<Initialize>().fuse();
-        let hover_stream = streaming_layer.request::<HoverRequest>().fuse();
+        let initialized_stream = streaming_layer.notification_stream::<Initialized>().fuse();
+        let initialize_stream = streaming_layer.request_stream::<Initialize>().fuse();
+        let hover_stream = streaming_layer.request_stream::<HoverRequest>().fuse();
 
         let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
 
