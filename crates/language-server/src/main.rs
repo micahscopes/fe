@@ -10,7 +10,7 @@ mod util;
 // mod lsp_kameo;
 mod lsp_actor_service;
 mod lsp_streaming_layer;
-mod router_layer;
+mod streaming_router;
 
 use futures::stream::StreamExt;
 use std::{ops::ControlFlow, time::Duration};
@@ -29,8 +29,9 @@ use backend::{db::Jar, Backend};
 use functionality::streams::setup_streams;
 use lsp_actor::{ActOnNotification, ActOnRequest};
 // use functionality::streams::{setup_streams, StreamHandler};
-use tower::ServiceBuilder;
+use tower::{layer::layer_fn, ServiceBuilder};
 // use functionality::streams::handle_lsp_events;
+use lsp_streams::RouterStreams;
 struct TickEvent;
 
 #[tokio_macros::main]
@@ -42,19 +43,13 @@ async fn main() {
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
         let mut backend = Backend::new(client.clone());
         let (actor, actor_ref) = Actor::new(backend);
-        let streaming_layer = lsp_streaming_layer::StreamingLayer::new();
-        let initialized_stream = streaming_layer.notification_stream::<Initialized>().fuse();
-        let initialize_stream = streaming_layer.request_stream::<Initialize>().fuse();
-        let hover_stream = streaming_layer.request_stream::<HoverRequest>().fuse();
-
         let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
 
-        // let router = Router::new(actor_ref.clone());
+        let mut streaming_router = Router::new(());
+        let initialize_stream = streaming_router.request_stream::<Initialize>();
+        let initialized_stream = streaming_router.notification_stream::<Initialized>();
 
-        ServiceBuilder::new()
-            .layer(streaming_layer)
-            .service(actor_service)
-        // ServiceBuilder::new().layer(streaming_layer).service(router)
+        streaming_router.with_fallback(actor_service)
     });
 
     // let (message_senders, message_receivers) = server::setup_message_channels();

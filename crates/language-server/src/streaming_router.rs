@@ -8,7 +8,6 @@ use std::task::{Context, Poll};
 use tower::Service;
 
 pub struct RouterService<St, InnerService> {
-    router: Router<St>,
     inner: InnerService,
 }
 
