@@ -1,81 +1,82 @@
 mod actor;
+mod attach_stream_to_actor;
 mod backend;
 mod functionality;
-// mod logger;
-mod attach_stream_to_actor;
 mod lsp_actor;
-mod lsp_streams;
-mod server;
-mod util;
-// mod lsp_kameo;
 mod lsp_actor_service;
 mod lsp_streaming_layer;
+mod lsp_streams;
+mod server;
 mod streaming_router;
+mod util;
 
 use futures::stream::StreamExt;
-use std::{ops::ControlFlow, time::Duration};
+use lsp_actor_service::LspActorService;
+use serde_json::Value;
+use std::{ops::ControlFlow, sync::Arc, time::Duration};
+use tokio::sync::{Mutex, RwLock};
 
 use actor::Actor;
 use async_lsp::{
+    can_handle::CanHandle,
     lsp_types::{
         notification::Initialized,
-        request::{HoverRequest, Initialize},
-        Hover, InitializeParams,
+        request::{HoverRequest, Initialize, Request},
+        Hover, InitializeParams, InitializeResult,
     },
     router::Router,
-    ClientSocket,
+    steer::{self, FirstComeFirstServe, LspPicker, LspSteer},
+    util::BoxLspService,
+    AnyEvent, AnyNotification, AnyRequest, ClientSocket, LspService, ResponseError,
 };
 use backend::{db::Jar, Backend};
 use functionality::streams::setup_streams;
 use lsp_actor::{ActOnNotification, ActOnRequest};
-// use functionality::streams::{setup_streams, StreamHandler};
-use tower::{layer::layer_fn, ServiceBuilder};
-// use functionality::streams::handle_lsp_events;
 use lsp_streams::RouterStreams;
+use tower::{layer::layer_fn, util::BoxService, Service, ServiceBuilder};
 struct TickEvent;
+
+impl<M> CanHandle<M> for LspActorService {
+    fn can_handle(&self, msg: &M) -> bool {
+        true
+    }
+}
 
 #[tokio_macros::main]
 async fn main() {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-    // let rx = setup_logger(Level::INFO).unwrap();
-
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
         let mut backend = Backend::new(client.clone());
-        let (actor, actor_ref) = Actor::new(backend);
+        let (mut actor, actor_ref) = Actor::new(backend);
+
+        actor.register_notification_handler::<Initialized, _>(|state, params| ());
+
         let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
 
         let mut streaming_router = Router::new(());
         let initialize_stream = streaming_router.request_stream::<Initialize>();
         let initialized_stream = streaming_router.notification_stream::<Initialized>();
 
-        streaming_router.with_fallback(actor_service)
+        let services: Vec<BoxLspService<serde_json::Value, ResponseError>> = vec![
+            BoxLspService::new(streaming_router),
+            BoxLspService::new(actor_service),
+        ];
+
+        // let picker = FirstComeFirstServe::<BoxLspService<Value, ResponseError>>::default();
+        let steering_router = LspSteer::new(services, FirstComeFirstServe);
+        steering_router
     });
 
-    // let (message_senders, message_receivers) = server::setup_message_channels();
-    // let (service, socket) =
-    //     tower_lsp::LspService::build(|client| Server::new(client, message_senders)).finish();
-    // let server = service.inner();
+    #[cfg(unix)]
+    let (stdin, stdout) = (
+        async_lsp::stdio::PipeStdin::lock_tokio().unwrap(),
+        async_lsp::stdio::PipeStdout::lock_tokio().unwrap(),
+    );
+    // Fallback to spawn blocking read/write otherwise.
+    #[cfg(not(unix))]
+    let (stdin, stdout) = (
+        tokio_util::compat::TokioAsyncReadCompatExt::compat(tokio::io::stdin()),
+        tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(tokio::io::stdout()),
+    );
 
-    // let client = server.client.clone();
-    // let mut backend = Backend::new(client);
-
-    // separate runtime for the backend
-    // let backend_runtime = tokio::runtime::Builder::new_multi_thread()
-    //     .worker_threads(4)
-    //     .enable_all()
-    //     .build()
-    //     .unwrap();
-
-    // backend_runtime.spawn(backend.handle_streams());
-
-    // tokio::select! {
-    // setup logging
-    // _ = handle_log_messages(rx, server.client.clone()) => {},
-    // start the server
-    // _ = tower_lsp::Server::new(stdin, stdout, socket)
-    //     .serve(service) => {}
-    // backend
-    // _ = functionality::streams::setup_streams(&mut backend, message_receivers) => {}
-    // }
+    server.run_buffered(stdin, stdout).await.unwrap();
 }

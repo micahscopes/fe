@@ -1,3 +1,5 @@
+use async_lsp::can_handle::CanHandle;
+use async_lsp::AnyRequest;
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
@@ -10,8 +12,14 @@ use std::sync::Arc;
 
 type BoxedAny = Box<dyn Any + Send>;
 type StateRef<S> = Rc<RefCell<S>>;
-type MessageHandler<S> = Box<dyn Fn(StateRef<S>, BoxedAny) -> LocalBoxFuture<'static, ()>>;
 type RequestHandler<S> = Box<dyn Fn(StateRef<S>, BoxedAny) -> LocalBoxFuture<'static, BoxedAny>>;
+type SyncMessageHandler<S> = Box<dyn Fn(StateRef<S>, BoxedAny) -> ()>;
+type AsyncMessageHandler<S> = Box<dyn Fn(StateRef<S>, BoxedAny) -> LocalBoxFuture<'static, ()>>;
+
+enum NotificationHandler<S> {
+    Sync(SyncMessageHandler<S>),
+    Async(AsyncMessageHandler<S>),
+}
 
 #[derive(Debug)]
 pub enum ActorError {
@@ -27,7 +35,7 @@ pub enum Message {
 pub struct Actor<S: 'static> {
     state: StateRef<S>,
     receiver: mpsc::UnboundedReceiver<Message>,
-    message_handlers: HashMap<std::any::TypeId, MessageHandler<S>>,
+    notification_handlers: HashMap<std::any::TypeId, NotificationHandler<S>>,
     request_handlers: HashMap<std::any::TypeId, RequestHandler<S>>,
     handler_types: Arc<HandlerTypes>,
 }
@@ -38,7 +46,7 @@ pub struct ActorRef {
 }
 
 struct HandlerTypes {
-    message_handlers: std::sync::RwLock<HashMap<std::any::TypeId, ()>>,
+    notification_handlers: std::sync::RwLock<HashMap<std::any::TypeId, ()>>,
     request_handlers: std::sync::RwLock<HashMap<std::any::TypeId, ()>>,
 }
 
@@ -46,7 +54,7 @@ impl<S: 'static> Actor<S> {
     pub fn new(state: S) -> (Self, ActorRef) {
         let (sender, receiver) = mpsc::unbounded();
         let handler_types = Arc::new(HandlerTypes {
-            message_handlers: std::sync::RwLock::new(HashMap::new()),
+            notification_handlers: std::sync::RwLock::new(HashMap::new()),
             request_handlers: std::sync::RwLock::new(HashMap::new()),
         });
 
@@ -54,7 +62,7 @@ impl<S: 'static> Actor<S> {
             Self {
                 state: Rc::new(RefCell::new(state)),
                 receiver,
-                message_handlers: HashMap::new(),
+                notification_handlers: HashMap::new(),
                 request_handlers: HashMap::new(),
                 handler_types: handler_types.clone(),
             },
@@ -70,8 +78,15 @@ impl<S: 'static> Actor<S> {
             match message {
                 Message::Notification(params) => {
                     let type_id = (*params).type_id();
-                    if let Some(handler) = self.message_handlers.get(&type_id) {
-                        handler(self.state.clone(), params).await;
+                    if let Some(handler) = self.notification_handlers.get(&type_id) {
+                        match handler {
+                            NotificationHandler::Sync(handler) => {
+                                handler(self.state.clone(), params)
+                            }
+                            NotificationHandler::Async(handler) => {
+                                handler(self.state.clone(), params).await
+                            }
+                        }
                     }
                 }
                 Message::Request(params, responder) => {
@@ -85,21 +100,40 @@ impl<S: 'static> Actor<S> {
         }
     }
 
-    pub fn register_message_handler<M: Send + 'static, F, Fut>(&mut self, handler: F)
+    pub fn register_async_notification_handler<M: Send + 'static, F, Fut>(&mut self, handler: F)
     where
         F: Fn(StateRef<S>, M) -> Fut + 'static,
         Fut: std::future::Future<Output = ()> + 'static,
     {
         let type_id = std::any::TypeId::of::<M>();
-        self.message_handlers.insert(
+        self.notification_handlers.insert(
             type_id,
-            Box::new(move |state, params| {
+            NotificationHandler::Async(Box::new(move |state, params| {
                 let params = params.downcast::<M>().unwrap();
                 handler(state, *params).boxed_local()
-            }),
+            })),
         );
         self.handler_types
-            .message_handlers
+            .notification_handlers
+            .write()
+            .unwrap()
+            .insert(type_id, ());
+    }
+
+    pub fn register_notification_handler<M: Send + 'static, F>(&mut self, handler: F)
+    where
+        F: Fn(StateRef<S>, M) -> () + 'static,
+    {
+        let type_id = std::any::TypeId::of::<M>();
+        self.notification_handlers.insert(
+            type_id,
+            NotificationHandler::Sync(Box::new(move |state, params| {
+                let params = params.downcast::<M>().unwrap();
+                handler(state, *params);
+            })),
+        );
+        self.handler_types
+            .notification_handlers
             .write()
             .unwrap()
             .insert(type_id, ());
@@ -137,7 +171,7 @@ impl<S: 'static> Actor<S> {
 impl ActorRef {
     fn has_message_handler<M: 'static>(&self) -> bool {
         self.handler_types
-            .message_handlers
+            .notification_handlers
             .read()
             .unwrap()
             .contains_key(&std::any::TypeId::of::<M>())
