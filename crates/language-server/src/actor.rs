@@ -17,6 +17,7 @@ pub enum ActorError {
     StateAccessError,
     ExecutionError(Box<dyn std::error::Error + Send + Sync>),
     CustomError(Box<dyn std::error::Error + Send + Sync>),
+    SendError,
 }
 
 impl std::fmt::Display for ActorError {
@@ -26,6 +27,7 @@ impl std::fmt::Display for ActorError {
             ActorError::StateAccessError => write!(f, "Failed to access actor state"),
             ActorError::ExecutionError(e) => write!(f, "Execution error: {}", e),
             ActorError::CustomError(e) => write!(f, "Custom error: {}", e),
+            ActorError::SendError => write!(f, "Failed to send message"),
         }
     }
 }
@@ -75,16 +77,78 @@ impl<S: 'static, C: 'static, R: 'static> AsyncFuncHandler<S, C, R> {
     }
 }
 
+pub enum Message {
+    Notification(BoxedAny),
+    Request(
+        BoxedAny,
+        futures::channel::oneshot::Sender<Result<BoxedAny, ActorError>>,
+    ),
+}
+
 pub struct Actor<S: 'static> {
     state: StateRef<S>,
+    receiver: mpsc::UnboundedReceiver<Message>,
     handlers: HashMap<std::any::TypeId, Box<dyn Any + Send + Sync>>,
+    handler_types: Arc<HandlerTypes>,
+}
+
+pub struct ActorRef {
+    sender: mpsc::UnboundedSender<Message>,
+    handler_types: Arc<HandlerTypes>,
+}
+
+struct HandlerTypes {
+    handlers: std::sync::RwLock<HashMap<std::any::TypeId, ()>>,
 }
 
 impl<S: 'static> Actor<S> {
-    pub fn new(state: S) -> Self {
-        Self {
-            state: Rc::new(RefCell::new(state)),
-            handlers: HashMap::new(),
+    pub fn new(state: S) -> (Self, ActorRef) {
+        let (sender, receiver) = mpsc::unbounded();
+        let handler_types = Arc::new(HandlerTypes {
+            handlers: std::sync::RwLock::new(HashMap::new()),
+        });
+
+        (
+            Self {
+                state: Rc::new(RefCell::new(state)),
+                receiver,
+                handlers: HashMap::new(),
+                handler_types: handler_types.clone(),
+            },
+            ActorRef {
+                sender,
+                handler_types,
+            },
+        )
+    }
+
+    pub async fn run(&mut self) {
+        while let Some(message) = self.receiver.next().await {
+            match message {
+                Message::Notification(params) => {
+                    let type_id = (*params).type_id();
+                    if let Some(handler) = self.handlers.get(&type_id) {
+                        let handler = handler
+                            .downcast_ref::<AsyncFuncHandler<S, BoxedAny, ()>>()
+                            .unwrap();
+                        let mut state = self.state.borrow_mut();
+                        let _ = handler.0(&mut *state, params).await;
+                    }
+                }
+                Message::Request(params, responder) => {
+                    let type_id = (*params).type_id();
+                    if let Some(handler) = self.handlers.get(&type_id) {
+                        let handler = handler
+                            .downcast_ref::<AsyncFuncHandler<S, BoxedAny, BoxedAny>>()
+                            .unwrap();
+                        let mut state = self.state.borrow_mut();
+                        let result = handler.0(&mut *state, params).await;
+                        let _ = responder.send(result);
+                    } else {
+                        let _ = responder.send(Err(ActorError::HandlerNotFound));
+                    }
+                }
+            }
         }
     }
 
@@ -98,20 +162,60 @@ impl<S: 'static> Actor<S> {
         let type_id = std::any::TypeId::of::<C>();
         let handler = AsyncFuncHandler::new(handler);
         self.handlers.insert(type_id, Box::new(handler));
+        self.handler_types
+            .handlers
+            .write()
+            .unwrap()
+            .insert(type_id, ());
+    }
+}
+
+impl ActorRef {
+    fn has_handler<M: 'static>(&self) -> bool {
+        self.handler_types
+            .handlers
+            .read()
+            .unwrap()
+            .contains_key(&std::any::TypeId::of::<M>())
     }
 
-    pub async fn handle<C, R>(&self, params: C) -> Result<R, ActorError>
-    where
-        C: 'static,
-        R: 'static,
-    {
-        let type_id = std::any::TypeId::of::<C>();
-        if let Some(handler) = self.handlers.get(&type_id) {
-            let handler = handler.downcast_ref::<AsyncFuncHandler<S, C, R>>().unwrap();
-            let mut state = self.state.borrow_mut();
-            handler.0(&mut *state, params).await
-        } else {
-            Err(ActorError::HandlerNotFound)
+    pub async fn ask<M: Send + 'static, R: Send + 'static>(
+        &self,
+        message: M,
+    ) -> Result<R, ActorError> {
+        if !self.has_handler::<M>() {
+            return Err(ActorError::HandlerNotFound);
+        }
+
+        let (responder, receiver) = futures::channel::oneshot::channel();
+        let message = Message::Request(Box::new(message), responder);
+        self.sender
+            .unbounded_send(message)
+            .map_err(|_| ActorError::SendError)?;
+
+        receiver
+            .await
+            .map_err(|_| ActorError::SendError)?
+            .and_then(|result| Ok(*result.downcast().unwrap()))
+    }
+
+    pub fn tell<M: Send + 'static>(&self, message: M) -> Result<(), ActorError> {
+        if !self.has_handler::<M>() {
+            return Err(ActorError::HandlerNotFound);
+        }
+
+        let message = Message::Notification(Box::new(message));
+        self.sender
+            .unbounded_send(message)
+            .map_err(|_| ActorError::SendError)
+    }
+}
+
+impl Clone for ActorRef {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            handler_types: self.handler_types.clone(),
         }
     }
 }
