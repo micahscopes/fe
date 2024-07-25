@@ -45,6 +45,29 @@ impl Backend {
     }
 }
 
+pub async fn initialize(
+    backend: &mut Backend,
+    message: InitializeParams,
+) -> Result<InitializeResult, ResponseError> {
+    info!("initializing language server!");
+
+    let root = message.root_uri.unwrap().to_file_path().ok().unwrap();
+
+    let _ = backend.workspace.set_workspace_root(&mut backend.db, &root);
+    let _ = backend.workspace.load_std_lib(&mut backend.db, &root);
+    let _ = backend.workspace.sync(&mut backend.db);
+
+    let capabilities = server_capabilities();
+    let initialize_result = InitializeResult {
+        capabilities,
+        server_info: Some(async_lsp::lsp_types::ServerInfo {
+            name: String::from("fe-language-server"),
+            version: Some(String::from(env!("CARGO_PKG_VERSION"))),
+        }),
+    };
+    Ok(initialize_result)
+}
+
 // // #[async_trait::async_trait(?Send)]
 // impl RequestHandler<InitializeParams, LspResult<Initialize>> for Backend {
 //     async fn handle(

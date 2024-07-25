@@ -30,7 +30,7 @@ use async_lsp::{
     AnyEvent, AnyNotification, AnyRequest, ClientSocket, LspService, ResponseError,
 };
 use backend::{db::Jar, Backend};
-use functionality::streams::setup_streams;
+use functionality::{handlers, streams::setup_streams};
 use lsp_actor::{ActOnNotification, ActOnRequest};
 use lsp_streams::RouterStreams;
 use tower::{layer::layer_fn, util::BoxService, Service, ServiceBuilder};
@@ -48,13 +48,13 @@ async fn main() {
         let mut backend = Backend::new(client.clone());
         let (mut actor, actor_ref) = Actor::new(backend);
 
-        actor.register_notification_handler::<Initialized, _>(|state, params| ());
+        actor.register_request_handler(handlers::initialize);
 
         let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
 
         let mut streaming_router = Router::new(());
-        let initialize_stream = streaming_router.request_stream::<Initialize>();
-        let initialized_stream = streaming_router.notification_stream::<Initialized>();
+        // let initialize_stream = streaming_router.request_stream::<Initialize>();
+        // let initialized_stream = streaming_router.notification_stream::<Initialized>();
 
         let services: Vec<BoxLspService<serde_json::Value, ResponseError>> = vec![
             BoxLspService::new(streaming_router),

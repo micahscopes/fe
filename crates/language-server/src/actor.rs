@@ -1,5 +1,6 @@
 use async_lsp::can_handle::CanHandle;
 use async_lsp::AnyRequest;
+use async_lsp::ResponseError;
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
@@ -139,22 +140,27 @@ impl<S: 'static> Actor<S> {
             .insert(type_id, ());
     }
 
-    pub fn register_request_handler<C: Send + 'static, R: Send + 'static, F, Fut>(
+    pub fn register_request_handler<C: Send + 'static, R: Send + 'static, F>(
         &mut self,
         handler: F,
     ) where
-        F: Fn(StateRef<S>, C) -> Fut + 'static,
-        Fut: std::future::Future<Output = R> + 'static,
+        F: Fn(&mut S, C) -> impl std::future::Future<Output = R> + 'static,
     {
         let type_id = std::any::TypeId::of::<C>();
-        let handler = Rc::new(RefCell::new(handler));
+        // let handler = Rc::new(RefCell::new(handler));
+        let handler = Rc::new(move |state: &mut S, params: C| {
+            let future = handler(state, params);
+            async move { future.await }
+        });
         self.request_handlers.insert(
             type_id,
             Box::new(move |state, params| {
                 let handler = handler.clone();
                 let params = params.downcast::<C>().unwrap();
+                let state = state.clone();
                 async move {
-                    let result = handler.borrow()(state, *params).await;
+                    let mut state = state.borrow_mut();
+                    let result = handler(&mut *state, *params).await;
                     Box::new(result) as BoxedAny
                 }
                 .boxed_local()
