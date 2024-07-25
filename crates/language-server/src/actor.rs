@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::FutureExt;
 use futures::StreamExt;
+use tokio::runtime::Builder;
 
 #[derive(Debug)]
 pub enum ActorError {
@@ -120,6 +122,34 @@ impl<S: 'static> Actor<S> {
                 handler_types,
             },
         )
+    }
+
+    pub fn spawn_local<F>(init: F) -> ActorRef
+    where
+        F: FnOnce() -> (Self, ActorRef),
+        F: Send + 'static,
+    {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(1) // Adjust as needed
+            .enable_all()
+            .build()
+            .unwrap();
+        let (tx, rx) = channel();
+
+        std::thread::spawn(move || {
+            let local = tokio::task::LocalSet::new();
+
+            let actor_ref = local.spawn_local(async move {
+                let (mut actor, actor_ref) = init();
+                tx.send(actor_ref);
+                actor.run().await;
+            });
+            runtime.block_on(local);
+            actor_ref
+        });
+        let actor_ref = rx.recv().unwrap();
+
+        actor_ref
     }
 
     pub async fn run(&mut self) {

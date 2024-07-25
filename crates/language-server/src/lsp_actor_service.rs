@@ -48,18 +48,31 @@ impl Service<AnyRequest> for LspActorService {
 
 impl LspService for LspActorService {
     fn notify(&mut self, notif: AnyNotification) -> ControlFlow<async_lsp::Result<()>> {
+        let method = notif.method.clone();
         match self.actor_ref.tell(notif) {
             Ok(()) => ControlFlow::Continue(()),
+            Err(ActorError::HandlerNotFound) => {
+                tracing::warn!("Method not found for notification `{}`", method);
+                ControlFlow::Continue(())
+            }
             Err(e) => ControlFlow::Break(Err(Error::Response(ResponseError::new(
                 async_lsp::ErrorCode::INTERNAL_ERROR,
-                format!("Failed to send notification: {:?}", e),
+                format!(
+                    "Failed to send notification: {:?} for notification `{}`",
+                    e, method
+                ),
             )))),
         }
     }
 
     fn emit(&mut self, event: AnyEvent) -> ControlFlow<async_lsp::Result<()>> {
+        let type_name = event.type_name();
         match self.actor_ref.tell(event) {
             Ok(()) => ControlFlow::Continue(()),
+            Err(ActorError::HandlerNotFound) => {
+                tracing::warn!("Method not found for event: {:?}", type_name);
+                ControlFlow::Continue(())
+            }
             Err(e) => ControlFlow::Break(Err(Error::Response(ResponseError::new(
                 async_lsp::ErrorCode::INTERNAL_ERROR,
                 format!("Failed to emit event: {:?}", e),

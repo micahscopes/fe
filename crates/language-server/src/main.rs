@@ -10,15 +10,20 @@ mod server;
 mod streaming_router;
 mod util;
 
+use async_lsp::panic::CatchUnwindLayer;
+use async_lsp::server::LifecycleLayer;
 use futures::stream::StreamExt;
 use lsp_actor_service::LspActorService;
 use serde_json::Value;
 use std::{ops::ControlFlow, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, RwLock};
+use tracing::Level;
+use tracing::{error, info};
 
 use actor::Actor;
 use async_lsp::{
     can_handle::CanHandle,
+    client_monitor::ClientProcessMonitorLayer,
     lsp_types::{
         notification::Initialized,
         request::{HoverRequest, Initialize, Request},
@@ -42,18 +47,32 @@ impl<M> CanHandle<M> for LspActorService {
     }
 }
 
-#[tokio_macros::main]
+#[tokio::main]
 async fn main() {
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
-        let mut backend = Backend::new(client.clone());
-        let (mut actor, actor_ref) = Actor::new(backend);
+        // let client = client.clone();
+        // let mut backend = Backend::new(client.clone());
+        // let (mut actor, actor_ref) = Actor::new(backend);
+        // actor.register_request_handler(handlers::initialize);
 
-        actor.register_request_handler(handlers::initialize);
+        let client_cloned = client.clone();
+        let actor_ref = Actor::spawn_local(move || {
+            let backend = Backend::new(client_cloned);
+            let (mut actor, actor_ref) = Actor::new(backend);
+            actor.register_request_handler(handlers::initialize);
 
+            (actor, actor_ref)
+        });
         let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
 
         let mut streaming_router = Router::new(());
-        let initialize_stream = streaming_router.request_stream::<Initialize>();
+        streaming_router.request::<Initialize, _>(|_, _| async {
+            info!("initializing language server!");
+            Ok(InitializeResult::default())
+        });
+        // .notification::<Initialized>(|_, _| ControlFlow::Continue(()));
+
+        // let initialize_stream = streaming_router.request_stream::<Initialize>();
         let initialized_stream = streaming_router.notification_stream::<Initialized>();
 
         let services: Vec<BoxLspService<serde_json::Value, ResponseError>> = vec![
@@ -62,9 +81,21 @@ async fn main() {
         ];
 
         // let picker = FirstComeFirstServe::<BoxLspService<Value, ResponseError>>::default();
-        let steering_router = LspSteer::new(services, FirstComeFirstServe);
-        steering_router
+        let router = LspSteer::new(services, FirstComeFirstServe);
+        // steering_router
+        ServiceBuilder::new()
+            // .layer(TracingLayer::default())
+            .layer(LifecycleLayer::default())
+            .layer(CatchUnwindLayer::default())
+            // .layer(ConcurrencyLayer::default())
+            .layer(ClientProcessMonitorLayer::new(client.clone()))
+            .service(router)
     });
+    tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .init();
 
     #[cfg(unix)]
     let (stdin, stdout) = (
@@ -78,5 +109,8 @@ async fn main() {
         tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(tokio::io::stdout()),
     );
 
-    server.run_buffered(stdin, stdout).await.unwrap();
+    match server.run_buffered(stdin, stdout).await {
+        Ok(_) => info!("Server finished successfully"),
+        Err(e) => error!("Server error: {:?}", e),
+    }
 }
