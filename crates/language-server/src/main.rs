@@ -46,11 +46,11 @@ impl<M> CanHandle<M> for LspActorService {
 async fn main() {
     let (server, _) = async_lsp::MainLoop::new_server(|client| {
         let mut backend = Backend::new(client.clone());
-        let (mut actor, actor_ref) = Actor::new(backend);
+        let mut actor = Actor::new(backend);
 
         actor.register_request_handler(handlers::initialize);
 
-        let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
+        // let actor_service = lsp_actor_service::LspActorService::new(actor_ref.clone());
 
         let mut streaming_router = Router::new(());
         // let initialize_stream = streaming_router.request_stream::<Initialize>();
@@ -58,7 +58,7 @@ async fn main() {
 
         let services: Vec<BoxLspService<serde_json::Value, ResponseError>> = vec![
             BoxLspService::new(streaming_router),
-            BoxLspService::new(actor_service),
+            // BoxLspService::new(actor_service),
         ];
 
         // let picker = FirstComeFirstServe::<BoxLspService<Value, ResponseError>>::default();
