@@ -1,0 +1,12 @@
+[language]
+name = "fe"
+grammar = "fe"
+path_suffixes = ["fe"]
+line_comments = ["// "]
+brackets = [
+    { start = "{", end = "}", split_on_newline = true },
+    { start = "(", end = ")" },
+    { start = "[", end = "]" },
+]
+word_characters = ["a-z", "A-Z", "0-9", "_", "$"]
+autoclose_before = ";:.,=}])>` \n\t"
