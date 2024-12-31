@@ -219,10 +219,14 @@ impl<'db> ModuleTreeBuilder<'db> {
                 continue;
             }
 
-            assert!(child_path
-                .parent()
-                .unwrap()
-                .starts_with(root_path.parent().unwrap()));
+            let child_parent = child_path.parent().unwrap();
+            let root_parent = root_path.parent().unwrap();
+            assert!(
+                child_parent.starts_with(root_parent),
+                "Path assertion failed:\nchild_parent: {:?}\nroot_parent: {:?}",
+                child_parent,
+                root_parent
+            );
 
             if let Some(parent_mod) = self.parent_module(child) {
                 let cur_mod = self.mod_map[&child_mod];
