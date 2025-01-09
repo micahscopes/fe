@@ -14,7 +14,10 @@ use hir::{
 };
 use hir_analysis::{
     name_resolution::{DefConflictAnalysisPass, ImportAnalysisPass, PathAnalysisPass},
-    ty::{BodyAnalysisPass, FuncAnalysisPass, ImplTraitAnalysisPass, TraitAnalysisPass},
+    ty::{
+        AdtDefAnalysisPass, BodyAnalysisPass, FuncAnalysisPass, ImplAnalysisPass,
+        ImplTraitAnalysisPass, TraitAnalysisPass, TypeAliasAnalysisPass,
+    },
 };
 use url::Url;
 
@@ -131,10 +134,50 @@ fn initialize_analysis_pass(db: &LanguageServerDatabase) -> AnalysisPassManager<
     pass_manager.add_module_pass(Box::new(DefConflictAnalysisPass::new(db)));
     pass_manager.add_module_pass(Box::new(ImportAnalysisPass::new(db)));
     pass_manager.add_module_pass(Box::new(PathAnalysisPass::new(db)));
+    pass_manager.add_module_pass(Box::new(AdtDefAnalysisPass::new(db)));
+    pass_manager.add_module_pass(Box::new(TypeAliasAnalysisPass::new(db)));
     pass_manager.add_module_pass(Box::new(TraitAnalysisPass::new(db)));
+    pass_manager.add_module_pass(Box::new(ImplAnalysisPass::new(db)));
     pass_manager.add_module_pass(Box::new(ImplTraitAnalysisPass::new(db)));
     pass_manager.add_module_pass(Box::new(FuncAnalysisPass::new(db)));
     pass_manager.add_module_pass(Box::new(BodyAnalysisPass::new(db)));
 
     pass_manager
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::{
+        db::LanguageServerDatabase,
+        workspace::{IngotFileContext, Workspace},
+    };
+
+    use common::input::IngotKind;
+    use dir_test::{dir_test, Fixture};
+    use fe_compiler_test_utils::snap_test;
+    use std::path::Path;
+
+    #[dir_test(
+        dir: "$CARGO_MANIFEST_DIR/test_files/with_std",
+        glob: "**/lib.fe",
+    )]
+    fn test_diagnosis_with_stdlib(fixture: Fixture<&str>) {
+        let cargo_manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        let ingot_base_dir = Path::new(&cargo_manifest_dir).join("test_files/with_std");
+
+        let mut db = LanguageServerDatabase::default();
+        let mut workspace = Workspace::default();
+
+        let _ = workspace.set_workspace_root(&mut db, &ingot_base_dir);
+
+        let fixture_path = fixture.path();
+        let input = workspace.touch_input_for_file_path(&mut db, fixture.path());
+        assert_eq!(input.unwrap().ingot(&db).kind(&db), IngotKind::Local);
+
+        let actual = db.diagnostics_for_ingot(input.unwrap().ingot(&db));
+        let actual =
+            serde_json::to_string_pretty(&actual).expect("Failed to convert diagnostics to string");
+
+        snap_test!(actual, &fixture_path);
+    }
 }
