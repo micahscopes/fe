@@ -40,15 +40,18 @@ pub(crate) fn setup(
     lsp_actor_service
         // mutating handlers
         .handle_request_mut::<Initialize>(handlers::initialize)
+        .handle_notification_mut::<notification::DidChangeConfiguration>(
+            handlers::handle_did_change_configuration,
+        )
         .handle_request_mut::<GotoDefinition>(goto::handle_goto_definition)
         .handle_event_mut::<FileChange>(handlers::handle_file_change)
-        .handle_event::<FilesNeedDiagnostics>(handlers::handle_files_need_diagnostics)
         // non-mutating handlers
         .handle_notification::<Initialized>(handlers::initialized)
         .handle_request::<HoverRequest>(handlers::handle_hover_request)
         .handle_notification::<DidOpenTextDocument>(handlers::handle_did_open_text_document)
         .handle_notification::<DidChangeTextDocument>(handlers::handle_did_change_text_document)
         .handle_notification::<DidChangeWatchedFiles>(handlers::handle_did_change_watched_files)
+        .handle_event::<FilesNeedDiagnostics>(handlers::handle_files_need_diagnostics)
         .handle_notification::<notification::Exit>(handlers::handle_exit);
 
     let mut streaming_router = Router::new(());

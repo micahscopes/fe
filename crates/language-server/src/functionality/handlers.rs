@@ -237,7 +237,11 @@ pub async fn handle_files_need_diagnostics(
                 }
             });
         };
-        backend.workers.spawn_blocking(diagnostic_task);
+        if backend.settings.enable_diagnostic_workers {
+            backend.workers.spawn_blocking(diagnostic_task);
+        } else {
+            diagnostic_task();
+        }
     }
     Ok(())
 }
@@ -264,4 +268,14 @@ pub async fn handle_hover_request(
 
     info!("sending hover response: {:?}", response);
     Ok(response)
+}
+
+pub async fn handle_did_change_configuration(
+    backend: &mut Backend,
+    message: async_lsp::lsp_types::DidChangeConfigurationParams,
+) -> Result<(), ResponseError> {
+    if let Ok(settings) = serde_json::from_value(message.settings) {
+        backend.settings = settings;
+    }
+    Ok(())
 }
