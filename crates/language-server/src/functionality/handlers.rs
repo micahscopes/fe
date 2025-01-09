@@ -235,7 +235,14 @@ pub async fn handle_files_need_diagnostics(
                 }
             });
         };
-        backend.workers.spawn_blocking(diagnostic_task);
+
+        let use_worker_thread = false;
+
+        if use_worker_thread {
+            backend.workers.spawn_blocking(diagnostic_task);
+        } else {
+            diagnostic_task();
+        }
     }
     Ok(())
 }

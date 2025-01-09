@@ -1,0 +1,5 @@
+use std::get_42
+
+fn really_get_42() -> u256 {
+  get_42()
+}

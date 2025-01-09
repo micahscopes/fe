@@ -1,0 +1,24 @@
+---
+source: crates/language-server/src/functionality/diagnostics.rs
+assertion_line: 181
+expression: actual
+input_file: crates/language-server/test_files/with_std/src/lib.fe
+---
+{
+  "file:///home/micah/hacker-stuff-2023/fe-stuff/fe/crates/language-server/test_files/with_std/src/lib.fe": [
+    {
+      "range": {
+        "start": {
+          "line": 1,
+          "character": 9
+        },
+        "end": {
+          "line": 1,
+          "character": 15
+        }
+      },
+      "severity": 1,
+      "message": "`get_43` is not found"
+    }
+  ]
+}
