@@ -58,7 +58,7 @@ pub(crate) fn setup_panic_hook() {
 
         // Log the panic information and backtrace
         tracing::error!(
-            "Panic occurred{}: {}\nBacktrace:\n{:?}",
+            "Panic occurred{}: {}\nBacktrace:\n{:#?}",
             location,
             message,
             backtrace
