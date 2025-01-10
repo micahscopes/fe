@@ -42,3 +42,4 @@ tracing-tree = "0.4.0"
 [dev-dependencies]
 fe-compiler-test-utils = { path = "../test-utils" }
 dir-test = "0.1"
+tracing = "0.1.40"

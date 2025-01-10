@@ -1,5 +1,7 @@
 use std::get_42
 
-fn really_get_42() -> u256 {
-  get_42()
+fn do_not_really_get_42() -> u256 {
+  23
+  //get_42()
 }
+

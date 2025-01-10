@@ -4,6 +4,7 @@ use hir::{
     },
     span::DynLazySpan,
 };
+use tracing::info;
 
 use super::{
     is_scope_visible_from,
@@ -355,7 +356,16 @@ where
         Some(PathRes::Const(_) | PathRes::Mod(_) | PathRes::Trait(_)) | None => {}
     };
 
+    let ident = path.ident(hir_db).unwrap().clone();
+    let parent = path.parent(hir_db);
     let query = make_query(db, path, parent_scope);
+    info!(
+        "Resolving path: {:?} from scope {:?} with ident {:?} and parent {:?}",
+        path,
+        parent_scope,
+        ident.data(db.as_hir_db()),
+        parent
+    );
     let bucket = resolve_query(db, query);
 
     let res = if is_tail && resolve_tail_as_value {

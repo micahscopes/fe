@@ -22,9 +22,11 @@ bitflags = "2.5"
 cranelift-entity = "0.91"
 hir = { path = "../hir", package = "fe-hir" }
 common = { path = "../common2", package = "fe-common2" }
+tracing = "0.1.41"
 
 [dev-dependencies]
 codespan-reporting = "0.11"
 dir-test = "0.3"
 # TODO move cs diagnostics utils
 driver = { path = "../driver2", package = "fe-driver2" }
+tracing = "0.1.41"
