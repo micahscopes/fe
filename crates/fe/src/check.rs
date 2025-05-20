@@ -1,3 +1,8 @@
+use camino::Utf8PathBuf;
+use common::InputDb;
+use driver::DriverDataBase;
+use hir_analysis::HirAnalysisDb;
+
 // use std::default;
 //
 // use camino::Utf8PathBuf;
@@ -50,10 +55,7 @@
 //     }
 // }
 //
-// pub fn check(path: &Utf8PathBuf) {
-//     // let mut files_handler = IngotFilesHandler::default();
-//     let mut graph_resolver = IngotGraphResolver::<IngotFilesHandler>::default();
-//     let mut graph_handler = IngotGraphHandler::default();
-//
-//     let graph = graph_resolver.resolve();
-// }
+pub fn check(path: &Utf8PathBuf) {
+    let mut db = DriverDataBase::default();
+    driver::setup_ingot(&mut db, path);
+}

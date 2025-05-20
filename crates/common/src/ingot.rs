@@ -1,10 +1,8 @@
 use camino::Utf8PathBuf;
 use radix_immutable::StringPrefixView;
-use serde::Serialize;
 use url::Url;
 
-use crate::config::IngotMetadata;
-// use crate::config::IngotManifest;
+use crate::config::{Config, IngotMetadata};
 use crate::core::BUILTIN_CORE_BASE_URL;
 use crate::file::{File, Workspace};
 use crate::urlext::UrlExt;
@@ -106,12 +104,7 @@ pub trait IngotIndex {
     fn containing_ingot_base(&self, db: &dyn InputDb, location: &Url) -> Option<Url>;
     fn containing_ingot_config(self, db: &dyn InputDb, location: Url) -> Option<File>;
     fn containing_ingot<'db>(self, db: &'db dyn InputDb, location: &Url) -> Option<Ingot<'db>>;
-    fn touch_ingot<'db>(
-        self,
-        db: &'db mut dyn InputDb,
-        base_url: &Url,
-        initial_config: IngotMetadata,
-    ) -> Option<Ingot<'db>>;
+    fn touch_ingot<'db>(self, db: &'db mut dyn InputDb, base_url: &Url) -> Option<Ingot<'db>>;
 }
 
 pub type Version = serde_semver::semver::Version;
@@ -168,31 +161,17 @@ impl IngotIndex for Workspace {
         containing_ingot_impl(db, self, location.clone())
     }
 
-    fn touch_ingot<'db>(
-        self,
-        db: &'db mut dyn InputDb,
-        base_url: &Url,
-        config: IngotMetadata,
-    ) -> Option<Ingot<'db>> {
+    fn touch_ingot<'db>(self, db: &'db mut dyn InputDb, base_url: &Url) -> Option<Ingot<'db>> {
         let base_dir = base_url
             .directory()
             .expect("Base URL should have a directory");
         let config_file = base_dir
             .join("fe.toml")
             .expect("Config file should be indexed");
-        // Wrap the config in a proper IngotConfig wrapper for serialization
-        let ingot_config = IngotConfig { ingot: config };
-        let config_toml = toml::to_string(&ingot_config).unwrap_or_default();
-        let config = self.touch(db, config_file, Some(config_toml));
+        let config = self.touch(db, config_file, None);
 
         config.containing_ingot(db)
     }
-}
-
-/// A wrapper struct to ensure the config is serialized with an [ingot] table
-#[derive(Serialize)]
-struct IngotConfig {
-    ingot: IngotMetadata,
 }
 
 #[salsa::tracked]

@@ -2,11 +2,11 @@ use camino::Utf8PathBuf;
 use smol_str::SmolStr;
 use toml::Value;
 
-use crate::input::Version;
+use crate::ingot::Version;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub ingot: Ingot,
+    pub ingot: IngotMetadata,
     pub dependencies: Vec<Dependency>,
     pub diagnostics: Vec<ConfigDiagnostics>,
 }
@@ -14,7 +14,7 @@ pub struct Config {
 impl Config {
     pub fn from_string(content: String) -> Self {
         let mut diagnostics = Vec::new();
-        let mut ingot = Ingot::default();
+        let mut ingot = IngotMetadata::default();
         let mut dependencies = Vec::new();
 
         let parsed: Value = match content.parse() {
@@ -96,7 +96,7 @@ impl Config {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct Ingot {
+pub struct IngotMetadata {
     pub name: Option<SmolStr>,
     pub version: Option<Version>,
 }

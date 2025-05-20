@@ -2,6 +2,7 @@ mod check;
 mod tree;
 
 use camino::Utf8PathBuf;
+use check::check;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Clone, Parser)]
@@ -34,7 +35,7 @@ pub fn run(opts: &Options) {
     match &opts.command {
         Command::Build => eprintln!("`fe build` doesn't work at the moment"),
         Command::Check { path, core } => {
-            todo!()
+            check(path);
         }
         Command::Tree { path } => {
             tree::print_tree(path);

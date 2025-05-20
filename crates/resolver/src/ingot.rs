@@ -14,6 +14,11 @@ pub fn basic_ingot_graph_resolver() -> IngotGraphResolver<BasicIngotNodeHandler>
     )
 }
 
+pub fn ingot_graph_resolver<NH>(node_handler: NH) -> IngotGraphResolver<NH> {
+    let files_resolver = FilesResolver::with_patterns(&["fe.toml", "src/**/*.fe"]);
+    GraphResolverImpl::new(files_resolver, node_handler)
+}
+
 #[derive(Debug)]
 pub struct IngotConfigDoesNotExist;
 
