@@ -20,7 +20,10 @@ pub(crate) mod module_tree;
 
 pub use attr::*;
 pub use body::*;
-use common::ingot::{Ingot, IngotIndex, IngotKind};
+use common::{
+    config::{Dependency, DependencyDescription},
+    ingot::{Ingot, IngotIndex, IngotKind},
+};
 pub use expr::*;
 pub use ident::*;
 pub use item::*;
@@ -80,11 +83,18 @@ impl<'db> HirIngot<'db> for Ingot<'db> {
     fn resolved_external_ingots(self, db: &'db dyn HirDb) -> Vec<(IdentId<'db>, Ingot<'db>)> {
         self.dependencies(db)
             .iter()
-            .filter_map(|(name, url)| {
-                self.index(db)
-                    .containing_ingot(db, url)
-                    .map(|ingot_description| (IdentId::new(db, name), ingot_description))
-            })
+            .filter_map(
+                |Dependency {
+                     alias,
+                     description: DependencyDescription { url, .. },
+                 }| {
+                    db.workspace()
+                        .containing_ingot(db, url)
+                        .map(|ingot_description| {
+                            (IdentId::new(db, alias.to_string()), ingot_description)
+                        })
+                },
+            )
             .collect()
     }
 

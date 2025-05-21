@@ -1,10 +1,11 @@
 use camino::Utf8PathBuf;
 use smol_str::SmolStr;
 use toml::Value;
+use url::Url;
 
 use crate::ingot::Version;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Config {
     pub ingot: IngotMetadata,
     pub dependencies: Vec<Dependency>,
@@ -58,7 +59,10 @@ impl Config {
             for (alias, value) in deps {
                 match value {
                     Value::String(path) => {
-                        dependencies.push(Dependency::path(alias.into(), Utf8PathBuf::from(path)));
+                        dependencies.push(Dependency::from_file_path(
+                            alias.into(),
+                            Utf8PathBuf::from(path),
+                        ));
                     }
                     Value::Table(tbl) => {
                         let path = tbl.get("path").and_then(|v| v.as_str());
@@ -74,7 +78,7 @@ impl Config {
                                     diagnostics.push(ConfigDiagnostics::InvalidVersion);
                                 }
                             }
-                            dependencies.push(Dependency::path_with_arguments(
+                            dependencies.push(Dependency::from_file_path_with_arguments(
                                 alias.into(),
                                 Utf8PathBuf::from(path.unwrap()),
                                 args,
@@ -96,54 +100,59 @@ impl Config {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct IngotMetadata {
     pub name: Option<SmolStr>,
     pub version: Option<Version>,
 }
 
-#[derive(Debug, Clone)]
-pub enum DependencyDescription {
-    Path(Utf8PathBuf),
-    PathWithArguments {
-        path: Utf8PathBuf,
-        arguments: IngotArguments,
-    },
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DependencyDescription {
+    pub url: Url,
+    pub arguments: Option<IngotArguments>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Dependency {
     pub alias: SmolStr,
     pub description: DependencyDescription,
 }
 
 impl Dependency {
-    pub fn path(alias: SmolStr, path: Utf8PathBuf) -> Self {
+    pub fn from_file_path(alias: SmolStr, path: Utf8PathBuf) -> Self {
+        let url = Url::from_file_path(path).expect("couldn't parse file path");
         Self {
             alias,
-            description: DependencyDescription::Path(path),
+            description: DependencyDescription {
+                url,
+                arguments: None,
+            },
         }
     }
 
-    pub fn path_with_arguments(
+    pub fn from_file_path_with_arguments(
         alias: SmolStr,
         path: Utf8PathBuf,
         arguments: IngotArguments,
     ) -> Self {
+        let url = Url::from_file_path(path).expect("couldn't parse file path");
         Self {
             alias,
-            description: DependencyDescription::PathWithArguments { path, arguments },
+            description: DependencyDescription {
+                url,
+                arguments: Some(arguments),
+            },
         }
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct IngotArguments {
     pub name: Option<SmolStr>,
     pub version: Option<Version>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConfigDiagnostics {
     MissingName,
     MissingVersion,

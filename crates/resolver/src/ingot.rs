@@ -47,16 +47,23 @@ impl ResolutionHandler<FilesResolver> for BasicIngotNodeHandler {
             return config
                 .dependencies
                 .into_iter()
-                .map(|dependency| match dependency.description {
-                    DependencyDescription::Path(path) => (
-                        ingot_path.join(path).canonicalize_utf8().unwrap(),
-                        (dependency.alias, IngotArguments::default()),
-                    ),
-                    DependencyDescription::PathWithArguments { path, arguments } => (
-                        ingot_path.join(path).canonicalize_utf8().unwrap(),
-                        (dependency.alias, arguments),
-                    ),
-                })
+                .map(
+                    |Dependency {
+                         alias,
+                         description: DependencyDescription { url, arguments },
+                     }| {
+                        (
+                            Utf8PathBuf::from_path_buf(
+                                url.to_file_path().expect("url should be a file path"),
+                            )
+                            .expect("url should be a file path"),
+                            (
+                                alias,
+                                arguments.unwrap_or_else(|| IngotArguments::default()),
+                            ),
+                        )
+                    },
+                )
                 .collect();
         }
 

@@ -207,11 +207,11 @@ impl<'a> ResolutionHandler<FilesResolver> for InputNodeHandler<'a> {
 
         for (path, content) in files {
             if path.ends_with("fe.toml") {
-                // self.workspace.touch(
-                //     self.db,
-                //     Url::from_file_path(path).unwrap(),
-                //     Some(content.clone()),
-                // );
+                self.workspace.touch(
+                    self.db,
+                    Url::from_file_path(path).unwrap(),
+                    Some(content.clone()),
+                );
                 config = Some(content);
             } else {
                 self.workspace
@@ -224,16 +224,17 @@ impl<'a> ResolutionHandler<FilesResolver> for InputNodeHandler<'a> {
             return config
                 .dependencies
                 .into_iter()
-                .map(|dependency| match dependency.description {
-                    DependencyDescription::Path(path) => (
-                        ingot_path.join(path).canonicalize_utf8().unwrap(),
-                        (dependency.alias, IngotArguments::default()),
-                    ),
-                    DependencyDescription::PathWithArguments { path, arguments } => (
-                        ingot_path.join(path).canonicalize_utf8().unwrap(),
-                        (dependency.alias, arguments),
-                    ),
-                })
+                .map(
+                    |Dependency {
+                         alias,
+                         description: DependencyDescription { url, arguments },
+                     }| {
+                        (
+                            ingot_path.join(url).canonicalize_utf8().unwrap(),
+                            (alias, arguments),
+                        )
+                    },
+                )
                 .collect();
         } else {
             vec![]
@@ -267,33 +268,33 @@ pub fn setup_workspace(db: &mut dyn InputDb, path: &Utf8PathBuf) -> Workspace {
         .transient_resolve(&path.canonicalize_utf8().unwrap())
         .unwrap();
 
-    for node_id in graph.node_identifiers() {
-        if let Some(ingot_path) = graph.node_weight(node_id) {
-            if let Ok(url) = Url::from_file_path(ingot_path) {
-                let dependencies: Vec<(String, Url)> = graph
-                    .edges_directed(node_id, petgraph::Direction::Outgoing)
-                    .filter_map(|edge| {
-                        let (alias, _) = edge.weight();
-                        let alias = alias.to_string();
-                        graph.node_weight(edge.target()).and_then(|target_path| {
-                            Url::from_file_path(target_path)
-                                .ok()
-                                .map(|url| (alias.clone(), url))
-                        })
-                    })
-                    .collect();
+    // for node_id in graph.node_identifiers() {
+    //     if let Some(ingot_path) = graph.node_weight(node_id) {
+    //         if let Ok(url) = Url::from_file_path(ingot_path) {
+    //             let dependencies: Vec<(String, Url)> = graph
+    //                 .edges_directed(node_id, petgraph::Direction::Outgoing)
+    //                 .filter_map(|edge| {
+    //                     let (alias, _) = edge.weight();
+    //                     let alias = alias.to_string();
+    //                     graph.node_weight(edge.target()).and_then(|target_path| {
+    //                         Url::from_file_path(target_path)
+    //                             .ok()
+    //                             .map(|url| (alias.clone(), url))
+    //                     })
+    //                 })
+    //                 .collect();
 
-                let ingot = workspace
-                    .containing_ingot(db, &Url::from_file_path(ingot_path).unwrap())
-                    .unwrap();
+    //             // let ingot = workspace
+    //             //     .containing_ingot(db, &Url::from_file_path(ingot_path).unwrap())
+    //             //     .unwrap();
 
-                // ???
-                ingot.dependencies(dependencies);
+    //             // ???
+    //             // ingot.set_dependencies(db);
 
-                println!("{:?} -> {:?}", url, dependencies);
-            }
-        }
-    }
+    //             println!("{:?} -> {:?}", url, dependencies);
+    //         }
+    //     }
+    // }
 
     workspace
 }
