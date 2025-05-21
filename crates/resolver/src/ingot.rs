@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
 use camino::Utf8PathBuf;
-use common::config::{Config, Dependency, IngotArguments};
+use common::config::{Config, Dependency, DependencyDescription, IngotArguments};
+use smol_str::SmolStr;
 
 use crate::{files::FilesResolver, graph::GraphResolverImpl, ResolutionHandler, Resolver};
 
-pub type IngotGraphResolver<NH> = GraphResolverImpl<FilesResolver, NH, IngotArguments>;
+pub type IngotGraphResolver<NH> = GraphResolverImpl<FilesResolver, NH, (SmolStr, IngotArguments)>;
 
 pub fn basic_ingot_graph_resolver() -> IngotGraphResolver<BasicIngotNodeHandler> {
     GraphResolverImpl::new(
@@ -33,7 +34,7 @@ pub struct BasicIngotNodeHandler {
 }
 
 impl ResolutionHandler<FilesResolver> for BasicIngotNodeHandler {
-    type Item = Vec<(Utf8PathBuf, IngotArguments)>;
+    type Item = Vec<(Utf8PathBuf, (SmolStr, IngotArguments))>;
 
     fn handle_resolution(
         &mut self,
@@ -46,14 +47,14 @@ impl ResolutionHandler<FilesResolver> for BasicIngotNodeHandler {
             return config
                 .dependencies
                 .into_iter()
-                .map(|dependency| match dependency {
-                    Dependency::Path(path) => (
+                .map(|dependency| match dependency.description {
+                    DependencyDescription::Path(path) => (
                         ingot_path.join(path).canonicalize_utf8().unwrap(),
-                        IngotArguments::default(),
+                        (dependency.alias, IngotArguments::default()),
                     ),
-                    Dependency::PathWithArguments { path, arguments } => (
+                    DependencyDescription::PathWithArguments { path, arguments } => (
                         ingot_path.join(path).canonicalize_utf8().unwrap(),
-                        arguments,
+                        (dependency.alias, arguments),
                     ),
                 })
                 .collect();

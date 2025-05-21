@@ -808,6 +808,8 @@ dependencies = [
  "fe-hir",
  "fe-hir-analysis",
  "fe-resolver",
+ "smol_str",
+ "url",
 ]
 
 [[package]]
@@ -976,6 +978,7 @@ dependencies = [
  "indexmap",
  "petgraph",
  "semver",
+ "smol_str",
  "toml",
 ]
 

@@ -11,3 +11,5 @@ resolver.workspace = true
 camino.workspace = true
 hir-analysis.workspace = true
 hir.workspace = true
+url.workspace = true
+smol_str.workspace = true

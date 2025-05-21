@@ -9,7 +9,7 @@ description = "Resolver lib for Fe."
 
 [dependencies]
 common.workspace = true
-
+smol_str.workspace = true
 camino.workspace = true
 glob.workspace = true
 semver.workspace = true

@@ -287,8 +287,7 @@ pub fn setup_workspace(db: &mut dyn InputDb, path: &Utf8PathBuf) -> Workspace {
                     .containing_ingot(db, &Url::from_file_path(ingot_path).unwrap())
                     .unwrap();
 
-                // ???
-                ingot.dependencies(dependencies);
+                ingot.dependencies = dependencies;
 
                 println!("{:?} -> {:?}", url, dependencies);
             }

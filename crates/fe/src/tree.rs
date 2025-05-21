@@ -7,6 +7,7 @@ use resolver::{
     ingot::basic_ingot_graph_resolver,
     Resolver,
 };
+use smol_str::SmolStr;
 
 pub fn print_tree(path: &Utf8PathBuf) {
     let mut graph_resolver = basic_ingot_graph_resolver();
@@ -49,7 +50,7 @@ impl TreePrefix {
 }
 
 pub fn print_tree_impl(
-    graph: &DiGraph<Utf8PathBuf, IngotArguments>,
+    graph: &DiGraph<Utf8PathBuf, (SmolStr, IngotArguments)>,
     root_path: &Utf8PathBuf,
     configs: &HashMap<Utf8PathBuf, Config>,
 ) -> String {
@@ -76,7 +77,7 @@ pub fn print_tree_impl(
 }
 
 fn print_node(
-    graph: &DiGraph<Utf8PathBuf, IngotArguments>,
+    graph: &DiGraph<Utf8PathBuf, (SmolStr, IngotArguments)>,
     node: NodeIndex,
     prefix: TreePrefix,
     output: &mut String,

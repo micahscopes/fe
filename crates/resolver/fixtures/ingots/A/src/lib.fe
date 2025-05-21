@@ -1,0 +1,5 @@
+use B::Bar
+
+fn foo() {
+  let b = Bar {} 
+}

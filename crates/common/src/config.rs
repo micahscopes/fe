@@ -58,7 +58,7 @@ impl Config {
             for (alias, value) in deps {
                 match value {
                     Value::String(path) => {
-                        dependencies.push(Dependency::Path(Utf8PathBuf::from(path)));
+                        dependencies.push(Dependency::path(alias.into(), Utf8PathBuf::from(path)));
                     }
                     Value::Table(tbl) => {
                         let path = tbl.get("path").and_then(|v| v.as_str());
@@ -74,10 +74,11 @@ impl Config {
                                     diagnostics.push(ConfigDiagnostics::InvalidVersion);
                                 }
                             }
-                            dependencies.push(Dependency::PathWithArguments {
-                                path: Utf8PathBuf::from(path_str),
-                                arguments: args,
-                            });
+                            dependencies.push(Dependency::path_with_arguments(
+                                alias.into(),
+                                Utf8PathBuf::from(path.unwrap()),
+                                args,
+                            ));
                         } else {
                             diagnostics.push(ConfigDiagnostics::InvalidDependencyDescription);
                         }
@@ -102,12 +103,38 @@ pub struct IngotMetadata {
 }
 
 #[derive(Debug, Clone)]
-pub enum Dependency {
+pub enum DependencyDescription {
     Path(Utf8PathBuf),
     PathWithArguments {
         path: Utf8PathBuf,
         arguments: IngotArguments,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct Dependency {
+    pub alias: SmolStr,
+    pub description: DependencyDescription,
+}
+
+impl Dependency {
+    pub fn path(alias: SmolStr, path: Utf8PathBuf) -> Self {
+        Self {
+            alias,
+            description: DependencyDescription::Path(path),
+        }
+    }
+
+    pub fn path_with_arguments(
+        alias: SmolStr,
+        path: Utf8PathBuf,
+        arguments: IngotArguments,
+    ) -> Self {
+        Self {
+            alias,
+            description: DependencyDescription::PathWithArguments { path, arguments },
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
