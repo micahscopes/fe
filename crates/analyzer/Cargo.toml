@@ -8,16 +8,16 @@ repository = "https://github.com/ethereum/fe"
 
 [dependencies]
 
-fe-common = {path = "../common", version = "^0.19.1-alpha"}
-fe-parser = {path = "../parser", version = "^0.19.1-alpha"}
-fe-library = {path = "../library", version = "^0.19.1-alpha"}
+fe-common = { path = "../common", version = "^0.19.1-alpha" }
+fe-parser = { path = "../parser", version = "^0.19.1-alpha" }
+fe-library = { path = "../library", version = "^0.19.1-alpha" }
 hex = "0.4"
 num-bigint = "0.4.3"
 num-traits = "0.2.14"
 strum = { version = "0.23.0", features = ["derive"] }
 semver = "1.0.0"
 salsa = "0.16.1"
-parking_lot_core = { version = "=0.8.0" } # used by salsa; version pinned for wasm compatibility
+parking_lot_core = { version = "=0.8.0" }                       # used by salsa; version pinned for wasm compatibility
 indexmap = "1.6.2"
 if_chain = "1.0.1"
 smallvec = { version = "1.6.1", features = ["union"] }
@@ -27,9 +27,8 @@ smol_str = "0.1.21"
 [dev-dependencies]
 insta = "1.7.1"
 rstest = "0.6.4"
-test-files = {path = "../test-files", package = "fe-test-files" }
-fe-library = {path = "../library"}
-wasm-bindgen-test = "0.3"
+test-files = { path = "../test-files", package = "fe-test-files" }
+fe-library = { path = "../library" }
 pretty_assertions = "1.0.0"
 criterion = "0.3.5"
 

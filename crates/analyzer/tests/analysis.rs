@@ -10,7 +10,6 @@ use insta::assert_snapshot;
 use smallvec::SmallVec;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
-use wasm_bindgen_test::wasm_bindgen_test;
 
 #[test]
 fn analyze_std_lib() {
@@ -73,7 +72,6 @@ fn ingot_files_to_modules() {
 macro_rules! test_analysis {
     ($name:ident, $path:expr) => {
         #[test]
-        #[wasm_bindgen_test]
         fn $name() {
             let mut db = TestDb::default();
 
@@ -104,7 +102,6 @@ macro_rules! test_analysis {
 macro_rules! test_analysis_ingot {
     ($name:ident, $path:expr) => {
         #[test]
-        #[wasm_bindgen_test]
         fn $name() {
             let mut db = TestDb::default();
 

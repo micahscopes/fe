@@ -6,7 +6,6 @@ use fe_common::diagnostics::diagnostics_string;
 use fe_common::files::FileKind;
 use indexmap::indexmap;
 use insta::assert_snapshot;
-use wasm_bindgen_test::wasm_bindgen_test;
 
 fn error_string(path: &str, src: &str) -> String {
     let mut db = TestDb::default();
@@ -41,7 +40,6 @@ fn error_string_ingot(path: &str) -> String {
 macro_rules! test_ingot {
     ($name:ident) => {
         #[test]
-        #[wasm_bindgen_test]
         fn $name() {
             let path = concat!("compile_errors/", stringify!($name), "/src");
 
@@ -60,7 +58,6 @@ macro_rules! test_ingot {
 macro_rules! test_file {
     ($name:ident) => {
         #[test]
-        #[wasm_bindgen_test]
         fn $name() {
             let path = concat!("compile_errors/", stringify!($name), ".fe");
             if cfg!(target_arch = "wasm32") {
@@ -78,7 +75,6 @@ macro_rules! test_file {
 macro_rules! test_stmt {
     ($name:ident, $stmt:expr) => {
         #[test]
-        #[wasm_bindgen_test]
         fn $name() {
             let src = format!(
                 "contract C {{\n pub fn f(self) {{\n  {}\n }}\n}}",
