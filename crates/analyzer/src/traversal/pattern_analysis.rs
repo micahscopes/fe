@@ -58,9 +58,16 @@ impl PatternMatrix {
     }
 
     pub fn find_non_exhaustiveness(&self, db: &dyn AnalyzerDb) -> Option<Vec<SimplifiedPattern>> {
+        eprintln!("\nDEBUG: find_non_exhaustiveness called with matrix:");
+        eprintln!("  nrows = {}", self.nrows());
         if self.nrows() == 0 {
             // Non Exhaustive!
+            eprintln!("DEBUG: Returning empty vec (non-exhaustive)");
             return Some(vec![]);
+        }
+        eprintln!("  ncols = {}", self.ncols());
+        for (i, row) in self.rows.iter().enumerate() {
+            eprintln!("  Row {}: {:?}", i, row);
         }
         if self.ncols() == 0 {
             return None;
@@ -69,7 +76,9 @@ impl PatternMatrix {
         let ty = self.first_column_ty();
         let sigma_set = self.sigma_set();
         if sigma_set.is_complete(db) {
+            eprintln!("DEBUG: Sigma set is complete, checking constructors");
             for ctor in sigma_set.into_iter() {
+                eprintln!("DEBUG: Checking constructor {:?}", ctor);
                 match self.phi_specialize(db, ctor).find_non_exhaustiveness(db) {
                     Some(vec) if vec.is_empty() => {
                         let pat_kind = SimplifiedPatternKind::Constructor {
@@ -83,6 +92,16 @@ impl PatternMatrix {
 
                     Some(mut vec) => {
                         let field_num = ctor.arity(db);
+                        eprintln!(
+                            "DEBUG: Constructor = {:?}, arity = {}, vec.len() = {}",
+                            ctor,
+                            field_num,
+                            vec.len()
+                        );
+                        eprintln!(
+                            "DEBUG: vec contents = {:?}",
+                            vec.iter().map(|p| format!("{:?}", p)).collect::<Vec<_>>()
+                        );
                         debug_assert!(vec.len() >= field_num);
                         let rem = vec.split_off(field_num);
                         let pat_kind = SimplifiedPatternKind::Constructor {

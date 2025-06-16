@@ -214,6 +214,7 @@ test_file! { bad_enums }
 test_file! { enum_match }
 test_file! { enum_name_conflict }
 test_file! { exhaustiveness }
+test_file! { complex_tuple_enum_exhaustiveness }
 test_file! { unreachable_pattern }
 test_file! { bad_string }
 test_file! { bad_tuple_attr1 }
