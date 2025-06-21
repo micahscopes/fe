@@ -63,7 +63,7 @@ impl Config {
                     }
                     Value::Table(tbl) => {
                         let path = tbl.get("path").and_then(|v| v.as_str());
-                        if let Some(path_str) = path {
+                        if let Some(_path_str) = path {
                             let mut args = IngotArguments::default();
                             if let Some(name) = tbl.get("name").and_then(|v| v.as_str()) {
                                 args.name = Some(SmolStr::new(name));
@@ -152,7 +152,7 @@ impl Dependency {
                 arguments: IngotArguments::default(),
                 url: base_url.join_directory(path).unwrap(),
             },
-            DependencyDescription::PathWithArguments { path, arguments } => BasedDependency {
+            DependencyDescription::PathWithArguments { path, .. } => BasedDependency {
                 alias: self.alias.clone(),
                 arguments: IngotArguments::default(),
                 url: base_url.join_directory(path).unwrap(),

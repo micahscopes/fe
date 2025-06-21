@@ -8,6 +8,7 @@ use url::Url;
 use crate::config::{Config, DependencyDescription};
 use crate::core::BUILTIN_CORE_BASE_URL;
 use crate::file::{File, Workspace};
+use crate::indexmap::IndexSet;
 use crate::urlext::UrlExt;
 use crate::InputDb;
 
@@ -62,13 +63,11 @@ impl IngotBaseUrl for Url {
     }
 }
 
-#[salsa::tracked]
+#[salsa::interned]
 #[derive(Debug)]
 pub struct Ingot<'db> {
     pub base: Url,
     pub standalone_file: Option<File>,
-    #[tracked]
-    pub index: Workspace,
     pub kind: IngotKind,
 }
 
@@ -95,84 +94,90 @@ impl<'db> Ingot<'db> {
 
     #[salsa::tracked]
     pub fn files(self, db: &'db dyn InputDb) -> StringPrefixView<'db, Url, File> {
-        if let Some(standalone_file) = self.standalone_file(db) {
-            // For standalone ingots, use the standalone file URL as the base
-            db.workspace().items_at_base(
-                db,
-                standalone_file
-                    .url(db)
-                    .expect("file should be registered in the index"),
-            )
-        } else {
-            // For regular ingots, use the ingot base URL
-            db.workspace().items_at_base(db, self.base(db))
-        }
+        ingot_files(db, self)
     }
 
     #[salsa::tracked]
     pub fn config(self, db: &'db dyn InputDb) -> Option<Config> {
-        db.workspace()
-            .containing_ingot_config(db, self.base(db))
-            .map(|config_file| Config::from_string(config_file.text(db).clone()))
+        ingot_config(db, self)
     }
 
     #[salsa::tracked]
     pub fn version(self, db: &'db dyn InputDb) -> Option<Version> {
-        self.config(db).map(|config| config.ingot.version).flatten()
+        ingot_version(db, self)
     }
 
     #[salsa::tracked]
-    pub fn dependencies(self, db: &'db dyn InputDb) -> Vec<(SmolStr, Url)> {
-        let base_url = self.base(db);
-        let mut deps = match self.config(db) {
-            Some(config) => config
-                .dependencies
-                .into_iter()
-                .map(|dependency| {
-                    let mut path = match dependency.description {
-                        DependencyDescription::Path(path) => path,
-                        DependencyDescription::PathWithArguments { path, arguments } => path,
-                    };
-                    if !path.ends_with("/") {
-                        path.push("");
-                    }
-                    let url = base_url.join(path.as_str()).unwrap().directory().unwrap();
-                    (dependency.alias, url)
-                })
-                .collect(),
-            None => vec![],
-        };
-
-        if self.kind(db) != IngotKind::Core {
-            deps.push((
-                "core".into(),
-                Url::parse(BUILTIN_CORE_BASE_URL).expect("couldn't parse core ingot URL"),
-            ))
-        }
-        deps
-
-        // // Only include core dependency if not already in a core ingot
-        // let core_dependency = if self.kind(db) != IngotKind::Core {
-        //     vec![Dependency {
-        //         alias: "core".into(),
-        //         description: DependencyDescription {
-        //             url: Url::parse(BUILTIN_CORE_BASE_URL).expect("couldn't parse core ingot URL"),
-        //             arguments: None,
-        //         },
-        //     }]
-        // } else {
-        //     vec![]
-        // };
-        //
-        // match self.config(db) {
-        //     Some(config) => config
-        //         .dependencies
-        //         .into_iter()
-        //         .chain(core_dependency)
-        //         .collect(),
-        //     None => core_dependency,
-        // }
+    pub fn dependencies(self, db: &'db dyn InputDb) -> IndexSet<(SmolStr, Url)> {
+        ingot_dependencies(db, self)
     }
+}
+
+#[salsa::tracked]
+pub fn ingot_files<'db>(
+    db: &'db dyn InputDb,
+    ingot: Ingot<'db>,
+) -> StringPrefixView<'db, Url, File> {
+    if let Some(standalone_file) = ingot.standalone_file(db) {
+        // For standalone ingots, use the standalone file URL as the base
+        db.workspace().items_at_base(
+            db,
+            standalone_file
+                .url(db)
+                .expect("file should be registered in the index"),
+        )
+    } else {
+        // For regular ingots, use the ingot base URL
+        db.workspace().items_at_base(db, ingot.base(db))
+    }
+}
+
+#[salsa::tracked]
+pub fn ingot_config<'db>(db: &'db dyn InputDb, ingot: Ingot<'db>) -> Option<Config> {
+    db.workspace()
+        .containing_ingot_config(db, ingot.base(db))
+        .map(|config_file| Config::from_string(config_file.text(db).clone()))
+}
+
+#[salsa::tracked]
+pub fn ingot_version<'db>(db: &'db dyn InputDb, ingot: Ingot<'db>) -> Option<Version> {
+    ingot_config(db, ingot)
+        .map(|config| config.ingot.version)
+        .flatten()
+}
+
+#[salsa::tracked]
+pub fn ingot_dependencies<'db>(
+    db: &'db dyn InputDb,
+    ingot: Ingot<'db>,
+) -> IndexSet<(SmolStr, Url)> {
+    let base_url = ingot.base(db);
+    let mut deps: IndexSet<(SmolStr, Url)> = match ingot_config(db, ingot) {
+        Some(config) => config
+            .dependencies
+            .into_iter()
+            .map(|dependency| {
+                let mut path = match dependency.description {
+                    DependencyDescription::Path(path) => path,
+                    DependencyDescription::PathWithArguments { path, .. } => path,
+                };
+                if !path.ends_with("/") {
+                    path.push("");
+                }
+                let url = base_url.join(path.as_str()).unwrap().directory().unwrap();
+                (dependency.alias, url)
+            })
+            .collect(),
+        None => IndexSet::new(),
+    };
+
+    if ingot.kind(db) != IngotKind::Core {
+        deps.insert((
+            "core".into(),
+            Url::parse(BUILTIN_CORE_BASE_URL).expect("couldn't parse core ingot URL"),
+        ));
+    }
+    deps
 }
 
 pub type Version = serde_semver::semver::Version;
@@ -234,20 +239,13 @@ impl Workspace {
 }
 
 /// Private helper to create canonical ingots for regular projects
-#[salsa::tracked]
-pub(super) fn ingot_at_base_url<'db>(
-    db: &'db dyn InputDb,
-    index: Workspace,
-    base_url: Url,
-) -> Ingot<'db> {
-    let core_url = Url::parse(BUILTIN_CORE_BASE_URL).expect("Failed to parse core URL");
+pub(super) fn ingot_at_base_url<'db>(db: &'db dyn InputDb, base_url: Url) -> Ingot<'db> {
     let is_core = base_url.scheme().contains("core");
 
     let ingot = Ingot::new(
         db,
         base_url,
         None,
-        index,
         if is_core {
             IngotKind::Core
         } else {
@@ -256,7 +254,7 @@ pub(super) fn ingot_at_base_url<'db>(
     );
 
     // this is a sad necessity :(( for now
-    let _ = ingot.files(db);
+    // let _ = ingot.files(db);
 
     ingot
 }
@@ -265,16 +263,13 @@ pub(super) fn ingot_at_base_url<'db>(
 #[salsa::tracked]
 pub(super) fn standalone_ingot<'db>(
     db: &'db dyn InputDb,
-    index: Workspace,
     base_url: Url,
     root_file: Option<File>,
 ) -> Ingot<'db> {
-    let core_url = Url::parse(BUILTIN_CORE_BASE_URL).expect("Failed to parse core URL");
-
-    let ingot = Ingot::new(db, base_url, root_file, index, IngotKind::StandAlone);
+    let ingot = Ingot::new(db, base_url, root_file, IngotKind::StandAlone);
 
     // this is a sad necessity :(( for now
-    let _ = ingot.files(db);
+    // let _ = ingot.files(db);
 
     ingot
 }
@@ -294,7 +289,7 @@ pub(super) fn containing_ingot_impl<'db>(
             .expect("Config file should be indexed")
             .directory()
             .expect("Config URL should have a directory");
-        Some(ingot_at_base_url(db, index, base_url))
+        Some(ingot_at_base_url(db, base_url))
     } else {
         // Make a standalone ingot if no config is found
         let base = location.directory().unwrap_or_else(|| location.clone());
@@ -303,7 +298,7 @@ pub(super) fn containing_ingot_impl<'db>(
         } else {
             None
         };
-        Some(standalone_ingot(db, index, base, specific_root_file))
+        Some(standalone_ingot(db, base, specific_root_file))
     }
 }
 
