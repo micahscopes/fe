@@ -73,7 +73,19 @@ pub fn run(opts: &Options) {
                 db.builtin_core().base(&db)
             };
 
-            let path_url = Url::from_directory_path(path).unwrap();
+            let path_url = match path.canonicalize_utf8() {
+                Ok(canonical_path) => match Url::from_directory_path(canonical_path) {
+                    Ok(url) => url,
+                    Err(_) => {
+                        error!("failed to create URL from path: {path}");
+                        std::process::exit(2)
+                    }
+                },
+                Err(err) => {
+                    error!("failed to canonicalize path `{path}`: {err}");
+                    std::process::exit(2)
+                }
+            };
 
             let local_ingot = match ingot_resolver.resolve(&path_url) {
                 Ok(Ingot::Folder {
