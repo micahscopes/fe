@@ -23,7 +23,7 @@ impl Resolver for ConfigResolver {
     type Diagnostic = ();
 
     fn resolve(&mut self, ingot_url: &Url) -> Result<String, Error> {
-        let config_path = Utf8PathBuf::from(ingot_url).join(FE_CONFIG_SUFFIX);
+        let config_path = Utf8PathBuf::from(ingot_url.path()).join(FE_CONFIG_SUFFIX);
 
         if config_path.exists() {
             fs::read_to_string(&config_path).map_err(Error::FileReadError)
