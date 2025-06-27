@@ -84,7 +84,7 @@ pub fn run(opts: &Options) {
                             files,
                         }),
                 }) => {
-                    let base_url = url_from_directory_path(path.canonicalize_utf8().unwrap())
+                    let base_url = Url::from_directory_path(path.canonicalize_utf8().unwrap())
                         .expect("failed to parse base URL");
 
                     let diagnostics = ingot_resolver.take_diagnostics();
@@ -103,7 +103,7 @@ pub fn run(opts: &Options) {
                     base_url.ingot(&db).expect("Failed to find ingot")
                 }
                 Ok(Ingot::SingleFile { url: _, content }) => {
-                    let url = url_from_file_path(path.canonicalize_utf8().unwrap()).unwrap();
+                    let url = Url::from_file_path(path.canonicalize_utf8().unwrap()).unwrap();
                     db.workspace().touch(&mut db, url.clone(), Some(content));
                     db.workspace()
                         .containing_ingot(&db, &url)
@@ -161,47 +161,3 @@ fn _dump_scope_graph(db: &DriverDataBase, top_mod: TopLevelMod) -> String {
 }
 
 // Maybe the driver should eventually only support WASI?
-
-fn url_from_file_path<P: AsRef<std::path::Path>>(path: P) -> Result<Url, ()> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Url::from_file_path(path)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        let path_str = path.as_ref().to_string_lossy();
-        let url_str = if path_str.starts_with('/') {
-            format!("file://{}", path_str)
-        } else {
-            format!("file:///{}", path_str)
-        };
-        Url::parse(&url_str).map_err(|_| ())
-    }
-}
-
-fn url_from_directory_path<P: AsRef<std::path::Path>>(path: P) -> Result<Url, ()> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Url::from_directory_path(path)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        let path_str = path.as_ref().to_string_lossy();
-        let url_str = if path_str.starts_with('/') {
-            if path_str.ends_with('/') {
-                format!("file://{}", path_str)
-            } else {
-                format!("file://{}/", path_str)
-            }
-        } else {
-            if path_str.ends_with('/') {
-                format!("file:///{}", path_str)
-            } else {
-                format!("file:///{}/", path_str)
-            }
-        };
-        Url::parse(&url_str).map_err(|_| ())
-    }
-}

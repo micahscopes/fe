@@ -118,9 +118,7 @@ impl<'db> Ingot<'db> {
 
     #[salsa::tracked]
     pub fn version(self, db: &'db dyn InputDb) -> Option<Version> {
-        self.config(db)
-            .map(|config| config.metadata.version)
-            .flatten()
+        self.config(db).and_then(|config| config.metadata.version)
     }
 
     #[salsa::tracked]
