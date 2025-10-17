@@ -107,7 +107,8 @@ pub(crate) fn lower_impl_trait<'db>(
     // (including Self). This ensures defaults like `type Output = Self` resolve
     // to the implementor's concrete self type rather than remaining as `Self`.
     let trait_scope = trait_.def(db).trait_(db).scope();
-    for t in trait_.def(db).trait_(db).assoc_type_decls(db).iter() {
+    for assoc_type in trait_.def(db).trait_(db).assoc_types(db) {
+        let t = assoc_type.decl(db);
         let (Some(name), Some(default)) = (t.name.to_opt(), t.default) else {
             continue;
         };
