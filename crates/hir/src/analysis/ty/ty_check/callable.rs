@@ -12,6 +12,7 @@ use super::{ExprProp, TyChecker};
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
+        binder::Binder,
         diagnostics::{BodyDiag, FuncBodyDiag},
         fold::{AssocTySubst, TyFoldable, TyFolder},
         func_def::FuncDef,
@@ -30,6 +31,46 @@ pub struct Callable<'db> {
     /// The originating trait instance if this callable comes from a trait method
     /// (e.g., operator overloading, method call, indexing). None for inherent functions.
     pub trait_inst: Option<TraitInstId<'db>>,
+}
+
+/// Context-rich wrapper for a function parameter with automatic instantiation.
+/// This carries the parent callable context (generic args + trait instance)
+/// and provides access to the fully instantiated parameter type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallableParam<'db> {
+    callable: Callable<'db>,
+    index: usize,
+    generic_ty: Binder<TyId<'db>>,
+}
+
+impl<'db> CallableParam<'db> {
+    /// Returns the fully instantiated type of this parameter.
+    /// Automatically applies:
+    /// 1. Generic argument instantiation
+    /// 2. Trait associated type substitution (if from trait method)
+    pub fn ty(&self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
+        let mut ty = self.generic_ty.instantiate(db, self.callable.generic_args());
+        if let Some(inst) = self.callable.trait_inst {
+            let mut subst = AssocTySubst::new(inst);
+            ty = ty.fold_with(db, &mut subst);
+        }
+        ty
+    }
+
+    /// Returns the parameter label if present (e.g., `foo:` in `call(foo: x)`).
+    pub fn label(&self, db: &'db dyn HirAnalysisDb) -> Option<IdentId<'db>> {
+        self.callable.func_def.param_label(db, self.index)
+    }
+
+    /// Returns the index of this parameter in the function signature.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Returns the parent callable.
+    pub fn callable(&self) -> &Callable<'db> {
+        &self.callable
+    }
 }
 
 impl<'db> TyVisitable<'db> for Callable<'db> {
@@ -90,6 +131,20 @@ impl<'db> Callable<'db> {
 
     pub fn trait_inst(&self) -> Option<TraitInstId<'db>> {
         self.trait_inst
+    }
+
+    /// Returns an iterator over context-rich parameter wrappers.
+    /// Each parameter automatically carries instantiation context.
+    pub fn params(&self, db: &'db dyn HirAnalysisDb) -> impl Iterator<Item = CallableParam<'db>> + '_ {
+        self.func_def
+            .arg_tys(db)
+            .iter()
+            .enumerate()
+            .map(|(index, &generic_ty)| CallableParam {
+                callable: self.clone(),
+                index,
+                generic_ty,
+            })
     }
 
     pub fn ret_ty(&self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
@@ -192,12 +247,8 @@ impl<'db> Callable<'db> {
             args.push(arg);
         }
 
-        for (i, (given, expected)) in args
-            .into_iter()
-            .zip(self.func_def.arg_tys(db).iter())
-            .enumerate()
-        {
-            if let Some(expected_label) = self.func_def.param_label(db, i)
+        for (given, param) in args.into_iter().zip(self.params(db)) {
+            if let Some(expected_label) = param.label(db)
                 && !expected_label.is_self(db)
                 && Some(expected_label) != given.label
             {
@@ -210,12 +261,8 @@ impl<'db> Callable<'db> {
                 tc.push_diag(diag);
             }
 
-            let mut expected = expected.instantiate(db, &self.generic_args);
-            if let Some(inst) = self.trait_inst {
-                let mut subst = AssocTySubst::new(inst);
-                expected = expected.fold_with(db, &mut subst);
-            }
-            let expected = tc.normalize_ty(expected);
+            // param.ty() automatically applies generic instantiation + trait substitution
+            let expected = tc.normalize_ty(param.ty(db));
             tc.equate_ty(given.expr_prop.ty, expected, given.expr_span);
         }
     }
