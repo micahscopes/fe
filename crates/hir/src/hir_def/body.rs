@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 use salsa::Update;
 
 use super::{
-    Expr, ExprId, Partial, Pat, PatId, Stmt, StmtId, TopLevelMod, TrackedItemId,
+    Const, Expr, ExprId, Func, Partial, Pat, PatId, Stmt, StmtId, TopLevelMod, TrackedItemId,
     scope_graph::ScopeId,
 };
 use crate::{
@@ -32,6 +32,10 @@ pub struct Body<'db> {
     pub expr: ExprId,
 
     pub body_kind: BodyKind,
+
+    /// The item that owns this body (Func or Const).
+    /// For anonymous bodies (e.g., in array lengths), this is None.
+    pub owner: Option<BodyOwner<'db>>,
 
     #[return_ref]
     pub stmts: NodeStore<StmtId, Partial<Stmt<'db>>>,
@@ -54,6 +58,22 @@ impl<'db> Body<'db> {
 
     pub fn scope(self) -> ScopeId<'db> {
         ScopeId::from_item(self.into())
+    }
+
+    /// Returns the function that owns this body, if any.
+    pub fn owner_func(self, db: &'db dyn HirDb) -> Option<Func<'db>> {
+        match self.owner(db) {
+            Some(BodyOwner::Func(func)) => Some(func),
+            _ => None,
+        }
+    }
+
+    /// Returns the const that owns this body, if any.
+    pub fn owner_const(self, db: &'db dyn HirDb) -> Option<Const<'db>> {
+        match self.owner(db) {
+            Some(BodyOwner::Const(const_)) => Some(const_),
+            _ => None,
+        }
     }
 
     #[doc(hidden)]
@@ -83,6 +103,12 @@ impl<'db> Body<'db> {
 pub enum BodyKind {
     FuncBody,
     Anonymous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
+pub enum BodyOwner<'db> {
+    Func(Func<'db>),
+    Const(Const<'db>),
 }
 
 #[derive(Debug, Hash, Clone)]

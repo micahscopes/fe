@@ -94,6 +94,7 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
             self.id,
             body_expr,
             body_kind,
+            None,  // TODO: Pass owner once we have it
             self.stmts,
             self.exprs,
             self.pats,
