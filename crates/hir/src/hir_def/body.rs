@@ -62,18 +62,18 @@ impl<'db> Body<'db> {
 
     /// Returns the function that owns this body, if any.
     pub fn owner_func(self, db: &'db dyn HirDb) -> Option<Func<'db>> {
-        match self.owner(db) {
-            Some(BodyOwner::Func(func)) => Some(func),
+        self.computed_owner(db).and_then(|owner| match owner {
+            BodyOwner::Func(func) => Some(func),
             _ => None,
-        }
+        })
     }
 
     /// Returns the const that owns this body, if any.
     pub fn owner_const(self, db: &'db dyn HirDb) -> Option<Const<'db>> {
-        match self.owner(db) {
-            Some(BodyOwner::Const(const_)) => Some(const_),
+        self.computed_owner(db).and_then(|owner| match owner {
+            BodyOwner::Const(const_) => Some(const_),
             _ => None,
-        }
+        })
     }
 
     #[doc(hidden)]
@@ -96,6 +96,38 @@ impl<'db> Body<'db> {
     /// salsa track this method.
     pub fn iter_block(self, db: &dyn HirDb) -> FxHashMap<ExprId, usize> {
         BlockOrderCalculator::new(db, self).calculate()
+    }
+}
+
+#[salsa::tracked]
+impl<'db> Body<'db> {
+    /// Computes the owner of this body by searching through all functions and consts in the module.
+    #[salsa::tracked]
+    pub fn computed_owner(self, db: &'db dyn HirDb) -> Option<BodyOwner<'db>> {
+        // Search through all funcs and consts in the top module
+        let top_mod = self.top_mod(db);
+
+        // Check all functions
+        for func in top_mod.all_funcs(db) {
+            if let Some(func_body) = func.body(db) {
+                if func_body == self {
+                    return Some(BodyOwner::Func(*func));
+                }
+            }
+        }
+
+        // Check all consts
+        for item in top_mod.all_items(db) {
+            if let crate::hir_def::ItemKind::Const(const_) = item {
+                if let Some(const_body) = const_.body(db).to_opt() {
+                    if const_body == self {
+                        return Some(BodyOwner::Const(*const_));
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
