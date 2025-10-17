@@ -1043,7 +1043,7 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                     "duplicate variant name in enum definition".into()
                 };
 
-                let name = enum_.variants(db).data(db)[idxs[0] as usize]
+                let name = enum_.variant_defs(db).data(db)[idxs[0] as usize]
                     .name
                     .unwrap()
                     .data(db);

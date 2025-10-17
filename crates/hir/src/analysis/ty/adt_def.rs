@@ -32,7 +32,7 @@ pub fn lower_adt<'db>(db: &'db dyn HirAnalysisDb, adt: AdtRef<'db>) -> AdtDef<'d
         ),
         AdtRef::Enum(e) => (
             collect_generic_params(db, e.into()),
-            collect_enum_variant_types(db, scope, e.variants(db)),
+            collect_enum_variant_types(db, scope, e.variant_defs(db)),
         ),
     };
 
@@ -51,9 +51,9 @@ fn collect_field_types<'db>(
 fn collect_enum_variant_types<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
-    variants: VariantDefListId<'db>,
+    variant_defs: VariantDefListId<'db>,
 ) -> Vec<AdtField<'db>> {
-    variants
+    variant_defs
         .data(db)
         .iter()
         .map(|variant| {
@@ -119,7 +119,7 @@ impl<'db> AdtDef<'db> {
         match self.adt_ref(db) {
             AdtRef::Enum(e) => {
                 let span = e.variant_span(field_idx);
-                match e.variants(db).data(db)[field_idx].kind {
+                match e.variant_defs(db).data(db)[field_idx].kind {
                     VariantKind::Tuple(_) => span.tuple_type().elem_ty(ty_idx).into(),
                     VariantKind::Record(_) => span.fields().field(ty_idx).ty().into(),
                     VariantKind::Unit => unreachable!(),

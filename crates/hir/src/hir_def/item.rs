@@ -763,7 +763,7 @@ pub struct Enum<'db> {
     pub vis: Visibility,
     pub generic_params: GenericParamListId<'db>,
     pub where_clause: WhereClauseId<'db>,
-    pub variants: VariantDefListId<'db>,
+    pub(crate) variant_defs: VariantDefListId<'db>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -781,6 +781,11 @@ impl<'db> Enum<'db> {
     pub fn scope(self) -> ScopeId<'db> {
         ScopeId::from_item(self.into())
     }
+
+    pub fn variants(self, db: &dyn HirDb) -> impl Iterator<Item = EnumVariant<'db>> + '_ {
+        let count = self.variant_defs(db).data(db).len();
+        (0..count).map(move |i| EnumVariant::new(self, i))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, salsa::Update)]
@@ -797,7 +802,7 @@ impl<'db> EnumVariant<'db> {
         }
     }
     pub fn def(self, db: &'db dyn HirDb) -> &'db VariantDef<'db> {
-        &self.enum_.variants(db).data(db)[self.idx as usize]
+        &self.enum_.variant_defs(db).data(db)[self.idx as usize]
     }
 
     pub fn kind(self, db: &'db dyn HirDb) -> VariantKind<'db> {
