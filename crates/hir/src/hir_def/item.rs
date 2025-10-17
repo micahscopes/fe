@@ -729,7 +729,7 @@ pub struct Struct<'db> {
     pub vis: Visibility,
     pub generic_params: GenericParamListId<'db>,
     pub where_clause: WhereClauseId<'db>,
-    pub fields: FieldDefListId<'db>,
+    pub(crate) field_defs: FieldDefListId<'db>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -755,7 +755,52 @@ impl<'db> Struct<'db> {
     /// ```
     /// Then this method returns ` { x, y }`.
     pub fn format_initializer_args(self, db: &dyn HirDb) -> String {
-        self.fields(db).format_initializer_args(db)
+        self.field_defs(db).format_initializer_args(db)
+    }
+
+    pub fn fields(self, db: &'db dyn HirDb) -> impl Iterator<Item = StructField<'db>> + 'db {
+        let count = self.field_defs(db).data(db).len();
+        (0..count).map(move |i| StructField::new(FieldParent::Struct(self), i))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StructField<'db> {
+    parent: FieldParent<'db>,
+    index: u16,
+}
+
+impl<'db> StructField<'db> {
+    pub fn new(parent: FieldParent<'db>, index: usize) -> Self {
+        Self {
+            parent,
+            index: index as u16,
+        }
+    }
+
+    pub fn def(self, db: &'db dyn HirDb) -> &'db FieldDef<'db> {
+        let fields = self.parent.fields(db);
+        &fields.data(db)[self.index as usize]
+    }
+
+    pub fn parent(self) -> FieldParent<'db> {
+        self.parent
+    }
+
+    pub fn name(self, db: &'db dyn HirDb) -> Partial<IdentId<'db>> {
+        self.def(db).name
+    }
+
+    pub fn ty(self, db: &'db dyn HirDb) -> Partial<TypeId<'db>> {
+        self.def(db).ty
+    }
+
+    pub fn vis(self, db: &'db dyn HirDb) -> Visibility {
+        self.def(db).vis
+    }
+
+    pub fn attributes(self, db: &'db dyn HirDb) -> AttrListId<'db> {
+        self.def(db).attributes
     }
 }
 
@@ -768,7 +813,7 @@ pub struct Contract<'db> {
     pub name: Partial<IdentId<'db>>,
     pub attributes: AttrListId<'db>,
     pub vis: Visibility,
-    pub fields: FieldDefListId<'db>,
+    pub(crate) field_defs: FieldDefListId<'db>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -781,6 +826,11 @@ impl<'db> Contract<'db> {
 
     pub fn scope(self) -> ScopeId<'db> {
         ScopeId::from_item(self.into())
+    }
+
+    pub fn fields(self, db: &'db dyn HirDb) -> impl Iterator<Item = StructField<'db>> + 'db {
+        let count = self.field_defs(db).data(db).len();
+        (0..count).map(move |i| StructField::new(FieldParent::Contract(self), i))
     }
 }
 
@@ -1244,8 +1294,8 @@ impl<'db> FieldParent<'db> {
 
     pub fn fields(self, db: &'db dyn HirDb) -> FieldDefListId<'db> {
         match self {
-            FieldParent::Struct(struct_) => struct_.fields(db),
-            FieldParent::Contract(contract) => contract.fields(db),
+            FieldParent::Struct(struct_) => struct_.field_defs(db),
+            FieldParent::Contract(contract) => contract.field_defs(db),
             FieldParent::Variant(variant) => match variant.kind(db) {
                 VariantKind::Record(fields) => fields,
                 _ => unreachable!(),

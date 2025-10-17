@@ -24,11 +24,11 @@ pub fn lower_adt<'db>(db: &'db dyn HirAnalysisDb, adt: AdtRef<'db>) -> AdtDef<'d
     let (params, variants) = match adt {
         AdtRef::Contract(c) => (
             GenericParamTypeSet::empty(db, scope),
-            vec![collect_field_types(db, scope, c.fields(db))],
+            vec![collect_field_types(db, scope, c.field_defs(db))],
         ),
         AdtRef::Struct(s) => (
             collect_generic_params(db, s.into()),
-            vec![collect_field_types(db, scope, s.fields(db))],
+            vec![collect_field_types(db, scope, s.field_defs(db))],
         ),
         AdtRef::Enum(e) => (
             collect_generic_params(db, e.into()),

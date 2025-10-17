@@ -165,7 +165,7 @@ impl<'db> ScopeGraphBuilder<'db> {
 
             Struct(inner) => {
                 self.graph.add_lex_edge(item_node, parent_node);
-                self.add_field_scope(item_node, FieldParent::Struct(inner), inner.fields(self.db));
+                self.add_field_scope(item_node, FieldParent::Struct(inner), inner.field_defs(self.db));
                 self.add_generic_param_scope(
                     item_node,
                     inner.into(),
@@ -185,7 +185,7 @@ impl<'db> ScopeGraphBuilder<'db> {
                 self.add_field_scope(
                     item_node,
                     FieldParent::Contract(inner),
-                    inner.fields(self.db),
+                    inner.field_defs(self.db),
                 );
                 self.graph
                     .add_edge(item_node, item_node, EdgeKind::self_ty());

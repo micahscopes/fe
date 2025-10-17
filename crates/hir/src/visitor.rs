@@ -567,7 +567,7 @@ pub fn walk_struct<'db, V>(
     ctxt.with_new_ctxt(
         |span| span.fields(),
         |ctxt| {
-            let id = struct_.fields(ctxt.db);
+            let id = struct_.field_defs(ctxt.db);
             visitor.visit_field_def_list(ctxt, id);
         },
     );
@@ -600,7 +600,7 @@ pub fn walk_contract<'db, V>(
     ctxt.with_new_ctxt(
         |span| span.fields(),
         |ctxt| {
-            let id = contract.fields(ctxt.db);
+            let id = contract.field_defs(ctxt.db);
             visitor.visit_field_def_list(ctxt, id);
         },
     );

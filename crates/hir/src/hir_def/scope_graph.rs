@@ -631,8 +631,8 @@ impl<'db> FromScope<'db> for &'db FieldDef<'db> {
         let idx = idx as usize;
 
         match parent {
-            FieldParent::Struct(s) => Some(&s.fields(db).data(db)[idx]),
-            FieldParent::Contract(c) => Some(&c.fields(db).data(db)[idx]),
+            FieldParent::Struct(s) => Some(&s.field_defs(db).data(db)[idx]),
+            FieldParent::Contract(c) => Some(&c.field_defs(db).data(db)[idx]),
             FieldParent::Variant(v) => match v.kind(db) {
                 VariantKind::Record(fields) => Some(&fields.data(db)[idx]),
                 _ => unreachable!(),

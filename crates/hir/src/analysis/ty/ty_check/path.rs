@@ -184,8 +184,8 @@ impl<'db> RecordLike<'db> {
             RecordLike::Type(ty) => {
                 let adt_def = ty.adt_def(db)?;
                 let (hir_field_list_id, adt_field_list_ref) = match adt_def.adt_ref(db) {
-                    AdtRef::Struct(s) => Some((s.fields(db), &adt_def.fields(db)[0])),
-                    AdtRef::Contract(c) => Some((c.fields(db), &adt_def.fields(db)[0])),
+                    AdtRef::Struct(s) => Some((s.field_defs(db), &adt_def.fields(db)[0])),
+                    AdtRef::Contract(c) => Some((c.field_defs(db), &adt_def.fields(db)[0])),
                     _ => None,
                 }?;
 
@@ -229,8 +229,8 @@ impl<'db> RecordLike<'db> {
             RecordLike::Type(ty) => {
                 let adt_def = ty.adt_def(db)?;
                 match adt_def.adt_ref(db) {
-                    AdtRef::Struct(s) => Some((s.fields(db), &adt_def.fields(db)[0])),
-                    AdtRef::Contract(c) => Some((c.fields(db), &adt_def.fields(db)[0])),
+                    AdtRef::Struct(s) => Some((s.field_defs(db), &adt_def.fields(db)[0])),
+                    AdtRef::Contract(c) => Some((c.field_defs(db), &adt_def.fields(db)[0])),
                     _ => None,
                 }
             }
@@ -286,8 +286,8 @@ impl<'db> RecordLike<'db> {
                     return Vec::default();
                 };
                 let fields = match adt_ref {
-                    AdtRef::Struct(s) => s.fields(db),
-                    AdtRef::Contract(c) => c.fields(db),
+                    AdtRef::Struct(s) => s.field_defs(db),
+                    AdtRef::Contract(c) => c.field_defs(db),
                     _ => return Vec::default(),
                 };
                 fields
