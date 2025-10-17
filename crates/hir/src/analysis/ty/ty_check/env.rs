@@ -69,16 +69,15 @@ impl<'db> TyCheckEnv<'db> {
 
         env.enter_scope(body.expr(db));
 
-        let Some(params) = func.params(db).to_opt() else {
-            return Err(());
-        };
+        let params: Vec<_> = func.params(db).collect();
 
-        for (idx, param) in params.data(db).iter().enumerate() {
-            let Some(name) = param.name() else {
+        for (idx, param) in params.iter().enumerate() {
+            let Some(name) = param.name(db) else {
                 continue;
             };
 
-            let mut ty = match param.ty {
+            let desc = param.desc(db);
+            let mut ty = match desc.ty {
                 Partial::Present(hir_ty) => {
                     lower_hir_ty(db, hir_ty, func.scope(), env.assumptions())
                 }
@@ -91,7 +90,7 @@ impl<'db> TyCheckEnv<'db> {
             let var = LocalBinding::Param {
                 idx,
                 ty,
-                is_mut: param.is_mut,
+                is_mut: desc.is_mut,
             };
 
             env.var_env.last_mut().unwrap().register_var(name, var);
@@ -587,13 +586,8 @@ impl<'db> LocalBinding<'db> {
 
             Self::Param { idx, .. } => {
                 let func = env.func().unwrap();
-                let Partial::Present(func_params) =
-                    func.hir_func_def(env.db).unwrap().params(hir_db)
-                else {
-                    unreachable!();
-                };
-
-                func_params.data(hir_db)[*idx].name().unwrap()
+                let params: Vec<_> = func.hir_func_def(env.db).unwrap().params(hir_db).collect();
+                params[*idx].name(hir_db).unwrap()
             }
         }
     }

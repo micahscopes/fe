@@ -1,7 +1,7 @@
 use parser::ast::{self};
 
 use super::FileLowerCtxt;
-use crate::hir_def::{Body, IdentId, Partial, TypeId, params::*};
+use crate::hir_def::{Body, FuncParamDescription, IdentId, Partial, TypeId, params::*};
 
 impl<'db> GenericArgListId<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::GenericArgList) -> Self {
@@ -43,7 +43,7 @@ impl<'db> FuncParamListId<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::FuncParamList) -> Self {
         let params = ast
             .into_iter()
-            .map(|param| FuncParam::lower_ast(ctxt, param))
+            .map(|param| FuncParamDescription::lower_ast(ctxt, param))
             .collect::<Vec<_>>();
         Self::new(ctxt.db(), params)
     }
@@ -152,7 +152,7 @@ impl<'db> GenericParam<'db> {
     }
 }
 
-impl<'db> FuncParam<'db> {
+impl<'db> FuncParamDescription<'db> {
     fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::FuncParam) -> Self {
         let is_mut = ast.mut_token().is_some();
         let label = ast.label().map(|ast| FuncParamName::lower_label(ctxt, ast));

@@ -957,8 +957,9 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
             },
 
             Self::DuplicateArgName(func, idxs) => {
-                let name = func.params(db).unwrap().data(db)[idxs[0] as usize]
-                    .name()
+                let params: Vec<_> = func.params(db).collect();
+                let name = params[idxs[0] as usize]
+                    .name(db)
                     .unwrap()
                     .data(db);
 
@@ -983,12 +984,13 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
             }
 
             Self::DuplicateArgLabel(func, idxs) => {
-                let params = func.params(db).unwrap().data(db);
-                let name = params[idxs[0] as usize].label_eagerly().unwrap().data(db);
+                let params: Vec<_> = func.params(db).collect();
+                let name = params[idxs[0] as usize].label_eagerly(db).unwrap().data(db);
 
                 let spans = idxs.iter().map(|i| {
                     let s = func.span().params().clone().param(*i as usize);
-                    if params[*i as usize].label.is_some() {
+                    let param_desc = params[*i as usize].desc(db);
+                    if param_desc.label.is_some() {
                         s.label().resolve(db)
                     } else {
                         s.name().resolve(db)

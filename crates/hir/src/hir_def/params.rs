@@ -71,7 +71,7 @@ impl GenericParamListId<'_> {
 #[derive(Debug)]
 pub struct FuncParamListId<'db> {
     #[return_ref]
-    pub data: Vec<FuncParam<'db>>,
+    pub data: Vec<FuncParamDescription<'db>>,
 }
 
 #[salsa::interned]
@@ -133,7 +133,7 @@ pub struct AssocTypeGenericArg<'db> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FuncParam<'db> {
+pub struct FuncParamDescription<'db> {
     pub is_mut: bool,
     pub label: Option<FuncParamName<'db>>,
     pub name: Partial<FuncParamName<'db>>,
@@ -144,7 +144,7 @@ pub struct FuncParam<'db> {
     pub self_ty_fallback: bool,
 }
 
-impl<'db> FuncParam<'db> {
+impl<'db> FuncParamDescription<'db> {
     pub fn label_eagerly(&self) -> Option<IdentId<'db>> {
         match self.label {
             Some(FuncParamName::Ident(ident)) => return Some(ident),

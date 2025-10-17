@@ -501,7 +501,7 @@ pub fn walk_func<'db, V>(
         },
     );
 
-    if let Some(id) = func.params(ctxt.db).to_opt() {
+    if let Some(id) = func.param_descriptions(ctxt.db).to_opt() {
         ctxt.with_new_ctxt(
             |span| span.params(),
             |ctxt| {
@@ -1515,12 +1515,17 @@ pub fn walk_func_param_list<'db, V>(
     V: Visitor<'db> + ?Sized,
 {
     let parent_item = ctxt.scope().item();
-    for (idx, param) in params.data(ctxt.db).iter().enumerate() {
+    let ItemKind::Func(func) = parent_item else {
+        unreachable!("FuncParamListId should only be used with Func items");
+    };
+
+    for (idx, _) in params.data(ctxt.db).iter().enumerate() {
+        let param = FuncParam::new(func, idx);
         ctxt.with_new_scoped_ctxt(
             ScopeId::FuncParam(parent_item, idx as u16),
             |span| span.param(idx),
             |ctxt| {
-                visitor.visit_func_param(ctxt, param);
+                visitor.visit_func_param(ctxt, &param);
             },
         )
     }
@@ -1533,16 +1538,17 @@ pub fn walk_func_param<'db, V>(
 ) where
     V: Visitor<'db> + ?Sized,
 {
-    if let Some(FuncParamName::Ident(ident)) = param.label {
+    let desc = param.desc(ctxt.db);
+    if let Some(FuncParamName::Ident(ident)) = desc.label {
         ctxt.with_new_ctxt(|span| span.label(), |ctxt| visitor.visit_ident(ctxt, ident));
     }
 
-    if let Some(FuncParamName::Ident(ident)) = param.name.to_opt() {
+    if let Some(FuncParamName::Ident(ident)) = desc.name.to_opt() {
         ctxt.with_new_ctxt(|span| span.name(), |ctxt| visitor.visit_ident(ctxt, ident));
     }
 
-    if let Some(ty) = param.ty.to_opt() {
-        if param.is_self_param(ctxt.db) && param.self_ty_fallback {
+    if let Some(ty) = desc.ty.to_opt() {
+        if param.is_self_param(ctxt.db) && desc.self_ty_fallback {
             ctxt.with_new_ctxt(
                 |span| span.fallback_self_ty(),
                 |ctxt| {

@@ -12,7 +12,7 @@ use super::{
     },
     ty_def::TyId,
 };
-use crate::analysis::HirAnalysisDb;
+use crate::{analysis::HirAnalysisDb, hir_def::FuncParamName};
 
 /// Compares the implementation method with the trait method to ensure they
 /// match.
@@ -163,29 +163,26 @@ fn compare_arg_label<'db>(
     let hir_impl_m = impl_m.hir_func_def(db).unwrap();
     let hir_trait_m = trait_m.hir_func_def(db).unwrap();
 
-    let (Some(impl_m_params), Some(trait_m_params)) = (
-        hir_impl_m.params(db).to_opt(),
-        hir_trait_m.params(db).to_opt(),
-    ) else {
-        return true;
-    };
+    let impl_m_params: Vec<_> = hir_impl_m.params(db).collect();
+    let trait_m_params: Vec<_> = hir_trait_m.params(db).collect();
 
     for (idx, (expected_param, method_param)) in trait_m_params
-        .data(db)
         .iter()
-        .zip(impl_m_params.data(db))
+        .zip(&impl_m_params)
         .enumerate()
     {
-        let Some(expected_label) = expected_param
-            .label
-            .or_else(|| expected_param.name.to_opt())
-        else {
-            continue;
-        };
+        // Compare the label field directly, not label_eagerly which loses underscore distinction
+        let expected_label = expected_param
+            .label(db)
+            .or_else(|| expected_param.name(db).map(FuncParamName::Ident));
+        let method_label = method_param
+            .label(db)
+            .or_else(|| method_param.name(db).map(FuncParamName::Ident));
 
-        let Some(method_label) = method_param.label.or_else(|| method_param.name.to_opt()) else {
+        // Only check if at least one has a label/name
+        if expected_label.is_none() && method_label.is_none() {
             continue;
-        };
+        }
 
         if expected_label != method_label {
             sink.push(

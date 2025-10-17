@@ -1,5 +1,5 @@
 use crate::{
-    hir_def::{EnumVariant, Func, FuncParamName, IdentId, Partial, scope_graph::ScopeId},
+    hir_def::{EnumVariant, Func, FuncParamName, IdentId, scope_graph::ScopeId},
     span::DynLazySpan,
 };
 use common::ingot::Ingot;
@@ -25,21 +25,18 @@ pub fn lower_func<'db>(
     let name = func.name(db).to_opt()?;
     let params_set = collect_generic_params(db, func.into());
     let assumptions = collect_func_def_constraints(db, func.into(), true).instantiate_identity();
-    let args = match func.params(db) {
-        Partial::Present(params) => params
-            .data(db)
-            .iter()
-            .map(|arg| {
-                let ty = arg
-                    .ty
-                    .to_opt()
-                    .map(|ty| lower_hir_ty(db, ty, func.scope(), assumptions))
-                    .unwrap_or_else(|| TyId::invalid(db, InvalidCause::ParseError));
-                Binder::bind(ty)
-            })
-            .collect(),
-        Partial::Absent => vec![],
-    };
+    let args = func
+        .params(db)
+        .map(|arg| {
+            let desc = arg.desc(db);
+            let ty = desc
+                .ty
+                .to_opt()
+                .map(|ty| lower_hir_ty(db, ty, func.scope(), assumptions))
+                .unwrap_or_else(|| TyId::invalid(db, InvalidCause::ParseError));
+            Binder::bind(ty)
+        })
+        .collect();
 
     // When lowering the return type, we need to use assumptions that include
     // the function's own generic parameter constraints

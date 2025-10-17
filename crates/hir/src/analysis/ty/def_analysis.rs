@@ -986,9 +986,10 @@ impl<'db> Visitor<'db> for DefAnalyzer<'db> {
             collect_func_def_constraints(self.db, hir_func.into(), true).instantiate_identity(),
         );
 
-        if let Some(args) = hir_func.params(self.db).to_opt() {
+        let params: Vec<_> = hir_func.params(self.db).collect();
+        if !params.is_empty() {
             let dupes =
-                check_duplicate_names(args.data(self.db).iter().map(|p| p.name()), |idxs| {
+                check_duplicate_names(params.iter().map(|p| p.name(self.db)), |idxs| {
                     TyLowerDiag::DuplicateArgName(hir_func, idxs).into()
                 });
             let found_dupes = !dupes.is_empty();
@@ -998,7 +999,7 @@ impl<'db> Visitor<'db> for DefAnalyzer<'db> {
             // `label_eagerly` gives the arg name if no label is present)
             if !found_dupes {
                 self.diags.extend(check_duplicate_names(
-                    args.data(self.db).iter().map(|p| p.label_eagerly()),
+                    params.iter().map(|p| p.label_eagerly(self.db)),
                     |idxs| TyLowerDiag::DuplicateArgLabel(hir_func, idxs).into(),
                 ));
             }
@@ -1026,11 +1027,12 @@ impl<'db> Visitor<'db> for DefAnalyzer<'db> {
         ctxt: &mut VisitorCtxt<'db, LazyFuncParamSpan<'db>>,
         param: &crate::hir_def::FuncParam<'db>,
     ) {
-        let Some(hir_ty) = param.ty.to_opt() else {
+        let desc = param.desc(ctxt.db());
+        let Some(hir_ty) = desc.ty.to_opt() else {
             return;
         };
 
-        let ty_span: DynLazySpan = if param.is_self_param(ctxt.db()) && param.self_ty_fallback {
+        let ty_span: DynLazySpan = if param.is_self_param(ctxt.db()) && desc.self_ty_fallback {
             ctxt.span().unwrap().name().into()
         } else {
             ctxt.span().unwrap().ty().into()

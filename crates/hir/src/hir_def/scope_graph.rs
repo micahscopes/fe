@@ -295,11 +295,12 @@ impl<'db> ScopeId<'db> {
             ScopeId::Field(..) => self.resolve_to::<&FieldDef>(db).unwrap().name.to_opt(),
 
             ScopeId::FuncParam(..) => {
-                let param: &FuncParam = self.resolve_to(db).unwrap();
-                if let Some(FuncParamName::Ident(ident)) = param.label {
+                let param: FuncParam = self.resolve_to(db).unwrap();
+                let desc = param.desc(db);
+                if let Some(FuncParamName::Ident(ident)) = desc.label {
                     Some(ident)
                 } else {
-                    param.name()
+                    param.name(db)
                 }
             }
 
@@ -324,9 +325,10 @@ impl<'db> ScopeId<'db> {
 
             ScopeId::FuncParam(parent, idx) => {
                 let func: Func = parent.try_into().unwrap();
-                let param = &func.params(db).to_opt()?.data(db)[idx as usize];
+                let param = FuncParam::new(func, idx as usize);
+                let desc = param.desc(db);
                 let param_span = func.span().params().param(idx as usize);
-                if let Some(FuncParamName::Ident(_)) = param.label {
+                if let Some(FuncParamName::Ident(_)) = desc.label {
                     Some(param_span.label().into())
                 } else {
                     Some(param_span.name().into())
@@ -648,16 +650,14 @@ impl<'db> FromScope<'db> for &'db VariantDef<'db> {
     }
 }
 
-impl<'db> FromScope<'db> for &'db FuncParam<'db> {
-    fn from_scope(scope: ScopeId<'db>, db: &'db dyn HirDb) -> Option<Self> {
+impl<'db> FromScope<'db> for FuncParam<'db> {
+    fn from_scope(scope: ScopeId<'db>, _db: &'db dyn HirDb) -> Option<Self> {
         let ScopeId::FuncParam(parent, idx) = scope else {
             return None;
         };
 
         let func: Func = parent.try_into().unwrap();
-        func.params(db)
-            .to_opt()
-            .map(|params| &params.data(db)[idx as usize])
+        Some(FuncParam::new(func, idx as usize))
     }
 }
 

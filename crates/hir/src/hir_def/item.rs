@@ -620,7 +620,7 @@ pub struct Func<'db> {
     pub attributes: AttrListId<'db>,
     pub generic_params: GenericParamListId<'db>,
     pub where_clause: WhereClauseId<'db>,
-    param_descriptions: Partial<FuncParamListId<'db>>,
+    pub(crate) param_descriptions: Partial<FuncParamListId<'db>>,
     pub ret_ty: Option<TypeId<'db>>,
     pub modifier: ItemModifier,
     pub body: Option<Body<'db>>,
@@ -644,15 +644,7 @@ impl<'db> Func<'db> {
     }
 
     pub fn is_method(self, db: &dyn HirDb) -> bool {
-        let Some(params) = self.params(db).to_opt() else {
-            return false;
-        };
-
-        let Some(first_param) = params.data(db).first() else {
-            return false;
-        };
-
-        first_param.is_self_param(db)
+        self.params(db).next().is_some_and(|p| p.is_self_param(db))
     }
 
     /// Returns `true` if the function is method or associated functions.
@@ -668,22 +660,62 @@ impl<'db> Func<'db> {
         )
     }
 
-    pub fn params(self, db: &dyn HirDb) -> Vec<FuncParam> {}
+    pub fn params(self, db: &'db dyn HirDb) -> impl Iterator<Item = FuncParam<'db>> + 'db {
+        let param_list = self.param_descriptions(db);
+        let count = param_list.to_opt().map_or(0, |list| list.data(db).len());
+        (0..count).map(move |i| FuncParam::new(self, i))
+    }
 
     pub fn param_label(self, db: &'db dyn HirDb, idx: usize) -> Option<IdentId<'db>> {
-        self.params(db).to_opt()?.data(db).get(idx)?.label_eagerly()
+        let params: Vec<_> = self.params(db).collect();
+        params.get(idx)?.label_eagerly(db)
     }
 
     pub fn param_label_or_name(self, db: &'db dyn HirDb, idx: usize) -> Option<FuncParamName<'db>> {
-        let param = self.params(db).to_opt()?.data(db).get(idx)?;
-        param.label.or(param.name.to_opt())
+        let params: Vec<_> = self.params(db).collect();
+        params.get(idx)?.label_or_name(db)
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FuncParam<'db> {
     parent: Func<'db>,
     index: u16,
-    desc: FuncParamDescription<'db>,
+}
+
+impl<'db> FuncParam<'db> {
+    pub fn new(parent: Func<'db>, index: usize) -> Self {
+        Self {
+            parent,
+            index: index as u16,
+        }
+    }
+
+    pub fn desc(self, db: &'db dyn HirDb) -> &'db FuncParamDescription<'db> {
+        let params = self.parent.param_descriptions(db).to_opt().unwrap();
+        &params.data(db)[self.index as usize]
+    }
+
+    pub fn label(self, db: &'db dyn HirDb) -> Option<FuncParamName<'db>> {
+        self.desc(db).label
+    }
+
+    pub fn label_eagerly(self, db: &'db dyn HirDb) -> Option<IdentId<'db>> {
+        self.desc(db).label_eagerly()
+    }
+
+    pub fn name(self, db: &'db dyn HirDb) -> Option<IdentId<'db>> {
+        self.desc(db).name()
+    }
+
+    pub fn is_self_param(self, db: &'db dyn HirDb) -> bool {
+        self.desc(db).is_self_param(db)
+    }
+
+    pub fn label_or_name(self, db: &'db dyn HirDb) -> Option<FuncParamName<'db>> {
+        let desc = self.desc(db);
+        desc.label.or(desc.name.to_opt())
+    }
 }
 
 #[salsa::tracked]
@@ -782,7 +814,7 @@ impl<'db> Enum<'db> {
         ScopeId::from_item(self.into())
     }
 
-    pub fn variants(self, db: &dyn HirDb) -> impl Iterator<Item = EnumVariant<'db>> + '_ {
+    pub fn variants(self, db: &'db dyn HirDb) -> impl Iterator<Item = EnumVariant<'db>> + 'db {
         let count = self.variant_defs(db).data(db).len();
         (0..count).map(move |i| EnumVariant::new(self, i))
     }
