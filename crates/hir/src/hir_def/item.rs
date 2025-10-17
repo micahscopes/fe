@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     HirDb,
-    hir_def::TraitRefId,
+    hir_def::{FuncParamDescription, TraitRefId},
     lower,
     span::{
         DynLazySpan, HirOrigin,
@@ -41,6 +41,7 @@ use crate::{
     derive_more::TryInto,
     salsa::Update,
 )]
+// these are all the items
 pub enum ItemKind<'db> {
     TopMod(TopLevelMod<'db>),
     Mod(Mod<'db>),
@@ -619,7 +620,7 @@ pub struct Func<'db> {
     pub attributes: AttrListId<'db>,
     pub generic_params: GenericParamListId<'db>,
     pub where_clause: WhereClauseId<'db>,
-    pub params: Partial<FuncParamListId<'db>>,
+    param_descriptions: Partial<FuncParamListId<'db>>,
     pub ret_ty: Option<TypeId<'db>>,
     pub modifier: ItemModifier,
     pub body: Option<Body<'db>>,
@@ -667,6 +668,8 @@ impl<'db> Func<'db> {
         )
     }
 
+    pub fn params(self, db: &dyn HirDb) -> Vec<FuncParam> {}
+
     pub fn param_label(self, db: &'db dyn HirDb, idx: usize) -> Option<IdentId<'db>> {
         self.params(db).to_opt()?.data(db).get(idx)?.label_eagerly()
     }
@@ -675,6 +678,12 @@ impl<'db> Func<'db> {
         let param = self.params(db).to_opt()?.data(db).get(idx)?;
         param.label.or(param.name.to_opt())
     }
+}
+
+pub struct FuncParam<'db> {
+    parent: Func<'db>,
+    index: u16,
+    desc: FuncParamDescription<'db>,
 }
 
 #[salsa::tracked]
