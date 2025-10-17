@@ -4,7 +4,7 @@ use super::{Body, IdentId, LitKind, Partial, PathId};
 use crate::{HirDb, span::pat::LazyPatSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
-pub enum Pat<'db> {
+pub enum PatDescription<'db> {
     WildCard,
     Rest,
     Lit(Partial<LitKind<'db>>),
@@ -25,12 +25,12 @@ impl PatId {
         LazyPatSpan::new(body, self)
     }
 
-    pub fn data<'db>(self, db: &'db dyn HirDb, body: Body<'db>) -> &'db Partial<Pat<'db>> {
+    pub fn data<'db>(self, db: &'db dyn HirDb, body: Body<'db>) -> &'db Partial<PatDescription<'db>> {
         &body.pats(db)[self]
     }
 
     pub fn is_rest(self, db: &dyn HirDb, body: Body) -> bool {
-        matches!(self.data(db, body), Partial::Present(Pat::Rest))
+        matches!(self.data(db, body), Partial::Present(PatDescription::Rest))
     }
 }
 
@@ -47,7 +47,7 @@ impl<'db> RecordPatField<'db> {
         }
 
         match self.pat.data(db, body) {
-            Partial::Present(Pat::Path(Partial::Present(path), _)) => path.as_ident(db),
+            Partial::Present(PatDescription::Path(Partial::Present(path), _)) => path.as_ident(db),
             _ => None,
         }
     }

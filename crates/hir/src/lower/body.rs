@@ -3,8 +3,10 @@ use parser::ast;
 use super::FileLowerCtxt;
 use crate::{
     hir_def::{
-        Body, BodyKind, BodySourceMap, Expr, ExprId, NodeStore, Partial, Pat, PatId, Stmt, StmtId,
+        Body, BodyKind, BodySourceMap, ExprId, NodeStore, Partial, PatId, StmtId,
         TrackedItemId, TrackedItemVariant,
+        ExprDescription, StmtDescription, PatDescription,
+        Expr,
     },
     span::HirOrigin,
 };
@@ -29,14 +31,14 @@ pub(super) struct BodyCtxt<'ctxt, 'db> {
     pub(super) f_ctxt: &'ctxt mut FileLowerCtxt<'db>,
     pub(super) id: TrackedItemId<'db>,
 
-    pub(super) stmts: NodeStore<StmtId, Partial<Stmt<'db>>>,
-    pub(super) exprs: NodeStore<ExprId, Partial<Expr<'db>>>,
-    pub(super) pats: NodeStore<PatId, Partial<Pat<'db>>>,
+    pub(super) stmts: NodeStore<StmtId, Partial<StmtDescription<'db>>>,
+    pub(super) exprs: NodeStore<ExprId, Partial<ExprDescription<'db>>>,
+    pub(super) pats: NodeStore<PatId, Partial<PatDescription<'db>>>,
     pub(super) source_map: BodySourceMap,
 }
 
 impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
-    pub(super) fn push_expr(&mut self, expr: Expr<'db>, origin: HirOrigin<ast::Expr>) -> ExprId {
+    pub(super) fn push_expr(&mut self, expr: ExprDescription<'db>, origin: HirOrigin<ast::Expr>) -> ExprId {
         let expr_id = self.exprs.push(Partial::Present(expr));
         self.source_map.expr_map.insert(expr_id, origin);
 
@@ -56,14 +58,14 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
         expr_id
     }
 
-    pub(super) fn push_stmt(&mut self, stmt: Stmt<'db>, origin: HirOrigin<ast::Stmt>) -> StmtId {
+    pub(super) fn push_stmt(&mut self, stmt: StmtDescription<'db>, origin: HirOrigin<ast::Stmt>) -> StmtId {
         let stmt_id = self.stmts.push(Partial::Present(stmt));
         self.source_map.stmt_map.insert(stmt_id, origin);
 
         stmt_id
     }
 
-    pub(super) fn push_pat(&mut self, pat: Pat<'db>, origin: HirOrigin<ast::Pat>) -> PatId {
+    pub(super) fn push_pat(&mut self, pat: PatDescription<'db>, origin: HirOrigin<ast::Pat>) -> PatId {
         let pat_id = self.pats.push(Partial::Present(pat));
         self.source_map.pat_map.insert(pat_id, origin);
         pat_id

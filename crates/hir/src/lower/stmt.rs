@@ -2,7 +2,7 @@ use parser::ast::{self, prelude::*};
 
 use super::body::BodyCtxt;
 use crate::{
-    hir_def::{Expr, Pat, TypeId, stmt::*},
+    hir_def::{Expr, Pat, Stmt, TypeId, stmt::*, StmtDescription},
     span::HirOrigin,
 };
 
@@ -15,7 +15,7 @@ impl<'db> Stmt<'db> {
                     .type_annotation()
                     .map(|ty| TypeId::lower_ast(ctxt.f_ctxt, ty));
                 let init = let_.initializer().map(|init| Expr::lower_ast(ctxt, init));
-                (Stmt::Let(pat, ty, init), HirOrigin::raw(&ast))
+                (StmtDescription::Let(pat, ty, init), HirOrigin::raw(&ast))
             }
             ast::StmtKind::For(for_) => {
                 let bind = Pat::lower_ast_opt(ctxt, for_.pat());
@@ -26,7 +26,7 @@ impl<'db> Stmt<'db> {
                         .and_then(|body| ast::Expr::cast(body.syntax().clone())),
                 );
 
-                (Stmt::For(bind, iter, body), HirOrigin::raw(&ast))
+                (StmtDescription::For(bind, iter, body), HirOrigin::raw(&ast))
             }
 
             ast::StmtKind::While(while_) => {
@@ -38,23 +38,23 @@ impl<'db> Stmt<'db> {
                         .and_then(|body| ast::Expr::cast(body.syntax().clone())),
                 );
 
-                (Stmt::While(cond, body), HirOrigin::raw(&ast))
+                (StmtDescription::While(cond, body), HirOrigin::raw(&ast))
             }
 
-            ast::StmtKind::Continue(_) => (Stmt::Continue, HirOrigin::raw(&ast)),
+            ast::StmtKind::Continue(_) => (StmtDescription::Continue, HirOrigin::raw(&ast)),
 
-            ast::StmtKind::Break(_) => (Stmt::Break, HirOrigin::raw(&ast)),
+            ast::StmtKind::Break(_) => (StmtDescription::Break, HirOrigin::raw(&ast)),
 
             ast::StmtKind::Return(ret) => {
                 let expr = ret
                     .has_value()
                     .then(|| Expr::push_to_body_opt(ctxt, ret.expr()));
-                (Stmt::Return(expr), HirOrigin::raw(&ast))
+                (StmtDescription::Return(expr), HirOrigin::raw(&ast))
             }
 
             ast::StmtKind::Expr(expr) => {
                 let expr = Expr::push_to_body_opt(ctxt, expr.expr());
-                (Stmt::Expr(expr), HirOrigin::raw(&ast))
+                (StmtDescription::Expr(expr), HirOrigin::raw(&ast))
             }
         };
 

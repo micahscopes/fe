@@ -7,7 +7,7 @@ use fe_hir::analysis::{
     ty::trait_resolution::PredicateListId,
 };
 use fe_hir::{
-    hir_def::{Expr, ExprId, ItemKind, Pat, PatId, PathId, TopLevelMod, TypeId},
+    hir_def::{ExprId, ItemKind, PatId, PathId, TopLevelMod, TypeId, ExprDescription, PatDescription},
     visitor::prelude::*,
 };
 use test_db::{HirAnalysisTestDb, HirPropertyFormatter};
@@ -64,15 +64,15 @@ impl<'db> Visitor<'db> for PathVisitor<'db, '_> {
         self.domain_stack.pop();
     }
 
-    fn visit_pat(&mut self, _: &mut VisitorCtxt<'db, LazyPatSpan<'db>>, _: PatId, _: &Pat<'db>) {}
+    fn visit_pat(&mut self, _: &mut VisitorCtxt<'db, LazyPatSpan<'db>>, _: PatId, _: &PatDescription<'db>) {}
 
     fn visit_expr(
         &mut self,
         ctxt: &mut VisitorCtxt<'db, LazyExprSpan<'db>>,
         expr: ExprId,
-        expr_data: &Expr<'db>,
+        expr_data: &ExprDescription<'db>,
     ) {
-        if matches!(expr_data, Expr::Block { .. }) {
+        if matches!(expr_data, ExprDescription::Block { .. }) {
             walk_expr(self, ctxt, expr);
         }
     }

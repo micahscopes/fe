@@ -7,7 +7,7 @@ mod stmt;
 
 pub use self::path::RecordLike;
 use crate::{
-    hir_def::{Body, Expr, ExprId, Func, LitKind, Partial, Pat, PatId, PathId, TypeId as HirTyId},
+    hir_def::{Body, ExprId, Func, LitKind, Partial, PatId, PathId, TypeId as HirTyId, ExprDescription, PatDescription},
     span::{
         DynLazySpan, expr::LazyExprSpan, pat::LazyPatSpan, path::LazyPathSpan, types::LazyTySpan,
     },
@@ -106,7 +106,7 @@ impl<'db> TyChecker<'db> {
         self.env.body()
     }
 
-    fn parent_expr(&self) -> Option<&'db Expr<'db>> {
+    fn parent_expr(&self) -> Option<&'db ExprDescription<'db>> {
         let id = self.env.parent_expr()?;
         match &self.body().exprs(self.db)[id] {
             Partial::Present(expr) => Some(expr),
@@ -389,7 +389,7 @@ impl<'db> Visitor<'db> for TyCheckerFinalizer<'db> {
         &mut self,
         ctxt: &mut VisitorCtxt<'db, LazyPatSpan<'db>>,
         pat: PatId,
-        _: &Pat<'db>,
+        _: &PatDescription<'db>,
     ) {
         let ty = self.body.pat_ty(self.db, pat);
         let span = ctxt.span().unwrap();
@@ -402,10 +402,10 @@ impl<'db> Visitor<'db> for TyCheckerFinalizer<'db> {
         &mut self,
         ctxt: &mut VisitorCtxt<'db, LazyExprSpan<'db>>,
         expr: ExprId,
-        expr_data: &Expr<'db>,
+        expr_data: &ExprDescription<'db>,
     ) {
         // Skip the check if the expr is block.
-        if !matches!(expr_data, Expr::Block(..)) {
+        if !matches!(expr_data, ExprDescription::Block(..)) {
             let prop = self.body.expr_prop(self.db, expr);
             let span = ctxt.span().unwrap();
             self.check_unknown(prop.ty, span.clone().into());
@@ -416,7 +416,7 @@ impl<'db> Visitor<'db> for TyCheckerFinalizer<'db> {
 
         // We need this additional check for method call because the callable type is
         // not tied to the expression type.
-        if let Expr::MethodCall(..) = expr_data
+        if let ExprDescription::MethodCall(..) = expr_data
             && let Some(callable) = self.body.callable_expr(expr)
         {
             let callable_ty = callable.ty(self.db);

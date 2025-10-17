@@ -12,7 +12,7 @@ use fe_hir::analysis::ty::{
 };
 use fe_hir::hir_def::LitKind;
 use fe_hir::{
-    hir_def::{Expr, ExprId},
+    hir_def::{ExprId, ExprDescription},
     visitor::prelude::*,
 };
 use test_db::{HirAnalysisTestDb, HirPropertyFormatter};
@@ -169,9 +169,9 @@ impl<'db> Visitor<'db> for DecisionTreeVisitor<'db, '_> {
         &mut self,
         ctxt: &mut VisitorCtxt<'db, fe_hir::span::expr::LazyExprSpan<'db>>,
         expr_id: ExprId,
-        expr: &Expr<'db>,
+        expr: &ExprDescription<'db>,
     ) {
-        if let Expr::Match(_scrutinee, arms) = expr
+        if let ExprDescription::Match(_scrutinee, arms) = expr
             && let Some(arms) = arms.clone().to_opt()
         {
             let body = ctxt.body();

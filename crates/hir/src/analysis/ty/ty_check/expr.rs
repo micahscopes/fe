@@ -1,8 +1,8 @@
 use std::panic;
 
 use crate::hir_def::{
-    ArithBinOp, BinOp, Expr, ExprId, FieldIndex, IdentId, Partial, Pat, PatId, PathId, UnOp,
-    VariantKind,
+    ArithBinOp, BinOp, ExprId, FieldIndex, IdentId, Partial, PatId, PathId, UnOp,
+    VariantKind, ExprDescription, PatDescription,
 };
 use common::ingot::IngotKind;
 use either::Either;
@@ -50,22 +50,22 @@ impl<'db> TyChecker<'db> {
 
         self.env.enter_expr(expr);
         let mut actual = match expr_data {
-            Expr::Lit(lit) => ExprProp::new(self.lit_ty(lit), true),
-            Expr::Block(..) => self.check_block(expr, expr_data, expected),
-            Expr::Un(..) => self.check_unary(expr, expr_data),
-            Expr::Bin(lhs, rhs, op) => self.check_binary(expr, *lhs, *rhs, *op),
-            Expr::Call(..) => self.check_call(expr, expr_data),
-            Expr::MethodCall(..) => self.check_method_call(expr, expr_data),
-            Expr::Path(..) => self.check_path(expr, expr_data),
-            Expr::RecordInit(..) => self.check_record_init(expr, expr_data),
-            Expr::Field(..) => self.check_field(expr, expr_data),
-            Expr::Tuple(..) => self.check_tuple(expr, expr_data, expected),
-            Expr::Array(..) => self.check_array(expr, expr_data, expected),
-            Expr::ArrayRep(..) => self.check_array_rep(expr, expr_data, expected),
-            Expr::If(..) => self.check_if(expr, expr_data),
-            Expr::Match(..) => self.check_match(expr, expr_data),
-            Expr::Assign(..) => self.check_assign(expr, expr_data),
-            Expr::AugAssign(..) => self.check_aug_assign(expr, expr_data),
+            ExprDescription::Lit(lit) => ExprProp::new(self.lit_ty(lit), true),
+            ExprDescription::Block(..) => self.check_block(expr, expr_data, expected),
+            ExprDescription::Un(..) => self.check_unary(expr, expr_data),
+            ExprDescription::Bin(lhs, rhs, op) => self.check_binary(expr, *lhs, *rhs, *op),
+            ExprDescription::Call(..) => self.check_call(expr, expr_data),
+            ExprDescription::MethodCall(..) => self.check_method_call(expr, expr_data),
+            ExprDescription::Path(..) => self.check_path(expr, expr_data),
+            ExprDescription::RecordInit(..) => self.check_record_init(expr, expr_data),
+            ExprDescription::Field(..) => self.check_field(expr, expr_data),
+            ExprDescription::Tuple(..) => self.check_tuple(expr, expr_data, expected),
+            ExprDescription::Array(..) => self.check_array(expr, expr_data, expected),
+            ExprDescription::ArrayRep(..) => self.check_array_rep(expr, expr_data, expected),
+            ExprDescription::If(..) => self.check_if(expr, expr_data),
+            ExprDescription::Match(..) => self.check_match(expr, expr_data),
+            ExprDescription::Assign(..) => self.check_assign(expr, expr_data),
+            ExprDescription::AugAssign(..) => self.check_aug_assign(expr, expr_data),
         };
         self.env.leave_expr();
 
@@ -83,10 +83,10 @@ impl<'db> TyChecker<'db> {
     fn check_block(
         &mut self,
         expr: ExprId,
-        expr_data: &Expr<'db>,
+        expr_data: &ExprDescription<'db>,
         expected: TyId<'db>,
     ) -> ExprProp<'db> {
-        let Expr::Block(stmts) = expr_data else {
+        let ExprDescription::Block(stmts) = expr_data else {
             unreachable!()
         };
 
@@ -106,8 +106,8 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn check_unary(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::Un(lhs, op) = expr_data else {
+    fn check_unary(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::Un(lhs, op) = expr_data else {
             unreachable!()
         };
         let prop = self.check_expr_unknown(*lhs);
@@ -182,8 +182,8 @@ impl<'db> TyChecker<'db> {
         self.check_ops_trait(expr, lhs.ty, &op, Some(rhs_expr))
     }
 
-    fn check_call(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::Call(callee, args) = expr_data else {
+    fn check_call(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::Call(callee, args) = expr_data else {
             unreachable!()
         };
         let callee_ty = self.check_expr_unknown(*callee).ty;
@@ -202,7 +202,7 @@ impl<'db> TyChecker<'db> {
 
         let call_span = expr.span(self.body()).into_call_expr();
 
-        if let Partial::Present(Expr::Path(Partial::Present(path))) =
+        if let Partial::Present(ExprDescription::Path(Partial::Present(path))) =
             callee.data(self.db, self.body())
         {
             let idx = path.segment_index(self.db);
@@ -229,8 +229,8 @@ impl<'db> TyChecker<'db> {
         ExprProp::new(normalized_ret_ty, true)
     }
 
-    fn check_method_call(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::MethodCall(receiver, method_name, generic_args, args) = expr_data else {
+    fn check_method_call(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::MethodCall(receiver, method_name, generic_args, args) = expr_data else {
             unreachable!()
         };
         let call_span = expr.span(self.body()).into_method_call_expr();
@@ -368,8 +368,8 @@ impl<'db> TyChecker<'db> {
         ExprProp::new(normalized_ret_ty, true)
     }
 
-    fn check_path(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::Path(path) = expr_data else {
+    fn check_path(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::Path(path) = expr_data else {
             unreachable!()
         };
 
@@ -386,7 +386,7 @@ impl<'db> TyChecker<'db> {
             match self.resolve_path(*path, true, path_span.clone()) {
                 Ok(r) => ResolvedPathInBody::Reso(r),
                 Err(err) => {
-                    let expected_kind = if matches!(self.parent_expr(), Some(Expr::Call(..))) {
+                    let expected_kind = if matches!(self.parent_expr(), Some(ExprDescription::Call(..))) {
                         ExpectedPathKind::Function
                     } else {
                         ExpectedPathKind::Value
@@ -512,8 +512,8 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn check_record_init(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::RecordInit(path, ..) = expr_data else {
+    fn check_record_init(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::RecordInit(path, ..) = expr_data else {
             unreachable!()
         };
         let span = expr.span(self.body()).into_record_init_expr();
@@ -588,7 +588,7 @@ impl<'db> TyChecker<'db> {
     fn check_record_init_fields(&mut self, record_like: &RecordLike<'db>, expr: ExprId) {
         let hir_db = self.db;
 
-        let Partial::Present(Expr::RecordInit(_, fields)) = expr.data(hir_db, self.body()) else {
+        let Partial::Present(ExprDescription::RecordInit(_, fields)) = expr.data(hir_db, self.body()) else {
             unreachable!()
         };
         let span = expr.span(self.body()).into_record_init_expr().fields();
@@ -615,8 +615,8 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn check_field(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::Field(lhs, index) = expr_data else {
+    fn check_field(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::Field(lhs, index) = expr_data else {
             unreachable!()
         };
         let Partial::Present(field) = index else {
@@ -685,10 +685,10 @@ impl<'db> TyChecker<'db> {
     fn check_tuple(
         &mut self,
         _expr: ExprId,
-        expr_data: &Expr<'db>,
+        expr_data: &ExprDescription<'db>,
         expected: TyId<'db>,
     ) -> ExprProp<'db> {
-        let Expr::Tuple(elems) = expr_data else {
+        let ExprDescription::Tuple(elems) = expr_data else {
             unreachable!()
         };
 
@@ -739,10 +739,10 @@ impl<'db> TyChecker<'db> {
     fn check_array(
         &mut self,
         _expr: ExprId,
-        expr_data: &Expr<'db>,
+        expr_data: &ExprDescription<'db>,
         expected: TyId<'db>,
     ) -> ExprProp<'db> {
-        let Expr::Array(elems) = expr_data else {
+        let ExprDescription::Array(elems) = expr_data else {
             unreachable!()
         };
 
@@ -762,10 +762,10 @@ impl<'db> TyChecker<'db> {
     fn check_array_rep(
         &mut self,
         _expr: ExprId,
-        expr_data: &Expr<'db>,
+        expr_data: &ExprDescription<'db>,
         expected: TyId<'db>,
     ) -> ExprProp<'db> {
-        let Expr::ArrayRep(elem, len) = expr_data else {
+        let ExprDescription::ArrayRep(elem, len) = expr_data else {
             unreachable!()
         };
 
@@ -800,8 +800,8 @@ impl<'db> TyChecker<'db> {
         ExprProp::new(ty, true)
     }
 
-    fn check_if(&mut self, _expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::If(cond, then, else_) = expr_data else {
+    fn check_if(&mut self, _expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::If(cond, then, else_) = expr_data else {
             unreachable!()
         };
 
@@ -824,8 +824,8 @@ impl<'db> TyChecker<'db> {
         ExprProp::new(ty, true)
     }
 
-    fn check_match(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::Match(scrutinee, arms) = expr_data else {
+    fn check_match(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::Match(scrutinee, arms) = expr_data else {
             unreachable!()
         };
 
@@ -838,7 +838,7 @@ impl<'db> TyChecker<'db> {
 
         let mut match_ty = self.fresh_ty();
         // Store cloned HirPat data and the original PatId for diagnostics.
-        let mut hir_pats_with_ids: Vec<(&Pat<'db>, PatId)> = Vec::with_capacity(arms.len());
+        let mut hir_pats_with_ids: Vec<(&PatDescription<'db>, PatId)> = Vec::with_capacity(arms.len());
 
         // First loop: Type check patterns, collect HIR patterns for analysis, and type check arm bodies.
         for arm in arms.iter() {
@@ -859,7 +859,7 @@ impl<'db> TyChecker<'db> {
         }
 
         // Collect owned HirPat data for analysis.
-        let collected_hir_pats: Vec<Pat<'db>> = hir_pats_with_ids
+        let collected_hir_pats: Vec<PatDescription<'db>> = hir_pats_with_ids
             .iter()
             .map(|(p, _id)| (*p).clone())
             .collect();
@@ -902,8 +902,8 @@ impl<'db> TyChecker<'db> {
         ExprProp::new(match_ty, true)
     }
 
-    fn check_assign(&mut self, _expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::Assign(lhs, rhs) = expr_data else {
+    fn check_assign(&mut self, _expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::Assign(lhs, rhs) = expr_data else {
             unreachable!()
         };
 
@@ -918,8 +918,8 @@ impl<'db> TyChecker<'db> {
         ExprProp::new(result_ty, true)
     }
 
-    fn check_aug_assign(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
-        let Expr::AugAssign(lhs, rhs, op) = expr_data else {
+    fn check_aug_assign(&mut self, expr: ExprId, expr_data: &ExprDescription<'db>) -> ExprProp<'db> {
+        let ExprDescription::AugAssign(lhs, rhs, op) = expr_data else {
             unreachable!()
         };
 
@@ -1149,9 +1149,9 @@ impl<'db> TyChecker<'db> {
         };
 
         match expr_data {
-            Expr::Field(lhs, ..) => self.find_base_binding(*lhs),
-            Expr::Bin(lhs, _rhs, op) if *op == BinOp::Index => self.find_base_binding(*lhs),
-            Expr::Path(..) => self.env.typed_expr(expr)?.binding(),
+            ExprDescription::Field(lhs, ..) => self.find_base_binding(*lhs),
+            ExprDescription::Bin(lhs, _rhs, op) if *op == BinOp::Index => self.find_base_binding(*lhs),
+            ExprDescription::Path(..) => self.env.typed_expr(expr)?.binding(),
             _ => None,
         }
     }
@@ -1165,8 +1165,8 @@ impl<'db> TyChecker<'db> {
         };
 
         match expr_data {
-            Expr::Path(..) | Expr::Field(..) => true,
-            Expr::Bin(_, _, op) if *op == BinOp::Index => true,
+            ExprDescription::Path(..) | ExprDescription::Field(..) => true,
+            ExprDescription::Bin(_, _, op) if *op == BinOp::Index => true,
             _ => false,
         }
     }

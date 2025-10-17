@@ -1,7 +1,8 @@
 use crate::{
     hir_def::{
-        Body, BodyKind, Expr, ExprId, Func, IdentId, IntegerId, Partial, Pat, PatId, Stmt, StmtId,
+        Body, BodyKind, ExprId, Func, IdentId, IntegerId, Partial, PatId, StmtId,
         prim_ty::PrimTy, scope_graph::ScopeId,
+        ExprDescription, PatDescription, StmtDescription,
     },
     span::DynLazySpan,
 };
@@ -161,7 +162,7 @@ impl<'db> TyCheckEnv<'db> {
 
     pub(super) fn enter_scope(&mut self, block: ExprId) {
         let new_scope = match block.data(self.db, self.body) {
-            Partial::Present(Expr::Block(_)) => ScopeId::Block(self.body, block),
+            Partial::Present(ExprDescription::Block(_)) => ScopeId::Block(self.body, block),
             _ => self.scope(),
         };
 
@@ -302,11 +303,11 @@ impl<'db> TyCheckEnv<'db> {
         }
     }
 
-    pub(super) fn expr_data(&self, expr: ExprId) -> &'db Partial<Expr<'db>> {
+    pub(super) fn expr_data(&self, expr: ExprId) -> &'db Partial<ExprDescription<'db>> {
         expr.data(self.db, self.body)
     }
 
-    pub(super) fn stmt_data(&self, stmt: StmtId) -> &'db Partial<Stmt<'db>> {
+    pub(super) fn stmt_data(&self, stmt: StmtId) -> &'db Partial<StmtDescription<'db>> {
         stmt.data(self.db, self.body)
     }
 
@@ -576,7 +577,7 @@ impl<'db> LocalBinding<'db> {
         let hir_db = env.db;
         match self {
             Self::Local { pat, .. } => {
-                let Partial::Present(Pat::Path(Partial::Present(path), ..)) =
+                let Partial::Present(PatDescription::Path(Partial::Present(path), ..)) =
                     pat.data(hir_db, env.body())
                 else {
                     unreachable!();

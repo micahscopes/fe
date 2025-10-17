@@ -1,4 +1,4 @@
-use crate::hir_def::{IdentId, Partial, Stmt, StmtId};
+use crate::hir_def::{IdentId, Partial, StmtId, StmtDescription};
 
 use super::TyChecker;
 use crate::analysis::ty::{
@@ -14,18 +14,18 @@ impl<'db> TyChecker<'db> {
         };
 
         match stmt_data {
-            Stmt::Let(..) => self.check_let(stmt, stmt_data),
-            Stmt::For(..) => self.check_for(stmt, stmt_data),
-            Stmt::While(..) => self.check_while(stmt, stmt_data),
-            Stmt::Continue => self.check_continue(stmt, stmt_data),
-            Stmt::Break => self.check_break(stmt, stmt_data),
-            Stmt::Return(..) => self.check_return(stmt, stmt_data),
-            Stmt::Expr(expr) => self.check_expr(*expr, expected).ty,
+            StmtDescription::Let(..) => self.check_let(stmt, stmt_data),
+            StmtDescription::For(..) => self.check_for(stmt, stmt_data),
+            StmtDescription::While(..) => self.check_while(stmt, stmt_data),
+            StmtDescription::Continue => self.check_continue(stmt, stmt_data),
+            StmtDescription::Break => self.check_break(stmt, stmt_data),
+            StmtDescription::Return(..) => self.check_return(stmt, stmt_data),
+            StmtDescription::Expr(expr) => self.check_expr(*expr, expected).ty,
         }
     }
 
-    fn check_let(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {
-        let Stmt::Let(pat, ascription, expr) = stmt_data else {
+    fn check_let(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+        let StmtDescription::Let(pat, ascription, expr) = stmt_data else {
             unreachable!()
         };
 
@@ -45,8 +45,8 @@ impl<'db> TyChecker<'db> {
         TyId::unit(self.db)
     }
 
-    fn check_for(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {
-        let Stmt::For(pat, expr, body) = stmt_data else {
+    fn check_for(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+        let StmtDescription::For(pat, expr, body) = stmt_data else {
             unreachable!()
         };
 
@@ -93,8 +93,8 @@ impl<'db> TyChecker<'db> {
         TyId::unit(self.db)
     }
 
-    fn check_while(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {
-        let Stmt::While(cond, body) = stmt_data else {
+    fn check_while(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+        let StmtDescription::While(cond, body) = stmt_data else {
             unreachable!()
         };
 
@@ -107,8 +107,8 @@ impl<'db> TyChecker<'db> {
         TyId::unit(self.db)
     }
 
-    fn check_continue(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {
-        assert!(matches!(stmt_data, Stmt::Continue));
+    fn check_continue(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+        assert!(matches!(stmt_data, StmtDescription::Continue));
 
         if self.env.current_loop().is_none() {
             let span = stmt.span(self.env.body());
@@ -122,8 +122,8 @@ impl<'db> TyChecker<'db> {
         TyId::never(self.db)
     }
 
-    fn check_break(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {
-        assert!(matches!(stmt_data, Stmt::Break));
+    fn check_break(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+        assert!(matches!(stmt_data, StmtDescription::Break));
 
         if self.env.current_loop().is_none() {
             let span = stmt.span(self.env.body());
@@ -137,8 +137,8 @@ impl<'db> TyChecker<'db> {
         TyId::never(self.db)
     }
 
-    fn check_return(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {
-        let Stmt::Return(expr) = stmt_data else {
+    fn check_return(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+        let StmtDescription::Return(expr) = stmt_data else {
             unreachable!()
         };
 

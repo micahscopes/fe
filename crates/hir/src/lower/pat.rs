@@ -2,23 +2,23 @@ use parser::ast;
 
 use super::body::BodyCtxt;
 use crate::{
-    hir_def::{IdentId, LitKind, PathId, pat::*},
+    hir_def::{IdentId, LitKind, Pat, PathId, pat::*, PatDescription},
     span::HirOrigin,
 };
 
 impl<'db> Pat<'db> {
     pub(super) fn lower_ast(ctxt: &mut BodyCtxt<'_, 'db>, ast: ast::Pat) -> PatId {
         let pat = match &ast.kind() {
-            ast::PatKind::WildCard(_) => Pat::WildCard,
+            ast::PatKind::WildCard(_) => PatDescription::WildCard,
 
-            ast::PatKind::Rest(_) => Pat::Rest,
+            ast::PatKind::Rest(_) => PatDescription::Rest,
 
             ast::PatKind::Lit(lit_pat) => {
                 let lit_kind = lit_pat
                     .lit()
                     .map(|lit| LitKind::lower_ast(ctxt.f_ctxt, lit))
                     .into();
-                Pat::Lit(lit_kind)
+                PatDescription::Lit(lit_kind)
             }
 
             ast::PatKind::Tuple(tup) => {
@@ -26,12 +26,12 @@ impl<'db> Pat<'db> {
                     Some(elems) => elems.iter().map(|pat| Pat::lower_ast(ctxt, pat)).collect(),
                     None => vec![],
                 };
-                Pat::Tuple(elems)
+                PatDescription::Tuple(elems)
             }
 
             ast::PatKind::Path(path_ast) => {
                 let path = PathId::lower_ast_partial(ctxt.f_ctxt, path_ast.path());
-                Pat::Path(path, path_ast.mut_token().is_some())
+                PatDescription::Path(path, path_ast.mut_token().is_some())
             }
 
             ast::PatKind::PathTuple(path_tup) => {
@@ -40,7 +40,7 @@ impl<'db> Pat<'db> {
                     Some(elems) => elems.iter().map(|pat| Pat::lower_ast(ctxt, pat)).collect(),
                     None => vec![],
                 };
-                Pat::PathTuple(path, elems)
+                PatDescription::PathTuple(path, elems)
             }
 
             ast::PatKind::Record(record) => {
@@ -52,13 +52,13 @@ impl<'db> Pat<'db> {
                         .collect(),
                     None => vec![],
                 };
-                Pat::Record(path, fields)
+                PatDescription::Record(path, fields)
             }
 
             ast::PatKind::Or(or) => {
                 let lhs = Self::lower_ast_opt(ctxt, or.lhs());
                 let rhs = Self::lower_ast_opt(ctxt, or.rhs());
-                Pat::Or(lhs, rhs)
+                PatDescription::Or(lhs, rhs)
             }
         };
 

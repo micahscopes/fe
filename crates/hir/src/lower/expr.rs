@@ -3,7 +3,7 @@ use parser::ast::{self, prelude::*};
 use super::body::BodyCtxt;
 use crate::{
     hir_def::{
-        Body, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, Pat, PathId, Stmt, expr::*,
+        Body, Expr, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, Pat, PathId, Stmt, expr::*, ExprDescription,
     },
     span::HirOrigin,
 };
@@ -14,7 +14,7 @@ impl<'db> Expr<'db> {
             ast::ExprKind::Lit(lit) => {
                 if let Some(lit) = lit.lit() {
                     let lit = LitKind::lower_ast(ctxt.f_ctxt, lit);
-                    Self::Lit(lit)
+                    ExprDescription::Lit(lit)
                 } else {
                     return ctxt.push_invalid_expr(HirOrigin::raw(&ast));
                 }
@@ -28,7 +28,7 @@ impl<'db> Expr<'db> {
                     let stmt = Stmt::push_to_body(ctxt, stmt);
                     stmts.push(stmt);
                 }
-                let expr_id = ctxt.push_expr(Self::Block(stmts), HirOrigin::raw(&ast));
+                let expr_id = ctxt.push_expr(ExprDescription::Block(stmts), HirOrigin::raw(&ast));
 
                 for item in block.items() {
                     ItemKind::lower_ast(ctxt.f_ctxt, item);
@@ -43,14 +43,14 @@ impl<'db> Expr<'db> {
                 let rhs = Self::push_to_body_opt(ctxt, bin.rhs());
                 let op = bin.op().expect("parser guarantees op presence");
                 let op = BinOp::lower_ast(op);
-                Self::Bin(lhs, rhs, op)
+                ExprDescription::Bin(lhs, rhs, op)
             }
 
             ast::ExprKind::Un(un) => {
                 let expr = Self::push_to_body_opt(ctxt, un.expr());
                 let op = un.op().expect("parser guarantees op presence");
                 let op = UnOp::lower_ast(op);
-                Self::Un(expr, op)
+                ExprDescription::Un(expr, op)
             }
 
             ast::ExprKind::Call(call) => {
@@ -63,7 +63,7 @@ impl<'db> Expr<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
-                Self::Call(callee, args)
+                ExprDescription::Call(callee, args)
             }
 
             ast::ExprKind::MethodCall(method_call) => {
@@ -80,12 +80,12 @@ impl<'db> Expr<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
-                Self::MethodCall(receiver, method_name, generic_args, args)
+                ExprDescription::MethodCall(receiver, method_name, generic_args, args)
             }
 
             ast::ExprKind::Path(path) => {
                 let path = PathId::lower_ast_partial(ctxt.f_ctxt, path.path());
-                Self::Path(path)
+                ExprDescription::Path(path)
             }
 
             ast::ExprKind::RecordInit(record_init) => {
@@ -99,7 +99,7 @@ impl<'db> Expr<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
-                Self::RecordInit(path, fields)
+                ExprDescription::RecordInit(path, fields)
             }
 
             ast::ExprKind::Field(field) => {
@@ -111,13 +111,13 @@ impl<'db> Expr<'db> {
                 } else {
                     None.into()
                 };
-                Self::Field(receiver, field)
+                ExprDescription::Field(receiver, field)
             }
 
             ast::ExprKind::Index(index) => {
                 let indexed = Self::push_to_body_opt(ctxt, index.expr());
                 let index = Self::push_to_body_opt(ctxt, index.index());
-                Self::Bin(indexed, index, BinOp::Index)
+                ExprDescription::Bin(indexed, index, BinOp::Index)
             }
 
             ast::ExprKind::Tuple(tup) => {
@@ -126,7 +126,7 @@ impl<'db> Expr<'db> {
                     .map(|elem| Self::push_to_body_opt(ctxt, elem))
                     .collect();
 
-                Self::Tuple(elems)
+                ExprDescription::Tuple(elems)
             }
 
             ast::ExprKind::Array(array) => {
@@ -134,7 +134,7 @@ impl<'db> Expr<'db> {
                     .elems()
                     .map(|elem| Self::push_to_body_opt(ctxt, elem))
                     .collect();
-                Self::Array(elems)
+                ExprDescription::Array(elems)
             }
 
             ast::ExprKind::ArrayRep(array_rep) => {
@@ -143,7 +143,7 @@ impl<'db> Expr<'db> {
                     .len()
                     .map(|ast| Body::lower_ast_nameless(ctxt.f_ctxt, ast))
                     .into();
-                Self::ArrayRep(val, len)
+                ExprDescription::ArrayRep(val, len)
             }
 
             ast::ExprKind::If(if_) => {
@@ -154,7 +154,7 @@ impl<'db> Expr<'db> {
                         .and_then(|body| ast::Expr::cast(body.syntax().clone())),
                 );
                 let else_ = if_.else_().map(|ast| Self::lower_ast(ctxt, ast));
-                Self::If(cond, then, else_)
+                ExprDescription::If(cond, then, else_)
             }
 
             ast::ExprKind::Match(match_) => {
@@ -168,7 +168,7 @@ impl<'db> Expr<'db> {
                     })
                     .into();
 
-                Self::Match(scrutinee, arm)
+                ExprDescription::Match(scrutinee, arm)
             }
 
             ast::ExprKind::Paren(paren) => {
@@ -178,7 +178,7 @@ impl<'db> Expr<'db> {
             ast::ExprKind::Assign(assign) => {
                 let lhs = Self::push_to_body_opt(ctxt, assign.lhs_expr());
                 let rhs = Self::push_to_body_opt(ctxt, assign.rhs_expr());
-                Self::Assign(lhs, rhs)
+                ExprDescription::Assign(lhs, rhs)
             }
 
             ast::ExprKind::AugAssign(aug_assign) => {
@@ -186,7 +186,7 @@ impl<'db> Expr<'db> {
                 let rhs = Self::push_to_body_opt(ctxt, aug_assign.rhs_expr());
                 let op = aug_assign.op().expect("parser guarantees op presence");
                 let op = ArithBinOp::lower_ast(op);
-                Self::AugAssign(lhs, rhs, op)
+                ExprDescription::AugAssign(lhs, rhs, op)
             }
         };
 

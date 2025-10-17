@@ -3,10 +3,10 @@ use std::{marker::PhantomData, mem};
 use crate::{
     HirDb,
     hir_def::{
-        Body, CallArg, Const, Contract, Enum, EnumVariant, Expr, ExprId, Field, FieldDef,
+        Body, CallArg, Const, Contract, Enum, EnumVariant, ExprDescription, ExprId, Field, FieldDef,
         FieldDefListId, FieldIndex, FieldParent, Func, FuncParam, FuncParamListId, FuncParamName,
         GenericArg, GenericArgListId, GenericParam, GenericParamListId, IdentId, Impl, ImplTrait,
-        ItemKind, KindBound, LitKind, MatchArm, Mod, Partial, Pat, PatId, PathId, PathKind, Stmt,
+        ItemKind, KindBound, LitKind, MatchArm, Mod, Partial, PatDescription, PatId, PathId, PathKind, StmtDescription,
         StmtId, Struct, TopLevelMod, Trait, TraitRefId, TupleTypeId, TypeAlias, TypeBound, TypeId,
         TypeKind, Use, UseAlias, UsePathId, UsePathSegment, VariantDef, VariantDefListId,
         VariantKind, WhereClauseId, WherePredicate, attr, scope_graph::ScopeId,
@@ -298,7 +298,7 @@ pub trait Visitor<'db> {
         &mut self,
         ctxt: &mut VisitorCtxt<'db, LazyStmtSpan<'db>>,
         stmt: StmtId,
-        #[allow(unused_variables)] stmt_data: &Stmt<'db>,
+        #[allow(unused_variables)] stmt_data: &StmtDescription<'db>,
     ) {
         walk_stmt(self, ctxt, stmt)
     }
@@ -307,7 +307,7 @@ pub trait Visitor<'db> {
         &mut self,
         ctxt: &mut VisitorCtxt<'db, LazyExprSpan<'db>>,
         expr: ExprId,
-        #[allow(unused_variables)] expr_data: &Expr<'db>,
+        #[allow(unused_variables)] expr_data: &ExprDescription<'db>,
     ) {
         walk_expr(self, ctxt, expr)
     }
@@ -316,7 +316,7 @@ pub trait Visitor<'db> {
         &mut self,
         ctxt: &mut VisitorCtxt<'db, LazyPatSpan<'db>>,
         pat: PatId,
-        #[allow(unused_variables)] pat_data: &Pat<'db>,
+        #[allow(unused_variables)] pat_data: &PatDescription<'db>,
     ) {
         walk_pat(self, ctxt, pat)
     }
@@ -925,7 +925,7 @@ pub fn walk_stmt<'db, V>(
     };
 
     match stmt {
-        Stmt::Let(pat_id, ty, expr_id) => {
+        StmtDescription::Let(pat_id, ty, expr_id) => {
             visit_node_in_body!(visitor, ctxt, pat_id, pat);
 
             if let Some(ty) = ty {
@@ -942,22 +942,22 @@ pub fn walk_stmt<'db, V>(
             }
         }
 
-        Stmt::For(pat_id, cond_id, for_body_id) => {
+        StmtDescription::For(pat_id, cond_id, for_body_id) => {
             visit_node_in_body!(visitor, ctxt, pat_id, pat);
             visit_node_in_body!(visitor, ctxt, cond_id, expr);
             visit_node_in_body!(visitor, ctxt, for_body_id, expr);
         }
 
-        Stmt::While(cond_id, while_body_id) => {
+        StmtDescription::While(cond_id, while_body_id) => {
             visit_node_in_body!(visitor, ctxt, cond_id, expr);
             visit_node_in_body!(visitor, ctxt, while_body_id, expr);
         }
 
-        Stmt::Return(Some(expr_id)) | Stmt::Expr(expr_id) => {
+        StmtDescription::Return(Some(expr_id)) | StmtDescription::Expr(expr_id) => {
             visit_node_in_body!(visitor, ctxt, expr_id, expr);
         }
 
-        Stmt::Return(None) | Stmt::Continue | Stmt::Break => {}
+        StmtDescription::Return(None) | StmtDescription::Continue | StmtDescription::Break => {}
     }
 }
 
@@ -973,14 +973,14 @@ pub fn walk_expr<'db, V>(
     };
 
     match data {
-        Expr::Lit(lit) => ctxt.with_new_ctxt(
+        ExprDescription::Lit(lit) => ctxt.with_new_ctxt(
             |span| span.into_lit_expr().lit(),
             |ctxt| {
                 visitor.visit_lit(ctxt, *lit);
             },
         ),
 
-        Expr::Block(stmts) => {
+        ExprDescription::Block(stmts) => {
             let s_graph = ctxt.top_mod().scope_graph(ctxt.db);
             let scope = ctxt.scope();
             for item in s_graph.child_items(scope) {
@@ -993,16 +993,16 @@ pub fn walk_expr<'db, V>(
             }
         }
 
-        Expr::Bin(lhs_id, rhs_id, _) => {
+        ExprDescription::Bin(lhs_id, rhs_id, _) => {
             visit_node_in_body!(visitor, ctxt, lhs_id, expr);
             visit_node_in_body!(visitor, ctxt, rhs_id, expr);
         }
 
-        Expr::Un(expr_id, _) => {
+        ExprDescription::Un(expr_id, _) => {
             visit_node_in_body!(visitor, ctxt, expr_id, expr);
         }
 
-        Expr::Call(callee_id, call_args) => {
+        ExprDescription::Call(callee_id, call_args) => {
             visit_node_in_body!(visitor, ctxt, callee_id, expr);
             ctxt.with_new_ctxt(
                 |span| span.into_call_expr(),
@@ -1017,7 +1017,7 @@ pub fn walk_expr<'db, V>(
             );
         }
 
-        Expr::MethodCall(receiver_id, method_name, generic_args, call_args) => {
+        ExprDescription::MethodCall(receiver_id, method_name, generic_args, call_args) => {
             visit_node_in_body!(visitor, ctxt, receiver_id, expr);
 
             ctxt.with_new_ctxt(
@@ -1045,7 +1045,7 @@ pub fn walk_expr<'db, V>(
             );
         }
 
-        Expr::Path(path) => {
+        ExprDescription::Path(path) => {
             if let Some(path) = path.to_opt() {
                 ctxt.with_new_ctxt(
                     |span| span.into_path_expr().path(),
@@ -1056,7 +1056,7 @@ pub fn walk_expr<'db, V>(
             }
         }
 
-        Expr::RecordInit(path, fields) => {
+        ExprDescription::RecordInit(path, fields) => {
             ctxt.with_new_ctxt(
                 |span| span.into_record_init_expr(),
                 |ctxt| {
@@ -1079,7 +1079,7 @@ pub fn walk_expr<'db, V>(
             );
         }
 
-        Expr::Field(receiver_id, field_name) => {
+        ExprDescription::Field(receiver_id, field_name) => {
             visit_node_in_body!(visitor, ctxt, receiver_id, expr);
 
             match field_name {
@@ -1101,26 +1101,26 @@ pub fn walk_expr<'db, V>(
             }
         }
 
-        Expr::Tuple(elems) => {
+        ExprDescription::Tuple(elems) => {
             for elem_id in elems {
                 visit_node_in_body!(visitor, ctxt, elem_id, expr);
             }
         }
 
-        Expr::Array(elems) => {
+        ExprDescription::Array(elems) => {
             for elem_id in elems {
                 visit_node_in_body!(visitor, ctxt, elem_id, expr);
             }
         }
 
-        Expr::ArrayRep(val, rep) => {
+        ExprDescription::ArrayRep(val, rep) => {
             visit_node_in_body!(visitor, ctxt, val, expr);
             if let Some(body) = rep.to_opt() {
                 visitor.visit_body(&mut VisitorCtxt::with_body(ctxt.db, body), body);
             }
         }
 
-        Expr::If(cond, then, else_) => {
+        ExprDescription::If(cond, then, else_) => {
             visit_node_in_body!(visitor, ctxt, cond, expr);
             visit_node_in_body!(visitor, ctxt, then, expr);
             if let Some(else_) = else_ {
@@ -1128,7 +1128,7 @@ pub fn walk_expr<'db, V>(
             }
         }
 
-        Expr::Match(scrutinee, arms) => {
+        ExprDescription::Match(scrutinee, arms) => {
             visit_node_in_body!(visitor, ctxt, scrutinee, expr);
 
             if let Partial::Present(arms) = arms {
@@ -1148,12 +1148,12 @@ pub fn walk_expr<'db, V>(
             }
         }
 
-        Expr::Assign(left_expr_id, right_expr_id) => {
+        ExprDescription::Assign(left_expr_id, right_expr_id) => {
             visit_node_in_body!(visitor, ctxt, left_expr_id, expr);
             visit_node_in_body!(visitor, ctxt, right_expr_id, expr);
         }
 
-        Expr::AugAssign(left_expr_id, right_expr_id, _) => {
+        ExprDescription::AugAssign(left_expr_id, right_expr_id, _) => {
             visit_node_in_body!(visitor, ctxt, left_expr_id, expr);
             visit_node_in_body!(visitor, ctxt, right_expr_id, expr);
         }
@@ -1180,7 +1180,7 @@ where
     };
 
     match data {
-        Pat::Lit(lit) => {
+        PatDescription::Lit(lit) => {
             if let Some(lit) = lit.to_opt() {
                 ctxt.with_new_ctxt(
                     |span| span.into_lit_pat().lit(),
@@ -1191,13 +1191,13 @@ where
             };
         }
 
-        Pat::Tuple(elems) => {
+        PatDescription::Tuple(elems) => {
             for elem in elems {
                 visit_node_in_body!(visitor, ctxt, elem, pat);
             }
         }
 
-        Pat::Path(path, _) => {
+        PatDescription::Path(path, _) => {
             if let Some(path) = path.to_opt() {
                 ctxt.with_new_ctxt(
                     |span| span.into_path_pat().path(),
@@ -1208,7 +1208,7 @@ where
             };
         }
 
-        Pat::PathTuple(path, elems) => {
+        PatDescription::PathTuple(path, elems) => {
             if let Some(path) = path.to_opt() {
                 ctxt.with_new_ctxt(
                     |span| span.into_path_tuple_pat().path(),
@@ -1223,7 +1223,7 @@ where
             }
         }
 
-        Pat::Record(path, fields) => ctxt.with_new_ctxt(
+        PatDescription::Record(path, fields) => ctxt.with_new_ctxt(
             |span| span.into_record_pat(),
             |ctxt| {
                 if let Some(path) = path.to_opt() {
@@ -1260,12 +1260,12 @@ where
             },
         ),
 
-        Pat::Or(lhs, rhs) => {
+        PatDescription::Or(lhs, rhs) => {
             visit_node_in_body!(visitor, ctxt, lhs, pat);
             visit_node_in_body!(visitor, ctxt, rhs, pat);
         }
 
-        Pat::WildCard | Pat::Rest => {}
+        PatDescription::WildCard | PatDescription::Rest => {}
     }
 }
 
@@ -2100,7 +2100,7 @@ where
         expr: ExprId,
     ) -> Self {
         let scope_id = match expr.data(db, body) {
-            Partial::Present(Expr::Block(_)) => ScopeId::Block(body, expr),
+            Partial::Present(ExprDescription::Block(_)) => ScopeId::Block(body, expr),
             _ => scope,
         };
 

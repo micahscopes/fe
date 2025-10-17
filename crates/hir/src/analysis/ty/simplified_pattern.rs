@@ -7,7 +7,8 @@ use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution::{PathRes, ResolvedVariant, resolve_path};
 use crate::analysis::ty::ty_def::TyId;
 use crate::hir_def::{
-    Body as HirBody, LitKind, Partial, Pat as HirPat, PathId, VariantKind, scope_graph::ScopeId,
+    Body as HirBody, LitKind, Partial, PathId, VariantKind, scope_graph::ScopeId,
+    PatDescription as HirPat,
 };
 use crate::hir_def::{EnumVariant, FieldParent, IdentId, PatId};
 use rustc_hash::FxHashMap;

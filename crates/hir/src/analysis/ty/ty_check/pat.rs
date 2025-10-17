@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::hir_def::{Partial, Pat, PatId, VariantKind};
+use crate::hir_def::{Partial, PatId, VariantKind, PatDescription};
 use either::Either;
 
 use super::{RecordLike, TyChecker, env::LocalBinding, path::RecordInitChecker};
@@ -22,19 +22,19 @@ impl<'db> TyChecker<'db> {
         };
 
         let ty = match pat_data {
-            Pat::WildCard => {
+            PatDescription::WildCard => {
                 let ty_var = self.table.new_var(TyVarSort::General, &Kind::Star);
                 self.unify_ty(pat, ty_var, expected)
             }
 
-            Pat::Rest => expected, // rest pattern type checking?
-            Pat::Lit(..) => self.check_lit_pat(pat, pat_data),
-            Pat::Tuple(..) => self.check_tuple_pat(pat, pat_data, expected),
-            Pat::Path(..) => self.check_path_pat(pat, pat_data),
-            Pat::PathTuple(..) => self.check_path_tuple_pat(pat, pat_data),
-            Pat::Record(..) => self.check_record_pat(pat, pat_data),
+            PatDescription::Rest => expected, // rest pattern type checking?
+            PatDescription::Lit(..) => self.check_lit_pat(pat, pat_data),
+            PatDescription::Tuple(..) => self.check_tuple_pat(pat, pat_data, expected),
+            PatDescription::Path(..) => self.check_path_pat(pat, pat_data),
+            PatDescription::PathTuple(..) => self.check_path_tuple_pat(pat, pat_data),
+            PatDescription::Record(..) => self.check_record_pat(pat, pat_data),
 
-            Pat::Or(lhs, rhs) => {
+            PatDescription::Or(lhs, rhs) => {
                 self.check_pat(*lhs, expected);
                 self.check_pat(*rhs, expected)
             }
@@ -43,8 +43,8 @@ impl<'db> TyChecker<'db> {
         self.unify_ty(pat, ty, expected)
     }
 
-    fn check_lit_pat(&mut self, _pat: PatId, pat_data: &Pat<'db>) -> TyId<'db> {
-        let Pat::Lit(lit) = pat_data else {
+    fn check_lit_pat(&mut self, _pat: PatId, pat_data: &PatDescription<'db>) -> TyId<'db> {
+        let PatDescription::Lit(lit) = pat_data else {
             unreachable!()
         };
 
@@ -57,10 +57,10 @@ impl<'db> TyChecker<'db> {
     fn check_tuple_pat(
         &mut self,
         pat: PatId,
-        pat_data: &Pat<'db>,
+        pat_data: &PatDescription<'db>,
         expected: TyId<'db>,
     ) -> TyId<'db> {
-        let Pat::Tuple(pat_tup) = pat_data else {
+        let PatDescription::Tuple(pat_tup) = pat_data else {
             unreachable!()
         };
 
@@ -103,8 +103,8 @@ impl<'db> TyChecker<'db> {
         unified
     }
 
-    fn check_path_pat(&mut self, pat: PatId, pat_data: &Pat<'db>) -> TyId<'db> {
-        let Pat::Path(path, is_mut) = pat_data else {
+    fn check_path_pat(&mut self, pat: PatId, pat_data: &PatDescription<'db>) -> TyId<'db> {
+        let PatDescription::Path(path, is_mut) = pat_data else {
             unreachable!()
         };
 
@@ -225,8 +225,8 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn check_path_tuple_pat(&mut self, pat: PatId, pat_data: &Pat<'db>) -> TyId<'db> {
-        let Pat::PathTuple(Partial::Present(path), elems) = pat_data else {
+    fn check_path_tuple_pat(&mut self, pat: PatId, pat_data: &PatDescription<'db>) -> TyId<'db> {
+        let PatDescription::PathTuple(Partial::Present(path), elems) = pat_data else {
             return TyId::invalid(self.db, InvalidCause::ParseError);
         };
 
@@ -324,9 +324,9 @@ impl<'db> TyChecker<'db> {
             };
 
             // Call check_pat for the current source pattern element (current_pat_id).
-            // If current_pat_id is Pat::Rest, its type will be unified with elem_ty (the type of the variant field it starts covering).
+            // If current_pat_id is PatDescription::Rest, its type will be unified with elem_ty (the type of the variant field it starts covering).
             // If the current variant field 'i' is covered by rest_range (meaning '..' covers it),
-            // but current_pat_id is *not* Pat::Rest, it means this current_pat_id is for a field *after* the '..'.
+            // but current_pat_id is *not* PatDescription::Rest, it means this current_pat_id is for a field *after* the '..'.
             // In that case, we only proceed to check_pat if 'i' is NOT in rest_range.
             if current_pat_id.is_rest(self.db, self.body()) {
                 // For rest patterns, use the variant's type
@@ -340,7 +340,7 @@ impl<'db> TyChecker<'db> {
                 self.check_pat(current_pat_id, elem_ty);
                 arg_idx += 1;
             }
-            // If rest_range.contains(&i) and current_pat_id is not Pat::Rest,
+            // If rest_range.contains(&i) and current_pat_id is not PatDescription::Rest,
             // it means this variant field `i` is covered by a `..` that has already been processed (or will be).
             // We do nothing for this `elem_ty` and `current_pat_id` pair, and `arg_idx` is not incremented,
             // allowing `current_pat_id` to be matched against a subsequent variant field.
@@ -349,8 +349,8 @@ impl<'db> TyChecker<'db> {
         variant.ty
     }
 
-    fn check_record_pat(&mut self, pat: PatId, pat_data: &Pat<'db>) -> TyId<'db> {
-        let Pat::Record(Partial::Present(path), _) = pat_data else {
+    fn check_record_pat(&mut self, pat: PatId, pat_data: &PatDescription<'db>) -> TyId<'db> {
+        let PatDescription::Record(Partial::Present(path), _) = pat_data else {
             return TyId::invalid(self.db, InvalidCause::ParseError);
         };
 
@@ -417,7 +417,7 @@ impl<'db> TyChecker<'db> {
     }
 
     fn check_record_pat_fields(&mut self, record_like: RecordLike<'db>, pat: PatId) {
-        let Partial::Present(Pat::Record(_, fields)) = pat.data(self.db, self.body()) else {
+        let Partial::Present(PatDescription::Record(_, fields)) = pat.data(self.db, self.body()) else {
             unreachable!()
         };
 

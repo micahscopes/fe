@@ -4,7 +4,7 @@ use super::{Body, GenericArgListId, IdentId, IntegerId, LitKind, Partial, PatId,
 use crate::{HirDb, span::expr::LazyExprSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
-pub enum Expr<'db> {
+pub enum ExprDescription<'db> {
     Lit(LitKind<'db>),
     Block(Vec<StmtId>),
     /// The first `ExprId` is the lhs, the second is the rhs.
@@ -55,7 +55,7 @@ impl ExprId {
         LazyExprSpan::new(body, self)
     }
 
-    pub fn data<'db>(self, db: &'db dyn HirDb, body: Body<'db>) -> &'db Partial<Expr<'db>> {
+    pub fn data<'db>(self, db: &'db dyn HirDb, body: Body<'db>) -> &'db Partial<ExprDescription<'db>> {
         &body.exprs(db)[self]
     }
 }
@@ -163,7 +163,7 @@ impl<'db> CallArg<'db> {
             return Some(label);
         };
 
-        let Partial::Present(Expr::Path(Partial::Present(path))) = self.expr.data(db, body) else {
+        let Partial::Present(ExprDescription::Path(Partial::Present(path))) = self.expr.data(db, body) else {
             return None;
         };
 
@@ -187,7 +187,7 @@ impl<'db> Field<'db> {
             return Some(label);
         };
 
-        let Partial::Present(Expr::Path(Partial::Present(path))) = self.expr.data(db, body) else {
+        let Partial::Present(ExprDescription::Path(Partial::Present(path))) = self.expr.data(db, body) else {
             return None;
         };
 

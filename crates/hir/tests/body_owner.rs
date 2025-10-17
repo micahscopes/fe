@@ -79,3 +79,60 @@ const FOO: i32 = 42
     // Verify it's the same const
     assert_eq!(const_item, owner_const);
 }
+
+#[test]
+fn test_context_rich_wrappers() {
+    let mut db = HirAnalysisTestDb::default();
+
+    let file = db.new_stand_alone(
+        "test.fe".into(),
+        r#"
+fn bar() {
+    let x = 1
+    let y = 2
+}
+"#,
+    );
+
+    let top_mod = lower::map_file_to_mod(&db, file);
+
+    // Get the function
+    let func = top_mod
+        .all_funcs(&db)
+        .iter()
+        .find(|f| {
+            if let Some(name) = f.name(&db).to_opt() {
+                name.data(&db) == "bar"
+            } else {
+                false
+            }
+        })
+        .expect("should find bar function");
+
+    // Get the body
+    let body = func.body(&db).expect("bar should have a body");
+
+    // Get the body's root expression ID
+    let root_expr_id = body.expr(&db);
+
+    // Create a context-rich wrapper for the expression
+    let expr_wrapper = body.wrap_expr(root_expr_id);
+
+    // Test that the wrapper carries context
+    assert_eq!(expr_wrapper.body(), body);
+    assert_eq!(expr_wrapper.id(), root_expr_id);
+
+    // Test upward navigation: expr → body → func
+    let func_from_expr = expr_wrapper
+        .containing_func(&db)
+        .expect("expr should know its containing function");
+    assert_eq!(*func, func_from_expr);
+
+    // Test scope access (currently delegates to body scope)
+    let scope = expr_wrapper.scope(&db);
+    assert_eq!(scope, body.scope());
+
+    // Test data access through wrapper
+    let expr_data = expr_wrapper.data(&db);
+    assert!(matches!(expr_data, fe_hir::hir_def::Partial::Present(fe_hir::hir_def::expr::ExprDescription::Block(_))));
+}

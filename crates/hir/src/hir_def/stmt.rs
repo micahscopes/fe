@@ -4,7 +4,7 @@ use super::{Body, ExprId, Partial, PatId, TypeId};
 use crate::{HirDb, span::stmt::LazyStmtSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
-pub enum Stmt<'db> {
+pub enum StmtDescription<'db> {
     /// The `let` statement. The first `PatId` is the pattern for binding, the
     /// second `Option<TypeId>` is the type annotation, and the third
     /// `Option<ExprId>` is the expression for initialization.
@@ -35,7 +35,7 @@ impl StmtId {
         LazyStmtSpan::new(body, self)
     }
 
-    pub fn data<'db>(self, db: &'db dyn HirDb, body: Body<'db>) -> &'db Partial<Stmt<'db>> {
+    pub fn data<'db>(self, db: &'db dyn HirDb, body: Body<'db>) -> &'db Partial<StmtDescription<'db>> {
         &body.stmts(db)[self]
     }
 }

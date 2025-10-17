@@ -1,4 +1,4 @@
-use crate::hir_def::{Body, Const, Expr, IntegerId, LitKind, Partial};
+use crate::hir_def::{Body, Const, IntegerId, LitKind, Partial, ExprDescription};
 
 use super::{
     ty_def::{InvalidCause, TyId, TyParam, TyVar},
@@ -59,7 +59,7 @@ pub(crate) fn evaluate_const_ty<'db>(
 
     let expr = expr.clone();
 
-    if let Expr::Path(path) = &expr {
+    if let ExprDescription::Path(path) = &expr {
         let Some(path) = path.to_opt() else {
             return ConstTyId::new(
                 db,
@@ -100,12 +100,12 @@ pub(crate) fn evaluate_const_ty<'db>(
 
     let mut table = UnificationTable::new(db);
     let (resolved, ty) = match expr {
-        Expr::Lit(LitKind::Bool(b)) => (
+        ExprDescription::Lit(LitKind::Bool(b)) => (
             EvaluatedConstTy::LitBool(b),
             TyId::new(db, TyData::TyBase(TyBase::bool())),
         ),
 
-        Expr::Lit(LitKind::Int(i)) => (
+        ExprDescription::Lit(LitKind::Int(i)) => (
             EvaluatedConstTy::LitInt(i),
             table.new_var(TyVarSort::Integral, &Kind::Star),
         ),
@@ -190,10 +190,10 @@ impl<'db> ConstTyId<'db> {
                 };
 
                 match expr {
-                    Expr::Lit(LitKind::Bool(value)) => format!("const {}", value),
-                    Expr::Lit(LitKind::Int(int)) => format!("const {}", int.data(db)),
-                    Expr::Lit(LitKind::String(string)) => format!("const \"{}\"", string.data(db)),
-                    Expr::Path(path) if path.is_present() => {
+                    ExprDescription::Lit(LitKind::Bool(value)) => format!("const {}", value),
+                    ExprDescription::Lit(LitKind::Int(int)) => format!("const {}", int.data(db)),
+                    ExprDescription::Lit(LitKind::String(string)) => format!("const \"{}\"", string.data(db)),
+                    ExprDescription::Path(path) if path.is_present() => {
                         format!("const {}", path.unwrap().pretty_print(db))
                     }
                     _ => "const value".into(),

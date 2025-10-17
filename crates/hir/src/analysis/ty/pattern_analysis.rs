@@ -7,7 +7,7 @@ use super::simplified_pattern::{
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::ty::AdtRef;
 use crate::analysis::ty::ty_def::TyId;
-use crate::hir_def::{Body as HirBody, LitKind, Pat as HirPat, scope_graph::ScopeId};
+use crate::hir_def::{Body as HirBody, LitKind, PatDescription as HirPat, scope_graph::ScopeId};
 use common::indexmap::IndexSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
