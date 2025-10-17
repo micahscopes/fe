@@ -95,10 +95,25 @@ fn check_duplicate_field_names<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: FieldParent<'db>,
 ) -> SmallVec<[TyDiagCollection<'db>; 2]> {
-    check_duplicate_names(
-        owner.fields(db).data(db).iter().map(|f| f.name.to_opt()),
-        |idxs| TyLowerDiag::DuplicateFieldName(owner, idxs).into(),
-    )
+    let names: Vec<_> = match owner {
+        FieldParent::Struct(s) => s.fields(db).map(|f| f.def(db).name.to_opt()).collect(),
+        FieldParent::Contract(c) => c.fields(db).map(|f| f.def(db).name.to_opt()).collect(),
+        FieldParent::Variant(v) => {
+            // For variants, we need to access fields through VariantKind
+            let fields = match v.kind(db) {
+                crate::hir_def::VariantKind::Record(fields) => fields,
+                _ => unreachable!(),
+            };
+            fields
+                .data(db)
+                .iter()
+                .map(|f| f.name.to_opt())
+                .collect()
+        }
+    };
+    check_duplicate_names(names.into_iter(), |idxs| {
+        TyLowerDiag::DuplicateFieldName(owner, idxs).into()
+    })
 }
 
 fn check_duplicate_variant_names<'db>(

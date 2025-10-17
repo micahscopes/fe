@@ -18,7 +18,7 @@ use crate::analysis::{
 };
 use crate::{
     ParserError, SpannedHirDb,
-    hir_def::{FieldIndex, PathKind},
+    hir_def::{FieldIndex, FieldParent, PathKind},
     span::LazySpan,
 };
 use common::diagnostics::{
@@ -1013,10 +1013,24 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
             }
 
             Self::DuplicateFieldName(parent, idxs) => {
-                let name = parent.fields(db).data(db)[idxs[0] as usize]
-                    .name
-                    .unwrap()
-                    .data(db);
+                let name = match parent {
+                    FieldParent::Struct(s) => {
+                        let field = s.fields(db).nth(idxs[0] as usize).unwrap();
+                        field.def(db).name.unwrap().data(db)
+                    }
+                    FieldParent::Contract(c) => {
+                        let field = c.fields(db).nth(idxs[0] as usize).unwrap();
+                        field.def(db).name.unwrap().data(db)
+                    }
+                    FieldParent::Variant(v) => {
+                        // For variants, we need to access fields through VariantKind
+                        let fields = match v.kind(db) {
+                            crate::hir_def::VariantKind::Record(fields) => fields,
+                            _ => unreachable!(),
+                        };
+                        fields.data(db)[idxs[0] as usize].name.unwrap().data(db)
+                    }
+                };
 
                 let spans = idxs
                     .iter()

@@ -183,11 +183,12 @@ impl<'db> RecordLike<'db> {
         match self {
             RecordLike::Type(ty) => {
                 let adt_def = ty.adt_def(db)?;
-                let (hir_field_list_id, adt_field_list_ref) = match adt_def.adt_ref(db) {
-                    AdtRef::Struct(s) => Some((s.field_defs(db), &adt_def.fields(db)[0])),
-                    AdtRef::Contract(c) => Some((c.field_defs(db), &adt_def.fields(db)[0])),
-                    _ => None,
-                }?;
+                let adt_field_list_ref = adt_def.fields(db).iter().next()?;
+                let hir_field_list_id = match adt_def.adt_ref(db) {
+                    AdtRef::Struct(s) => s.field_defs(db),
+                    AdtRef::Contract(c) => c.field_defs(db),
+                    _ => return None,
+                };
 
                 let field_idx = hir_field_list_id.field_idx(db, name)?;
                 let args = ty.generic_args(db);
@@ -201,12 +202,14 @@ impl<'db> RecordLike<'db> {
             }
             RecordLike::Variant(variant) => {
                 let adt_def = variant.ty.adt_def(db)?;
-                let (hir_field_list_id, adt_field_list_ref) = match variant.kind(db) {
-                    HirVariantKind::Record(fields_id) => {
-                        Some((fields_id, &adt_def.fields(db)[variant.variant.idx as usize]))
-                    }
-                    _ => None,
-                }?;
+                let adt_field_list_ref = adt_def
+                    .fields(db)
+                    .iter()
+                    .nth(variant.variant.idx as usize)?;
+                let hir_field_list_id = match variant.kind(db) {
+                    HirVariantKind::Record(fields_id) => fields_id,
+                    _ => return None,
+                };
 
                 let field_idx = hir_field_list_id.field_idx(db, name)?;
                 let args = variant.ty.generic_args(db);
@@ -228,18 +231,22 @@ impl<'db> RecordLike<'db> {
         match self {
             RecordLike::Type(ty) => {
                 let adt_def = ty.adt_def(db)?;
-                match adt_def.adt_ref(db) {
-                    AdtRef::Struct(s) => Some((s.field_defs(db), &adt_def.fields(db)[0])),
-                    AdtRef::Contract(c) => Some((c.field_defs(db), &adt_def.fields(db)[0])),
-                    _ => None,
-                }
+                let adt_field = adt_def.fields(db).iter().next()?;
+                let hir_field_list = match adt_def.adt_ref(db) {
+                    AdtRef::Struct(s) => s.field_defs(db),
+                    AdtRef::Contract(c) => c.field_defs(db),
+                    _ => return None,
+                };
+                Some((hir_field_list, adt_field))
             }
             RecordLike::Variant(variant) => {
                 let adt_def = variant.ty.adt_def(db)?;
+                let adt_field = adt_def
+                    .fields(db)
+                    .iter()
+                    .nth(variant.variant.idx as usize)?;
                 match variant.kind(db) {
-                    HirVariantKind::Record(fields_id) => {
-                        Some((fields_id, &adt_def.fields(db)[variant.variant.idx as usize]))
-                    }
+                    HirVariantKind::Record(fields_id) => Some((fields_id, adt_field)),
                     _ => None,
                 }
             }
@@ -285,28 +292,26 @@ impl<'db> RecordLike<'db> {
                 let Some(adt_ref) = ty.adt_ref(db) else {
                     return Vec::default();
                 };
-                let fields = match adt_ref {
-                    AdtRef::Struct(s) => s.field_defs(db),
-                    AdtRef::Contract(c) => c.field_defs(db),
-                    _ => return Vec::default(),
-                };
-                fields
+                match adt_ref {
+                    AdtRef::Struct(s) => s
+                        .fields(db)
+                        .filter_map(|field| field.def(db).name.to_opt())
+                        .collect(),
+                    AdtRef::Contract(c) => c
+                        .fields(db)
+                        .filter_map(|field| field.def(db).name.to_opt())
+                        .collect(),
+                    _ => Vec::default(),
+                }
+            }
+            RecordLike::Variant(variant) => match variant.kind(db) {
+                HirVariantKind::Record(fields) => fields
                     .data(db)
                     .iter()
                     .filter_map(|field| field.name.to_opt())
-                    .collect()
-            }
-            RecordLike::Variant(variant) => {
-                let fields = match variant.kind(db) {
-                    HirVariantKind::Record(fields) => fields,
-                    _ => return Vec::default(),
-                };
-                fields
-                    .data(db)
-                    .iter()
-                    .filter_map(|field| field.name.to_opt())
-                    .collect()
-            }
+                    .collect(),
+                _ => Vec::default(),
+            },
         }
     }
 
