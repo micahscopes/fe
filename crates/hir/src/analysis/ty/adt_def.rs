@@ -119,7 +119,8 @@ impl<'db> AdtDef<'db> {
         match self.adt_ref(db) {
             AdtRef::Enum(e) => {
                 let span = e.variant_span(field_idx);
-                match e.variant_defs(db).data(db)[field_idx].kind {
+                let variant = e.variants(db).nth(field_idx).unwrap();
+                match variant.kind(db) {
                     VariantKind::Tuple(_) => span.tuple_type().elem_ty(ty_idx).into(),
                     VariantKind::Record(_) => span.fields().field(ty_idx).ty().into(),
                     VariantKind::Unit => unreachable!(),
