@@ -1,47 +1,30 @@
 # HIR Item-by-Item Transformation Guide
 
-## The Goal: Systematic Field → Method Conversion
+## The Goal: Context-Rich Collection Wrappers
 
-**Current state:** `hir_def` items have **public attribute-like fields**
-**Target state:** Items have **private fields** with **context-injecting accessor methods**
+**Current state:** Collection fields return raw list IDs requiring manual index tracking
+**Target state:** Collection fields return iterators of context-carrying wrappers
 
-### The Two Transformation Patterns
+### Understanding Salsa Accessors
 
-#### Pattern A: Simple Encapsulation
-For scalar/simple fields - just make private, use salsa-generated accessor
+**Important:** Salsa tracked structs automatically generate accessor methods for ALL fields.
+Both `pub` and `pub(crate)` fields become methods accessed like `x.foo(db)`.
 
-```rust
-// Before
-#[salsa::tracked]
-pub struct Func<'db> {
-    pub name: Partial<IdentId<'db>>,  // ← public field
-}
+This means most simple fields are already fine as-is. The transformation focuses on **collections**.
 
-// After
-#[salsa::tracked]
-pub struct Func<'db> {
-    pub(crate) name: Partial<IdentId<'db>>,  // ← private field
-}
+### The Transformation Pattern: Context-Rich Wrappers
 
-// Access changes from:
-let name = func.name;
-
-// To:
-let name = func.name(db);  // ← salsa-generated method
-```
-
-#### Pattern B: Context-Rich Wrapper
-For collection fields - make private, return iterator of context-carrying wrappers
+For collection fields - rename field, add public method returning iterator of context-carrying wrappers
 
 ```rust
 // Before
 #[salsa::tracked]
 pub struct Enum<'db> {
-    pub variants: VariantDefListId<'db>,  // ← public field, raw ID
+    pub variants: VariantDefListId<'db>,  // ← returns raw list ID
 }
 
 // Usage: manual index tracking
-let variant_list = enum_.variants;
+let variant_list = enum_.variants(db);
 for i in 0..variant_list.data(db).len() {
     let variant_def = &variant_list.data(db)[i];
     let name = variant_def.name;  // ← no parent context
@@ -50,135 +33,30 @@ for i in 0..variant_list.data(db).len() {
 // After
 #[salsa::tracked]
 pub struct Enum<'db> {
-    pub(crate) variant_list: VariantDefListId<'db>,  // ← private, renamed
+    variant_defs: VariantDefListId<'db>,  // ← renamed (salsa generates private accessor)
 }
 
 impl Enum<'db> {
-    pub fn variants(self, db: &dyn HirDb) -> impl Iterator<Item = EnumVariant<'db>> {
-        let count = self.variant_list(db).data(db).len();
+    pub fn variants(self, db: &dyn HirDb) -> impl Iterator<Item = EnumVariant<'db>> + '_ {
+        let count = self.variant_defs(db).data(db).len();
         (0..count).map(move |i| EnumVariant::new(self, i))
     }
 }
 
 // Usage: context-rich iteration
 for variant in enum_.variants(db) {
-    let name = variant.name(db);  // ← has parent context!
-    let parent_enum = variant.enum_;  // ← can navigate upward
+    let name = variant.name(db);      // ← has parent context!
+    let parent_enum = variant.parent(); // ← can navigate upward
 }
 ```
 
-## Complete Transformation Checklist
+## Items Requiring Transformation
 
-### Group 1: Leaves (No dependencies on other items)
+Focus on structs with collection fields that need context-rich wrappers:
 
-Transform these first - they don't reference other items being transformed.
-
-#### ✅ 1. TopLevelMod
-- **Pattern:** A (simple)
-- **Public fields to hide:** `name`
-- **Dependencies:** None
-- **Estimated effort:** 5 min
-
-**Transformation:**
-```rust
-// Before
-#[salsa::tracked]
-pub struct TopLevelMod<'db> {
-    pub name: IdentId<'db>,
-    pub(crate) file: File,
-}
-
-// After
-#[salsa::tracked]
-pub struct TopLevelMod<'db> {
-    pub(crate) name: IdentId<'db>,  // ← changed
-    pub(crate) file: File,
-}
-
-// Update all call sites:
-// top_mod.name → top_mod.name(db)
-```
-
-**Commit:** `refactor(hir): privatize TopLevelMod fields, use accessor methods`
-
----
-
-#### ✅ 2. Const
-- **Pattern:** A (simple)
-- **Public fields to hide:** `name`, `attributes`, `ty`, `body`, `vis`, `top_mod`
-- **Dependencies:** TopLevelMod (already done), Body
-- **Estimated effort:** 10 min
-
-**Transformation:**
-```rust
-// Before
-#[salsa::tracked]
-pub struct Const<'db> {
-    pub name: Partial<IdentId<'db>>,
-    pub attributes: AttrListId<'db>,
-    pub ty: Partial<TypeId<'db>>,
-    pub body: Partial<Body<'db>>,
-    pub vis: Visibility,
-    pub top_mod: TopLevelMod<'db>,
-}
-
-// After
-#[salsa::tracked]
-pub struct Const<'db> {
-    pub(crate) name: Partial<IdentId<'db>>,
-    pub(crate) attributes: AttrListId<'db>,
-    pub(crate) ty: Partial<TypeId<'db>>,
-    pub(crate) body: Partial<Body<'db>>,
-    pub(crate) vis: Visibility,
-    pub(crate) top_mod: TopLevelMod<'db>,
-}
-
-// All access becomes: const_.name(db), const_.body(db), etc.
-```
-
-**Commit:** `refactor(hir): privatize Const fields, use accessor methods`
-
----
-
-#### ✅ 3. Use
-- **Pattern:** A (simple)
-- **Public fields to hide:** `path`, `alias`, `vis`, `top_mod`
-- **Dependencies:** TopLevelMod
-- **Estimated effort:** 10 min
-
-**Commit:** `refactor(hir): privatize Use fields, use accessor methods`
-
----
-
-#### ✅ 4. TypeAlias
-- **Pattern:** A (simple)
-- **Public fields to hide:** `name`, `attributes`, `vis`, `generic_params`, `ty`, `top_mod`
-- **Dependencies:** TopLevelMod
-- **Estimated effort:** 10 min
-
-**Commit:** `refactor(hir): privatize TypeAlias fields, use accessor methods`
-
----
-
-#### ✅ 5. Mod
-- **Pattern:** A (simple)
-- **Public fields to hide:** `name`, `attributes`, `vis`, `top_mod`
-- **Dependencies:** TopLevelMod
-- **Estimated effort:** 10 min
-
-**Commit:** `refactor(hir): privatize Mod fields, use accessor methods`
-
----
-
-### Group 2: Collections (Need context-rich wrappers)
-
-These have collection fields that should return iterators of wrappers.
-
-#### ✅ 6. Struct (and Contract)
-- **Pattern:** A for simple fields, B for `fields`
-- **Public fields to hide:** `name`, `attributes`, `vis`, `generic_params`, `where_clause`, `top_mod`
+### 1. Struct (and Contract)
+- **Collection field:** `fields: FieldDefListId<'db>`
 - **Wrapper needed:** `Field<'db>` (wraps FieldDef with parent context)
-- **Dependencies:** TopLevelMod, FieldDefListId
 - **Estimated effort:** 30 min
 
 **Transformation:**
@@ -186,30 +64,20 @@ These have collection fields that should return iterators of wrappers.
 // Before
 #[salsa::tracked]
 pub struct Struct<'db> {
-    pub name: Partial<IdentId<'db>>,
-    pub attributes: AttrListId<'db>,
-    pub vis: Visibility,
-    pub generic_params: GenericParamListId<'db>,
-    pub where_clause: WhereClauseId<'db>,
-    pub fields: FieldDefListId<'db>,  // ← needs wrapper!
-    pub top_mod: TopLevelMod<'db>,
+    // ... other fields ...
+    pub fields: FieldDefListId<'db>,  // ← returns raw list ID
 }
 
 // After
 #[salsa::tracked]
 pub struct Struct<'db> {
-    pub(crate) name: Partial<IdentId<'db>>,
-    pub(crate) attributes: AttrListId<'db>,
-    pub(crate) vis: Visibility,
-    pub(crate) generic_params: GenericParamListId<'db>,
-    pub(crate) where_clause: WhereClauseId<'db>,
-    pub(crate) field_list: FieldDefListId<'db>,  // ← renamed + private
-    pub(crate) top_mod: TopLevelMod<'db>,
+    // ... other fields ...
+    field_defs: FieldDefListId<'db>,  // ← renamed (salsa generates private accessor)
 }
 
 impl Struct<'db> {
     pub fn fields(self, db: &dyn HirDb) -> impl Iterator<Item = Field<'db>> + '_ {
-        let count = self.field_list(db).data(db).len();
+        let count = self.field_defs(db).data(db).len();
         (0..count).map(move |i| Field::new(FieldParent::Struct(self), i))
     }
 }
@@ -260,10 +128,9 @@ impl Field<'db> {
 
 ---
 
-#### ✅ 7. Enum
-- **Pattern:** A for simple fields, B for `variants`
-- **Wrapper needed:** `EnumVariant<'db>` (**already exists!** Just need to update API)
-- **Dependencies:** TopLevelMod, VariantDefListId
+### 2. Enum
+- **Collection field:** `variants: VariantDefListId<'db>`
+- **Wrapper:** `EnumVariant<'db>` (**already exists!** Just need to add iterator API)
 - **Estimated effort:** 20 min
 
 **Transformation:**
@@ -271,30 +138,20 @@ impl Field<'db> {
 // Before
 #[salsa::tracked]
 pub struct Enum<'db> {
-    pub name: Partial<IdentId<'db>>,
-    pub attributes: AttrListId<'db>,
-    pub vis: Visibility,
-    pub generic_params: GenericParamListId<'db>,
-    pub where_clause: WhereClauseId<'db>,
-    pub variants: VariantDefListId<'db>,  // ← needs wrapper!
-    pub top_mod: TopLevelMod<'db>,
+    // ... other fields ...
+    pub variants: VariantDefListId<'db>,  // ← returns raw list ID
 }
 
 // After
 #[salsa::tracked]
 pub struct Enum<'db> {
-    pub(crate) name: Partial<IdentId<'db>>,
-    pub(crate) attributes: AttrListId<'db>,
-    pub(crate) vis: Visibility,
-    pub(crate) generic_params: GenericParamListId<'db>,
-    pub(crate) where_clause: WhereClauseId<'db>,
-    pub(crate) variant_list: VariantDefListId<'db>,  // ← renamed + private
-    pub(crate) top_mod: TopLevelMod<'db>,
+    // ... other fields ...
+    variant_defs: VariantDefListId<'db>,  // ← renamed (salsa generates private accessor)
 }
 
 impl Enum<'db> {
     pub fn variants(self, db: &dyn HirDb) -> impl Iterator<Item = EnumVariant<'db>> + '_ {
-        let count = self.variant_list(db).data(db).len();
+        let count = self.variant_defs(db).data(db).len();
         (0..count).map(move |i| EnumVariant::new(self, i))
     }
 }
@@ -303,111 +160,49 @@ impl Enum<'db> {
 // Just update call sites to use the iterator API
 ```
 
-**Commit:** `refactor(hir): add variants() iterator for Enum, privatize fields`
+**Commit:** `refactor(hir): add variants() iterator for Enum`
 
 ---
 
-#### ✅ 8. Func
-- **Pattern:** A for simple fields, B for `param_descriptions`
+### 3. Func
+- **Collection field:** `params: Partial<FuncParamListId<'db>>` (note: already renamed to `param_descriptions` in staged changes)
 - **Wrapper needed:** `FuncParam<'db>` (**already sketched!** Need to implement)
-- **Dependencies:** TopLevelMod, Body, FuncParamListId
 - **Estimated effort:** 30 min
 
-**Transformation:**
+**Current state (staged changes):**
 ```rust
-// Before
 #[salsa::tracked]
 pub struct Func<'db> {
-    pub name: Partial<IdentId<'db>>,
-    pub attributes: AttrListId<'db>,
-    pub generic_params: GenericParamListId<'db>,
-    pub where_clause: WhereClauseId<'db>,
-    param_descriptions: Partial<FuncParamListId<'db>>,  // ← already private! ✅
-    pub ret_ty: Option<TypeId<'db>>,
-    pub modifier: ItemModifier,
-    pub body: Option<Body<'db>>,
-    pub is_extern: bool,
-    pub top_mod: TopLevelMod<'db>,
+    // ... other fields ...
+    param_descriptions: Partial<FuncParamListId<'db>>,  // ← already renamed!
 }
 
 impl Func<'db> {
     pub fn params(self, db: &dyn HirDb) -> Vec<FuncParam> {}  // ← empty, needs impl!
 }
 
-// After
-#[salsa::tracked]
-pub struct Func<'db> {
-    pub(crate) name: Partial<IdentId<'db>>,
-    pub(crate) attributes: AttrListId<'db>,
-    pub(crate) generic_params: GenericParamListId<'db>,
-    pub(crate) where_clause: WhereClauseId<'db>,
-    param_descriptions: Partial<FuncParamListId<'db>>,
-    pub(crate) ret_ty: Option<TypeId<'db>>,
-    pub(crate) modifier: ItemModifier,
-    pub(crate) body: Option<Body<'db>>,
-    pub(crate) is_extern: bool,
-    pub(crate) top_mod: TopLevelMod<'db>,
-}
-
-impl Func<'db> {
-    pub fn params(self, db: &dyn HirDb) -> impl Iterator<Item = FuncParam<'db>> + '_ {
-        let Some(param_list) = self.param_descriptions(db).to_opt() else {
-            return itertools::Either::Left(std::iter::empty());
-        };
-
-        let iter = param_list.data(db)
-            .iter()
-            .enumerate()
-            .map(move |(idx, desc)| FuncParam {
-                parent: self,
-                index: idx as u16,
-                desc: *desc,
-            });
-
-        itertools::Either::Right(iter)
-    }
-}
-
-// FuncParam already defined, add impl
-impl FuncParam<'db> {
-    pub fn parent(self) -> Func<'db> {
-        self.parent
-    }
-
-    pub fn index(self) -> usize {
-        self.index as usize
-    }
-
-    pub fn name(self, db: &dyn HirDb) -> Partial<FuncParamName<'db>> {
-        self.desc.name
-    }
-
-    pub fn label(self, db: &dyn HirDb) -> Option<FuncParamName<'db>> {
-        self.desc.label
-    }
-
-    pub fn ty_hir(self, db: &dyn HirDb) -> Partial<TypeId<'db>> {
-        self.desc.ty
-    }
-
-    pub fn is_mut(self, db: &dyn HirDb) -> bool {
-        self.desc.is_mut
-    }
-
-    pub fn span(self, db: &dyn HirDb) -> LazyFuncParamSpan<'db> {
-        self.parent.span().params().param(self.index)
-    }
+pub struct FuncParam<'db> {
+    parent: Func<'db>,
+    index: u16,
+    desc: FuncParamDescription<'db>,  // ← type doesn't exist yet!
 }
 ```
 
-**Commit:** `refactor(hir): implement FuncParam wrapper, privatize Func fields`
+**Needs completion:**
+- Implement the empty `params()` method body
+- Add impl block for `FuncParam` wrapper with accessor methods
+- Resolve naming (what is `FuncParamDescription`?)
+- Update broken call sites like `param_label()`
+
+See STAGED_CHANGES_ANALYSIS.md for detailed analysis.
+
+**Commit:** `refactor(hir): implement FuncParam wrapper and params() iterator`
 
 ---
 
-#### ✅ 9. Trait
-- **Pattern:** A for simple fields, B for `types` and `super_traits`
+### 4. Trait
+- **Collection field:** `types: Vec<AssocTyDecl<'db>>`
 - **Wrapper needed:** `AssocType<'db>` (new)
-- **Dependencies:** TopLevelMod, TraitRefId, AssocTyDecl
 - **Estimated effort:** 40 min
 
 **Transformation:**
@@ -415,38 +210,20 @@ impl FuncParam<'db> {
 // Before
 #[salsa::tracked]
 pub struct Trait<'db> {
-    pub name: Partial<IdentId<'db>>,
-    pub attributes: AttrListId<'db>,
-    pub vis: Visibility,
-    pub generic_params: GenericParamListId<'db>,
+    // ... other fields ...
     #[return_ref]
-    pub super_traits: Vec<TraitRefId<'db>>,  // ← could return iterator
-    pub where_clause: WhereClauseId<'db>,
-    #[return_ref]
-    pub types: Vec<AssocTyDecl<'db>>,  // ← needs wrapper!
-    pub top_mod: TopLevelMod<'db>,
+    pub types: Vec<AssocTyDecl<'db>>,  // ← returns raw vec
 }
 
 // After
 #[salsa::tracked]
 pub struct Trait<'db> {
-    pub(crate) name: Partial<IdentId<'db>>,
-    pub(crate) attributes: AttrListId<'db>,
-    pub(crate) vis: Visibility,
-    pub(crate) generic_params: GenericParamListId<'db>,
+    // ... other fields ...
     #[return_ref]
-    pub(crate) super_trait_refs: Vec<TraitRefId<'db>>,  // ← renamed
-    pub(crate) where_clause: WhereClauseId<'db>,
-    #[return_ref]
-    pub(crate) assoc_type_decls: Vec<AssocTyDecl<'db>>,  // ← renamed
-    pub(crate) top_mod: TopLevelMod<'db>,
+    assoc_type_decls: Vec<AssocTyDecl<'db>>,  // ← renamed (salsa generates private accessor)
 }
 
 impl Trait<'db> {
-    pub fn super_traits(self, db: &dyn HirDb) -> &[TraitRefId<'db>] {
-        self.super_trait_refs(db)  // For now, just delegate
-    }
-
     pub fn assoc_types(self, db: &dyn HirDb) -> impl Iterator<Item = AssocType<'db>> + '_ {
         let count = self.assoc_type_decls(db).len();
         (0..count).map(move |i| AssocType {
@@ -490,96 +267,44 @@ impl AssocType<'db> {
 }
 ```
 
-**Commit:** `refactor(hir): add AssocType wrapper for Trait, privatize fields`
+**Commit:** `refactor(hir): add AssocType wrapper for Trait`
 
 ---
 
-#### ✅ 10. ImplTrait
-- **Pattern:** Similar to Trait
+### 5. ImplTrait
+- **Collection field:** `types: Vec<...>` (similar to Trait)
 - **Wrapper needed:** `AssocTypeDef<'db>` (new)
-- **Dependencies:** TopLevelMod, TraitRefId
 - **Estimated effort:** 40 min
 
-**Commit:** `refactor(hir): add AssocTypeDef wrapper for ImplTrait, privatize fields`
+**Commit:** `refactor(hir): add AssocTypeDef wrapper for ImplTrait`
 
 ---
 
-#### ✅ 11. Impl
-- **Pattern:** A (simple, but has child items via scope graph)
-- **Public fields to hide:** `ty`, `attributes`, `generic_params`, `where_clause`, `top_mod`
-- **Dependencies:** TopLevelMod
-- **Estimated effort:** 15 min
-- **Note:** Child functions accessed via `impl.funcs(db)` which uses scope graph, not a field
+## Testing Strategy
 
-**Commit:** `refactor(hir): privatize Impl fields, use accessor methods`
+For each transformation:
 
----
+1. **Rename collection field** (e.g., `fields` → `field_defs`)
+2. **Add public iterator method** returning context-rich wrappers
+3. **Implement wrapper struct** with parent reference and accessor methods
+4. **Run `cargo check`** - see what breaks
+5. **Fix call sites** to use new iterator API
+6. **Run tests:** `cargo test -p fe-hir`
+7. **Commit**
 
-## Testing Strategy for Each Transformation
-
-For each item transformation:
-
-1. **Make fields private** (add `pub(crate)`)
-2. **Run `cargo check`** - see what breaks
-3. **Fix call sites** systematically:
-   - Use ripgrep: `rg "struct_name\.\w+" --type rust`
-   - Update to method calls: `.field` → `.field(db)`
-4. **For wrapper fields:**
-   - Implement wrapper struct with methods
-   - Update iteration patterns to use new API
-5. **Run tests:** `cargo test -p fe-hir`
-6. **Commit** with message format: `refactor(hir): <what changed>`
-
-## Progress Tracking Template
+## Progress Tracking
 
 ```markdown
-## Transformation Progress
-
-- [x] 1. TopLevelMod (Pattern A)
-- [x] 2. Const (Pattern A)
-- [ ] 3. Use (Pattern A)
-- [ ] 4. TypeAlias (Pattern A)
-- [ ] 5. Mod (Pattern A)
-- [ ] 6. Struct + Field wrapper (Pattern B)
-- [ ] 7. Enum + variants iterator (Pattern B)
-- [ ] 8. Func + FuncParam impl (Pattern B)
-- [ ] 9. Trait + AssocType wrapper (Pattern B)
-- [ ] 10. ImplTrait + AssocTypeDef wrapper (Pattern B)
-- [ ] 11. Impl (Pattern A)
+[ ] 1. Struct + Field wrapper
+[ ] 2. Enum + EnumVariant iterator (wrapper already exists)
+[ ] 3. Func + FuncParam wrapper (already sketched, needs completion)
+[ ] 4. Trait + AssocType wrapper
+[ ] 5. ImplTrait + AssocTypeDef wrapper
 ```
-
-## Validation: Is Transformation Complete?
-
-For each struct, check:
-- ✅ No public fields except `id` (auto-generated by salsa)
-- ✅ All collection fields have iterator methods returning wrappers
-- ✅ All wrapper structs have parent reference and methods
-- ✅ Tests pass: `cargo test -p fe-hir`
-- ✅ No clippy warnings about public fields
-
-## Next Steps After hir_def Items
-
-Once all `hir_def/item.rs` structs are transformed:
-
-1. **Transform other hir_def modules:**
-   - `params.rs` (GenericParam wrappers)
-   - `expr.rs` / `stmt.rs` / `pat.rs` (Node wrappers with Body context)
-   - `path.rs`, `types.rs`, etc.
-
-2. **Add context embedding:**
-   - Body owner back-references
-   - Scope tree construction
-   - Expr/Stmt/Pat wrappers with embedded context
-
-3. **Migrate analysis layer:**
-   - Update to use new iterator APIs
-   - Remove redundant context threading
-   - Simplify TyChecker
 
 ## Key Principles
 
 1. **One struct per commit** - easy to review, easy to revert
 2. **Test after each** - don't batch transformations
-3. **Follow dependency order** - leaves first, then collections
-4. **Pattern A before B** - simple changes build confidence
-5. **Document wrappers** - explain what context they carry and why
+3. **Start simple** - Enum is easiest (wrapper already exists)
+4. **Workshop naming** - decide naming conventions before implementing
