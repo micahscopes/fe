@@ -94,7 +94,7 @@ pub(crate) fn lower_impl_trait<'db>(
         .to_vec();
 
     let mut types: IndexMap<_, _> = impl_trait
-        .types(db)
+        .assoc_type_defs(db)
         .iter()
         .filter_map(|t| match (t.name.to_opt(), t.ty.to_opt()) {
             (Some(name), Some(ty)) => Some((name, lower_hir_ty(db, ty, scope, assumptions))),
@@ -107,7 +107,7 @@ pub(crate) fn lower_impl_trait<'db>(
     // (including Self). This ensures defaults like `type Output = Self` resolve
     // to the implementor's concrete self type rather than remaining as `Self`.
     let trait_scope = trait_.def(db).trait_(db).scope();
-    for t in trait_.def(db).trait_(db).types(db).iter() {
+    for t in trait_.def(db).trait_(db).assoc_type_decls(db).iter() {
         let (Some(name), Some(default)) = (t.name.to_opt(), t.default) else {
             continue;
         };

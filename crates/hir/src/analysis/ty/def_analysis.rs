@@ -148,7 +148,7 @@ pub fn analyze_trait<'db>(
     let _trait_def = lower_trait(db, trait_);
     let assumptions = collect_constraints(db, trait_.into()).instantiate_identity();
 
-    for assoc_type in trait_.types(db) {
+    for assoc_type in trait_.assoc_type_decls(db) {
         if let Some(default_ty) = assoc_type.default {
             // Lower the default type
             let default_ty = lower_hir_ty(db, default_ty, trait_.scope(), assumptions);
@@ -909,7 +909,7 @@ impl<'db> Visitor<'db> for DefAnalyzer<'db> {
         ctxt: &mut VisitorCtxt<'db, LazyImplTraitSpan<'db>>,
         impl_trait: ImplTrait<'db>,
     ) {
-        for assoc_type in impl_trait.types(self.db) {
+        for assoc_type in impl_trait.assoc_type_defs(self.db) {
             if let Some(ty) = assoc_type.ty.to_opt() {
                 let ty_span = assoc_type
                     .name
@@ -1405,7 +1405,7 @@ fn analyze_impl_trait_specific_error<'db>(
     //    and that they satisfy their bounds
     let trait_hir = trait_def.trait_(db);
     let impl_types = implementor.instantiate_identity().types(db);
-    for assoc_type in trait_hir.types(db) {
+    for assoc_type in trait_hir.assoc_type_decls(db) {
         let Some(name) = assoc_type.name.to_opt() else {
             continue;
         };

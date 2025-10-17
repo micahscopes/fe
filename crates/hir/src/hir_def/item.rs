@@ -988,7 +988,7 @@ pub struct Trait<'db> {
     pub super_traits: Vec<TraitRefId<'db>>,
     pub where_clause: WhereClauseId<'db>,
     #[return_ref]
-    pub types: Vec<AssocTyDecl<'db>>,
+    pub(crate) assoc_type_decls: Vec<AssocTyDecl<'db>>,
 
     pub top_mod: TopLevelMod<'db>,
 
@@ -1023,9 +1023,49 @@ impl<'db> Trait<'db> {
     }
 
     pub fn assoc_ty(self, db: &'db dyn HirDb, name: IdentId<'db>) -> Option<&'db AssocTyDecl<'db>> {
-        self.types(db)
+        self.assoc_type_decls(db)
             .iter()
             .find(|trait_type| trait_type.name.to_opt() == Some(name))
+    }
+
+    pub fn assoc_types(self, db: &'db dyn HirDb) -> impl Iterator<Item = TraitAssocType<'db>> + 'db {
+        let count = self.assoc_type_decls(db).len();
+        (0..count).map(move |i| TraitAssocType::new(self, i))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TraitAssocType<'db> {
+    parent: Trait<'db>,
+    index: u16,
+}
+
+impl<'db> TraitAssocType<'db> {
+    pub fn new(parent: Trait<'db>, index: usize) -> Self {
+        Self {
+            parent,
+            index: index as u16,
+        }
+    }
+
+    pub fn decl(self, db: &'db dyn HirDb) -> &'db AssocTyDecl<'db> {
+        &self.parent.assoc_type_decls(db)[self.index as usize]
+    }
+
+    pub fn parent(self) -> Trait<'db> {
+        self.parent
+    }
+
+    pub fn name(self, db: &'db dyn HirDb) -> Partial<IdentId<'db>> {
+        self.decl(db).name
+    }
+
+    pub fn bounds(self, db: &'db dyn HirDb) -> &'db [TypeBound<'db>] {
+        &self.decl(db).bounds
+    }
+
+    pub fn default(self, db: &'db dyn HirDb) -> Option<TypeId<'db>> {
+        self.decl(db).default
     }
 }
 
@@ -1048,7 +1088,7 @@ pub struct ImplTrait<'db> {
     pub generic_params: GenericParamListId<'db>,
     pub where_clause: WhereClauseId<'db>,
     #[return_ref]
-    pub types: Vec<AssocTyDef<'db>>,
+    pub(crate) assoc_type_defs: Vec<AssocTyDef<'db>>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -1064,10 +1104,15 @@ impl<'db> ImplTrait<'db> {
         db: &'db dyn HirDb,
         name: IdentId<'db>,
     ) -> Option<LazyTraitTypeSpan<'db>> {
-        self.types(db)
+        self.assoc_type_defs(db)
             .iter()
             .position(|t| t.name.to_opt() == Some(name))
             .map(|idx| self.span().associated_type(idx))
+    }
+
+    pub fn assoc_types(self, db: &'db dyn HirDb) -> impl Iterator<Item = ImplTraitAssocType<'db>> + 'db {
+        let count = self.assoc_type_defs(db).len();
+        (0..count).map(move |i| ImplTraitAssocType::new(self, i))
     }
 
     pub fn children_non_nested(
@@ -1095,6 +1140,37 @@ impl<'db> ImplTrait<'db> {
 pub struct AssocTyDef<'db> {
     pub name: Partial<IdentId<'db>>,
     pub ty: Partial<TypeId<'db>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImplTraitAssocType<'db> {
+    parent: ImplTrait<'db>,
+    index: u16,
+}
+
+impl<'db> ImplTraitAssocType<'db> {
+    pub fn new(parent: ImplTrait<'db>, index: usize) -> Self {
+        Self {
+            parent,
+            index: index as u16,
+        }
+    }
+
+    pub fn def(self, db: &'db dyn HirDb) -> &'db AssocTyDef<'db> {
+        &self.parent.assoc_type_defs(db)[self.index as usize]
+    }
+
+    pub fn parent(self) -> ImplTrait<'db> {
+        self.parent
+    }
+
+    pub fn name(self, db: &'db dyn HirDb) -> Partial<IdentId<'db>> {
+        self.def(db).name
+    }
+
+    pub fn ty(self, db: &'db dyn HirDb) -> Partial<TypeId<'db>> {
+        self.def(db).ty
+    }
 }
 
 #[salsa::tracked]
