@@ -94,11 +94,13 @@ pub(crate) fn lower_impl_trait<'db>(
         .to_vec();
 
     let mut types: IndexMap<_, _> = impl_trait
-        .assoc_type_defs(db)
-        .iter()
-        .filter_map(|t| match (t.name.to_opt(), t.ty.to_opt()) {
-            (Some(name), Some(ty)) => Some((name, lower_hir_ty(db, ty, scope, assumptions))),
-            _ => None,
+        .assoc_types(db)
+        .filter_map(|assoc_type| {
+            let t = assoc_type.def(db);
+            match (t.name.to_opt(), t.ty.to_opt()) {
+                (Some(name), Some(ty)) => Some((name, lower_hir_ty(db, ty, scope, assumptions))),
+                _ => None,
+            }
         })
         .collect();
 

@@ -925,9 +925,10 @@ impl<'db> Visitor<'db> for DefAnalyzer<'db> {
         ctxt: &mut VisitorCtxt<'db, LazyImplTraitSpan<'db>>,
         impl_trait: ImplTrait<'db>,
     ) {
-        for assoc_type in impl_trait.assoc_type_defs(self.db) {
-            if let Some(ty) = assoc_type.ty.to_opt() {
-                let ty_span = assoc_type
+        for assoc_type in impl_trait.assoc_types(self.db) {
+            let assoc_type_def = assoc_type.def(self.db);
+            if let Some(ty) = assoc_type_def.ty.to_opt() {
+                let ty_span = assoc_type_def
                     .name
                     .to_opt()
                     .and_then(|name| impl_trait.associated_type_span(self.db, name))
