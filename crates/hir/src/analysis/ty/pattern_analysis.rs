@@ -367,9 +367,7 @@ impl<'db> SigmaSet<'db> {
             ctors.insert(ConstructorKind::Type(ty));
         } else if let Some(adt_def) = ty.adt_def(db) {
             if let AdtRef::Enum(enum_def) = adt_def.adt_ref(db) {
-                let variant_defs = enum_def.variant_defs(db);
-                for (idx, _) in variant_defs.data(db).iter().enumerate() {
-                    let variant = crate::hir_def::EnumVariant::new(enum_def, idx);
+                for variant in enum_def.variants(db) {
                     let ctor = ConstructorKind::Variant(variant, ty);
                     ctors.insert(ctor);
                 }
