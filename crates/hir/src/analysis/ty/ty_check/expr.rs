@@ -1,7 +1,7 @@
 use std::panic;
 
 use crate::hir_def::{
-    ArithBinOp, BinOp, ExprId, FieldIndex, IdentId, Partial, PatId, PathId, UnOp,
+    ArithBinOp, BinOp, Expr, ExprId, FieldIndex, IdentId, Partial, PatId, PathId, UnOp,
     VariantKind, ExprDescription, PatDescription,
 };
 use common::ingot::IngotKind;
@@ -14,10 +14,8 @@ use super::{
 };
 use crate::analysis::ty::{
     diagnostics::{BodyDiag, FuncBodyDiag},
-    fold::{AssocTySubst, TyFoldable as _},
     trait_def::TraitInstId,
     ty_check::callable::Callable,
-    ty_def::{TyBase, TyData},
 };
 use crate::analysis::ty::{trait_def::TraitDef, trait_lower::lower_trait};
 use crate::analysis::{
@@ -1086,7 +1084,8 @@ impl<'db> TyChecker<'db> {
     }
 
     fn check_assign_lhs(&mut self, lhs: ExprId, typed_lhs: &ExprProp<'db>) {
-        if !self.is_assignable_expr(lhs) {
+        let lhs_expr = self.body().wrap_expr(lhs);
+        if !self.is_assignable_expr(lhs_expr) {
             let diag = BodyDiag::NonAssignableExpr(lhs.span(self.body()).into());
             self.push_diag(diag);
 
@@ -1094,7 +1093,7 @@ impl<'db> TyChecker<'db> {
         }
 
         if !typed_lhs.is_mut {
-            let binding = self.find_base_binding(lhs);
+            let binding = self.find_base_binding(lhs_expr);
             let diag = match binding {
                 Some(binding) => {
                     let (ident, def_span) = (
@@ -1139,15 +1138,15 @@ impl<'db> TyChecker<'db> {
     ///
     /// An `Option` containing the `LocalBinding` if a base binding is found,
     /// or `None` if there is no base binding.
-    fn find_base_binding(&self, expr: ExprId) -> Option<LocalBinding<'db>> {
-        let Partial::Present(expr_data) = self.env.expr_data(expr) else {
+    fn find_base_binding(&self, expr: Expr<'db>) -> Option<LocalBinding<'db>> {
+        let Partial::Present(expr_data) = expr.data(self.db) else {
             return None;
         };
 
         match expr_data {
-            ExprDescription::Field(lhs, ..) => self.find_base_binding(*lhs),
-            ExprDescription::Bin(lhs, _rhs, op) if *op == BinOp::Index => self.find_base_binding(*lhs),
-            ExprDescription::Path(..) => self.env.typed_expr(expr)?.binding(),
+            ExprDescription::Field(lhs, ..) => self.find_base_binding(self.body().wrap_expr(*lhs)),
+            ExprDescription::Bin(lhs, _rhs, op) if *op == BinOp::Index => self.find_base_binding(self.body().wrap_expr(*lhs)),
+            ExprDescription::Path(..) => self.env.typed_expr(expr.id())?.binding(),
             _ => None,
         }
     }
@@ -1155,8 +1154,8 @@ impl<'db> TyChecker<'db> {
     /// Returns `true`` if the expression can be used as an left hand side of an
     /// assignment.
     /// This method doesn't take mutability into account.
-    fn is_assignable_expr(&self, expr: ExprId) -> bool {
-        let Partial::Present(expr_data) = expr.data(self.db, self.body()) else {
+    fn is_assignable_expr(&self, expr: Expr<'db>) -> bool {
+        let Partial::Present(expr_data) = expr.data(self.db) else {
             return false;
         };
 
