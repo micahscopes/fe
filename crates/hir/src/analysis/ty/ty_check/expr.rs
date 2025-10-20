@@ -991,14 +991,9 @@ impl<'db> TyChecker<'db> {
                     .instantiate_with_inst(&mut self.table, lhs_ty, inst);
 
                 if let Some(rhs_expr) = rhs_expr {
-                    // Derive expected RHS type from the instantiated function type
-                    let (base, gen_args) = func_ty.decompose_ty_app(self.db);
-                    if let TyData::TyBase(TyBase::Func(func_def)) = base.data(self.db) {
-                        let mut expected_rhs =
-                            func_def.arg_tys(self.db)[1].instantiate(self.db, gen_args);
-                        let mut subst = AssocTySubst::new(inst);
-                        expected_rhs =
-                            self.normalize_ty(expected_rhs.fold_with(self.db, &mut subst));
+                    // Derive expected RHS type from the instantiated function type using CallableParam
+                    if let Ok(callable) = Callable::new(self.db, func_ty, expr.span(self.body()).into(), Some(inst)) {
+                        let expected_rhs = self.normalize_ty(callable.nth_param(self.db, 1).ty(self.db));
                         self.check_expr(rhs_expr, expected_rhs);
                     }
                 }
@@ -1023,15 +1018,16 @@ impl<'db> TyChecker<'db> {
                     let snapshot = self.table.snapshot();
                     let candidate_func_ty =
                         trait_method.instantiate_with_inst(&mut self.table, lhs_ty, inst);
-                    let (base, gen_args) = candidate_func_ty.decompose_ty_app(self.db);
-                    let expected_rhs =
-                        if let TyData::TyBase(TyBase::Func(func_def)) = base.data(self.db) {
-                            let mut subst = AssocTySubst::new(inst);
-                            let ty = func_def.arg_tys(self.db)[1].instantiate(self.db, gen_args);
-                            self.normalize_ty(ty.fold_with(self.db, &mut subst))
-                        } else {
-                            unreachable!("candidate func ty should be a func");
-                        };
+                    let expected_rhs = if let Ok(callable) = Callable::new(
+                        self.db,
+                        candidate_func_ty,
+                        expr.span(self.body()).into(),
+                        Some(inst),
+                    ) {
+                        self.normalize_ty(callable.nth_param(self.db, 1).ty(self.db))
+                    } else {
+                        unreachable!("candidate func ty should be a func");
+                    };
                     let unifies = self.table.unify(rhs.ty, expected_rhs).is_ok();
                     self.table.rollback_to(snapshot);
                     if unifies {

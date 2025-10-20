@@ -147,6 +147,17 @@ impl<'db> Callable<'db> {
             })
     }
 
+    /// Returns a specific parameter by index with automatic instantiation context.
+    /// Useful for accessing individual parameters (e.g., for operator overloading).
+    pub fn nth_param(&self, db: &'db dyn HirAnalysisDb, idx: usize) -> CallableParam<'db> {
+        let generic_ty = self.func_def.arg_tys(db)[idx];
+        CallableParam {
+            callable: self.clone(),
+            index: idx,
+            generic_ty,
+        }
+    }
+
     pub fn ret_ty(&self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
         let ret = self.func_def.ret_ty(db).instantiate(db, &self.generic_args);
         if let Some(inst) = self.trait_inst {
