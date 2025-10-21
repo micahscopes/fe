@@ -105,7 +105,7 @@ impl<'db> Func<'db> {
         let modifier = ItemModifier::lower_ast(ast.modifier());
         let body = ast
             .body()
-            .map(|body| Body::lower_ast(ctxt, ast::Expr::cast(body.syntax().clone()).unwrap()));
+            .map(|body| Body::lower_ast(ctxt, ast::Expr::cast(body.syntax().clone()).unwrap(), id));
         let origin = HirOrigin::raw(&ast);
 
         let fn_ = Self::new(
@@ -399,7 +399,7 @@ impl<'db> Const<'db> {
 
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
-        let body = ast.value().map(|ast| Body::lower_ast(ctxt, ast)).into();
+        let body = ast.value().map(|ast| Body::lower_ast(ctxt, ast, id)).into();
         let vis = ItemModifier::lower_ast(ast.modifier()).to_visibility();
         let origin = HirOrigin::raw(&ast);
 

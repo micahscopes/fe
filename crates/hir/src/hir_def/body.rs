@@ -34,9 +34,10 @@ pub struct Body<'db> {
 
     pub body_kind: BodyKind,
 
-    /// The item that owns this body (Func or Const).
+    /// The TrackedItemId of the item that owns this body (Func or Const).
     /// For anonymous bodies (e.g., in array lengths), this is None.
-    pub owner: Option<BodyOwner<'db>>,
+    /// Use `resolved_owner()` query to get the actual BodyOwner.
+    owner_id: Option<TrackedItemId<'db>>,
 
     #[return_ref]
     pub stmts: NodeStore<StmtId, Partial<StmtDescription<'db>>>,
@@ -117,10 +118,59 @@ impl<'db> Body<'db> {
 
 #[salsa::tracked]
 impl<'db> Body<'db> {
+    /// Resolves the owner TrackedItemId to the actual BodyOwner (Func or Const).
+    /// Returns None for anonymous bodies or if resolution fails.
+    #[salsa::tracked]
+    pub fn resolved_owner(self, db: &'db dyn HirDb) -> Option<BodyOwner<'db>> {
+        use crate::hir_def::{TrackedItemVariant};
+
+        let owner_id = self.owner_id(db)?;
+        let top_mod = self.top_mod(db);
+
+        // Extract the variant to determine if it's a Func or Const
+        // The owner_id might be Joined(Func(...), ...) or just Func(...)
+        let mut variant = owner_id.variant_kind(db);
+
+        // Unwrap Joined variants to get to the actual item
+        while let TrackedItemVariant::Joined(left, _right) = variant {
+            variant = *left;
+        }
+
+        match variant {
+            TrackedItemVariant::Func(name) => {
+                // Find the function with this name
+                for func in top_mod.all_funcs(db) {
+                    if func.name(db) == name {
+                        return Some(BodyOwner::Func(*func));
+                    }
+                }
+            }
+            TrackedItemVariant::Const(name) => {
+                // Find the const with this name
+                for item in top_mod.all_items(db) {
+                    if let crate::hir_def::ItemKind::Const(const_) = item {
+                        if const_.name(db) == name {
+                            return Some(BodyOwner::Const(*const_));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        None
+    }
+
     /// Computes the owner of this body by searching through all functions and consts in the module.
+    /// DEPRECATED: Use resolved_owner() instead once owner_id is properly wired through lowering.
     #[salsa::tracked]
     pub fn computed_owner(self, db: &'db dyn HirDb) -> Option<BodyOwner<'db>> {
-        // Search through all funcs and consts in the top module
+        // First try the new path
+        if let Some(owner) = self.resolved_owner(db) {
+            return Some(owner);
+        }
+
+        // Fall back to O(n) search if owner_id wasn't set
         let top_mod = self.top_mod(db);
 
         // Check all functions

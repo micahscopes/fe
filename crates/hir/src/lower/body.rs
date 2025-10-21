@@ -12,18 +12,18 @@ use crate::{
 };
 
 impl<'db> Body<'db> {
-    pub(super) fn lower_ast(f_ctxt: &mut FileLowerCtxt<'db>, ast: ast::Expr) -> Self {
+    pub(super) fn lower_ast(f_ctxt: &mut FileLowerCtxt<'db>, ast: ast::Expr, owner_id: TrackedItemId<'db>) -> Self {
         let id = f_ctxt.joined_id(TrackedItemVariant::FuncBody);
         let mut ctxt = BodyCtxt::new(f_ctxt, id);
         let body_expr = Expr::lower_ast(&mut ctxt, ast.clone());
-        ctxt.build(&ast, body_expr, BodyKind::FuncBody)
+        ctxt.build(&ast, body_expr, BodyKind::FuncBody, Some(owner_id))
     }
 
     pub(super) fn lower_ast_nameless(f_ctxt: &mut FileLowerCtxt<'db>, ast: ast::Expr) -> Self {
         let id = f_ctxt.joined_id(TrackedItemVariant::NamelessBody);
         let mut ctxt = BodyCtxt::new(f_ctxt, id);
         let body_expr = Expr::lower_ast(&mut ctxt, ast.clone());
-        ctxt.build(&ast, body_expr, BodyKind::Anonymous)
+        ctxt.build(&ast, body_expr, BodyKind::Anonymous, None)
     }
 }
 
@@ -89,14 +89,14 @@ impl<'ctxt, 'db> BodyCtxt<'ctxt, 'db> {
         }
     }
 
-    fn build(self, ast: &ast::Expr, body_expr: ExprId, body_kind: BodyKind) -> Body<'db> {
+    fn build(self, ast: &ast::Expr, body_expr: ExprId, body_kind: BodyKind, owner_id: Option<TrackedItemId<'db>>) -> Body<'db> {
         let origin = HirOrigin::raw(ast);
         let body = Body::new(
             self.f_ctxt.db(),
             self.id,
             body_expr,
             body_kind,
-            None,  // TODO: Pass owner once we have it
+            owner_id,
             self.stmts,
             self.exprs,
             self.pats,

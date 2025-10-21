@@ -1470,6 +1470,12 @@ pub struct TrackedItemId<'db> {
 }
 
 impl<'db> TrackedItemId<'db> {
+    /// Returns the variant of this TrackedItemId.
+    /// This is useful for resolving the owner of a body or determining the kind of item.
+    pub fn variant_kind(self, db: &'db dyn HirDb) -> TrackedItemVariant<'db> {
+        self.variant(db)
+    }
+
     pub(crate) fn join(self, db: &'db dyn HirDb, variant: TrackedItemVariant<'db>) -> Self {
         let old = self.variant(db);
         let joined = old.join(variant);
