@@ -1,4 +1,4 @@
-use fe_hir::{lower, hir_def::ItemKind};
+use fe_hir::{lower, hir_def::{ItemKind, scope_graph::ScopeId}};
 
 mod test_db;
 use test_db::HirAnalysisTestDb;
@@ -128,9 +128,10 @@ fn bar() {
         .expect("expr should know its containing function");
     assert_eq!(*func, func_from_expr);
 
-    // Test scope access (currently delegates to body scope)
+    // Test scope access - root expr is a block, so it creates its own scope
     let scope = expr_wrapper.scope(&db);
-    assert_eq!(scope, body.scope());
+    // The root expression is a Block, so it should return ScopeId::Block, not Item scope
+    assert_eq!(scope, ScopeId::Block(body, root_expr_id));
 
     // Test data access through wrapper
     let expr_data = expr_wrapper.data(&db);

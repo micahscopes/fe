@@ -37,14 +37,23 @@ use crate::analysis::{
 };
 
 impl<'db> TyChecker<'db> {
-    /// Legacy wrapper that delegates to Expr::type_check.
-    /// TODO: Migrate all call sites to use expr.type_check(tc, expected) directly.
+    /// Convenience method for type-checking a single expression.
+    ///
+    /// For one-off type checks, this method provides a concise API. When you need to call
+    /// multiple methods on the same expression (e.g., type-checking and getting span for
+    /// diagnostics), consider creating the wrapper once:
+    /// ```
+    /// let expr = tc.body().wrap_expr(expr_id);
+    /// let prop = expr.type_check(tc, expected);
+    /// let span = expr.span(tc.db);
+    /// ```
     pub(super) fn check_expr(&mut self, expr: ExprId, expected: TyId<'db>) -> ExprProp<'db> {
         self.body().wrap_expr(expr).type_check(self, expected)
     }
 
-    /// Legacy wrapper that delegates to Expr::type_check_unknown.
-    /// TODO: Migrate all call sites to use expr.type_check_unknown(tc) directly.
+    /// Convenience method for type-checking an expression with an unknown expected type.
+    ///
+    /// See [`check_expr`](Self::check_expr) for guidance on when to use wrapper API directly.
     pub(super) fn check_expr_unknown(&mut self, expr: ExprId) -> ExprProp<'db> {
         self.body().wrap_expr(expr).type_check_unknown(self)
     }
