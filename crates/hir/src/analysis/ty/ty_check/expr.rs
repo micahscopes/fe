@@ -875,7 +875,15 @@ impl<'db> Expr<'db> {
             match tc.resolve_path(*path, true, path_span.clone()) {
                 Ok(r) => ResolvedPathInBody::Reso(r),
                 Err(err) => {
-                    let expected_kind = if matches!(tc.parent_expr(), Some(ExprDescription::Call(..))) {
+                    // Use Expr::parent() instead of manual expr_stack tracking
+                    let parent_is_call = self.parent(tc.db)
+                        .and_then(|p| match p.data(tc.db) {
+                            Partial::Present(ExprDescription::Call(..)) => Some(()),
+                            _ => None,
+                        })
+                        .is_some();
+
+                    let expected_kind = if parent_is_call {
                         ExpectedPathKind::Function
                     } else {
                         ExpectedPathKind::Value
