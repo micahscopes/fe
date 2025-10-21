@@ -197,6 +197,99 @@ impl<'db> Body<'db> {
     }
 }
 
+/// Helper to find the parent expression of a given expression by walking the body.
+fn find_expr_parent(db: &dyn HirDb, body: Body<'_>, target: ExprId) -> Option<ExprId> {
+    find_expr_parent_recursive(db, body, body.expr(db), target)
+}
+
+fn find_expr_parent_recursive(db: &dyn HirDb, body: Body<'_>, current: ExprId, target: ExprId) -> Option<ExprId> {
+    use crate::hir_def::expr::ExprDescription;
+
+    let data = &body.exprs(db)[current];
+    let Partial::Present(expr_data) = data else {
+        return None;
+    };
+
+    // Check all child expressions
+    let check_child = |child: ExprId| -> Option<ExprId> {
+        if child == target {
+            Some(current)
+        } else {
+            find_expr_parent_recursive(db, body, child, target)
+        }
+    };
+
+    match expr_data {
+        ExprDescription::Block(stmts) => {
+            // Check expressions in statements
+            for &stmt_id in stmts.iter() {
+                if let Some(parent) = find_stmt_for_expr(db, body, stmt_id, target) {
+                    return Some(parent);
+                }
+            }
+            None
+        }
+        ExprDescription::If(cond, then_branch, else_branch) => {
+            check_child(*cond)
+                .or_else(|| check_child(*then_branch))
+                .or_else(|| else_branch.and_then(|e| check_child(e)))
+        }
+        ExprDescription::Match(scrutinee, arms) => {
+            check_child(*scrutinee).or_else(|| {
+                if let Partial::Present(arms_vec) = arms {
+                    arms_vec.iter().find_map(|arm| check_child(arm.body))
+                } else {
+                    None
+                }
+            })
+        }
+        ExprDescription::Call(callee, args) => {
+            check_child(*callee).or_else(|| args.iter().find_map(|arg| check_child(arg.expr)))
+        }
+        ExprDescription::MethodCall(receiver, _, _, args) => {
+            check_child(*receiver).or_else(|| args.iter().find_map(|arg| check_child(arg.expr)))
+        }
+        ExprDescription::Un(operand, _) => check_child(*operand),
+        ExprDescription::Bin(lhs, rhs, _) => check_child(*lhs).or_else(|| check_child(*rhs)),
+        ExprDescription::RecordInit(_, fields) => {
+            fields.iter().find_map(|field| check_child(field.expr))
+        }
+        ExprDescription::Field(base, _) => check_child(*base),
+        ExprDescription::Tuple(elems) => elems.iter().find_map(|&elem| check_child(elem)),
+        ExprDescription::Array(elems) => elems.iter().find_map(|&elem| check_child(elem)),
+        ExprDescription::ArrayRep(elem, _) => check_child(*elem),
+        ExprDescription::AugAssign(lhs, rhs, _) => check_child(*lhs).or_else(|| check_child(*rhs)),
+        ExprDescription::Assign(lhs, rhs) => check_child(*lhs).or_else(|| check_child(*rhs)),
+        ExprDescription::Path(_) | ExprDescription::Lit(_) => None,
+    }
+}
+
+fn find_stmt_for_expr(db: &dyn HirDb, body: Body<'_>, stmt_id: StmtId, target: ExprId) -> Option<ExprId> {
+    use crate::hir_def::stmt::StmtDescription;
+
+    let data = &body.stmts(db)[stmt_id];
+    let Partial::Present(stmt_data) = data else {
+        return None;
+    };
+
+    match stmt_data {
+        StmtDescription::Let(_, _, Some(init)) => {
+            find_expr_parent_recursive(db, body, *init, target)
+        }
+        StmtDescription::For(_, iter, body_expr) => {
+            find_expr_parent_recursive(db, body, *iter, target)
+                .or_else(|| find_expr_parent_recursive(db, body, *body_expr, target))
+        }
+        StmtDescription::While(cond, body_expr) => {
+            find_expr_parent_recursive(db, body, *cond, target)
+                .or_else(|| find_expr_parent_recursive(db, body, *body_expr, target))
+        }
+        StmtDescription::Return(Some(expr)) => find_expr_parent_recursive(db, body, *expr, target),
+        StmtDescription::Expr(expr) => find_expr_parent_recursive(db, body, *expr, target),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BodyKind {
     FuncBody,
@@ -243,12 +336,35 @@ impl<'db> Expr<'db> {
         &self.body.exprs(db)[self.id]
     }
 
+    /// Returns the parent expression containing this expression, if any.
+    /// Returns None for the body's root expression.
+    ///
+    /// Note: This walks the entire body to find the parent, which is O(n) where n is the body size.
+    /// For most function bodies this is acceptably fast. If profiling shows this is a bottleneck,
+    /// we can cache a parent map.
+    pub fn parent(self, db: &'db dyn HirDb) -> Option<Expr<'db>> {
+        find_expr_parent(db, self.body, self.id).map(|parent_id| Expr::new(self.body, parent_id))
+    }
+
     /// Returns the scope containing this expression.
-    /// For now, delegates to the body's scope. In the future, this could
-    /// resolve to the nearest enclosing block scope.
-    pub fn scope(self, _db: &'db dyn HirDb) -> ScopeId<'db> {
-        // TODO: Look up expr's specific scope from a scope tree
-        self.body.scope()
+    /// Walks up the parent chain to find the nearest enclosing block scope.
+    pub fn scope(self, db: &'db dyn HirDb) -> ScopeId<'db> {
+        use crate::hir_def::expr::ExprDescription;
+
+        // If this expression IS a block, it creates its own scope
+        if let Partial::Present(ExprDescription::Block(_)) = self.data(db) {
+            return ScopeId::Block(self.body, self.id);
+        }
+
+        // Otherwise, walk up to find the parent's scope
+        match self.parent(db) {
+            Some(parent_expr) => parent_expr.scope(db),
+            None => {
+                // No parent expression - we're at the body root
+                // Use the function/const's scope
+                self.body.scope()
+            }
+        }
     }
 
     /// Returns the function containing this expression, if any.
