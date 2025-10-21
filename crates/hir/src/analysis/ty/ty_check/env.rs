@@ -161,10 +161,9 @@ impl<'db> TyCheckEnv<'db> {
     }
 
     pub(super) fn enter_scope(&mut self, block: ExprId) {
-        let new_scope = match block.data(self.db, self.body) {
-            Partial::Present(ExprDescription::Block(_)) => ScopeId::Block(self.body, block),
-            _ => self.scope(),
-        };
+        // Use Expr::scope() to determine the scope - this eliminates duplicated logic
+        // and ensures consistency with the wrapper API.
+        let new_scope = self.body.wrap_expr(block).scope(self.db);
 
         let var_env = BlockEnv::new(new_scope, self.var_env.len());
         self.var_env.push(var_env);
