@@ -49,12 +49,7 @@ impl<'db> CallableParam<'db> {
     /// 1. Generic argument instantiation
     /// 2. Trait associated type substitution (if from trait method)
     pub fn ty(&self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
-        let mut ty = self.generic_ty.instantiate(db, self.callable.generic_args());
-        if let Some(inst) = self.callable.trait_inst {
-            let mut subst = AssocTySubst::new(inst);
-            ty = ty.fold_with(db, &mut subst);
-        }
-        ty
+        self.callable.apply_instantiation(db, self.generic_ty)
     }
 
     /// Returns the parameter label if present (e.g., `foo:` in `call(foo: x)`).
@@ -125,6 +120,19 @@ impl<'db> Callable<'db> {
         })
     }
 
+    /// Helper method to apply generic instantiation and trait associated type substitution.
+    /// This encapsulates the common pattern of:
+    /// 1. Instantiating a type with generic arguments
+    /// 2. Optionally applying trait associated type substitution
+    fn apply_instantiation(&self, db: &'db dyn HirAnalysisDb, ty: Binder<TyId<'db>>) -> TyId<'db> {
+        let mut ty = ty.instantiate(db, &self.generic_args);
+        if let Some(inst) = self.trait_inst {
+            let mut subst = AssocTySubst::new(inst);
+            ty = ty.fold_with(db, &mut subst);
+        }
+        ty
+    }
+
     pub fn generic_args(&self) -> &[TyId<'db>] {
         &self.generic_args
     }
@@ -159,18 +167,12 @@ impl<'db> Callable<'db> {
     }
 
     pub fn ret_ty(&self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
-        let ret = self.func_def.ret_ty(db).instantiate(db, &self.generic_args);
-        if let Some(inst) = self.trait_inst {
-            let mut subst = AssocTySubst::new(inst);
-            ret.fold_with(db, &mut subst)
-        } else {
-            ret
-        }
+        self.apply_instantiation(db, self.func_def.ret_ty(db))
     }
 
     pub fn ty(&self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
-        let mut ty = TyId::func(db, self.func_def);
-        ty = TyId::foldl(db, ty, &self.generic_args);
+        let ty = TyId::func(db, self.func_def);
+        let ty = TyId::foldl(db, ty, &self.generic_args);
         if let Some(inst) = self.trait_inst {
             let mut subst = AssocTySubst::new(inst);
             ty.fold_with(db, &mut subst)
