@@ -346,7 +346,6 @@ impl<'db> Expr<'db> {
 
         let expected = normalize_ty(tc.db, expected, tc.env.scope(), tc.env.assumptions());
 
-        tc.env.enter_expr(self.id());
         let mut actual = match expr_data {
             ExprDescription::Lit(lit) => ExprProp::new(tc.lit_ty(lit), true),
             ExprDescription::Block(..) => self.type_check_block(tc, expected),
@@ -365,7 +364,6 @@ impl<'db> Expr<'db> {
             ExprDescription::MethodCall(..) => self.type_check_method_call(tc),
             ExprDescription::RecordInit(..) => self.type_check_record_init(tc),
         };
-        tc.env.leave_expr();
 
         let typeable = Typeable::Expr(self.id(), actual);
         actual.ty = normalize_ty(tc.db, actual.ty, tc.env.scope(), tc.env.assumptions());
