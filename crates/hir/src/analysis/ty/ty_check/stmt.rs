@@ -1,4 +1,4 @@
-use crate::hir_def::{IdentId, Partial, StmtId, StmtDescription};
+use crate::hir_def::{IdentId, Partial, StmtId, StmtDescription, Stmt};
 
 use super::TyChecker;
 use crate::analysis::ty::{
@@ -8,161 +8,190 @@ use crate::analysis::ty::{
 };
 
 impl<'db> TyChecker<'db> {
+    /// Legacy wrapper that delegates to Stmt::type_check.
+    /// TODO: Migrate all call sites to use stmt.type_check(tc, expected) directly.
     pub(super) fn check_stmt(&mut self, stmt: StmtId, expected: TyId<'db>) -> TyId<'db> {
-        let Partial::Present(stmt_data) = self.env.stmt_data(stmt) else {
-            return TyId::invalid(self.db, InvalidCause::ParseError);
+        self.body().wrap_stmt(stmt).type_check(self, expected)
+    }
+}
+
+impl<'db> Stmt<'db> {
+    pub(super) fn type_check(self, tc: &mut TyChecker<'db>, expected: TyId<'db>) -> TyId<'db> {
+        let Partial::Present(stmt_data) = self.data(tc.db) else {
+            return TyId::invalid(tc.db, InvalidCause::ParseError);
         };
 
         match stmt_data {
-            StmtDescription::Let(..) => self.check_let(stmt, stmt_data),
-            StmtDescription::For(..) => self.check_for(stmt, stmt_data),
-            StmtDescription::While(..) => self.check_while(stmt, stmt_data),
-            StmtDescription::Continue => self.check_continue(stmt, stmt_data),
-            StmtDescription::Break => self.check_break(stmt, stmt_data),
-            StmtDescription::Return(..) => self.check_return(stmt, stmt_data),
-            StmtDescription::Expr(expr) => self.check_expr(*expr, expected).ty,
+            StmtDescription::Let(..) => self.type_check_let(tc),
+            StmtDescription::For(..) => self.type_check_for(tc),
+            StmtDescription::While(..) => self.type_check_while(tc),
+            StmtDescription::Continue => self.type_check_continue(tc),
+            StmtDescription::Break => self.type_check_break(tc),
+            StmtDescription::Return(..) => self.type_check_return(tc),
+            StmtDescription::Expr(expr) => self.body().wrap_expr(*expr).type_check(tc, expected).ty,
         }
     }
 
-    fn check_let(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+    fn type_check_let(self, tc: &mut TyChecker<'db>) -> TyId<'db> {
+        let Partial::Present(stmt_data) = self.data(tc.db) else {
+            unreachable!()
+        };
         let StmtDescription::Let(pat, ascription, expr) = stmt_data else {
             unreachable!()
         };
 
-        let span = stmt.span(self.env.body()).into_let_stmt();
+        let span = self.id().span(self.body()).into_let_stmt();
 
         let ascription = match ascription {
-            Some(ty) => self.lower_ty(*ty, span.ty(), true),
-            None => self.fresh_ty(),
+            Some(ty) => tc.lower_ty(*ty, span.ty(), true),
+            None => tc.fresh_ty(),
         };
 
         if let Some(expr) = expr {
-            self.check_expr(*expr, ascription);
+            self.body().wrap_expr(*expr).type_check(tc, ascription);
         }
 
-        self.check_pat(*pat, ascription);
-        self.env.flush_pending_bindings();
-        TyId::unit(self.db)
+        tc.check_pat(*pat, ascription);
+        tc.env.flush_pending_bindings();
+        TyId::unit(tc.db)
     }
 
-    fn check_for(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+    fn type_check_for(self, tc: &mut TyChecker<'db>) -> TyId<'db> {
+        let Partial::Present(stmt_data) = self.data(tc.db) else {
+            unreachable!()
+        };
         let StmtDescription::For(pat, expr, body) = stmt_data else {
             unreachable!()
         };
 
-        let expr_ty = self.fresh_ty();
-        let typed_expr = self
-            .check_expr(*expr, expr_ty)
-            .fold_with(self.db, &mut self.table);
+        let expr_ty = tc.fresh_ty();
+        let typed_expr = self.body()
+            .wrap_expr(*expr)
+            .type_check(tc, expr_ty)
+            .fold_with(tc.db, &mut tc.table);
         let expr_ty = typed_expr.ty;
 
-        let (base, arg) = expr_ty.decompose_ty_app(self.db);
+        let (base, arg) = expr_ty.decompose_ty_app(tc.db);
         // TODO: We can generalize this by just checking the `expr_ty` implements
         // `Iterator` trait when `std::iter::Iterator` is implemented.
-        let elem_ty = if base.is_array(self.db) {
+        let elem_ty = if base.is_array(tc.db) {
             arg[0]
-        } else if base.has_invalid(self.db) {
-            TyId::invalid(self.db, InvalidCause::Other)
-        } else if base.is_ty_var(self.db) {
-            let diag = BodyDiag::TypeMustBeKnown(expr.span(self.body()).into());
-            self.push_diag(diag);
-            TyId::invalid(self.db, InvalidCause::Other)
+        } else if base.has_invalid(tc.db) {
+            TyId::invalid(tc.db, InvalidCause::Other)
+        } else if base.is_ty_var(tc.db) {
+            let expr_wrapped = self.body().wrap_expr(*expr);
+            let diag = BodyDiag::TypeMustBeKnown(expr_wrapped.span(tc.db).into());
+            tc.push_diag(diag);
+            TyId::invalid(tc.db, InvalidCause::Other)
         } else {
+            let expr_wrapped = self.body().wrap_expr(*expr);
             let diag = BodyDiag::TraitNotImplemented {
-                primary: expr.span(self.body()).into(),
-                ty: expr_ty.pretty_print(self.db).to_string(),
-                trait_name: IdentId::new(self.db, "Iterator".to_string()),
+                primary: expr_wrapped.span(tc.db).into(),
+                ty: expr_ty.pretty_print(tc.db).to_string(),
+                trait_name: IdentId::new(tc.db, "Iterator".to_string()),
             };
-            self.push_diag(diag);
+            tc.push_diag(diag);
 
-            TyId::invalid(self.db, InvalidCause::Other)
+            TyId::invalid(tc.db, InvalidCause::Other)
         };
 
-        self.check_pat(*pat, elem_ty);
+        tc.check_pat(*pat, elem_ty);
 
-        self.env.enter_loop(stmt);
-        self.env.enter_scope(*body);
-        self.env.flush_pending_bindings();
+        tc.env.enter_loop(self.id());
+        tc.env.enter_scope(*body);
+        tc.env.flush_pending_bindings();
 
-        let body_ty = self.fresh_ty();
-        self.check_expr(*body, body_ty);
+        let body_ty = tc.fresh_ty();
+        self.body().wrap_expr(*body).type_check(tc, body_ty);
 
-        self.env.leave_scope();
-        self.env.leave_loop();
+        tc.env.leave_scope();
+        tc.env.leave_loop();
 
-        TyId::unit(self.db)
+        TyId::unit(tc.db)
     }
 
-    fn check_while(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+    fn type_check_while(self, tc: &mut TyChecker<'db>) -> TyId<'db> {
+        let Partial::Present(stmt_data) = self.data(tc.db) else {
+            unreachable!()
+        };
         let StmtDescription::While(cond, body) = stmt_data else {
             unreachable!()
         };
 
-        self.check_expr(*cond, TyId::bool(self.db));
+        self.body().wrap_expr(*cond).type_check(tc, TyId::bool(tc.db));
 
-        self.env.enter_loop(stmt);
-        self.check_expr(*body, TyId::unit(self.db));
-        self.env.leave_loop();
+        tc.env.enter_loop(self.id());
+        self.body().wrap_expr(*body).type_check(tc, TyId::unit(tc.db));
+        tc.env.leave_loop();
 
-        TyId::unit(self.db)
+        TyId::unit(tc.db)
     }
 
-    fn check_continue(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+    fn type_check_continue(self, tc: &mut TyChecker<'db>) -> TyId<'db> {
+        let Partial::Present(stmt_data) = self.data(tc.db) else {
+            unreachable!()
+        };
         assert!(matches!(stmt_data, StmtDescription::Continue));
 
-        if self.env.current_loop().is_none() {
-            let span = stmt.span(self.env.body());
+        if tc.env.current_loop().is_none() {
+            let span = self.id().span(self.body());
             let diag = BodyDiag::LoopControlOutsideOfLoop {
                 primary: span.into(),
                 is_break: false,
             };
-            self.push_diag(diag);
+            tc.push_diag(diag);
         }
 
-        TyId::never(self.db)
+        TyId::never(tc.db)
     }
 
-    fn check_break(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+    fn type_check_break(self, tc: &mut TyChecker<'db>) -> TyId<'db> {
+        let Partial::Present(stmt_data) = self.data(tc.db) else {
+            unreachable!()
+        };
         assert!(matches!(stmt_data, StmtDescription::Break));
 
-        if self.env.current_loop().is_none() {
-            let span = stmt.span(self.env.body());
+        if tc.env.current_loop().is_none() {
+            let span = self.id().span(self.body());
             let diag = BodyDiag::LoopControlOutsideOfLoop {
                 primary: span.into(),
                 is_break: true,
             };
-            self.push_diag(diag);
+            tc.push_diag(diag);
         }
 
-        TyId::never(self.db)
+        TyId::never(tc.db)
     }
 
-    fn check_return(&mut self, stmt: StmtId, stmt_data: &StmtDescription<'db>) -> TyId<'db> {
+    fn type_check_return(self, tc: &mut TyChecker<'db>) -> TyId<'db> {
+        let Partial::Present(stmt_data) = self.data(tc.db) else {
+            unreachable!()
+        };
         let StmtDescription::Return(expr) = stmt_data else {
             unreachable!()
         };
 
         let returned_ty = if let Some(expr) = expr {
-            let returned_ty = self.fresh_ty();
-            self.check_expr(*expr, returned_ty);
-            returned_ty.fold_with(self.db, &mut self.table)
+            let returned_ty = tc.fresh_ty();
+            self.body().wrap_expr(*expr).type_check(tc, returned_ty);
+            returned_ty.fold_with(tc.db, &mut tc.table)
         } else {
-            TyId::unit(self.db)
+            TyId::unit(tc.db)
         };
 
-        if self.table.unify(returned_ty, self.expected).is_err() {
-            let func = self.env.func();
-            let span = stmt.span(self.env.body());
+        if tc.table.unify(returned_ty, tc.expected).is_err() {
+            let func = tc.env.func();
+            let span = self.id().span(self.body());
             let diag = BodyDiag::ReturnedTypeMismatch {
                 primary: span.into(),
                 actual: returned_ty,
-                expected: self.expected,
-                func: func.map(|f| f.hir_func_def(self.db).unwrap()),
+                expected: tc.expected,
+                func: func.map(|f| f.hir_func_def(tc.db).unwrap()),
             };
 
-            self.push_diag(diag);
+            tc.push_diag(diag);
         }
 
-        TyId::never(self.db)
+        TyId::never(tc.db)
     }
 }
