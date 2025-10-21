@@ -1169,7 +1169,9 @@ impl<'db> Expr<'db> {
             ExprDescription::Assign(..) => self.type_check_assign(tc),
             ExprDescription::AugAssign(..) => self.type_check_aug_assign(tc),
             ExprDescription::Field(..) => self.type_check_field(tc),
-            _ => todo!("Migrate final 3 variants: MethodCall, Path, RecordInit"),
+            ExprDescription::Path(..) => self.type_check_path(tc),
+            ExprDescription::MethodCall(..) => self.type_check_method_call(tc),
+            ExprDescription::RecordInit(..) => self.type_check_record_init(tc),
         };
         tc.env.leave_expr();
 
@@ -1658,6 +1660,373 @@ impl<'db> Expr<'db> {
         tc.push_diag(diag);
 
         ExprProp::invalid(tc.db)
+    }
+
+    fn type_check_path(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Path(path) = expr_data else {
+            unreachable!()
+        };
+
+        let Partial::Present(path) = path else {
+            return ExprProp::invalid(tc.db);
+        };
+
+        let path_expr_span = self.span(tc.db).into_path_expr();
+        let path_span = path_expr_span.clone().path();
+
+        let res = if path.is_bare_ident(tc.db) {
+            resolve_ident_expr(tc.db, &tc.env, *path)
+        } else {
+            match tc.resolve_path(*path, true, path_span.clone()) {
+                Ok(r) => ResolvedPathInBody::Reso(r),
+                Err(err) => {
+                    let expected_kind = if matches!(tc.parent_expr(), Some(ExprDescription::Call(..))) {
+                        ExpectedPathKind::Function
+                    } else {
+                        ExpectedPathKind::Value
+                    };
+
+                    if let Some(diag) =
+                        err.into_diag(tc.db, *path, path_span.clone(), expected_kind)
+                    {
+                        tc.push_diag(diag)
+                    }
+                    ResolvedPathInBody::Invalid
+                }
+            }
+        };
+
+        match res {
+            ResolvedPathInBody::Binding(binding) => {
+                let ty = tc.env.lookup_binding_ty(binding);
+                let is_mut = binding.is_mut();
+                ExprProp::new_binding_ref(ty, is_mut, binding)
+            }
+            ResolvedPathInBody::NewBinding(ident) => {
+                let diag = BodyDiag::UndefinedVariable(path_expr_span.into(), ident);
+                tc.push_diag(diag);
+
+                ExprProp::invalid(tc.db)
+            }
+            ResolvedPathInBody::Diag(diag) => {
+                tc.push_diag(diag);
+                ExprProp::invalid(tc.db)
+            }
+            ResolvedPathInBody::Invalid => ExprProp::invalid(tc.db),
+
+            ResolvedPathInBody::Reso(reso) => match reso {
+                PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+                    if let Some(const_ty_ty) = ty.const_ty_ty(tc.db) {
+                        ExprProp::new(tc.table.instantiate_to_term(const_ty_ty), true)
+                    } else {
+                        let diag = if ty.is_struct(tc.db) {
+                            let record_like = RecordLike::from_ty(ty);
+                            BodyDiag::unit_variant_expected(
+                                tc.db,
+                                path_expr_span.clone().into(),
+                                record_like,
+                            )
+                        } else {
+                            BodyDiag::NotValue {
+                                primary: path_expr_span.clone().into(),
+                                given: Either::Right(ty),
+                            }
+                        };
+                        tc.push_diag(diag);
+
+                        ExprProp::invalid(tc.db)
+                    }
+                }
+                PathRes::Func(ty) => ExprProp::new(tc.table.instantiate_to_term(ty), true),
+                PathRes::Trait(trait_) => {
+                    let diag = BodyDiag::NotValue {
+                        primary: path_expr_span.clone().into(),
+                        given: Either::Left(trait_.def(tc.db).trait_(tc.db).into()),
+                    };
+                    tc.push_diag(diag);
+                    ExprProp::invalid(tc.db)
+                }
+                PathRes::EnumVariant(variant) => {
+                    let ty = match variant.kind(tc.db) {
+                        VariantKind::Unit => variant.ty,
+                        VariantKind::Tuple(_) => {
+                            let ty = variant.constructor_func_ty(tc.db).unwrap();
+                            tc.table.instantiate_to_term(ty)
+                        }
+                        VariantKind::Record(_) => {
+                            let record_like = RecordLike::from_variant(variant);
+                            let diag = BodyDiag::unit_variant_expected(
+                                tc.db,
+                                self.span(tc.db).into(),
+                                record_like,
+                            );
+                            tc.push_diag(diag);
+
+                            TyId::invalid(tc.db, InvalidCause::Other)
+                        }
+                    };
+
+                    ExprProp::new(tc.table.instantiate_to_term(ty), true)
+                }
+                PathRes::Const(_, ty) => ExprProp::new(ty, true),
+                PathRes::Method(receiver_ty, candidate) => {
+                    let canonical_r_ty = Canonicalized::new(tc.db, receiver_ty);
+                    let method_ty = match candidate {
+                        MethodCandidate::InherentMethod(func_def) => {
+                            // TODO: move this to path resolver
+                            let mut method_ty = TyId::func(tc.db, func_def);
+                            for &arg in receiver_ty.generic_args(tc.db) {
+                                // If the method is defined in "specialized" impl block
+                                // of a generic type (eg `impl Option<i32>`), then
+                                // calling `TyId::app(db, method_ty, ..)` will result in
+                                // `TyId::invalid`.
+                                if method_ty.applicable_ty(tc.db).is_some() {
+                                    method_ty = TyId::app(tc.db, method_ty, arg);
+                                } else {
+                                    break;
+                                }
+                            }
+                            method_ty
+                        }
+                        MethodCandidate::TraitMethod(cand)
+                        | MethodCandidate::NeedsConfirmation(cand) => {
+                            let inst = canonical_r_ty.extract_solution(&mut tc.table, cand.inst);
+                            if matches!(candidate, MethodCandidate::NeedsConfirmation(_)) {
+                                tc.env
+                                    .register_confirmation(inst, path_expr_span.clone().into());
+                            }
+                            cand.method
+                                .instantiate_with_inst(&mut tc.table, receiver_ty, inst)
+                        }
+                    };
+                    ExprProp::new(tc.table.instantiate_to_term(method_ty), true)
+                }
+                PathRes::Mod(_) | PathRes::FuncParam(..) => todo!(),
+            },
+        }
+    }
+
+    fn type_check_method_call(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::MethodCall(receiver, method_name, generic_args, args) = expr_data else {
+            unreachable!()
+        };
+        let call_span = self.span(tc.db).into_method_call_expr();
+        let Some(method_name) = method_name.to_opt() else {
+            return ExprProp::invalid(tc.db);
+        };
+
+        let receiver_prop = tc.check_expr_unknown(*receiver);
+        if receiver_prop.ty.has_invalid(tc.db) {
+            return ExprProp::invalid(tc.db);
+        }
+
+        let canonical_r_ty = Canonicalized::new(tc.db, receiver_prop.ty);
+        let candidate = match select_method_candidate(
+            tc.db,
+            canonical_r_ty.value,
+            method_name,
+            tc.env.scope(),
+            tc.env.assumptions(),
+            None,
+        ) {
+            Ok(candidate) => candidate,
+            Err(err) => {
+                match err {
+                    MethodSelectionError::AmbiguousTraitMethod(insts) => {
+                        // Defer resolution using return-type constraints
+                        let ret_ty = tc.fresh_ty();
+                        let typed = ExprProp::new(ret_ty, true);
+                        tc.env.type_expr(self.id(), typed);
+                        // Instantiate candidates with fresh inference vars so
+                        // later unifications can bind their parameters.
+                        let cands: Vec<_> = insts
+                            .into_iter()
+                            .map(|inst| {
+                                tc.table.instantiate_with_fresh_vars(
+                                    crate::analysis::ty::binder::Binder::bind(inst),
+                                )
+                            })
+                            .collect();
+
+                        tc.env.register_pending_method(super::env::PendingMethod {
+                            expr: self.id(),
+                            recv_ty: receiver_prop.ty,
+                            method_name,
+                            candidates: cands,
+                            span: call_span.method_name().into(),
+                        });
+                        return typed;
+                    }
+                    _ => {
+                        let receiver_wrapped = self.body().wrap_expr(*receiver);
+                        let diag = body_diag_from_method_selection_err(
+                            tc.db,
+                            err,
+                            Spanned::new(
+                                canonical_r_ty.value.value,
+                                receiver_wrapped.span(tc.db).into(),
+                            ),
+                            Spanned::new(method_name, call_span.method_name().into()),
+                        );
+                        tc.push_diag(diag);
+                        return ExprProp::invalid(tc.db);
+                    }
+                }
+            }
+        };
+
+        let receiver_wrapped = self.body().wrap_expr(*receiver);
+        let (func_ty, trait_inst) = match candidate {
+            MethodCandidate::InherentMethod(func_def) => {
+                let func_ty = TyId::func(tc.db, func_def);
+                (tc.table.instantiate_to_term(func_ty), None)
+            }
+
+            MethodCandidate::TraitMethod(cand) => {
+                let inst = canonical_r_ty.extract_solution(&mut tc.table, cand.inst);
+                let func_ty =
+                    cand.method
+                        .instantiate_with_inst(&mut tc.table, receiver_prop.ty, inst);
+                (func_ty, Some(inst))
+            }
+
+            MethodCandidate::NeedsConfirmation(cand) => {
+                let inst = canonical_r_ty.extract_solution(&mut tc.table, cand.inst);
+                tc.env
+                    .register_confirmation(inst, call_span.clone().into());
+                let trait_method = cand.method;
+                let func_ty =
+                    trait_method.instantiate_with_inst(&mut tc.table, receiver_prop.ty, inst);
+                (func_ty, Some(inst))
+            }
+        };
+
+        let mut callable = match Callable::new(
+            tc.db,
+            func_ty,
+            receiver_wrapped.span(tc.db).into(),
+            trait_inst,
+        ) {
+            Ok(callable) => callable,
+            Err(diag) => {
+                tc.push_diag(diag);
+                return ExprProp::invalid(tc.db);
+            }
+        };
+
+        if !callable.unify_generic_args(tc, *generic_args, call_span.clone().generic_args()) {
+            return ExprProp::invalid(tc.db);
+        }
+
+        if !callable.func_def.is_method(tc.db) {
+            let diag = BodyDiag::NotAMethod {
+                span: call_span,
+                receiver_ty: receiver_prop.ty,
+                func_name: method_name,
+                func_ty,
+            };
+            tc.push_diag(diag);
+            return ExprProp::invalid(tc.db);
+        }
+
+        callable.check_args(
+            tc,
+            args,
+            call_span.clone().args(),
+            Some((*receiver, receiver_prop)),
+        );
+
+        // Check function constraints after instantiation
+        callable.check_constraints(tc, call_span.method_name().into());
+
+        let ret_ty = callable.ret_ty(tc.db);
+
+        // Normalize the return type to resolve any associated types
+        let normalized_ret_ty = tc.normalize_ty(ret_ty);
+        tc.env.register_callable(self.id(), callable);
+        ExprProp::new(normalized_ret_ty, true)
+    }
+
+    fn type_check_record_init(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::RecordInit(path, ..) = expr_data else {
+            unreachable!()
+        };
+        let span = self.span(tc.db).into_record_init_expr();
+
+        let Partial::Present(path) = path else {
+            return ExprProp::invalid(tc.db);
+        };
+
+        let Ok(reso) = tc.resolve_path(*path, true, span.clone().path()) else {
+            return ExprProp::invalid(tc.db);
+        };
+
+        match reso {
+            PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+                let record_like = RecordLike::from_ty(ty);
+                if record_like.is_record(tc.db) {
+                    tc.check_record_init_fields(&record_like, self.id());
+                    ExprProp::new(ty, true)
+                } else {
+                    let diag =
+                        BodyDiag::record_expected(tc.db, span.path().into(), Some(record_like));
+                    tc.push_diag(diag);
+                    ExprProp::invalid(tc.db)
+                }
+            }
+
+            PathRes::Func(ty) | PathRes::Const(_, ty) => {
+                let record_like = RecordLike::from_ty(ty);
+                let diag =
+                    BodyDiag::record_expected(tc.db, span.path().into(), Some(record_like));
+                tc.push_diag(diag);
+                ExprProp::invalid(tc.db)
+            }
+            PathRes::Method(..) | PathRes::FuncParam(..) => {
+                let diag = BodyDiag::record_expected(tc.db, span.path().into(), None);
+                tc.push_diag(diag);
+                ExprProp::invalid(tc.db)
+            }
+
+            PathRes::EnumVariant(variant) => {
+                let ty = variant.ty;
+                let record_like = RecordLike::from_variant(variant);
+                if record_like.is_record(tc.db) {
+                    tc.check_record_init_fields(&record_like, self.id());
+                    ExprProp::new(ty, true)
+                } else {
+                    let diag = BodyDiag::record_expected(tc.db, span.path().into(), None);
+                    tc.push_diag(diag);
+
+                    ExprProp::invalid(tc.db)
+                }
+            }
+            PathRes::Mod(scope) => {
+                let diag = BodyDiag::NotValue {
+                    primary: span.into(),
+                    given: Either::Left(scope.item()),
+                };
+                tc.push_diag(diag);
+                ExprProp::invalid(tc.db)
+            }
+            PathRes::Trait(trait_) => {
+                let diag = BodyDiag::NotValue {
+                    primary: span.into(),
+                    given: Either::Left(trait_.def(tc.db).trait_(tc.db).into()),
+                };
+                tc.push_diag(diag);
+                ExprProp::invalid(tc.db)
+            }
+        }
     }
 }
 
