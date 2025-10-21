@@ -210,6 +210,11 @@ impl<'db> Expr<'db> {
     pub fn containing_const(self, db: &'db dyn HirDb) -> Option<Const<'db>> {
         self.body.owner_const(db)
     }
+
+    /// Returns the lazy span for this expression.
+    pub fn span(self, _db: &'db dyn HirDb) -> crate::span::expr::LazyExprSpan<'db> {
+        self.id.span(self.body)
+    }
 }
 
 /// Context-rich wrapper for statements that carries the body context.

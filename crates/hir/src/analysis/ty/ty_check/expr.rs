@@ -37,45 +37,16 @@ use crate::analysis::{
 };
 
 impl<'db> TyChecker<'db> {
+    /// Legacy wrapper that delegates to Expr::type_check.
+    /// TODO: Migrate all call sites to use expr.type_check(tc, expected) directly.
     pub(super) fn check_expr(&mut self, expr: ExprId, expected: TyId<'db>) -> ExprProp<'db> {
-        let Partial::Present(expr_data) = self.env.expr_data(expr) else {
-            let typed = ExprProp::invalid(self.db);
-            self.env.type_expr(expr, typed);
-            return typed;
-        };
-
-        let expected = normalize_ty(self.db, expected, self.env.scope(), self.env.assumptions());
-
-        self.env.enter_expr(expr);
-        let mut actual = match expr_data {
-            ExprDescription::Lit(lit) => ExprProp::new(self.lit_ty(lit), true),
-            ExprDescription::Block(..) => self.check_block(expr, expr_data, expected),
-            ExprDescription::Un(..) => self.check_unary(expr, expr_data),
-            ExprDescription::Bin(lhs, rhs, op) => self.check_binary(expr, *lhs, *rhs, *op),
-            ExprDescription::Call(..) => self.check_call(expr, expr_data),
-            ExprDescription::MethodCall(..) => self.check_method_call(expr, expr_data),
-            ExprDescription::Path(..) => self.check_path(expr, expr_data),
-            ExprDescription::RecordInit(..) => self.check_record_init(expr, expr_data),
-            ExprDescription::Field(..) => self.check_field(expr, expr_data),
-            ExprDescription::Tuple(..) => self.check_tuple(expr, expr_data, expected),
-            ExprDescription::Array(..) => self.check_array(expr, expr_data, expected),
-            ExprDescription::ArrayRep(..) => self.check_array_rep(expr, expr_data, expected),
-            ExprDescription::If(..) => self.check_if(expr, expr_data),
-            ExprDescription::Match(..) => self.check_match(expr, expr_data),
-            ExprDescription::Assign(..) => self.check_assign(expr, expr_data),
-            ExprDescription::AugAssign(..) => self.check_aug_assign(expr, expr_data),
-        };
-        self.env.leave_expr();
-
-        let typeable = Typeable::Expr(expr, actual);
-        actual.ty = normalize_ty(self.db, actual.ty, self.env.scope(), self.env.assumptions());
-        actual.ty = self.unify_ty(typeable, actual.ty, expected);
-        actual
+        self.body().wrap_expr(expr).type_check(self, expected)
     }
 
+    /// Legacy wrapper that delegates to Expr::type_check_unknown.
+    /// TODO: Migrate all call sites to use expr.type_check_unknown(tc) directly.
     pub(super) fn check_expr_unknown(&mut self, expr: ExprId) -> ExprProp<'db> {
-        let t = self.fresh_ty();
-        self.check_expr(expr, t)
+        self.body().wrap_expr(expr).type_check_unknown(self)
     }
 
     fn check_block(
@@ -1164,6 +1135,76 @@ impl<'db> TyChecker<'db> {
             ExprDescription::Bin(_, _, op) if *op == BinOp::Index => true,
             _ => false,
         }
+    }
+}
+
+/// Type-checking methods on Expr wrappers.
+/// These methods implement the traversal API where context flows through the wrappers.
+impl<'db> Expr<'db> {
+    pub(super) fn type_check(
+        self,
+        tc: &mut TyChecker<'db>,
+        expected: TyId<'db>,
+    ) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            let typed = ExprProp::invalid(tc.db);
+            tc.env.type_expr(self.id(), typed);
+            return typed;
+        };
+
+        let expected = normalize_ty(tc.db, expected, tc.env.scope(), tc.env.assumptions());
+
+        tc.env.enter_expr(self.id());
+        let mut actual = match expr_data {
+            ExprDescription::Lit(lit) => ExprProp::new(tc.lit_ty(lit), true),
+            ExprDescription::Un(..) => self.type_check_unary(tc),
+            _ => todo!("Migrate other variants"),
+        };
+        tc.env.leave_expr();
+
+        let typeable = Typeable::Expr(self.id(), actual);
+        actual.ty = normalize_ty(tc.db, actual.ty, tc.env.scope(), tc.env.assumptions());
+        actual.ty = tc.unify_ty(typeable, actual.ty, expected);
+        actual
+    }
+
+    fn type_check_unary(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Un(lhs, op) = expr_data else {
+            unreachable!()
+        };
+
+        let lhs_expr = self.body().wrap_expr(*lhs);
+        let prop = lhs_expr.type_check_unknown(tc);
+
+        if *op == UnOp::Plus {
+            // TODO: remove support for unary plus? what should it do?
+            return prop;
+        }
+        if prop.ty.has_invalid(tc.db) {
+            return ExprProp::invalid(tc.db);
+        }
+
+        if prop.ty.is_integral_var(tc.db) && matches!(op, UnOp::Plus | UnOp::Minus | UnOp::BitNot)
+        {
+            return prop;
+        }
+
+        let base_ty = prop.ty.base_ty(tc.db);
+        if base_ty.is_ty_var(tc.db) {
+            let diag = BodyDiag::TypeMustBeKnown(lhs_expr.span(tc.db).into());
+            tc.push_diag(diag);
+            return ExprProp::invalid(tc.db);
+        }
+
+        tc.check_ops_trait(self.id(), prop.ty, op, None)
+    }
+
+    pub(super) fn type_check_unknown(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let t = tc.fresh_ty();
+        self.type_check(tc, t)
     }
 }
 
