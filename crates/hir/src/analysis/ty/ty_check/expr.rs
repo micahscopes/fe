@@ -1157,8 +1157,19 @@ impl<'db> Expr<'db> {
         tc.env.enter_expr(self.id());
         let mut actual = match expr_data {
             ExprDescription::Lit(lit) => ExprProp::new(tc.lit_ty(lit), true),
+            ExprDescription::Block(..) => self.type_check_block(tc, expected),
             ExprDescription::Un(..) => self.type_check_unary(tc),
-            _ => todo!("Migrate other variants"),
+            ExprDescription::Bin(..) => self.type_check_binary(tc),
+            ExprDescription::Call(..) => self.type_check_call(tc),
+            ExprDescription::Tuple(..) => self.type_check_tuple(tc, expected),
+            ExprDescription::Array(..) => self.type_check_array(tc, expected),
+            ExprDescription::ArrayRep(..) => self.type_check_array_rep(tc, expected),
+            ExprDescription::If(..) => self.type_check_if(tc),
+            ExprDescription::Match(..) => self.type_check_match(tc),
+            ExprDescription::Assign(..) => self.type_check_assign(tc),
+            ExprDescription::AugAssign(..) => self.type_check_aug_assign(tc),
+            ExprDescription::Field(..) => self.type_check_field(tc),
+            _ => todo!("Migrate final 3 variants: MethodCall, Path, RecordInit"),
         };
         tc.env.leave_expr();
 
@@ -1205,6 +1216,448 @@ impl<'db> Expr<'db> {
     pub(super) fn type_check_unknown(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
         let t = tc.fresh_ty();
         self.type_check(tc, t)
+    }
+
+    fn type_check_block(self, tc: &mut TyChecker<'db>, expected: TyId<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Block(stmts) = expr_data else {
+            unreachable!()
+        };
+
+        if stmts.is_empty() {
+            ExprProp::new(TyId::unit(tc.db), true)
+        } else {
+            tc.env.enter_scope(self.id());
+            for &stmt in stmts[..stmts.len() - 1].iter() {
+                let ty = tc.fresh_ty();
+                tc.check_stmt(stmt, ty);
+            }
+
+            let last_stmt = stmts[stmts.len() - 1];
+            let res = tc.check_stmt(last_stmt, expected);
+            tc.env.leave_scope();
+            ExprProp::new(res, true)
+        }
+    }
+
+    fn type_check_binary(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Bin(lhs_expr, rhs_expr, op) = expr_data else {
+            unreachable!()
+        };
+
+        // Logical operands must be bools
+        if matches!(op, BinOp::Logical(_)) {
+            let bool = TyId::bool(tc.db);
+            let lhs = tc.check_expr(*lhs_expr, bool);
+            let rhs = tc.check_expr(*rhs_expr, bool);
+            return if lhs.ty.is_bool(tc.db) && rhs.ty.is_bool(tc.db) {
+                ExprProp::new(bool, true)
+            } else {
+                ExprProp::invalid(tc.db)
+            };
+        }
+
+        let lhs = tc.check_expr_unknown(*lhs_expr);
+        if lhs.ty.has_invalid(tc.db) {
+            return ExprProp::invalid(tc.db);
+        }
+
+        if matches!(op, BinOp::Index) && lhs.ty.is_array(tc.db) {
+            // Built-in array indexing (TODO: move to trait impl)
+            let args = lhs.ty.generic_args(tc.db);
+            let elem_ty = args[0];
+            let index_ty = args[1].const_ty_ty(tc.db).unwrap();
+            tc.check_expr(*rhs_expr, index_ty);
+            return ExprProp::new(elem_ty, lhs.is_mut);
+        } else if lhs.ty.is_integral_var(tc.db) {
+            // Avoid 'type must be known' diagnostics when lhs is an unknown integer ty
+            tc.check_expr(*rhs_expr, lhs.ty);
+            return lhs;
+        }
+
+        // Fail if lhs ty is unknown
+        if lhs.ty.base_ty(tc.db).is_ty_var(tc.db) {
+            tc.check_expr_unknown(*rhs_expr);
+            let lhs_expr_wrapped = self.body().wrap_expr(*lhs_expr);
+            let diag = BodyDiag::TypeMustBeKnown(lhs_expr_wrapped.span(tc.db).into());
+            tc.push_diag(diag);
+            return ExprProp::invalid(tc.db);
+        }
+
+        tc.check_ops_trait(self.id(), lhs.ty, op, Some(*rhs_expr))
+    }
+
+    fn type_check_call(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Call(callee, args) = expr_data else {
+            unreachable!()
+        };
+
+        let callee_ty = tc.check_expr_unknown(*callee).ty;
+        if callee_ty.has_invalid(tc.db) {
+            return ExprProp::invalid(tc.db);
+        }
+
+        let callee_wrapped = self.body().wrap_expr(*callee);
+        let mut callable =
+            match Callable::new(tc.db, callee_ty, callee_wrapped.span(tc.db).into(), None) {
+                Ok(callable) => callable,
+                Err(diag) => {
+                    tc.push_diag(diag);
+                    return ExprProp::invalid(tc.db);
+                }
+            };
+
+        let call_span = self.span(tc.db).into_call_expr();
+
+        if let Partial::Present(ExprDescription::Path(Partial::Present(path))) =
+            callee_wrapped.data(tc.db)
+        {
+            let idx = path.segment_index(tc.db);
+
+            if !callable.unify_generic_args(
+                tc,
+                path.generic_args(tc.db),
+                self.span(tc.db)
+                    .into_path_expr()
+                    .path()
+                    .segment(idx)
+                    .generic_args(),
+            ) {
+                return ExprProp::invalid(tc.db);
+            }
+        };
+
+        callable.check_args(tc, args, call_span.args(), None);
+
+        let ret_ty = callable.ret_ty(tc.db);
+        // Normalize the return type to resolve any associated types
+        let normalized_ret_ty = tc.normalize_ty(ret_ty);
+        tc.env.register_callable(self.id(), callable);
+        ExprProp::new(normalized_ret_ty, true)
+    }
+
+    fn type_check_tuple(self, tc: &mut TyChecker<'db>, expected: TyId<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Tuple(elems) = expr_data else {
+            unreachable!()
+        };
+
+        let elem_tys = match expected.decompose_ty_app(tc.db) {
+            (base, args) if base.is_tuple(tc.db) && args.len() == elems.len() => args.to_vec(),
+            _ => tc.fresh_tys_n(elems.len()),
+        };
+
+        for (elem, elem_ty) in elems.iter().zip(elem_tys.iter()) {
+            tc.check_expr(*elem, *elem_ty);
+        }
+
+        let ty = TyId::tuple_with_elems(tc.db, &elem_tys);
+        ExprProp::new(ty, true)
+    }
+
+    fn type_check_array(self, tc: &mut TyChecker<'db>, expected: TyId<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Array(elems) = expr_data else {
+            unreachable!()
+        };
+
+        let mut expected_elem_ty = match expected.decompose_ty_app(tc.db) {
+            (base, args) if base.is_array(tc.db) => args[0],
+            _ => tc.fresh_ty(),
+        };
+
+        for elem in elems {
+            expected_elem_ty = tc.check_expr(*elem, expected_elem_ty).ty;
+        }
+
+        let ty = TyId::array_with_len(tc.db, expected_elem_ty, elems.len());
+        ExprProp::new(ty, true)
+    }
+
+    fn type_check_array_rep(self, tc: &mut TyChecker<'db>, expected: TyId<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::ArrayRep(elem, len) = expr_data else {
+            unreachable!()
+        };
+
+        let mut expected_elem_ty = match expected.decompose_ty_app(tc.db) {
+            (base, args) if base.is_array(tc.db) => args[0],
+            _ => tc.fresh_ty(),
+        };
+
+        expected_elem_ty = tc.check_expr(*elem, expected_elem_ty).ty;
+
+        let array = TyId::array(tc.db, expected_elem_ty);
+        let ty = if let Some(len_body) = len.to_opt() {
+            let expected_len_ty = array
+                .applicable_ty(tc.db)
+                .and_then(|applicable| applicable.const_ty);
+
+            let len_ty = ConstTyId::from_body(tc.db, len_body, expected_len_ty, None);
+            let len_ty = TyId::const_ty(tc.db, len_ty);
+            let array_ty = TyId::app(tc.db, array, len_ty);
+
+            if let Some(diag) = array_ty.emit_diag(tc.db, len_body.span().into()) {
+                tc.push_diag(diag);
+            }
+
+            array_ty
+        } else {
+            let len_ty = ConstTyId::invalid(tc.db, InvalidCause::ParseError);
+            let len_ty = TyId::const_ty(tc.db, len_ty);
+            TyId::app(tc.db, array, len_ty)
+        };
+
+        ExprProp::new(ty, true)
+    }
+
+    fn type_check_if(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::If(cond, then, else_) = expr_data else {
+            unreachable!()
+        };
+
+        tc.check_expr(*cond, TyId::bool(tc.db));
+
+        let if_ty = tc.fresh_ty();
+        let ty = match else_ {
+            Some(else_) => {
+                tc.check_expr_in_new_scope(*then, if_ty);
+                tc.check_expr_in_new_scope(*else_, if_ty).ty
+            }
+
+            None => {
+                // If there is no else branch, the if expression itself typed as `()`
+                tc.check_expr_in_new_scope(*then, if_ty);
+                TyId::unit(tc.db)
+            }
+        };
+
+        ExprProp::new(ty, true)
+    }
+
+    fn type_check_match(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Match(scrutinee, arms) = expr_data else {
+            unreachable!()
+        };
+
+        let scrutinee_ty = tc.fresh_ty();
+        let scrutinee_ty = tc.check_expr(*scrutinee, scrutinee_ty).ty;
+
+        let Partial::Present(arms) = arms else {
+            return ExprProp::invalid(tc.db);
+        };
+
+        let mut match_ty = tc.fresh_ty();
+        // Store cloned HirPat data and the original PatId for diagnostics.
+        let mut hir_pats_with_ids: Vec<(&PatDescription<'db>, PatId)> = Vec::with_capacity(arms.len());
+
+        // First loop: Type check patterns, collect HIR patterns for analysis, and type check arm bodies.
+        for arm in arms.iter() {
+            tc.check_pat(arm.pat, scrutinee_ty);
+
+            let pat_data_partial = arm.pat.data(tc.db, tc.body());
+            if let Partial::Present(actual_pat_data) = pat_data_partial {
+                // Clone the Pat data for ownership in the vector.
+                hir_pats_with_ids.push((actual_pat_data, arm.pat));
+            }
+            // If pat_data is Partial::Absent, check_pat should have already emitted an error.
+            // We only include valid patterns in the exhaustiveness/reachability analysis.
+
+            tc.env.enter_scope(arm.body);
+            tc.env.flush_pending_bindings();
+            match_ty = tc.check_expr(arm.body, match_ty).ty;
+            tc.env.leave_scope();
+        }
+
+        // Collect owned HirPat data for analysis.
+        let collected_hir_pats: Vec<PatDescription<'db>> = hir_pats_with_ids
+            .iter()
+            .map(|(p, _id)| (*p).clone())
+            .collect();
+
+        // Perform reachability analysis.
+        let reachability = crate::analysis::ty::pattern_analysis::check_reachability(
+            tc.db,
+            &collected_hir_pats,
+            tc.body(),
+            tc.env.scope(),
+            scrutinee_ty,
+        );
+
+        for (i, is_reachable) in reachability.iter().enumerate() {
+            if !is_reachable {
+                let (_current_hir_pat, current_pat_id) = &hir_pats_with_ids[i];
+                let diag = BodyDiag::UnreachablePattern {
+                    primary: current_pat_id.span(tc.body()).into(),
+                };
+                tc.push_diag(diag);
+            }
+        }
+
+        // Perform exhaustiveness analysis.
+        if let Err(missing_patterns) = crate::analysis::ty::pattern_analysis::check_exhaustiveness(
+            tc.db,
+            &collected_hir_pats,
+            tc.body(),
+            tc.env.scope(),
+            scrutinee_ty,
+        ) {
+            let diag = BodyDiag::NonExhaustiveMatch {
+                primary: self.span(tc.db).into(),
+                scrutinee_ty,
+                missing_patterns,
+            };
+            tc.push_diag(diag);
+        }
+
+        ExprProp::new(match_ty, true)
+    }
+
+    fn type_check_assign(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Assign(lhs, rhs) = expr_data else {
+            unreachable!()
+        };
+
+        let lhs_ty = tc.fresh_ty();
+        let typed_lhs = tc.check_expr(*lhs, lhs_ty);
+        tc.check_expr(*rhs, lhs_ty);
+
+        let result_ty = TyId::unit(tc.db);
+
+        tc.check_assign_lhs(*lhs, &typed_lhs);
+
+        ExprProp::new(result_ty, true)
+    }
+
+    fn type_check_aug_assign(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::AugAssign(lhs, rhs, op) = expr_data else {
+            unreachable!()
+        };
+
+        let unit = ExprProp::new(TyId::unit(tc.db), true);
+
+        let typed_lhs = tc.check_expr_unknown(*lhs);
+        let lhs_ty = typed_lhs.ty;
+        if lhs_ty.has_invalid(tc.db) {
+            return unit;
+        }
+        tc.check_assign_lhs(*lhs, &typed_lhs);
+
+        // Avoid 'type must be known' diagnostics for unknown integer ty
+        if lhs_ty.is_integral_var(tc.db) {
+            tc.check_expr(*rhs, lhs_ty);
+            return unit;
+        }
+
+        let lhs_base_ty = lhs_ty.base_ty(tc.db);
+        if lhs_base_ty.is_ty_var(tc.db) {
+            let lhs_wrapped = self.body().wrap_expr(*lhs);
+            let diag = BodyDiag::TypeMustBeKnown(lhs_wrapped.span(tc.db).into());
+            tc.push_diag(diag);
+            return unit;
+        }
+
+        tc.check_ops_trait(self.id(), lhs_ty, &AugAssignOp(*op), Some(*rhs));
+
+        // Return unit ty even if trait resolution fails
+        unit
+    }
+
+    fn type_check_field(self, tc: &mut TyChecker<'db>) -> ExprProp<'db> {
+        let Partial::Present(expr_data) = self.data(tc.db) else {
+            unreachable!()
+        };
+        let ExprDescription::Field(lhs, index) = expr_data else {
+            unreachable!()
+        };
+        let Partial::Present(field) = index else {
+            return ExprProp::invalid(tc.db);
+        };
+
+        let lhs_ty = tc.fresh_ty();
+        let typed_lhs = tc.check_expr(*lhs, lhs_ty);
+        let lhs_ty = typed_lhs.ty;
+        // let lhs_ty = normalize_ty(tc.db, lhs_ty, tc.env.scope(), tc.env.assumptions());
+
+        let (ty_base, ty_args) = lhs_ty.decompose_ty_app(tc.db);
+
+        if ty_base.has_invalid(tc.db) {
+            return ExprProp::invalid(tc.db);
+        }
+        let ty_base = lhs_ty;
+
+        if ty_base.is_ty_var(tc.db) {
+            let lhs_wrapped = self.body().wrap_expr(*lhs);
+            let diag = BodyDiag::TypeMustBeKnown(lhs_wrapped.span(tc.db).into());
+            tc.push_diag(diag);
+            return ExprProp::invalid(tc.db);
+        }
+
+        match field {
+            FieldIndex::Ident(label) => {
+                let record_like = RecordLike::from_ty(lhs_ty);
+                if let Some(field_ty) = record_like.record_field_ty(tc.db, *label) {
+                    if let Some(scope) = record_like.record_field_scope(tc.db, *label)
+                        && !is_scope_visible_from(tc.db, scope, tc.env.scope())
+                    {
+                        // Check the visibility of the field.
+                        let diag = PathResDiag::Invisible(
+                            self.span(tc.db).into_field_expr().accessor().into(),
+                            *label,
+                            scope.name_span(tc.db),
+                        );
+
+                        tc.push_diag(diag);
+                        return ExprProp::invalid(tc.db);
+                    }
+                    return ExprProp::new(field_ty, typed_lhs.is_mut);
+                }
+            }
+
+            FieldIndex::Index(i) => {
+                let arg_len = ty_args.len().into();
+                if ty_base.is_tuple(tc.db) && i.data(tc.db) < &arg_len {
+                    let i: usize = i.data(tc.db).try_into().unwrap();
+                    let ty = ty_args[i];
+                    return ExprProp::new(ty, typed_lhs.is_mut);
+                }
+            }
+        };
+
+        let diag = BodyDiag::AccessedFieldNotFound {
+            primary: self.span(tc.db).into(),
+            given_ty: lhs_ty,
+            index: *field,
+        };
+        tc.push_diag(diag);
+
+        ExprProp::invalid(tc.db)
     }
 }
 
