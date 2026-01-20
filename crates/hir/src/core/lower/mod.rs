@@ -29,6 +29,7 @@ mod attr;
 mod body;
 mod contract;
 mod expr;
+mod hir_builder;
 mod item;
 mod msg;
 mod params;
@@ -202,6 +203,14 @@ impl<'db> FileLowerCtxt<'db> {
 
     pub(super) fn joined_id(&self, id: TrackedItemVariant<'db>) -> TrackedItemId<'db> {
         self.builder.joined_id(id)
+    }
+
+    pub(super) fn current_id(&self) -> TrackedItemId<'db> {
+        self.builder.current_id()
+    }
+
+    pub(super) fn set_current_id(&mut self, id: TrackedItemId<'db>) {
+        self.builder.set_current_id(id);
     }
 
     /// Creates a new scope for an item.

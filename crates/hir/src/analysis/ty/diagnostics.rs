@@ -4,11 +4,11 @@ use super::{
     ty_check::{RecordLike, TraitOps},
     ty_def::{Kind, TyId},
 };
-use crate::span::DynLazySpan;
 use crate::visitor::prelude::*;
 use crate::{analysis::HirAnalysisDb, hir_def::Trait};
 use crate::{analysis::diagnostics::DiagnosticVoucher, hir_def::PathId};
 use crate::{analysis::name_resolution::diagnostics::PathResDiag, hir_def::ItemKind};
+use crate::{analysis::ty::ty_check::EffectParamOwner, span::DynLazySpan};
 use crate::{
     core::hir_def::{
         CallableDef, Enum, FieldIndex, FieldParent, Func, GenericParamOwner, IdentId, ImplTrait,
@@ -234,9 +234,23 @@ pub enum BodyDiag<'db> {
     UndefinedVariable(DynLazySpan<'db>, IdentId<'db>),
 
     InvalidEffectKey {
-        owner: crate::analysis::ty::ty_check::EffectParamOwner<'db>,
+        owner: EffectParamOwner<'db>,
         key: PathId<'db>,
         idx: usize,
+    },
+
+    ContractRootEffectTraitNotImplemented {
+        owner: EffectParamOwner<'db>,
+        idx: usize,
+        root_ty: TyId<'db>,
+        trait_req: TraitInstId<'db>,
+    },
+
+    ContractRootEffectTypeNotZeroSized {
+        owner: EffectParamOwner<'db>,
+        key: PathId<'db>,
+        idx: usize,
+        given: TyId<'db>,
     },
 
     MissingEffect {
@@ -267,6 +281,15 @@ pub enum BodyDiag<'db> {
         provided_span: Option<DynLazySpan<'db>>,
     },
 
+    EffectProviderMismatch {
+        primary: DynLazySpan<'db>,
+        func: Func<'db>,
+        key: PathId<'db>,
+        expected: TyId<'db>,
+        given: TyId<'db>,
+        provided_span: Option<DynLazySpan<'db>>,
+    },
+
     EffectTraitUnsatisfied {
         primary: DynLazySpan<'db>,
         func: Func<'db>,
@@ -284,6 +307,13 @@ pub enum BodyDiag<'db> {
     },
 
     TypeMustBeKnown(DynLazySpan<'db>),
+
+    InvalidCast {
+        primary: DynLazySpan<'db>,
+        from: TyId<'db>,
+        to: TyId<'db>,
+        hint: Option<String>,
+    },
 
     AccessedFieldNotFound {
         primary: DynLazySpan<'db>,
@@ -547,13 +577,17 @@ impl<'db> BodyDiag<'db> {
             Self::MissingRecordFields { .. } => 11,
             Self::UndefinedVariable(..) => 12,
             Self::InvalidEffectKey { .. } => 51,
+            Self::ContractRootEffectTraitNotImplemented { .. } => 53,
+            Self::ContractRootEffectTypeNotZeroSized { .. } => 54,
             Self::MissingEffect { .. } => 36,
             Self::EffectMutabilityMismatch { .. } => 37,
             Self::EffectTypeMismatch { .. } => 38,
+            Self::EffectProviderMismatch { .. } => 52,
             Self::EffectTraitUnsatisfied { .. } => 39,
             Self::AmbiguousEffect { .. } => 40,
             Self::ReturnedTypeMismatch { .. } => 13,
             Self::TypeMustBeKnown(..) => 14,
+            Self::InvalidCast { .. } => 55,
             Self::AccessedFieldNotFound { .. } => 15,
             Self::OpsTraitNotImplemented { .. } => 16,
             Self::NonAssignableExpr(..) => 17,

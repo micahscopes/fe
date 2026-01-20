@@ -114,7 +114,9 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
             Partial::Present(Expr::Path(_)) => {
                 let expr_prop = self.typed_body.expr_prop(self.db, expr);
                 if let Some(binding) = expr_prop.binding {
-                    if extract_contract_function(self.db, self.func).is_some()
+                    if self
+                        .hir_func
+                        .is_some_and(|func| extract_contract_function(self.db, func).is_some())
                         && matches!(binding, LocalBinding::EffectParam { .. })
                     {
                         // TODO: document/enforce this rule:
@@ -153,6 +155,9 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
             Partial::Present(Expr::Un(inner, op)) => ValueOrigin::Unary {
                 op: *op,
                 inner: self.ensure_value(*inner),
+            },
+            Partial::Present(Expr::Cast(inner, _)) => ValueOrigin::TransparentCast {
+                value: self.ensure_value(*inner),
             },
             Partial::Present(Expr::Bin(lhs, rhs, op)) => ValueOrigin::Binary {
                 op: *op,

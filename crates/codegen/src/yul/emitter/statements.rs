@@ -227,7 +227,7 @@ impl<'db> FunctionEmitter<'db> {
             ));
         }
         let ty = self.mir_func.body.local(dest).ty;
-        let size_bytes = layout::ty_size_bytes_or_word_aligned(self.db, ty);
+        let size_bytes = layout::ty_size_bytes_or_word_aligned_in(self.db, &self.layout, ty);
         let (yul_name, declared) = self.resolve_local_for_write(dest, state)?;
         self.emit_alloc_value(docs, &yul_name, size_bytes, declared);
         Ok(())
@@ -274,11 +274,8 @@ impl<'db> FunctionEmitter<'db> {
         let addr = self.lower_place_ref(place, state)?;
         let rhs = self.lower_value(value, state)?;
         let stored = self.apply_to_word_conversion(&rhs, value_ty);
-        let line = match self.mir_func.body.place_address_space(place) {
-            mir::ir::AddressSpaceKind::Memory => format!("mstore({addr}, {stored})"),
-            mir::ir::AddressSpaceKind::Storage => format!("sstore({addr}, {stored})"),
-        };
-        docs.push(YulDoc::line(line));
+        let space = self.mir_func.body.place_address_space(place);
+        docs.push(YulDoc::line(Self::yul_store(space, &addr, &stored)));
         Ok(())
     }
 
@@ -307,7 +304,7 @@ impl<'db> FunctionEmitter<'db> {
         value_ty: hir::analysis::ty::ty_def::TyId<'db>,
         state: &mut BlockState,
     ) -> Result<(), YulError> {
-        if layout::ty_size_bytes(self.db, value_ty).is_some_and(|size| size == 0) {
+        if layout::ty_size_bytes_in(self.db, &self.layout, value_ty).is_some_and(|size| size == 0) {
             return Ok(());
         }
         if value_ty.is_array(self.db) {
@@ -352,11 +349,8 @@ impl<'db> FunctionEmitter<'db> {
         let addr = self.lower_place_ref(dst_place, state)?;
         let rhs = self.lower_place_load(src_place, value_ty, state)?;
         let stored = self.apply_to_word_conversion(&rhs, value_ty);
-        let line = match self.mir_func.body.place_address_space(dst_place) {
-            mir::ir::AddressSpaceKind::Memory => format!("mstore({addr}, {stored})"),
-            mir::ir::AddressSpaceKind::Storage => format!("sstore({addr}, {stored})"),
-        };
-        docs.push(YulDoc::line(line));
+        let space = self.mir_func.body.place_address_space(dst_place);
+        docs.push(YulDoc::line(Self::yul_store(space, &addr, &stored)));
         Ok(())
     }
 
@@ -372,17 +366,14 @@ impl<'db> FunctionEmitter<'db> {
         let dst_addr = self.lower_place_ref(dst_place, state)?;
         let src_space = self.mir_func.body.place_address_space(src_place);
         let dst_space = self.mir_func.body.place_address_space(dst_place);
-        let discr = match src_space {
-            mir::ir::AddressSpaceKind::Memory => format!("mload({src_addr})"),
-            mir::ir::AddressSpaceKind::Storage => format!("sload({src_addr})"),
-        };
+        let discr = Self::yul_load(src_space, &src_addr);
         let discr_temp = state.alloc_local();
         docs.push(YulDoc::line(format!("let {discr_temp} := {discr}")));
-        let store_discr = match dst_space {
-            mir::ir::AddressSpaceKind::Memory => format!("mstore({dst_addr}, {discr_temp})"),
-            mir::ir::AddressSpaceKind::Storage => format!("sstore({dst_addr}, {discr_temp})"),
-        };
-        docs.push(YulDoc::line(store_discr));
+        docs.push(YulDoc::line(Self::yul_store(
+            dst_space,
+            &dst_addr,
+            &discr_temp,
+        )));
 
         let Some(adt_def) = enum_ty.adt_def(self.db) else {
             return Err(YulError::Unsupported("enum store requires enum adt".into()));
@@ -432,12 +423,9 @@ impl<'db> FunctionEmitter<'db> {
         state: &mut BlockState,
     ) -> Result<(), YulError> {
         let addr = self.lower_place_ref(place, state)?;
-        let value = variant.idx as u64;
-        let line = match self.mir_func.body.place_address_space(place) {
-            mir::ir::AddressSpaceKind::Memory => format!("mstore({addr}, {value})"),
-            mir::ir::AddressSpaceKind::Storage => format!("sstore({addr}, {value})"),
-        };
-        docs.push(YulDoc::line(line));
+        let value = (variant.idx as u64).to_string();
+        let space = self.mir_func.body.place_address_space(place);
+        docs.push(YulDoc::line(Self::yul_store(space, &addr, &value)));
         Ok(())
     }
 
@@ -453,6 +441,24 @@ impl<'db> FunctionEmitter<'db> {
         let mut path = place.projection.clone();
         path.push(proj);
         mir::ir::Place::new(place.base, path)
+    }
+
+    fn yul_store(space: mir::ir::AddressSpaceKind, addr: &str, value: &str) -> String {
+        match space {
+            mir::ir::AddressSpaceKind::Memory => format!("mstore({addr}, {value})"),
+            mir::ir::AddressSpaceKind::Calldata => unreachable!("write to calldata"),
+            mir::ir::AddressSpaceKind::Storage => format!("sstore({addr}, {value})"),
+            mir::ir::AddressSpaceKind::TransientStorage => format!("tstore({addr}, {value})"),
+        }
+    }
+
+    fn yul_load(space: mir::ir::AddressSpaceKind, addr: &str) -> String {
+        match space {
+            mir::ir::AddressSpaceKind::Memory => format!("mload({addr})"),
+            mir::ir::AddressSpaceKind::Calldata => format!("calldataload({addr})"),
+            mir::ir::AddressSpaceKind::Storage => format!("sload({addr})"),
+            mir::ir::AddressSpaceKind::TransientStorage => format!("tload({addr})"),
+        }
     }
 
     /// Emits Yul for an intrinsic instruction.

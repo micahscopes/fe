@@ -1,8 +1,8 @@
 use crate::{
     analysis::place::Place,
     hir_def::{
-        Body, Contract, EffectParamListId, Expr, ExprId, FieldParent, Func, IdentId, IntegerId,
-        ItemKind, Partial, Pat, PatId, PathId, Stmt, StmtId, TraitRefId, prim_ty::PrimTy,
+        Body, Contract, EffectParamListId, Expr, ExprId, Func, IdentId, IntegerId, ItemKind,
+        Partial, Pat, PatId, PathId, Stmt, StmtId, TraitRefId, prim_ty::PrimTy,
         scope_graph::ScopeId,
     },
     span::DynLazySpan,
@@ -17,7 +17,7 @@ use smallvec1::SmallVec;
 use thin_vec::ThinVec;
 
 use super::owner::BodyOwner;
-use super::{Callable, ConstRef, TypedBody};
+use super::{Callable, ConstRef, TypedBody, stmt::ForLoopSeq};
 use crate::analysis::{
     HirAnalysisDb,
     name_resolution::{PathRes, resolve_path},
@@ -61,6 +61,9 @@ pub(super) struct TyCheckEnv<'db> {
 
     /// Resolved effect arguments at call sites, keyed by the call expression.
     call_effect_args: FxHashMap<ExprId, Vec<super::ResolvedEffectArg<'db>>>,
+
+    /// Resolved Seq trait methods for for-loops, keyed by the for statement.
+    for_loop_seq: FxHashMap<StmtId, ForLoopSeq<'db>>,
 }
 
 impl<'db> TyCheckEnv<'db> {
@@ -114,6 +117,7 @@ impl<'db> TyCheckEnv<'db> {
             param_bindings: Vec::new(),
             pat_bindings: FxHashMap::default(),
             call_effect_args: FxHashMap::default(),
+            for_loop_seq: FxHashMap::default(),
         };
 
         env.enter_scope(body.expr(db));
@@ -143,6 +147,33 @@ impl<'db> TyCheckEnv<'db> {
                     };
                 }
             }
+            BodyOwner::ContractInit { contract } => {
+                let Some(init) = contract.init(db) else {
+                    return Ok(env);
+                };
+                let assumptions = base_assumptions;
+                for (idx, param) in init.params(db).data(db).iter().enumerate() {
+                    let mut ty = match param.ty.to_opt() {
+                        Some(hir_ty) => lower_hir_ty(db, hir_ty, owner_scope, assumptions),
+                        None => TyId::invalid(db, InvalidCause::ParseError),
+                    };
+
+                    if !ty.is_star_kind(db) {
+                        ty = TyId::invalid(db, InvalidCause::Other);
+                    }
+
+                    let var = LocalBinding::Param {
+                        site: ParamSite::ContractInit(contract),
+                        idx,
+                        ty,
+                        is_mut: param.is_mut,
+                    };
+                    env.param_bindings.push(var);
+                    if let Some(name) = param.name() {
+                        env.var_env.last_mut().unwrap().register_var(name, var);
+                    }
+                }
+            }
             BodyOwner::ContractRecvArm { .. } => {}
         }
 
@@ -165,6 +196,7 @@ impl<'db> TyCheckEnv<'db> {
                     self.seed_func_effects(func, base_assumptions)
                 }
             }
+            BodyOwner::ContractInit { .. } => self.seed_contract_effects(base_assumptions),
             BodyOwner::ContractRecvArm { .. } => self.seed_contract_effects(base_assumptions),
         }
     }
@@ -355,6 +387,21 @@ impl<'db> TyCheckEnv<'db> {
                     (EffectParamSite::Func(func), func.effects(self.db)),
                 ]
             }
+            BodyOwner::ContractInit { contract } => {
+                let Some(init) = contract.init(self.db) else {
+                    return Vec::new();
+                };
+                vec![
+                    (
+                        EffectParamSite::Contract(contract),
+                        contract.effects(self.db),
+                    ),
+                    (
+                        EffectParamSite::ContractInit { contract },
+                        init.effects(self.db),
+                    ),
+                ]
+            }
             BodyOwner::ContractRecvArm {
                 contract,
                 recv_idx,
@@ -404,6 +451,7 @@ impl<'db> TyCheckEnv<'db> {
     fn contract_from_site(&self, site: EffectParamSite<'db>) -> Option<Contract<'db>> {
         match site {
             EffectParamSite::Contract(contract) => Some(contract),
+            EffectParamSite::ContractInit { contract } => Some(contract),
             EffectParamSite::ContractRecvArm { contract, .. } => Some(contract),
             EffectParamSite::Func(func) => self.parent_contract_for_func(func),
         }
@@ -416,14 +464,14 @@ impl<'db> TyCheckEnv<'db> {
     ) -> Option<TyId<'db>> {
         let contract = self.contract_from_site(site)?;
         let ident = key_path.ident(self.db).to_opt()?;
-        let parent = FieldParent::Contract(contract);
-        let field_ty = parent
-            .fields(self.db)
-            .find(|f| f.name(self.db) == Some(ident))?
-            .ty(self.db);
 
-        Some(if field_ty.is_star_kind(self.db) {
-            field_ty
+        let ty = contract
+            .fields(self.db)
+            .get(&ident)
+            .map(|info| info.target_ty)?;
+
+        Some(if ty.is_star_kind(self.db) {
+            ty
         } else {
             TyId::invalid(self.db, InvalidCause::Other)
         })
@@ -448,6 +496,12 @@ impl<'db> TyCheckEnv<'db> {
     pub(super) fn register_const_ref(&mut self, expr: ExprId, const_ref: ConstRef<'db>) {
         if self.const_refs.insert(expr, const_ref).is_some() {
             panic!("const ref is already registered for the given expr")
+        }
+    }
+
+    pub(super) fn register_for_loop_seq(&mut self, stmt: StmtId, seq: ForLoopSeq<'db>) {
+        if self.for_loop_seq.insert(stmt, seq).is_some() {
+            panic!("for loop seq is already registered for the given stmt")
         }
     }
 
@@ -491,6 +545,7 @@ impl<'db> TyCheckEnv<'db> {
                     rt
                 }
             }
+            BodyOwner::ContractInit { .. } => TyId::unit(self.db),
             BodyOwner::ContractRecvArm { .. } => {
                 let Some(arm) = self.owner.recv_arm(self.db) else {
                     return TyId::invalid(self.db, InvalidCause::Other);
@@ -773,6 +828,12 @@ impl<'db> TyCheckEnv<'db> {
             .map(|(expr, callable)| (expr, callable.fold_with(self.db, &mut prober)))
             .collect();
 
+        let for_loop_seq = self
+            .for_loop_seq
+            .into_iter()
+            .map(|(stmt, seq)| (stmt, seq.fold_with(self.db, &mut prober)))
+            .collect();
+
         TypedBody {
             body: Some(self.body),
             pat_ty: self.pat_ty,
@@ -782,6 +843,7 @@ impl<'db> TyCheckEnv<'db> {
             call_effect_args: self.call_effect_args,
             param_bindings: self.param_bindings,
             pat_bindings: self.pat_bindings,
+            for_loop_seq,
         }
     }
 
@@ -912,6 +974,9 @@ impl<'db> EffectEnv<'db> {
 pub enum EffectParamSite<'db> {
     Func(Func<'db>),
     Contract(Contract<'db>),
+    ContractInit {
+        contract: Contract<'db>,
+    },
     ContractRecvArm {
         contract: Contract<'db>,
         recv_idx: u32,
@@ -922,6 +987,7 @@ pub enum EffectParamSite<'db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
 pub enum ParamSite<'db> {
     Func(Func<'db>),
+    ContractInit(Contract<'db>),
     /// Effect param that resolves to a contract field.
     EffectField(EffectParamSite<'db>),
 }
@@ -929,6 +995,13 @@ pub enum ParamSite<'db> {
 fn param_span(site: ParamSite<'_>, idx: usize) -> DynLazySpan<'_> {
     match site {
         ParamSite::Func(func) => func.span().params().param(idx).name().into(),
+        ParamSite::ContractInit(contract) => contract
+            .span()
+            .init_block()
+            .params()
+            .param(idx)
+            .name()
+            .into(),
         ParamSite::EffectField(effect_site) => effect_param_span(effect_site, idx),
     }
 }
@@ -940,6 +1013,12 @@ fn param_name<'db>(
 ) -> Option<IdentId<'db>> {
     match site {
         ParamSite::Func(func) => func.params(db).nth(idx).and_then(|p| p.name(db)),
+        ParamSite::ContractInit(contract) => contract
+            .init(db)?
+            .params(db)
+            .data(db)
+            .get(idx)
+            .and_then(|p| p.name()),
         ParamSite::EffectField(effect_site) => effect_param_name(db, effect_site, idx),
     }
 }
@@ -954,6 +1033,12 @@ fn effect_param_name<'db>(
         EffectParamSite::Contract(contract) => {
             contract.effects(db).data(db).get(idx).and_then(|p| p.name)
         }
+        EffectParamSite::ContractInit { contract } => contract
+            .init(db)?
+            .effects(db)
+            .data(db)
+            .get(idx)
+            .and_then(|p| p.name),
         EffectParamSite::ContractRecvArm {
             contract,
             recv_idx,
@@ -973,6 +1058,13 @@ fn effect_param_span(site: EffectParamSite<'_>, idx: usize) -> DynLazySpan<'_> {
         EffectParamSite::Contract(contract) => {
             contract.span().effects().param_idx(idx).name().into()
         }
+        EffectParamSite::ContractInit { contract } => contract
+            .span()
+            .init_block()
+            .effects()
+            .param_idx(idx)
+            .name()
+            .into(),
         EffectParamSite::ContractRecvArm {
             contract,
             recv_idx,

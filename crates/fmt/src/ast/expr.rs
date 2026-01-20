@@ -17,6 +17,8 @@ use super::types::{Doc, ToDoc, block_list};
 fn bin_op_precedence(op: &BinOp) -> u8 {
     use parser::ast::ArithBinOp;
     match op {
+        // Range has lowest precedence
+        BinOp::Arith(ArithBinOp::Range(_)) => 0,
         BinOp::Logical(LogicalBinOp::Or(_)) => 1,
         BinOp::Logical(LogicalBinOp::And(_)) => 2,
         BinOp::Comp(_) => 3,
@@ -392,6 +394,23 @@ impl ToDoc for ast::UnExpr {
         };
 
         alloc.text(op).append(expr)
+    }
+}
+
+impl ToDoc for ast::CastExpr {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        let alloc = &ctx.alloc;
+
+        let expr = match self.expr() {
+            Some(e) => e.to_doc(ctx),
+            None => return alloc.nil(),
+        };
+        let ty = match self.ty() {
+            Some(t) => t.to_doc(ctx),
+            None => return expr,
+        };
+
+        expr.append(alloc.text(" as ")).append(ty)
     }
 }
 

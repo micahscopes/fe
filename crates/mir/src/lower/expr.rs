@@ -2,8 +2,14 @@
 //! to specialized lowering helpers.
 
 use hir::{
-    analysis::ty::ty_check::ResolvedEffectArg,
+    analysis::ty::ty_check::{Callable, ForLoopSeq, ResolvedEffectArg},
     projection::{IndexSource, Projection},
+};
+
+use hir::analysis::ty::{
+    binder::Binder,
+    fold::{AssocTySubst, TyFoldable},
+    normalize::normalize_ty,
 };
 
 use crate::{
@@ -16,7 +22,7 @@ use hir::analysis::{
     place::PlaceBase,
     ty::ty_check::{EffectArg, EffectPassMode},
 };
-use hir::hir_def::expr::BinOp;
+use hir::hir_def::expr::{ArithBinOp, BinOp};
 
 enum RootLvalue<'db> {
     Place(Place<'db>),
@@ -65,18 +71,25 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                     .is_some_and(|id| id.data(self.db) == contract_name)
             })?;
 
-        let fields = contract.hir_fields(self.db).data(self.db);
-        if field_idx >= fields.len() {
-            return None;
-        }
-
-        let scope = contract.scope();
-        let assumptions = PredicateListId::empty_list(self.db);
+        let fields = contract.fields(self.db);
+        let field = fields.get_index(field_idx)?.1;
+        let desired_space = if field.is_provider {
+            self.effect_provider_space_for_provider_ty(field.declared_ty)?
+        } else {
+            AddressSpaceKind::Storage
+        };
 
         let mut offset = 0;
-        for field in fields.iter().take(field_idx) {
-            let field_ty = lower_opt_hir_ty(self.db, field.type_ref(), scope, assumptions);
-            offset += ty_storage_slots(self.db, field_ty)?;
+        for field in fields.values().take(field_idx) {
+            let space = if field.is_provider {
+                self.effect_provider_space_for_provider_ty(field.declared_ty)?
+            } else {
+                AddressSpaceKind::Storage
+            };
+            if space != desired_space {
+                continue;
+            }
+            offset += ty_storage_slots(self.db, field.target_ty)?;
         }
         Some(offset)
     }
@@ -212,8 +225,16 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                 let _ = self.lower_expr(*inner);
                 self.ensure_value(expr)
             }
+            Partial::Present(Expr::Cast(inner, _)) => {
+                let _ = self.lower_expr(*inner);
+                self.ensure_value(expr)
+            }
             Partial::Present(Expr::Bin(lhs, rhs, BinOp::Index)) => {
                 self.lower_index_expr(expr, *lhs, *rhs)
+            }
+            Partial::Present(Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Range))) => {
+                // Desugar range expression `start..end` into Range struct construction
+                self.lower_range_expr(expr, *lhs, *rhs)
             }
             Partial::Present(Expr::Bin(lhs, rhs, _)) => {
                 let _ = self.lower_expr(*lhs);
@@ -260,7 +281,7 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
             }
             return value_id;
         }
-        let Some(callable) = self.typed_body.callable_expr(expr).cloned() else {
+        let Some(mut callable) = self.typed_body.callable_expr(expr).cloned() else {
             return value_id;
         };
         let callable_def = callable.callable_def;
@@ -269,33 +290,8 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
             return value_id;
         };
 
-        let provider_kind = self.effect_provider_kind_for_provider_ty(ty);
-        let result_space = provider_kind
-            .map(|kind| match kind {
-                EffectProviderKind::Memory => AddressSpaceKind::Memory,
-                EffectProviderKind::Storage => AddressSpaceKind::Storage,
-                EffectProviderKind::Calldata => AddressSpaceKind::Memory,
-            })
-            .unwrap_or_else(|| self.expr_address_space(expr));
-
-        // Effect pointer provider newtypes (`MemPtr`/`StorPtr`) are represented as a single word
-        // at runtime (the raw address/slot). Stdlib constructors for these types are transparent
-        // wrappers and can be lowered as a representation-preserving cast.
-        if callable_def.ingot(self.db).kind(self.db) == IngotKind::Std
-            && provider_kind.is_some()
-            && args.len() == 1
-            && returns_value
-        {
-            if let Some(dest) = dest_override {
-                self.builder.body.locals[dest.index()].address_space = result_space;
-                self.assign(stmt, Some(dest), Rvalue::Value(args[0]));
-                self.builder.body.values[value_id.index()].origin = ValueOrigin::Local(dest);
-            } else {
-                self.builder.body.values[value_id.index()].origin =
-                    ValueOrigin::TransparentCast { value: args[0] };
-            }
-            return value_id;
-        }
+        let provider_space = self.effect_provider_space_for_provider_ty(ty);
+        let result_space = provider_space.unwrap_or_else(|| self.expr_address_space(expr));
 
         if matches!(
             callable_def.ingot(self.db).kind(self.db),
@@ -303,7 +299,8 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         ) && callable_def
             .name(self.db)
             .is_some_and(|name| name.data(self.db) == "contract_field_slot")
-            && let Some(contract_fn) = extract_contract_function(self.db, self.func)
+            && let Some(func) = self.hir_func
+            && let Some(contract_fn) = extract_contract_function(self.db, func)
             && let Some(arg_expr) = arg_exprs.first().copied()
             && let Some(field_idx) = self.u256_lit_from_expr(arg_expr)
             && let Some(field_idx) = field_idx.to_usize()
@@ -312,6 +309,23 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         {
             self.builder.body.values[value_id.index()].origin =
                 ValueOrigin::Synthetic(SyntheticValue::Int(BigUint::from(offset)));
+            if returns_value && let Some(dest) = dest_override {
+                self.assign(stmt, Some(dest), Rvalue::Value(value_id));
+            }
+            return value_id;
+        }
+
+        if self.is_cast_intrinsic(callable_def) {
+            let mut cast_args = args.clone();
+            if self.is_method_call(expr) && !cast_args.is_empty() {
+                cast_args.remove(0);
+            }
+            if cast_args.len() != 1 {
+                return value_id;
+            }
+            let arg_value = cast_args[0];
+            self.builder.body.values[value_id.index()].origin =
+                ValueOrigin::TransparentCast { value: arg_value };
             if returns_value && let Some(dest) = dest_override {
                 self.assign(stmt, Some(dest), Rvalue::Value(value_id));
             }
@@ -426,17 +440,16 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         }
 
         let mut effect_args = Vec::new();
-        let mut effect_kinds = Vec::new();
         let mut effect_writebacks: Vec<(LocalId, Place<'db>)> = Vec::new();
         if let CallableDef::Func(func_def) = callable.callable_def
             && func_def.has_effects(self.db)
             && extract_contract_function(self.db, func_def).is_none()
             && let Some(resolved) = self.typed_body.call_effect_args(expr)
         {
+            self.finalize_place_effect_provider_args_for_call(func_def, &mut callable, resolved);
             for resolved_arg in resolved {
-                let (kind, value) = self.lower_effect_arg(resolved_arg, &mut effect_writebacks);
+                let value = self.lower_effect_arg(resolved_arg, &mut effect_writebacks);
                 effect_args.push(value);
-                effect_kinds.push(kind);
             }
         }
 
@@ -448,14 +461,18 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         if let Some(dest) = dest {
             self.builder.body.locals[dest.index()].address_space = result_space;
         }
+        let hir_target = crate::ir::HirCallTarget {
+            callable_def: callable.callable_def,
+            generic_args: callable.generic_args().to_vec(),
+            trait_inst: callable.trait_inst(),
+        };
         let call_origin = CallOrigin {
-            expr,
-            callable: callable.clone(),
+            expr: Some(expr),
+            hir_target: Some(hir_target),
             args,
             effect_args,
-            effect_kinds,
-            receiver_space,
             resolved_name: None,
+            receiver_space,
         };
         if ty.is_never(self.db) {
             self.set_current_terminator(Terminator::TerminatingCall(
@@ -471,6 +488,123 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         self.builder.body.values[value_id.index()].origin =
             dest.map(ValueOrigin::Local).unwrap_or(ValueOrigin::Unit);
         value_id
+    }
+
+    fn finalize_place_effect_provider_args_for_call(
+        &mut self,
+        callee: Func<'db>,
+        callable: &mut hir::analysis::ty::ty_check::Callable<'db>,
+        resolved: &[ResolvedEffectArg<'db>],
+    ) {
+        let assumptions = PredicateListId::empty_list(self.db);
+        let provider_arg_idx_by_effect =
+            hir::analysis::ty::effects::place_effect_provider_param_index_map(self.db, callee);
+        let caller_provider_arg_idx_by_effect = self.hir_func.map(|func| {
+            hir::analysis::ty::effects::place_effect_provider_param_index_map(self.db, func)
+        });
+
+        for resolved_arg in resolved {
+            let Some(effect_view) = callee.effect_params(self.db).nth(resolved_arg.param_idx)
+            else {
+                continue;
+            };
+            let effect_idx = effect_view.index();
+            let Some(provider_arg_idx) = provider_arg_idx_by_effect
+                .get(effect_idx)
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+
+            // Don't stomp explicit provider arguments (HIR unifies those already).
+            if let Some(existing) = callable.generic_args().get(provider_arg_idx).copied()
+                && !matches!(existing.data(self.db), TyData::TyVar(_))
+            {
+                continue;
+            }
+
+            let Some(key_path) = effect_view.key_path(self.db) else {
+                continue;
+            };
+            let Ok(path_res) = resolve_path(self.db, key_path, callee.scope(), assumptions, false)
+            else {
+                continue;
+            };
+            let base_target_ty = match path_res {
+                PathRes::Ty(ty) | PathRes::TyAlias(_, ty) if ty.is_star_kind(self.db) => ty,
+                _ => continue,
+            };
+
+            let mut target_ty =
+                Binder::bind(base_target_ty).instantiate(self.db, callable.generic_args());
+            if let Some(inst) = callable.trait_inst() {
+                let mut subst = AssocTySubst::new(inst);
+                target_ty = target_ty.fold_with(self.db, &mut subst);
+            }
+            target_ty = normalize_ty(self.db, target_ty, callee.scope(), assumptions);
+
+            let inferred_provider_ty = match resolved_arg.pass_mode {
+                EffectPassMode::ByTempPlace => {
+                    TyId::app(self.db, self.core.mem_ptr_ctor, target_ty)
+                }
+                EffectPassMode::ByPlace => {
+                    let provider_for_effect_param_binding =
+                        |this: &Self, binding: LocalBinding<'db>| -> Option<TyId<'db>> {
+                            let LocalBinding::EffectParam { site, idx, .. } = binding else {
+                                return None;
+                            };
+                            let current_func = this.hir_func?;
+                            let EffectParamSite::Func(binding_func) = site else {
+                                return None;
+                            };
+                            if binding_func != current_func {
+                                return None;
+                            }
+                            let caller_provider_arg_idx_by_effect =
+                                caller_provider_arg_idx_by_effect?;
+                            let provider_idx = caller_provider_arg_idx_by_effect
+                                .get(idx)
+                                .copied()
+                                .flatten()?;
+                            if let Some(concrete) = this.generic_args.get(provider_idx).copied() {
+                                return Some(concrete);
+                            }
+                            CallableDef::Func(current_func)
+                                .params(this.db)
+                                .get(provider_idx)
+                                .copied()
+                        };
+
+                    let EffectArg::Place(place) = &resolved_arg.arg else {
+                        continue;
+                    };
+                    let PlaceBase::Binding(binding) = place.base;
+                    match binding {
+                        binding @ LocalBinding::EffectParam { .. } => {
+                            provider_for_effect_param_binding(self, binding).unwrap_or_else(|| {
+                                TyId::app(self.db, self.core.mem_ptr_ctor, target_ty)
+                            })
+                        }
+                        LocalBinding::Param {
+                            site: ParamSite::EffectField(effect_site),
+                            idx,
+                            ..
+                        } => self
+                            .contract_field_provider_ty_for_effect_site(effect_site, idx)
+                            .unwrap_or_else(|| {
+                                TyId::app(self.db, self.core.stor_ptr_ctor, target_ty)
+                            }),
+                        _ => TyId::app(self.db, self.core.mem_ptr_ctor, target_ty),
+                    }
+                }
+                _ => continue,
+            };
+
+            if let Some(slot) = callable.generic_args_mut().get_mut(provider_arg_idx) {
+                *slot = inferred_provider_ty;
+            }
+        }
     }
 
     fn materialize_value_in_temp_place(
@@ -507,7 +641,7 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         &mut self,
         resolved_arg: &ResolvedEffectArg<'db>,
         effect_writebacks: &mut Vec<(LocalId, Place<'db>)>,
-    ) -> (EffectProviderKind, ValueId) {
+    ) -> ValueId {
         // Handle ByPlace: resolve binding and materialize as needed
         if resolved_arg.pass_mode == EffectPassMode::ByPlace {
             let EffectArg::Place(place) = &resolved_arg.arg else {
@@ -516,14 +650,14 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
             let PlaceBase::Binding(binding) = place.base;
 
             let addr_space = self.address_space_for_binding(&binding);
-            let kind = self.effect_provider_kind_for_address_space(addr_space);
+            let is_non_memory = !matches!(addr_space, AddressSpaceKind::Memory);
 
             // EffectParam: just get the binding value
             if matches!(binding, LocalBinding::EffectParam { .. }) {
                 let value = self
                     .binding_value(binding)
                     .unwrap_or_else(|| self.synthetic_u256(BigUint::from(0u8)));
-                return (kind, value);
+                return value;
             }
 
             let binding_ty = match binding {
@@ -538,15 +672,15 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
 
             let value_repr = self.value_repr_for_ty(binding_ty, addr_space);
 
-            // Storage providers are already addressable as slots even when their logical type is
+            // Storage providers are addressable as handles even when their logical type is
             // word-represented (e.g. transparent newtypes around `u256`).
-            if value_repr.address_space().is_some() || kind == EffectProviderKind::Storage {
+            if value_repr.address_space().is_some() || is_non_memory {
                 let value = self.alloc_value(binding_ty, ValueOrigin::Local(local), value_repr);
-                return (kind, value);
+                return value;
             }
 
             // Memory provider: materialize in temp place
-            if kind == EffectProviderKind::Memory {
+            if matches!(addr_space, AddressSpaceKind::Memory) {
                 let initial =
                     self.alloc_value(binding_ty, ValueOrigin::Local(local), ValueRepr::Word);
                 let (addr_value, addr_place) = self.materialize_value_in_temp_place(
@@ -558,7 +692,7 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                 if binding.is_mut() {
                     effect_writebacks.push((local, addr_place));
                 }
-                return (kind, addr_value);
+                return addr_value;
             }
 
             return self.default_effect_arg();
@@ -571,10 +705,9 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
             };
 
             let value = self.lower_expr(*expr_id);
-            let kind = EffectProviderKind::Memory;
 
             if self.builder.body.value(value).repr.is_ref() {
-                return (kind, value);
+                return value;
             }
 
             let ty = self.typed_body.expr_ty(self.db, *expr_id);
@@ -584,21 +717,11 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                 AddressSpaceKind::Memory,
                 "eff_tmp",
             );
-            return (kind, addr_value);
+            return addr_value;
         }
 
         // Handle ByValue: lower the value directly
         if resolved_arg.pass_mode == EffectPassMode::ByValue {
-            let kind = match &resolved_arg.arg {
-                EffectArg::Value(expr_id) => self
-                    .effect_provider_kind_for_provider_ty(
-                        self.typed_body.expr_ty(self.db, *expr_id),
-                    )
-                    .unwrap_or(EffectProviderKind::Storage),
-                EffectArg::Binding(binding) => self.effect_provider_kind_for_binding(*binding),
-                _ => EffectProviderKind::Storage,
-            };
-
             let value = match &resolved_arg.arg {
                 EffectArg::Value(expr_id) => self.lower_expr(*expr_id),
                 EffectArg::Binding(binding) => self
@@ -607,18 +730,15 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                 EffectArg::Unknown | EffectArg::Place(_) => self.synthetic_u256(BigUint::from(0u8)),
             };
 
-            return (kind, value);
+            return value;
         }
 
         // Unknown or any other case
         self.default_effect_arg()
     }
 
-    fn default_effect_arg(&mut self) -> (EffectProviderKind, ValueId) {
-        (
-            EffectProviderKind::Storage,
-            self.synthetic_u256(BigUint::from(0u8)),
-        )
+    fn default_effect_arg(&mut self) -> ValueId {
+        self.synthetic_u256(BigUint::from(0u8))
     }
 
     fn lower_expr_into_local(&mut self, stmt: StmtId, expr: ExprId, dest: LocalId) -> ValueId {
@@ -759,7 +879,7 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         let Ok(res) = hir::analysis::name_resolution::path_resolver::resolve_path(
             self.db,
             key_path,
-            self.func.scope(),
+            self.owner.scope(),
             PredicateListId::empty_list(self.db),
             false,
         ) else {
@@ -786,10 +906,20 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         let Some(binding) = prop.binding else {
             return value_id;
         };
-        if !matches!(binding, LocalBinding::EffectParam { .. }) {
+        let is_effect_binding = matches!(binding, LocalBinding::EffectParam { .. })
+            || matches!(
+                binding,
+                LocalBinding::Param {
+                    site: ParamSite::EffectField(_),
+                    ..
+                }
+            );
+        if !is_effect_binding {
             return value_id;
         }
-        if self.effect_param_key_is_trait(binding) {
+        if matches!(binding, LocalBinding::EffectParam { .. })
+            && self.effect_param_key_is_trait(binding)
+        {
             return value_id;
         }
 
@@ -884,6 +1014,73 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         value_id
     }
 
+    /// Lower a range expression `start..end` into Range struct construction.
+    ///
+    /// This desugars range expressions into:
+    /// 1. Evaluating start and end expressions
+    /// 2. Allocating a Range struct
+    /// 3. Storing start and end into the struct fields
+    fn lower_range_expr(&mut self, expr: ExprId, start: ExprId, end: ExprId) -> ValueId {
+        let value_id = self.ensure_value(expr);
+        if self.current_block().is_none() {
+            return value_id;
+        }
+
+        // Get the Range type (already set by type checker)
+        let range_ty = self.typed_body.expr_ty(self.db, expr);
+
+        // Lower start and end expressions
+        let start_value = self.lower_expr(start);
+        if self.current_block().is_none() {
+            return value_id;
+        }
+        let end_value = self.lower_expr(end);
+        if self.current_block().is_none() {
+            return value_id;
+        }
+
+        if layout::is_zero_sized_ty(self.db, range_ty) {
+            let value = &mut self.builder.body.values[value_id.index()];
+            value.origin = ValueOrigin::Unit;
+            value.repr = ValueRepr::Word;
+            return value_id;
+        }
+
+        // Allocate memory for the struct
+        let alloc_value = self.emit_alloc(expr, range_ty);
+
+        // Get field indices for start and end
+        let start_ident = IdentId::new(self.db, "start".to_string());
+        let end_ident = IdentId::new(self.db, "end".to_string());
+
+        let mut inits = Vec::with_capacity(2);
+
+        // Add start field initialization
+        if let Some(info) = self.field_access_info(range_ty, FieldIndex::Ident(start_ident))
+            && !layout::is_zero_sized_ty(self.db, info.field_ty)
+        {
+            inits.push((
+                MirProjectionPath::from_projection(Projection::Field(info.field_idx)),
+                start_value,
+            ));
+        }
+
+        // Add end field initialization
+        if let Some(info) = self.field_access_info(range_ty, FieldIndex::Ident(end_ident))
+            && !layout::is_zero_sized_ty(self.db, info.field_ty)
+        {
+            inits.push((
+                MirProjectionPath::from_projection(Projection::Field(info.field_idx)),
+                end_value,
+            ));
+        }
+
+        // Emit the aggregate initialization
+        self.emit_init_aggregate(alloc_value, inits);
+
+        alloc_value
+    }
+
     fn lower_index_expr(&mut self, expr: ExprId, lhs: ExprId, rhs: ExprId) -> ValueId {
         let value_id = self.ensure_value(expr);
         if self.current_block().is_none() {
@@ -941,11 +1138,17 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         match expr.data(self.db, self.body) {
             Partial::Present(Expr::Path(_)) => {
                 let binding = self.typed_body.expr_prop(self.db, expr).binding?;
-                if !matches!(binding, LocalBinding::EffectParam { .. }) {
-                    return None;
-                }
-                if self.effect_param_key_is_trait(binding) {
-                    return None;
+                match binding {
+                    LocalBinding::EffectParam { .. } => {
+                        if self.effect_param_key_is_trait(binding) {
+                            return None;
+                        }
+                    }
+                    LocalBinding::Param {
+                        site: ParamSite::EffectField(_),
+                        ..
+                    } => {}
+                    _ => return None,
                 }
 
                 let ty = self.typed_body.expr_ty(self.db, expr);
@@ -1206,46 +1409,13 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                             }
                         }
                     }
-                    Pat::Tuple(pats) => {
+                    Pat::Tuple(_) | Pat::PathTuple(_, _) | Pat::Record(_, _) => {
                         let Some(expr) = value else {
                             return;
                         };
-                        let tuple_value = self.lower_expr(*expr);
-                        let base_space = self.value_address_space(tuple_value);
-                        for (field_idx, field_pat) in pats.iter().enumerate() {
-                            let Partial::Present(field_pat_data) =
-                                field_pat.data(self.db, self.body)
-                            else {
-                                continue;
-                            };
-                            if matches!(field_pat_data, Pat::WildCard | Pat::Rest) {
-                                continue;
-                            }
-                            let binding = self.typed_body.pat_binding(*field_pat).unwrap_or(
-                                LocalBinding::Local {
-                                    pat: *field_pat,
-                                    is_mut: matches!(field_pat_data, Pat::Path(_, true)),
-                                },
-                            );
-                            let Some(local) = self.local_for_binding(binding) else {
-                                continue;
-                            };
-                            let field_ty = self.typed_body.pat_ty(self.db, *field_pat);
-                            let is_by_ref = self.is_by_ref_ty(field_ty);
-                            let place = Place::new(
-                                tuple_value,
-                                MirProjectionPath::from_projection(Projection::Field(field_idx)),
-                            );
-                            if is_by_ref {
-                                let field_value = self.alloc_value(
-                                    field_ty,
-                                    ValueOrigin::PlaceRef(place),
-                                    ValueRepr::Ref(base_space),
-                                );
-                                self.assign(Some(stmt_id), Some(local), Rvalue::Value(field_value));
-                            } else {
-                                self.assign(Some(stmt_id), Some(local), Rvalue::Load { place });
-                            }
+                        let value_id = self.lower_expr(*expr);
+                        if self.current_block().is_some() {
+                            self.bind_pat_value(*pat, value_id);
                         }
                     }
                     _ => {
@@ -1258,8 +1428,8 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                     }
                 }
             }
-            Stmt::For(_, _, _) => {
-                panic!("for loops are not supported in MIR lowering yet");
+            Stmt::For(pat, iter_expr, body) => {
+                self.lower_for(stmt_id, *pat, *iter_expr, *body);
             }
             Stmt::While(cond, body_expr) => self.lower_while(*cond, *body_expr),
             Stmt::Continue => {
@@ -1273,7 +1443,7 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
             Stmt::Return(value) => {
                 self.move_to_block(block);
                 if let Some(expr) = value {
-                    let ret_ty = self.func.return_ty(self.db);
+                    let ret_ty = self.return_ty;
                     let returns_value = !self.is_unit_ty(ret_ty) && !ret_ty.is_never(self.db);
                     if returns_value {
                         let ret_value = Some(self.lower_expr(*expr));
@@ -1344,6 +1514,493 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
                 body: body_block,
                 exit: exit_block,
                 backedge,
+            },
+        );
+
+        self.move_to_block(exit_block);
+    }
+
+    /// Lowers a `for` loop by desugaring into a while loop.
+    ///
+    /// For Range (`for i in start..end`):
+    ///   - The loop variable `i` is initialized to `start`
+    ///   - Loop continues while `i < end`
+    ///   - Each iteration increments `i` by 1
+    ///
+    /// Lower a for-loop using the generic Seq trait approach when available.
+    ///
+    /// If the type checker resolved Seq::len and Seq::get methods for this loop,
+    /// uses those to implement iteration. Otherwise falls back to special-cased
+    /// array lowering (legacy path for ill-typed code).
+    fn lower_for(&mut self, stmt: StmtId, pat: PatId, iter_expr: ExprId, body_expr: ExprId) {
+        let Some(block) = self.current_block() else {
+            return;
+        };
+
+        // Try to use resolved Seq methods from type checker
+        if let Some(seq_info) = self.typed_body.for_loop_seq(stmt).cloned() {
+            self.lower_for_seq(stmt, pat, iter_expr, body_expr, block, &seq_info);
+            return;
+        }
+
+        // Fallback to special-cased lowering for arrays.
+        let iter_ty = self.typed_body.expr_ty(self.db, iter_expr);
+        if iter_ty.is_array(self.db) {
+            self.lower_for_array(stmt, pat, iter_expr, body_expr, block);
+        }
+    }
+
+    /// Lower a for-loop using the generic Seq trait methods.
+    ///
+    /// Desugars `for x in seq` into:
+    /// ```
+    /// let __idx = 0
+    /// let __len = seq.len()
+    /// while __idx < __len {
+    ///     let x = seq.get(__idx)
+    ///     body
+    ///     __idx = __idx + 1
+    /// }
+    /// ```
+    fn lower_for_seq(
+        &mut self,
+        stmt: StmtId,
+        pat: PatId,
+        iter_expr: ExprId,
+        body_expr: ExprId,
+        block: BasicBlockId,
+        seq_info: &ForLoopSeq<'db>,
+    ) {
+        let usize_ty = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)));
+        let elem_ty = seq_info.elem_ty;
+
+        // Lower the iterable expression
+        self.move_to_block(block);
+        let iterable_value = self.lower_expr(iter_expr);
+        let Some(after_iter_block) = self.current_block() else {
+            return;
+        };
+
+        // Create hidden index local
+        let idx_local = self.alloc_temp_local(usize_ty, true, "for_idx");
+
+        // Initialize index to 0
+        self.move_to_block(after_iter_block);
+        let zero = self.synthetic_u256(BigUint::from(0u64));
+        self.assign(Some(stmt), Some(idx_local), Rvalue::Value(zero));
+
+        // Call Seq::len to get the length
+        let len_value = self.emit_seq_len_call(
+            iterable_value,
+            &seq_info.len_callable,
+            &seq_info.len_effect_args,
+        );
+        let Some(after_len_block) = self.current_block() else {
+            return;
+        };
+
+        // Allocate blocks for loop structure
+        let cond_entry = self.alloc_block();
+        let body_block = self.alloc_block();
+        let inc_block = self.alloc_block();
+        let exit_block = self.alloc_block();
+
+        // Jump to condition
+        self.move_to_block(after_len_block);
+        self.goto(cond_entry);
+
+        // Condition: idx < len
+        self.move_to_block(cond_entry);
+        let idx_value = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Local(idx_local),
+            repr: ValueRepr::Word,
+        });
+        let cond_value = self.builder.body.alloc_value(ValueData {
+            ty: TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Bool))),
+            origin: ValueOrigin::Binary {
+                op: BinOp::Comp(hir::hir_def::expr::CompBinOp::Lt),
+                lhs: idx_value,
+                rhs: len_value,
+            },
+            repr: ValueRepr::Word,
+        });
+        let cond_header = cond_entry;
+
+        // Set up loop scope
+        self.loop_stack.push(LoopScope {
+            continue_target: inc_block,
+            break_target: exit_block,
+        });
+
+        // Body block: call get, bind element, execute body
+        self.move_to_block(body_block);
+
+        // Call Seq::get to get the element
+        let idx_for_get = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Local(idx_local),
+            repr: ValueRepr::Word,
+        });
+        let elem_value = self.emit_seq_get_call(
+            iterable_value,
+            idx_for_get,
+            elem_ty,
+            &seq_info.get_callable,
+            &seq_info.get_effect_args,
+        );
+        self.bind_pat_value(pat, elem_value);
+
+        // Execute the body
+        let _ = self.lower_expr(body_expr);
+        let body_end = self.current_block();
+
+        self.loop_stack.pop();
+
+        // Normal fallthrough from the body goes to the increment block; `continue`
+        // also targets `inc_block` via the loop scope.
+        if let Some(body_end_block) = body_end {
+            self.move_to_block(body_end_block);
+            self.goto(inc_block);
+        }
+
+        // Increment block: idx = idx + 1; goto cond
+        self.move_to_block(inc_block);
+        let one = self.synthetic_u256(BigUint::from(1u64));
+        let current_idx = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Local(idx_local),
+            repr: ValueRepr::Word,
+        });
+        let incremented = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Binary {
+                op: BinOp::Arith(ArithBinOp::Add),
+                lhs: current_idx,
+                rhs: one,
+            },
+            repr: ValueRepr::Word,
+        });
+        self.assign(None, Some(idx_local), Rvalue::Value(incremented));
+        let Some(inc_end) = self.current_block() else {
+            return;
+        };
+        self.goto(cond_entry);
+
+        // Wire up the branch
+        self.move_to_block(cond_header);
+        self.branch(cond_value, body_block, exit_block);
+
+        // Register loop info
+        self.builder.body.loop_headers.insert(
+            cond_entry,
+            LoopInfo {
+                body: body_block,
+                exit: exit_block,
+                backedge: Some(inc_end),
+            },
+        );
+
+        self.move_to_block(exit_block);
+    }
+
+    /// Emit a synthesized call to Seq::len(self) -> usize
+    fn emit_seq_len_call(
+        &mut self,
+        receiver: ValueId,
+        callable: &Callable<'db>,
+        resolved_effect_args: &[ResolvedEffectArg<'db>],
+    ) -> ValueId {
+        let usize_ty = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)));
+
+        // Create a local for the result
+        let result_local = self.alloc_temp_local(usize_ty, false, "seq_len");
+
+        let mut receiver_space = None;
+        let needs_space = callable
+            .callable_def
+            .receiver_ty(self.db)
+            .is_some_and(|binder| {
+                let ty = binder.instantiate_identity();
+                self.value_repr_for_ty(ty, AddressSpaceKind::Memory)
+                    .address_space()
+                    .is_some()
+            });
+        if needs_space {
+            receiver_space = Some(self.value_address_space(receiver));
+        }
+
+        let mut effect_args = Vec::new();
+        let mut effect_writebacks: Vec<(LocalId, Place<'db>)> = Vec::new();
+        if let hir::hir_def::CallableDef::Func(func_def) = callable.callable_def
+            && func_def.has_effects(self.db)
+            && extract_contract_function(self.db, func_def).is_none()
+        {
+            for resolved_arg in resolved_effect_args {
+                let value = self.lower_effect_arg(resolved_arg, &mut effect_writebacks);
+                effect_args.push(value);
+            }
+        }
+
+        let hir_target = crate::ir::HirCallTarget {
+            callable_def: callable.callable_def,
+            generic_args: callable.generic_args().to_vec(),
+            trait_inst: callable.trait_inst(),
+        };
+        let call_origin = CallOrigin {
+            expr: None,
+            hir_target: Some(hir_target),
+            args: vec![receiver],
+            effect_args,
+            receiver_space,
+            resolved_name: None,
+        };
+
+        self.assign(None, Some(result_local), Rvalue::Call(call_origin));
+        for (dest, place) in effect_writebacks {
+            self.assign(None, Some(dest), Rvalue::Load { place });
+        }
+
+        self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Local(result_local),
+            repr: ValueRepr::Word,
+        })
+    }
+
+    /// Emit a synthesized call to Seq::get(self, i: usize) -> T
+    fn emit_seq_get_call(
+        &mut self,
+        receiver: ValueId,
+        index: ValueId,
+        elem_ty: TyId<'db>,
+        callable: &Callable<'db>,
+        resolved_effect_args: &[ResolvedEffectArg<'db>],
+    ) -> ValueId {
+        let repr = if self.is_by_ref_ty(elem_ty) {
+            ValueRepr::Ref(self.value_address_space(receiver))
+        } else {
+            ValueRepr::Word
+        };
+
+        // Create a local for the result
+        let result_local = self.alloc_temp_local(elem_ty, false, "seq_get");
+        if let ValueRepr::Ref(space) = repr {
+            self.builder.body.locals[result_local.index()].address_space = space;
+        }
+
+        let mut receiver_space = None;
+        let needs_space = callable
+            .callable_def
+            .receiver_ty(self.db)
+            .is_some_and(|binder| {
+                let ty = binder.instantiate_identity();
+                self.value_repr_for_ty(ty, AddressSpaceKind::Memory)
+                    .address_space()
+                    .is_some()
+            });
+        if needs_space {
+            receiver_space = Some(self.value_address_space(receiver));
+        }
+
+        let mut effect_args = Vec::new();
+        let mut effect_writebacks: Vec<(LocalId, Place<'db>)> = Vec::new();
+        if let hir::hir_def::CallableDef::Func(func_def) = callable.callable_def
+            && func_def.has_effects(self.db)
+            && extract_contract_function(self.db, func_def).is_none()
+        {
+            for resolved_arg in resolved_effect_args {
+                let value = self.lower_effect_arg(resolved_arg, &mut effect_writebacks);
+                effect_args.push(value);
+            }
+        }
+
+        let hir_target = crate::ir::HirCallTarget {
+            callable_def: callable.callable_def,
+            generic_args: callable.generic_args().to_vec(),
+            trait_inst: callable.trait_inst(),
+        };
+        let call_origin = CallOrigin {
+            expr: None,
+            hir_target: Some(hir_target),
+            args: vec![receiver, index],
+            effect_args,
+            receiver_space,
+            resolved_name: None,
+        };
+
+        self.assign(None, Some(result_local), Rvalue::Call(call_origin));
+        for (dest, place) in effect_writebacks {
+            self.assign(None, Some(dest), Rvalue::Load { place });
+        }
+
+        self.builder.body.alloc_value(ValueData {
+            ty: elem_ty,
+            origin: ValueOrigin::Local(result_local),
+            repr,
+        })
+    }
+
+    /// Lower a for-loop over an array.
+    ///
+    /// Desugars `for x in arr` into:
+    /// ```
+    /// let mut __idx = 0
+    /// while __idx < arr.len {
+    ///     let x = arr[__idx]
+    ///     body
+    ///     __idx = __idx + 1
+    /// }
+    /// ```
+    fn lower_for_array(
+        &mut self,
+        stmt: StmtId,
+        pat: PatId,
+        iter_expr: ExprId,
+        body_expr: ExprId,
+        block: BasicBlockId,
+    ) {
+        let usize_ty = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)));
+
+        // Lower the array expression
+        self.move_to_block(block);
+        let array_value = self.lower_expr(iter_expr);
+        let Some(after_array_block) = self.current_block() else {
+            return;
+        };
+
+        // Get array type info
+        let array_ty = self.typed_body.expr_ty(self.db, iter_expr);
+        let args = array_ty.generic_args(self.db);
+        let elem_ty = args.first().copied().unwrap_or(usize_ty);
+
+        // Get array length from type
+        let array_len = layout::array_len(self.db, array_ty).unwrap_or(0);
+        let len_value = self.synthetic_u256(BigUint::from(array_len));
+
+        // Create hidden index local
+        let idx_local = self.alloc_temp_local(usize_ty, true, "for_idx");
+
+        // Initialize index to 0
+        self.move_to_block(after_array_block);
+        let zero = self.synthetic_u256(BigUint::from(0u64));
+        self.assign(Some(stmt), Some(idx_local), Rvalue::Value(zero));
+
+        // Allocate blocks
+        let cond_entry = self.alloc_block();
+        let body_block = self.alloc_block();
+        let inc_block = self.alloc_block();
+        let exit_block = self.alloc_block();
+
+        // Jump to condition
+        self.goto(cond_entry);
+
+        // Condition: idx < len
+        self.move_to_block(cond_entry);
+        let idx_value = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Local(idx_local),
+            repr: ValueRepr::Word,
+        });
+        let cond_value = self.builder.body.alloc_value(ValueData {
+            ty: TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Bool))),
+            origin: ValueOrigin::Binary {
+                op: BinOp::Comp(hir::hir_def::expr::CompBinOp::Lt),
+                lhs: idx_value,
+                rhs: len_value,
+            },
+            repr: ValueRepr::Word,
+        });
+        let cond_header = cond_entry;
+
+        // Set up loop scope
+        self.loop_stack.push(LoopScope {
+            continue_target: inc_block,
+            break_target: exit_block,
+        });
+
+        // Body block: first bind element, then execute body
+        self.move_to_block(body_block);
+
+        // Bind element: elem = arr[idx]
+        let idx_for_access = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Local(idx_local),
+            repr: ValueRepr::Word,
+        });
+
+        let place = Place::new(
+            array_value,
+            MirProjectionPath::from_projection(Projection::Index(IndexSource::Dynamic(
+                idx_for_access,
+            ))),
+        );
+
+        let elem_value = if self.is_by_ref_ty(elem_ty) {
+            let addr_space = self.value_address_space(array_value);
+            self.builder.body.alloc_value(ValueData {
+                ty: elem_ty,
+                origin: ValueOrigin::PlaceRef(place),
+                repr: ValueRepr::Ref(addr_space),
+            })
+        } else {
+            let dest = self.alloc_temp_local(elem_ty, false, "load");
+            self.assign(None, Some(dest), Rvalue::Load { place });
+            self.builder.body.alloc_value(ValueData {
+                ty: elem_ty,
+                origin: ValueOrigin::Local(dest),
+                repr: self.value_repr_for_ty(elem_ty, AddressSpaceKind::Memory),
+            })
+        };
+
+        self.bind_pat_value(pat, elem_value);
+
+        // Execute the body
+        let _ = self.lower_expr(body_expr);
+        let body_end = self.current_block();
+
+        self.loop_stack.pop();
+
+        // Normal fallthrough from the body goes to the increment block; `continue`
+        // also targets `inc_block` via the loop scope.
+        if let Some(body_end_block) = body_end {
+            self.move_to_block(body_end_block);
+            self.goto(inc_block);
+        }
+
+        self.move_to_block(inc_block);
+        let one = self.synthetic_u256(BigUint::from(1u64));
+        let current_idx = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Local(idx_local),
+            repr: ValueRepr::Word,
+        });
+        let incremented = self.builder.body.alloc_value(ValueData {
+            ty: usize_ty,
+            origin: ValueOrigin::Binary {
+                op: BinOp::Arith(ArithBinOp::Add),
+                lhs: current_idx,
+                rhs: one,
+            },
+            repr: ValueRepr::Word,
+        });
+        self.assign(None, Some(idx_local), Rvalue::Value(incremented));
+        let Some(inc_end) = self.current_block() else {
+            return;
+        };
+        self.goto(cond_entry);
+
+        // Wire up branch
+        self.move_to_block(cond_header);
+        self.branch(cond_value, body_block, exit_block);
+
+        // Register loop info
+        self.builder.body.loop_headers.insert(
+            cond_entry,
+            LoopInfo {
+                body: body_block,
+                exit: exit_block,
+                backedge: Some(inc_end),
             },
         );
 

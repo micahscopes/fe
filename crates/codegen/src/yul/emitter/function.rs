@@ -1,10 +1,11 @@
 use driver::DriverDataBase;
-use mir::{BasicBlockId, MirFunction, Terminator};
+use mir::layout::TargetDataLayout;
+use mir::{BasicBlockId, MirFunction, Terminator, ir::MirFunctionOrigin};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::yul::{doc::YulDoc, errors::YulError, state::BlockState};
 
-use super::util::{escape_yul_reserved, function_name};
+use super::util::{function_name, prefix_yul_name};
 
 /// Emits Yul for a single MIR function.
 pub(super) struct FunctionEmitter<'db> {
@@ -12,6 +13,7 @@ pub(super) struct FunctionEmitter<'db> {
     pub(super) mir_func: &'db MirFunction<'db>,
     /// Mapping from monomorphized function symbols to code region labels.
     pub(super) code_regions: &'db FxHashMap<String, String>,
+    pub(super) layout: TargetDataLayout,
     ipdom: Vec<Option<BasicBlockId>>,
 }
 
@@ -27,15 +29,19 @@ impl<'db> FunctionEmitter<'db> {
         db: &'db DriverDataBase,
         mir_func: &'db MirFunction<'db>,
         code_regions: &'db FxHashMap<String, String>,
+        layout: TargetDataLayout,
     ) -> Result<Self, YulError> {
-        if mir_func.func.body(db).is_none() {
-            return Err(YulError::MissingBody(function_name(db, mir_func.func)));
+        if let MirFunctionOrigin::Hir(func) = mir_func.origin
+            && func.body(db).is_none()
+        {
+            return Err(YulError::MissingBody(function_name(db, func)));
         }
         let ipdom = compute_immediate_postdominators(&mir_func.body);
         Ok(Self {
             db,
             mir_func,
             code_regions,
+            layout,
             ipdom,
         })
     }
@@ -46,13 +52,13 @@ impl<'db> FunctionEmitter<'db> {
 
     /// Produces the final Yul docs for the current MIR function.
     pub(super) fn emit_doc(mut self) -> Result<Vec<YulDoc>, YulError> {
-        let func_name = self.mir_func.symbol_name.as_str();
+        let func_name = prefix_yul_name(&self.mir_func.symbol_name);
         let (param_names, mut state) = self.init_entry_state();
         let body_docs = self.emit_block(self.mir_func.body.entry, &mut state)?;
         let function_doc = YulDoc::block(
             format!(
                 "{} ",
-                self.format_function_signature(func_name, &param_names)
+                self.format_function_signature(&func_name, &param_names)
             ),
             body_docs,
         );
@@ -103,7 +109,7 @@ impl<'db> FunctionEmitter<'db> {
 }
 
 fn unique_yul_name(raw_name: &str, used: &mut FxHashSet<String>) -> String {
-    let base = escape_yul_reserved(raw_name);
+    let base = format!("${raw_name}");
     let mut candidate = base.clone();
     let mut suffix = 0;
     while used.contains(&candidate) {

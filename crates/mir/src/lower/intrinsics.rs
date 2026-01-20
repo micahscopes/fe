@@ -104,6 +104,29 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         }
     }
 
+    /// Returns `true` if the callable definition refers to the `__bitcast` intrinsic.
+    ///
+    /// This is the generic bitcast intrinsic `__bitcast<From, To>(value: From) -> To` in core
+    /// that reinterprets bits between primitive integer types without runtime cost.
+    pub(super) fn is_cast_intrinsic(&self, func_def: CallableDef<'db>) -> bool {
+        match func_def.ingot(self.db).kind(self.db) {
+            IngotKind::Core | IngotKind::Std => {}
+            _ => return false,
+        }
+
+        let CallableDef::Func(func) = func_def else {
+            return false;
+        };
+        if func.body(self.db).is_some() {
+            return false;
+        }
+
+        let Some(name) = func_def.name(self.db) else {
+            return false;
+        };
+        name.data(self.db).as_str() == "__bitcast"
+    }
+
     /// Resolves the `code_region` target represented by an intrinsic argument path.
     ///
     /// # Parameters
@@ -113,7 +136,23 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
     /// A `CodeRegionRoot` describing the referenced function, or `None` on failure.
     pub(super) fn code_region_target(&self, expr: ExprId) -> Option<CodeRegionRoot<'db>> {
         let ty = self.typed_body.expr_ty(self.db, expr);
-        self.code_region_target_from_ty(ty)
+        let (base, args) = ty.decompose_ty_app(self.db);
+        let TyData::TyBase(TyBase::Func(CallableDef::Func(func))) = base.data(self.db) else {
+            return None;
+        };
+        let _ = extract_contract_function(self.db, *func)?;
+        let generic_args = args.to_vec();
+        debug_assert!(
+            generic_args
+                .iter()
+                .all(|ty| !matches!(ty.data(self.db), TyData::TyVar(_))),
+            "code_region target generic args should never contain TyVar; this should be canonicalized during typing"
+        );
+        Some(CodeRegionRoot {
+            origin: crate::ir::MirFunctionOrigin::Hir(*func),
+            generic_args,
+            symbol: None,
+        })
     }
 
     /// Resolves the `code_region` target represented by a function-item type.
@@ -128,7 +167,7 @@ impl<'db, 'a> MirBuilder<'db, 'a> {
         };
         let _ = extract_contract_function(self.db, *func)?;
         Some(CodeRegionRoot {
-            func: *func,
+            origin: crate::ir::MirFunctionOrigin::Hir(*func),
             generic_args: args.to_vec(),
             symbol: None,
         })
