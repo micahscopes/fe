@@ -71,17 +71,31 @@ impl LspDiagnostics for DriverDataBase {
             }
         }
 
-        let mut mir_diags =
-            self.mir_diagnostics_for_ingot(ingot, MirDiagnosticsMode::TemplatesOnly);
-        mir_diags.sort_by(|lhs, rhs| match lhs.error_code.cmp(&rhs.error_code) {
-            std::cmp::Ordering::Equal => lhs.primary_span().cmp(&rhs.primary_span()),
-            ord => ord,
-        });
-        for diag in mir_diags {
-            let lsp_diags = diag_to_lsp(self, diag).clone();
-            for (uri, more_diags) in lsp_diags {
-                let diags = result.entry(uri.clone()).or_insert_with(Vec::new);
-                diags.extend(more_diags);
+        // MIR diagnostics may panic on malformed intermediate text during editing.
+        // Catch panics to prevent killing the Backend actor (which would cause
+        // SendError for all subsequent LSP requests until restart).
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.mir_diagnostics_for_ingot(ingot, MirDiagnosticsMode::TemplatesOnly)
+        })) {
+            Ok(mut mir_diags) => {
+                mir_diags.sort_by(|lhs, rhs| match lhs.error_code.cmp(&rhs.error_code) {
+                    std::cmp::Ordering::Equal => lhs.primary_span().cmp(&rhs.primary_span()),
+                    ord => ord,
+                });
+                for diag in mir_diags {
+                    let lsp_diags = diag_to_lsp(self, diag).clone();
+                    for (uri, more_diags) in lsp_diags {
+                        let diags = result.entry(uri.clone()).or_insert_with(Vec::new);
+                        diags.extend(more_diags);
+                    }
+                }
+            }
+            Err(panic_info) => {
+                tracing::error!(
+                    "MIR diagnostics panicked (skipping): {:?}",
+                    panic_info.downcast_ref::<&str>().copied()
+                        .or_else(|| panic_info.downcast_ref::<String>().map(|s| s.as_str()))
+                );
             }
         }
 
@@ -188,5 +202,119 @@ fn standalone_file_warning() -> Diagnostic {
         tags: None,
         code_description: None,
         data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::load_ingot_from_directory;
+    use common::InputDb;
+    use std::path::PathBuf;
+
+    const FIXTURE: &str = "single_ingot";
+
+    fn fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_files")
+            .join(FIXTURE)
+    }
+
+    fn lib_url() -> Url {
+        Url::from_file_path(fixture_path().join("src").join("lib.fe")).unwrap()
+    }
+
+    /// Set up the DB from the fixture directory.
+    fn setup_db() -> DriverDataBase {
+        let mut db = DriverDataBase::default();
+        load_ingot_from_directory(&mut db, &fixture_path());
+        db
+    }
+
+    /// Resolve the ingot for lib.fe and run diagnostics_for_ingot.
+    fn run_diagnostics(db: &DriverDataBase) -> FxHashMap<Url, Vec<Diagnostic>> {
+        let ingot = db
+            .workspace()
+            .containing_ingot(db, lib_url())
+            .expect("ingot not found");
+        db.diagnostics_for_ingot(ingot)
+    }
+
+    /// Update file text then run diagnostics (re-resolves ingot after mutation).
+    fn update_and_diagnose(db: &mut DriverDataBase, new_text: &str) -> FxHashMap<Url, Vec<Diagnostic>> {
+        db.workspace().update(db, lib_url(), new_text.to_string());
+        run_diagnostics(db)
+    }
+
+    /// Regression test: diagnostics_for_ingot must not panic on valid code.
+    #[test]
+    fn diagnostics_for_valid_ingot_does_not_panic() {
+        let db = setup_db();
+        let _diags = run_diagnostics(&db);
+    }
+
+    /// Regression test: diagnostics must survive incomplete/truncated source text,
+    /// simulating a user mid-edit (e.g., typing `struct S<T, const N: usize>`).
+    #[test]
+    fn diagnostics_survive_truncated_source() {
+        let mut db = setup_db();
+        let _diags = update_and_diagnose(&mut db, "struct S<T, const");
+    }
+
+    /// Regression test: diagnostics must survive completely empty file content.
+    #[test]
+    fn diagnostics_survive_empty_file() {
+        let mut db = setup_db();
+        let _diags = update_and_diagnose(&mut db, "");
+    }
+
+    /// Regression test: diagnostics must survive garbage/non-Fe content.
+    #[test]
+    fn diagnostics_survive_garbage_content() {
+        let mut db = setup_db();
+        let _diags = update_and_diagnose(&mut db, "}{}{}{{{{}}}}}(((");
+    }
+
+    /// Regression test: simulates the exact "mself" scenario Sean reported —
+    /// an intermediate editing state where `self` is being changed to `mut self`.
+    #[test]
+    fn diagnostics_survive_intermediate_self_edit() {
+        let mut db = setup_db();
+        let _diags = update_and_diagnose(
+            &mut db,
+            r#"
+struct Foo {
+    x: u256
+}
+
+impl Foo {
+    fn set(mself, val: u256) {
+        self.x = val
+    }
+}
+"#,
+        );
+    }
+
+    /// Regression test: simulates partial generic struct definition.
+    #[test]
+    fn diagnostics_survive_partial_generic_definition() {
+        let mut db = setup_db();
+        let _diags = update_and_diagnose(&mut db, "struct S<T, const N:");
+    }
+
+    /// Regression test: diagnostics must not crash on incomplete function bodies
+    /// during mid-edit states.
+    #[test]
+    fn diagnostics_survive_partial_function_body() {
+        let mut db = setup_db();
+        let _diags = update_and_diagnose(
+            &mut db,
+            r#"
+fn foo() -> u256 {
+    let x: u256 = 42
+    let y: u256 =
+"#,
+        );
     }
 }
