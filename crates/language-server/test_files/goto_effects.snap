@@ -1,5 +1,6 @@
 ---
 source: crates/language-server/src/functionality/goto.rs
+assertion_line: 448
 expression: snapshot
 input_file: test_files/goto_effects.fe
 ---
@@ -295,7 +296,7 @@ note:
    ┌─ goto_effects.fe:86:17
    │
 86 │             let c: u256 = ctx.caller()
-   │                 ^ -> local: u256
+   │                 ^ -> local: invalid(Other)
 
 note: 
    ┌─ goto_effects.fe:86:27
@@ -325,7 +326,7 @@ note:
    ┌─ goto_effects.fe:87:45
    │
 87 │             state.value = state.value + x + c
-   │                                             ^ -> local: u256
+   │                                             ^ -> local: invalid(Other)
 
 note: 
    ┌─ goto_effects.fe:88:13
