@@ -1,0 +1,5 @@
+[patch.'https://github.com/fe-lang/sonatina']
+sonatina-ir = { path = "/home/micah/hacker-stuff-2023/fe-stuff/sonatina/crates/ir" }
+sonatina-triple = { path = "/home/micah/hacker-stuff-2023/fe-stuff/sonatina/crates/triple" }
+sonatina-codegen = { path = "/home/micah/hacker-stuff-2023/fe-stuff/sonatina/crates/codegen" }
+sonatina-verifier = { path = "/home/micah/hacker-stuff-2023/fe-stuff/sonatina/crates/verifier" }
