@@ -1,0 +1,14 @@
+WHAT: Removes InlineHint::Never from dispatch arm helper functions generated
+by the Fe MIR lowering.
+
+WHY: Each contract selector match arm generates a helper function for parameter
+decoding. These were marked Never-inline, preventing Sonatina from merging
+them into the dispatch function. Removing the hint allows inlining.
+
+GAS IMPACT: None on any contract.
+
+TEAM NOTES: This commit removed the inline hint but the Sonatina inliner
+still didn't inline these functions — likely because they exceeded other
+inlining thresholds or the cost model rejected them. The follow-up (step 21,
+handler inlining) was needed to get actual gas improvement. This step laid
+the groundwork.
