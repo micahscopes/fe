@@ -1,0 +1,29 @@
+WHAT: Adds #[arithmetic(unchecked)] to CallData::len(), making the
+calldatasize - base subtraction unchecked.
+
+WHY: CallData stores a base offset; len() computes calldatasize - base.
+This subtraction can never underflow because base is always <= calldatasize
+(it's set from calldatasize at construction). The checked subtraction
+generates uaddo/overflow-branch that wastes ~3 opcodes per call.
+
+GAS IMPACT: -1236 gas total. ALL 20 benchmarked functions improved.
+  math: -80 each (3 functions)
+  governance/vote: -100
+  erc20: -60 to -120
+  governance: -40 to -100
+  verifier/plonkVerify: -140
+  escrow: -16 to -20
+  amm: -20 to -60
+
+CODEGEN IMPACT: Removes uaddo from CallData::len hot path. Since len()
+is called during dispatch (checking minimum calldata size), every
+contract benefits.
+
+TEAM NOTES: Second Fe std library change in a row that improves all
+contracts universally. Steps 15+16 together saved ~3600 gas across all
+contracts. This validates the strategy of targeting shared std library
+code paths over per-contract optimizer tweaks.
+
+NOTE: In the original campaign, this step showed a merkle regression
+because the rosetta merkle source was different. With consistent source,
+the improvement is universal.
