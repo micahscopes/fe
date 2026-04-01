@@ -1,0 +1,28 @@
+WHAT: Removes InlineHint::Never from recv handler functions. When handlers
+are inlined into the dispatch function, the optimizer can see through the
+call boundary and eliminate redundant object allocations.
+
+WHY: Each contract function was lowered as a separate handler function that
+the dispatch function called. The Never-inline hint prevented merging them.
+Once inlined, struct parameters that were allocated as objrefs in the handler
+become visible to the caller's optimization scope, enabling scalarization
+and dead store elimination.
+
+GAS IMPACT: -1268 gas total. ALL 18 non-merkle functions improved.
+  math: -121 to -124 each (-2.0%)
+  amm/swapAForB: -124
+  erc20: -68 to -136
+  governance: -22 to -71
+  escrow: -35 to -53
+  amm: -24 to -55
+  verifier/groth16Verify: -35
+
+CODEGEN IMPACT: Function count in IR should drop as handlers merge into
+dispatch. Object allocations may decrease as cross-function scalarization
+becomes possible.
+
+TEAM NOTES: This is the counterpart to step 19 (dispatch arm inlining).
+Step 19 removed the hint but didn't improve gas; step 21 removed the
+HANDLER hint and got real improvement. The distinction: dispatch arms
+are thin wrappers, but handlers contain the actual function body. Inlining
+the handler is what exposes struct allocation/access to the optimizer.
