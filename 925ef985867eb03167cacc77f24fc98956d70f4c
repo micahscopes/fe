@@ -1,0 +1,18 @@
+WHAT: Adds #[arithmetic(unchecked)] to all crypto precompile wrappers in
+std::evm::crypto (ec_add, ec_mul, ec_pairing, sha256, modexp, ecrecover).
+
+WHY: Crypto precompile wrappers do pointer arithmetic to set up staticcall
+input buffers. These are bounded by fixed sizes (128, 96, 192 bytes) and
+can never overflow. The checked arithmetic generates unnecessary uaddo
+instructions in hot inner loops of the verifier.
+
+GAS IMPACT: -3608 gas total.
+  verifier/plonkVerify: -3498 (-1.0%)
+  verifier/groth16Verify: -110
+  Other contracts: no change (don't use crypto precompiles)
+
+TEAM NOTES: Targeted optimization for the verifier. The plonk verifier
+calls ec_add 8 times, ec_mul 10 times, modexp 6 times — each with 2-3
+uaddo instructions from buffer pointer arithmetic. Eliminating ~50 uaddo
+instructions saves ~3500 gas. This demonstrates that #[arithmetic(unchecked)]
+on provably-safe std library functions is a reliable optimization pattern.
