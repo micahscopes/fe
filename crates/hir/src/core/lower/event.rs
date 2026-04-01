@@ -474,6 +474,7 @@ fn lower_emit_method<'db>(
     let data_ptr_ident = builder.ident("data_ptr");
     let reserve_head_ident = builder.ident("reserve_head");
     let encode_ident = builder.ident("encode");
+    let encode_to_ptr_ident = builder.ident("encode_to_ptr");
     let finish_ident = builder.ident("finish");
     let as_topic_ident = builder.ident("as_topic");
     let log_method_ident = builder.ident(&format!("log{}", indexed_fields.len() + 1));
@@ -526,20 +527,9 @@ fn lower_emit_method<'db>(
             let (data_ptr, data_len) = if data_fields.is_empty() {
                 (int_lit(body, 0), int_lit(body, 0))
             } else {
-                let enc_new_call = {
-                    let new_path = PathId::from_ident(db, roots.std)
-                        .push_str(db, "abi")
-                        .push_str(db, "SolEncoder")
-                        .push_str(db, "new");
-                    let callee = body.path_expr(new_path);
-                    body.call_expr(callee, vec![])
-                };
-                let enc_pat = body.push_pat(Pat::Path(
-                    Partial::Present(PathId::from_ident(db, enc_ident)),
-                    true,
-                ));
-                body.emit_stmt(Stmt::Let(enc_pat, None, Some(enc_new_call)));
-
+                // Direct encoding: allocate memory, then encode_to_ptr.
+                // This avoids the SolEncoder cursor overhead (alloc + reserve_head
+                // + finish) by writing directly to a pre-allocated buffer.
                 let size_ty = if data_fields.len() == 1 {
                     data_fields[0].1
                 } else {
@@ -557,12 +547,21 @@ fn lower_emit_method<'db>(
                 ));
                 body.emit_stmt(Stmt::Let(data_len_pat, None, Some(encoded_size_expr)));
 
-                let enc_expr = body.ident_expr(enc_ident);
-                let data_len_expr = body.ident_expr(data_len_ident);
-                let reserve_head =
-                    body.method_call_expr(enc_expr, reserve_head_ident, vec![data_len_expr]);
-                body.emit_expr_stmt(reserve_head);
+                // Allocate buffer: data_ptr = mem::alloc(data_len)
+                let alloc_path = PathId::from_ident(db, roots.std)
+                    .push_str(db, "evm")
+                    .push_str(db, "mem")
+                    .push_str(db, "alloc");
+                let alloc_callee = body.path_expr(alloc_path);
+                let data_len_arg = body.ident_expr(data_len_ident);
+                let alloc_call = body.call_expr(alloc_callee, vec![data_len_arg]);
+                let data_ptr_pat = body.push_pat(Pat::Path(
+                    Partial::Present(PathId::from_ident(db, data_ptr_ident)),
+                    false,
+                ));
+                body.emit_stmt(Stmt::Let(data_ptr_pat, None, Some(alloc_call)));
 
+                // Encode directly to buffer: data.encode_to_ptr(data_ptr)
                 let encode_receiver = if data_fields.len() == 1 {
                     self_field_expr(body, self_expr, data_fields[0].0)
                 } else {
@@ -572,23 +571,13 @@ fn lower_emit_method<'db>(
                     }
                     body.push_expr(Expr::Tuple(elems))
                 };
-                let enc_arg_base = body.ident_expr(enc_ident);
-                let enc_arg = body.mut_expr(enc_arg_base);
-                let encode = body.method_call_expr(encode_receiver, encode_ident, vec![enc_arg]);
+                let data_ptr_arg = body.ident_expr(data_ptr_ident);
+                let encode = body.method_call_expr(
+                    encode_receiver,
+                    encode_to_ptr_ident,
+                    vec![data_ptr_arg],
+                );
                 body.emit_expr_stmt(encode);
-
-                let enc_expr = body.ident_expr(enc_ident);
-                let finish_call = body.method_call_expr(enc_expr, finish_ident, vec![]);
-                let data_ptr_pat = body.push_pat(Pat::Path(
-                    Partial::Present(PathId::from_ident(db, data_ptr_ident)),
-                    false,
-                ));
-                let data_len_pat = body.push_pat(Pat::Path(
-                    Partial::Present(PathId::from_ident(db, data_len_ident)),
-                    false,
-                ));
-                let tuple_pat = body.push_pat(Pat::Tuple(vec![data_ptr_pat, data_len_pat]));
-                body.emit_stmt(Stmt::Let(tuple_pat, None, Some(finish_call)));
 
                 (
                     body.ident_expr(data_ptr_ident),
