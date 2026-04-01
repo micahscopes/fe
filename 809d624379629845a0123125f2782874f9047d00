@@ -188,6 +188,44 @@ mem_alloc 0
 0
 evm_malloc 8
 
+--- merkle ---
+functions 9
+ir_insts 72
+blocks 0
+0
+obj.store 10
+obj.load 7
+obj.alloc 4
+obj.proj 19
+call  13
+uaddo 3
+umulo 1
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 3
+evm_mstore 0
+0
+evm_mload 0
+0
+evm_sstore 0
+0
+evm_sload 0
+0
+brz 0
+0
+phi 3
+ret  0
+0
+is_zero 3
+ptr_to_int 1
+int_to_ptr 0
+0
+mem_alloc 0
+0
+evm_malloc 1
+
 --- verifier ---
 functions 41
 ir_insts 1122
