@@ -336,6 +336,15 @@ impl<I> AbiDecoder<Sol> for SolDecoder<I>
         w
     }
 
+    /// Read a word without bounds checking. Caller must ensure the
+    /// cursor position is within bounds before calling.
+    #[arithmetic(unchecked)]
+    fn read_word_unchecked(mut self) -> u256 {
+        let w = self.cur.input.word_at(self.cur.pos)
+        self.cur.pos = self.cur.pos + 32
+        w
+    }
+
     #[arithmetic(unchecked)]
     fn peek_word(self, _ at: u256) -> u256 {
         let len = self.cur.input.len()
