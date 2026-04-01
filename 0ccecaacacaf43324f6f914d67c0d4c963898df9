@@ -1,0 +1,22 @@
+WHAT: Adds #[arithmetic(unchecked)] to SolEncoder's finish() and write_word_at()
+methods.
+
+WHY: finish() computes end - start (can't underflow, end >= start by construction).
+write_word_at() does a plain mstore with no arithmetic. Both had redundant
+overflow checks.
+
+GAS IMPACT: Mixed, small. -465 gas total across contracts.
+  amm: -113 to -117
+  math: -15 to -17
+  escrow: -12 to -17
+  governance: -6 to -27
+  erc20: +12 to +15 (small regression from code layout effects)
+
+CODEGEN IMPACT: Removes 2 uaddo instructions from encoder paths. The erc20
+regression is likely a code layout artifact (different instruction ordering
+changes JUMPDEST positions).
+
+TEAM NOTES: Diminishing returns on unchecked annotations. The big wins (steps
+15, 16, 18) already captured the high-frequency paths. Encoder paths are
+called less often than decoder paths (decode happens on every call, encode
+only on return/events).
