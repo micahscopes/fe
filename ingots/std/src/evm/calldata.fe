@@ -30,6 +30,7 @@ impl CallData {
 }
 
 impl ByteInput for CallData {
+    #[arithmetic(unchecked)]
     fn len(self) -> u256 {
         let total = calldatasize()
         if self.base > total {
