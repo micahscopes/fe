@@ -419,6 +419,7 @@ impl AbiEncoder<Sol> for SolEncoder {
         self.pos = p + 32
     }
 
+    #[arithmetic(unchecked)]
     fn write_word_at(mut self, at: u256, value: u256) {
         mstore(addr: at, value: value)
     }
@@ -442,6 +443,7 @@ impl AbiEncoder<Sol> for SolEncoder {
         ptr
     }
 
+    #[arithmetic(unchecked)]
     fn finish(self) -> (u256, u256) {
         let start = self.start
         (start, self.end - start)
