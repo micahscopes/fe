@@ -53,6 +53,13 @@ governance:
   sol_vote: 54502
   bytecode: 3797 bytes
 
+merkle:
+  fe_computeRoot_depth7: 9971
+  fe_verify_depth7: 14810
+  sol_computeRoot_depth7: 10122
+  sol_verify_depth7: 15045
+  bytecode: 933 bytes
+
 verifier:
   fe_plonkVerify: 351112
   fe_groth16Verify: 196457
