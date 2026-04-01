@@ -108,3 +108,25 @@
      17 LT
      17 0x0119
      16 EQ
+
+--- merkle ---
+     32 SWAP1
+     32 JUMPDEST
+     22 JUMP
+     17 MSTORE
+     16 DUP1
+     15 POP
+     15 JUMPI
+     13 PUSH0
+     12 DUP2
+     11 SWAP2
+     11 ADD
+     10 0x20
+     10 0x01ce
+      9 SWAP3
+      7 MLOAD
+      7 DUP3
+      6 LT
+      6 ISZERO
+      5 DUP4
+      5 0x0131
