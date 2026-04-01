@@ -1,0 +1,17 @@
+WHAT: Adds .cargo/config.toml to patch sonatina dependencies to local paths.
+Also updates Cargo.lock to remove git source pins for sonatina crates.
+
+WHY: Enables fe to build against the local sonatina checkout. Previously
+the cargo patch had to be injected temporarily.
+
+GAS IMPACT: Unexpected regression across all contracts (+46 to +251 gas).
+This is likely a Cargo compilation artifact from the Cargo.lock changes
+(removing git source pins changes dependency resolution order, which can
+affect code generation through different inlining decisions or layout).
+The sonatina code is identical to step 11.
+
+TEAM NOTES: This regression is an artifact of the build system change,
+not a real compiler regression. The Cargo.lock diff removes git source
+annotations, which may cause Cargo to resolve dependencies slightly
+differently. The gas numbers from step 13 onward are the true baseline
+for Fe-side changes.
