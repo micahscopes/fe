@@ -1,0 +1,264 @@
+=== Sonatina IR Stats ===
+--- erc20 ---
+functions 30
+ir_insts 260
+blocks 0
+0
+obj.store 41
+obj.load 25
+obj.alloc 19
+obj.proj 69
+call  57
+uaddo 11
+umulo 0
+0
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 7
+evm_mstore 0
+0
+evm_mload 0
+0
+evm_sstore 11
+evm_sload 12
+brz 0
+0
+phi 2
+ret  0
+0
+is_zero 13
+ptr_to_int 6
+int_to_ptr 0
+0
+mem_alloc 0
+0
+evm_malloc 6
+
+--- math ---
+functions 8
+ir_insts 95
+blocks 0
+0
+obj.store 6
+obj.load 6
+obj.alloc 2
+obj.proj 12
+call  9
+uaddo 0
+0
+umulo 0
+0
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 7
+evm_mstore 0
+0
+evm_mload 0
+0
+evm_sstore 0
+0
+evm_sload 0
+0
+brz 0
+0
+phi 3
+ret  0
+0
+is_zero 4
+ptr_to_int 0
+0
+int_to_ptr 0
+0
+mem_alloc 0
+0
+evm_malloc 0
+0
+
+--- amm ---
+functions 18
+ir_insts 124
+blocks 0
+0
+obj.store 18
+obj.load 15
+obj.alloc 6
+obj.proj 32
+call  20
+uaddo 5
+umulo 2
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 5
+evm_mstore 0
+0
+evm_mload 0
+0
+evm_sstore 6
+evm_sload 12
+brz 0
+0
+phi 1
+ret  0
+0
+is_zero 8
+ptr_to_int 1
+int_to_ptr 0
+0
+mem_alloc 0
+0
+evm_malloc 1
+
+--- escrow ---
+functions 18
+ir_insts 100
+blocks 0
+0
+obj.store 4
+obj.load 3
+obj.alloc 1
+obj.proj 10
+call  21
+uaddo 1
+umulo 0
+0
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 2
+evm_mstore 0
+0
+evm_mload 0
+0
+evm_sstore 9
+evm_sload 5
+brz 0
+0
+phi 2
+ret  0
+0
+is_zero 7
+ptr_to_int 4
+int_to_ptr 0
+0
+mem_alloc 0
+0
+evm_malloc 4
+
+--- governance ---
+functions 41
+ir_insts 317
+blocks 0
+0
+obj.store 27
+obj.load 16
+obj.alloc 12
+obj.proj 47
+call  91
+uaddo 16
+umulo 0
+0
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 8
+evm_mstore 0
+0
+evm_mload 0
+0
+evm_sstore 18
+evm_sload 34
+brz 0
+0
+phi 3
+ret  0
+0
+is_zero 25
+ptr_to_int 8
+int_to_ptr 0
+0
+mem_alloc 0
+0
+evm_malloc 8
+
+--- merkle ---
+functions 7
+ir_insts 50
+blocks 0
+0
+obj.store 5
+obj.load 5
+obj.alloc 2
+obj.proj 10
+call  6
+uaddo 3
+umulo 1
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 7
+evm_mstore 0
+0
+evm_mload 0
+0
+evm_sstore 0
+0
+evm_sload 0
+0
+brz 0
+0
+phi 2
+ret  0
+0
+is_zero 3
+ptr_to_int 1
+int_to_ptr 0
+0
+mem_alloc 0
+0
+evm_malloc 1
+
+--- verifier ---
+functions 40
+ir_insts 1099
+blocks 0
+0
+obj.store 210
+obj.load 126
+obj.alloc 35
+obj.proj 357
+call  153
+uaddo 20
+umulo 0
+0
+saddo 0
+0
+smulo 0
+0
+evm_calldata_load 41
+evm_mstore 41
+evm_mload 0
+0
+evm_sstore 0
+0
+evm_sload 0
+0
+brz 0
+0
+phi 16
+ret  0
+0
+is_zero 14
+ptr_to_int 12
+int_to_ptr 1
+mem_alloc 0
+0
+evm_malloc 10
