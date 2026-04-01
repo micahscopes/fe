@@ -223,7 +223,11 @@ fn finish_handler<'db>(
         runtime_return_shape: spec.runtime_return_shape,
         runtime_return_pointer_leaf_infos: Vec::new(),
         contract_function: None,
-        inline_hint: Some(InlineHint::Never),
+        // Allow inlining: when the handler is inlined into the dispatch
+        // arm (which is itself inlined into the runtime function), the
+        // message struct can be scalarized away — obj.alloc + stores +
+        // loads collapse into direct value passing.
+        inline_hint: None,
         symbol_name: spec.symbol_name,
         symbol_source: SymbolSource::Internal,
         receiver_space: None,
