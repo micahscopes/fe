@@ -408,7 +408,10 @@ impl<'db, 'a> ContractEmitter<'db, 'a> {
             returns_value: false,
             runtime_return_shape: RuntimeShape::Erased,
             contract_function: None,
-            inline_hint: Some(InlineHint::Never),
+            // Allow inlining: the dispatch arm is called once from the
+            // selector switch. Inlining lets the optimizer scalarize the
+            // message struct away (obj.alloc + stores + loads → direct values).
+            inline_hint: None,
             runtime_abi: RuntimeAbi::source_shaped(0, Vec::new()),
             symbol_name: mangler.symbol_for(arm.id),
         })
