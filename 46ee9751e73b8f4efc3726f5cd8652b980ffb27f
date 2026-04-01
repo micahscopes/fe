@@ -1,0 +1,19 @@
+WHAT: Replaces SolEncoder cursor-based encoding with direct mem::alloc +
+encode_to_ptr for event data encoding in the HIR lowering.
+
+WHY: Event emission was going through the full SolEncoder abstraction
+(alloc cursor, advance cursor, write words), which generates multiple
+obj.alloc + obj.store operations. Direct encoding skips the cursor overhead.
+
+GAS IMPACT: -957 gas total.
+  amm/swapAForB: -408
+  amm/addLiquidity: -312
+  erc20/transfer: -58
+  erc20/approve: -38
+  governance: -9 to -26
+  amm/getK: -11
+
+TEAM NOTES: This is a Fe lowering change (hir/src/core/lower/event.rs), not
+a std library change. It optimizes event emission at the compiler level by
+generating more efficient IR directly. AMM benefits most because swap/addLiq
+emit events with multiple parameters. Contracts without events see no change.
