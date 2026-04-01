@@ -312,10 +312,11 @@ impl<I> AbiDecoder<Sol> for SolDecoder<I>
         self.cur.pos = new_pos
     }
 
+    #[arithmetic(unchecked)]
     fn read_u8(mut self) -> u8 {
         let len = self.cur.input.len()
         let new_pos = self.cur.pos + 1
-        if new_pos < self.cur.pos || new_pos > len {
+        if new_pos > len {
             revert(offset: 0, len: 0)
         }
         let b = self.cur.input.byte_at(self.cur.pos)
@@ -323,10 +324,11 @@ impl<I> AbiDecoder<Sol> for SolDecoder<I>
         b
     }
 
+    #[arithmetic(unchecked)]
     fn read_word(mut self) -> u256 {
         let len = self.cur.input.len()
         let new_pos = self.cur.pos + 32
-        if new_pos < self.cur.pos || new_pos > len {
+        if new_pos > len {
             revert(offset: 0, len: 0)
         }
         let w = self.cur.input.word_at(self.cur.pos)
