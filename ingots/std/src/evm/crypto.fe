@@ -10,6 +10,7 @@ use super::mem
 /// Assert that a precompile STATICCALL succeeded and returned the expected
 /// number of bytes. Reverts if the call failed or returndata is too short
 /// (e.g., calling a non-existent precompile address on a non-standard chain).
+#[arithmetic(unchecked)]
 fn assert_precompile_ok(_ ok: u256, _ expected_ret_len: u256) {
     if ok == 0 { ops::revert(offset: 0, len: 0) }
     if ops::returndatasize() < expected_ret_len { ops::revert(offset: 0, len: 0) }
@@ -39,6 +40,7 @@ pub fn keccak256(_ offset: u256, _ len: u256) -> u256 {
 }
 
 /// SHA256 hash of a memory region (precompile 0x02).
+#[arithmetic(unchecked)]
 pub fn sha256(_ offset: u256, _ len: u256) -> u256 {
     let out: u256 = mem::alloc(32)
     let ok: u256 = ops::staticcall(
@@ -60,6 +62,7 @@ pub fn sha256(_ offset: u256, _ len: u256) -> u256 {
 /// Recover signer address from a message hash and ECDSA signature (precompile 0x01).
 /// Returns the recovered address as a u256 (lower 160 bits).
 /// Reverts if recovery fails (invalid signature).
+#[arithmetic(unchecked)]
 pub fn ecrecover(_ hash: u256, _ v: u256, _ r: u256, _ s: u256) -> u256 {
     let ptr: u256 = mem::alloc(128)
     ops::mstore(addr: ptr, value: hash)
@@ -83,6 +86,7 @@ pub fn ecrecover(_ hash: u256, _ v: u256, _ r: u256, _ s: u256) -> u256 {
 // ---------------------------------------------------------------------------
 
 /// EC point addition on BN254 (precompile 0x06).
+#[arithmetic(unchecked)]
 pub fn ec_add(_ ax: u256, _ ay: u256, _ bx: u256, _ by: u256) -> (u256, u256) {
     let ptr: u256 = mem::alloc(128)
     ops::mstore(addr: ptr, value: ax)
@@ -102,6 +106,7 @@ pub fn ec_add(_ ax: u256, _ ay: u256, _ bx: u256, _ by: u256) -> (u256, u256) {
 }
 
 /// EC scalar multiplication on BN254 (precompile 0x07).
+#[arithmetic(unchecked)]
 pub fn ec_mul(_ px: u256, _ py: u256, _ s: u256) -> (u256, u256) {
     let ptr: u256 = mem::alloc(96)
     ops::mstore(addr: ptr, value: px)
@@ -129,6 +134,7 @@ pub fn ec_mul(_ px: u256, _ py: u256, _ s: u256) -> (u256, u256) {
 /// `e(a1, b1) * e(a2, b2) * ... * e(aN, bN) == 1`
 ///
 /// Use effects (RawMem) to build the buffer, then pass it here.
+#[arithmetic(unchecked)]
 pub fn ec_pairing(_ offset: u256, _ len: u256) -> bool {
     let out: u256 = mem::alloc(32)
     let ok: u256 = ops::staticcall(
@@ -145,6 +151,7 @@ pub fn ec_pairing(_ offset: u256, _ len: u256) -> bool {
 
 /// Modular exponentiation (precompile 0x05).
 /// Computes `base^exp % modulus` for u256-sized inputs.
+#[arithmetic(unchecked)]
 pub fn modexp(_ base: u256, _ exp: u256, _ modulus: u256) -> u256 {
     let ptr: u256 = mem::alloc(192)
     ops::mstore(addr: ptr, value: 32)
