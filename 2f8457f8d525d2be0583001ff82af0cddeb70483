@@ -1,0 +1,66 @@
+=== Benchmark Results (step 16 of 26) ===
+Commit: 2f8457f8d525 (fe)
+Sonatina at: 9a6a51c51412
+
+erc20:
+  fe_approve: 28851 (-60, -0.2%)
+  fe_transfer: 58557 (-120, -0.2%)
+  sol_approve: 27849
+  sol_transfer: 56579
+  bytecode: 2289 bytes
+
+math:
+  fe_mulDivRoundingUp: 6850 (-80, -1.2%)
+  fe_mulDiv_512bit: 6808 (-80, -1.2%)
+  fe_mulDiv_simple: 6310 (-80, -1.3%)
+  sol_mulDivRoundingUp: 6242
+  sol_mulDiv_512bit: 6168
+  sol_mulDiv_simple: 5697
+  bytecode: 1129 bytes
+
+amm:
+  fe_addLiquidity: 17678 (-60, -0.3%)
+  fe_getK: 9790 (-20, -0.2%)
+  fe_swapAForB: 18231 (-40, -0.2%)
+  sol_addLiquidity: 15698
+  sol_getK: 9723
+  sol_swapAForB: 16426
+  bytecode: 2207 bytes
+
+escrow:
+  fe_deposit: 59508 (-20, -0.0%)
+  fe_getBalance: 4444 (-20, -0.4%)
+  fe_release: 3427 (-16, -0.5%)
+  sol_deposit: 59155
+  sol_getBalance: 3932
+  sol_release: 2996
+  bytecode: 627 bytes
+
+governance:
+  fe_balanceOf: 8000 (-40, -0.5%)
+  fe_delegate: 61520 (-80, -0.1%)
+  fe_execute: 32036 (-40, -0.1%)
+  fe_mint: 18485 (-60, -0.3%)
+  fe_propose: 85314 (-80, -0.1%)
+  fe_transfer: 19692 (-60, -0.3%)
+  fe_vote: 54547 (-100, -0.2%)
+  sol_balanceOf: 12709
+  sol_delegate: 60318
+  sol_execute: 33762
+  sol_mint: 23015
+  sol_propose: 106990
+  sol_transfer: 24089
+  sol_vote: 54502
+  bytecode: 3797 bytes
+
+merkle:
+  fe_computeRoot_depth7: 9971
+  fe_verify_depth7: 14810
+  sol_computeRoot_depth7: 10122
+  sol_verify_depth7: 15045
+  bytecode: 1581 bytes
+
+verifier:
+  fe_plonkVerify: 351112 (-140, -0.0%)
+  fe_groth16Verify: 196457 (-40, -0.0%)
+  sol_plonkVerify: 286297
