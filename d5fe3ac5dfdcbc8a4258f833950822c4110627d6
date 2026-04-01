@@ -1,0 +1,26 @@
+WHAT: Moves bounds checking from per-word reads to dispatch level for all
+fixed-size ABI type decodes. Individual read_word calls use unchecked access;
+a single upfront check validates total calldata length.
+
+WHY: Fe's Decode impls for u256, address, bool etc. each called read_word
+with individual bounds checks. For a function with 3 parameters, that's 3
+redundant bounds checks when one upfront check suffices. This eliminates
+uaddo/branch per parameter decode.
+
+GAS IMPACT: -6197 gas total. ALL 17 benchmarked functions improved.
+  math: -625 each (3 functions, -9.1% to -9.9%)
+  governance/vote: -525
+  verifier/plonkVerify: -966
+  amm/addLiquidity: -452
+  erc20: -200 to -400
+  governance: -30 to -357
+  verifier/groth16Verify: -259
+  amm: -69 to -276
+
+CODEGEN IMPACT: Significant reduction in uaddo count across all contracts.
+Branch count drops as overflow check branches are eliminated.
+
+TEAM NOTES: Third Fe std library unchecked change. Steps 15, 16, 18 together
+saved ~9,800 gas. The pattern is consistent: identify provably-safe arithmetic
+in hot paths, add #[arithmetic(unchecked)]. This step moved from individual
+unchecked annotations to a structural change (one check, many unchecked reads).
