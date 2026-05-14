@@ -157,7 +157,7 @@ fn diagnostic_func_ref(location: &Location) -> Option<FuncRef> {
     }
 }
 
-fn to_sonatina_opt_level(opt_level: OptLevel) -> SonatinaOptLevel {
+pub(crate) fn to_sonatina_opt_level(opt_level: OptLevel) -> SonatinaOptLevel {
     match opt_level {
         OptLevel::O0 => SonatinaOptLevel::O0,
         OptLevel::O1 => SonatinaOptLevel::O1,
