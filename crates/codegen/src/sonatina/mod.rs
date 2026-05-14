@@ -245,6 +245,32 @@ pub fn compile_runtime_package_sonatina(
     lower_runtime::compile_runtime_package_sonatina(db, package, layout)
 }
 
+pub fn compile_runtime_package_sonatina_native(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    layout: TargetDataLayout,
+) -> Result<Module, LowerError> {
+    let isa = create_native_isa();
+    let ctx = ModuleCtx::new(&isa);
+    lower_runtime::compile_runtime_package_sonatina_with_ctx(db, package, layout, ctx)
+}
+
+fn create_native_isa() -> sonatina_ir::isa::native::Native {
+    use sonatina_triple::{Architecture, OperatingSystem, Vendor};
+    let arch = if cfg!(target_arch = "x86_64") {
+        Architecture::X86_64
+    } else if cfg!(target_arch = "aarch64") {
+        Architecture::Aarch64
+    } else {
+        Architecture::X86_64
+    };
+    sonatina_ir::isa::native::Native::new(TargetTriple::new(
+        arch,
+        Vendor::Unknown,
+        OperatingSystem::Native,
+    ))
+}
+
 fn select_runtime_package_contract<'db>(
     db: &'db dyn mir::MirDb,
     package: RuntimePackage<'db>,

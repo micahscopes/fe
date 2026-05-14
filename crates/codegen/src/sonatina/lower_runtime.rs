@@ -48,11 +48,9 @@ use sonatina_ir::{
             EvmPrevRandao, EvmReturn, EvmReturnDataCopy, EvmReturnDataSize, EvmRevert, EvmSdiv,
             EvmSelfBalance, EvmSelfDestruct, EvmSignExtend, EvmSload, EvmSmod, EvmSstore,
             EvmStaticCall, EvmStop, EvmTimestamp, EvmTload, EvmTstore, EvmUdiv, EvmUmod,
-            inst_set::EvmInstSet,
         },
         logic::{And, Not, Or, Xor},
     },
-    isa::Isa,
     module::FuncRef,
     object::EmbedSymbol,
     types::{CompoundType, EnumReprHint, EnumVariantRef, VariantData},
@@ -72,10 +70,18 @@ pub(super) fn compile_runtime_package_sonatina(
     package: &RuntimePackage<'_>,
     layout: TargetDataLayout,
 ) -> Result<Module, LowerError> {
+    compile_runtime_package_sonatina_with_ctx(db, package, layout, super::create_module_ctx())
+}
+
+pub(super) fn compile_runtime_package_sonatina_with_ctx(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    layout: TargetDataLayout,
+    ctx: sonatina_ir::module::ModuleCtx,
+) -> Result<Module, LowerError> {
     let _ = layout;
-    let builder = ModuleBuilder::new(create_module_ctx());
-    let isa = super::create_evm_isa();
-    let mut lowerer = ModuleLowerer::new(db, builder, &isa, package);
+    let builder = ModuleBuilder::new(ctx);
+    let mut lowerer = ModuleLowerer::new(db, builder, package);
     lowerer.declare_functions()?;
     lowerer.lower_const_regions()?;
     lowerer.lower_bodies()?;
@@ -86,7 +92,6 @@ pub(super) fn compile_runtime_package_sonatina(
 struct ModuleLowerer<'db, 'a> {
     db: &'db DriverDataBase,
     builder: ModuleBuilder,
-    isa: &'a sonatina_ir::isa::evm::Evm,
     package: &'a RuntimePackage<'db>,
     func_map: FxHashMap<mir::RuntimeInstance<'db>, FuncRef>,
     func_symbols: FxHashMap<mir::RuntimeInstance<'db>, String>,
@@ -101,13 +106,11 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
     fn new(
         db: &'db DriverDataBase,
         builder: ModuleBuilder,
-        isa: &'a sonatina_ir::isa::evm::Evm,
         package: &'a RuntimePackage<'db>,
     ) -> Self {
         Self {
             db,
             builder,
-            isa,
             package,
             func_map: FxHashMap::default(),
             func_symbols: assign_sonatina_function_symbols(db, package),
@@ -123,8 +126,8 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
         self.builder.build()
     }
 
-    fn inst_set(&self) -> &'static EvmInstSet {
-        self.isa.inst_set()
+    fn inst_set(&self) -> &'static dyn sonatina_ir::InstSetBase {
+        self.builder.inst_set()
     }
 
     fn function_symbol(&self, instance: RuntimeInstance<'db>) -> String {
@@ -4381,7 +4384,7 @@ fn intrinsic_value_type(prim: PrimTy) -> Type {
 
 fn lower_intrinsic_operand(
     fb: &mut FunctionBuilder<InstInserter>,
-    is: &EvmInstSet,
+    is: &dyn sonatina_ir::InstSetBase,
     value: ValueId,
     prim: PrimTy,
     op_ty: Type,
@@ -4395,7 +4398,7 @@ fn lower_intrinsic_operand(
 
 fn cast_int_value(
     fb: &mut FunctionBuilder<InstInserter>,
-    is: &EvmInstSet,
+    is: &dyn sonatina_ir::InstSetBase,
     value: ValueId,
     target_ty: Type,
     signed: bool,
@@ -4500,7 +4503,7 @@ fn zero_for_type(fb: &mut FunctionBuilder<InstInserter>, ty: Type) -> ValueId {
 fn condition_to_i1(
     fb: &mut FunctionBuilder<InstInserter>,
     cond: ValueId,
-    is: &EvmInstSet,
+    is: &dyn sonatina_ir::InstSetBase,
 ) -> ValueId {
     if fb.type_of(cond) == Type::I1 {
         cond
