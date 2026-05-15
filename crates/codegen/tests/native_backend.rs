@@ -842,6 +842,83 @@ pub fn sum_to_n(n: u64) -> u64 {
     assert_eq!(val, 55, "sum(1..=10) should be 55");
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn b3_if_else_on_cranelift() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "if_else.fe",
+        r#"
+pub fn max(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module).map_err(|e| format!("{e:?}"))?;
+            let f: fn(*const u64, *const u64) -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const u64, *const u64) -> u64>("max")
+                    .ok_or("max not found")?;
+                std::mem::transmute(ptr)
+            };
+            let a: u64 = 10;
+            let b: u64 = 20;
+            Ok(f(&a, &b))
+        },
+    );
+    assert_eq!(result.expect("if-else should work"), 20);
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+fn b3_fibonacci_on_cranelift() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "fib.fe",
+        r#"
+pub fn fib(n: u64) -> u64 {
+    if n <= 1 {
+        return n
+    }
+    let mut a: u64 = 0
+    let mut b: u64 = 1
+    let mut i: u64 = 2
+    while i <= n {
+        let temp: u64 = a + b
+        a = b
+        b = temp
+        i = i + 1
+    }
+    b
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module).map_err(|e| format!("{e:?}"))?;
+            let f: fn(*const u64) -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const u64) -> u64>("fib")
+                    .ok_or("fib not found")?;
+                std::mem::transmute(ptr)
+            };
+            let n: u64 = 10;
+            Ok(f(&n))
+        },
+    );
+    assert_eq!(result.expect("fibonacci should work"), 55);
+}
+
 #[test]
 fn stage5b_poseidon_compiles_to_spirv_skeleton() {
     use sonatina_codegen::Backend;
