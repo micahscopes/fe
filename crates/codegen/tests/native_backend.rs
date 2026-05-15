@@ -708,6 +708,94 @@ pub fn fp_add_check(a: u256, b: u256, expected: u256) -> bool {
     result.expect("Full Fp struct operations should compile and execute correctly");
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn a1_fp_struct_with_methods_variable_inputs() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // A1: Fp struct with methods — the actual Poseidon pattern from fp.fe
+    let result: Result<bool, String> = with_top_mod_for_source(
+        "fp_struct_methods.fe",
+        r#"
+use std::evm::crypto::{addmod, mulmod}
+
+const PRIME: u256 = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+
+pub struct Fp {
+    pub val: u256,
+}
+
+impl Fp {
+    pub fn new(val: u256) -> Fp { Fp { val } }
+
+    pub fn add(self, rhs: Fp) -> Fp {
+        Fp { val: addmod(self.val, rhs.val, PRIME) }
+    }
+
+    pub fn mul(self, rhs: Fp) -> Fp {
+        Fp { val: mulmod(self.val, rhs.val, PRIME) }
+    }
+
+    pub fn pow5(self) -> Fp {
+        let x2: Fp = self.mul(self)
+        let x4: Fp = x2.mul(x2)
+        x4.mul(self)
+    }
+}
+
+pub fn fp_add_test(a: u256, b: u256, expected: u256) -> bool {
+    let result: Fp = Fp::new(a).add(Fp::new(b))
+    result.val == expected
+}
+
+pub fn fp_pow5_test(base: u256, expected: u256) -> bool {
+    let result: Fp = Fp::new(base).pow5()
+    result.val == expected
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== A1 Fp Struct IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            // Test fp_add: Fp::new(7).add(Fp::new(3)).val == 10
+            let f_add: fn(*const [u64; 4], *const [u64; 4], *const [u64; 4]) -> u8 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const [u64; 4], *const [u64; 4], *const [u64; 4]) -> u8>("fp_add_test")
+                    .ok_or("fp_add_test not found")?;
+                std::mem::transmute(ptr)
+            };
+            let seven: [u64; 4] = [7, 0, 0, 0];
+            let three: [u64; 4] = [3, 0, 0, 0];
+            let ten: [u64; 4] = [10, 0, 0, 0];
+            if f_add(&seven, &three, &ten) == 0 {
+                return Err("Fp::new(7).add(Fp::new(3)).val != 10".to_string());
+            }
+
+            // Test fp_pow5: Fp::new(3).pow5().val == 243
+            let f_pow5: fn(*const [u64; 4], *const [u64; 4]) -> u8 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const [u64; 4], *const [u64; 4]) -> u8>("fp_pow5_test")
+                    .ok_or("fp_pow5_test not found")?;
+                std::mem::transmute(ptr)
+            };
+            let two43: [u64; 4] = [243, 0, 0, 0];
+            if f_pow5(&three, &two43) == 0 {
+                return Err("Fp::new(3).pow5().val != 243".to_string());
+            }
+
+            Ok(true)
+        },
+    );
+
+    result.expect("A1: Fp struct methods with variable inputs should work");
+}
+
 #[test]
 fn stage5b_poseidon_compiles_to_spirv_skeleton() {
     use sonatina_codegen::Backend;
