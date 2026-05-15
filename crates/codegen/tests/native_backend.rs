@@ -992,6 +992,217 @@ pub fn field_add() -> u256 {
     }
 }
 
+#[test]
+fn library_mode_const_array_sum_ir() {
+    let result: Result<String, String> = with_top_mod_for_source(
+        "const_arr_sum.fe",
+        r#"
+pub fn sum3() -> u64 {
+    let arr: [u64; 3] = [10, 20, 30]
+    arr[0] + arr[1] + arr[2]
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            Ok(ir)
+        },
+    );
+
+    let ir = result.expect("const array sum should compile to IR");
+    eprintln!("=== Const Array Sum IR ===\n{ir}");
+    assert!(ir.contains("sum3"), "expected sum3 function in IR");
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+fn library_mode_const_array_sum_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "const_arr_sum.fe",
+        r#"
+pub fn sum3() -> u64 {
+    let arr: [u64; 3] = [10, 20, 30]
+    arr[0] + arr[1] + arr[2]
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Const Array Sum IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn() -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn() -> u64>("sum3")
+                    .ok_or("sum3 function not found in artifact")?;
+                std::mem::transmute(ptr)
+            };
+            Ok(f())
+        },
+    );
+
+    let val = result.expect("const array sum should compile and execute");
+    assert_eq!(val, 60, "sum3() should return 10+20+30=60");
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+#[ignore] // MIR doesn't load objref param before using as array index/bounds check
+fn library_mode_array_dynamic_index_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    let result: Result<(u64, u64, u64), String> = with_top_mod_for_source(
+        "arr_dyn.fe",
+        r#"
+pub fn get_elem(idx: u64) -> u64 {
+    let arr: [u64; 3] = [100, 200, 300]
+    arr[idx]
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Dynamic Array Index IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn(*const u64) -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const u64) -> u64>("get_elem")
+                    .ok_or("get_elem function not found")?;
+                std::mem::transmute(ptr)
+            };
+            let idx0: u64 = 0;
+            let idx1: u64 = 1;
+            let idx2: u64 = 2;
+            Ok((f(&idx0), f(&idx1), f(&idx2)))
+        },
+    );
+
+    let (v0, v1, v2) = result.expect("dynamic array index should compile and execute");
+    assert_eq!(v0, 100, "arr[0] should be 100");
+    assert_eq!(v1, 200, "arr[1] should be 200");
+    assert_eq!(v2, 300, "arr[2] should be 300");
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+fn library_mode_array_const_index_sum_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "arr_csum.fe",
+        r#"
+pub fn const_sum() -> u64 {
+    let a: [u64; 4] = [11, 22, 33, 44]
+    let s0: u64 = a[0]
+    let s1: u64 = s0 + a[1]
+    let s2: u64 = s1 + a[2]
+    s2 + a[3]
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Const Index Sum IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn() -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn() -> u64>("const_sum")
+                    .ok_or("const_sum not found")?;
+                std::mem::transmute(ptr)
+            };
+            Ok(f())
+        },
+    );
+
+    let val = result.expect("const index array sum should execute");
+    assert_eq!(val, 110, "11+22+33+44=110");
+}
+
+#[test]
+fn library_mode_poseidon_mock_sigma_ir() {
+    let result: Result<String, String> = with_top_mod_for_source(
+        "mock_sigma.fe",
+        r#"
+pub fn sigma(x: u64) -> u64 {
+    x * x + x
+}
+
+pub fn sigma_test() -> u64 {
+    sigma(x: 3)
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            Ok(ir)
+        },
+    );
+
+    let ir = result.expect("sigma should compile to native IR");
+    eprintln!("=== Mock Sigma IR ===\n{ir}");
+    assert!(ir.contains("sigma"), "expected sigma function");
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+fn library_mode_poseidon_mock_sigma_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "mock_sigma_jit.fe",
+        r#"
+pub fn sigma_test() -> u64 {
+    let x: u64 = 5
+    x * x + x
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Mock Sigma JIT IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn() -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn() -> u64>("sigma_test")
+                    .ok_or("sigma_test not found")?;
+                std::mem::transmute(ptr)
+            };
+            Ok(f())
+        },
+    );
+
+    let val = result.expect("sigma should execute via JIT");
+    assert_eq!(val, 30, "5*5+5=30");
+}
+
 /// Verify that the EVM path still works for the same source.
 #[test]
 fn evm_ir_for_simple_contract_still_works() {
