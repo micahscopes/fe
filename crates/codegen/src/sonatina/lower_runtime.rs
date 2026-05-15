@@ -2242,6 +2242,20 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         Ok(self.fb.use_var(var))
     }
 
+    fn local_scalar_value(&mut self, local: RLocalId) -> Result<ValueId, LowerError> {
+        let val = self.local_value(local)?;
+        if let Some(class) = self.body.value_class(local) {
+            if let RuntimeClass::Ref { pointee, kind: RefKind::Object, .. } = class {
+                let pointee_ty = self.module.ty_for_class(pointee)?;
+                return Ok(self.fb.insert_inst(
+                    ObjLoad::new(self.module.inst_set(), val),
+                    pointee_ty,
+                ));
+            }
+        }
+        Ok(val)
+    }
+
     fn local_ty(&mut self, local: RLocalId) -> Result<Type, LowerError> {
         let class = self
             .body

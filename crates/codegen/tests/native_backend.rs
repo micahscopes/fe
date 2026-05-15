@@ -1056,7 +1056,6 @@ pub fn sum3() -> u64 {
 
 #[cfg(feature = "cranelift")]
 #[test]
-#[ignore] // MIR doesn't load objref param before using as array index/bounds check
 fn library_mode_array_dynamic_index_jit() {
     use sonatina_codegen::Backend;
     use sonatina_codegen::isa::cranelift::CraneliftBackend;
