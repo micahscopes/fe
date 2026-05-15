@@ -84,6 +84,50 @@ pub fn compute() -> u64 {
     );
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn native_jit_executes_standalone_function() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // Compile Fe source to Sonatina IR targeting native
+    let module = with_top_mod_for_source(
+        "native_jit.fe",
+        r#"
+pub fn compute() -> u64 {
+    let a: u64 = 21
+    let b: u64 = 21
+    a + b
+}
+"#,
+        |db, top_mod| {
+            let package = mir::build_runtime_package(db, top_mod).unwrap();
+            fe_codegen::sonatina::compile_runtime_package_sonatina_native(
+                db,
+                &package,
+                fe_codegen::EVM_LAYOUT,
+            )
+        },
+    );
+    let module = module.expect("Fe → native Sonatina IR should succeed");
+
+    // Compile through Cranelift JIT
+    let backend = CraneliftBackend::new();
+    let artifact = backend
+        .compile_module(&module)
+        .expect("CraneliftBackend should compile the native IR");
+
+    // Execute the JIT-compiled function
+    let compute: fn() -> u64 = unsafe {
+        let ptr = artifact
+            .get_func_ptr::<fn() -> u64>("compute")
+            .expect("compute function should be in the artifact");
+        std::mem::transmute(ptr)
+    };
+
+    assert_eq!(compute(), 42, "JIT-compiled Fe function should return 42");
+}
+
 /// Verify that the EVM path still works for the same source.
 #[test]
 fn evm_ir_for_simple_contract_still_works() {

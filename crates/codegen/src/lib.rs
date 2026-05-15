@@ -2,7 +2,7 @@ mod backend;
 mod function_symbols;
 mod layout;
 mod runtime_package;
-mod sonatina;
+pub mod sonatina;
 mod test_output;
 
 pub use backend::{Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend};
