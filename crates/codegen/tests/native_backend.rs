@@ -1202,6 +1202,70 @@ pub fn sigma_test() -> u64 {
     assert_eq!(val, 30, "5*5+5=30");
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn library_mode_poseidon_mock_hash_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // Poseidon-style hash with constant arrays, loops, array indexing,
+    // and function calls. Uses u64 to avoid u256 complexity.
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "mock_hash_jit.fe",
+        r#"
+fn sigma(x: u64) -> u64 {
+    x * x + x
+}
+
+pub fn mock_hash_test() -> u64 {
+    let c0: u64 = 11
+    let c1: u64 = 13
+    let c2: u64 = 17
+
+    let mut s0: u64 = 1
+    let mut s1: u64 = 2
+    let mut s2: u64 = 0
+
+    // Round 1: ark + sigma
+    s0 = sigma(x: s0 + c0)
+    s1 = sigma(x: s1 + c1)
+    s2 = sigma(x: s2 + c2)
+
+    // Mix (simplified MDS)
+    let t0: u64 = 2 * s0 + s1 + s2
+    let t1: u64 = s0 + 2 * s1 + s2
+    let t2: u64 = s0 + s1 + 2 * s2
+
+    t0 + t1 + t2
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Mock Hash JIT IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn() -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn() -> u64>("mock_hash_test")
+                    .ok_or("mock_hash_test not found")?;
+                std::mem::transmute(ptr)
+            };
+            Ok(f())
+        },
+    );
+
+    // sigma(12)=12*12+12=156, sigma(15)=15*15+15=240, sigma(17)=17*17+17=306
+    // mix: t0=2*156+240+306=858, t1=156+2*240+306=942, t2=156+240+2*306=1008
+    // total = 858+942+1008 = 2808
+    let val = result.expect("mock hash should execute via JIT");
+    assert_eq!(val, 2808, "mock_hash_test should return 2808");
+}
+
 /// Verify that the EVM path still works for the same source.
 #[test]
 fn evm_ir_for_simple_contract_still_works() {
