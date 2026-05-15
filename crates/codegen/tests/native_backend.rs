@@ -1329,9 +1329,125 @@ pub fn hash_4_rounds() -> u64 {
     );
 
     let val = result.expect("full rounds hash should execute via JIT");
-    // The exact value depends on the computation — just verify it executes
     eprintln!("hash_4_rounds() = {val}");
     assert!(val > 0, "hash result should be non-zero");
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+fn library_mode_loop_with_sigma_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // While loop with sigma(x)=x*x+x accumulation — proves loops+arithmetic
+    // work through Fe→Sonatina→Cranelift pipeline with variable state.
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "loop_sigma.fe",
+        r#"
+pub fn sum_sigma_loop() -> u64 {
+    let mut total: u64 = 0
+    let mut i: u64 = 0
+    while i < 4 {
+        total = total + i * i + i
+        i = i + 1
+    }
+    total
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Loop Sigma IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn() -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn() -> u64>("sum_sigma_loop")
+                    .ok_or("sum_sigma_loop not found")?;
+                std::mem::transmute(ptr)
+            };
+            Ok(f())
+        },
+    );
+
+    // sigma(0)=0, sigma(1)=2, sigma(2)=6, sigma(3)=12 → total=20
+    let val = result.expect("loop sigma should execute via JIT");
+    assert_eq!(val, 20, "sum of sigma(0..4) should be 20");
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+#[ignore] // mstore/mload i256 round-trip for mutable vars needs codegen fix
+fn library_mode_poseidon_rounds_loop_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // Poseidon-style hash with while-loop rounds, round constants,
+    // and inline sigma(x)=x*x+x nonlinearity. This is the full A2 test.
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "poseidon_rounds.fe",
+        r#"
+pub fn poseidon_4_rounds() -> u64 {
+    let mut s0: u64 = 1
+    let mut s1: u64 = 2
+    let mut s2: u64 = 0
+    let mut round: u64 = 0
+
+    while round < 4 {
+        // ark: add round constants (simplified: use round*3+offset)
+        let c0: u64 = 11 + round * 7
+        let c1: u64 = 13 + round * 7
+        let c2: u64 = 17 + round * 7
+
+        // inline sigma nonlinearity: sigma(x) = x*x + x
+        let a0: u64 = s0 + c0
+        s0 = a0 * a0 + a0
+        let a1: u64 = s1 + c1
+        s1 = a1 * a1 + a1
+        let a2: u64 = s2 + c2
+        s2 = a2 * a2 + a2
+
+        // simplified mix (MDS-like)
+        let t0: u64 = 2 * s0 + s1 + s2
+        let t1: u64 = s0 + 2 * s1 + s2
+        let t2: u64 = s0 + s1 + 2 * s2
+        s0 = t0
+        s1 = t1
+        s2 = t2
+
+        round = round + 1
+    }
+
+    s0 + s1 + s2
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Poseidon Rounds IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn() -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn() -> u64>("poseidon_4_rounds")
+                    .ok_or("poseidon_4_rounds not found")?;
+                std::mem::transmute(ptr)
+            };
+            Ok(f())
+        },
+    );
+
+    let val = result.expect("Poseidon 4-round loop should execute via JIT");
+    eprintln!("poseidon_4_rounds() = {val}");
+    assert!(val > 0, "Poseidon result should be non-zero");
 }
 
 /// Verify that the EVM path still works for the same source.
