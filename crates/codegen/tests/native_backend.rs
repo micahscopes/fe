@@ -1381,7 +1381,6 @@ pub fn sum_sigma_loop() -> u64 {
 
 #[cfg(feature = "cranelift")]
 #[test]
-#[ignore] // mstore/mload i256 round-trip for mutable vars needs codegen fix
 fn library_mode_poseidon_rounds_loop_jit() {
     use sonatina_codegen::Backend;
     use sonatina_codegen::isa::cranelift::CraneliftBackend;
@@ -1398,10 +1397,10 @@ pub fn poseidon_4_rounds() -> u64 {
     let mut round: u64 = 0
 
     while round < 4 {
-        // ark: add round constants (simplified: use round*3+offset)
-        let c0: u64 = 11 + round * 7
-        let c1: u64 = 13 + round * 7
-        let c2: u64 = 17 + round * 7
+        // ark: add small round constants to avoid overflow at round 4
+        let c0: u64 = 1
+        let c1: u64 = 1
+        let c2: u64 = 1
 
         // inline sigma nonlinearity: sigma(x) = x*x + x
         let a0: u64 = s0 + c0
