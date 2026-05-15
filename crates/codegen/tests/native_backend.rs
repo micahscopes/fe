@@ -540,6 +540,100 @@ pub fn field_add_check(a: u256, b: u256, expected: u256) -> bool {
     );
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn stage4_real_fp_struct_addmod_variable_inputs() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // The REAL test: Fp struct with addmod, variable inputs, through Cranelift JIT.
+    let result: Result<bool, String> = with_top_mod_for_source(
+        "fp_struct_runtime.fe",
+        r#"
+use std::evm::crypto::addmod
+
+const PRIME: u256 = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+
+pub fn fp_add_check(a_val: u256, b_val: u256, expected_val: u256) -> bool {
+    let result_val: u256 = addmod(a_val, b_val, PRIME)
+    result_val == expected_val
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Fp Struct IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn(*const [u64; 4], *const [u64; 4], *const [u64; 4]) -> u8 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const [u64; 4], *const [u64; 4], *const [u64; 4]) -> u8>("fp_add_check")
+                    .ok_or("fp_add_check not found")?;
+                std::mem::transmute(ptr)
+            };
+
+            // addmod(7, 3, PRIME) = 10
+            let a: [u64; 4] = [7, 0, 0, 0];
+            let b: [u64; 4] = [3, 0, 0, 0];
+            let expected: [u64; 4] = [10, 0, 0, 0];
+            Ok(f(&a, &b, &expected) != 0)
+        },
+    );
+
+    let val = result.expect("Fp add with variable inputs should work");
+    assert!(val, "addmod(7, 3, PRIME) should equal 10");
+}
+
+#[cfg(feature = "cranelift")]
+#[test]
+fn stage4_fp_pow5_variable_inputs() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // pow5 via chained mulmod with variable inputs
+    let result: Result<bool, String> = with_top_mod_for_source(
+        "fp_pow5_runtime.fe",
+        r#"
+use std::evm::crypto::mulmod
+
+const PRIME: u256 = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+
+pub fn pow5_check(base: u256, expected: u256) -> bool {
+    let x2: u256 = mulmod(base, base, PRIME)
+    let x4: u256 = mulmod(x2, x2, PRIME)
+    let x5: u256 = mulmod(x4, base, PRIME)
+    x5 == expected
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn(*const [u64; 4], *const [u64; 4]) -> u8 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const [u64; 4], *const [u64; 4]) -> u8>("pow5_check")
+                    .ok_or("pow5_check not found")?;
+                std::mem::transmute(ptr)
+            };
+
+            // 3^5 = 243 (mod PRIME, no reduction since 243 < PRIME)
+            let base: [u64; 4] = [3, 0, 0, 0];
+            let expected: [u64; 4] = [243, 0, 0, 0];
+            Ok(f(&base, &expected) != 0)
+        },
+    );
+
+    let val = result.expect("pow5 with variable inputs should work");
+    assert!(val, "pow5(3) should equal 243 over BN254 prime");
+}
+
 #[test]
 fn stage5b_poseidon_compiles_to_spirv_skeleton() {
     use sonatina_codegen::Backend;
