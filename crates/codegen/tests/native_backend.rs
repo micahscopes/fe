@@ -796,6 +796,52 @@ pub fn fp_pow5_test(base: u256, expected: u256) -> bool {
     result.expect("A1: Fp struct methods with variable inputs should work");
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn a2_loop_and_accumulator() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // Test loops work in Cranelift — prerequisite for full Poseidon hash
+    let result: Result<u64, String> = with_top_mod_for_source(
+        "loop_test.fe",
+        r#"
+pub fn sum_to_n(n: u64) -> u64 {
+    let mut result: u64 = 0
+    let mut i: u64 = 1
+    while i <= n {
+        result = result + i
+        i = i + 1
+    }
+    result
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Loop IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            let f: fn(*const u64) -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const u64) -> u64>("sum_to_n")
+                    .ok_or("sum_to_n not found")?;
+                std::mem::transmute(ptr)
+            };
+
+            let n: u64 = 10;
+            Ok(f(&n))
+        },
+    );
+
+    let val = result.expect("Loop should compile and execute");
+    assert_eq!(val, 55, "sum(1..=10) should be 55");
+}
+
 #[test]
 fn stage5b_poseidon_compiles_to_spirv_skeleton() {
     use sonatina_codegen::Backend;
