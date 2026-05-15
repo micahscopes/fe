@@ -355,6 +355,49 @@ pub fn poseidon_fp_test() -> bool {
     eprintln!("Poseidon pow5 (addmod/mulmod) compiled to {} bytes of WASM", artifact.bytes.len());
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn library_mode_parameterized_function_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // Library mode: parameterized pub fn compiled directly as a JIT-callable function.
+    // No contract, no dispatcher, no synthetic root.
+    let result = with_top_mod_for_source(
+        "library_add.fe",
+        r#"
+pub fn add(a: u64, b: u64) -> u64 {
+    a + b
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Library Mode IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            // Function takes objref<i64> args (pointers), so pass &i64
+            let f: fn(*const i64, *const i64) -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const i64, *const i64) -> u64>("add")
+                    .ok_or("add function not found in artifact")?;
+                std::mem::transmute(ptr)
+            };
+            let a: i64 = 3;
+            let b: i64 = 4;
+            Ok(f(&a as *const i64, &b as *const i64))
+        },
+    );
+
+    let result: Result<u64, String> = result;
+    let val = result.expect("library mode should compile and execute parameterized function");
+    assert_eq!(val, 7, "add(3, 4) should return 7");
+}
+
 #[test]
 fn native_ir_for_poseidon_fp() {
     // Attempt to compile Poseidon's fp.fe through the native path.

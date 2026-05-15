@@ -4105,9 +4105,14 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
             .current_block()
             .expect("overflow block requires current block");
         self.fb.switch_to_block(revert_block);
-        let zero = zero_for_type(&mut self.fb, Type::I256);
-        self.fb
-            .insert_inst_no_result(EvmRevert::new(self.module.inst_set(), zero, zero));
+        if self.module.inst_set().has_evm_revert().is_some() {
+            let zero = zero_for_type(&mut self.fb, Type::I256);
+            self.fb
+                .insert_inst_no_result(EvmRevert::new(self.module.inst_set(), zero, zero));
+        } else {
+            self.fb
+                .insert_inst_no_result(Unreachable::new(self.module.inst_set()));
+        }
         self.fb.switch_to_block(current);
         self.empty_revert_block = Some(revert_block);
         revert_block
@@ -4141,6 +4146,11 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
     }
 
     fn emit_panic_revert_payload(&mut self, code: u64) {
+        if self.module.inst_set().has_evm_revert().is_none() {
+            self.fb
+                .insert_inst_no_result(Unreachable::new(self.module.inst_set()));
+            return;
+        }
         let zero = self.fb.make_imm_value(I256::zero());
         let selector = self.fb.make_imm_value(panic_selector_immediate());
         let code_offset = self.fb.make_imm_value(I256::from(4u64));

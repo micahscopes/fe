@@ -245,6 +245,16 @@ pub fn compile_runtime_package_sonatina(
     lower_runtime::compile_runtime_package_sonatina(db, package, layout)
 }
 
+pub fn compile_library_sonatina_native(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+) -> Result<Module, LowerError> {
+    let package = mir::build_library_package(db, top_mod)?;
+    let isa = create_native_isa();
+    let ctx = ModuleCtx::new(&isa);
+    lower_runtime::compile_runtime_package_sonatina_with_ctx(db, &package, crate::EVM_LAYOUT, ctx)
+}
+
 pub fn compile_runtime_package_sonatina_native(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
