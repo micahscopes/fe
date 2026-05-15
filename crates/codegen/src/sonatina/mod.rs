@@ -533,6 +533,16 @@ pub fn emit_runtime_package_sonatina_ir(
     Ok(writer.dump_string())
 }
 
+pub fn emit_module_sonatina_ir_native(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+) -> Result<String, LowerError> {
+    let package = build_runtime_package(db, top_mod)?;
+    let module = compile_runtime_package_sonatina_native(db, &package, crate::EVM_LAYOUT)?;
+    let mut writer = ModuleWriter::new(&module);
+    Ok(writer.dump_string())
+}
+
 pub fn emit_runtime_package_sonatina_ir_optimized(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
