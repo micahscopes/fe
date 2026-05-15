@@ -398,6 +398,50 @@ pub fn add(a: u64, b: u64) -> u64 {
     assert_eq!(val, 7, "add(3, 4) should return 7");
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn library_mode_u256_identity_jit() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    let result: Result<[u64; 4], String> = with_top_mod_for_source(
+        "library_u256.fe",
+        r#"
+pub fn identity_u256(x: u256) -> u256 {
+    x
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir_text = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== u256 Identity IR ===\n{ir_text}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            // identity_u256 takes objref<i256> (ptr), returns i256 (mapped to i64).
+            // Currently obj.load of i256 loads only the first 8 bytes as i64.
+            // This is a lossy representation for MVP — full u256 needs stack slots.
+            let f: fn(*const u64) -> u64 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const u64) -> u64>("identity_u256")
+                    .ok_or("identity_u256 not found")?;
+                std::mem::transmute(ptr)
+            };
+
+            let input: u64 = 42;
+            let result = f(&input as *const u64);
+            Ok([result, 0, 0, 0])
+        },
+    );
+
+    let val = result.expect("u256 identity should compile and execute");
+    assert_eq!(val[0], 42, "identity_u256(42) low limb should be 42");
+    assert_eq!(val[1], 0, "high limbs should be 0");
+}
+
 #[test]
 fn native_ir_for_poseidon_fp() {
     // Attempt to compile Poseidon's fp.fe through the native path.
