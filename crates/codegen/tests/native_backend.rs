@@ -634,6 +634,80 @@ pub fn pow5_check(base: u256, expected: u256) -> bool {
     assert!(val, "pow5(3) should equal 243 over BN254 prime");
 }
 
+#[cfg(feature = "cranelift")]
+#[test]
+fn stage4_full_fp_struct_pow5_variable_inputs() {
+    use sonatina_codegen::Backend;
+    use sonatina_codegen::isa::cranelift::CraneliftBackend;
+
+    // The FULL Poseidon test: Fp struct with add/mul/pow5 methods,
+    // variable inputs, through Cranelift JIT.
+    let result: Result<bool, String> = with_top_mod_for_source(
+        "fp_full_runtime.fe",
+        r#"
+use std::evm::crypto::{addmod, mulmod}
+
+const PRIME: u256 = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001
+
+pub fn fp_add(a: u256, b: u256) -> u256 {
+    addmod(a, b, PRIME)
+}
+
+pub fn fp_mul(a: u256, b: u256) -> u256 {
+    mulmod(a, b, PRIME)
+}
+
+pub fn fp_pow5_check(base: u256, expected: u256) -> bool {
+    let x2: u256 = fp_mul(base, base)
+    let x4: u256 = fp_mul(x2, x2)
+    let x5: u256 = fp_mul(x4, base)
+    x5 == expected
+}
+
+pub fn fp_add_check(a: u256, b: u256, expected: u256) -> bool {
+    let sum: u256 = fp_add(a, b)
+    sum == expected
+}
+"#,
+        |db, top_mod| {
+            let module = fe_codegen::sonatina::compile_library_sonatina_native(db, top_mod)
+                .map_err(|e| format!("{e}"))?;
+
+            let ir = sonatina_ir::ir_writer::ModuleWriter::new(&module).dump_string();
+            eprintln!("=== Full Fp IR ===\n{ir}");
+
+            let backend = CraneliftBackend::new();
+            let artifact = backend.compile_module(&module)
+                .map_err(|e| format!("{e:?}"))?;
+
+            // Test fp_add: addmod(7, 3, PRIME) = 10
+            let f_add: fn(*const [u64; 4], *const [u64; 4], *const [u64; 4]) -> u8 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const [u64; 4], *const [u64; 4], *const [u64; 4]) -> u8>("fp_add_check")
+                    .ok_or("fp_add_check not found")?;
+                std::mem::transmute(ptr)
+            };
+            let a: [u64; 4] = [7, 0, 0, 0];
+            let b: [u64; 4] = [3, 0, 0, 0];
+            let ten: [u64; 4] = [10, 0, 0, 0];
+            assert!(f_add(&a, &b, &ten) != 0, "fp_add(7, 3) should equal 10");
+
+            // Test fp_pow5: 3^5 = 243
+            let f_pow5: fn(*const [u64; 4], *const [u64; 4]) -> u8 = unsafe {
+                let ptr = artifact.get_func_ptr::<fn(*const [u64; 4], *const [u64; 4]) -> u8>("fp_pow5_check")
+                    .ok_or("fp_pow5_check not found")?;
+                std::mem::transmute(ptr)
+            };
+            let three: [u64; 4] = [3, 0, 0, 0];
+            let two43: [u64; 4] = [243, 0, 0, 0];
+            assert!(f_pow5(&three, &two43) != 0, "fp_pow5(3) should equal 243");
+
+            Ok(true)
+        },
+    );
+
+    result.expect("Full Fp struct operations should compile and execute correctly");
+}
+
 #[test]
 fn stage5b_poseidon_compiles_to_spirv_skeleton() {
     use sonatina_codegen::Backend;
