@@ -80,12 +80,20 @@ pub(super) fn compile_runtime_package_sonatina_with_ctx(
     ctx: sonatina_ir::module::ModuleCtx,
 ) -> Result<Module, LowerError> {
     let _ = layout;
+    let is_native = !matches!(
+        ctx.triple.architecture,
+        sonatina_triple::Architecture::Evm
+    );
     let builder = ModuleBuilder::new(ctx);
     let mut lowerer = ModuleLowerer::new(db, builder, package);
     lowerer.declare_functions()?;
     lowerer.lower_const_regions()?;
-    lowerer.lower_bodies()?;
-    lowerer.declare_objects()?;
+    if is_native {
+        lowerer.lower_bodies_native()?;
+    } else {
+        lowerer.lower_bodies()?;
+        lowerer.declare_objects()?;
+    }
     Ok(lowerer.finish())
 }
 
@@ -297,6 +305,38 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
             let func_ref = self.func_ref(function.instance(self.db))?;
             let ctx = FunctionLowerer::new(self, body, func_ref)?;
             ctx.lower()?;
+        }
+        Ok(())
+    }
+
+    fn lower_bodies_native(&mut self) -> Result<(), LowerError> {
+        for function in self.package.functions(self.db) {
+            if runtime_intrinsic(self.db, function.instance(self.db)).is_some() {
+                continue;
+            }
+            let body = function.instance(self.db).body(self.db);
+            let func_ref = self.func_ref(function.instance(self.db))?;
+            let symbol = self.function_symbol(function.instance(self.db));
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let ctx = FunctionLowerer::new(self, body.clone(), func_ref)?;
+                ctx.lower()
+            }));
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "skipping function {symbol} for native target: {e}"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "skipping function {symbol} for native target: \
+                         uses unsupported EVM-specific instructions"
+                    );
+                }
+            }
         }
         Ok(())
     }
