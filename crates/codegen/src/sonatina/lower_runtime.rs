@@ -310,13 +310,19 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
     }
 
     fn lower_bodies_native(&mut self) -> Result<(), LowerError> {
-        for function in self.package.functions(self.db) {
+        let all_functions: Vec<_> = self.package.functions(self.db);
+        eprintln!(
+            "[native] lower_bodies_native: {} functions in package",
+            all_functions.len()
+        );
+        for function in all_functions {
             if runtime_intrinsic(self.db, function.instance(self.db)).is_some() {
                 continue;
             }
             let body = function.instance(self.db).body(self.db);
             let func_ref = self.func_ref(function.instance(self.db))?;
             let symbol = self.function_symbol(function.instance(self.db));
+            eprintln!("[native] lowering function: {symbol}");
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let ctx = FunctionLowerer::new(self, body.clone(), func_ref)?;

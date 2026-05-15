@@ -57,6 +57,33 @@ pub contract Arith {
     );
 }
 
+#[test]
+fn native_ir_for_standalone_function() {
+    // Standalone parameterless pub fn (no contract) — goes through the
+    // non-contract MIR path. Parameters make a function ineligible as a
+    // root candidate in Fe's current model, so we use a parameterless fn.
+    let ir = with_top_mod_for_source(
+        "native_standalone.fe",
+        r#"
+pub fn compute() -> u64 {
+    let a: u64 = 3
+    let b: u64 = 4
+    a + b
+}
+"#,
+        |db, top_mod| fe_codegen::emit_module_sonatina_ir_native(db, top_mod),
+    );
+
+    let ir_text = ir.expect("native IR emission should succeed for standalone function");
+    eprintln!("=== Native Standalone IR ===\n{ir_text}");
+    assert!(ir_text.contains("func"), "expected a function definition in native IR");
+    assert!(ir_text.contains("i64"), "expected i64 type (native integer size)");
+    assert!(
+        ir_text.contains("compute"),
+        "expected compute function name in IR"
+    );
+}
+
 /// Verify that the EVM path still works for the same source.
 #[test]
 fn evm_ir_for_simple_contract_still_works() {
