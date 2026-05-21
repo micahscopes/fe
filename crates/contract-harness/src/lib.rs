@@ -4,7 +4,7 @@ use common::InputDb;
 use driver::DriverDataBase;
 use ethers_core::abi::{AbiParser, ParamType, ParseError as AbiParseError, Token, decode};
 use hex::FromHex;
-pub use revm::primitives::U256;
+pub use revm::primitives::{Address, Log, U256};
 use revm::{
     InspectCommitEvm,
     bytecode::Bytecode,
@@ -15,7 +15,7 @@ use revm::{
     database::InMemoryDB,
     handler::{ExecuteCommitEvm, MainBuilder, MainContext, MainnetContext, MainnetEvm},
     interpreter::interpreter_types::Jumps,
-    primitives::{Address, Bytes as EvmBytes, Log, TxKind},
+    primitives::{Bytes as EvmBytes, TxKind},
     state::AccountInfo,
 };
 use std::{
@@ -143,6 +143,7 @@ pub struct CallResult {
 pub struct CallResultWithLogs {
     pub result: CallResult,
     pub logs: Vec<String>,
+    pub raw_logs: Vec<Log>,
 }
 
 /// Per-call gas attribution gathered from a full instruction trace replay.
@@ -239,6 +240,7 @@ fn transact_with_logs(
                 gas_used,
             },
             logs: format_logs(&logs),
+            raw_logs: logs,
         }),
         ExecutionResult::Success {
             output: Output::Create(..),
@@ -791,6 +793,15 @@ impl RuntimeInstance {
     /// via internal calls (e.g. `evm.call(value: 1, ...)`).
     pub fn fund_contract(&mut self, amount: U256) {
         let address = self.address;
+        self.fund_account(address, amount);
+    }
+
+    /// Adds `amount` wei to the given account's balance.
+    ///
+    /// Useful for tests where the caller needs to send ETH along with a call
+    /// (e.g. payable deposits). Default `ExecutionOptions` uses `Address::ZERO`
+    /// as the caller; fund that address to enable value transfers from it.
+    pub fn fund_account(&mut self, address: Address, amount: U256) {
         let js = &mut self.evm.ctx.journaled_state;
 
         // Update the underlying DB cache so future loads see the balance.
@@ -1152,6 +1163,101 @@ impl RuntimeInstance {
             .total_step_gas
             .saturating_sub(profile.constructor_frame_gas);
         profile
+    }
+
+    /// Re-executes a call and returns per-step `(PC, opcode, gas_cost)` trace
+    /// plus total transaction gas from the ExecutionResult.
+    pub fn call_raw_gas_trace(
+        &self,
+        calldata: &[u8],
+        options: ExecutionOptions,
+    ) -> (Vec<(u32, u8, u64)>, u64) {
+        struct PcTracer {
+            steps: Vec<(u32, u8, u64)>,
+            pending_gas: u64,
+            pending_pc: u32,
+            pending_opcode: u8,
+            depth: u32,
+            subcall_gas: u64,
+        }
+
+        impl<CTX, INTR: revm::interpreter::InterpreterTypes> revm::Inspector<CTX, INTR> for PcTracer {
+            fn step(&mut self, interp: &mut revm::interpreter::Interpreter<INTR>, _context: &mut CTX) {
+                if self.depth == 1 {
+                    self.pending_gas = interp.gas.remaining();
+                    self.pending_pc = interp.bytecode.pc() as u32;
+                    self.pending_opcode = interp.bytecode.opcode();
+                    self.subcall_gas = 0;
+                }
+            }
+
+            fn step_end(&mut self, interp: &mut revm::interpreter::Interpreter<INTR>, _context: &mut CTX) {
+                if self.depth == 1 {
+                    // For call/create opcodes, the gas delta includes the sub-call's
+                    // cost. We record only the base opcode cost (100 for STATICCALL).
+                    let is_call_opcode = matches!(self.pending_opcode,
+                        0xf1 | 0xf2 | 0xf4 | 0xfa | 0xf0 | 0xf5);
+                    let cost = if is_call_opcode {
+                        100 // base CALL cost; actual sub-call gas is not attributable to this source line
+                    } else {
+                        self.pending_gas.saturating_sub(interp.gas.remaining())
+                    };
+                    self.steps.push((self.pending_pc, self.pending_opcode, cost));
+                }
+            }
+
+            fn call(&mut self, _ctx: &mut CTX, _inputs: &mut revm::interpreter::CallInputs) -> Option<revm::interpreter::CallOutcome> {
+                self.depth += 1;
+                None
+            }
+
+            fn call_end(&mut self, _ctx: &mut CTX, _inputs: &revm::interpreter::CallInputs, outcome: &mut revm::interpreter::CallOutcome) {
+                if self.depth > 0 {
+                    self.subcall_gas = self.subcall_gas.saturating_add(outcome.result.gas.spent());
+                    self.depth -= 1;
+                }
+            }
+
+            fn create(&mut self, _ctx: &mut CTX, _inputs: &mut revm::interpreter::CreateInputs) -> Option<revm::interpreter::CreateOutcome> {
+                self.depth += 1;
+                None
+            }
+
+            fn create_end(&mut self, _ctx: &mut CTX, _inputs: &revm::interpreter::CreateInputs, outcome: &mut revm::interpreter::CreateOutcome) {
+                if self.depth > 0 {
+                    self.subcall_gas = self.subcall_gas.saturating_add(outcome.result.gas.spent());
+                    self.depth -= 1;
+                }
+            }
+        }
+
+        let ctx = self.evm.ctx.clone();
+        let mut tracer = PcTracer { steps: Vec::new(), pending_gas: 0, pending_pc: 0, pending_opcode: 0, depth: 0, subcall_gas: 0 };
+        let mut trace_evm = ctx.build_mainnet_with_inspector(&mut tracer);
+
+        let nonce = options.nonce.unwrap_or_else(|| {
+            self.next_nonce_by_caller.get(&options.caller).copied().unwrap_or(0)
+        });
+
+        let tx = TxEnv::builder()
+            .caller(options.caller)
+            .gas_limit(options.gas_limit)
+            .gas_price(options.gas_price)
+            .to(self.address)
+            .value(options.value)
+            .data(EvmBytes::copy_from_slice(calldata))
+            .nonce(nonce)
+            .build()
+            .expect("tx builder");
+
+        let result = trace_evm.inspect_tx_commit(tx);
+        let tx_gas = match &result {
+            Ok(ExecutionResult::Success { gas_used, .. }) => *gas_used,
+            Ok(ExecutionResult::Revert { gas_used, .. }) => *gas_used,
+            Ok(ExecutionResult::Halt { gas_used, .. }) => *gas_used,
+            Err(_) => 0,
+        };
+        (tracer.steps, tx_gas)
     }
 
     /// Returns the contract address assigned to this runtime instance.
