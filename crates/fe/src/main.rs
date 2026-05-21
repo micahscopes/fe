@@ -1,5 +1,6 @@
 #![allow(clippy::print_stderr, clippy::print_stdout)]
 mod abi;
+mod analyze;
 mod build;
 mod check;
 mod cli;
@@ -171,6 +172,23 @@ pub enum Command {
         #[arg(long, default_value = "false")]
         recovery_mode: bool,
     },
+    /// Analyze a Fe contract's compilation landscape.
+    Analyze {
+        /// Path to a .fe source file.
+        path: Utf8PathBuf,
+        /// Emphasize ABI/business split and dedup savings.
+        #[arg(long)]
+        gas_focus: bool,
+        /// Run a gas profile via revm execution trace.
+        #[arg(long)]
+        profile: bool,
+        /// Hex selector to profile (e.g. 0x22895118). Auto-detects from source if omitted.
+        #[arg(long)]
+        selector: Option<String>,
+        /// Machine-readable JSON output with full function details.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate documentation for a Fe project
     Doc {
         /// Path to a .fe file or ingot directory
@@ -274,6 +292,21 @@ pub enum Command {
         /// Use recovery mode when parsing.
         #[arg(long, default_value = "false")]
         recovery_mode: bool,
+    },
+    /// Run gas benchmarks comparing Fe (Sonatina) against Solidity.
+    Bench {
+        /// Path to benchmark fixtures directory.
+        #[arg(value_name = "PATH", default_value = "bench_fixtures")]
+        path: Utf8PathBuf,
+        /// Filter benchmarks by name.
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// solc binary to use (overrides FE_SOLC_PATH).
+        #[arg(long)]
+        solc: Option<String>,
+        /// Output directory for CSV reports.
+        #[arg(long, short)]
+        output: Option<Utf8PathBuf>,
     },
     /// Create a new ingot or workspace.
     New {
@@ -486,6 +519,9 @@ pub fn run(opts: &Options) {
                 }
             }
         }
+        Command::Analyze { path, gas_focus, profile, selector, json } => {
+            analyze::analyze_command(path, *gas_focus, *profile, selector.as_deref(), *json);
+        }
         Command::Doc {
             path,
             output,
@@ -586,6 +622,23 @@ pub fn run(opts: &Options) {
                 }
             }
         }
+        Command::Bench {
+            path,
+            filter,
+            solc,
+            output,
+        } => match fe::bench::run_benchmarks(
+            path.as_path(),
+            filter.as_deref(),
+            solc.as_deref(),
+            output.as_ref().map(|p| p.as_path()),
+        ) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("Error: {err}");
+                std::process::exit(1);
+            }
+        },
         Command::New {
             path,
             workspace,
