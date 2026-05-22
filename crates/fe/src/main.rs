@@ -307,6 +307,9 @@ pub enum Command {
         /// Output directory for CSV reports.
         #[arg(long, short)]
         output: Option<Utf8PathBuf>,
+        /// Show source-level gas attribution for Fe functions.
+        #[arg(long)]
+        profile: bool,
     },
     /// Create a new ingot or workspace.
     New {
@@ -627,11 +630,13 @@ pub fn run(opts: &Options) {
             filter,
             solc,
             output,
+            profile,
         } => match fe::bench::run_benchmarks(
             path.as_path(),
             filter.as_deref(),
             solc.as_deref(),
             output.as_ref().map(|p| p.as_path()),
+            *profile,
         ) {
             Ok(()) => {}
             Err(err) => {

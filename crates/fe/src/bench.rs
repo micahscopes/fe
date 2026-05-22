@@ -12,7 +12,7 @@ use crate::bench_support::{
     print_sol_gas_table, sol_variant_label,
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use contract_harness::{ExecutionOptions, RuntimeInstance};
+use contract_harness::{self, ExecutionOptions, RuntimeInstance};
 use ethers_core::abi::AbiParser;
 
 /// A single benchmark fixture: paired Fe + Solidity sources with a call manifest.
@@ -71,6 +71,7 @@ pub fn run_benchmarks(
     filter: Option<&str>,
     solc: Option<&str>,
     output: Option<&Utf8Path>,
+    profile: bool,
 ) -> Result<(), String> {
     let path = resolve_fixtures_dir(path)?;
     let fixtures = discover_fixtures(&path, filter)?;
@@ -102,6 +103,13 @@ pub fn run_benchmarks(
             compile_fe_sonatina(&fixture.fe_source, &fixture.name, &fixture.contract_name)
                 .map_err(|e| format!("[{}] {e}", fixture.name))?;
 
+        // When profiling, also compile with provenance for source mapping
+        let profile_ctx = if profile {
+            Some(compile_for_profile(&fixture.fe_source, &fixture.name, &fixture.contract_name)?)
+        } else {
+            None
+        };
+
         for call in &fixture.calls {
             let calldata = encode_calldata(&call.signature, &call.args)
                 .map_err(|e| format!("[{}] {}: {e}", fixture.name, call.signature))?;
@@ -128,6 +136,10 @@ pub fn run_benchmarks(
                 fe_sonatina_gas,
                 sol_gas,
             });
+
+            if let Some(ctx) = &profile_ctx {
+                print_source_profile(ctx, &calldata, fn_name);
+            }
         }
     }
 
@@ -372,6 +384,79 @@ fn write_csv(results: &[BenchResult], out_dir: &Utf8Path) -> Result<(), String> 
         out_dir.join("gas_benchmark.csv")
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Source-level gas profiling
+// ---------------------------------------------------------------------------
+
+struct ProfileContext {
+    analysis: codegen::analyze::SourceAnalysis,
+}
+
+fn compile_for_profile(
+    fe_source: &str,
+    name: &str,
+    _contract_name: &str,
+) -> Result<ProfileContext, String> {
+    let analysis = codegen::analyze::SourceAnalysis::from_source(fe_source)
+        .map_err(|e| format!("[{name}] analysis: {e}"))?;
+    Ok(ProfileContext { analysis })
+}
+
+fn print_source_profile(ctx: &ProfileContext, calldata: &[u8], fn_name: &str) {
+    let package = ctx.analysis.package();
+    let (artifacts, origins) = match codegen::compile_with_frontend_provenance(
+        &ctx.analysis.db, &package, codegen::EVM_LAYOUT, codegen::OptLevel::O1,
+    ) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("  [profile] compile: {e}"); return; }
+    };
+
+    let deploy_hex = artifacts.iter()
+        .flat_map(|art| art.sections.iter())
+        .find(|(name, _)| name.0 == "init")
+        .or_else(|| artifacts.iter().flat_map(|art| art.sections.iter()).find(|(name, _)| name.0 == "runtime"))
+        .map(|(_, s)| hex::encode(&s.bytes));
+
+    let Some(deploy_hex) = deploy_hex else {
+        eprintln!("  [profile] no bytecode section"); return;
+    };
+
+    let mut instance = RuntimeInstance::deploy(&deploy_hex)
+        .or_else(|_| RuntimeInstance::new(&deploy_hex))
+        .unwrap_or_else(|e| { eprintln!("  [profile] deploy: {e}"); std::process::exit(1); });
+    instance.fund_account(
+        contract_harness::Address::ZERO,
+        contract_harness::U256::from(u128::MAX / 2),
+    );
+
+    let (trace, tx_gas) = instance.call_raw_gas_trace(calldata, ExecutionOptions::default());
+    if trace.is_empty() { return; }
+
+    let gas_steps: Vec<_> = trace.iter()
+        .map(|(pc, op, gas)| codegen::gas_profile::GasTraceStep { pc: *pc, opcode: *op, gas_cost: *gas })
+        .collect();
+
+    let profile = codegen::gas_profile::build_gas_profile(
+        &ctx.analysis.db, &package, &artifacts, &origins, &gas_steps, tx_gas,
+    );
+
+    let mapped = profile.total_gas - profile.unmapped_gas;
+    let mapped_pct = if profile.total_gas > 0 { mapped as f64 / profile.total_gas as f64 * 100.0 } else { 0.0 };
+    println!("\n  Source profile for {fn_name} ({} steps, {mapped_pct:.0}% mapped):", profile.total_steps);
+    for entry in profile.by_source_line.iter().take(8) {
+        let pct = if profile.total_gas > 0 { entry.gas as f64 / profile.total_gas as f64 * 100.0 } else { 0.0 };
+        let snippet = if entry.source_snippet.len() > 35 {
+            let end = entry.source_snippet.char_indices()
+                .take_while(|(i, _)| *i < 32).last()
+                .map(|(i, c)| i + c.len_utf8()).unwrap_or(32);
+            format!("{}...", &entry.source_snippet[..end])
+        } else {
+            entry.source_snippet.clone()
+        };
+        println!("    {:>6} gas ({:>5.1}%)  L{:<4} {}", entry.gas, pct, entry.line, snippet);
+    }
 }
 
 #[cfg(test)]
