@@ -1,0 +1,24 @@
+error[E0599]: no function or associated item named `new` found for struct `BytecodeSourceMapEntry` in the current scope
+ --> tests/ui/bytecode_source_map_entry_raw_parts.rs:5:37
+  |
+5 |     let _ = BytecodeSourceMapEntry::new(
+  |                                     ^^^ function or associated item not found in `BytecodeSourceMapEntry`
+  |
+note: if you're trying to build a new `BytecodeSourceMapEntry` consider using one of the following associated functions:
+      BytecodeSourceMapEntry::try_from_origin
+      BytecodeSourceMapEntry::from_origin
+ --> src/debug.rs
+  |
+  | /     pub fn try_from_origin(
+  | |         origin: &BytecodePcOrigin,
+  | |         kind: BytecodeSourceMapEntryKind,
+  | |     ) -> Result<Self, BytecodeSourceMapEntryError> {
+  | |__________________________________________________^
+...
+  |       pub fn from_origin(origin: &BytecodePcOrigin, kind: BytecodeSourceMapEntryKind) -> Self {
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is a method `ne` with a similar name, but with different arguments
+ --> $RUST/core/src/cmp.rs
+  |
+  |     fn ne(&self, other: &Rhs) -> bool {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,47 @@
+error[E0308]: mismatched types
+  --> tests/ui/end_to_end_origin_owner_key_mismatch.rs:11:55
+   |
+11 |     let _ = EndToEndOriginNode::RuntimeStmt { origin, owner_key };
+   |                                                       ^^^^^^^^^ expected `EndToEndRuntimeOwnerKey`, found `EndToEndSemanticOwnerKey`
+
+error[E0308]: mismatched types
+  --> tests/ui/end_to_end_origin_owner_key_mismatch.rs:18:61
+   |
+18 |     let _ = EndToEndOriginNode::RuntimeTerminator { origin, owner_key };
+   |                                                             ^^^^^^^^^ expected `EndToEndRuntimeOwnerKey`, found `EndToEndSemanticOwnerKey`
+
+error[E0308]: mismatched types
+  --> tests/ui/end_to_end_origin_owner_key_mismatch.rs:23:9
+   |
+23 |         owner_key,
+   |         ^^^^^^^^^ expected `EndToEndRuntimeOwnerKey`, found `EndToEndSemanticOwnerKey`
+
+error[E0308]: mismatched types
+  --> tests/ui/end_to_end_origin_owner_key_mismatch.rs:29:28
+   |
+29 |     expects_semantic_owner(owner_key);
+   |     ---------------------- ^^^^^^^^^ expected `EndToEndSemanticOwnerKey`, found `EndToEndRuntimeOwnerKey`
+   |     |
+   |     arguments to this function are incorrect
+   |
+note: function defined here
+  --> tests/ui/end_to_end_origin_owner_key_mismatch.rs:36:4
+   |
+36 | fn expects_semantic_owner(_: EndToEndSemanticOwnerKey) {}
+   |    ^^^^^^^^^^^^^^^^^^^^^^ ---------------------------
+
+error[E0308]: mismatched types
+  --> tests/ui/end_to_end_origin_owner_key_mismatch.rs:33:51
+   |
+33 |     let _ = EndToEndOriginOwnerKeys::for_function("sonatina:func:test");
+   |             ------------------------------------- ^^^^^^^^^^^^^^^^^^^^ expected `&SonatinaFunctionExportKey`, found `&str`
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected reference `&SonatinaFunctionExportKey`
+              found reference `&'static str`
+note: associated function defined here
+  --> src/origin.rs
+   |
+   |     pub fn for_function(function_key: &SonatinaFunctionExportKey) -> Self {
+   |            ^^^^^^^^^^^^

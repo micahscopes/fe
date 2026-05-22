@@ -1,0 +1,36 @@
+error[E0308]: mismatched types
+  --> tests/ui/sonatina_function_export_key_raw_strings.rs:10:46
+   |
+10 |     let _ = sonatina_inst_export_key(origin, "sonatina:func:test");
+   |             ------------------------         ^^^^^^^^^^^^^^^^^^^^ expected `&SonatinaFunctionExportKey`, found `&str`
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected reference `&SonatinaFunctionExportKey`
+              found reference `&'static str`
+note: function defined here
+  --> src/origin.rs
+   |
+   | pub fn sonatina_inst_export_key(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/sonatina_function_export_key_raw_strings.rs:13:60
+   |
+13 |     let _ = codegen_origin_node_export_key(&node, |_| Some("sonatina:func:test".to_string()));
+   |                                                       ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `SonatinaFunctionExportKey`, found `String`
+   |                                                       |
+   |                                                       arguments to this enum variant are incorrect
+   |
+help: the type constructed contains `String` due to the type of the argument passed
+  --> tests/ui/sonatina_function_export_key_raw_strings.rs:13:55
+   |
+13 |     let _ = codegen_origin_node_export_key(&node, |_| Some("sonatina:func:test".to_string()));
+   |                                                       ^^^^^--------------------------------^
+   |                                                            |
+   |                                                            this argument influences the type of `Some`
+note: tuple variant defined here
+  --> $RUST/core/src/option.rs
+   |
+   |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+   |     ^^^^

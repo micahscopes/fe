@@ -1,5 +1,6 @@
 #![allow(clippy::print_stderr, clippy::print_stdout)]
 mod abi;
+mod analyze;
 mod build;
 mod check;
 mod cli;
@@ -45,6 +46,12 @@ pub enum BuildEmit {
 pub enum TestEmit {
     Ir,
     Rmir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AnalyzeFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -167,6 +174,56 @@ pub enum Command {
         /// Only write the report if `fe check` fails.
         #[arg(long, requires = "report")]
         report_failed_only: bool,
+        /// Use recovery mode when parsing.
+        #[arg(long, default_value = "false")]
+        recovery_mode: bool,
+    },
+    /// Analyze typed origin data for a Fe target.
+    Analyze {
+        /// Path to an ingot/workspace directory, workspace member name, or .fe file.
+        #[arg(default_value_t = default_project_path())]
+        path: Utf8PathBuf,
+        /// Analyze a single workspace ingot by member name.
+        ///
+        /// This requires targeting a workspace root path.
+        #[arg(short = 'i', long = "ingot", value_name = "INGOT")]
+        ingot: Option<String>,
+        /// Treat a `.fe` file target as standalone, even if it is inside an ingot.
+        #[arg(long)]
+        standalone: bool,
+        /// Compilation profile to use when resolving profile-aware config.
+        #[arg(long, default_value = "dev", value_name = "PROFILE")]
+        profile: String,
+        #[command(flatten)]
+        optimize: OptimizeArgs,
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: AnalyzeFormat,
+        /// Analyze Fe test runtime packages instead of regular runtime packages.
+        #[arg(long)]
+        tests: bool,
+        /// Include typed bytecode source-map summaries.
+        #[arg(long)]
+        source_maps: bool,
+        /// Include individual bytecode source-map entries.
+        ///
+        /// Requires `--source-maps`.
+        #[arg(long)]
+        source_map_entries: bool,
+        /// Include typed bytecode origin facts.
+        #[arg(long)]
+        origin_facts: bool,
+        /// Include full engine-agnostic relation tables for emitted typed facts.
+        ///
+        /// Requires `--format json` and either `--origin-facts` or `--shape-facts`.
+        #[arg(long)]
+        fact_relation_tables: bool,
+        /// Include runtime shape hash summaries.
+        #[arg(long)]
+        shape_hashes: bool,
+        /// Include typed runtime shape facts.
+        #[arg(long)]
+        shape_facts: bool,
         /// Use recovery mode when parsing.
         #[arg(long, default_value = "false")]
         recovery_mode: bool,
@@ -488,6 +545,56 @@ pub fn run(opts: &Options) {
                 *dump_mir,
                 (*report).then_some(report_out),
                 *report_failed_only,
+                *recovery_mode,
+            ) {
+                Ok(has_errors) => {
+                    if has_errors {
+                        std::process::exit(1);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Analyze {
+            path,
+            ingot,
+            standalone,
+            profile,
+            optimize,
+            format,
+            tests,
+            source_maps,
+            source_map_entries,
+            origin_facts,
+            fact_relation_tables,
+            shape_hashes,
+            shape_facts,
+            recovery_mode,
+        } => {
+            let opt_level = match effective_opt_level(optimize.as_deref()) {
+                Ok(level) => level,
+                Err(err) => {
+                    eprintln!("Error: {err}");
+                    std::process::exit(1);
+                }
+            };
+            match analyze::analyze(
+                path,
+                ingot.as_deref(),
+                *standalone,
+                profile,
+                *format,
+                *tests,
+                *source_maps,
+                *source_map_entries,
+                *origin_facts,
+                *fact_relation_tables,
+                *shape_hashes,
+                *shape_facts,
+                opt_level,
                 *recovery_mode,
             ) {
                 Ok(has_errors) => {

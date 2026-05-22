@@ -1,3 +1,4 @@
+use common::shape::{ShapeBuilder, ShapeDescribe, ShapeDimension, ShapeNodeId};
 use cranelift_entity::{EntityRef, entity_impl};
 use hir::analysis::{
     semantic::{FieldIndex, SemanticInstance},
@@ -11,9 +12,10 @@ use salsa::Update;
 use crate::{
     db::MirDb,
     instance::{RuntimeInstance, RuntimeInstanceKey},
+    origin::RuntimeBodyOrigins,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum AddressSpaceKind {
     Memory,
     Storage,
@@ -21,19 +23,25 @@ pub enum AddressSpaceKind {
     Calldata,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RuntimeClass<'db> {
-    Scalar(ScalarClass<'db>),
+    Scalar(#[shape(child)] ScalarClass<'db>),
     AggregateValue {
+        #[shape(with = shape_layout_ref)]
         layout: LayoutId<'db>,
     },
     Ref {
+        #[shape(child)]
         pointee: Box<RuntimeClass<'db>>,
+        #[shape(child)]
         kind: RefKind<'db>,
+        #[shape(child)]
         view: RefView<'db>,
     },
     RawAddr {
+        #[shape(child)]
         space: AddressSpaceKind,
+        #[shape(with = shape_optional_layout_ref)]
         target: Option<LayoutId<'db>>,
     },
 }
@@ -256,20 +264,22 @@ impl<'db> RuntimeClass<'db> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RefKind<'db> {
     Const,
     Object,
     Provider {
+        #[shape(with = shape_ty_ref)]
         provider_ty: TyId<'db>,
+        #[shape(child)]
         space: AddressSpaceKind,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RefView<'db> {
     Whole,
-    EnumVariant(VariantId<'db>),
+    EnumVariant(#[shape(child)] VariantId<'db>),
 }
 
 fn layouts_share_runtime_rep<'db>(
@@ -353,15 +363,17 @@ fn ref_kinds_share_runtime_rep<'db>(actual: &RefKind<'db>, desired: &RefKind<'db
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RuntimeCarrier<'db> {
     Erased,
-    Value(RuntimeClass<'db>),
+    Value(#[shape(child)] RuntimeClass<'db>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct ScalarClass<'db> {
+    #[shape(child)]
     pub repr: ScalarRepr,
+    #[shape(child)]
     pub role: ScalarRole<'db>,
 }
 
@@ -371,18 +383,32 @@ impl ScalarClass<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum ScalarRepr {
     Bool,
-    Int { bits: u16, signed: bool },
-    FixedBytes { len: u16 },
-    Address { bits: u16 },
+    Int {
+        #[shape(field = Types)]
+        bits: u16,
+        #[shape(field = Types)]
+        signed: bool,
+    },
+    FixedBytes {
+        #[shape(field = Types)]
+        len: u16,
+    },
+    Address {
+        #[shape(field = Types)]
+        bits: u16,
+    },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum ScalarRole<'db> {
     Plain,
-    EnumTag { enum_layout: LayoutId<'db> },
+    EnumTag {
+        #[shape(with = shape_layout_ref)]
+        enum_layout: LayoutId<'db>,
+    },
 }
 
 #[salsa::interned]
@@ -422,9 +448,11 @@ pub enum Layout<'db> {
     Enum(EnumLayout<'db>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct StructLayout<'db> {
+    #[shape(with = shape_ty_ref)]
     pub source_ty: TyId<'db>,
+    #[shape(child)]
     pub fields: Box<[RuntimeClass<'db>]>,
 }
 
@@ -438,29 +466,39 @@ impl<'db> StructLayout<'db> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct ArrayLayout<'db> {
+    #[shape(with = shape_ty_ref)]
     pub source_ty: TyId<'db>,
+    #[shape(child)]
     pub elem: RuntimeClass<'db>,
+    #[shape(field = Types)]
     pub len: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct EnumLayout<'db> {
+    #[shape(with = shape_ty_ref)]
     pub source_ty: TyId<'db>,
+    #[shape(child)]
     pub tag: ScalarClass<'db>,
+    #[shape(child)]
     pub variants: Box<[EnumVariantLayout<'db>]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct EnumLayoutKey<'db> {
+    #[shape(with = shape_ty_ref)]
     pub source_ty: TyId<'db>,
+    #[shape(child)]
     pub variants: Box<[EnumVariantLayout<'db>]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct EnumVariantLayout<'db> {
+    #[shape(field = Names)]
     pub name: String,
+    #[shape(child)]
     pub fields: Box<[RuntimeClass<'db>]>,
 }
 
@@ -474,9 +512,11 @@ impl<'db> EnumVariantLayout<'db> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct VariantId<'db> {
+    #[shape(with = shape_layout_ref)]
     pub enum_layout: LayoutId<'db>,
+    #[shape(field = Types)]
     pub index: u16,
 }
 
@@ -530,36 +570,218 @@ impl<'db> ConstRegionId<'db> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum ConstNode<'db> {
-    Scalar(ConstScalar),
+    Scalar(#[shape(child)] ConstScalar),
     Aggregate {
+        #[shape(skip = "layout identity is covered by layout/type shape policy")]
         layout: LayoutId<'db>,
+        #[shape(child)]
         fields: Box<[ConstNode<'db>]>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum ConstScalar {
-    Bool(bool),
+    Bool(#[shape(field = Constants)] bool),
     Int {
+        #[shape(field = Types)]
         bits: u16,
+        #[shape(field = Types)]
         signed: bool,
+        #[shape(field = Constants)]
         words: Vec<u8>,
     },
-    FixedBytes(Vec<u8>),
+    FixedBytes(#[shape(field = Constants)] Vec<u8>),
     Address {
+        #[shape(field = Types)]
         bits: u16,
+        #[shape(field = Constants)]
         bytes: Vec<u8>,
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Update)]
-pub struct RLocalId(u32);
+#[cfg(test)]
+mod shape_tests {
+    use common::shape::{ShapeDescribe, ShapeDimension};
+    use hir::hir_def::{ArithBinOp, BinOp};
+
+    use super::{
+        AddressSpaceKind, ConstNode, ConstScalar, RBlockId, RExpr, RLocalId, RStmt, RTerminator,
+        RuntimeClass, ScalarClass, ScalarRepr, ScalarRole,
+    };
+
+    #[test]
+    fn const_scalar_shape_separates_type_and_value_dimensions() {
+        let one = ConstScalar::Int {
+            bits: 8,
+            signed: false,
+            words: vec![1],
+        }
+        .shape_hashes();
+        let two = ConstScalar::Int {
+            bits: 8,
+            signed: false,
+            words: vec![2],
+        }
+        .shape_hashes();
+        let wider = ConstScalar::Int {
+            bits: 16,
+            signed: false,
+            words: vec![1],
+        }
+        .shape_hashes();
+
+        assert_eq!(
+            one.graph().digest(ShapeDimension::Types),
+            two.graph().digest(ShapeDimension::Types)
+        );
+        assert_ne!(
+            one.graph().digest(ShapeDimension::Constants),
+            two.graph().digest(ShapeDimension::Constants)
+        );
+        assert_ne!(
+            one.graph().digest(ShapeDimension::Types),
+            wider.graph().digest(ShapeDimension::Types)
+        );
+    }
+
+    #[test]
+    fn const_node_scalar_shape_observes_child_value_changes() {
+        let first = ConstNode::Scalar(ConstScalar::Bool(false)).shape_hashes();
+        let second = ConstNode::Scalar(ConstScalar::Bool(true)).shape_hashes();
+
+        assert_ne!(
+            first
+                .node(common::shape::ShapeNodeId::from_u32(0))
+                .unwrap()
+                .tree()
+                .digest(ShapeDimension::Constants),
+            second
+                .node(common::shape::ShapeNodeId::from_u32(0))
+                .unwrap()
+                .tree()
+                .digest(ShapeDimension::Constants)
+        );
+    }
+
+    #[test]
+    fn runtime_class_shape_tracks_type_dimensions_and_address_space() {
+        let u8_scalar = RuntimeClass::Scalar(ScalarClass {
+            repr: ScalarRepr::Int {
+                bits: 8,
+                signed: false,
+            },
+            role: ScalarRole::Plain,
+        })
+        .shape_hashes();
+        let u16_scalar = RuntimeClass::Scalar(ScalarClass {
+            repr: ScalarRepr::Int {
+                bits: 16,
+                signed: false,
+            },
+            role: ScalarRole::Plain,
+        })
+        .shape_hashes();
+        let memory_raw = RuntimeClass::RawAddr {
+            space: AddressSpaceKind::Memory,
+            target: None,
+        }
+        .shape_hashes();
+        let storage_raw = RuntimeClass::RawAddr {
+            space: AddressSpaceKind::Storage,
+            target: None,
+        }
+        .shape_hashes();
+
+        assert_ne!(
+            u8_scalar.graph().digest(ShapeDimension::Types),
+            u16_scalar.graph().digest(ShapeDimension::Types)
+        );
+        assert_ne!(
+            memory_raw.graph().digest(ShapeDimension::Structure),
+            storage_raw.graph().digest(ShapeDimension::Structure)
+        );
+    }
+
+    #[test]
+    fn derived_runtime_stmt_shape_observes_child_expression_content() {
+        let first = RStmt::Assign {
+            dst: RLocalId::from_u32(0),
+            expr: RExpr::ConstScalar(ConstScalar::Bool(false)),
+        }
+        .shape_hashes();
+        let second = RStmt::Assign {
+            dst: RLocalId::from_u32(0),
+            expr: RExpr::ConstScalar(ConstScalar::Bool(true)),
+        }
+        .shape_hashes();
+
+        assert_ne!(
+            first.graph().digest(ShapeDimension::Constants),
+            second.graph().digest(ShapeDimension::Constants)
+        );
+    }
+
+    #[test]
+    fn derived_runtime_expr_shape_observes_operator_and_operands() {
+        let add = RExpr::Binary {
+            op: BinOp::Arith(ArithBinOp::Add),
+            lhs: RLocalId::from_u32(0),
+            rhs: RLocalId::from_u32(1),
+        }
+        .shape_hashes();
+        let sub = RExpr::Binary {
+            op: BinOp::Arith(ArithBinOp::Sub),
+            lhs: RLocalId::from_u32(0),
+            rhs: RLocalId::from_u32(1),
+        }
+        .shape_hashes();
+        let different_operand = RExpr::Binary {
+            op: BinOp::Arith(ArithBinOp::Add),
+            lhs: RLocalId::from_u32(0),
+            rhs: RLocalId::from_u32(2),
+        }
+        .shape_hashes();
+
+        assert_ne!(
+            add.graph().digest(ShapeDimension::Structure),
+            sub.graph().digest(ShapeDimension::Structure)
+        );
+        assert_ne!(
+            add.graph().digest(ShapeDimension::Structure),
+            different_operand.graph().digest(ShapeDimension::Structure)
+        );
+    }
+
+    #[test]
+    fn derived_runtime_terminator_shape_observes_switch_cases() {
+        let first = RTerminator::SwitchScalar {
+            discr: RLocalId::from_u32(0),
+            cases: Box::new([(ConstScalar::Bool(false), RBlockId::from_u32(1))]),
+            default: RBlockId::from_u32(2),
+        }
+        .shape_hashes();
+        let second = RTerminator::SwitchScalar {
+            discr: RLocalId::from_u32(0),
+            cases: Box::new([(ConstScalar::Bool(true), RBlockId::from_u32(1))]),
+            default: RBlockId::from_u32(2),
+        }
+        .shape_hashes();
+
+        assert_ne!(
+            first.graph().digest(ShapeDimension::Constants),
+            second.graph().digest(ShapeDimension::Constants)
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Update, ShapeDescribe)]
+pub struct RLocalId(#[shape(field = Structure)] u32);
 entity_impl!(RLocalId);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Update)]
-pub struct RBlockId(u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Update, ShapeDescribe)]
+pub struct RBlockId(#[shape(field = Structure)] u32);
 entity_impl!(RBlockId);
 
 pub type RValueId = RLocalId;
@@ -599,45 +821,56 @@ pub struct LoweredRuntimeBody<'db> {
     pub direct_callees: Vec<RuntimeCallEdge<'db>>,
     pub referenced_const_regions: Vec<ConstRegionId<'db>>,
     pub referenced_code_regions: Vec<RuntimeCodeRegion<'db>>,
+    pub origins: RuntimeBodyOrigins<'db>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct RLocal<'db> {
+    #[shape(with = shape_ty_ref)]
     pub semantic_ty: TyId<'db>,
+    #[shape(child)]
     pub carrier: RuntimeCarrier<'db>,
+    #[shape(child)]
     pub root: RuntimeLocalRoot<'db>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RuntimeLocalRoot<'db> {
     None,
-    Slot(RuntimeClass<'db>),
-    Ref(RuntimeClass<'db>),
+    Slot(#[shape(child)] RuntimeClass<'db>),
+    Ref(#[shape(child)] RuntimeClass<'db>),
     Ptr {
+        #[shape(child)]
         space: AddressSpaceKind,
+        #[shape(child)]
         class: RuntimeClass<'db>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RuntimeLocalLowering<'db> {
     Erased,
     DirectValue,
     PlaceCarrier {
+        #[shape(child)]
         place_class: RuntimeClass<'db>,
     },
     PlaceBoundValue {
+        #[shape(child)]
         provider: Option<RuntimeProviderBindingId>,
+        #[shape(child)]
         place_class: RuntimeClass<'db>,
     },
     DirectCarrier {
+        #[shape(child)]
         provider: Option<RuntimeProviderBindingId>,
+        #[shape(child)]
         place_class: RuntimeClass<'db>,
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Update)]
-pub struct RuntimeProviderBindingId(u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Update, ShapeDescribe)]
+pub struct RuntimeProviderBindingId(#[shape(field = Structure)] u32);
 entity_impl!(RuntimeProviderBindingId);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
@@ -666,9 +899,11 @@ pub struct RuntimeParam<'db> {
     pub class: RuntimeClass<'db>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct RBlock<'db> {
+    #[shape(child)]
     pub stmts: Vec<RStmt<'db>>,
+    #[shape(child)]
     pub terminator: RTerminator<'db>,
 }
 
@@ -992,30 +1227,37 @@ pub enum RuntimeSectionRef<'db> {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum PlaceRoot<'db> {
-    Slot(RLocalId),
-    Ref(RValueId),
-    Provider(RuntimeProviderBindingId),
+    Slot(#[shape(child)] RLocalId),
+    Ref(#[shape(child)] RValueId),
+    Provider(#[shape(child)] RuntimeProviderBindingId),
     Ptr {
+        #[shape(child)]
         addr: RValueId,
+        #[shape(child)]
         space: AddressSpaceKind,
+        #[shape(child)]
         class: RuntimeClass<'db>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub struct RuntimePlace<'db> {
+    #[shape(child)]
     pub root: PlaceRoot<'db>,
+    #[shape(child)]
     pub path: Box<[PlaceElem<'db>]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum PlaceElem<'db> {
-    Field(FieldIndex),
-    Index(IndexSource<RValueId>),
+    Field(#[shape(with = shape_field_index)] FieldIndex),
+    Index(#[shape(with = shape_index_source)] IndexSource<RValueId>),
     VariantField {
+        #[shape(child)]
         variant: VariantId<'db>,
+        #[shape(with = shape_field_index)]
         field: FieldIndex,
     },
     Deref,
@@ -1072,83 +1314,123 @@ pub enum ResolvedPlaceElem<'db> {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RuntimeBuiltin<'db> {
     Mload {
+        #[shape(child)]
         addr: RValueId,
     },
     Mstore {
+        #[shape(child)]
         addr: RValueId,
+        #[shape(child)]
         value: RValueId,
     },
     Mstore8 {
+        #[shape(child)]
         addr: RValueId,
+        #[shape(child)]
         value: RValueId,
     },
     Mcopy {
+        #[shape(child)]
         dst: RValueId,
+        #[shape(child)]
         src: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     Msize,
     Sload {
+        #[shape(child)]
         slot: RValueId,
     },
     Sstore {
+        #[shape(child)]
         slot: RValueId,
+        #[shape(child)]
         value: RValueId,
     },
     CallValue,
     ReturnDataSize,
     ReturnDataCopy {
+        #[shape(child)]
         dst: RValueId,
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     CallDataSize,
     CallDataLoad {
+        #[shape(child)]
         offset: RValueId,
     },
     CallDataCopy {
+        #[shape(child)]
         dst: RValueId,
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     CodeSize,
     CodeCopy {
+        #[shape(child)]
         dst: RValueId,
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     Keccak256 {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     AddMod {
+        #[shape(child)]
         lhs: RValueId,
+        #[shape(child)]
         rhs: RValueId,
+        #[shape(child)]
         modulus: RValueId,
     },
     MulMod {
+        #[shape(child)]
         lhs: RValueId,
+        #[shape(child)]
         rhs: RValueId,
+        #[shape(child)]
         modulus: RValueId,
     },
     SignExtend {
+        #[shape(child)]
         byte: RValueId,
+        #[shape(child)]
         value: RValueId,
     },
     IntrinsicArith {
+        #[shape(child)]
         op: IntrinsicArithBinOp,
+        #[shape(field = Structure)]
         checked: bool,
+        #[shape(child)]
         lhs: RValueId,
+        #[shape(child)]
         rhs: RValueId,
+        #[shape(child)]
         class: ScalarClass<'db>,
     },
     Saturating {
+        #[shape(child)]
         op: SaturatingBinOp,
+        #[shape(child)]
         lhs: RValueId,
+        #[shape(child)]
         rhs: RValueId,
+        #[shape(child)]
         class: ScalarClass<'db>,
     },
     Address,
@@ -1164,101 +1446,154 @@ pub enum RuntimeBuiltin<'db> {
     BaseFee,
     SelfBalance,
     BlockHash {
+        #[shape(child)]
         block: RValueId,
     },
     Gas,
     CurrentCodeRegionLen,
     CodeRegionOffset {
+        #[shape(with = shape_runtime_code_region_ref)]
         region: RuntimeCodeRegion<'db>,
     },
     CodeRegionLen {
+        #[shape(with = shape_runtime_code_region_ref)]
         region: RuntimeCodeRegion<'db>,
     },
     Malloc {
+        #[shape(child)]
         size: RValueId,
     },
     Call {
+        #[shape(child)]
         gas: RValueId,
+        #[shape(child)]
         addr: RValueId,
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         args_offset: RValueId,
+        #[shape(child)]
         args_len: RValueId,
+        #[shape(child)]
         ret_offset: RValueId,
+        #[shape(child)]
         ret_len: RValueId,
     },
     StaticCall {
+        #[shape(child)]
         gas: RValueId,
+        #[shape(child)]
         addr: RValueId,
+        #[shape(child)]
         args_offset: RValueId,
+        #[shape(child)]
         args_len: RValueId,
+        #[shape(child)]
         ret_offset: RValueId,
+        #[shape(child)]
         ret_len: RValueId,
     },
     DelegateCall {
+        #[shape(child)]
         gas: RValueId,
+        #[shape(child)]
         addr: RValueId,
+        #[shape(child)]
         args_offset: RValueId,
+        #[shape(child)]
         args_len: RValueId,
+        #[shape(child)]
         ret_offset: RValueId,
+        #[shape(child)]
         ret_len: RValueId,
     },
     Create {
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     Create2 {
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
+        #[shape(child)]
         salt: RValueId,
     },
     Log0 {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     Log1 {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
+        #[shape(child)]
         topic0: RValueId,
     },
     Log2 {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
+        #[shape(child)]
         topic0: RValueId,
+        #[shape(child)]
         topic1: RValueId,
     },
     Log3 {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
+        #[shape(child)]
         topic0: RValueId,
+        #[shape(child)]
         topic1: RValueId,
+        #[shape(child)]
         topic2: RValueId,
     },
     Log4 {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
+        #[shape(child)]
         topic0: RValueId,
+        #[shape(child)]
         topic1: RValueId,
+        #[shape(child)]
         topic2: RValueId,
+        #[shape(child)]
         topic3: RValueId,
     },
     CallDataSelector,
     MakeContractFieldRef {
+        #[shape(field = Constants)]
         slot: u128,
+        #[shape(child)]
         class: RuntimeClass<'db>,
+        #[shape(child)]
         kind: RefKind<'db>,
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum SaturatingBinOp {
     Add,
     Sub,
     Mul,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum IntrinsicArithBinOp {
     Add,
     Sub,
@@ -1268,162 +1603,232 @@ pub enum IntrinsicArithBinOp {
     Pow,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RExpr<'db> {
-    Use(RValueId),
-    ConstScalar(ConstScalar),
+    Use(#[shape(child)] RValueId),
+    ConstScalar(#[shape(child)] ConstScalar),
     Placeholder {
+        #[shape(child)]
         class: RuntimeClass<'db>,
     },
-    Builtin(RuntimeBuiltin<'db>),
+    Builtin(#[shape(child)] RuntimeBuiltin<'db>),
     Unary {
+        #[shape(with = shape_un_op)]
         op: UnOp,
+        #[shape(child)]
         value: RValueId,
     },
     Binary {
+        #[shape(with = shape_bin_op)]
         op: BinOp,
+        #[shape(child)]
         lhs: RValueId,
+        #[shape(child)]
         rhs: RValueId,
     },
     Cast {
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         to: ScalarClass<'db>,
     },
     ConstRef {
+        #[shape(with = shape_const_region_ref)]
         region: ConstRegionId<'db>,
+        #[shape(with = shape_layout_ref)]
         layout: LayoutId<'db>,
     },
     AllocObject {
+        #[shape(with = shape_layout_ref)]
         layout: LayoutId<'db>,
     },
     MaterializeToObject {
+        #[shape(child)]
         src: RValueId,
     },
     MaterializePlaceToObject {
+        #[shape(child)]
         place: RuntimePlace<'db>,
     },
     ProviderFromRaw {
+        #[shape(child)]
         raw: RValueId,
+        #[shape(with = shape_ty_ref)]
         provider_ty: TyId<'db>,
+        #[shape(child)]
         space: AddressSpaceKind,
+        #[shape(with = shape_optional_layout_ref)]
         target: Option<LayoutId<'db>>,
     },
     WordToRawAddr {
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         space: AddressSpaceKind,
+        #[shape(with = shape_optional_layout_ref)]
         target: Option<LayoutId<'db>>,
     },
     ProviderToRaw {
+        #[shape(child)]
         value: RValueId,
     },
     RetagRef {
+        #[shape(child)]
         value: RValueId,
     },
     AddrOf {
+        #[shape(child)]
         place: RuntimePlace<'db>,
     },
     Load {
+        #[shape(child)]
         place: RuntimePlace<'db>,
     },
     AggregateExtract {
+        #[shape(child)]
         value: RValueId,
+        #[shape(field = Structure)]
         index: u32,
     },
     Call {
+        #[shape(with = shape_runtime_instance_ref)]
         callee: RuntimeInstance<'db>,
+        #[shape(child)]
         args: Box<[RValueId]>,
     },
     EnumMake {
+        #[shape(with = shape_layout_ref)]
         layout: LayoutId<'db>,
+        #[shape(child)]
         variant: VariantId<'db>,
+        #[shape(child)]
         fields: Box<[RValueId]>,
     },
     EnumTagOfValue {
+        #[shape(child)]
         value: RValueId,
     },
     EnumIsVariant {
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         variant: VariantId<'db>,
     },
     EnumExtract {
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         variant: VariantId<'db>,
+        #[shape(with = shape_field_index)]
         field: FieldIndex,
     },
     EnumGetTag {
+        #[shape(child)]
         root: RValueId,
     },
     EnumAssertVariantRef {
+        #[shape(child)]
         root: RValueId,
+        #[shape(child)]
         variant: VariantId<'db>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RStmt<'db> {
     Assign {
+        #[shape(child)]
         dst: RLocalId,
+        #[shape(child)]
         expr: RExpr<'db>,
     },
     EnumAssertVariant {
+        #[shape(child)]
         value: RValueId,
+        #[shape(child)]
         variant: VariantId<'db>,
     },
     Store {
+        #[shape(child)]
         dst: RuntimePlace<'db>,
+        #[shape(child)]
         src: RValueId,
     },
     CopyInto {
+        #[shape(child)]
         dst: RuntimePlace<'db>,
+        #[shape(child)]
         src: RValueId,
     },
     EnumSetTag {
+        #[shape(child)]
         root: RValueId,
+        #[shape(child)]
         variant: VariantId<'db>,
     },
     EnumWriteVariant {
+        #[shape(child)]
         root: RValueId,
+        #[shape(child)]
         variant: VariantId<'db>,
+        #[shape(child)]
         fields: Box<[RValueId]>,
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Update, ShapeDescribe)]
 pub enum RTerminator<'db> {
-    Goto(RBlockId),
+    Goto(#[shape(child)] RBlockId),
     Branch {
+        #[shape(child)]
         cond: RValueId,
+        #[shape(child)]
         then_bb: RBlockId,
+        #[shape(child)]
         else_bb: RBlockId,
     },
     SwitchScalar {
+        #[shape(child)]
         discr: RValueId,
+        #[shape(child)]
         cases: Box<[(ConstScalar, RBlockId)]>,
+        #[shape(child)]
         default: RBlockId,
     },
     MatchEnumTag {
+        #[shape(child)]
         tag: RValueId,
+        #[shape(with = shape_layout_ref)]
         enum_layout: LayoutId<'db>,
+        #[shape(child)]
         cases: Box<[(VariantId<'db>, RBlockId)]>,
+        #[shape(child)]
         default: Option<RBlockId>,
     },
     TerminalCall {
+        #[shape(with = shape_runtime_instance_ref)]
         callee: RuntimeInstance<'db>,
+        #[shape(child)]
         args: Box<[RValueId]>,
     },
     ReturnData {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     Revert {
+        #[shape(child)]
         offset: RValueId,
+        #[shape(child)]
         len: RValueId,
     },
     SelfDestruct {
+        #[shape(child)]
         beneficiary: RValueId,
     },
     Trap,
-    Return(Option<RValueId>),
+    Return(#[shape(child)] Option<RValueId>),
     Stop,
 }
 
@@ -1460,4 +1865,118 @@ impl<'db> RuntimeProgramView<'db> for &'db dyn MirDb {
     fn code_region(&self, _id: RuntimeCodeRegion<'db>) -> Option<ResolvedCodeRegion<'db>> {
         None
     }
+}
+
+fn shape_layout_ref<'db>(
+    builder: &mut ShapeBuilder,
+    node: ShapeNodeId,
+    label: &str,
+    _layout: &LayoutId<'db>,
+) {
+    builder.add_field_value(node, ShapeDimension::Types, label, "layout_ref");
+}
+
+fn shape_optional_layout_ref<'db>(
+    builder: &mut ShapeBuilder,
+    node: ShapeNodeId,
+    label: &str,
+    layout: &Option<LayoutId<'db>>,
+) {
+    builder.add_field_value(
+        node,
+        ShapeDimension::Types,
+        format!("{label}.kind"),
+        if layout.is_some() { "some" } else { "none" },
+    );
+    if layout.is_some() {
+        builder.add_field_value(node, ShapeDimension::Types, label, "layout_ref");
+    }
+}
+
+fn shape_ty_ref<'db>(builder: &mut ShapeBuilder, node: ShapeNodeId, label: &str, _ty: &TyId<'db>) {
+    builder.add_field_value(node, ShapeDimension::Types, label, "ty_ref");
+}
+
+fn shape_const_region_ref<'db>(
+    builder: &mut ShapeBuilder,
+    node: ShapeNodeId,
+    label: &str,
+    _region: &ConstRegionId<'db>,
+) {
+    builder.add_field_value(node, ShapeDimension::Constants, label, "const_region_ref");
+}
+
+fn shape_runtime_instance_ref<'db>(
+    builder: &mut ShapeBuilder,
+    node: ShapeNodeId,
+    label: &str,
+    _instance: &RuntimeInstance<'db>,
+) {
+    builder.add_field_value(node, ShapeDimension::Types, label, "runtime_instance_ref");
+}
+
+fn shape_runtime_code_region_ref<'db>(
+    builder: &mut ShapeBuilder,
+    node: ShapeNodeId,
+    label: &str,
+    _region: &RuntimeCodeRegion<'db>,
+) {
+    builder.add_field_value(
+        node,
+        ShapeDimension::TraceEvents,
+        label,
+        "runtime_code_region_ref",
+    );
+}
+
+fn shape_field_index(
+    builder: &mut ShapeBuilder,
+    node: ShapeNodeId,
+    label: &str,
+    field: &FieldIndex,
+) {
+    builder.add_field_value(node, ShapeDimension::Structure, label, &field.0);
+}
+
+fn shape_index_source(
+    builder: &mut ShapeBuilder,
+    node: ShapeNodeId,
+    label: &str,
+    source: &IndexSource<RValueId>,
+) {
+    match source {
+        IndexSource::Constant(index) => {
+            builder.add_field_value(
+                node,
+                ShapeDimension::Structure,
+                format!("{label}.kind"),
+                "constant",
+            );
+            builder.add_field_value(
+                node,
+                ShapeDimension::Constants,
+                format!("{label}.value"),
+                index,
+            );
+        }
+        IndexSource::Dynamic(value) => {
+            builder.add_field_value(
+                node,
+                ShapeDimension::Structure,
+                format!("{label}.kind"),
+                "dynamic",
+            );
+            builder.add_child_node(node, format!("{label}.value"), value);
+        }
+    }
+}
+
+fn shape_un_op(builder: &mut ShapeBuilder, node: ShapeNodeId, label: &str, op: &UnOp) {
+    let rendered = format!("{op:?}");
+    builder.add_field_value(node, ShapeDimension::Structure, label, &rendered);
+}
+
+fn shape_bin_op(builder: &mut ShapeBuilder, node: ShapeNodeId, label: &str, op: &BinOp) {
+    let rendered = format!("{op:?}");
+    builder.add_field_value(node, ShapeDimension::Structure, label, &rendered);
 }

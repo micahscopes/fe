@@ -4,14 +4,19 @@ pub mod compilation;
 pub mod config;
 pub mod dependencies;
 pub mod diagnostics;
+pub mod facts;
 pub mod file;
 pub mod indexmap;
 pub mod ingot;
 pub mod layout;
 pub mod options;
+pub mod origin;
 pub mod paths;
+pub mod shape;
 pub mod stdlib;
 pub mod urlext;
+
+extern crate self as common;
 
 use compilation::CompilationSettings;
 use dependencies::DependencyGraph;
@@ -29,6 +34,8 @@ pub trait InputDb: salsa::Database {
 
 #[doc(hidden)]
 pub use paste::paste;
+#[doc(hidden)]
+pub use salsa;
 
 // Macro for implementing the InputDb trait for a Salsa database struct
 // This assumes the database has a field named `index` of type `Option<Workspace>`.

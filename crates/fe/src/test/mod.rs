@@ -17,8 +17,13 @@ use crate::workspace_ingot::{
 use camino::Utf8PathBuf;
 use codegen::{
     ExpectedRevert, OptLevel, SonatinaTestOptions, TestMetadata, TestModuleOutput,
+    debug::{
+        BytecodeSourceMapExportMetadata, BytecodeSourceMapExportOptions,
+        bytecode_source_map_entries_json,
+    },
     emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina,
     emit_test_module_sonatina,
+    origin::{BytecodeObjectKey, BytecodeSectionKey, BytecodeSectionNameKey},
 };
 use colored::Colorize;
 use common::{
@@ -1565,7 +1570,17 @@ fn prepare_tests_single_file(
         };
     }
 
-    maybe_write_suite_ir(db, top_mod, opt_level, report);
+    if let Err(err) = maybe_write_suite_ir(db, top_mod, opt_level, report) {
+        let msg = format!("Failed to write suite report artifacts: {err}");
+        let _ = writeln!(output, "{msg}");
+        if let Some(report) = report {
+            write_codegen_report_error(report, &msg);
+        }
+        return SuitePreparation {
+            results: suite_error_result(suite, "report", msg),
+            single_jobs: Vec::new(),
+        };
+    }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         maybe_write_requested_suite_artifacts_for_top_mod(
             db,
@@ -1737,7 +1752,17 @@ fn prepare_tests_ingot(
         };
     }
 
-    maybe_write_suite_ir(db, root_mod, opt_level, report);
+    if let Err(err) = maybe_write_suite_ir(db, root_mod, opt_level, report) {
+        let msg = format!("Failed to write suite report artifacts: {err}");
+        let _ = writeln!(output, "{msg}");
+        if let Some(report) = report {
+            write_codegen_report_error(report, &msg);
+        }
+        return SuitePreparation {
+            results: suite_error_result(suite, "report", msg),
+            single_jobs: Vec::new(),
+        };
+    }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         maybe_write_requested_suite_artifacts_for_ingot(
             db,
@@ -2210,57 +2235,58 @@ fn maybe_write_suite_ir(
     top_mod: TopLevelMod<'_>,
     opt_level: OptLevel,
     report: Option<&ReportContext>,
-) {
+) -> Result<(), String> {
     let Some(report) = report else {
-        return;
+        return Ok(());
     };
 
     let artifacts_dir = report.root_dir.join("artifacts");
-    let _ = create_dir_all_utf8(&artifacts_dir);
+    create_dir_all_utf8(&artifacts_dir)?;
 
     match build_runtime_package(db, top_mod) {
         Ok(package) => {
             let path = artifacts_dir.join("runtime_package.txt");
-            let _ = std::fs::write(&path, format!("{package:#?}"));
+            write_test_report_artifact(&path, format!("{package:#?}"))?;
         }
         Err(err) => {
             let path = artifacts_dir.join("runtime_package_error.txt");
-            let _ = std::fs::write(&path, format!("{err}"));
+            write_test_report_artifact(&path, format!("{err}"))?;
         }
     }
 
     match codegen::emit_module_sonatina_ir(db, top_mod) {
         Ok(ir) => {
             let path = artifacts_dir.join("sonatina_ir.txt");
-            let _ = std::fs::write(&path, ir);
+            write_test_report_artifact(&path, ir)?;
         }
         Err(err) => {
             let path = artifacts_dir.join("sonatina_ir_error.txt");
-            let _ = std::fs::write(&path, format!("{err}"));
+            write_test_report_artifact(&path, format!("{err}"))?;
         }
     }
 
     match codegen::emit_module_sonatina_ir_optimized(db, top_mod, opt_level, None) {
         Ok(ir) => {
             let path = artifacts_dir.join("sonatina_ir_optimized.txt");
-            let _ = std::fs::write(&path, ir);
+            write_test_report_artifact(&path, ir)?;
         }
         Err(err) => {
             let path = artifacts_dir.join("sonatina_ir_optimized_error.txt");
-            let _ = std::fs::write(&path, format!("{err}"));
+            write_test_report_artifact(&path, format!("{err}"))?;
         }
     }
 
     match codegen::validate_module_sonatina_ir(db, top_mod) {
         Ok(report) => {
             let path = artifacts_dir.join("sonatina_validate.txt");
-            let _ = std::fs::write(&path, report);
+            write_test_report_artifact(&path, report)?;
         }
         Err(err) => {
             let path = artifacts_dir.join("sonatina_validate_error.txt");
-            let _ = std::fs::write(&path, format!("{err}"));
+            write_test_report_artifact(&path, format!("{err}"))?;
         }
     }
+    Ok(())
 }
 
 fn suite_name_for_path(path: &Utf8PathBuf) -> String {
@@ -2513,8 +2539,10 @@ pub(super) fn compile_and_run_test(
         return failure(format!("missing test bytecode for `{}`", case.display_name));
     }
 
-    if let Some(report) = report {
-        write_sonatina_case_artifacts(report, case);
+    if let Some(report) = report
+        && let Err(err) = write_sonatina_case_artifacts(report, case)
+    {
+        return failure(format!("failed to write test report artifacts: {err}"));
     }
 
     let bytecode = hex::encode(&case.bytecode);
@@ -2535,26 +2563,108 @@ pub(super) fn compile_and_run_test(
     }
 }
 
-fn write_sonatina_case_artifacts(report: &ReportContext, case: &TestMetadata) {
+fn write_test_report_artifact(
+    path: &Utf8PathBuf,
+    contents: impl AsRef<[u8]>,
+) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|err| format!("failed to write `{path}`: {err}"))
+}
+
+fn write_sonatina_case_artifacts(
+    report: &ReportContext,
+    case: &TestMetadata,
+) -> Result<(), String> {
     let dir = report
         .root_dir
         .join("artifacts")
         .join("tests")
         .join(sanitize_filename(&case.display_name))
         .join("sonatina");
-    let _ = create_dir_all_utf8(&dir);
+    create_dir_all_utf8(&dir)?;
 
     let init_path = dir.join("initcode.hex");
-    let _ = std::fs::write(&init_path, hex::encode(&case.bytecode));
+    let initcode_hex = hex::encode(&case.bytecode);
+    write_test_report_artifact(&init_path, initcode_hex.as_bytes())?;
 
     if let Some(runtime) = extract_runtime_from_sonatina_initcode(&case.bytecode) {
-        let _ = std::fs::write(dir.join("runtime.bin"), runtime);
-        let _ = std::fs::write(dir.join("runtime.hex"), hex::encode(runtime));
+        write_test_report_artifact(&dir.join("runtime.bin"), runtime)?;
+        let runtime_hex = hex::encode(runtime);
+        write_test_report_artifact(&dir.join("runtime.hex"), runtime_hex.as_bytes())?;
     }
 
     if let Some(json) = &case.sonatina_observability_json {
-        let _ = std::fs::write(dir.join("observability.json"), json);
+        write_test_report_artifact(&dir.join("observability.json"), json.as_bytes())?;
     }
+
+    let source_map_object = case
+        .sonatina_source_map_summary
+        .as_ref()
+        .and_then(|summary| summary.object())
+        .or_else(|| {
+            case.sonatina_source_map_entries
+                .first()
+                .map(|entry| entry.object())
+        });
+    let source_map_section = case
+        .sonatina_source_map_summary
+        .as_ref()
+        .and_then(|summary| summary.section())
+        .or_else(|| {
+            case.sonatina_source_map_entries
+                .first()
+                .map(|entry| entry.section())
+        });
+    let source_map_object_key = source_map_object.map(BytecodeObjectKey::new);
+    let source_map_section_key =
+        source_map_object_key
+            .as_ref()
+            .zip(source_map_section)
+            .map(|(object, section)| {
+                BytecodeSectionKey::new(object.clone(), BytecodeSectionNameKey::new(section))
+            });
+    let source_map_metadata = source_map_section_key
+        .as_ref()
+        .map(BytecodeSourceMapExportMetadata::section)
+        .or_else(|| {
+            source_map_object_key
+                .as_ref()
+                .map(BytecodeSourceMapExportMetadata::object)
+        });
+    let source_map_options = BytecodeSourceMapExportOptions::new()
+        .with_optional_metadata(source_map_metadata)
+        .with_bytecode_origin_coverage(case.sonatina_bytecode_origin_coverage);
+    if let Some(json) =
+        bytecode_source_map_entries_json(&case.sonatina_source_map_entries, source_map_options)
+            .map_err(|err| {
+                format!(
+                    "failed to serialize test Sonatina source map for `{}`: {err}",
+                    case.display_name
+                )
+            })?
+    {
+        write_test_report_artifact(&dir.join("source_map.json"), json.as_bytes())?;
+    }
+
+    if let Some(facts) = &case.sonatina_origin_facts {
+        let json = serde_json::to_string_pretty(&facts.export()).map_err(|err| {
+            format!(
+                "failed to serialize test Sonatina origin facts for `{}`: {err}",
+                case.display_name
+            )
+        })?;
+        write_test_report_artifact(&dir.join("origin_facts.json"), json.as_bytes())?;
+    }
+
+    if let Some(facts) = &case.sonatina_snapshot_origin_facts {
+        let json = serde_json::to_string_pretty(&facts.export()).map_err(|err| {
+            format!(
+                "failed to serialize test Sonatina snapshot origin facts for `{}`: {err}",
+                case.display_name
+            )
+        })?;
+        write_test_report_artifact(&dir.join("snapshot_origin_facts.json"), json.as_bytes())?;
+    }
+    Ok(())
 }
 
 fn extract_runtime_from_sonatina_initcode(init: &[u8]) -> Option<&[u8]> {
@@ -2609,6 +2719,9 @@ fn write_report_manifest(
     out.push_str("details: see `meta/args.txt` and `meta/git.txt` for exact repro context\n");
     out.push_str("sonatina_ir: Sonatina reports include pre-opt IR at `artifacts/sonatina_ir.txt` and post-selected-opt-level IR at `artifacts/sonatina_ir_optimized.txt` (with `opt_level: 0`, both represent the same unoptimized module)\n");
     out.push_str("sonatina_observability: when available, Sonatina test artifacts include `artifacts/tests/<test>/sonatina/observability.json`\n");
+    out.push_str("sonatina_source_map: when available, typed origin source maps are written to `artifacts/tests/<test>/sonatina/source_map.json`\n");
+    out.push_str("sonatina_origin_facts: when available, typed origin facts are written to `artifacts/tests/<test>/sonatina/origin_facts.json`\n");
+    out.push_str("sonatina_snapshot_origin_facts: when available, typed post-opt snapshot-diff origin facts are written to `artifacts/tests/<test>/sonatina/snapshot_origin_facts.json`\n");
     out.push_str(&format!("tests: {}\n", results.len()));
     let passed = results.iter().filter(|r| r.passed).count();
     out.push_str(&format!("passed: {passed}\n"));
@@ -2835,5 +2948,272 @@ fn print_summary(results: &[TestResult]) {
         for result in results.iter().filter(|r| !r.passed) {
             println!("    {}", result.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use codegen::{
+        OptLevel,
+        debug::{BytecodeSourceMapEntry, BytecodeSourceMapEntryKind},
+        origin::{
+            BytecodeObjectKey, BytecodeOriginCoverage, BytecodePcOrigin, BytecodePcRange,
+            BytecodeSectionKey, BytecodeSectionNameKey, BytecodeUnmappedReason,
+        },
+    };
+    use common::{InputDb, facts::SourceSpanKind};
+    use driver::DriverDataBase;
+    use serde_json::Value;
+    use tempfile::tempdir;
+    use url::Url;
+
+    use super::{ReportContext, TestMetadata, maybe_write_suite_ir, write_sonatina_case_artifacts};
+
+    fn source_map_entry(
+        object: &str,
+        section: &str,
+        pc_start: u32,
+        pc_end: u32,
+        kind: BytecodeSourceMapEntryKind,
+    ) -> BytecodeSourceMapEntry {
+        let range = BytecodePcRange::new(pc_start, pc_end).expect("valid PC range");
+        let section = BytecodeSectionKey::new(
+            BytecodeObjectKey::new(object),
+            BytecodeSectionNameKey::new(section),
+        );
+        let origin = BytecodePcOrigin::new(section, range);
+        BytecodeSourceMapEntry::from_origin(&origin, kind)
+    }
+
+    #[test]
+    fn sonatina_report_renders_source_map_from_typed_entries() {
+        let temp = tempdir().expect("tempdir");
+        let report = ReportContext {
+            root_dir: Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap(),
+        };
+        let case = TestMetadata {
+            display_name: "source_map_case".to_string(),
+            hir_name: "source_map_case".to_string(),
+            symbol_name: "source_map_case".to_string(),
+            object_name: "source_map_case".to_string(),
+            bytecode: vec![0x00],
+            sonatina_observability_json: None,
+            sonatina_source_map_summary: None,
+            sonatina_source_map_entries: vec![source_map_entry(
+                "source_map_case",
+                "runtime",
+                1,
+                2,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/lib.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "lib".to_string(),
+                },
+            )],
+            sonatina_bytecode_origin_coverage: Some(BytecodeOriginCoverage::new(0, 1, 0)),
+            sonatina_origin_facts: None,
+            sonatina_snapshot_origin_facts: None,
+            value_param_count: 0,
+            effect_param_count: 0,
+            init_bytecode: Vec::new(),
+            expected_revert: None,
+            initial_balance: None,
+        };
+
+        write_sonatina_case_artifacts(&report, &case).expect("sonatina artifacts should write");
+
+        let json_path = report
+            .root_dir
+            .join("artifacts/tests/source_map_case/sonatina/source_map.json");
+        let json = std::fs::read_to_string(json_path).expect("source map artifact should exist");
+        let value = serde_json::from_str::<Value>(&json).expect("source map should be valid JSON");
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["object"], "source_map_case");
+        assert_eq!(value["section"], "runtime");
+        assert_eq!(value["bytecode_origin_coverage"]["total"], 1);
+        assert_eq!(
+            value["bytecode_origin_coverage"]["sonatina_backend_prepared"],
+            1
+        );
+        assert_eq!(value["entries"][0]["kind"], "source");
+        assert_eq!(value["entries"][0]["file"], "src/lib.fe");
+        assert_eq!(value["entries"][0]["snippet"], "lib");
+    }
+
+    #[test]
+    fn sonatina_report_surfaces_source_map_write_errors() {
+        let temp = tempdir().expect("tempdir");
+        let report = ReportContext {
+            root_dir: Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap(),
+        };
+        let blocked_path = report
+            .root_dir
+            .join("artifacts/tests/source_map_case/sonatina/source_map.json");
+        std::fs::create_dir_all(blocked_path.as_std_path())
+            .expect("block source-map file path with directory");
+        let case = TestMetadata {
+            display_name: "source_map_case".to_string(),
+            hir_name: "source_map_case".to_string(),
+            symbol_name: "source_map_case".to_string(),
+            object_name: "source_map_case".to_string(),
+            bytecode: vec![0x00],
+            sonatina_observability_json: None,
+            sonatina_source_map_summary: None,
+            sonatina_source_map_entries: vec![source_map_entry(
+                "source_map_case",
+                "runtime",
+                1,
+                2,
+                BytecodeSourceMapEntryKind::BytecodeUnmapped {
+                    reason: BytecodeUnmappedReason::Unknown,
+                },
+            )],
+            sonatina_bytecode_origin_coverage: None,
+            sonatina_origin_facts: None,
+            sonatina_snapshot_origin_facts: None,
+            value_param_count: 0,
+            effect_param_count: 0,
+            init_bytecode: Vec::new(),
+            expected_revert: None,
+            initial_balance: None,
+        };
+
+        let err = write_sonatina_case_artifacts(&report, &case)
+            .expect_err("source-map report write should fail");
+
+        assert!(err.contains("source_map.json"));
+    }
+
+    #[test]
+    fn suite_ir_report_surfaces_write_errors() {
+        let temp = tempdir().expect("tempdir");
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///suite_report_write_error.fe").unwrap();
+        let file = db.workspace().touch(
+            &mut db,
+            url,
+            Some(
+                r#"
+fn sample() -> u256 {
+    1
+}
+"#
+                .to_string(),
+            ),
+        );
+        let top_mod = db.top_mod(file);
+        let report = ReportContext {
+            root_dir: Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap(),
+        };
+        let blocked_path = report.root_dir.join("artifacts/runtime_package.txt");
+        std::fs::create_dir_all(blocked_path.as_std_path())
+            .expect("block runtime-package report file path with directory");
+
+        let err = maybe_write_suite_ir(&db, top_mod, OptLevel::O0, Some(&report))
+            .expect_err("suite IR report write should fail");
+
+        assert!(err.contains("runtime_package.txt"));
+    }
+
+    #[test]
+    fn sonatina_report_renders_origin_facts_from_typed_facts() {
+        let temp = tempdir().expect("tempdir");
+        let report = ReportContext {
+            root_dir: Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap(),
+        };
+        let pc = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::BytecodePc,
+            "object:origin_fact_case:section:runtime",
+            "pc:1..2",
+        );
+        let synthetic = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::SonatinaSynthetic,
+            "sonatina",
+            "prologue",
+        );
+        let mut graph = common::origin::OriginGraph::new();
+        graph.push(synthetic, pc, common::origin::OriginLinkKind::Synthetic);
+        let origin_facts = common::facts::origin_graph_facts(&graph, Clone::clone);
+        let pre_opt = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::SonatinaInst,
+            "sonatina:func:origin_fact_case",
+            "pre_opt:inst:11",
+        );
+        let snapshot_loss = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::SonatinaSynthetic,
+            "sonatina",
+            "pre_opt_snapshot_loss",
+        );
+        let mut snapshot_graph = common::origin::OriginGraph::new();
+        snapshot_graph.push(
+            pre_opt,
+            snapshot_loss,
+            common::origin::OriginLinkKind::Synthetic,
+        );
+        let snapshot_origin_facts =
+            common::facts::origin_graph_facts(&snapshot_graph, Clone::clone);
+        let case = TestMetadata {
+            display_name: "origin_fact_case".to_string(),
+            hir_name: "origin_fact_case".to_string(),
+            symbol_name: "origin_fact_case".to_string(),
+            object_name: "origin_fact_case".to_string(),
+            bytecode: vec![0x00],
+            sonatina_observability_json: None,
+            sonatina_source_map_summary: None,
+            sonatina_source_map_entries: Vec::new(),
+            sonatina_bytecode_origin_coverage: None,
+            sonatina_origin_facts: Some(origin_facts),
+            sonatina_snapshot_origin_facts: Some(snapshot_origin_facts),
+            value_param_count: 0,
+            effect_param_count: 0,
+            init_bytecode: Vec::new(),
+            expected_revert: None,
+            initial_balance: None,
+        };
+
+        write_sonatina_case_artifacts(&report, &case).expect("sonatina artifacts should write");
+
+        let json_path = report
+            .root_dir
+            .join("artifacts/tests/origin_fact_case/sonatina/origin_facts.json");
+        let json = std::fs::read_to_string(json_path).expect("origin facts artifact should exist");
+        let value = serde_json::from_str::<Value>(&json).expect("origin facts should be JSON");
+        assert_eq!(value["schema_version"], 1);
+        assert!(
+            value["facts"]
+                .as_array()
+                .expect("facts array")
+                .iter()
+                .any(|fact| {
+                    fact["type"] == "origin_node" && fact["key"]["kind"] == "bytecode.pc"
+                })
+        );
+
+        let snapshot_json_path = report
+            .root_dir
+            .join("artifacts/tests/origin_fact_case/sonatina/snapshot_origin_facts.json");
+        let snapshot_json =
+            std::fs::read_to_string(snapshot_json_path).expect("snapshot facts artifact exists");
+        let snapshot_value =
+            serde_json::from_str::<Value>(&snapshot_json).expect("snapshot facts should be JSON");
+        assert_eq!(snapshot_value["schema_version"], 1);
+        assert!(
+            snapshot_value["facts"]
+                .as_array()
+                .expect("snapshot facts array")
+                .iter()
+                .any(|fact| {
+                    fact["type"] == "origin_node"
+                        && fact["key"]["kind"] == "sonatina.synthetic"
+                        && fact["key"]["local_key"] == "pre_opt_snapshot_loss"
+                })
+        );
     }
 }

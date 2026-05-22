@@ -18,14 +18,15 @@ use mir::{
     AddressSpaceKind, ConstNode, ConstRegionId, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId,
     RBlockId, RExpr, RLocalId, RStmt, RTerminator, ResolvedPlaceElem, ResolvedPlaceRootKind,
     RuntimeBody, RuntimeBuiltin, RuntimeClass, RuntimeFunction, RuntimeInlineHint, RuntimeInstance,
-    RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, SaturatingBinOp, ScalarClass,
+    RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, RuntimeStmtIndex,
+    RuntimeStmtOrigin, RuntimeStmtSite, RuntimeTerminatorOrigin, SaturatingBinOp, ScalarClass,
     ScalarRepr, VariantId, instance::RuntimeInstanceSource, resolve_runtime_place,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec1::{SmallVec, smallvec};
 use sonatina_ir::{
-    BlockId, GlobalVariableData, GlobalVariableRef, I256, Immediate, Linkage, Module, Signature,
-    Type, Value, ValueId,
+    BlockId, GlobalVariableData, GlobalVariableRef, I256, Immediate, InstId, Linkage, Module,
+    Signature, Type, Value, ValueId,
     builder::{FunctionBuilder, ModuleBuilder, ObjectBuilder, Variable},
     func_cursor::InstInserter,
     inst::{
@@ -62,6 +63,10 @@ use super::{LowerError, create_module_ctx};
 use crate::{
     TargetDataLayout,
     function_symbols::{FunctionSymbolInput, FunctionSymbolStyle, assign_function_symbols},
+    origin::{
+        SonatinaFunctionOrigins, SonatinaOriginSource, SonatinaPackageOrigins,
+        SonatinaSyntheticOrigin, SonatinaUnmappedReason,
+    },
 };
 
 const PANIC_OVERFLOW: u64 = 0x11;
@@ -72,6 +77,15 @@ pub(super) fn compile_runtime_package_sonatina(
     package: &RuntimePackage<'_>,
     layout: TargetDataLayout,
 ) -> Result<Module, LowerError> {
+    let (module, _) = compile_runtime_package_sonatina_with_origins(db, package, layout)?;
+    Ok(module)
+}
+
+pub(super) fn compile_runtime_package_sonatina_with_origins<'db>(
+    db: &'db DriverDataBase,
+    package: &RuntimePackage<'db>,
+    layout: TargetDataLayout,
+) -> Result<(Module, SonatinaPackageOrigins<'db>), LowerError> {
     let _ = layout;
     let builder = ModuleBuilder::new(create_module_ctx());
     let isa = super::create_evm_isa();
@@ -96,6 +110,7 @@ struct ModuleLowerer<'db, 'a> {
     const_globals: FxHashMap<ConstRegionId<'db>, GlobalVariableRef>,
     const_names: FxHashMap<ConstRegionId<'db>, String>,
     explicit_code_region_sections: FxHashSet<(mir::RuntimeObject<'db>, mir::RuntimeSectionName)>,
+    origins: SonatinaPackageOrigins<'db>,
 }
 
 impl<'db, 'a> ModuleLowerer<'db, 'a> {
@@ -118,11 +133,12 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
             const_globals: FxHashMap::default(),
             const_names: FxHashMap::default(),
             explicit_code_region_sections: FxHashSet::default(),
+            origins: SonatinaPackageOrigins::new(),
         }
     }
 
-    fn finish(self) -> Module {
-        self.builder.build()
+    fn finish(self) -> (Module, SonatinaPackageOrigins<'db>) {
+        (self.builder.build(), self.origins)
     }
 
     fn inst_set(&self) -> &'static EvmInstSet {
@@ -819,6 +835,7 @@ struct FunctionLowerer<'ctx, 'db, 'a> {
     body: RuntimeBody<'db>,
     current_sections: Vec<mir::RuntimeSectionRef<'db>>,
     fb: FunctionBuilder<InstInserter>,
+    origins: SonatinaFunctionOrigins<'db>,
     prologue_block: BlockId,
     block_map: Vec<Option<BlockId>>,
     reachable_blocks: Vec<bool>,
@@ -872,11 +889,13 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                 },
             })
             .collect::<Result<FxHashMap<_, _>, _>>()?;
+        let runtime_instance = body.owner;
         Ok(Self {
             module,
             body,
             current_sections,
             fb,
+            origins: SonatinaFunctionOrigins::new(func_ref, runtime_instance),
             prologue_block,
             block_map,
             reachable_blocks,
@@ -892,6 +911,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
     fn lower(mut self) -> Result<(), LowerError> {
         let entry_block = self.block_id(RBlockId::from_u32(0))?;
         self.fb.switch_to_block(self.prologue_block);
+        let before = self.inst_snapshot();
         self.initialize_locals().map_err(|err| {
             self.with_body_context(
                 format!(
@@ -905,29 +925,39 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         })?;
         self.fb
             .insert_inst_no_result(Jump::new(self.module.inst_set(), entry_block));
+        self.record_new_insts_since(
+            &before,
+            SonatinaOriginSource::Synthetic(SonatinaSyntheticOrigin::Prologue),
+        );
         let blocks = self.body.blocks.clone();
         for (idx, block) in blocks.iter().enumerate() {
             if !self.reachable_blocks[idx] {
                 continue;
             }
-            self.fb
-                .switch_to_block(self.block_id(RBlockId::from_u32(idx as u32))?);
+            let block_id = RBlockId::from_u32(idx as u32);
+            self.fb.switch_to_block(self.block_id(block_id)?);
             let mut terminated = false;
             for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
-                if matches!(
-                    self.lower_stmt(stmt).map_err(|err| {
-                        self.with_body_context(
-                            format!(
-                                "while lowering `{}` at bb{idx}[{stmt_idx}]",
-                                self.module.function_symbol(self.body.owner)
-                            ),
-                            Some(RBlockId::from_u32(idx as u32)),
-                            Some(stmt_idx),
-                        )
-                        .wrap(err)
-                    })?,
-                    Lowered::Terminated
-                ) {
+                let before = self.inst_snapshot();
+                let lowered = self.lower_stmt(stmt).map_err(|err| {
+                    self.with_body_context(
+                        format!(
+                            "while lowering `{}` at bb{idx}[{stmt_idx}]",
+                            self.module.function_symbol(self.body.owner)
+                        ),
+                        Some(block_id),
+                        Some(stmt_idx),
+                    )
+                    .wrap(err)
+                })?;
+                self.record_new_insts_since(
+                    &before,
+                    SonatinaOriginSource::RuntimeStmt(RuntimeStmtOrigin::new(
+                        self.body.owner,
+                        RuntimeStmtSite::new(block_id, RuntimeStmtIndex::from_u32(stmt_idx as u32)),
+                    )),
+                );
+                if matches!(lowered, Lowered::Terminated) {
                     self.pending_enum_proof = None;
                     terminated = true;
                     break;
@@ -937,21 +967,82 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                 continue;
             }
             self.pending_enum_proof = None;
+            let before = self.inst_snapshot();
             self.lower_terminator(&block.terminator).map_err(|err| {
                 self.with_body_context(
                     format!(
                         "while lowering `{}` terminator at bb{idx}",
                         self.module.function_symbol(self.body.owner)
                     ),
-                    Some(RBlockId::from_u32(idx as u32)),
+                    Some(block_id),
                     None,
                 )
                 .wrap(err)
             })?;
+            self.record_new_insts_since(
+                &before,
+                SonatinaOriginSource::RuntimeTerminator(RuntimeTerminatorOrigin::new(
+                    self.body.owner,
+                    block_id,
+                )),
+            );
         }
         self.fb.seal_all();
-        self.fb.finish();
+        let final_insts = self.inst_snapshot();
+        self.origins
+            .retain_insts(|inst| final_insts.contains(&inst));
+        self.record_unmapped_insts();
+        let Self {
+            module,
+            fb,
+            origins,
+            ..
+        } = self;
+        fb.finish();
+        module.origins.push_function(origins);
         Ok(())
+    }
+
+    fn inst_snapshot(&self) -> FxHashSet<InstId> {
+        self.fb
+            .func
+            .layout
+            .iter_block()
+            .flat_map(|block| self.fb.func.layout.iter_inst(block))
+            .collect()
+    }
+
+    fn record_new_insts_since(
+        &mut self,
+        before: &FxHashSet<InstId>,
+        source: SonatinaOriginSource<'db>,
+    ) {
+        let mut insts = self
+            .inst_snapshot()
+            .into_iter()
+            .filter(|inst| !before.contains(inst))
+            .collect::<Vec<_>>();
+        insts.sort_unstable_by_key(|inst| inst.0);
+        for inst in insts {
+            if !self.origins.has_inst(inst) {
+                self.origins.push_inst(inst, source);
+            }
+        }
+    }
+
+    fn record_unmapped_insts(&mut self) {
+        let mut insts = self.inst_snapshot().into_iter().collect::<Vec<_>>();
+        insts.sort_unstable_by_key(|inst| inst.0);
+        for inst in insts {
+            if !self.origins.has_inst(inst) {
+                self.origins.push_inst(
+                    inst,
+                    SonatinaOriginSource::Unmapped(
+                        SonatinaUnmappedReason::InsertedOutsideLoweringSegment,
+                    ),
+                );
+            }
+        }
     }
 
     fn block_id(&self, block: RBlockId) -> Result<BlockId, LowerError> {

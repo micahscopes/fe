@@ -11,8 +11,10 @@ doctest = false
 
 [dependencies]
 camino.workspace = true
+fe-shape-derive = { path = "../shape-derive" }
 paste.workspace = true
 salsa.workspace = true
+serde = { version = "1.0", features = ["derive"] }
 serde-semver.workspace = true
 smol_str.workspace = true
 rust-embed = "8.5.0"
@@ -26,3 +28,7 @@ typed-path.workspace = true
 ordermap = "0.5.5"
 rustc-hash.workspace = true
 radix_immutable = "0.1"
+
+[dev-dependencies]
+serde_json = "1"
+trybuild = "1.0"

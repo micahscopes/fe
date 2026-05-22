@@ -31,11 +31,16 @@ use hir::analysis::{
 use hir::hir_def::{
     ArithBinOp, BinOp, CompBinOp, Func, UnOp, attr::ArithmeticMode, scope_graph::ScopeId,
 };
+use hir::origin::SemanticOrigin;
 use hir::projection::{IndexSource, Projection};
 
 use crate::{
     db::MirDb,
     instance::{RuntimeInstance, RuntimeInstanceKey, get_or_build_runtime_instance},
+    origin::{
+        RuntimeBodyOrigins, RuntimeOriginSource, RuntimeStmtIndex, RuntimeStmtOrigin,
+        RuntimeStmtSite, RuntimeTerminatorOrigin,
+    },
     resolve_runtime_place_address_class,
     runtime::{
         AddressSpaceKind, ConstRegionId, ConstScalar, IntrinsicArithBinOp, LayoutId, PlaceElem,
@@ -89,7 +94,7 @@ use super::{
 pub fn lower_to_rmir<'db>(
     db: &'db dyn MirDb,
     instance: RuntimeInstance<'db>,
-) -> Result<RuntimeBody<'db>, LowerError> {
+) -> Result<(RuntimeBody<'db>, RuntimeBodyOrigins<'db>), LowerError> {
     let key = instance.key(db);
     let semantic = key
         .semantic(db)
@@ -306,6 +311,8 @@ pub(super) struct RmirEmitter<'db> {
     pub(super) locals: Vec<RLocal<'db>>,
     pub(super) blocks: Vec<RBlock<'db>>,
     pub(super) terminated_blocks: Vec<bool>,
+    pub(super) origins: RuntimeBodyOrigins<'db>,
+    pub(super) current_origin: RuntimeOriginSource<'db>,
 }
 
 enum LoweredBuiltinCall<'db> {
@@ -460,17 +467,27 @@ impl<'db> RmirEmitter<'db> {
             locals,
             blocks,
             terminated_blocks,
+            origins: RuntimeBodyOrigins::new(),
+            current_origin: RuntimeOriginSource::Synthetic,
         }
     }
 
-    fn finish(mut self, signature: RuntimeInterfaceSignature<'db>) -> RuntimeBody<'db> {
+    fn finish(
+        mut self,
+        signature: RuntimeInterfaceSignature<'db>,
+    ) -> (RuntimeBody<'db>, RuntimeBodyOrigins<'db>) {
         while self.blocks.len() < self.semantic_body.blocks.len() {
+            let block = RBlockId::from_u32(self.blocks.len() as u32);
             self.blocks.push(RBlock {
                 stmts: Vec::new(),
                 terminator: RTerminator::Return(None),
             });
+            self.origins.push_terminator(
+                RuntimeTerminatorOrigin::new(self.instance, block),
+                RuntimeOriginSource::Synthetic,
+            );
         }
-        RuntimeBody {
+        let body = RuntimeBody {
             owner: self.instance,
             key: self.key,
             signature,
@@ -478,7 +495,8 @@ impl<'db> RmirEmitter<'db> {
             provider_bindings: self.provider_bindings,
             locals: self.locals,
             blocks: self.blocks,
-        }
+        };
+        (body, self.origins)
     }
 
     fn layout_for_ty(&self, ty: TyId<'db>) -> LayoutId<'db> {
@@ -508,23 +526,36 @@ impl<'db> RmirEmitter<'db> {
             })
             .collect();
         self.terminated_blocks = vec![false; self.semantic_body.blocks.len()];
+        let semantic_key = self.current_semantic_key();
         let blocks = self.semantic_body.blocks.clone();
         for (idx, block) in blocks.iter().enumerate() {
             let bb = RBlockId::from_u32(idx as u32);
             for (stmt_idx, stmt) in block.stmts.iter().enumerate() {
+                self.current_origin =
+                    RuntimeOriginSource::Semantic(SemanticOrigin::new(semantic_key, stmt.origin));
                 self.lower_stmt(bb, stmt_idx, stmt);
                 if self.terminated_blocks[bb.index()] {
                     break;
                 }
             }
             if !self.terminated_blocks[bb.index()] {
-                self.blocks[bb.index()].terminator = self.lower_terminator(bb, &block.terminator);
+                self.current_origin = RuntimeOriginSource::Semantic(SemanticOrigin::new(
+                    semantic_key,
+                    block.terminator.origin,
+                ));
+                let terminator = self.lower_terminator(bb, &block.terminator);
+                self.set_terminator(bb, terminator);
             }
         }
+        self.current_origin = RuntimeOriginSource::Synthetic;
     }
 
     fn set_terminator(&mut self, bb: RBlockId, terminator: RTerminator<'db>) {
         self.blocks[bb.index()].terminator = terminator;
+        self.origins.push_terminator(
+            RuntimeTerminatorOrigin::new(self.instance, bb),
+            self.current_origin,
+        );
         self.terminated_blocks[bb.index()] = true;
     }
 
@@ -4738,7 +4769,12 @@ impl<'db> RmirEmitter<'db> {
 
     fn push_stmt(&mut self, bb: RBlockId, stmt: RStmt<'db>) {
         if !self.terminated_blocks[bb.index()] {
+            let stmt_idx = RuntimeStmtIndex::from_u32(self.blocks[bb.index()].stmts.len() as u32);
             self.blocks[bb.index()].stmts.push(stmt);
+            self.origins.push_stmt(
+                RuntimeStmtOrigin::new(self.instance, RuntimeStmtSite::new(bb, stmt_idx)),
+                self.current_origin,
+            );
         }
     }
 

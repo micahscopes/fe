@@ -1,0 +1,6 @@
+error: shape field has multiple policies; choose exactly one of field, child, with, or skip
+ --> tests/ui/shape_describe_multiple_policies.rs:7:5
+  |
+7 | /     #[shape(field = Constants, child)]
+8 | |     value: u32,
+  | |______________^

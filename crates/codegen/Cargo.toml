@@ -11,6 +11,9 @@ common.workspace = true
 hex = "0.4"
 num-bigint.workspace = true
 rustc-hash.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+salsa.workspace = true
 sonatina-ir.workspace = true
 sonatina-triple.workspace = true
 sonatina-codegen.workspace = true
@@ -22,5 +25,6 @@ tracing.workspace = true
 [dev-dependencies]
 dir-test.workspace = true
 test-utils.workspace = true
+trybuild = "1.0"
 url.workspace = true
 hir = { workspace = true, features = ["testutils"] }

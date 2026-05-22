@@ -1,0 +1,31 @@
+error[E0308]: mismatched types
+ --> tests/ui/bytecode_source_map_export_metadata_raw_strings.rs:4:67
+  |
+4 |     let _ = BytecodeSourceMapExportOptions::new().with_object_key("Foo");
+  |                                                   --------------- ^^^^^ expected `&BytecodeObjectKey`, found `&str`
+  |                                                   |
+  |                                                   arguments to this method are incorrect
+  |
+  = note: expected reference `&BytecodeObjectKey`
+             found reference `&'static str`
+note: method defined here
+ --> src/debug.rs
+  |
+  |     pub fn with_object_key(self, object: &'a BytecodeObjectKey) -> Self {
+  |            ^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+ --> tests/ui/bytecode_source_map_export_metadata_raw_strings.rs:5:54
+  |
+5 |     let _ = BytecodeSourceMapExportMetadata::section("runtime");
+  |             ---------------------------------------- ^^^^^^^^^ expected `&BytecodeSectionKey`, found `&str`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected reference `&BytecodeSectionKey`
+             found reference `&'static str`
+note: associated function defined here
+ --> src/debug.rs
+  |
+  |     pub const fn section(section: &'a BytecodeSectionKey) -> Self {
+  |                  ^^^^^^^

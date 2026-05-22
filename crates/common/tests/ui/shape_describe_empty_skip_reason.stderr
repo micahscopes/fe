@@ -1,0 +1,5 @@
+error: shape skip reason must not be empty
+ --> tests/ui/shape_describe_empty_skip_reason.rs:7:13
+  |
+7 |     #[shape(skip = "")]
+  |             ^^^^^^^^^

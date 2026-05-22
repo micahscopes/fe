@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/frontend_origin_label_map_raw_sonatina_map.rs:8:30
+  |
+8 |     accepts_raw_sonatina_map(labels);
+  |     ------------------------ ^^^^^^ expected `HashMap<(FuncRef, InstId), String, ...>`, found `FrontendOriginLabelMap`
+  |     |
+  |     arguments to this function are incorrect
+  |
+  = note: expected struct `HashMap<(sonatina_ir::module::FuncRef, sonatina_ir::inst::InstId), String, rustc_hash::FxBuildHasher>`
+             found struct `FrontendOriginLabelMap`
+note: function defined here
+ --> tests/ui/frontend_origin_label_map_raw_sonatina_map.rs:4:4
+  |
+4 | fn accepts_raw_sonatina_map(_: FrontendProvenanceMap) {}
+  |    ^^^^^^^^^^^^^^^^^^^^^^^^ ------------------------

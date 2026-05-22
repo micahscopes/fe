@@ -6,6 +6,11 @@ use hir::{
 };
 use num_bigint::BigUint;
 
+use common::facts::TypedFactSet;
+
+use crate::debug::{BytecodeSourceMapEntry, BytecodeSourceMapSummary};
+use crate::origin::BytecodeOriginCoverage;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestMetadata {
     pub display_name: String,
@@ -14,6 +19,11 @@ pub struct TestMetadata {
     pub object_name: String,
     pub bytecode: Vec<u8>,
     pub sonatina_observability_json: Option<String>,
+    pub sonatina_source_map_summary: Option<BytecodeSourceMapSummary>,
+    pub sonatina_source_map_entries: Vec<BytecodeSourceMapEntry>,
+    pub sonatina_bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+    pub sonatina_origin_facts: Option<TypedFactSet>,
+    pub sonatina_snapshot_origin_facts: Option<TypedFactSet>,
     pub value_param_count: usize,
     pub effect_param_count: usize,
     pub init_bytecode: Vec<u8>,

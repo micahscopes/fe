@@ -4,6 +4,7 @@ use salsa::Update;
 
 use crate::{
     db::MirDb,
+    origin::RuntimeBodyOrigins,
     runtime::{
         LowerError, LoweredRuntimeBody, RLocalId, RuntimeBody, RuntimeCallEdge, RuntimeClass,
         RuntimeExitBehavior, RuntimeInterfaceSignature, RuntimeParam, RuntimeSyntheticSpec,
@@ -72,6 +73,11 @@ impl<'db> RuntimeInstance<'db> {
         expect_lowered_runtime_body(db, self).body(db)
     }
 
+    #[salsa::tracked]
+    pub fn origins(self, db: &'db dyn MirDb) -> RuntimeBodyOrigins<'db> {
+        expect_lowered_runtime_body(db, self).origins(db)
+    }
+
     #[salsa::tracked(return_ref)]
     pub fn calls(self, db: &'db dyn MirDb) -> Vec<RuntimeCallEdge<'db>> {
         expect_lowered_runtime_body(db, self).direct_callees(db)
@@ -130,7 +136,7 @@ fn lower_runtime_body<'db>(
     db: &'db dyn MirDb,
     instance: RuntimeInstance<'db>,
 ) -> Result<LoweredRuntimeBody<'db>, LowerError> {
-    let body = match instance.key(db).source(db) {
+    let (body, origins) = match instance.key(db).source(db) {
         RuntimeInstanceSource::Semantic(semantic) => {
             if let Err(diag) = check_semantic_borrows(db, semantic) {
                 return Err(LowerError::Unsupported(format!(
@@ -149,7 +155,9 @@ fn lower_runtime_body<'db>(
             lower_to_rmir(db, instance)?
         }
         RuntimeInstanceSource::Synthetic(synthetic) => {
-            lower_synthetic_runtime_body(db, instance, synthetic.spec(db).clone())
+            let body = lower_synthetic_runtime_body(db, instance, synthetic.spec(db).clone());
+            let origins = RuntimeBodyOrigins::synthetic_for_body(instance, &body);
+            (body, origins)
         }
     };
     let direct_callees = collect_runtime_calls_lowered(&body);
@@ -161,6 +169,7 @@ fn lower_runtime_body<'db>(
         direct_callees,
         referenced_const_regions,
         referenced_code_regions,
+        origins,
     ))
 }
 

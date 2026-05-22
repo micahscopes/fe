@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/codegen_origin_fact_export_raw_graph.rs:6:40
+  |
+6 |     let _ = codegen_origin_graph_facts(&raw_graph, |_| None);
+  |             -------------------------- ^^^^^^^^^^ expected `&CodegenOriginGraph`, found `&OriginGraph<CodegenOriginNode>`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected reference `&CodegenOriginGraph`
+             found reference `&OriginGraph<CodegenOriginNode>`
+note: function defined here
+ --> src/origin.rs
+  |
+  | pub fn codegen_origin_graph_facts(
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^

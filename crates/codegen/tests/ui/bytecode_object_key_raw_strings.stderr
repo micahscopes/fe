@@ -1,0 +1,43 @@
+error[E0308]: arguments to this function are incorrect
+ --> tests/ui/bytecode_object_key_raw_strings.rs:4:13
+  |
+4 |     let _ = BytecodeSectionKey::new("Foo", "runtime");
+  |             ^^^^^^^^^^^^^^^^^^^^^^^ -----  --------- expected `BytecodeSectionNameKey`, found `&str`
+  |                                     |
+  |                                     expected `BytecodeObjectKey`, found `&str`
+  |
+note: associated function defined here
+ --> src/origin.rs
+  |
+  |     pub fn new(object: BytecodeObjectKey, section: BytecodeSectionNameKey) -> Self {
+  |            ^^^
+
+error[E0308]: mismatched types
+ --> tests/ui/bytecode_object_key_raw_strings.rs:5:68
+  |
+5 |     let _ = BytecodeSectionKey::new(BytecodeObjectKey::new("Foo"), "runtime");
+  |             -----------------------                                ^^^^^^^^^ expected `BytecodeSectionNameKey`, found `&str`
+  |             |
+  |             arguments to this function are incorrect
+  |
+note: associated function defined here
+ --> src/origin.rs
+  |
+  |     pub fn new(object: BytecodeObjectKey, section: BytecodeSectionNameKey) -> Self {
+  |            ^^^
+
+error[E0308]: mismatched types
+ --> tests/ui/bytecode_object_key_raw_strings.rs:8:45
+  |
+8 |     let _ = origins.origin_graph_for_object("Foo");
+  |                     ----------------------- ^^^^^ expected `&BytecodeObjectKey`, found `&str`
+  |                     |
+  |                     arguments to this method are incorrect
+  |
+  = note: expected reference `&BytecodeObjectKey`
+             found reference `&'static str`
+note: method defined here
+ --> src/origin.rs
+  |
+  |     pub fn origin_graph_for_object(&self, object: &BytecodeObjectKey) -> CodegenOriginGraph {
+  |            ^^^^^^^^^^^^^^^^^^^^^^^

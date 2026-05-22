@@ -4,8 +4,17 @@ use std::{
 };
 
 use camino::{Utf8Path, Utf8PathBuf};
-use codegen::{OptLevel, SonatinaContractBytecode};
-use common::{InputDb, config::Config, dependencies::WorkspaceMemberRecord, file::IngotFileKind};
+use codegen::{
+    OptLevel, SonatinaContractBytecode,
+    debug::{
+        BytecodeSourceMapEntry, BytecodeSourceMapExportOptions, bytecode_source_map_entries_json,
+    },
+    origin::{BytecodeObjectKey, BytecodeOriginCoverage},
+};
+use common::{
+    InputDb, config::Config, dependencies::WorkspaceMemberRecord, facts::TypedFactSet,
+    file::IngotFileKind,
+};
 use driver::DriverDataBase;
 use driver::cli_target::{CliTarget, resolve_cli_target};
 use hir::hir_def::{HirIngot, ManualContractRootAttr, TopLevelMod};
@@ -83,6 +92,10 @@ fn write_report_file(report: &BuildReportContext, rel: &str, contents: &str) {
         let _ = std::fs::create_dir_all(parent.as_std_path());
     }
     let _ = std::fs::write(path.as_std_path(), contents);
+}
+
+fn write_file(path: &Utf8Path, contents: impl AsRef<[u8]>) -> Result<(), String> {
+    fs::write(path.as_std_path(), contents).map_err(|err| format!("Failed to write {path}: {err}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -896,6 +909,20 @@ fn build_ingot_url(
     )
 }
 
+fn emit_ingot_sonatina_bytecode_for_build(
+    db: &DriverDataBase,
+    ingot: hir::Ingot<'_>,
+    opt_level: OptLevel,
+    contract: Option<&str>,
+    emit_source_maps: bool,
+) -> Result<BTreeMap<String, SonatinaContractBytecode>, codegen::LowerError> {
+    if emit_source_maps {
+        codegen::emit_ingot_sonatina_bytecode_with_source_maps(db, ingot, opt_level, contract)
+    } else {
+        codegen::emit_ingot_sonatina_bytecode(db, ingot, opt_level, contract)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_ingot(
     db: &DriverDataBase,
@@ -952,14 +979,19 @@ fn build_ingot(
             }
         }
         if emit.writes_any_bytecode() {
-            let bytecode =
-                match codegen::emit_ingot_sonatina_bytecode(db, ingot, opt_level, contract) {
-                    Ok(bytecode) => bytecode,
-                    Err(err) => {
-                        eprintln!("Error: Failed to compile Sonatina bytecode: {err}");
-                        return BuildSummary { had_errors: true };
-                    }
-                };
+            let bytecode = match emit_ingot_sonatina_bytecode_for_build(
+                db,
+                ingot,
+                opt_level,
+                contract,
+                report_dir.is_some(),
+            ) {
+                Ok(bytecode) => bytecode,
+                Err(err) => {
+                    eprintln!("Error: Failed to compile Sonatina bytecode: {err}");
+                    return BuildSummary { had_errors: true };
+                }
+            };
             had_errors |= write_sonatina_bytecode_artifacts(
                 &names_to_build,
                 &bytecode,
@@ -979,6 +1011,20 @@ fn build_ingot(
     }
 
     BuildSummary { had_errors }
+}
+
+fn emit_module_sonatina_bytecode_for_build(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    opt_level: OptLevel,
+    contract: Option<&str>,
+    emit_source_maps: bool,
+) -> Result<BTreeMap<String, SonatinaContractBytecode>, codegen::LowerError> {
+    if emit_source_maps {
+        codegen::emit_module_sonatina_bytecode_with_source_maps(db, top_mod, opt_level, contract)
+    } else {
+        codegen::emit_module_sonatina_bytecode(db, top_mod, opt_level, contract)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1038,14 +1084,19 @@ fn build_top_mod(
             }
         }
         if emit.writes_any_bytecode() {
-            let bytecode =
-                match codegen::emit_module_sonatina_bytecode(db, top_mod, opt_level, contract) {
-                    Ok(bytecode) => bytecode,
-                    Err(err) => {
-                        eprintln!("Error: Failed to compile Sonatina bytecode: {err}");
-                        return BuildSummary { had_errors: true };
-                    }
-                };
+            let bytecode = match emit_module_sonatina_bytecode_for_build(
+                db,
+                top_mod,
+                opt_level,
+                contract,
+                report_dir.is_some(),
+            ) {
+                Ok(bytecode) => bytecode,
+                Err(err) => {
+                    eprintln!("Error: Failed to compile Sonatina bytecode: {err}");
+                    return BuildSummary { had_errors: true };
+                }
+            };
             had_errors |= write_sonatina_bytecode_artifacts(
                 &names_to_build,
                 &bytecode,
@@ -1225,12 +1276,15 @@ fn write_abi_artifacts(
                     }
                     continue;
                 }
-                if let Err(err) = fs::write(abi_path.as_std_path(), &result.json) {
-                    eprintln!("Error: Failed to write ABI: {err}");
+                if let Err(err) = write_file(&abi_path, result.json.as_bytes()) {
+                    eprintln!("Error: {err}");
                     had_errors = true;
                 } else {
-                    if let Some(path) = report_path.as_ref() {
-                        let _ = fs::write(path.as_std_path(), &result.json);
+                    if let Some(path) = report_path.as_ref()
+                        && let Err(err) = write_file(path, result.json.as_bytes())
+                    {
+                        eprintln!("Error: {err}");
+                        had_errors = true;
                     }
                     println!("Wrote {out_dir}/{base}.abi.json");
                 }
@@ -1267,10 +1321,9 @@ fn write_named_ir_artifact(
     } else {
         format!("{ir}\n")
     };
-    fs::write(path.as_std_path(), &ir_with_newline)
-        .map_err(|err| format!("Failed to write {path}: {err}"))?;
+    write_file(&path, ir_with_newline.as_bytes())?;
     if let Some(dir) = report_dir {
-        let _ = fs::write(dir.join(&file_name).as_std_path(), ir_with_newline);
+        write_file(&dir.join(&file_name), ir_with_newline.as_bytes())?;
     }
     println!("Wrote {out_dir}/{file_name}");
     Ok(())
@@ -1285,16 +1338,33 @@ fn write_sonatina_bytecode_artifacts(
 ) -> bool {
     let mut had_errors = false;
     for name in names_to_build {
-        let Some(SonatinaContractBytecode { deploy, runtime }) = bytecode.get(name) else {
+        let Some(SonatinaContractBytecode {
+            deploy,
+            runtime,
+            source_map_entries,
+            bytecode_origin_coverage,
+            origin_facts,
+            snapshot_origin_facts,
+        }) = bytecode.get(name)
+        else {
             eprintln!("Error: Sonatina did not emit bytecode for contract \"{name}\"");
             had_errors = true;
             continue;
         };
         let deploy_hex = hex::encode(deploy);
         let runtime_hex = hex::encode(runtime);
-        if let Err(err) =
-            write_contract_artifacts(out_dir, report_dir, name, &deploy_hex, &runtime_hex, emit)
-        {
+        if let Err(err) = write_contract_artifacts(
+            out_dir,
+            report_dir,
+            name,
+            &deploy_hex,
+            &runtime_hex,
+            source_map_entries,
+            *bytecode_origin_coverage,
+            origin_facts.as_ref(),
+            snapshot_origin_facts.as_ref(),
+            emit,
+        ) {
             eprintln!("Error: {err}");
             had_errors = true;
         } else {
@@ -1344,26 +1414,58 @@ fn write_contract_artifacts(
     contract_name: &str,
     bytecode: &str,
     runtime_bytecode: &str,
+    source_map_entries: &[BytecodeSourceMapEntry],
+    bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+    origin_facts: Option<&TypedFactSet>,
+    snapshot_origin_facts: Option<&TypedFactSet>,
     emit: EmitSelection,
 ) -> Result<(), String> {
     let base = sanitize_filename(contract_name);
     if emit.bytecode {
         let deploy_path = out_dir.join(format!("{base}.bin"));
-        fs::write(deploy_path.as_std_path(), bytecode)
-            .map_err(|err| format!("Failed to write {deploy_path}: {err}"))?;
+        write_file(&deploy_path, bytecode.as_bytes())?;
         if let Some(dir) = report_dir {
             let deploy_path = dir.join(format!("{base}.bin"));
-            let _ = fs::write(deploy_path.as_std_path(), bytecode);
+            write_file(&deploy_path, bytecode.as_bytes())?;
         }
     }
     if emit.runtime_bytecode {
         let runtime_path = out_dir.join(format!("{base}.runtime.bin"));
-        fs::write(runtime_path.as_std_path(), runtime_bytecode)
-            .map_err(|err| format!("Failed to write {runtime_path}: {err}"))?;
+        write_file(&runtime_path, runtime_bytecode.as_bytes())?;
         if let Some(dir) = report_dir {
             let runtime_path = dir.join(format!("{base}.runtime.bin"));
-            let _ = fs::write(runtime_path.as_std_path(), runtime_bytecode);
+            write_file(&runtime_path, runtime_bytecode.as_bytes())?;
         }
+    }
+    if let Some(dir) = report_dir {
+        let source_map_object = BytecodeObjectKey::new(contract_name);
+        let source_map_options = BytecodeSourceMapExportOptions::new()
+            .with_object_key(&source_map_object)
+            .with_bytecode_origin_coverage(bytecode_origin_coverage);
+        if let Some(json) = bytecode_source_map_entries_json(source_map_entries, source_map_options)
+            .map_err(|err| format!("failed to serialize `{base}.source_map.json`: {err}"))?
+        {
+            let source_map_path = dir.join(format!("{base}.source_map.json"));
+            write_file(&source_map_path, json.as_bytes())?;
+        }
+    }
+    if let Some(dir) = report_dir
+        && let Some(origin_facts) = origin_facts
+    {
+        let json = serde_json::to_string_pretty(&origin_facts.export())
+            .map_err(|err| format!("failed to serialize `{base}.origin_facts.json`: {err}"))?;
+        let origin_facts_path = dir.join(format!("{base}.origin_facts.json"));
+        write_file(&origin_facts_path, json.as_bytes())?;
+    }
+    if let Some(dir) = report_dir
+        && let Some(snapshot_origin_facts) = snapshot_origin_facts
+    {
+        let json =
+            serde_json::to_string_pretty(&snapshot_origin_facts.export()).map_err(|err| {
+                format!("failed to serialize `{base}.snapshot_origin_facts.json`: {err}")
+            })?;
+        let snapshot_facts_path = dir.join(format!("{base}.snapshot_origin_facts.json"));
+        write_file(&snapshot_facts_path, json.as_bytes())?;
     }
     Ok(())
 }
@@ -1414,6 +1516,23 @@ mod tests {
     use serde_json::Value;
     use tempfile::tempdir;
 
+    fn source_map_entry(
+        object: &str,
+        section: &str,
+        pc_start: u32,
+        pc_end: u32,
+        kind: codegen::debug::BytecodeSourceMapEntryKind,
+    ) -> codegen::debug::BytecodeSourceMapEntry {
+        let range =
+            codegen::origin::BytecodePcRange::new(pc_start, pc_end).expect("valid PC range");
+        let section_key = codegen::origin::BytecodeSectionKey::new(
+            codegen::origin::BytecodeObjectKey::new(object),
+            codegen::origin::BytecodeSectionNameKey::new(section),
+        );
+        let origin = codegen::origin::BytecodePcOrigin::new(section_key, range);
+        codegen::debug::BytecodeSourceMapEntry::from_origin(&origin, kind)
+    }
+
     #[test]
     fn describe_emit_selection_lists_abi() {
         let emit = EmitSelection {
@@ -1423,6 +1542,231 @@ mod tests {
             abi: true,
         };
         assert_eq!(describe_emit_selection(emit), "abi");
+    }
+
+    #[test]
+    fn write_contract_artifacts_copies_source_map_into_report_dir() {
+        let temp = tempdir().expect("tempdir");
+        let out_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("out")).expect("utf8 output path");
+        let report_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("report")).expect("utf8 report path");
+        fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
+        fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
+        let source_map_entries = vec![source_map_entry(
+            "Foo",
+            "runtime",
+            1,
+            2,
+            codegen::debug::BytecodeSourceMapEntryKind::Source {
+                span_kind: common::facts::SourceSpanKind::Original,
+                file: "src/main.fe".to_string(),
+                start_byte: 10,
+                end_byte: 14,
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 6,
+                snippet: "main".to_string(),
+            },
+        )];
+
+        write_contract_artifacts(
+            &out_dir,
+            Some(&report_dir),
+            "Foo",
+            "00",
+            "00",
+            &source_map_entries,
+            Some(BytecodeOriginCoverage::new(1, 0, 0)),
+            None,
+            None,
+            EmitSelection {
+                bytecode: true,
+                runtime_bytecode: true,
+                ir: false,
+                abi: false,
+            },
+        )
+        .expect("contract artifacts should write");
+
+        let json_path = report_dir.join("Foo.source_map.json");
+        let json = fs::read_to_string(json_path.as_std_path()).expect("read source map");
+        let value = serde_json::from_str::<Value>(&json).expect("parse source map");
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["object"], "Foo");
+        assert_eq!(value["bytecode_origin_coverage"]["total"], 1);
+        assert_eq!(value["bytecode_origin_coverage"]["sonatina_post_opt"], 1);
+        assert_eq!(value["entries"][0]["kind"], "source");
+        assert_eq!(value["entries"][0]["section"], "runtime");
+        assert_eq!(value["entries"][0]["snippet"], "main");
+    }
+
+    #[test]
+    fn write_contract_artifacts_reports_source_map_write_errors() {
+        let temp = tempdir().expect("tempdir");
+        let out_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("out")).expect("utf8 output path");
+        let report_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("report")).expect("utf8 report path");
+        fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
+        fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
+        fs::create_dir(report_dir.join("Foo.source_map.json").as_std_path())
+            .expect("block source-map file path with directory");
+        let source_map_entries = vec![source_map_entry(
+            "Foo",
+            "runtime",
+            1,
+            2,
+            codegen::debug::BytecodeSourceMapEntryKind::BytecodeUnmapped {
+                reason: codegen::origin::BytecodeUnmappedReason::Unknown,
+            },
+        )];
+
+        let err = write_contract_artifacts(
+            &out_dir,
+            Some(&report_dir),
+            "Foo",
+            "00",
+            "00",
+            &source_map_entries,
+            None,
+            None,
+            None,
+            EmitSelection {
+                bytecode: false,
+                runtime_bytecode: false,
+                ir: false,
+                abi: false,
+            },
+        )
+        .expect_err("source-map report write should fail");
+
+        assert!(err.contains("Foo.source_map.json"));
+    }
+
+    #[test]
+    fn write_contract_artifacts_copies_origin_facts_into_report_dir() {
+        let temp = tempdir().expect("tempdir");
+        let out_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("out")).expect("utf8 output path");
+        let report_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("report")).expect("utf8 report path");
+        fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
+        fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
+
+        let hir = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::HirExpr,
+            "body:foo",
+            "expr:0",
+        );
+        let pc = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::BytecodePc,
+            "object:Foo:section:runtime",
+            "pc:1..2",
+        );
+        let mut graph = common::origin::OriginGraph::new();
+        graph.push(hir, pc, common::origin::OriginLinkKind::Lowered);
+        let origin_facts = common::facts::origin_graph_facts(&graph, Clone::clone);
+
+        write_contract_artifacts(
+            &out_dir,
+            Some(&report_dir),
+            "Foo",
+            "00",
+            "00",
+            &[],
+            None,
+            Some(&origin_facts),
+            None,
+            EmitSelection {
+                bytecode: true,
+                runtime_bytecode: true,
+                ir: false,
+                abi: false,
+            },
+        )
+        .expect("contract artifacts should write");
+
+        let json_path = report_dir.join("Foo.origin_facts.json");
+        let json = fs::read_to_string(json_path.as_std_path()).expect("read origin facts");
+        let value = serde_json::from_str::<Value>(&json).expect("parse origin facts");
+        assert_eq!(value["schema_version"], 1);
+        let facts = value["facts"].as_array().expect("facts array");
+        assert!(facts.iter().any(|fact| {
+            fact["type"] == "origin_node"
+                && fact["id"]["namespace"] == "origin_node"
+                && fact["key"]["kind"] == "bytecode.pc"
+        }));
+        assert!(
+            facts
+                .iter()
+                .any(|fact| fact["type"] == "origin_link" && fact["kind"] == "lowered")
+        );
+    }
+
+    #[test]
+    fn write_contract_artifacts_copies_snapshot_origin_facts_into_report_dir() {
+        let temp = tempdir().expect("tempdir");
+        let out_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("out")).expect("utf8 output path");
+        let report_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("report")).expect("utf8 report path");
+        fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
+        fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
+
+        let pre_opt = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::SonatinaInst,
+            "sonatina:func:Foo",
+            "pre_opt:inst:11",
+        );
+        let snapshot_loss = common::origin::OriginExportKey::new(
+            common::origin::OriginExportKind::SonatinaSynthetic,
+            "sonatina",
+            "pre_opt_snapshot_loss",
+        );
+        let mut graph = common::origin::OriginGraph::new();
+        graph.push(
+            pre_opt,
+            snapshot_loss,
+            common::origin::OriginLinkKind::Synthetic,
+        );
+        let snapshot_origin_facts = common::facts::origin_graph_facts(&graph, Clone::clone);
+
+        write_contract_artifacts(
+            &out_dir,
+            Some(&report_dir),
+            "Foo",
+            "00",
+            "00",
+            &[],
+            None,
+            None,
+            Some(&snapshot_origin_facts),
+            EmitSelection {
+                bytecode: true,
+                runtime_bytecode: true,
+                ir: false,
+                abi: false,
+            },
+        )
+        .expect("contract artifacts should write");
+
+        let json_path = report_dir.join("Foo.snapshot_origin_facts.json");
+        let json = fs::read_to_string(json_path.as_std_path()).expect("read snapshot facts");
+        let value = serde_json::from_str::<Value>(&json).expect("parse snapshot facts");
+        assert_eq!(value["schema_version"], 1);
+        let facts = value["facts"].as_array().expect("facts array");
+        assert!(facts.iter().any(|fact| {
+            fact["type"] == "origin_node"
+                && fact["key"]["kind"] == "sonatina.synthetic"
+                && fact["key"]["local_key"] == "pre_opt_snapshot_loss"
+        }));
+        assert!(
+            facts
+                .iter()
+                .any(|fact| fact["type"] == "origin_link" && fact["kind"] == "synthetic")
+        );
     }
 
     #[test]

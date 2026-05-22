@@ -1,0 +1,15 @@
+error[E0451]: fields `object`, `section`, `pc_start`, `pc_end` and `kind` of struct `BytecodeSourceMapEntry` are private
+ --> tests/ui/bytecode_source_map_entry_private_fields.rs:5:9
+  |
+4 |     let _ = BytecodeSourceMapEntry {
+  |             ---------------------- in this type
+5 |         object: "Foo".to_string(),
+  |         ^^^^^^ private field
+6 |         section: "runtime".to_string(),
+  |         ^^^^^^^ private field
+7 |         pc_start: 0,
+  |         ^^^^^^^^ private field
+8 |         pc_end: 4,
+  |         ^^^^^^ private field
+9 |         kind: BytecodeSourceMapEntryKind::SemanticSpanMissing,
+  |         ^^^^ private field

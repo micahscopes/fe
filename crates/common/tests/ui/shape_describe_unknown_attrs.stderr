@@ -1,0 +1,11 @@
+error: unknown shape attribute on item or variant
+ --> tests/ui/shape_describe_unknown_attrs.rs:6:9
+  |
+6 | #[shape(unknown = "item")]
+  |         ^^^^^^^
+
+error: unknown shape attribute on field
+  --> tests/ui/shape_describe_unknown_attrs.rs:14:13
+   |
+14 |     #[shape(origin = "not-supported")]
+   |             ^^^^^^

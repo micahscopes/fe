@@ -1,0 +1,5 @@
+error: unknown shape dimension; expected one of Structure, Names, Constants, Types, TraceEvents
+ --> tests/ui/shape_describe_unknown_dimension.rs:7:21
+  |
+7 |     #[shape(field = NotADimension)]
+  |                     ^^^^^^^^^^^^^

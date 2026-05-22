@@ -1,0 +1,11 @@
+error[E0308]: mismatched types
+ --> tests/ui/bytecode_source_map_entry_kind_raw_strings.rs:5:20
+  |
+5 |         span_kind: "original".to_string(),
+  |                    ^^^^^^^^^^^^^^^^^^^^^^ expected `SourceSpanKind`, found `String`
+
+error[E0308]: mismatched types
+  --> tests/ui/bytecode_source_map_entry_kind_raw_strings.rs:17:17
+   |
+17 |         reason: "no_ir_inst".to_string(),
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^ expected `BytecodeUnmappedReason`, found `String`

@@ -1,0 +1,11 @@
+error: duplicate shape kind attribute
+ --> tests/ui/shape_describe_duplicate_attrs.rs:6:25
+  |
+6 | #[shape(kind = "first", kind = "second")]
+  |                         ^^^^
+
+error: duplicate shape label attribute
+  --> tests/ui/shape_describe_duplicate_attrs.rs:11:45
+   |
+11 |     #[shape(field = Names, label = "first", label = "second")]
+   |                                             ^^^^^

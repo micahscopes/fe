@@ -1,0 +1,5 @@
+error: field `value` is missing #[shape(...)] policy; use #[shape(field = Structure)], #[shape(child)], #[shape(with = path)], or #[shape(skip = "reason")]
+ --> tests/ui/shape_describe_missing_policy.rs:7:5
+  |
+7 |     value: u32,
+  |     ^^^^^^^^^^

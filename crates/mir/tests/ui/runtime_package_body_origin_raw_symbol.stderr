@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/runtime_package_body_origin_raw_symbol.rs:4:44
+  |
+4 |     let _ = RuntimePackageBodyOrigins::new("runtime:test", instance, RuntimeBodyOrigins::new());
+  |             ------------------------------ ^^^^^^^^^^^^^^ expected `RuntimePackageBodySymbol`, found `&str`
+  |             |
+  |             arguments to this function are incorrect
+  |
+note: associated function defined here
+ --> src/origin.rs
+  |
+  |     pub fn new(
+  |            ^^^
