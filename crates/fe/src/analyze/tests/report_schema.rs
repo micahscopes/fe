@@ -273,7 +273,11 @@ fn origin_count_roundtrips_through_fail_closed_schema() {
         "{err}"
     );
 
-    report["targets"][0]["runtime_statements"]["total"] = serde_json::json!(3);
+    report["targets"][0]["runtime_statements"] = serde_json::json!({
+        "total": 0,
+        "semantic": 0,
+        "synthetic": 0
+    });
     serde_json::from_value::<AnalyzeReport>(report)
         .expect("analyze report should accept consistent nested origin counts");
 }
