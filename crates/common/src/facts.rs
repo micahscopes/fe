@@ -526,6 +526,34 @@ impl<'a> TypedFactRelationIndex<'a> {
         )
     }
 
+    pub fn path_export_between_keys(
+        &self,
+        from_key: &OriginExportKey,
+        to_key: &OriginExportKey,
+    ) -> Result<Option<OriginPathWitnessExport>, TypedFactRelationError> {
+        let keys_by_id = self.origin_node_keys_by_id()?;
+        let outgoing = self.origin_outgoing_by_id()?;
+        let ids_by_key = keys_by_id
+            .iter()
+            .map(|(id, key)| (key.clone(), *id))
+            .collect::<BTreeMap<_, _>>();
+        let Some(from_id) = ids_by_key.get(from_key).copied() else {
+            return Ok(None);
+        };
+        let Some(to_id) = ids_by_key.get(to_key).copied() else {
+            return Ok(None);
+        };
+
+        Ok(self.origin_path_export(
+            from_id,
+            to_id,
+            from_key.kind(),
+            to_key.kind(),
+            &keys_by_id,
+            &outgoing,
+        ))
+    }
+
     pub fn representative_path_exports_with_priority(
         &self,
         priority_kind_pairs: impl IntoIterator<Item = (OriginExportKind, OriginExportKind)>,
@@ -4363,7 +4391,11 @@ mod tests {
             first_runtime.clone(),
             OriginLinkKind::Lowered,
         );
-        origin_graph.push(semantic, second_runtime.clone(), OriginLinkKind::Lowered);
+        origin_graph.push(
+            semantic.clone(),
+            second_runtime.clone(),
+            OriginLinkKind::Lowered,
+        );
         let origin_facts = origin_graph_facts(&origin_graph, Clone::clone)
             .with_source_spans([
                 SourceSpanExport::new(
@@ -4389,7 +4421,7 @@ mod tests {
                     3,
                 ),
                 SourceSpanExport::new(
-                    second_runtime,
+                    second_runtime.clone(),
                     SourceSpanKind::Original,
                     "file:///a.fe",
                     4,
@@ -4452,6 +4484,12 @@ mod tests {
                 [(OriginExportKind::Semantic, OriginExportKind::RuntimeStmt)],
                 4,
             )
+        );
+        assert_eq!(
+            index
+                .path_export_between_keys(&semantic, &second_runtime)
+                .expect("relation stable-key path should query"),
+            fact_index.path_export_between_keys(&semantic, &second_runtime)
         );
     }
 

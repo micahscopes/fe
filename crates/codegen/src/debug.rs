@@ -756,6 +756,172 @@ impl OwnedBytecodeSourceMapExport {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BytecodeDebugLocationEntry {
+    object: String,
+    section: String,
+    pc_start: u32,
+    pc_end: u32,
+    span_kind: SourceSpanKind,
+    file: String,
+    start_byte: usize,
+    end_byte: usize,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    snippet: String,
+}
+
+impl BytecodeDebugLocationEntry {
+    fn from_source_map_entry(entry: &BytecodeSourceMapEntry) -> Option<Self> {
+        let BytecodeSourceMapEntryKind::Source {
+            span_kind,
+            file,
+            start_byte,
+            end_byte,
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+            snippet,
+        } = entry.kind()
+        else {
+            return None;
+        };
+
+        Some(Self {
+            object: entry.object().to_string(),
+            section: entry.section().to_string(),
+            pc_start: entry.pc_start(),
+            pc_end: entry.pc_end(),
+            span_kind: *span_kind,
+            file: file.clone(),
+            start_byte: *start_byte,
+            end_byte: *end_byte,
+            start_line: *start_line,
+            start_col: *start_col,
+            end_line: *end_line,
+            end_col: *end_col,
+            snippet: snippet.clone(),
+        })
+    }
+
+    pub fn object(&self) -> &str {
+        &self.object
+    }
+
+    pub fn section(&self) -> &str {
+        &self.section
+    }
+
+    pub const fn pc_start(&self) -> u32 {
+        self.pc_start
+    }
+
+    pub const fn pc_end(&self) -> u32 {
+        self.pc_end
+    }
+
+    pub const fn span_kind(&self) -> SourceSpanKind {
+        self.span_kind
+    }
+
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    pub const fn start_byte(&self) -> usize {
+        self.start_byte
+    }
+
+    pub const fn end_byte(&self) -> usize {
+        self.end_byte
+    }
+
+    pub const fn start_line(&self) -> usize {
+        self.start_line
+    }
+
+    pub const fn start_col(&self) -> usize {
+        self.start_col
+    }
+
+    pub const fn end_line(&self) -> usize {
+        self.end_line
+    }
+
+    pub const fn end_col(&self) -> usize {
+        self.end_col
+    }
+
+    pub fn snippet(&self) -> &str {
+        &self.snippet
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OwnedBytecodeDebugLocationExport {
+    schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    section: Option<String>,
+    locations: Vec<BytecodeDebugLocationEntry>,
+}
+
+impl OwnedBytecodeDebugLocationExport {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    fn from_options(
+        options: BytecodeSourceMapExportOptions<'_>,
+        source_map_entries: &[BytecodeSourceMapEntry],
+    ) -> Result<Option<Self>, BytecodeSourceMapExportEntryError> {
+        let object = options
+            .metadata
+            .map(|metadata| metadata.object_name().to_owned());
+        let section = options
+            .metadata
+            .and_then(|metadata| metadata.section_name().map(str::to_owned));
+        validate_source_map_export_entries(
+            object.as_deref(),
+            section.as_deref(),
+            source_map_entries,
+        )?;
+
+        let locations = source_map_entries
+            .iter()
+            .filter_map(BytecodeDebugLocationEntry::from_source_map_entry)
+            .collect::<Vec<_>>();
+        if locations.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            schema_version: Self::SCHEMA_VERSION,
+            object,
+            section,
+            locations,
+        }))
+    }
+
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub fn object(&self) -> Option<&str> {
+        self.object.as_deref()
+    }
+
+    pub fn section(&self) -> Option<&str> {
+        self.section.as_deref()
+    }
+
+    pub fn locations(&self) -> &[BytecodeDebugLocationEntry] {
+        &self.locations
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct BytecodeOriginCoverageExport {
     total: usize,
@@ -1327,6 +1493,25 @@ pub fn bytecode_source_map_entries_export(
         .transpose()
 }
 
+pub fn bytecode_debug_location_entries_json(
+    source_map_entries: &[BytecodeSourceMapEntry],
+    options: BytecodeSourceMapExportOptions<'_>,
+) -> Result<Option<String>, BytecodeSourceMapExportError> {
+    let Some(export) = bytecode_debug_location_entries_export(source_map_entries, options)? else {
+        return Ok(None);
+    };
+    serde_json::to_string(&export)
+        .map(Some)
+        .map_err(BytecodeSourceMapExportError::from)
+}
+
+pub fn bytecode_debug_location_entries_export(
+    source_map_entries: &[BytecodeSourceMapEntry],
+    options: BytecodeSourceMapExportOptions<'_>,
+) -> Result<Option<OwnedBytecodeDebugLocationExport>, BytecodeSourceMapExportEntryError> {
+    OwnedBytecodeDebugLocationExport::from_options(options, source_map_entries)
+}
+
 fn matches_filter(origin: &BytecodePcOrigin, filter: &BytecodeSourceMapFilter) -> bool {
     origin.section().object().as_str() == filter.object()
         && origin.section().section() == filter.section()
@@ -1537,6 +1722,7 @@ mod tests {
         BytecodeSourceMapEntry, BytecodeSourceMapEntryError, BytecodeSourceMapEntryKind,
         BytecodeSourceMapExportMetadata, BytecodeSourceMapExportOptions,
         OwnedBytecodeSourceMapExport, SourceSpanInvalidReason, SourceSpanKind,
+        bytecode_debug_location_entries_export, bytecode_debug_location_entries_json,
         bytecode_source_map_entries_export, bytecode_source_map_entries_json,
         bytecode_source_map_entries_summary, span_snippet,
     };
@@ -2360,6 +2546,83 @@ mod tests {
 
         assert_eq!(export.object(), Some("Foo"));
         assert_eq!(export.section(), None);
+    }
+
+    #[test]
+    fn bytecode_debug_location_export_uses_only_valid_source_entries() {
+        let entries = vec![
+            source_map_entry(
+                "Foo",
+                "runtime",
+                0,
+                4,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "main".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                4,
+                8,
+                BytecodeSourceMapEntryKind::BytecodeUnmapped {
+                    reason: BytecodeUnmappedReason::Synthetic,
+                },
+            ),
+        ];
+        let object = BytecodeObjectKey::new("Foo");
+        let export = bytecode_debug_location_entries_export(
+            &entries,
+            BytecodeSourceMapExportOptions::new()
+                .with_metadata(BytecodeSourceMapExportMetadata::object(&object)),
+        )
+        .expect("debug location export should validate")
+        .expect("source entries should produce debug locations");
+
+        assert_eq!(export.schema_version(), 1);
+        assert_eq!(export.object(), Some("Foo"));
+        assert_eq!(export.section(), None);
+        assert_eq!(export.locations().len(), 1);
+        assert_eq!(export.locations()[0].object(), "Foo");
+        assert_eq!(export.locations()[0].section(), "runtime");
+        assert_eq!(export.locations()[0].pc_start(), 0);
+        assert_eq!(export.locations()[0].pc_end(), 4);
+        assert_eq!(export.locations()[0].span_kind(), SourceSpanKind::Original);
+        assert_eq!(export.locations()[0].file(), "src/main.fe");
+        assert_eq!(export.locations()[0].start_byte(), 10);
+        assert_eq!(export.locations()[0].end_byte(), 14);
+        assert_eq!(export.locations()[0].start_line(), 1);
+        assert_eq!(export.locations()[0].start_col(), 2);
+        assert_eq!(export.locations()[0].end_line(), 1);
+        assert_eq!(export.locations()[0].end_col(), 6);
+        assert_eq!(export.locations()[0].snippet(), "main");
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_skips_non_source_entries() {
+        let entries = vec![source_map_entry(
+            "Foo",
+            "runtime",
+            0,
+            4,
+            BytecodeSourceMapEntryKind::BytecodeUnmapped {
+                reason: BytecodeUnmappedReason::Synthetic,
+            },
+        )];
+
+        assert!(
+            bytecode_debug_location_entries_json(&entries, BytecodeSourceMapExportOptions::new())
+                .expect("non-source debug location export should validate")
+                .is_none()
+        );
     }
 
     #[test]

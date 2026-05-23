@@ -19,7 +19,7 @@ use codegen::{
     ExpectedRevert, OptLevel, SonatinaTestOptions, TestMetadata, TestModuleOutput,
     debug::{
         BytecodeSourceMapExportMetadata, BytecodeSourceMapExportOptions,
-        bytecode_source_map_entries_json,
+        bytecode_debug_location_entries_json, bytecode_source_map_entries_json,
     },
     emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina,
     emit_test_module_sonatina,
@@ -2645,6 +2645,21 @@ fn write_sonatina_case_artifacts(
         write_test_report_artifact(&dir.join("source_map.json"), json.as_bytes())?;
     }
 
+    let debug_location_options =
+        BytecodeSourceMapExportOptions::new().with_optional_metadata(source_map_metadata);
+    if let Some(json) = bytecode_debug_location_entries_json(
+        &case.sonatina_source_map_entries,
+        debug_location_options,
+    )
+    .map_err(|err| {
+        format!(
+            "failed to serialize test Sonatina debug locations for `{}`: {err}",
+            case.display_name
+        )
+    })? {
+        write_test_report_artifact(&dir.join("debug_locations.json"), json.as_bytes())?;
+    }
+
     if let Some(facts) = &case.sonatina_origin_facts {
         let json = serde_json::to_string_pretty(&facts.export()).map_err(|err| {
             format!(
@@ -3045,6 +3060,19 @@ mod tests {
         assert_eq!(value["entries"][0]["kind"], "source");
         assert_eq!(value["entries"][0]["file"], "src/lib.fe");
         assert_eq!(value["entries"][0]["snippet"], "lib");
+
+        let json_path = report
+            .root_dir
+            .join("artifacts/tests/source_map_case/sonatina/debug_locations.json");
+        let json =
+            std::fs::read_to_string(json_path).expect("debug locations artifact should exist");
+        let value =
+            serde_json::from_str::<Value>(&json).expect("debug locations should be valid JSON");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["object"], "source_map_case");
+        assert_eq!(value["section"], "runtime");
+        assert_eq!(value["locations"][0]["file"], "src/lib.fe");
+        assert_eq!(value["locations"][0]["snippet"], "lib");
     }
 
     #[test]

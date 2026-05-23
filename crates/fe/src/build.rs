@@ -7,7 +7,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use codegen::{
     OptLevel, SonatinaContractBytecode,
     debug::{
-        BytecodeSourceMapEntry, BytecodeSourceMapExportOptions, bytecode_source_map_entries_json,
+        BytecodeSourceMapEntry, BytecodeSourceMapExportOptions,
+        bytecode_debug_location_entries_json, bytecode_source_map_entries_json,
     },
     origin::{BytecodeObjectKey, BytecodeOriginCoverage},
 };
@@ -1448,6 +1449,18 @@ fn write_contract_artifacts(
             let source_map_path = dir.join(format!("{base}.source_map.json"));
             write_file(&source_map_path, json.as_bytes())?;
         }
+
+        let debug_location_options =
+            BytecodeSourceMapExportOptions::new().with_object_key(&source_map_object);
+        if let Some(json) =
+            bytecode_debug_location_entries_json(source_map_entries, debug_location_options)
+                .map_err(|err| {
+                    format!("failed to serialize `{base}.debug_locations.json`: {err}")
+                })?
+        {
+            let debug_location_path = dir.join(format!("{base}.debug_locations.json"));
+            write_file(&debug_location_path, json.as_bytes())?;
+        }
     }
     if let Some(dir) = report_dir
         && let Some(origin_facts) = origin_facts
@@ -1600,6 +1613,15 @@ mod tests {
         assert_eq!(value["entries"][0]["kind"], "source");
         assert_eq!(value["entries"][0]["section"], "runtime");
         assert_eq!(value["entries"][0]["snippet"], "main");
+
+        let json_path = report_dir.join("Foo.debug_locations.json");
+        let json = fs::read_to_string(json_path.as_std_path()).expect("read debug locations");
+        let value = serde_json::from_str::<Value>(&json).expect("parse debug locations");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["object"], "Foo");
+        assert_eq!(value["locations"][0]["section"], "runtime");
+        assert_eq!(value["locations"][0]["file"], "src/main.fe");
+        assert_eq!(value["locations"][0]["snippet"], "main");
     }
 
     #[test]
