@@ -67,6 +67,7 @@ pub struct SonatinaContractBytecode {
     pub runtime: Vec<u8>,
     pub source_map_entries: Vec<BytecodeSourceMapEntry>,
     pub bytecode_origin_coverage: Option<crate::origin::BytecodeOriginCoverage>,
+    pub post_opt_origin_coverage: Option<crate::origin::SonatinaPostOptOriginCoverage>,
     pub origin_facts: Option<TypedFactSet>,
     pub snapshot_origin_facts: Option<TypedFactSet>,
 }
@@ -634,6 +635,7 @@ fn emit_runtime_package_sonatina_bytecode_impl<'db>(
         artifacts,
         mut source_map_entries_by_object,
         mut bytecode_origin_coverage_by_object,
+        mut post_opt_origin_coverage_by_object,
         mut origin_facts_by_object,
         mut snapshot_origin_facts_by_object,
     ) = if emit_source_maps {
@@ -657,12 +659,19 @@ fn emit_runtime_package_sonatina_bytecode_impl<'db>(
         let mut facts_by_object = BTreeMap::new();
         let mut snapshot_facts_by_object = BTreeMap::new();
         let mut coverage_by_object = BTreeMap::new();
+        let mut post_opt_coverage_by_object = BTreeMap::new();
         for object in package.root_objects(db) {
             let object_name = object.name(db).clone();
             let object_key = BytecodeObjectKey::new(object_name.clone());
             let coverage = compiled.bytecode_origins.coverage_for_object(&object_key);
             if !coverage.is_empty() {
                 coverage_by_object.insert(object_name.clone(), coverage);
+            }
+            let post_opt_coverage = compiled
+                .bytecode_origins
+                .post_opt_origin_coverage_for_object(&object_key, &compiled.post_opt_origins);
+            if !post_opt_coverage.is_empty() {
+                post_opt_coverage_by_object.insert(object_name.clone(), post_opt_coverage);
             }
             if let Some(facts) = compiled
                 .bytecode_origins
@@ -700,6 +709,7 @@ fn emit_runtime_package_sonatina_bytecode_impl<'db>(
             compiled.artifacts,
             entries_by_object,
             coverage_by_object,
+            post_opt_coverage_by_object,
             facts_by_object,
             snapshot_facts_by_object,
         )
@@ -708,6 +718,7 @@ fn emit_runtime_package_sonatina_bytecode_impl<'db>(
         ensure_module_sonatina_ir_valid(&module)?;
         (
             compile_runtime_objects(module, opt_level, false)?,
+            BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
@@ -764,6 +775,8 @@ fn emit_runtime_package_sonatina_bytecode_impl<'db>(
                     .remove(object_name.as_str())
                     .unwrap_or_default(),
                 bytecode_origin_coverage: bytecode_origin_coverage_by_object
+                    .remove(object_name.as_str()),
+                post_opt_origin_coverage: post_opt_origin_coverage_by_object
                     .remove(object_name.as_str()),
                 origin_facts: origin_facts_by_object.remove(object_name.as_str()),
                 snapshot_origin_facts: snapshot_origin_facts_by_object.remove(object_name.as_str()),
@@ -1000,6 +1013,12 @@ pub fn emit_test_module_sonatina(
         let sonatina_bytecode_origin_coverage = compiled
             .bytecode_origins
             .coverage_for_section(&bytecode_section_key);
+        let sonatina_post_opt_origin_coverage = compiled
+            .bytecode_origins
+            .post_opt_origin_coverage_for_section(
+                &bytecode_section_key,
+                &compiled.post_opt_origins,
+            );
         let sonatina_source_map_entries =
             bytecode_source_map_entries(db, &source_resolutions, Some(&source_map_filter));
         let sonatina_source_spans =
@@ -1036,12 +1055,13 @@ pub fn emit_test_module_sonatina(
             ),
             sonatina_source_map_summary: bytecode_source_map_entries_summary(
                 &sonatina_source_map_entries,
-                Some(source_map_filter.object()),
-                Some(source_map_filter.section()),
+                Some(source_map_filter.metadata()),
             ),
             sonatina_source_map_entries,
             sonatina_bytecode_origin_coverage: (!sonatina_bytecode_origin_coverage.is_empty())
                 .then_some(sonatina_bytecode_origin_coverage),
+            sonatina_post_opt_origin_coverage: (!sonatina_post_opt_origin_coverage.is_empty())
+                .then_some(sonatina_post_opt_origin_coverage),
             sonatina_origin_facts,
             sonatina_snapshot_origin_facts,
             value_param_count: 0,
@@ -1736,20 +1756,22 @@ fn test_origin_b() uses (evm: mut Evm) {
                         .expect("source map should serialize")
                     })
                     .is_some_and(|json| {
-                        let value = serde_json::from_str::<serde_json::Value>(&json)
-                            .expect("source map should be valid JSON");
-                        value["schema_version"].as_u64()
-                            == Some(u64::from(
-                                crate::debug::OwnedBytecodeSourceMapExport::SCHEMA_VERSION,
-                            ))
-                            && value["entries"].as_array().is_some_and(|entries| {
-                                entries.iter().any(|entry| {
-                                    entry["kind"] == "source"
-                                        && entry.get("pc_start").is_some()
-                                        && entry["file"]
-                                            .as_str()
-                                            .is_some_and(|file| file.contains("int_downcast.fe"))
-                                })
+                        let export = serde_json::from_str::<
+                            crate::debug::OwnedBytecodeSourceMapExport,
+                        >(&json)
+                        .expect("source map should match owned schema");
+                        export.schema_version()
+                            == crate::debug::OwnedBytecodeSourceMapExport::SCHEMA_VERSION
+                            && export.entries().iter().any(|entry| {
+                                entry.pc_start() < entry.pc_end()
+                                    && matches!(
+                                        entry.kind(),
+                                        crate::debug::BytecodeSourceMapEntryKind::Source {
+                                            file,
+                                            ..
+                                        }
+                                            if file.contains("int_downcast.fe")
+                                    )
                             })
                     })
             }),
@@ -1775,6 +1797,13 @@ fn test_origin_b() uses (evm: mut Evm) {
                         .is_some_and(|coverage| {
                             coverage.total() == case.sonatina_source_map_entries.len()
                                 && coverage.is_partitioned()
+                        })
+                    && case
+                        .sonatina_post_opt_origin_coverage
+                        .is_some_and(|coverage| {
+                            coverage.total() > 0
+                                && coverage.is_post_opt_partitioned()
+                                && coverage.observed_pre_opt_total() > 0
                         })
                     && case
                         .sonatina_source_map_entries

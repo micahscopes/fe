@@ -1,0 +1,11 @@
+error: shape kind must not be empty
+ --> tests/ui/shape_describe_empty_kind_or_label.rs:6:9
+  |
+6 | #[shape(kind = "")]
+  |         ^^^^^^^^^
+
+error: shape label must not be empty
+  --> tests/ui/shape_describe_empty_kind_or_label.rs:14:28
+   |
+14 |     #[shape(field = Names, label = "")]
+   |                            ^^^^^^^^^^

@@ -1,0 +1,18 @@
+error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+ --> tests/ui/typed_fact_relation_raw_constructor.rs:4:13
+  |
+4 |     let _ = TypedFactRelation::new("origin_node", ["id", "kind"], Vec::new());
+  |             ^^^^^^^^^^^^^^^^^^^^^^ -------------  -------------- unexpected argument #2 of type `[&str; 2]`
+  |                                    |
+  |                                    expected `TypedFactRelationName`, found `&str`
+  |
+note: associated function defined here
+ --> src/facts.rs
+  |
+  |     pub fn new(
+  |            ^^^
+help: remove the extra argument
+  |
+4 -     let _ = TypedFactRelation::new("origin_node", ["id", "kind"], Vec::new());
+4 +     let _ = TypedFactRelation::new(/* TypedFactRelationName */, Vec::new());
+  |

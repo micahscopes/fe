@@ -1,0 +1,11 @@
+error[E0599]: no method named `key` found for struct `RuntimeStmtOrigin<'db>` in the current scope
+ --> tests/ui/runtime_origin_raw_key_escape.rs:4:20
+  |
+4 |     let _ = origin.key();
+  |                    ^^^ private field, not a method
+
+error[E0599]: no method named `key` found for struct `RuntimeTerminatorOrigin<'db>` in the current scope
+  --> tests/ui/runtime_origin_raw_key_escape.rs:10:20
+   |
+10 |     let _ = origin.key();
+   |                    ^^^ private field, not a method

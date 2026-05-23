@@ -7,10 +7,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use codegen::{
     OptLevel, SonatinaContractBytecode,
     debug::{
-        BytecodeSourceMapEntry, BytecodeSourceMapExportOptions,
-        bytecode_debug_location_entries_json, bytecode_source_map_entries_json,
+        BytecodeSourceMapEntry, BytecodeSourceMapExportOptions, bytecode_debug_artifacts_json,
     },
-    origin::{BytecodeObjectKey, BytecodeOriginCoverage},
+    origin::{BytecodeObjectKey, BytecodeOriginCoverage, SonatinaPostOptOriginCoverage},
 };
 use common::{
     InputDb, config::Config, dependencies::WorkspaceMemberRecord, facts::TypedFactSet,
@@ -1344,6 +1343,7 @@ fn write_sonatina_bytecode_artifacts(
             runtime,
             source_map_entries,
             bytecode_origin_coverage,
+            post_opt_origin_coverage,
             origin_facts,
             snapshot_origin_facts,
         }) = bytecode.get(name)
@@ -1362,6 +1362,7 @@ fn write_sonatina_bytecode_artifacts(
             &runtime_hex,
             source_map_entries,
             *bytecode_origin_coverage,
+            *post_opt_origin_coverage,
             origin_facts.as_ref(),
             snapshot_origin_facts.as_ref(),
             emit,
@@ -1417,6 +1418,7 @@ fn write_contract_artifacts(
     runtime_bytecode: &str,
     source_map_entries: &[BytecodeSourceMapEntry],
     bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+    post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverage>,
     origin_facts: Option<&TypedFactSet>,
     snapshot_origin_facts: Option<&TypedFactSet>,
     emit: EmitSelection,
@@ -1442,24 +1444,19 @@ fn write_contract_artifacts(
         let source_map_object = BytecodeObjectKey::new(contract_name);
         let source_map_options = BytecodeSourceMapExportOptions::new()
             .with_object_key(&source_map_object)
-            .with_bytecode_origin_coverage(bytecode_origin_coverage);
-        if let Some(json) = bytecode_source_map_entries_json(source_map_entries, source_map_options)
-            .map_err(|err| format!("failed to serialize `{base}.source_map.json`: {err}"))?
-        {
-            let source_map_path = dir.join(format!("{base}.source_map.json"));
-            write_file(&source_map_path, json.as_bytes())?;
-        }
-
+            .with_bytecode_origin_coverage(bytecode_origin_coverage)
+            .with_post_opt_origin_coverage(post_opt_origin_coverage);
         let debug_location_options =
             BytecodeSourceMapExportOptions::new().with_object_key(&source_map_object);
-        if let Some(json) =
-            bytecode_debug_location_entries_json(source_map_entries, debug_location_options)
-                .map_err(|err| {
-                    format!("failed to serialize `{base}.debug_locations.json`: {err}")
-                })?
-        {
-            let debug_location_path = dir.join(format!("{base}.debug_locations.json"));
-            write_file(&debug_location_path, json.as_bytes())?;
+        let debug_artifacts = bytecode_debug_artifacts_json(
+            source_map_entries,
+            source_map_options,
+            debug_location_options,
+        )
+        .map_err(|err| format!("failed to serialize `{base}` debug artifacts: {err}"))?;
+        for artifact in debug_artifacts.artifacts() {
+            let artifact_path = dir.join(artifact.file_name_with_base(&base));
+            write_file(&artifact_path, artifact.json().as_bytes())?;
         }
     }
     if let Some(dir) = report_dir
@@ -1526,6 +1523,11 @@ fn ingot_has_source_files(db: &DriverDataBase, ingot: hir::Ingot<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codegen::debug::{
+        BytecodeSourceMapEntryKind, OwnedBytecodeDebugLineTableExport,
+        OwnedBytecodeDebugLocationExport, OwnedBytecodeSourceMapExport,
+    };
+    use common::facts::OwnedTypedFactSetExport;
     use serde_json::Value;
     use tempfile::tempdir;
 
@@ -1592,6 +1594,7 @@ mod tests {
             "00",
             &source_map_entries,
             Some(BytecodeOriginCoverage::new(1, 0, 0)),
+            Some(SonatinaPostOptOriginCoverage::new(1, 0, 0)),
             None,
             None,
             EmitSelection {
@@ -1605,23 +1608,58 @@ mod tests {
 
         let json_path = report_dir.join("Foo.source_map.json");
         let json = fs::read_to_string(json_path.as_std_path()).expect("read source map");
-        let value = serde_json::from_str::<Value>(&json).expect("parse source map");
-        assert_eq!(value["schema_version"], 2);
-        assert_eq!(value["object"], "Foo");
-        assert_eq!(value["bytecode_origin_coverage"]["total"], 1);
-        assert_eq!(value["bytecode_origin_coverage"]["sonatina_post_opt"], 1);
-        assert_eq!(value["entries"][0]["kind"], "source");
-        assert_eq!(value["entries"][0]["section"], "runtime");
-        assert_eq!(value["entries"][0]["snippet"], "main");
+        let export = serde_json::from_str::<OwnedBytecodeSourceMapExport>(&json)
+            .expect("source map should match owned schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedBytecodeSourceMapExport::SCHEMA_VERSION
+        );
+        assert_eq!(export.object(), Some("Foo"));
+        assert_eq!(export.section(), None);
+        let bytecode_coverage = export
+            .bytecode_origin_coverage()
+            .expect("source map should include bytecode coverage");
+        assert_eq!(bytecode_coverage.total(), 1);
+        assert_eq!(bytecode_coverage.sonatina_post_opt(), 1);
+        let post_opt_coverage = export
+            .post_opt_origin_coverage()
+            .expect("source map should include post-opt coverage");
+        assert_eq!(post_opt_coverage.total(), 1);
+        assert_eq!(post_opt_coverage.same_inst_id(), 1);
+        assert_eq!(post_opt_coverage.observed_pre_opt_total(), 1);
+        assert_eq!(export.entries()[0].section(), "runtime");
+        match export.entries()[0].kind() {
+            BytecodeSourceMapEntryKind::Source { snippet, .. } => assert_eq!(snippet, "main"),
+            other => panic!("expected source entry, got {}", other.kind_name()),
+        }
 
         let json_path = report_dir.join("Foo.debug_locations.json");
         let json = fs::read_to_string(json_path.as_std_path()).expect("read debug locations");
-        let value = serde_json::from_str::<Value>(&json).expect("parse debug locations");
-        assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["object"], "Foo");
-        assert_eq!(value["locations"][0]["section"], "runtime");
-        assert_eq!(value["locations"][0]["file"], "src/main.fe");
-        assert_eq!(value["locations"][0]["snippet"], "main");
+        let export = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect("debug locations should match owned schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedBytecodeDebugLocationExport::SCHEMA_VERSION
+        );
+        assert_eq!(export.object(), Some("Foo"));
+        assert_eq!(export.section(), None);
+        assert_eq!(export.locations()[0].section(), "runtime");
+        assert_eq!(export.locations()[0].file(), "src/main.fe");
+        assert_eq!(export.locations()[0].snippet(), "main");
+
+        let json_path = report_dir.join("Foo.debug_line_table.json");
+        let json = fs::read_to_string(json_path.as_std_path()).expect("read debug line table");
+        let export = serde_json::from_str::<OwnedBytecodeDebugLineTableExport>(&json)
+            .expect("debug line table should match owned schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedBytecodeDebugLineTableExport::SCHEMA_VERSION
+        );
+        assert_eq!(export.object(), Some("Foo"));
+        assert_eq!(export.section(), None);
+        assert_eq!(export.files()[0].path(), "src/main.fe");
+        assert_eq!(export.rows()[0].section(), "runtime");
+        assert_eq!(export.rows()[0].snippet(), "main");
     }
 
     #[test]
@@ -1655,6 +1693,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             EmitSelection {
                 bytecode: false,
                 runtime_bytecode: false,
@@ -1668,6 +1707,110 @@ mod tests {
     }
 
     #[test]
+    fn write_contract_artifacts_reports_debug_location_write_errors() {
+        let temp = tempdir().expect("tempdir");
+        let out_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("out")).expect("utf8 output path");
+        let report_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("report")).expect("utf8 report path");
+        fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
+        fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
+        fs::create_dir(report_dir.join("Foo.debug_locations.json").as_std_path())
+            .expect("block debug-locations file path with directory");
+        let source_map_entries = vec![source_map_entry(
+            "Foo",
+            "runtime",
+            1,
+            2,
+            codegen::debug::BytecodeSourceMapEntryKind::Source {
+                span_kind: common::facts::SourceSpanKind::Original,
+                file: "src/main.fe".to_string(),
+                start_byte: 10,
+                end_byte: 14,
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 6,
+                snippet: "main".to_string(),
+            },
+        )];
+
+        let err = write_contract_artifacts(
+            &out_dir,
+            Some(&report_dir),
+            "Foo",
+            "00",
+            "00",
+            &source_map_entries,
+            None,
+            None,
+            None,
+            None,
+            EmitSelection {
+                bytecode: false,
+                runtime_bytecode: false,
+                ir: false,
+                abi: false,
+            },
+        )
+        .expect_err("debug-location report write should fail");
+
+        assert!(err.contains("Foo.debug_locations.json"));
+    }
+
+    #[test]
+    fn write_contract_artifacts_reports_debug_line_table_write_errors() {
+        let temp = tempdir().expect("tempdir");
+        let out_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("out")).expect("utf8 output path");
+        let report_dir =
+            Utf8PathBuf::from_path_buf(temp.path().join("report")).expect("utf8 report path");
+        fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
+        fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
+        fs::create_dir(report_dir.join("Foo.debug_line_table.json").as_std_path())
+            .expect("block debug-line-table file path with directory");
+        let source_map_entries = vec![source_map_entry(
+            "Foo",
+            "runtime",
+            1,
+            2,
+            codegen::debug::BytecodeSourceMapEntryKind::Source {
+                span_kind: common::facts::SourceSpanKind::Original,
+                file: "src/main.fe".to_string(),
+                start_byte: 10,
+                end_byte: 14,
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 6,
+                snippet: "main".to_string(),
+            },
+        )];
+
+        let err = write_contract_artifacts(
+            &out_dir,
+            Some(&report_dir),
+            "Foo",
+            "00",
+            "00",
+            &source_map_entries,
+            None,
+            None,
+            None,
+            None,
+            EmitSelection {
+                bytecode: false,
+                runtime_bytecode: false,
+                ir: false,
+                abi: false,
+            },
+        )
+        .expect_err("debug-line-table report write should fail");
+
+        assert!(err.contains("Foo.debug_line_table.json"));
+    }
+
+    #[test]
     fn write_contract_artifacts_copies_origin_facts_into_report_dir() {
         let temp = tempdir().expect("tempdir");
         let out_dir =
@@ -1677,16 +1820,18 @@ mod tests {
         fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
         fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
 
-        let hir = common::origin::OriginExportKey::new(
+        let hir = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::HirExpr,
             "body:foo",
             "expr:0",
-        );
-        let pc = common::origin::OriginExportKey::new(
+        )
+        .unwrap();
+        let pc = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::BytecodePc,
             "object:Foo:section:runtime",
             "pc:1..2",
-        );
+        )
+        .unwrap();
         let mut graph = common::origin::OriginGraph::new();
         graph.push(hir, pc, common::origin::OriginLinkKind::Lowered);
         let origin_facts = common::facts::origin_graph_facts(&graph, Clone::clone);
@@ -1698,6 +1843,7 @@ mod tests {
             "00",
             "00",
             &[],
+            None,
             None,
             Some(&origin_facts),
             None,
@@ -1712,18 +1858,21 @@ mod tests {
 
         let json_path = report_dir.join("Foo.origin_facts.json");
         let json = fs::read_to_string(json_path.as_std_path()).expect("read origin facts");
-        let value = serde_json::from_str::<Value>(&json).expect("parse origin facts");
-        assert_eq!(value["schema_version"], 1);
-        let facts = value["facts"].as_array().expect("facts array");
-        assert!(facts.iter().any(|fact| {
-            fact["type"] == "origin_node"
-                && fact["id"]["namespace"] == "origin_node"
-                && fact["key"]["kind"] == "bytecode.pc"
+        let export = serde_json::from_str::<OwnedTypedFactSetExport>(&json)
+            .expect("origin facts should match typed schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedTypedFactSetExport::SCHEMA_VERSION
+        );
+        let facts = common::facts::TypedFactSet::new(export.facts().to_vec());
+        assert!(facts.origin_nodes().any(|fact| {
+            fact.id().namespace() == common::facts::FactNamespace::OriginNode
+                && fact.key().kind() == common::origin::OriginExportKind::BytecodePc
         }));
         assert!(
             facts
-                .iter()
-                .any(|fact| fact["type"] == "origin_link" && fact["kind"] == "lowered")
+                .origin_links()
+                .any(|fact| fact.kind() == common::origin::OriginLinkKind::Lowered)
         );
     }
 
@@ -1737,16 +1886,18 @@ mod tests {
         fs::create_dir_all(out_dir.as_std_path()).expect("create output dir");
         fs::create_dir_all(report_dir.as_std_path()).expect("create report dir");
 
-        let pre_opt = common::origin::OriginExportKey::new(
+        let pre_opt = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::SonatinaInst,
             "sonatina:func:Foo",
             "pre_opt:inst:11",
-        );
-        let snapshot_loss = common::origin::OriginExportKey::new(
+        )
+        .unwrap();
+        let snapshot_loss = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::SonatinaSynthetic,
             "sonatina",
             "pre_opt_snapshot_loss",
-        );
+        )
+        .unwrap();
         let mut graph = common::origin::OriginGraph::new();
         graph.push(
             pre_opt,
@@ -1764,6 +1915,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
             Some(&snapshot_origin_facts),
             EmitSelection {
                 bytecode: true,
@@ -1776,18 +1928,21 @@ mod tests {
 
         let json_path = report_dir.join("Foo.snapshot_origin_facts.json");
         let json = fs::read_to_string(json_path.as_std_path()).expect("read snapshot facts");
-        let value = serde_json::from_str::<Value>(&json).expect("parse snapshot facts");
-        assert_eq!(value["schema_version"], 1);
-        let facts = value["facts"].as_array().expect("facts array");
-        assert!(facts.iter().any(|fact| {
-            fact["type"] == "origin_node"
-                && fact["key"]["kind"] == "sonatina.synthetic"
-                && fact["key"]["local_key"] == "pre_opt_snapshot_loss"
+        let export = serde_json::from_str::<OwnedTypedFactSetExport>(&json)
+            .expect("snapshot facts should match typed schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedTypedFactSetExport::SCHEMA_VERSION
+        );
+        let facts = common::facts::TypedFactSet::new(export.facts().to_vec());
+        assert!(facts.origin_nodes().any(|fact| {
+            fact.key().kind() == common::origin::OriginExportKind::SonatinaSynthetic
+                && fact.key().local_key() == "pre_opt_snapshot_loss"
         }));
         assert!(
             facts
-                .iter()
-                .any(|fact| fact["type"] == "origin_link" && fact["kind"] == "synthetic")
+                .origin_links()
+                .any(|fact| fact.kind() == common::origin::OriginLinkKind::Synthetic)
         );
     }
 

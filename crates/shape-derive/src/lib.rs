@@ -42,7 +42,10 @@ fn parse_container_attrs(attrs: &[syn::Attribute]) -> syn::Result<ContainerAttrs
                 if result.kind.is_some() {
                     return Err(meta.error("duplicate shape kind attribute"));
                 }
-                result.kind = Some(meta.value()?.parse::<LitStr>()?.value());
+                result.kind = Some(parse_non_empty_lit_str(
+                    &meta,
+                    "shape kind must not be empty",
+                )?);
                 Ok(())
             } else if meta.path.is_ident("stable_key") {
                 if result.stable_key.is_some() {
@@ -92,7 +95,10 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 if result.label.is_some() {
                     return Err(meta.error("duplicate shape label attribute"));
                 }
-                result.label = Some(meta.value()?.parse::<LitStr>()?.value());
+                result.label = Some(parse_non_empty_lit_str(
+                    &meta,
+                    "shape label must not be empty",
+                )?);
                 Ok(())
             } else {
                 Err(meta.error("unknown shape attribute on field"))
@@ -120,6 +126,17 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
     }
 
     Ok(result)
+}
+
+fn parse_non_empty_lit_str(
+    meta: &syn::meta::ParseNestedMeta<'_>,
+    message: &'static str,
+) -> syn::Result<String> {
+    let value = meta.value()?.parse::<LitStr>()?.value();
+    if value.trim().is_empty() {
+        return Err(meta.error(message));
+    }
+    Ok(value)
 }
 
 fn set_mode(field: &syn::Field, slot: &mut Option<FieldMode>, mode: FieldMode) -> syn::Result<()> {
@@ -451,5 +468,26 @@ mod tests {
 
         let err = derive_impl(input).expect_err("duplicate label should fail");
         assert!(err.to_string().contains("duplicate shape label"));
+    }
+
+    #[test]
+    fn empty_kind_and_label_are_rejected() {
+        let input = parse_quote! {
+            #[shape(kind = "")]
+            struct EmptyKind;
+        };
+
+        let err = derive_impl(input).expect_err("empty kind should fail");
+        assert!(err.to_string().contains("shape kind must not be empty"));
+
+        let input = parse_quote! {
+            struct EmptyLabel {
+                #[shape(field = Names, label = "")]
+                value: String,
+            }
+        };
+
+        let err = derive_impl(input).expect_err("empty label should fail");
+        assert!(err.to_string().contains("shape label must not be empty"));
     }
 }

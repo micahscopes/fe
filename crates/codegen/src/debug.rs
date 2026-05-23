@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 use common::{
     InputDb,
@@ -10,8 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use crate::origin::{
     BytecodeObjectKey, BytecodeOriginCoverage, BytecodePcOrigin, BytecodePcRange,
     BytecodeSectionKey, BytecodeSourceResolution, BytecodeSourceResolutionResult,
-    BytecodeUnmappedReason, SonatinaSyntheticOrigin, SonatinaUnmappedReason,
-    bytecode_pc_export_key,
+    BytecodeUnmappedReason, SonatinaPostOptOriginCoverage, SonatinaSyntheticOrigin,
+    SonatinaUnmappedReason, bytecode_pc_export_key,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +71,7 @@ impl<'a> BytecodeSourceMapExportMetadata<'a> {
 pub struct BytecodeSourceMapExportOptions<'a> {
     metadata: Option<BytecodeSourceMapExportMetadata<'a>>,
     bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+    post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverage>,
 }
 
 impl<'a> BytecodeSourceMapExportOptions<'a> {
@@ -78,6 +79,7 @@ impl<'a> BytecodeSourceMapExportOptions<'a> {
         Self {
             metadata: None,
             bytecode_origin_coverage: None,
+            post_opt_origin_coverage: None,
         }
     }
 
@@ -111,6 +113,14 @@ impl<'a> BytecodeSourceMapExportOptions<'a> {
         bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
     ) -> Self {
         self.bytecode_origin_coverage = bytecode_origin_coverage;
+        self
+    }
+
+    pub fn with_post_opt_origin_coverage(
+        mut self,
+        post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverage>,
+    ) -> Self {
+        self.post_opt_origin_coverage = post_opt_origin_coverage;
         self
     }
 }
@@ -672,11 +682,13 @@ pub struct OwnedBytecodeSourceMapExport {
     section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bytecode_origin_coverage: Option<BytecodeOriginCoverageExport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverageExport>,
     entries: Vec<BytecodeSourceMapEntry>,
 }
 
 impl OwnedBytecodeSourceMapExport {
-    pub const SCHEMA_VERSION: u32 = 2;
+    pub const SCHEMA_VERSION: u32 = 3;
 
     pub fn try_new(
         metadata: Option<BytecodeSourceMapExportMetadata<'_>>,
@@ -686,6 +698,7 @@ impl OwnedBytecodeSourceMapExport {
             metadata.map(|metadata| metadata.object_name().to_owned()),
             metadata.and_then(|metadata| metadata.section_name().map(str::to_owned)),
             None,
+            None,
             entries,
         )
     }
@@ -694,6 +707,7 @@ impl OwnedBytecodeSourceMapExport {
         object: Option<String>,
         section: Option<String>,
         bytecode_origin_coverage: Option<BytecodeOriginCoverageExport>,
+        post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverageExport>,
         entries: Vec<BytecodeSourceMapEntry>,
     ) -> Result<Self, BytecodeSourceMapExportEntryError> {
         validate_source_map_export_entries(object.as_deref(), section.as_deref(), &entries)?;
@@ -712,6 +726,7 @@ impl OwnedBytecodeSourceMapExport {
             object,
             section,
             bytecode_origin_coverage,
+            post_opt_origin_coverage,
             entries,
         })
     }
@@ -723,6 +738,9 @@ impl OwnedBytecodeSourceMapExport {
         let bytecode_origin_coverage = options
             .bytecode_origin_coverage
             .map(BytecodeOriginCoverageExport::from);
+        let post_opt_origin_coverage = options
+            .post_opt_origin_coverage
+            .map(SonatinaPostOptOriginCoverageExport::from);
         Self::from_serialized_parts(
             options
                 .metadata
@@ -731,6 +749,7 @@ impl OwnedBytecodeSourceMapExport {
                 .metadata
                 .and_then(|metadata| metadata.section_name().map(str::to_owned)),
             bytecode_origin_coverage,
+            post_opt_origin_coverage,
             entries,
         )
     }
@@ -749,6 +768,10 @@ impl OwnedBytecodeSourceMapExport {
 
     pub const fn bytecode_origin_coverage(&self) -> Option<&BytecodeOriginCoverageExport> {
         self.bytecode_origin_coverage.as_ref()
+    }
+
+    pub const fn post_opt_origin_coverage(&self) -> Option<&SonatinaPostOptOriginCoverageExport> {
+        self.post_opt_origin_coverage.as_ref()
     }
 
     pub fn entries(&self) -> &[BytecodeSourceMapEntry] {
@@ -774,6 +797,42 @@ pub struct BytecodeDebugLocationEntry {
 }
 
 impl BytecodeDebugLocationEntry {
+    fn from_serialized_parts(
+        object: String,
+        section: String,
+        pc_start: u32,
+        pc_end: u32,
+        span_kind: SourceSpanKind,
+        file: String,
+        start_byte: usize,
+        end_byte: usize,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+        snippet: String,
+    ) -> Result<Self, BytecodeSourceMapExportEntryError> {
+        validate_debug_location_entry_parts(
+            &object, &section, pc_start, pc_end, &file, start_byte, end_byte, start_line,
+            start_col, end_line, end_col, &snippet,
+        )?;
+        Ok(Self {
+            object,
+            section,
+            pc_start,
+            pc_end,
+            span_kind,
+            file,
+            start_byte,
+            end_byte,
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+            snippet,
+        })
+    }
+
     fn from_source_map_entry(entry: &BytecodeSourceMapEntry) -> Option<Self> {
         let BytecodeSourceMapEntryKind::Source {
             span_kind,
@@ -860,6 +919,49 @@ impl BytecodeDebugLocationEntry {
     }
 }
 
+impl<'de> Deserialize<'de> for BytecodeDebugLocationEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawLocation {
+            object: String,
+            section: String,
+            pc_start: u32,
+            pc_end: u32,
+            span_kind: SourceSpanKind,
+            file: String,
+            start_byte: usize,
+            end_byte: usize,
+            start_line: usize,
+            start_col: usize,
+            end_line: usize,
+            end_col: usize,
+            snippet: String,
+        }
+
+        let raw = RawLocation::deserialize(deserializer)?;
+        Self::from_serialized_parts(
+            raw.object,
+            raw.section,
+            raw.pc_start,
+            raw.pc_end,
+            raw.span_kind,
+            raw.file,
+            raw.start_byte,
+            raw.end_byte,
+            raw.start_line,
+            raw.start_col,
+            raw.end_line,
+            raw.end_col,
+            raw.snippet,
+        )
+        .map_err(de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OwnedBytecodeDebugLocationExport {
     schema_version: u32,
@@ -872,6 +974,24 @@ pub struct OwnedBytecodeDebugLocationExport {
 
 impl OwnedBytecodeDebugLocationExport {
     pub const SCHEMA_VERSION: u32 = 1;
+
+    fn from_serialized_parts(
+        object: Option<String>,
+        section: Option<String>,
+        locations: Vec<BytecodeDebugLocationEntry>,
+    ) -> Result<Self, BytecodeSourceMapExportEntryError> {
+        if locations.is_empty() {
+            return Err(BytecodeSourceMapExportEntryError::EmptyDebugLocations);
+        }
+        validate_debug_location_export_entries(object.as_deref(), section.as_deref(), &locations)?;
+
+        Ok(Self {
+            schema_version: Self::SCHEMA_VERSION,
+            object,
+            section,
+            locations,
+        })
+    }
 
     fn from_options(
         options: BytecodeSourceMapExportOptions<'_>,
@@ -897,12 +1017,7 @@ impl OwnedBytecodeDebugLocationExport {
             return Ok(None);
         }
 
-        Ok(Some(Self {
-            schema_version: Self::SCHEMA_VERSION,
-            object,
-            section,
-            locations,
-        }))
+        Self::from_serialized_parts(object, section, locations).map(Some)
     }
 
     pub const fn schema_version(&self) -> u32 {
@@ -919,6 +1034,446 @@ impl OwnedBytecodeDebugLocationExport {
 
     pub fn locations(&self) -> &[BytecodeDebugLocationEntry] {
         &self.locations
+    }
+}
+
+impl<'de> Deserialize<'de> for OwnedBytecodeDebugLocationExport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawExport {
+            schema_version: u32,
+            object: Option<String>,
+            section: Option<String>,
+            locations: Vec<BytecodeDebugLocationEntry>,
+        }
+
+        let raw = RawExport::deserialize(deserializer)?;
+        if raw.schema_version != Self::SCHEMA_VERSION {
+            return Err(de::Error::custom(format!(
+                "unsupported bytecode debug-location schema_version {}; expected {}",
+                raw.schema_version,
+                Self::SCHEMA_VERSION
+            )));
+        }
+        Self::from_serialized_parts(raw.object, raw.section, raw.locations)
+            .map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BytecodeDebugSourceFile {
+    path: String,
+}
+
+impl BytecodeDebugSourceFile {
+    fn from_serialized_path(path: String) -> Result<Self, BytecodeSourceMapExportEntryError> {
+        if path.is_empty() {
+            return Err(BytecodeSourceMapExportEntryError::EmptySourceFile);
+        }
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BytecodeDebugLineRow {
+    object: String,
+    section: String,
+    pc_start: u32,
+    pc_end: u32,
+    file_index: usize,
+    span_kind: SourceSpanKind,
+    start_byte: usize,
+    end_byte: usize,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    snippet: String,
+}
+
+impl BytecodeDebugLineRow {
+    #[allow(clippy::too_many_arguments)]
+    fn from_serialized_parts(
+        object: String,
+        section: String,
+        pc_start: u32,
+        pc_end: u32,
+        file_index: usize,
+        span_kind: SourceSpanKind,
+        start_byte: usize,
+        end_byte: usize,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+        snippet: String,
+    ) -> Self {
+        Self {
+            object,
+            section,
+            pc_start,
+            pc_end,
+            file_index,
+            span_kind,
+            start_byte,
+            end_byte,
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+            snippet,
+        }
+    }
+
+    pub fn object(&self) -> &str {
+        &self.object
+    }
+
+    pub fn section(&self) -> &str {
+        &self.section
+    }
+
+    pub const fn pc_start(&self) -> u32 {
+        self.pc_start
+    }
+
+    pub const fn pc_end(&self) -> u32 {
+        self.pc_end
+    }
+
+    pub const fn file_index(&self) -> usize {
+        self.file_index
+    }
+
+    pub const fn span_kind(&self) -> SourceSpanKind {
+        self.span_kind
+    }
+
+    pub const fn start_byte(&self) -> usize {
+        self.start_byte
+    }
+
+    pub const fn end_byte(&self) -> usize {
+        self.end_byte
+    }
+
+    pub const fn start_line(&self) -> usize {
+        self.start_line
+    }
+
+    pub const fn start_col(&self) -> usize {
+        self.start_col
+    }
+
+    pub const fn end_line(&self) -> usize {
+        self.end_line
+    }
+
+    pub const fn end_col(&self) -> usize {
+        self.end_col
+    }
+
+    pub fn snippet(&self) -> &str {
+        &self.snippet
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BytecodeDebugLineRecord<'a> {
+    file: &'a BytecodeDebugSourceFile,
+    row: &'a BytecodeDebugLineRow,
+}
+
+impl<'a> BytecodeDebugLineRecord<'a> {
+    pub const fn source_file(&self) -> &'a BytecodeDebugSourceFile {
+        self.file
+    }
+
+    pub const fn row(&self) -> &'a BytecodeDebugLineRow {
+        self.row
+    }
+
+    pub fn object(&self) -> &str {
+        self.row.object()
+    }
+
+    pub fn section(&self) -> &str {
+        self.row.section()
+    }
+
+    pub const fn pc_start(&self) -> u32 {
+        self.row.pc_start()
+    }
+
+    pub const fn pc_end(&self) -> u32 {
+        self.row.pc_end()
+    }
+
+    pub fn file(&self) -> &str {
+        self.file.path()
+    }
+
+    pub const fn span_kind(&self) -> SourceSpanKind {
+        self.row.span_kind()
+    }
+
+    pub const fn start_byte(&self) -> usize {
+        self.row.start_byte()
+    }
+
+    pub const fn end_byte(&self) -> usize {
+        self.row.end_byte()
+    }
+
+    pub const fn start_line(&self) -> usize {
+        self.row.start_line()
+    }
+
+    pub const fn start_col(&self) -> usize {
+        self.row.start_col()
+    }
+
+    pub const fn end_line(&self) -> usize {
+        self.row.end_line()
+    }
+
+    pub const fn end_col(&self) -> usize {
+        self.row.end_col()
+    }
+
+    pub fn snippet(&self) -> &str {
+        self.row.snippet()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BytecodeDebugLineTable {
+    object: Option<String>,
+    section: Option<String>,
+    files: Vec<BytecodeDebugSourceFile>,
+    rows: Vec<BytecodeDebugLineRow>,
+}
+
+impl BytecodeDebugLineTable {
+    pub fn from_debug_locations(export: &OwnedBytecodeDebugLocationExport) -> Self {
+        let mut files = Vec::<BytecodeDebugSourceFile>::new();
+        let mut rows = Vec::with_capacity(export.locations().len());
+
+        for location in export.locations() {
+            let file_index = match files.iter().position(|file| file.path() == location.file()) {
+                Some(index) => index,
+                None => {
+                    let index = files.len();
+                    files.push(BytecodeDebugSourceFile {
+                        path: location.file().to_string(),
+                    });
+                    index
+                }
+            };
+            rows.push(BytecodeDebugLineRow {
+                object: location.object().to_string(),
+                section: location.section().to_string(),
+                pc_start: location.pc_start(),
+                pc_end: location.pc_end(),
+                file_index,
+                span_kind: location.span_kind(),
+                start_byte: location.start_byte(),
+                end_byte: location.end_byte(),
+                start_line: location.start_line(),
+                start_col: location.start_col(),
+                end_line: location.end_line(),
+                end_col: location.end_col(),
+                snippet: location.snippet().to_string(),
+            });
+        }
+
+        Self {
+            object: export.object().map(str::to_owned),
+            section: export.section().map(str::to_owned),
+            files,
+            rows,
+        }
+    }
+
+    pub fn object(&self) -> Option<&str> {
+        self.object.as_deref()
+    }
+
+    pub fn section(&self) -> Option<&str> {
+        self.section.as_deref()
+    }
+
+    pub fn files(&self) -> &[BytecodeDebugSourceFile] {
+        &self.files
+    }
+
+    pub fn rows(&self) -> &[BytecodeDebugLineRow] {
+        &self.rows
+    }
+
+    pub fn line_records(&self) -> impl Iterator<Item = BytecodeDebugLineRecord<'_>> {
+        debug_line_records(&self.files, &self.rows)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OwnedBytecodeDebugLineTableExport {
+    schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    section: Option<String>,
+    files: Vec<BytecodeDebugSourceFile>,
+    rows: Vec<BytecodeDebugLineRow>,
+}
+
+impl OwnedBytecodeDebugLineTableExport {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    fn from_serialized_parts(
+        object: Option<String>,
+        section: Option<String>,
+        files: Vec<BytecodeDebugSourceFile>,
+        rows: Vec<BytecodeDebugLineRow>,
+    ) -> Result<Self, BytecodeSourceMapExportEntryError> {
+        validate_debug_line_table_entries(object.as_deref(), section.as_deref(), &files, &rows)?;
+
+        Ok(Self {
+            schema_version: Self::SCHEMA_VERSION,
+            object,
+            section,
+            files,
+            rows,
+        })
+    }
+
+    pub fn from_debug_locations(
+        export: &OwnedBytecodeDebugLocationExport,
+    ) -> Result<Self, BytecodeSourceMapExportEntryError> {
+        let table = BytecodeDebugLineTable::from_debug_locations(export);
+        Self::from_serialized_parts(table.object, table.section, table.files, table.rows)
+    }
+
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub fn object(&self) -> Option<&str> {
+        self.object.as_deref()
+    }
+
+    pub fn section(&self) -> Option<&str> {
+        self.section.as_deref()
+    }
+
+    pub fn files(&self) -> &[BytecodeDebugSourceFile] {
+        &self.files
+    }
+
+    pub fn rows(&self) -> &[BytecodeDebugLineRow] {
+        &self.rows
+    }
+
+    pub fn line_records(&self) -> impl Iterator<Item = BytecodeDebugLineRecord<'_>> {
+        debug_line_records(&self.files, &self.rows)
+    }
+}
+
+fn debug_line_records<'a>(
+    files: &'a [BytecodeDebugSourceFile],
+    rows: &'a [BytecodeDebugLineRow],
+) -> impl Iterator<Item = BytecodeDebugLineRecord<'a>> {
+    rows.iter().map(move |row| {
+        let file = files
+            .get(row.file_index())
+            .expect("validated bytecode debug line tables contain valid file indices");
+        BytecodeDebugLineRecord { file, row }
+    })
+}
+
+impl<'de> Deserialize<'de> for OwnedBytecodeDebugLineTableExport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawFile {
+            path: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRow {
+            object: String,
+            section: String,
+            pc_start: u32,
+            pc_end: u32,
+            file_index: usize,
+            span_kind: SourceSpanKind,
+            start_byte: usize,
+            end_byte: usize,
+            start_line: usize,
+            start_col: usize,
+            end_line: usize,
+            end_col: usize,
+            snippet: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawExport {
+            schema_version: u32,
+            object: Option<String>,
+            section: Option<String>,
+            files: Vec<RawFile>,
+            rows: Vec<RawRow>,
+        }
+
+        let raw = RawExport::deserialize(deserializer)?;
+        if raw.schema_version != Self::SCHEMA_VERSION {
+            return Err(de::Error::custom(format!(
+                "unsupported bytecode debug-line-table schema_version {}; expected {}",
+                raw.schema_version,
+                Self::SCHEMA_VERSION
+            )));
+        }
+        let files = raw
+            .files
+            .into_iter()
+            .map(|file| BytecodeDebugSourceFile::from_serialized_path(file.path))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(de::Error::custom)?;
+        let rows = raw
+            .rows
+            .into_iter()
+            .map(|row| {
+                BytecodeDebugLineRow::from_serialized_parts(
+                    row.object,
+                    row.section,
+                    row.pc_start,
+                    row.pc_end,
+                    row.file_index,
+                    row.span_kind,
+                    row.start_byte,
+                    row.end_byte,
+                    row.start_line,
+                    row.start_col,
+                    row.end_line,
+                    row.end_col,
+                    row.snippet,
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::from_serialized_parts(raw.object, raw.section, files, rows).map_err(de::Error::custom)
     }
 }
 
@@ -1001,6 +1556,110 @@ impl<'de> Deserialize<'de> for BytecodeOriginCoverageExport {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SonatinaPostOptOriginCoverageExport {
+    total: usize,
+    same_inst_id: usize,
+    created_or_unmatched_after_preopt_snapshot: usize,
+    pre_opt_snapshot_losses: usize,
+    observed_pre_opt_total: usize,
+}
+
+impl From<SonatinaPostOptOriginCoverage> for SonatinaPostOptOriginCoverageExport {
+    fn from(coverage: SonatinaPostOptOriginCoverage) -> Self {
+        Self {
+            total: coverage.total(),
+            same_inst_id: coverage.same_inst_id(),
+            created_or_unmatched_after_preopt_snapshot: coverage
+                .created_or_unmatched_after_preopt_snapshot(),
+            pre_opt_snapshot_losses: coverage.pre_opt_snapshot_losses(),
+            observed_pre_opt_total: coverage.observed_pre_opt_total(),
+        }
+    }
+}
+
+impl SonatinaPostOptOriginCoverageExport {
+    pub const fn total(&self) -> usize {
+        self.total
+    }
+
+    pub const fn same_inst_id(&self) -> usize {
+        self.same_inst_id
+    }
+
+    pub const fn created_or_unmatched_after_preopt_snapshot(&self) -> usize {
+        self.created_or_unmatched_after_preopt_snapshot
+    }
+
+    pub const fn pre_opt_snapshot_losses(&self) -> usize {
+        self.pre_opt_snapshot_losses
+    }
+
+    pub const fn observed_pre_opt_total(&self) -> usize {
+        self.observed_pre_opt_total
+    }
+
+    pub const fn post_opt_classified_total(&self) -> usize {
+        self.same_inst_id + self.created_or_unmatched_after_preopt_snapshot
+    }
+
+    pub const fn computed_observed_pre_opt_total(&self) -> usize {
+        self.same_inst_id + self.pre_opt_snapshot_losses
+    }
+}
+
+impl<'de> Deserialize<'de> for SonatinaPostOptOriginCoverageExport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCoverage {
+            total: usize,
+            same_inst_id: usize,
+            created_or_unmatched_after_preopt_snapshot: usize,
+            pre_opt_snapshot_losses: usize,
+            observed_pre_opt_total: usize,
+        }
+
+        let raw = RawCoverage::deserialize(deserializer)?;
+        let classified_total = raw
+            .same_inst_id
+            .checked_add(raw.created_or_unmatched_after_preopt_snapshot)
+            .ok_or_else(|| {
+                de::Error::custom("post_opt_origin_coverage classified total overflows usize")
+            })?;
+        if raw.total != classified_total {
+            return Err(de::Error::custom(format!(
+                "post_opt_origin_coverage total {} does not match classified total {}",
+                raw.total, classified_total
+            )));
+        }
+        let observed_pre_opt_total = raw
+            .same_inst_id
+            .checked_add(raw.pre_opt_snapshot_losses)
+            .ok_or_else(|| {
+                de::Error::custom("post_opt_origin_coverage observed pre-opt total overflows usize")
+            })?;
+        if raw.observed_pre_opt_total != observed_pre_opt_total {
+            return Err(de::Error::custom(format!(
+                "post_opt_origin_coverage observed_pre_opt_total {} does not match same_inst_id plus pre_opt_snapshot_losses {}",
+                raw.observed_pre_opt_total, observed_pre_opt_total
+            )));
+        }
+
+        Ok(Self {
+            total: raw.total,
+            same_inst_id: raw.same_inst_id,
+            created_or_unmatched_after_preopt_snapshot: raw
+                .created_or_unmatched_after_preopt_snapshot,
+            pre_opt_snapshot_losses: raw.pre_opt_snapshot_losses,
+            observed_pre_opt_total: raw.observed_pre_opt_total,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for OwnedBytecodeSourceMapExport {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1013,6 +1672,7 @@ impl<'de> Deserialize<'de> for OwnedBytecodeSourceMapExport {
             object: Option<String>,
             section: Option<String>,
             bytecode_origin_coverage: Option<BytecodeOriginCoverageExport>,
+            post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverageExport>,
             entries: Vec<BytecodeSourceMapEntry>,
         }
 
@@ -1029,6 +1689,7 @@ impl<'de> Deserialize<'de> for OwnedBytecodeSourceMapExport {
             raw.object,
             raw.section,
             raw.bytecode_origin_coverage,
+            raw.post_opt_origin_coverage,
             raw.entries,
         )
         .map_err(de::Error::custom)
@@ -1039,6 +1700,10 @@ impl<'de> Deserialize<'de> for OwnedBytecodeSourceMapExport {
 pub enum BytecodeSourceMapExportEntryError {
     EmptyObject,
     EmptySection,
+    InvalidPcRange {
+        pc_start: u32,
+        pc_end: u32,
+    },
     EmptySourceFile,
     EmptySourceSnippet,
     InvalidSourceByteRange {
@@ -1071,6 +1736,13 @@ pub enum BytecodeSourceMapExportEntryError {
         coverage_total: usize,
         entry_count: usize,
     },
+    EmptyDebugLocations,
+    EmptyDebugLineTableFiles,
+    EmptyDebugLineTableRows,
+    InvalidDebugLineTableFileIndex {
+        file_index: usize,
+        file_count: usize,
+    },
 }
 
 impl fmt::Display for BytecodeSourceMapExportEntryError {
@@ -1079,6 +1751,12 @@ impl fmt::Display for BytecodeSourceMapExportEntryError {
             Self::EmptyObject => write!(f, "bytecode source-map export object must not be empty"),
             Self::EmptySection => {
                 write!(f, "bytecode source-map export section must not be empty")
+            }
+            Self::InvalidPcRange { pc_start, pc_end } => {
+                write!(
+                    f,
+                    "invalid bytecode source-map export PC range {pc_start}..{pc_end}"
+                )
             }
             Self::EmptySourceFile => write!(f, "bytecode source-map source file must not be empty"),
             Self::EmptySourceSnippet => {
@@ -1125,6 +1803,31 @@ impl fmt::Display for BytecodeSourceMapExportEntryError {
             } => write!(
                 f,
                 "bytecode_origin_coverage total {coverage_total} does not match {entry_count} source-map entries"
+            ),
+            Self::EmptyDebugLocations => {
+                write!(
+                    f,
+                    "bytecode debug-location export must contain at least one location"
+                )
+            }
+            Self::EmptyDebugLineTableFiles => {
+                write!(
+                    f,
+                    "bytecode debug-line-table export must contain at least one source file"
+                )
+            }
+            Self::EmptyDebugLineTableRows => {
+                write!(
+                    f,
+                    "bytecode debug-line-table export must contain at least one row"
+                )
+            }
+            Self::InvalidDebugLineTableFileIndex {
+                file_index,
+                file_count,
+            } => write!(
+                f,
+                "bytecode debug-line-table row references file_index {file_index}, but only {file_count} source files exist"
             ),
         }
     }
@@ -1201,10 +1904,331 @@ impl From<serde_json::Error> for BytecodeSourceMapExportError {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BytecodeDebugArtifactMetadataMismatch {
+    source_map_object: Option<String>,
+    source_map_section: Option<String>,
+    debug_locations_object: Option<String>,
+    debug_locations_section: Option<String>,
+}
+
+impl BytecodeDebugArtifactMetadataMismatch {
+    fn new(
+        source_map_object: Option<String>,
+        source_map_section: Option<String>,
+        debug_locations_object: Option<String>,
+        debug_locations_section: Option<String>,
+    ) -> Self {
+        Self {
+            source_map_object,
+            source_map_section,
+            debug_locations_object,
+            debug_locations_section,
+        }
+    }
+
+    pub fn source_map_object(&self) -> Option<&str> {
+        self.source_map_object.as_deref()
+    }
+
+    pub fn source_map_section(&self) -> Option<&str> {
+        self.source_map_section.as_deref()
+    }
+
+    pub fn debug_locations_object(&self) -> Option<&str> {
+        self.debug_locations_object.as_deref()
+    }
+
+    pub fn debug_locations_section(&self) -> Option<&str> {
+        self.debug_locations_section.as_deref()
+    }
+}
+
+impl fmt::Display for BytecodeDebugArtifactMetadataMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "debug artifact metadata mismatch: source-map object={:?} section={:?}; debug-location object={:?} section={:?}",
+            self.source_map_object(),
+            self.source_map_section(),
+            self.debug_locations_object(),
+            self.debug_locations_section()
+        )
+    }
+}
+
+#[derive(Debug)]
+pub enum BytecodeDebugArtifactsExportError {
+    MetadataMismatch(BytecodeDebugArtifactMetadataMismatch),
+    SourceMap(BytecodeSourceMapExportEntryError),
+    DebugLocations(BytecodeSourceMapExportEntryError),
+    DebugLineTable(BytecodeSourceMapExportEntryError),
+}
+
+impl fmt::Display for BytecodeDebugArtifactsExportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MetadataMismatch(err) => err.fmt(f),
+            Self::SourceMap(err) => write!(f, "source-map artifact: {err}"),
+            Self::DebugLocations(err) => write!(f, "debug-location artifact: {err}"),
+            Self::DebugLineTable(err) => write!(f, "debug-line-table artifact: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for BytecodeDebugArtifactsExportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MetadataMismatch { .. } => None,
+            Self::SourceMap(err) | Self::DebugLocations(err) | Self::DebugLineTable(err) => {
+                Some(err)
+            }
+        }
+    }
+}
+
+impl From<BytecodeDebugArtifactsExportError> for BytecodeDebugArtifactsJsonError {
+    fn from(err: BytecodeDebugArtifactsExportError) -> Self {
+        match err {
+            BytecodeDebugArtifactsExportError::MetadataMismatch(err) => Self::MetadataMismatch(err),
+            BytecodeDebugArtifactsExportError::SourceMap(err) => Self::SourceMap(err.into()),
+            BytecodeDebugArtifactsExportError::DebugLocations(err) => {
+                Self::DebugLocations(err.into())
+            }
+            BytecodeDebugArtifactsExportError::DebugLineTable(err) => {
+                Self::DebugLineTable(err.into())
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum BytecodeDebugArtifactsJsonError {
+    MetadataMismatch(BytecodeDebugArtifactMetadataMismatch),
+    SourceMap(BytecodeSourceMapExportError),
+    DebugLocations(BytecodeSourceMapExportError),
+    DebugLineTable(BytecodeSourceMapExportError),
+}
+
+impl fmt::Display for BytecodeDebugArtifactsJsonError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MetadataMismatch(err) => err.fmt(f),
+            Self::SourceMap(err) => write!(f, "source-map artifact: {err}"),
+            Self::DebugLocations(err) => write!(f, "debug-location artifact: {err}"),
+            Self::DebugLineTable(err) => write!(f, "debug-line-table artifact: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for BytecodeDebugArtifactsJsonError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MetadataMismatch { .. } => None,
+            Self::SourceMap(err) | Self::DebugLocations(err) | Self::DebugLineTable(err) => {
+                Some(err)
+            }
+        }
+    }
+}
+
 fn validate_source_map_export_entries(
     object: Option<&str>,
     section: Option<&str>,
     entries: &[BytecodeSourceMapEntry],
+) -> Result<(), BytecodeSourceMapExportEntryError> {
+    for entry in entries {
+        validate_source_map_entry_kind(entry.kind())
+            .map_err(BytecodeSourceMapExportEntryError::from)?;
+    }
+
+    validate_export_metadata_and_pc_ranges(object, section, entries)
+}
+
+fn validate_debug_location_entry_parts(
+    object: &str,
+    section: &str,
+    pc_start: u32,
+    pc_end: u32,
+    file: &str,
+    start_byte: usize,
+    end_byte: usize,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+    snippet: &str,
+) -> Result<(), BytecodeSourceMapExportEntryError> {
+    if object.is_empty() {
+        return Err(BytecodeSourceMapExportEntryError::EmptyObject);
+    }
+    if section.is_empty() {
+        return Err(BytecodeSourceMapExportEntryError::EmptySection);
+    }
+    if BytecodePcRange::new(pc_start, pc_end).is_none() {
+        return Err(BytecodeSourceMapExportEntryError::InvalidPcRange { pc_start, pc_end });
+    }
+    if file.is_empty() {
+        return Err(BytecodeSourceMapExportEntryError::EmptySourceFile);
+    }
+    if snippet.is_empty() {
+        return Err(BytecodeSourceMapExportEntryError::EmptySourceSnippet);
+    }
+    if start_byte > end_byte {
+        return Err(BytecodeSourceMapExportEntryError::InvalidSourceByteRange {
+            start_byte,
+            end_byte,
+        });
+    }
+    if start_line > end_line || (start_line == end_line && start_col > end_col) {
+        return Err(
+            BytecodeSourceMapExportEntryError::InvalidSourcePositionRange {
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_debug_location_export_entries(
+    object: Option<&str>,
+    section: Option<&str>,
+    locations: &[BytecodeDebugLocationEntry],
+) -> Result<(), BytecodeSourceMapExportEntryError> {
+    for location in locations {
+        validate_debug_location_entry_parts(
+            location.object(),
+            location.section(),
+            location.pc_start(),
+            location.pc_end(),
+            location.file(),
+            location.start_byte(),
+            location.end_byte(),
+            location.start_line(),
+            location.start_col(),
+            location.end_line(),
+            location.end_col(),
+            location.snippet(),
+        )?;
+    }
+
+    validate_export_metadata_and_pc_ranges(object, section, locations)
+}
+
+fn validate_debug_line_table_entries(
+    object: Option<&str>,
+    section: Option<&str>,
+    files: &[BytecodeDebugSourceFile],
+    rows: &[BytecodeDebugLineRow],
+) -> Result<(), BytecodeSourceMapExportEntryError> {
+    if files.is_empty() {
+        return Err(BytecodeSourceMapExportEntryError::EmptyDebugLineTableFiles);
+    }
+    if rows.is_empty() {
+        return Err(BytecodeSourceMapExportEntryError::EmptyDebugLineTableRows);
+    }
+    for file in files {
+        if file.path().is_empty() {
+            return Err(BytecodeSourceMapExportEntryError::EmptySourceFile);
+        }
+    }
+    for row in rows {
+        let Some(file) = files.get(row.file_index()) else {
+            return Err(
+                BytecodeSourceMapExportEntryError::InvalidDebugLineTableFileIndex {
+                    file_index: row.file_index(),
+                    file_count: files.len(),
+                },
+            );
+        };
+        validate_debug_location_entry_parts(
+            row.object(),
+            row.section(),
+            row.pc_start(),
+            row.pc_end(),
+            file.path(),
+            row.start_byte(),
+            row.end_byte(),
+            row.start_line(),
+            row.start_col(),
+            row.end_line(),
+            row.end_col(),
+            row.snippet(),
+        )?;
+    }
+
+    validate_export_metadata_and_pc_ranges(object, section, rows)
+}
+
+trait BytecodePcExportEntry {
+    fn object(&self) -> &str;
+    fn section(&self) -> &str;
+    fn pc_start(&self) -> u32;
+    fn pc_end(&self) -> u32;
+}
+
+impl BytecodePcExportEntry for BytecodeSourceMapEntry {
+    fn object(&self) -> &str {
+        BytecodeSourceMapEntry::object(self)
+    }
+
+    fn section(&self) -> &str {
+        BytecodeSourceMapEntry::section(self)
+    }
+
+    fn pc_start(&self) -> u32 {
+        BytecodeSourceMapEntry::pc_start(self)
+    }
+
+    fn pc_end(&self) -> u32 {
+        BytecodeSourceMapEntry::pc_end(self)
+    }
+}
+
+impl BytecodePcExportEntry for BytecodeDebugLocationEntry {
+    fn object(&self) -> &str {
+        BytecodeDebugLocationEntry::object(self)
+    }
+
+    fn section(&self) -> &str {
+        BytecodeDebugLocationEntry::section(self)
+    }
+
+    fn pc_start(&self) -> u32 {
+        BytecodeDebugLocationEntry::pc_start(self)
+    }
+
+    fn pc_end(&self) -> u32 {
+        BytecodeDebugLocationEntry::pc_end(self)
+    }
+}
+
+impl BytecodePcExportEntry for BytecodeDebugLineRow {
+    fn object(&self) -> &str {
+        BytecodeDebugLineRow::object(self)
+    }
+
+    fn section(&self) -> &str {
+        BytecodeDebugLineRow::section(self)
+    }
+
+    fn pc_start(&self) -> u32 {
+        BytecodeDebugLineRow::pc_start(self)
+    }
+
+    fn pc_end(&self) -> u32 {
+        BytecodeDebugLineRow::pc_end(self)
+    }
+}
+
+fn validate_export_metadata_and_pc_ranges<T: BytecodePcExportEntry>(
+    object: Option<&str>,
+    section: Option<&str>,
+    entries: &[T],
 ) -> Result<(), BytecodeSourceMapExportEntryError> {
     if object.is_some_and(str::is_empty) {
         return Err(BytecodeSourceMapExportEntryError::EmptyObject);
@@ -1214,8 +2238,12 @@ fn validate_source_map_export_entries(
     }
 
     for entry in entries {
-        validate_source_map_entry_kind(entry.kind())
-            .map_err(BytecodeSourceMapExportEntryError::from)?;
+        if BytecodePcRange::new(entry.pc_start(), entry.pc_end()).is_none() {
+            return Err(BytecodeSourceMapExportEntryError::InvalidPcRange {
+                pc_start: entry.pc_start(),
+                pc_end: entry.pc_end(),
+            });
+        }
         if let Some(object) = object
             && entry.object() != object
         {
@@ -1296,6 +2324,7 @@ pub struct BytecodeSourceMapSummary {
     section: Option<String>,
     total: usize,
     source: usize,
+    debug_line_table_files: usize,
     source_span_invalid: usize,
     semantic_span_missing: usize,
     runtime_stmt_missing: usize,
@@ -1321,6 +2350,18 @@ impl BytecodeSourceMapSummary {
     }
 
     pub const fn source(&self) -> usize {
+        self.source
+    }
+
+    pub const fn debug_locations(&self) -> usize {
+        self.source
+    }
+
+    pub const fn debug_line_table_files(&self) -> usize {
+        self.debug_line_table_files
+    }
+
+    pub const fn debug_line_table_rows(&self) -> usize {
         self.source
     }
 
@@ -1367,14 +2408,15 @@ impl BytecodeSourceMapSummary {
 
 pub fn bytecode_source_map_entries_summary(
     entries: &[BytecodeSourceMapEntry],
-    object: Option<&str>,
-    section: Option<&str>,
+    metadata: Option<BytecodeSourceMapExportMetadata<'_>>,
 ) -> Option<BytecodeSourceMapSummary> {
+    let (object, section) = export_metadata_parts(metadata);
     let mut summary = BytecodeSourceMapSummary {
         object: object.map(str::to_owned),
         section: section.map(str::to_owned),
         ..BytecodeSourceMapSummary::default()
     };
+    let mut debug_line_table_files = BTreeSet::new();
 
     for entry in entries.iter().filter(|entry| {
         object.is_none_or(|object| entry.object() == object)
@@ -1382,7 +2424,10 @@ pub fn bytecode_source_map_entries_summary(
     }) {
         summary.total += 1;
         match entry.kind() {
-            BytecodeSourceMapEntryKind::Source { .. } => summary.source += 1,
+            BytecodeSourceMapEntryKind::Source { file, .. } => {
+                summary.source += 1;
+                debug_line_table_files.insert(file);
+            }
             BytecodeSourceMapEntryKind::SourceSpanInvalid { .. } => {
                 summary.source_span_invalid += 1;
             }
@@ -1410,6 +2455,7 @@ pub fn bytecode_source_map_entries_summary(
             }
         }
     }
+    summary.debug_line_table_files = debug_line_table_files.len();
 
     (summary.total > 0).then_some(summary)
 }
@@ -1510,6 +2556,199 @@ pub fn bytecode_debug_location_entries_export(
     options: BytecodeSourceMapExportOptions<'_>,
 ) -> Result<Option<OwnedBytecodeDebugLocationExport>, BytecodeSourceMapExportEntryError> {
     OwnedBytecodeDebugLocationExport::from_options(options, source_map_entries)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BytecodeDebugArtifactsExport {
+    source_map: Option<OwnedBytecodeSourceMapExport>,
+    debug_locations: Option<OwnedBytecodeDebugLocationExport>,
+    debug_line_table: Option<OwnedBytecodeDebugLineTableExport>,
+}
+
+impl BytecodeDebugArtifactsExport {
+    pub fn source_map(&self) -> Option<&OwnedBytecodeSourceMapExport> {
+        self.source_map.as_ref()
+    }
+
+    pub fn debug_locations(&self) -> Option<&OwnedBytecodeDebugLocationExport> {
+        self.debug_locations.as_ref()
+    }
+
+    pub fn debug_line_table(&self) -> Option<&OwnedBytecodeDebugLineTableExport> {
+        self.debug_line_table.as_ref()
+    }
+}
+
+pub fn bytecode_debug_artifacts_export(
+    source_map_entries: &[BytecodeSourceMapEntry],
+    source_map_options: BytecodeSourceMapExportOptions<'_>,
+    debug_location_options: BytecodeSourceMapExportOptions<'_>,
+) -> Result<BytecodeDebugArtifactsExport, BytecodeDebugArtifactsExportError> {
+    validate_debug_artifact_metadata(source_map_options.metadata, debug_location_options.metadata)?;
+    let source_map = bytecode_source_map_entries_export(source_map_entries, source_map_options)
+        .map_err(BytecodeDebugArtifactsExportError::SourceMap)?;
+    let debug_locations =
+        bytecode_debug_location_entries_export(source_map_entries, debug_location_options)
+            .map_err(BytecodeDebugArtifactsExportError::DebugLocations)?;
+    let debug_line_table = debug_locations
+        .as_ref()
+        .map(OwnedBytecodeDebugLineTableExport::from_debug_locations)
+        .transpose()
+        .map_err(BytecodeDebugArtifactsExportError::DebugLineTable)?;
+
+    Ok(BytecodeDebugArtifactsExport {
+        source_map,
+        debug_locations,
+        debug_line_table,
+    })
+}
+
+fn export_metadata_parts(
+    metadata: Option<BytecodeSourceMapExportMetadata<'_>>,
+) -> (Option<&str>, Option<&str>) {
+    match metadata {
+        Some(metadata) => (Some(metadata.object_name()), metadata.section_name()),
+        None => (None, None),
+    }
+}
+
+fn validate_debug_artifact_metadata(
+    source_map_metadata: Option<BytecodeSourceMapExportMetadata<'_>>,
+    debug_location_metadata: Option<BytecodeSourceMapExportMetadata<'_>>,
+) -> Result<(), BytecodeDebugArtifactsExportError> {
+    let source_map_parts = export_metadata_parts(source_map_metadata);
+    let debug_location_parts = export_metadata_parts(debug_location_metadata);
+    if source_map_parts == debug_location_parts {
+        return Ok(());
+    }
+
+    Err(BytecodeDebugArtifactsExportError::MetadataMismatch(
+        BytecodeDebugArtifactMetadataMismatch::new(
+            source_map_parts.0.map(str::to_owned),
+            source_map_parts.1.map(str::to_owned),
+            debug_location_parts.0.map(str::to_owned),
+            debug_location_parts.1.map(str::to_owned),
+        ),
+    ))
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BytecodeDebugArtifactsJson {
+    source_map: Option<String>,
+    debug_locations: Option<String>,
+    debug_line_table: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BytecodeDebugArtifactKind {
+    SourceMap,
+    DebugLocations,
+    DebugLineTable,
+}
+
+impl BytecodeDebugArtifactKind {
+    pub const fn file_name(self) -> &'static str {
+        match self {
+            Self::SourceMap => "source_map.json",
+            Self::DebugLocations => "debug_locations.json",
+            Self::DebugLineTable => "debug_line_table.json",
+        }
+    }
+
+    pub fn file_name_with_base(self, base: &str) -> String {
+        format!("{base}.{}", self.file_name())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BytecodeDebugArtifactJson<'a> {
+    kind: BytecodeDebugArtifactKind,
+    json: &'a str,
+}
+
+impl<'a> BytecodeDebugArtifactJson<'a> {
+    pub const fn kind(self) -> BytecodeDebugArtifactKind {
+        self.kind
+    }
+
+    pub const fn json(self) -> &'a str {
+        self.json
+    }
+
+    pub const fn file_name(self) -> &'static str {
+        self.kind.file_name()
+    }
+
+    pub fn file_name_with_base(self, base: &str) -> String {
+        self.kind.file_name_with_base(base)
+    }
+}
+
+impl BytecodeDebugArtifactsJson {
+    pub fn source_map(&self) -> Option<&str> {
+        self.source_map.as_deref()
+    }
+
+    pub fn debug_locations(&self) -> Option<&str> {
+        self.debug_locations.as_deref()
+    }
+
+    pub fn debug_line_table(&self) -> Option<&str> {
+        self.debug_line_table.as_deref()
+    }
+
+    pub fn artifacts(&self) -> impl Iterator<Item = BytecodeDebugArtifactJson<'_>> {
+        [
+            (BytecodeDebugArtifactKind::SourceMap, self.source_map()),
+            (
+                BytecodeDebugArtifactKind::DebugLocations,
+                self.debug_locations(),
+            ),
+            (
+                BytecodeDebugArtifactKind::DebugLineTable,
+                self.debug_line_table(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(kind, json)| json.map(|json| BytecodeDebugArtifactJson { kind, json }))
+    }
+}
+
+pub fn bytecode_debug_artifacts_json(
+    source_map_entries: &[BytecodeSourceMapEntry],
+    source_map_options: BytecodeSourceMapExportOptions<'_>,
+    debug_location_options: BytecodeSourceMapExportOptions<'_>,
+) -> Result<BytecodeDebugArtifactsJson, BytecodeDebugArtifactsJsonError> {
+    let exports = bytecode_debug_artifacts_export(
+        source_map_entries,
+        source_map_options,
+        debug_location_options,
+    )
+    .map_err(BytecodeDebugArtifactsJsonError::from)?;
+    let source_map = exports
+        .source_map()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(BytecodeSourceMapExportError::from)
+        .map_err(BytecodeDebugArtifactsJsonError::SourceMap)?;
+    let debug_locations = exports
+        .debug_locations()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(BytecodeSourceMapExportError::from)
+        .map_err(BytecodeDebugArtifactsJsonError::DebugLocations)?;
+    let debug_line_table = exports
+        .debug_line_table()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(BytecodeSourceMapExportError::from)
+        .map_err(BytecodeDebugArtifactsJsonError::DebugLineTable)?;
+
+    Ok(BytecodeDebugArtifactsJson {
+        source_map,
+        debug_locations,
+        debug_line_table,
+    })
 }
 
 fn matches_filter(origin: &BytecodePcOrigin, filter: &BytecodeSourceMapFilter) -> bool {
@@ -1716,12 +2955,15 @@ mod tests {
     use crate::origin::{
         BytecodeObjectKey, BytecodeOriginCoverage, BytecodePcOrigin, BytecodePcRange,
         BytecodeSectionKey, BytecodeSectionNameKey, BytecodeUnmappedReason,
+        SonatinaPostOptOriginCoverage,
     };
 
     use super::{
-        BytecodeSourceMapEntry, BytecodeSourceMapEntryError, BytecodeSourceMapEntryKind,
-        BytecodeSourceMapExportMetadata, BytecodeSourceMapExportOptions,
-        OwnedBytecodeSourceMapExport, SourceSpanInvalidReason, SourceSpanKind,
+        BytecodeDebugArtifactKind, BytecodeDebugArtifactsExportError, BytecodeSourceMapEntry,
+        BytecodeSourceMapEntryError, BytecodeSourceMapEntryKind, BytecodeSourceMapExportMetadata,
+        BytecodeSourceMapExportOptions, OwnedBytecodeDebugLineTableExport,
+        OwnedBytecodeDebugLocationExport, OwnedBytecodeSourceMapExport, SourceSpanInvalidReason,
+        SourceSpanKind, bytecode_debug_artifacts_export, bytecode_debug_artifacts_json,
         bytecode_debug_location_entries_export, bytecode_debug_location_entries_json,
         bytecode_source_map_entries_export, bytecode_source_map_entries_json,
         bytecode_source_map_entries_summary, span_snippet,
@@ -1750,6 +2992,29 @@ mod tests {
     ) -> BytecodeSourceMapEntry {
         let origin = source_map_origin(object, section, pc_start, pc_end);
         BytecodeSourceMapEntry::from_origin(&origin, kind)
+    }
+
+    fn debug_location_value(
+        object: &str,
+        section: &str,
+        pc_start: u32,
+        pc_end: u32,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "object": object,
+            "section": section,
+            "pc_start": pc_start,
+            "pc_end": pc_end,
+            "span_kind": "original",
+            "file": "src/main.fe",
+            "start_byte": 10,
+            "end_byte": 14,
+            "start_line": 1,
+            "start_col": 2,
+            "end_line": 1,
+            "end_col": 6,
+            "snippet": "main"
+        })
     }
 
     #[test]
@@ -1800,9 +3065,12 @@ mod tests {
         assert_eq!(export.entries(), entries.as_slice());
 
         let bytecode_origin_coverage = BytecodeOriginCoverage::new(1, 1, 0);
+        let post_opt_origin_coverage = SonatinaPostOptOriginCoverage::new(1, 1, 1);
         let json = bytecode_source_map_entries_json(
             &entries,
-            options.with_bytecode_origin_coverage(Some(bytecode_origin_coverage)),
+            options
+                .with_bytecode_origin_coverage(Some(bytecode_origin_coverage))
+                .with_post_opt_origin_coverage(Some(post_opt_origin_coverage)),
         )
         .expect("source map should serialize")
         .expect("non-empty entries should render JSON");
@@ -1824,6 +3092,17 @@ mod tests {
         assert_eq!(decoded_coverage.sonatina_post_opt(), 1);
         assert_eq!(decoded_coverage.sonatina_backend_prepared(), 1);
         assert_eq!(decoded_coverage.unmapped(), 0);
+        let decoded_post_opt_coverage = decoded
+            .post_opt_origin_coverage()
+            .expect("post-opt coverage should roundtrip through source-map JSON");
+        assert_eq!(decoded_post_opt_coverage.total(), 2);
+        assert_eq!(decoded_post_opt_coverage.same_inst_id(), 1);
+        assert_eq!(
+            decoded_post_opt_coverage.created_or_unmatched_after_preopt_snapshot(),
+            1
+        );
+        assert_eq!(decoded_post_opt_coverage.pre_opt_snapshot_losses(), 1);
+        assert_eq!(decoded_post_opt_coverage.observed_pre_opt_total(), 2);
     }
 
     #[test]
@@ -1841,7 +3120,7 @@ mod tests {
 
     #[test]
     fn bytecode_source_map_json_rejects_unknown_export_fields() {
-        let json = r#"{"schema_version":2,"entries":[],"extra":true}"#;
+        let json = r#"{"schema_version":3,"entries":[],"extra":true}"#;
         let err = serde_json::from_str::<OwnedBytecodeSourceMapExport>(json)
             .expect_err("unknown source-map export fields must fail closed");
 
@@ -1850,7 +3129,7 @@ mod tests {
 
     #[test]
     fn bytecode_source_map_json_rejects_empty_export_objects() {
-        let json = r#"{"schema_version":2,"object":"","entries":[]}"#;
+        let json = r#"{"schema_version":3,"object":"","entries":[]}"#;
         let err = serde_json::from_str::<OwnedBytecodeSourceMapExport>(json)
             .expect_err("source-map export object metadata must be non-empty");
 
@@ -1863,7 +3142,7 @@ mod tests {
 
     #[test]
     fn bytecode_source_map_json_rejects_empty_export_sections() {
-        let json = r#"{"schema_version":2,"section":"","entries":[]}"#;
+        let json = r#"{"schema_version":3,"section":"","entries":[]}"#;
         let err = serde_json::from_str::<OwnedBytecodeSourceMapExport>(json)
             .expect_err("source-map export section metadata must be non-empty");
 
@@ -1877,7 +3156,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_unknown_entry_fields() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -1896,7 +3175,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_invalid_pc_ranges() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -1918,7 +3197,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_empty_objects() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "",
                 "section": "runtime",
@@ -1940,7 +3219,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_empty_sections() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "",
@@ -1962,7 +3241,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_unknown_coverage_fields() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "bytecode_origin_coverage": {
                 "total": 1,
                 "sonatina_post_opt": 1,
@@ -1987,7 +3266,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_inconsistent_coverage_partition() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "bytecode_origin_coverage": {
                 "total": 2,
                 "sonatina_post_opt": 1,
@@ -2015,7 +3294,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_coverage_entry_count_mismatch() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "bytecode_origin_coverage": {
                 "total": 2,
                 "sonatina_post_opt": 1,
@@ -2041,9 +3320,94 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_source_map_json_rejects_unknown_post_opt_coverage_fields() {
+        let json = r#"{
+            "schema_version": 3,
+            "post_opt_origin_coverage": {
+                "total": 1,
+                "same_inst_id": 1,
+                "created_or_unmatched_after_preopt_snapshot": 0,
+                "pre_opt_snapshot_losses": 0,
+                "observed_pre_opt_total": 1,
+                "extra": true
+            },
+            "entries": [{
+                "object": "Foo",
+                "section": "runtime",
+                "pc_start": 0,
+                "pc_end": 4,
+                "kind": "semantic_span_missing"
+            }]
+        }"#;
+        let err = serde_json::from_str::<OwnedBytecodeSourceMapExport>(json)
+            .expect_err("unknown source-map post-opt coverage fields must fail closed");
+
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn bytecode_source_map_json_rejects_inconsistent_post_opt_coverage_partition() {
+        let json = r#"{
+            "schema_version": 3,
+            "post_opt_origin_coverage": {
+                "total": 2,
+                "same_inst_id": 1,
+                "created_or_unmatched_after_preopt_snapshot": 0,
+                "pre_opt_snapshot_losses": 0,
+                "observed_pre_opt_total": 1
+            },
+            "entries": [{
+                "object": "Foo",
+                "section": "runtime",
+                "pc_start": 0,
+                "pc_end": 4,
+                "kind": "semantic_span_missing"
+            }]
+        }"#;
+        let err = serde_json::from_str::<OwnedBytecodeSourceMapExport>(json)
+            .expect_err("source-map post-opt coverage partitions must match their total");
+
+        assert!(
+            err.to_string()
+                .contains("post_opt_origin_coverage total 2 does not match classified total 1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_source_map_json_rejects_inconsistent_post_opt_observed_total() {
+        let json = r#"{
+            "schema_version": 3,
+            "post_opt_origin_coverage": {
+                "total": 1,
+                "same_inst_id": 1,
+                "created_or_unmatched_after_preopt_snapshot": 0,
+                "pre_opt_snapshot_losses": 1,
+                "observed_pre_opt_total": 1
+            },
+            "entries": [{
+                "object": "Foo",
+                "section": "runtime",
+                "pc_start": 0,
+                "pc_end": 4,
+                "kind": "semantic_span_missing"
+            }]
+        }"#;
+        let err = serde_json::from_str::<OwnedBytecodeSourceMapExport>(json)
+            .expect_err("source-map post-opt observed pre-opt totals must match");
+
+        assert!(
+            err.to_string().contains(
+                "post_opt_origin_coverage observed_pre_opt_total 1 does not match same_inst_id plus pre_opt_snapshot_losses 2"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn bytecode_source_map_json_rejects_unknown_source_fields() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2071,7 +3435,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_missing_source_snippet() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2097,7 +3461,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_empty_source_files() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2128,7 +3492,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_empty_source_snippets() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2159,7 +3523,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_unknown_source_span_kind() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2190,7 +3554,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_roundtrips_source_span_invalid_reason() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2216,7 +3580,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_unknown_source_span_invalid_reason() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2239,7 +3603,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_source_fields_for_source_span_invalid() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2263,7 +3627,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_unknown_sonatina_synthetic_reason() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2286,7 +3650,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_unknown_sonatina_unmapped_reason() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2309,7 +3673,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_unknown_bytecode_unmapped_reason() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2332,7 +3696,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_inverted_source_byte_ranges() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2363,7 +3727,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_inverted_source_positions() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2395,7 +3759,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_export_object_mismatch() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "object": "Foo",
             "entries": [{
                 "object": "Bar",
@@ -2419,7 +3783,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_export_section_mismatch() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "section": "runtime",
             "entries": [{
                 "object": "Foo",
@@ -2443,7 +3807,7 @@ mod tests {
     #[test]
     fn bytecode_source_map_json_rejects_overlapping_pc_ranges() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "entries": [{
                 "object": "Foo",
                 "section": "runtime",
@@ -2475,6 +3839,7 @@ mod tests {
             Some(String::new()),
             None,
             None,
+            None,
             Vec::new(),
         )
         .expect_err("source-map export object metadata must be non-empty");
@@ -2491,6 +3856,7 @@ mod tests {
         let err = OwnedBytecodeSourceMapExport::from_serialized_parts(
             None,
             Some(String::new()),
+            None,
             None,
             Vec::new(),
         )
@@ -2579,13 +3945,11 @@ mod tests {
             ),
         ];
         let object = BytecodeObjectKey::new("Foo");
-        let export = bytecode_debug_location_entries_export(
-            &entries,
-            BytecodeSourceMapExportOptions::new()
-                .with_metadata(BytecodeSourceMapExportMetadata::object(&object)),
-        )
-        .expect("debug location export should validate")
-        .expect("source entries should produce debug locations");
+        let options = BytecodeSourceMapExportOptions::new()
+            .with_metadata(BytecodeSourceMapExportMetadata::object(&object));
+        let export = bytecode_debug_location_entries_export(&entries, options)
+            .expect("debug location export should validate")
+            .expect("source entries should produce debug locations");
 
         assert_eq!(export.schema_version(), 1);
         assert_eq!(export.object(), Some("Foo"));
@@ -2604,6 +3968,584 @@ mod tests {
         assert_eq!(export.locations()[0].end_line(), 1);
         assert_eq!(export.locations()[0].end_col(), 6);
         assert_eq!(export.locations()[0].snippet(), "main");
+
+        let json = bytecode_debug_location_entries_json(&entries, options)
+            .expect("debug location JSON should serialize")
+            .expect("source entries should produce debug location JSON");
+        let decoded: OwnedBytecodeDebugLocationExport =
+            serde_json::from_str(&json).expect("debug location JSON should roundtrip");
+
+        assert_eq!(
+            decoded.schema_version(),
+            OwnedBytecodeDebugLocationExport::SCHEMA_VERSION
+        );
+        assert_eq!(decoded.object(), Some("Foo"));
+        assert_eq!(decoded.section(), None);
+        assert_eq!(decoded.locations(), export.locations());
+    }
+
+    #[test]
+    fn bytecode_debug_artifacts_json_renders_source_map_and_debug_locations_together() {
+        let entries = vec![
+            source_map_entry(
+                "Foo",
+                "runtime",
+                0,
+                4,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "main".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                4,
+                8,
+                BytecodeSourceMapEntryKind::BytecodeUnmapped {
+                    reason: BytecodeUnmappedReason::Synthetic,
+                },
+            ),
+        ];
+        let object = BytecodeObjectKey::new("Foo");
+        let source_map_options = BytecodeSourceMapExportOptions::new()
+            .with_object_key(&object)
+            .with_bytecode_origin_coverage(Some(BytecodeOriginCoverage::new(1, 0, 1)))
+            .with_post_opt_origin_coverage(Some(SonatinaPostOptOriginCoverage::new(1, 0, 1)));
+        let debug_location_options = BytecodeSourceMapExportOptions::new().with_object_key(&object);
+
+        let artifacts =
+            bytecode_debug_artifacts_json(&entries, source_map_options, debug_location_options)
+                .expect("debug artifacts should render together");
+        let source_map: OwnedBytecodeSourceMapExport = serde_json::from_str(
+            artifacts
+                .source_map()
+                .expect("source-map JSON should render"),
+        )
+        .expect("source-map JSON should decode");
+        let debug_locations: OwnedBytecodeDebugLocationExport = serde_json::from_str(
+            artifacts
+                .debug_locations()
+                .expect("debug-location JSON should render"),
+        )
+        .expect("debug-location JSON should decode");
+        let debug_line_table: OwnedBytecodeDebugLineTableExport = serde_json::from_str(
+            artifacts
+                .debug_line_table()
+                .expect("debug-line-table JSON should render"),
+        )
+        .expect("debug-line-table JSON should decode");
+
+        assert_eq!(source_map.object(), Some("Foo"));
+        assert_eq!(source_map.entries().len(), 2);
+        assert_eq!(
+            source_map
+                .bytecode_origin_coverage()
+                .expect("coverage should render")
+                .total(),
+            2
+        );
+        assert_eq!(
+            source_map
+                .post_opt_origin_coverage()
+                .expect("post-opt coverage should render")
+                .observed_pre_opt_total(),
+            2
+        );
+        assert_eq!(debug_locations.object(), Some("Foo"));
+        assert_eq!(debug_locations.locations().len(), 1);
+        assert_eq!(debug_locations.locations()[0].snippet(), "main");
+        assert_eq!(debug_line_table.object(), Some("Foo"));
+        assert_eq!(debug_line_table.files().len(), 1);
+        assert_eq!(debug_line_table.rows().len(), 1);
+        assert_eq!(debug_line_table.rows()[0].snippet(), "main");
+    }
+
+    #[test]
+    fn bytecode_debug_artifacts_json_iterates_stable_artifact_filenames() {
+        let entries = vec![
+            source_map_entry(
+                "Foo",
+                "runtime",
+                0,
+                4,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "main".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                4,
+                8,
+                BytecodeSourceMapEntryKind::BytecodeUnmapped {
+                    reason: BytecodeUnmappedReason::Synthetic,
+                },
+            ),
+        ];
+        let object = BytecodeObjectKey::new("Foo");
+        let source_map_options = BytecodeSourceMapExportOptions::new().with_object_key(&object);
+        let debug_location_options = BytecodeSourceMapExportOptions::new().with_object_key(&object);
+        let artifacts =
+            bytecode_debug_artifacts_json(&entries, source_map_options, debug_location_options)
+                .expect("debug artifacts should render together");
+        let filenames = artifacts
+            .artifacts()
+            .map(|artifact| {
+                (
+                    artifact.kind(),
+                    artifact.file_name(),
+                    artifact.file_name_with_base("Foo"),
+                    artifact.json().is_empty(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            filenames,
+            vec![
+                (
+                    BytecodeDebugArtifactKind::SourceMap,
+                    "source_map.json",
+                    "Foo.source_map.json".to_string(),
+                    false
+                ),
+                (
+                    BytecodeDebugArtifactKind::DebugLocations,
+                    "debug_locations.json",
+                    "Foo.debug_locations.json".to_string(),
+                    false
+                ),
+                (
+                    BytecodeDebugArtifactKind::DebugLineTable,
+                    "debug_line_table.json",
+                    "Foo.debug_line_table.json".to_string(),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_artifacts_export_returns_typed_source_map_and_locations() {
+        let entries = vec![
+            source_map_entry(
+                "Foo",
+                "runtime",
+                0,
+                4,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "main".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                4,
+                8,
+                BytecodeSourceMapEntryKind::BytecodeUnmapped {
+                    reason: BytecodeUnmappedReason::Synthetic,
+                },
+            ),
+        ];
+        let object = BytecodeObjectKey::new("Foo");
+        let source_map_options = BytecodeSourceMapExportOptions::new()
+            .with_object_key(&object)
+            .with_bytecode_origin_coverage(Some(BytecodeOriginCoverage::new(1, 0, 1)))
+            .with_post_opt_origin_coverage(Some(SonatinaPostOptOriginCoverage::new(1, 0, 1)));
+        let debug_location_options = BytecodeSourceMapExportOptions::new().with_object_key(&object);
+
+        let artifacts =
+            bytecode_debug_artifacts_export(&entries, source_map_options, debug_location_options)
+                .expect("typed debug artifacts should be exported together");
+        let source_map = artifacts
+            .source_map()
+            .expect("source-map export should be present");
+        let debug_locations = artifacts
+            .debug_locations()
+            .expect("debug-location export should be present");
+        let debug_line_table = artifacts
+            .debug_line_table()
+            .expect("debug-line-table export should be present");
+
+        assert_eq!(source_map.entries().len(), 2);
+        assert_eq!(source_map.bytecode_origin_coverage().unwrap().total(), 2);
+        assert_eq!(
+            source_map
+                .post_opt_origin_coverage()
+                .unwrap()
+                .pre_opt_snapshot_losses(),
+            1
+        );
+        assert_eq!(debug_locations.locations().len(), 1);
+        assert_eq!(debug_locations.locations()[0].snippet(), "main");
+        assert_eq!(
+            debug_line_table.schema_version(),
+            OwnedBytecodeDebugLineTableExport::SCHEMA_VERSION
+        );
+        assert_eq!(debug_line_table.files().len(), 1);
+        assert_eq!(debug_line_table.rows().len(), 1);
+    }
+
+    #[test]
+    fn bytecode_debug_artifacts_export_rejects_metadata_mismatch() {
+        let entries = vec![source_map_entry(
+            "Foo",
+            "runtime",
+            0,
+            4,
+            BytecodeSourceMapEntryKind::Source {
+                span_kind: SourceSpanKind::Original,
+                file: "src/main.fe".to_string(),
+                start_byte: 10,
+                end_byte: 14,
+                start_line: 1,
+                start_col: 2,
+                end_line: 1,
+                end_col: 6,
+                snippet: "main".to_string(),
+            },
+        )];
+        let object = BytecodeObjectKey::new("Foo");
+        let section =
+            BytecodeSectionKey::new(object.clone(), BytecodeSectionNameKey::new("runtime"));
+        let source_map_options = BytecodeSourceMapExportOptions::new().with_object_key(&object);
+        let debug_location_options =
+            BytecodeSourceMapExportOptions::new().with_section_key(&section);
+
+        let err =
+            bytecode_debug_artifacts_export(&entries, source_map_options, debug_location_options)
+                .expect_err("debug artifact bundle scopes should match");
+
+        match err {
+            BytecodeDebugArtifactsExportError::MetadataMismatch(mismatch) => {
+                assert_eq!(mismatch.source_map_object(), Some("Foo"));
+                assert_eq!(mismatch.source_map_section(), None);
+                assert_eq!(mismatch.debug_locations_object(), Some("Foo"));
+                assert_eq!(mismatch.debug_locations_section(), Some("runtime"));
+            }
+            other => panic!("expected metadata mismatch, got {other}"),
+        }
+    }
+
+    #[test]
+    fn bytecode_debug_line_table_interns_files_and_preserves_location_rows() {
+        let entries = vec![
+            source_map_entry(
+                "Foo",
+                "runtime",
+                0,
+                4,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "main".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                4,
+                8,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 20,
+                    end_byte: 24,
+                    start_line: 2,
+                    start_col: 3,
+                    end_line: 2,
+                    end_col: 7,
+                    snippet: "next".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                8,
+                12,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Expanded,
+                    file: "src/helper.fe".to_string(),
+                    start_byte: 30,
+                    end_byte: 36,
+                    start_line: 4,
+                    start_col: 1,
+                    end_line: 4,
+                    end_col: 7,
+                    snippet: "helper".to_string(),
+                },
+            ),
+        ];
+        let object = BytecodeObjectKey::new("Foo");
+        let source_map_options = BytecodeSourceMapExportOptions::new().with_object_key(&object);
+        let debug_location_options = BytecodeSourceMapExportOptions::new().with_object_key(&object);
+
+        let artifacts =
+            bytecode_debug_artifacts_export(&entries, source_map_options, debug_location_options)
+                .expect("typed debug artifacts should be exported together");
+        let table = artifacts
+            .debug_line_table()
+            .expect("source locations should produce a debug line table");
+
+        assert_eq!(
+            table.schema_version(),
+            OwnedBytecodeDebugLineTableExport::SCHEMA_VERSION
+        );
+        assert_eq!(table.object(), Some("Foo"));
+        assert_eq!(table.section(), None);
+        assert_eq!(table.files().len(), 2);
+        assert_eq!(table.files()[0].path(), "src/main.fe");
+        assert_eq!(table.files()[1].path(), "src/helper.fe");
+        assert_eq!(table.rows().len(), 3);
+        assert_eq!(table.rows()[0].file_index(), 0);
+        assert_eq!(table.rows()[1].file_index(), 0);
+        assert_eq!(table.rows()[2].file_index(), 1);
+        assert_eq!(table.rows()[0].pc_start(), 0);
+        assert_eq!(table.rows()[2].pc_end(), 12);
+        assert_eq!(table.rows()[2].span_kind(), SourceSpanKind::Expanded);
+        assert_eq!(table.rows()[2].snippet(), "helper");
+
+        let line_records = table
+            .line_records()
+            .map(|record| {
+                (
+                    record.pc_start(),
+                    record.pc_end(),
+                    record.file().to_string(),
+                    record.span_kind(),
+                    record.snippet().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            line_records,
+            vec![
+                (
+                    0,
+                    4,
+                    "src/main.fe".to_string(),
+                    SourceSpanKind::Original,
+                    "main".to_string()
+                ),
+                (
+                    4,
+                    8,
+                    "src/main.fe".to_string(),
+                    SourceSpanKind::Original,
+                    "next".to_string()
+                ),
+                (
+                    8,
+                    12,
+                    "src/helper.fe".to_string(),
+                    SourceSpanKind::Expanded,
+                    "helper".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_line_table_json_rejects_invalid_file_indices() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "object": "Foo",
+            "files": [{"path": "src/main.fe"}],
+            "rows": [{
+                "object": "Foo",
+                "section": "runtime",
+                "pc_start": 0,
+                "pc_end": 4,
+                "file_index": 1,
+                "span_kind": "original",
+                "start_byte": 10,
+                "end_byte": 14,
+                "start_line": 1,
+                "start_col": 2,
+                "end_line": 1,
+                "end_col": 6,
+                "snippet": "main"
+            }]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLineTableExport>(&json)
+            .expect_err("debug-line-table rows must reference interned files");
+
+        assert!(
+            err.to_string().contains(
+                "bytecode debug-line-table row references file_index 1, but only 1 source files exist"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_line_table_json_line_records_resolve_file_indices() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "object": "Foo",
+            "section": "runtime",
+            "files": [
+                {"path": "src/main.fe"},
+                {"path": "src/helper.fe"}
+            ],
+            "rows": [
+                {
+                    "object": "Foo",
+                    "section": "runtime",
+                    "pc_start": 0,
+                    "pc_end": 4,
+                    "file_index": 0,
+                    "span_kind": "original",
+                    "start_byte": 10,
+                    "end_byte": 14,
+                    "start_line": 1,
+                    "start_col": 2,
+                    "end_line": 1,
+                    "end_col": 6,
+                    "snippet": "main"
+                },
+                {
+                    "object": "Foo",
+                    "section": "runtime",
+                    "pc_start": 4,
+                    "pc_end": 8,
+                    "file_index": 1,
+                    "span_kind": "expanded",
+                    "start_byte": 30,
+                    "end_byte": 36,
+                    "start_line": 4,
+                    "start_col": 1,
+                    "end_line": 4,
+                    "end_col": 7,
+                    "snippet": "helper"
+                }
+            ]
+        })
+        .to_string();
+        let table: OwnedBytecodeDebugLineTableExport =
+            serde_json::from_str(&json).expect("debug-line-table JSON should decode");
+        let line_records = table
+            .line_records()
+            .map(|record| {
+                (
+                    record.object().to_string(),
+                    record.section().to_string(),
+                    record.pc_start(),
+                    record.pc_end(),
+                    record.file().to_string(),
+                    record.start_byte(),
+                    record.end_byte(),
+                    record.start_line(),
+                    record.start_col(),
+                    record.end_line(),
+                    record.end_col(),
+                    record.snippet().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            line_records,
+            vec![
+                (
+                    "Foo".to_string(),
+                    "runtime".to_string(),
+                    0,
+                    4,
+                    "src/main.fe".to_string(),
+                    10,
+                    14,
+                    1,
+                    2,
+                    1,
+                    6,
+                    "main".to_string(),
+                ),
+                (
+                    "Foo".to_string(),
+                    "runtime".to_string(),
+                    4,
+                    8,
+                    "src/helper.fe".to_string(),
+                    30,
+                    36,
+                    4,
+                    1,
+                    4,
+                    7,
+                    "helper".to_string(),
+                ),
+            ]
+        );
+        let first = table
+            .line_records()
+            .next()
+            .expect("decoded line table should contain a first record");
+        assert_eq!(first.source_file().path(), "src/main.fe");
+        assert_eq!(first.row().file_index(), 0);
+    }
+
+    #[test]
+    fn bytecode_debug_line_table_json_rejects_unknown_schema_version() {
+        let json = serde_json::json!({
+            "schema_version": 999,
+            "files": [{"path": "src/main.fe"}],
+            "rows": [{
+                "object": "Foo",
+                "section": "runtime",
+                "pc_start": 0,
+                "pc_end": 4,
+                "file_index": 0,
+                "span_kind": "original",
+                "start_byte": 10,
+                "end_byte": 14,
+                "start_line": 1,
+                "start_col": 2,
+                "end_line": 1,
+                "end_col": 6,
+                "snippet": "main"
+            }]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLineTableExport>(&json)
+            .expect_err("unknown debug-line-table schema versions must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("unsupported bytecode debug-line-table schema_version 999"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2622,6 +4564,181 @@ mod tests {
             bytecode_debug_location_entries_json(&entries, BytecodeSourceMapExportOptions::new())
                 .expect("non-source debug location export should validate")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_unknown_schema_version() {
+        let json = serde_json::json!({
+            "schema_version": 999,
+            "locations": [debug_location_value("Foo", "runtime", 0, 4)]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("unknown debug-location schema versions must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("unsupported bytecode debug-location schema_version 999"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_unknown_export_fields() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "locations": [debug_location_value("Foo", "runtime", 0, 4)],
+            "extra": true
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("unknown debug-location export fields must fail closed");
+
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_unknown_location_fields() {
+        let mut location = debug_location_value("Foo", "runtime", 0, 4);
+        location["extra"] = serde_json::json!(true);
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "locations": [location]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("unknown debug-location entry fields must fail closed");
+
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_empty_locations() {
+        let json = r#"{"schema_version":1,"locations":[]}"#;
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(json)
+            .expect_err("empty debug-location exports must fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("bytecode debug-location export must contain at least one location"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_empty_export_objects() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "object": "",
+            "locations": [debug_location_value("Foo", "runtime", 0, 4)]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("debug-location export object metadata must be non-empty");
+
+        assert!(
+            err.to_string()
+                .contains("bytecode source-map export object must not be empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_invalid_pc_ranges() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "locations": [debug_location_value("Foo", "runtime", 4, 4)]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("debug-location PC ranges must be non-empty");
+
+        assert!(
+            err.to_string()
+                .contains("invalid bytecode source-map export PC range 4..4"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_object_mismatch() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "object": "Foo",
+            "locations": [debug_location_value("Bar", "runtime", 0, 4)]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("debug-location export object must match location objects");
+
+        assert!(
+            err.to_string().contains(
+                "bytecode source-map export object `Foo` does not match entry object `Bar`"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_overlapping_pc_ranges() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "locations": [
+                debug_location_value("Foo", "runtime", 0, 8),
+                debug_location_value("Foo", "runtime", 4, 12)
+            ]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("debug-location PC ranges must not overlap within one object section");
+
+        assert!(
+            err.to_string().contains(
+                "bytecode source-map PC ranges overlap in object `Foo` section `runtime`: 0..8 overlaps 4..12"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_inverted_source_byte_ranges() {
+        let mut location = debug_location_value("Foo", "runtime", 0, 4);
+        location["start_byte"] = serde_json::json!(14);
+        location["end_byte"] = serde_json::json!(10);
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "locations": [location]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("debug-location source byte ranges must be ordered");
+
+        assert!(
+            err.to_string()
+                .contains("bytecode source-map source entry has invalid byte range 14..10"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bytecode_debug_location_json_rejects_inverted_source_positions() {
+        let mut location = debug_location_value("Foo", "runtime", 0, 4);
+        location["start_col"] = serde_json::json!(6);
+        location["end_col"] = serde_json::json!(2);
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "locations": [location]
+        })
+        .to_string();
+        let err = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect_err("debug-location source line/column ranges must be ordered");
+
+        assert!(
+            err.to_string().contains(
+                "bytecode source-map source entry has invalid line/column range 1:6..1:2"
+            ),
+            "{err}"
         );
     }
 
@@ -2886,16 +5003,93 @@ mod tests {
             ),
         ];
 
-        let summary = bytecode_source_map_entries_summary(&entries, Some("Foo"), Some("runtime"))
-            .expect("runtime entries should summarize");
+        let object = BytecodeObjectKey::new("Foo");
+        let section = BytecodeSectionKey::new(object, BytecodeSectionNameKey::new("runtime"));
+        let summary = bytecode_source_map_entries_summary(
+            &entries,
+            Some(BytecodeSourceMapExportMetadata::section(&section)),
+        )
+        .expect("runtime entries should summarize");
 
         assert_eq!(summary.object(), Some("Foo"));
         assert_eq!(summary.section(), Some("runtime"));
         assert_eq!(summary.total(), 3);
         assert_eq!(summary.source(), 1);
+        assert_eq!(summary.debug_locations(), 1);
+        assert_eq!(summary.debug_line_table_files(), 1);
+        assert_eq!(summary.debug_line_table_rows(), 1);
         assert_eq!(summary.source_span_invalid(), 1);
         assert_eq!(summary.runtime_stmt_missing(), 1);
         assert_eq!(summary.bytecode_unmapped(), 0);
         assert_eq!(summary.non_source(), 2);
+    }
+
+    #[test]
+    fn bytecode_source_map_entries_summary_counts_debug_line_table_files() {
+        let entries = vec![
+            source_map_entry(
+                "Foo",
+                "runtime",
+                0,
+                4,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "main".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                4,
+                8,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/main.fe".to_string(),
+                    start_byte: 20,
+                    end_byte: 24,
+                    start_line: 2,
+                    start_col: 2,
+                    end_line: 2,
+                    end_col: 6,
+                    snippet: "next".to_string(),
+                },
+            ),
+            source_map_entry(
+                "Foo",
+                "runtime",
+                8,
+                12,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Expanded,
+                    file: "src/helper.fe".to_string(),
+                    start_byte: 30,
+                    end_byte: 36,
+                    start_line: 4,
+                    start_col: 1,
+                    end_line: 4,
+                    end_col: 7,
+                    snippet: "helper".to_string(),
+                },
+            ),
+        ];
+
+        let object = BytecodeObjectKey::new("Foo");
+        let section = BytecodeSectionKey::new(object, BytecodeSectionNameKey::new("runtime"));
+        let summary = bytecode_source_map_entries_summary(
+            &entries,
+            Some(BytecodeSourceMapExportMetadata::section(&section)),
+        )
+        .expect("runtime entries should summarize");
+
+        assert_eq!(summary.debug_locations(), 3);
+        assert_eq!(summary.debug_line_table_rows(), 3);
+        assert_eq!(summary.debug_line_table_files(), 2);
     }
 }

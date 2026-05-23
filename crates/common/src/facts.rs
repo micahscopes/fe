@@ -21,6 +21,109 @@ crate::define_closed_string_enum! {
     }
 }
 
+crate::define_closed_string_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum TypedFactRelationName {
+        OriginNode => "origin_node",
+        OriginLink => "origin_link",
+        SourceSpan => "source_span",
+        ShapeNode => "shape_node",
+        ShapeField => "shape_field",
+        ShapeChild => "shape_child",
+        ShapeEdge => "shape_edge",
+        TraceEvent => "trace_event",
+        DataFlow => "data_flow",
+        ShapeHash => "shape_hash",
+    }
+}
+
+crate::define_closed_string_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum TypedFactRelationColumnName {
+        Id => "id",
+        Kind => "kind",
+        OwnerKey => "owner_key",
+        LocalKey => "local_key",
+        From => "from",
+        To => "to",
+        Origin => "origin",
+        SpanKind => "span_kind",
+        File => "file",
+        StartByte => "start_byte",
+        EndByte => "end_byte",
+        StartLine => "start_line",
+        StartCol => "start_col",
+        EndLine => "end_line",
+        EndCol => "end_col",
+        SourceId => "source_id",
+        StableKey => "stable_key",
+        Node => "node",
+        Dimension => "dimension",
+        Name => "name",
+        Value => "value",
+        Parent => "parent",
+        Child => "child",
+        Label => "label",
+        Order => "order",
+        EventKind => "event_kind",
+        Source => "source",
+        Target => "target",
+        Scope => "scope",
+        DigestHex => "digest_hex",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypedFactRelationSchema {
+    name: TypedFactRelationName,
+    columns: &'static [TypedFactRelationColumnName],
+}
+
+impl TypedFactRelationSchema {
+    pub const fn new(
+        name: TypedFactRelationName,
+        columns: &'static [TypedFactRelationColumnName],
+    ) -> Self {
+        Self { name, columns }
+    }
+
+    pub const fn name(self) -> TypedFactRelationName {
+        self.name
+    }
+
+    pub const fn columns(self) -> &'static [TypedFactRelationColumnName] {
+        self.columns
+    }
+
+    pub fn column_names(self) -> impl Iterator<Item = &'static str> {
+        self.columns.iter().map(|column| column.as_str())
+    }
+}
+
+impl TypedFactRelationName {
+    pub fn schema(self) -> TypedFactRelationSchema {
+        typed_fact_relation_schema_for_name(self)
+    }
+
+    pub fn column_index(
+        self,
+        column: TypedFactRelationColumnName,
+    ) -> Result<usize, TypedFactRelationError> {
+        self.schema()
+            .columns()
+            .iter()
+            .position(|candidate| *candidate == column)
+            .ok_or_else(|| TypedFactRelationError::UnknownColumn {
+                relation: self.as_str().to_string(),
+                column: column.as_str().to_string(),
+            })
+    }
+}
+
+pub fn typed_fact_relation_schemas() -> &'static [TypedFactRelationSchema] {
+    TYPED_FACT_RELATION_SCHEMAS
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactId {
@@ -43,6 +146,38 @@ impl FactId {
 
     pub fn stable_key(self) -> String {
         format!("{}:{}", self.namespace.as_str(), self.ordinal)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactNamespaceError {
+    WrongNamespace { id: FactId, expected: FactNamespace },
+}
+
+impl fmt::Display for FactNamespaceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongNamespace { id, expected } => write!(
+                f,
+                "fact id {} has namespace {}, expected {}",
+                id.stable_key(),
+                id.namespace().as_str(),
+                expected.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FactNamespaceError {}
+
+fn validated_fact_namespace(
+    id: FactId,
+    expected: FactNamespace,
+) -> Result<FactId, FactNamespaceError> {
+    if id.namespace() == expected {
+        Ok(id)
+    } else {
+        Err(FactNamespaceError::WrongNamespace { id, expected })
     }
 }
 
@@ -234,11 +369,13 @@ pub struct TypedFactRelationSet {
 impl TypedFactRelationSet {
     pub const SCHEMA_VERSION: u32 = OwnedTypedFactSetExport::SCHEMA_VERSION;
 
-    pub fn new(relations: Vec<TypedFactRelation>) -> Self {
-        Self {
+    pub fn new(relations: Vec<TypedFactRelation>) -> Result<Self, TypedFactRelationError> {
+        let relation_set = Self {
             schema_version: Self::SCHEMA_VERSION,
             relations,
-        }
+        };
+        validate_typed_fact_relation_set(relation_set.schema_version(), relation_set.relations())?;
+        Ok(relation_set)
     }
 
     pub const fn schema_version(&self) -> u32 {
@@ -249,10 +386,10 @@ impl TypedFactRelationSet {
         &self.relations
     }
 
-    pub fn relation(&self, name: &str) -> Option<&TypedFactRelation> {
+    pub fn relation(&self, name: TypedFactRelationName) -> Option<&TypedFactRelation> {
         self.relations
             .iter()
-            .find(|relation| relation.name() == name)
+            .find(|relation| relation.relation_name() == name)
     }
 }
 
@@ -279,32 +416,40 @@ impl<'de> Deserialize<'de> for TypedFactRelationSet {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedFactRelation {
-    name: String,
-    columns: Vec<String>,
+    name: TypedFactRelationName,
     rows: Vec<Vec<String>>,
 }
 
 impl TypedFactRelation {
     pub fn new(
-        name: impl Into<String>,
-        columns: impl IntoIterator<Item = &'static str>,
+        name: TypedFactRelationName,
         rows: Vec<Vec<String>>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            columns: columns.into_iter().map(str::to_string).collect(),
-            rows,
-        }
+    ) -> Result<Self, TypedFactRelationError> {
+        let relation = Self { name, rows };
+        validate_typed_fact_relation_typed(relation.relation_name(), relation.rows())?;
+        Ok(relation)
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
+    pub const fn relation_name(&self) -> TypedFactRelationName {
+        self.name
     }
 
-    pub fn columns(&self) -> &[String] {
-        &self.columns
+    pub const fn name(&self) -> &'static str {
+        self.name.as_str()
+    }
+
+    pub fn typed_columns(&self) -> &[TypedFactRelationColumnName] {
+        self.name.schema().columns()
+    }
+
+    pub fn column_names(&self) -> impl Iterator<Item = &'static str> {
+        self.name.schema().column_names()
+    }
+
+    pub fn columns(&self) -> Vec<String> {
+        self.column_names().map(str::to_string).collect()
     }
 
     pub fn rows(&self) -> &[Vec<String>] {
@@ -313,6 +458,19 @@ impl TypedFactRelation {
 
     pub fn row_count(&self) -> usize {
         self.rows.len()
+    }
+}
+
+impl Serialize for TypedFactRelation {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut out = serializer.serialize_struct("TypedFactRelation", 3)?;
+        out.serialize_field("name", &self.name)?;
+        out.serialize_field("columns", self.typed_columns())?;
+        out.serialize_field("rows", &self.rows)?;
+        out.end()
     }
 }
 
@@ -332,31 +490,61 @@ impl<'de> Deserialize<'de> for TypedFactRelation {
         let raw = RawRelation::deserialize(deserializer)?;
         validate_typed_fact_relation(&raw.name, &raw.columns, &raw.rows)
             .map_err(de::Error::custom)?;
+        let name = TypedFactRelationName::from_str(&raw.name)
+            .expect("validated typed fact relation should have a known relation name");
 
         Ok(Self {
-            name: raw.name,
-            columns: raw.columns,
+            name,
             rows: raw.rows,
         })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct TypedFactRelationCount {
-    relation: String,
+    relation: TypedFactRelationName,
     rows: usize,
 }
 
-impl TypedFactRelationCount {
-    pub fn new(relation: impl Into<String>, rows: usize) -> Self {
-        Self {
-            relation: relation.into(),
-            rows,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypedFactRelationCountError {
+    ZeroRows,
+}
+
+impl fmt::Display for TypedFactRelationCountError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroRows => write!(
+                f,
+                "typed fact relation count rows must be greater than zero"
+            ),
         }
     }
+}
 
-    pub fn relation(&self) -> &str {
-        &self.relation
+impl std::error::Error for TypedFactRelationCountError {}
+
+impl TypedFactRelationCount {
+    pub fn new(relation: TypedFactRelationName, rows: usize) -> Self {
+        Self::try_new(relation, rows).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        relation: TypedFactRelationName,
+        rows: usize,
+    ) -> Result<Self, TypedFactRelationCountError> {
+        if rows == 0 {
+            return Err(TypedFactRelationCountError::ZeroRows);
+        }
+        Ok(Self { relation, rows })
+    }
+
+    pub const fn relation(&self) -> TypedFactRelationName {
+        self.relation
+    }
+
+    pub const fn relation_name(&self) -> &'static str {
+        self.relation.as_str()
     }
 
     pub const fn rows(&self) -> usize {
@@ -364,18 +552,63 @@ impl TypedFactRelationCount {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl<'de> Deserialize<'de> for TypedFactRelationCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCount {
+            relation: TypedFactRelationName,
+            rows: usize,
+        }
+
+        let raw = RawCount::deserialize(deserializer)?;
+        Self::try_new(raw.relation, raw.rows).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SourceSpanFileCount {
     file: String,
     spans: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceSpanFileCountError {
+    EmptyFile,
+    ZeroSpans,
+}
+
+impl fmt::Display for SourceSpanFileCountError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyFile => write!(f, "source span file count file must not be empty"),
+            Self::ZeroSpans => write!(f, "source span file count spans must be greater than zero"),
+        }
+    }
+}
+
+impl std::error::Error for SourceSpanFileCountError {}
+
 impl SourceSpanFileCount {
     pub fn new(file: impl Into<String>, spans: usize) -> Self {
-        Self {
-            file: file.into(),
-            spans,
+        Self::try_new(file, spans).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        file: impl Into<String>,
+        spans: usize,
+    ) -> Result<Self, SourceSpanFileCountError> {
+        let file = file.into();
+        if file.is_empty() {
+            return Err(SourceSpanFileCountError::EmptyFile);
         }
+        if spans == 0 {
+            return Err(SourceSpanFileCountError::ZeroSpans);
+        }
+        Ok(Self { file, spans })
     }
 
     pub fn file(&self) -> &str {
@@ -387,10 +620,26 @@ impl SourceSpanFileCount {
     }
 }
 
+impl<'de> Deserialize<'de> for SourceSpanFileCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCount {
+            file: String,
+            spans: usize,
+        }
+
+        let raw = RawCount::deserialize(deserializer)?;
+        Self::try_new(raw.file, raw.spans).map_err(de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TypedFactRelationIndex<'a> {
-    relations_by_name: BTreeMap<&'a str, &'a TypedFactRelation>,
-    columns_by_relation: BTreeMap<&'a str, BTreeMap<&'a str, usize>>,
+    relations_by_name: BTreeMap<TypedFactRelationName, &'a TypedFactRelation>,
 }
 
 impl<'a> TypedFactRelationIndex<'a> {
@@ -398,50 +647,41 @@ impl<'a> TypedFactRelationIndex<'a> {
         validate_typed_fact_relation_set(relations.schema_version(), relations.relations())?;
 
         let mut relations_by_name = BTreeMap::new();
-        let mut columns_by_relation = BTreeMap::new();
         for relation in relations.relations() {
-            relations_by_name.insert(relation.name(), relation);
-            columns_by_relation.insert(
-                relation.name(),
-                relation
-                    .columns()
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, column)| (column.as_str(), idx))
-                    .collect(),
-            );
+            relations_by_name.insert(relation.relation_name(), relation);
         }
 
-        Ok(Self {
-            relations_by_name,
-            columns_by_relation,
-        }
-        .validate_semantics()?)
+        Ok(Self { relations_by_name }.validate_semantics()?)
     }
 
-    pub fn relation(&self, name: &str) -> Result<&'a TypedFactRelation, TypedFactRelationError> {
-        self.relations_by_name.get(name).copied().ok_or_else(|| {
+    pub fn relation(
+        &self,
+        name: TypedFactRelationName,
+    ) -> Result<&'a TypedFactRelation, TypedFactRelationError> {
+        self.relations_by_name.get(&name).copied().ok_or_else(|| {
             TypedFactRelationError::UnknownRelation {
-                relation: name.to_string(),
+                relation: name.as_str().to_string(),
             }
         })
     }
 
-    pub fn row_count(&self, relation: &str) -> Result<usize, TypedFactRelationError> {
+    pub fn row_count(
+        &self,
+        relation: TypedFactRelationName,
+    ) -> Result<usize, TypedFactRelationError> {
         Ok(self.relation(relation)?.row_count())
     }
 
     pub fn rows(
         &self,
-        relation: &str,
+        relation: TypedFactRelationName,
     ) -> Result<Vec<TypedFactRelationRow<'a>>, TypedFactRelationError> {
         let relation_table = self.relation(relation)?;
         Ok(relation_table
             .rows()
             .iter()
             .map(|row| TypedFactRelationRow {
-                relation: relation_table.name(),
-                columns: relation_table.columns(),
+                relation,
                 row: row.as_slice(),
             })
             .collect())
@@ -449,8 +689,8 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     pub fn rows_where(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
         value: &str,
     ) -> Result<Vec<TypedFactRelationRow<'a>>, TypedFactRelationError> {
         let relation_table = self.relation(relation)?;
@@ -460,24 +700,23 @@ impl<'a> TypedFactRelationIndex<'a> {
             .iter()
             .filter(|row| row[column] == value)
             .map(|row| TypedFactRelationRow {
-                relation: relation_table.name(),
-                columns: relation_table.columns(),
+                relation,
                 row: row.as_slice(),
             })
             .collect())
     }
 
     pub fn relation_counts(&self) -> Result<Vec<TypedFactRelationCount>, TypedFactRelationError> {
-        TYPED_FACT_RELATION_SCHEMAS
+        typed_fact_relation_schemas()
             .iter()
-            .filter_map(|(name, _)| {
-                let relation = match self.relation(name) {
+            .filter_map(|schema| {
+                let relation = match self.relation(schema.name()) {
                     Ok(relation) => relation,
                     Err(err) => return Some(Err(err)),
                 };
                 (relation.row_count() > 0).then(|| {
                     Ok(TypedFactRelationCount::new(
-                        relation.name(),
+                        schema.name(),
                         relation.row_count(),
                     ))
                 })
@@ -620,11 +859,91 @@ impl<'a> TypedFactRelationIndex<'a> {
         Ok(exports)
     }
 
+    pub fn representative_source_path_exports_with_priority(
+        &self,
+        priority_kind_pairs: impl IntoIterator<Item = (OriginExportKind, OriginExportKind)>,
+        limit: usize,
+    ) -> Result<Vec<OriginSourcePathWitnessExport>, TypedFactRelationError> {
+        let node_ids = self.origin_node_ids_in_fact_order()?;
+        let keys_by_id = self.origin_node_keys_by_id()?;
+        let outgoing = self.origin_outgoing_by_id()?;
+        let source_spans_by_id = self.source_spans_by_origin_id(&keys_by_id)?;
+        let mut seen_pairs = BTreeSet::new();
+        let mut exports = Vec::new();
+        if limit == 0 || source_spans_by_id.is_empty() {
+            return Ok(exports);
+        }
+
+        for (from_kind, to_kind) in priority_kind_pairs {
+            if !seen_pairs.insert((from_kind, to_kind)) {
+                continue;
+            }
+            let Some(export) = self.representative_source_path_export_for_kind_pair_from_graph(
+                from_kind,
+                to_kind,
+                &node_ids,
+                &keys_by_id,
+                &outgoing,
+                &source_spans_by_id,
+            )?
+            else {
+                continue;
+            };
+            exports.push(export);
+            if exports.len() >= limit {
+                return Ok(exports);
+            }
+        }
+
+        for start_id in &node_ids {
+            let Some(start_key) = keys_by_id.get(start_id) else {
+                continue;
+            };
+            for end_id in self.reachable_origin_ids_from(start_id, &outgoing)? {
+                let Some(end_key) = keys_by_id.get(end_id) else {
+                    continue;
+                };
+                let Some(source_span) = source_spans_by_id
+                    .get(end_id)
+                    .and_then(|spans| spans.first())
+                else {
+                    continue;
+                };
+                let pair = (start_key.kind(), end_key.kind());
+                if !seen_pairs.insert(pair) {
+                    continue;
+                }
+                let Some(path) = self.origin_path_export(
+                    start_id,
+                    end_id,
+                    pair.0,
+                    pair.1,
+                    &keys_by_id,
+                    &outgoing,
+                ) else {
+                    continue;
+                };
+                exports.push(OriginSourcePathWitnessExport::new(
+                    path,
+                    source_span.clone(),
+                ));
+                if exports.len() >= limit {
+                    return Ok(exports);
+                }
+            }
+        }
+
+        Ok(exports)
+    }
+
     pub fn source_span_file_counts(
         &self,
     ) -> Result<Vec<SourceSpanFileCount>, TypedFactRelationError> {
-        let relation_table = self.relation("source_span")?;
-        let file_column = self.column_index("source_span", "file")?;
+        let relation_table = self.relation(TypedFactRelationName::SourceSpan)?;
+        let file_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::File,
+        )?;
         let mut counts = BTreeMap::<String, usize>::new();
 
         for row in relation_table.rows() {
@@ -669,6 +988,51 @@ impl<'a> TypedFactRelationIndex<'a> {
         Ok(None)
     }
 
+    fn representative_source_path_export_for_kind_pair_from_graph(
+        &self,
+        from_kind: OriginExportKind,
+        to_kind: OriginExportKind,
+        node_ids: &[&'a str],
+        keys_by_id: &BTreeMap<&'a str, OriginExportKey>,
+        outgoing: &BTreeMap<&'a str, Vec<(&'a str, OriginLinkKind)>>,
+        source_spans_by_id: &BTreeMap<&'a str, Vec<SourceSpanExport>>,
+    ) -> Result<Option<OriginSourcePathWitnessExport>, TypedFactRelationError> {
+        for start_id in node_ids {
+            let Some(start_key) = keys_by_id.get(start_id) else {
+                continue;
+            };
+            if start_key.kind() != from_kind {
+                continue;
+            }
+
+            for end_id in self.reachable_origin_ids_from(start_id, outgoing)? {
+                let Some(end_key) = keys_by_id.get(end_id) else {
+                    continue;
+                };
+                if end_key.kind() != to_kind {
+                    continue;
+                }
+                let Some(source_span) = source_spans_by_id
+                    .get(end_id)
+                    .and_then(|spans| spans.first())
+                else {
+                    continue;
+                };
+                let Some(path) = self
+                    .origin_path_export(start_id, end_id, from_kind, to_kind, keys_by_id, outgoing)
+                else {
+                    continue;
+                };
+                return Ok(Some(OriginSourcePathWitnessExport::new(
+                    path,
+                    source_span.clone(),
+                )));
+            }
+        }
+
+        Ok(None)
+    }
+
     fn origin_path_export(
         &self,
         from_id: &'a str,
@@ -690,12 +1054,22 @@ impl<'a> TypedFactRelationIndex<'a> {
     }
 
     fn origin_node_ids_in_fact_order(&self) -> Result<Vec<&'a str>, TypedFactRelationError> {
-        let relation_table = self.relation("origin_node")?;
-        let id_column = self.column_index("origin_node", "id")?;
+        let relation_table = self.relation(TypedFactRelationName::OriginNode)?;
+        let id_column = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::Id,
+        )?;
         let mut ids = Vec::new();
         for row in relation_table.rows() {
             let id = row[id_column].as_str();
-            ids.push((self.origin_node_id_ordinal("origin_node", "id", id)?, id));
+            ids.push((
+                self.origin_node_id_ordinal(
+                    TypedFactRelationName::OriginNode,
+                    TypedFactRelationColumnName::Id,
+                    id,
+                )?,
+                id,
+            ));
         }
         ids.sort_by_key(|(ordinal, _)| *ordinal);
         Ok(ids.into_iter().map(|(_, id)| id).collect())
@@ -704,22 +1078,34 @@ impl<'a> TypedFactRelationIndex<'a> {
     fn origin_node_keys_by_id(
         &self,
     ) -> Result<BTreeMap<&'a str, OriginExportKey>, TypedFactRelationError> {
-        let relation_table = self.relation("origin_node")?;
-        let id_column = self.column_index("origin_node", "id")?;
-        let kind_column = self.column_index("origin_node", "kind")?;
-        let owner_column = self.column_index("origin_node", "owner_key")?;
-        let local_column = self.column_index("origin_node", "local_key")?;
+        let relation_table = self.relation(TypedFactRelationName::OriginNode)?;
+        let id_column = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::Id,
+        )?;
+        let kind_column = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::Kind,
+        )?;
+        let owner_column = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::OwnerKey,
+        )?;
+        let local_column = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::LocalKey,
+        )?;
         let mut keys_by_id = BTreeMap::new();
 
         for row in relation_table.rows() {
             let Some(kind) = OriginExportKind::from_str(&row[kind_column]) else {
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: "origin_node".to_string(),
-                    column: "kind".to_string(),
+                    relation: TypedFactRelationName::OriginNode.as_str().to_string(),
+                    column: TypedFactRelationColumnName::Kind.as_str().to_string(),
                     value: row[kind_column].clone(),
                 });
             };
-            let key = OriginExportKey::try_new(
+            let key = OriginExportKey::try_from_raw_parts(
                 kind,
                 row[owner_column].clone(),
                 row[local_column].clone(),
@@ -732,7 +1118,7 @@ impl<'a> TypedFactRelationIndex<'a> {
                     _ => owner_column,
                 };
                 TypedFactRelationError::InvalidRelationValue {
-                    relation: "origin_node".to_string(),
+                    relation: TypedFactRelationName::OriginNode.as_str().to_string(),
                     column: column.to_string(),
                     value: row[idx].clone(),
                 }
@@ -743,24 +1129,153 @@ impl<'a> TypedFactRelationIndex<'a> {
         Ok(keys_by_id)
     }
 
+    fn source_spans_by_origin_id(
+        &self,
+        keys_by_id: &BTreeMap<&'a str, OriginExportKey>,
+    ) -> Result<BTreeMap<&'a str, Vec<SourceSpanExport>>, TypedFactRelationError> {
+        let relation_table = self.relation(TypedFactRelationName::SourceSpan)?;
+        let origin_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::Origin,
+        )?;
+        let span_kind_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::SpanKind,
+        )?;
+        let file_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::File,
+        )?;
+        let start_byte_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::StartByte,
+        )?;
+        let end_byte_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::EndByte,
+        )?;
+        let start_line_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::StartLine,
+        )?;
+        let start_col_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::StartCol,
+        )?;
+        let end_line_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::EndLine,
+        )?;
+        let end_col_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::EndCol,
+        )?;
+        let mut source_spans_by_id = BTreeMap::<&'a str, Vec<SourceSpanExport>>::new();
+
+        for row in relation_table.rows() {
+            let origin_id = row[origin_column].as_str();
+            self.origin_node_id_ordinal(
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::Origin,
+                origin_id,
+            )?;
+            let Some(origin_key) = keys_by_id.get(origin_id) else {
+                return Err(TypedFactRelationError::MissingRelationReference {
+                    relation: TypedFactRelationName::SourceSpan.as_str().to_string(),
+                    column: TypedFactRelationColumnName::Origin.as_str().to_string(),
+                    value: origin_id.to_string(),
+                    target_relation: TypedFactRelationName::OriginNode.as_str().to_string(),
+                });
+            };
+            let Some(span_kind) = SourceSpanKind::from_str(&row[span_kind_column]) else {
+                return Err(TypedFactRelationError::InvalidRelationValue {
+                    relation: TypedFactRelationName::SourceSpan.as_str().to_string(),
+                    column: TypedFactRelationColumnName::SpanKind.as_str().to_string(),
+                    value: row[span_kind_column].clone(),
+                });
+            };
+
+            source_spans_by_id
+                .entry(origin_id)
+                .or_default()
+                .push(SourceSpanExport::new(
+                    origin_key.clone(),
+                    span_kind,
+                    row[file_column].clone(),
+                    self.parse_relation_number(
+                        TypedFactRelationName::SourceSpan,
+                        TypedFactRelationColumnName::StartByte,
+                        &row[start_byte_column],
+                    )?,
+                    self.parse_relation_number(
+                        TypedFactRelationName::SourceSpan,
+                        TypedFactRelationColumnName::EndByte,
+                        &row[end_byte_column],
+                    )?,
+                    self.parse_relation_number(
+                        TypedFactRelationName::SourceSpan,
+                        TypedFactRelationColumnName::StartLine,
+                        &row[start_line_column],
+                    )?,
+                    self.parse_relation_number(
+                        TypedFactRelationName::SourceSpan,
+                        TypedFactRelationColumnName::StartCol,
+                        &row[start_col_column],
+                    )?,
+                    self.parse_relation_number(
+                        TypedFactRelationName::SourceSpan,
+                        TypedFactRelationColumnName::EndLine,
+                        &row[end_line_column],
+                    )?,
+                    self.parse_relation_number(
+                        TypedFactRelationName::SourceSpan,
+                        TypedFactRelationColumnName::EndCol,
+                        &row[end_col_column],
+                    )?,
+                ));
+        }
+        for spans in source_spans_by_id.values_mut() {
+            spans.sort();
+        }
+
+        Ok(source_spans_by_id)
+    }
+
     fn origin_outgoing_by_id(
         &self,
     ) -> Result<BTreeMap<&'a str, Vec<(&'a str, OriginLinkKind)>>, TypedFactRelationError> {
-        let relation_table = self.relation("origin_link")?;
-        let from_column = self.column_index("origin_link", "from")?;
-        let to_column = self.column_index("origin_link", "to")?;
-        let kind_column = self.column_index("origin_link", "kind")?;
+        let relation_table = self.relation(TypedFactRelationName::OriginLink)?;
+        let from_column = self.column_index(
+            TypedFactRelationName::OriginLink,
+            TypedFactRelationColumnName::From,
+        )?;
+        let to_column = self.column_index(
+            TypedFactRelationName::OriginLink,
+            TypedFactRelationColumnName::To,
+        )?;
+        let kind_column = self.column_index(
+            TypedFactRelationName::OriginLink,
+            TypedFactRelationColumnName::Kind,
+        )?;
         let mut outgoing = BTreeMap::<&str, Vec<(u64, &str, OriginLinkKind)>>::new();
 
         for row in relation_table.rows() {
             let from = row[from_column].as_str();
             let to = row[to_column].as_str();
-            self.origin_node_id_ordinal("origin_link", "from", from)?;
-            let to_ordinal = self.origin_node_id_ordinal("origin_link", "to", to)?;
+            self.origin_node_id_ordinal(
+                TypedFactRelationName::OriginLink,
+                TypedFactRelationColumnName::From,
+                from,
+            )?;
+            let to_ordinal = self.origin_node_id_ordinal(
+                TypedFactRelationName::OriginLink,
+                TypedFactRelationColumnName::To,
+                to,
+            )?;
             let Some(kind) = OriginLinkKind::from_str(&row[kind_column]) else {
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: "origin_link".to_string(),
-                    column: "kind".to_string(),
+                    relation: TypedFactRelationName::OriginLink.as_str().to_string(),
+                    column: TypedFactRelationColumnName::Kind.as_str().to_string(),
                     value: row[kind_column].clone(),
                 });
             };
@@ -807,8 +1322,12 @@ impl<'a> TypedFactRelationIndex<'a> {
         let mut ids = seen
             .into_iter()
             .map(|id| {
-                self.origin_node_id_ordinal("origin_link", "to", id)
-                    .map(|ordinal| (ordinal, id))
+                self.origin_node_id_ordinal(
+                    TypedFactRelationName::OriginLink,
+                    TypedFactRelationColumnName::To,
+                    id,
+                )
+                .map(|ordinal| (ordinal, id))
             })
             .collect::<Result<Vec<_>, _>>()?;
         ids.sort_by_key(|(ordinal, _)| *ordinal);
@@ -817,98 +1336,112 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn origin_node_id_ordinal(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
         value: &str,
     ) -> Result<u64, TypedFactRelationError> {
         value
             .strip_prefix("origin_node:")
             .and_then(|ordinal| ordinal.parse::<u64>().ok())
             .ok_or_else(|| TypedFactRelationError::InvalidRelationValue {
-                relation: relation.to_string(),
-                column: column.to_string(),
+                relation: relation.as_str().to_string(),
+                column: column.as_str().to_string(),
                 value: value.to_string(),
             })
     }
 
     pub fn column_index(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
     ) -> Result<usize, TypedFactRelationError> {
-        self.column_indexes(relation)?
-            .get(column)
-            .copied()
-            .ok_or_else(|| TypedFactRelationError::UnknownColumn {
-                relation: relation.to_string(),
-                column: column.to_string(),
-            })
-    }
-
-    fn column_indexes(
-        &self,
-        relation: &str,
-    ) -> Result<&BTreeMap<&'a str, usize>, TypedFactRelationError> {
-        self.columns_by_relation.get(relation).ok_or_else(|| {
-            TypedFactRelationError::UnknownRelation {
-                relation: relation.to_string(),
-            }
-        })
+        self.relation(relation)?;
+        relation.column_index(column)
     }
 
     fn validate_semantics(self) -> Result<Self, TypedFactRelationError> {
-        self.validate_column_values("origin_node", "kind", OriginExportKind::from_str)?;
-        self.validate_column_values("origin_link", "kind", OriginLinkKind::from_str)?;
-        self.validate_column_values("source_span", "span_kind", SourceSpanKind::from_str)?;
-        self.validate_column_values("shape_field", "dimension", ShapeDimension::from_str)?;
-        self.validate_numeric_column::<u32>("shape_node", "source_id")?;
-        self.validate_numeric_column::<u32>("shape_child", "order")?;
-        self.validate_non_empty_column("shape_node", "stable_key")?;
-        self.validate_non_empty_column("shape_node", "kind")?;
-        self.validate_non_empty_column("shape_field", "name")?;
-        self.validate_non_empty_column("shape_child", "label")?;
-        self.validate_non_empty_column("shape_edge", "label")?;
-        self.validate_non_empty_column("trace_event", "event_kind")?;
-        self.validate_non_empty_column("data_flow", "kind")?;
+        use TypedFactRelationColumnName as Column;
+        use TypedFactRelationName as Relation;
+
+        self.validate_column_values(
+            Relation::OriginNode,
+            Column::Kind,
+            OriginExportKind::from_str,
+        )?;
+        self.validate_column_values(Relation::OriginLink, Column::Kind, OriginLinkKind::from_str)?;
+        self.validate_column_values(
+            Relation::SourceSpan,
+            Column::SpanKind,
+            SourceSpanKind::from_str,
+        )?;
+        self.validate_column_values(
+            Relation::ShapeField,
+            Column::Dimension,
+            ShapeDimension::from_str,
+        )?;
+        self.validate_numeric_column::<u32>(Relation::ShapeNode, Column::SourceId)?;
+        self.validate_numeric_column::<u32>(Relation::ShapeChild, Column::Order)?;
+        self.validate_non_empty_column(Relation::ShapeNode, Column::StableKey)?;
+        self.validate_non_empty_column(Relation::ShapeNode, Column::Kind)?;
+        self.validate_non_empty_column(Relation::ShapeField, Column::Name)?;
+        self.validate_non_empty_column(Relation::ShapeChild, Column::Label)?;
+        self.validate_non_empty_column(Relation::ShapeEdge, Column::Label)?;
+        self.validate_non_empty_column(Relation::TraceEvent, Column::EventKind)?;
+        self.validate_non_empty_column(Relation::DataFlow, Column::Kind)?;
         self.validate_origin_export_key_rows()?;
 
-        self.validate_unique_columns("origin_node", &["kind", "owner_key", "local_key"])?;
-        self.validate_unique_columns("origin_link", &["from", "to", "kind"])?;
-        self.validate_unique_columns("shape_node", &["source_id"])?;
-        self.validate_unique_columns("shape_node", &["stable_key"])?;
+        self.validate_unique_columns(
+            Relation::OriginNode,
+            &[Column::Kind, Column::OwnerKey, Column::LocalKey],
+        )?;
+        self.validate_unique_columns(
+            Relation::OriginLink,
+            &[Column::From, Column::To, Column::Kind],
+        )?;
+        self.validate_unique_columns(Relation::ShapeNode, &[Column::SourceId])?;
+        self.validate_unique_columns(Relation::ShapeNode, &[Column::StableKey])?;
 
-        let origin_ids = self.relation_id_set("origin_node", "id")?;
-        let shape_ids = self.relation_id_set("shape_node", "id")?;
+        let origin_ids = self.relation_id_set(Relation::OriginNode, Column::Id)?;
+        let shape_ids = self.relation_id_set(Relation::ShapeNode, Column::Id)?;
 
         self.validate_relation_references(
-            "origin_link",
+            Relation::OriginLink,
             [
-                ("from", &origin_ids, "origin_node"),
-                ("to", &origin_ids, "origin_node"),
-            ],
-        )?;
-        self.validate_relation_references("source_span", [("origin", &origin_ids, "origin_node")])?;
-        self.validate_relation_references("shape_field", [("node", &shape_ids, "shape_node")])?;
-        self.validate_relation_references(
-            "shape_child",
-            [
-                ("parent", &shape_ids, "shape_node"),
-                ("child", &shape_ids, "shape_node"),
+                (Column::From, &origin_ids, Relation::OriginNode),
+                (Column::To, &origin_ids, Relation::OriginNode),
             ],
         )?;
         self.validate_relation_references(
-            "shape_edge",
+            Relation::SourceSpan,
+            [(Column::Origin, &origin_ids, Relation::OriginNode)],
+        )?;
+        self.validate_relation_references(
+            Relation::ShapeField,
+            [(Column::Node, &shape_ids, Relation::ShapeNode)],
+        )?;
+        self.validate_relation_references(
+            Relation::ShapeChild,
             [
-                ("from", &shape_ids, "shape_node"),
-                ("to", &shape_ids, "shape_node"),
+                (Column::Parent, &shape_ids, Relation::ShapeNode),
+                (Column::Child, &shape_ids, Relation::ShapeNode),
             ],
         )?;
-        self.validate_relation_references("trace_event", [("node", &shape_ids, "shape_node")])?;
         self.validate_relation_references(
-            "data_flow",
+            Relation::ShapeEdge,
             [
-                ("source", &shape_ids, "shape_node"),
-                ("target", &shape_ids, "shape_node"),
+                (Column::From, &shape_ids, Relation::ShapeNode),
+                (Column::To, &shape_ids, Relation::ShapeNode),
+            ],
+        )?;
+        self.validate_relation_references(
+            Relation::TraceEvent,
+            [(Column::Node, &shape_ids, Relation::ShapeNode)],
+        )?;
+        self.validate_relation_references(
+            Relation::DataFlow,
+            [
+                (Column::Source, &shape_ids, Relation::ShapeNode),
+                (Column::Target, &shape_ids, Relation::ShapeNode),
             ],
         )?;
         self.validate_source_span_rows()?;
@@ -919,18 +1452,18 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn relation_id_set(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
     ) -> Result<BTreeSet<String>, TypedFactRelationError> {
         let relation_table = self.relation(relation)?;
-        let column = self.column_index(relation, column)?;
+        let column_idx = self.column_index(relation, column)?;
         let mut ids = BTreeSet::new();
         for row in relation_table.rows() {
-            self.validate_fact_id_cell(relation, "id", &row[column])?;
-            if !ids.insert(row[column].clone()) {
+            self.validate_fact_id_cell(relation, column, &row[column_idx])?;
+            if !ids.insert(row[column_idx].clone()) {
                 return Err(TypedFactRelationError::DuplicateRelationId {
-                    relation: relation.to_string(),
-                    value: row[column].clone(),
+                    relation: relation.as_str().to_string(),
+                    value: row[column_idx].clone(),
                 });
             }
         }
@@ -939,24 +1472,24 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn validate_fact_id_cell(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
         value: &str,
     ) -> Result<(), TypedFactRelationError> {
         let Some(ordinal) = value
-            .strip_prefix(relation)
+            .strip_prefix(relation.as_str())
             .and_then(|rest| rest.strip_prefix(':'))
         else {
             return Err(TypedFactRelationError::InvalidRelationValue {
-                relation: relation.to_string(),
-                column: column.to_string(),
+                relation: relation.as_str().to_string(),
+                column: column.as_str().to_string(),
                 value: value.to_string(),
             });
         };
         if ordinal.parse::<u64>().is_err() {
             return Err(TypedFactRelationError::InvalidRelationValue {
-                relation: relation.to_string(),
-                column: column.to_string(),
+                relation: relation.as_str().to_string(),
+                column: column.as_str().to_string(),
                 value: value.to_string(),
             });
         }
@@ -965,13 +1498,13 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn validate_unique_columns(
         &self,
-        relation: &str,
-        columns: &[&str],
+        relation: TypedFactRelationName,
+        columns: &[TypedFactRelationColumnName],
     ) -> Result<(), TypedFactRelationError> {
         let relation_table = self.relation(relation)?;
         let column_indexes = columns
             .iter()
-            .map(|column| self.column_index(relation, column))
+            .map(|column| self.column_index(relation, *column))
             .collect::<Result<Vec<_>, _>>()?;
         let mut seen = BTreeSet::new();
         for row in relation_table.rows() {
@@ -981,8 +1514,11 @@ impl<'a> TypedFactRelationIndex<'a> {
                 .collect::<Vec<_>>();
             if !seen.insert(values.clone()) {
                 return Err(TypedFactRelationError::DuplicateRelationKey {
-                    relation: relation.to_string(),
-                    columns: columns.iter().map(|column| (*column).to_string()).collect(),
+                    relation: relation.as_str().to_string(),
+                    columns: columns
+                        .iter()
+                        .map(|column| column.as_str().to_string())
+                        .collect(),
                     values,
                 });
             }
@@ -991,22 +1527,33 @@ impl<'a> TypedFactRelationIndex<'a> {
     }
 
     fn validate_origin_export_key_rows(&self) -> Result<(), TypedFactRelationError> {
-        let relation = self.relation("origin_node")?;
-        let kind_idx = self.column_index("origin_node", "kind")?;
-        let owner_idx = self.column_index("origin_node", "owner_key")?;
-        let local_idx = self.column_index("origin_node", "local_key")?;
+        let relation = self.relation(TypedFactRelationName::OriginNode)?;
+        let kind_idx = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::Kind,
+        )?;
+        let owner_idx = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::OwnerKey,
+        )?;
+        let local_idx = self.column_index(
+            TypedFactRelationName::OriginNode,
+            TypedFactRelationColumnName::LocalKey,
+        )?;
 
         for row in relation.rows() {
             let Some(kind) = OriginExportKind::from_str(&row[kind_idx]) else {
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: "origin_node".to_string(),
-                    column: "kind".to_string(),
+                    relation: TypedFactRelationName::OriginNode.as_str().to_string(),
+                    column: TypedFactRelationColumnName::Kind.as_str().to_string(),
                     value: row[kind_idx].clone(),
                 });
             };
-            if let Err(err) =
-                OriginExportKey::try_new(kind, row[owner_idx].clone(), row[local_idx].clone())
-            {
+            if let Err(err) = OriginExportKey::try_from_raw_parts(
+                kind,
+                row[owner_idx].clone(),
+                row[local_idx].clone(),
+            ) {
                 let column = invalid_origin_export_key_part(err);
                 let idx = match column {
                     "owner_key" => owner_idx,
@@ -1014,7 +1561,7 @@ impl<'a> TypedFactRelationIndex<'a> {
                     _ => owner_idx,
                 };
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: "origin_node".to_string(),
+                    relation: TypedFactRelationName::OriginNode.as_str().to_string(),
                     column: column.to_string(),
                     value: row[idx].clone(),
                 });
@@ -1026,8 +1573,14 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn validate_relation_references<'b>(
         &self,
-        relation: &str,
-        references: impl IntoIterator<Item = (&'b str, &'b BTreeSet<String>, &'b str)>,
+        relation: TypedFactRelationName,
+        references: impl IntoIterator<
+            Item = (
+                TypedFactRelationColumnName,
+                &'b BTreeSet<String>,
+                TypedFactRelationName,
+            ),
+        >,
     ) -> Result<(), TypedFactRelationError> {
         let relation_table = self.relation(relation)?;
         let references = references
@@ -1042,10 +1595,10 @@ impl<'a> TypedFactRelationIndex<'a> {
             for (column, idx, target_ids, target_relation) in &references {
                 if !target_ids.contains(&row[*idx]) {
                     return Err(TypedFactRelationError::MissingRelationReference {
-                        relation: relation.to_string(),
-                        column: (*column).to_string(),
+                        relation: relation.as_str().to_string(),
+                        column: column.as_str().to_string(),
                         value: row[*idx].clone(),
-                        target_relation: (*target_relation).to_string(),
+                        target_relation: target_relation.as_str().to_string(),
                     });
                 }
             }
@@ -1056,8 +1609,8 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn validate_numeric_column<T>(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
     ) -> Result<(), TypedFactRelationError>
     where
         T: std::str::FromStr,
@@ -1072,16 +1625,16 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn validate_non_empty_column(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
     ) -> Result<(), TypedFactRelationError> {
         let relation_table = self.relation(relation)?;
         let column_idx = self.column_index(relation, column)?;
         for row in relation_table.rows() {
             if row[column_idx].is_empty() {
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: relation.to_string(),
-                    column: column.to_string(),
+                    relation: relation.as_str().to_string(),
+                    column: column.as_str().to_string(),
                     value: row[column_idx].clone(),
                 });
             }
@@ -1091,8 +1644,8 @@ impl<'a> TypedFactRelationIndex<'a> {
 
     fn parse_relation_number<T>(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
         value: &str,
     ) -> Result<T, TypedFactRelationError>
     where
@@ -1101,16 +1654,16 @@ impl<'a> TypedFactRelationIndex<'a> {
         value
             .parse::<T>()
             .map_err(|_| TypedFactRelationError::InvalidRelationValue {
-                relation: relation.to_string(),
-                column: column.to_string(),
+                relation: relation.as_str().to_string(),
+                column: column.as_str().to_string(),
                 value: value.to_string(),
             })
     }
 
     fn validate_column_values<T>(
         &self,
-        relation: &str,
-        column: &str,
+        relation: TypedFactRelationName,
+        column: TypedFactRelationColumnName,
         mut parse: impl FnMut(&str) -> Option<T>,
     ) -> Result<(), TypedFactRelationError> {
         let relation_table = self.relation(relation)?;
@@ -1118,8 +1671,8 @@ impl<'a> TypedFactRelationIndex<'a> {
         for row in relation_table.rows() {
             if parse(&row[column_idx]).is_none() {
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: relation.to_string(),
-                    column: column.to_string(),
+                    relation: relation.as_str().to_string(),
+                    column: column.as_str().to_string(),
                     value: row[column_idx].clone(),
                 });
             }
@@ -1128,15 +1681,39 @@ impl<'a> TypedFactRelationIndex<'a> {
     }
 
     fn validate_source_span_rows(&self) -> Result<(), TypedFactRelationError> {
-        let relation_table = self.relation("source_span")?;
-        let origin_column = self.column_index("source_span", "origin")?;
-        let file_column = self.column_index("source_span", "file")?;
-        let start_byte_column = self.column_index("source_span", "start_byte")?;
-        let end_byte_column = self.column_index("source_span", "end_byte")?;
-        let start_line_column = self.column_index("source_span", "start_line")?;
-        let start_col_column = self.column_index("source_span", "start_col")?;
-        let end_line_column = self.column_index("source_span", "end_line")?;
-        let end_col_column = self.column_index("source_span", "end_col")?;
+        let relation_table = self.relation(TypedFactRelationName::SourceSpan)?;
+        let origin_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::Origin,
+        )?;
+        let file_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::File,
+        )?;
+        let start_byte_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::StartByte,
+        )?;
+        let end_byte_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::EndByte,
+        )?;
+        let start_line_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::StartLine,
+        )?;
+        let start_col_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::StartCol,
+        )?;
+        let end_line_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::EndLine,
+        )?;
+        let end_col_column = self.column_index(
+            TypedFactRelationName::SourceSpan,
+            TypedFactRelationColumnName::EndCol,
+        )?;
 
         for row in relation_table.rows() {
             let origin = &row[origin_column];
@@ -1146,33 +1723,33 @@ impl<'a> TypedFactRelationIndex<'a> {
                 });
             }
             let start_byte = self.parse_relation_number::<usize>(
-                "source_span",
-                "start_byte",
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::StartByte,
                 &row[start_byte_column],
             )?;
             let end_byte = self.parse_relation_number::<usize>(
-                "source_span",
-                "end_byte",
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::EndByte,
                 &row[end_byte_column],
             )?;
             let start_line = self.parse_relation_number::<usize>(
-                "source_span",
-                "start_line",
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::StartLine,
                 &row[start_line_column],
             )?;
             let start_col = self.parse_relation_number::<usize>(
-                "source_span",
-                "start_col",
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::StartCol,
                 &row[start_col_column],
             )?;
             let end_line = self.parse_relation_number::<usize>(
-                "source_span",
-                "end_line",
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::EndLine,
                 &row[end_line_column],
             )?;
             let end_col = self.parse_relation_number::<usize>(
-                "source_span",
-                "end_col",
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::EndCol,
                 &row[end_col_column],
             )?;
 
@@ -1201,11 +1778,23 @@ impl<'a> TypedFactRelationIndex<'a> {
         &self,
         shape_ids: &BTreeSet<String>,
     ) -> Result<(), TypedFactRelationError> {
-        let relation_table = self.relation("shape_hash")?;
-        let node_column = self.column_index("shape_hash", "node")?;
-        let scope_column = self.column_index("shape_hash", "scope")?;
-        let dimension_column = self.column_index("shape_hash", "dimension")?;
-        let digest_column = self.column_index("shape_hash", "digest_hex")?;
+        let relation_table = self.relation(TypedFactRelationName::ShapeHash)?;
+        let node_column = self.column_index(
+            TypedFactRelationName::ShapeHash,
+            TypedFactRelationColumnName::Node,
+        )?;
+        let scope_column = self.column_index(
+            TypedFactRelationName::ShapeHash,
+            TypedFactRelationColumnName::Scope,
+        )?;
+        let dimension_column = self.column_index(
+            TypedFactRelationName::ShapeHash,
+            TypedFactRelationColumnName::Dimension,
+        )?;
+        let digest_column = self.column_index(
+            TypedFactRelationName::ShapeHash,
+            TypedFactRelationColumnName::DigestHex,
+        )?;
         let mut shape_hash_keys = BTreeSet::new();
 
         for row in relation_table.rows() {
@@ -1213,15 +1802,15 @@ impl<'a> TypedFactRelationIndex<'a> {
             let scope_raw = &row[scope_column];
             let Some(scope) = ShapeHashScope::from_str(scope_raw) else {
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: "shape_hash".to_string(),
-                    column: "scope".to_string(),
+                    relation: TypedFactRelationName::ShapeHash.as_str().to_string(),
+                    column: TypedFactRelationColumnName::Scope.as_str().to_string(),
                     value: scope_raw.clone(),
                 });
             };
             let Some(dimension) = ShapeDimension::from_str(&row[dimension_column]) else {
                 return Err(TypedFactRelationError::InvalidRelationValue {
-                    relation: "shape_hash".to_string(),
-                    column: "dimension".to_string(),
+                    relation: TypedFactRelationName::ShapeHash.as_str().to_string(),
+                    column: TypedFactRelationColumnName::Dimension.as_str().to_string(),
                     value: row[dimension_column].clone(),
                 });
             };
@@ -1244,11 +1833,7 @@ impl<'a> TypedFactRelationIndex<'a> {
                 });
             }
 
-            let key = (
-                node.clone(),
-                scope.as_str().to_string(),
-                dimension.as_str().to_string(),
-            );
+            let key = (node.clone(), scope, dimension);
             if !shape_hash_keys.insert(key) {
                 return Err(TypedFactRelationError::DuplicateShapeHash {
                     node: node.clone(),
@@ -1301,52 +1886,47 @@ fn invalid_origin_export_key_part(err: OriginExportKeyError) -> &'static str {
 }
 
 fn require_shape_hash_relation_row(
-    shape_hash_keys: &BTreeSet<(String, String, String)>,
+    shape_hash_keys: &BTreeSet<(String, ShapeHashScope, ShapeDimension)>,
     node: &str,
     scope: ShapeHashScope,
     dimension: ShapeDimension,
 ) -> Result<(), TypedFactRelationError> {
-    let key = (
-        node.to_string(),
-        scope.as_str().to_string(),
-        dimension.as_str().to_string(),
-    );
+    let key = (node.to_string(), scope, dimension);
     if shape_hash_keys.contains(&key) {
         Ok(())
     } else {
         Err(TypedFactRelationError::MissingShapeHash {
             node: key.0,
-            scope: key.1,
-            dimension: key.2,
+            scope: key.1.as_str().to_string(),
+            dimension: key.2.as_str().to_string(),
         })
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypedFactRelationRow<'a> {
-    relation: &'a str,
-    columns: &'a [String],
+    relation: TypedFactRelationName,
     row: &'a [String],
 }
 
 impl<'a> TypedFactRelationRow<'a> {
-    pub fn relation(&self) -> &'a str {
+    pub const fn relation(&self) -> TypedFactRelationName {
         self.relation
+    }
+
+    pub const fn relation_name(&self) -> &'static str {
+        self.relation.as_str()
     }
 
     pub fn cells(&self) -> &'a [String] {
         self.row
     }
 
-    pub fn cell(&self, column: &str) -> Result<&'a str, TypedFactRelationError> {
-        let index = self
-            .columns
-            .iter()
-            .position(|candidate| candidate == column)
-            .ok_or_else(|| TypedFactRelationError::UnknownColumn {
-                relation: self.relation.to_string(),
-                column: column.to_string(),
-            })?;
+    pub fn cell(
+        &self,
+        column: TypedFactRelationColumnName,
+    ) -> Result<&'a str, TypedFactRelationError> {
+        let index = self.relation.column_index(column)?;
         Ok(self.row[index].as_str())
     }
 }
@@ -1561,30 +2141,98 @@ impl fmt::Display for TypedFactRelationError {
 
 impl std::error::Error for TypedFactRelationError {}
 
-const TYPED_FACT_RELATION_SCHEMAS: &[(&str, &[&str])] = &[
-    ("origin_node", &["id", "kind", "owner_key", "local_key"]),
-    ("origin_link", &["from", "to", "kind"]),
-    (
-        "source_span",
+const TYPED_FACT_RELATION_SCHEMAS: &[TypedFactRelationSchema] = &[
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::OriginNode,
         &[
-            "origin",
-            "span_kind",
-            "file",
-            "start_byte",
-            "end_byte",
-            "start_line",
-            "start_col",
-            "end_line",
-            "end_col",
+            TypedFactRelationColumnName::Id,
+            TypedFactRelationColumnName::Kind,
+            TypedFactRelationColumnName::OwnerKey,
+            TypedFactRelationColumnName::LocalKey,
         ],
     ),
-    ("shape_node", &["id", "source_id", "stable_key", "kind"]),
-    ("shape_field", &["node", "dimension", "name", "value"]),
-    ("shape_child", &["parent", "child", "label", "order"]),
-    ("shape_edge", &["from", "to", "label"]),
-    ("trace_event", &["node", "event_kind", "value"]),
-    ("data_flow", &["source", "target", "kind"]),
-    ("shape_hash", &["node", "scope", "dimension", "digest_hex"]),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::OriginLink,
+        &[
+            TypedFactRelationColumnName::From,
+            TypedFactRelationColumnName::To,
+            TypedFactRelationColumnName::Kind,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::SourceSpan,
+        &[
+            TypedFactRelationColumnName::Origin,
+            TypedFactRelationColumnName::SpanKind,
+            TypedFactRelationColumnName::File,
+            TypedFactRelationColumnName::StartByte,
+            TypedFactRelationColumnName::EndByte,
+            TypedFactRelationColumnName::StartLine,
+            TypedFactRelationColumnName::StartCol,
+            TypedFactRelationColumnName::EndLine,
+            TypedFactRelationColumnName::EndCol,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::ShapeNode,
+        &[
+            TypedFactRelationColumnName::Id,
+            TypedFactRelationColumnName::SourceId,
+            TypedFactRelationColumnName::StableKey,
+            TypedFactRelationColumnName::Kind,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::ShapeField,
+        &[
+            TypedFactRelationColumnName::Node,
+            TypedFactRelationColumnName::Dimension,
+            TypedFactRelationColumnName::Name,
+            TypedFactRelationColumnName::Value,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::ShapeChild,
+        &[
+            TypedFactRelationColumnName::Parent,
+            TypedFactRelationColumnName::Child,
+            TypedFactRelationColumnName::Label,
+            TypedFactRelationColumnName::Order,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::ShapeEdge,
+        &[
+            TypedFactRelationColumnName::From,
+            TypedFactRelationColumnName::To,
+            TypedFactRelationColumnName::Label,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::TraceEvent,
+        &[
+            TypedFactRelationColumnName::Node,
+            TypedFactRelationColumnName::EventKind,
+            TypedFactRelationColumnName::Value,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::DataFlow,
+        &[
+            TypedFactRelationColumnName::Source,
+            TypedFactRelationColumnName::Target,
+            TypedFactRelationColumnName::Kind,
+        ],
+    ),
+    TypedFactRelationSchema::new(
+        TypedFactRelationName::ShapeHash,
+        &[
+            TypedFactRelationColumnName::Node,
+            TypedFactRelationColumnName::Scope,
+            TypedFactRelationColumnName::Dimension,
+            TypedFactRelationColumnName::DigestHex,
+        ],
+    ),
 ];
 
 fn validate_typed_fact_relation_set(
@@ -1600,22 +2248,32 @@ fn validate_typed_fact_relation_set(
 
     let mut seen = BTreeSet::new();
     for relation in relations {
-        validate_typed_fact_relation(relation.name(), relation.columns(), relation.rows())?;
-        if !seen.insert(relation.name().to_string()) {
+        let relation_name = relation.relation_name();
+        validate_typed_fact_relation_typed(relation_name, relation.rows())?;
+        if !seen.insert(relation_name) {
             return Err(TypedFactRelationError::DuplicateRelation {
-                relation: relation.name().to_string(),
+                relation: relation_name.as_str().to_string(),
             });
         }
     }
-    for (name, _) in TYPED_FACT_RELATION_SCHEMAS {
-        if !seen.contains(*name) {
+    for schema in typed_fact_relation_schemas() {
+        let relation_name = schema.name();
+        if !seen.contains(&relation_name) {
             return Err(TypedFactRelationError::MissingRelation {
-                relation: (*name).to_string(),
+                relation: relation_name.as_str().to_string(),
             });
         }
     }
 
     Ok(())
+}
+
+fn validate_typed_fact_relation_typed(
+    name: TypedFactRelationName,
+    rows: &[Vec<String>],
+) -> Result<(), TypedFactRelationError> {
+    let expected_columns = name.schema().columns();
+    validate_typed_fact_relation_rows(name.as_str(), expected_columns.len(), rows)
 }
 
 fn validate_typed_fact_relation(
@@ -1623,29 +2281,38 @@ fn validate_typed_fact_relation(
     columns: &[String],
     rows: &[Vec<String>],
 ) -> Result<(), TypedFactRelationError> {
-    let Some(expected_columns) = typed_fact_relation_columns(name) else {
+    let Some(schema) = typed_fact_relation_schema_for_raw_name(name) else {
         return Err(TypedFactRelationError::UnknownRelation {
             relation: name.to_string(),
         });
     };
+    let expected_columns = schema.columns();
     if !columns_match(columns, expected_columns) {
         return Err(TypedFactRelationError::WrongColumns {
             relation: name.to_string(),
             actual: columns.to_vec(),
             expected: expected_columns
                 .iter()
-                .map(|column| (*column).to_string())
+                .map(|column| column.as_str().to_string())
                 .collect(),
         });
     }
 
+    validate_typed_fact_relation_rows(name, expected_columns.len(), rows)
+}
+
+fn validate_typed_fact_relation_rows(
+    name: &str,
+    expected_columns: usize,
+    rows: &[Vec<String>],
+) -> Result<(), TypedFactRelationError> {
     for (idx, row) in rows.iter().enumerate() {
-        if row.len() != expected_columns.len() {
+        if row.len() != expected_columns {
             return Err(TypedFactRelationError::WrongRowWidth {
                 relation: name.to_string(),
                 row: idx,
                 actual: row.len(),
-                expected: expected_columns.len(),
+                expected: expected_columns,
             });
         }
     }
@@ -1653,18 +2320,25 @@ fn validate_typed_fact_relation(
     Ok(())
 }
 
-fn typed_fact_relation_columns(name: &str) -> Option<&'static [&'static str]> {
-    TYPED_FACT_RELATION_SCHEMAS
-        .iter()
-        .find_map(|(relation_name, columns)| (*relation_name == name).then_some(*columns))
+fn typed_fact_relation_schema_for_raw_name(name: &str) -> Option<TypedFactRelationSchema> {
+    let name = TypedFactRelationName::from_str(name)?;
+    Some(typed_fact_relation_schema_for_name(name))
 }
 
-fn columns_match(actual: &[String], expected: &[&str]) -> bool {
+fn typed_fact_relation_schema_for_name(name: TypedFactRelationName) -> TypedFactRelationSchema {
+    TYPED_FACT_RELATION_SCHEMAS
+        .iter()
+        .copied()
+        .find(|schema| schema.name() == name)
+        .expect("typed fact relation name should have a schema descriptor")
+}
+
+fn columns_match(actual: &[String], expected: &[TypedFactRelationColumnName]) -> bool {
     actual.len() == expected.len()
         && actual
             .iter()
             .zip(expected.iter())
-            .all(|(actual, expected)| actual == expected)
+            .all(|(actual, expected)| actual == expected.as_str())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1905,32 +2579,43 @@ fn require_non_empty_shape_fact_text(
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct OriginReachabilitySummary {
     reachable_pairs: usize,
     reachable_pairs_by_kind: Vec<OriginReachableKindPairSummary>,
 }
 
 impl OriginReachabilitySummary {
+    pub fn new(
+        reachable_pairs: usize,
+        reachable_pairs_by_kind: Vec<OriginReachableKindPairSummary>,
+    ) -> Self {
+        Self::try_new(reachable_pairs, reachable_pairs_by_kind)
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        reachable_pairs: usize,
+        reachable_pairs_by_kind: Vec<OriginReachableKindPairSummary>,
+    ) -> Result<Self, OriginReachabilitySummaryError> {
+        validate_origin_reachability_summary(reachable_pairs, &reachable_pairs_by_kind)?;
+        Ok(Self {
+            reachable_pairs,
+            reachable_pairs_by_kind,
+        })
+    }
+
     fn from_pair_counts(
         pair_counts: BTreeMap<(OriginExportKind, OriginExportKind), usize>,
     ) -> Self {
         let reachable_pairs = pair_counts.values().sum();
         let reachable_pairs_by_kind = pair_counts
             .into_iter()
-            .map(
-                |((from_kind, to_kind), reachable_pairs)| OriginReachableKindPairSummary {
-                    from_kind,
-                    to_kind,
-                    reachable_pairs,
-                },
-            )
+            .map(|((from_kind, to_kind), reachable_pairs)| {
+                OriginReachableKindPairSummary::new(from_kind, to_kind, reachable_pairs)
+            })
             .collect();
-        Self {
-            reachable_pairs,
-            reachable_pairs_by_kind,
-        }
+        Self::new(reachable_pairs, reachable_pairs_by_kind)
     }
 
     pub const fn reachable_pairs(&self) -> usize {
@@ -1950,8 +2635,101 @@ impl OriginReachabilitySummary {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for OriginReachabilitySummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSummary {
+            reachable_pairs: usize,
+            reachable_pairs_by_kind: Vec<OriginReachableKindPairSummary>,
+        }
+
+        let raw = RawSummary::deserialize(deserializer)?;
+        Self::try_new(raw.reachable_pairs, raw.reachable_pairs_by_kind).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginReachabilitySummaryError {
+    ZeroReachablePairsForKind {
+        from_kind: OriginExportKind,
+        to_kind: OriginExportKind,
+    },
+    DuplicateKindPair {
+        from_kind: OriginExportKind,
+        to_kind: OriginExportKind,
+    },
+    ReachablePairTotalOverflow,
+    ReachablePairTotalMismatch {
+        declared: usize,
+        actual: usize,
+    },
+}
+
+impl fmt::Display for OriginReachabilitySummaryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroReachablePairsForKind { from_kind, to_kind } => write!(
+                f,
+                "reachable origin kind pair {} -> {} must have at least one reachable pair",
+                from_kind.as_str(),
+                to_kind.as_str()
+            ),
+            Self::DuplicateKindPair { from_kind, to_kind } => write!(
+                f,
+                "duplicate reachable origin kind pair {} -> {}",
+                from_kind.as_str(),
+                to_kind.as_str()
+            ),
+            Self::ReachablePairTotalOverflow => {
+                write!(f, "reachable origin kind-pair total overflowed")
+            }
+            Self::ReachablePairTotalMismatch { declared, actual } => write!(
+                f,
+                "reachable origin kind-pair total {declared} does not match per-kind sum {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OriginReachabilitySummaryError {}
+
+fn validate_origin_reachability_summary(
+    reachable_pairs: usize,
+    reachable_pairs_by_kind: &[OriginReachableKindPairSummary],
+) -> Result<(), OriginReachabilitySummaryError> {
+    let mut seen_pairs = BTreeSet::new();
+    let mut actual = 0usize;
+    for pair in reachable_pairs_by_kind {
+        if pair.reachable_pairs() == 0 {
+            return Err(OriginReachabilitySummaryError::ZeroReachablePairsForKind {
+                from_kind: pair.from_kind(),
+                to_kind: pair.to_kind(),
+            });
+        }
+        if !seen_pairs.insert((pair.from_kind(), pair.to_kind())) {
+            return Err(OriginReachabilitySummaryError::DuplicateKindPair {
+                from_kind: pair.from_kind(),
+                to_kind: pair.to_kind(),
+            });
+        }
+        actual = actual
+            .checked_add(pair.reachable_pairs())
+            .ok_or(OriginReachabilitySummaryError::ReachablePairTotalOverflow)?;
+    }
+    if actual != reachable_pairs {
+        return Err(OriginReachabilitySummaryError::ReachablePairTotalMismatch {
+            declared: reachable_pairs,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OriginReachableKindPairSummary {
     from_kind: OriginExportKind,
     to_kind: OriginExportKind,
@@ -1959,6 +2737,32 @@ pub struct OriginReachableKindPairSummary {
 }
 
 impl OriginReachableKindPairSummary {
+    pub fn new(
+        from_kind: OriginExportKind,
+        to_kind: OriginExportKind,
+        reachable_pairs: usize,
+    ) -> Self {
+        Self::try_new(from_kind, to_kind, reachable_pairs).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        from_kind: OriginExportKind,
+        to_kind: OriginExportKind,
+        reachable_pairs: usize,
+    ) -> Result<Self, OriginReachabilitySummaryError> {
+        if reachable_pairs == 0 {
+            return Err(OriginReachabilitySummaryError::ZeroReachablePairsForKind {
+                from_kind,
+                to_kind,
+            });
+        }
+        Ok(Self {
+            from_kind,
+            to_kind,
+            reachable_pairs,
+        })
+    }
+
     pub const fn from_kind(&self) -> OriginExportKind {
         self.from_kind
     }
@@ -1972,8 +2776,53 @@ impl OriginReachableKindPairSummary {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for OriginReachableKindPairSummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPair {
+            from_kind: OriginExportKind,
+            to_kind: OriginExportKind,
+            reachable_pairs: usize,
+        }
+
+        let raw = RawPair::deserialize(deserializer)?;
+        Self::try_new(raw.from_kind, raw.to_kind, raw.reachable_pairs).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginPathError {
+    EmptyPath,
+    LengthMismatch { nodes: usize, links: usize },
+    WrongNamespace(FactNamespaceError),
+}
+
+impl From<FactNamespaceError> for OriginPathError {
+    fn from(err: FactNamespaceError) -> Self {
+        Self::WrongNamespace(err)
+    }
+}
+
+impl fmt::Display for OriginPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyPath => write!(f, "origin path must contain at least one node"),
+            Self::LengthMismatch { nodes, links } => write!(
+                f,
+                "origin path has {nodes} nodes and {links} links; expected exactly one more node than link"
+            ),
+            Self::WrongNamespace(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for OriginPathError {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OriginPath {
     nodes: Vec<FactId>,
     links: Vec<OriginLinkKind>,
@@ -1981,12 +2830,26 @@ pub struct OriginPath {
 
 impl OriginPath {
     pub fn new(nodes: Vec<FactId>, links: Vec<OriginLinkKind>) -> Self {
-        debug_assert_eq!(
-            nodes.len(),
-            links.len() + 1,
-            "an origin path must have one more node than edge"
-        );
-        Self { nodes, links }
+        Self::try_new(nodes, links).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        nodes: Vec<FactId>,
+        links: Vec<OriginLinkKind>,
+    ) -> Result<Self, OriginPathError> {
+        if nodes.is_empty() {
+            return Err(OriginPathError::EmptyPath);
+        }
+        if nodes.len() != links.len() + 1 {
+            return Err(OriginPathError::LengthMismatch {
+                nodes: nodes.len(),
+                links: links.len(),
+            });
+        }
+        for node in &nodes {
+            validated_fact_namespace(*node, FactNamespace::OriginNode)?;
+        }
+        Ok(Self { nodes, links })
     }
 
     pub fn nodes(&self) -> &[FactId] {
@@ -1995,6 +2858,23 @@ impl OriginPath {
 
     pub fn links(&self) -> &[OriginLinkKind] {
         &self.links
+    }
+}
+
+impl<'de> Deserialize<'de> for OriginPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPath {
+            nodes: Vec<FactId>,
+            links: Vec<OriginLinkKind>,
+        }
+
+        let raw = RawPath::deserialize(deserializer)?;
+        Self::try_new(raw.nodes, raw.links).map_err(de::Error::custom)
     }
 }
 
@@ -2028,8 +2908,50 @@ impl OriginKindPathWitness {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginPathWitnessExportError {
+    EmptyPath,
+    LengthMismatch {
+        nodes: usize,
+        links: usize,
+    },
+    FromKindMismatch {
+        expected: OriginExportKind,
+        actual: OriginExportKind,
+    },
+    ToKindMismatch {
+        expected: OriginExportKind,
+        actual: OriginExportKind,
+    },
+}
+
+impl fmt::Display for OriginPathWitnessExportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyPath => write!(f, "origin path witness must contain at least one node"),
+            Self::LengthMismatch { nodes, links } => write!(
+                f,
+                "origin path witness has {nodes} nodes and {links} links; expected exactly one more node than link"
+            ),
+            Self::FromKindMismatch { expected, actual } => write!(
+                f,
+                "origin path witness starts with {}, expected {}",
+                actual.as_str(),
+                expected.as_str()
+            ),
+            Self::ToKindMismatch { expected, actual } => write!(
+                f,
+                "origin path witness ends with {}, expected {}",
+                actual.as_str(),
+                expected.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OriginPathWitnessExportError {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OriginPathWitnessExport {
     from_kind: OriginExportKind,
     to_kind: OriginExportKind,
@@ -2044,12 +2966,51 @@ impl OriginPathWitnessExport {
         nodes: Vec<OriginExportKey>,
         links: Vec<OriginLinkKind>,
     ) -> Self {
-        Self {
+        Self::try_new(from_kind, to_kind, nodes, links).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        from_kind: OriginExportKind,
+        to_kind: OriginExportKind,
+        nodes: Vec<OriginExportKey>,
+        links: Vec<OriginLinkKind>,
+    ) -> Result<Self, OriginPathWitnessExportError> {
+        if nodes.is_empty() {
+            return Err(OriginPathWitnessExportError::EmptyPath);
+        }
+        if nodes.len() != links.len() + 1 {
+            return Err(OriginPathWitnessExportError::LengthMismatch {
+                nodes: nodes.len(),
+                links: links.len(),
+            });
+        }
+        let actual_from = nodes
+            .first()
+            .expect("non-empty path witness should have a first node")
+            .kind();
+        if actual_from != from_kind {
+            return Err(OriginPathWitnessExportError::FromKindMismatch {
+                expected: from_kind,
+                actual: actual_from,
+            });
+        }
+        let actual_to = nodes
+            .last()
+            .expect("non-empty path witness should have a last node")
+            .kind();
+        if actual_to != to_kind {
+            return Err(OriginPathWitnessExportError::ToKindMismatch {
+                expected: to_kind,
+                actual: actual_to,
+            });
+        }
+
+        Ok(Self {
             from_kind,
             to_kind,
             nodes,
             links,
-        }
+        })
     }
 
     pub const fn from_kind(&self) -> OriginExportKind {
@@ -2066,6 +3027,112 @@ impl OriginPathWitnessExport {
 
     pub fn links(&self) -> &[OriginLinkKind] {
         &self.links
+    }
+}
+
+impl<'de> Deserialize<'de> for OriginPathWitnessExport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPathWitness {
+            from_kind: OriginExportKind,
+            to_kind: OriginExportKind,
+            nodes: Vec<OriginExportKey>,
+            links: Vec<OriginLinkKind>,
+        }
+
+        let raw = RawPathWitness::deserialize(deserializer)?;
+        Self::try_new(raw.from_kind, raw.to_kind, raw.nodes, raw.links).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OriginSourcePathWitnessExportError {
+    SourceSpanTargetMismatch {
+        path_target: OriginExportKey,
+        source_origin: OriginExportKey,
+    },
+}
+
+impl fmt::Display for OriginSourcePathWitnessExportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SourceSpanTargetMismatch {
+                path_target,
+                source_origin,
+            } => write!(
+                f,
+                "origin source path witness attaches source span {}:{}:{} to path ending at {}:{}:{}",
+                source_origin.kind().as_str(),
+                source_origin.owner_key(),
+                source_origin.local_key(),
+                path_target.kind().as_str(),
+                path_target.owner_key(),
+                path_target.local_key()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OriginSourcePathWitnessExportError {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OriginSourcePathWitnessExport {
+    path: OriginPathWitnessExport,
+    source_span: SourceSpanExport,
+}
+
+impl OriginSourcePathWitnessExport {
+    pub fn new(path: OriginPathWitnessExport, source_span: SourceSpanExport) -> Self {
+        Self::try_new(path, source_span).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        path: OriginPathWitnessExport,
+        source_span: SourceSpanExport,
+    ) -> Result<Self, OriginSourcePathWitnessExportError> {
+        let path_target = path
+            .nodes()
+            .last()
+            .expect("validated path witness should have a terminal node");
+        if path_target != source_span.origin_key() {
+            return Err(
+                OriginSourcePathWitnessExportError::SourceSpanTargetMismatch {
+                    path_target: path_target.clone(),
+                    source_origin: source_span.origin_key().clone(),
+                },
+            );
+        }
+
+        Ok(Self { path, source_span })
+    }
+
+    pub const fn path(&self) -> &OriginPathWitnessExport {
+        &self.path
+    }
+
+    pub const fn source_span(&self) -> &SourceSpanExport {
+        &self.source_span
+    }
+}
+
+impl<'de> Deserialize<'de> for OriginSourcePathWitnessExport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSourcePathWitness {
+            path: OriginPathWitnessExport,
+            source_span: SourceSpanExport,
+        }
+
+        let raw = RawSourcePathWitness::deserialize(deserializer)?;
+        Self::try_new(raw.path, raw.source_span).map_err(de::Error::custom)
     }
 }
 
@@ -2997,12 +4064,12 @@ impl<'de> Deserialize<'de> for TypedFact {
         }
 
         match RawTypedFact::deserialize(deserializer)? {
-            RawTypedFact::OriginNode { id, key } => {
-                Ok(Self::OriginNode(OriginNodeFact::new(id, key)))
-            }
-            RawTypedFact::OriginLink { from, to, kind } => {
-                Ok(Self::OriginLink(OriginLinkFact::new(from, to, kind)))
-            }
+            RawTypedFact::OriginNode { id, key } => Ok(Self::OriginNode(
+                OriginNodeFact::try_new(id, key).map_err(de::Error::custom)?,
+            )),
+            RawTypedFact::OriginLink { from, to, kind } => Ok(Self::OriginLink(
+                OriginLinkFact::try_new(from, to, kind).map_err(de::Error::custom)?,
+            )),
             RawTypedFact::SourceSpan {
                 origin,
                 span_kind,
@@ -3013,63 +4080,69 @@ impl<'de> Deserialize<'de> for TypedFact {
                 start_col,
                 end_line,
                 end_col,
-            } => Ok(Self::SourceSpan(SourceSpanFact::new(
-                origin, span_kind, file, start_byte, end_byte, start_line, start_col, end_line,
-                end_col,
-            ))),
+            } => Ok(Self::SourceSpan(
+                SourceSpanFact::try_new(
+                    origin, span_kind, file, start_byte, end_byte, start_line, start_col, end_line,
+                    end_col,
+                )
+                .map_err(de::Error::custom)?,
+            )),
             RawTypedFact::ShapeNode {
                 id,
                 source_id,
                 stable_key,
                 kind,
-            } => Ok(Self::ShapeNode(ShapeNodeFact::new(
-                id, source_id, stable_key, kind,
-            ))),
+            } => Ok(Self::ShapeNode(
+                ShapeNodeFact::try_new(id, source_id, stable_key, kind)
+                    .map_err(de::Error::custom)?,
+            )),
             RawTypedFact::ShapeField {
                 node,
                 dimension,
                 name,
                 value,
-            } => Ok(Self::ShapeField(ShapeFieldFact::new(
-                node, dimension, name, value,
-            ))),
+            } => Ok(Self::ShapeField(
+                ShapeFieldFact::try_new(node, dimension, name, value).map_err(de::Error::custom)?,
+            )),
             RawTypedFact::ShapeChild {
                 parent,
                 child,
                 label,
                 order,
-            } => Ok(Self::ShapeChild(ShapeChildFact::new(
-                parent, child, label, order,
-            ))),
-            RawTypedFact::ShapeEdge { from, to, label } => {
-                Ok(Self::ShapeEdge(ShapeEdgeFact::new(from, to, label)))
-            }
+            } => Ok(Self::ShapeChild(
+                ShapeChildFact::try_new(parent, child, label, order).map_err(de::Error::custom)?,
+            )),
+            RawTypedFact::ShapeEdge { from, to, label } => Ok(Self::ShapeEdge(
+                ShapeEdgeFact::try_new(from, to, label).map_err(de::Error::custom)?,
+            )),
             RawTypedFact::TraceEvent {
                 node,
                 event_kind,
                 value,
-            } => Ok(Self::TraceEvent(TraceEventFact::new(
-                node, event_kind, value,
-            ))),
+            } => Ok(Self::TraceEvent(
+                TraceEventFact::try_new(node, event_kind, value).map_err(de::Error::custom)?,
+            )),
             RawTypedFact::DataFlow {
                 source,
                 target,
                 kind,
-            } => Ok(Self::DataFlow(DataFlowFact::new(source, target, kind))),
+            } => Ok(Self::DataFlow(
+                DataFlowFact::try_new(source, target, kind).map_err(de::Error::custom)?,
+            )),
             RawTypedFact::ShapeHash {
                 node,
                 scope,
                 dimension,
                 digest_hex,
-            } => Ok(Self::ShapeHash(ShapeHashFact::new(
-                node, scope, dimension, digest_hex,
-            ))),
+            } => Ok(Self::ShapeHash(
+                ShapeHashFact::try_new(node, scope, dimension, digest_hex)
+                    .map_err(de::Error::custom)?,
+            )),
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OriginNodeFact {
     id: FactId,
     key: OriginExportKey,
@@ -3077,7 +4150,14 @@ pub struct OriginNodeFact {
 
 impl OriginNodeFact {
     pub fn new(id: FactId, key: OriginExportKey) -> Self {
-        Self { id, key }
+        Self::try_new(id, key).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(id: FactId, key: OriginExportKey) -> Result<Self, FactNamespaceError> {
+        Ok(Self {
+            id: validated_fact_namespace(id, FactNamespace::OriginNode)?,
+            key,
+        })
     }
 
     pub const fn id(&self) -> FactId {
@@ -3089,8 +4169,24 @@ impl OriginNodeFact {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for OriginNodeFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOriginNode {
+            id: FactId,
+            key: OriginExportKey,
+        }
+
+        let raw = RawOriginNode::deserialize(deserializer)?;
+        Self::try_new(raw.id, raw.key).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OriginLinkFact {
     from: FactId,
     to: FactId,
@@ -3098,8 +4194,20 @@ pub struct OriginLinkFact {
 }
 
 impl OriginLinkFact {
-    pub const fn new(from: FactId, to: FactId, kind: OriginLinkKind) -> Self {
-        Self { from, to, kind }
+    pub fn new(from: FactId, to: FactId, kind: OriginLinkKind) -> Self {
+        Self::try_new(from, to, kind).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        from: FactId,
+        to: FactId,
+        kind: OriginLinkKind,
+    ) -> Result<Self, FactNamespaceError> {
+        Ok(Self {
+            from: validated_fact_namespace(from, FactNamespace::OriginNode)?,
+            to: validated_fact_namespace(to, FactNamespace::OriginNode)?,
+            kind,
+        })
     }
 
     pub const fn from(&self) -> FactId {
@@ -3115,6 +4223,24 @@ impl OriginLinkFact {
     }
 }
 
+impl<'de> Deserialize<'de> for OriginLinkFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOriginLink {
+            from: FactId,
+            to: FactId,
+            kind: OriginLinkKind,
+        }
+
+        let raw = RawOriginLink::deserialize(deserializer)?;
+        Self::try_new(raw.from, raw.to, raw.kind).map_err(de::Error::custom)
+    }
+}
+
 crate::define_closed_string_enum! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum SourceSpanKind {
@@ -3124,7 +4250,7 @@ crate::define_closed_string_enum! {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SourceSpanExport {
     origin_key: OriginExportKey,
     span_kind: SourceSpanKind,
@@ -3135,6 +4261,77 @@ pub struct SourceSpanExport {
     start_col: usize,
     end_line: usize,
     end_col: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceSpanExportError {
+    EmptyFile,
+    InvalidByteRange {
+        start_byte: usize,
+        end_byte: usize,
+    },
+    InvalidPositionRange {
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+    },
+}
+
+impl fmt::Display for SourceSpanExportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyFile => write!(f, "source span file must not be empty"),
+            Self::InvalidByteRange {
+                start_byte,
+                end_byte,
+            } => write!(
+                f,
+                "source span byte range must be ordered: {start_byte}..{end_byte}"
+            ),
+            Self::InvalidPositionRange {
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+            } => write!(
+                f,
+                "source span line/column range must be ordered: {start_line}:{start_col}..{end_line}:{end_col}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SourceSpanExportError {}
+
+fn validated_source_span_parts(
+    file: impl Into<String>,
+    start_byte: usize,
+    end_byte: usize,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> Result<String, SourceSpanExportError> {
+    let file = file.into();
+    if file.is_empty() {
+        return Err(SourceSpanExportError::EmptyFile);
+    }
+    if start_byte > end_byte {
+        return Err(SourceSpanExportError::InvalidByteRange {
+            start_byte,
+            end_byte,
+        });
+    }
+    if start_line > end_line || (start_line == end_line && start_col > end_col) {
+        return Err(SourceSpanExportError::InvalidPositionRange {
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+        });
+    }
+    Ok(file)
 }
 
 impl SourceSpanExport {
@@ -3149,17 +4346,28 @@ impl SourceSpanExport {
         end_line: usize,
         end_col: usize,
     ) -> Self {
-        let file = file.into();
-        assert!(!file.is_empty(), "source span file must not be empty");
-        assert!(
-            start_byte <= end_byte,
-            "source span byte range must be ordered: {start_byte}..{end_byte}"
-        );
-        assert!(
-            start_line < end_line || (start_line == end_line && start_col <= end_col),
-            "source span line/column range must be ordered: {start_line}:{start_col}..{end_line}:{end_col}"
-        );
-        Self {
+        Self::try_new(
+            origin_key, span_kind, file, start_byte, end_byte, start_line, start_col, end_line,
+            end_col,
+        )
+        .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        origin_key: OriginExportKey,
+        span_kind: SourceSpanKind,
+        file: impl Into<String>,
+        start_byte: usize,
+        end_byte: usize,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+    ) -> Result<Self, SourceSpanExportError> {
+        let file = validated_source_span_parts(
+            file, start_byte, end_byte, start_line, start_col, end_line, end_col,
+        )?;
+        Ok(Self {
             origin_key,
             span_kind,
             file,
@@ -3169,7 +4377,7 @@ impl SourceSpanExport {
             start_col,
             end_line,
             end_col,
-        }
+        })
     }
 
     pub const fn origin_key(&self) -> &OriginExportKey {
@@ -3209,6 +4417,41 @@ impl SourceSpanExport {
     }
 }
 
+impl<'de> Deserialize<'de> for SourceSpanExport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSourceSpan {
+            origin_key: OriginExportKey,
+            span_kind: SourceSpanKind,
+            file: String,
+            start_byte: usize,
+            end_byte: usize,
+            start_line: usize,
+            start_col: usize,
+            end_line: usize,
+            end_col: usize,
+        }
+
+        let raw = RawSourceSpan::deserialize(deserializer)?;
+        Self::try_new(
+            raw.origin_key,
+            raw.span_kind,
+            raw.file,
+            raw.start_byte,
+            raw.end_byte,
+            raw.start_line,
+            raw.start_col,
+            raw.end_line,
+            raw.end_col,
+        )
+        .map_err(de::Error::custom)
+    }
+}
+
 fn source_span_export_sort_key(span: &SourceSpanExport) -> impl Ord + '_ {
     (
         span.origin_key(),
@@ -3223,8 +4466,36 @@ fn source_span_export_sort_key(span: &SourceSpanExport) -> impl Ord + '_ {
     )
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceSpanFactBuildError {
+    WrongNamespace(FactNamespaceError),
+    InvalidSpan(SourceSpanExportError),
+}
+
+impl fmt::Display for SourceSpanFactBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongNamespace(err) => err.fmt(f),
+            Self::InvalidSpan(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SourceSpanFactBuildError {}
+
+impl From<FactNamespaceError> for SourceSpanFactBuildError {
+    fn from(err: FactNamespaceError) -> Self {
+        Self::WrongNamespace(err)
+    }
+}
+
+impl From<SourceSpanExportError> for SourceSpanFactBuildError {
+    fn from(err: SourceSpanExportError) -> Self {
+        Self::InvalidSpan(err)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SourceSpanFact {
     origin: FactId,
     span_kind: SourceSpanKind,
@@ -3249,17 +4520,38 @@ impl SourceSpanFact {
         end_line: usize,
         end_col: usize,
     ) -> Self {
-        Self {
+        Self::try_new(
+            origin, span_kind, file, start_byte, end_byte, start_line, start_col, end_line, end_col,
+        )
+        .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        origin: FactId,
+        span_kind: SourceSpanKind,
+        file: impl Into<String>,
+        start_byte: usize,
+        end_byte: usize,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+    ) -> Result<Self, SourceSpanFactBuildError> {
+        let origin = validated_fact_namespace(origin, FactNamespace::OriginNode)?;
+        let file = validated_source_span_parts(
+            file, start_byte, end_byte, start_line, start_col, end_line, end_col,
+        )?;
+        Ok(Self {
             origin,
             span_kind,
-            file: file.into(),
+            file,
             start_byte,
             end_byte,
             start_line,
             start_col,
             end_line,
             end_col,
-        }
+        })
     }
 
     fn from_export(origin: FactId, span: SourceSpanExport) -> Self {
@@ -3313,8 +4605,80 @@ impl SourceSpanFact {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for SourceSpanFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawSourceSpanFact {
+            origin: FactId,
+            span_kind: SourceSpanKind,
+            file: String,
+            start_byte: usize,
+            end_byte: usize,
+            start_line: usize,
+            start_col: usize,
+            end_line: usize,
+            end_col: usize,
+        }
+
+        let raw = RawSourceSpanFact::deserialize(deserializer)?;
+        Self::try_new(
+            raw.origin,
+            raw.span_kind,
+            raw.file,
+            raw.start_byte,
+            raw.end_byte,
+            raw.start_line,
+            raw.start_col,
+            raw.end_line,
+            raw.end_col,
+        )
+        .map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShapeFactTextError {
+    Empty { field: &'static str },
+    WrongNamespace(FactNamespaceError),
+}
+
+impl fmt::Display for ShapeFactTextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { field } => write!(f, "{field} must not be empty"),
+            Self::WrongNamespace(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ShapeFactTextError {}
+
+impl From<FactNamespaceError> for ShapeFactTextError {
+    fn from(err: FactNamespaceError) -> Self {
+        Self::WrongNamespace(err)
+    }
+}
+
+fn validated_shape_node_id(id: FactId) -> Result<FactId, ShapeFactTextError> {
+    validated_fact_namespace(id, FactNamespace::ShapeNode).map_err(Into::into)
+}
+
+fn non_empty_shape_fact_text(
+    field: &'static str,
+    value: impl Into<String>,
+) -> Result<String, ShapeFactTextError> {
+    let value = value.into();
+    if value.is_empty() {
+        return Err(ShapeFactTextError::Empty { field });
+    }
+    Ok(value)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ShapeNodeFact {
     id: FactId,
     source_id: ShapeNodeId,
@@ -3329,12 +4693,21 @@ impl ShapeNodeFact {
         stable_key: impl Into<String>,
         kind: impl Into<String>,
     ) -> Self {
-        Self {
-            id,
+        Self::try_new(id, source_id, stable_key, kind).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        id: FactId,
+        source_id: ShapeNodeId,
+        stable_key: impl Into<String>,
+        kind: impl Into<String>,
+    ) -> Result<Self, ShapeFactTextError> {
+        Ok(Self {
+            id: validated_shape_node_id(id)?,
             source_id,
-            stable_key: stable_key.into(),
-            kind: kind.into(),
-        }
+            stable_key: non_empty_shape_fact_text("shape stable key", stable_key)?,
+            kind: non_empty_shape_fact_text("shape node kind", kind)?,
+        })
     }
 
     pub const fn id(&self) -> FactId {
@@ -3354,8 +4727,26 @@ impl ShapeNodeFact {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for ShapeNodeFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawShapeNode {
+            id: FactId,
+            source_id: ShapeNodeId,
+            stable_key: String,
+            kind: String,
+        }
+
+        let raw = RawShapeNode::deserialize(deserializer)?;
+        Self::try_new(raw.id, raw.source_id, raw.stable_key, raw.kind).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ShapeFieldFact {
     node: FactId,
     dimension: ShapeDimension,
@@ -3370,12 +4761,21 @@ impl ShapeFieldFact {
         name: impl Into<String>,
         value: impl Into<String>,
     ) -> Self {
-        Self {
-            node,
+        Self::try_new(node, dimension, name, value).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        node: FactId,
+        dimension: ShapeDimension,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ShapeFactTextError> {
+        Ok(Self {
+            node: validated_shape_node_id(node)?,
             dimension,
-            name: name.into(),
+            name: non_empty_shape_fact_text("shape field name", name)?,
             value: value.into(),
-        }
+        })
     }
 
     pub const fn node(&self) -> FactId {
@@ -3395,8 +4795,26 @@ impl ShapeFieldFact {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for ShapeFieldFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawShapeField {
+            node: FactId,
+            dimension: ShapeDimension,
+            name: String,
+            value: String,
+        }
+
+        let raw = RawShapeField::deserialize(deserializer)?;
+        Self::try_new(raw.node, raw.dimension, raw.name, raw.value).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ShapeChildFact {
     parent: FactId,
     child: FactId,
@@ -3406,12 +4824,21 @@ pub struct ShapeChildFact {
 
 impl ShapeChildFact {
     pub fn new(parent: FactId, child: FactId, label: impl Into<String>, order: u32) -> Self {
-        Self {
-            parent,
-            child,
-            label: label.into(),
+        Self::try_new(parent, child, label, order).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        parent: FactId,
+        child: FactId,
+        label: impl Into<String>,
+        order: u32,
+    ) -> Result<Self, ShapeFactTextError> {
+        Ok(Self {
+            parent: validated_shape_node_id(parent)?,
+            child: validated_shape_node_id(child)?,
+            label: non_empty_shape_fact_text("shape child label", label)?,
             order,
-        }
+        })
     }
 
     pub const fn parent(&self) -> FactId {
@@ -3431,8 +4858,26 @@ impl ShapeChildFact {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for ShapeChildFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawShapeChild {
+            parent: FactId,
+            child: FactId,
+            label: String,
+            order: u32,
+        }
+
+        let raw = RawShapeChild::deserialize(deserializer)?;
+        Self::try_new(raw.parent, raw.child, raw.label, raw.order).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ShapeEdgeFact {
     from: FactId,
     to: FactId,
@@ -3441,11 +4886,19 @@ pub struct ShapeEdgeFact {
 
 impl ShapeEdgeFact {
     pub fn new(from: FactId, to: FactId, label: impl Into<String>) -> Self {
-        Self {
-            from,
-            to,
-            label: label.into(),
-        }
+        Self::try_new(from, to, label).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        from: FactId,
+        to: FactId,
+        label: impl Into<String>,
+    ) -> Result<Self, ShapeFactTextError> {
+        Ok(Self {
+            from: validated_shape_node_id(from)?,
+            to: validated_shape_node_id(to)?,
+            label: non_empty_shape_fact_text("shape edge label", label)?,
+        })
     }
 
     pub const fn from(&self) -> FactId {
@@ -3461,8 +4914,25 @@ impl ShapeEdgeFact {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for ShapeEdgeFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawShapeEdge {
+            from: FactId,
+            to: FactId,
+            label: String,
+        }
+
+        let raw = RawShapeEdge::deserialize(deserializer)?;
+        Self::try_new(raw.from, raw.to, raw.label).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TraceEventFact {
     node: FactId,
     event_kind: String,
@@ -3471,11 +4941,19 @@ pub struct TraceEventFact {
 
 impl TraceEventFact {
     pub fn new(node: FactId, event_kind: impl Into<String>, value: impl Into<String>) -> Self {
-        Self {
-            node,
-            event_kind: event_kind.into(),
+        Self::try_new(node, event_kind, value).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        node: FactId,
+        event_kind: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ShapeFactTextError> {
+        Ok(Self {
+            node: validated_shape_node_id(node)?,
+            event_kind: non_empty_shape_fact_text("trace event kind", event_kind)?,
             value: value.into(),
-        }
+        })
     }
 
     pub const fn node(&self) -> FactId {
@@ -3491,8 +4969,25 @@ impl TraceEventFact {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+impl<'de> Deserialize<'de> for TraceEventFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawTraceEvent {
+            node: FactId,
+            event_kind: String,
+            value: String,
+        }
+
+        let raw = RawTraceEvent::deserialize(deserializer)?;
+        Self::try_new(raw.node, raw.event_kind, raw.value).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DataFlowFact {
     source: FactId,
     target: FactId,
@@ -3501,11 +4996,19 @@ pub struct DataFlowFact {
 
 impl DataFlowFact {
     pub fn new(source: FactId, target: FactId, kind: impl Into<String>) -> Self {
-        Self {
-            source,
-            target,
-            kind: kind.into(),
-        }
+        Self::try_new(source, target, kind).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        source: FactId,
+        target: FactId,
+        kind: impl Into<String>,
+    ) -> Result<Self, ShapeFactTextError> {
+        Ok(Self {
+            source: validated_shape_node_id(source)?,
+            target: validated_shape_node_id(target)?,
+            kind: non_empty_shape_fact_text("data flow kind", kind)?,
+        })
     }
 
     pub const fn source(&self) -> FactId {
@@ -3518,6 +5021,24 @@ impl DataFlowFact {
 
     pub fn kind(&self) -> &str {
         &self.kind
+    }
+}
+
+impl<'de> Deserialize<'de> for DataFlowFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDataFlow {
+            source: FactId,
+            target: FactId,
+            kind: String,
+        }
+
+        let raw = RawDataFlow::deserialize(deserializer)?;
+        Self::try_new(raw.source, raw.target, raw.kind).map_err(de::Error::custom)
     }
 }
 
@@ -3575,13 +5096,38 @@ impl ShapeHashFactKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ShapeHashFact {
     node: Option<FactId>,
     scope: ShapeHashScope,
     dimension: ShapeDimension,
     digest_hex: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShapeHashFactError {
+    InvalidDigest { digest_hex: String },
+    WrongNamespace(FactNamespaceError),
+}
+
+impl fmt::Display for ShapeHashFactError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDigest { digest_hex } => write!(
+                f,
+                "shape hash digest `{digest_hex}` must be canonical 16-character lowercase hex"
+            ),
+            Self::WrongNamespace(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ShapeHashFactError {}
+
+impl From<FactNamespaceError> for ShapeHashFactError {
+    fn from(err: FactNamespaceError) -> Self {
+        Self::WrongNamespace(err)
+    }
 }
 
 impl ShapeHashFact {
@@ -3591,12 +5137,29 @@ impl ShapeHashFact {
         dimension: ShapeDimension,
         digest_hex: impl Into<String>,
     ) -> Self {
-        Self {
+        Self::try_new(node, scope, dimension, digest_hex).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_new(
+        node: Option<FactId>,
+        scope: ShapeHashScope,
+        dimension: ShapeDimension,
+        digest_hex: impl Into<String>,
+    ) -> Result<Self, ShapeHashFactError> {
+        let digest_hex = digest_hex.into();
+        if !is_canonical_shape_hash_digest(&digest_hex) {
+            return Err(ShapeHashFactError::InvalidDigest { digest_hex });
+        }
+        let node = match node {
+            Some(node) => Some(validated_fact_namespace(node, FactNamespace::ShapeNode)?),
+            None => None,
+        };
+        Ok(Self {
             node,
             scope,
             dimension,
-            digest_hex: digest_hex.into(),
-        }
+            digest_hex,
+        })
     }
 
     pub const fn node(&self) -> Option<FactId> {
@@ -3613,6 +5176,25 @@ impl ShapeHashFact {
 
     pub fn digest_hex(&self) -> &str {
         &self.digest_hex
+    }
+}
+
+impl<'de> Deserialize<'de> for ShapeHashFact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawShapeHash {
+            node: Option<FactId>,
+            scope: ShapeHashScope,
+            dimension: ShapeDimension,
+            digest_hex: String,
+        }
+
+        let raw = RawShapeHash::deserialize(deserializer)?;
+        Self::try_new(raw.node, raw.scope, raw.dimension, raw.digest_hex).map_err(de::Error::custom)
     }
 }
 
@@ -3776,119 +5358,184 @@ pub fn shape_graph_facts(graph: &ShapeGraph) -> TypedFactSet {
 }
 
 fn typed_fact_relation_export(facts: &TypedFactSet) -> TypedFactRelationSet {
-    let mut origin_node_rows = Vec::new();
-    let mut origin_link_rows = Vec::new();
-    let mut source_span_rows = Vec::new();
-    let mut shape_node_rows = Vec::new();
-    let mut shape_field_rows = Vec::new();
-    let mut shape_child_rows = Vec::new();
-    let mut shape_edge_rows = Vec::new();
-    let mut trace_event_rows = Vec::new();
-    let mut data_flow_rows = Vec::new();
-    let mut shape_hash_rows = Vec::new();
+    let mut rows = TypedFactRelationRows::new();
 
     for fact in facts.facts() {
-        match fact {
-            TypedFact::OriginNode(fact) => origin_node_rows.push(vec![
-                fact_id_cell(fact.id()),
-                fact.key().kind().as_str().to_string(),
-                fact.key().owner_key().to_string(),
-                fact.key().local_key().to_string(),
-            ]),
-            TypedFact::OriginLink(fact) => origin_link_rows.push(vec![
-                fact_id_cell(fact.from()),
-                fact_id_cell(fact.to()),
-                fact.kind().as_str().to_string(),
-            ]),
-            TypedFact::SourceSpan(fact) => source_span_rows.push(vec![
-                fact_id_cell(fact.origin()),
-                fact.span_kind().as_str().to_string(),
-                fact.file().to_string(),
-                fact.start_byte().to_string(),
-                fact.end_byte().to_string(),
-                fact.start_line().to_string(),
-                fact.start_col().to_string(),
-                fact.end_line().to_string(),
-                fact.end_col().to_string(),
-            ]),
-            TypedFact::ShapeNode(fact) => shape_node_rows.push(vec![
-                fact_id_cell(fact.id()),
-                fact.source_id().as_u32().to_string(),
-                fact.stable_key().to_string(),
-                fact.kind().to_string(),
-            ]),
-            TypedFact::ShapeField(fact) => shape_field_rows.push(vec![
-                fact_id_cell(fact.node()),
-                fact.dimension().as_str().to_string(),
-                fact.name().to_string(),
-                fact.value().to_string(),
-            ]),
-            TypedFact::ShapeChild(fact) => shape_child_rows.push(vec![
-                fact_id_cell(fact.parent()),
-                fact_id_cell(fact.child()),
-                fact.label().to_string(),
-                fact.order().to_string(),
-            ]),
-            TypedFact::ShapeEdge(fact) => shape_edge_rows.push(vec![
-                fact_id_cell(fact.from()),
-                fact_id_cell(fact.to()),
-                fact.label().to_string(),
-            ]),
-            TypedFact::TraceEvent(fact) => trace_event_rows.push(vec![
-                fact_id_cell(fact.node()),
-                fact.event_kind().to_string(),
-                fact.value().to_string(),
-            ]),
-            TypedFact::DataFlow(fact) => data_flow_rows.push(vec![
-                fact_id_cell(fact.source()),
-                fact_id_cell(fact.target()),
-                fact.kind().to_string(),
-            ]),
-            TypedFact::ShapeHash(fact) => shape_hash_rows.push(vec![
-                shape_hash_node_cell(fact.node()),
-                fact.scope().as_str().to_string(),
-                fact.dimension().as_str().to_string(),
-                fact.digest_hex().to_string(),
-            ]),
+        rows.push(fact.relation_row());
+    }
+
+    rows.into_relation_set()
+}
+
+impl TypedFact {
+    fn relation_row(&self) -> TypedFactRelationRowExport {
+        match self {
+            Self::OriginNode(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::OriginNode,
+                vec![
+                    fact_id_cell(fact.id()),
+                    fact.key().kind().as_str().to_string(),
+                    fact.key().owner_key().to_string(),
+                    fact.key().local_key().to_string(),
+                ],
+            ),
+            Self::OriginLink(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::OriginLink,
+                vec![
+                    fact_id_cell(fact.from()),
+                    fact_id_cell(fact.to()),
+                    fact.kind().as_str().to_string(),
+                ],
+            ),
+            Self::SourceSpan(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::SourceSpan,
+                vec![
+                    fact_id_cell(fact.origin()),
+                    fact.span_kind().as_str().to_string(),
+                    fact.file().to_string(),
+                    fact.start_byte().to_string(),
+                    fact.end_byte().to_string(),
+                    fact.start_line().to_string(),
+                    fact.start_col().to_string(),
+                    fact.end_line().to_string(),
+                    fact.end_col().to_string(),
+                ],
+            ),
+            Self::ShapeNode(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::ShapeNode,
+                vec![
+                    fact_id_cell(fact.id()),
+                    fact.source_id().as_u32().to_string(),
+                    fact.stable_key().to_string(),
+                    fact.kind().to_string(),
+                ],
+            ),
+            Self::ShapeField(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::ShapeField,
+                vec![
+                    fact_id_cell(fact.node()),
+                    fact.dimension().as_str().to_string(),
+                    fact.name().to_string(),
+                    fact.value().to_string(),
+                ],
+            ),
+            Self::ShapeChild(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::ShapeChild,
+                vec![
+                    fact_id_cell(fact.parent()),
+                    fact_id_cell(fact.child()),
+                    fact.label().to_string(),
+                    fact.order().to_string(),
+                ],
+            ),
+            Self::ShapeEdge(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::ShapeEdge,
+                vec![
+                    fact_id_cell(fact.from()),
+                    fact_id_cell(fact.to()),
+                    fact.label().to_string(),
+                ],
+            ),
+            Self::TraceEvent(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::TraceEvent,
+                vec![
+                    fact_id_cell(fact.node()),
+                    fact.event_kind().to_string(),
+                    fact.value().to_string(),
+                ],
+            ),
+            Self::DataFlow(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::DataFlow,
+                vec![
+                    fact_id_cell(fact.source()),
+                    fact_id_cell(fact.target()),
+                    fact.kind().to_string(),
+                ],
+            ),
+            Self::ShapeHash(fact) => TypedFactRelationRowExport::new(
+                TypedFactRelationName::ShapeHash,
+                vec![
+                    shape_hash_node_cell(fact.node()),
+                    fact.scope().as_str().to_string(),
+                    fact.dimension().as_str().to_string(),
+                    fact.digest_hex().to_string(),
+                ],
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TypedFactRelationRowExport {
+    relation: TypedFactRelationName,
+    cells: Vec<String>,
+}
+
+impl TypedFactRelationRowExport {
+    fn new(relation: TypedFactRelationName, cells: Vec<String>) -> Self {
+        let expected_width = relation.schema().columns().len();
+        assert_eq!(
+            cells.len(),
+            expected_width,
+            "typed fact relation `{}` row should match declared schema width",
+            relation.as_str()
+        );
+
+        Self { relation, cells }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TypedFactRelationRows {
+    rows_by_relation: BTreeMap<TypedFactRelationName, Vec<Vec<String>>>,
+}
+
+impl TypedFactRelationRows {
+    fn new() -> Self {
+        Self {
+            rows_by_relation: typed_fact_relation_schemas()
+                .iter()
+                .map(|schema| (schema.name(), Vec::new()))
+                .collect(),
         }
     }
 
-    for rows in [
-        &mut origin_node_rows,
-        &mut origin_link_rows,
-        &mut source_span_rows,
-        &mut shape_node_rows,
-        &mut shape_field_rows,
-        &mut shape_child_rows,
-        &mut shape_edge_rows,
-        &mut trace_event_rows,
-        &mut data_flow_rows,
-        &mut shape_hash_rows,
-    ] {
-        rows.sort();
+    fn push(&mut self, row: TypedFactRelationRowExport) {
+        self.rows_by_relation
+            .get_mut(&row.relation)
+            .expect("typed fact relation rows should be initialized from declared schemas")
+            .push(row.cells);
     }
 
-    TypedFactRelationSet::new(vec![
-        typed_fact_relation_from_schema("origin_node", origin_node_rows),
-        typed_fact_relation_from_schema("origin_link", origin_link_rows),
-        typed_fact_relation_from_schema("source_span", source_span_rows),
-        typed_fact_relation_from_schema("shape_node", shape_node_rows),
-        typed_fact_relation_from_schema("shape_field", shape_field_rows),
-        typed_fact_relation_from_schema("shape_child", shape_child_rows),
-        typed_fact_relation_from_schema("shape_edge", shape_edge_rows),
-        typed_fact_relation_from_schema("trace_event", trace_event_rows),
-        typed_fact_relation_from_schema("data_flow", data_flow_rows),
-        typed_fact_relation_from_schema("shape_hash", shape_hash_rows),
-    ])
+    fn into_relation_set(mut self) -> TypedFactRelationSet {
+        let relations = typed_fact_relation_schemas()
+            .iter()
+            .map(|schema| {
+                let mut rows = self
+                    .rows_by_relation
+                    .remove(&schema.name())
+                    .expect("typed fact relation rows should contain every declared schema");
+                rows.sort();
+                typed_fact_relation_from_schema(schema.name(), rows)
+            })
+            .collect::<Vec<_>>();
+
+        debug_assert!(
+            self.rows_by_relation.is_empty(),
+            "typed fact relation rows should not contain undeclared schemas"
+        );
+
+        TypedFactRelationSet::new(relations)
+            .expect("typed fact relation export should produce a complete declared schema")
+    }
 }
 
 fn typed_fact_relation_from_schema(
-    name: &'static str,
+    name: TypedFactRelationName,
     rows: Vec<Vec<String>>,
 ) -> TypedFactRelation {
-    let columns = typed_fact_relation_columns(name)
-        .expect("typed fact relation export should use declared relation schemas");
-    TypedFactRelation::new(name, columns.iter().copied(), rows)
+    TypedFactRelation::new(name, rows)
+        .expect("typed fact relation export should use declared relation schemas")
 }
 
 fn fact_id_cell(id: FactId) -> String {
@@ -3906,15 +5553,23 @@ mod tests {
 
     use crate::{
         facts::{
-            FactId, FactIndexError, FactNamespace, OriginFactIndex, OriginLinkFact,
-            OriginLinkFact as OriginLinkFactRow, OriginNodeFact, OwnedTypedFactSetExport,
-            ShapeFactIndex, ShapeHashFactKey, ShapeHashScope, SourceSpanExport,
-            SourceSpanFileCount, SourceSpanKind, TypedFact, TypedFactRelationCount,
-            TypedFactRelationError, TypedFactRelationIndex, TypedFactRelationSet, TypedFactSet,
-            origin_graph_facts, shape_graph_facts, try_origin_graph_facts,
+            DataFlowFact, FactId, FactIndexError, FactNamespace, FactNamespaceError,
+            OriginFactIndex, OriginLinkFact, OriginLinkFact as OriginLinkFactRow, OriginNodeFact,
+            OriginPath, OriginPathError, OriginPathWitnessExport, OriginPathWitnessExportError,
+            OriginReachabilitySummary, OriginReachabilitySummaryError,
+            OriginReachableKindPairSummary, OriginSourcePathWitnessExport,
+            OriginSourcePathWitnessExportError, OwnedTypedFactSetExport, ShapeChildFact,
+            ShapeEdgeFact, ShapeFactIndex, ShapeFactTextError, ShapeFieldFact, ShapeHashFact,
+            ShapeHashFactError, ShapeHashFactKey, ShapeHashScope, ShapeNodeFact, SourceSpanExport,
+            SourceSpanExportError, SourceSpanFact, SourceSpanFactBuildError, SourceSpanFileCount,
+            SourceSpanFileCountError, SourceSpanKind, TraceEventFact, TypedFact,
+            TypedFactRelationColumnName, TypedFactRelationCount, TypedFactRelationCountError,
+            TypedFactRelationError, TypedFactRelationIndex, TypedFactRelationName,
+            TypedFactRelationSet, TypedFactSet, origin_graph_facts, shape_graph_facts,
+            try_origin_graph_facts,
         },
         origin::{OriginExportKey, OriginExportKind, OriginGraph, OriginLinkKind},
-        shape::{ShapeDimension, ShapeGraph},
+        shape::{ShapeDimension, ShapeGraph, ShapeNodeId},
     };
 
     fn relation_rows_mut<'a>(
@@ -3938,13 +5593,15 @@ mod tests {
             .to_string()
     }
 
+    fn origin_key(kind: OriginExportKind, owner: &str, local: &str) -> OriginExportKey {
+        OriginExportKey::try_from_raw_parts(kind, owner, local).unwrap()
+    }
+
     #[test]
     fn origin_graph_export_uses_typed_namespaced_ids() {
-        let hir = OriginExportKey::new(OriginExportKind::HirExpr, "body:a", "expr:0");
-        let first_stmt =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:f", "bb0:stmt0");
-        let second_stmt =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:f", "bb0:stmt1");
+        let hir = origin_key(OriginExportKind::HirExpr, "body:a", "expr:0");
+        let first_stmt = origin_key(OriginExportKind::RuntimeStmt, "runtime:f", "bb0:stmt0");
+        let second_stmt = origin_key(OriginExportKind::RuntimeStmt, "runtime:f", "bb0:stmt1");
         let mut graph = OriginGraph::new();
         graph.push(hir.clone(), first_stmt.clone(), OriginLinkKind::Lowered);
         graph.push(hir.clone(), second_stmt.clone(), OriginLinkKind::Lowered);
@@ -3983,8 +5640,8 @@ mod tests {
 
     #[test]
     fn fallible_origin_graph_export_propagates_key_errors() {
-        let hir = OriginExportKey::new(OriginExportKind::HirExpr, "body:a", "expr:0");
-        let stmt = OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:f", "bb0:stmt0");
+        let hir = origin_key(OriginExportKind::HirExpr, "body:a", "expr:0");
+        let stmt = origin_key(OriginExportKind::RuntimeStmt, "runtime:f", "bb0:stmt0");
         let mut graph = OriginGraph::new();
         graph.push(hir.clone(), stmt, OriginLinkKind::Lowered);
 
@@ -4002,9 +5659,8 @@ mod tests {
 
     #[test]
     fn typed_fact_json_roundtrips_stable_origin_and_shape_keys() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic.clone(), runtime.clone(), OriginLinkKind::Lowered);
 
@@ -4063,7 +5719,7 @@ mod tests {
     #[should_panic(expected = "source span file must not be empty")]
     fn source_span_export_rejects_empty_files() {
         SourceSpanExport::new(
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::BytecodePc,
                 "object:Foo:section:runtime",
                 "pc:0..4",
@@ -4083,7 +5739,7 @@ mod tests {
     #[should_panic(expected = "source span byte range must be ordered")]
     fn source_span_export_rejects_inverted_byte_ranges() {
         SourceSpanExport::new(
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::BytecodePc,
                 "object:Foo:section:runtime",
                 "pc:0..4",
@@ -4103,7 +5759,7 @@ mod tests {
     #[should_panic(expected = "source span line/column range must be ordered")]
     fn source_span_export_rejects_inverted_line_column_ranges() {
         SourceSpanExport::new(
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::BytecodePc,
                 "object:Foo:section:runtime",
                 "pc:0..4",
@@ -4120,10 +5776,88 @@ mod tests {
     }
 
     #[test]
+    fn source_span_export_json_roundtrips() {
+        let span = SourceSpanExport::new(
+            origin_key(
+                OriginExportKind::BytecodePc,
+                "object:Foo:section:runtime",
+                "pc:0..4",
+            ),
+            SourceSpanKind::Original,
+            "file:///roundtrip.fe",
+            0,
+            4,
+            1,
+            0,
+            1,
+            4,
+        );
+
+        let json = serde_json::to_string(&span).expect("source span should serialize");
+        let decoded =
+            serde_json::from_str::<SourceSpanExport>(&json).expect("source span should decode");
+
+        assert_eq!(decoded, span);
+    }
+
+    #[test]
+    fn source_span_export_json_rejects_empty_files() {
+        let json = r#"{
+            "origin_key": {
+                "kind": "bytecode.pc",
+                "owner_key": "object:Foo:section:runtime",
+                "local_key": "pc:0..4"
+            },
+            "span_kind": "original",
+            "file": "",
+            "start_byte": 0,
+            "end_byte": 4,
+            "start_line": 1,
+            "start_col": 0,
+            "end_line": 1,
+            "end_col": 4
+        }"#;
+        let err = serde_json::from_str::<SourceSpanExport>(json)
+            .expect_err("source span JSON should reject empty files");
+
+        assert!(
+            err.to_string()
+                .contains("source span file must not be empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn source_span_export_json_rejects_inverted_ranges() {
+        let json = r#"{
+            "origin_key": {
+                "kind": "bytecode.pc",
+                "owner_key": "object:Foo:section:runtime",
+                "local_key": "pc:0..4"
+            },
+            "span_kind": "original",
+            "file": "file:///bad-range.fe",
+            "start_byte": 4,
+            "end_byte": 0,
+            "start_line": 1,
+            "start_col": 0,
+            "end_line": 1,
+            "end_col": 4
+        }"#;
+        let err = serde_json::from_str::<SourceSpanExport>(json)
+            .expect_err("source span JSON should reject inverted byte ranges");
+
+        assert!(
+            err.to_string()
+                .contains("source span byte range must be ordered: 4..0"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn typed_fact_relation_export_has_engine_agnostic_tables() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic.clone(), runtime.clone(), OriginLinkKind::Lowered);
         let origin_facts = origin_graph_facts(&origin_graph, Clone::clone)
@@ -4147,7 +5881,7 @@ mod tests {
         );
         assert_eq!(
             origin_relations
-                .relation("origin_node")
+                .relation(TypedFactRelationName::OriginNode)
                 .expect("origin_node relation")
                 .columns()
                 .iter()
@@ -4157,14 +5891,14 @@ mod tests {
         );
         assert_eq!(
             origin_relations
-                .relation("origin_link")
+                .relation(TypedFactRelationName::OriginLink)
                 .expect("origin_link relation")
                 .row_count(),
             1
         );
         assert!(
             origin_relations
-                .relation("source_span")
+                .relation(TypedFactRelationName::SourceSpan)
                 .expect("source_span relation")
                 .rows()
                 .iter()
@@ -4186,7 +5920,7 @@ mod tests {
         let shape_relations = shape_graph_facts(&shape_graph).relation_export();
         assert!(
             shape_relations
-                .relation("trace_event")
+                .relation(TypedFactRelationName::TraceEvent)
                 .expect("trace_event relation")
                 .rows()
                 .iter()
@@ -4194,7 +5928,7 @@ mod tests {
         );
         assert!(
             shape_relations
-                .relation("data_flow")
+                .relation(TypedFactRelationName::DataFlow)
                 .expect("data_flow relation")
                 .rows()
                 .iter()
@@ -4202,7 +5936,7 @@ mod tests {
         );
         assert!(
             shape_relations
-                .relation("shape_hash")
+                .relation(TypedFactRelationName::ShapeHash)
                 .expect("shape_hash relation")
                 .rows()
                 .iter()
@@ -4211,16 +5945,68 @@ mod tests {
     }
 
     #[test]
+    fn typed_fact_relation_schema_descriptor_exposes_wire_names_and_columns() {
+        let schema = TypedFactRelationName::OriginNode.schema();
+
+        assert_eq!(schema.name(), TypedFactRelationName::OriginNode);
+        assert_eq!(
+            schema.column_names().collect::<Vec<_>>(),
+            vec!["id", "kind", "owner_key", "local_key"]
+        );
+        assert_eq!(
+            TypedFactRelationName::OriginLink
+                .column_index(TypedFactRelationColumnName::To)
+                .expect("known column should have an index"),
+            1
+        );
+        assert_eq!(
+            TypedFactRelationName::OriginLink
+                .column_index(TypedFactRelationColumnName::File)
+                .expect_err("mismatched column should fail closed"),
+            TypedFactRelationError::UnknownColumn {
+                relation: "origin_link".to_string(),
+                column: "file".to_string(),
+            }
+        );
+        assert!(
+            super::typed_fact_relation_schemas()
+                .iter()
+                .any(|schema| schema.name() == TypedFactRelationName::ShapeHash)
+        );
+
+        let relation = super::TypedFactRelation::new(TypedFactRelationName::OriginLink, Vec::new())
+            .expect("declared relation should construct from schema");
+        assert_eq!(relation.relation_name(), TypedFactRelationName::OriginLink);
+        assert_eq!(relation.name(), "origin_link");
+        assert_eq!(
+            relation.typed_columns(),
+            &[
+                TypedFactRelationColumnName::From,
+                TypedFactRelationColumnName::To,
+                TypedFactRelationColumnName::Kind,
+            ]
+        );
+        assert_eq!(
+            relation
+                .columns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["from", "to", "kind"]
+        );
+    }
+
+    #[test]
     fn typed_fact_relation_export_columns_follow_declared_schema() {
         let relations = TypedFactSet::new(Vec::new()).relation_export();
         assert_eq!(
             relations.relations().len(),
-            super::TYPED_FACT_RELATION_SCHEMAS.len()
+            super::typed_fact_relation_schemas().len()
         );
 
-        for (name, expected_columns) in super::TYPED_FACT_RELATION_SCHEMAS {
+        for schema in super::typed_fact_relation_schemas() {
             let relation = relations
-                .relation(name)
+                .relation(schema.name())
                 .expect("declared relation should be exported");
             assert_eq!(
                 relation
@@ -4228,17 +6014,16 @@ mod tests {
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
-                *expected_columns
+                schema.column_names().collect::<Vec<_>>()
             );
         }
     }
 
     #[test]
     fn typed_fact_relation_export_is_deterministic_for_fact_order() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
-        let pc = OriginExportKey::new(
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let pc = origin_key(
             OriginExportKind::BytecodePc,
             "object:a:section:runtime",
             "pc:0..4",
@@ -4295,9 +6080,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_export_roundtrips_schema() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let relations = origin_graph_facts(&origin_graph, Clone::clone).relation_export();
@@ -4308,7 +6092,7 @@ mod tests {
         assert_eq!(decoded, relations);
         assert_eq!(
             decoded
-                .relation("origin_link")
+                .relation(TypedFactRelationName::OriginLink)
                 .expect("origin_link relation")
                 .row_count(),
             1
@@ -4317,9 +6101,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_answers_exact_origin_join_oracle() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime.clone(), OriginLinkKind::Lowered);
         let origin_facts = origin_graph_facts(&origin_graph, Clone::clone)
@@ -4342,49 +6125,90 @@ mod tests {
         let index = TypedFactRelationIndex::new(&decoded_relations)
             .expect("decoded relations should build a query index");
 
-        assert_eq!(index.row_count("origin_link").expect("origin links"), 1);
+        assert_eq!(
+            index
+                .row_count(TypedFactRelationName::OriginLink)
+                .expect("origin links"),
+            1
+        );
         let semantic_rows = index
-            .rows_where("origin_node", "kind", "semantic")
+            .rows_where(
+                TypedFactRelationName::OriginNode,
+                TypedFactRelationColumnName::Kind,
+                "semantic",
+            )
             .expect("semantic rows should query");
         let runtime_rows = index
-            .rows_where("origin_node", "kind", "runtime.stmt")
+            .rows_where(
+                TypedFactRelationName::OriginNode,
+                TypedFactRelationColumnName::Kind,
+                "runtime.stmt",
+            )
             .expect("runtime rows should query");
         assert_eq!(semantic_rows.len(), 1);
         assert_eq!(runtime_rows.len(), 1);
-        let semantic_id = semantic_rows[0].cell("id").expect("semantic id");
-        let runtime_id = runtime_rows[0].cell("id").expect("runtime id");
+        assert_eq!(
+            semantic_rows[0].relation(),
+            TypedFactRelationName::OriginNode
+        );
+        assert_eq!(semantic_rows[0].relation_name(), "origin_node");
+        let semantic_id = semantic_rows[0]
+            .cell(TypedFactRelationColumnName::Id)
+            .expect("semantic id");
+        let runtime_id = runtime_rows[0]
+            .cell(TypedFactRelationColumnName::Id)
+            .expect("runtime id");
 
         let lowered_edges = index
-            .rows_where("origin_link", "kind", "lowered")
+            .rows_where(
+                TypedFactRelationName::OriginLink,
+                TypedFactRelationColumnName::Kind,
+                "lowered",
+            )
             .expect("lowered edges should query");
         assert_eq!(lowered_edges.len(), 1);
         assert_eq!(
-            lowered_edges[0].cell("from").expect("edge from"),
+            lowered_edges[0]
+                .cell(TypedFactRelationColumnName::From)
+                .expect("edge from"),
             semantic_id
         );
-        assert_eq!(lowered_edges[0].cell("to").expect("edge to"), runtime_id);
+        assert_eq!(
+            lowered_edges[0]
+                .cell(TypedFactRelationColumnName::To)
+                .expect("edge to"),
+            runtime_id
+        );
 
         let source_spans = index
-            .rows_where("source_span", "origin", runtime_id)
+            .rows_where(
+                TypedFactRelationName::SourceSpan,
+                TypedFactRelationColumnName::Origin,
+                runtime_id,
+            )
             .expect("source spans should query by origin");
         assert_eq!(source_spans.len(), 1);
         assert_eq!(
-            source_spans[0].cell("file").expect("span file"),
+            source_spans[0]
+                .cell(TypedFactRelationColumnName::File)
+                .expect("span file"),
             "file:///relation_index.fe"
         );
         assert_eq!(
-            source_spans[0].cell("span_kind").expect("span kind"),
+            source_spans[0]
+                .cell(TypedFactRelationColumnName::SpanKind)
+                .expect("span kind"),
             "original"
         );
     }
 
     #[test]
     fn typed_fact_relation_index_counts_source_span_files() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
         let first_runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+            origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let second_runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:1");
+            origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:1");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(
             semantic.clone(),
@@ -4455,9 +6279,9 @@ mod tests {
                 .relation_counts()
                 .expect("relation counts should query"),
             vec![
-                TypedFactRelationCount::new("origin_node", 3),
-                TypedFactRelationCount::new("origin_link", 2),
-                TypedFactRelationCount::new("source_span", 3),
+                TypedFactRelationCount::new(TypedFactRelationName::OriginNode, 3),
+                TypedFactRelationCount::new(TypedFactRelationName::OriginLink, 2),
+                TypedFactRelationCount::new(TypedFactRelationName::SourceSpan, 3),
             ]
         );
         assert_eq!(
@@ -4491,6 +6315,462 @@ mod tests {
                 .expect("relation stable-key path should query"),
             fact_index.path_export_between_keys(&semantic, &second_runtime)
         );
+
+        let source_paths = index
+            .representative_source_path_exports_with_priority(
+                [(OriginExportKind::Semantic, OriginExportKind::RuntimeStmt)],
+                4,
+            )
+            .expect("relation source path witnesses should query");
+        assert_eq!(source_paths.len(), 1);
+        let source_path = &source_paths[0];
+        assert_eq!(source_path.path().from_kind(), OriginExportKind::Semantic);
+        assert_eq!(source_path.path().to_kind(), OriginExportKind::RuntimeStmt);
+        assert_eq!(
+            source_path.source_span().origin_key().kind(),
+            OriginExportKind::RuntimeStmt
+        );
+        assert!(source_path.source_span().file().starts_with("file:///"));
+        assert_eq!(
+            Some(source_path.path()),
+            fact_index
+                .path_export_between_keys(&semantic, source_path.source_span().origin_key())
+                .as_ref()
+        );
+        assert!(
+            index
+                .representative_source_path_exports_with_priority(
+                    [(OriginExportKind::Semantic, OriginExportKind::RuntimeStmt)],
+                    0,
+                )
+                .expect("zero limit source path witness query should succeed")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn origin_fact_ids_roundtrip_through_fail_closed_namespaces() {
+        let origin = FactId::new(FactNamespace::OriginNode, 0);
+        let runtime = FactId::new(FactNamespace::OriginNode, 1);
+        let shape = FactId::new(FactNamespace::ShapeNode, 0);
+        let key = origin_key(OriginExportKind::Semantic, "semantic:contract", "expr:0");
+        let node = OriginNodeFact::new(origin, key.clone());
+        let json = serde_json::to_string(&node).expect("origin node should serialize");
+        let decoded =
+            serde_json::from_str::<OriginNodeFact>(&json).expect("origin node should decode");
+
+        assert_eq!(decoded, node);
+        assert_eq!(
+            OriginNodeFact::try_new(shape, key),
+            Err(FactNamespaceError::WrongNamespace {
+                id: shape,
+                expected: FactNamespace::OriginNode,
+            })
+        );
+        assert_eq!(
+            OriginLinkFact::try_new(origin, shape, OriginLinkKind::Lowered),
+            Err(FactNamespaceError::WrongNamespace {
+                id: shape,
+                expected: FactNamespace::OriginNode,
+            })
+        );
+        assert!(OriginLinkFact::try_new(origin, runtime, OriginLinkKind::Lowered).is_ok());
+
+        let wrong_link_namespace = r#"{
+            "from": {"namespace": "origin_node", "ordinal": 0},
+            "to": {"namespace": "shape_node", "ordinal": 0},
+            "kind": "lowered"
+        }"#;
+        let err = serde_json::from_str::<OriginLinkFact>(wrong_link_namespace)
+            .expect_err("origin link facts should reject non-origin endpoints");
+        assert!(err.to_string().contains("expected origin_node"), "{err}");
+
+        let wrong_typed_fact_namespace = r#"{
+            "schema_version": 1,
+            "facts": [{
+                "type": "origin_node",
+                "id": {"namespace": "shape_node", "ordinal": 0},
+                "key": {
+                    "kind": "semantic",
+                    "owner_key": "semantic:contract",
+                    "local_key": "expr:0"
+                }
+            }]
+        }"#;
+        let err = serde_json::from_str::<OwnedTypedFactSetExport>(wrong_typed_fact_namespace)
+            .expect_err("typed origin node facts should reject non-origin ids");
+        assert!(
+            err.to_string()
+                .contains("fact id shape_node:0 has namespace shape_node, expected origin_node"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn source_span_fact_roundtrips_through_fail_closed_schema() {
+        let origin = FactId::new(FactNamespace::OriginNode, 0);
+        let shape = FactId::new(FactNamespace::ShapeNode, 0);
+        let span = SourceSpanFact::new(
+            origin,
+            SourceSpanKind::Original,
+            "file:///a.fe",
+            0,
+            4,
+            0,
+            0,
+            0,
+            4,
+        );
+        let json = serde_json::to_string(&span).expect("source span fact should serialize");
+        let decoded =
+            serde_json::from_str::<SourceSpanFact>(&json).expect("source span fact should decode");
+        assert_eq!(decoded, span);
+
+        assert_eq!(
+            SourceSpanFact::try_new(origin, SourceSpanKind::Original, "", 0, 4, 0, 0, 0, 4),
+            Err(SourceSpanFactBuildError::InvalidSpan(
+                SourceSpanExportError::EmptyFile
+            ))
+        );
+        assert_eq!(
+            SourceSpanFact::try_new(
+                shape,
+                SourceSpanKind::Original,
+                "file:///a.fe",
+                0,
+                4,
+                0,
+                0,
+                0,
+                4
+            ),
+            Err(SourceSpanFactBuildError::WrongNamespace(
+                FactNamespaceError::WrongNamespace {
+                    id: shape,
+                    expected: FactNamespace::OriginNode,
+                }
+            ))
+        );
+        assert_eq!(
+            SourceSpanFact::try_new(
+                origin,
+                SourceSpanKind::Original,
+                "file:///a.fe",
+                4,
+                0,
+                0,
+                0,
+                0,
+                4,
+            ),
+            Err(SourceSpanFactBuildError::InvalidSpan(
+                SourceSpanExportError::InvalidByteRange {
+                    start_byte: 4,
+                    end_byte: 0,
+                }
+            ))
+        );
+        assert_eq!(
+            SourceSpanFact::try_new(
+                origin,
+                SourceSpanKind::Original,
+                "file:///a.fe",
+                0,
+                4,
+                1,
+                0,
+                0,
+                4,
+            ),
+            Err(SourceSpanFactBuildError::InvalidSpan(
+                SourceSpanExportError::InvalidPositionRange {
+                    start_line: 1,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 4,
+                }
+            ))
+        );
+
+        let unknown_field = r#"{
+            "origin": {"namespace": "origin_node", "ordinal": 0},
+            "span_kind": "original",
+            "file": "file:///a.fe",
+            "start_byte": 0,
+            "end_byte": 4,
+            "start_line": 0,
+            "start_col": 0,
+            "end_line": 0,
+            "end_col": 4,
+            "extra": true
+        }"#;
+        let err = serde_json::from_str::<SourceSpanFact>(unknown_field)
+            .expect_err("source span facts should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn source_span_file_count_roundtrips_through_fail_closed_schema() {
+        let count = SourceSpanFileCount::new("file:///a.fe", 2);
+        let json = serde_json::to_string(&count).expect("source span count should serialize");
+        let decoded =
+            serde_json::from_str::<SourceSpanFileCount>(&json).expect("count should decode");
+
+        assert_eq!(decoded, count);
+        assert_eq!(
+            SourceSpanFileCount::try_new("", 1),
+            Err(SourceSpanFileCountError::EmptyFile)
+        );
+        assert_eq!(
+            SourceSpanFileCount::try_new("file:///a.fe", 0),
+            Err(SourceSpanFileCountError::ZeroSpans)
+        );
+
+        let empty_file = r#"{"file":"","spans":1}"#;
+        let err = serde_json::from_str::<SourceSpanFileCount>(empty_file)
+            .expect_err("empty source-span file counts should fail closed");
+        assert!(err.to_string().contains("file must not be empty"));
+
+        let zero_spans = r#"{"file":"file:///a.fe","spans":0}"#;
+        let err = serde_json::from_str::<SourceSpanFileCount>(zero_spans)
+            .expect_err("zero-span file counts should fail closed");
+        assert!(err.to_string().contains("greater than zero"));
+
+        let unknown_field = r#"{"file":"file:///a.fe","spans":1,"extra":true}"#;
+        let err = serde_json::from_str::<SourceSpanFileCount>(unknown_field)
+            .expect_err("source-span file counts should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn typed_fact_relation_count_roundtrips_through_fail_closed_schema() {
+        let count = TypedFactRelationCount::new(TypedFactRelationName::OriginNode, 2);
+        let json = serde_json::to_string(&count).expect("relation count should serialize");
+        assert_eq!(json, r#"{"relation":"origin_node","rows":2}"#);
+        let decoded =
+            serde_json::from_str::<TypedFactRelationCount>(&json).expect("count should decode");
+
+        assert_eq!(decoded, count);
+        assert_eq!(
+            TypedFactRelationCount::try_new(TypedFactRelationName::OriginNode, 0),
+            Err(TypedFactRelationCountError::ZeroRows)
+        );
+
+        let zero_rows = r#"{"relation":"origin_node","rows":0}"#;
+        let err = serde_json::from_str::<TypedFactRelationCount>(zero_rows)
+            .expect_err("zero-row relation counts should fail closed");
+        assert!(err.to_string().contains("greater than zero"));
+
+        let unknown_relation = r#"{"relation":"unknown_relation","rows":1}"#;
+        serde_json::from_str::<TypedFactRelationCount>(unknown_relation)
+            .expect_err("unknown relation-count names should fail closed");
+
+        let unknown_field = r#"{"relation":"origin_node","rows":1,"extra":true}"#;
+        let err = serde_json::from_str::<TypedFactRelationCount>(unknown_field)
+            .expect_err("relation counts should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn shape_fact_text_fields_roundtrip_through_fail_closed_schema() {
+        let node = FactId::new(FactNamespace::ShapeNode, 0);
+        let child = FactId::new(FactNamespace::ShapeNode, 1);
+        let origin = FactId::new(FactNamespace::OriginNode, 0);
+        let shape_node = ShapeNodeFact::new(node, ShapeNodeId::from_u32(0), "root", "block");
+        let json = serde_json::to_string(&shape_node).expect("shape node should serialize");
+        let decoded =
+            serde_json::from_str::<ShapeNodeFact>(&json).expect("shape node should decode");
+        assert_eq!(decoded, shape_node);
+
+        assert_eq!(
+            ShapeNodeFact::try_new(node, ShapeNodeId::from_u32(0), "", "block"),
+            Err(ShapeFactTextError::Empty {
+                field: "shape stable key"
+            })
+        );
+        assert_eq!(
+            ShapeNodeFact::try_new(node, ShapeNodeId::from_u32(0), "root", ""),
+            Err(ShapeFactTextError::Empty {
+                field: "shape node kind"
+            })
+        );
+        assert_eq!(
+            ShapeNodeFact::try_new(origin, ShapeNodeId::from_u32(0), "root", "block"),
+            Err(ShapeFactTextError::WrongNamespace(
+                FactNamespaceError::WrongNamespace {
+                    id: origin,
+                    expected: FactNamespace::ShapeNode,
+                }
+            ))
+        );
+        assert_eq!(
+            ShapeFieldFact::try_new(node, ShapeDimension::Structure, "", ""),
+            Err(ShapeFactTextError::Empty {
+                field: "shape field name"
+            })
+        );
+        assert_eq!(
+            ShapeFieldFact::try_new(origin, ShapeDimension::Structure, "constant", ""),
+            Err(ShapeFactTextError::WrongNamespace(
+                FactNamespaceError::WrongNamespace {
+                    id: origin,
+                    expected: FactNamespace::ShapeNode,
+                }
+            ))
+        );
+        assert!(ShapeFieldFact::try_new(node, ShapeDimension::Structure, "constant", "").is_ok());
+        assert_eq!(
+            ShapeChildFact::try_new(node, child, "", 0),
+            Err(ShapeFactTextError::Empty {
+                field: "shape child label"
+            })
+        );
+        assert_eq!(
+            ShapeEdgeFact::try_new(node, child, ""),
+            Err(ShapeFactTextError::Empty {
+                field: "shape edge label"
+            })
+        );
+        assert_eq!(
+            TraceEventFact::try_new(node, "", ""),
+            Err(ShapeFactTextError::Empty {
+                field: "trace event kind"
+            })
+        );
+        assert!(TraceEventFact::try_new(node, "lowered", "").is_ok());
+        assert_eq!(
+            DataFlowFact::try_new(node, child, ""),
+            Err(ShapeFactTextError::Empty {
+                field: "data flow kind"
+            })
+        );
+
+        let empty_field_name = r#"{
+            "node": {"namespace": "shape_node", "ordinal": 0},
+            "dimension": "structure",
+            "name": "",
+            "value": ""
+        }"#;
+        let err = serde_json::from_str::<ShapeFieldFact>(empty_field_name)
+            .expect_err("empty shape field names should fail closed");
+        assert!(
+            err.to_string()
+                .contains("shape field name must not be empty")
+        );
+
+        let unknown_field = r#"{
+            "id": {"namespace": "shape_node", "ordinal": 0},
+            "source_id": 0,
+            "stable_key": "root",
+            "kind": "block",
+            "extra": true
+        }"#;
+        let err = serde_json::from_str::<ShapeNodeFact>(unknown_field)
+            .expect_err("shape node facts should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+
+        let wrong_namespace = r#"{
+            "node": {"namespace": "origin_node", "ordinal": 0},
+            "dimension": "structure",
+            "name": "constant",
+            "value": ""
+        }"#;
+        let err = serde_json::from_str::<ShapeFieldFact>(wrong_namespace)
+            .expect_err("shape field facts should reject non-shape node IDs");
+        assert!(err.to_string().contains("expected shape_node"), "{err}");
+
+        let wrong_typed_fact_namespace = r#"{
+            "schema_version": 1,
+            "facts": [{
+                "type": "shape_node",
+                "id": {"namespace": "origin_node", "ordinal": 0},
+                "source_id": 0,
+                "stable_key": "root",
+                "kind": "block"
+            }]
+        }"#;
+        let err = serde_json::from_str::<OwnedTypedFactSetExport>(wrong_typed_fact_namespace)
+            .expect_err("typed shape node facts should reject non-shape ids");
+        assert!(
+            err.to_string()
+                .contains("fact id origin_node:0 has namespace origin_node, expected shape_node"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn shape_hash_fact_roundtrips_through_fail_closed_digest_schema() {
+        let hash = ShapeHashFact::new(
+            None,
+            ShapeHashScope::Graph,
+            ShapeDimension::Structure,
+            "0000000000000000",
+        );
+        let json = serde_json::to_string(&hash).expect("shape hash fact should serialize");
+        let decoded =
+            serde_json::from_str::<ShapeHashFact>(&json).expect("shape hash fact should decode");
+
+        assert_eq!(decoded, hash);
+        assert_eq!(
+            ShapeHashFact::try_new(
+                None,
+                ShapeHashScope::Graph,
+                ShapeDimension::Structure,
+                "ABCDEF0000000000",
+            ),
+            Err(ShapeHashFactError::InvalidDigest {
+                digest_hex: "ABCDEF0000000000".to_string(),
+            })
+        );
+        let origin = FactId::new(FactNamespace::OriginNode, 0);
+        assert_eq!(
+            ShapeHashFact::try_new(
+                Some(origin),
+                ShapeHashScope::Local,
+                ShapeDimension::Structure,
+                "0000000000000000",
+            ),
+            Err(ShapeHashFactError::WrongNamespace(
+                FactNamespaceError::WrongNamespace {
+                    id: origin,
+                    expected: FactNamespace::ShapeNode,
+                }
+            ))
+        );
+
+        let invalid_digest = r#"{
+            "node": null,
+            "scope": "graph",
+            "dimension": "structure",
+            "digest_hex": "ABCDEF0000000000"
+        }"#;
+        let err = serde_json::from_str::<ShapeHashFact>(invalid_digest)
+            .expect_err("non-canonical shape hash digests should fail closed");
+        assert!(
+            err.to_string()
+                .contains("canonical 16-character lowercase hex")
+        );
+
+        let unknown_field = r#"{
+            "node": null,
+            "scope": "graph",
+            "dimension": "structure",
+            "digest_hex": "0000000000000000",
+            "extra": true
+        }"#;
+        let err = serde_json::from_str::<ShapeHashFact>(unknown_field)
+            .expect_err("shape hash facts should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+
+        let wrong_namespace = r#"{
+            "node": {"namespace": "origin_node", "ordinal": 0},
+            "scope": "local",
+            "dimension": "structure",
+            "digest_hex": "0000000000000000"
+        }"#;
+        let err = serde_json::from_str::<ShapeHashFact>(wrong_namespace)
+            .expect_err("shape hash facts should reject non-shape node IDs");
+        assert!(err.to_string().contains("expected shape_node"), "{err}");
     }
 
     #[test]
@@ -4516,54 +6796,103 @@ mod tests {
             .expect("decoded relations should build a query index");
 
         let root_rows = index
-            .rows_where("shape_node", "stable_key", "root")
+            .rows_where(
+                TypedFactRelationName::ShapeNode,
+                TypedFactRelationColumnName::StableKey,
+                "root",
+            )
             .expect("root rows should query");
         let leaf_rows = index
-            .rows_where("shape_node", "stable_key", "leaf")
+            .rows_where(
+                TypedFactRelationName::ShapeNode,
+                TypedFactRelationColumnName::StableKey,
+                "leaf",
+            )
             .expect("leaf rows should query");
         assert_eq!(root_rows.len(), 1);
         assert_eq!(leaf_rows.len(), 1);
-        assert_eq!(root_rows[0].cell("kind").expect("root kind"), "block");
-        let root_id = root_rows[0].cell("id").expect("root id");
-        let leaf_id = leaf_rows[0].cell("id").expect("leaf id");
+        assert_eq!(root_rows[0].relation(), TypedFactRelationName::ShapeNode);
+        assert_eq!(
+            root_rows[0]
+                .cell(TypedFactRelationColumnName::Kind)
+                .expect("root kind"),
+            "block"
+        );
+        let root_id = root_rows[0]
+            .cell(TypedFactRelationColumnName::Id)
+            .expect("root id");
+        let leaf_id = leaf_rows[0]
+            .cell(TypedFactRelationColumnName::Id)
+            .expect("leaf id");
 
         let trace_events = index
-            .rows_where("trace_event", "node", root_id)
+            .rows_where(
+                TypedFactRelationName::TraceEvent,
+                TypedFactRelationColumnName::Node,
+                root_id,
+            )
             .expect("trace events should query by node");
         assert_eq!(trace_events.len(), 1);
         assert_eq!(
-            trace_events[0].cell("event_kind").expect("event kind"),
+            trace_events[0]
+                .cell(TypedFactRelationColumnName::EventKind)
+                .expect("event kind"),
             "runtime_code_region"
         );
         assert_eq!(
-            trace_events[0].cell("value").expect("event value"),
+            trace_events[0]
+                .cell(TypedFactRelationColumnName::Value)
+                .expect("event value"),
             "runtime_code_region_ref"
         );
 
         let data_flows = index
-            .rows_where("data_flow", "source", root_id)
+            .rows_where(
+                TypedFactRelationName::DataFlow,
+                TypedFactRelationColumnName::Source,
+                root_id,
+            )
             .expect("data-flow rows should query by source");
         assert_eq!(data_flows.len(), 1);
-        assert_eq!(data_flows[0].cell("target").expect("flow target"), leaf_id);
         assert_eq!(
-            data_flows[0].cell("kind").expect("flow kind"),
+            data_flows[0]
+                .cell(TypedFactRelationColumnName::Target)
+                .expect("flow target"),
+            leaf_id
+        );
+        assert_eq!(
+            data_flows[0]
+                .cell(TypedFactRelationColumnName::Kind)
+                .expect("flow kind"),
             "data-flow:value"
         );
 
         let graph_hashes = index
-            .rows_where("shape_hash", "node", "graph")
+            .rows_where(
+                TypedFactRelationName::ShapeHash,
+                TypedFactRelationColumnName::Node,
+                "graph",
+            )
             .expect("graph hashes should query");
         assert!(graph_hashes.iter().any(|row| {
-            row.cell("scope").expect("hash scope") == "graph"
-                && row.cell("dimension").expect("hash dimension") == "structure"
-                && row.cell("digest_hex").expect("hash digest").len() == 16
+            row.cell(TypedFactRelationColumnName::Scope)
+                .expect("hash scope")
+                == "graph"
+                && row
+                    .cell(TypedFactRelationColumnName::Dimension)
+                    .expect("hash dimension")
+                    == "structure"
+                && row
+                    .cell(TypedFactRelationColumnName::DigestHex)
+                    .expect("hash digest")
+                    .len()
+                    == 16
         }));
     }
 
     #[test]
-    fn typed_fact_relation_index_rejects_malformed_or_unknown_queries() {
-        let empty_relations = TypedFactRelationSet::new(Vec::new());
-        let err = TypedFactRelationIndex::new(&empty_relations)
+    fn typed_fact_relation_index_rejects_malformed_or_mismatched_queries() {
+        let err = TypedFactRelationSet::new(Vec::new())
             .expect_err("publicly constructed incomplete relation sets must fail");
         assert_eq!(
             err,
@@ -4572,31 +6901,33 @@ mod tests {
             }
         );
 
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let relations = origin_graph_facts(&origin_graph, Clone::clone).relation_export();
         let index = TypedFactRelationIndex::new(&relations).expect("relations should index");
 
         let err = index
-            .rows_where("origin_node", "missing_column", "x")
-            .expect_err("unknown columns must fail closed");
+            .rows_where(
+                TypedFactRelationName::OriginNode,
+                TypedFactRelationColumnName::File,
+                "x",
+            )
+            .expect_err("column/relation mismatches must fail closed");
         assert_eq!(
             err,
             TypedFactRelationError::UnknownColumn {
                 relation: "origin_node".to_string(),
-                column: "missing_column".to_string(),
+                column: "file".to_string(),
             }
         );
     }
 
     #[test]
     fn typed_fact_relation_index_rejects_missing_origin_references() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let mut relation_json =
@@ -4624,9 +6955,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_invalid_closed_values() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let mut relation_json =
@@ -4682,9 +7012,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_duplicate_origin_export_keys() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let mut relation_json =
@@ -4733,9 +7062,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_duplicate_origin_links() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let mut relation_json =
@@ -4775,9 +7103,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_empty_origin_key_parts() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let mut relation_json =
@@ -4804,9 +7131,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_reserved_origin_key_separators() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let mut relation_json =
@@ -4833,9 +7159,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_wrong_relation_id_namespace() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime, OriginLinkKind::Lowered);
         let mut relation_json =
@@ -4862,9 +7187,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_inverted_source_span_ranges() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime.clone(), OriginLinkKind::Lowered);
         let origin_facts = origin_graph_facts(&origin_graph, Clone::clone)
@@ -4912,9 +7236,8 @@ mod tests {
 
     #[test]
     fn typed_fact_relation_index_rejects_empty_source_span_files() {
-        let semantic = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let semantic = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let mut origin_graph = OriginGraph::new();
         origin_graph.push(semantic, runtime.clone(), OriginLinkKind::Lowered);
         let origin_facts = origin_graph_facts(&origin_graph, Clone::clone)
@@ -5508,9 +7831,8 @@ mod tests {
             .expect_err("typed fact JSON must reject empty source-span files");
 
         assert!(
-            err.to_string().contains(
-                "invalid origin facts in typed fact export: source span for origin origin_node:0 has empty file"
-            ),
+            err.to_string()
+                .contains("source span file must not be empty"),
             "{err}"
         );
     }
@@ -5575,21 +7897,20 @@ mod tests {
             .expect_err("typed fact JSON must reject inverted source span positions");
 
         assert!(
-            err.to_string().contains(
-                "invalid origin facts in typed fact export: source span for origin origin_node:0 has invalid line/column range 1:0..0:4"
-            ),
+            err.to_string()
+                .contains("source span line/column range must be ordered: 1:0..0:4"),
             "{err}"
         );
     }
 
     #[test]
     fn source_span_export_is_deterministic_and_keyed_by_origin() {
-        let first = OriginExportKey::new(
+        let first = origin_key(
             OriginExportKind::BytecodePc,
             "object:A:section:runtime",
             "pc:0..4",
         );
-        let second = OriginExportKey::new(
+        let second = origin_key(
             OriginExportKind::BytecodePc,
             "object:B:section:runtime",
             "pc:0..4",
@@ -5736,9 +8057,8 @@ mod tests {
             .expect_err("typed fact JSON must reject empty shape stable keys");
 
         assert!(
-            err.to_string().contains(
-                "invalid shape facts in typed fact export: shape stable key must not be empty"
-            ),
+            err.to_string()
+                .contains("shape stable key must not be empty"),
             "{err}"
         );
     }
@@ -5771,9 +8091,8 @@ mod tests {
             .expect_err("typed fact JSON must reject empty shape child labels");
 
         assert!(
-            err.to_string().contains(
-                "invalid shape facts in typed fact export: shape child label must not be empty"
-            ),
+            err.to_string()
+                .contains("shape child label must not be empty"),
             "{err}"
         );
     }
@@ -5857,9 +8176,8 @@ mod tests {
             .expect_err("typed fact JSON must reject non-canonical shape hash digests");
 
         assert!(
-            err.to_string().contains(
-                "invalid shape facts in typed fact export: shape hash for scope local dimension structure at node shape_node:0 has invalid digest; expected canonical 16-character lowercase hex"
-            ),
+            err.to_string()
+                .contains("canonical 16-character lowercase hex"),
             "{err}"
         );
     }
@@ -5917,48 +8235,325 @@ mod tests {
     }
 
     #[test]
+    fn origin_reachability_summary_roundtrips_through_fail_closed_schema() {
+        let semantic_to_runtime = OriginReachableKindPairSummary::new(
+            OriginExportKind::Semantic,
+            OriginExportKind::RuntimeStmt,
+            2,
+        );
+        let runtime_to_pc = OriginReachableKindPairSummary::new(
+            OriginExportKind::RuntimeStmt,
+            OriginExportKind::BytecodePc,
+            3,
+        );
+        let summary = OriginReachabilitySummary::new(
+            5,
+            vec![semantic_to_runtime.clone(), runtime_to_pc.clone()],
+        );
+        let json = serde_json::to_string(&summary).expect("reachability summary should serialize");
+        let decoded = serde_json::from_str::<OriginReachabilitySummary>(&json)
+            .expect("reachability summary should decode");
+        assert_eq!(decoded, summary);
+        assert_eq!(
+            OriginReachabilitySummary::default().reachable_pairs(),
+            0,
+            "empty reachability is valid for fact sets without reachable pairs"
+        );
+
+        assert_eq!(
+            OriginReachableKindPairSummary::try_new(
+                OriginExportKind::Semantic,
+                OriginExportKind::RuntimeStmt,
+                0,
+            ),
+            Err(OriginReachabilitySummaryError::ZeroReachablePairsForKind {
+                from_kind: OriginExportKind::Semantic,
+                to_kind: OriginExportKind::RuntimeStmt,
+            })
+        );
+        assert_eq!(
+            OriginReachabilitySummary::try_new(
+                6,
+                vec![semantic_to_runtime.clone(), runtime_to_pc.clone()],
+            ),
+            Err(OriginReachabilitySummaryError::ReachablePairTotalMismatch {
+                declared: 6,
+                actual: 5,
+            })
+        );
+        assert_eq!(
+            OriginReachabilitySummary::try_new(
+                4,
+                vec![semantic_to_runtime.clone(), semantic_to_runtime.clone()],
+            ),
+            Err(OriginReachabilitySummaryError::DuplicateKindPair {
+                from_kind: OriginExportKind::Semantic,
+                to_kind: OriginExportKind::RuntimeStmt,
+            })
+        );
+
+        let zero_pair = r#"{
+            "from_kind": "semantic",
+            "to_kind": "runtime.stmt",
+            "reachable_pairs": 0
+        }"#;
+        let err = serde_json::from_str::<OriginReachableKindPairSummary>(zero_pair)
+            .expect_err("reachable kind-pair JSON should reject zero counts");
+        assert!(
+            err.to_string()
+                .contains("must have at least one reachable pair"),
+            "{err}"
+        );
+
+        let mismatched_total = r#"{
+            "reachable_pairs": 6,
+            "reachable_pairs_by_kind": [{
+                "from_kind": "semantic",
+                "to_kind": "runtime.stmt",
+                "reachable_pairs": 2
+            }, {
+                "from_kind": "runtime.stmt",
+                "to_kind": "bytecode.pc",
+                "reachable_pairs": 3
+            }]
+        }"#;
+        let err = serde_json::from_str::<OriginReachabilitySummary>(mismatched_total)
+            .expect_err("reachability summary JSON should reject mismatched totals");
+        assert!(
+            err.to_string()
+                .contains("total 6 does not match per-kind sum 5"),
+            "{err}"
+        );
+
+        let duplicate_pair = r#"{
+            "reachable_pairs": 4,
+            "reachable_pairs_by_kind": [{
+                "from_kind": "semantic",
+                "to_kind": "runtime.stmt",
+                "reachable_pairs": 2
+            }, {
+                "from_kind": "semantic",
+                "to_kind": "runtime.stmt",
+                "reachable_pairs": 2
+            }]
+        }"#;
+        let err = serde_json::from_str::<OriginReachabilitySummary>(duplicate_pair)
+            .expect_err("reachability summary JSON should reject duplicate kind pairs");
+        assert!(
+            err.to_string()
+                .contains("duplicate reachable origin kind pair semantic -> runtime.stmt"),
+            "{err}"
+        );
+
+        let unknown_field = r#"{
+            "reachable_pairs": 0,
+            "reachable_pairs_by_kind": [],
+            "unexpected": true
+        }"#;
+        let err = serde_json::from_str::<OriginReachabilitySummary>(unknown_field)
+            .expect_err("reachability summary JSON should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn origin_path_witnesses_roundtrip_through_fail_closed_schema() {
+        let origin = FactId::new(FactNamespace::OriginNode, 0);
+        let runtime = FactId::new(FactNamespace::OriginNode, 1);
+        let shape = FactId::new(FactNamespace::ShapeNode, 0);
+        let path = OriginPath::new(vec![origin, runtime], vec![OriginLinkKind::Lowered]);
+        let json = serde_json::to_string(&path).expect("origin path should serialize");
+        let decoded = serde_json::from_str::<OriginPath>(&json).expect("origin path should decode");
+        assert_eq!(decoded, path);
+
+        assert_eq!(
+            OriginPath::try_new(vec![], vec![]),
+            Err(OriginPathError::EmptyPath)
+        );
+        assert_eq!(
+            OriginPath::try_new(vec![origin], vec![OriginLinkKind::Lowered]),
+            Err(OriginPathError::LengthMismatch { nodes: 1, links: 1 })
+        );
+        assert_eq!(
+            OriginPath::try_new(vec![shape], vec![]),
+            Err(OriginPathError::WrongNamespace(
+                FactNamespaceError::WrongNamespace {
+                    id: shape,
+                    expected: FactNamespace::OriginNode
+                }
+            ))
+        );
+
+        let err = serde_json::from_str::<OriginPath>(
+            r#"{
+                "nodes": [{"namespace": "shape_node", "ordinal": 0}],
+                "links": []
+            }"#,
+        )
+        .expect_err("path JSON should reject non-origin node namespaces");
+        assert!(err.to_string().contains("expected origin_node"), "{err}");
+
+        let semantic_key = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime_key = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "bb0:stmt0");
+        let pc_key = origin_key(
+            OriginExportKind::BytecodePc,
+            "object:A:section:runtime",
+            "pc:0..2",
+        );
+        let witness = OriginPathWitnessExport::new(
+            OriginExportKind::Semantic,
+            OriginExportKind::BytecodePc,
+            vec![semantic_key.clone(), runtime_key, pc_key.clone()],
+            vec![OriginLinkKind::Lowered, OriginLinkKind::Lowered],
+        );
+        let json = serde_json::to_string(&witness).expect("path witness should serialize");
+        let decoded = serde_json::from_str::<OriginPathWitnessExport>(&json)
+            .expect("path witness should decode");
+        assert_eq!(decoded, witness);
+
+        assert_eq!(
+            OriginPathWitnessExport::try_new(
+                OriginExportKind::Semantic,
+                OriginExportKind::BytecodePc,
+                vec![],
+                vec![],
+            ),
+            Err(OriginPathWitnessExportError::EmptyPath)
+        );
+        assert_eq!(
+            OriginPathWitnessExport::try_new(
+                OriginExportKind::Semantic,
+                OriginExportKind::BytecodePc,
+                vec![semantic_key.clone()],
+                vec![OriginLinkKind::Lowered],
+            ),
+            Err(OriginPathWitnessExportError::LengthMismatch { nodes: 1, links: 1 })
+        );
+        assert_eq!(
+            OriginPathWitnessExport::try_new(
+                OriginExportKind::RuntimeStmt,
+                OriginExportKind::BytecodePc,
+                vec![semantic_key.clone(), pc_key.clone()],
+                vec![OriginLinkKind::Lowered],
+            ),
+            Err(OriginPathWitnessExportError::FromKindMismatch {
+                expected: OriginExportKind::RuntimeStmt,
+                actual: OriginExportKind::Semantic,
+            })
+        );
+        assert_eq!(
+            OriginPathWitnessExport::try_new(
+                OriginExportKind::Semantic,
+                OriginExportKind::RuntimeStmt,
+                vec![semantic_key.clone(), pc_key.clone()],
+                vec![OriginLinkKind::Lowered],
+            ),
+            Err(OriginPathWitnessExportError::ToKindMismatch {
+                expected: OriginExportKind::RuntimeStmt,
+                actual: OriginExportKind::BytecodePc,
+            })
+        );
+
+        let mut bad_witness = serde_json::to_value(&witness).expect("witness should serialize");
+        bad_witness["links"] = serde_json::Value::Array(vec![]);
+        let err = serde_json::from_value::<OriginPathWitnessExport>(bad_witness)
+            .expect_err("path witness JSON should reject mismatched link counts");
+        assert!(
+            err.to_string()
+                .contains("expected exactly one more node than link"),
+            "{err}"
+        );
+
+        let source_span = SourceSpanExport::new(
+            pc_key.clone(),
+            SourceSpanKind::Original,
+            "file:///path-witness.fe",
+            10,
+            14,
+            1,
+            2,
+            1,
+            6,
+        );
+        let source_witness = OriginSourcePathWitnessExport::new(witness.clone(), source_span);
+        let json =
+            serde_json::to_string(&source_witness).expect("source path witness should serialize");
+        let decoded = serde_json::from_str::<OriginSourcePathWitnessExport>(&json)
+            .expect("source path witness should decode");
+        assert_eq!(decoded, source_witness);
+
+        let mismatched_span = SourceSpanExport::new(
+            semantic_key.clone(),
+            SourceSpanKind::Original,
+            "file:///path-witness.fe",
+            10,
+            14,
+            1,
+            2,
+            1,
+            6,
+        );
+        assert_eq!(
+            OriginSourcePathWitnessExport::try_new(witness.clone(), mismatched_span),
+            Err(
+                OriginSourcePathWitnessExportError::SourceSpanTargetMismatch {
+                    path_target: pc_key.clone(),
+                    source_origin: semantic_key.clone(),
+                }
+            )
+        );
+
+        let mut bad_source_witness =
+            serde_json::to_value(&source_witness).expect("source witness should serialize");
+        bad_source_witness["source_span"]["origin_key"] =
+            serde_json::to_value(&semantic_key).expect("origin key should serialize");
+        let err = serde_json::from_value::<OriginSourcePathWitnessExport>(bad_source_witness)
+            .expect_err("source path witness JSON should reject mismatched terminal origin");
+        assert!(
+            err.to_string().contains("path ending at bytecode.pc"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn origin_fact_index_answers_exact_reachability_oracle() {
-        let semantic_a = OriginExportKey::new(OriginExportKind::Semantic, "semantic:a", "expr:0");
-        let runtime_a =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
-        let pre_a = OriginExportKey::new(
+        let semantic_a = origin_key(OriginExportKind::Semantic, "semantic:a", "expr:0");
+        let runtime_a = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let pre_a = origin_key(
             OriginExportKind::SonatinaInst,
             "sonatina:a",
             "pre_opt:inst:1",
         );
-        let post_a = OriginExportKey::new(
+        let post_a = origin_key(
             OriginExportKind::SonatinaInst,
             "sonatina:a",
             "post_opt:inst:4",
         );
-        let pc_a = OriginExportKey::new(
+        let pc_a = origin_key(
             OriginExportKind::BytecodePc,
             "object:A:section:runtime",
             "pc:0..2",
         );
 
-        let semantic_b = OriginExportKey::new(OriginExportKind::Semantic, "semantic:b", "expr:0");
-        let runtime_b =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:b", "block:0:stmt:0");
-        let pre_b = OriginExportKey::new(
+        let semantic_b = origin_key(OriginExportKind::Semantic, "semantic:b", "expr:0");
+        let runtime_b = origin_key(OriginExportKind::RuntimeStmt, "runtime:b", "block:0:stmt:0");
+        let pre_b = origin_key(
             OriginExportKind::SonatinaInst,
             "sonatina:b",
             "pre_opt:inst:1",
         );
-        let post_b = OriginExportKey::new(
+        let post_b = origin_key(
             OriginExportKind::SonatinaInst,
             "sonatina:b",
             "post_opt:inst:4",
         );
-        let pc_b = OriginExportKey::new(
+        let pc_b = origin_key(
             OriginExportKind::BytecodePc,
             "object:B:section:runtime",
             "pc:0..2",
         );
 
-        let unmapped =
-            OriginExportKey::new(OriginExportKind::BytecodeUnmapped, "bytecode", "no_ir_inst");
-        let pc_unmapped = OriginExportKey::new(
+        let unmapped = origin_key(OriginExportKind::BytecodeUnmapped, "bytecode", "no_ir_inst");
+        let pc_unmapped = origin_key(
             OriginExportKind::BytecodePc,
             "object:C:section:runtime",
             "pc:8..9",
@@ -6074,7 +8669,7 @@ mod tests {
             index
                 .path_export_between_keys(
                     &semantic_a,
-                    &OriginExportKey::new(
+                    &origin_key(
                         OriginExportKind::BytecodePc,
                         "object:missing:section:runtime",
                         "pc:0..1",
@@ -6196,12 +8791,31 @@ mod tests {
         let decoded = serde_json::from_str::<super::OriginPathWitnessExport>(&json)
             .expect("path export should deserialize");
         assert_eq!(&decoded, semantic_to_pc);
+
+        let source_path = super::OriginSourcePathWitnessExport::new(
+            (*semantic_to_pc).clone(),
+            SourceSpanExport::new(
+                pc_a,
+                SourceSpanKind::Original,
+                "file:///source-path-witness.fe",
+                10,
+                14,
+                1,
+                2,
+                1,
+                6,
+            ),
+        );
+        let json =
+            serde_json::to_string(&source_path).expect("source path export should serialize");
+        let decoded = serde_json::from_str::<super::OriginSourcePathWitnessExport>(&json)
+            .expect("source path export should deserialize");
+        assert_eq!(decoded, source_path);
     }
 
     #[test]
     fn origin_fact_index_rejects_missing_origin_link_endpoint() {
-        let key =
-            OriginExportKey::new(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
+        let key = origin_key(OriginExportKind::RuntimeStmt, "runtime:a", "block:0:stmt:0");
         let origin_id = FactId::new(FactNamespace::OriginNode, 0);
         let missing_id = FactId::new(FactNamespace::OriginNode, 1);
         let facts = TypedFactSet::new(vec![

@@ -24,6 +24,30 @@ common::define_origin_owner_key! {
     pub struct SemanticOriginInstanceOwnerKey;
 }
 
+common::define_origin_local_key! {
+    pub struct HirExprOriginLocalKey;
+}
+
+impl HirExprOriginLocalKey {
+    pub fn from_expr(expr: ExprId) -> Self {
+        Self::new(expr.index().to_string())
+    }
+}
+
+common::define_origin_local_key! {
+    pub struct HirStmtOriginLocalKey;
+}
+
+impl HirStmtOriginLocalKey {
+    pub fn from_stmt(stmt: StmtId) -> Self {
+        Self::new(stmt.index().to_string())
+    }
+}
+
+common::define_origin_local_key! {
+    pub struct SemanticOriginLocalKey;
+}
+
 pub trait SemanticOriginOwnerKey: OriginExportOwnerKey {}
 
 impl SemanticOriginOwnerKey for SemanticOriginInstanceOwnerKey {}
@@ -42,8 +66,8 @@ impl<'db> HirExprOrigin<'db> {
     pub fn export_key(self, stable_body_key: &HirOriginBodyOwnerKey) -> OriginExportKey {
         OriginExportKey::new(
             OriginExportKind::HirExpr,
-            stable_body_key.as_str(),
-            self.expr().index().to_string(),
+            stable_body_key,
+            &HirExprOriginLocalKey::from_expr(self.expr()),
         )
     }
 
@@ -70,8 +94,8 @@ impl<'db> HirStmtOrigin<'db> {
     pub fn export_key(self, stable_body_key: &HirOriginBodyOwnerKey) -> OriginExportKey {
         OriginExportKey::new(
             OriginExportKind::HirStmt,
-            stable_body_key.as_str(),
-            self.stmt().index().to_string(),
+            stable_body_key,
+            &HirStmtOriginLocalKey::from_stmt(self.stmt()),
         )
     }
 
@@ -114,8 +138,8 @@ impl<'db> SemanticOrigin<'db> {
     ) -> OriginExportKey {
         OriginExportKey::new(
             OriginExportKind::Semantic,
-            stable_instance_key.as_str(),
-            sem_origin_local_key(self.origin()),
+            stable_instance_key,
+            &SemanticOriginLocalKey::from_origin(self.origin()),
         )
     }
 
@@ -147,6 +171,12 @@ impl<'db> SemanticOrigin<'db> {
 
     pub fn resolve_source_span(self, db: &'db dyn SpannedHirAnalysisDb) -> Option<Span> {
         self.lazy_span(db).resolve(db)
+    }
+}
+
+impl SemanticOriginLocalKey {
+    pub fn from_origin(origin: SemOrigin<'_>) -> Self {
+        Self::new(sem_origin_local_key(origin))
     }
 }
 

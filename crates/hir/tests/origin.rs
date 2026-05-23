@@ -14,6 +14,10 @@ use fe_hir::{
     test_db::HirAnalysisTestDb,
 };
 
+fn origin_key(kind: OriginExportKind, owner: &str, local: impl Into<String>) -> OriginExportKey {
+    OriginExportKey::try_from_raw_parts(kind, owner, local.into()).unwrap()
+}
+
 fn find_func<'db>(db: &'db HirAnalysisTestDb, top_mod: TopLevelMod<'db>, name: &str) -> Func<'db> {
     top_mod
         .all_funcs(db)
@@ -157,11 +161,11 @@ fn a() -> u256 {
     assert_ne!(expr_key, stmt_key);
     assert_eq!(
         expr_key,
-        OriginExportKey::new(OriginExportKind::HirExpr, "body:a", "7")
+        origin_key(OriginExportKind::HirExpr, "body:a", "7")
     );
     assert_eq!(
         stmt_key,
-        OriginExportKey::new(OriginExportKind::HirStmt, "body:a", "7")
+        origin_key(OriginExportKind::HirStmt, "body:a", "7")
     );
 }
 
@@ -236,7 +240,7 @@ fn generic<T>(value: T) -> T {
     assert_ne!(first, second);
     assert_eq!(
         second.export_key(&owner_key),
-        OriginExportKey::new(
+        origin_key(
             OriginExportKind::Semantic,
             "semantic:generic:u256",
             format!("expr:{}", local_expr.index())

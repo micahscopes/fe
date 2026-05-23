@@ -1,0 +1,11 @@
+error[E0599]: no method named `key` found for struct `SonatinaInstOrigin` in the current scope
+ --> tests/ui/codegen_origin_raw_key_escape.rs:9:18
+  |
+9 |     let _ = inst.key();
+  |                  ^^^ private field, not a method
+
+error[E0599]: no method named `key` found for struct `BytecodePcOrigin` in the current scope
+  --> tests/ui/codegen_origin_raw_key_escape.rs:17:16
+   |
+17 |     let _ = pc.key();
+   |                ^^^ private field, not a method

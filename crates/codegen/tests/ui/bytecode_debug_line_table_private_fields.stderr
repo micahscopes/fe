@@ -1,0 +1,55 @@
+error[E0451]: field `path` of struct `BytecodeDebugSourceFile` is private
+ --> tests/ui/bytecode_debug_line_table_private_fields.rs:8:9
+  |
+7 |     let file = BytecodeDebugSourceFile {
+  |                ----------------------- in this type
+8 |         path: "src/main.fe".to_string(),
+  |         ^^^^ private field
+
+error[E0451]: fields `object`, `section`, `pc_start`, `pc_end`, `file_index`, `span_kind`, `start_byte`, `end_byte`, `start_line`, `start_col`, `end_line`, `end_col` and `snippet` of struct `BytecodeDebugLineRow` are private
+  --> tests/ui/bytecode_debug_line_table_private_fields.rs:12:9
+   |
+11 |     let row = BytecodeDebugLineRow {
+   |               -------------------- in this type
+12 |         object: "Foo".to_string(),
+   |         ^^^^^^ private field
+13 |         section: "runtime".to_string(),
+   |         ^^^^^^^ private field
+14 |         pc_start: 0,
+   |         ^^^^^^^^ private field
+15 |         pc_end: 4,
+   |         ^^^^^^ private field
+16 |         file_index: 0,
+   |         ^^^^^^^^^^ private field
+17 |         span_kind: SourceSpanKind::Original,
+   |         ^^^^^^^^^ private field
+18 |         start_byte: 0,
+   |         ^^^^^^^^^^ private field
+19 |         end_byte: 4,
+   |         ^^^^^^^^ private field
+20 |         start_line: 1,
+   |         ^^^^^^^^^^ private field
+21 |         start_col: 1,
+   |         ^^^^^^^^^ private field
+22 |         end_line: 1,
+   |         ^^^^^^^^ private field
+23 |         end_col: 5,
+   |         ^^^^^^^ private field
+24 |         snippet: "main".to_string(),
+   |         ^^^^^^^ private field
+
+error[E0451]: fields `schema_version`, `object`, `section`, `files` and `rows` of struct `OwnedBytecodeDebugLineTableExport` are private
+  --> tests/ui/bytecode_debug_line_table_private_fields.rs:28:9
+   |
+27 |     let _ = OwnedBytecodeDebugLineTableExport {
+   |             --------------------------------- in this type
+28 |         schema_version: 1,
+   |         ^^^^^^^^^^^^^^ private field
+29 |         object: Some("Foo".to_string()),
+   |         ^^^^^^ private field
+30 |         section: Some("runtime".to_string()),
+   |         ^^^^^^^ private field
+31 |         files: vec![file],
+   |         ^^^^^ private field
+32 |         rows: vec![row],
+   |         ^^^^ private field

@@ -178,16 +178,34 @@ struct OriginExportKeySerde {
 }
 
 impl OriginExportKey {
-    pub fn new(
-        kind: OriginExportKind,
-        owner_key: impl Into<String>,
-        local_key: impl Into<String>,
-    ) -> Self {
+    pub fn new<Owner, Local>(kind: OriginExportKind, owner_key: &Owner, local_key: &Local) -> Self
+    where
+        Owner: OriginExportOwnerKey + ?Sized,
+        Local: OriginExportLocalKey + ?Sized,
+    {
         Self::try_new(kind, owner_key, local_key)
             .unwrap_or_else(|err| panic!("invalid origin export key: {err}"))
     }
 
-    pub fn try_new(
+    pub fn try_new<Owner, Local>(
+        kind: OriginExportKind,
+        owner_key: &Owner,
+        local_key: &Local,
+    ) -> Result<Self, OriginExportKeyError>
+    where
+        Owner: OriginExportOwnerKey + ?Sized,
+        Local: OriginExportLocalKey + ?Sized,
+    {
+        Self::try_from_raw_parts(kind, owner_key.as_str(), local_key.to_export_local_key())
+    }
+
+    /// Build an export key from decoded or imported wire fields.
+    ///
+    /// Prefer [`OriginExportKey::new`] at compiler construction sites so owner
+    /// and local-key namespaces stay nominal. This raw path exists for serde and
+    /// relation-table import boundaries where the stable strings are already the
+    /// data being validated.
+    pub fn try_from_raw_parts(
         kind: OriginExportKind,
         owner_key: impl Into<String>,
         local_key: impl Into<String>,
@@ -265,7 +283,7 @@ impl<'de> Deserialize<'de> for OriginExportKey {
         D: Deserializer<'de>,
     {
         let raw = OriginExportKeySerde::deserialize(deserializer)?;
-        Self::try_new(raw.kind, raw.owner_key, raw.local_key).map_err(de::Error::custom)
+        Self::try_from_raw_parts(raw.kind, raw.owner_key, raw.local_key).map_err(de::Error::custom)
     }
 }
 
@@ -288,6 +306,10 @@ fn validate_origin_export_key_part(
 
 pub trait OriginExportOwnerKey {
     fn as_str(&self) -> &str;
+}
+
+pub trait OriginExportLocalKey {
+    fn to_export_local_key(&self) -> String;
 }
 
 #[doc(hidden)]
@@ -324,6 +346,36 @@ macro_rules! define_origin_owner_key {
         impl $crate::origin::OriginExportOwnerKey for $name {
             fn as_str(&self) -> &str {
                 self.as_str()
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! define_origin_local_key {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident;
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, $crate::salsa::Update)]
+        $vis struct $name(::std::string::String);
+
+        impl $name {
+            pub fn new(key: impl Into<::std::string::String>) -> Self {
+                let key = key.into();
+                $crate::origin::assert_origin_key_text("origin local key", &key);
+                Self(key)
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl $crate::origin::OriginExportLocalKey for $name {
+            fn to_export_local_key(&self) -> ::std::string::String {
+                self.as_str().to_string()
             }
         }
     };
@@ -380,10 +432,6 @@ macro_rules! define_origin_key_type {
 
             pub fn $local(self) -> $local_ty {
                 self.key.into_parts().1
-            }
-
-            pub fn key(self) -> $crate::origin::OriginKey<$owner_ty, $local_ty> {
-                self.key
             }
         }
     };
@@ -674,12 +722,20 @@ mod tests {
         struct TestOwnerKey;
     }
 
+    crate::define_origin_local_key! {
+        struct TestLocalKey;
+    }
+
     crate::define_closed_string_enum! {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, salsa::Update)]
         enum TestClosedKind {
             Alpha => "alpha",
             BetaValue => "beta_value",
         }
+    }
+
+    fn raw_export_key(kind: OriginExportKind, owner: &str, local: &str) -> OriginExportKey {
+        OriginExportKey::try_from_raw_parts(kind, owner, local).unwrap()
     }
 
     crate::define_origin_key_type! {
@@ -717,9 +773,9 @@ mod tests {
 
     #[test]
     fn export_key_keeps_kind_owner_and_local_separate() {
-        let expr = OriginExportKey::new(OriginExportKind::HirExpr, "body:a", "0");
-        let stmt = OriginExportKey::new(OriginExportKind::HirStmt, "body:a", "0");
-        let other_body_expr = OriginExportKey::new(OriginExportKind::HirExpr, "body:b", "0");
+        let expr = raw_export_key(OriginExportKind::HirExpr, "body:a", "0");
+        let stmt = raw_export_key(OriginExportKind::HirStmt, "body:a", "0");
+        let other_body_expr = raw_export_key(OriginExportKind::HirExpr, "body:b", "0");
 
         assert_ne!(expr, stmt);
         assert_ne!(expr, other_body_expr);
@@ -730,8 +786,20 @@ mod tests {
     }
 
     #[test]
-    fn export_key_formats_canonical_storage_key_and_display_label() {
+    fn export_key_constructor_requires_typed_owner_and_local_key_parts() {
         let key = OriginExportKey::new(
+            OriginExportKind::Semantic,
+            &TestOwnerKey::new("semantic:test"),
+            &TestLocalKey::new("expr:0"),
+        );
+
+        assert_eq!(key.owner_key(), "semantic:test");
+        assert_eq!(key.local_key(), "expr:0");
+    }
+
+    #[test]
+    fn export_key_formats_canonical_storage_key_and_display_label() {
+        let key = raw_export_key(
             OriginExportKind::BytecodePc,
             "object:Foo:section:runtime",
             "pc:4..8",
@@ -750,11 +818,11 @@ mod tests {
     #[test]
     fn export_key_rejects_empty_owner_and_local_parts() {
         assert_eq!(
-            OriginExportKey::try_new(OriginExportKind::Semantic, "", "expr:0"),
+            OriginExportKey::try_from_raw_parts(OriginExportKind::Semantic, "", "expr:0"),
             Err(OriginExportKeyError::EmptyOwnerKey)
         );
         assert_eq!(
-            OriginExportKey::try_new(OriginExportKind::Semantic, "semantic:test", ""),
+            OriginExportKey::try_from_raw_parts(OriginExportKind::Semantic, "semantic:test", ""),
             Err(OriginExportKeyError::EmptyLocalKey)
         );
     }
@@ -762,11 +830,19 @@ mod tests {
     #[test]
     fn export_key_rejects_reserved_storage_separator() {
         assert_eq!(
-            OriginExportKey::try_new(OriginExportKind::Semantic, "semantic\u{1f}test", "expr:0"),
+            OriginExportKey::try_from_raw_parts(
+                OriginExportKind::Semantic,
+                "semantic\u{1f}test",
+                "expr:0"
+            ),
             Err(OriginExportKeyError::ReservedStorageSeparator { field: "owner_key" })
         );
         assert_eq!(
-            OriginExportKey::try_new(OriginExportKind::Semantic, "semantic:test", "expr\u{1f}0"),
+            OriginExportKey::try_from_raw_parts(
+                OriginExportKind::Semantic,
+                "semantic:test",
+                "expr\u{1f}0"
+            ),
             Err(OriginExportKeyError::ReservedStorageSeparator { field: "local_key" })
         );
     }
@@ -866,7 +942,6 @@ mod tests {
 
         assert_eq!(origin.owner(), TestOwner(4));
         assert_eq!(origin.local(), TestLocal(9));
-        assert_eq!(origin.key().into_parts(), (TestOwner(4), TestLocal(9)));
     }
 
     #[test]
@@ -878,6 +953,7 @@ mod tests {
         assert_update::<OriginGraph<OriginKey<TestOwner, TestLocal>>>();
         assert_update::<TestStringKey>();
         assert_update::<TestOwnerKey>();
+        assert_update::<TestLocalKey>();
         assert_update::<TestClosedKind>();
         assert_update::<TestOrigin>();
     }

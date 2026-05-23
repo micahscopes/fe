@@ -1,0 +1,37 @@
+error[E0308]: mismatched types
+ --> tests/ui/bytecode_source_map_summary_raw_filters.rs:5:71
+  |
+5 |     let _summary = bytecode_source_map_entries_summary(&entries, Some("Foo"), Some("runtime"));
+  |                                                                  ---- ^^^^^ expected `BytecodeSourceMapExportMetadata<'_>`, found `&str`
+  |                                                                  |
+  |                                                                  arguments to this enum variant are incorrect
+  |
+help: the type constructed contains `&'static str` due to the type of the argument passed
+ --> tests/ui/bytecode_source_map_summary_raw_filters.rs:5:66
+  |
+5 |     let _summary = bytecode_source_map_entries_summary(&entries, Some("Foo"), Some("runtime"));
+  |                                                                  ^^^^^-----^
+  |                                                                       |
+  |                                                                       this argument influences the type of `Some`
+note: tuple variant defined here
+ --> $RUST/core/src/option.rs
+  |
+  |     Some(#[stable(feature = "rust1", since = "1.0.0")] T),
+  |     ^^^^
+
+error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+ --> tests/ui/bytecode_source_map_summary_raw_filters.rs:5:20
+  |
+5 |     let _summary = bytecode_source_map_entries_summary(&entries, Some("Foo"), Some("runtime"));
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                        --------------- unexpected argument #3 of type `Option<&str>`
+  |
+note: function defined here
+ --> src/debug.rs
+  |
+  | pub fn bytecode_source_map_entries_summary(
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+  |
+5 -     let _summary = bytecode_source_map_entries_summary(&entries, Some("Foo"), Some("runtime"));
+5 +     let _summary = bytecode_source_map_entries_summary(&entries, Some("Foo"));
+  |

@@ -19,7 +19,7 @@ use codegen::{
     ExpectedRevert, OptLevel, SonatinaTestOptions, TestMetadata, TestModuleOutput,
     debug::{
         BytecodeSourceMapExportMetadata, BytecodeSourceMapExportOptions,
-        bytecode_debug_location_entries_json, bytecode_source_map_entries_json,
+        bytecode_debug_artifacts_json,
     },
     emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina,
     emit_test_module_sonatina,
@@ -2632,32 +2632,23 @@ fn write_sonatina_case_artifacts(
         });
     let source_map_options = BytecodeSourceMapExportOptions::new()
         .with_optional_metadata(source_map_metadata)
-        .with_bytecode_origin_coverage(case.sonatina_bytecode_origin_coverage);
-    if let Some(json) =
-        bytecode_source_map_entries_json(&case.sonatina_source_map_entries, source_map_options)
-            .map_err(|err| {
-                format!(
-                    "failed to serialize test Sonatina source map for `{}`: {err}",
-                    case.display_name
-                )
-            })?
-    {
-        write_test_report_artifact(&dir.join("source_map.json"), json.as_bytes())?;
-    }
-
+        .with_bytecode_origin_coverage(case.sonatina_bytecode_origin_coverage)
+        .with_post_opt_origin_coverage(case.sonatina_post_opt_origin_coverage);
     let debug_location_options =
         BytecodeSourceMapExportOptions::new().with_optional_metadata(source_map_metadata);
-    if let Some(json) = bytecode_debug_location_entries_json(
+    let debug_artifacts = bytecode_debug_artifacts_json(
         &case.sonatina_source_map_entries,
+        source_map_options,
         debug_location_options,
     )
     .map_err(|err| {
         format!(
-            "failed to serialize test Sonatina debug locations for `{}`: {err}",
+            "failed to serialize test Sonatina debug artifacts for `{}`: {err}",
             case.display_name
         )
-    })? {
-        write_test_report_artifact(&dir.join("debug_locations.json"), json.as_bytes())?;
+    })?;
+    for artifact in debug_artifacts.artifacts() {
+        write_test_report_artifact(&dir.join(artifact.file_name()), artifact.json().as_bytes())?;
     }
 
     if let Some(facts) = &case.sonatina_origin_facts {
@@ -2971,15 +2962,21 @@ mod tests {
     use camino::Utf8PathBuf;
     use codegen::{
         OptLevel,
-        debug::{BytecodeSourceMapEntry, BytecodeSourceMapEntryKind},
+        debug::{
+            BytecodeSourceMapEntry, BytecodeSourceMapEntryKind, OwnedBytecodeDebugLineTableExport,
+            OwnedBytecodeDebugLocationExport, OwnedBytecodeSourceMapExport,
+        },
         origin::{
             BytecodeObjectKey, BytecodeOriginCoverage, BytecodePcOrigin, BytecodePcRange,
             BytecodeSectionKey, BytecodeSectionNameKey, BytecodeUnmappedReason,
+            SonatinaPostOptOriginCoverage,
         },
     };
-    use common::{InputDb, facts::SourceSpanKind};
+    use common::{
+        InputDb,
+        facts::{OwnedTypedFactSetExport, SourceSpanKind, TypedFactSet},
+    };
     use driver::DriverDataBase;
-    use serde_json::Value;
     use tempfile::tempdir;
     use url::Url;
 
@@ -3033,6 +3030,7 @@ mod tests {
                 },
             )],
             sonatina_bytecode_origin_coverage: Some(BytecodeOriginCoverage::new(0, 1, 0)),
+            sonatina_post_opt_origin_coverage: Some(SonatinaPostOptOriginCoverage::new(0, 1, 0)),
             sonatina_origin_facts: None,
             sonatina_snapshot_origin_facts: None,
             value_param_count: 0,
@@ -3048,31 +3046,67 @@ mod tests {
             .root_dir
             .join("artifacts/tests/source_map_case/sonatina/source_map.json");
         let json = std::fs::read_to_string(json_path).expect("source map artifact should exist");
-        let value = serde_json::from_str::<Value>(&json).expect("source map should be valid JSON");
-        assert_eq!(value["schema_version"], 2);
-        assert_eq!(value["object"], "source_map_case");
-        assert_eq!(value["section"], "runtime");
-        assert_eq!(value["bytecode_origin_coverage"]["total"], 1);
+        let export = serde_json::from_str::<OwnedBytecodeSourceMapExport>(&json)
+            .expect("source map should match owned schema");
         assert_eq!(
-            value["bytecode_origin_coverage"]["sonatina_backend_prepared"],
+            export.schema_version(),
+            OwnedBytecodeSourceMapExport::SCHEMA_VERSION
+        );
+        assert_eq!(export.object(), Some("source_map_case"));
+        assert_eq!(export.section(), Some("runtime"));
+        let bytecode_coverage = export
+            .bytecode_origin_coverage()
+            .expect("source map should include bytecode coverage");
+        assert_eq!(bytecode_coverage.total(), 1);
+        assert_eq!(bytecode_coverage.sonatina_backend_prepared(), 1);
+        let post_opt_coverage = export
+            .post_opt_origin_coverage()
+            .expect("source map should include post-opt coverage");
+        assert_eq!(post_opt_coverage.total(), 1);
+        assert_eq!(
+            post_opt_coverage.created_or_unmatched_after_preopt_snapshot(),
             1
         );
-        assert_eq!(value["entries"][0]["kind"], "source");
-        assert_eq!(value["entries"][0]["file"], "src/lib.fe");
-        assert_eq!(value["entries"][0]["snippet"], "lib");
+        assert_eq!(post_opt_coverage.observed_pre_opt_total(), 0);
+        match export.entries()[0].kind() {
+            BytecodeSourceMapEntryKind::Source { file, snippet, .. } => {
+                assert_eq!(file, "src/lib.fe");
+                assert_eq!(snippet, "lib");
+            }
+            other => panic!("expected source entry, got {}", other.kind_name()),
+        }
 
         let json_path = report
             .root_dir
             .join("artifacts/tests/source_map_case/sonatina/debug_locations.json");
         let json =
             std::fs::read_to_string(json_path).expect("debug locations artifact should exist");
-        let value =
-            serde_json::from_str::<Value>(&json).expect("debug locations should be valid JSON");
-        assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["object"], "source_map_case");
-        assert_eq!(value["section"], "runtime");
-        assert_eq!(value["locations"][0]["file"], "src/lib.fe");
-        assert_eq!(value["locations"][0]["snippet"], "lib");
+        let export = serde_json::from_str::<OwnedBytecodeDebugLocationExport>(&json)
+            .expect("debug locations should match owned schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedBytecodeDebugLocationExport::SCHEMA_VERSION
+        );
+        assert_eq!(export.object(), Some("source_map_case"));
+        assert_eq!(export.section(), Some("runtime"));
+        assert_eq!(export.locations()[0].file(), "src/lib.fe");
+        assert_eq!(export.locations()[0].snippet(), "lib");
+
+        let json_path = report
+            .root_dir
+            .join("artifacts/tests/source_map_case/sonatina/debug_line_table.json");
+        let json =
+            std::fs::read_to_string(json_path).expect("debug line table artifact should exist");
+        let export = serde_json::from_str::<OwnedBytecodeDebugLineTableExport>(&json)
+            .expect("debug line table should match owned schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedBytecodeDebugLineTableExport::SCHEMA_VERSION
+        );
+        assert_eq!(export.object(), Some("source_map_case"));
+        assert_eq!(export.section(), Some("runtime"));
+        assert_eq!(export.files()[0].path(), "src/lib.fe");
+        assert_eq!(export.rows()[0].snippet(), "lib");
     }
 
     #[test]
@@ -3104,6 +3138,7 @@ mod tests {
                 },
             )],
             sonatina_bytecode_origin_coverage: None,
+            sonatina_post_opt_origin_coverage: None,
             sonatina_origin_facts: None,
             sonatina_snapshot_origin_facts: None,
             value_param_count: 0,
@@ -3117,6 +3152,112 @@ mod tests {
             .expect_err("source-map report write should fail");
 
         assert!(err.contains("source_map.json"));
+    }
+
+    #[test]
+    fn sonatina_report_surfaces_debug_location_write_errors() {
+        let temp = tempdir().expect("tempdir");
+        let report = ReportContext {
+            root_dir: Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap(),
+        };
+        let blocked_path = report
+            .root_dir
+            .join("artifacts/tests/source_map_case/sonatina/debug_locations.json");
+        std::fs::create_dir_all(blocked_path.as_std_path())
+            .expect("block debug-locations file path with directory");
+        let case = TestMetadata {
+            display_name: "source_map_case".to_string(),
+            hir_name: "source_map_case".to_string(),
+            symbol_name: "source_map_case".to_string(),
+            object_name: "source_map_case".to_string(),
+            bytecode: vec![0x00],
+            sonatina_observability_json: None,
+            sonatina_source_map_summary: None,
+            sonatina_source_map_entries: vec![source_map_entry(
+                "source_map_case",
+                "runtime",
+                1,
+                2,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/lib.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "lib".to_string(),
+                },
+            )],
+            sonatina_bytecode_origin_coverage: None,
+            sonatina_post_opt_origin_coverage: None,
+            sonatina_origin_facts: None,
+            sonatina_snapshot_origin_facts: None,
+            value_param_count: 0,
+            effect_param_count: 0,
+            init_bytecode: Vec::new(),
+            expected_revert: None,
+            initial_balance: None,
+        };
+
+        let err = write_sonatina_case_artifacts(&report, &case)
+            .expect_err("debug-location report write should fail");
+
+        assert!(err.contains("debug_locations.json"));
+    }
+
+    #[test]
+    fn sonatina_report_surfaces_debug_line_table_write_errors() {
+        let temp = tempdir().expect("tempdir");
+        let report = ReportContext {
+            root_dir: Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap(),
+        };
+        let blocked_path = report
+            .root_dir
+            .join("artifacts/tests/source_map_case/sonatina/debug_line_table.json");
+        std::fs::create_dir_all(blocked_path.as_std_path())
+            .expect("block debug-line-table file path with directory");
+        let case = TestMetadata {
+            display_name: "source_map_case".to_string(),
+            hir_name: "source_map_case".to_string(),
+            symbol_name: "source_map_case".to_string(),
+            object_name: "source_map_case".to_string(),
+            bytecode: vec![0x00],
+            sonatina_observability_json: None,
+            sonatina_source_map_summary: None,
+            sonatina_source_map_entries: vec![source_map_entry(
+                "source_map_case",
+                "runtime",
+                1,
+                2,
+                BytecodeSourceMapEntryKind::Source {
+                    span_kind: SourceSpanKind::Original,
+                    file: "src/lib.fe".to_string(),
+                    start_byte: 10,
+                    end_byte: 14,
+                    start_line: 1,
+                    start_col: 2,
+                    end_line: 1,
+                    end_col: 6,
+                    snippet: "lib".to_string(),
+                },
+            )],
+            sonatina_bytecode_origin_coverage: None,
+            sonatina_post_opt_origin_coverage: None,
+            sonatina_origin_facts: None,
+            sonatina_snapshot_origin_facts: None,
+            value_param_count: 0,
+            effect_param_count: 0,
+            init_bytecode: Vec::new(),
+            expected_revert: None,
+            initial_balance: None,
+        };
+
+        let err = write_sonatina_case_artifacts(&report, &case)
+            .expect_err("debug-line-table report write should fail");
+
+        assert!(err.contains("debug_line_table.json"));
     }
 
     #[test]
@@ -3156,29 +3297,33 @@ fn sample() -> u256 {
         let report = ReportContext {
             root_dir: Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap(),
         };
-        let pc = common::origin::OriginExportKey::new(
+        let pc = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::BytecodePc,
             "object:origin_fact_case:section:runtime",
             "pc:1..2",
-        );
-        let synthetic = common::origin::OriginExportKey::new(
+        )
+        .unwrap();
+        let synthetic = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::SonatinaSynthetic,
             "sonatina",
             "prologue",
-        );
+        )
+        .unwrap();
         let mut graph = common::origin::OriginGraph::new();
         graph.push(synthetic, pc, common::origin::OriginLinkKind::Synthetic);
         let origin_facts = common::facts::origin_graph_facts(&graph, Clone::clone);
-        let pre_opt = common::origin::OriginExportKey::new(
+        let pre_opt = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::SonatinaInst,
             "sonatina:func:origin_fact_case",
             "pre_opt:inst:11",
-        );
-        let snapshot_loss = common::origin::OriginExportKey::new(
+        )
+        .unwrap();
+        let snapshot_loss = common::origin::OriginExportKey::try_from_raw_parts(
             common::origin::OriginExportKind::SonatinaSynthetic,
             "sonatina",
             "pre_opt_snapshot_loss",
-        );
+        )
+        .unwrap();
         let mut snapshot_graph = common::origin::OriginGraph::new();
         snapshot_graph.push(
             pre_opt,
@@ -3197,6 +3342,7 @@ fn sample() -> u256 {
             sonatina_source_map_summary: None,
             sonatina_source_map_entries: Vec::new(),
             sonatina_bytecode_origin_coverage: None,
+            sonatina_post_opt_origin_coverage: None,
             sonatina_origin_facts: Some(origin_facts),
             sonatina_snapshot_origin_facts: Some(snapshot_origin_facts),
             value_param_count: 0,
@@ -3212,16 +3358,22 @@ fn sample() -> u256 {
             .root_dir
             .join("artifacts/tests/origin_fact_case/sonatina/origin_facts.json");
         let json = std::fs::read_to_string(json_path).expect("origin facts artifact should exist");
-        let value = serde_json::from_str::<Value>(&json).expect("origin facts should be JSON");
-        assert_eq!(value["schema_version"], 1);
+        let export = serde_json::from_str::<OwnedTypedFactSetExport>(&json)
+            .expect("origin facts should match typed schema");
+        assert_eq!(
+            export.schema_version(),
+            OwnedTypedFactSetExport::SCHEMA_VERSION
+        );
+        let facts = TypedFactSet::new(export.facts().to_vec());
         assert!(
-            value["facts"]
-                .as_array()
-                .expect("facts array")
-                .iter()
-                .any(|fact| {
-                    fact["type"] == "origin_node" && fact["key"]["kind"] == "bytecode.pc"
-                })
+            facts
+                .origin_nodes()
+                .any(|fact| { fact.key().kind() == common::origin::OriginExportKind::BytecodePc })
+        );
+        assert!(
+            facts
+                .origin_links()
+                .any(|fact| fact.kind() == common::origin::OriginLinkKind::Synthetic)
         );
 
         let snapshot_json_path = report
@@ -3229,19 +3381,21 @@ fn sample() -> u256 {
             .join("artifacts/tests/origin_fact_case/sonatina/snapshot_origin_facts.json");
         let snapshot_json =
             std::fs::read_to_string(snapshot_json_path).expect("snapshot facts artifact exists");
-        let snapshot_value =
-            serde_json::from_str::<Value>(&snapshot_json).expect("snapshot facts should be JSON");
-        assert_eq!(snapshot_value["schema_version"], 1);
+        let snapshot_export = serde_json::from_str::<OwnedTypedFactSetExport>(&snapshot_json)
+            .expect("snapshot facts should match typed schema");
+        assert_eq!(
+            snapshot_export.schema_version(),
+            OwnedTypedFactSetExport::SCHEMA_VERSION
+        );
+        let snapshot_facts = TypedFactSet::new(snapshot_export.facts().to_vec());
+        assert!(snapshot_facts.origin_nodes().any(|fact| {
+            fact.key().kind() == common::origin::OriginExportKind::SonatinaSynthetic
+                && fact.key().local_key() == "pre_opt_snapshot_loss"
+        }));
         assert!(
-            snapshot_value["facts"]
-                .as_array()
-                .expect("snapshot facts array")
-                .iter()
-                .any(|fact| {
-                    fact["type"] == "origin_node"
-                        && fact["key"]["kind"] == "sonatina.synthetic"
-                        && fact["key"]["local_key"] == "pre_opt_snapshot_loss"
-                })
+            snapshot_facts
+                .origin_links()
+                .any(|fact| fact.kind() == common::origin::OriginLinkKind::Synthetic)
         );
     }
 }

@@ -55,6 +55,12 @@ impl RuntimeStmtSite {
     }
 }
 
+impl common::origin::OriginExportLocalKey for RuntimeStmtSite {
+    fn to_export_local_key(&self) -> String {
+        (*self).export_local_key()
+    }
+}
+
 common::define_origin_key_type! {
     /// Origin key for a MIR runtime statement. The statement site is only
     /// meaningful inside its owning runtime instance.
@@ -92,10 +98,6 @@ impl<'db> RuntimeCodeRegionOrigin<'db> {
     pub fn region(self) -> RuntimeCodeRegion<'db> {
         self.key.into_parts().0
     }
-
-    pub fn key(self) -> OriginKey<RuntimeCodeRegion<'db>, ()> {
-        self.key
-    }
 }
 
 pub trait RuntimeOriginOwnerKey: OriginExportOwnerKey {}
@@ -106,8 +108,8 @@ pub fn runtime_stmt_export_key<K: RuntimeOriginOwnerKey + ?Sized>(
 ) -> OriginExportKey {
     OriginExportKey::new(
         OriginExportKind::RuntimeStmt,
-        stable_instance_key.as_str(),
-        origin.site().export_local_key(),
+        stable_instance_key,
+        &origin.site(),
     )
 }
 
@@ -117,8 +119,8 @@ pub fn runtime_terminator_export_key<K: RuntimeOriginOwnerKey + ?Sized>(
 ) -> OriginExportKey {
     OriginExportKey::new(
         OriginExportKind::RuntimeTerminator,
-        stable_instance_key.as_str(),
-        runtime_terminator_local_key(origin.block()),
+        stable_instance_key,
+        &RuntimeTerminatorLocalKey::for_block(origin.block()),
     )
 }
 
@@ -126,8 +128,22 @@ pub fn runtime_terminator_local_key(block: RBlockId) -> String {
     format!("block:{}:terminator", block.index())
 }
 
+common::define_origin_local_key! {
+    pub struct RuntimeTerminatorLocalKey;
+}
+
+impl RuntimeTerminatorLocalKey {
+    pub fn for_block(block: RBlockId) -> Self {
+        Self::new(runtime_terminator_local_key(block))
+    }
+}
+
 common::define_origin_owner_key! {
     pub struct RuntimeCodeRegionOwnerKey;
+}
+
+common::define_origin_local_key! {
+    pub struct RuntimeCodeRegionLocalKey;
 }
 
 common::define_origin_string_key! {
@@ -142,8 +158,8 @@ pub fn runtime_code_region_export_key(
     let _ = origin.region();
     OriginExportKey::new(
         OriginExportKind::RuntimeCodeRegion,
-        stable_region_key.as_str(),
-        "region",
+        stable_region_key,
+        &RuntimeCodeRegionLocalKey::new("region"),
     )
 }
 
@@ -245,13 +261,20 @@ pub struct RuntimePackageOrigins<'db> {
 }
 
 impl<'db> RuntimePackageOrigins<'db> {
-    pub fn new(bodies: Vec<RuntimePackageBodyOrigins<'db>>) -> Self {
+    pub fn new(mut bodies: Vec<RuntimePackageBodyOrigins<'db>>) -> Self {
+        bodies.sort_by(|lhs, rhs| lhs.symbol_key().cmp(rhs.symbol_key()));
         for (index, body) in bodies.iter().enumerate() {
             assert!(
                 !bodies[..index]
                     .iter()
                     .any(|previous| previous.instance() == body.instance()),
                 "runtime package origins cannot contain the same runtime instance more than once"
+            );
+            assert!(
+                !bodies[..index]
+                    .iter()
+                    .any(|previous| previous.symbol_key() == body.symbol_key()),
+                "runtime package origins cannot contain the same runtime body symbol more than once"
             );
         }
         Self { bodies }
@@ -299,7 +322,7 @@ pub fn runtime_package_origins<'db>(
     db: &'db dyn MirDb,
     package: RuntimePackage<'db>,
 ) -> RuntimePackageOrigins<'db> {
-    let mut bodies = package
+    let bodies = package
         .functions(db)
         .iter()
         .map(|function| {
@@ -311,7 +334,6 @@ pub fn runtime_package_origins<'db>(
             )
         })
         .collect::<Vec<_>>();
-    bodies.sort_by(|lhs, rhs| lhs.symbol().cmp(rhs.symbol()));
     RuntimePackageOrigins::new(bodies)
 }
 
@@ -453,7 +475,7 @@ common::define_origin_string_key! {
     pub struct RuntimeOriginFactTargetKey;
 }
 
-common::define_origin_string_key! {
+common::define_origin_local_key! {
     pub struct RuntimeOriginFactSyntheticLocalKey;
 }
 
@@ -591,11 +613,7 @@ pub fn runtime_origin_fact_node_export_key(node: &RuntimeOriginFactNode<'_>) -> 
         RuntimeOriginFactNode::Synthetic {
             owner_key,
             local_key,
-        } => OriginExportKey::new(
-            OriginExportKind::RuntimeSynthetic,
-            owner_key.as_str(),
-            local_key.as_str(),
-        ),
+        } => OriginExportKey::new(OriginExportKind::RuntimeSynthetic, owner_key, local_key),
         RuntimeOriginFactNode::Stmt { origin, owner_key } => {
             runtime_stmt_export_key(*origin, owner_key)
         }
@@ -663,6 +681,10 @@ mod tests {
         instance::{RuntimeInstanceKey, RuntimeInstanceSource, get_or_build_runtime_instance},
         runtime::build_runtime_package,
     };
+
+    fn origin_key(kind: OriginExportKind, owner: &str, local: &str) -> OriginExportKey {
+        OriginExportKey::try_from_raw_parts(kind, owner, local).unwrap()
+    }
 
     fn find_func<'db>(db: &'db DriverDataBase, top_mod: TopLevelMod<'db>, name: &str) -> Func<'db> {
         top_mod
@@ -854,6 +876,94 @@ fn test_origin_keys() -> u256 {
     }
 
     #[test]
+    #[should_panic(
+        expected = "runtime package origins cannot contain the same runtime body symbol more than once"
+    )]
+    fn runtime_package_origins_reject_duplicate_body_symbols() {
+        let mut db = DriverDataBase::default();
+        let file_url = Url::parse("file:///duplicate_runtime_package_symbol.fe").unwrap();
+        let file = db.workspace().touch(
+            &mut db,
+            file_url,
+            Some(
+                r#"
+fn helper_a() -> u256 {
+    1
+}
+
+fn helper_b() -> u256 {
+    2
+}
+"#
+                .to_string(),
+            ),
+        );
+        let top_mod = db.top_mod(file);
+        let first_instance = runtime_instance_for_func(&db, find_func(&db, top_mod, "helper_a"));
+        let second_instance = runtime_instance_for_func(&db, find_func(&db, top_mod, "helper_b"));
+
+        RuntimePackageOrigins::new(vec![
+            RuntimePackageBodyOrigins::new(
+                RuntimePackageBodySymbol::new("same"),
+                first_instance,
+                RuntimeBodyOrigins::new(),
+            ),
+            RuntimePackageBodyOrigins::new(
+                RuntimePackageBodySymbol::new("same"),
+                second_instance,
+                RuntimeBodyOrigins::new(),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn runtime_package_origins_constructor_orders_bodies_by_symbol() {
+        let mut db = DriverDataBase::default();
+        let file_url = Url::parse("file:///runtime_package_origin_constructor_order.fe").unwrap();
+        let file = db.workspace().touch(
+            &mut db,
+            file_url,
+            Some(
+                r#"
+fn helper_a() -> u256 {
+    1
+}
+
+fn helper_b() -> u256 {
+    2
+}
+"#
+                .to_string(),
+            ),
+        );
+        let top_mod = db.top_mod(file);
+        let first_instance = runtime_instance_for_func(&db, find_func(&db, top_mod, "helper_a"));
+        let second_instance = runtime_instance_for_func(&db, find_func(&db, top_mod, "helper_b"));
+
+        let origins = RuntimePackageOrigins::new(vec![
+            RuntimePackageBodyOrigins::new(
+                RuntimePackageBodySymbol::new("z_second"),
+                first_instance,
+                RuntimeBodyOrigins::new(),
+            ),
+            RuntimePackageBodyOrigins::new(
+                RuntimePackageBodySymbol::new("a_first"),
+                second_instance,
+                RuntimeBodyOrigins::new(),
+            ),
+        ]);
+
+        assert_eq!(
+            origins
+                .bodies()
+                .iter()
+                .map(RuntimePackageBodyOrigins::symbol)
+                .collect::<Vec<_>>(),
+            vec!["a_first", "z_second"]
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "origin string key must not be empty")]
     fn runtime_package_body_symbols_reject_empty_strings() {
         let _ = RuntimePackageBodySymbol::new("");
@@ -890,7 +1000,7 @@ fn test_origin_keys() -> u256 {
         assert_ne!(stmt_key, terminator_key);
         assert_eq!(
             stmt_key,
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::RuntimeStmt,
                 "runtime:test",
                 "block:3:stmt:5"
@@ -898,7 +1008,7 @@ fn test_origin_keys() -> u256 {
         );
         assert_eq!(
             terminator_key,
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::RuntimeTerminator,
                 "runtime:test",
                 "block:3:terminator"
@@ -915,7 +1025,7 @@ fn test_origin_keys() -> u256 {
 
         assert_eq!(
             runtime_origin_fact_node_export_key(&node),
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::RuntimeSynthetic,
                 "runtime:test",
                 "block:0:stmt:0"

@@ -17,6 +17,14 @@ use mir::{
 use sonatina_codegen::object::{ObjectArtifact, PcMapEntry, UnmappedReason};
 use sonatina_ir::{InstId, Module, module::FuncRef};
 
+common::define_origin_string_key! {
+    /// Frontend label attached to Sonatina observability rows.
+    ///
+    /// Fe derives these labels from stable origin export keys before handing
+    /// them to Sonatina's external frontend-provenance map.
+    pub struct FrontendOriginLabel;
+}
+
 /// Fe-owned wrapper around Sonatina's frontend provenance label map.
 ///
 /// Sonatina's external observability API still uses "provenance"; the origin
@@ -32,8 +40,15 @@ impl FrontendOriginLabelMap {
         Self::default()
     }
 
-    pub fn insert_if_absent(&mut self, function: FuncRef, inst: InstId, label: String) {
-        self.inner.entry((function, inst)).or_insert(label);
+    pub fn insert_if_absent(
+        &mut self,
+        function: FuncRef,
+        inst: InstId,
+        label: FrontendOriginLabel,
+    ) {
+        self.inner
+            .entry((function, inst))
+            .or_insert_with(|| label.as_str().to_string());
     }
 
     pub fn as_sonatina_frontend_provenance(
@@ -80,6 +95,12 @@ impl SonatinaInstLocal {
     }
 }
 
+impl common::origin::OriginExportLocalKey for SonatinaInstOrigin {
+    fn to_export_local_key(&self) -> String {
+        format!("{}:inst:{}", self.stage().as_str(), self.inst().0)
+    }
+}
+
 /// Origin key for a Sonatina instruction. `InstId` is function-local, so the
 /// owning `FuncRef` is part of the key. The local key also carries the
 /// compilation stage so pre-opt, post-opt, and backend-prepared IDs cannot be
@@ -119,28 +140,20 @@ impl SonatinaInstOrigin {
     pub fn stage(self) -> SonatinaInstStage {
         self.key.into_parts().1.stage()
     }
-
-    pub fn key(self) -> OriginKey<FuncRef, SonatinaInstLocal> {
-        self.key
-    }
 }
 
 pub fn sonatina_inst_export_key(
     origin: SonatinaInstOrigin,
     stable_function_key: &SonatinaFunctionExportKey,
 ) -> OriginExportKey {
-    OriginExportKey::new(
-        OriginExportKind::SonatinaInst,
-        stable_function_key.as_str(),
-        format!("{}:inst:{}", origin.stage().as_str(), origin.inst().0),
-    )
+    OriginExportKey::new(OriginExportKind::SonatinaInst, stable_function_key, &origin)
 }
 
 pub fn sonatina_synthetic_export_key(origin: SonatinaSyntheticOrigin) -> OriginExportKey {
     OriginExportKey::new(
         OriginExportKind::SonatinaSynthetic,
-        "sonatina",
-        origin.as_str(),
+        &SonatinaSyntheticOwnerKey::new("sonatina"),
+        &origin,
     )
 }
 
@@ -150,6 +163,10 @@ common::define_origin_string_key! {
 
 common::define_origin_string_key! {
     pub struct BytecodeSectionNameKey;
+}
+
+common::define_origin_owner_key! {
+    pub struct BytecodePcOwnerKey;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -175,12 +192,12 @@ impl BytecodeSectionKey {
         &self.section
     }
 
-    pub fn export_owner_key(self) -> String {
-        format!(
+    pub fn export_owner_key(&self) -> BytecodePcOwnerKey {
+        BytecodePcOwnerKey::new(format!(
             "object:{}:section:{}",
             self.object.as_str(),
             self.section.as_str()
-        )
+        ))
     }
 }
 
@@ -209,6 +226,12 @@ impl BytecodePcRange {
     }
 }
 
+impl common::origin::OriginExportLocalKey for BytecodePcRange {
+    fn to_export_local_key(&self) -> String {
+        (*self).export_local_key()
+    }
+}
+
 /// Origin key for a bytecode PC range. PC offsets are section-local in
 /// Sonatina observability, so both object and section are part of the owner.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -230,26 +253,21 @@ impl BytecodePcOrigin {
     pub fn range(&self) -> BytecodePcRange {
         *self.key.local()
     }
-
-    pub fn key(self) -> OriginKey<BytecodeSectionKey, BytecodePcRange> {
-        self.key
-    }
 }
 
 pub fn bytecode_pc_export_key(origin: BytecodePcOrigin) -> OriginExportKey {
-    let (section, range) = origin.key().into_parts();
     OriginExportKey::new(
         OriginExportKind::BytecodePc,
-        section.export_owner_key(),
-        range.export_local_key(),
+        &origin.section().export_owner_key(),
+        &origin.range(),
     )
 }
 
 pub fn bytecode_unmapped_export_key(reason: BytecodeUnmappedReason) -> OriginExportKey {
     OriginExportKey::new(
         OriginExportKind::BytecodeUnmapped,
-        "bytecode",
-        reason.as_str(),
+        &BytecodeUnmappedOwnerKey::new("bytecode"),
+        &reason,
     )
 }
 
@@ -259,6 +277,16 @@ common::define_closed_string_enum! {
         Prologue => "prologue",
         PostPreOptSnapshotGap => "post_preopt_snapshot_gap",
         PreOptSnapshotLoss => "pre_opt_snapshot_loss",
+    }
+}
+
+common::define_origin_owner_key! {
+    pub struct SonatinaSyntheticOwnerKey;
+}
+
+impl common::origin::OriginExportLocalKey for SonatinaSyntheticOrigin {
+    fn to_export_local_key(&self) -> String {
+        self.as_str().to_string()
     }
 }
 
@@ -521,6 +549,16 @@ common::define_closed_string_enum! {
         LabelOrFixupOnly => "label_or_fixup_only",
         Synthetic => "synthetic",
         Unknown => "unknown",
+    }
+}
+
+common::define_origin_owner_key! {
+    pub struct BytecodeUnmappedOwnerKey;
+}
+
+impl common::origin::OriginExportLocalKey for BytecodeUnmappedReason {
+    fn to_export_local_key(&self) -> String {
+        self.as_str().to_string()
     }
 }
 
@@ -821,6 +859,30 @@ impl<'db> SonatinaPostOptPackageOrigins<'db> {
         coverage
     }
 
+    pub fn coverage_for_functions(
+        &self,
+        functions: &BTreeSet<FuncRef>,
+    ) -> SonatinaPostOptOriginCoverage {
+        let mut coverage = SonatinaPostOptOriginCoverage::default();
+        for function in self
+            .functions
+            .iter()
+            .filter(|function| functions.contains(&function.function()))
+        {
+            let function_coverage = function.coverage();
+            coverage.total += function_coverage.total;
+            coverage.same_inst_id += function_coverage.same_inst_id;
+            coverage.created_or_unmatched_after_preopt_snapshot +=
+                function_coverage.created_or_unmatched_after_preopt_snapshot;
+        }
+        coverage.pre_opt_snapshot_losses = self
+            .pre_opt_snapshot_losses
+            .iter()
+            .filter(|record| functions.contains(&record.pre_opt().origin().function()))
+            .count();
+        coverage
+    }
+
     pub fn origin_graph(&self) -> CodegenOriginGraph {
         let mut graph = CodegenOriginGraph::new();
         for record in self.records() {
@@ -978,9 +1040,12 @@ impl<'db> BytecodePackageOrigins<'db> {
                     BytecodeSectionNameKey::new(section_name.0.clone()),
                 );
                 for entry in &observability.pc_map {
-                    let Some(range) = BytecodePcRange::new(entry.pc_start, entry.pc_end) else {
-                        continue;
-                    };
+                    let range = bytecode_pc_range_from_entry(
+                        &artifact.object.0,
+                        &section_name.0,
+                        entry.pc_start,
+                        entry.pc_end,
+                    );
                     let pc = BytecodePcOrigin::new(section_key.clone(), range);
                     let source = bytecode_source_from_pc_entry(entry, post_opt);
                     records.push(BytecodeOriginRecord::new(pc, source));
@@ -1014,6 +1079,24 @@ impl<'db> BytecodePackageOrigins<'db> {
                 .iter()
                 .filter(|record| record.origin().section() == section),
         )
+    }
+
+    pub fn post_opt_origin_coverage_for_object(
+        &self,
+        object: &BytecodeObjectKey,
+        post_opt_origins: &SonatinaPostOptPackageOrigins<'db>,
+    ) -> SonatinaPostOptOriginCoverage {
+        let functions = self.post_opt_functions_for_object(object);
+        post_opt_origins.coverage_for_functions(&functions)
+    }
+
+    pub fn post_opt_origin_coverage_for_section(
+        &self,
+        section: &BytecodeSectionKey,
+        post_opt_origins: &SonatinaPostOptPackageOrigins<'db>,
+    ) -> SonatinaPostOptOriginCoverage {
+        let functions = self.post_opt_functions_for_section(section);
+        post_opt_origins.coverage_for_functions(&functions)
     }
 
     pub fn resolve_source_spans(
@@ -1176,16 +1259,26 @@ impl<'db> BytecodePackageOrigins<'db> {
         self.records
             .iter()
             .filter(|record| record.origin().section().object() == object)
-            .filter_map(|record| match record.source() {
-                BytecodeOriginSource::SonatinaPostOpt(post_opt) => {
-                    Some(post_opt.origin().function())
-                }
-                BytecodeOriginSource::SonatinaBackendPrepared(backend_prepared) => {
-                    Some(backend_prepared.origin().function())
-                }
-                BytecodeOriginSource::Unmapped(_) => None,
-            })
+            .filter_map(bytecode_origin_record_function)
             .collect()
+    }
+
+    fn post_opt_functions_for_section(&self, section: &BytecodeSectionKey) -> BTreeSet<FuncRef> {
+        self.records
+            .iter()
+            .filter(|record| record.origin().section() == section)
+            .filter_map(bytecode_origin_record_function)
+            .collect()
+    }
+}
+
+fn bytecode_origin_record_function(record: &BytecodeOriginRecord<'_>) -> Option<FuncRef> {
+    match record.source() {
+        BytecodeOriginSource::SonatinaPostOpt(post_opt) => Some(post_opt.origin().function()),
+        BytecodeOriginSource::SonatinaBackendPrepared(backend_prepared) => {
+            Some(backend_prepared.origin().function())
+        }
+        BytecodeOriginSource::Unmapped(_) => None,
     }
 }
 
@@ -1215,6 +1308,19 @@ fn sort_bytecode_origin_records(records: &mut [BytecodeOriginRecord<'_>]) {
                     .cmp(&right.origin().range().end())
             })
     });
+}
+
+fn bytecode_pc_range_from_entry(
+    object: &str,
+    section: &str,
+    pc_start: u32,
+    pc_end: u32,
+) -> BytecodePcRange {
+    BytecodePcRange::new(pc_start, pc_end).unwrap_or_else(|| {
+        panic!(
+            "bytecode origin PC-map ranges must be non-empty and ordered: object `{object}` section `{section}` range {pc_start}..{pc_end}"
+        )
+    })
 }
 
 fn assert_bytecode_origin_records_do_not_overlap(records: &[BytecodeOriginRecord<'_>]) {
@@ -1522,7 +1628,7 @@ fn bytecode_source_from_pc_entry<'db>(
 fn frontend_label_for_pre_opt_source(
     source: SonatinaOriginSource<'_>,
     function_key: &SonatinaFunctionExportKey,
-) -> Option<String> {
+) -> Option<FrontendOriginLabel> {
     let key = match source {
         SonatinaOriginSource::RuntimeStmt(origin) => runtime_stmt_export_key(origin, function_key),
         SonatinaOriginSource::RuntimeTerminator(origin) => {
@@ -1530,7 +1636,7 @@ fn frontend_label_for_pre_opt_source(
         }
         SonatinaOriginSource::Synthetic(_) | SonatinaOriginSource::Unmapped(_) => return None,
     };
-    Some(key.display_label())
+    Some(FrontendOriginLabel::new(key.display_label()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1733,7 +1839,7 @@ impl EndToEndOriginOwnerKeys {
     }
 }
 
-common::define_origin_string_key! {
+common::define_origin_local_key! {
     pub struct EndToEndRuntimeSyntheticLocalKey;
 }
 
@@ -1803,8 +1909,8 @@ pub fn end_to_end_origin_node_export_key(
             local_key,
         } => Some(OriginExportKey::new(
             OriginExportKind::RuntimeSynthetic,
-            owner_key.as_str(),
-            local_key.as_str(),
+            owner_key,
+            local_key,
         )),
         EndToEndOriginNode::RuntimeStmt { origin, owner_key } => {
             Some(runtime_stmt_export_key(*origin, owner_key))
@@ -1833,8 +1939,8 @@ fn end_to_end_origin_node_export_key_checked(
             local_key,
         } => Ok(OriginExportKey::new(
             OriginExportKind::RuntimeSynthetic,
-            owner_key.as_str(),
-            local_key.as_str(),
+            owner_key,
+            local_key,
         )),
         EndToEndOriginNode::RuntimeStmt { origin, owner_key } => {
             Ok(runtime_stmt_export_key(*origin, owner_key))
@@ -2065,16 +2171,16 @@ mod tests {
         BytecodePackageOrigins, BytecodePcOrigin, BytecodePcRange, BytecodeSectionKey,
         BytecodeSectionNameKey, CodegenOriginGraph, CodegenOriginNode, EndToEndOriginGraph,
         EndToEndOriginNode, EndToEndOriginOwnerKeys, EndToEndRuntimeOwnerKey,
-        EndToEndRuntimeSyntheticLocalKey, SonatinaBackendPreparedOriginRecord,
-        SonatinaBackendPreparedOriginSource, SonatinaFunctionExportKey, SonatinaInstOrigin,
-        SonatinaInstOriginRecord, SonatinaInstStage, SonatinaOriginCoverage, SonatinaOriginSource,
-        SonatinaPostOptFunctionOrigins, SonatinaPostOptOriginCoverage, SonatinaPostOptOriginRecord,
-        SonatinaPostOptOriginSource, SonatinaPostOptPackageOrigins,
-        SonatinaPreOptSnapshotLossReason, SonatinaPreOptSnapshotLossRecord,
-        SonatinaSyntheticOrigin, bytecode_pc_export_key, bytecode_source_from_pc_entry,
-        bytecode_unmapped_export_key, codegen_origin_graph_facts, codegen_origin_node_export_key,
-        end_to_end_origin_graph_facts, end_to_end_origin_node_export_key, sonatina_inst_export_key,
-        sonatina_synthetic_export_key,
+        EndToEndRuntimeSyntheticLocalKey, FrontendOriginLabel, FrontendOriginLabelMap,
+        SonatinaBackendPreparedOriginRecord, SonatinaBackendPreparedOriginSource,
+        SonatinaFunctionExportKey, SonatinaInstOrigin, SonatinaInstOriginRecord, SonatinaInstStage,
+        SonatinaOriginCoverage, SonatinaOriginSource, SonatinaPostOptFunctionOrigins,
+        SonatinaPostOptOriginCoverage, SonatinaPostOptOriginRecord, SonatinaPostOptOriginSource,
+        SonatinaPostOptPackageOrigins, SonatinaPreOptSnapshotLossReason,
+        SonatinaPreOptSnapshotLossRecord, SonatinaSyntheticOrigin, bytecode_pc_export_key,
+        bytecode_source_from_pc_entry, bytecode_unmapped_export_key, codegen_origin_graph_facts,
+        codegen_origin_node_export_key, end_to_end_origin_graph_facts,
+        end_to_end_origin_node_export_key, sonatina_inst_export_key, sonatina_synthetic_export_key,
     };
 
     fn bytecode_section_key(object: &str, section: &str) -> BytecodeSectionKey {
@@ -2082,6 +2188,10 @@ mod tests {
             BytecodeObjectKey::new(object),
             BytecodeSectionNameKey::new(section),
         )
+    }
+
+    fn origin_key(kind: OriginExportKind, owner: &str, local: &str) -> OriginExportKey {
+        OriginExportKey::try_from_raw_parts(kind, owner, local).unwrap()
     }
 
     fn pc_map_entry(pc_start: u32, pc_end: u32) -> PcMapEntry {
@@ -2206,6 +2316,38 @@ mod tests {
         assert_eq!(first.stage(), SonatinaInstStage::PreOpt);
         assert_eq!(post_opt.stage(), SonatinaInstStage::PostOpt);
         assert_eq!(backend_prepared.stage(), SonatinaInstStage::BackendPrepared);
+    }
+
+    #[test]
+    fn frontend_origin_label_map_stores_nominal_labels() {
+        let function = FuncRef::from_u32(0);
+        let inst = InstId::from_u32(7);
+        let mut labels = FrontendOriginLabelMap::new();
+
+        labels.insert_if_absent(
+            function,
+            inst,
+            FrontendOriginLabel::new("runtime.stmt:owner:stmt"),
+        );
+        labels.insert_if_absent(
+            function,
+            inst,
+            FrontendOriginLabel::new("runtime.stmt:owner:ignored"),
+        );
+
+        assert_eq!(
+            labels
+                .as_sonatina_frontend_provenance()
+                .get(&(function, inst))
+                .map(String::as_str),
+            Some("runtime.stmt:owner:stmt")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "origin string key must not be empty")]
+    fn frontend_origin_label_rejects_empty_labels() {
+        FrontendOriginLabel::new("");
     }
 
     #[test]
@@ -2398,6 +2540,34 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "bytecode origin PC-map ranges must be non-empty and ordered: object `A` section `runtime` range 4..4"
+    )]
+    fn bytecode_package_origins_reject_empty_pc_map_ranges() {
+        let artifact = object_artifact("A", [("runtime", 4, 4)]);
+        let post_opt_origins = SonatinaPostOptPackageOrigins {
+            functions: Vec::new(),
+            pre_opt_snapshot_losses: Vec::new(),
+        };
+
+        BytecodePackageOrigins::from_artifacts(&[artifact], &post_opt_origins);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "bytecode origin PC-map ranges must be non-empty and ordered: object `A` section `runtime` range 8..4"
+    )]
+    fn bytecode_package_origins_reject_inverted_pc_map_ranges() {
+        let artifact = object_artifact("A", [("runtime", 8, 4)]);
+        let post_opt_origins = SonatinaPostOptPackageOrigins {
+            functions: Vec::new(),
+            pre_opt_snapshot_losses: Vec::new(),
+        };
+
+        BytecodePackageOrigins::from_artifacts(&[artifact], &post_opt_origins);
+    }
+
+    #[test]
     fn bytecode_package_origins_allow_adjacent_pc_ranges_in_one_section() {
         let mut artifact = object_artifact("A", [("runtime", 4, 8)]);
         push_pc_map_entry(&mut artifact, "runtime", 8, 12);
@@ -2434,7 +2604,7 @@ mod tests {
 
         assert_eq!(
             inst_key,
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::SonatinaInst,
                 "sonatina:func:a",
                 "pre_opt:inst:7"
@@ -2442,7 +2612,7 @@ mod tests {
         );
         assert_eq!(
             pc_key,
-            OriginExportKey::new(
+            origin_key(
                 OriginExportKind::BytecodePc,
                 "object:Foo:section:runtime",
                 "pc:4..8"
@@ -2500,7 +2670,7 @@ mod tests {
 
         assert_eq!(
             end_to_end_origin_node_export_key(&node, |_| None),
-            Some(OriginExportKey::new(
+            Some(origin_key(
                 OriginExportKind::RuntimeSynthetic,
                 "sonatina:func:test",
                 "block:0:stmt:0"
@@ -2521,7 +2691,7 @@ mod tests {
                 assert_eq!(func, FuncRef::from_u32(2));
                 Some(SonatinaFunctionExportKey::new("sonatina:func:foo"))
             }),
-            Some(OriginExportKey::new(
+            Some(origin_key(
                 OriginExportKind::SonatinaInst,
                 "sonatina:func:foo",
                 "post_opt:inst:9"
@@ -2836,6 +3006,90 @@ mod tests {
                 .origin_links()
                 .any(|link| link.kind() == OriginLinkKind::Synthetic)
         );
+    }
+
+    #[test]
+    fn post_opt_origin_coverage_filters_to_bytecode_object_functions() {
+        let first_function = FuncRef::from_u32(2);
+        let second_function = FuncRef::from_u32(3);
+        let first_kept_pre_opt = SonatinaInstOriginRecord::new(
+            SonatinaInstOrigin::pre_opt(first_function, InstId::from_u32(9)),
+            SonatinaOriginSource::Synthetic(SonatinaSyntheticOrigin::Prologue),
+        );
+        let first_lost_pre_opt = SonatinaInstOriginRecord::new(
+            SonatinaInstOrigin::pre_opt(first_function, InstId::from_u32(11)),
+            SonatinaOriginSource::Synthetic(SonatinaSyntheticOrigin::Prologue),
+        );
+        let second_lost_pre_opt = SonatinaInstOriginRecord::new(
+            SonatinaInstOrigin::pre_opt(second_function, InstId::from_u32(13)),
+            SonatinaOriginSource::Synthetic(SonatinaSyntheticOrigin::Prologue),
+        );
+        let first_same = SonatinaPostOptOriginRecord::new(
+            SonatinaInstOrigin::post_opt(first_function, InstId::from_u32(9)),
+            SonatinaPostOptOriginSource::SameInstId(first_kept_pre_opt),
+        );
+        let first_created = SonatinaPostOptOriginRecord::new(
+            SonatinaInstOrigin::post_opt(first_function, InstId::from_u32(10)),
+            SonatinaPostOptOriginSource::CreatedOrUnmatchedAfterPreOptSnapshot,
+        );
+        let second_created = SonatinaPostOptOriginRecord::new(
+            SonatinaInstOrigin::post_opt(second_function, InstId::from_u32(12)),
+            SonatinaPostOptOriginSource::CreatedOrUnmatchedAfterPreOptSnapshot,
+        );
+        let post_opt_origins = SonatinaPostOptPackageOrigins {
+            functions: vec![
+                SonatinaPostOptFunctionOrigins::new(
+                    first_function,
+                    vec![first_same, first_created],
+                ),
+                SonatinaPostOptFunctionOrigins::new(second_function, vec![second_created]),
+            ],
+            pre_opt_snapshot_losses: vec![
+                SonatinaPreOptSnapshotLossRecord::new(
+                    first_lost_pre_opt,
+                    SonatinaPreOptSnapshotLossReason::ElidedOrRewrittenBeforePostOptSnapshot,
+                ),
+                SonatinaPreOptSnapshotLossRecord::new(
+                    second_lost_pre_opt,
+                    SonatinaPreOptSnapshotLossReason::ElidedOrRewrittenBeforePostOptSnapshot,
+                ),
+            ],
+        };
+        let first_section = bytecode_section_key("First", "runtime");
+        let second_section = bytecode_section_key("Second", "runtime");
+        let origins = BytecodePackageOrigins {
+            records: vec![
+                BytecodeOriginRecord::new(
+                    BytecodePcOrigin::new(
+                        first_section.clone(),
+                        BytecodePcRange::new(0, 4).expect("valid PC range"),
+                    ),
+                    BytecodeOriginSource::SonatinaPostOpt(first_same),
+                ),
+                BytecodeOriginRecord::new(
+                    BytecodePcOrigin::new(
+                        second_section,
+                        BytecodePcRange::new(0, 4).expect("valid PC range"),
+                    ),
+                    BytecodeOriginSource::SonatinaPostOpt(second_created),
+                ),
+            ],
+        };
+
+        let coverage = origins.post_opt_origin_coverage_for_object(
+            &BytecodeObjectKey::new("First"),
+            &post_opt_origins,
+        );
+        assert_eq!(coverage.total(), 2);
+        assert_eq!(coverage.same_inst_id(), 1);
+        assert_eq!(coverage.created_or_unmatched_after_preopt_snapshot(), 1);
+        assert_eq!(coverage.pre_opt_snapshot_losses(), 1);
+        assert_eq!(coverage.observed_pre_opt_total(), 2);
+        assert!(coverage.is_post_opt_partitioned());
+
+        let section_coverage =
+            origins.post_opt_origin_coverage_for_section(&first_section, &post_opt_origins);
+        assert_eq!(section_coverage, coverage);
     }
 
     #[test]

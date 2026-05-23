@@ -17,9 +17,33 @@ fn bytecode_source_map_export_metadata_rejects_raw_strings() {
 }
 
 #[test]
+fn bytecode_source_map_summary_rejects_raw_filters() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/bytecode_source_map_summary_raw_filters.rs");
+}
+
+#[test]
 fn bytecode_source_map_entry_requires_constructor() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/ui/bytecode_source_map_entry_private_fields.rs");
+}
+
+#[test]
+fn bytecode_debug_location_entry_requires_decoder() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/bytecode_debug_location_entry_private_fields.rs");
+}
+
+#[test]
+fn bytecode_debug_line_table_requires_decoder() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/bytecode_debug_line_table_private_fields.rs");
+}
+
+#[test]
+fn source_map_coverage_exports_require_decoders() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/source_map_coverage_export_private_fields.rs");
 }
 
 #[test]
@@ -53,7 +77,19 @@ fn codegen_origin_fact_export_requires_nominal_graph() {
 }
 
 #[test]
+fn codegen_origins_do_not_expose_raw_origin_keys() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/codegen_origin_raw_key_escape.rs");
+}
+
+#[test]
 fn frontend_origin_label_map_is_not_raw_sonatina_provenance_map() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/ui/frontend_origin_label_map_raw_sonatina_map.rs");
+}
+
+#[test]
+fn frontend_origin_label_map_rejects_raw_strings() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/frontend_origin_label_map_raw_strings.rs");
 }

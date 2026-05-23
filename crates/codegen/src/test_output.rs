@@ -9,7 +9,7 @@ use num_bigint::BigUint;
 use common::facts::TypedFactSet;
 
 use crate::debug::{BytecodeSourceMapEntry, BytecodeSourceMapSummary};
-use crate::origin::BytecodeOriginCoverage;
+use crate::origin::{BytecodeOriginCoverage, SonatinaPostOptOriginCoverage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestMetadata {
@@ -22,6 +22,7 @@ pub struct TestMetadata {
     pub sonatina_source_map_summary: Option<BytecodeSourceMapSummary>,
     pub sonatina_source_map_entries: Vec<BytecodeSourceMapEntry>,
     pub sonatina_bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+    pub sonatina_post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverage>,
     pub sonatina_origin_facts: Option<TypedFactSet>,
     pub sonatina_snapshot_origin_facts: Option<TypedFactSet>,
     pub value_param_count: usize,

@@ -1,0 +1,17 @@
+error[E0599]: no method named `key` found for struct `HirExprOrigin<'db>` in the current scope
+ --> tests/ui/hir_origin_raw_key_escape.rs:4:20
+  |
+4 |     let _ = origin.key();
+  |                    ^^^ private field, not a method
+
+error[E0599]: no method named `key` found for struct `HirStmtOrigin<'db>` in the current scope
+ --> tests/ui/hir_origin_raw_key_escape.rs:8:20
+  |
+8 |     let _ = origin.key();
+  |                    ^^^ private field, not a method
+
+error[E0599]: no method named `key` found for struct `SemanticOrigin<'db>` in the current scope
+  --> tests/ui/hir_origin_raw_key_escape.rs:12:20
+   |
+12 |     let _ = origin.key();
+   |                    ^^^ private field, not a method

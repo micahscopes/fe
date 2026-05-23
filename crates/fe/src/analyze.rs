@@ -5,17 +5,20 @@ use codegen::{
     OptLevel, SonatinaContractBytecode, SonatinaTestOptions, TestMetadata,
     debug::{
         BytecodeOriginCoverageExport, BytecodeSourceMapEntry, BytecodeSourceMapEntryKind,
-        BytecodeSourceMapSummary, bytecode_source_map_entries_summary,
+        BytecodeSourceMapSummary, SonatinaPostOptOriginCoverageExport,
+        bytecode_source_map_entries_summary,
     },
     emit_runtime_package_sonatina_bytecode_with_source_maps, emit_test_module_sonatina,
-    origin::BytecodeOriginCoverage,
+    origin::{BytecodeOriginCoverage, SonatinaPostOptOriginCoverage},
 };
 use common::{
     InputDb,
     config::{Config, WorkspaceConfig},
     facts::{
-        OriginPathWitnessExport, OriginReachabilitySummary, OwnedTypedFactSetExport,
-        TypedFactRelationIndex, TypedFactRelationSet, TypedFactSet, shape_graph_facts,
+        OriginPathWitnessExport, OriginReachabilitySummary, OriginSourcePathWitnessExport,
+        OwnedTypedFactSetExport, SourceSpanFileCount, TypedFactRelationCount,
+        TypedFactRelationIndex, TypedFactRelationName, TypedFactRelationSet, TypedFactSet,
+        shape_graph_facts,
     },
     file::IngotFileKind,
     origin::OriginExportKind,
@@ -33,7 +36,7 @@ use mir::{
     runtime_package_origins,
 };
 use salsa::Setter;
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize, de};
 use url::Url;
 
 use crate::{
@@ -50,15 +53,17 @@ pub(crate) struct AnalyzeOutcome {
     pub(crate) output: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnalyzeReport {
     schema_version: u32,
     profile: String,
-    package_kind: &'static str,
+    package_kind: String,
     targets: Vec<AnalyzeTargetReport>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnalyzeTargetReport {
     label: String,
     runtime_bodies: usize,
@@ -70,7 +75,8 @@ struct AnalyzeTargetReport {
     shapes: Vec<AnalyzeShapeReport>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnalyzeBodyReport {
     symbol: String,
     statements: OriginCount,
@@ -79,7 +85,7 @@ struct AnalyzeBodyReport {
 
 #[derive(Debug, Serialize)]
 struct AnalyzeSourceMapReport {
-    scope: &'static str,
+    scope: String,
     label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     test: Option<String>,
@@ -87,6 +93,9 @@ struct AnalyzeSourceMapReport {
     section: String,
     total: usize,
     source: usize,
+    debug_locations: usize,
+    debug_line_table_files: usize,
+    debug_line_table_rows: usize,
     non_source: usize,
     source_span_invalid: usize,
     semantic_span_missing: usize,
@@ -99,7 +108,9 @@ struct AnalyzeSourceMapReport {
     bytecode_unmapped: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     bytecode_origin_coverage: Option<BytecodeOriginCoverageExport>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverageExport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     entries: Vec<BytecodeSourceMapEntry>,
 }
 
@@ -112,16 +123,20 @@ impl AnalyzeSourceMapReport {
         section: String,
         summary: &BytecodeSourceMapSummary,
         bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+        post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverage>,
         entries: Vec<BytecodeSourceMapEntry>,
     ) -> Self {
-        Self {
-            scope,
+        let report = Self {
+            scope: scope.to_string(),
             label,
             test,
             object,
             section,
             total: summary.total(),
             source: summary.source(),
+            debug_locations: summary.debug_locations(),
+            debug_line_table_files: summary.debug_line_table_files(),
+            debug_line_table_rows: summary.debug_line_table_rows(),
             non_source: summary.non_source(),
             source_span_invalid: summary.source_span_invalid(),
             semantic_span_missing: summary.semantic_span_missing(),
@@ -134,14 +149,377 @@ impl AnalyzeSourceMapReport {
             bytecode_unmapped: summary.bytecode_unmapped(),
             bytecode_origin_coverage: bytecode_origin_coverage
                 .map(BytecodeOriginCoverageExport::from),
+            post_opt_origin_coverage: post_opt_origin_coverage
+                .map(SonatinaPostOptOriginCoverageExport::from),
             entries,
+        };
+        report
+            .validate()
+            .unwrap_or_else(|err| panic!("invalid analyze source-map report: {err}"));
+        report
+    }
+
+    fn validate(&self) -> Result<(), AnalyzeSourceMapReportError> {
+        let classified_non_source = checked_sum(
+            "analyze source-map non-source classifications",
+            [
+                self.source_span_invalid,
+                self.semantic_span_missing,
+                self.runtime_stmt_missing,
+                self.runtime_terminator_missing,
+                self.runtime_synthetic,
+                self.sonatina_synthetic,
+                self.sonatina_unmapped,
+                self.post_preopt_snapshot_gap,
+                self.bytecode_unmapped,
+            ],
+        )?;
+        if self.non_source != classified_non_source {
+            return Err(AnalyzeSourceMapReportError::NonSourceMismatch {
+                declared: self.non_source,
+                actual: classified_non_source,
+            });
+        }
+
+        let classified_total = self.source.checked_add(self.non_source).ok_or(
+            AnalyzeSourceMapReportError::CountOverflow {
+                field: "analyze source-map total",
+            },
+        )?;
+        if self.total != classified_total {
+            return Err(AnalyzeSourceMapReportError::TotalMismatch {
+                declared: self.total,
+                actual: classified_total,
+            });
+        }
+        if self.debug_locations != self.source {
+            return Err(AnalyzeSourceMapReportError::DebugLocationsMismatch {
+                declared: self.debug_locations,
+                source: self.source,
+            });
+        }
+        if self.debug_line_table_rows != self.source {
+            return Err(AnalyzeSourceMapReportError::DebugLineTableRowsMismatch {
+                declared: self.debug_line_table_rows,
+                source: self.source,
+            });
+        }
+        if self.debug_line_table_files > self.source {
+            return Err(
+                AnalyzeSourceMapReportError::DebugLineTableFilesExceedSource {
+                    files: self.debug_line_table_files,
+                    source: self.source,
+                },
+            );
+        }
+        if let Some(coverage) = &self.bytecode_origin_coverage {
+            if coverage.total() != self.total {
+                return Err(
+                    AnalyzeSourceMapReportError::BytecodeOriginCoverageTotalMismatch {
+                        report_total: self.total,
+                        coverage_total: coverage.total(),
+                    },
+                );
+            }
+        }
+
+        if !self.entries.is_empty() {
+            if self.entries.len() != self.total {
+                return Err(AnalyzeSourceMapReportError::EntryCountMismatch {
+                    declared: self.total,
+                    actual: self.entries.len(),
+                });
+            }
+            let counts = AnalyzeSourceMapEntryCounts::from_entries(&self.entries);
+            self.validate_entry_count("source", self.source, counts.source)?;
+            self.validate_entry_count(
+                "source_span_invalid",
+                self.source_span_invalid,
+                counts.source_span_invalid,
+            )?;
+            self.validate_entry_count(
+                "semantic_span_missing",
+                self.semantic_span_missing,
+                counts.semantic_span_missing,
+            )?;
+            self.validate_entry_count(
+                "runtime_stmt_missing",
+                self.runtime_stmt_missing,
+                counts.runtime_stmt_missing,
+            )?;
+            self.validate_entry_count(
+                "runtime_terminator_missing",
+                self.runtime_terminator_missing,
+                counts.runtime_terminator_missing,
+            )?;
+            self.validate_entry_count(
+                "runtime_synthetic",
+                self.runtime_synthetic,
+                counts.runtime_synthetic,
+            )?;
+            self.validate_entry_count(
+                "sonatina_synthetic",
+                self.sonatina_synthetic,
+                counts.sonatina_synthetic,
+            )?;
+            self.validate_entry_count(
+                "sonatina_unmapped",
+                self.sonatina_unmapped,
+                counts.sonatina_unmapped,
+            )?;
+            self.validate_entry_count(
+                "post_preopt_snapshot_gap",
+                self.post_preopt_snapshot_gap,
+                counts.post_preopt_snapshot_gap,
+            )?;
+            self.validate_entry_count(
+                "bytecode_unmapped",
+                self.bytecode_unmapped,
+                counts.bytecode_unmapped,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_entry_count(
+        &self,
+        field: &'static str,
+        declared: usize,
+        actual: usize,
+    ) -> Result<(), AnalyzeSourceMapReportError> {
+        if declared == actual {
+            Ok(())
+        } else {
+            Err(AnalyzeSourceMapReportError::EntryClassificationMismatch {
+                field,
+                declared,
+                actual,
+            })
         }
     }
 }
 
+impl<'de> Deserialize<'de> for AnalyzeSourceMapReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawReport {
+            scope: String,
+            label: String,
+            test: Option<String>,
+            object: String,
+            section: String,
+            total: usize,
+            source: usize,
+            debug_locations: usize,
+            debug_line_table_files: usize,
+            debug_line_table_rows: usize,
+            non_source: usize,
+            source_span_invalid: usize,
+            semantic_span_missing: usize,
+            runtime_stmt_missing: usize,
+            runtime_terminator_missing: usize,
+            runtime_synthetic: usize,
+            sonatina_synthetic: usize,
+            sonatina_unmapped: usize,
+            post_preopt_snapshot_gap: usize,
+            bytecode_unmapped: usize,
+            bytecode_origin_coverage: Option<BytecodeOriginCoverageExport>,
+            post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverageExport>,
+            #[serde(default)]
+            entries: Vec<BytecodeSourceMapEntry>,
+        }
+
+        let raw = RawReport::deserialize(deserializer)?;
+        let report = Self {
+            scope: raw.scope,
+            label: raw.label,
+            test: raw.test,
+            object: raw.object,
+            section: raw.section,
+            total: raw.total,
+            source: raw.source,
+            debug_locations: raw.debug_locations,
+            debug_line_table_files: raw.debug_line_table_files,
+            debug_line_table_rows: raw.debug_line_table_rows,
+            non_source: raw.non_source,
+            source_span_invalid: raw.source_span_invalid,
+            semantic_span_missing: raw.semantic_span_missing,
+            runtime_stmt_missing: raw.runtime_stmt_missing,
+            runtime_terminator_missing: raw.runtime_terminator_missing,
+            runtime_synthetic: raw.runtime_synthetic,
+            sonatina_synthetic: raw.sonatina_synthetic,
+            sonatina_unmapped: raw.sonatina_unmapped,
+            post_preopt_snapshot_gap: raw.post_preopt_snapshot_gap,
+            bytecode_unmapped: raw.bytecode_unmapped,
+            bytecode_origin_coverage: raw.bytecode_origin_coverage,
+            post_opt_origin_coverage: raw.post_opt_origin_coverage,
+            entries: raw.entries,
+        };
+        report.validate().map_err(de::Error::custom)?;
+        Ok(report)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AnalyzeSourceMapEntryCounts {
+    source: usize,
+    source_span_invalid: usize,
+    semantic_span_missing: usize,
+    runtime_stmt_missing: usize,
+    runtime_terminator_missing: usize,
+    runtime_synthetic: usize,
+    sonatina_synthetic: usize,
+    sonatina_unmapped: usize,
+    post_preopt_snapshot_gap: usize,
+    bytecode_unmapped: usize,
+}
+
+impl AnalyzeSourceMapEntryCounts {
+    fn from_entries(entries: &[BytecodeSourceMapEntry]) -> Self {
+        let mut counts = Self::default();
+        for entry in entries {
+            match entry.kind() {
+                BytecodeSourceMapEntryKind::Source { .. } => counts.source += 1,
+                BytecodeSourceMapEntryKind::SourceSpanInvalid { .. } => {
+                    counts.source_span_invalid += 1;
+                }
+                BytecodeSourceMapEntryKind::SemanticSpanMissing => {
+                    counts.semantic_span_missing += 1;
+                }
+                BytecodeSourceMapEntryKind::RuntimeStmtMissing => {
+                    counts.runtime_stmt_missing += 1;
+                }
+                BytecodeSourceMapEntryKind::RuntimeTerminatorMissing => {
+                    counts.runtime_terminator_missing += 1;
+                }
+                BytecodeSourceMapEntryKind::RuntimeSynthetic => {
+                    counts.runtime_synthetic += 1;
+                }
+                BytecodeSourceMapEntryKind::SonatinaSynthetic { .. } => {
+                    counts.sonatina_synthetic += 1;
+                }
+                BytecodeSourceMapEntryKind::SonatinaUnmapped { .. } => {
+                    counts.sonatina_unmapped += 1;
+                }
+                BytecodeSourceMapEntryKind::PostPreOptSnapshotGap => {
+                    counts.post_preopt_snapshot_gap += 1;
+                }
+                BytecodeSourceMapEntryKind::BytecodeUnmapped { .. } => {
+                    counts.bytecode_unmapped += 1;
+                }
+            }
+        }
+        counts
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AnalyzeSourceMapReportError {
+    CountOverflow {
+        field: &'static str,
+    },
+    NonSourceMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    TotalMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    DebugLocationsMismatch {
+        declared: usize,
+        source: usize,
+    },
+    DebugLineTableRowsMismatch {
+        declared: usize,
+        source: usize,
+    },
+    DebugLineTableFilesExceedSource {
+        files: usize,
+        source: usize,
+    },
+    BytecodeOriginCoverageTotalMismatch {
+        report_total: usize,
+        coverage_total: usize,
+    },
+    EntryCountMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    EntryClassificationMismatch {
+        field: &'static str,
+        declared: usize,
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for AnalyzeSourceMapReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CountOverflow { field } => write!(f, "{field} overflowed"),
+            Self::NonSourceMismatch { declared, actual } => write!(
+                f,
+                "analyze source-map non_source {declared} does not match classified non-source count {actual}"
+            ),
+            Self::TotalMismatch { declared, actual } => write!(
+                f,
+                "analyze source-map total {declared} does not match source plus non_source count {actual}"
+            ),
+            Self::DebugLocationsMismatch { declared, source } => write!(
+                f,
+                "analyze source-map debug_locations {declared} does not match source count {source}"
+            ),
+            Self::DebugLineTableRowsMismatch { declared, source } => write!(
+                f,
+                "analyze source-map debug_line_table_rows {declared} does not match source count {source}"
+            ),
+            Self::DebugLineTableFilesExceedSource { files, source } => write!(
+                f,
+                "analyze source-map debug_line_table_files {files} exceeds source count {source}"
+            ),
+            Self::BytecodeOriginCoverageTotalMismatch {
+                report_total,
+                coverage_total,
+            } => write!(
+                f,
+                "analyze source-map total {report_total} does not match bytecode origin coverage total {coverage_total}"
+            ),
+            Self::EntryCountMismatch { declared, actual } => write!(
+                f,
+                "analyze source-map total {declared} does not match emitted entry count {actual}"
+            ),
+            Self::EntryClassificationMismatch {
+                field,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "analyze source-map {field} count {declared} does not match emitted entry count {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AnalyzeSourceMapReportError {}
+
+fn checked_sum(
+    field: &'static str,
+    values: impl IntoIterator<Item = usize>,
+) -> Result<usize, AnalyzeSourceMapReportError> {
+    values.into_iter().try_fold(0usize, |sum, value| {
+        sum.checked_add(value)
+            .ok_or(AnalyzeSourceMapReportError::CountOverflow { field })
+    })
+}
+
 #[derive(Debug, Serialize)]
 struct AnalyzeOriginFactReport {
-    scope: &'static str,
+    scope: String,
     label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     object: Option<String>,
@@ -149,36 +527,309 @@ struct AnalyzeOriginFactReport {
     origin_nodes: usize,
     origin_links: usize,
     source_spans: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    source_span_files: Vec<AnalyzeSourceSpanFileCount>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    relation_counts: Vec<AnalyzeFactRelationCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_span_files: Vec<SourceSpanFileCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relation_counts: Vec<TypedFactRelationCount>,
     #[serde(skip_serializing_if = "Option::is_none")]
     relation_tables: Option<TypedFactRelationSet>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reachability: Option<OriginReachabilitySummary>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     path_witnesses: Vec<OriginPathWitnessExport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_path_witnesses: Vec<OriginSourcePathWitnessExport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_error: Option<String>,
     facts: OwnedTypedFactSetExport,
 }
 
-#[derive(Debug, Serialize)]
-struct AnalyzeFactRelationCount {
-    relation: String,
-    rows: usize,
+impl AnalyzeOriginFactReport {
+    fn validate(&self) -> Result<(), AnalyzeOriginFactReportError> {
+        let facts = TypedFactSet::new(self.facts.facts().to_vec());
+        let origin_nodes = facts.origin_nodes().count();
+        let origin_links = facts.origin_links().count();
+        let source_spans = facts.source_spans().count();
+        let origin_total = checked_origin_fact_total(origin_nodes, origin_links, source_spans)?;
+
+        if self.origin_nodes != origin_nodes {
+            return Err(AnalyzeOriginFactReportError::OriginNodeCountMismatch {
+                declared: self.origin_nodes,
+                actual: origin_nodes,
+            });
+        }
+        if self.origin_links != origin_links {
+            return Err(AnalyzeOriginFactReportError::OriginLinkCountMismatch {
+                declared: self.origin_links,
+                actual: origin_links,
+            });
+        }
+        if self.source_spans != source_spans {
+            return Err(AnalyzeOriginFactReportError::SourceSpanCountMismatch {
+                declared: self.source_spans,
+                actual: source_spans,
+            });
+        }
+        if self.total != origin_total {
+            return Err(AnalyzeOriginFactReportError::TotalMismatch {
+                declared: self.total,
+                actual: origin_total,
+            });
+        }
+        if self.total != facts.facts().len() {
+            return Err(AnalyzeOriginFactReportError::NonOriginFactRows {
+                total: self.total,
+                fact_rows: facts.facts().len(),
+            });
+        }
+
+        if !self.source_span_files.is_empty() {
+            let source_span_file_total =
+                self.source_span_files
+                    .iter()
+                    .try_fold(0usize, |sum, file| {
+                        sum.checked_add(file.spans())
+                            .ok_or(AnalyzeOriginFactReportError::SourceSpanFileCountOverflow)
+                    })?;
+            if source_span_file_total != self.source_spans {
+                return Err(AnalyzeOriginFactReportError::SourceSpanFileCountMismatch {
+                    declared: self.source_spans,
+                    actual: source_span_file_total,
+                });
+            }
+        }
+
+        for count in &self.relation_counts {
+            let expected = match count.relation() {
+                TypedFactRelationName::OriginNode => self.origin_nodes,
+                TypedFactRelationName::OriginLink => self.origin_links,
+                TypedFactRelationName::SourceSpan => self.source_spans,
+                relation => {
+                    return Err(AnalyzeOriginFactReportError::UnexpectedRelationCount { relation });
+                }
+            };
+            if count.rows() != expected {
+                return Err(AnalyzeOriginFactReportError::RelationCountMismatch {
+                    relation: count.relation(),
+                    declared: count.rows(),
+                    actual: expected,
+                });
+            }
+        }
+
+        if let Some(relations) = &self.relation_tables {
+            self.validate_relation_table_count(
+                relations,
+                TypedFactRelationName::OriginNode,
+                self.origin_nodes,
+            )?;
+            self.validate_relation_table_count(
+                relations,
+                TypedFactRelationName::OriginLink,
+                self.origin_links,
+            )?;
+            self.validate_relation_table_count(
+                relations,
+                TypedFactRelationName::SourceSpan,
+                self.source_spans,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_relation_table_count(
+        &self,
+        relations: &TypedFactRelationSet,
+        relation: TypedFactRelationName,
+        expected: usize,
+    ) -> Result<(), AnalyzeOriginFactReportError> {
+        let actual = relations
+            .relation(relation)
+            .map(|relation| relation.row_count())
+            .unwrap_or_default();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(AnalyzeOriginFactReportError::RelationTableCountMismatch {
+                relation,
+                declared: expected,
+                actual,
+            })
+        }
+    }
 }
 
-#[derive(Debug, Serialize)]
-struct AnalyzeSourceSpanFileCount {
-    file: String,
-    spans: usize,
+impl<'de> Deserialize<'de> for AnalyzeOriginFactReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawReport {
+            scope: String,
+            label: String,
+            object: Option<String>,
+            total: usize,
+            origin_nodes: usize,
+            origin_links: usize,
+            source_spans: usize,
+            #[serde(default)]
+            source_span_files: Vec<SourceSpanFileCount>,
+            #[serde(default)]
+            relation_counts: Vec<TypedFactRelationCount>,
+            relation_tables: Option<TypedFactRelationSet>,
+            reachability: Option<OriginReachabilitySummary>,
+            #[serde(default)]
+            path_witnesses: Vec<OriginPathWitnessExport>,
+            #[serde(default)]
+            source_path_witnesses: Vec<OriginSourcePathWitnessExport>,
+            query_error: Option<String>,
+            facts: OwnedTypedFactSetExport,
+        }
+
+        let raw = RawReport::deserialize(deserializer)?;
+        let report = Self {
+            scope: raw.scope,
+            label: raw.label,
+            object: raw.object,
+            total: raw.total,
+            origin_nodes: raw.origin_nodes,
+            origin_links: raw.origin_links,
+            source_spans: raw.source_spans,
+            source_span_files: raw.source_span_files,
+            relation_counts: raw.relation_counts,
+            relation_tables: raw.relation_tables,
+            reachability: raw.reachability,
+            path_witnesses: raw.path_witnesses,
+            source_path_witnesses: raw.source_path_witnesses,
+            query_error: raw.query_error,
+            facts: raw.facts,
+        };
+        report.validate().map_err(de::Error::custom)?;
+        Ok(report)
+    }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AnalyzeOriginFactReportError {
+    CountOverflow,
+    TotalMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    NonOriginFactRows {
+        total: usize,
+        fact_rows: usize,
+    },
+    OriginNodeCountMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    OriginLinkCountMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    SourceSpanCountMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    SourceSpanFileCountOverflow,
+    SourceSpanFileCountMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    UnexpectedRelationCount {
+        relation: TypedFactRelationName,
+    },
+    RelationCountMismatch {
+        relation: TypedFactRelationName,
+        declared: usize,
+        actual: usize,
+    },
+    RelationTableCountMismatch {
+        relation: TypedFactRelationName,
+        declared: usize,
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for AnalyzeOriginFactReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CountOverflow => write!(f, "analyze origin-fact total overflowed"),
+            Self::TotalMismatch { declared, actual } => write!(
+                f,
+                "analyze origin-fact total {declared} does not match origin fact count {actual}"
+            ),
+            Self::NonOriginFactRows { total, fact_rows } => write!(
+                f,
+                "analyze origin-fact total {total} does not cover all typed fact rows {fact_rows}"
+            ),
+            Self::OriginNodeCountMismatch { declared, actual } => write!(
+                f,
+                "analyze origin-fact origin_nodes {declared} does not match typed fact count {actual}"
+            ),
+            Self::OriginLinkCountMismatch { declared, actual } => write!(
+                f,
+                "analyze origin-fact origin_links {declared} does not match typed fact count {actual}"
+            ),
+            Self::SourceSpanCountMismatch { declared, actual } => write!(
+                f,
+                "analyze origin-fact source_spans {declared} does not match typed fact count {actual}"
+            ),
+            Self::SourceSpanFileCountOverflow => {
+                write!(f, "analyze origin-fact source-span file count overflowed")
+            }
+            Self::SourceSpanFileCountMismatch { declared, actual } => write!(
+                f,
+                "analyze origin-fact source_span_files total {actual} does not match source_spans {declared}"
+            ),
+            Self::UnexpectedRelationCount { relation } => write!(
+                f,
+                "analyze origin-fact relation_counts contains non-origin relation {}",
+                relation.as_str()
+            ),
+            Self::RelationCountMismatch {
+                relation,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "analyze origin-fact relation count {}={declared} does not match report count {actual}",
+                relation.as_str()
+            ),
+            Self::RelationTableCountMismatch {
+                relation,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "analyze origin-fact relation table {} has {actual} rows, expected {declared}",
+                relation.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AnalyzeOriginFactReportError {}
+
+fn checked_origin_fact_total(
+    origin_nodes: usize,
+    origin_links: usize,
+    source_spans: usize,
+) -> Result<usize, AnalyzeOriginFactReportError> {
+    origin_nodes
+        .checked_add(origin_links)
+        .and_then(|sum| sum.checked_add(source_spans))
+        .ok_or(AnalyzeOriginFactReportError::CountOverflow)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnalyzeShapeReport {
-    scope: &'static str,
+    scope: String,
     label: String,
     shape_nodes: usize,
     shape_fields: usize,
@@ -187,17 +838,18 @@ struct AnalyzeShapeReport {
     trace_events: usize,
     data_flows: usize,
     graph_hashes: Vec<AnalyzeShapeHashReport>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    relation_counts: Vec<AnalyzeFactRelationCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relation_counts: Vec<TypedFactRelationCount>,
     #[serde(skip_serializing_if = "Option::is_none")]
     facts: Option<OwnedTypedFactSetExport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     relation_tables: Option<TypedFactRelationSet>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnalyzeShapeHashReport {
-    dimension: &'static str,
+    dimension: ShapeDimension,
     digest_hex: String,
 }
 
@@ -229,14 +881,51 @@ const ORIGIN_PATH_WITNESS_PRIORITY: &[(OriginExportKind, OriginExportKind)] = &[
     ),
 ];
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 struct OriginCount {
     total: usize,
     semantic: usize,
     synthetic: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OriginCountError {
+    TotalOverflow,
+    TotalMismatch { declared: usize, actual: usize },
+}
+
+impl std::fmt::Display for OriginCountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TotalOverflow => write!(f, "origin count total overflowed"),
+            Self::TotalMismatch { declared, actual } => write!(
+                f,
+                "origin count total {declared} does not match semantic plus synthetic count {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OriginCountError {}
+
 impl OriginCount {
+    fn try_new(total: usize, semantic: usize, synthetic: usize) -> Result<Self, OriginCountError> {
+        let actual = semantic
+            .checked_add(synthetic)
+            .ok_or(OriginCountError::TotalOverflow)?;
+        if total != actual {
+            return Err(OriginCountError::TotalMismatch {
+                declared: total,
+                actual,
+            });
+        }
+        Ok(Self {
+            total,
+            semantic,
+            synthetic,
+        })
+    }
+
     fn push(&mut self, source: RuntimeOriginSource<'_>) {
         self.total += 1;
         match source {
@@ -249,6 +938,24 @@ impl OriginCount {
         self.total += other.total;
         self.semantic += other.semantic;
         self.synthetic += other.synthetic;
+    }
+}
+
+impl<'de> Deserialize<'de> for OriginCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawCount {
+            total: usize,
+            semantic: usize,
+            synthetic: usize,
+        }
+
+        let raw = RawCount::deserialize(deserializer)?;
+        Self::try_new(raw.total, raw.semantic, raw.synthetic).map_err(de::Error::custom)
     }
 }
 
@@ -374,7 +1081,8 @@ pub(crate) fn analyze_to_string(
             "tests"
         } else {
             "runtime"
-        },
+        }
+        .to_string(),
         targets: Vec::new(),
     };
 
@@ -809,6 +1517,7 @@ fn source_map_report_for_test(
         &test.object_name,
         summary,
         test.sonatina_bytecode_origin_coverage,
+        test.sonatina_post_opt_origin_coverage,
         entries,
     ))
 }
@@ -824,6 +1533,7 @@ fn source_map_report_for_runtime_contract(
         contract,
         &output.source_map_entries,
         output.bytecode_origin_coverage,
+        output.post_opt_origin_coverage,
         include_source_map_entries,
     )
 }
@@ -833,6 +1543,7 @@ fn source_map_report_from_summary(
     fallback_object: &str,
     summary: &BytecodeSourceMapSummary,
     bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+    post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverage>,
     entries: Vec<BytecodeSourceMapEntry>,
 ) -> AnalyzeSourceMapReport {
     AnalyzeSourceMapReport::from_summary(
@@ -843,6 +1554,7 @@ fn source_map_report_from_summary(
         summary.section().unwrap_or("<all>").to_string(),
         summary,
         bytecode_origin_coverage,
+        post_opt_origin_coverage,
         entries,
     )
 }
@@ -853,9 +1565,10 @@ fn source_map_report_from_entries(
     fallback_object: &str,
     all_entries: &[BytecodeSourceMapEntry],
     bytecode_origin_coverage: Option<BytecodeOriginCoverage>,
+    post_opt_origin_coverage: Option<SonatinaPostOptOriginCoverage>,
     include_entries: bool,
 ) -> Option<AnalyzeSourceMapReport> {
-    let summary = bytecode_source_map_entries_summary(all_entries, None, None)?;
+    let summary = bytecode_source_map_entries_summary(all_entries, None)?;
 
     Some(AnalyzeSourceMapReport::from_summary(
         scope,
@@ -868,6 +1581,7 @@ fn source_map_report_from_entries(
         "<all>".to_string(),
         &summary,
         bytecode_origin_coverage,
+        post_opt_origin_coverage,
         include_entries
             .then(|| all_entries.to_vec())
             .unwrap_or_default(),
@@ -953,7 +1667,7 @@ fn shape_report_for_graph(
     let facts = facts.map(|facts| facts.to_owned_export());
 
     AnalyzeShapeReport {
-        scope,
+        scope: scope.to_string(),
         label,
         shape_nodes,
         shape_fields,
@@ -964,7 +1678,7 @@ fn shape_report_for_graph(
         graph_hashes: ShapeDimension::ALL
             .into_iter()
             .map(|dimension| AnalyzeShapeHashReport {
-                dimension: dimension.as_str(),
+                dimension,
                 digest_hex: graph_hashes.digest(dimension).to_hex(),
             })
             .collect(),
@@ -1103,17 +1817,31 @@ fn origin_fact_report(
     let relation_counts = relation_counts_from_relation_index(&relation_index);
     let source_span_files = source_span_file_counts_from_relation_index(&relation_index);
 
-    let (path_witnesses, query_error) = match relation_index
-        .representative_path_exports_with_priority(
+    let mut query_errors = Vec::new();
+    let path_witnesses = match relation_index.representative_path_exports_with_priority(
+        ORIGIN_PATH_WITNESS_PRIORITY.iter().copied(),
+        ORIGIN_PATH_WITNESS_LIMIT,
+    ) {
+        Ok(path_witnesses) => path_witnesses,
+        Err(err) => {
+            query_errors.push(format!("{err:?}"));
+            Vec::new()
+        }
+    };
+    let source_path_witnesses = match relation_index
+        .representative_source_path_exports_with_priority(
             ORIGIN_PATH_WITNESS_PRIORITY.iter().copied(),
             ORIGIN_PATH_WITNESS_LIMIT,
         ) {
-        Ok(path_witnesses) => (path_witnesses, None),
-        Err(err) => (Vec::new(), Some(format!("{err:?}"))),
+        Ok(source_path_witnesses) => source_path_witnesses,
+        Err(err) => {
+            query_errors.push(format!("{err:?}"));
+            Vec::new()
+        }
     };
 
     AnalyzeOriginFactReport {
-        scope,
+        scope: scope.to_string(),
         label,
         object,
         total: facts.facts().len(),
@@ -1125,7 +1853,8 @@ fn origin_fact_report(
         relation_tables: include_relation_tables.then_some(relation_export),
         reachability,
         path_witnesses,
-        query_error,
+        source_path_witnesses,
+        query_error: (!query_errors.is_empty()).then(|| query_errors.join("; ")),
         facts: facts.to_owned_export(),
     }
 }
@@ -1137,30 +1866,18 @@ fn relation_index_for_export(export: &TypedFactRelationSet) -> TypedFactRelation
 
 fn relation_counts_from_relation_index(
     index: &TypedFactRelationIndex<'_>,
-) -> Vec<AnalyzeFactRelationCount> {
+) -> Vec<TypedFactRelationCount> {
     index
         .relation_counts()
         .expect("typed fact relation export should contain declared relations")
-        .into_iter()
-        .map(|count| AnalyzeFactRelationCount {
-            relation: count.relation().to_string(),
-            rows: count.rows(),
-        })
-        .collect()
 }
 
 fn source_span_file_counts_from_relation_index(
     index: &TypedFactRelationIndex<'_>,
-) -> Vec<AnalyzeSourceSpanFileCount> {
+) -> Vec<SourceSpanFileCount> {
     index
         .source_span_file_counts()
         .expect("typed fact relation export should contain source_span relation")
-        .into_iter()
-        .map(|count| AnalyzeSourceSpanFileCount {
-            file: count.file().to_string(),
-            spans: count.spans(),
-        })
-        .collect()
 }
 
 fn analyze_top_mod_diagnostics(db: &DriverDataBase, top_mod: TopLevelMod<'_>, label: &str) -> bool {
@@ -1314,17 +2031,34 @@ fn render_text_report(report: &AnalyzeReport) -> String {
                         )
                     })
                     .unwrap_or_default();
+                let post_opt_coverage = source_map
+                    .post_opt_origin_coverage
+                    .as_ref()
+                    .map(|coverage| {
+                        format!(
+                            " post_opt_origins={} same_inst_id={} created_or_unmatched_after_preopt_snapshot={} pre_opt_snapshot_losses={}",
+                            coverage.total(),
+                            coverage.same_inst_id(),
+                            coverage.created_or_unmatched_after_preopt_snapshot(),
+                            coverage.pre_opt_snapshot_losses(),
+                        )
+                    })
+                    .unwrap_or_default();
                 writeln!(
                     out,
-                    "    {} {} {}:{} total={} source={} non_source={}{}",
+                    "    {} {} {}:{} total={} source={} debug_locations={} debug_line_table_files={} debug_line_table_rows={} non_source={}{}{}",
                     source_map.scope,
                     source_map.label,
                     source_map.object,
                     source_map.section,
                     source_map.total,
                     source_map.source,
+                    source_map.debug_locations,
+                    source_map.debug_line_table_files,
+                    source_map.debug_line_table_rows,
                     source_map.non_source,
                     bytecode_coverage,
+                    post_opt_coverage,
                 )
                 .unwrap();
                 write_source_map_breakdown(&mut out, source_map);
@@ -1347,6 +2081,14 @@ fn render_text_report(report: &AnalyzeReport) -> String {
                 let path_witnesses = (!origin_facts.path_witnesses.is_empty())
                     .then(|| format!(" path_witnesses={}", origin_facts.path_witnesses.len()))
                     .unwrap_or_default();
+                let source_path_witnesses = (!origin_facts.source_path_witnesses.is_empty())
+                    .then(|| {
+                        format!(
+                            " source_path_witnesses={}",
+                            origin_facts.source_path_witnesses.len()
+                        )
+                    })
+                    .unwrap_or_default();
                 let query_error = origin_facts
                     .query_error
                     .as_ref()
@@ -1357,7 +2099,7 @@ fn render_text_report(report: &AnalyzeReport) -> String {
                     .unwrap_or_default();
                 writeln!(
                     out,
-                    "    {} {}{} total={} origin_nodes={} origin_links={} source_spans={}{}{}{}{}",
+                    "    {} {}{} total={} origin_nodes={} origin_links={} source_spans={}{}{}{}{}{}",
                     origin_facts.scope,
                     origin_facts.label,
                     origin_facts
@@ -1371,6 +2113,7 @@ fn render_text_report(report: &AnalyzeReport) -> String {
                     origin_facts.source_spans,
                     reachable_pairs,
                     path_witnesses,
+                    source_path_witnesses,
                     query_error,
                     relations,
                 )
@@ -1392,6 +2135,12 @@ fn render_text_report(report: &AnalyzeReport) -> String {
                         write_origin_path_witness(&mut out, witness);
                     }
                 }
+                if !origin_facts.source_path_witnesses.is_empty() {
+                    writeln!(out, "      source paths:").unwrap();
+                    for witness in &origin_facts.source_path_witnesses {
+                        write_origin_source_path_witness(&mut out, witness);
+                    }
+                }
             }
         }
         if !target.shapes.is_empty() {
@@ -1403,7 +2152,7 @@ fn render_text_report(report: &AnalyzeReport) -> String {
                 let graph_hashes = shape
                     .graph_hashes
                     .iter()
-                    .map(|hash| format!("{}={}", hash.dimension, hash.digest_hex))
+                    .map(|hash| format!("{}={}", hash.dimension.as_str(), hash.digest_hex))
                     .collect::<Vec<_>>()
                     .join(" ");
                 writeln!(
@@ -1526,19 +2275,19 @@ fn write_origin_reachability_pairs(out: &mut String, summary: &OriginReachabilit
     writeln!(out, "      reachable kind pairs: {pairs}").unwrap();
 }
 
-fn write_relation_counts(out: &mut String, counts: &[AnalyzeFactRelationCount]) {
+fn write_relation_counts(out: &mut String, counts: &[TypedFactRelationCount]) {
     let relation_counts = counts
         .iter()
-        .map(|count| format!("{}={}", count.relation, count.rows))
+        .map(|count| format!("{}={}", count.relation_name(), count.rows()))
         .collect::<Vec<_>>()
         .join(" ");
     writeln!(out, "      relation counts: {relation_counts}").unwrap();
 }
 
-fn write_source_span_file_counts(out: &mut String, counts: &[AnalyzeSourceSpanFileCount]) {
+fn write_source_span_file_counts(out: &mut String, counts: &[SourceSpanFileCount]) {
     let source_span_files = counts
         .iter()
-        .map(|count| format!("{:?}={}", count.file, count.spans))
+        .map(|count| format!("{:?}={}", count.file(), count.spans()))
         .collect::<Vec<_>>()
         .join(" ");
     writeln!(out, "      source span files: {source_span_files}").unwrap();
@@ -1552,6 +2301,31 @@ fn write_origin_path_witness(out: &mut String, witness: &OriginPathWitnessExport
         witness.to_kind().as_str()
     )
     .unwrap();
+    write_origin_path_nodes(out, witness);
+}
+
+fn write_origin_source_path_witness(out: &mut String, witness: &OriginSourcePathWitnessExport) {
+    let span = witness.source_span();
+    let path = witness.path();
+    writeln!(
+        out,
+        "        {} -> {} source span_kind={} file={:?} bytes={}..{} lines={}:{}..{}:{}:",
+        path.from_kind().as_str(),
+        path.to_kind().as_str(),
+        span.span_kind().as_str(),
+        span.file(),
+        span.start_byte(),
+        span.end_byte(),
+        span.start_line(),
+        span.start_col(),
+        span.end_line(),
+        span.end_col(),
+    )
+    .unwrap();
+    write_origin_path_nodes(out, path);
+}
+
+fn write_origin_path_nodes(out: &mut String, witness: &OriginPathWitnessExport) {
     let Some((first, rest)) = witness.nodes().split_first() else {
         writeln!(out, "          <empty>").unwrap();
         return;
@@ -1625,11 +2399,25 @@ mod tests {
     use std::fs;
 
     use camino::Utf8PathBuf;
-    use codegen::OptLevel;
-    use serde_json::Value;
+    use codegen::{
+        OptLevel,
+        debug::{BytecodeSourceMapEntry, BytecodeSourceMapEntryKind},
+    };
+    use common::{
+        facts::{
+            OriginReachabilitySummary, OwnedTypedFactSetExport, TypedFactRelationCount,
+            TypedFactRelationName, TypedFactRelationSet, TypedFactSet,
+        },
+        origin::{OriginExportKind, OriginLinkKind},
+        shape::ShapeDimension,
+    };
     use tempfile::tempdir;
 
-    use super::{AnalyzeOptions, analyze_to_string};
+    use super::{
+        AnalyzeOptions, AnalyzeOriginFactReport, AnalyzeReport, AnalyzeShapeHashReport,
+        AnalyzeShapeReport, AnalyzeSourceMapReport, OriginCount, OriginCountError,
+        analyze_to_string,
+    };
     use crate::AnalyzeFormat;
 
     fn json_options(
@@ -1655,81 +2443,580 @@ mod tests {
         )
     }
 
-    fn has_reachable_kind_pair(report: &Value, from_kind: &str, to_kind: &str) -> bool {
-        report["reachability"]["reachable_pairs_by_kind"]
-            .as_array()
-            .is_some_and(|pairs| {
-                pairs.iter().any(|pair| {
-                    pair["from_kind"] == from_kind
-                        && pair["to_kind"] == to_kind
-                        && pair["reachable_pairs"]
-                            .as_u64()
-                            .is_some_and(|count| count > 0)
-                })
-            })
+    fn analyze_report(output: &str) -> AnalyzeReport {
+        let report = serde_json::from_str::<AnalyzeReport>(output)
+            .expect("analyze report should match schema");
+        assert_eq!(report.schema_version, 1);
+        report
     }
 
-    fn has_path_witness(report: &Value, from_kind: &str, to_kind: &str) -> bool {
-        report["path_witnesses"]
-            .as_array()
-            .is_some_and(|witnesses| {
-                witnesses.iter().any(|witness| {
-                    witness["from_kind"] == from_kind
-                        && witness["to_kind"] == to_kind
-                        && witness["links"]
-                            .as_array()
-                            .is_some_and(|links| !links.is_empty())
-                        && witness["nodes"].as_array().is_some_and(|nodes| {
-                            nodes.len() >= 2
-                                && nodes.first().is_some_and(|node| node["kind"] == from_kind)
-                                && nodes.last().is_some_and(|node| node["kind"] == to_kind)
-                        })
-                })
+    #[test]
+    fn origin_count_roundtrips_through_fail_closed_schema() {
+        let count = OriginCount::try_new(3, 2, 1).expect("origin count should validate");
+        let json = serde_json::to_string(&count).expect("origin count should serialize");
+        let decoded =
+            serde_json::from_str::<OriginCount>(&json).expect("origin count should decode");
+        assert_eq!(decoded, count);
+
+        assert_eq!(
+            OriginCount::try_new(4, 2, 1),
+            Err(OriginCountError::TotalMismatch {
+                declared: 4,
+                actual: 3
             })
+        );
+
+        let mismatched_total = r#"{
+            "total": 4,
+            "semantic": 2,
+            "synthetic": 1
+        }"#;
+        let err = serde_json::from_str::<OriginCount>(mismatched_total)
+            .expect_err("origin count JSON should reject inconsistent totals");
+        assert!(
+            err.to_string()
+                .contains("total 4 does not match semantic plus synthetic count 3"),
+            "{err}"
+        );
+
+        let unknown_field = r#"{
+            "total": 3,
+            "semantic": 2,
+            "synthetic": 1,
+            "extra": 0
+        }"#;
+        let err = serde_json::from_str::<OriginCount>(unknown_field)
+            .expect_err("origin count JSON should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"), "{err}");
+
+        let mut report = serde_json::json!({
+            "schema_version": 1,
+            "profile": "dev",
+            "package_kind": "single_file",
+            "targets": [{
+                "label": "target",
+                "runtime_bodies": 1,
+                "runtime_statements": {
+                    "total": 2,
+                    "semantic": 2,
+                    "synthetic": 1
+                },
+                "runtime_terminators": {
+                    "total": 0,
+                    "semantic": 0,
+                    "synthetic": 0
+                },
+                "bodies": [],
+                "source_maps": [],
+                "origin_facts": [],
+                "shapes": []
+            }]
+        });
+        let err = serde_json::from_value::<AnalyzeReport>(report.clone())
+            .expect_err("analyze report should reject inconsistent nested origin counts");
+        assert!(
+            err.to_string()
+                .contains("total 2 does not match semantic plus synthetic count 3"),
+            "{err}"
+        );
+
+        report["targets"][0]["runtime_statements"]["total"] = serde_json::json!(3);
+        serde_json::from_value::<AnalyzeReport>(report)
+            .expect("analyze report should accept consistent nested origin counts");
     }
 
-    fn has_relation_count(report: &Value, relation: &str) -> bool {
-        report["relation_counts"].as_array().is_some_and(|counts| {
-            counts.iter().any(|count| {
-                count["relation"] == relation && count["rows"].as_u64().is_some_and(|rows| rows > 0)
-            })
+    fn source_map_report_value() -> serde_json::Value {
+        serde_json::json!({
+            "scope": "test_bytecode",
+            "label": "test_source_map",
+            "test": "test_source_map",
+            "object": "test_source_map",
+            "section": "runtime",
+            "total": 2,
+            "source": 1,
+            "debug_locations": 1,
+            "debug_line_table_files": 1,
+            "debug_line_table_rows": 1,
+            "non_source": 1,
+            "source_span_invalid": 0,
+            "semantic_span_missing": 0,
+            "runtime_stmt_missing": 0,
+            "runtime_terminator_missing": 0,
+            "runtime_synthetic": 0,
+            "sonatina_synthetic": 0,
+            "sonatina_unmapped": 0,
+            "post_preopt_snapshot_gap": 0,
+            "bytecode_unmapped": 1,
+            "bytecode_origin_coverage": {
+                "total": 2,
+                "sonatina_post_opt": 1,
+                "sonatina_backend_prepared": 0,
+                "unmapped": 1
+            },
+            "post_opt_origin_coverage": {
+                "total": 1,
+                "same_inst_id": 1,
+                "created_or_unmatched_after_preopt_snapshot": 0,
+                "pre_opt_snapshot_losses": 0,
+                "observed_pre_opt_total": 1
+            },
+            "entries": [{
+                "object": "test_source_map",
+                "section": "runtime",
+                "pc_start": 0,
+                "pc_end": 1,
+                "kind": "source",
+                "span_kind": "original",
+                "file": "src/main.fe",
+                "start_byte": 0,
+                "end_byte": 4,
+                "start_line": 0,
+                "start_col": 0,
+                "end_line": 0,
+                "end_col": 4,
+                "snippet": "main"
+            }, {
+                "object": "test_source_map",
+                "section": "runtime",
+                "pc_start": 1,
+                "pc_end": 2,
+                "kind": "bytecode_unmapped",
+                "reason": "synthetic"
+            }]
         })
     }
 
-    fn has_relation_table(report: &Value, relation: &str) -> bool {
-        report["relation_tables"]["relations"]
-            .as_array()
-            .is_some_and(|relations| {
-                relations.iter().any(|table| {
-                    table["name"] == relation
-                        && table["rows"]
-                            .as_array()
-                            .is_some_and(|rows| !rows.is_empty())
-                })
-            })
-    }
-
-    fn has_source_span_file_count(report: &Value) -> bool {
-        report["source_span_files"].as_array().is_some_and(|files| {
-            files.iter().any(|file| {
-                file["file"].as_str().is_some_and(|path| !path.is_empty())
-                    && file["spans"].as_u64().is_some_and(|spans| spans > 0)
-            })
+    fn origin_fact_report_value() -> serde_json::Value {
+        serde_json::json!({
+            "scope": "runtime",
+            "label": "Foo",
+            "total": 1,
+            "origin_nodes": 1,
+            "origin_links": 0,
+            "source_spans": 0,
+            "facts": {
+                "schema_version": 1,
+                "facts": [{
+                    "type": "origin_node",
+                    "id": {"namespace": "origin_node", "ordinal": 0},
+                    "key": {
+                        "kind": "semantic",
+                        "owner_key": "semantic:Foo",
+                        "local_key": "expr:0"
+                    }
+                }]
+            }
         })
     }
 
-    fn has_partitioned_bytecode_origin_coverage(report: &Value) -> bool {
-        let coverage = &report["bytecode_origin_coverage"];
-        let Some(total) = coverage["total"].as_u64() else {
-            return false;
-        };
-        total > 0
-            && coverage["sonatina_post_opt"].as_u64().unwrap_or_default()
-                + coverage["sonatina_backend_prepared"]
-                    .as_u64()
-                    .unwrap_or_default()
-                + coverage["unmapped"].as_u64().unwrap_or_default()
-                == total
+    fn origin_fact_report_with_source_span_value() -> serde_json::Value {
+        serde_json::json!({
+            "scope": "runtime_bytecode",
+            "label": "Foo",
+            "object": "Foo",
+            "total": 2,
+            "origin_nodes": 1,
+            "origin_links": 0,
+            "source_spans": 1,
+            "source_span_files": [{
+                "file": "file:///foo.fe",
+                "spans": 1
+            }],
+            "facts": {
+                "schema_version": 1,
+                "facts": [{
+                    "type": "origin_node",
+                    "id": {"namespace": "origin_node", "ordinal": 0},
+                    "key": {
+                        "kind": "bytecode.pc",
+                        "owner_key": "object:Foo:section:runtime",
+                        "local_key": "pc:0..1"
+                    }
+                }, {
+                    "type": "source_span",
+                    "origin": {"namespace": "origin_node", "ordinal": 0},
+                    "span_kind": "original",
+                    "file": "file:///foo.fe",
+                    "start_byte": 0,
+                    "end_byte": 4,
+                    "start_line": 0,
+                    "start_col": 0,
+                    "end_line": 0,
+                    "end_col": 4
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn analyze_origin_fact_report_roundtrips_through_fail_closed_counts() {
+        let value = origin_fact_report_value();
+        let report = serde_json::from_value::<AnalyzeOriginFactReport>(value.clone())
+            .expect("origin-fact report should decode");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.origin_nodes, 1);
+        assert_eq!(report.origin_links, 0);
+        assert_eq!(report.source_spans, 0);
+
+        let json = serde_json::to_string(&report).expect("origin-fact report should serialize");
+        serde_json::from_str::<AnalyzeOriginFactReport>(&json)
+            .expect("origin-fact report should roundtrip");
+
+        let mut bad_total = value.clone();
+        bad_total["total"] = serde_json::json!(2);
+        let err = serde_json::from_value::<AnalyzeOriginFactReport>(bad_total)
+            .expect_err("origin-fact report should reject inconsistent totals");
+        assert!(
+            err.to_string()
+                .contains("total 2 does not match origin fact count 1"),
+            "{err}"
+        );
+
+        let mut bad_origin_nodes = value.clone();
+        bad_origin_nodes["origin_nodes"] = serde_json::json!(2);
+        let err = serde_json::from_value::<AnalyzeOriginFactReport>(bad_origin_nodes)
+            .expect_err("origin-fact report should reject inconsistent origin node counts");
+        assert!(
+            err.to_string()
+                .contains("origin_nodes 2 does not match typed fact count 1"),
+            "{err}"
+        );
+
+        let mut bad_relation_count = value.clone();
+        bad_relation_count["relation_counts"] = serde_json::json!([{
+            "relation": "origin_node",
+            "rows": 2
+        }]);
+        let err = serde_json::from_value::<AnalyzeOriginFactReport>(bad_relation_count)
+            .expect_err("origin-fact report should reject inconsistent relation counts");
+        assert!(
+            err.to_string()
+                .contains("relation count origin_node=2 does not match report count 1"),
+            "{err}"
+        );
+
+        let mut bad_unexpected_relation = value.clone();
+        bad_unexpected_relation["relation_counts"] = serde_json::json!([{
+            "relation": "shape_node",
+            "rows": 1
+        }]);
+        let err = serde_json::from_value::<AnalyzeOriginFactReport>(bad_unexpected_relation)
+            .expect_err("origin-fact report should reject shape relation counts");
+        assert!(
+            err.to_string()
+                .contains("relation_counts contains non-origin relation shape_node"),
+            "{err}"
+        );
+
+        let mut with_source_span = origin_fact_report_with_source_span_value();
+        serde_json::from_value::<AnalyzeOriginFactReport>(with_source_span.clone())
+            .expect("origin-fact report with source span should decode");
+        with_source_span["source_span_files"][0]["spans"] = serde_json::json!(2);
+        let err = serde_json::from_value::<AnalyzeOriginFactReport>(with_source_span)
+            .expect_err("origin-fact report should reject source-span file summary drift");
+        assert!(
+            err.to_string()
+                .contains("source_span_files total 2 does not match source_spans 1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn analyze_source_map_report_roundtrips_through_fail_closed_counts() {
+        let value = source_map_report_value();
+        let report = serde_json::from_value::<AnalyzeSourceMapReport>(value.clone())
+            .expect("source-map report should decode");
+        assert_eq!(report.total, 2);
+        assert_eq!(report.non_source, 1);
+        assert_eq!(report.entries.len(), 2);
+
+        let json = serde_json::to_string(&report).expect("source-map report should serialize");
+        serde_json::from_str::<AnalyzeSourceMapReport>(&json)
+            .expect("source-map report should roundtrip");
+
+        let mut no_entries = value.clone();
+        no_entries
+            .as_object_mut()
+            .expect("report should be an object")
+            .remove("entries");
+        let decoded = serde_json::from_value::<AnalyzeSourceMapReport>(no_entries)
+            .expect("entry rows are optional for compact reports");
+        assert!(decoded.entries.is_empty());
+        assert_eq!(decoded.total, 2);
+
+        let mut bad_non_source = value.clone();
+        bad_non_source["non_source"] = serde_json::json!(2);
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_non_source)
+            .expect_err("source-map report should reject inconsistent non-source counts");
+        assert!(
+            err.to_string()
+                .contains("non_source 2 does not match classified non-source count 1"),
+            "{err}"
+        );
+
+        let mut bad_total = value.clone();
+        bad_total["total"] = serde_json::json!(3);
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_total)
+            .expect_err("source-map report should reject inconsistent totals");
+        assert!(
+            err.to_string()
+                .contains("total 3 does not match source plus non_source count 2"),
+            "{err}"
+        );
+
+        let mut bad_debug_locations = value.clone();
+        bad_debug_locations["debug_locations"] = serde_json::json!(2);
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_debug_locations)
+            .expect_err("source-map report should reject inconsistent debug-location counts");
+        assert!(
+            err.to_string()
+                .contains("debug_locations 2 does not match source count 1"),
+            "{err}"
+        );
+
+        let mut bad_debug_rows = value.clone();
+        bad_debug_rows["debug_line_table_rows"] = serde_json::json!(2);
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_debug_rows)
+            .expect_err("source-map report should reject inconsistent line-table rows");
+        assert!(
+            err.to_string()
+                .contains("debug_line_table_rows 2 does not match source count 1"),
+            "{err}"
+        );
+
+        let mut bad_debug_files = value.clone();
+        bad_debug_files["debug_line_table_files"] = serde_json::json!(2);
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_debug_files)
+            .expect_err("source-map report should reject impossible line-table file counts");
+        assert!(
+            err.to_string()
+                .contains("debug_line_table_files 2 exceeds source count 1"),
+            "{err}"
+        );
+
+        let mut bad_coverage_total = value.clone();
+        bad_coverage_total["bytecode_origin_coverage"] = serde_json::json!({
+            "total": 3,
+            "sonatina_post_opt": 2,
+            "sonatina_backend_prepared": 0,
+            "unmapped": 1
+        });
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_coverage_total).expect_err(
+            "source-map report should reject coverage totals that do not match report totals",
+        );
+        assert!(
+            err.to_string()
+                .contains("total 2 does not match bytecode origin coverage total 3"),
+            "{err}"
+        );
+
+        let mut bad_entry_count = value.clone();
+        bad_entry_count["entries"] = serde_json::json!([bad_entry_count["entries"][0].clone()]);
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_entry_count)
+            .expect_err("source-map report should reject entry-count drift");
+        assert!(
+            err.to_string()
+                .contains("total 2 does not match emitted entry count 1"),
+            "{err}"
+        );
+
+        let mut bad_entry_kind = value.clone();
+        bad_entry_kind["entries"][1] = serde_json::json!({
+            "object": "test_source_map",
+            "section": "runtime",
+            "pc_start": 1,
+            "pc_end": 2,
+            "kind": "semantic_span_missing"
+        });
+        let err = serde_json::from_value::<AnalyzeSourceMapReport>(bad_entry_kind)
+            .expect_err("source-map report should reject entry classification drift");
+        assert!(
+            err.to_string()
+                .contains("semantic_span_missing count 0 does not match emitted entry count 1"),
+            "{err}"
+        );
+    }
+
+    fn typed_facts_from_export(export: &OwnedTypedFactSetExport) -> TypedFactSet {
+        assert_eq!(
+            export.schema_version(),
+            OwnedTypedFactSetExport::SCHEMA_VERSION
+        );
+        TypedFactSet::new(export.facts().to_vec())
+    }
+
+    fn typed_origin_facts(report: &AnalyzeOriginFactReport) -> TypedFactSet {
+        typed_facts_from_export(&report.facts)
+    }
+
+    fn shape_facts(report: &AnalyzeShapeReport) -> TypedFactSet {
+        let facts = report
+            .facts
+            .as_ref()
+            .expect("shape facts should be emitted");
+        typed_facts_from_export(facts)
+    }
+
+    fn has_origin_node_kind(facts: &TypedFactSet, kind: OriginExportKind) -> bool {
+        facts.origin_nodes().any(|fact| fact.key().kind() == kind)
+    }
+
+    fn has_origin_link_kind(facts: &TypedFactSet, kind: OriginLinkKind) -> bool {
+        facts.origin_links().any(|fact| fact.kind() == kind)
+    }
+
+    fn has_source_span_fact(facts: &TypedFactSet) -> bool {
+        facts.source_spans().next().is_some()
+    }
+
+    fn has_shape_node_fact(facts: &TypedFactSet) -> bool {
+        facts.shape_nodes().next().is_some()
+    }
+
+    fn has_shape_hash_fact(facts: &TypedFactSet) -> bool {
+        facts.shape_hashes().next().is_some()
+    }
+
+    fn origin_kind(raw: &str) -> OriginExportKind {
+        OriginExportKind::from_str(raw).expect("test should use a known origin kind")
+    }
+
+    fn typed_reachability(report: &AnalyzeOriginFactReport) -> &OriginReachabilitySummary {
+        report
+            .reachability
+            .as_ref()
+            .expect("report reachability should match typed schema")
+    }
+
+    fn has_reachable_kind_pair(
+        report: &AnalyzeOriginFactReport,
+        from_kind: &str,
+        to_kind: &str,
+    ) -> bool {
+        typed_reachability(report).pair_count(origin_kind(from_kind), origin_kind(to_kind)) > 0
+    }
+
+    fn has_path_witness(report: &AnalyzeOriginFactReport, from_kind: &str, to_kind: &str) -> bool {
+        let from_kind = origin_kind(from_kind);
+        let to_kind = origin_kind(to_kind);
+        report.path_witnesses.iter().any(|witness| {
+            witness.from_kind() == from_kind
+                && witness.to_kind() == to_kind
+                && !witness.links().is_empty()
+                && witness.nodes().len() >= 2
+                && witness
+                    .nodes()
+                    .first()
+                    .is_some_and(|node| node.kind() == from_kind)
+                && witness
+                    .nodes()
+                    .last()
+                    .is_some_and(|node| node.kind() == to_kind)
+        })
+    }
+
+    fn has_source_path_witness(
+        report: &AnalyzeOriginFactReport,
+        from_kind: &str,
+        to_kind: &str,
+    ) -> bool {
+        let from_kind = origin_kind(from_kind);
+        let to_kind = origin_kind(to_kind);
+        report.source_path_witnesses.iter().any(|witness| {
+            let path = witness.path();
+            let span = witness.source_span();
+            path.from_kind() == from_kind
+                && path.to_kind() == to_kind
+                && !path.links().is_empty()
+                && path.nodes().len() >= 2
+                && path
+                    .nodes()
+                    .first()
+                    .is_some_and(|node| node.kind() == from_kind)
+                && path
+                    .nodes()
+                    .last()
+                    .is_some_and(|node| node.kind() == to_kind)
+                && span.origin_key().kind() == to_kind
+                && !span.file().is_empty()
+                && span.start_byte() <= span.end_byte()
+        })
+    }
+
+    fn has_relation_count(counts: &[TypedFactRelationCount], relation: &str) -> bool {
+        counts
+            .iter()
+            .any(|count| count.relation_name() == relation && count.rows() > 0)
+    }
+
+    fn has_relation_table(
+        relation_tables: &Option<TypedFactRelationSet>,
+        relation: TypedFactRelationName,
+    ) -> bool {
+        let relation_tables = relation_tables
+            .as_ref()
+            .expect("report relation tables should match typed schema");
+        assert_eq!(
+            relation_tables.schema_version(),
+            TypedFactRelationSet::SCHEMA_VERSION
+        );
+        relation_tables
+            .relation(relation)
+            .is_some_and(|table| !table.rows().is_empty())
+    }
+
+    #[test]
+    fn analyze_shape_hash_report_uses_closed_dimensions() {
+        let valid = r#"{"dimension":"structure","digest_hex":"0000000000000000"}"#;
+        let decoded = serde_json::from_str::<AnalyzeShapeHashReport>(valid)
+            .expect("known shape hash dimension should decode");
+        assert_eq!(decoded.dimension, ShapeDimension::Structure);
+
+        let unknown_dimension = r#"{"dimension":"unknown","digest_hex":"0000000000000000"}"#;
+        serde_json::from_str::<AnalyzeShapeHashReport>(unknown_dimension)
+            .expect_err("unknown shape hash dimensions should fail closed");
+
+        let unknown_field =
+            r#"{"dimension":"structure","digest_hex":"0000000000000000","extra":true}"#;
+        let err = serde_json::from_str::<AnalyzeShapeHashReport>(unknown_field)
+            .expect_err("shape hash reports should reject unknown fields");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    fn has_source_span_file_count(report: &AnalyzeOriginFactReport) -> bool {
+        report
+            .source_span_files
+            .iter()
+            .any(|file| !file.file().is_empty() && file.spans() > 0)
+    }
+
+    fn has_typed_source_entry(entries: &[BytecodeSourceMapEntry]) -> bool {
+        entries.iter().any(|entry| {
+            entry.pc_start() < entry.pc_end()
+                && matches!(
+                    entry.kind(),
+                    BytecodeSourceMapEntryKind::Source { snippet, .. }
+                        if !snippet.trim().is_empty()
+                )
+        })
+    }
+
+    fn has_partitioned_bytecode_origin_coverage(report: &AnalyzeSourceMapReport) -> bool {
+        let coverage = report
+            .bytecode_origin_coverage
+            .as_ref()
+            .expect("bytecode origin coverage should match typed schema");
+        coverage.total() > 0 && coverage.classified_total() == coverage.total()
+    }
+
+    fn has_partitioned_post_opt_origin_coverage(report: &AnalyzeSourceMapReport) -> bool {
+        let coverage = report
+            .post_opt_origin_coverage
+            .as_ref()
+            .expect("post-opt origin coverage should match typed schema");
+        coverage.total() > 0
+            && coverage.post_opt_classified_total() == coverage.total()
+            && coverage.computed_observed_pre_opt_total() == coverage.observed_pre_opt_total()
     }
 
     #[test]
@@ -1798,14 +3085,11 @@ fn sample() -> u256 {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["targets"][0]["label"], file_path.as_str());
+        let report = analyze_report(&outcome.output);
+        assert_eq!(report.targets[0].label, file_path.as_str());
         assert!(
-            value["targets"][0]["runtime_statements"]["total"]
-                .as_u64()
-                .is_some_and(|total| total > 0),
-            "expected runtime statement origins in {value:#?}"
+            report.targets[0].runtime_statements.total > 0,
+            "expected runtime statement origins in {report:#?}"
         );
     }
 
@@ -1833,40 +3117,28 @@ fn sample() -> u256 {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        let origin_facts = value["targets"][0]["origin_facts"]
-            .as_array()
-            .expect("origin facts should be an array");
+        let report = analyze_report(&outcome.output);
+        let origin_facts = &report.targets[0].origin_facts;
         assert!(
             origin_facts.iter().any(|report| {
-                report["scope"] == "runtime"
-                    && report["origin_nodes"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
-                    && report["origin_links"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
-                    && report["facts"]["schema_version"] == 1
-                    && report["reachability"]["reachable_pairs"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
+                if report.scope != "runtime" {
+                    return false;
+                }
+                let facts = typed_origin_facts(report);
+                report.origin_nodes > 0
+                    && report.origin_links > 0
+                    && typed_reachability(report).reachable_pairs() > 0
                     && (has_reachable_kind_pair(report, "semantic", "runtime.stmt")
                         || has_reachable_kind_pair(report, "semantic", "runtime.terminator"))
                     && (has_path_witness(report, "semantic", "runtime.stmt")
                         || has_path_witness(report, "semantic", "runtime.terminator"))
-                    && has_relation_count(report, "origin_node")
-                    && has_relation_count(report, "origin_link")
-                    && report["facts"]["facts"].as_array().is_some_and(|facts| {
-                        facts.iter().any(|fact| {
-                            fact["type"] == "origin_node"
-                                && (fact["key"]["kind"] == "runtime.stmt"
-                                    || fact["key"]["kind"] == "runtime.terminator")
-                        }) && facts
-                            .iter()
-                            .any(|fact| fact["type"] == "origin_link" && fact["kind"] == "lowered")
-                    })
+                    && has_relation_count(&report.relation_counts, "origin_node")
+                    && has_relation_count(&report.relation_counts, "origin_link")
+                    && (has_origin_node_kind(&facts, OriginExportKind::RuntimeStmt)
+                        || has_origin_node_kind(&facts, OriginExportKind::RuntimeTerminator))
+                    && has_origin_link_kind(&facts, OriginLinkKind::Lowered)
             }),
-            "expected typed runtime origin facts in {value:#?}"
+            "expected typed runtime origin facts in {report:#?}"
         );
     }
 
@@ -1984,18 +3256,21 @@ fn sample() -> u256 {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        let origin_facts = value["targets"][0]["origin_facts"]
-            .as_array()
-            .expect("origin facts should be an array");
+        let report = analyze_report(&outcome.output);
+        let origin_facts = &report.targets[0].origin_facts;
         assert!(
             origin_facts.iter().any(|report| {
-                report["scope"] == "runtime"
-                    && report["relation_tables"]["schema_version"] == 1
-                    && has_relation_table(report, "origin_node")
-                    && has_relation_table(report, "origin_link")
+                report.scope == "runtime"
+                    && has_relation_table(
+                        &report.relation_tables,
+                        TypedFactRelationName::OriginNode,
+                    )
+                    && has_relation_table(
+                        &report.relation_tables,
+                        TypedFactRelationName::OriginLink,
+                    )
             }),
-            "expected runtime origin relation tables in {value:#?}"
+            "expected runtime origin relation tables in {report:#?}"
         );
     }
 
@@ -2024,49 +3299,51 @@ fn sample() -> u256 {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        let shapes = value["targets"][0]["shapes"]
-            .as_array()
-            .expect("shapes should be an array");
+        let report = analyze_report(&outcome.output);
+        let shapes = &report.targets[0].shapes;
         assert!(
             shapes.iter().any(|shape| {
-                shape["scope"] == "const_region"
-                    && shape["shape_nodes"].as_u64().is_some_and(|count| count > 0)
-                    && shape["trace_events"].as_u64().is_some()
-                    && shape["data_flows"].as_u64().is_some()
-                    && shape["graph_hashes"].as_array().is_some_and(|hashes| {
-                        hashes.iter().any(|hash| hash["dimension"] == "constants")
-                            && hashes.iter().any(|hash| hash["dimension"] == "types")
-                    })
-                    && shape["facts"]["schema_version"] == 1
-                    && has_relation_count(shape, "shape_node")
-                    && has_relation_count(shape, "shape_hash")
-                    && shape["facts"]["facts"].as_array().is_some_and(|facts| {
-                        facts.iter().any(|fact| fact["type"] == "shape_node")
-                            && facts.iter().any(|fact| fact["type"] == "shape_hash")
-                    })
+                if shape.scope != "const_region" {
+                    return false;
+                }
+                let facts = shape_facts(shape);
+                shape.shape_nodes > 0
+                    && shape
+                        .graph_hashes
+                        .iter()
+                        .any(|hash| hash.dimension == ShapeDimension::Constants)
+                    && shape
+                        .graph_hashes
+                        .iter()
+                        .any(|hash| hash.dimension == ShapeDimension::Types)
+                    && has_relation_count(&shape.relation_counts, "shape_node")
+                    && has_relation_count(&shape.relation_counts, "shape_hash")
+                    && has_shape_node_fact(&facts)
+                    && has_shape_hash_fact(&facts)
             }),
-            "expected const-region shape hashes and facts in {value:#?}"
+            "expected const-region shape hashes and facts in {report:#?}"
         );
         assert!(
             shapes.iter().any(|shape| {
-                shape["scope"] == "runtime_body"
-                    && shape["shape_nodes"].as_u64().is_some_and(|count| count > 0)
-                    && shape["trace_events"].as_u64().is_some()
-                    && shape["data_flows"].as_u64().is_some()
-                    && shape["graph_hashes"].as_array().is_some_and(|hashes| {
-                        hashes.iter().any(|hash| hash["dimension"] == "structure")
-                            && hashes.iter().any(|hash| hash["dimension"] == "constants")
-                    })
-                    && shape["facts"]["schema_version"] == 1
-                    && has_relation_count(shape, "shape_node")
-                    && has_relation_count(shape, "shape_hash")
-                    && shape["facts"]["facts"].as_array().is_some_and(|facts| {
-                        facts.iter().any(|fact| fact["type"] == "shape_node")
-                            && facts.iter().any(|fact| fact["type"] == "shape_hash")
-                    })
+                if shape.scope != "runtime_body" {
+                    return false;
+                }
+                let facts = shape_facts(shape);
+                shape.shape_nodes > 0
+                    && shape
+                        .graph_hashes
+                        .iter()
+                        .any(|hash| hash.dimension == ShapeDimension::Structure)
+                    && shape
+                        .graph_hashes
+                        .iter()
+                        .any(|hash| hash.dimension == ShapeDimension::Constants)
+                    && has_relation_count(&shape.relation_counts, "shape_node")
+                    && has_relation_count(&shape.relation_counts, "shape_hash")
+                    && has_shape_node_fact(&facts)
+                    && has_shape_hash_fact(&facts)
             }),
-            "expected runtime body shape hashes and facts in {value:#?}"
+            "expected runtime body shape hashes and facts in {report:#?}"
         );
     }
 
@@ -2160,20 +3437,17 @@ fn sample() -> u256 {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        let shapes = value["targets"][0]["shapes"]
-            .as_array()
-            .expect("shapes should be an array");
+        let report = analyze_report(&outcome.output);
+        let shapes = &report.targets[0].shapes;
         assert!(
             shapes.iter().any(|shape| {
-                shape["scope"] == "const_region"
-                    && shape["relation_tables"]["schema_version"] == 1
-                    && has_relation_count(shape, "shape_node")
-                    && has_relation_count(shape, "shape_hash")
-                    && has_relation_table(shape, "shape_node")
-                    && has_relation_table(shape, "shape_hash")
+                shape.scope == "const_region"
+                    && has_relation_count(&shape.relation_counts, "shape_node")
+                    && has_relation_count(&shape.relation_counts, "shape_hash")
+                    && has_relation_table(&shape.relation_tables, TypedFactRelationName::ShapeNode)
+                    && has_relation_table(&shape.relation_tables, TypedFactRelationName::ShapeHash)
             }),
-            "expected shape relation tables in {value:#?}"
+            "expected shape relation tables in {report:#?}"
         );
     }
 
@@ -2208,8 +3482,8 @@ fn sample() -> u256 {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        assert_eq!(value["targets"][0]["label"], "analyze_app");
+        let report = analyze_report(&outcome.output);
+        assert_eq!(report.targets[0].label, "analyze_app");
     }
 
     #[test]
@@ -2244,13 +3518,11 @@ fn test_sample() {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        assert_eq!(value["package_kind"], "tests");
+        let report = analyze_report(&outcome.output);
+        assert_eq!(report.package_kind, "tests");
         assert!(
-            value["targets"][0]["runtime_statements"]["total"]
-                .as_u64()
-                .is_some_and(|total| total > 0),
-            "expected test runtime statement origins in {value:#?}"
+            report.targets[0].runtime_statements.total > 0,
+            "expected test runtime statement origins in {report:#?}"
         );
     }
 
@@ -2287,34 +3559,26 @@ fn test_source_map() {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        let source_maps = value["targets"][0]["source_maps"]
-            .as_array()
-            .expect("source maps should be an array");
+        let report = analyze_report(&outcome.output);
+        let source_maps = &report.targets[0].source_maps;
         assert!(
             source_maps.iter().any(|source_map| {
-                source_map["total"].as_u64().is_some_and(|total| total > 0)
-                    && source_map["scope"] == "test_bytecode"
-                    && source_map["label"] == "test_source_map"
-                    && source_map["source"]
-                        .as_u64()
-                        .is_some_and(|source| source > 0)
+                if source_map.scope != "test_bytecode"
+                    || source_map.label != "test_source_map"
+                    || source_map.test.as_deref() != Some("test_source_map")
+                {
+                    return false;
+                }
+                source_map.total > 0
+                    && source_map.source > 0
+                    && source_map.debug_locations > 0
+                    && source_map.debug_line_table_files > 0
+                    && source_map.debug_line_table_rows > 0
                     && has_partitioned_bytecode_origin_coverage(source_map)
-                    && source_map["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|entry| {
-                            entry["kind"] == "source"
-                                && entry.get("pc_start").is_some()
-                                && entry.get("pc_end").is_some()
-                                && entry.get("file").is_some()
-                                && entry.get("start_byte").is_some()
-                                && entry["snippet"]
-                                    .as_str()
-                                    .is_some_and(|snippet| !snippet.trim().is_empty())
-                        })
-                    })
-                    && source_map["test"] == "test_source_map"
+                    && has_partitioned_post_opt_origin_coverage(source_map)
+                    && has_typed_source_entry(&source_map.entries)
             }),
-            "expected source-map summary with full source entries in {value:#?}"
+            "expected source-map summary with full source entries in {report:#?}"
         );
     }
 
@@ -2351,57 +3615,64 @@ pub contract Foo {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        let source_maps = value["targets"][0]["source_maps"]
-            .as_array()
-            .expect("source maps should be an array");
+        let report = analyze_report(&outcome.output);
+        let source_maps = &report.targets[0].source_maps;
         assert!(
             source_maps.iter().any(|source_map| {
-                source_map["scope"] == "runtime_bytecode"
-                    && source_map["label"] == "Foo"
-                    && source_map["object"] == "Foo"
-                    && source_map["total"].as_u64().is_some_and(|total| total > 0)
+                if source_map.scope != "runtime_bytecode"
+                    || source_map.label != "Foo"
+                    || source_map.object != "Foo"
+                {
+                    return false;
+                }
+                source_map.total > 0
+                    && source_map.debug_locations > 0
+                    && source_map.debug_line_table_files > 0
+                    && source_map.debug_line_table_rows > 0
                     && has_partitioned_bytecode_origin_coverage(source_map)
-                    && source_map["entries"].as_array().is_some_and(|entries| {
-                        entries.iter().any(|entry| {
-                            entry["kind"] == "source"
-                                && entry.get("pc_start").is_some()
-                                && entry.get("pc_end").is_some()
-                                && entry["snippet"]
-                                    .as_str()
-                                    .is_some_and(|snippet| !snippet.trim().is_empty())
-                        })
-                    })
+                    && has_partitioned_post_opt_origin_coverage(source_map)
+                    && has_typed_source_entry(&source_map.entries)
             }),
-            "expected runtime bytecode source-map report in {value:#?}"
+            "expected runtime bytecode source-map report in {report:#?}"
         );
 
-        let origin_facts = value["targets"][0]["origin_facts"]
-            .as_array()
-            .expect("origin facts should be an array");
+        let origin_facts = &report.targets[0].origin_facts;
         assert!(
             origin_facts.iter().any(|report| {
-                report["scope"] == "runtime_bytecode"
-                    && report["label"] == "Foo"
-                    && report["object"] == "Foo"
-                    && has_path_witness(report, "semantic", "bytecode.pc")
+                if report.scope != "runtime_bytecode"
+                    || report.label != "Foo"
+                    || report.object.as_deref() != Some("Foo")
+                {
+                    return false;
+                }
+                let facts = typed_origin_facts(report);
+                has_path_witness(report, "semantic", "bytecode.pc")
+                    && has_source_path_witness(report, "semantic", "bytecode.pc")
                     && (has_reachable_kind_pair(report, "runtime.stmt", "bytecode.pc")
                         || has_reachable_kind_pair(report, "runtime.terminator", "bytecode.pc"))
                     && (has_path_witness(report, "runtime.stmt", "bytecode.pc")
                         || has_path_witness(report, "runtime.terminator", "bytecode.pc"))
+                    && (has_source_path_witness(report, "runtime.stmt", "bytecode.pc")
+                        || has_source_path_witness(report, "runtime.terminator", "bytecode.pc"))
                     && has_source_span_file_count(report)
-                    && report["facts"]["schema_version"] == 1
+                    && has_origin_node_kind(&facts, OriginExportKind::BytecodePc)
+                    && has_source_span_fact(&facts)
             }),
-            "expected runtime bytecode origin facts in {value:#?}"
+            "expected runtime bytecode origin facts in {report:#?}"
         );
         assert!(
             origin_facts.iter().any(|report| {
-                report["scope"] == "runtime_sonatina_snapshot"
-                    && report["label"] == "Foo"
-                    && report["object"] == "Foo"
-                    && report["facts"]["schema_version"] == 1
+                if report.scope != "runtime_sonatina_snapshot"
+                    || report.label != "Foo"
+                    || report.object.as_deref() != Some("Foo")
+                {
+                    return false;
+                }
+                let facts = typed_origin_facts(report);
+                has_origin_node_kind(&facts, OriginExportKind::SonatinaInst)
+                    || has_origin_node_kind(&facts, OriginExportKind::SonatinaSynthetic)
             }),
-            "expected runtime Sonatina snapshot origin facts in {value:#?}"
+            "expected runtime Sonatina snapshot origin facts in {report:#?}"
         );
     }
 
@@ -2453,6 +3724,10 @@ pub contract Foo {
         for expected in [
             "  source maps:\n",
             "classification: source=",
+            "debug_locations=",
+            "debug_line_table_files=",
+            "debug_line_table_rows=",
+            "post_opt_origins=",
             "source_span_invalid=",
             "semantic_span_missing=",
             "runtime_stmt_missing=",
@@ -2462,6 +3737,8 @@ pub contract Foo {
             "kind=source",
             "snippet=",
             "      source span files:",
+            "      source paths:\n",
+            "source span_kind=original",
         ] {
             assert!(outcome.output.contains(expected), "{}", outcome.output);
         }
@@ -2500,73 +3777,55 @@ fn test_origin_facts() {
         .expect("analyze succeeds");
 
         assert!(!outcome.has_errors);
-        let value = serde_json::from_str::<Value>(&outcome.output).expect("valid JSON");
-        let origin_facts = value["targets"][0]["origin_facts"]
-            .as_array()
-            .expect("origin facts should be an array");
+        let report = analyze_report(&outcome.output);
+        let origin_facts = &report.targets[0].origin_facts;
         assert!(
-            origin_facts.iter().any(|report| {
-                report["scope"] == "runtime"
-                    && report["origin_links"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
-            }),
-            "expected runtime origin facts alongside test bytecode facts in {value:#?}"
+            origin_facts
+                .iter()
+                .any(|report| { report.scope == "runtime" && report.origin_links > 0 }),
+            "expected runtime origin facts alongside test bytecode facts in {report:#?}"
         );
         assert!(
             origin_facts.iter().any(|report| {
-                report["scope"] == "test_bytecode"
-                    && report["label"] == "test_origin_facts"
-                    && report["origin_nodes"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
-                    && report["origin_links"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
-                    && report["source_spans"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
+                if report.scope != "test_bytecode" || report.label != "test_origin_facts" {
+                    return false;
+                }
+                let facts = typed_origin_facts(report);
+                report.origin_nodes > 0
+                    && report.origin_links > 0
+                    && report.source_spans > 0
                     && has_source_span_file_count(report)
-                    && has_relation_count(report, "origin_node")
-                    && has_relation_count(report, "origin_link")
-                    && has_relation_count(report, "source_span")
+                    && has_relation_count(&report.relation_counts, "origin_node")
+                    && has_relation_count(&report.relation_counts, "origin_link")
+                    && has_relation_count(&report.relation_counts, "source_span")
                     && (has_reachable_kind_pair(report, "runtime.stmt", "bytecode.pc")
                         || has_reachable_kind_pair(report, "runtime.terminator", "bytecode.pc"))
                     && (has_path_witness(report, "runtime.stmt", "bytecode.pc")
                         || has_path_witness(report, "runtime.terminator", "bytecode.pc"))
-                    && report["facts"]["schema_version"] == 1
-                    && report["facts"]["facts"].as_array().is_some_and(|facts| {
-                        facts.iter().any(|fact| {
-                            fact["type"] == "origin_node" && fact["key"]["kind"] == "bytecode.pc"
-                        }) && facts.iter().any(|fact| {
-                            fact["type"] == "origin_link"
-                                && (fact["kind"] == "lowered" || fact["kind"] == "transformed")
-                        }) && facts.iter().any(|fact| fact["type"] == "source_span")
-                    })
+                    && (has_source_path_witness(report, "runtime.stmt", "bytecode.pc")
+                        || has_source_path_witness(report, "runtime.terminator", "bytecode.pc"))
+                    && has_origin_node_kind(&facts, OriginExportKind::BytecodePc)
+                    && (has_origin_link_kind(&facts, OriginLinkKind::Lowered)
+                        || has_origin_link_kind(&facts, OriginLinkKind::Transformed))
+                    && has_source_span_fact(&facts)
             }),
-            "expected typed origin facts for test bytecode in {value:#?}"
+            "expected typed origin facts for test bytecode in {report:#?}"
         );
         assert!(
             origin_facts.iter().any(|report| {
-                report["scope"] == "test_sonatina_snapshot"
-                    && report["label"] == "test_origin_facts"
-                    && report["object"] == "test_origin_facts"
-                    && report["origin_nodes"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
-                    && report["origin_links"]
-                        .as_u64()
-                        .is_some_and(|count| count > 0)
-                    && report["facts"]["schema_version"] == 1
-                    && report["facts"]["facts"].as_array().is_some_and(|facts| {
-                        facts.iter().any(|fact| {
-                            fact["type"] == "origin_node" && fact["key"]["kind"] == "sonatina.inst"
-                        }) && facts
-                            .iter()
-                            .any(|fact| fact["type"] == "origin_link" && fact["kind"] == "alias")
-                    })
+                if report.scope != "test_sonatina_snapshot"
+                    || report.label != "test_origin_facts"
+                    || report.object.as_deref() != Some("test_origin_facts")
+                {
+                    return false;
+                }
+                let facts = typed_origin_facts(report);
+                report.origin_nodes > 0
+                    && report.origin_links > 0
+                    && has_origin_node_kind(&facts, OriginExportKind::SonatinaInst)
+                    && has_origin_link_kind(&facts, OriginLinkKind::Alias)
             }),
-            "expected typed Sonatina snapshot origin facts for test bytecode in {value:#?}"
+            "expected typed Sonatina snapshot origin facts for test bytecode in {report:#?}"
         );
     }
 }
