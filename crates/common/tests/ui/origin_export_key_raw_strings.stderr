@@ -7,7 +7,7 @@ error[E0277]: the trait bound `str: OriginExportOwnerKey` is not satisfied
   |             required by a bound introduced by this call
   |
 note: required by a bound in `OriginExportKey::new`
- --> src/origin.rs
+ --> src/origin/export_key.rs
   |
   |     pub fn new<Owner, Local>(kind: OriginExportKind, owner_key: &Owner, local_key: &Local) -> Self
   |            --- required by a bound in this associated function
@@ -22,7 +22,7 @@ error[E0277]: the trait bound `str: OriginExportLocalKey` is not satisfied
   |             -------------------- required by a bound introduced by this call  ^^^^^^^^ the trait `OriginExportLocalKey` is not implemented for `str`
   |
 note: required by a bound in `OriginExportKey::new`
- --> src/origin.rs
+ --> src/origin/export_key.rs
   |
   |     pub fn new<Owner, Local>(kind: OriginExportKind, owner_key: &Owner, local_key: &Local) -> Self
   |            --- required by a bound in this associated function

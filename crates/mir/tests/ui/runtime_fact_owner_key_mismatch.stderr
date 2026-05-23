@@ -39,7 +39,7 @@ error[E0308]: arguments to this function are incorrect
    |                                             expected `RuntimeOriginFactSemanticOwnerKey`, found `RuntimeOriginFactRuntimeOwnerKey`
    |
 note: associated function defined here
-  --> src/origin.rs
+  --> src/origin/fact_graph.rs
    |
    |     pub const fn new(
    |                  ^^^
@@ -60,7 +60,7 @@ error[E0308]: mismatched types
    = note: expected reference `&RuntimeOriginFactTargetKey`
               found reference `&'static str`
 note: associated function defined here
-  --> src/origin.rs
+  --> src/origin/fact_graph.rs
    |
    |     pub fn for_body(
    |            ^^^^^^^^
@@ -76,7 +76,7 @@ error[E0308]: mismatched types
    = note: expected reference `&RuntimePackageBodySymbol`
               found reference `&'static str`
 note: associated function defined here
-  --> src/origin.rs
+  --> src/origin/fact_graph.rs
    |
    |     pub fn for_body(
    |            ^^^^^^^^
@@ -96,12 +96,12 @@ error[E0277]: the trait bound `str: RuntimeOriginOwnerKey` is not satisfied
    |             required by a bound introduced by this call
    |
 help: the trait `RuntimeOriginOwnerKey` is implemented for `RuntimeOriginFactRuntimeOwnerKey`
-  --> src/origin.rs
+  --> src/origin/fact_graph.rs
    |
    | impl RuntimeOriginOwnerKey for RuntimeOriginFactRuntimeOwnerKey {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `runtime_stmt_export_key`
-  --> src/origin.rs
+  --> src/origin/runtime_identity.rs
    |
    | pub fn runtime_stmt_export_key<K: RuntimeOriginOwnerKey + ?Sized>(
    |                                   ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `runtime_stmt_export_key`
@@ -115,12 +115,12 @@ error[E0277]: the trait bound `str: RuntimeOriginOwnerKey` is not satisfied
    |             required by a bound introduced by this call
    |
 help: the trait `RuntimeOriginOwnerKey` is implemented for `RuntimeOriginFactRuntimeOwnerKey`
-  --> src/origin.rs
+  --> src/origin/fact_graph.rs
    |
    | impl RuntimeOriginOwnerKey for RuntimeOriginFactRuntimeOwnerKey {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `runtime_terminator_export_key`
-  --> src/origin.rs
+  --> src/origin/runtime_identity.rs
    |
    | pub fn runtime_terminator_export_key<K: RuntimeOriginOwnerKey + ?Sized>(
    |                                         ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `runtime_terminator_export_key`

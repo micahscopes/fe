@@ -7,12 +7,12 @@ error[E0308]: mismatched types
   |             arguments to this function are incorrect
   |
 note: associated function defined here
- --> $WORKSPACE/crates/common/src/origin.rs
+ --> $WORKSPACE/crates/common/src/origin/macros.rs
   |
   |               pub const fn new($owner: $owner_ty, $local: $local_ty) -> Self {
   |                            ^^^
   |
- ::: src/origin.rs
+ ::: src/origin/runtime_identity.rs
   |
   | / common::define_origin_key_type! {
   | |     /// Origin key for a MIR runtime terminator. Terminators are block-local and

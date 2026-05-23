@@ -7,7 +7,7 @@ error[E0308]: mismatched types
   |             arguments to this function are incorrect
   |
 note: associated function defined here
- --> src/origin.rs
+ --> src/origin/package.rs
   |
   |     pub fn new(
   |            ^^^
