@@ -7,7 +7,7 @@ error[E0308]: mismatched types
   |                   arguments to this method are incorrect
   |
 note: method defined here
- --> src/facts.rs
+ --> src/facts/relation_index.rs
   |
   |     pub fn rows_where(
   |            ^^^^^^^^^^
@@ -21,7 +21,7 @@ error[E0308]: mismatched types
   |                   arguments to this method are incorrect
   |
 note: method defined here
- --> src/facts.rs
+ --> src/facts/relation_index.rs
   |
   |     pub fn column_index(
   |            ^^^^^^^^^^^^
@@ -35,7 +35,7 @@ error[E0308]: mismatched types
    |                 arguments to this method are incorrect
    |
 note: method defined here
-  --> src/facts.rs
+  --> src/facts/relation.rs
    |
    |     pub fn cell(
    |            ^^^^

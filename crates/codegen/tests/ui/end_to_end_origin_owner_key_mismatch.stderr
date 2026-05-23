@@ -41,7 +41,7 @@ error[E0308]: mismatched types
    = note: expected reference `&SonatinaFunctionExportKey`
               found reference `&'static str`
 note: associated function defined here
-  --> src/origin.rs
+  --> src/origin/end_to_end_graph.rs
    |
    |     pub fn for_function(function_key: &SonatinaFunctionExportKey) -> Self {
    |            ^^^^^^^^^^^^

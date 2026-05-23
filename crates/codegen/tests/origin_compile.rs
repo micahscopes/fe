@@ -83,6 +83,12 @@ fn codegen_origins_do_not_expose_raw_origin_keys() {
 }
 
 #[test]
+fn bytecode_pc_range_does_not_expose_raw_local_export_key() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/bytecode_pc_range_export_local_key_escape.rs");
+}
+
+#[test]
 fn frontend_origin_label_map_is_not_raw_sonatina_provenance_map() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/ui/frontend_origin_label_map_raw_sonatina_map.rs");

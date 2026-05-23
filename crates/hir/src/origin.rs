@@ -143,10 +143,6 @@ impl<'db> SemanticOrigin<'db> {
         )
     }
 
-    pub fn export_local_key(self) -> String {
-        sem_origin_local_key(self.origin())
-    }
-
     pub fn lazy_span(self, db: &'db dyn HirAnalysisDb) -> DynLazySpan<'db> {
         match self.origin() {
             SemOrigin::Expr(expr) => self

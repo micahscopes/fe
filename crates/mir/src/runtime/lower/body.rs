@@ -483,7 +483,7 @@ impl<'db> RmirEmitter<'db> {
                 terminator: RTerminator::Return(None),
             });
             self.origins.push_terminator(
-                RuntimeTerminatorOrigin::new(self.instance, block),
+                RuntimeTerminatorOrigin::for_block(self.instance, block),
                 RuntimeOriginSource::Synthetic,
             );
         }
@@ -553,7 +553,7 @@ impl<'db> RmirEmitter<'db> {
     fn set_terminator(&mut self, bb: RBlockId, terminator: RTerminator<'db>) {
         self.blocks[bb.index()].terminator = terminator;
         self.origins.push_terminator(
-            RuntimeTerminatorOrigin::new(self.instance, bb),
+            RuntimeTerminatorOrigin::for_block(self.instance, bb),
             self.current_origin,
         );
         self.terminated_blocks[bb.index()] = true;

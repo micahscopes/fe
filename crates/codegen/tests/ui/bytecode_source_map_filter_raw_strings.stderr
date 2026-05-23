@@ -21,7 +21,7 @@ error[E0308]: mismatched types
   |             arguments to this function are incorrect
   |
 note: associated function defined here
- --> src/debug.rs
+ --> src/debug/source_map_options.rs
   |
   |     pub fn new(section: BytecodeSectionKey) -> Self {
   |            ^^^

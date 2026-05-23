@@ -9,7 +9,7 @@ error[E0308]: mismatched types
   = note: expected reference `&BytecodeObjectKey`
              found reference `&'static str`
 note: method defined here
- --> src/debug.rs
+ --> src/debug/source_map_options.rs
   |
   |     pub fn with_object_key(self, object: &'a BytecodeObjectKey) -> Self {
   |            ^^^^^^^^^^^^^^^
@@ -25,7 +25,7 @@ error[E0308]: mismatched types
   = note: expected reference `&BytecodeSectionKey`
              found reference `&'static str`
 note: associated function defined here
- --> src/debug.rs
+ --> src/debug/source_map_options.rs
   |
   |     pub const fn section(section: &'a BytecodeSectionKey) -> Self {
   |                  ^^^^^^^

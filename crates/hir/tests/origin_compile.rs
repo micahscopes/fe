@@ -15,3 +15,9 @@ fn hir_origin_wrappers_do_not_expose_raw_keys() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/ui/hir_origin_raw_key_escape.rs");
 }
+
+#[test]
+fn semantic_origin_does_not_expose_raw_local_export_key() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/semantic_origin_export_local_key_escape.rs");
+}

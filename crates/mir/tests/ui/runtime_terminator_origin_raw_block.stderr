@@ -1,0 +1,24 @@
+error[E0308]: mismatched types
+ --> tests/ui/runtime_terminator_origin_raw_block.rs:4:52
+  |
+4 |     let _ = RuntimeTerminatorOrigin::new(instance, RBlockId::from_u32(0));
+  |             ----------------------------           ^^^^^^^^^^^^^^^^^^^^^ expected `RuntimeTerminatorSite`, found `RBlockId`
+  |             |
+  |             arguments to this function are incorrect
+  |
+note: associated function defined here
+ --> $WORKSPACE/crates/common/src/origin.rs
+  |
+  |               pub const fn new($owner: $owner_ty, $local: $local_ty) -> Self {
+  |                            ^^^
+  |
+ ::: src/origin.rs
+  |
+  | / common::define_origin_key_type! {
+  | |     /// Origin key for a MIR runtime terminator. Terminators are block-local and
+  | |     /// only meaningful inside their owning runtime instance.
+  | |     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
+... |
+  | | }
+  | |_- in this macro invocation
+  = note: this error originates in the macro `common::define_origin_key_type` (in Nightly builds, run with -Z macro-backtrace for more info)

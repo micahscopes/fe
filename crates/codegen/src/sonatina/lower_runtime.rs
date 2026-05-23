@@ -981,7 +981,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
             })?;
             self.record_new_insts_since(
                 &before,
-                SonatinaOriginSource::RuntimeTerminator(RuntimeTerminatorOrigin::new(
+                SonatinaOriginSource::RuntimeTerminator(RuntimeTerminatorOrigin::for_block(
                     self.body.owner,
                     block_id,
                 )),

@@ -1,0 +1,21 @@
+error[E0624]: method `export_local_key` is private
+ --> tests/ui/runtime_site_export_local_key_escape.rs:5:18
+  |
+5 |     let _ = site.export_local_key();
+  |                  ^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/origin.rs
+  |
+  |     fn export_local_key(self) -> String {
+  |     ----------------------------------- private method defined here
+
+error[E0624]: method `export_local_key` is private
+  --> tests/ui/runtime_site_export_local_key_escape.rs:10:18
+   |
+10 |     let _ = site.export_local_key();
+   |                  ^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/origin.rs
+   |
+   |     fn export_local_key(self) -> String {
+   |     ----------------------------------- private method defined here

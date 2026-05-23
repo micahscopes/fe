@@ -1,0 +1,14 @@
+error[E0599]: no method named `export_local_key` found for struct `SemanticOrigin<'db>` in the current scope
+ --> tests/ui/semantic_origin_export_local_key_escape.rs:4:20
+  |
+4 |     let _ = origin.export_local_key();
+  |                    ^^^^^^^^^^^^^^^^
+  |
+help: there is a method `export_key` with a similar name, but with different arguments
+ --> src/origin.rs
+  |
+  | /     pub fn export_key<K: SemanticOriginOwnerKey + ?Sized>(
+  | |         self,
+  | |         stable_instance_key: &K,
+  | |     ) -> OriginExportKey {
+  | |________________________^

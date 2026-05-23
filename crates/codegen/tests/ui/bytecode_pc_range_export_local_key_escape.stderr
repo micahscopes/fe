@@ -1,0 +1,10 @@
+error[E0624]: method `export_local_key` is private
+ --> tests/ui/bytecode_pc_range_export_local_key_escape.rs:5:19
+  |
+5 |     let _ = range.export_local_key();
+  |                   ^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/origin/bytecode_keys.rs
+  |
+  |     fn export_local_key(self) -> String {
+  |     ----------------------------------- private method defined here

@@ -1,0 +1,14 @@
+error[E0308]: mismatched types
+  --> tests/ui/shape_hash_fact_raw_digest.rs:11:9
+   |
+ 7 |     let _ = ShapeHashFact::new(
+   |             ------------------ arguments to this function are incorrect
+...
+11 |         "0000000000000000",
+   |         ^^^^^^^^^^^^^^^^^^ expected `ShapeHashDigest`, found `&str`
+   |
+note: associated function defined here
+  --> src/facts/shape_hash.rs
+   |
+   |     pub fn new(
+   |            ^^^

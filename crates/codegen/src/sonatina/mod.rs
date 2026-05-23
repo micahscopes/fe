@@ -231,9 +231,12 @@ fn compile_runtime_objects_with_origins<'db>(
     let artifacts = compile
         .compile()
         .map_err(|errors| LowerError::Internal(format_object_compile_errors(&errors)))?;
-    let bytecode_origins = BytecodePackageOrigins::from_artifacts(&artifacts, &post_opt_origins);
-    let frontend_origin_labels =
-        bytecode_origins.frontend_origin_label_map(|func| function_keys.get(&func).cloned());
+    let bytecode_origins =
+        BytecodePackageOrigins::try_from_artifacts(&artifacts, &post_opt_origins)
+            .map_err(|err| LowerError::Internal(err.to_string()))?;
+    let frontend_origin_labels = bytecode_origins
+        .try_frontend_origin_label_map(|func| function_keys.get(&func).cloned())
+        .map_err(|err| LowerError::Internal(err.to_string()))?;
 
     Ok(RuntimeObjectCompilation {
         artifacts,

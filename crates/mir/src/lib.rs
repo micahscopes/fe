@@ -13,10 +13,10 @@ pub use origin::{
     RuntimeOriginFactTargetKey, RuntimeOriginGraph, RuntimeOriginNode, RuntimeOriginOwnerKey,
     RuntimeOriginSource, RuntimePackageBodyOrigins, RuntimePackageBodySymbol,
     RuntimePackageOrigins, RuntimeStmtIndex, RuntimeStmtOrigin, RuntimeStmtOriginRecord,
-    RuntimeStmtSite, RuntimeTerminatorOrigin, RuntimeTerminatorOriginRecord,
+    RuntimeStmtSite, RuntimeTerminatorOrigin, RuntimeTerminatorOriginRecord, RuntimeTerminatorSite,
     runtime_code_region_export_key, runtime_origin_fact_node_export_key,
     runtime_package_origin_fact_graph, runtime_package_origin_facts, runtime_package_origins,
-    runtime_stmt_export_key, runtime_terminator_export_key, runtime_terminator_local_key,
+    runtime_stmt_export_key, runtime_terminator_export_key,
 };
 pub use runtime::{
     AddressSpaceKind, ArrayLayout, BorrowAccess, BorrowTransportSet, ConstNode, ConstRegion,

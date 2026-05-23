@@ -7,7 +7,7 @@ error[E0308]: arguments to this function are incorrect
   |                                     expected `BytecodeObjectKey`, found `&str`
   |
 note: associated function defined here
- --> src/origin.rs
+ --> src/origin/bytecode_keys.rs
   |
   |     pub fn new(object: BytecodeObjectKey, section: BytecodeSectionNameKey) -> Self {
   |            ^^^
@@ -21,7 +21,7 @@ error[E0308]: mismatched types
   |             arguments to this function are incorrect
   |
 note: associated function defined here
- --> src/origin.rs
+ --> src/origin/bytecode_keys.rs
   |
   |     pub fn new(object: BytecodeObjectKey, section: BytecodeSectionNameKey) -> Self {
   |            ^^^
@@ -37,7 +37,7 @@ error[E0308]: mismatched types
   = note: expected reference `&BytecodeObjectKey`
              found reference `&'static str`
 note: method defined here
- --> src/origin.rs
+ --> src/origin/bytecode_origins.rs
   |
   |     pub fn origin_graph_for_object(&self, object: &BytecodeObjectKey) -> CodegenOriginGraph {
   |            ^^^^^^^^^^^^^^^^^^^^^^^

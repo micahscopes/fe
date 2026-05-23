@@ -21,3 +21,9 @@ fn typed_fact_relation_count_rejects_raw_relation_strings() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/ui/typed_fact_relation_count_raw_relation.rs");
 }
+
+#[test]
+fn shape_hash_fact_rejects_raw_digest_strings() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/shape_hash_fact_raw_digest.rs");
+}
