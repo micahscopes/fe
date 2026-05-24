@@ -7,6 +7,7 @@ pub use core::lower::{
 pub mod analysis;
 pub mod core;
 pub mod diagnosable;
+pub mod origin;
 pub mod projection;
 pub use core::{hir_def, lower, print, semantic, span, visitor};
 
