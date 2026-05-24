@@ -1,0 +1,6 @@
+78039ec77 Fix origin_count_roundtrips fixture: zero counts for empty body list
+e05c3a45d WIP: Module splitting pass — origin_index, relation_index, origin_paths
+22569ca17 WIP: Module splitting, schema hardening, compile-fail coverage
+525194d16 WIP: Typed schema validation, debug-location export, fact relation hardening
+7d54f5db7 Add typed debug-location export boundary
+310fde07e WIP: Typed origin/shape infrastructure (phases 1-11)
