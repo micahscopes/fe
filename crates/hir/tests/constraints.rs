@@ -3,7 +3,9 @@ use std::path::Path;
 use common::diagnostics::{CompleteDiagnostic, cmp_complete_diagnostics};
 use dir_test::{Fixture, dir_test};
 use fe_hir::{
-    analysis::initialize_analysis_pass, hir_def::TopLevelMod, test_db::HirAnalysisTestDb,
+    analysis::{elab::elaboration_request_summaries_for_top_mod, initialize_analysis_pass},
+    hir_def::TopLevelMod,
+    test_db::HirAnalysisTestDb,
 };
 
 #[dir_test(
@@ -929,6 +931,53 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "compiler capability is not available");
+}
+
+#[test]
+fn derive_attrs_collect_elaboration_requests() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_attrs_collect_elaboration_requests.fe".into(),
+        r#"
+trait Eq {}
+trait Default {}
+
+#[derive(Eq, Default)]
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    let summaries = elaboration_request_summaries_for_top_mod(&db, top_mod);
+    assert_eq!(
+        summaries,
+        vec![
+            "Pair<A, B>: Eq requested for Pair<A, B>".to_string(),
+            "Pair<A, B>: Default requested for Pair<A, B>".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn derive_head_must_resolve_to_trait() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_head_must_resolve_to_trait.fe".into(),
+        r#"
+struct NotATrait {}
+
+#[derive(NotATrait)]
+struct Foo {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid elaboration request");
+    assert_diag_message(&diags, "derive head must resolve to a trait");
 }
 
 #[test]

@@ -2,6 +2,7 @@ use crate::{HirDb, span::DynLazySpan};
 pub mod analysis_pass;
 pub mod core_requirements;
 pub mod diagnostics;
+pub mod elab;
 pub mod place;
 pub mod semantic;
 
@@ -9,6 +10,7 @@ use self::analysis_pass::{
     AnalysisPassManager, ArithmeticAttrPass, ErrorLowerPass, EventLowerPass, InlineAttrPass,
     LoopUnrollAttrPass, MsgLowerPass, ParsingPass, PayableAttrPass,
 };
+use self::elab::ElaborationRequestAnalysisPass;
 use self::name_resolution::ImportAnalysisPass;
 use self::ty::{
     AdtDefAnalysisPass, BodyAnalysisPass, ContractAnalysisPass, DefConflictAnalysisPass,
@@ -41,6 +43,10 @@ pub fn initialize_analysis_pass() -> AnalysisPassManager {
     pass_manager.add_module_pass("AdtDef", Box::new(AdtDefAnalysisPass {}));
     pass_manager.add_module_pass("TypeAlias", Box::new(TypeAliasAnalysisPass {}));
     pass_manager.add_module_pass("Trait", Box::new(TraitAnalysisPass {}));
+    pass_manager.add_module_pass(
+        "ElaborationRequest",
+        Box::new(ElaborationRequestAnalysisPass {}),
+    );
     pass_manager.add_module_pass("Impl", Box::new(ImplAnalysisPass {}));
     pass_manager.add_module_pass("ImplTrait", Box::new(ImplTraitAnalysisPass {}));
     pass_manager.add_module_pass("Func", Box::new(FuncAnalysisPass {}));

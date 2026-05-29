@@ -2047,6 +2047,18 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
+            Self::InvalidElaborationRequest { span, message } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "invalid elaboration request".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: message.clone(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
+
             Self::OwnParamCannotBeBorrow { span, ty } => CompleteDiagnostic {
                 severity: Severity::Error,
                 message: "invalid `own` parameter".to_string(),

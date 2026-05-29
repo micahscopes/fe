@@ -49,7 +49,7 @@ pub enum TyDiagCollection<'db> {
 }
 
 impl<'db> TyDiagCollection<'db> {
-    pub(super) fn to_voucher(&self) -> Box<dyn DiagnosticVoucher + 'db> {
+    pub(crate) fn to_voucher(&self) -> Box<dyn DiagnosticVoucher + 'db> {
         match self.clone() {
             TyDiagCollection::Ty(diag) => Box::new(diag) as _,
             TyDiagCollection::PathRes(diag) => Box::new(diag) as _,
@@ -148,6 +148,11 @@ pub enum TyLowerDiag<'db> {
         message: String,
     },
 
+    InvalidElaborationRequest {
+        span: DynLazySpan<'db>,
+        message: String,
+    },
+
     /// `own` parameters must have owned types. Borrow-handle types (`mut`/`ref`) are not owned.
     OwnParamCannotBeBorrow {
         span: DynLazySpan<'db>,
@@ -208,6 +213,7 @@ impl TyLowerDiag<'_> {
             Self::ConstHoleInValuePosition { .. } => 32,
             Self::CompileTimeOnlyTypeInRuntimeContext { .. } => 36,
             Self::InvalidEvidenceProvider { .. } => 37,
+            Self::InvalidElaborationRequest { .. } => 38,
             Self::OwnParamCannotBeBorrow { .. } => 14,
             Self::InvalidMutParamPrefixWithoutOwnType { .. } => 31,
             Self::InvalidConstTyExpr(_) => 15,
