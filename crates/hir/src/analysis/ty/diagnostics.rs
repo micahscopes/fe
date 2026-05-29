@@ -427,6 +427,13 @@ pub enum BodyDiag<'db> {
     WhereConstraintPredicateMissingEvidence {
         primary: DynLazySpan<'db>,
     },
+    InvalidConstraintPredicate {
+        primary: DynLazySpan<'db>,
+    },
+    UnsupportedConstraint {
+        primary: DynLazySpan<'db>,
+        constraint: String,
+    },
 
     InvalidCast {
         primary: DynLazySpan<'db>,
@@ -805,6 +812,8 @@ impl<'db> BodyDiag<'db> {
             Self::WhereConstPredicateFailed { .. } => 82,
             Self::WhereConstPredicateEvalFailed { .. } => 83,
             Self::WhereConstraintPredicateMissingEvidence { .. } => 84,
+            Self::InvalidConstraintPredicate { .. } => 86,
+            Self::UnsupportedConstraint { .. } => 85,
             Self::AccessedFieldNotFound { .. } => 15,
             Self::OpsTraitNotImplemented { .. } => 16,
             Self::UnsupportedUnaryPlus(..) => 52,

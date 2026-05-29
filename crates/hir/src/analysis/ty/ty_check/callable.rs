@@ -788,7 +788,7 @@ impl<'db> Callable<'db> {
                     }
                     ConstraintId::new(db, ConstraintKind::ConstPredicate(pred))
                 }
-                ConstraintKind::Invalid => continue,
+                ConstraintKind::Invalid => constraint,
                 _ => constraint,
             };
 

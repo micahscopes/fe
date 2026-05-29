@@ -3139,6 +3139,41 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 error_code,
             },
 
+            Self::InvalidConstraintPredicate { primary } => CompleteDiagnostic {
+                severity,
+                message: "invalid constraint predicate".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "this where-clause constraint is not well formed".to_string(),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![
+                    "constraint predicates must have `Constraint` kind, such as `P<T>` where `P: * -> Constraint`"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
+            Self::UnsupportedConstraint {
+                primary,
+                constraint,
+            } => CompleteDiagnostic {
+                severity,
+                message: "unsupported constraint kind".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!(
+                        "`{constraint}` is not supported by the constraint solver yet"
+                    ),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![
+                    "this constraint form is reserved for future metaprogramming work and must not be silently accepted"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
             Self::InvalidCast {
                 primary,
                 from,

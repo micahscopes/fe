@@ -260,6 +260,105 @@ fn fail<P: * -> Constraint, T>() {
 }
 
 #[test]
+fn malformed_generic_constraint_application_is_not_silently_discharged() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "malformed_generic_constraint_application_is_not_silently_discharged.fe".into(),
+        r#"
+fn needs<P, T>()
+where
+    P<T>
+{}
+
+fn fail<P, T>() {
+    needs<P, T>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid constraint predicate");
+}
+
+#[test]
+fn concrete_trait_constraint_application_call_with_matching_assumption_passes() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "concrete_trait_constraint_application_call_with_matching_assumption_passes.fe".into(),
+        r#"
+trait Eq {}
+
+fn needs<T>()
+where
+    Eq<T>
+{}
+
+fn caller<T>()
+where
+    Eq<T>
+{
+    needs<T>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn concrete_trait_constraint_application_call_uses_trait_solver() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "concrete_trait_constraint_application_call_uses_trait_solver.fe".into(),
+        r#"
+trait Eq {}
+
+struct Item {}
+
+fn needs<T>()
+where
+    Eq<T>
+{}
+
+fn fail() {
+    needs<Item>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "trait bound is not satisfied");
+}
+
+#[test]
+fn constraint_kind_param_cannot_be_used_as_return_type() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "constraint_kind_param_cannot_be_used_as_return_type.fe".into(),
+        r#"
+fn bad<C: Constraint>() -> C {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "expected `*` kind in this context");
+}
+
+#[test]
+fn generic_constraint_application_cannot_be_used_as_return_type() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generic_constraint_application_cannot_be_used_as_return_type.fe".into(),
+        r#"
+fn bad<P: * -> Constraint, T>() -> P<T> {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "expected `*` kind in this context");
+}
+
+#[test]
 fn const_predicate_adt_instantiation_enforces_where_clause() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

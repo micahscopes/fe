@@ -1335,7 +1335,16 @@ impl<'db> TyChecker<'db> {
             ConstraintKind::ConstraintApplication(application) => {
                 self.process_constraint_application_obligation(application, obligation, final_pass)
             }
-            ConstraintKind::Invalid => ObligationOutcome::Discharged,
+            ConstraintKind::Invalid => {
+                if final_pass {
+                    self.push_diag(BodyDiag::InvalidConstraintPredicate {
+                        primary: obligation.span.clone(),
+                    });
+                    ObligationOutcome::Discharged
+                } else {
+                    ObligationOutcome::Requeue(obligation)
+                }
+            }
             _ => self.process_future_constraint_obligation(obligation, final_pass),
         }
     }
@@ -1345,12 +1354,15 @@ impl<'db> TyChecker<'db> {
         obligation: env::Obligation<'db>,
         final_pass: bool,
     ) -> ObligationOutcome<'db> {
-        debug_assert!(
-            final_pass,
-            "future constraint reached the obligation solver before a dedicated solver exists: {}",
-            obligation.constraint.pretty_print(self.db)
-        );
-        ObligationOutcome::Discharged
+        if final_pass {
+            self.push_diag(BodyDiag::UnsupportedConstraint {
+                primary: obligation.span.clone(),
+                constraint: obligation.constraint.pretty_print(self.db),
+            });
+            ObligationOutcome::Discharged
+        } else {
+            ObligationOutcome::Requeue(obligation)
+        }
     }
 
     fn register_residual_constraints(
