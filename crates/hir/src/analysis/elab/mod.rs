@@ -131,6 +131,100 @@ pub(crate) struct ElaborationCtfeContextId<'db> {
     capabilities: Vec<ElaborationCapabilityWitness<'db>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum BuilderCommand<'db> {
+    Require(ConstraintId<'db>),
+    Finish,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum BuilderError<'db> {
+    WrongTarget {
+        expected: ConstraintId<'db>,
+        attempted: ConstraintId<'db>,
+    },
+    AlreadyFinished,
+    UnsupportedTarget(ConstraintId<'db>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) struct ImplBuilderSession<'db> {
+    context: ElaborationCtfeContextId<'db>,
+    target: ConstraintId<'db>,
+    commands: Vec<BuilderCommand<'db>>,
+    finished: bool,
+}
+
+impl<'db> ImplBuilderSession<'db> {
+    pub(crate) fn new(db: &'db dyn HirAnalysisDb, context: ElaborationCtfeContextId<'db>) -> Self {
+        Self {
+            context,
+            target: context.request(db).goal(db),
+            commands: Vec::new(),
+            finished: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn require(
+        &mut self,
+        constraint: ConstraintId<'db>,
+    ) -> Result<(), BuilderError<'db>> {
+        if self.finished {
+            return Err(BuilderError::AlreadyFinished);
+        }
+        self.commands.push(BuilderCommand::Require(constraint));
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn emit_impl(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        goal: ConstraintId<'db>,
+    ) -> Result<(), BuilderError<'db>> {
+        if self.finished {
+            return Err(BuilderError::AlreadyFinished);
+        }
+        if !constraints_match(db, self.target, goal) {
+            return Err(BuilderError::WrongTarget {
+                expected: self.target,
+                attempted: goal,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Result<GeneratedImplId<'db>, BuilderError<'db>> {
+        if self.finished {
+            return Err(BuilderError::AlreadyFinished);
+        }
+        let ConstraintKind::Trait(trait_inst) = self.target.kind(db) else {
+            return Err(BuilderError::UnsupportedTarget(self.target));
+        };
+
+        self.finished = true;
+        self.commands.push(BuilderCommand::Finish);
+        let obligations: Vec<ConstraintId<'db>> = self
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                BuilderCommand::Require(constraint) => Some(*constraint),
+                BuilderCommand::Finish => None,
+            })
+            .collect();
+
+        Ok(GeneratedImplId {
+            context: self.context,
+            trait_inst,
+            obligations: ConstraintListId::new(db, obligations),
+        })
+    }
+}
+
 impl<'db> ElaborationCtfeContextId<'db> {
     pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
         let provider = self
@@ -290,14 +384,16 @@ fn generated_impl_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
-    let ConstraintKind::Trait(trait_inst) = context.request(db).goal(db).kind(db) else {
-        return None;
-    };
-    Some(GeneratedImplId {
-        context,
-        trait_inst,
-        obligations: ConstraintListId::empty(db),
-    })
+    ImplBuilderSession::new(db, context).finish(db).ok()
+}
+
+fn constraints_match<'db>(
+    db: &'db dyn HirAnalysisDb,
+    lhs: ConstraintId<'db>,
+    rhs: ConstraintId<'db>,
+) -> bool {
+    let mut table = UnificationTable::new(db);
+    table.unify(lhs, rhs).is_ok()
 }
 
 fn derive_requests_for_target<'db>(
@@ -497,5 +593,115 @@ impl ModuleAnalysisPass for ElaborationRequestAnalysisPass {
             .iter()
             .map(|diag| diag.to_voucher())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        analysis::ty::{constraint::ConstraintId, trait_def::TraitInstId, ty_def::TyId},
+        hir_def::ItemKind,
+        test_db::HirAnalysisTestDb,
+    };
+
+    fn find_trait<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> Trait<'db> {
+        top_mod
+            .all_items(db)
+            .iter()
+            .find_map(|item| match item {
+                ItemKind::Trait(trait_)
+                    if trait_
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(db) == name) =>
+                {
+                    Some(*trait_)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing `{name}` trait"))
+    }
+
+    fn first_builder_context<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+    ) -> ElaborationCtfeContextId<'db> {
+        let request = *elaboration_requests_for_top_mod(db, top_mod)
+            .first()
+            .expect("missing elaboration request");
+        *elaboration_ctfe_contexts_for_request(db, request)
+            .first()
+            .expect("missing elaboration context")
+    }
+
+    #[test]
+    fn raw_impl_builder_records_required_obligations() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "raw_impl_builder_records_required_obligations.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let eq = find_trait(&db, top_mod, "Eq");
+        let field_obligation =
+            ConstraintId::from_trait(&db, TraitInstId::new_simple(&db, eq, vec![TyId::u256(&db)]));
+        let context = first_builder_context(&db, top_mod);
+        let mut builder = ImplBuilderSession::new(&db, context);
+        builder.require(field_obligation).unwrap();
+
+        let generated = builder.finish(&db).unwrap();
+        assert_eq!(generated.obligations.list(&db), &[field_obligation]);
+    }
+
+    #[test]
+    fn raw_impl_builder_rejects_wrong_target() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "raw_impl_builder_rejects_wrong_target.fe".into(),
+            r#"
+trait Eq {}
+trait Default {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let default = find_trait(&db, top_mod, "Default");
+        let target_ty = first_builder_context(&db, top_mod)
+            .request(&db)
+            .target(&db)
+            .ty(&db);
+        let wrong_goal =
+            ConstraintId::from_trait(&db, TraitInstId::new_simple(&db, default, vec![target_ty]));
+
+        let context = first_builder_context(&db, top_mod);
+        let mut builder = ImplBuilderSession::new(&db, context);
+        let err = builder.emit_impl(&db, wrong_goal).unwrap_err();
+        assert!(matches!(err, BuilderError::WrongTarget { .. }));
     }
 }
