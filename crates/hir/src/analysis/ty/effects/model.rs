@@ -3,6 +3,7 @@ use crate::{
         HirAnalysisDb,
         ty::{
             const_ty::{ConstTyData, ConstTyId},
+            constraint::compiler_capability_for_ty,
             layout_holes::{
                 LayoutPlaceholderPolicy, collect_unique_layout_placeholders_in_order_with_policy,
                 layout_hole_fallback_ty,
@@ -211,6 +212,9 @@ impl<'db> EffectRequirementDecl<'db> {
     ) -> Option<Self> {
         let key = match requirement.key {
             SemanticEffectRequirementKey::Type(carrier) => {
+                if compiler_capability_for_ty(db, carrier).is_some() {
+                    return None;
+                }
                 EffectRequirementKey::Type(TypeKeySchema { carrier })
             }
             SemanticEffectRequirementKey::Trait(trait_inst) => EffectRequirementKey::Trait(

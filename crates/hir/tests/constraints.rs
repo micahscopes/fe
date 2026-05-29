@@ -785,12 +785,20 @@ fn compiler_capabilities_forward_through_const_uses() {
     let file = db.new_stand_alone(
         "compiler_capabilities_forward_through_const_uses.fe".into(),
         r#"
+trait Eq {}
+
 const fn helper_reflect<T>() uses (reflect: Reflect<T>) {}
 
+const fn helper_builder<T>() uses (builder: mut ImplBuilder<Eq<T>>) {}
+
 const fn caller<T>()
-    uses (reflect: Reflect<T>)
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
 {
     helper_reflect<T>()
+    helper_builder<T>()
 }
 "#,
     );
