@@ -98,6 +98,7 @@ pub(crate) fn is_ty_visible_from(db: &dyn HirAnalysisDb, ty: TyId, from_scope: S
         // projection type itself is well-formed, regardless of the visibility of
         // the associated type declaration inside the trait. Treat them as visible.
         TyData::AssocTy(_assoc_ty) => true,
+        TyData::ConstraintTerm(_) => true,
 
         TyData::ConstTy(const_ty) => match const_ty.data(db) {
             ConstTyData::TyVar(_, _) => true,

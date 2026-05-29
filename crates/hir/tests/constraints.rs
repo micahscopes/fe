@@ -382,6 +382,56 @@ fn bad<P: * -> Constraint, T>() -> P<T> {}
 }
 
 #[test]
+fn concrete_trait_constraint_can_be_type_constructor_arg() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "concrete_trait_constraint_can_be_type_constructor_arg.fe".into(),
+        r#"
+trait Eq {}
+
+fn accepts<T>(
+    ev: Evidence<Eq<T>>,
+    builder: ImplBuilder<Eq<T>>,
+    reflect: Reflect<T>,
+    info: TypeInfo<T>,
+) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn generic_constraint_can_be_type_constructor_arg() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generic_constraint_can_be_type_constructor_arg.fe".into(),
+        r#"
+fn accepts<P, T>(ev: Evidence<P<T>>)
+where
+    P<T>
+{}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn star_kind_arg_cannot_fill_constraint_constructor_slot() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "star_kind_arg_cannot_fill_constraint_constructor_slot.fe".into(),
+        r#"
+fn bad<T>(ev: Evidence<T>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid type argument kind");
+}
+
+#[test]
 fn const_predicate_adt_instantiation_enforces_where_clause() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

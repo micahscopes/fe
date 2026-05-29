@@ -25,7 +25,7 @@ use crate::analysis::{
         trait_resolution::constraint::collect_func_decl_constraints,
         ty_def::{BorrowKind, CapabilityKind},
         ty_def::{InvalidCause, TyBase, TyData, TyFlags, TyId},
-        ty_lower::lower_generic_arg_list,
+        ty_lower::lower_generic_arg_list_for_params,
         visitor::{TyVisitable, TyVisitor, collect_flags},
     },
 };
@@ -151,14 +151,16 @@ pub(super) fn unify_explicit_call_generic_args<'db>(
         return Ok(());
     }
 
-    let given_args = lower_generic_arg_list(
+    let offset = callable.callable_def.offset_to_explicit_params_position(db);
+    let expected_args = callable.generic_args[offset..].to_vec();
+    let given_args = lower_generic_arg_list_for_params(
         db,
         args,
         tc.env.scope(),
         tc.env.assumptions(),
         LayoutHoleArgSite::GenericArgList(args),
+        &expected_args,
     );
-    let offset = callable.callable_def.offset_to_explicit_params_position(db);
     let current_args = &mut callable.generic_args[offset..];
     if current_args.len() != given_args.len() {
         return Err(CallGenericArgUnifyError::ArityMismatch {

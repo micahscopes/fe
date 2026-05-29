@@ -9,6 +9,10 @@ pub enum PrimTy {
     Int(IntTy),
     Uint(UintTy),
     String,
+    Evidence,
+    ImplBuilder,
+    Reflect,
+    TypeInfo,
 }
 
 impl PrimTy {
@@ -18,6 +22,10 @@ impl PrimTy {
             PrimTy::Int(ty) => ty.name(db),
             PrimTy::Uint(ty) => ty.name(db),
             PrimTy::String => IdentId::new(db, "String".to_string()),
+            PrimTy::Evidence => IdentId::new(db, "Evidence".to_string()),
+            PrimTy::ImplBuilder => IdentId::new(db, "ImplBuilder".to_string()),
+            PrimTy::Reflect => IdentId::new(db, "Reflect".to_string()),
+            PrimTy::TypeInfo => IdentId::new(db, "TypeInfo".to_string()),
         }
     }
 
@@ -39,6 +47,10 @@ impl PrimTy {
             PrimTy::Uint(UintTy::U256),
             PrimTy::Uint(UintTy::Usize),
             PrimTy::String,
+            PrimTy::Evidence,
+            PrimTy::ImplBuilder,
+            PrimTy::Reflect,
+            PrimTy::TypeInfo,
         ]
     }
 }

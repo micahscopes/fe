@@ -14,6 +14,7 @@ use super::{
         AppFrameId, CallableInputLayoutHoleOrigin, ConstTyData, ConstTyId, EvaluatedConstTy,
         HoleId, LayoutHoleArgSite, LocalFrameId, LocalFrameSite, StructuralHoleOrigin,
     },
+    constraint::ConstraintKind,
     effects::{ResolvedEffectKey, TraitKeySchema},
     fold::{TyFoldable, TyFolder},
     layout_holes::{
@@ -26,9 +27,12 @@ use super::{
     trait_def::TraitInstId,
     trait_resolution::{
         PredicateListId,
-        constraint::{collect_func_decl_trait_constraints, collect_trait_constraints},
+        constraint::{
+            collect_func_decl_trait_constraints, collect_trait_constraints,
+            lower_hir_constraint_predicate,
+        },
     },
-    ty_def::{InvalidCause, Kind, TyData, TyId, TyParam},
+    ty_def::{ApplicableTyProp, InvalidCause, Kind, TyData, TyId, TyParam},
     visitor::TyVisitable,
 };
 use crate::analysis::name_resolution::{PathRes, PathResErrorKind, resolve_path};
@@ -877,6 +881,98 @@ pub(crate) fn lower_generic_arg_list<'db>(
     assumptions: PredicateListId<'db>,
     hole_site: LayoutHoleArgSite<'db>,
 ) -> Vec<TyId<'db>> {
+    lower_generic_arg_list_impl(db, args, scope, assumptions, hole_site, |_| None)
+}
+
+pub(crate) fn lower_generic_arg_list_for_base<'db>(
+    db: &'db dyn HirAnalysisDb,
+    args: GenericArgListId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    hole_site: LayoutHoleArgSite<'db>,
+    base: TyId<'db>,
+) -> Vec<TyId<'db>> {
+    let mut current = base;
+    lower_generic_arg_list_impl(db, args, scope, assumptions, hole_site, |idx| {
+        let expected = current.applicable_ty(db);
+        if let Some(expected) = &expected {
+            let arg = lower_generic_arg_for_expected(
+                db,
+                &args.data(db)[idx],
+                idx,
+                scope,
+                assumptions,
+                hole_site,
+                Some(expected),
+            );
+            current = TyId::app_metadata_only(db, current, arg);
+            return Some(arg);
+        }
+        None
+    })
+}
+
+pub(crate) fn lower_generic_arg_list_for_params<'db>(
+    db: &'db dyn HirAnalysisDb,
+    args: GenericArgListId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    hole_site: LayoutHoleArgSite<'db>,
+    params: &[TyId<'db>],
+) -> Vec<TyId<'db>> {
+    lower_generic_arg_list_impl(db, args, scope, assumptions, hole_site, |idx| {
+        let expected = params.get(idx).map(|param| ApplicableTyProp {
+            kind: param.kind(db).clone(),
+            const_ty: param.const_ty_ty(db),
+        });
+        Some(lower_generic_arg_for_expected(
+            db,
+            &args.data(db)[idx],
+            idx,
+            scope,
+            assumptions,
+            hole_site,
+            expected.as_ref(),
+        ))
+    })
+}
+
+fn lower_generic_arg_list_impl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    args: GenericArgListId<'db>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    hole_site: LayoutHoleArgSite<'db>,
+    mut lower_with_expected: impl FnMut(usize) -> Option<TyId<'db>>,
+) -> Vec<TyId<'db>> {
+    args.data(db)
+        .iter()
+        .enumerate()
+        .map(|(arg_idx, arg)| {
+            lower_with_expected(arg_idx).unwrap_or_else(|| {
+                lower_generic_arg_for_expected(
+                    db,
+                    arg,
+                    arg_idx,
+                    scope,
+                    assumptions,
+                    hole_site,
+                    None,
+                )
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn lower_generic_arg_for_expected<'db>(
+    db: &'db dyn HirAnalysisDb,
+    arg: &GenericArg<'db>,
+    arg_idx: usize,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+    hole_site: LayoutHoleArgSite<'db>,
+    expected: Option<&ApplicableTyProp<'db>>,
+) -> TyId<'db> {
     let hole_local_frame = match hole_site {
         LayoutHoleArgSite::Path(path) => LocalFrameId::root_path(db, path),
         LayoutHoleArgSite::GenericArgList(args) => LocalFrameId::root_generic_arg_list(db, args),
@@ -886,107 +982,120 @@ pub(crate) fn lower_generic_arg_list<'db>(
         LayoutHoleArgSite::GenericArgList(args) => AppFrameId::root_generic_arg_list(db, args),
     };
 
-    args.data(db)
-        .iter()
-        .enumerate()
-        .map(|(arg_idx, arg)| match arg {
-            GenericArg::Type(ty_arg) => {
-                let arg_frame = ty_arg
-                    .ty
-                    .to_opt()
-                    .map(|hir_ty| hole_app_frame.child_type_component(db, hir_ty, arg_idx));
-                // Generic args are syntactically ambiguous: `String<N>` may parse `N` as a type
-                // even when `String` expects a const generic arg. When a type-arg is a path that
-                // resolves as a value const/trait-const, lower it as a const-ty argument so
-                // downstream `TyId::app` sees a const generic.
-                if let Some(hir_ty) = ty_arg.ty.to_opt()
-                    && let HirTyKind::Path(path) = hir_ty.data(db)
-                    && let Some(path) = path.to_opt()
-                    && let Ok(resolved) = resolve_path(db, path, scope, assumptions, true)
-                {
-                    match resolved {
-                        PathRes::Const(const_def, ty) => {
-                            if let Some(body) = const_def.body(db).to_opt() {
-                                let const_ty =
-                                    ConstTyId::from_body(db, body, Some(ty), Some(const_def));
-                                return TyId::const_ty(db, const_ty);
-                            }
-                            return TyId::invalid(db, InvalidCause::ParseError);
-                        }
-                        PathRes::TraitConst(recv_ty, inst, name) => {
-                            let mut args = inst.args(db).clone();
-                            if let Some(self_arg) = args.first_mut() {
-                                *self_arg = recv_ty;
-                            }
-                            let inst = TraitInstId::new(
-                                db,
-                                inst.def(db),
-                                args,
-                                inst.assoc_type_bindings(db).clone(),
-                            );
+    match arg {
+        GenericArg::Type(ty_arg) => {
+            let arg_frame = ty_arg
+                .ty
+                .to_opt()
+                .map(|hir_ty| hole_app_frame.child_type_component(db, hir_ty, arg_idx));
 
-                            if let Some(expected_ty) = inst
-                                .def(db)
-                                .const_(db, name)
-                                .and_then(|v| v.ty_binder(db))
-                                .map(|b| b.instantiate(db, inst.args(db)))
-                            {
-                                let assoc = AssocConstUse::new(scope, assumptions, inst, name);
-                                if let Some(const_ty) =
-                                    super::const_ty::const_ty_or_abstract_from_assoc_const_use(
-                                        db,
-                                        assoc,
-                                        expected_ty,
-                                    )
-                                {
-                                    return TyId::const_ty(db, const_ty);
-                                }
-                            }
-                        }
-                        PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
-                            if let TyData::ConstTy(const_ty) = ty.data(db) {
-                                return TyId::const_ty(db, *const_ty);
-                            }
-                        }
-                        PathRes::EnumVariant(variant)
-                            if variant.ty.is_unit_variant_only_enum(db) =>
-                        {
-                            let evaluated = EvaluatedConstTy::EnumVariant(variant.variant);
+            if expected.is_some_and(|expected| matches!(expected.kind, Kind::Constraint)) {
+                let constraint = lower_hir_constraint_predicate(db, ty_arg.ty, scope, assumptions);
+                let ty = if matches!(constraint.kind(db), ConstraintKind::Invalid) {
+                    let given = lower_opt_hir_ty(db, ty_arg.ty, scope, assumptions);
+                    TyId::invalid(
+                        db,
+                        InvalidCause::KindMismatch {
+                            expected: Some(Kind::Constraint),
+                            given,
+                        },
+                    )
+                } else {
+                    TyId::constraint_term(db, constraint)
+                };
+                return arg_frame
+                    .map_or(ty, |frame| rebase_structural_holes_under_app(db, ty, frame));
+            }
+
+            // Generic args are syntactically ambiguous: `String<N>` may parse `N` as a type
+            // even when `String` expects a const generic arg. When a type-arg is a path that
+            // resolves as a value const/trait-const, lower it as a const-ty argument so
+            // downstream `TyId::app` sees a const generic.
+            if let Some(hir_ty) = ty_arg.ty.to_opt()
+                && let HirTyKind::Path(path) = hir_ty.data(db)
+                && let Some(path) = path.to_opt()
+                && let Ok(resolved) = resolve_path(db, path, scope, assumptions, true)
+            {
+                match resolved {
+                    PathRes::Const(const_def, ty) => {
+                        if let Some(body) = const_def.body(db).to_opt() {
                             let const_ty =
-                                ConstTyId::new(db, ConstTyData::Evaluated(evaluated, variant.ty));
+                                ConstTyId::from_body(db, body, Some(ty), Some(const_def));
                             return TyId::const_ty(db, const_ty);
                         }
-                        _ => {}
+                        return TyId::invalid(db, InvalidCause::ParseError);
                     }
-                }
-                let ty = lower_opt_hir_ty(db, ty_arg.ty, scope, assumptions);
-                arg_frame.map_or(ty, |frame| rebase_structural_holes_under_app(db, ty, frame))
-            }
-            GenericArg::Const(const_arg) => match const_arg.value {
-                ConstGenericArgValue::Expr(body) => {
-                    let const_ty = ConstTyId::from_opt_body(db, body);
-                    TyId::const_ty(db, const_ty)
-                }
-                ConstGenericArgValue::Hole => TyId::const_ty(
-                    db,
-                    ConstTyId::structural_hole(
-                        db,
-                        TyId::invalid(db, InvalidCause::Other),
-                        StructuralHoleOrigin::ExplicitWildcard {
-                            site: hole_site,
-                            arg_idx,
-                        },
-                        hole_local_frame,
-                    ),
-                ),
-            },
+                    PathRes::TraitConst(recv_ty, inst, name) => {
+                        let mut args = inst.args(db).clone();
+                        if let Some(self_arg) = args.first_mut() {
+                            *self_arg = recv_ty;
+                        }
+                        let inst = TraitInstId::new(
+                            db,
+                            inst.def(db),
+                            args,
+                            inst.assoc_type_bindings(db).clone(),
+                        );
 
-            GenericArg::AssocType(_assoc_type_arg) => {
-                // TODO: ?
-                TyId::invalid(db, InvalidCause::Other)
+                        if let Some(expected_ty) = inst
+                            .def(db)
+                            .const_(db, name)
+                            .and_then(|v| v.ty_binder(db))
+                            .map(|b| b.instantiate(db, inst.args(db)))
+                        {
+                            let assoc = AssocConstUse::new(scope, assumptions, inst, name);
+                            if let Some(const_ty) =
+                                super::const_ty::const_ty_or_abstract_from_assoc_const_use(
+                                    db,
+                                    assoc,
+                                    expected_ty,
+                                )
+                            {
+                                return TyId::const_ty(db, const_ty);
+                            }
+                        }
+                    }
+                    PathRes::Ty(ty) | PathRes::TyAlias(_, ty) => {
+                        if let TyData::ConstTy(const_ty) = ty.data(db) {
+                            return TyId::const_ty(db, *const_ty);
+                        }
+                    }
+                    PathRes::EnumVariant(variant) if variant.ty.is_unit_variant_only_enum(db) => {
+                        let evaluated = EvaluatedConstTy::EnumVariant(variant.variant);
+                        let const_ty =
+                            ConstTyId::new(db, ConstTyData::Evaluated(evaluated, variant.ty));
+                        return TyId::const_ty(db, const_ty);
+                    }
+                    _ => {}
+                }
             }
-        })
-        .collect()
+            let ty = lower_opt_hir_ty(db, ty_arg.ty, scope, assumptions);
+            arg_frame.map_or(ty, |frame| rebase_structural_holes_under_app(db, ty, frame))
+        }
+        GenericArg::Const(const_arg) => match const_arg.value {
+            ConstGenericArgValue::Expr(body) => {
+                let const_ty = ConstTyId::from_opt_body(db, body);
+                TyId::const_ty(db, const_ty)
+            }
+            ConstGenericArgValue::Hole => TyId::const_ty(
+                db,
+                ConstTyId::structural_hole(
+                    db,
+                    TyId::invalid(db, InvalidCause::Other),
+                    StructuralHoleOrigin::ExplicitWildcard {
+                        site: hole_site,
+                        arg_idx,
+                    },
+                    hole_local_frame,
+                ),
+            ),
+        },
+
+        GenericArg::AssocType(_assoc_type_arg) => {
+            // TODO: ?
+            TyId::invalid(db, InvalidCause::Other)
+        }
+    }
 }
 
 #[salsa::interned]

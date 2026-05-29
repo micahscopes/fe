@@ -22,6 +22,7 @@ use rustc_hash::FxHashSet;
 use salsa::Update;
 use smallvec::SmallVec;
 
+use super::constraint::ConstraintId;
 use super::{
     adt_def::{AdtDef, adt_layout_hole_plan_with_explicit_args, instantiated_adt_field_ty},
     const_ty::{ConstTyData, ConstTyId, EvaluatedConstTy, TypePrintMode},
@@ -229,6 +230,7 @@ impl<'db> TyId<'db> {
                 )
             }
             TyData::TyApp(_, _) => pretty_print_ty_app(db, self, mode),
+            TyData::ConstraintTerm(constraint) => constraint.pretty_print(db),
             TyData::TyBase(base) => base.pretty_print(db),
             TyData::ConstTy(const_ty) => const_ty.pretty_print_with_mode(db, mode),
             TyData::Never => "!".to_string(),
@@ -370,6 +372,13 @@ impl<'db> TyId<'db> {
 
     pub(crate) fn qualified_ty(db: &'db dyn HirAnalysisDb, trait_: TraitInstId<'db>) -> Self {
         Self::new(db, TyData::QualifiedTy(trait_))
+    }
+
+    pub(crate) fn constraint_term(
+        db: &'db dyn HirAnalysisDb,
+        constraint: ConstraintId<'db>,
+    ) -> Self {
+        Self::new(db, TyData::ConstraintTerm(constraint))
     }
 
     pub(crate) fn adt(db: &'db dyn HirAnalysisDb, adt: AdtDef<'db>) -> Self {
@@ -570,6 +579,7 @@ impl<'db> TyId<'db> {
             TyData::TyParam(param) => Some(param.scope(db)),
             TyData::AssocTy(assoc_ty) => assoc_ty.scope(db),
             TyData::QualifiedTy(trait_inst) => Some(trait_inst.def(db).scope()),
+            TyData::ConstraintTerm(_) => None,
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.scope(db)),
             TyData::TyBase(TyBase::Contract(c)) => Some(c.scope()),
             TyData::TyBase(TyBase::Func(func)) => Some(func.scope()),
@@ -595,6 +605,7 @@ impl<'db> TyId<'db> {
             TyData::TyParam(param) => param.scope(db).name_span(db),
             TyData::AssocTy(assoc_ty) => assoc_ty.scope(db)?.name_span(db),
             TyData::QualifiedTy(trait_inst) => trait_inst.def(db).scope().name_span(db),
+            TyData::ConstraintTerm(_) => None,
 
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.name_span(db)),
             TyData::TyBase(TyBase::Contract(c)) => c.scope().name_span(db),
@@ -1072,6 +1083,7 @@ pub struct ApplicableTyProp<'db> {
     pub const_ty: Option<TyId<'db>>,
 }
 
+#[allow(private_interfaces)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TyData<'db> {
     /// Type variable.
@@ -1084,6 +1096,10 @@ pub enum TyData<'db> {
 
     /// Qualified type, e.g., `<T as Iterator>`.
     QualifiedTy(TraitInstId<'db>),
+
+    /// A proposition-kind term carried as an argument to a type constructor,
+    /// e.g. the `Eq<T>` in `Evidence<Eq<T>>`.
+    ConstraintTerm(ConstraintId<'db>),
 
     // Type application,
     // e.g., `Option<i32>` is represented as `TApp(TyConst(Option), TyConst(i32))`.
@@ -1680,6 +1696,10 @@ impl<'db> TyBase<'db> {
                 PrimTy::View => "View",
                 PrimTy::BorrowMut => "BorrowMut",
                 PrimTy::BorrowRef => "BorrowRef",
+                PrimTy::Evidence => "Evidence",
+                PrimTy::ImplBuilder => "ImplBuilder",
+                PrimTy::Reflect => "Reflect",
+                PrimTy::TypeInfo => "TypeInfo",
             }
             .to_string(),
 
@@ -1744,6 +1764,10 @@ impl From<HirPrimTy> for TyBase<'_> {
             },
 
             HirPrimTy::String => Self::Prim(PrimTy::String),
+            HirPrimTy::Evidence => Self::Prim(PrimTy::Evidence),
+            HirPrimTy::ImplBuilder => Self::Prim(PrimTy::ImplBuilder),
+            HirPrimTy::Reflect => Self::Prim(PrimTy::Reflect),
+            HirPrimTy::TypeInfo => Self::Prim(PrimTy::TypeInfo),
         }
     }
 }
@@ -1772,6 +1796,10 @@ pub enum PrimTy {
     View,
     BorrowMut,
     BorrowRef,
+    Evidence,
+    ImplBuilder,
+    Reflect,
+    TypeInfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1860,6 +1888,7 @@ impl HasKind for TyData<'_> {
                 .and_then(|decl| super::ty_lower::lower_kind_in_bounds(&decl.bounds))
                 .unwrap_or(Kind::Star),
             TyData::QualifiedTy(_) => Kind::Star,
+            TyData::ConstraintTerm(_) => Kind::Constraint,
             TyData::TyBase(base) => base.kind(db),
             TyData::TyApp(abs, _) => match abs.kind(db) {
                 // `TyId::app` method handles the kind mismatch, so we don't need to verify it again
@@ -1902,6 +1931,8 @@ impl HasKind for PrimTy {
             Self::Ptr => Kind::abs(Kind::Star, Kind::Star),
             Self::String => Kind::abs(Kind::Star, Kind::Star),
             Self::View | Self::BorrowMut | Self::BorrowRef => Kind::abs(Kind::Star, Kind::Star),
+            Self::Evidence | Self::ImplBuilder => Kind::abs(Kind::Constraint, Kind::Star),
+            Self::Reflect | Self::TypeInfo => Kind::abs(Kind::Star, Kind::Star),
             _ => Kind::Star,
         }
     }

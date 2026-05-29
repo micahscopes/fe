@@ -13,18 +13,16 @@ use salsa::Update;
 
 use super::{
     binder::Binder,
-    const_ty::{AppFrameId, ConstTyId},
     fold::{TyFoldable, TyFolder},
-    layout_holes::rebase_structural_holes_under_app,
     trait_def::{ImplementorId, ImplementorOrigin, TraitInstId},
     trait_resolution::PredicateListId,
     ty_def::{InvalidCause, TyId},
-    ty_lower::{ConstDefaultCompletion, lower_hir_ty, lower_opt_hir_ty},
+    ty_lower::{ConstDefaultCompletion, lower_generic_arg_for_expected, lower_hir_ty},
 };
 use crate::analysis::{
     HirAnalysisDb,
     name_resolution::{PathRes, PathResError},
-    ty::ty_def::{Kind, TyData},
+    ty::ty_def::{ApplicableTyProp, Kind, TyData},
 };
 
 type TraitImplTable<'db> = FxHashMap<Trait<'db>, Vec<Binder<ImplementorId<'db>>>>;
@@ -225,31 +223,38 @@ fn lower_trait_ref_impl_inner<'db>(
 ) -> Result<TraitInstId<'db>, TraitArgError<'db>> {
     let trait_params: &[TyId<'db>] = t.params(db);
     let args = path.generic_args(db).data(db);
-    let arg_frame_root = AppFrameId::root_generic_arg_list(db, path.generic_args(db));
 
     // Lower provided explicit args (excluding Self)
     let mut provided_explicit = Vec::new();
     let mut assoc_bindings = IndexMap::new();
     for (arg_idx, arg) in args.iter().enumerate() {
         match arg {
-            GenericArg::Type(ty_arg) => {
-                let hole_frame = ty_arg
-                    .ty
-                    .to_opt()
-                    .map(|hir_ty| arg_frame_root.child_type_component(db, hir_ty, arg_idx));
-                let ty = lower_opt_hir_ty(db, ty_arg.ty, scope, assumptions);
-                let ty =
-                    hole_frame.map_or(ty, |frame| rebase_structural_holes_under_app(db, ty, frame));
+            GenericArg::Const(const_arg)
+                if matches!(const_arg.value, ConstGenericArgValue::Hole) =>
+            {
+                return Err(TraitArgError::ConstHoleNotAllowed { arg_idx });
+            }
+            GenericArg::Type(_) | GenericArg::Const(_) => {
+                let expected =
+                    trait_params
+                        .get(provided_explicit.len() + 1)
+                        .map(|param| ApplicableTyProp {
+                            kind: param.kind(db).clone(),
+                            const_ty: param.const_ty_ty(db),
+                        });
+                let ty = lower_generic_arg_for_expected(
+                    db,
+                    arg,
+                    arg_idx,
+                    scope,
+                    assumptions,
+                    crate::analysis::ty::const_ty::LayoutHoleArgSite::GenericArgList(
+                        path.generic_args(db),
+                    ),
+                    expected.as_ref(),
+                );
                 provided_explicit.push(ty);
             }
-            GenericArg::Const(const_arg) => match const_arg.value {
-                ConstGenericArgValue::Expr(body) => {
-                    provided_explicit.push(TyId::const_ty(db, ConstTyId::from_opt_body(db, body)));
-                }
-                ConstGenericArgValue::Hole => {
-                    return Err(TraitArgError::ConstHoleNotAllowed { arg_idx });
-                }
-            },
             GenericArg::AssocType(AssocTypeGenericArg { name, ty }) => {
                 if let (Some(name), Some(ty)) = (name.to_opt(), ty.to_opt()) {
                     let ty = lower_hir_ty(db, ty, scope, assumptions);

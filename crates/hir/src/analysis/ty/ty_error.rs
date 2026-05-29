@@ -14,8 +14,9 @@ use crate::analysis::{
 };
 
 use super::{
+    constraint::ConstraintKind,
     diagnostics::{TyDiagCollection, TyLowerDiag},
-    trait_resolution::PredicateListId,
+    trait_resolution::{PredicateListId, constraint::lower_hir_constraint_predicate},
     ty_def::{InvalidCause, TyData, TyId},
     ty_lower::lower_hir_ty,
 };
@@ -156,6 +157,18 @@ impl<'db> Visitor<'db> for HirTyErrVisitor<'db> {
                     let mut path_ctxt = VisitorCtxt::new(ctxt.db(), ctxt.scope(), path_span);
                     walk_path(self, &mut path_ctxt, path);
                 }
+                return;
+            }
+        }
+
+        if let GenericArg::Type(type_arg) = arg {
+            let constraint = lower_hir_constraint_predicate(
+                self.db,
+                type_arg.ty,
+                ctxt.scope(),
+                self.assumptions,
+            );
+            if !matches!(constraint.kind(self.db), ConstraintKind::Invalid) {
                 return;
             }
         }

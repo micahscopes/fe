@@ -83,6 +83,7 @@ where
             visitor.visit_ty(trait_inst.self_ty(visitor.db()));
             trait_inst.visit_with(visitor);
         }
+        TyData::ConstraintTerm(constraint) => constraint.visit_with(visitor),
         TyData::TyApp(abs, arg) => visitor.visit_app(*abs, *arg),
         TyData::TyBase(ty_con) => visitor.visit_ty_base(ty_con),
         TyData::ConstTy(const_ty) => visitor.visit_const_ty(const_ty),

@@ -480,7 +480,7 @@ pub(crate) fn collect_decl_constraints<'db>(
         let scope = owner.scope();
         let where_clause = where_owner.where_clause(db);
         for predicate in where_clause.constraint_predicates(db) {
-            constraints.push(lower_where_constraint_predicate(
+            constraints.push(lower_hir_constraint_predicate(
                 db,
                 predicate.ty,
                 scope,
@@ -524,7 +524,7 @@ fn lower_constraint_application_predicate<'db>(
     ConstraintId::new(db, ConstraintKind::ConstraintApplication(application))
 }
 
-fn lower_where_constraint_predicate<'db>(
+pub(crate) fn lower_hir_constraint_predicate<'db>(
     db: &'db dyn HirAnalysisDb,
     hir_ty: Partial<HirTypeId<'db>>,
     scope: ScopeId<'db>,

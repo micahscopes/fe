@@ -37,7 +37,8 @@ use crate::analysis::{
         ty_def::{InvalidCause, Kind, TyData, TyId},
         ty_lower::{
             ConstDefaultCompletion, TyAlias, collect_generic_params, lower_generic_arg_list,
-            lower_hir_ty, lower_type_alias,
+            lower_generic_arg_list_for_base, lower_generic_arg_list_for_params, lower_hir_ty,
+            lower_type_alias,
         },
     },
 };
@@ -1385,13 +1386,21 @@ pub fn resolve_name_res<'db>(
     let res = match nameres.kind {
         NameResKind::Prim(prim) => {
             let ty = TyId::from_hir_prim_ty(db, prim);
+            let args = lower_generic_arg_list_for_base(
+                db,
+                path.generic_args(db),
+                scope,
+                assumptions,
+                LayoutHoleArgSite::Path(path),
+                ty,
+            );
             PathRes::Ty(TyId::foldl(db, ty, &args))
         }
         NameResKind::Scope(scope_id) => match scope_id {
             ScopeId::Item(item) => match item {
                 ItemKind::Struct(_) | ItemKind::Enum(_) => {
                     let adt_ref = AdtRef::try_from_item(item).unwrap();
-                    PathRes::Ty(ty_from_adtref(db, path, adt_ref, &args, assumptions)?)
+                    PathRes::Ty(ty_from_adtref(db, path, adt_ref, scope, assumptions)?)
                 }
                 ItemKind::Contract(contract) => {
                     // Contracts have no generic parameters
@@ -1437,6 +1446,14 @@ pub fn resolve_name_res<'db>(
 
                 ItemKind::TypeAlias(type_alias) => {
                     let alias = lower_type_alias(db, type_alias);
+                    let args = lower_generic_arg_list_for_params(
+                        db,
+                        path.generic_args(db),
+                        scope,
+                        assumptions,
+                        LayoutHoleArgSite::Path(path),
+                        alias.params(db),
+                    );
                     let expected = alias.params(db).len();
                     if args.len() > expected {
                         return Err(PathResError::new(
@@ -1455,10 +1472,26 @@ pub fn resolve_name_res<'db>(
 
                 ItemKind::Impl(impl_) => {
                     let base = impl_.ty(db);
+                    let args = lower_generic_arg_list_for_base(
+                        db,
+                        path.generic_args(db),
+                        scope,
+                        assumptions,
+                        LayoutHoleArgSite::Path(path),
+                        base,
+                    );
                     PathRes::Ty(TyId::foldl(db, base, &args))
                 }
                 ItemKind::ImplTrait(impl_) => {
                     let base = impl_.ty(db);
+                    let args = lower_generic_arg_list_for_base(
+                        db,
+                        path.generic_args(db),
+                        scope,
+                        assumptions,
+                        LayoutHoleArgSite::Path(path),
+                        base,
+                    );
                     PathRes::Ty(TyId::foldl(db, base, &args))
                 }
 
@@ -1466,6 +1499,14 @@ pub fn resolve_name_res<'db>(
                     if path.is_self_ty(db) {
                         let params = collect_generic_params(db, t.into());
                         let ty = params.trait_self(db).unwrap();
+                        let args = lower_generic_arg_list_for_base(
+                            db,
+                            path.generic_args(db),
+                            scope,
+                            assumptions,
+                            LayoutHoleArgSite::Path(path),
+                            ty,
+                        );
                         let ty = TyId::foldl(db, ty, &args);
                         PathRes::Ty(ty)
                     } else {
@@ -1473,8 +1514,16 @@ pub fn resolve_name_res<'db>(
                         // domain errors (e.g., trait or value used where a type is expected)
                         // with precise spans in the name-resolution phase.
                         if !path.generic_args(db).is_empty(db) {
+                            let trait_params = t.params(db);
                             let gen_args = path.generic_args(db).data(db);
                             for (idx, ga) in gen_args.iter().enumerate() {
+                                if trait_params
+                                    .get(idx + 1)
+                                    .is_some_and(|param| matches!(param.kind(db), Kind::Constraint))
+                                {
+                                    continue;
+                                }
+
                                 if let GenericArg::Type(ty_arg) = ga
                                     && let Some(hir_ty) = ty_arg.ty.to_opt()
                                     && let TypeKind::Path(p) = hir_ty.data(db)
@@ -1543,6 +1592,14 @@ pub fn resolve_name_res<'db>(
                 let ty = param_set
                     .param_by_original_idx(db, idx as usize)
                     .unwrap_or_else(|| TyId::invalid(db, InvalidCause::Other));
+                let args = lower_generic_arg_list_for_base(
+                    db,
+                    path.generic_args(db),
+                    scope,
+                    assumptions,
+                    LayoutHoleArgSite::Path(path),
+                    ty,
+                );
                 let ty = TyId::foldl(db, ty, &args);
                 PathRes::Ty(ty)
             }
@@ -1553,6 +1610,14 @@ pub fn resolve_name_res<'db>(
 
                 let params = collect_generic_params(db, t.into());
                 let self_ty = params.trait_self(db).unwrap();
+                let args = lower_generic_arg_list_for_params(
+                    db,
+                    path.generic_args(db),
+                    scope,
+                    assumptions,
+                    LayoutHoleArgSite::Path(path),
+                    &params.params(db)[1..],
+                );
 
                 let mut trait_args = vec![self_ty];
                 trait_args.extend_from_slice(&args);
@@ -1568,6 +1633,14 @@ pub fn resolve_name_res<'db>(
             ScopeId::TraitConst(t, idx) => {
                 let params = collect_generic_params(db, t.into());
                 let self_ty = params.trait_self(db).unwrap();
+                let args = lower_generic_arg_list_for_params(
+                    db,
+                    path.generic_args(db),
+                    scope,
+                    assumptions,
+                    LayoutHoleArgSite::Path(path),
+                    &params.params(db)[1..],
+                );
 
                 let mut trait_args = vec![self_ty];
                 trait_args.extend_from_slice(&args);
@@ -1583,7 +1656,7 @@ pub fn resolve_name_res<'db>(
                 } else {
                     // The variant was imported via `use`.
                     debug_assert!(path.parent(db).is_none());
-                    ty_from_adtref(db, path, var.enum_.into(), &[], assumptions)?
+                    ty_from_adtref(db, path, var.enum_.into(), scope, assumptions)?
                 };
                 // TODO report error if args isn't empty
                 PathRes::EnumVariant(ResolvedVariant {
@@ -1615,11 +1688,19 @@ fn ty_from_adtref<'db>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
     adt_ref: AdtRef<'db>,
-    args: &[TyId<'db>],
+    scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> PathResolutionResult<'db, TyId<'db>> {
     let adt = adt_ref.as_adt(db);
     let ty = TyId::adt(db, adt);
+    let args = lower_generic_arg_list_for_base(
+        db,
+        path.generic_args(db),
+        scope,
+        assumptions,
+        LayoutHoleArgSite::Path(path),
+        ty,
+    );
     let explicit_param_len = adt.param_set(db).params(db).len();
     let explicit_provided_len = args.len().min(explicit_param_len);
     let explicit_args = &args[..explicit_provided_len];
