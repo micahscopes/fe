@@ -1329,7 +1329,22 @@ impl<'db> TyChecker<'db> {
             ConstraintKind::ConstPredicate(pred) => {
                 self.process_const_predicate_obligation(pred, obligation, final_pass)
             }
+            ConstraintKind::Invalid => ObligationOutcome::Discharged,
+            _ => self.process_future_constraint_obligation(obligation, final_pass),
         }
+    }
+
+    fn process_future_constraint_obligation(
+        &mut self,
+        obligation: env::Obligation<'db>,
+        final_pass: bool,
+    ) -> ObligationOutcome<'db> {
+        debug_assert!(
+            final_pass,
+            "future constraint reached the obligation solver before a dedicated solver exists: {}",
+            obligation.constraint.pretty_print(self.db)
+        );
+        ObligationOutcome::Discharged
     }
 
     fn register_residual_constraints(

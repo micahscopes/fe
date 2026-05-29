@@ -788,6 +788,8 @@ impl<'db> Callable<'db> {
                     }
                     ConstraintId::new(db, ConstraintKind::ConstPredicate(pred))
                 }
+                ConstraintKind::Invalid => continue,
+                _ => constraint,
             };
 
             if collect_flags(db, constraint).contains(TyFlags::HAS_INVALID) {

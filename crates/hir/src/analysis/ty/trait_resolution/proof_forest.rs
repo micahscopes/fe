@@ -387,6 +387,8 @@ impl GeneratorNode {
                         ConstProveResult::Disproved | ConstProveResult::Error => return None,
                     }
                 }
+                ConstraintKind::Invalid => {}
+                _ => residual_constraints.push(constraint),
             }
         }
 
