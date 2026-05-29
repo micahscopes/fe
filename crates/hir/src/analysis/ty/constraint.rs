@@ -58,11 +58,25 @@ pub(crate) enum CompilerCapabilityKind<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum EffectCapabilityKind<'db> {
+pub(crate) enum CapabilityMode {
+    Read,
+    Mut,
+}
+
+impl CapabilityMode {
+    fn pretty_print(self) -> &'static str {
+        match self {
+            Self::Read => "read capability",
+            Self::Mut => "mut capability",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum EffectCapabilityKey<'db> {
     Type {
         provider: TyId<'db>,
         target: TyId<'db>,
-        mutable: bool,
     },
     Trait {
         provider: TyId<'db>,
@@ -74,7 +88,8 @@ pub(crate) enum EffectCapabilityKind<'db> {
 #[salsa::interned]
 #[derive(Debug)]
 pub(crate) struct EffectCapabilityId<'db> {
-    pub(crate) kind: EffectCapabilityKind<'db>,
+    pub(crate) mode: CapabilityMode,
+    pub(crate) key: EffectCapabilityKey<'db>,
 }
 
 #[salsa::interned]
@@ -221,32 +236,26 @@ impl<'db> ConstraintId<'db> {
 
 impl<'db> EffectCapabilityId<'db> {
     pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
-        match self.kind(db) {
-            EffectCapabilityKind::Type {
-                provider,
-                target,
-                mutable,
-            } => {
-                let capability = if mutable {
-                    "mut capability"
-                } else {
-                    "capability"
-                };
+        let prefix = self.mode(db).pretty_print();
+        match self.key(db) {
+            EffectCapabilityKey::Type { provider, target } => {
                 format!(
-                    "{capability} {} -> {}",
+                    "{prefix} {} -> {}",
                     provider.pretty_print(db),
                     target.pretty_print(db)
                 )
             }
-            EffectCapabilityKind::Trait {
+            EffectCapabilityKey::Trait {
                 provider,
                 requirement,
             } => format!(
-                "capability {} -> {}",
+                "{prefix} {} -> {}",
                 provider.pretty_print(db),
                 requirement.pretty_print(db, true)
             ),
-            EffectCapabilityKind::Compiler(capability) => capability.pretty_print(db),
+            EffectCapabilityKey::Compiler(capability) => {
+                format!("{prefix} {}", capability.pretty_print(db))
+            }
         }
     }
 }
@@ -456,7 +465,7 @@ impl<'db> TyFoldable<'db> for CompilerCapabilityKind<'db> {
     }
 }
 
-impl<'db> TyVisitable<'db> for EffectCapabilityKind<'db> {
+impl<'db> TyVisitable<'db> for EffectCapabilityKey<'db> {
     fn visit_with<V>(&self, visitor: &mut V)
     where
         V: TyVisitor<'db> + ?Sized,
@@ -480,20 +489,15 @@ impl<'db> TyVisitable<'db> for EffectCapabilityKind<'db> {
     }
 }
 
-impl<'db> TyFoldable<'db> for EffectCapabilityKind<'db> {
+impl<'db> TyFoldable<'db> for EffectCapabilityKey<'db> {
     fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
     where
         F: TyFolder<'db>,
     {
         match self {
-            Self::Type {
-                provider,
-                target,
-                mutable,
-            } => Self::Type {
+            Self::Type { provider, target } => Self::Type {
                 provider: provider.fold_with(db, folder),
                 target: target.fold_with(db, folder),
-                mutable,
             },
             Self::Trait {
                 provider,
@@ -512,7 +516,7 @@ impl<'db> TyVisitable<'db> for EffectCapabilityId<'db> {
     where
         V: TyVisitor<'db> + ?Sized,
     {
-        self.kind(visitor.db()).visit_with(visitor);
+        self.key(visitor.db()).visit_with(visitor);
     }
 }
 
@@ -521,7 +525,7 @@ impl<'db> TyFoldable<'db> for EffectCapabilityId<'db> {
     where
         F: TyFolder<'db>,
     {
-        Self::new(db, self.kind(db).fold_with(db, folder))
+        Self::new(db, self.mode(db), self.key(db).fold_with(db, folder))
     }
 }
 
@@ -884,12 +888,35 @@ mod tests {
         let db = HirAnalysisTestDb::default();
         let capability = EffectCapabilityId::new(
             &db,
-            EffectCapabilityKind::Compiler(CompilerCapabilityKind::Reflect(TyId::bool(&db))),
+            CapabilityMode::Read,
+            EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(TyId::bool(&db))),
         );
         let constraint = ConstraintId::new(&db, ConstraintKind::EffectCapability(capability));
         let list = ConstraintListId::new(&db, vec![constraint]);
 
         assert!(list.trait_predicates(&db).list(&db).is_empty());
-        assert_eq!(constraint.pretty_print(&db), "Reflect<bool>");
+        assert_eq!(
+            constraint.pretty_print(&db),
+            "read capability Reflect<bool>"
+        );
+    }
+
+    #[test]
+    fn capability_mode_participates_in_identity_and_pretty_printing() {
+        let db = HirAnalysisTestDb::default();
+        let read = EffectCapabilityId::new(
+            &db,
+            CapabilityMode::Read,
+            EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(TyId::bool(&db))),
+        );
+        let mut_ = EffectCapabilityId::new(
+            &db,
+            CapabilityMode::Mut,
+            EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(TyId::bool(&db))),
+        );
+
+        assert_ne!(read, mut_);
+        assert_eq!(read.pretty_print(&db), "read capability Reflect<bool>");
+        assert_eq!(mut_.pretty_print(&db), "mut capability Reflect<bool>");
     }
 }
