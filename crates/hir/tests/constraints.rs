@@ -7,6 +7,7 @@ use fe_hir::{
         elab::{
             elaboration_ctfe_context_summaries_for_top_mod,
             elaboration_request_summaries_for_top_mod, generated_impl_summaries_for_top_mod,
+            reflected_field_summaries_for_top_mod,
         },
         initialize_analysis_pass,
     },
@@ -684,6 +685,26 @@ struct Bad<T> {
 }
 
 #[test]
+fn field_descriptors_cannot_escape_struct_fields() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "field_descriptors_cannot_escape_struct_fields.fe".into(),
+        r#"
+struct Foo {
+    x: u256,
+}
+
+struct Bad {
+    field: Field<Foo, u256>,
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
 fn compile_time_only_type_constructors_cannot_escape_enum_variant_fields() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -1046,6 +1067,64 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
     assert_eq!(
         summaries,
         vec!["Foo: Eq requested for Foo via derive_eq with []".to_string()]
+    );
+}
+
+#[test]
+fn typed_reflection_exposes_struct_fields_from_reflect_capability() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "typed_reflection_exposes_struct_fields_from_reflect_capability.fe".into(),
+        r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Box<T> {
+    value: T,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (reflect: Reflect<T>)
+{
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        reflected_field_summaries_for_top_mod(&db, top_mod),
+        vec!["Box<T>.value: Field<Box<T>, T>".to_string()]
+    );
+}
+
+#[test]
+fn typed_reflection_requires_reflect_capability() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "typed_reflection_requires_reflect_capability.fe".into(),
+        r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {
+    x: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        reflected_field_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
     );
 }
 

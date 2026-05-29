@@ -8,8 +8,10 @@ use crate::{
         name_resolution::{PathRes, resolve_path},
         ty::{
             binder::Binder,
-            constraint::{ConstraintId, ConstraintKind},
-            constraint::{ConstraintListId, GeneratedImplId},
+            constraint::{
+                CapabilityMode, CompilerCapabilityKind, ConstraintId, ConstraintKind,
+                ConstraintListId, EffectCapabilityKey, GeneratedImplId,
+            },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{EvidenceProviderId, providers_for_constraint_head},
             fold::TyFoldable,
@@ -17,11 +19,14 @@ use crate::{
             trait_resolution::{
                 PredicateListId, constraint::collect_func_effect_capability_constraints,
             },
-            ty_def::TyId,
+            ty_def::{PrimTy, TyBase, TyData, TyId},
             unify::UnificationTable,
         },
     },
-    hir_def::{Attr, Enum, HirIngot, ItemKind, NormalAttr, Struct, TopLevelMod, Trait},
+    hir_def::{
+        Attr, Enum, FieldParent, HirIngot, IdentId, ItemKind, NormalAttr, Struct, TopLevelMod,
+        Trait,
+    },
     span::DynLazySpan,
 };
 
@@ -129,6 +134,14 @@ pub(crate) struct ElaborationCtfeContextId<'db> {
 
     #[return_ref]
     capabilities: Vec<ElaborationCapabilityWitness<'db>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) struct ReflectedField<'db> {
+    parent: TyId<'db>,
+    index: u32,
+    name: IdentId<'db>,
+    ty: TyId<'db>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
@@ -249,6 +262,22 @@ impl<'db> ElaborationCtfeContextId<'db> {
     }
 }
 
+impl<'db> ReflectedField<'db> {
+    pub(crate) fn field_ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
+        let field_ctor = TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::Field)));
+        TyId::app(db, TyId::app(db, field_ctor, self.parent), self.ty)
+    }
+
+    pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
+        format!(
+            "{}.{}: {}",
+            self.parent.pretty_print(db),
+            self.name.data(db),
+            self.field_ty(db).pretty_print(db)
+        )
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn elaborate_request<'db>(
     _db: &'db dyn HirAnalysisDb,
@@ -347,6 +376,26 @@ pub fn elaboration_ctfe_context_summaries_for_top_mod<'db>(
         .collect()
 }
 
+pub fn reflected_field_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    elaboration_requests_for_top_mod(db, top_mod)
+        .iter()
+        .flat_map(|&request| {
+            elaboration_ctfe_contexts_for_request(db, request)
+                .iter()
+                .flat_map(|&context| {
+                    reflected_fields_for_context(db, context)
+                        .into_iter()
+                        .map(|field| field.pretty_print(db))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[salsa::tracked(return_ref)]
 pub(crate) fn generated_impls_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -385,6 +434,51 @@ fn generated_impl_for_context<'db>(
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
     ImplBuilderSession::new(db, context).finish(db).ok()
+}
+
+pub(crate) fn reflected_fields_for_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> Vec<ReflectedField<'db>> {
+    context
+        .capabilities(db)
+        .iter()
+        .filter_map(|witness| {
+            if witness.capability.mode(db) != CapabilityMode::Read {
+                return None;
+            }
+            match witness.capability.key(db) {
+                EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(target)) => {
+                    Some(target)
+                }
+                _ => None,
+            }
+        })
+        .flat_map(|target| reflect_struct_fields(db, target))
+        .collect()
+}
+
+fn reflect_struct_fields<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: TyId<'db>,
+) -> Vec<ReflectedField<'db>> {
+    let Some(FieldParent::Struct(struct_)) = target.field_parent(db) else {
+        return Vec::new();
+    };
+
+    let field_tys = target.field_types(db);
+    FieldParent::Struct(struct_)
+        .fields(db)
+        .zip(field_tys)
+        .filter_map(|(field, ty)| {
+            Some(ReflectedField {
+                parent: target,
+                index: field.idx as u32,
+                name: field.name(db)?,
+                ty,
+            })
+        })
+        .collect()
 }
 
 fn constraints_match<'db>(

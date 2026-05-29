@@ -13,6 +13,7 @@ pub enum PrimTy {
     ImplBuilder,
     Reflect,
     TypeInfo,
+    Field,
 }
 
 impl PrimTy {
@@ -26,6 +27,7 @@ impl PrimTy {
             PrimTy::ImplBuilder => IdentId::new(db, "ImplBuilder".to_string()),
             PrimTy::Reflect => IdentId::new(db, "Reflect".to_string()),
             PrimTy::TypeInfo => IdentId::new(db, "TypeInfo".to_string()),
+            PrimTy::Field => IdentId::new(db, "Field".to_string()),
         }
     }
 
@@ -51,6 +53,7 @@ impl PrimTy {
             PrimTy::ImplBuilder,
             PrimTy::Reflect,
             PrimTy::TypeInfo,
+            PrimTy::Field,
         ]
     }
 }
