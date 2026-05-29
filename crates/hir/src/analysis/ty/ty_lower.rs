@@ -1,8 +1,8 @@
 use crate::core::hir_def::{
     CallableDef, ConstGenericArgValue, GenericArg, GenericArgListId, GenericParam,
     GenericParamOwner, GenericParamView, IdentId, KindBound as HirKindBound, Partial, PathId,
-    TypeAlias as HirTypeAlias, TypeBound, TypeId as HirTyId, TypeKind as HirTyKind, TypeMode,
-    scope_graph::ScopeId,
+    PathKind, TypeAlias as HirTypeAlias, TypeBound, TypeId as HirTyId, TypeKind as HirTyKind,
+    TypeMode, VariantKind, scope_graph::ScopeId,
 };
 use rustc_hash::FxHashMap;
 use salsa::Update;
@@ -1346,6 +1346,319 @@ struct GenericParamCollector<'db> {
     offset_to_original: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct KindVarId(usize);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InferKind {
+    Known(Kind),
+    Var(KindVarId),
+    Abs(Box<(InferKind, InferKind)>),
+}
+
+#[derive(Default)]
+struct KindInferenceTable {
+    vars: Vec<Option<InferKind>>,
+}
+
+impl KindInferenceTable {
+    fn fresh_var(&mut self) -> InferKind {
+        let id = KindVarId(self.vars.len());
+        self.vars.push(None);
+        InferKind::Var(id)
+    }
+
+    fn kind_from_bound(&mut self, kind: &Kind) -> InferKind {
+        match kind {
+            Kind::Star => InferKind::Known(Kind::Star),
+            Kind::Constraint => InferKind::Known(Kind::Constraint),
+            Kind::Abs(inner) => InferKind::Abs(Box::new((
+                self.kind_from_bound(&inner.0),
+                self.kind_from_bound(&inner.1),
+            ))),
+            // Named kind paths are syntax scaffolding for now, not stable
+            // semantic variables. Treat each placeholder occurrence as a local
+            // inference variable and zonk it before interning TyParams.
+            Kind::Placeholder(_) => self.fresh_var(),
+            Kind::Any => InferKind::Known(Kind::Any),
+        }
+    }
+
+    fn expect(&mut self, actual: InferKind, expected: Kind) -> Result<(), ()> {
+        self.unify(actual, InferKind::Known(expected))
+    }
+
+    fn apply(&mut self, function: InferKind, argument: InferKind) -> InferKind {
+        let result = self.fresh_var();
+        let expected_function = InferKind::Abs(Box::new((argument, result.clone())));
+        let _ = self.unify(function, expected_function);
+        result
+    }
+
+    fn unify(&mut self, lhs: InferKind, rhs: InferKind) -> Result<(), ()> {
+        let lhs = self.resolve(lhs);
+        let rhs = self.resolve(rhs);
+
+        match (lhs, rhs) {
+            (InferKind::Known(Kind::Any), _) | (_, InferKind::Known(Kind::Any)) => Ok(()),
+            (InferKind::Known(a), InferKind::Known(b)) if a == b => Ok(()),
+            (InferKind::Abs(a), InferKind::Abs(b)) => {
+                self.unify(a.0, b.0)?;
+                self.unify(a.1, b.1)
+            }
+            (InferKind::Var(var), kind) | (kind, InferKind::Var(var)) => self.bind_var(var, kind),
+            _ => Err(()),
+        }
+    }
+
+    fn bind_var(&mut self, var: KindVarId, kind: InferKind) -> Result<(), ()> {
+        let kind = self.resolve(kind);
+        if matches!(kind, InferKind::Var(other) if other == var) {
+            return Ok(());
+        }
+        if self.contains_var(&kind, var) {
+            return Err(());
+        }
+        self.vars[var.0] = Some(kind);
+        Ok(())
+    }
+
+    fn resolve(&mut self, kind: InferKind) -> InferKind {
+        match kind {
+            InferKind::Var(var) => match self.vars[var.0].clone() {
+                Some(kind) => {
+                    let resolved = self.resolve(kind);
+                    self.vars[var.0] = Some(resolved.clone());
+                    resolved
+                }
+                None => InferKind::Var(var),
+            },
+            InferKind::Abs(inner) => {
+                InferKind::Abs(Box::new((self.resolve(inner.0), self.resolve(inner.1))))
+            }
+            kind => kind,
+        }
+    }
+
+    fn contains_var(&mut self, kind: &InferKind, needle: KindVarId) -> bool {
+        match self.resolve(kind.clone()) {
+            InferKind::Var(var) => var == needle,
+            InferKind::Abs(inner) => {
+                self.contains_var(&inner.0, needle) || self.contains_var(&inner.1, needle)
+            }
+            InferKind::Known(_) => false,
+        }
+    }
+
+    fn zonk(&mut self, kind: InferKind) -> Kind {
+        match self.resolve(kind) {
+            InferKind::Known(Kind::Placeholder(_)) | InferKind::Var(_) => Kind::Star,
+            InferKind::Known(kind) => kind,
+            InferKind::Abs(inner) => Kind::Abs(Box::new((self.zonk(inner.0), self.zonk(inner.1)))),
+        }
+    }
+}
+
+struct OwnerKindInference<'db> {
+    db: &'db dyn HirAnalysisDb,
+    owner: GenericParamOwner<'db>,
+    table: KindInferenceTable,
+    param_kinds: Vec<Option<InferKind>>,
+    param_by_name: FxHashMap<IdentId<'db>, usize>,
+}
+
+impl<'db> OwnerKindInference<'db> {
+    fn new(
+        db: &'db dyn HirAnalysisDb,
+        owner: GenericParamOwner<'db>,
+        params: &[TyParamPrecursor<'db>],
+    ) -> Self {
+        let mut table = KindInferenceTable::default();
+        let mut param_kinds = Vec::with_capacity(params.len());
+        let mut param_by_name = FxHashMap::default();
+
+        for (idx, param) in params.iter().enumerate() {
+            if param.participates_in_kind_inference() {
+                if let Partial::Present(name) = param.name {
+                    param_by_name.entry(name).or_insert(idx);
+                }
+
+                let kind = param
+                    .kind
+                    .as_ref()
+                    .map(|kind| table.kind_from_bound(kind))
+                    .unwrap_or_else(|| table.fresh_var());
+                param_kinds.push(Some(kind));
+            } else {
+                param_kinds.push(None);
+            }
+        }
+
+        Self {
+            db,
+            owner,
+            table,
+            param_kinds,
+            param_by_name,
+        }
+    }
+
+    fn infer_owner(&mut self) {
+        self.infer_declaration_type_positions();
+        self.infer_where_constraint_predicates();
+    }
+
+    fn write_back(mut self, params: &mut [TyParamPrecursor<'db>]) {
+        for (idx, kind) in self.param_kinds.into_iter().enumerate() {
+            let Some(kind) = kind else {
+                continue;
+            };
+            if let Some(param) = params.get_mut(idx) {
+                param.kind = Some(self.table.zonk(kind));
+            }
+        }
+    }
+
+    fn infer_declaration_type_positions(&mut self) {
+        match self.owner {
+            GenericParamOwner::Func(func) => {
+                for param in func.params(self.db) {
+                    if let Some(ty) = param.hir_ty(self.db) {
+                        self.expect_type_position(ty);
+                    }
+                }
+                if let Some(ret) = func.hir_return_ty(self.db) {
+                    self.expect_type_position(ret);
+                }
+            }
+            GenericParamOwner::Struct(struct_) => {
+                for field in struct_.hir_fields(self.db).data(self.db) {
+                    if let Some(ty) = field.type_ref().to_opt() {
+                        self.expect_type_position(ty);
+                    }
+                }
+            }
+            GenericParamOwner::Enum(enum_) => {
+                for variant in enum_.variants(self.db) {
+                    match variant.kind(self.db) {
+                        VariantKind::Unit => {}
+                        VariantKind::Tuple(tuple) => {
+                            for ty in tuple.data(self.db) {
+                                if let Some(ty) = ty.to_opt() {
+                                    self.expect_type_position(ty);
+                                }
+                            }
+                        }
+                        VariantKind::Record(fields) => {
+                            for field in fields.data(self.db) {
+                                if let Some(ty) = field.type_ref().to_opt() {
+                                    self.expect_type_position(ty);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            GenericParamOwner::TypeAlias(_)
+            | GenericParamOwner::Impl(_)
+            | GenericParamOwner::Trait(_)
+            | GenericParamOwner::ImplTrait(_) => {}
+        }
+    }
+
+    fn infer_where_constraint_predicates(&mut self) {
+        let Some(where_clause_owner) = self.owner.where_clause_owner() else {
+            return;
+        };
+
+        let where_clause = where_clause_owner.where_clause(self.db);
+        for pred in where_clause.constraint_predicates(self.db) {
+            if let Some(ty) = pred.ty.to_opt() {
+                let kind = self.infer_hir_ty(ty);
+                let _ = self.table.expect(kind, Kind::Constraint);
+            }
+        }
+    }
+
+    fn expect_type_position(&mut self, ty: HirTyId<'db>) {
+        let kind = self.infer_hir_ty(ty);
+        let _ = self.table.expect(kind, Kind::Star);
+    }
+
+    fn infer_hir_ty(&mut self, ty: HirTyId<'db>) -> InferKind {
+        match ty.data(self.db) {
+            HirTyKind::Ptr(inner) | HirTyKind::Mode(_, inner) => {
+                if let Some(inner) = inner.to_opt() {
+                    self.expect_type_position(inner);
+                }
+                InferKind::Known(Kind::Star)
+            }
+            HirTyKind::Path(path) => path
+                .to_opt()
+                .map(|path| self.infer_path(path))
+                .unwrap_or(InferKind::Known(Kind::Any)),
+            HirTyKind::Tuple(tuple) => {
+                for ty in tuple.data(self.db) {
+                    if let Some(ty) = ty.to_opt() {
+                        self.expect_type_position(ty);
+                    }
+                }
+                InferKind::Known(Kind::Star)
+            }
+            HirTyKind::Array(elem, _) => {
+                if let Some(elem) = elem.to_opt() {
+                    self.expect_type_position(elem);
+                }
+                InferKind::Known(Kind::Star)
+            }
+            HirTyKind::Never => InferKind::Known(Kind::Star),
+        }
+    }
+
+    fn infer_path(&mut self, path: PathId<'db>) -> InferKind {
+        let mut kind = if let Some(parent) = path.parent(self.db) {
+            self.infer_path(parent)
+        } else {
+            self.path_head_kind(path)
+        };
+
+        for arg in path.generic_args(self.db).data(self.db) {
+            let arg_kind = self.infer_generic_arg(arg);
+            kind = self.table.apply(kind, arg_kind);
+        }
+
+        kind
+    }
+
+    fn path_head_kind(&mut self, path: PathId<'db>) -> InferKind {
+        match path.kind(self.db) {
+            PathKind::Ident { ident, .. } => ident
+                .to_opt()
+                .and_then(|ident| self.param_by_name.get(&ident).copied())
+                .and_then(|idx| self.param_kinds.get(idx).cloned().flatten())
+                .unwrap_or(InferKind::Known(Kind::Star)),
+            PathKind::QualifiedType { .. } => InferKind::Known(Kind::Star),
+        }
+    }
+
+    fn infer_generic_arg(&mut self, arg: &GenericArg<'db>) -> InferKind {
+        match arg {
+            GenericArg::Type(arg) => arg
+                .ty
+                .to_opt()
+                .map(|ty| self.infer_hir_ty(ty))
+                .unwrap_or(InferKind::Known(Kind::Any)),
+            GenericArg::Const(_) => InferKind::Known(Kind::Star),
+            GenericArg::AssocType(arg) => {
+                if let Some(ty) = arg.ty.to_opt() {
+                    self.expect_type_position(ty);
+                }
+                InferKind::Known(Kind::Any)
+            }
+        }
+    }
+}
+
 impl<'db> GenericParamCollector<'db> {
     fn new(
         db: &'db dyn HirAnalysisDb,
@@ -1452,6 +1765,7 @@ impl<'db> GenericParamCollector<'db> {
     fn finalize(mut self) -> GenericParamTypeSet<'db> {
         self.collect_generic_params();
         self.collect_kind_in_where_clause();
+        self.infer_kind_in_declarations();
 
         GenericParamTypeSet::new(
             self.db,
@@ -1464,6 +1778,12 @@ impl<'db> GenericParamCollector<'db> {
     fn trait_self_ty_mut(&mut self) -> Option<&mut TyParamPrecursor<'db>> {
         let cand = self.params.get_mut(0)?;
         cand.is_trait_self().then_some(cand)
+    }
+
+    fn infer_kind_in_declarations(&mut self) {
+        let mut inference = OwnerKindInference::new(self.db, self.owner, &self.params);
+        inference.infer_owner();
+        inference.write_back(&mut self.params);
     }
 }
 
@@ -1616,6 +1936,10 @@ impl<'db> TyParamPrecursor<'db> {
         matches!(self.variant, Variant::Const(_) | Variant::ImplicitConst(_))
     }
 
+    fn participates_in_kind_inference(&self) -> bool {
+        matches!(self.variant, Variant::Normal | Variant::TraitSelf)
+    }
+
     fn declared_const_ty(
         &self,
         db: &'db dyn HirAnalysisDb,
@@ -1711,10 +2035,10 @@ fn f<P: * -> Constraint>() {}
     }
 
     #[test]
-    fn lowers_named_kind_bounds_as_named_placeholders() {
+    fn lowers_named_kind_bounds_without_leaking_placeholders() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
-            "lowers_named_kind_bounds_as_named_placeholders.fe".into(),
+            "lowers_named_kind_bounds_without_leaking_placeholders.fe".into(),
             r#"
 fn f<F: A<B> -> *, G: * -> A<B> >() {}
 "#,
@@ -1728,11 +2052,85 @@ fn f<F: A<B> -> *, G: * -> A<B> >() {}
 
         assert!(matches!(
             f_kind,
-            Kind::Abs(inner) if inner.0 == Kind::Placeholder("A<B>".to_string()) && inner.1 == Kind::Star
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Star
         ));
         assert!(matches!(
             g_kind,
-            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Placeholder("A<B>".to_string())
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Star
         ));
+    }
+
+    #[test]
+    fn infers_generic_constraint_application_kinds() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "infers_generic_constraint_application_kinds.fe".into(),
+            r#"
+fn f<P, T>()
+where
+    P<T>
+{}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "f");
+        let param_set = collect_generic_params(&db, func.into());
+        let p_kind = param_set.params(&db)[0].kind(&db);
+        let t_kind = param_set.params(&db)[1].kind(&db);
+
+        assert!(matches!(
+            p_kind,
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Constraint
+        ));
+        assert_eq!(*t_kind, Kind::Star);
+    }
+
+    #[test]
+    fn infers_type_position_application_kinds() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "infers_type_position_application_kinds.fe".into(),
+            r#"
+fn f<F, T>(value: F<T>) {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "f");
+        let param_set = collect_generic_params(&db, func.into());
+        let f_kind = param_set.params(&db)[0].kind(&db);
+        let t_kind = param_set.params(&db)[1].kind(&db);
+
+        assert!(matches!(
+            f_kind,
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Star
+        ));
+        assert_eq!(*t_kind, Kind::Star);
+    }
+
+    #[test]
+    fn infers_return_type_application_kinds() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "infers_return_type_application_kinds.fe".into(),
+            r#"
+extern {
+    fn f<F, T>() -> F<T>
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "f");
+        let param_set = collect_generic_params(&db, func.into());
+        let f_kind = param_set.params(&db)[0].kind(&db);
+        let t_kind = param_set.params(&db)[1].kind(&db);
+
+        assert!(matches!(
+            f_kind,
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Star
+        ));
+        assert_eq!(*t_kind, Kind::Star);
     }
 }

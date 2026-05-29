@@ -239,6 +239,29 @@ where
 }
 
 #[test]
+fn generic_constraint_application_infers_constructor_kind() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generic_constraint_application_infers_constructor_kind.fe".into(),
+        r#"
+fn needs<P, T>()
+where
+    P<T>
+{}
+
+fn caller<P, T>()
+where
+    P<T>
+{
+    needs<P, T>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn generic_constraint_application_call_requires_matching_assumption() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -265,12 +288,12 @@ fn malformed_generic_constraint_application_is_not_silently_discharged() {
     let file = db.new_stand_alone(
         "malformed_generic_constraint_application_is_not_silently_discharged.fe".into(),
         r#"
-fn needs<P, T>()
+fn needs<P: *, T>()
 where
     P<T>
 {}
 
-fn fail<P, T>() {
+fn fail<P: *, T>() {
     needs<P, T>()
 }
 "#,

@@ -3075,6 +3075,10 @@ impl<'db> Func<'db> {
         (0..len).map(move |idx| FuncParamView { func: self, idx })
     }
 
+    pub(crate) fn hir_return_ty(self, db: &'db dyn HirDb) -> Option<TypeId<'db>> {
+        self.ret_type_ref(db)
+    }
+
     /// Iterate effect parameters as contextual views.
     pub fn effect_params(
         self,
