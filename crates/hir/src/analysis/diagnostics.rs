@@ -2614,6 +2614,29 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 }
             }
 
+            Self::InvalidCompilerCapabilityMode {
+                owner,
+                key,
+                idx,
+                reason,
+            } => {
+                let idx = *idx;
+                let key_str = key.pretty_print(db);
+                let span = owner.effect_param_path_span(db, idx).resolve(db);
+
+                CompleteDiagnostic {
+                    severity: Severity::Error,
+                    message: "invalid compiler capability mode".to_string(),
+                    sub_diagnostics: vec![SubDiagnostic {
+                        style: LabelStyle::Primary,
+                        message: format!("compiler capability `{key_str}` {}", reason.label()),
+                        span,
+                    }],
+                    notes: vec![],
+                    error_code,
+                }
+            }
+
             Self::ContractRootEffectTraitNotImplemented {
                 owner,
                 idx,

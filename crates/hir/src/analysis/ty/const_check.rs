@@ -1,4 +1,5 @@
 use crate::analysis::HirAnalysisDb;
+use crate::analysis::ty::constraint::compiler_capability_for_ty;
 use crate::analysis::ty::diagnostics::{BodyDiag, FuncBodyDiag};
 use crate::analysis::ty::trait_def::resolve_trait_method_instance;
 use crate::analysis::ty::trait_resolution::TraitSolveCx;
@@ -24,7 +25,7 @@ pub(crate) fn check_const_fn_body<'db>(
         diags: Vec::new(),
     };
 
-    if func.has_effects(db) {
+    if func.has_effects(db) && !func_effects_are_compiler_capabilities(db, func) {
         checker
             .diags
             .push(BodyDiag::ConstFnEffectsNotAllowed(func.span().effects().into()).into());
@@ -56,7 +57,9 @@ impl<'db> ConstFnChecker<'db, '_> {
                 primary,
                 callee: callable.callable_def(),
             });
-        } else if callee.has_effects(self.db) {
+        } else if callee.has_effects(self.db)
+            && !func_effects_are_compiler_capabilities(self.db, callee)
+        {
             self.push(BodyDiag::ConstFnEffectfulCall {
                 primary,
                 callee: callable.callable_def(),
@@ -257,4 +260,16 @@ impl<'db> ConstFnChecker<'db, '_> {
             }
         }
     }
+}
+
+fn func_effects_are_compiler_capabilities<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+) -> bool {
+    func.effect_requirements(db).iter().all(|requirement| {
+        requirement
+            .key
+            .key_ty()
+            .is_some_and(|ty| compiler_capability_for_ty(db, ty).is_some())
+    })
 }

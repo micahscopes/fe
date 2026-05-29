@@ -249,6 +249,21 @@ impl RuntimeTypeContext {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub enum CompilerCapabilityModeError {
+    RequiresRead,
+    RequiresMut,
+}
+
+impl CompilerCapabilityModeError {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::RequiresRead => "must be requested without `mut`",
+            Self::RequiresMut => "must be requested with `mut`",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub struct CallConstraintDiagInfo<'db> {
     pub callable_def: CallableDef<'db>,
@@ -350,6 +365,13 @@ pub enum BodyDiag<'db> {
         owner: EffectParamOwner<'db>,
         key: PathId<'db>,
         idx: usize,
+    },
+
+    InvalidCompilerCapabilityMode {
+        owner: EffectParamOwner<'db>,
+        key: PathId<'db>,
+        idx: usize,
+        reason: CompilerCapabilityModeError,
     },
 
     ContractRootEffectTraitNotImplemented {
@@ -824,6 +846,7 @@ impl<'db> BodyDiag<'db> {
             Self::MissingRecordFields { .. } => 11,
             Self::UndefinedVariable(..) => 12,
             Self::InvalidEffectKey { .. } => 51,
+            Self::InvalidCompilerCapabilityMode { .. } => 87,
             Self::ContractRootEffectTraitNotImplemented { .. } => 53,
             Self::ContractRootEffectTypeNotZeroSized { .. } => 54,
             Self::MissingEffect { .. } => 36,

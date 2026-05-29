@@ -15,8 +15,9 @@ use crate::analysis::{
         binder::Binder,
         const_ty::ConstTyId,
         constraint::{
-            ConstPredicateInstId, ConstPredicateRef, ConstraintApplicationId, ConstraintHeadId,
-            ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
+            CapabilityMode, ConstPredicateInstId, ConstPredicateRef, ConstraintApplicationId,
+            ConstraintHeadId, ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
+            EffectCapabilityId, EffectCapabilityKey, compiler_capability_for_ty,
         },
         corelib::resolve_core_trait,
         effects::{
@@ -99,6 +100,9 @@ pub(crate) fn collect_func_effect_provider_constraints<'db>(
                 ));
             }
             (Some(target_ty), None) => {
+                if compiler_capability_for_ty(db, target_ty).is_some() {
+                    continue;
+                }
                 if !target_ty.is_star_kind(db) {
                     continue;
                 }
@@ -141,6 +145,47 @@ pub(crate) fn collect_func_effect_provider_constraints<'db>(
             }
             _ => {}
         }
+    }
+
+    out
+}
+
+pub(crate) fn collect_func_effect_capability_constraints<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: crate::hir_def::Func<'db>,
+) -> Vec<ConstraintId<'db>> {
+    let scope = func.scope();
+    let assumptions = collect_func_decl_trait_constraints(db, func.into(), true)
+        .instantiate_identity()
+        .extend_all_bounds(db);
+
+    let mut out = Vec::new();
+    for binding in func.effect_requirements(db) {
+        let identity = canonical_effect_identity_for_binding(
+            db,
+            binding,
+            scope,
+            assumptions,
+            None,
+            EffectKeyCanonMode::Solver,
+        );
+        let Some(key_ty) = identity.key_ty else {
+            continue;
+        };
+        let Some(capability) = compiler_capability_for_ty(db, key_ty) else {
+            continue;
+        };
+        let mode = if identity.is_mut {
+            CapabilityMode::Mut
+        } else {
+            CapabilityMode::Read
+        };
+        let capability =
+            EffectCapabilityId::new(db, mode, EffectCapabilityKey::Compiler(capability));
+        out.push(ConstraintId::new(
+            db,
+            ConstraintKind::EffectCapability(capability),
+        ));
     }
 
     out
@@ -310,6 +355,9 @@ pub(crate) fn collect_func_def_constraints<'db>(
         .collect();
     for inst in collect_func_effect_provider_constraints(db, hir_func) {
         constraints.insert(ConstraintId::from_trait(db, inst));
+    }
+    for constraint in collect_func_effect_capability_constraints(db, hir_func) {
+        constraints.insert(constraint);
     }
 
     Binder::bind(ConstraintListId::new(
@@ -688,8 +736,11 @@ mod tests {
 
     use super::*;
     use crate::analysis::ty::{
-        GoalSatisfiability, TraitSolveCx, constraint::ConstraintKind,
-        corelib::resolve_lib_type_path, is_goal_satisfiable, layout_holes::ty_contains_const_hole,
+        GoalSatisfiability, TraitSolveCx,
+        constraint::{CapabilityMode, CompilerCapabilityKind, ConstraintKind, EffectCapabilityKey},
+        corelib::resolve_lib_type_path,
+        is_goal_satisfiable,
+        layout_holes::ty_contains_const_hole,
     };
     use crate::{
         hir_def::{Enum, EnumVariant, Struct, WhereClauseOwner},
@@ -935,6 +986,66 @@ fn f() uses (evm: mut Evm) {}
             inst.def(&db) == effect_ref_mut_trait
                 && inst.args(&db).as_slice() == [provider_ty, evm_ty]
         }));
+    }
+
+    #[test]
+    fn compiler_reflect_uses_lower_to_read_capability_constraint() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("compiler_reflect_uses_lower_to_read_capability_constraint.fe"),
+            r#"
+const fn f<T>() uses (reflect: Reflect<T>) {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "f");
+
+        assert!(collect_func_effect_provider_constraints(&db, func).is_empty());
+        let constraints = collect_func_effect_capability_constraints(&db, func);
+        assert_eq!(constraints.len(), 1);
+
+        let ConstraintKind::EffectCapability(capability) = constraints[0].kind(&db) else {
+            panic!("expected effect capability constraint");
+        };
+        assert_eq!(capability.mode(&db), CapabilityMode::Read);
+        let EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(target)) =
+            capability.key(&db)
+        else {
+            panic!("expected Reflect compiler capability");
+        };
+        assert_eq!(target.pretty_print(&db), "T");
+    }
+
+    #[test]
+    fn compiler_impl_builder_uses_lower_to_mut_capability_constraint() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("compiler_impl_builder_uses_lower_to_mut_capability_constraint.fe"),
+            r#"
+trait Eq {}
+
+const fn f<T>() uses (builder: mut ImplBuilder<Eq<T>>) {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "f");
+
+        assert!(collect_func_effect_provider_constraints(&db, func).is_empty());
+        let constraints = collect_func_effect_capability_constraints(&db, func);
+        assert_eq!(constraints.len(), 1);
+
+        let ConstraintKind::EffectCapability(capability) = constraints[0].kind(&db) else {
+            panic!("expected effect capability constraint");
+        };
+        assert_eq!(capability.mode(&db), CapabilityMode::Mut);
+        let EffectCapabilityKey::Compiler(CompilerCapabilityKind::ImplBuilder(goal)) =
+            capability.key(&db)
+        else {
+            panic!("expected ImplBuilder compiler capability");
+        };
+        assert_eq!(goal.pretty_print(&db), "T: Eq");
     }
 
     #[test]

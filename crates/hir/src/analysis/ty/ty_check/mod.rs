@@ -58,9 +58,9 @@ use super::{
     assoc_const::AssocConstUse,
     canonical::Canonical,
     diagnostics::{
-        BodyDiag, CallConstraintDiagInfo, ConstPredicateDiagInfo, ConstPredicateProofFailureKind,
-        FuncBodyDiag, RuntimeTypeContext, StaticAssertComparisonValues, TraitConstraintDiag,
-        TyDiagCollection, TyLowerDiag,
+        BodyDiag, CallConstraintDiagInfo, CompilerCapabilityModeError, ConstPredicateDiagInfo,
+        ConstPredicateProofFailureKind, FuncBodyDiag, RuntimeTypeContext,
+        StaticAssertComparisonValues, TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
     trait_def::TraitInstId,
@@ -82,8 +82,8 @@ use crate::analysis::ty::ty_def::{TyBase, TyData};
 use crate::analysis::ty::{
     const_ty::{ConstTyData, invalid_cause_from_ctfe_error},
     constraint::{
-        ConstPredicateInstId, ConstraintApplicationId, ConstraintId, ConstraintKind,
-        ConstraintListId, ParamEnv,
+        CompilerCapabilityKind, ConstPredicateInstId, ConstraintApplicationId, ConstraintId,
+        ConstraintKind, ConstraintListId, ParamEnv, compiler_capability_for_ty,
     },
     effect_handle_metadata,
     fold::AssocTySubst,
@@ -562,22 +562,84 @@ impl<'db> TyChecker<'db> {
                 continue;
             };
 
-            if !matches!(
-                resolve_callable_input_effect_key(
-                    self.db,
-                    func,
-                    idx,
-                    key_path,
-                    self.env.assumptions(),
-                ),
-                ResolvedEffectKey::Type(_) | ResolvedEffectKey::Trait(_)
+            match resolve_callable_input_effect_key(
+                self.db,
+                func,
+                idx,
+                key_path,
+                self.env.assumptions(),
             ) {
-                self.push_diag(BodyDiag::InvalidEffectKey {
-                    owner: EffectParamOwner::Func(func),
-                    key: key_path,
-                    idx,
-                });
+                ResolvedEffectKey::Type(schema) => {
+                    if let Some(capability) = compiler_capability_for_ty(self.db, schema.carrier) {
+                        if !func.is_const(self.db) {
+                            if let Some(compile_time_use) =
+                                schema.carrier.compile_time_only_use(self.db)
+                            {
+                                self.push_diag(TyDiagCollection::from(
+                                    TyLowerDiag::CompileTimeOnlyTypeInRuntimeContext {
+                                        span: EffectParamOwner::Func(func)
+                                            .effect_param_path_span(self.db, idx),
+                                        ty: schema.carrier,
+                                        kind: compile_time_use.kind,
+                                        context: RuntimeTypeContext::FunctionParam,
+                                    },
+                                ));
+                            }
+                        }
+
+                        self.check_compiler_capability_effect_mode(
+                            EffectParamOwner::Func(func),
+                            key_path,
+                            idx,
+                            capability,
+                            effect.is_mut,
+                        );
+                    }
+                }
+                ResolvedEffectKey::Trait(_) => {}
+                ResolvedEffectKey::Invalid | ResolvedEffectKey::Other => {
+                    self.push_diag(BodyDiag::InvalidEffectKey {
+                        owner: EffectParamOwner::Func(func),
+                        key: key_path,
+                        idx,
+                    });
+                }
             }
+        }
+    }
+
+    fn check_compiler_capability_effect_mode(
+        &mut self,
+        owner: EffectParamOwner<'db>,
+        key: PathId<'db>,
+        idx: usize,
+        capability: CompilerCapabilityKind<'db>,
+        is_mut: bool,
+    ) {
+        let reason = match capability {
+            CompilerCapabilityKind::Reflect(_) | CompilerCapabilityKind::TypeInfo(_) if is_mut => {
+                Some(CompilerCapabilityModeError::RequiresRead)
+            }
+            CompilerCapabilityKind::ImplBuilder(_) | CompilerCapabilityKind::EvidenceBuilder(_)
+                if !is_mut =>
+            {
+                Some(CompilerCapabilityModeError::RequiresMut)
+            }
+            CompilerCapabilityKind::ModuleBuilder(_) | CompilerCapabilityKind::ItemBuilder(_)
+                if !is_mut =>
+            {
+                Some(CompilerCapabilityModeError::RequiresMut)
+            }
+            _ => None,
+        };
+
+        if let Some(reason) = reason {
+            self.push_diag(BodyDiag::InvalidCompilerCapabilityMode {
+                owner,
+                key,
+                idx,
+                reason,
+            });
         }
     }
 

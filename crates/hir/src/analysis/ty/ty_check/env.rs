@@ -41,6 +41,7 @@ use crate::analysis::{
             PredicateListId,
             constraint::{
                 collect_constraints, collect_func_decl_constraints,
+                collect_func_effect_capability_constraints,
                 collect_func_effect_provider_constraints,
             },
         },
@@ -74,6 +75,7 @@ pub(crate) struct TyCheckEnv<'db> {
 
     effect_env: keyed_effect_env::EffectEnv<'db>,
     effect_bounds: ThinVec<TraitInstId<'db>>,
+    effect_constraints: ThinVec<ConstraintId<'db>>,
     base_assumptions: PredicateListId<'db>,
     assumptions: PredicateListId<'db>,
     base_constraint_assumptions: ConstraintListId<'db>,
@@ -230,6 +232,7 @@ impl<'db> TyCheckEnv<'db> {
             deferred: Vec::new(),
             effect_env: keyed_effect_env::EffectEnv::new(),
             effect_bounds: ThinVec::new(),
+            effect_constraints: ThinVec::new(),
             base_assumptions,
             assumptions: base_assumptions,
             base_constraint_assumptions,
@@ -326,6 +329,7 @@ impl<'db> TyCheckEnv<'db> {
                 .iter()
                 .map(|inst| ConstraintId::from_trait(db, *inst)),
         );
+        constraints.extend(env.effect_constraints.iter().copied());
         env.constraint_assumptions =
             ConstraintListId::new(db, constraints).extend_all_trait_bounds(db);
         env.assumptions = env.constraint_assumptions.trait_predicates(db);
@@ -349,6 +353,8 @@ impl<'db> TyCheckEnv<'db> {
     fn register_func_effect_bindings(&mut self, func: Func<'db>) {
         self.effect_bounds
             .extend(collect_func_effect_provider_constraints(self.db, func));
+        self.effect_constraints
+            .extend(collect_func_effect_capability_constraints(self.db, func));
         for binding in func.effect_requirements(self.db) {
             if !matches!(
                 binding.key.kind(),

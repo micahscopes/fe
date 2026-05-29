@@ -8,7 +8,7 @@ use crate::analysis::{
         fold::{TyFoldable, TyFolder},
         trait_def::{ImplementorId, TraitInstId},
         trait_resolution::PredicateListId,
-        ty_def::TyId,
+        ty_def::{PrimTy, TyBase, TyData, TyId},
         visitor::{TyVisitable, TyVisitor},
     },
 };
@@ -44,6 +44,39 @@ pub(crate) struct ConstraintId<'db> {
 impl<'db> ConstraintId<'db> {
     pub(crate) fn from_trait(db: &'db dyn HirAnalysisDb, inst: TraitInstId<'db>) -> Self {
         Self::new(db, ConstraintKind::Trait(inst))
+    }
+}
+
+pub(crate) fn compiler_capability_for_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<CompilerCapabilityKind<'db>> {
+    let (base, args) = ty.decompose_ty_app(db);
+    let TyData::TyBase(TyBase::Prim(prim)) = base.data(db) else {
+        return None;
+    };
+
+    match (prim, args) {
+        (PrimTy::Reflect, [target]) if target.has_star_kind(db) => {
+            Some(CompilerCapabilityKind::Reflect(*target))
+        }
+        (PrimTy::TypeInfo, [target]) if target.has_star_kind(db) => {
+            Some(CompilerCapabilityKind::TypeInfo(*target))
+        }
+        (PrimTy::ImplBuilder, [goal]) => {
+            constraint_goal_from_ty(db, *goal).map(CompilerCapabilityKind::ImplBuilder)
+        }
+        _ => None,
+    }
+}
+
+fn constraint_goal_from_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<ConstraintId<'db>> {
+    match ty.data(db) {
+        TyData::ConstraintTerm(constraint) => Some(*constraint),
+        _ => None,
     }
 }
 

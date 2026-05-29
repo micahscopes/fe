@@ -97,7 +97,14 @@ fn assert_const_predicate_note(diags: &[CompleteDiagnostic], expected: &str) {
 
 fn assert_diag_message(diags: &[CompleteDiagnostic], expected: &str) {
     assert!(
-        diags.iter().any(|diag| diag.message.contains(expected)),
+        diags.iter().any(|diag| {
+            diag.message.contains(expected)
+                || diag
+                    .sub_diagnostics
+                    .iter()
+                    .any(|sub| sub.message.contains(expected))
+                || diag.notes.iter().any(|note| note.contains(expected))
+        }),
         "expected diagnostic message containing `{expected}`, got diagnostics: {diags:#?}"
     );
 }
@@ -724,6 +731,52 @@ fn bad() {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
+fn compile_time_only_capabilities_cannot_be_requested_by_runtime_functions() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compile_time_only_capabilities_cannot_be_requested_by_runtime_functions.fe".into(),
+        r#"
+fn bad<T>() uses (reflect: Reflect<T>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
+fn reflect_capability_must_be_requested_read_only() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "reflect_capability_must_be_requested_read_only.fe".into(),
+        r#"
+const fn bad<T>() uses (reflect: mut Reflect<T>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid compiler capability mode");
+    assert_diag_message(&diags, "must be requested without `mut`");
+}
+
+#[test]
+fn impl_builder_capability_must_be_requested_mutably() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "impl_builder_capability_must_be_requested_mutably.fe".into(),
+        r#"
+trait Eq {}
+
+const fn bad<T>() uses (builder: ImplBuilder<Eq<T>>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid compiler capability mode");
+    assert_diag_message(&diags, "must be requested with `mut`");
 }
 
 #[test]
