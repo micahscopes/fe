@@ -3411,6 +3411,10 @@ impl<'db> WherePredicateBoundView<'db> {
 }
 
 impl<'db> TypeAlias<'db> {
+    pub(crate) fn hir_type_ref(self, db: &'db dyn HirDb) -> Partial<TypeId<'db>> {
+        self.type_ref(db)
+    }
+
     /// Semantic alias target type (convenience over lower_type_alias).
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
         let ta = lower_type_alias(db, self);
@@ -3810,6 +3814,10 @@ pub(crate) enum InherentImplAdmissibility<'db> {
 }
 
 impl<'db> Impl<'db> {
+    pub(crate) fn hir_type_ref(self, db: &'db dyn HirDb) -> Partial<TypeId<'db>> {
+        self.type_ref(db)
+    }
+
     /// Semantic implementor type of this inherent impl.
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
         let assumptions = constraints_for(db, self.into());
@@ -3899,6 +3907,10 @@ pub(crate) enum ImplTraitLowerError<'db> {
 }
 
 impl<'db> ImplTrait<'db> {
+    pub(crate) fn hir_type_ref(self, db: &'db dyn HirDb) -> Partial<TypeId<'db>> {
+        self.type_ref(db)
+    }
+
     /// Semantic self type of this impl-trait block.
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
         let assumptions = constraints_for(db, self.into());

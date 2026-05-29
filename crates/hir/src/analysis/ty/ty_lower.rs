@@ -1559,10 +1559,22 @@ impl<'db> OwnerKindInference<'db> {
                     }
                 }
             }
-            GenericParamOwner::TypeAlias(_)
-            | GenericParamOwner::Impl(_)
-            | GenericParamOwner::Trait(_)
-            | GenericParamOwner::ImplTrait(_) => {}
+            GenericParamOwner::TypeAlias(alias) => {
+                if let Some(ty) = alias.hir_type_ref(self.db).to_opt() {
+                    self.expect_type_position(ty);
+                }
+            }
+            GenericParamOwner::Impl(impl_) => {
+                if let Some(ty) = impl_.hir_type_ref(self.db).to_opt() {
+                    self.expect_type_position(ty);
+                }
+            }
+            GenericParamOwner::ImplTrait(impl_trait) => {
+                if let Some(ty) = impl_trait.hir_type_ref(self.db).to_opt() {
+                    self.expect_type_position(ty);
+                }
+            }
+            GenericParamOwner::Trait(_) => {}
         }
     }
 
@@ -2013,6 +2025,27 @@ mod tests {
             .expect("missing function")
     }
 
+    fn find_type_alias<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        alias_name: &str,
+    ) -> crate::hir_def::TypeAlias<'db> {
+        top_mod
+            .children_non_nested(db)
+            .find_map(|item| match item {
+                ItemKind::TypeAlias(alias)
+                    if alias
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == alias_name) =>
+                {
+                    Some(alias)
+                }
+                _ => None,
+            })
+            .expect("missing type alias")
+    }
+
     #[test]
     fn lowers_constraint_kind_bound() {
         let mut db = HirAnalysisTestDb::default();
@@ -2124,6 +2157,29 @@ extern {
         db.assert_no_diags(top_mod);
         let func = find_func(&db, top_mod, "f");
         let param_set = collect_generic_params(&db, func.into());
+        let f_kind = param_set.params(&db)[0].kind(&db);
+        let t_kind = param_set.params(&db)[1].kind(&db);
+
+        assert!(matches!(
+            f_kind,
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Star
+        ));
+        assert_eq!(*t_kind, Kind::Star);
+    }
+
+    #[test]
+    fn infers_type_alias_application_kinds() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "infers_type_alias_application_kinds.fe".into(),
+            r#"
+type Applied<F, T> = F<T>
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let alias = find_type_alias(&db, top_mod, "Applied");
+        let param_set = collect_generic_params(&db, alias.into());
         let f_kind = param_set.params(&db)[0].kind(&db);
         let t_kind = param_set.params(&db)[1].kind(&db);
 
