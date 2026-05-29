@@ -1,16 +1,19 @@
 use crate::core::hir_def::{
-    GenericParam, GenericParamOwner, GenericParamView, ItemKind, Trait, TraitRefId, TypeBound,
-    scope_graph::ScopeId, types::TypeId as HirTypeId,
+    ConstGenericArgValue, GenericArg, GenericParam, GenericParamOwner, GenericParamView, ItemKind,
+    Partial, Trait, TraitRefId, TypeBound, TypeKind, scope_graph::ScopeId,
+    types::TypeId as HirTypeId,
 };
 use crate::hir_def::CallableDef;
 use common::indexmap::{IndexMap, IndexSet};
 use either::Either;
 
+use crate::analysis::name_resolution::{PathRes, resolve_path};
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
         adt_def::AdtDef,
         binder::Binder,
+        const_ty::ConstTyId,
         constraint::{
             ConstPredicateInstId, ConstPredicateRef, ConstraintApplicationId, ConstraintHeadId,
             ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
@@ -25,7 +28,7 @@ use crate::analysis::{
         trait_lower::{lower_impl_trait, lower_trait_ref},
         trait_resolution::PredicateListId,
         ty_def::{Kind, TyBase, TyData, TyId, TyVarSort},
-        ty_lower::{collect_generic_params, lower_hir_ty},
+        ty_lower::{collect_generic_params, lower_hir_ty, lower_opt_hir_ty},
         unify::InferenceKey,
     },
 };
@@ -477,14 +480,12 @@ pub(crate) fn collect_decl_constraints<'db>(
         let scope = owner.scope();
         let where_clause = where_owner.where_clause(db);
         for predicate in where_clause.constraint_predicates(db) {
-            let ty = predicate
-                .ty
-                .to_opt()
-                .map(|hir_ty| lower_hir_ty(db, hir_ty, scope, trait_predicates))
-                .unwrap_or_else(|| {
-                    TyId::invalid(db, crate::analysis::ty::ty_def::InvalidCause::ParseError)
-                });
-            constraints.push(lower_constraint_application_predicate(db, ty));
+            constraints.push(lower_where_constraint_predicate(
+                db,
+                predicate.ty,
+                scope,
+                trait_predicates,
+            ));
         }
 
         for (index, _) in where_owner
@@ -521,6 +522,93 @@ fn lower_constraint_application_predicate<'db>(
     let head = ConstraintHeadId::new(db, head);
     let application = ConstraintApplicationId::new(db, head, args.to_vec());
     ConstraintId::new(db, ConstraintKind::ConstraintApplication(application))
+}
+
+fn lower_where_constraint_predicate<'db>(
+    db: &'db dyn HirAnalysisDb,
+    hir_ty: Partial<HirTypeId<'db>>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+) -> ConstraintId<'db> {
+    if let Some(constraint) =
+        lower_concrete_trait_constraint_predicate(db, hir_ty, scope, assumptions)
+    {
+        return constraint;
+    }
+
+    let ty = hir_ty
+        .to_opt()
+        .map(|hir_ty| lower_hir_ty(db, hir_ty, scope, assumptions))
+        .unwrap_or_else(|| {
+            TyId::invalid(db, crate::analysis::ty::ty_def::InvalidCause::ParseError)
+        });
+    lower_constraint_application_predicate(db, ty)
+}
+
+fn lower_concrete_trait_constraint_predicate<'db>(
+    db: &'db dyn HirAnalysisDb,
+    hir_ty: Partial<HirTypeId<'db>>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+) -> Option<ConstraintId<'db>> {
+    let hir_ty = hir_ty.to_opt()?;
+    let TypeKind::Path(path) = hir_ty.data(db) else {
+        return None;
+    };
+    let path = path.to_opt()?;
+    let generic_args = path.generic_args(db);
+    if generic_args.is_empty(db) {
+        return None;
+    }
+
+    let Ok(PathRes::Trait(inst)) =
+        resolve_path(db, path.strip_generic_args(db), scope, assumptions, false)
+    else {
+        return None;
+    };
+    let trait_ = inst.def(db);
+    let trait_params = trait_.params(db);
+    let args = generic_args.data(db);
+    if args.len() != trait_params.len() {
+        return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+    }
+
+    let mut lowered_args = Vec::with_capacity(args.len());
+    for arg in args {
+        let lowered = match arg {
+            GenericArg::Type(ty_arg) => lower_opt_hir_ty(db, ty_arg.ty, scope, assumptions),
+            GenericArg::Const(const_arg) => match const_arg.value {
+                ConstGenericArgValue::Expr(body) => {
+                    TyId::const_ty(db, ConstTyId::from_opt_body(db, body))
+                }
+                ConstGenericArgValue::Hole => {
+                    return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+                }
+            },
+            GenericArg::AssocType(_) => {
+                return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+            }
+        };
+        lowered_args.push(lowered);
+    }
+
+    for (expected_ty, actual_ty) in trait_params.iter().zip(lowered_args.iter_mut()) {
+        if !expected_ty.kind(db).does_match(actual_ty.kind(db)) {
+            return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+        }
+
+        let expected_const_ty = match expected_ty.data(db) {
+            TyData::ConstTy(expected_ty) => expected_ty.ty(db).into(),
+            _ => None,
+        };
+        match actual_ty.evaluate_const_ty(db, expected_const_ty) {
+            Ok(evaluated_ty) => *actual_ty = evaluated_ty,
+            Err(_) => return Some(ConstraintId::new(db, ConstraintKind::Invalid)),
+        }
+    }
+
+    let inst = TraitInstId::new(db, trait_, lowered_args, IndexMap::new());
+    Some(ConstraintId::from_trait(db, inst))
 }
 
 fn collect_constraints_cycle_initial<'db>(
