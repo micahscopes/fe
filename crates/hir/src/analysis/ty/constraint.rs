@@ -70,7 +70,7 @@ pub(crate) fn compiler_capability_for_ty<'db>(
     }
 }
 
-fn constraint_goal_from_ty<'db>(
+pub(crate) fn constraint_goal_from_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
 ) -> Option<ConstraintId<'db>> {
@@ -78,6 +78,20 @@ fn constraint_goal_from_ty<'db>(
         TyData::ConstraintTerm(constraint) => Some(*constraint),
         _ => None,
     }
+}
+
+pub(crate) fn evidence_goal_for_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<ConstraintId<'db>> {
+    let (base, args) = ty.decompose_ty_app(db);
+    let TyData::TyBase(TyBase::Prim(PrimTy::Evidence)) = base.data(db) else {
+        return None;
+    };
+    let [goal] = args else {
+        return None;
+    };
+    constraint_goal_from_ty(db, *goal)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]

@@ -383,6 +383,11 @@ impl<'db> Func<'db> {
     pub fn diags_param_types(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
         self.params(db).flat_map(|v| v.diags(db)).collect()
     }
+
+    pub fn diags_evidence_provider(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
+        let (_, diags) = ty::evidence_provider::validate_evidence_provider(db, self);
+        diags
+    }
 }
 
 impl<'db> Diagnosable<'db> for FuncParamView<'db> {
@@ -1413,6 +1418,7 @@ impl<'db> Diagnosable<'db> for Func<'db> {
         out.extend(self.diags_parameters(db));
         out.extend(self.diags_param_types(db));
         out.extend(self.diags_return(db));
+        out.extend(self.diags_evidence_provider(db));
 
         for pred in WhereClauseOwner::Func(self).clause(db).predicates(db) {
             out.extend(pred.diags(db));

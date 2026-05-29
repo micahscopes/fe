@@ -143,6 +143,11 @@ pub enum TyLowerDiag<'db> {
         context: RuntimeTypeContext,
     },
 
+    InvalidEvidenceProvider {
+        span: DynLazySpan<'db>,
+        message: String,
+    },
+
     /// `own` parameters must have owned types. Borrow-handle types (`mut`/`ref`) are not owned.
     OwnParamCannotBeBorrow {
         span: DynLazySpan<'db>,
@@ -202,6 +207,7 @@ impl TyLowerDiag<'_> {
             Self::NormalTypeExpected { .. } => 13,
             Self::ConstHoleInValuePosition { .. } => 32,
             Self::CompileTimeOnlyTypeInRuntimeContext { .. } => 36,
+            Self::InvalidEvidenceProvider { .. } => 37,
             Self::OwnParamCannotBeBorrow { .. } => 14,
             Self::InvalidMutParamPrefixWithoutOwnType { .. } => 31,
             Self::InvalidConstTyExpr(_) => 15,

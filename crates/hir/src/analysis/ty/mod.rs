@@ -35,6 +35,7 @@ pub mod const_ty;
 pub(crate) mod constraint;
 pub mod corelib;
 pub mod effects;
+pub(crate) mod evidence_provider;
 pub mod msg_selector;
 
 pub mod decision_tree;

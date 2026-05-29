@@ -2035,6 +2035,18 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
+            Self::InvalidEvidenceProvider { span, message } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "invalid evidence provider".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: message.clone(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
+
             Self::OwnParamCannotBeBorrow { span, ty } => CompleteDiagnostic {
                 severity: Severity::Error,
                 message: "invalid `own` parameter".to_string(),

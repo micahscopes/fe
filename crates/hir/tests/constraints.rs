@@ -826,6 +826,112 @@ const fn caller<T>() {
 }
 
 #[test]
+fn evidence_provider_signature_validation_accepts_const_evidence_return() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "evidence_provider_signature_validation_accepts_const_evidence_return.fe".into(),
+        r#"
+trait Eq {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn evidence_provider_must_be_const_fn() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "evidence_provider_must_be_const_fn.fe".into(),
+        r#"
+trait Eq {}
+
+#[evidence_provider(Eq)]
+fn derive_eq<T>() -> bool {
+    true
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "must be `const fn`");
+}
+
+#[test]
+fn evidence_provider_must_return_evidence() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "evidence_provider_must_return_evidence.fe".into(),
+        r#"
+trait Eq {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>() -> bool {
+    true
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "must return `Evidence<C>`");
+}
+
+#[test]
+fn evidence_provider_head_must_match_returned_constraint() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "evidence_provider_head_must_match_returned_constraint.fe".into(),
+        r#"
+trait Eq {}
+trait Default {}
+
+#[evidence_provider(Eq)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>> {
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "does not match the provider head");
+}
+
+#[test]
+fn evidence_provider_body_must_declare_forwarded_capabilities() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "evidence_provider_body_must_declare_forwarded_capabilities.fe".into(),
+        r#"
+trait Eq {}
+
+const fn helper<T>() uses (reflect: Reflect<T>) {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    helper<T>()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compiler capability is not available");
+}
+
+#[test]
 fn const_predicate_false_fails_as_disproved_constraint() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

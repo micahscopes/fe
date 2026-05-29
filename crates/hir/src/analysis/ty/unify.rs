@@ -16,7 +16,10 @@ use super::{
 };
 use crate::analysis::{
     HirAnalysisDb,
-    ty::const_ty::{ConstTyData, EvaluatedConstTy, normalize_const_tys_for_comparison},
+    ty::{
+        const_ty::{ConstTyData, EvaluatedConstTy, normalize_const_tys_for_comparison},
+        constraint::{CompilerCapabilityKind, ConstraintId, ConstraintKind, EffectCapabilityKey},
+    },
 };
 
 pub(crate) type UnificationTable<'db> = UnificationTableBase<'db, InPlace<InferenceKey<'db>>>;
@@ -145,6 +148,8 @@ where
                     Err(UnificationError::TypeMismatch)
                 }
             }
+
+            (TyData::ConstraintTerm(c1), TyData::ConstraintTerm(c2)) => self.unify(*c1, *c2),
 
             (TyData::Invalid(_), _)
             | (_, TyData::Invalid(_))
@@ -629,6 +634,143 @@ impl<'db> Unifiable<'db> for TraitInstId<'db> {
         }
 
         Ok(())
+    }
+}
+
+impl<'db> Unifiable<'db> for ConstraintId<'db> {
+    fn unify<U: UnificationStore<'db>>(
+        self,
+        table: &mut UnificationTableBase<'db, U>,
+        other: Self,
+    ) -> UnificationResult {
+        if self == other {
+            return Ok(());
+        }
+
+        let db = table.db;
+        match (self.kind(db), other.kind(db)) {
+            (ConstraintKind::Trait(lhs), ConstraintKind::Trait(rhs)) => table.unify(lhs, rhs),
+            (ConstraintKind::ConstPredicate(lhs), ConstraintKind::ConstPredicate(rhs)) => {
+                if lhs.predicate(db) != rhs.predicate(db)
+                    || lhs.args(db).len() != rhs.args(db).len()
+                {
+                    return Err(UnificationError::TypeMismatch);
+                }
+                for (&lhs_arg, &rhs_arg) in lhs.args(db).iter().zip(rhs.args(db)) {
+                    table.unify_ty(lhs_arg, rhs_arg)?;
+                }
+                Ok(())
+            }
+            (ConstraintKind::EffectCapability(lhs), ConstraintKind::EffectCapability(rhs)) => {
+                if lhs.mode(db) != rhs.mode(db) {
+                    return Err(UnificationError::TypeMismatch);
+                }
+                unify_effect_capability_key(table, lhs.key(db), rhs.key(db))
+            }
+            (ConstraintKind::TypeEqual(lhs), ConstraintKind::TypeEqual(rhs)) => {
+                table.unify_ty(lhs.lhs(db), rhs.lhs(db))?;
+                table.unify_ty(lhs.rhs(db), rhs.rhs(db))
+            }
+            (ConstraintKind::AssocTypeEqual(lhs), ConstraintKind::AssocTypeEqual(rhs)) => {
+                if lhs.assoc_name(db) != rhs.assoc_name(db) {
+                    return Err(UnificationError::TypeMismatch);
+                }
+                table.unify(lhs.trait_inst(db), rhs.trait_inst(db))?;
+                table.unify_ty(lhs.value(db), rhs.value(db))
+            }
+            (
+                ConstraintKind::ConstraintApplication(lhs),
+                ConstraintKind::ConstraintApplication(rhs),
+            ) => {
+                if lhs.head(db) != rhs.head(db) || lhs.args(db).len() != rhs.args(db).len() {
+                    return Err(UnificationError::TypeMismatch);
+                }
+                for (&lhs_arg, &rhs_arg) in lhs.args(db).iter().zip(rhs.args(db)) {
+                    table.unify_ty(lhs_arg, rhs_arg)?;
+                }
+                Ok(())
+            }
+            (ConstraintKind::WellFormed(lhs), ConstraintKind::WellFormed(rhs)) => {
+                table.unify_ty(lhs, rhs)
+            }
+            (ConstraintKind::Invalid, _) | (_, ConstraintKind::Invalid) => Ok(()),
+            _ => Err(UnificationError::TypeMismatch),
+        }
+    }
+}
+
+fn unify_effect_capability_key<'db, U>(
+    table: &mut UnificationTableBase<'db, U>,
+    lhs: EffectCapabilityKey<'db>,
+    rhs: EffectCapabilityKey<'db>,
+) -> UnificationResult
+where
+    U: UnificationStore<'db>,
+{
+    match (lhs, rhs) {
+        (
+            EffectCapabilityKey::Type {
+                provider: lhs_provider,
+                target: lhs_target,
+            },
+            EffectCapabilityKey::Type {
+                provider: rhs_provider,
+                target: rhs_target,
+            },
+        ) => {
+            table.unify_ty(lhs_provider, rhs_provider)?;
+            table.unify_ty(lhs_target, rhs_target)
+        }
+        (
+            EffectCapabilityKey::Trait {
+                provider: lhs_provider,
+                requirement: lhs_requirement,
+            },
+            EffectCapabilityKey::Trait {
+                provider: rhs_provider,
+                requirement: rhs_requirement,
+            },
+        ) => {
+            table.unify_ty(lhs_provider, rhs_provider)?;
+            table.unify(lhs_requirement, rhs_requirement)
+        }
+        (EffectCapabilityKey::Compiler(lhs), EffectCapabilityKey::Compiler(rhs)) => {
+            unify_compiler_capability(table, lhs, rhs)
+        }
+        _ => Err(UnificationError::TypeMismatch),
+    }
+}
+
+fn unify_compiler_capability<'db, U>(
+    table: &mut UnificationTableBase<'db, U>,
+    lhs: CompilerCapabilityKind<'db>,
+    rhs: CompilerCapabilityKind<'db>,
+) -> UnificationResult
+where
+    U: UnificationStore<'db>,
+{
+    match (lhs, rhs) {
+        (CompilerCapabilityKind::Reflect(lhs), CompilerCapabilityKind::Reflect(rhs))
+        | (CompilerCapabilityKind::TypeInfo(lhs), CompilerCapabilityKind::TypeInfo(rhs)) => {
+            table.unify_ty(lhs, rhs)
+        }
+        (CompilerCapabilityKind::ImplBuilder(lhs), CompilerCapabilityKind::ImplBuilder(rhs))
+        | (
+            CompilerCapabilityKind::EvidenceBuilder(lhs),
+            CompilerCapabilityKind::EvidenceBuilder(rhs),
+        ) => table.unify(lhs, rhs),
+        (
+            CompilerCapabilityKind::ModuleBuilder(lhs),
+            CompilerCapabilityKind::ModuleBuilder(rhs),
+        )
+        | (CompilerCapabilityKind::ItemBuilder(lhs), CompilerCapabilityKind::ItemBuilder(rhs)) => {
+            if lhs == rhs {
+                Ok(())
+            } else {
+                Err(UnificationError::TypeMismatch)
+            }
+        }
+        _ => Err(UnificationError::TypeMismatch),
     }
 }
 
