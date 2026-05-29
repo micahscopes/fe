@@ -419,6 +419,7 @@ fn ty_mentions_effect_provider_param<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'
         | TyData::Never
         | TyData::Invalid(_) => false,
         TyData::TyApp(..) => unreachable!("TyApp handled before data match"),
+        _ => false,
     }
 }
 
@@ -506,6 +507,7 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
             format!("invalid${}", stable_identity_hash(&cause.pretty_print(db)))
         }
         TyData::TyApp(..) => unreachable!("TyApp handled before data match"),
+        _ => format!("opaque${}", stable_identity_hash(ty.pretty_print(db))),
     }
 }
 

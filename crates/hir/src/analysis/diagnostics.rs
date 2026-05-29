@@ -2010,6 +2010,31 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 }
             }
 
+            Self::CompileTimeOnlyTypeInRuntimeContext {
+                span,
+                ty,
+                kind,
+                context,
+            } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "compile-time-only type cannot be used at runtime".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!(
+                        "{} `{}` contains compile-time-only `{}`",
+                        context.label(),
+                        ty.pretty_print(db),
+                        kind.name()
+                    ),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "compile-time-only types must stay in const or elaboration-only contexts"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
             Self::OwnParamCannotBeBorrow { span, ty } => CompleteDiagnostic {
                 severity: Severity::Error,
                 message: "invalid `own` parameter".to_string(),

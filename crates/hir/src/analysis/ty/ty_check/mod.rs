@@ -59,8 +59,8 @@ use super::{
     canonical::Canonical,
     diagnostics::{
         BodyDiag, CallConstraintDiagInfo, ConstPredicateDiagInfo, ConstPredicateProofFailureKind,
-        FuncBodyDiag, StaticAssertComparisonValues, TraitConstraintDiag, TyDiagCollection,
-        TyLowerDiag,
+        FuncBodyDiag, RuntimeTypeContext, StaticAssertComparisonValues, TraitConstraintDiag,
+        TyDiagCollection, TyLowerDiag,
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
     trait_def::TraitInstId,
@@ -441,6 +441,14 @@ enum CallConstraintBoundOwner<'db> {
 impl<'db> TyChecker<'db> {
     fn string_literal_fallback(&self) -> StringFallback {
         StringFallback::Fixed
+    }
+
+    fn allows_compile_time_only_types(&self) -> bool {
+        match self.env.owner() {
+            BodyOwner::Func(func) => func.is_const(self.db),
+            BodyOwner::Const(_) | BodyOwner::AnonConstBody { .. } => true,
+            BodyOwner::ContractInit { .. } | BodyOwner::ContractRecvArm { .. } => false,
+        }
     }
 
     fn new(db: &'db dyn HirAnalysisDb, owner: BodyOwner<'db>) -> Result<Self, ()> {
@@ -2369,6 +2377,21 @@ impl<'db> TyChecker<'db> {
                 TyLowerDiag::ConstHoleInValuePosition {
                     span: span.clone().into(),
                     ty,
+                },
+            ));
+            return TyId::invalid(self.db, InvalidCause::Other);
+        }
+
+        if star_kind_required
+            && !self.allows_compile_time_only_types()
+            && let Some(use_) = ty.compile_time_only_use(self.db)
+        {
+            self.push_diag(TyDiagCollection::from(
+                TyLowerDiag::CompileTimeOnlyTypeInRuntimeContext {
+                    span: span.clone().into(),
+                    ty: use_.ty,
+                    kind: use_.kind,
+                    context: RuntimeTypeContext::LocalType,
                 },
             ));
             return TyId::invalid(self.db, InvalidCause::Other);

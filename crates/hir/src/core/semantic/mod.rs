@@ -36,7 +36,7 @@ use crate::analysis::HirAnalysisDb;
 use crate::analysis::ty::corelib::{
     resolve_core_trait, resolve_lib_func_path, resolve_lib_type_path,
 };
-use crate::analysis::ty::diagnostics::{ImplDiag, TyLowerDiag};
+use crate::analysis::ty::diagnostics::{ImplDiag, RuntimeTypeContext, TyLowerDiag};
 use crate::analysis::ty::fold::TyFoldable;
 use crate::analysis::ty::normalize::normalize_ty;
 use crate::analysis::ty::ty_def::Kind;
@@ -1229,6 +1229,20 @@ impl<'db> FuncParamView<'db> {
                 TyLowerDiag::NormalTypeExpected {
                     span: ty_span.clone(),
                     given: ty,
+                }
+                .into(),
+            );
+            return out;
+        }
+        if !func.is_const(db)
+            && let Some(use_) = ty.compile_time_only_use(db)
+        {
+            out.push(
+                TyLowerDiag::CompileTimeOnlyTypeInRuntimeContext {
+                    span: ty_span.clone(),
+                    ty: use_.ty,
+                    kind: use_.kind,
+                    context: RuntimeTypeContext::FunctionParam,
                 }
                 .into(),
             );
@@ -4845,6 +4859,23 @@ impl<'db> FieldView<'db> {
                 TyLowerDiag::NormalTypeExpected {
                     span: span.clone(),
                     given: ty,
+                }
+                .into(),
+            );
+            return out;
+        }
+        if let Some(use_) = ty.compile_time_only_use(db) {
+            let context = match self.parent {
+                FieldParent::Struct(_) => RuntimeTypeContext::StructField,
+                FieldParent::Contract(_) => RuntimeTypeContext::ContractField,
+                FieldParent::Variant(_) => RuntimeTypeContext::EnumVariantField,
+            };
+            out.push(
+                TyLowerDiag::CompileTimeOnlyTypeInRuntimeContext {
+                    span: span.clone(),
+                    ty: use_.ty,
+                    kind: use_.kind,
+                    context,
                 }
                 .into(),
             );

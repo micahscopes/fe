@@ -3,8 +3,7 @@ use std::path::Path;
 use common::diagnostics::{CompleteDiagnostic, cmp_complete_diagnostics};
 use dir_test::{Fixture, dir_test};
 use fe_hir::{
-    hir_def::TopLevelMod,
-    test_db::{HirAnalysisTestDb, initialize_analysis_pass},
+    analysis::initialize_analysis_pass, hir_def::TopLevelMod, test_db::HirAnalysisTestDb,
 };
 
 #[dir_test(
@@ -389,7 +388,7 @@ fn concrete_trait_constraint_can_be_type_constructor_arg() {
         r#"
 trait Eq {}
 
-fn accepts<T>(
+const fn accepts<T>(
     ev: Evidence<Eq<T>>,
     builder: ImplBuilder<Eq<T>>,
     reflect: Reflect<T>,
@@ -407,7 +406,7 @@ fn generic_constraint_can_be_type_constructor_arg() {
     let file = db.new_stand_alone(
         "generic_constraint_can_be_type_constructor_arg.fe".into(),
         r#"
-fn accepts<P, T>(ev: Evidence<P<T>>)
+const fn accepts<P, T>(ev: Evidence<P<T>>)
 where
     P<T>
 {}
@@ -619,6 +618,112 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn compile_time_only_type_constructors_cannot_escape_runtime_function_params() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compile_time_only_type_constructors_cannot_escape_runtime_function_params.fe".into(),
+        r#"
+trait Eq {}
+
+fn bad<T>(ev: Evidence<Eq<T>>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
+fn compile_time_only_type_constructors_cannot_escape_runtime_function_returns() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compile_time_only_type_constructors_cannot_escape_runtime_function_returns.fe".into(),
+        r#"
+trait Eq {}
+
+fn bad<T>() -> Evidence<Eq<T>> {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
+fn compile_time_only_type_constructors_cannot_escape_struct_fields() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compile_time_only_type_constructors_cannot_escape_struct_fields.fe".into(),
+        r#"
+struct Bad<T> {
+    reflect: Reflect<T>,
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
+fn compile_time_only_type_constructors_cannot_escape_enum_variant_fields() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compile_time_only_type_constructors_cannot_escape_enum_variant_fields.fe".into(),
+        r#"
+trait Eq {}
+
+enum Bad<T> {
+    Value(Evidence<Eq<T>>)
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
+fn compile_time_only_type_constructors_cannot_escape_contract_fields() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compile_time_only_type_constructors_cannot_escape_contract_fields.fe".into(),
+        r#"
+trait Eq {}
+
+struct Item {}
+
+contract Bad {
+    builder: ImplBuilder<Eq<Item>>
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
+fn compile_time_only_type_constructors_cannot_escape_runtime_locals() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compile_time_only_type_constructors_cannot_escape_runtime_locals.fe".into(),
+        r#"
+trait Eq {}
+
+struct Item {}
+
+fn bad() {
+    let ev: Evidence<Eq<Item>>
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
 }
 
 #[test]

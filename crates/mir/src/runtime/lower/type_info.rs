@@ -499,7 +499,11 @@ fn scalar_class_from_repr_ty<'db>(db: &'db dyn MirDb, ty: TyId<'db>) -> Option<S
             | PrimTy::Ptr
             | PrimTy::View
             | PrimTy::BorrowMut
-            | PrimTy::BorrowRef => return None,
+            | PrimTy::BorrowRef
+            | PrimTy::Evidence
+            | PrimTy::ImplBuilder
+            | PrimTy::Reflect
+            | PrimTy::TypeInfo => return None,
         },
         TyData::TyBase(TyBase::Contract(_)) => ScalarRepr::Address { bits: 256 },
         TyData::TyVar(var) if matches!(var.sort, TyVarSort::Integral) => ScalarRepr::Int {

@@ -369,6 +369,7 @@ fn readable_type_component<'db>(db: &'db DriverDataBase, ty: TyId<'db>) -> Optio
         | TyData::TyVar(_)
         | TyData::Invalid(_)
         | TyData::TyApp(..) => None,
+        _ => None,
     }
 }
 

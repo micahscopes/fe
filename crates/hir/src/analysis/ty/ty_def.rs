@@ -199,6 +199,56 @@ impl<'db> TyId<'db> {
         self.flags(db).contains(TyFlags::HAS_VAR)
     }
 
+    pub(crate) fn compile_time_only_use(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<CompileTimeOnlyUse<'db>> {
+        if let Some(kind) = self.compile_time_only_kind(db) {
+            return Some(CompileTimeOnlyUse { kind, ty: self });
+        }
+
+        match self.data(db) {
+            TyData::TyApp(abs, arg) => abs
+                .compile_time_only_use(db)
+                .or_else(|| arg.compile_time_only_use(db)),
+            TyData::AssocTy(assoc) => assoc
+                .trait_
+                .args(db)
+                .iter()
+                .copied()
+                .find_map(|ty| ty.compile_time_only_use(db)),
+            TyData::QualifiedTy(trait_inst) => trait_inst
+                .args(db)
+                .iter()
+                .copied()
+                .find_map(|ty| ty.compile_time_only_use(db)),
+            TyData::ConstTy(const_ty) => const_ty.ty(db).compile_time_only_use(db),
+            TyData::TyVar(_)
+            | TyData::TyParam(_)
+            | TyData::ConstraintTerm(_)
+            | TyData::TyBase(_)
+            | TyData::Never
+            | TyData::Invalid(_) => None,
+        }
+    }
+
+    fn compile_time_only_kind(self, db: &'db dyn HirAnalysisDb) -> Option<CompileTimeOnlyKind> {
+        let (base, args) = self.decompose_ty_app(db);
+        if args.is_empty() {
+            return None;
+        }
+
+        match base.data(db) {
+            TyData::TyBase(TyBase::Prim(PrimTy::Evidence)) => Some(CompileTimeOnlyKind::Evidence),
+            TyData::TyBase(TyBase::Prim(PrimTy::ImplBuilder)) => {
+                Some(CompileTimeOnlyKind::ImplBuilder)
+            }
+            TyData::TyBase(TyBase::Prim(PrimTy::Reflect)) => Some(CompileTimeOnlyKind::Reflect),
+            TyData::TyBase(TyBase::Prim(PrimTy::TypeInfo)) => Some(CompileTimeOnlyKind::TypeInfo),
+            _ => None,
+        }
+    }
+
     /// Returns `true` if the type has exactly the runtime type kind, or is an
     /// error-recovery type.
     pub fn has_star_kind(self, db: &dyn HirAnalysisDb) -> bool {
@@ -1823,6 +1873,31 @@ impl CapabilityKind {
             Self::View => 1,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub enum CompileTimeOnlyKind {
+    Evidence,
+    ImplBuilder,
+    Reflect,
+    TypeInfo,
+}
+
+impl CompileTimeOnlyKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Evidence => "Evidence",
+            Self::ImplBuilder => "ImplBuilder",
+            Self::Reflect => "Reflect",
+            Self::TypeInfo => "TypeInfo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub struct CompileTimeOnlyUse<'db> {
+    pub kind: CompileTimeOnlyKind,
+    pub ty: TyId<'db>,
 }
 
 impl PrimTy {

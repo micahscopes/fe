@@ -4375,7 +4375,11 @@ fn intrinsic_value_type(prim: PrimTy) -> Type {
         | PrimTy::Ptr
         | PrimTy::View
         | PrimTy::BorrowMut
-        | PrimTy::BorrowRef => Type::I256,
+        | PrimTy::BorrowRef
+        | PrimTy::Evidence
+        | PrimTy::ImplBuilder
+        | PrimTy::Reflect
+        | PrimTy::TypeInfo => Type::I256,
     }
 }
 

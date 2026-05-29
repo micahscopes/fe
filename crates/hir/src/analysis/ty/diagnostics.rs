@@ -3,7 +3,7 @@ use super::{
     provider::ProviderAddressSpace,
     trait_def::TraitInstId,
     ty_check::{RecordLike, TraitOps},
-    ty_def::{BorrowKind, CapabilityKind, Kind, TyId},
+    ty_def::{BorrowKind, CapabilityKind, CompileTimeOnlyKind, Kind, TyId},
 };
 use crate::visitor::prelude::*;
 use crate::{analysis::HirAnalysisDb, hir_def::Trait};
@@ -136,6 +136,13 @@ pub enum TyLowerDiag<'db> {
         ty: TyId<'db>,
     },
 
+    CompileTimeOnlyTypeInRuntimeContext {
+        span: DynLazySpan<'db>,
+        ty: TyId<'db>,
+        kind: CompileTimeOnlyKind,
+        context: RuntimeTypeContext,
+    },
+
     /// `own` parameters must have owned types. Borrow-handle types (`mut`/`ref`) are not owned.
     OwnParamCannotBeBorrow {
         span: DynLazySpan<'db>,
@@ -194,6 +201,7 @@ impl TyLowerDiag<'_> {
             Self::ConstTyExpected { .. } => 12,
             Self::NormalTypeExpected { .. } => 13,
             Self::ConstHoleInValuePosition { .. } => 32,
+            Self::CompileTimeOnlyTypeInRuntimeContext { .. } => 36,
             Self::OwnParamCannotBeBorrow { .. } => 14,
             Self::InvalidMutParamPrefixWithoutOwnType { .. } => 31,
             Self::InvalidConstTyExpr(_) => 15,
@@ -214,6 +222,29 @@ impl TyLowerDiag<'_> {
             Self::DuplicateGenericParamName(..) => 19,
             Self::NonTrailingDefaultGenericParam(_) => 21,
             Self::GenericDefaultForwardRef { .. } => 22,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+pub enum RuntimeTypeContext {
+    FunctionParam,
+    FunctionReturn,
+    StructField,
+    EnumVariantField,
+    ContractField,
+    LocalType,
+}
+
+impl RuntimeTypeContext {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::FunctionParam => "function parameter type",
+            Self::FunctionReturn => "function return type",
+            Self::StructField => "struct field type",
+            Self::EnumVariantField => "enum variant field type",
+            Self::ContractField => "contract storage field type",
+            Self::LocalType => "local type annotation",
         }
     }
 }

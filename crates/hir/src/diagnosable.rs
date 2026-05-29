@@ -12,7 +12,7 @@ use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution;
 use crate::analysis::ty;
 use crate::analysis::ty::diagnostics::{
-    BodyDiag, FuncBodyDiag, TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
+    BodyDiag, FuncBodyDiag, RuntimeTypeContext, TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
 };
 use crate::analysis::ty::trait_lower::lower_impl_trait;
 use crate::analysis::ty::ty_check::check_anon_const_body;
@@ -359,6 +359,18 @@ impl<'db> Func<'db> {
                 diags.push(TyLowerDiag::NormalTypeExpected { span, given: ret }.into());
             } else if ty::ty_contains_const_hole(db, ret) {
                 diags.push(TyLowerDiag::ConstHoleInValuePosition { span, ty: ret }.into());
+            } else if !self.is_const(db)
+                && let Some(use_) = ret.compile_time_only_use(db)
+            {
+                diags.push(
+                    TyLowerDiag::CompileTimeOnlyTypeInRuntimeContext {
+                        span,
+                        ty: use_.ty,
+                        kind: use_.kind,
+                        context: RuntimeTypeContext::FunctionReturn,
+                    }
+                    .into(),
+                );
             }
         }
         diags
@@ -923,6 +935,18 @@ impl<'db> VariantView<'db> {
                     TyLowerDiag::NormalTypeExpected {
                         span: span.clone().into(),
                         given: ty,
+                    }
+                    .into(),
+                );
+                continue;
+            }
+            if let Some(use_) = ty.compile_time_only_use(db) {
+                out.push(
+                    TyLowerDiag::CompileTimeOnlyTypeInRuntimeContext {
+                        span: span.clone().into(),
+                        ty: use_.ty,
+                        kind: use_.kind,
+                        context: RuntimeTypeContext::EnumVariantField,
                     }
                     .into(),
                 );
