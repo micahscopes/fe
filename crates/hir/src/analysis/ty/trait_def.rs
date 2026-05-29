@@ -18,7 +18,7 @@ use salsa::Update;
 use super::{
     binder::Binder,
     canonical::Canonical,
-    constraint::ConstraintListId,
+    constraint::{ConstraintListId, GeneratedImplId},
     diagnostics::{ImplDiag, TyDiagCollection},
     fold::TyFoldable as _,
     trait_lower::collect_implementor_methods,
@@ -168,6 +168,7 @@ fn std_evm_contract_trait_def<'db>(
 pub(crate) enum ImplementorOrigin<'db> {
     Hir(ImplTrait<'db>),
     VirtualContract(Contract<'db>),
+    Generated(GeneratedImplId<'db>),
     Assumption,
 }
 
@@ -389,7 +390,9 @@ pub fn assoc_const_body_and_impl_args_for_trait_inst<'db>(
     };
     let hir_impl = match implementor.origin(db) {
         ImplementorOrigin::Hir(impl_trait) => impl_trait,
-        ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => return None,
+        ImplementorOrigin::VirtualContract(_)
+        | ImplementorOrigin::Generated(_)
+        | ImplementorOrigin::Assumption => return None,
     };
     let def = hir_impl
         .hir_consts(db)
@@ -452,6 +455,25 @@ impl<'db> TraitEnv<'db> {
             }
         }
 
+        for &generated in crate::analysis::elab::generated_impls_for_ingot(db, ingot) {
+            let implementor = ImplementorId::new(
+                db,
+                generated.trait_inst,
+                Vec::new(),
+                IndexMap::new(),
+                ImplementorOrigin::Generated(generated),
+            );
+            let binder = Binder::bind(implementor);
+            impls
+                .entry(implementor.trait_def(db))
+                .or_default()
+                .push(binder);
+            ty_to_implementors
+                .entry(Binder::bind(implementor.self_ty(db).base_ty(db)))
+                .or_default()
+                .push(binder);
+        }
+
         Self {
             impls,
             ty_to_implementors,
@@ -499,6 +521,10 @@ impl<'db> ImplementorId<'db> {
                     .to_opt()
                     .map(|n| n.data(db).to_string())
                     .unwrap_or_else(|| "<unknown>".to_string())
+            ),
+            ImplementorOrigin::Generated(generated) => panic!(
+                "requested HIR impl-trait for generated implementor ({})",
+                generated.trait_inst.pretty_print(db, true)
             ),
             ImplementorOrigin::Assumption => {
                 panic!("requested HIR impl-trait for assumption-based implementor")
@@ -552,6 +578,7 @@ impl<'db> ImplementorId<'db> {
             ImplementorOrigin::Hir(impl_trait) => {
                 collect_constraints(db, impl_trait.into()).instantiate(db, self.params(db))
             }
+            ImplementorOrigin::Generated(generated) => generated.obligations,
             ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => {
                 ConstraintListId::empty(db)
             }
@@ -563,6 +590,7 @@ impl<'db> ImplementorId<'db> {
             ImplementorOrigin::Hir(impl_trait) => {
                 collect_trait_constraints(db, impl_trait.into()).instantiate(db, self.params(db))
             }
+            ImplementorOrigin::Generated(generated) => generated.obligations.trait_predicates(db),
             ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => {
                 PredicateListId::empty_list(db)
             }

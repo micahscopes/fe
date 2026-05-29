@@ -409,6 +409,7 @@ pub(crate) fn collect_implementor_methods<'db>(
     let impl_trait = match implementor.origin(db) {
         super::trait_def::ImplementorOrigin::Hir(impl_trait) => impl_trait,
         super::trait_def::ImplementorOrigin::VirtualContract(_)
+        | super::trait_def::ImplementorOrigin::Generated(_)
         | super::trait_def::ImplementorOrigin::Assumption => return methods,
     };
     let scope = impl_trait.scope();

@@ -432,7 +432,9 @@ pub(crate) struct ConstProofId<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) struct GeneratedImplId<'db> {
-    pub(crate) implementor: ImplementorId<'db>,
+    pub(crate) context: crate::analysis::elab::ElaborationCtfeContextId<'db>,
+    pub(crate) trait_inst: TraitInstId<'db>,
+    pub(crate) obligations: ConstraintListId<'db>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
@@ -822,7 +824,8 @@ impl<'db> TyVisitable<'db> for GeneratedImplId<'db> {
     where
         V: TyVisitor<'db> + ?Sized,
     {
-        self.implementor.visit_with(visitor);
+        self.trait_inst.visit_with(visitor);
+        self.obligations.visit_with(visitor);
     }
 }
 
@@ -832,7 +835,9 @@ impl<'db> TyFoldable<'db> for GeneratedImplId<'db> {
         F: TyFolder<'db>,
     {
         Self {
-            implementor: self.implementor.fold_with(db, folder),
+            context: self.context,
+            trait_inst: self.trait_inst.fold_with(db, folder),
+            obligations: self.obligations.fold_with(db, folder),
         }
     }
 }

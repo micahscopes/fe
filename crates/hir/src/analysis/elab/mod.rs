@@ -9,6 +9,7 @@ use crate::{
         ty::{
             binder::Binder,
             constraint::{ConstraintId, ConstraintKind},
+            constraint::{ConstraintListId, GeneratedImplId},
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{EvidenceProviderId, providers_for_constraint_head},
             fold::TyFoldable,
@@ -250,6 +251,53 @@ pub fn elaboration_ctfe_context_summaries_for_top_mod<'db>(
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+#[salsa::tracked(return_ref)]
+pub(crate) fn generated_impls_for_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+) -> Vec<GeneratedImplId<'db>> {
+    elaboration_requests_for_ingot(db, ingot)
+        .iter()
+        .flat_map(|&request| {
+            elaboration_ctfe_contexts_for_request(db, request)
+                .iter()
+                .filter_map(move |&context| generated_impl_for_context(db, context))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+pub fn generated_impl_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    generated_impls_for_ingot(db, top_mod.ingot(db))
+        .iter()
+        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
+        .map(|generated| {
+            format!(
+                "generated {} with obligations {}",
+                generated.trait_inst.pretty_print(db, true),
+                generated.obligations.pretty_print(db),
+            )
+        })
+        .collect()
+}
+
+fn generated_impl_for_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> Option<GeneratedImplId<'db>> {
+    let ConstraintKind::Trait(trait_inst) = context.request(db).goal(db).kind(db) else {
+        return None;
+    };
+    Some(GeneratedImplId {
+        context,
+        trait_inst,
+        obligations: ConstraintListId::empty(db),
+    })
 }
 
 fn derive_requests_for_target<'db>(

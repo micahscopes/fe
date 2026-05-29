@@ -6,7 +6,7 @@ use fe_hir::{
     analysis::{
         elab::{
             elaboration_ctfe_context_summaries_for_top_mod,
-            elaboration_request_summaries_for_top_mod,
+            elaboration_request_summaries_for_top_mod, generated_impl_summaries_for_top_mod,
         },
         initialize_analysis_pass,
     },
@@ -1047,6 +1047,67 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
         summaries,
         vec!["Foo: Eq requested for Foo via derive_eq with []".to_string()]
     );
+}
+
+#[test]
+fn generated_derive_evidence_is_visible_to_trait_solver() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_derive_evidence_is_visible_to_trait_solver.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn derive_without_provider_does_not_satisfy_trait_solver() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_without_provider_does_not_satisfy_trait_solver.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
 }
 
 #[test]
