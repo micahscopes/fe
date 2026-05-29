@@ -3983,6 +3983,12 @@ impl<'db> ImplTrait<'db> {
         let env = ingot_trait_env(db, trait_.ingot(db));
         if let Some(impls) = env.impls.get(&trait_.def(db)) {
             for &cand_view in impls {
+                if !matches!(
+                    cand_view.skip_binder().origin(db),
+                    ImplementorOrigin::Hir(_)
+                ) {
+                    continue;
+                }
                 let cand_impl_trait = cand_view.skip_binder().hir_impl_trait(db);
                 if cand_impl_trait == self {
                     continue;

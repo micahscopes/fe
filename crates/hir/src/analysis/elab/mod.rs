@@ -433,7 +433,17 @@ fn generated_impl_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
-    ImplBuilderSession::new(db, context).finish(db).ok()
+    let goal = context.request(db).goal(db);
+    if !context_has_impl_builder(db, context, goal) {
+        return None;
+    }
+
+    let mut builder = ImplBuilderSession::new(db, context);
+    builder.emit_impl(db, goal).ok()?;
+    for obligation in derive_obligations_for_context(db, context)? {
+        builder.require(obligation).ok()?;
+    }
+    builder.finish(db).ok()
 }
 
 pub(crate) fn reflected_fields_for_context<'db>(
@@ -456,6 +466,70 @@ pub(crate) fn reflected_fields_for_context<'db>(
         })
         .flat_map(|target| reflect_struct_fields(db, target))
         .collect()
+}
+
+fn derive_obligations_for_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> Option<Vec<ConstraintId<'db>>> {
+    let request = context.request(db);
+    let ElaborationTarget::Struct(_) = request.target(db) else {
+        return None;
+    };
+    let ConstraintKind::Trait(trait_inst) = request.goal(db).kind(db) else {
+        return None;
+    };
+    let target_ty = request.target(db).ty(db);
+    if !context_has_reflect_target(db, context, target_ty) {
+        return None;
+    }
+
+    let trait_ = trait_inst.def(db);
+    Some(
+        reflected_fields_for_context(db, context)
+            .into_iter()
+            .filter(|field| tys_match(db, field.parent, target_ty))
+            .map(|field| {
+                ConstraintId::from_trait(db, TraitInstId::new_simple(db, trait_, vec![field.ty]))
+            })
+            .collect(),
+    )
+}
+
+fn context_has_impl_builder<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+    goal: ConstraintId<'db>,
+) -> bool {
+    context.capabilities(db).iter().any(|witness| {
+        if witness.capability.mode(db) != CapabilityMode::Mut {
+            return false;
+        }
+        match witness.capability.key(db) {
+            EffectCapabilityKey::Compiler(CompilerCapabilityKind::ImplBuilder(capability_goal)) => {
+                constraints_match(db, capability_goal, goal)
+            }
+            _ => false,
+        }
+    })
+}
+
+fn context_has_reflect_target<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+    target: TyId<'db>,
+) -> bool {
+    context.capabilities(db).iter().any(|witness| {
+        if witness.capability.mode(db) != CapabilityMode::Read {
+            return false;
+        }
+        match witness.capability.key(db) {
+            EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(reflected)) => {
+                tys_match(db, reflected, target)
+            }
+            _ => false,
+        }
+    })
 }
 
 fn reflect_struct_fields<'db>(
@@ -486,6 +560,11 @@ fn constraints_match<'db>(
     lhs: ConstraintId<'db>,
     rhs: ConstraintId<'db>,
 ) -> bool {
+    let mut table = UnificationTable::new(db);
+    table.unify(lhs, rhs).is_ok()
+}
+
+fn tys_match<'db>(db: &'db dyn HirAnalysisDb, lhs: TyId<'db>, rhs: TyId<'db>) -> bool {
     let mut table = UnificationTable::new(db);
     table.unify(lhs, rhs).is_ok()
 }

@@ -5,7 +5,7 @@ use crate::hir_def::{ItemKind, Trait};
 use common::indexmap::{IndexMap, IndexSet};
 
 use super::{
-    trait_def::{ImplementorId, TraitInstId},
+    trait_def::{ImplementorId, ImplementorOrigin, TraitInstId},
     trait_resolution::{PredicateListId, TraitGoalSolution, TraitSolverQuery},
     ty_check::{EffectArg, ExprProp, LocalBinding, ResolvedEffectArg},
     ty_def::{TyData, TyId},
@@ -305,7 +305,12 @@ impl<'db> TyFoldable<'db> for ImplementorId<'db> {
             .iter()
             .map(|ty| ty.fold_with(db, folder))
             .collect::<Vec<_>>();
-        let origin = self.origin(db);
+        let origin = match self.origin(db) {
+            ImplementorOrigin::Generated(generated) => {
+                ImplementorOrigin::Generated(generated.fold_with(db, folder))
+            }
+            origin => origin,
+        };
 
         let types = self
             .types(db)

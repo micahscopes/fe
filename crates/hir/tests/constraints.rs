@@ -1145,7 +1145,12 @@ where
 struct Foo {}
 
 #[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
     ev
 }
 
@@ -1161,6 +1166,218 @@ fn caller() {
         generated_impl_summaries_for_top_mod(&db, top_mod),
         vec!["generated Foo: Eq with obligations {}".to_string()]
     );
+}
+
+#[test]
+fn generated_derive_evidence_requires_builder_capability() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_derive_evidence_requires_builder_capability.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (reflect: Reflect<T>)
+{
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
+}
+
+#[test]
+fn generated_derive_records_field_obligations() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_derive_records_field_obligations.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct FieldTy {}
+
+impl Eq for FieldTy {}
+
+#[derive(Eq)]
+struct Box {
+    value: FieldTy,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    ev
+}
+
+fn caller() {
+    require_eq<Box>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated Box: Eq with obligations {FieldTy: Eq}".to_string()]
+    );
+}
+
+#[test]
+fn generated_generic_derive_forwards_field_obligations() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_generic_derive_forwards_field_obligations.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    ev
+}
+
+fn caller<A, B>()
+where
+    A: Eq,
+    B: Eq
+{
+    require_eq<Pair<A, B>>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated Pair<A, B>: Eq with obligations {A: Eq, B: Eq}".to_string()]
+    );
+}
+
+#[test]
+fn generated_default_derive_records_field_obligations() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_default_derive_records_field_obligations.fe".into(),
+        r#"
+trait Default {}
+
+fn require_default<T>()
+where
+    T: Default
+{}
+
+struct FieldTy {}
+
+impl Default for FieldTy {}
+
+#[derive(Default)]
+struct Box {
+    value: FieldTy,
+}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Default<T>>,
+    )
+{
+    ev
+}
+
+fn caller() {
+    require_default<Box>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated Box: Default with obligations {FieldTy: Default}".to_string()]
+    );
+}
+
+#[test]
+fn generated_derive_reports_missing_field_obligation() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_derive_reports_missing_field_obligation.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct FieldTy {}
+
+#[derive(Eq)]
+struct Box {
+    value: FieldTy,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    ev
+}
+
+fn caller() {
+    require_eq<Box>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_unsatisfied_bound(&diags, "FieldTy: Eq");
 }
 
 #[test]

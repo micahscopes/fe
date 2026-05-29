@@ -456,10 +456,11 @@ impl<'db> TraitEnv<'db> {
         }
 
         for &generated in crate::analysis::elab::generated_impls_for_ingot(db, ingot) {
+            let params = generated.trait_inst.self_ty(db).generic_args(db).to_vec();
             let implementor = ImplementorId::new(
                 db,
                 generated.trait_inst,
-                Vec::new(),
+                params,
                 IndexMap::new(),
                 ImplementorOrigin::Generated(generated),
             );
