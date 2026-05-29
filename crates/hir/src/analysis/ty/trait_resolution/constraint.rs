@@ -12,7 +12,8 @@ use crate::analysis::{
         adt_def::AdtDef,
         binder::Binder,
         constraint::{
-            ConstPredicateInstId, ConstPredicateRef, ConstraintId, ConstraintKind, ConstraintListId,
+            ConstPredicateInstId, ConstPredicateRef, ConstraintApplicationId, ConstraintHeadId,
+            ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
         },
         corelib::resolve_core_trait,
         effects::{
@@ -23,7 +24,7 @@ use crate::analysis::{
         trait_def::TraitInstId,
         trait_lower::{lower_impl_trait, lower_trait_ref},
         trait_resolution::PredicateListId,
-        ty_def::{TyBase, TyData, TyId, TyVarSort},
+        ty_def::{Kind, TyBase, TyData, TyId, TyVarSort},
         ty_lower::{collect_generic_params, lower_hir_ty},
         unify::InferenceKey,
     },
@@ -467,14 +468,25 @@ pub(crate) fn collect_decl_constraints<'db>(
     db: &'db dyn HirAnalysisDb,
     owner: GenericParamOwner<'db>,
 ) -> Binder<ConstraintListId<'db>> {
-    let trait_constraints = ConstraintListId::from_trait_predicates(
-        db,
-        collect_decl_trait_constraints_raw(db, owner).instantiate_identity(),
-    );
+    let trait_predicates = collect_decl_trait_constraints_raw(db, owner).instantiate_identity();
+    let trait_constraints = ConstraintListId::from_trait_predicates(db, trait_predicates);
     let mut constraints = trait_constraints.list(db).to_vec();
 
     if let Some(where_owner) = owner.where_clause_owner() {
         let args = collect_generic_params(db, owner).params(db).to_vec();
+        let scope = owner.scope();
+        let where_clause = where_owner.where_clause(db);
+        for predicate in where_clause.constraint_predicates(db) {
+            let ty = predicate
+                .ty
+                .to_opt()
+                .map(|hir_ty| lower_hir_ty(db, hir_ty, scope, trait_predicates))
+                .unwrap_or_else(|| {
+                    TyId::invalid(db, crate::analysis::ty::ty_def::InvalidCause::ParseError)
+                });
+            constraints.push(lower_constraint_application_predicate(db, ty));
+        }
+
         for (index, _) in where_owner
             .where_clause(db)
             .const_predicates(db)
@@ -491,6 +503,24 @@ pub(crate) fn collect_decl_constraints<'db>(
     }
 
     Binder::bind(ConstraintListId::new(db, constraints))
+}
+
+fn lower_constraint_application_predicate<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> ConstraintId<'db> {
+    if ty.has_invalid(db) || !matches!(ty.kind(db), Kind::Constraint | Kind::Any) {
+        return ConstraintId::new(db, ConstraintKind::Invalid);
+    }
+
+    let (base, args) = ty.decompose_ty_app(db);
+    let head = match base.data(db) {
+        TyData::TyParam(_) => ConstraintHeadKind::GenericParam(base),
+        _ => return ConstraintId::new(db, ConstraintKind::Invalid),
+    };
+    let head = ConstraintHeadId::new(db, head);
+    let application = ConstraintApplicationId::new(db, head, args.to_vec());
+    ConstraintId::new(db, ConstraintKind::ConstraintApplication(application))
 }
 
 fn collect_constraints_cycle_initial<'db>(
@@ -695,6 +725,40 @@ where
                 .where_clause(&db)
                 .const_predicates(&db)[0]
         );
+    }
+
+    #[test]
+    fn constraint_collection_includes_generic_constraint_applications() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("constraint_collection_includes_generic_constraint_applications.fe"),
+            r#"
+fn needs_constraint<P: * -> Constraint, T>()
+where
+    P<T>
+{}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "needs_constraint");
+
+        let constraints = collect_func_decl_constraints(&db, func.into(), true)
+            .instantiate_identity()
+            .extend_all_trait_bounds(&db);
+        let applications = constraints
+            .list(&db)
+            .iter()
+            .filter_map(|constraint| match constraint.kind(&db) {
+                ConstraintKind::ConstraintApplication(application) => Some(application),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(applications.len(), 1);
+        assert_eq!(applications[0].pretty_print(&db), "P<T>");
+        assert!(constraints.trait_predicates(&db).list(&db).is_empty());
+        assert!(constraints.const_predicates(&db).is_empty());
     }
 
     #[test]
