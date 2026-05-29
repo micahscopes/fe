@@ -27,7 +27,9 @@ use crate::analysis::ty::pattern_ir::{
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
-        constraint::{ConstraintId, ConstraintListId, ParamEnv},
+        constraint::{
+            ConstraintId, ConstraintKind, ConstraintListId, EffectCapabilityId, ParamEnv,
+        },
         corelib::resolve_lib_type_path,
         effects::{
             EffectKeyKind,
@@ -76,6 +78,7 @@ pub(crate) struct TyCheckEnv<'db> {
     effect_env: keyed_effect_env::EffectEnv<'db>,
     effect_bounds: ThinVec<TraitInstId<'db>>,
     effect_constraints: ThinVec<ConstraintId<'db>>,
+    capability_env: CapabilityEnv<'db>,
     base_assumptions: PredicateListId<'db>,
     assumptions: PredicateListId<'db>,
     base_constraint_assumptions: ConstraintListId<'db>,
@@ -100,6 +103,37 @@ pub(crate) struct TyCheckEnv<'db> {
 
     /// Resolved Seq trait methods for for-loops, keyed by the for statement.
     for_loop_seq: SecondaryMap<StmtId, Option<ForLoopSeq<'db>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CapabilityEnv<'db> {
+    witnesses: Vec<CapabilityWitness<'db>>,
+}
+
+impl<'db> CapabilityEnv<'db> {
+    fn insert(&mut self, witness: CapabilityWitness<'db>) {
+        if !self.contains(witness.capability) {
+            self.witnesses.push(witness);
+        }
+    }
+
+    fn contains(&self, capability: EffectCapabilityId<'db>) -> bool {
+        self.witnesses
+            .iter()
+            .any(|witness| witness.capability == capability)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CapabilityWitness<'db> {
+    capability: EffectCapabilityId<'db>,
+    #[allow(dead_code)]
+    origin: CapabilityOrigin,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CapabilityOrigin {
+    UsesParam,
 }
 
 impl<'db> TyCheckEnv<'db> {
@@ -233,6 +267,7 @@ impl<'db> TyCheckEnv<'db> {
             effect_env: keyed_effect_env::EffectEnv::new(),
             effect_bounds: ThinVec::new(),
             effect_constraints: ThinVec::new(),
+            capability_env: CapabilityEnv::default(),
             base_assumptions,
             assumptions: base_assumptions,
             base_constraint_assumptions,
@@ -355,6 +390,15 @@ impl<'db> TyCheckEnv<'db> {
             .extend(collect_func_effect_provider_constraints(self.db, func));
         self.effect_constraints
             .extend(collect_func_effect_capability_constraints(self.db, func));
+        for &constraint in &self.effect_constraints {
+            let ConstraintKind::EffectCapability(capability) = constraint.kind(self.db) else {
+                continue;
+            };
+            self.capability_env.insert(CapabilityWitness {
+                capability,
+                origin: CapabilityOrigin::UsesParam,
+            });
+        }
         for binding in func.effect_requirements(self.db) {
             if !matches!(
                 binding.key.kind(),
@@ -635,6 +679,10 @@ impl<'db> TyCheckEnv<'db> {
     #[allow(dead_code)]
     pub(crate) fn constraint_assumptions(&self) -> ConstraintListId<'db> {
         self.constraint_assumptions
+    }
+
+    pub(crate) fn has_effect_capability(&self, capability: EffectCapabilityId<'db>) -> bool {
+        self.capability_env.contains(capability)
     }
 
     #[allow(dead_code)]

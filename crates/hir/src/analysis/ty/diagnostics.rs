@@ -374,6 +374,11 @@ pub enum BodyDiag<'db> {
         reason: CompilerCapabilityModeError,
     },
 
+    MissingEffectCapability {
+        primary: DynLazySpan<'db>,
+        capability: String,
+    },
+
     ContractRootEffectTraitNotImplemented {
         owner: EffectParamOwner<'db>,
         idx: usize,
@@ -847,6 +852,7 @@ impl<'db> BodyDiag<'db> {
             Self::UndefinedVariable(..) => 12,
             Self::InvalidEffectKey { .. } => 51,
             Self::InvalidCompilerCapabilityMode { .. } => 87,
+            Self::MissingEffectCapability { .. } => 88,
             Self::ContractRootEffectTraitNotImplemented { .. } => 53,
             Self::ContractRootEffectTypeNotZeroSized { .. } => 54,
             Self::MissingEffect { .. } => 36,

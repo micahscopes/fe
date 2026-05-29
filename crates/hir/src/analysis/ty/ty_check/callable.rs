@@ -12,17 +12,20 @@ use crate::{
 use salsa::Update;
 
 use super::{BodyOwner, ExprProp, LocalBinding, TyChecker};
+use crate::analysis::ty::binder::Binder;
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
         const_ty::LayoutHoleArgSite,
-        constraint::{ConstraintId, ConstraintKind},
+        constraint::{ConstraintId, ConstraintKind, ConstraintListId},
         corelib::resolve_lib_func_path,
         diagnostics::{BodyDiag, FuncBodyDiag},
         fold::{AssocTySubst, TyFoldable, TyFolder},
         normalize::normalize_ty,
         trait_def::TraitInstId,
-        trait_resolution::constraint::collect_func_decl_constraints,
+        trait_resolution::constraint::{
+            collect_func_decl_constraints, collect_func_effect_capability_constraints,
+        },
         ty_def::{BorrowKind, CapabilityKind},
         ty_def::{InvalidCause, TyBase, TyData, TyFlags, TyId},
         ty_lower::lower_generic_arg_list_for_params,
@@ -798,6 +801,32 @@ impl<'db> Callable<'db> {
                 continue;
             }
 
+            tc.env.register_obligation(super::env::Obligation {
+                constraint,
+                origin: super::env::ObligationOrigin::CallConstraint {
+                    call_expr,
+                    callable_def: self.callable_def,
+                    constraint_idx,
+                },
+                span: span.clone(),
+            });
+        }
+
+        let CallableDef::Func(func) = self.callable_def else {
+            return;
+        };
+
+        let capability_constraints = collect_func_effect_capability_constraints(db, func);
+        if capability_constraints.is_empty() {
+            return;
+        }
+
+        let instantiated = Binder::bind(ConstraintListId::new(db, capability_constraints))
+            .instantiate(db, &self.generic_args);
+        for (constraint_idx, &constraint) in instantiated.list(db).iter().enumerate() {
+            if collect_flags(db, constraint).contains(TyFlags::HAS_INVALID) {
+                continue;
+            }
             tc.env.register_obligation(super::env::Obligation {
                 constraint,
                 origin: super::env::ObligationOrigin::CallConstraint {

@@ -1405,6 +1405,9 @@ impl<'db> TyChecker<'db> {
             ConstraintKind::ConstraintApplication(application) => {
                 self.process_constraint_application_obligation(application, obligation, final_pass)
             }
+            ConstraintKind::EffectCapability(capability) => {
+                self.process_effect_capability_obligation(capability, obligation, final_pass)
+            }
             ConstraintKind::Invalid => {
                 if final_pass {
                     self.push_diag(BodyDiag::InvalidConstraintPredicate {
@@ -1416,6 +1419,27 @@ impl<'db> TyChecker<'db> {
                 }
             }
             _ => self.process_future_constraint_obligation(obligation, final_pass),
+        }
+    }
+
+    fn process_effect_capability_obligation(
+        &mut self,
+        capability: crate::analysis::ty::constraint::EffectCapabilityId<'db>,
+        obligation: env::Obligation<'db>,
+        final_pass: bool,
+    ) -> ObligationOutcome<'db> {
+        if self.env.has_effect_capability(capability) {
+            return ObligationOutcome::Discharged;
+        }
+
+        if final_pass {
+            self.push_diag(BodyDiag::MissingEffectCapability {
+                primary: obligation.span.clone(),
+                capability: capability.pretty_print(self.db),
+            });
+            ObligationOutcome::Discharged
+        } else {
+            ObligationOutcome::Requeue(obligation)
         }
     }
 

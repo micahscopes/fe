@@ -780,6 +780,44 @@ const fn bad<T>() uses (builder: ImplBuilder<Eq<T>>) {}
 }
 
 #[test]
+fn compiler_capabilities_forward_through_const_uses() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compiler_capabilities_forward_through_const_uses.fe".into(),
+        r#"
+const fn helper_reflect<T>() uses (reflect: Reflect<T>) {}
+
+const fn caller<T>()
+    uses (reflect: Reflect<T>)
+{
+    helper_reflect<T>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn compiler_capability_calls_require_forwarded_uses() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "compiler_capability_calls_require_forwarded_uses.fe".into(),
+        r#"
+const fn helper<T>() uses (reflect: Reflect<T>) {}
+
+const fn caller<T>() {
+    helper<T>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compiler capability is not available");
+    assert_diag_message(&diags, "read capability Reflect<T>");
+}
+
+#[test]
 fn const_predicate_false_fails_as_disproved_constraint() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

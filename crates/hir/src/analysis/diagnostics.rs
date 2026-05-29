@@ -2637,6 +2637,21 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 }
             }
 
+            Self::MissingEffectCapability {
+                primary,
+                capability,
+            } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "compiler capability is not available".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!("requires `{capability}`"),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
+
             Self::ContractRootEffectTraitNotImplemented {
                 owner,
                 idx,
