@@ -50,6 +50,7 @@ pub fn lower_hir_kind_local(k: &HirKindBound) -> Kind {
     match k {
         HirKindBound::Mono => Kind::Star,
         HirKindBound::Constraint => Kind::Constraint,
+        HirKindBound::Path(_) => Kind::Any,
         HirKindBound::Abs(lhs, rhs) => {
             let lhs_k = match lhs {
                 Partial::Present(inner) => lower_hir_kind_local(inner),
@@ -3346,10 +3347,14 @@ impl<'db> WherePredicateView<'db> {
                     out.extend(bview.diags(db));
                 }
                 TypeBound::Kind(crate::hir_def::Partial::Present(kb)) => {
+                    let span = self.span().bounds().bound(i).kind_bound();
+                    if kb.contains_named_path() {
+                        out.push(TyLowerDiag::UnsupportedNamedKind(span.into()).into());
+                        continue;
+                    }
                     let expected = lower_hir_kind_local(kb);
                     let actual = subject.kind(db);
                     if !actual.does_match(&expected) {
-                        let span = self.span().bounds().bound(i).kind_bound();
                         out.push(
                             TyLowerDiag::InconsistentKindBound {
                                 span: span.into(),

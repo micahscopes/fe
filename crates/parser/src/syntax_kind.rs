@@ -513,6 +513,8 @@ pub enum SyntaxKind {
     KindBoundMono,
     /// `Constraint`.
     KindBoundConstraint,
+    /// `A` or `A<B>` in a kind expression.
+    KindBoundPath,
     /// `where Option<T>: Trait1 + Trait2`
     WhereClause,
     /// `Option<T>: Trait1 + Trait2`
@@ -799,6 +801,7 @@ impl SyntaxKind {
             SyntaxKind::KindBoundAbs => "kind bound",
             SyntaxKind::KindBoundMono => "kind bound",
             SyntaxKind::KindBoundConstraint => "kind bound",
+            SyntaxKind::KindBoundPath => "kind bound",
             SyntaxKind::WhereClause => "`where` clause",
             SyntaxKind::WherePredicate => "`where` predicate",
             SyntaxKind::WhereConstraintPredicate => "`where` constraint predicate",

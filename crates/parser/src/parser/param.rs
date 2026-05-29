@@ -242,7 +242,8 @@ impl super::Parse for TypeBoundScope {
         let is_type_kind = matches!(
             parser.current_kind(),
             Some(SyntaxKind::LParen | SyntaxKind::Star)
-        ) || parser.is_ident("Constraint");
+        ) || is_builtin_constraint_kind_atom(parser)
+            || is_named_kind_arrow_start(parser);
 
         if is_type_kind {
             parse_kind_bound(parser)
@@ -259,12 +260,34 @@ fn parse_kind_bound<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recove
     let checkpoint = parser.checkpoint();
     let is_newline_trivia = parser.set_newline_as_trivia(false);
 
-    if parser.is_ident("Constraint") {
+    parse_kind_atom(parser)?;
+
+    if parser.current_kind() == Some(SyntaxKind::Arrow) {
+        parser.parse_cp(KindBoundAbsScope::default(), checkpoint.into())?;
+    }
+    parser.set_newline_as_trivia(is_newline_trivia);
+    Ok(())
+}
+
+fn parse_kind_atom<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recovery<ErrProof>> {
+    if is_builtin_constraint_kind_atom(parser) {
         parser
             .parse(KindBoundConstraintScope::default())
             .unwrap_infallible();
     } else {
-        parser.expect(&[SyntaxKind::Star, SyntaxKind::LParen], None)?;
+        parser.expect(
+            &[
+                SyntaxKind::Star,
+                SyntaxKind::LParen,
+                SyntaxKind::Ident,
+                SyntaxKind::SelfKw,
+                SyntaxKind::SelfTypeKw,
+                SyntaxKind::IngotKw,
+                SyntaxKind::SuperKw,
+                SyntaxKind::Lt,
+            ],
+            None,
+        )?;
         if parser.bump_if(SyntaxKind::LParen) {
             parse_kind_bound(parser)?;
             if parser.find(
@@ -280,6 +303,8 @@ fn parse_kind_bound<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recove
             parser
                 .parse(KindBoundMonoScope::default())
                 .unwrap_infallible();
+        } else if is_kind_path_start(parser.current_kind()) {
+            parser.parse_or_recover(KindBoundPathScope::default())?;
         } else {
             // guaranteed by `expected`, unless other recovery
             // other tokens are added to the current scope
@@ -287,11 +312,40 @@ fn parse_kind_bound<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recove
         }
     }
 
-    if parser.current_kind() == Some(SyntaxKind::Arrow) {
-        parser.parse_cp(KindBoundAbsScope::default(), checkpoint.into())?;
-    }
-    parser.set_newline_as_trivia(is_newline_trivia);
     Ok(())
+}
+
+fn is_builtin_constraint_kind_atom<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    parser.is_ident("Constraint")
+        && !matches!(
+            parser.peek_n_non_trivia(2).as_slice(),
+            [SyntaxKind::Ident, SyntaxKind::Lt | SyntaxKind::Colon2]
+        )
+}
+
+fn is_kind_path_start(kind: Option<SyntaxKind>) -> bool {
+    matches!(
+        kind,
+        Some(
+            SyntaxKind::Ident
+                | SyntaxKind::SelfKw
+                | SyntaxKind::SelfTypeKw
+                | SyntaxKind::IngotKw
+                | SyntaxKind::SuperKw
+                | SyntaxKind::Lt
+        )
+    )
+}
+
+fn is_named_kind_arrow_start<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    parser.dry_run(|parser| {
+        if !is_kind_path_start(parser.current_kind()) {
+            return false;
+        }
+        parser
+            .parse(KindBoundPathScope::default())
+            .is_ok_and(|()| parser.current_kind() == Some(SyntaxKind::Arrow))
+    })
 }
 
 define_scope! { KindBoundMonoScope, KindBoundMono }
@@ -311,6 +365,15 @@ impl super::Parse for KindBoundConstraintScope {
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
         parser.bump_expected(SyntaxKind::Ident);
         Ok(())
+    }
+}
+
+define_scope! { KindBoundPathScope, KindBoundPath }
+impl super::Parse for KindBoundPathScope {
+    type Error = ParseError;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.parse(PathScope::default())
     }
 }
 

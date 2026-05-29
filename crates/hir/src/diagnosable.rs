@@ -1211,9 +1211,13 @@ impl<'db> GenericParamOwner<'db> {
 
             for (i, bound) in tp.bounds.iter().enumerate() {
                 if let TypeBound::Kind(Partial::Present(kb)) = bound {
+                    let span = view.span().into_type_param().bounds().bound(i).kind_bound();
+                    if kb.contains_named_path() {
+                        out.push(TyLowerDiag::UnsupportedNamedKind(span.into()).into());
+                        continue;
+                    }
                     let expected = lower_hir_kind_local(kb);
                     if !actual.does_match(&expected) {
-                        let span = view.span().into_type_param().bounds().bound(i).kind_bound();
                         out.push(
                             TyLowerDiag::InconsistentKindBound {
                                 span: span.into(),

@@ -530,10 +530,37 @@ module.exports = grammar({
       $.kind_bound,
     ),
 
-    kind_bound: $ => prec.right(choice(
-      seq('Constraint', optional(seq('->', $.kind_bound))),
-      seq('*', optional(seq('->', $.kind_bound))),
-      seq('(', $.kind_bound, ')', optional(seq('->', $.kind_bound))),
+    kind_bound: $ => choice(
+      $.kind_bound_arrow,
+      $._kind_bound_base,
+    ),
+
+    kind_bound_arrow: $ => prec.right(seq(
+      $._kind_bound_atom,
+      '->',
+      $._kind_bound_rhs,
+    )),
+
+    _kind_bound_rhs: $ => choice(
+      $.kind_bound_arrow,
+      $._kind_bound_base,
+      $.kind_bound_path,
+    ),
+
+    _kind_bound_atom: $ => choice(
+      $._kind_bound_base,
+      $.kind_bound_path,
+    ),
+
+    _kind_bound_base: $ => choice(
+      'Constraint',
+      '*',
+      seq('(', $._kind_bound_rhs, ')'),
+    ),
+
+    kind_bound_path: $ => prec.right(PREC.PATH + 6, seq(
+      $.path,
+      optional($.generic_arg_list),
     )),
 
     // Uses external scanner token _generic_open instead of '<' to avoid

@@ -1,7 +1,10 @@
 use rowan::ast::{AstNode, support};
 
 use super::ast_node;
-use crate::{FeLang, SyntaxKind as SK, SyntaxToken, ast::Type};
+use crate::{
+    FeLang, SyntaxKind as SK, SyntaxToken,
+    ast::{Path, Type},
+};
 
 ast_node! {
     /// A list of parameters.
@@ -491,7 +494,7 @@ impl TraitRef {
 
 ast_node! {
     pub struct KindBound,
-     SK::KindBoundAbs | SK::KindBoundMono | SK::KindBoundConstraint
+     SK::KindBoundAbs | SK::KindBoundMono | SK::KindBoundConstraint | SK::KindBoundPath
 }
 impl KindBound {
     pub fn mono(&self) -> Option<KindBoundMono> {
@@ -516,6 +519,13 @@ impl KindBound {
             _ => None,
         }
     }
+
+    pub fn path(&self) -> Option<KindBoundPath> {
+        match self.syntax().kind() {
+            SK::KindBoundPath => Some(KindBoundPath::cast(self.syntax().clone()).unwrap()),
+            _ => None,
+        }
+    }
 }
 
 ast_node! {
@@ -526,6 +536,16 @@ ast_node! {
 ast_node! {
     pub struct KindBoundConstraint,
     SK::KindBoundConstraint,
+}
+
+ast_node! {
+    pub struct KindBoundPath,
+    SK::KindBoundPath,
+}
+impl KindBoundPath {
+    pub fn path(&self) -> Option<Path> {
+        support::child(self.syntax())
+    }
 }
 
 ast_node! {
@@ -554,6 +574,8 @@ pub enum KindBoundVariant {
     Abs(KindBoundAbs),
     /// `Constraint`
     Constraint(KindBoundConstraint),
+    /// `A` or `A<B>`
+    Path(KindBoundPath),
 }
 
 /// A trait for AST nodes that can have generic parameters.
@@ -719,6 +741,62 @@ mod tests {
 
         assert!(abs.lhs().unwrap().mono().is_some());
         assert!(abs.rhs().unwrap().constraint().is_some());
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn generic_param_with_named_kind_bound_arrows() {
+        let source = r#"<F: A<B> -> *, G: * -> A<B> >"#;
+        let gp = parse_generic_params(source);
+        let mut params = gp.into_iter();
+
+        let GenericParamKind::Type(f_param) = params.next().unwrap().kind() else {
+            panic!("expected type param");
+        };
+        let f_bound = f_param.bounds().unwrap().iter().next().unwrap();
+        let f_abs = f_bound
+            .kind_bound()
+            .expect("expected kind bound")
+            .abs()
+            .expect("expected higher-kinded bound");
+        assert_eq!(
+            f_abs
+                .lhs()
+                .unwrap()
+                .path()
+                .unwrap()
+                .path()
+                .unwrap()
+                .syntax()
+                .text()
+                .to_string(),
+            "A<B>"
+        );
+        assert!(f_abs.rhs().unwrap().mono().is_some());
+
+        let GenericParamKind::Type(g_param) = params.next().unwrap().kind() else {
+            panic!("expected type param");
+        };
+        let g_bound = g_param.bounds().unwrap().iter().next().unwrap();
+        let g_abs = g_bound
+            .kind_bound()
+            .expect("expected kind bound")
+            .abs()
+            .expect("expected higher-kinded bound");
+        assert!(g_abs.lhs().unwrap().mono().is_some());
+        assert_eq!(
+            g_abs
+                .rhs()
+                .unwrap()
+                .path()
+                .unwrap()
+                .path()
+                .unwrap()
+                .syntax()
+                .text()
+                .to_string(),
+            "A<B>"
+        );
     }
 
     #[test]

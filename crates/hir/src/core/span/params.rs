@@ -270,6 +270,15 @@ define_lazy_span_node!(
     @node {
         (abs, abs, LazyKindBoundAbsSpan),
         (mono, mono, LazyKindBoundMonoSpan),
+        (path, path, LazyKindBoundPathSpan),
+    }
+);
+
+define_lazy_span_node!(
+    LazyKindBoundPathSpan,
+    ast::KindBoundPath,
+    @node {
+        (path, path, LazyPathSpan),
     }
 );
 

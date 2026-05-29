@@ -1775,6 +1775,20 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
+            Self::UnsupportedNamedKind(span) => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "named kind expressions are not supported yet".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "this parses as a kind expression, but named kind variables are not implemented yet".to_string(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "`*`, `Constraint`, and arrows over them are supported today".to_string(),
+                ],
+                error_code,
+            },
+
             Self::GenericParamAlreadyDefinedInParent {
                 span,
                 conflict_with,

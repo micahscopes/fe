@@ -318,6 +318,8 @@ impl KindBound {
             Partial::Present(KindBound::Mono)
         } else if ast.constraint().is_some() {
             Partial::Present(KindBound::Constraint)
+        } else if let Some(path) = ast.path().and_then(|path| path.path()) {
+            Partial::Present(KindBound::Path(path.text().to_string()))
         } else {
             Partial::Absent
         }
