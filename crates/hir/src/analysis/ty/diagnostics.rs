@@ -99,7 +99,6 @@ pub enum TyLowerDiag<'db> {
     },
 
     KindBoundNotAllowed(DynLazySpan<'db>),
-    UnsupportedNamedKind(DynLazySpan<'db>),
 
     GenericParamAlreadyDefinedInParent {
         span: LazyGenericParamSpan<'db>,
@@ -187,7 +186,6 @@ impl TyLowerDiag<'_> {
             Self::TypeAliasCycle { .. } => 4,
             Self::InconsistentKindBound { .. } => 5,
             Self::KindBoundNotAllowed(_) => 6,
-            Self::UnsupportedNamedKind(_) => 36,
             Self::GenericParamAlreadyDefinedInParent { .. } => 7,
             Self::DuplicateArgName { .. } => 8,
             Self::InvalidConstParamTy { .. } => 9,

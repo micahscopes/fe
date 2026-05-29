@@ -104,18 +104,16 @@ fn assert_diag_message(diags: &[CompleteDiagnostic], expected: &str) {
 }
 
 #[test]
-fn named_kind_paths_parse_but_report_semantic_diagnostic() {
+fn named_kind_paths_parse_and_lower_without_diagnostics() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "named_kind_paths_parse_but_report_semantic_diagnostic.fe".into(),
+        "named_kind_paths_parse_and_lower_without_diagnostics.fe".into(),
         r#"
 fn f<F: A<B> -> *, G: * -> A<B> >() {}
 "#,
     );
     let (top_mod, _) = db.top_mod(file);
-    let diags = diagnostics_for(&db, top_mod);
-
-    assert_diag_message(&diags, "named kind expressions are not supported yet");
+    db.assert_no_diags(top_mod);
 }
 
 #[test]

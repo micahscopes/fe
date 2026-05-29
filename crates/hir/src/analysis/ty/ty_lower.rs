@@ -1633,7 +1633,7 @@ pub(super) fn lower_kind(kind: &HirKindBound) -> Kind {
     match kind {
         HirKindBound::Mono => Kind::Star,
         HirKindBound::Constraint => Kind::Constraint,
-        HirKindBound::Path(_) => Kind::Any,
+        HirKindBound::Path(path) => Kind::Var(path.clone()),
         HirKindBound::Abs(lhs, rhs) => match (lhs, rhs) {
             (Partial::Present(lhs), Partial::Present(rhs)) => {
                 Kind::Abs(Box::new((lower_kind(lhs), lower_kind(rhs))))
@@ -1707,6 +1707,32 @@ fn f<P: * -> Constraint>() {}
         assert!(matches!(
             kind,
             Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Constraint
+        ));
+    }
+
+    #[test]
+    fn lowers_named_kind_bounds_as_internal_kind_vars() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "lowers_named_kind_bounds_as_internal_kind_vars.fe".into(),
+            r#"
+fn f<F: A<B> -> *, G: * -> A<B> >() {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "f");
+        let param_set = collect_generic_params(&db, func.into());
+        let f_kind = param_set.params(&db)[0].kind(&db);
+        let g_kind = param_set.params(&db)[1].kind(&db);
+
+        assert!(matches!(
+            f_kind,
+            Kind::Abs(inner) if inner.0 == Kind::Var("A<B>".to_string()) && inner.1 == Kind::Star
+        ));
+        assert!(matches!(
+            g_kind,
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Var("A<B>".to_string())
         ));
     }
 }

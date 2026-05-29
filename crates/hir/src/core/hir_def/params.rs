@@ -314,22 +314,8 @@ pub enum KindBound {
     Mono,
     /// `Constraint`
     Constraint,
-    /// A named kind expression. Parsed for forward compatibility; semantic
-    /// kind variables are not implemented yet.
+    /// A named kind expression lowered as an internal kind variable.
     Path(String),
     /// `* -> *`
     Abs(Partial<Box<KindBound>>, Partial<Box<KindBound>>),
-}
-
-impl KindBound {
-    pub fn contains_named_path(&self) -> bool {
-        match self {
-            Self::Path(_) => true,
-            Self::Abs(lhs, rhs) => {
-                matches!(lhs, Partial::Present(lhs) if lhs.contains_named_path())
-                    || matches!(rhs, Partial::Present(rhs) if rhs.contains_named_path())
-            }
-            Self::Mono | Self::Constraint => false,
-        }
-    }
 }
