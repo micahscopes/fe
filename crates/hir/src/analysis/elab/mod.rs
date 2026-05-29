@@ -30,8 +30,8 @@ use crate::{
         },
     },
     hir_def::{
-        Attr, Enum, FieldParent, HirIngot, IdentId, ItemKind, NormalAttr, Struct, TopLevelMod,
-        Trait,
+        Attr, Body, Enum, Expr, FieldParent, HirIngot, IdentId, ItemKind, NormalAttr, Partial,
+        Stmt, Struct, TopLevelMod, Trait,
     },
     span::DynLazySpan,
 };
@@ -132,6 +132,47 @@ pub(crate) struct ElaborationCapabilityWitness<'db> {
     origin: ElaborationCapabilityOrigin,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) struct CapabilityEnv<'db> {
+    witnesses: Vec<ElaborationCapabilityWitness<'db>>,
+}
+
+impl<'db> CapabilityEnv<'db> {
+    fn from_context(db: &'db dyn HirAnalysisDb, context: ElaborationCtfeContextId<'db>) -> Self {
+        Self {
+            witnesses: context.capabilities(db).clone(),
+        }
+    }
+
+    fn has_impl_builder(&self, db: &'db dyn HirAnalysisDb, goal: ConstraintId<'db>) -> bool {
+        self.witnesses.iter().any(|witness| {
+            if witness.capability.mode(db) != CapabilityMode::Mut {
+                return false;
+            }
+            match witness.capability.key(db) {
+                EffectCapabilityKey::Compiler(CompilerCapabilityKind::ImplBuilder(
+                    capability_goal,
+                )) => constraints_match(db, capability_goal, goal),
+                _ => false,
+            }
+        })
+    }
+
+    fn has_reflect_target(&self, db: &'db dyn HirAnalysisDb, target: TyId<'db>) -> bool {
+        self.witnesses.iter().any(|witness| {
+            if witness.capability.mode(db) != CapabilityMode::Read {
+                return false;
+            }
+            match witness.capability.key(db) {
+                EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(reflected)) => {
+                    tys_match(db, reflected, target)
+                }
+                _ => false,
+            }
+        })
+    }
+}
+
 #[salsa::interned]
 #[derive(Debug)]
 pub(crate) struct ElaborationCtfeContextId<'db> {
@@ -162,7 +203,7 @@ pub(crate) enum RequirementOrigin<'db> {
 pub(crate) enum GeneratedTraceFact<'db> {
     RequestedBy(ElaborationRequestId<'db>),
     GeneratedBy(ElaborationCtfeContextId<'db>),
-    Source(GeneratedImplSource),
+    Source(GeneratedImplSource<'db>),
     ProvidesEvidence(ConstraintId<'db>),
     RequiresConstraint {
         constraint: ConstraintId<'db>,
@@ -179,6 +220,35 @@ pub(crate) enum BuilderCommand<'db> {
     Finish,
 }
 
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct BuilderCommandListId<'db> {
+    #[return_ref]
+    commands: Vec<BuilderCommand<'db>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum ProviderSkipReason {
+    MissingBuilderCapability,
+    UnsupportedProviderBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum ProviderOutputStatus<'db> {
+    Succeeded { commands: BuilderCommandListId<'db> },
+    Failed,
+    Skipped { reason: ProviderSkipReason },
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct ProviderOutputId<'db> {
+    request: ElaborationRequestId<'db>,
+    provider: EvidenceProviderId<'db>,
+    context: ElaborationCtfeContextId<'db>,
+    status: ProviderOutputStatus<'db>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum BuilderError<'db> {
     WrongTarget {
@@ -186,6 +256,8 @@ pub(crate) enum BuilderError<'db> {
         attempted: ConstraintId<'db>,
     },
     AlreadyFinished,
+    CommandAfterFinish,
+    NotFinished,
     UnsupportedTarget(ConstraintId<'db>),
 }
 
@@ -253,36 +325,74 @@ impl<'db> ImplBuilderSession<'db> {
         if self.finished {
             return Err(BuilderError::AlreadyFinished);
         }
-        let ConstraintKind::Trait(trait_inst) = self.target.kind(db) else {
-            return Err(BuilderError::UnsupportedTarget(self.target));
-        };
 
         self.finished = true;
         self.commands.push(BuilderCommand::Finish);
-        let requirements: Vec<GeneratedRequirement<'db>> = self
-            .commands
-            .iter()
-            .filter_map(|command| match command {
-                BuilderCommand::Require { constraint, origin } => Some(GeneratedRequirement {
+        let commands = BuilderCommandListId::new(db, self.commands);
+        generated_impl_from_builder_commands(
+            db,
+            self.context,
+            GeneratedImplSource::StubDerivedFieldObligations,
+            commands,
+        )
+    }
+
+    fn finish_commands(
+        mut self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Result<BuilderCommandListId<'db>, BuilderError<'db>> {
+        if self.finished {
+            return Err(BuilderError::AlreadyFinished);
+        }
+        self.finished = true;
+        self.commands.push(BuilderCommand::Finish);
+        Ok(BuilderCommandListId::new(db, self.commands))
+    }
+}
+
+fn generated_impl_from_builder_commands<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+    source: GeneratedImplSource<'db>,
+    commands: BuilderCommandListId<'db>,
+) -> Result<GeneratedImplId<'db>, BuilderError<'db>> {
+    let target = context.request(db).goal(db);
+    let ConstraintKind::Trait(trait_inst) = target.kind(db) else {
+        return Err(BuilderError::UnsupportedTarget(target));
+    };
+
+    let mut finished = false;
+    let mut requirements = Vec::new();
+    for command in commands.commands(db) {
+        if finished {
+            return Err(BuilderError::CommandAfterFinish);
+        }
+        match command {
+            BuilderCommand::Require { constraint, origin } => {
+                requirements.push(GeneratedRequirement {
                     constraint: *constraint,
                     origin: *origin,
-                }),
-                BuilderCommand::Finish => None,
-            })
-            .collect();
-        let obligations: Vec<ConstraintId<'db>> = requirements
-            .iter()
-            .map(|requirement| requirement.constraint)
-            .collect();
-
-        Ok(GeneratedImplId {
-            context: self.context,
-            trait_inst,
-            source: GeneratedImplSource::StubDerivedFieldObligations,
-            requirements: GeneratedRequirementListId::new(db, requirements),
-            obligations: ConstraintListId::new(db, obligations),
-        })
+                })
+            }
+            BuilderCommand::Finish => finished = true,
+        }
     }
+
+    if !finished {
+        return Err(BuilderError::NotFinished);
+    }
+
+    let obligations = requirements
+        .iter()
+        .map(|requirement| requirement.constraint)
+        .collect::<Vec<_>>();
+    Ok(GeneratedImplId {
+        context,
+        trait_inst,
+        source,
+        requirements: GeneratedRequirementListId::new(db, requirements),
+        obligations: ConstraintListId::new(db, obligations),
+    })
 }
 
 impl<'db> ElaborationCtfeContextId<'db> {
@@ -393,9 +503,10 @@ impl<'db> GeneratedTraceFact<'db> {
                     .unwrap_or_else(|| "<anonymous provider>".to_string());
                 format!("{prefix} generated by {provider}")
             }
-            Self::Source(source) => {
-                format!("{prefix} generated output source {}", source.pretty_print())
-            }
+            Self::Source(source) => format!(
+                "{prefix} generated output source {}",
+                source.pretty_print(db)
+            ),
             Self::ProvidesEvidence(constraint) => {
                 format!("{prefix} provides {}", constraint.pretty_print(db))
             }
@@ -541,16 +652,16 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 .into_iter()
                 .filter_map(move |context| {
                     let goal = request.goal(db);
-                    if generated_stub_trait_has_required_methods(db, goal) {
+                    if provider_output_trait_has_required_methods(db, goal) {
                         return Some(invalid_request(
                             request.target(db).attr_span(),
                             format!(
-                                "generated stub impls cannot satisfy `{}` because it has required methods",
+                                "provider output for `{}` does not generate required methods yet",
                                 trait_name(db, concrete_trait_head(db, goal)?)
                             ),
                         ));
                     }
-                    let generated = generated_impl_candidate_for_context(db, *context)?;
+                    let generated = provider_generated_impl_candidate_for_context(db, *context)?;
                     generated_conflicts_with_authored_impl(db, generated).then(|| {
                         invalid_request(
                             request.target(db).attr_span(),
@@ -642,7 +753,7 @@ pub(crate) fn generated_impls_for_ingot<'db>(
         .flat_map(|&request| {
             elaboration_ctfe_contexts_for_request(db, request)
                 .iter()
-                .filter_map(move |&context| generated_impl_for_context(db, context))
+                .filter_map(move |&context| provider_generated_impl_for_context(db, context))
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -658,7 +769,7 @@ pub fn generated_impl_summaries_for_top_mod<'db>(
         .map(|generated| {
             format!(
                 "generated {} {} with obligations {}",
-                generated.source.pretty_print(),
+                generated.source.pretty_print(db),
                 generated.trait_inst.pretty_print(db, true),
                 generated.obligations.pretty_print(db),
             )
@@ -681,15 +792,116 @@ pub fn generated_trace_summaries_for_top_mod<'db>(
         .collect()
 }
 
-fn generated_impl_for_context<'db>(
+fn provider_generated_impl_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
-    let generated = generated_impl_candidate_for_context(db, context)?;
+    let generated = provider_generated_impl_candidate_for_context(db, context)?;
     (!generated_conflicts_with_authored_impl(db, generated)).then_some(generated)
 }
 
-fn generated_impl_candidate_for_context<'db>(
+fn provider_generated_impl_candidate_for_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> Option<GeneratedImplId<'db>> {
+    let output = provider_output_for_context(db, context);
+    provider_generated_impl_for_output(db, output)
+}
+
+fn provider_generated_impl_for_output<'db>(
+    db: &'db dyn HirAnalysisDb,
+    output: ProviderOutputId<'db>,
+) -> Option<GeneratedImplId<'db>> {
+    let ProviderOutputStatus::Succeeded { commands } = output.status(db) else {
+        return None;
+    };
+    if provider_output_trait_has_required_methods(db, output.request(db).goal(db)) {
+        return None;
+    }
+    generated_impl_from_builder_commands(
+        db,
+        output.context(db),
+        GeneratedImplSource::ProviderOutput(output),
+        commands,
+    )
+    .ok()
+}
+
+#[salsa::tracked]
+fn provider_output_for_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> ProviderOutputId<'db> {
+    let request = context.request(db);
+    let provider = context.provider(db);
+    let goal = request.goal(db);
+    let env = CapabilityEnv::from_context(db, context);
+    if !env.has_impl_builder(db, goal) {
+        return ProviderOutputId::new(
+            db,
+            request,
+            provider,
+            context,
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::MissingBuilderCapability,
+            },
+        );
+    }
+
+    let mut builder = ImplBuilderSession::new(db, context);
+    if builder.emit_impl(db, goal).is_err() {
+        return ProviderOutputId::new(db, request, provider, context, ProviderOutputStatus::Failed);
+    }
+
+    if provider_body_requests_field_obligations(db, provider) {
+        let target_ty = request.target(db).ty(db);
+        if !env.has_reflect_target(db, target_ty) {
+            return ProviderOutputId::new(
+                db,
+                request,
+                provider,
+                context,
+                ProviderOutputStatus::Skipped {
+                    reason: ProviderSkipReason::UnsupportedProviderBody,
+                },
+            );
+        }
+        let Some(requirements) = derive_requirements_for_context(db, context) else {
+            return ProviderOutputId::new(
+                db,
+                request,
+                provider,
+                context,
+                ProviderOutputStatus::Skipped {
+                    reason: ProviderSkipReason::UnsupportedProviderBody,
+                },
+            );
+        };
+        for requirement in requirements {
+            if builder
+                .require_with_origin(requirement.constraint, requirement.origin)
+                .is_err()
+            {
+                return ProviderOutputId::new(
+                    db,
+                    request,
+                    provider,
+                    context,
+                    ProviderOutputStatus::Failed,
+                );
+            }
+        }
+    }
+
+    let status = match builder.finish_commands(db) {
+        Ok(commands) => ProviderOutputStatus::Succeeded { commands },
+        Err(_) => ProviderOutputStatus::Failed,
+    };
+    ProviderOutputId::new(db, request, provider, context, status)
+}
+
+#[allow(dead_code)]
+fn stub_generated_impl_candidate_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
@@ -791,10 +1003,134 @@ fn derive_requirements_for_context<'db>(
     )
 }
 
+const FIELD_OBLIGATION_INTRINSIC: &str = "require_derive_field_obligations";
+
+fn provider_body_requests_field_obligations<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider: EvidenceProviderId<'db>,
+) -> bool {
+    let Some(body) = provider.func(db).body(db) else {
+        return false;
+    };
+    expr_contains_field_obligation_intrinsic(db, body, body.expr(db))
+}
+
+fn expr_contains_field_obligation_intrinsic<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    expr: crate::hir_def::ExprId,
+) -> bool {
+    let Partial::Present(expr_data) = expr.data(db, body) else {
+        return false;
+    };
+    match expr_data {
+        Expr::Block(stmts) => stmts
+            .iter()
+            .any(|stmt| stmt_contains_field_obligation_intrinsic(db, body, *stmt)),
+        Expr::Call(callee, args) => {
+            expr_is_path_ident(db, body, *callee, FIELD_OBLIGATION_INTRINSIC)
+                || expr_contains_field_obligation_intrinsic(db, body, *callee)
+                || args
+                    .iter()
+                    .any(|arg| expr_contains_field_obligation_intrinsic(db, body, arg.expr))
+        }
+        Expr::MethodCall(receiver, method, _, args) => {
+            method
+                .to_opt()
+                .is_some_and(|method| method.data(db) == FIELD_OBLIGATION_INTRINSIC)
+                || expr_contains_field_obligation_intrinsic(db, body, *receiver)
+                || args
+                    .iter()
+                    .any(|arg| expr_contains_field_obligation_intrinsic(db, body, arg.expr))
+        }
+        Expr::Bin(lhs, rhs, _) | Expr::Assign(lhs, rhs) | Expr::AugAssign(lhs, rhs, _) => {
+            expr_contains_field_obligation_intrinsic(db, body, *lhs)
+                || expr_contains_field_obligation_intrinsic(db, body, *rhs)
+        }
+        Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
+            expr_contains_field_obligation_intrinsic(db, body, *inner)
+        }
+        Expr::Tuple(items) | Expr::Array(items) => items
+            .iter()
+            .any(|item| expr_contains_field_obligation_intrinsic(db, body, *item)),
+        Expr::ArrayRep(value, _) => expr_contains_field_obligation_intrinsic(db, body, *value),
+        Expr::If(_, then_expr, else_expr) => {
+            expr_contains_field_obligation_intrinsic(db, body, *then_expr)
+                || else_expr.is_some_and(|else_expr| {
+                    expr_contains_field_obligation_intrinsic(db, body, else_expr)
+                })
+        }
+        Expr::Match(scrutinee, arms) => {
+            expr_contains_field_obligation_intrinsic(db, body, *scrutinee)
+                || match arms {
+                    Partial::Present(arms) => arms
+                        .iter()
+                        .any(|arm| expr_contains_field_obligation_intrinsic(db, body, arm.body)),
+                    Partial::Absent => false,
+                }
+        }
+        Expr::RecordInit(_, fields) => fields
+            .iter()
+            .any(|field| expr_contains_field_obligation_intrinsic(db, body, field.expr)),
+        Expr::With(_, inner) => expr_contains_field_obligation_intrinsic(db, body, *inner),
+        Expr::Lit(_) | Expr::Path(_) => false,
+    }
+}
+
+fn stmt_contains_field_obligation_intrinsic<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    stmt: crate::hir_def::StmtId,
+) -> bool {
+    let Partial::Present(stmt_data) = stmt.data(db, body) else {
+        return false;
+    };
+    match stmt_data {
+        Stmt::Let(_, _, init) => {
+            init.is_some_and(|init| expr_contains_field_obligation_intrinsic(db, body, init))
+        }
+        Stmt::For(_, iterable, loop_body, _) => {
+            expr_contains_field_obligation_intrinsic(db, body, *iterable)
+                || expr_contains_field_obligation_intrinsic(db, body, *loop_body)
+        }
+        Stmt::While(_, loop_body) => expr_contains_field_obligation_intrinsic(db, body, *loop_body),
+        Stmt::Return(expr) => {
+            expr.is_some_and(|expr| expr_contains_field_obligation_intrinsic(db, body, expr))
+        }
+        Stmt::Expr(expr) => expr_contains_field_obligation_intrinsic(db, body, *expr),
+        Stmt::Continue | Stmt::Break => false,
+    }
+}
+
+fn expr_is_path_ident<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    expr: crate::hir_def::ExprId,
+    expected: &str,
+) -> bool {
+    let Partial::Present(Expr::Path(Partial::Present(path))) = expr.data(db, body) else {
+        return false;
+    };
+    path.ident(db)
+        .to_opt()
+        .is_some_and(|ident| ident.data(db) == expected)
+}
+
 fn generated_stub_trait_has_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     goal: ConstraintId<'db>,
 ) -> bool {
+    trait_has_required_methods(db, goal)
+}
+
+fn provider_output_trait_has_required_methods<'db>(
+    db: &'db dyn HirAnalysisDb,
+    goal: ConstraintId<'db>,
+) -> bool {
+    trait_has_required_methods(db, goal)
+}
+
+fn trait_has_required_methods<'db>(db: &'db dyn HirAnalysisDb, goal: ConstraintId<'db>) -> bool {
     let ConstraintKind::Trait(trait_inst) = goal.kind(db) else {
         return false;
     };

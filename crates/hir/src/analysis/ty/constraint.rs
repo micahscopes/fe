@@ -431,16 +431,16 @@ pub(crate) struct ConstProofId<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum GeneratedImplSource {
+pub(crate) enum GeneratedImplSource<'db> {
     StubDerivedFieldObligations,
-    ProviderOutput,
+    ProviderOutput(crate::analysis::elab::ProviderOutputId<'db>),
 }
 
-impl GeneratedImplSource {
-    pub(crate) fn pretty_print(self) -> &'static str {
+impl<'db> GeneratedImplSource<'db> {
+    pub(crate) fn pretty_print(self, _db: &'db dyn HirAnalysisDb) -> &'static str {
         match self {
             Self::StubDerivedFieldObligations => "stub",
-            Self::ProviderOutput => "provider",
+            Self::ProviderOutput(_) => "provider",
         }
     }
 }
@@ -462,7 +462,7 @@ pub(crate) struct GeneratedRequirementListId<'db> {
 pub(crate) struct GeneratedImplId<'db> {
     pub(crate) context: crate::analysis::elab::ElaborationCtfeContextId<'db>,
     pub(crate) trait_inst: TraitInstId<'db>,
-    pub(crate) source: GeneratedImplSource,
+    pub(crate) source: GeneratedImplSource<'db>,
     pub(crate) requirements: GeneratedRequirementListId<'db>,
     pub(crate) obligations: ConstraintListId<'db>,
 }
