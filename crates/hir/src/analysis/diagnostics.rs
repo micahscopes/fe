@@ -3123,6 +3123,22 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 }
             }
 
+            Self::WhereConstraintPredicateMissingEvidence { primary } => CompleteDiagnostic {
+                severity,
+                message: "missing constraint predicate evidence".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "could not prove this constraint predicate from the current assumptions"
+                        .to_string(),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![
+                    "add a matching predicate to the caller's `where` clause or use a concrete type that satisfies it"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
             Self::InvalidCast {
                 primary,
                 from,

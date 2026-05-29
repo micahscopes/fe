@@ -203,6 +203,50 @@ where
 }
 
 #[test]
+fn generic_constraint_application_call_with_matching_assumption_passes() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generic_constraint_application_call_with_matching_assumption_passes.fe".into(),
+        r#"
+fn needs<P: * -> Constraint, T>()
+where
+    P<T>
+{}
+
+fn caller<P: * -> Constraint, T>()
+where
+    P<T>
+{
+    needs<P, T>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn generic_constraint_application_call_requires_matching_assumption() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generic_constraint_application_call_requires_matching_assumption.fe".into(),
+        r#"
+fn needs<P: * -> Constraint, T>()
+where
+    P<T>
+{}
+
+fn fail<P: * -> Constraint, T>() {
+    needs<P, T>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "missing constraint predicate evidence");
+}
+
+#[test]
 fn const_predicate_adt_instantiation_enforces_where_clause() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

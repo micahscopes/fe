@@ -81,7 +81,10 @@ use crate::analysis::semantic::{SemConstId, SemConstScalar, SemConstValue, eval_
 use crate::analysis::ty::ty_def::{TyBase, TyData};
 use crate::analysis::ty::{
     const_ty::{ConstTyData, invalid_cause_from_ctfe_error},
-    constraint::{ConstPredicateInstId, ConstraintId, ConstraintKind, ConstraintListId, ParamEnv},
+    constraint::{
+        ConstPredicateInstId, ConstraintApplicationId, ConstraintId, ConstraintKind,
+        ConstraintListId, ParamEnv,
+    },
     effect_handle_metadata,
     fold::AssocTySubst,
     normalize::normalize_ty,
@@ -1329,6 +1332,9 @@ impl<'db> TyChecker<'db> {
             ConstraintKind::ConstPredicate(pred) => {
                 self.process_const_predicate_obligation(pred, obligation, final_pass)
             }
+            ConstraintKind::ConstraintApplication(application) => {
+                self.process_constraint_application_obligation(application, obligation, final_pass)
+            }
             ConstraintKind::Invalid => ObligationOutcome::Discharged,
             _ => self.process_future_constraint_obligation(obligation, final_pass),
         }
@@ -1364,6 +1370,48 @@ impl<'db> TyChecker<'db> {
                 },
                 span: span.clone(),
             });
+        }
+    }
+
+    fn process_constraint_application_obligation(
+        &mut self,
+        mut application: ConstraintApplicationId<'db>,
+        obligation: env::Obligation<'db>,
+        final_pass: bool,
+    ) -> ObligationOutcome<'db> {
+        let db = self.db;
+        if self.has_dead_inference_keys(&application) {
+            return ObligationOutcome::Discharged;
+        }
+
+        application = application.fold_with(db, &mut self.table);
+        let flags = collect_flags(db, application);
+        if flags.contains(TyFlags::HAS_INVALID) || self.has_dead_inference_keys(&application) {
+            return ObligationOutcome::Discharged;
+        }
+
+        let required = ConstraintId::new(db, ConstraintKind::ConstraintApplication(application));
+        if self
+            .env
+            .param_env()
+            .constraints
+            .list(db)
+            .iter()
+            .any(|assumption| *assumption == required)
+        {
+            return ObligationOutcome::Discharged;
+        }
+
+        if final_pass {
+            self.push_diag(BodyDiag::WhereConstraintPredicateMissingEvidence {
+                primary: obligation.span.clone(),
+            });
+            ObligationOutcome::Discharged
+        } else {
+            ObligationOutcome::Requeue(env::Obligation {
+                constraint: required,
+                ..obligation
+            })
         }
     }
 
