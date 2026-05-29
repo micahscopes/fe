@@ -3,7 +3,13 @@ use std::path::Path;
 use common::diagnostics::{CompleteDiagnostic, cmp_complete_diagnostics};
 use dir_test::{Fixture, dir_test};
 use fe_hir::{
-    analysis::{elab::elaboration_request_summaries_for_top_mod, initialize_analysis_pass},
+    analysis::{
+        elab::{
+            elaboration_ctfe_context_summaries_for_top_mod,
+            elaboration_request_summaries_for_top_mod,
+        },
+        initialize_analysis_pass,
+    },
     hir_def::TopLevelMod,
     test_db::HirAnalysisTestDb,
 };
@@ -978,6 +984,69 @@ struct Foo {}
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "invalid elaboration request");
     assert_diag_message(&diags, "derive head must resolve to a trait");
+}
+
+#[test]
+fn elaboration_ctfe_context_seeds_declared_provider_capabilities() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "elaboration_ctfe_context_seeds_declared_provider_capabilities.fe".into(),
+        r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {
+    x: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    let summaries = elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod);
+    assert_eq!(
+        summaries,
+        vec![
+            "Foo: Eq requested for Foo via derive_eq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq>]".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn elaboration_ctfe_context_only_seeds_declared_provider_capabilities() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "elaboration_ctfe_context_only_seeds_declared_provider_capabilities.fe".into(),
+        r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    let summaries = elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod);
+    assert_eq!(
+        summaries,
+        vec!["Foo: Eq requested for Foo via derive_eq with []".to_string()]
+    );
 }
 
 #[test]

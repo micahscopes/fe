@@ -7,11 +7,17 @@ use crate::{
         diagnostics::DiagnosticVoucher,
         name_resolution::{PathRes, resolve_path},
         ty::{
+            binder::Binder,
             constraint::{ConstraintId, ConstraintKind},
             diagnostics::{TyDiagCollection, TyLowerDiag},
+            evidence_provider::{EvidenceProviderId, providers_for_constraint_head},
+            fold::TyFoldable,
             trait_def::TraitInstId,
-            trait_resolution::PredicateListId,
+            trait_resolution::{
+                PredicateListId, constraint::collect_func_effect_capability_constraints,
+            },
             ty_def::TyId,
+            unify::UnificationTable,
         },
     },
     hir_def::{Attr, Enum, HirIngot, ItemKind, NormalAttr, Struct, TopLevelMod, Trait},
@@ -103,6 +109,51 @@ pub(crate) struct ElaborationOutputId<'db> {
     request: ElaborationRequestId<'db>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum ElaborationCapabilityOrigin {
+    ProviderUsesParam,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) struct ElaborationCapabilityWitness<'db> {
+    capability: crate::analysis::ty::constraint::EffectCapabilityId<'db>,
+    origin: ElaborationCapabilityOrigin,
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct ElaborationCtfeContextId<'db> {
+    request: ElaborationRequestId<'db>,
+    provider: EvidenceProviderId<'db>,
+
+    #[return_ref]
+    capabilities: Vec<ElaborationCapabilityWitness<'db>>,
+}
+
+impl<'db> ElaborationCtfeContextId<'db> {
+    pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
+        let provider = self
+            .provider(db)
+            .func(db)
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string())
+            .unwrap_or_else(|| "<anonymous provider>".to_string());
+        let capabilities = self
+            .capabilities(db)
+            .iter()
+            .map(|witness| witness.capability.pretty_print(db))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} via {} with [{}]",
+            self.request(db).pretty_print(db),
+            provider,
+            capabilities
+        )
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn elaborate_request<'db>(
     _db: &'db dyn HirAnalysisDb,
@@ -171,6 +222,36 @@ pub fn elaboration_request_summaries_for_top_mod<'db>(
         .collect()
 }
 
+#[salsa::tracked(return_ref)]
+pub(crate) fn elaboration_ctfe_contexts_for_request<'db>(
+    db: &'db dyn HirAnalysisDb,
+    request: ElaborationRequestId<'db>,
+) -> Vec<ElaborationCtfeContextId<'db>> {
+    let Some(head) = concrete_trait_head(db, request.goal(db)) else {
+        return Vec::new();
+    };
+    let ingot = request.target(db).item().top_mod(db).ingot(db);
+    providers_for_constraint_head(db, ingot, head)
+        .into_iter()
+        .filter_map(|provider| elaborate_provider_context(db, request, provider))
+        .collect()
+}
+
+pub fn elaboration_ctfe_context_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    elaboration_requests_for_top_mod(db, top_mod)
+        .iter()
+        .flat_map(|&request| {
+            elaboration_ctfe_contexts_for_request(db, request)
+                .iter()
+                .map(|context| context.pretty_print(db))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn derive_requests_for_target<'db>(
     db: &'db dyn HirAnalysisDb,
     target: ElaborationTarget<'db>,
@@ -179,6 +260,66 @@ fn derive_requests_for_target<'db>(
         .into_iter()
         .flat_map(|(attr_index, attr)| derive_requests_for_attr(db, target, attr_index, attr))
         .collect()
+}
+
+fn concrete_trait_head<'db>(
+    db: &'db dyn HirAnalysisDb,
+    goal: ConstraintId<'db>,
+) -> Option<Trait<'db>> {
+    match goal.kind(db) {
+        ConstraintKind::Trait(inst) => Some(inst.def(db)),
+        _ => None,
+    }
+}
+
+fn elaborate_provider_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    request: ElaborationRequestId<'db>,
+    provider: EvidenceProviderId<'db>,
+) -> Option<ElaborationCtfeContextId<'db>> {
+    let capability_constraints = collect_func_effect_capability_constraints(db, provider.func(db));
+    let mut table = UnificationTable::new(db);
+    let mut instantiated = Binder::bind(provider_goal_and_capabilities(
+        db,
+        provider,
+        &capability_constraints,
+    ))
+    .instantiate_with(db, |ty| table.new_var_from_param(ty));
+
+    let instantiated_goal = instantiated.first().copied()?;
+    table.unify(instantiated_goal, request.goal(db)).ok()?;
+
+    let capabilities: Vec<ElaborationCapabilityWitness<'db>> = instantiated
+        .drain(1..)
+        .filter_map(|constraint| {
+            let folded = constraint.fold_with(db, &mut table);
+            let ConstraintKind::EffectCapability(capability) = folded.kind(db) else {
+                return None;
+            };
+            Some(ElaborationCapabilityWitness {
+                capability,
+                origin: ElaborationCapabilityOrigin::ProviderUsesParam,
+            })
+        })
+        .collect();
+
+    Some(ElaborationCtfeContextId::new(
+        db,
+        request,
+        provider,
+        capabilities,
+    ))
+}
+
+fn provider_goal_and_capabilities<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider: EvidenceProviderId<'db>,
+    capabilities: &[ConstraintId<'db>],
+) -> Vec<ConstraintId<'db>> {
+    let mut constraints = Vec::with_capacity(capabilities.len() + 1);
+    constraints.push(provider.goal(db));
+    constraints.extend(capabilities.iter().copied());
+    constraints
 }
 
 fn derive_attrs<'db>(

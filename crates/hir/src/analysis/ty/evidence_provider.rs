@@ -7,8 +7,9 @@ use crate::{
             diagnostics::{TyDiagCollection, TyLowerDiag},
         },
     },
-    hir_def::{Attr, Func, ItemKind, NormalAttr, Trait},
+    hir_def::{Attr, Func, HirIngot, ItemKind, NormalAttr, Trait},
 };
+use common::ingot::Ingot;
 
 #[salsa::interned]
 #[derive(Debug)]
@@ -93,6 +94,32 @@ pub(crate) fn validate_evidence_provider<'db>(
     } else {
         (EvidenceProviderValidationResult::Invalid, diags)
     }
+}
+
+pub(crate) fn validated_evidence_providers_for_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+) -> Vec<EvidenceProviderId<'db>> {
+    ingot
+        .all_funcs(db)
+        .iter()
+        .filter_map(|&func| match validate_evidence_provider(db, func).0 {
+            EvidenceProviderValidationResult::Valid(provider) => Some(provider),
+            EvidenceProviderValidationResult::Invalid
+            | EvidenceProviderValidationResult::NotProvider => None,
+        })
+        .collect()
+}
+
+pub(crate) fn providers_for_constraint_head<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    head: Trait<'db>,
+) -> Vec<EvidenceProviderId<'db>> {
+    validated_evidence_providers_for_ingot(db, ingot)
+        .into_iter()
+        .filter(|provider| provider.head(db) == head)
+        .collect()
 }
 
 fn evidence_provider_attrs<'db>(
