@@ -853,6 +853,30 @@ fn provider_output_for_context<'db>(
         return ProviderOutputId::new(db, request, provider, context, ProviderOutputStatus::Failed);
     }
 
+    match provider_body_finish_count(db, provider) {
+        0 => {
+            return ProviderOutputId::new(
+                db,
+                request,
+                provider,
+                context,
+                ProviderOutputStatus::Skipped {
+                    reason: ProviderSkipReason::UnsupportedProviderBody,
+                },
+            );
+        }
+        1 => {}
+        _ => {
+            return ProviderOutputId::new(
+                db,
+                request,
+                provider,
+                context,
+                ProviderOutputStatus::Failed,
+            );
+        }
+    }
+
     if provider_body_requests_field_obligations(db, provider) {
         let target_ty = request.target(db).ty(db);
         if !env.has_reflect_target(db, target_ty) {
@@ -1004,101 +1028,126 @@ fn derive_requirements_for_context<'db>(
 }
 
 const FIELD_OBLIGATION_INTRINSIC: &str = "require_derive_field_obligations";
+const FINISH_IMPL_INTRINSIC: &str = "finish_derive_impl";
 
 fn provider_body_requests_field_obligations<'db>(
     db: &'db dyn HirAnalysisDb,
     provider: EvidenceProviderId<'db>,
 ) -> bool {
-    let Some(body) = provider.func(db).body(db) else {
-        return false;
-    };
-    expr_contains_field_obligation_intrinsic(db, body, body.expr(db))
+    provider_body_intrinsic_count(db, provider, FIELD_OBLIGATION_INTRINSIC) > 0
 }
 
-fn expr_contains_field_obligation_intrinsic<'db>(
+fn provider_body_finish_count<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider: EvidenceProviderId<'db>,
+) -> usize {
+    provider_body_intrinsic_count(db, provider, FINISH_IMPL_INTRINSIC)
+}
+
+fn provider_body_intrinsic_count<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider: EvidenceProviderId<'db>,
+    intrinsic: &str,
+) -> usize {
+    let Some(body) = provider.func(db).body(db) else {
+        return 0;
+    };
+    count_intrinsic_calls_in_expr(db, body, body.expr(db), intrinsic)
+}
+
+fn count_intrinsic_calls_in_expr<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
     expr: crate::hir_def::ExprId,
-) -> bool {
+    intrinsic: &str,
+) -> usize {
     let Partial::Present(expr_data) = expr.data(db, body) else {
-        return false;
+        return 0;
     };
     match expr_data {
         Expr::Block(stmts) => stmts
             .iter()
-            .any(|stmt| stmt_contains_field_obligation_intrinsic(db, body, *stmt)),
+            .map(|stmt| count_intrinsic_calls_in_stmt(db, body, *stmt, intrinsic))
+            .sum(),
         Expr::Call(callee, args) => {
-            expr_is_path_ident(db, body, *callee, FIELD_OBLIGATION_INTRINSIC)
-                || expr_contains_field_obligation_intrinsic(db, body, *callee)
-                || args
+            usize::from(expr_is_path_ident(db, body, *callee, intrinsic))
+                + count_intrinsic_calls_in_expr(db, body, *callee, intrinsic)
+                + args
                     .iter()
-                    .any(|arg| expr_contains_field_obligation_intrinsic(db, body, arg.expr))
+                    .map(|arg| count_intrinsic_calls_in_expr(db, body, arg.expr, intrinsic))
+                    .sum::<usize>()
         }
         Expr::MethodCall(receiver, method, _, args) => {
-            method
-                .to_opt()
-                .is_some_and(|method| method.data(db) == FIELD_OBLIGATION_INTRINSIC)
-                || expr_contains_field_obligation_intrinsic(db, body, *receiver)
-                || args
+            usize::from(
+                method
+                    .to_opt()
+                    .is_some_and(|method| method.data(db) == intrinsic),
+            ) + count_intrinsic_calls_in_expr(db, body, *receiver, intrinsic)
+                + args
                     .iter()
-                    .any(|arg| expr_contains_field_obligation_intrinsic(db, body, arg.expr))
+                    .map(|arg| count_intrinsic_calls_in_expr(db, body, arg.expr, intrinsic))
+                    .sum::<usize>()
         }
         Expr::Bin(lhs, rhs, _) | Expr::Assign(lhs, rhs) | Expr::AugAssign(lhs, rhs, _) => {
-            expr_contains_field_obligation_intrinsic(db, body, *lhs)
-                || expr_contains_field_obligation_intrinsic(db, body, *rhs)
+            count_intrinsic_calls_in_expr(db, body, *lhs, intrinsic)
+                + count_intrinsic_calls_in_expr(db, body, *rhs, intrinsic)
         }
         Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
-            expr_contains_field_obligation_intrinsic(db, body, *inner)
+            count_intrinsic_calls_in_expr(db, body, *inner, intrinsic)
         }
         Expr::Tuple(items) | Expr::Array(items) => items
             .iter()
-            .any(|item| expr_contains_field_obligation_intrinsic(db, body, *item)),
-        Expr::ArrayRep(value, _) => expr_contains_field_obligation_intrinsic(db, body, *value),
+            .map(|item| count_intrinsic_calls_in_expr(db, body, *item, intrinsic))
+            .sum(),
+        Expr::ArrayRep(value, _) => count_intrinsic_calls_in_expr(db, body, *value, intrinsic),
         Expr::If(_, then_expr, else_expr) => {
-            expr_contains_field_obligation_intrinsic(db, body, *then_expr)
-                || else_expr.is_some_and(|else_expr| {
-                    expr_contains_field_obligation_intrinsic(db, body, else_expr)
-                })
+            count_intrinsic_calls_in_expr(db, body, *then_expr, intrinsic)
+                + else_expr
+                    .map(|else_expr| count_intrinsic_calls_in_expr(db, body, else_expr, intrinsic))
+                    .unwrap_or_default()
         }
         Expr::Match(scrutinee, arms) => {
-            expr_contains_field_obligation_intrinsic(db, body, *scrutinee)
-                || match arms {
+            count_intrinsic_calls_in_expr(db, body, *scrutinee, intrinsic)
+                + match arms {
                     Partial::Present(arms) => arms
                         .iter()
-                        .any(|arm| expr_contains_field_obligation_intrinsic(db, body, arm.body)),
-                    Partial::Absent => false,
+                        .map(|arm| count_intrinsic_calls_in_expr(db, body, arm.body, intrinsic))
+                        .sum(),
+                    Partial::Absent => 0,
                 }
         }
         Expr::RecordInit(_, fields) => fields
             .iter()
-            .any(|field| expr_contains_field_obligation_intrinsic(db, body, field.expr)),
-        Expr::With(_, inner) => expr_contains_field_obligation_intrinsic(db, body, *inner),
-        Expr::Lit(_) | Expr::Path(_) => false,
+            .map(|field| count_intrinsic_calls_in_expr(db, body, field.expr, intrinsic))
+            .sum(),
+        Expr::With(_, inner) => count_intrinsic_calls_in_expr(db, body, *inner, intrinsic),
+        Expr::Lit(_) | Expr::Path(_) => 0,
     }
 }
 
-fn stmt_contains_field_obligation_intrinsic<'db>(
+fn count_intrinsic_calls_in_stmt<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
     stmt: crate::hir_def::StmtId,
-) -> bool {
+    intrinsic: &str,
+) -> usize {
     let Partial::Present(stmt_data) = stmt.data(db, body) else {
-        return false;
+        return 0;
     };
     match stmt_data {
-        Stmt::Let(_, _, init) => {
-            init.is_some_and(|init| expr_contains_field_obligation_intrinsic(db, body, init))
-        }
+        Stmt::Let(_, _, init) => init
+            .map(|init| count_intrinsic_calls_in_expr(db, body, init, intrinsic))
+            .unwrap_or_default(),
         Stmt::For(_, iterable, loop_body, _) => {
-            expr_contains_field_obligation_intrinsic(db, body, *iterable)
-                || expr_contains_field_obligation_intrinsic(db, body, *loop_body)
+            count_intrinsic_calls_in_expr(db, body, *iterable, intrinsic)
+                + count_intrinsic_calls_in_expr(db, body, *loop_body, intrinsic)
         }
-        Stmt::While(_, loop_body) => expr_contains_field_obligation_intrinsic(db, body, *loop_body),
-        Stmt::Return(expr) => {
-            expr.is_some_and(|expr| expr_contains_field_obligation_intrinsic(db, body, expr))
-        }
-        Stmt::Expr(expr) => expr_contains_field_obligation_intrinsic(db, body, *expr),
-        Stmt::Continue | Stmt::Break => false,
+        Stmt::While(_, loop_body) => count_intrinsic_calls_in_expr(db, body, *loop_body, intrinsic),
+        Stmt::Return(expr) => expr
+            .map(|expr| count_intrinsic_calls_in_expr(db, body, expr, intrinsic))
+            .unwrap_or_default(),
+        Stmt::Expr(expr) => count_intrinsic_calls_in_expr(db, body, *expr, intrinsic),
+        Stmt::Continue | Stmt::Break => 0,
     }
 }
 
@@ -1543,5 +1592,123 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
         let mut builder = ImplBuilderSession::new(&db, context);
         let err = builder.emit_impl(&db, wrong_goal).unwrap_err();
         assert!(matches!(err, BuilderError::WrongTarget { .. }));
+    }
+
+    #[test]
+    fn builder_command_validation_requires_finish() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "builder_command_validation_requires_finish.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let eq = find_trait(&db, top_mod, "Eq");
+        let requirement =
+            ConstraintId::from_trait(&db, TraitInstId::new_simple(&db, eq, vec![TyId::u256(&db)]));
+        let context = first_builder_context(&db, top_mod);
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![BuilderCommand::Require {
+                constraint: requirement,
+                origin: RequirementOrigin::Synthetic,
+            }],
+        );
+        let err = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::StubDerivedFieldObligations,
+            commands,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BuilderError::NotFinished));
+    }
+
+    #[test]
+    fn builder_command_validation_rejects_commands_after_finish() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "builder_command_validation_rejects_commands_after_finish.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let eq = find_trait(&db, top_mod, "Eq");
+        let requirement =
+            ConstraintId::from_trait(&db, TraitInstId::new_simple(&db, eq, vec![TyId::u256(&db)]));
+        let context = first_builder_context(&db, top_mod);
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::Finish,
+                BuilderCommand::Require {
+                    constraint: requirement,
+                    origin: RequirementOrigin::Synthetic,
+                },
+            ],
+        );
+        let err = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::StubDerivedFieldObligations,
+            commands,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BuilderError::CommandAfterFinish));
+    }
+
+    #[test]
+    fn provider_output_rejects_duplicate_finish_calls() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provider_output_rejects_duplicate_finish_calls.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    finish_derive_impl<T>()
+    finish_derive_impl<T>()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(output.status(&db), ProviderOutputStatus::Failed));
     }
 }

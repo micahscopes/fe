@@ -1144,6 +1144,10 @@ where
 #[derive(Eq)]
 struct Foo {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[evidence_provider(Eq)]
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (
@@ -1151,6 +1155,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
+    finish_derive_impl<T>()
     ev
 }
 
@@ -1260,6 +1265,10 @@ const fn require_derive_field_obligations<T>()
     )
 {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[derive(Eq)]
 struct Box {
     value: FieldTy,
@@ -1273,6 +1282,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     require_derive_field_obligations<T>()
+    finish_derive_impl<T>()
     ev
 }
 
@@ -1310,6 +1320,10 @@ struct Box {
     value: FieldTy,
 }
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[evidence_provider(Eq)]
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (
@@ -1317,6 +1331,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
+    finish_derive_impl<T>()
     ev
 }
 
@@ -1331,6 +1346,43 @@ fn caller() {
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         vec!["generated provider Box: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn provider_body_must_finish_generated_impl() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_body_must_finish_generated_impl.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
     );
 }
 
@@ -1353,6 +1405,10 @@ const fn require_derive_field_obligations<T>()
     )
 {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[derive(Eq)]
 struct Box {
     value: FieldTy,
@@ -1366,6 +1422,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     require_derive_field_obligations<T>()
+    finish_derive_impl<T>()
     ev
 }
 "#,
@@ -1404,6 +1461,10 @@ const fn require_derive_field_obligations<T>()
     )
 {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[derive(Eq)]
 struct Pair {
     a: FieldTy,
@@ -1418,6 +1479,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     require_derive_field_obligations<T>()
+    finish_derive_impl<T>()
     ev
 }
 "#,
@@ -1464,6 +1526,10 @@ const fn require_derive_field_obligations<T>()
     )
 {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[evidence_provider(Eq)]
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (
@@ -1472,6 +1538,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     require_derive_field_obligations<T>()
+    finish_derive_impl<T>()
     ev
 }
 
@@ -1517,6 +1584,10 @@ const fn require_derive_field_obligations<T>()
     )
 {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Default<T>>)
+{}
+
 #[derive(Default)]
 struct Box {
     value: FieldTy,
@@ -1530,6 +1601,7 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
     )
 {
     require_derive_field_obligations<T>()
+    finish_derive_impl<T>()
     ev
 }
 
@@ -1597,6 +1669,10 @@ struct Foo {}
 
 impl Eq for Foo {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[evidence_provider(Eq)]
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (
@@ -1604,6 +1680,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
+    finish_derive_impl<T>()
     ev
 }
 "#,
@@ -1667,6 +1744,10 @@ const fn require_derive_field_obligations<T>()
     )
 {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[derive(Eq)]
 struct Box {
     value: FieldTy,
@@ -1680,6 +1761,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     require_derive_field_obligations<T>()
+    finish_derive_impl<T>()
     ev
 }
 
@@ -1718,6 +1800,10 @@ const fn require_derive_field_obligations<T>()
     )
 {}
 
+const fn finish_derive_impl<T>()
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{}
+
 #[evidence_provider(Eq)]
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (
@@ -1726,6 +1812,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     require_derive_field_obligations<T>()
+    finish_derive_impl<T>()
     ev
 }
 
