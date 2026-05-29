@@ -1,4 +1,4 @@
-use common::ingot::Ingot;
+use common::{indexmap::IndexMap, ingot::Ingot};
 
 use crate::{
     analysis::{
@@ -10,17 +10,23 @@ use crate::{
             binder::Binder,
             constraint::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintId, ConstraintKind,
-                ConstraintListId, EffectCapabilityKey, GeneratedImplId,
+                ConstraintListId, EffectCapabilityKey, GeneratedImplId, GeneratedImplSource,
+                GeneratedRequirement, GeneratedRequirementListId,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
-            evidence_provider::{EvidenceProviderId, providers_for_constraint_head},
-            fold::TyFoldable,
-            trait_def::TraitInstId,
+            evidence_provider::{
+                EvidenceProviderId, providers_for_constraint_head,
+                validated_evidence_providers_for_ingot,
+            },
+            fold::{TyFoldable, TyFolder},
+            trait_def::{ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict},
+            trait_lower::collect_trait_impls,
             trait_resolution::{
                 PredicateListId, constraint::collect_func_effect_capability_constraints,
             },
             ty_def::{PrimTy, TyBase, TyData, TyId},
             unify::UnificationTable,
+            visitor::{TyVisitable, TyVisitor},
         },
     },
     hir_def::{
@@ -145,19 +151,31 @@ pub(crate) struct ReflectedField<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+#[allow(dead_code)]
+pub(crate) enum RequirementOrigin<'db> {
+    ReflectedField(ReflectedField<'db>),
+    ProviderCode,
+    Synthetic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum GeneratedTraceFact<'db> {
     RequestedBy(ElaborationRequestId<'db>),
     GeneratedBy(ElaborationCtfeContextId<'db>),
+    Source(GeneratedImplSource),
     ProvidesEvidence(ConstraintId<'db>),
     RequiresConstraint {
         constraint: ConstraintId<'db>,
-        field: Option<ReflectedField<'db>>,
+        origin: RequirementOrigin<'db>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum BuilderCommand<'db> {
-    Require(ConstraintId<'db>),
+    Require {
+        constraint: ConstraintId<'db>,
+        origin: RequirementOrigin<'db>,
+    },
     Finish,
 }
 
@@ -194,10 +212,19 @@ impl<'db> ImplBuilderSession<'db> {
         &mut self,
         constraint: ConstraintId<'db>,
     ) -> Result<(), BuilderError<'db>> {
+        self.require_with_origin(constraint, RequirementOrigin::Synthetic)
+    }
+
+    pub(crate) fn require_with_origin(
+        &mut self,
+        constraint: ConstraintId<'db>,
+        origin: RequirementOrigin<'db>,
+    ) -> Result<(), BuilderError<'db>> {
         if self.finished {
             return Err(BuilderError::AlreadyFinished);
         }
-        self.commands.push(BuilderCommand::Require(constraint));
+        self.commands
+            .push(BuilderCommand::Require { constraint, origin });
         Ok(())
     }
 
@@ -232,18 +259,27 @@ impl<'db> ImplBuilderSession<'db> {
 
         self.finished = true;
         self.commands.push(BuilderCommand::Finish);
-        let obligations: Vec<ConstraintId<'db>> = self
+        let requirements: Vec<GeneratedRequirement<'db>> = self
             .commands
             .iter()
             .filter_map(|command| match command {
-                BuilderCommand::Require(constraint) => Some(*constraint),
+                BuilderCommand::Require { constraint, origin } => Some(GeneratedRequirement {
+                    constraint: *constraint,
+                    origin: *origin,
+                }),
                 BuilderCommand::Finish => None,
             })
+            .collect();
+        let obligations: Vec<ConstraintId<'db>> = requirements
+            .iter()
+            .map(|requirement| requirement.constraint)
             .collect();
 
         Ok(GeneratedImplId {
             context: self.context,
             trait_inst,
+            source: GeneratedImplSource::StubDerivedFieldObligations,
+            requirements: GeneratedRequirementListId::new(db, requirements),
             obligations: ConstraintListId::new(db, obligations),
         })
     }
@@ -289,6 +325,54 @@ impl<'db> ReflectedField<'db> {
     }
 }
 
+impl<'db> TyVisitable<'db> for ReflectedField<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        self.parent.visit_with(visitor);
+        self.ty.visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for ReflectedField<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self {
+            parent: self.parent.fold_with(db, folder),
+            index: self.index,
+            name: self.name,
+            ty: self.ty.fold_with(db, folder),
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for RequirementOrigin<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        match self {
+            Self::ReflectedField(field) => field.visit_with(visitor),
+            Self::ProviderCode | Self::Synthetic => {}
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for RequirementOrigin<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        match self {
+            Self::ReflectedField(field) => Self::ReflectedField(field.fold_with(db, folder)),
+            Self::ProviderCode | Self::Synthetic => self,
+        }
+    }
+}
+
 impl<'db> GeneratedTraceFact<'db> {
     fn pretty_print(self, db: &'db dyn HirAnalysisDb, generated: GeneratedImplId<'db>) -> String {
         let prefix = generated.trait_inst.pretty_print(db, true);
@@ -309,17 +393,31 @@ impl<'db> GeneratedTraceFact<'db> {
                     .unwrap_or_else(|| "<anonymous provider>".to_string());
                 format!("{prefix} generated by {provider}")
             }
+            Self::Source(source) => {
+                format!("{prefix} generated output source {}", source.pretty_print())
+            }
             Self::ProvidesEvidence(constraint) => {
                 format!("{prefix} provides {}", constraint.pretty_print(db))
             }
-            Self::RequiresConstraint { constraint, field } => match field {
-                Some(field) => format!(
+            Self::RequiresConstraint { constraint, origin } => match origin {
+                RequirementOrigin::ReflectedField(field) => format!(
                     "{prefix} requires {} from field {}.{}",
                     constraint.pretty_print(db),
                     field.parent.pretty_print(db),
                     field.name.data(db)
                 ),
-                None => format!("{prefix} requires {}", constraint.pretty_print(db)),
+                RequirementOrigin::ProviderCode => {
+                    format!(
+                        "{prefix} requires {} from provider code",
+                        constraint.pretty_print(db)
+                    )
+                }
+                RequirementOrigin::Synthetic => {
+                    format!(
+                        "{prefix} requires {} from synthetic requirement",
+                        constraint.pretty_print(db)
+                    )
+                }
             },
         }
     }
@@ -379,7 +477,7 @@ pub(crate) fn elaboration_request_diags_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
-    top_mod
+    let mut diags: Vec<_> = top_mod
         .all_items(db)
         .iter()
         .filter_map(|&item| ElaborationTarget::from_item(item))
@@ -388,7 +486,10 @@ pub(crate) fn elaboration_request_diags_for_top_mod<'db>(
                 .into_iter()
                 .filter_map(|result| result.err())
         })
-        .collect()
+        .collect();
+    diags.extend(duplicate_evidence_provider_diags_for_top_mod(db, top_mod));
+    diags.extend(generated_overlay_diags_for_top_mod(db, top_mod));
+    diags
 }
 
 pub fn elaboration_request_summaries_for_top_mod<'db>(
@@ -401,6 +502,78 @@ pub fn elaboration_request_summaries_for_top_mod<'db>(
         .collect()
 }
 
+fn duplicate_evidence_provider_diags_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<TyDiagCollection<'db>> {
+    let providers = validated_evidence_providers_for_ingot(db, top_mod.ingot(db));
+    let mut by_head: IndexMap<Trait<'db>, Vec<EvidenceProviderId<'db>>> = IndexMap::new();
+    for provider in providers {
+        by_head.entry(provider.head(db)).or_default().push(provider);
+    }
+
+    by_head
+        .into_iter()
+        .filter_map(|(head, providers)| {
+            if providers.len() <= 1 {
+                return None;
+            }
+            let span = providers[0].func(db).span().attributes().into();
+            Some(invalid_request(
+                span,
+                format!(
+                    "multiple evidence providers for `{}` are not supported yet",
+                    trait_name(db, head)
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn generated_overlay_diags_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<TyDiagCollection<'db>> {
+    elaboration_requests_for_top_mod(db, top_mod)
+        .iter()
+        .flat_map(|&request| {
+            elaboration_ctfe_contexts_for_request(db, request)
+                .into_iter()
+                .filter_map(move |context| {
+                    let goal = request.goal(db);
+                    if generated_stub_trait_has_required_methods(db, goal) {
+                        return Some(invalid_request(
+                            request.target(db).attr_span(),
+                            format!(
+                                "generated stub impls cannot satisfy `{}` because it has required methods",
+                                trait_name(db, concrete_trait_head(db, goal)?)
+                            ),
+                        ));
+                    }
+                    let generated = generated_impl_candidate_for_context(db, *context)?;
+                    generated_conflicts_with_authored_impl(db, generated).then(|| {
+                        invalid_request(
+                            request.target(db).attr_span(),
+                            format!(
+                                "generated implementation for `{}` conflicts with an authored implementation",
+                                generated.trait_inst.pretty_print(db, true)
+                            ),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn trait_name<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> String {
+    trait_
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .unwrap_or_else(|| "<anonymous trait>".to_string())
+}
+
 #[salsa::tracked(return_ref)]
 pub(crate) fn elaboration_ctfe_contexts_for_request<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -410,7 +583,11 @@ pub(crate) fn elaboration_ctfe_contexts_for_request<'db>(
         return Vec::new();
     };
     let ingot = request.target(db).item().top_mod(db).ingot(db);
-    providers_for_constraint_head(db, ingot, head)
+    let providers = providers_for_constraint_head(db, ingot, head);
+    if providers.len() != 1 {
+        return Vec::new();
+    }
+    providers
         .into_iter()
         .filter_map(|provider| elaborate_provider_context(db, request, provider))
         .collect()
@@ -480,7 +657,8 @@ pub fn generated_impl_summaries_for_top_mod<'db>(
         .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
         .map(|generated| {
             format!(
-                "generated {} with obligations {}",
+                "generated {} {} with obligations {}",
+                generated.source.pretty_print(),
                 generated.trait_inst.pretty_print(db, true),
                 generated.obligations.pretty_print(db),
             )
@@ -507,6 +685,14 @@ fn generated_impl_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
+    let generated = generated_impl_candidate_for_context(db, context)?;
+    (!generated_conflicts_with_authored_impl(db, generated)).then_some(generated)
+}
+
+fn generated_impl_candidate_for_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> Option<GeneratedImplId<'db>> {
     // This is still a typed overlay stub, not general CTFE execution. The
     // context must explicitly declare builder authority, and the only emitted
     // commands here are the derive-field obligations we can compute from typed
@@ -515,11 +701,16 @@ fn generated_impl_for_context<'db>(
     if !context_has_impl_builder(db, context, goal) {
         return None;
     }
+    if generated_stub_trait_has_required_methods(db, goal) {
+        return None;
+    }
 
     let mut builder = ImplBuilderSession::new(db, context);
     builder.emit_impl(db, goal).ok()?;
-    for obligation in derive_obligations_for_context(db, context)? {
-        builder.require(obligation).ok()?;
+    for requirement in derive_requirements_for_context(db, context)? {
+        builder
+            .require_with_origin(requirement.constraint, requirement.origin)
+            .ok()?;
     }
     builder.finish(db).ok()
 }
@@ -531,30 +722,16 @@ fn generated_trace_facts<'db>(
     let mut facts = vec![
         GeneratedTraceFact::RequestedBy(generated.context.request(db)),
         GeneratedTraceFact::GeneratedBy(generated.context),
+        GeneratedTraceFact::Source(generated.source),
         GeneratedTraceFact::ProvidesEvidence(ConstraintId::from_trait(db, generated.trait_inst)),
     ];
-    facts.extend(generated.obligations.list(db).iter().map(|&constraint| {
+    facts.extend(generated.requirements.list(db).iter().map(|requirement| {
         GeneratedTraceFact::RequiresConstraint {
-            constraint,
-            field: field_for_generated_obligation(db, generated, constraint),
+            constraint: requirement.constraint,
+            origin: requirement.origin,
         }
     }));
     facts
-}
-
-fn field_for_generated_obligation<'db>(
-    db: &'db dyn HirAnalysisDb,
-    generated: GeneratedImplId<'db>,
-    constraint: ConstraintId<'db>,
-) -> Option<ReflectedField<'db>> {
-    let trait_ = generated.trait_inst.def(db);
-    reflected_fields_for_context(db, generated.context)
-        .into_iter()
-        .find(|field| {
-            let field_constraint =
-                ConstraintId::from_trait(db, TraitInstId::new_simple(db, trait_, vec![field.ty]));
-            constraints_match(db, field_constraint, constraint)
-        })
 }
 
 pub(crate) fn reflected_fields_for_context<'db>(
@@ -579,10 +756,10 @@ pub(crate) fn reflected_fields_for_context<'db>(
         .collect()
 }
 
-fn derive_obligations_for_context<'db>(
+fn derive_requirements_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
-) -> Option<Vec<ConstraintId<'db>>> {
+) -> Option<Vec<GeneratedRequirement<'db>>> {
     let request = context.request(db);
     let ElaborationTarget::Struct(_) = request.target(db) else {
         return None;
@@ -601,10 +778,53 @@ fn derive_obligations_for_context<'db>(
             .into_iter()
             .filter(|field| tys_match(db, field.parent, target_ty))
             .map(|field| {
-                ConstraintId::from_trait(db, TraitInstId::new_simple(db, trait_, vec![field.ty]))
+                let constraint = ConstraintId::from_trait(
+                    db,
+                    TraitInstId::new_simple(db, trait_, vec![field.ty]),
+                );
+                GeneratedRequirement {
+                    constraint,
+                    origin: RequirementOrigin::ReflectedField(field),
+                }
             })
             .collect(),
     )
+}
+
+fn generated_stub_trait_has_required_methods<'db>(
+    db: &'db dyn HirAnalysisDb,
+    goal: ConstraintId<'db>,
+) -> bool {
+    let ConstraintKind::Trait(trait_inst) = goal.kind(db) else {
+        return false;
+    };
+    trait_inst
+        .def(db)
+        .method_defs(db)
+        .values()
+        .any(|method| method.body(db).is_none())
+}
+
+fn generated_conflicts_with_authored_impl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> bool {
+    let request = generated.context.request(db);
+    let ingot = request.target(db).item().top_mod(db).ingot(db);
+    let Some(authored_impls) = collect_trait_impls(db, ingot).get(&generated.trait_inst.def(db))
+    else {
+        return false;
+    };
+    let generated_impl = Binder::bind(ImplementorId::new(
+        db,
+        generated.trait_inst,
+        generated.trait_inst.self_ty(db).generic_args(db).to_vec(),
+        IndexMap::new(),
+        ImplementorOrigin::Generated(generated),
+    ));
+    authored_impls
+        .iter()
+        .any(|&authored| does_impl_trait_conflict(db, authored, generated_impl))
 }
 
 fn context_has_impl_builder<'db>(

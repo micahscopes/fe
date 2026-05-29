@@ -431,9 +431,39 @@ pub(crate) struct ConstProofId<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum GeneratedImplSource {
+    StubDerivedFieldObligations,
+    ProviderOutput,
+}
+
+impl GeneratedImplSource {
+    pub(crate) fn pretty_print(self) -> &'static str {
+        match self {
+            Self::StubDerivedFieldObligations => "stub",
+            Self::ProviderOutput => "provider",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) struct GeneratedRequirement<'db> {
+    pub(crate) constraint: ConstraintId<'db>,
+    pub(crate) origin: crate::analysis::elab::RequirementOrigin<'db>,
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct GeneratedRequirementListId<'db> {
+    #[return_ref]
+    pub(crate) list: Vec<GeneratedRequirement<'db>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) struct GeneratedImplId<'db> {
     pub(crate) context: crate::analysis::elab::ElaborationCtfeContextId<'db>,
     pub(crate) trait_inst: TraitInstId<'db>,
+    pub(crate) source: GeneratedImplSource,
+    pub(crate) requirements: GeneratedRequirementListId<'db>,
     pub(crate) obligations: ConstraintListId<'db>,
 }
 
@@ -825,7 +855,58 @@ impl<'db> TyVisitable<'db> for GeneratedImplId<'db> {
         V: TyVisitor<'db> + ?Sized,
     {
         self.trait_inst.visit_with(visitor);
+        for requirement in self.requirements.list(visitor.db()) {
+            requirement.visit_with(visitor);
+        }
         self.obligations.visit_with(visitor);
+    }
+}
+
+impl<'db> TyVisitable<'db> for GeneratedRequirement<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        self.constraint.visit_with(visitor);
+        self.origin.visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedRequirement<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self {
+            constraint: self.constraint.fold_with(db, folder),
+            origin: self.origin.fold_with(db, folder),
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for GeneratedRequirementListId<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        for requirement in self.list(visitor.db()) {
+            requirement.visit_with(visitor);
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedRequirementListId<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self::new(
+            db,
+            self.list(db)
+                .iter()
+                .map(|requirement| requirement.fold_with(db, folder))
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -837,6 +918,8 @@ impl<'db> TyFoldable<'db> for GeneratedImplId<'db> {
         Self {
             context: self.context,
             trait_inst: self.trait_inst.fold_with(db, folder),
+            source: self.source,
+            requirements: self.requirements.fold_with(db, folder),
             obligations: self.obligations.fold_with(db, folder),
         }
     }
