@@ -531,6 +531,7 @@ module.exports = grammar({
     ),
 
     kind_bound: $ => prec.right(choice(
+      seq('Constraint', optional(seq('->', $.kind_bound))),
       seq('*', optional(seq('->', $.kind_bound))),
       seq('(', $.kind_bound, ')', optional(seq('->', $.kind_bound))),
     )),

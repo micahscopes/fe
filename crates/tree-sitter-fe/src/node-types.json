@@ -9115,6 +9115,10 @@
     "named": false
   },
   {
+    "type": "Constraint",
+    "named": false
+  },
+  {
     "type": "Self",
     "named": false
   },
