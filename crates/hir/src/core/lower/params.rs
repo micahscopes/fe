@@ -300,6 +300,8 @@ impl KindBound {
             Partial::Present(KindBound::Abs(lhs, rhs))
         } else if ast.mono().is_some() {
             Partial::Present(KindBound::Mono)
+        } else if ast.constraint().is_some() {
+            Partial::Present(KindBound::Constraint)
         } else {
             Partial::Absent
         }

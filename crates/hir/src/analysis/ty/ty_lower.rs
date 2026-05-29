@@ -1632,6 +1632,7 @@ impl<'db> TyParamPrecursor<'db> {
 pub(super) fn lower_kind(kind: &HirKindBound) -> Kind {
     match kind {
         HirKindBound::Mono => Kind::Star,
+        HirKindBound::Constraint => Kind::Constraint,
         HirKindBound::Abs(lhs, rhs) => match (lhs, rhs) {
             (Partial::Present(lhs), Partial::Present(rhs)) => {
                 Kind::Abs(Box::new((lower_kind(lhs), lower_kind(rhs))))
@@ -1656,4 +1657,55 @@ pub(super) fn lower_kind_in_bounds<'db>(bounds: &[TypeBound<'db>]) -> Option<Kin
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        hir_def::{ItemKind, TopLevelMod},
+        test_db::HirAnalysisTestDb,
+    };
+
+    fn find_func<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        func_name: &str,
+    ) -> crate::hir_def::Func<'db> {
+        top_mod
+            .children_non_nested(db)
+            .find_map(|item| match item {
+                ItemKind::Func(func)
+                    if func
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == func_name) =>
+                {
+                    Some(func)
+                }
+                _ => None,
+            })
+            .expect("missing function")
+    }
+
+    #[test]
+    fn lowers_constraint_kind_bound() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "lowers_constraint_kind_bound.fe".into(),
+            r#"
+fn f<P: * -> Constraint>() {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "f");
+        let param_set = collect_generic_params(&db, func.into());
+        let kind = param_set.params(&db)[0].kind(&db);
+
+        assert!(matches!(
+            kind,
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Constraint
+        ));
+    }
 }

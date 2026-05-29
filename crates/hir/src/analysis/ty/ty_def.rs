@@ -916,7 +916,7 @@ impl<'db> TyId<'db> {
         }
 
         let applicable_kind = match self.kind(db) {
-            Kind::Star => return None,
+            Kind::Star | Kind::Constraint => return None,
             Kind::Abs(inner) => inner.0.clone(),
             Kind::Any => Kind::Any,
         };
@@ -1287,6 +1287,9 @@ pub enum Kind {
     /// Represents star kind, i.e., `*` kind.
     Star,
 
+    /// Represents the proposition kind inhabited by constraints.
+    Constraint,
+
     /// Represents higher kinded types.
     /// e.g.,
     /// `* -> *`, `(* -> *) -> *` or `* -> (* -> *) -> *`
@@ -1304,6 +1307,7 @@ impl Kind {
     pub fn does_match(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Star, Self::Star) => true,
+            (Self::Constraint, Self::Constraint) => true,
             (Self::Abs(a), Self::Abs(b)) => a.0.does_match(&b.0) && a.1.does_match(&b.1),
             (Self::Any, _) => true,
             (_, Self::Any) => true,
@@ -1316,6 +1320,7 @@ impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Star => write!(f, "*"),
+            Self::Constraint => write!(f, "Constraint"),
             Self::Abs(inner) => write!(f, "({} -> {})", inner.0, inner.1),
             Self::Any => write!(f, "Any"),
         }
