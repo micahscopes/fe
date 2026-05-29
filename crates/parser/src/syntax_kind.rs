@@ -517,6 +517,8 @@ pub enum SyntaxKind {
     WhereClause,
     /// `Option<T>: Trait1 + Trait2`
     WherePredicate,
+    /// `P<T>` in a where clause, for constraint-valued type applications.
+    WhereConstraintPredicate,
     /// `{ const_expr }` in a where clause
     WhereConstPredicate,
     /// `Transfer { to: Address, amount: u256 } -> bool`
@@ -799,6 +801,7 @@ impl SyntaxKind {
             SyntaxKind::KindBoundConstraint => "kind bound",
             SyntaxKind::WhereClause => "`where` clause",
             SyntaxKind::WherePredicate => "`where` predicate",
+            SyntaxKind::WhereConstraintPredicate => "`where` constraint predicate",
             SyntaxKind::WhereConstPredicate => "`where` const predicate",
             SyntaxKind::UsesClause => "`uses` clause",
             SyntaxKind::UsesParamList => "`uses` parameter list",

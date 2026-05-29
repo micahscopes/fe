@@ -498,6 +498,8 @@ impl super::Parse for WhereClauseScope {
                 Some(kind) if is_type_start(kind) => {
                     if is_type_bound_predicate(parser) {
                         parser.parse(WherePredicateScope::default())?;
+                    } else if is_constraint_application_predicate(parser) {
+                        parser.parse(WhereConstraintPredicateScope::default())?;
                     } else {
                         parser.parse(WhereConstPredicateScope::default())?;
                     }
@@ -562,6 +564,16 @@ impl super::Parse for WherePredicateScope {
     }
 }
 
+define_scope! { WhereConstraintPredicateScope, WhereConstraintPredicate }
+impl super::Parse for WhereConstraintPredicateScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parse_type(parser, None)?;
+        Ok(())
+    }
+}
+
 define_scope! { WhereConstPredicateScope, WhereConstPredicate }
 impl super::Parse for WhereConstPredicateScope {
     type Error = Recovery<ErrProof>;
@@ -575,6 +587,37 @@ impl super::Parse for WhereConstPredicateScope {
 /// Dry-run: does this position start a type-bound predicate (`Type: Bounds`)?
 fn is_type_bound_predicate<S: TokenStream>(parser: &mut Parser<S>) -> bool {
     parser.dry_run(|p| parse_type(p, None).is_ok() && p.current_kind() == Some(SyntaxKind::Colon))
+}
+
+/// Dry-run: does this position start a bare constraint application (`P<T>`)?
+///
+/// This intentionally requires explicit generic arguments so existing bare
+/// const predicates like `where FLAG` keep parsing as const expressions.
+fn is_constraint_application_predicate<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    parser.dry_run(|p| {
+        let saw_generic_args = p.dry_run(|q| {
+            let end_pos = q.dry_run(|r| {
+                let _ = parse_type(r, None);
+                r.current_pos
+            });
+
+            let mut saw_lt = false;
+            while q.current_pos < end_pos {
+                if q.current_kind() == Some(SyntaxKind::Lt) {
+                    saw_lt = true;
+                }
+                q.bump();
+            }
+            saw_lt
+        });
+
+        parse_type(p, None).is_ok()
+            && saw_generic_args
+            && matches!(
+                p.current_kind_same_line(),
+                Some(SyntaxKind::Comma | SyntaxKind::Newline | SyntaxKind::LBrace) | None
+            )
+    })
 }
 
 /// Tokens that unambiguously start expressions but never types.

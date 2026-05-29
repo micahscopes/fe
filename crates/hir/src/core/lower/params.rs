@@ -57,6 +57,10 @@ impl<'db> WhereClauseId<'db> {
             .iter()
             .map(|pred| WherePredicate::lower_ast(ctxt, pred))
             .collect::<Vec<_>>();
+        let constraint_predicates = ast
+            .constraint_predicates()
+            .map(|pred| WhereConstraintPredicate::lower_ast(ctxt, pred))
+            .collect::<Vec<_>>();
         let const_predicates = ast
             .const_predicates()
             .map(|cp| {
@@ -68,7 +72,12 @@ impl<'db> WhereClauseId<'db> {
                 )
             })
             .collect::<Vec<_>>();
-        Self::new(ctxt.db(), predicates, const_predicates)
+        Self::new(
+            ctxt.db(),
+            predicates,
+            constraint_predicates,
+            const_predicates,
+        )
     }
 
     pub(super) fn lower_ast_opt(
@@ -76,7 +85,7 @@ impl<'db> WhereClauseId<'db> {
         ast: Option<ast::WhereClause>,
     ) -> Self {
         ast.map(|ast| Self::lower_ast(ctxt, ast))
-            .unwrap_or_else(|| Self::new(ctxt.db(), Vec::new(), Vec::new()))
+            .unwrap_or_else(|| Self::new(ctxt.db(), Vec::new(), Vec::new(), Vec::new()))
     }
 }
 
@@ -267,6 +276,13 @@ impl<'db> WherePredicate<'db> {
             })
             .unwrap_or_default();
         Self { ty, bounds }
+    }
+}
+
+impl<'db> WhereConstraintPredicate<'db> {
+    fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::WhereConstraintPredicate) -> Self {
+        let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
+        Self { ty }
     }
 }
 

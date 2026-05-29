@@ -297,12 +297,29 @@ impl WhereClause {
     pub fn const_predicates(&self) -> impl Iterator<Item = WhereConstPredicate> {
         support::children(self.syntax())
     }
+
+    /// Returns an iterator over bare constraint applications in this where clause.
+    pub fn constraint_predicates(&self) -> impl Iterator<Item = WhereConstraintPredicate> {
+        support::children(self.syntax())
+    }
 }
 
 ast_node! {
     /// `T: Trait`
     pub struct WherePredicate,
     SK::WherePredicate,
+}
+
+ast_node! {
+    /// `P<T>`
+    pub struct WhereConstraintPredicate,
+    SK::WhereConstraintPredicate,
+}
+impl WhereConstraintPredicate {
+    /// Returns `P<T>`.
+    pub fn ty(&self) -> Option<super::Type> {
+        support::child(self.syntax())
+    }
 }
 
 ast_node! {
@@ -778,6 +795,24 @@ mod tests {
         assert_eq!(type_preds.len(), 1);
         assert!(matches!(
             type_preds[0].ty().unwrap().kind(),
+            TypeKind::Path(_)
+        ));
+
+        let const_preds: Vec<_> = wc.const_predicates().collect();
+        assert_eq!(const_preds.len(), 1);
+        assert!(const_preds[0].expr().is_some());
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn where_clause_with_constraint_predicate() {
+        let source = r#"where P<T>, FLAG"#;
+        let wc = parse_where_clause(source);
+
+        let constraint_preds: Vec<_> = wc.constraint_predicates().collect();
+        assert_eq!(constraint_preds.len(), 1);
+        assert!(matches!(
+            constraint_preds[0].ty().unwrap().kind(),
             TypeKind::Path(_)
         ));
 

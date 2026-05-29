@@ -109,6 +109,8 @@ pub struct WhereClauseId<'db> {
     #[return_ref]
     pub data: Vec<WherePredicate<'db>>,
     #[return_ref]
+    pub constraint_predicates: Vec<WhereConstraintPredicate<'db>>,
+    #[return_ref]
     pub const_predicates: Vec<Body<'db>>,
 }
 
@@ -247,6 +249,11 @@ impl<'db> FuncParam<'db> {
 pub struct WherePredicate<'db> {
     pub ty: Partial<TypeId<'db>>,
     pub bounds: Vec<TypeBound<'db>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WhereConstraintPredicate<'db> {
+    pub ty: Partial<TypeId<'db>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

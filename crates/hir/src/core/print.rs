@@ -343,6 +343,11 @@ impl<'db> WhereClauseId<'db> {
             .map(|p| p.pretty_print(db))
             .collect::<Vec<_>>();
 
+        predicates.extend(
+            self.constraint_predicates(db)
+                .iter()
+                .map(|p| p.pretty_print(db)),
+        );
         predicates.extend(self.const_predicates(db).iter().map(|p| p.pretty_print(db)));
 
         if predicates.is_empty() {
@@ -350,6 +355,13 @@ impl<'db> WhereClauseId<'db> {
         }
 
         format!(" where {}", predicates.join(", "))
+    }
+}
+
+impl<'db> WhereConstraintPredicate<'db> {
+    /// Pretty-prints a where constraint application like `P<T>`.
+    pub fn pretty_print(&self, db: &dyn HirDb) -> String {
+        unwrap_partial(self.ty, "WhereConstraintPredicate::ty").pretty_print(db)
     }
 }
 
