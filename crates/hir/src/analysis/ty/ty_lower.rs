@@ -1633,7 +1633,7 @@ pub(super) fn lower_kind(kind: &HirKindBound) -> Kind {
     match kind {
         HirKindBound::Mono => Kind::Star,
         HirKindBound::Constraint => Kind::Constraint,
-        HirKindBound::Path(path) => Kind::Var(path.clone()),
+        HirKindBound::Path(path) => Kind::Placeholder(path.clone()),
         HirKindBound::Abs(lhs, rhs) => match (lhs, rhs) {
             (Partial::Present(lhs), Partial::Present(rhs)) => {
                 Kind::Abs(Box::new((lower_kind(lhs), lower_kind(rhs))))
@@ -1711,10 +1711,10 @@ fn f<P: * -> Constraint>() {}
     }
 
     #[test]
-    fn lowers_named_kind_bounds_as_internal_kind_vars() {
+    fn lowers_named_kind_bounds_as_named_placeholders() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
-            "lowers_named_kind_bounds_as_internal_kind_vars.fe".into(),
+            "lowers_named_kind_bounds_as_named_placeholders.fe".into(),
             r#"
 fn f<F: A<B> -> *, G: * -> A<B> >() {}
 "#,
@@ -1728,11 +1728,11 @@ fn f<F: A<B> -> *, G: * -> A<B> >() {}
 
         assert!(matches!(
             f_kind,
-            Kind::Abs(inner) if inner.0 == Kind::Var("A<B>".to_string()) && inner.1 == Kind::Star
+            Kind::Abs(inner) if inner.0 == Kind::Placeholder("A<B>".to_string()) && inner.1 == Kind::Star
         ));
         assert!(matches!(
             g_kind,
-            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Var("A<B>".to_string())
+            Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Placeholder("A<B>".to_string())
         ));
     }
 }

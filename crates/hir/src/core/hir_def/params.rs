@@ -314,7 +314,8 @@ pub enum KindBound {
     Mono,
     /// `Constraint`
     Constraint,
-    /// A named kind expression lowered as an internal kind variable.
+    /// A named kind expression accepted as a placeholder until kind variables
+    /// have a real inference/unification story.
     Path(String),
     /// `* -> *`
     Abs(Partial<Box<KindBound>>, Partial<Box<KindBound>>),

@@ -198,9 +198,10 @@ impl<'db> TyId<'db> {
         self.flags(db).contains(TyFlags::HAS_VAR)
     }
 
-    /// Returns `true` if the type has a `*` kind.
+    /// Returns `true` if the type has exactly the runtime type kind, or is an
+    /// error-recovery type.
     pub fn has_star_kind(self, db: &dyn HirAnalysisDb) -> bool {
-        !matches!(self.kind(db), Kind::Abs(..))
+        matches!(self.kind(db), Kind::Star | Kind::Any)
     }
 
     #[salsa::tracked(return_ref)]
@@ -918,7 +919,7 @@ impl<'db> TyId<'db> {
         let applicable_kind = match self.kind(db) {
             Kind::Star | Kind::Constraint => return None,
             Kind::Abs(inner) => inner.0.clone(),
-            Kind::Var(_) => Kind::Any,
+            Kind::Placeholder(_) => return None,
             Kind::Any => Kind::Any,
         };
 
@@ -1296,8 +1297,11 @@ pub enum Kind {
     /// `* -> *`, `(* -> *) -> *` or `* -> (* -> *) -> *`
     Abs(Box<(Kind, Kind)>),
 
-    /// Represents an unresolved kind variable.
-    Var(String),
+    /// Represents a named kind placeholder.
+    ///
+    /// This is not a unification variable. It exists so parsed named kind
+    /// atoms can flow through HIR until the compiler has real kind inference.
+    Placeholder(String),
 
     /// `Any` kind is set to the type iff the type is `Invalid`.
     Any,
@@ -1313,7 +1317,7 @@ impl Kind {
             (Self::Star, Self::Star) => true,
             (Self::Constraint, Self::Constraint) => true,
             (Self::Abs(a), Self::Abs(b)) => a.0.does_match(&b.0) && a.1.does_match(&b.1),
-            (Self::Var(_), _) | (_, Self::Var(_)) => true,
+            (Self::Placeholder(_), _) | (_, Self::Placeholder(_)) => true,
             (Self::Any, _) => true,
             (_, Self::Any) => true,
             _ => false,
@@ -1327,7 +1331,7 @@ impl fmt::Display for Kind {
             Self::Star => write!(f, "*"),
             Self::Constraint => write!(f, "Constraint"),
             Self::Abs(inner) => write!(f, "({} -> {})", inner.0, inner.1),
-            Self::Var(name) => write!(f, "{name}"),
+            Self::Placeholder(name) => write!(f, "{name}"),
             Self::Any => write!(f, "Any"),
         }
     }

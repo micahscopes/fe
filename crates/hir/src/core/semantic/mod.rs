@@ -50,7 +50,7 @@ pub fn lower_hir_kind_local(k: &HirKindBound) -> Kind {
     match k {
         HirKindBound::Mono => Kind::Star,
         HirKindBound::Constraint => Kind::Constraint,
-        HirKindBound::Path(path) => Kind::Var(path.clone()),
+        HirKindBound::Path(path) => Kind::Placeholder(path.clone()),
         HirKindBound::Abs(lhs, rhs) => {
             let lhs_k = match lhs {
                 Partial::Present(inner) => lower_hir_kind_local(inner),
