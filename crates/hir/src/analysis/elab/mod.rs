@@ -285,6 +285,9 @@ pub(crate) enum BuilderError<'db> {
     AlreadyFinished,
     CommandAfterFinish,
     NotFinished,
+    DuplicateMethod {
+        name: IdentId<'db>,
+    },
     UnsupportedTarget(ConstraintId<'db>),
 }
 
@@ -412,6 +415,7 @@ fn generated_impl_from_builder_commands<'db>(
     let mut finished = false;
     let mut requirements = Vec::new();
     let mut methods = Vec::new();
+    let mut method_names = IndexSet::new();
     for command in commands.commands(db) {
         if finished {
             return Err(BuilderError::CommandAfterFinish);
@@ -424,7 +428,12 @@ fn generated_impl_from_builder_commands<'db>(
                 })
             }
             BuilderCommand::EmitMethodExpr { name, expr } => methods.push(GeneratedMethod {
-                name: *name,
+                name: {
+                    if !method_names.insert(*name) {
+                        return Err(BuilderError::DuplicateMethod { name: *name });
+                    }
+                    *name
+                },
                 body: GeneratedMethodBodyKind::Expr(*expr),
             }),
             BuilderCommand::Finish => finished = true,
@@ -724,8 +733,20 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 continue;
             }
 
-            let Some(generated) = provider_generated_impl_for_output(db, output) else {
-                continue;
+            let generated = match provider_generated_impl_result_for_output(db, output) {
+                Ok(Some(generated)) => generated,
+                Ok(None) => continue,
+                Err(err) => {
+                    diags.push(invalid_request(
+                        request.target(db).attr_span(),
+                        format!(
+                            "provider output for `{}` is invalid: {}",
+                            request.goal(db).pretty_print(db),
+                            builder_error_message(db, &err),
+                        ),
+                    ));
+                    continue;
+                }
             };
             let missing_methods = generated_missing_required_methods(db, generated);
             let unsupported_methods = generated_unsupported_required_methods(db, generated);
@@ -977,8 +998,17 @@ fn provider_generated_impl_for_output<'db>(
     db: &'db dyn HirAnalysisDb,
     output: ProviderOutputId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
+    provider_generated_impl_result_for_output(db, output)
+        .ok()
+        .flatten()
+}
+
+fn provider_generated_impl_result_for_output<'db>(
+    db: &'db dyn HirAnalysisDb,
+    output: ProviderOutputId<'db>,
+) -> Result<Option<GeneratedImplId<'db>>, BuilderError<'db>> {
     let ProviderOutputStatus::Succeeded { commands } = output.status(db) else {
-        return None;
+        return Ok(None);
     };
     generated_impl_from_builder_commands(
         db,
@@ -986,7 +1016,32 @@ fn provider_generated_impl_for_output<'db>(
         GeneratedImplSource::ProviderOutput(output),
         commands,
     )
-    .ok()
+    .map(Some)
+}
+
+fn builder_error_message<'db>(db: &'db dyn HirAnalysisDb, err: &BuilderError<'db>) -> String {
+    match err {
+        BuilderError::WrongTarget {
+            expected,
+            attempted,
+        } => format!(
+            "wrong target, expected `{}` but got `{}`",
+            expected.pretty_print(db),
+            attempted.pretty_print(db)
+        ),
+        BuilderError::AlreadyFinished => "builder was already finished".to_string(),
+        BuilderError::CommandAfterFinish => "builder emitted a command after finish".to_string(),
+        BuilderError::NotFinished => "builder did not finish".to_string(),
+        BuilderError::DuplicateMethod { name } => {
+            format!("duplicate generated method `{}`", name.data(db))
+        }
+        BuilderError::UnsupportedTarget(target) => {
+            format!(
+                "unsupported generated evidence target `{}`",
+                target.pretty_print(db)
+            )
+        }
+    }
 }
 
 #[salsa::tracked]

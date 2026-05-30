@@ -2322,6 +2322,36 @@ fn caller() {
 }
 
 #[test]
+fn provider_generated_duplicate_method_emission_is_rejected() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_duplicate_method_emission_is_rejected.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.emit_method(builder.bool(true))
+    builder.emit_method(builder.bool(false))
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "provider output for `Foo: Eq` is invalid");
+    assert_diag_message(&diags, "duplicate generated method `eq`");
+}
+
+#[test]
 fn provider_generated_field_get_eq_method_satisfies_required_method_trait() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
