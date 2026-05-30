@@ -36,8 +36,9 @@ use crate::{
         },
     },
     hir_def::{
-        Attr, Body, Enum, Expr, FieldParent, GenericArg, GenericArgListId, HirIngot, IdentId,
-        ItemKind, LitKind, NormalAttr, Partial, Pat, Stmt, Struct, TopLevelMod, Trait, TypeKind,
+        Attr, AttrArg, AttrArgValue, Body, Enum, Expr, FieldParent, GenericArg, GenericArgListId,
+        HirIngot, IdentId, ItemKind, LitKind, NormalAttr, Partial, Pat, Stmt, Struct, TopLevelMod,
+        Trait, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -102,16 +103,22 @@ pub(crate) enum ElaborationOrigin {
 pub(crate) struct ElaborationRequestId<'db> {
     target: ElaborationTarget<'db>,
     goal: ConstraintId<'db>,
+    selected_provider: Option<IdentId<'db>>,
     origin: ElaborationOrigin,
 }
 
 impl<'db> ElaborationRequestId<'db> {
     pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
-        format!(
+        let mut summary = format!(
             "{} requested for {}",
             self.goal(db).pretty_print(db),
             self.target(db).ty(db).pretty_print(db)
-        )
+        );
+        if let Some(provider) = self.selected_provider(db) {
+            summary.push_str(" using ");
+            summary.push_str(provider.data(db));
+        }
+        summary
     }
 }
 
@@ -659,6 +666,7 @@ pub(crate) fn elaboration_request_diags_for_top_mod<'db>(
         })
         .collect();
     diags.extend(duplicate_evidence_provider_diags_for_top_mod(db, top_mod));
+    diags.extend(selected_evidence_provider_diags_for_top_mod(db, top_mod));
     diags.extend(generated_overlay_diags_for_top_mod(db, top_mod));
     diags
 }
@@ -696,6 +704,11 @@ fn duplicate_evidence_provider_diags_for_top_mod<'db>(
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let providers = validated_evidence_providers_for_ingot(db, top_mod.ingot(db));
+    let implicit_heads = elaboration_requests_for_top_mod(db, top_mod)
+        .iter()
+        .filter(|request| request.selected_provider(db).is_none())
+        .filter_map(|request| concrete_trait_head(db, request.goal(db)))
+        .collect::<IndexSet<_>>();
     let mut by_head: IndexMap<Trait<'db>, Vec<EvidenceProviderId<'db>>> = IndexMap::new();
     for provider in providers {
         by_head.entry(provider.head(db)).or_default().push(provider);
@@ -707,6 +720,9 @@ fn duplicate_evidence_provider_diags_for_top_mod<'db>(
             if providers.len() <= 1 {
                 return None;
             }
+            if !implicit_heads.contains(&head) {
+                return None;
+            }
             let span = providers[0].func(db).span().attributes().into();
             Some(invalid_request(
                 span,
@@ -715,6 +731,37 @@ fn duplicate_evidence_provider_diags_for_top_mod<'db>(
                     trait_name(db, head)
                 ),
             ))
+        })
+        .collect()
+}
+
+fn selected_evidence_provider_diags_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<TyDiagCollection<'db>> {
+    elaboration_requests_for_top_mod(db, top_mod)
+        .iter()
+        .filter_map(|request| {
+            let selected = request.selected_provider(db)?;
+            let head = concrete_trait_head(db, request.goal(db))?;
+            let matches = matching_selected_providers(db, top_mod.ingot(db), head, selected);
+            if matches.len() == 1 {
+                return None;
+            }
+            let message = if matches.is_empty() {
+                format!(
+                    "selected evidence provider `{}` for `{}` was not found",
+                    selected.data(db),
+                    trait_name(db, head)
+                )
+            } else {
+                format!(
+                    "selected evidence provider `{}` for `{}` is ambiguous",
+                    selected.data(db),
+                    trait_name(db, head)
+                )
+            };
+            Some(invalid_request(request.target(db).attr_span(), message))
         })
         .collect()
 }
@@ -833,13 +880,36 @@ pub(crate) fn elaboration_ctfe_contexts_for_request<'db>(
         return Vec::new();
     };
     let ingot = request.target(db).item().top_mod(db).ingot(db);
-    let providers = providers_for_constraint_head(db, ingot, head);
+    let providers = if let Some(selected) = request.selected_provider(db) {
+        matching_selected_providers(db, ingot, head, selected)
+    } else {
+        providers_for_constraint_head(db, ingot, head)
+    };
     if providers.len() != 1 {
         return Vec::new();
     }
     providers
         .into_iter()
         .filter_map(|provider| elaborate_provider_context(db, request, provider))
+        .collect()
+}
+
+fn matching_selected_providers<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    head: Trait<'db>,
+    selected: IdentId<'db>,
+) -> Vec<EvidenceProviderId<'db>> {
+    providers_for_constraint_head(db, ingot, head)
+        .into_iter()
+        .filter(|provider| {
+            provider
+                .identity(db)
+                .func(db)
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name == selected)
+        })
         .collect()
 }
 
@@ -2435,16 +2505,44 @@ fn derive_requests_for_attr<'db>(
         ))];
     }
 
-    attr.args
+    let mut selected_provider = None;
+    let mut trait_args = Vec::new();
+    let mut errors = Vec::new();
+    for arg in &attr.args {
+        if arg.has_value || arg.value.is_some() {
+            match parse_derive_provider_selection(db, target, arg) {
+                Ok(provider) if selected_provider.replace(provider).is_none() => {}
+                Ok(_) => errors.push(invalid_request(
+                    target.attr_span(),
+                    "`#[derive(...)]` may only select one provider",
+                )),
+                Err(diag) => errors.push(diag),
+            }
+        } else {
+            trait_args.push(arg);
+        }
+    }
+
+    if let Some(selected) = selected_provider {
+        if trait_args.len() != 1 {
+            errors.push(invalid_request(
+                target.attr_span(),
+                format!(
+                    "`using = {}` requires exactly one derived trait",
+                    selected.data(db)
+                ),
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        return errors.into_iter().map(Err).collect();
+    }
+
+    trait_args
         .iter()
         .enumerate()
         .map(|(arg_index, arg)| {
-            if arg.has_value || arg.value.is_some() {
-                return Err(invalid_request(
-                    target.attr_span(),
-                    "derive arguments must be trait paths",
-                ));
-            }
             let Some(path) = arg.key.to_opt() else {
                 return Err(invalid_request(
                     target.attr_span(),
@@ -2457,6 +2555,7 @@ fn derive_requests_for_attr<'db>(
                 db,
                 target,
                 goal,
+                selected_provider,
                 ElaborationOrigin::DeriveAttr {
                     attr_index: attr_index as u32,
                     arg_index: arg_index as u32,
@@ -2464,6 +2563,26 @@ fn derive_requests_for_attr<'db>(
             ))
         })
         .collect()
+}
+
+fn parse_derive_provider_selection<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+    arg: &AttrArg<'db>,
+) -> Result<IdentId<'db>, TyDiagCollection<'db>> {
+    if arg.key_str(db) != Some("using") {
+        return Err(invalid_request(
+            target.attr_span(),
+            "derive keyword arguments currently only support `using = Provider`",
+        ));
+    }
+    match arg.value.as_ref() {
+        Some(AttrArgValue::Ident(provider)) => Ok(*provider),
+        _ => Err(invalid_request(
+            target.attr_span(),
+            "`using` must name an evidence provider",
+        )),
+    }
 }
 
 fn resolve_derive_trait<'db>(

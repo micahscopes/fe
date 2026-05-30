@@ -2148,6 +2148,84 @@ fn caller() {
 }
 
 #[test]
+fn derive_using_selects_named_provider_when_multiple_match() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_using_selects_named_provider_when_multiple_match.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq, using = derive_eq2)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using derive_eq2 using Derive<Eq> evidence from derive_eq2 with [mut capability ImplBuilder<Foo: Eq>]".to_string()]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn derive_using_reports_missing_provider() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_using_reports_missing_provider.fe".into(),
+        r#"
+trait Eq {}
+
+#[derive(Eq, using = missing_provider)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `missing_provider` for `Eq` was not found",
+    );
+}
+
+#[test]
 fn generated_derive_conflicts_with_authored_impl() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
