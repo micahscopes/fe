@@ -6,7 +6,8 @@ use fe_hir::{
     analysis::{
         elab::{
             elaboration_ctfe_context_summaries_for_top_mod,
-            elaboration_request_summaries_for_top_mod, generated_impl_summaries_for_top_mod,
+            elaboration_request_summaries_for_top_mod, evidence_provider_summaries_for_top_mod,
+            generated_impl_summaries_for_top_mod,
             generated_requirement_artifact_summaries_for_top_mod,
             generated_trace_summaries_for_top_mod, reflected_field_summaries_for_top_mod,
         },
@@ -939,6 +940,32 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn evidence_provider_summaries_include_provider_identity() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "evidence_provider_summaries_include_provider_identity.fe".into(),
+        r#"
+trait Eq {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        vec!["provider derive_eq for Eq -> T: Eq".to_string()]
+    );
 }
 
 #[test]

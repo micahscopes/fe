@@ -13,7 +13,24 @@ use common::ingot::Ingot;
 
 #[salsa::interned]
 #[derive(Debug)]
+pub(crate) struct EvidenceProviderIdentityId<'db> {
+    pub(crate) func: Func<'db>,
+}
+
+impl<'db> EvidenceProviderIdentityId<'db> {
+    pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
+        self.func(db)
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string())
+            .unwrap_or_else(|| "<anonymous provider>".to_string())
+    }
+}
+
+#[salsa::interned]
+#[derive(Debug)]
 pub(crate) struct EvidenceProviderId<'db> {
+    pub(crate) identity: EvidenceProviderIdentityId<'db>,
     pub(crate) func: Func<'db>,
     pub(crate) head: Trait<'db>,
     pub(crate) goal: ConstraintId<'db>,
@@ -88,8 +105,14 @@ pub(crate) fn validate_evidence_provider<'db>(
     }
 
     if diags.is_empty() {
-        let provider =
-            EvidenceProviderId::new(db, func, head.expect("validated head"), goal.unwrap());
+        let identity = EvidenceProviderIdentityId::new(db, func);
+        let provider = EvidenceProviderId::new(
+            db,
+            identity,
+            func,
+            head.expect("validated head"),
+            goal.unwrap(),
+        );
         (EvidenceProviderValidationResult::Valid(provider), diags)
     } else {
         (EvidenceProviderValidationResult::Invalid, diags)
