@@ -1051,14 +1051,7 @@ fn matching_selected_providers<'db>(
 ) -> Vec<EvidenceProviderId<'db>> {
     providers_for_constraint_head(db, ingot, head)
         .into_iter()
-        .filter(|provider| {
-            provider
-                .identity(db)
-                .func(db)
-                .name(db)
-                .to_opt()
-                .is_some_and(|name| name == selected)
-        })
+        .filter(|provider| provider.identity(db).name(db) == selected)
         .collect()
 }
 
@@ -1069,14 +1062,7 @@ fn providers_named_in_ingot<'db>(
 ) -> Vec<EvidenceProviderId<'db>> {
     validated_evidence_providers_for_ingot(db, ingot)
         .into_iter()
-        .filter(|provider| {
-            provider
-                .identity(db)
-                .func(db)
-                .name(db)
-                .to_opt()
-                .is_some_and(|name| name == selected)
-        })
+        .filter(|provider| provider.identity(db).name(db) == selected)
         .collect()
 }
 

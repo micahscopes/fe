@@ -10,23 +10,20 @@ use crate::{
             diagnostics::{TyDiagCollection, TyLowerDiag},
         },
     },
-    hir_def::{Attr, Func, HirIngot, ItemKind, NormalAttr, Trait},
+    hir_def::{Attr, AttrArgValue, Func, HirIngot, IdentId, ItemKind, NormalAttr, Trait},
 };
 use common::ingot::Ingot;
 
 #[salsa::interned]
 #[derive(Debug)]
 pub(crate) struct EvidenceProviderIdentityId<'db> {
+    pub(crate) name: IdentId<'db>,
     pub(crate) func: Func<'db>,
 }
 
 impl<'db> EvidenceProviderIdentityId<'db> {
     pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
-        self.func(db)
-            .name(db)
-            .to_opt()
-            .map(|name| name.data(db).to_string())
-            .unwrap_or_else(|| "<anonymous provider>".to_string())
+        self.name(db).data(db).to_string()
     }
 }
 
@@ -68,11 +65,11 @@ pub(crate) fn validate_evidence_provider<'db>(
         ));
     }
 
-    let head = match parse_provider_head(db, func, attrs[0]) {
-        Ok(head) => Some(head),
+    let (head, explicit_name) = match parse_provider_attr(db, func, attrs[0]) {
+        Ok((head, name)) => (Some(head), name),
         Err(message) => {
             diags.push(invalid_provider(attr_span.clone(), message));
-            None
+            (None, None)
         }
     };
 
@@ -109,7 +106,12 @@ pub(crate) fn validate_evidence_provider<'db>(
     }
 
     if diags.is_empty() {
-        let identity = EvidenceProviderIdentityId::new(db, func);
+        let name = explicit_name.unwrap_or_else(|| {
+            func.name(db)
+                .to_opt()
+                .unwrap_or_else(|| IdentId::new(db, "<anonymous provider>".to_string()))
+        });
+        let identity = EvidenceProviderIdentityId::new(db, name, func);
         let head = head.expect("validated head");
         let derive_head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(head));
         let derive_goal = ConstraintId::new(db, ConstraintKind::Derive(derive_head));
@@ -172,12 +174,12 @@ fn evidence_provider_attrs<'db>(
         .collect()
 }
 
-fn parse_provider_head<'db>(
+fn parse_provider_attr<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
     attr: &NormalAttr<'db>,
-) -> Result<Trait<'db>, &'static str> {
-    if attr.has_value || !attr.has_args || attr.args.len() != 1 {
+) -> Result<(Trait<'db>, Option<IdentId<'db>>), &'static str> {
+    if attr.has_value || !attr.has_args || !matches!(attr.args.len(), 1 | 2) {
         return Err("expected `#[evidence_provider(TraitName)]`");
     }
     let arg = &attr.args[0];
@@ -188,9 +190,31 @@ fn parse_provider_head<'db>(
         return Err("evidence provider head must be a trait path");
     };
 
-    match resolve_path(db, path, func.scope(), func.assumptions(db), false) {
+    let head = match resolve_path(db, path, func.scope(), func.assumptions(db), false) {
         Ok(PathRes::Trait(inst)) => Ok(inst.def(db)),
         _ => Err("evidence provider head must resolve to a trait"),
+    }?;
+
+    let name = match attr.args.get(1) {
+        None => None,
+        Some(arg) => Some(parse_provider_identity_arg(db, arg)?),
+    };
+
+    Ok((head, name))
+}
+
+fn parse_provider_identity_arg<'db>(
+    db: &'db dyn HirAnalysisDb,
+    arg: &crate::hir_def::AttrArg<'db>,
+) -> Result<IdentId<'db>, &'static str> {
+    if arg.key_str(db) != Some("name") {
+        return Err(
+            "evidence provider keyword arguments currently only support `name = ProviderName`",
+        );
+    }
+    match arg.value.as_ref() {
+        Some(AttrArgValue::Ident(name)) => Ok(*name),
+        _ => Err("evidence provider name must be an identifier"),
     }
 }
 
