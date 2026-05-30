@@ -228,6 +228,9 @@ pub(crate) enum ProviderSkipReason {
     MissingBuilderCapability,
     MissingReflectCapability,
     MissingFinish,
+    DuplicateFinish,
+    CommandAfterFinish,
+    InvalidBuilderRequirement,
     UnsupportedProviderBody,
 }
 
@@ -1101,9 +1104,12 @@ impl<'db> ProviderBodyExecutor<'db> {
                         ProviderSkipReason::UnsupportedProviderBody,
                     ));
                 }
-                self.builder
-                    .finish_explicit()
-                    .map_err(|_| ProviderExecutionFailure::Failed)?;
+                self.builder.finish_explicit().map_err(|err| match err {
+                    BuilderError::AlreadyFinished => {
+                        ProviderExecutionFailure::Skipped(ProviderSkipReason::DuplicateFinish)
+                    }
+                    _ => ProviderExecutionFailure::Failed,
+                })?;
                 Ok(true)
             }
             _ => Err(ProviderExecutionFailure::Skipped(
@@ -1120,12 +1126,12 @@ impl<'db> ProviderBodyExecutor<'db> {
     ) -> Result<(), ProviderExecutionFailure> {
         let Some(trait_) = self.resolve_trait_generic_arg(generic_args) else {
             return Err(ProviderExecutionFailure::Skipped(
-                ProviderSkipReason::UnsupportedProviderBody,
+                ProviderSkipReason::InvalidBuilderRequirement,
             ));
         };
         let Some(ElabValue::Type(arg_ty)) = self.eval_expr_value(body, constraint_arg) else {
             return Err(ProviderExecutionFailure::Skipped(
-                ProviderSkipReason::UnsupportedProviderBody,
+                ProviderSkipReason::InvalidBuilderRequirement,
             ));
         };
 
@@ -1138,7 +1144,12 @@ impl<'db> ProviderBodyExecutor<'db> {
             .unwrap_or(RequirementOrigin::ProviderCode);
         self.builder
             .require_with_origin(constraint, origin)
-            .map_err(|_| ProviderExecutionFailure::Failed)
+            .map_err(|err| match err {
+                BuilderError::AlreadyFinished => {
+                    ProviderExecutionFailure::Skipped(ProviderSkipReason::CommandAfterFinish)
+                }
+                _ => ProviderExecutionFailure::Failed,
+            })
     }
 
     fn reflect_fields_iterable(
@@ -2194,7 +2205,12 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 
         let context = first_builder_context(&db, top_mod);
         let output = provider_output_for_context(&db, context);
-        assert!(matches!(output.status(&db), ProviderOutputStatus::Failed));
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::DuplicateFinish
+            }
+        ));
     }
 
     #[test]
@@ -2230,7 +2246,12 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 
         let context = first_builder_context(&db, top_mod);
         let output = provider_output_for_context(&db, context);
-        assert!(matches!(output.status(&db), ProviderOutputStatus::Failed));
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::CommandAfterFinish
+            }
+        ));
     }
 
     #[test]
