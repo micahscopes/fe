@@ -32,6 +32,7 @@ use crate::{
                 PredicateListId, constraint::collect_func_effect_capability_constraints,
             },
             ty_def::{Kind, PrimTy, TyBase, TyData, TyId},
+            ty_lower::ConstDefaultCompletion,
             unify::UnificationTable,
             visitor::{TyVisitable, TyVisitor},
         },
@@ -1200,9 +1201,9 @@ fn generated_impl_is_admissible<'db>(
     generated: GeneratedImplId<'db>,
     candidates: &[GeneratedImplId<'db>],
 ) -> bool {
-    if !generated_missing_required_methods(db, generated).is_empty()
-        || !generated_unsupported_required_methods(db, generated).is_empty()
-    {
+    let missing = generated_missing_required_methods(db, generated);
+    let unsupported = generated_unsupported_required_methods(db, generated);
+    if !missing.is_empty() || !unsupported.is_empty() {
         return false;
     }
     !generated_conflicts_with_authored_impl(db, generated)
@@ -2322,6 +2323,7 @@ fn required_method_arg_ty_for_trait_inst<'db>(
 ) -> Option<TyId<'db>> {
     let method = required_method.as_callable(db)?;
     let arg_tys = method.arg_tys(db);
+    let trait_args = trait_inst_args_with_defaults(db, trait_inst);
 
     for (idx, param) in required_method.params(db).enumerate() {
         if param.is_self_param(db) {
@@ -2331,7 +2333,7 @@ fn required_method_arg_ty_for_trait_inst<'db>(
             let ty = arg_tys.get(idx).copied()?;
             let ty = ty.instantiate_identity();
             if ty_is_named_self(db, ty)
-                && let Some(&target_ty) = trait_inst.args(db).first()
+                && let Some(&target_ty) = trait_args.first()
             {
                 return Some(target_ty);
             }
@@ -2386,8 +2388,9 @@ fn instantiate_required_method_ty_for_trait_inst<'db>(
     required_method: crate::hir_def::Func<'db>,
     ty: TyId<'db>,
 ) -> TyId<'db> {
+    let trait_args = trait_inst_args_with_defaults(db, trait_inst);
     if ty_is_named_self(db, ty)
-        && let Some(&target_ty) = trait_inst.args(db).first()
+        && let Some(&target_ty) = trait_args.first()
     {
         return target_ty;
     }
@@ -2395,11 +2398,11 @@ fn instantiate_required_method_ty_for_trait_inst<'db>(
     let mut mappings = Vec::new();
     let method = required_method.as_callable(db).unwrap();
     if let Some(self_ty) = required_method.expected_self_ty(db)
-        && let Some(&target_ty) = trait_inst.args(db).first()
+        && let Some(&target_ty) = trait_args.first()
     {
         mappings.push((self_ty, target_ty));
     }
-    for (idx, &arg) in trait_inst.args(db).iter().enumerate() {
+    for (idx, &arg) in trait_args.iter().enumerate() {
         if let Some(&method_param) = method.params(db).get(idx) {
             mappings.push((method_param, arg));
         }
@@ -2413,6 +2416,30 @@ fn instantiate_required_method_ty_for_trait_inst<'db>(
             .find_map(|(param, arg)| (*param == ty).then_some(*arg))
             .unwrap_or(ty)
     })
+}
+
+fn trait_inst_args_with_defaults<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_inst: TraitInstId<'db>,
+) -> Vec<TyId<'db>> {
+    let args = trait_inst.args(db);
+    if args.len() >= trait_inst.def(db).params(db).len() {
+        return args.to_vec();
+    }
+    let Some((&self_ty, provided_explicit)) = args.split_first() else {
+        return Vec::new();
+    };
+    let completed = trait_inst.def(db).param_set(db).complete_explicit_args(
+        db,
+        Some(self_ty),
+        provided_explicit,
+        PredicateListId::empty_list(db),
+        ConstDefaultCompletion::evaluate(None),
+    );
+    let mut full_args = Vec::with_capacity(1 + completed.len());
+    full_args.push(self_ty);
+    full_args.extend(completed);
+    full_args
 }
 
 fn generated_expr_ty_matches<'db>(
@@ -2453,6 +2480,7 @@ fn generated_expr_static_ty<'db>(
         }
         GeneratedExprKind::FieldGet { base, field } => {
             let base_ty = generated_expr_static_ty(db, base, cx)?;
+            let base_ty = field_access_base_ty(db, base_ty);
             tys_match(db, base_ty, field.parent).then_some(field.ty)
         }
         GeneratedExprKind::EqExpr { lhs, rhs } => {
@@ -2465,6 +2493,16 @@ fn generated_expr_static_ty<'db>(
             generated_struct_init_ty(db, target, fields, cx)
         }
     }
+}
+
+fn field_access_base_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+    if let Some(inner) = ty.as_view(db) {
+        return field_access_base_ty(db, inner);
+    }
+    if let Some((_, inner)) = ty.as_capability(db) {
+        return field_access_base_ty(db, inner);
+    }
+    ty
 }
 
 fn generated_struct_init_ty<'db>(
