@@ -674,43 +674,52 @@ fn generated_overlay_diags_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
-    elaboration_requests_for_top_mod(db, top_mod)
-        .iter()
-        .flat_map(|&request| {
-            elaboration_ctfe_contexts_for_request(db, request)
-                .into_iter()
-                .filter_map(move |context| {
-                    let generated = provider_generated_impl_candidate_for_context(db, *context)?;
-                    let missing_methods = generated_missing_required_methods(db, generated);
-                    let unsupported_methods =
-                        generated_unsupported_required_methods(db, generated);
-                    if !missing_methods.is_empty() || !unsupported_methods.is_empty() {
-                        return Some(invalid_request(
-                            request.target(db).attr_span(),
-                            format!(
-                                "provider output for `{}` does not generate required methods yet: {}",
-                                trait_name(db, concrete_trait_head(db, request.goal(db))?),
-                                generated_method_error_summary(
-                                    db,
-                                    &missing_methods,
-                                    &unsupported_methods
-                                )
-                            ),
-                        ));
-                    }
-                    generated_conflicts_with_authored_impl(db, generated).then(|| {
-                        invalid_request(
-                            request.target(db).attr_span(),
-                            format!(
-                                "generated implementation for `{}` conflicts with an authored implementation",
-                                generated.trait_inst.pretty_print(db, true)
-                            ),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let candidates = generated_impl_candidates_for_ingot(db, top_mod.ingot(db));
+    let mut diags = Vec::new();
+    for &request in elaboration_requests_for_top_mod(db, top_mod) {
+        for &context in elaboration_ctfe_contexts_for_request(db, request) {
+            let Some(generated) = provider_generated_impl_candidate_for_context(db, context) else {
+                continue;
+            };
+            let missing_methods = generated_missing_required_methods(db, generated);
+            let unsupported_methods = generated_unsupported_required_methods(db, generated);
+            if !missing_methods.is_empty() || !unsupported_methods.is_empty() {
+                if let Some(head) = concrete_trait_head(db, request.goal(db)) {
+                    diags.push(invalid_request(
+                        request.target(db).attr_span(),
+                        format!(
+                            "provider output for `{}` does not generate required methods yet: {}",
+                            trait_name(db, head),
+                            generated_method_error_summary(
+                                db,
+                                &missing_methods,
+                                &unsupported_methods
+                            )
+                        ),
+                    ));
+                }
+                continue;
+            }
+            if generated_conflicts_with_authored_impl(db, generated) {
+                diags.push(invalid_request(
+                    request.target(db).attr_span(),
+                    format!(
+                        "generated implementation for `{}` conflicts with an authored implementation",
+                        generated.trait_inst.pretty_print(db, true)
+                    ),
+                ));
+            } else if generated_conflicts_with_generated_impl(db, generated, &candidates) {
+                diags.push(invalid_request(
+                    request.target(db).attr_span(),
+                    format!(
+                        "generated implementation for `{}` conflicts with another generated implementation",
+                        generated.trait_inst.pretty_print(db, true)
+                    ),
+                ));
+            }
+        }
+    }
+    diags
 }
 
 fn trait_name<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> String {
@@ -784,12 +793,26 @@ pub(crate) fn generated_impls_for_ingot<'db>(
     // requests and validated provider signatures. Trait solving consumes this
     // output later, but provider execution/builders must not be invoked from
     // inside the proof search itself.
+    let candidates = generated_impl_candidates_for_ingot(db, ingot);
+    candidates
+        .iter()
+        .copied()
+        .filter(|&generated| generated_impl_is_admissible(db, generated, &candidates))
+        .collect()
+}
+
+fn generated_impl_candidates_for_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+) -> Vec<GeneratedImplId<'db>> {
     elaboration_requests_for_ingot(db, ingot)
         .iter()
         .flat_map(|&request| {
             elaboration_ctfe_contexts_for_request(db, request)
                 .iter()
-                .filter_map(move |&context| provider_generated_impl_for_context(db, context))
+                .filter_map(move |&context| {
+                    provider_generated_impl_candidate_for_context(db, context)
+                })
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -855,17 +878,18 @@ pub fn generated_requirement_artifact_summaries_for_top_mod<'db>(
         .collect()
 }
 
-fn provider_generated_impl_for_context<'db>(
+fn generated_impl_is_admissible<'db>(
     db: &'db dyn HirAnalysisDb,
-    context: ElaborationCtfeContextId<'db>,
-) -> Option<GeneratedImplId<'db>> {
-    let generated = provider_generated_impl_candidate_for_context(db, context)?;
+    generated: GeneratedImplId<'db>,
+    candidates: &[GeneratedImplId<'db>],
+) -> bool {
     if !generated_missing_required_methods(db, generated).is_empty()
         || !generated_unsupported_required_methods(db, generated).is_empty()
     {
-        return None;
+        return false;
     }
-    (!generated_conflicts_with_authored_impl(db, generated)).then_some(generated)
+    !generated_conflicts_with_authored_impl(db, generated)
+        && !generated_conflicts_with_generated_impl(db, generated, candidates)
 }
 
 fn provider_generated_impl_candidate_for_context<'db>(
@@ -1601,6 +1625,33 @@ fn generated_conflicts_with_authored_impl<'db>(
     authored_impls
         .iter()
         .any(|&authored| does_impl_trait_conflict(db, authored, generated_impl))
+}
+
+fn generated_conflicts_with_generated_impl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+    candidates: &[GeneratedImplId<'db>],
+) -> bool {
+    let generated_impl = Binder::bind(ImplementorId::new(
+        db,
+        generated.trait_inst,
+        generated.trait_inst.self_ty(db).generic_args(db).to_vec(),
+        IndexMap::new(),
+        ImplementorOrigin::Generated(generated),
+    ));
+    candidates.iter().copied().any(|other| {
+        if other == generated {
+            return false;
+        }
+        let other_impl = Binder::bind(ImplementorId::new(
+            db,
+            other.trait_inst,
+            other.trait_inst.self_ty(db).generic_args(db).to_vec(),
+            IndexMap::new(),
+            ImplementorOrigin::Generated(other),
+        ));
+        does_impl_trait_conflict(db, other_impl, generated_impl)
+    })
 }
 
 #[cfg(test)]
