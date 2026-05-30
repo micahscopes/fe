@@ -2270,10 +2270,10 @@ fn caller() {
 }
 
 #[test]
-fn provider_generated_field_eq_method_satisfies_required_method_trait() {
+fn provider_generated_field_get_eq_method_satisfies_required_method_trait() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "provider_generated_field_eq_method_satisfies_required_method_trait.fe".into(),
+        "provider_generated_field_get_eq_method_satisfies_required_method_trait.fe".into(),
         r#"
 trait Eq {
     fn eq(self, other: Self) -> bool
