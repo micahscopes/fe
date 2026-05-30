@@ -1702,6 +1702,53 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
+fn duplicate_evidence_providers_do_not_generate_ambiguous_impls() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "duplicate_evidence_providers_do_not_generate_ambiguous_impls.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "multiple evidence providers for `Eq`");
+    assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn generated_derive_conflicts_with_authored_impl() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -1877,6 +1924,58 @@ fn caller() {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_unsatisfied_bound(&diags, "Loop: Eq");
+}
+
+#[test]
+fn mutually_recursive_generated_derives_do_not_panic() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "mutually_recursive_generated_derives_do_not_panic.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Left {
+    right: Right,
+}
+
+#[derive(Eq)]
+struct Right {
+    left: Left,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    builder.require_fields(reflect)
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Left>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_unsatisfied_bound(&diags, "Right: Eq");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Left: Eq with obligations {Right: Eq}".to_string(),
+            "generated provider Right: Eq with obligations {Left: Eq}".to_string(),
+        ]
+    );
 }
 
 #[test]
