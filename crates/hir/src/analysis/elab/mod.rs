@@ -10,6 +10,7 @@ use crate::{
         diagnostics::DiagnosticVoucher,
         name_resolution::{PathRes, resolve_path},
         ty::{
+            adt_def::AdtRef,
             binder::Binder,
             constraint::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintApplicationId, ConstraintHeadId,
@@ -36,9 +37,9 @@ use crate::{
         },
     },
     hir_def::{
-        Attr, AttrArg, AttrArgValue, Body, Enum, Expr, FieldParent, GenericArg, GenericArgListId,
-        HirIngot, IdentId, ItemKind, LitKind, NormalAttr, Partial, Pat, Stmt, Struct, TopLevelMod,
-        Trait, TypeKind,
+        Attr, AttrArg, AttrArgValue, Body, DeriveDecl, Enum, Expr, FieldParent, GenericArg,
+        GenericArgListId, HirIngot, IdentId, ItemKind, LitKind, NormalAttr, Partial, Pat, Stmt,
+        Struct, TopLevelMod, Trait, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -55,6 +56,13 @@ impl<'db> ElaborationTarget<'db> {
             ItemKind::Struct(struct_) => Some(Self::Struct(struct_)),
             ItemKind::Enum(enum_) => Some(Self::Enum(enum_)),
             _ => None,
+        }
+    }
+
+    fn from_adt_ref(adt: AdtRef<'db>) -> Self {
+        match adt {
+            AdtRef::Struct(struct_) => Self::Struct(struct_),
+            AdtRef::Enum(enum_) => Self::Enum(enum_),
         }
     }
 
@@ -94,8 +102,9 @@ impl<'db> ElaborationTarget<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum ElaborationOrigin {
+pub(crate) enum ElaborationOrigin<'db> {
     DeriveAttr { attr_index: u32, arg_index: u32 },
+    DeriveDecl(DeriveDecl<'db>),
 }
 
 #[salsa::interned]
@@ -104,7 +113,7 @@ pub(crate) struct ElaborationRequestId<'db> {
     target: ElaborationTarget<'db>,
     goal: ConstraintId<'db>,
     selected_provider: Option<IdentId<'db>>,
-    origin: ElaborationOrigin,
+    origin: ElaborationOrigin<'db>,
 }
 
 impl<'db> ElaborationRequestId<'db> {
@@ -119,6 +128,13 @@ impl<'db> ElaborationRequestId<'db> {
             summary.push_str(provider.data(db));
         }
         summary
+    }
+
+    fn span(self, db: &'db dyn HirAnalysisDb) -> DynLazySpan<'db> {
+        match self.origin(db) {
+            ElaborationOrigin::DeriveAttr { .. } => self.target(db).attr_span(),
+            ElaborationOrigin::DeriveDecl(decl) => decl.span().into(),
+        }
     }
 }
 
@@ -609,10 +625,11 @@ impl<'db> GeneratedTraceFact<'db> {
     }
 }
 
-impl ElaborationOrigin {
+impl<'db> ElaborationOrigin<'db> {
     fn pretty_print(self) -> &'static str {
         match self {
             Self::DeriveAttr { .. } => "derive attribute",
+            Self::DeriveDecl(_) => "derive declaration",
         }
     }
 }
@@ -647,6 +664,11 @@ pub(crate) fn elaboration_requests_for_top_mod<'db>(
                 .into_iter()
                 .filter_map(|result| result.ok())
         })
+        .chain(top_mod.all_derive_decls(db).iter().flat_map(|&decl| {
+            derive_requests_for_decl(db, decl)
+                .into_iter()
+                .filter_map(|result| result.ok())
+        }))
         .collect()
 }
 
@@ -665,6 +687,11 @@ pub(crate) fn elaboration_request_diags_for_top_mod<'db>(
                 .filter_map(|result| result.err())
         })
         .collect();
+    diags.extend(top_mod.all_derive_decls(db).iter().flat_map(|&decl| {
+        derive_requests_for_decl(db, decl)
+            .into_iter()
+            .filter_map(|result| result.err())
+    }));
     diags.extend(duplicate_evidence_provider_diags_for_top_mod(db, top_mod));
     diags.extend(selected_evidence_provider_diags_for_top_mod(db, top_mod));
     diags.extend(generated_overlay_diags_for_top_mod(db, top_mod));
@@ -761,7 +788,7 @@ fn selected_evidence_provider_diags_for_top_mod<'db>(
                     trait_name(db, head)
                 )
             };
-            Some(invalid_request(request.target(db).attr_span(), message))
+            Some(invalid_request(request.span(db), message))
         })
         .collect()
 }
@@ -785,7 +812,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 Ok(None) => continue,
                 Err(err) => {
                     diags.push(invalid_request(
-                        request.target(db).attr_span(),
+                        request.span(db),
                         format!(
                             "provider output for `{}` is invalid: {}",
                             request.goal(db).pretty_print(db),
@@ -800,7 +827,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
             if !missing_methods.is_empty() || !unsupported_methods.is_empty() {
                 if let Some(head) = concrete_trait_head(db, request.goal(db)) {
                     diags.push(invalid_request(
-                        request.target(db).attr_span(),
+                        request.span(db),
                         format!(
                             "provider output for `{}` does not generate required methods yet: {}",
                             trait_name(db, head),
@@ -816,7 +843,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
             }
             if generated_conflicts_with_authored_impl(db, generated) {
                 diags.push(invalid_request(
-                    request.target(db).attr_span(),
+                    request.span(db),
                     format!(
                         "generated implementation for `{}` conflicts with an authored implementation",
                         generated.trait_inst.pretty_print(db, true)
@@ -824,7 +851,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 ));
             } else if generated_conflicts_with_generated_impl(db, generated, &candidates) {
                 diags.push(invalid_request(
-                    request.target(db).attr_span(),
+                    request.span(db),
                     format!(
                         "generated implementation for `{}` conflicts with another generated implementation",
                         generated.trait_inst.pretty_print(db, true)
@@ -2628,6 +2655,62 @@ fn derive_requests_for_attr<'db>(
         .collect()
 }
 
+fn derive_requests_for_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: DeriveDecl<'db>,
+) -> Vec<Result<ElaborationRequestId<'db>, TyDiagCollection<'db>>> {
+    vec![derive_request_for_decl(db, decl)]
+}
+
+fn derive_request_for_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: DeriveDecl<'db>,
+) -> Result<ElaborationRequestId<'db>, TyDiagCollection<'db>> {
+    let span: DynLazySpan<'db> = decl.span().into();
+    let Some(head_path) = decl.head_path(db).to_opt() else {
+        return Err(invalid_request(
+            span.clone(),
+            "derive declarations require a trait head",
+        ));
+    };
+    let Some(target_path) = decl.target_path(db).to_opt() else {
+        return Err(invalid_request(
+            span.clone(),
+            "derive declarations require a target after `for`",
+        ));
+    };
+
+    let target = resolve_derive_target(db, decl, target_path)?;
+    let trait_ = resolve_derive_trait_in_scope(db, decl.scope(), span.clone(), head_path)?;
+    let selected_provider = match decl.selected_provider_path(db) {
+        None => None,
+        Some(path) => {
+            let Some(path) = path.to_opt() else {
+                return Err(invalid_request(
+                    span.clone(),
+                    "`using` must name an evidence provider",
+                ));
+            };
+            let Some(provider) = path.as_ident(db) else {
+                return Err(invalid_request(
+                    span.clone(),
+                    "`using` must name one evidence provider",
+                ));
+            };
+            Some(provider)
+        }
+    };
+
+    let goal = derive_goal(db, target, trait_);
+    Ok(ElaborationRequestId::new(
+        db,
+        target,
+        goal,
+        selected_provider,
+        ElaborationOrigin::DeriveDecl(decl),
+    ))
+}
+
 fn parse_derive_provider_selection<'db>(
     db: &'db dyn HirAnalysisDb,
     target: ElaborationTarget<'db>,
@@ -2653,19 +2736,56 @@ fn resolve_derive_trait<'db>(
     target: ElaborationTarget<'db>,
     path: crate::hir_def::PathId<'db>,
 ) -> Result<Trait<'db>, TyDiagCollection<'db>> {
+    resolve_derive_trait_in_scope(db, target.scope(), target.attr_span(), path)
+}
+
+fn resolve_derive_trait_in_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    span: DynLazySpan<'db>,
+    path: crate::hir_def::PathId<'db>,
+) -> Result<Trait<'db>, TyDiagCollection<'db>> {
     let assumptions = PredicateListId::empty_list(db);
-    match resolve_path(db, path, target.scope(), assumptions, false) {
+    match resolve_path(db, path, scope, assumptions, false) {
         Ok(PathRes::Trait(inst)) => Ok(inst.def(db)),
         Ok(res) => Err(invalid_request(
-            target.attr_span(),
+            span,
             format!(
                 "derive head must resolve to a trait, but resolved to {}",
                 res.kind_name()
             ),
         )),
+        Err(_) => Err(invalid_request(span, "derive head must resolve to a trait")),
+    }
+}
+
+fn resolve_derive_target<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: DeriveDecl<'db>,
+    path: crate::hir_def::PathId<'db>,
+) -> Result<ElaborationTarget<'db>, TyDiagCollection<'db>> {
+    let span: DynLazySpan<'db> = decl.span().into();
+    let assumptions = PredicateListId::empty_list(db);
+    match resolve_path(db, path, decl.scope(), assumptions, false) {
+        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+            let Some(adt) = ty.adt_ref(db) else {
+                return Err(invalid_request(
+                    span,
+                    "derive target must resolve to a struct or enum",
+                ));
+            };
+            Ok(ElaborationTarget::from_adt_ref(adt))
+        }
+        Ok(res) => Err(invalid_request(
+            span,
+            format!(
+                "derive target must resolve to a struct or enum, but resolved to {}",
+                res.kind_name()
+            ),
+        )),
         Err(_) => Err(invalid_request(
-            target.attr_span(),
-            "derive head must resolve to a trait",
+            span,
+            "derive target must resolve to a struct or enum",
         )),
     }
 }

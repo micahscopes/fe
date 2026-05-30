@@ -6,7 +6,7 @@ use crate::{
     hir_def::{
         AttrListId, Body, BodyKind, CompBinOp, EffectParamListId, FuncParamListId,
         GenericParamListId, IdentId, InlineAttrErrorKind, KeywordAttrArgSpec, KeywordAttrSpec,
-        PathId, TraitRefId, TupleTypeId, TypeBound, TypeId, WhereClauseId, item::*,
+        Partial, PathId, TraitRefId, TupleTypeId, TypeBound, TypeId, WhereClauseId, item::*,
         parse_inline_attr_specs,
     },
     lower::msg::lower_msg_as_mod,
@@ -236,6 +236,29 @@ impl<'db> ItemKind<'db> {
                     "impl trait",
                 );
                 ImplTrait::lower_ast(ctxt, impl_trait);
+            }
+            ast::ItemKind::DeriveDecl(decl) => {
+                super::arithmetic::report_arithmetic_attr_on_unsupported_item(
+                    ctxt,
+                    decl.attr_list(),
+                    "derive declaration",
+                );
+                super::event::report_event_attr_on_non_struct_item(
+                    ctxt,
+                    decl.attr_list(),
+                    "derive declaration",
+                );
+                super::error::report_error_attr_on_non_struct_item(
+                    ctxt,
+                    decl.attr_list(),
+                    "derive declaration",
+                );
+                super::payable::report_payable_attr_on_unsupported_item(
+                    ctxt,
+                    decl.attr_list(),
+                    "derive declaration",
+                );
+                DeriveDecl::lower_ast(ctxt, decl);
             }
             ast::ItemKind::Const(const_) => {
                 super::arithmetic::report_arithmetic_attr_on_unsupported_item(
@@ -918,6 +941,41 @@ impl<'db> StaticAssert<'db> {
             origin,
         );
         ctxt.leave_item_scope(assert_)
+    }
+}
+
+impl<'db> DeriveDecl<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveDecl) -> Self {
+        let idx = ctxt.next_derive_decl_idx();
+        let id = ctxt.joined_id(TrackedItemVariant::DeriveDecl(idx));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let head_path = ast
+            .head_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let target_path = ast
+            .target_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let selected_provider_path = ast
+            .provider_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .map(Partial::Present);
+        let origin = HirOrigin::raw(&ast);
+
+        let decl = Self::new(
+            ctxt.db(),
+            id,
+            attributes,
+            head_path,
+            target_path,
+            selected_provider_path,
+            ctxt.top_mod(),
+            origin,
+        );
+        ctxt.leave_item_scope(decl)
     }
 }
 

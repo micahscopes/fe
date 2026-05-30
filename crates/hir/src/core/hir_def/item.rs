@@ -22,10 +22,10 @@ use crate::{
     span::{
         DynLazySpan, HirOrigin,
         item::{
-            LazyConstSpan, LazyContractSpan, LazyEnumSpan, LazyFuncSpan, LazyImplSpan,
-            LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyStaticAssertSpan, LazyStructSpan,
-            LazyTopModSpan, LazyTraitSpan, LazyTraitTypeSpan, LazyTypeAliasSpan, LazyUseSpan,
-            LazyVariantDefSpan,
+            LazyConstSpan, LazyContractSpan, LazyDeriveDeclSpan, LazyEnumSpan, LazyFuncSpan,
+            LazyImplSpan, LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyStaticAssertSpan,
+            LazyStructSpan, LazyTopModSpan, LazyTraitSpan, LazyTraitTypeSpan, LazyTypeAliasSpan,
+            LazyUseSpan, LazyVariantDefSpan,
         },
         params::LazyGenericParamListSpan,
     },
@@ -55,6 +55,7 @@ pub enum ItemKind<'db> {
     Impl(Impl<'db>),
     Trait(Trait<'db>),
     ImplTrait(ImplTrait<'db>),
+    DeriveDecl(DeriveDecl<'db>),
     Const(Const<'db>),
     StaticAssert(StaticAssert<'db>),
     Use(Use<'db>),
@@ -84,7 +85,7 @@ impl<'db> ItemKind<'db> {
             TypeAlias(alias) => alias.name(db).to_opt(),
             Trait(trait_) => trait_.name(db).to_opt(),
             Const(const_) => const_.name(db).to_opt(),
-            Use(_) | StaticAssert(_) | Body(_) | Impl(_) | ImplTrait(_) => None,
+            Use(_) | StaticAssert(_) | Body(_) | Impl(_) | ImplTrait(_) | DeriveDecl(_) => None,
         }
     }
 
@@ -101,6 +102,7 @@ impl<'db> ItemKind<'db> {
             Self::Impl(impl_) => impl_.attributes(db),
             Self::Trait(trait_) => trait_.attributes(db),
             Self::ImplTrait(impl_trait) => impl_trait.attributes(db),
+            Self::DeriveDecl(decl) => decl.attributes(db),
             Self::Const(const_) => const_.attributes(db),
             Self::StaticAssert(assert_) => assert_.attributes(db),
             Self::Use(use_) => use_.attributes(db),
@@ -122,6 +124,7 @@ impl<'db> ItemKind<'db> {
             Trait(_) => "trait",
             Impl(_) => "impl",
             ImplTrait(_) => "impl trait",
+            DeriveDecl(_) => "derive",
             Const(_) => "const",
             StaticAssert(_) => "static_assert",
             Use(_) => "use",
@@ -140,7 +143,8 @@ impl<'db> ItemKind<'db> {
             TypeAlias(alias) => Some(alias.span().alias().into()),
             Trait(trait_) => Some(trait_.span().name().into()),
             Const(const_) => Some(const_.span().name().into()),
-            TopMod(_) | StaticAssert(_) | Use(_) | Body(_) | Impl(_) | ImplTrait(_) => None,
+            TopMod(_) | StaticAssert(_) | Use(_) | Body(_) | Impl(_) | ImplTrait(_)
+            | DeriveDecl(_) => None,
         }
     }
 
@@ -157,7 +161,9 @@ impl<'db> ItemKind<'db> {
             Trait(trait_) => trait_.vis(db),
             Const(const_) => const_.vis(db),
             Use(use_) => use_.vis(db),
-            StaticAssert(_) | Impl(_) | ImplTrait(_) | Body(_) => Visibility::Private,
+            StaticAssert(_) | Impl(_) | ImplTrait(_) | DeriveDecl(_) | Body(_) => {
+                Visibility::Private
+            }
         }
     }
 
@@ -173,6 +179,7 @@ impl<'db> ItemKind<'db> {
             ItemKind::Trait(trait_) => trait_.top_mod(db),
             ItemKind::Impl(impl_) => impl_.top_mod(db),
             ItemKind::ImplTrait(impl_trait) => impl_trait.top_mod(db),
+            ItemKind::DeriveDecl(decl) => decl.top_mod(db),
             ItemKind::Const(const_) => const_.top_mod(db),
             ItemKind::StaticAssert(assert_) => assert_.top_mod(db),
             ItemKind::Use(use_) => use_.top_mod(db),
@@ -564,6 +571,17 @@ impl<'db> TopLevelMod<'db> {
             .iter()
             .filter_map(|item| match item {
                 ItemKind::ImplTrait(impl_trait) => Some(*impl_trait),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[salsa::tracked(return_ref)]
+    pub fn all_derive_decls(self, db: &'db dyn HirDb) -> Vec<DeriveDecl<'db>> {
+        self.all_items(db)
+            .iter()
+            .filter_map(|item| match item {
+                ItemKind::DeriveDecl(decl) => Some(*decl),
                 _ => None,
             })
             .collect()
@@ -1284,6 +1302,32 @@ pub struct AssocConstDef<'db> {
 
 #[salsa::tracked]
 #[derive(Debug)]
+pub struct DeriveDecl<'db> {
+    #[id]
+    id: TrackedItemId<'db>,
+
+    pub(in crate::core) attributes: AttrListId<'db>,
+    pub head_path: Partial<PathId<'db>>,
+    pub target_path: Partial<PathId<'db>>,
+    pub selected_provider_path: Option<Partial<PathId<'db>>>,
+    pub top_mod: TopLevelMod<'db>,
+
+    #[return_ref]
+    pub(crate) origin: HirOrigin<ast::DeriveDecl>,
+}
+
+impl<'db> DeriveDecl<'db> {
+    pub fn span(self) -> LazyDeriveDeclSpan<'db> {
+        LazyDeriveDeclSpan::new(self)
+    }
+
+    pub fn scope(self) -> ScopeId<'db> {
+        ScopeId::from_item(self.into())
+    }
+}
+
+#[salsa::tracked]
+#[derive(Debug)]
 pub struct Const<'db> {
     #[id]
     id: TrackedItemId<'db>,
@@ -1662,6 +1706,7 @@ pub enum TrackedItemVariant<'db> {
     Impl(u32),
     Trait(Partial<IdentId<'db>>),
     ImplTrait(u32),
+    DeriveDecl(u32),
     Const(Partial<IdentId<'db>>),
     StaticAssert(u32),
     ContractInit,

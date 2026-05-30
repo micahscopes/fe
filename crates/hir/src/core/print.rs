@@ -1098,6 +1098,7 @@ impl<'db> ItemKind<'db> {
             ItemKind::Impl(i) => i.pretty_print(db),
             ItemKind::Trait(t) => t.pretty_print(db),
             ItemKind::ImplTrait(i) => i.pretty_print(db),
+            ItemKind::DeriveDecl(d) => d.pretty_print(db),
             ItemKind::Const(c) => c.pretty_print(db),
             ItemKind::StaticAssert(a) => a.pretty_print(db),
             ItemKind::Use(u) => u.pretty_print(db),
@@ -1594,6 +1595,25 @@ impl<'db> Const<'db> {
         let body = unwrap_partial(self.body(db), "Const::body");
         result.push_str(&body.pretty_print(db));
 
+        result
+    }
+}
+
+impl<'db> DeriveDecl<'db> {
+    pub fn pretty_print(self, db: &'db dyn HirDb) -> String {
+        let mut result = String::new();
+        result.push_str(&self.attributes(db).pretty_print_with_newline(db));
+        result.push_str("derive ");
+        let head = unwrap_partial(self.head_path(db), "DeriveDecl::head_path");
+        result.push_str(&head.pretty_print(db));
+        result.push_str(" for ");
+        let target = unwrap_partial(self.target_path(db), "DeriveDecl::target_path");
+        result.push_str(&target.pretty_print(db));
+        if let Some(provider) = self.selected_provider_path(db) {
+            result.push_str(" using ");
+            let provider = unwrap_partial(provider, "DeriveDecl::selected_provider_path");
+            result.push_str(&provider.pretty_print(db));
+        }
         result
     }
 }

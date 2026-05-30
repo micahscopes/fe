@@ -16,8 +16,8 @@ use super::{
 };
 use crate::{
     hir_def::{
-        Body, Const, Contract, Enum, Func, Impl, ImplTrait, ItemKind, Mod, StaticAssert, Struct,
-        TopLevelMod, Trait, TypeAlias, Use,
+        Body, Const, Contract, DeriveDecl, Enum, Func, Impl, ImplTrait, ItemKind, Mod,
+        StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
     },
     span::{
         DesugaredOrigin, DesugaredUseFocus, MsgDesugaredFocus,
@@ -412,6 +412,22 @@ impl<'db> LazyImplTraitSpan<'db> {
 
     pub fn associated_const(self, idx: usize) -> LazyTraitConstSpan<'db> {
         self.item_list().assoc_const(idx)
+    }
+}
+
+define_lazy_span_node!(
+    LazyDeriveDeclSpan,
+    ast::DeriveDecl,
+    @node {
+        (attributes, attr_list, LazyAttrListSpan),
+        (head_path, head_path, LazyPathSpan),
+        (target_path, target_path, LazyPathSpan),
+        (provider_path, provider_path, LazyPathSpan),
+    }
+);
+impl<'db> LazyDeriveDeclSpan<'db> {
+    pub fn new(d: DeriveDecl<'db>) -> Self {
+        Self(crate::span::transition::SpanTransitionChain::new(d))
     }
 }
 

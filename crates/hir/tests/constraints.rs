@@ -1095,6 +1095,37 @@ struct Pair<A, B> {
 }
 
 #[test]
+fn derive_declarations_collect_elaboration_requests() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declarations_collect_elaboration_requests.fe".into(),
+        r#"
+trait Eq {}
+trait Default {}
+
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+derive Eq for Pair
+derive Default for Pair
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    let summaries = elaboration_request_summaries_for_top_mod(&db, top_mod);
+    assert_eq!(
+        summaries,
+        vec![
+            "Pair<A, B>: Eq requested for Pair<A, B>".to_string(),
+            "Pair<A, B>: Default requested for Pair<A, B>".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn derive_head_must_resolve_to_trait() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -1110,6 +1141,42 @@ struct Foo {}
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "invalid elaboration request");
     assert_diag_message(&diags, "derive head must resolve to a trait");
+}
+
+#[test]
+fn derive_declaration_head_must_resolve_to_trait() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_head_must_resolve_to_trait.fe".into(),
+        r#"
+struct NotATrait {}
+struct Foo {}
+
+derive NotATrait for Foo
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid elaboration request");
+    assert_diag_message(&diags, "derive head must resolve to a trait");
+}
+
+#[test]
+fn derive_declaration_target_must_resolve_to_adt() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_target_must_resolve_to_adt.fe".into(),
+        r#"
+trait Eq {}
+const VALUE: u256 = 1
+
+derive Eq for VALUE
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid elaboration request");
+    assert_diag_message(&diags, "derive target must resolve to a struct or enum");
 }
 
 #[test]
@@ -2198,6 +2265,57 @@ fn caller() {
 }
 
 #[test]
+fn derive_declaration_using_selects_named_provider_when_multiple_match() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_using_selects_named_provider_when_multiple_match.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Foo {}
+
+derive Eq for Foo using derive_eq2
+
+#[evidence_provider(Eq)]
+const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using derive_eq2 using Derive<Eq> evidence from derive_eq2 with [mut capability ImplBuilder<Foo: Eq>]".to_string()]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
 fn derive_using_reports_missing_provider() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -2207,6 +2325,35 @@ trait Eq {}
 
 #[derive(Eq, using = missing_provider)]
 struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `missing_provider` for `Eq` was not found",
+    );
+}
+
+#[test]
+fn derive_declaration_using_reports_missing_provider() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_using_reports_missing_provider.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+derive Eq for Foo using missing_provider
 
 #[evidence_provider(Eq)]
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>

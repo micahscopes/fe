@@ -43,6 +43,7 @@ define_scope! {
         TypeKw,
         PubKw,
         UnsafeKw,
+        Ident,
         DocComment,
         Pound
     )
@@ -127,6 +128,14 @@ impl super::Parse for ItemScope {
                 parser.current_token().unwrap().text()
             );
             parser.error(&error_msg);
+        }
+
+        if parser.is_ident("derive") {
+            if modifiers.is_pub || modifiers.is_unsafe {
+                parser.error("derive declarations do not support item modifiers");
+            }
+            parser.parse_cp(DeriveDeclScope::default(), checkpoint)?;
+            return Ok(());
         }
 
         parser.expect(
@@ -898,6 +907,32 @@ impl super::Parse for ConstScope {
             parser.bump();
             parse_expr(parser)?;
         }
+        Ok(())
+    }
+}
+
+define_scope! { DeriveDeclScope, DeriveDecl }
+impl super::Parse for DeriveDeclScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        debug_assert!(parser.is_ident("derive"));
+        parser.bump();
+        parser.set_newline_as_trivia(false);
+        parser.set_scope_recovery_stack(&[SyntaxKind::ForKw, SyntaxKind::Ident]);
+
+        parser.parse_or_recover(PathScope::default())?;
+
+        if parser.find_and_pop(SyntaxKind::ForKw, ExpectedKind::Unspecified)? {
+            parser.bump();
+            parser.parse_or_recover(PathScope::default())?;
+        }
+
+        if parser.is_ident("using") {
+            parser.bump();
+            parser.parse_or_recover(PathScope::default())?;
+        }
+
         Ok(())
     }
 }

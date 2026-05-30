@@ -45,6 +45,7 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Impl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Trait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::ImplTrait))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveDecl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Const))
             .or_else(|| support::child(self.syntax()).map(ItemKind::StaticAssert))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Use))
@@ -471,6 +472,26 @@ impl ImplTrait {
 }
 
 ast_node! {
+    /// `derive Eq for Foo using StableEq`
+    pub struct DeriveDecl,
+    SK::DeriveDecl,
+}
+impl super::AttrListOwner for DeriveDecl {}
+impl DeriveDecl {
+    pub fn head_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).next()
+    }
+
+    pub fn target_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).nth(1)
+    }
+
+    pub fn provider_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).nth(2)
+    }
+}
+
+ast_node! {
     /// `const FOO: u32 = 42;`
     pub struct Const,
     SK::Const,
@@ -745,6 +766,7 @@ pub enum ItemKind {
     Impl(Impl),
     Trait(Trait),
     ImplTrait(ImplTrait),
+    DeriveDecl(DeriveDecl),
     Const(Const),
     StaticAssert(StaticAssert),
     Use(Use),

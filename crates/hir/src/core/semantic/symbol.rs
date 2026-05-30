@@ -28,6 +28,7 @@ pub enum SymbolKind {
     Trait,
     Impl,
     ImplTrait,
+    Derive,
     Const,
     Use,
     Field,
@@ -51,6 +52,7 @@ impl SymbolKind {
             Self::Trait => "trait",
             Self::Impl => "impl",
             Self::ImplTrait => "impl trait",
+            Self::Derive => "derive",
             Self::Const => "const",
             Self::Use => "use",
             Self::Field => "field",
@@ -91,6 +93,7 @@ impl<'db> From<ItemKind<'db>> for SymbolKind {
             ItemKind::Trait(_) => SymbolKind::Trait,
             ItemKind::Impl(_) => SymbolKind::Impl,
             ItemKind::ImplTrait(_) => SymbolKind::ImplTrait,
+            ItemKind::DeriveDecl(_) => SymbolKind::Derive,
             ItemKind::Const(_) => SymbolKind::Const,
             ItemKind::Use(_) => SymbolKind::Use,
             ItemKind::StaticAssert(_) => SymbolKind::Const,
@@ -540,7 +543,10 @@ pub fn item_kind_to_url_suffix(item: ItemKind) -> Option<&'static str> {
         ItemKind::Const(_) => Some("const"),
         ItemKind::Impl(_) => Some("impl"),
         ItemKind::ImplTrait(_) => Some("impl"),
-        ItemKind::StaticAssert(_) | ItemKind::Use(_) | ItemKind::Body(_) => None,
+        ItemKind::StaticAssert(_)
+        | ItemKind::Use(_)
+        | ItemKind::DeriveDecl(_)
+        | ItemKind::Body(_) => None,
     }
 }
 
