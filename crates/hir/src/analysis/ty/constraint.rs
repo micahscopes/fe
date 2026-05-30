@@ -473,6 +473,9 @@ pub(crate) enum GeneratedExprKind<'db> {
     FieldEq {
         field: ReflectedField<'db>,
     },
+    TypedPlaceholder {
+        ty: TyId<'db>,
+    },
 }
 
 #[salsa::interned]
@@ -968,6 +971,7 @@ impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
                 rhs.visit_with(visitor);
             }
             Self::FieldEq { field } => field.visit_with(visitor),
+            Self::TypedPlaceholder { ty } => ty.visit_with(visitor),
         }
     }
 }
@@ -985,6 +989,9 @@ impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
             },
             Self::FieldEq { field } => Self::FieldEq {
                 field: field.fold_with(db, folder),
+            },
+            Self::TypedPlaceholder { ty } => Self::TypedPlaceholder {
+                ty: ty.fold_with(db, folder),
             },
         }
     }

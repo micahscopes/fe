@@ -1683,12 +1683,37 @@ fn generated_unsupported_required_methods<'db>(
             match method.body {
                 GeneratedMethodBodyKind::MissingGeneratedBody => Some(method.name),
                 GeneratedMethodBodyKind::Expr(expr) => {
-                    (!generated_expr_ty_matches(db, expr, required_method.return_ty(db)))
-                        .then_some(method.name)
+                    let expected =
+                        generated_required_method_return_ty(db, generated, *required_method);
+                    (!generated_expr_ty_matches(db, expr, expected)).then_some(method.name)
                 }
             }
         })
         .collect()
+}
+
+fn generated_required_method_return_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+    required_method: crate::hir_def::Func<'db>,
+) -> TyId<'db> {
+    let trait_inst = generated.trait_inst;
+    let mut mappings = Vec::new();
+    let method = required_method.as_callable(db).unwrap();
+    for (idx, &arg) in trait_inst.args(db).iter().enumerate() {
+        if let Some(&method_param) = method.params(db).get(idx) {
+            mappings.push((method_param, arg));
+        }
+        if let Some(&trait_param) = trait_inst.def(db).params(db).get(idx) {
+            mappings.push((trait_param, arg));
+        }
+    }
+    Binder::bind(required_method.return_ty(db)).instantiate_with(db, |ty| {
+        mappings
+            .iter()
+            .find_map(|(param, arg)| (*param == ty).then_some(*arg))
+            .unwrap_or(ty)
+    })
 }
 
 fn generated_expr_ty_matches<'db>(
@@ -1704,6 +1729,7 @@ fn generated_expr_ty_matches<'db>(
                 && generated_expr_ty_matches(db, rhs, TyId::bool(db))
         }
         GeneratedExprKind::FieldEq { .. } => expected == TyId::bool(db),
+        GeneratedExprKind::TypedPlaceholder { ty } => tys_match(db, ty, expected),
     }
 }
 
@@ -2722,6 +2748,62 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
             .next()
             .expect("missing reflected field");
         let expr = GeneratedExprId::new(&db, GeneratedExprKind::FieldEq { field });
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitMethodExpr {
+                    name: method_name,
+                    expr,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert!(generated_unsupported_required_methods(&db, generated).is_empty());
+    }
+
+    #[test]
+    fn generated_method_body_instantiates_self_return_type() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_method_body_instantiates_self_return_type.fe".into(),
+            r#"
+trait Default {
+    fn default() -> Self
+}
+
+#[derive(Default)]
+struct Foo {}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (builder: mut ImplBuilder<Default<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let default_trait = find_trait(&db, top_mod, "Default");
+        let method_name = *default_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+        let target_ty = context.request(&db).target(&db).ty(&db);
+        let expr = GeneratedExprId::new(&db, GeneratedExprKind::TypedPlaceholder { ty: target_ty });
 
         let commands = BuilderCommandListId::new(
             &db,
