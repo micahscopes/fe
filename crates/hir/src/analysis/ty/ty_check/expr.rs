@@ -3166,6 +3166,13 @@ impl<'db> TyChecker<'db> {
                     true,
                 ))
             }
+            "emit_bool_method" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
+                    return None;
+                }
+                self.check_expr(args[0].expr, TyId::bool(self.db));
+                Some(ExprProp::new(TyId::unit(self.db), true))
+            }
             _ => None,
         }
     }

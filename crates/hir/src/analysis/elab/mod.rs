@@ -36,7 +36,7 @@ use crate::{
     },
     hir_def::{
         Attr, Body, Enum, Expr, FieldParent, GenericArg, GenericArgListId, HirIngot, IdentId,
-        ItemKind, NormalAttr, Partial, Pat, Stmt, Struct, TopLevelMod, Trait, TypeKind,
+        ItemKind, LitKind, NormalAttr, Partial, Pat, Stmt, Struct, TopLevelMod, Trait, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -325,6 +325,19 @@ impl<'db> ImplBuilderSession<'db> {
         }
         self.commands
             .push(BuilderCommand::Require { constraint, origin });
+        Ok(())
+    }
+
+    fn emit_method_expr(
+        &mut self,
+        name: IdentId<'db>,
+        expr: GeneratedExprId<'db>,
+    ) -> Result<(), BuilderError<'db>> {
+        if self.finished {
+            return Err(BuilderError::AlreadyFinished);
+        }
+        self.commands
+            .push(BuilderCommand::EmitMethodExpr { name, expr });
         Ok(())
     }
 
@@ -1272,6 +1285,16 @@ impl<'db> ProviderBodyExecutor<'db> {
                 })?;
                 Ok(true)
             }
+            BUILDER_EMIT_BOOL_METHOD => {
+                let [arg] = args else {
+                    return Err(skipped_failure(
+                        ProviderSkipReason::UnsupportedProviderBody,
+                        receiver.span(body).into(),
+                    ));
+                };
+                self.execute_emit_bool_method(body, arg.expr)?;
+                Ok(true)
+            }
             _ => Err(skipped_failure(
                 ProviderSkipReason::UnsupportedProviderBody,
                 receiver.span(body).into(),
@@ -1309,6 +1332,37 @@ impl<'db> ProviderBodyExecutor<'db> {
                 BuilderError::AlreadyFinished => skipped_failure(
                     ProviderSkipReason::CommandAfterFinish,
                     constraint_arg.span(body).into(),
+                ),
+                _ => ProviderExecutionFailure::Failed,
+            })
+    }
+
+    fn execute_emit_bool_method(
+        &mut self,
+        body: Body<'db>,
+        value_expr: crate::hir_def::ExprId,
+    ) -> Result<(), ProviderExecutionFailure<'db>> {
+        let required = required_method_names(self.db, self.context.request(self.db).goal(self.db));
+        let [method_name] = required.as_slice() else {
+            return Err(skipped_failure(
+                ProviderSkipReason::UnsupportedProviderBody,
+                value_expr.span(body).into(),
+            ));
+        };
+        let Partial::Present(Expr::Lit(LitKind::Bool(value))) = value_expr.data(self.db, body)
+        else {
+            return Err(skipped_failure(
+                ProviderSkipReason::UnsupportedProviderBody,
+                value_expr.span(body).into(),
+            ));
+        };
+        let expr = GeneratedExprId::new(self.db, GeneratedExprKind::BoolLiteral(*value));
+        self.builder
+            .emit_method_expr(*method_name, expr)
+            .map_err(|err| match err {
+                BuilderError::AlreadyFinished => skipped_failure(
+                    ProviderSkipReason::CommandAfterFinish,
+                    value_expr.span(body).into(),
                 ),
                 _ => ProviderExecutionFailure::Failed,
             })
@@ -1574,6 +1628,7 @@ fn derive_requirement_for_trait_field<'db>(
 
 const BUILDER_REQUIRE_METHOD: &str = "require";
 const BUILDER_FINISH_METHOD: &str = "finish";
+const BUILDER_EMIT_BOOL_METHOD: &str = "emit_bool_method";
 const REFLECT_FIELDS_METHOD: &str = "fields";
 const FIELD_TY_METHOD: &str = "ty";
 
