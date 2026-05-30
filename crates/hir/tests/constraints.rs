@@ -3018,6 +3018,8 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "recursive generated evidence request");
+    assert_diag_message(&diags, "Loop: Eq -> Loop: Eq");
     assert_unsatisfied_bound(&diags, "Loop: Eq");
 }
 
@@ -3065,6 +3067,8 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "recursive generated evidence request");
+    assert_diag_message(&diags, "Left: Eq -> Right: Eq -> Left: Eq");
     assert_unsatisfied_bound(&diags, "Right: Eq");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
