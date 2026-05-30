@@ -3217,6 +3217,34 @@ impl<'db> TyChecker<'db> {
                     true,
                 ))
             }
+            "default" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
+                    return None;
+                }
+                let value = self.fresh_ty();
+                self.check_expr(args[0].expr, self.type_info_ty(value));
+                Some(ExprProp::new(self.generated_expr_ty(value), true))
+            }
+            "struct_init" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || !args.is_empty() {
+                    return None;
+                }
+                Some(ExprProp::new(
+                    self.generated_expr_ty(self.impl_builder_target_from_goal(goal)?),
+                    true,
+                ))
+            }
+            "with_field" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 3 {
+                    return None;
+                }
+                let parent = self.fresh_ty();
+                let value = self.fresh_ty();
+                self.check_expr(args[0].expr, self.generated_expr_ty(parent));
+                self.check_expr(args[1].expr, self.field_ty(parent, value));
+                self.check_expr(args[2].expr, self.generated_expr_ty(value));
+                Some(ExprProp::new(self.generated_expr_ty(parent), true))
+            }
             "emit_method" => {
                 if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
                     return None;

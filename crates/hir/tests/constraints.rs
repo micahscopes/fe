@@ -2468,6 +2468,114 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
 }
 
 #[test]
+fn provider_generated_default_like_derive_builds_struct_init_body() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_default_like_derive_builds_struct_init_body.fe".into(),
+        r#"
+trait Default {
+    fn default() -> Self
+}
+
+fn require_default<T>()
+where
+    T: Default
+{}
+
+#[derive(Default)]
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Default<T>>,
+    )
+{
+    let mut init = builder.struct_init()
+    for field in reflect.fields() {
+        builder.require<Default>(field.ty())
+        init = builder.with_field(init, field, builder.default(field.ty()))
+    }
+    builder.emit_method(init)
+    builder.finish()
+    ev
+}
+
+fn caller<A, B>()
+where
+    A: Default,
+    B: Default
+{
+    require_default<Pair<A, B>>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Pair<A, B>: Default with obligations {A: Default, B: Default}"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn provider_outside_core_derives_concrete_core_default_struct() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_outside_core_derives_concrete_core_default_struct.fe".into(),
+        r#"
+use core::Default
+
+fn require_default<T>()
+where
+    T: Default
+{}
+
+#[derive(Default)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Default<T>>,
+    )
+{
+    let mut init = builder.struct_init()
+    for field in reflect.fields() {
+        builder.require<Default>(field.ty())
+        init = builder.with_field(init, field, builder.default(field.ty()))
+    }
+    builder.emit_method(init)
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_default<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Default with obligations {u256: Default}".to_string()]
+    );
+}
+
+#[test]
 fn generated_derive_reports_missing_field_obligation() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

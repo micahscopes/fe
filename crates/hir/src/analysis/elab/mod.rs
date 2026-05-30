@@ -17,7 +17,7 @@ use crate::{
                 EffectCapabilityKey, GeneratedExprId, GeneratedExprKind, GeneratedImplId,
                 GeneratedImplSource, GeneratedMethod, GeneratedMethodBodyKind,
                 GeneratedMethodListId, GeneratedRequirement, GeneratedRequirementListId,
-                GeneratedStructFieldInitListId,
+                GeneratedStructFieldInit, GeneratedStructFieldInitListId,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{
@@ -1349,7 +1349,10 @@ impl<'db> ProviderBodyExecutor<'db> {
             | BUILDER_SELF_REF_METHOD
             | BUILDER_OTHER_REF_METHOD
             | BUILDER_FIELD_GET_METHOD
-            | BUILDER_EQ_METHOD => Ok(false),
+            | BUILDER_EQ_METHOD
+            | BUILDER_DEFAULT_METHOD
+            | BUILDER_STRUCT_INIT_METHOD
+            | BUILDER_WITH_FIELD_METHOD => Ok(false),
             BUILDER_EMIT_METHOD => {
                 let [arg] = args else {
                     return Err(skipped_failure(
@@ -1596,6 +1599,65 @@ impl<'db> ProviderBodyExecutor<'db> {
                     GeneratedExprKind::EqExpr { lhs, rhs },
                 )))
             }
+            BUILDER_DEFAULT_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                let [ty_arg] = args.as_slice() else {
+                    return None;
+                };
+                let ElabValue::TypeWitness(ty) = self.eval_expr_value(body, ty_arg.expr)? else {
+                    return None;
+                };
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::DefaultCall { ty },
+                )))
+            }
+            BUILDER_STRUCT_INIT_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                if !args.is_empty() {
+                    return None;
+                }
+                let target = self.context.request(self.db).target(self.db).ty(self.db);
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::StructInit {
+                        target,
+                        fields: GeneratedStructFieldInitListId::new(self.db, Vec::new()),
+                    },
+                )))
+            }
+            BUILDER_WITH_FIELD_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                let [init_arg, field_arg, value_arg] = args.as_slice() else {
+                    return None;
+                };
+                let ElabValue::GeneratedExpr(init) = self.eval_expr_value(body, init_arg.expr)?
+                else {
+                    return None;
+                };
+                let GeneratedExprKind::StructInit { target, fields } = init.kind(self.db) else {
+                    return None;
+                };
+                let ElabValue::Field(field) = self.eval_expr_value(body, field_arg.expr)? else {
+                    return None;
+                };
+                let ElabValue::GeneratedExpr(value) = self.eval_expr_value(body, value_arg.expr)?
+                else {
+                    return None;
+                };
+                let mut field_inits = fields.list(self.db).to_vec();
+                field_inits.push(GeneratedStructFieldInit { field, value });
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::StructInit {
+                        target,
+                        fields: GeneratedStructFieldInitListId::new(self.db, field_inits),
+                    },
+                )))
+            }
             FIELD_TY_METHOD => {
                 if !args.is_empty() {
                     return None;
@@ -1804,6 +1866,9 @@ const BUILDER_SELF_REF_METHOD: &str = "self_ref";
 const BUILDER_OTHER_REF_METHOD: &str = "other_ref";
 const BUILDER_FIELD_GET_METHOD: &str = "field_get";
 const BUILDER_EQ_METHOD: &str = "eq";
+const BUILDER_DEFAULT_METHOD: &str = "default";
+const BUILDER_STRUCT_INIT_METHOD: &str = "struct_init";
+const BUILDER_WITH_FIELD_METHOD: &str = "with_field";
 const BUILDER_EMIT_METHOD: &str = "emit_method";
 const REFLECT_FIELDS_METHOD: &str = "fields";
 const FIELD_TY_METHOD: &str = "ty";
@@ -2420,11 +2485,7 @@ impl ModuleAnalysisPass for ElaborationRequestAnalysisPass {
 mod tests {
     use super::*;
     use crate::{
-        analysis::ty::{
-            constraint::{ConstraintId, GeneratedStructFieldInit},
-            trait_def::TraitInstId,
-            ty_def::TyId,
-        },
+        analysis::ty::{constraint::ConstraintId, trait_def::TraitInstId, ty_def::TyId},
         hir_def::ItemKind,
         span::LazySpan,
         test_db::HirAnalysisTestDb,
