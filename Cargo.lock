@@ -2117,8 +2117,8 @@ dependencies = [
  "fe-mir",
  "fe-resolver",
  "fe-semantic-indexing",
- "fe-solc-runner",
  "fe-shape-address",
+ "fe-solc-runner",
  "fe-test-utils",
  "fe-trace-facts",
  "fe-trace-query",
@@ -2474,7 +2474,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2519,7 +2519,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 2.0.116",
+ "syn 2.0.117",
 ]
 
 [[package]]
