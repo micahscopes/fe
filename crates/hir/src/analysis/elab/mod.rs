@@ -2940,7 +2940,7 @@ fn resolve_derive_target<'db>(
     let span: DynLazySpan<'db> = decl.span().into();
     let assumptions = PredicateListId::empty_list(db);
     match resolve_path(db, path, decl.scope(), assumptions, false) {
-        Ok(PathRes::Ty(ty) | PathRes::TyAlias(_, ty)) => {
+        Ok(PathRes::Ty(ty)) => {
             let Some(adt) = ty.adt_ref(db) else {
                 return Err(invalid_request(
                     span,
@@ -2949,6 +2949,10 @@ fn resolve_derive_target<'db>(
             };
             Ok(ElaborationTarget::from_adt_ref(adt))
         }
+        Ok(PathRes::TyAlias(..)) => Err(invalid_request(
+            span,
+            "derive target must be a nominal struct or enum, not a type alias",
+        )),
         Ok(res) => Err(invalid_request(
             span,
             format!(

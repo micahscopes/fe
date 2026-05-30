@@ -1180,6 +1180,28 @@ derive Eq for VALUE
 }
 
 #[test]
+fn derive_declaration_rejects_type_alias_target() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_rejects_type_alias_target.fe".into(),
+        r#"
+trait Eq {}
+struct Foo {}
+type Alias = Foo
+
+derive Eq for Alias
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid elaboration request");
+    assert_diag_message(
+        &diags,
+        "derive target must be a nominal struct or enum, not a type alias",
+    );
+}
+
+#[test]
 fn elaboration_ctfe_context_seeds_declared_provider_capabilities() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
