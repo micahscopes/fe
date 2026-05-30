@@ -515,7 +515,6 @@ pub(crate) struct GeneratedExprId<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum GeneratedMethodBodyKind<'db> {
-    MissingGeneratedBody,
     Expr(GeneratedExprId<'db>),
 }
 
@@ -1127,7 +1126,6 @@ impl<'db> TyVisitable<'db> for GeneratedMethodBodyKind<'db> {
         V: TyVisitor<'db> + ?Sized,
     {
         match self {
-            Self::MissingGeneratedBody => {}
             Self::Expr(expr) => expr.visit_with(visitor),
         }
     }
@@ -1139,7 +1137,6 @@ impl<'db> TyFoldable<'db> for GeneratedMethodBodyKind<'db> {
         F: TyFolder<'db>,
     {
         match self {
-            Self::MissingGeneratedBody => self,
             Self::Expr(expr) => Self::Expr(expr.fold_with(db, folder)),
         }
     }

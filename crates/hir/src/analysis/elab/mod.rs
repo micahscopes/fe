@@ -214,10 +214,6 @@ pub(crate) enum BuilderCommand<'db> {
         origin: RequirementOrigin<'db>,
     },
     #[allow(dead_code)]
-    EmitMethodStub {
-        name: IdentId<'db>,
-    },
-    #[allow(dead_code)]
     EmitMethodExpr {
         name: IdentId<'db>,
         expr: GeneratedExprId<'db>,
@@ -427,10 +423,6 @@ fn generated_impl_from_builder_commands<'db>(
                     origin: *origin,
                 })
             }
-            BuilderCommand::EmitMethodStub { name } => methods.push(GeneratedMethod {
-                name: *name,
-                body: GeneratedMethodBodyKind::MissingGeneratedBody,
-            }),
             BuilderCommand::EmitMethodExpr { name, expr } => methods.push(GeneratedMethod {
                 name: *name,
                 body: GeneratedMethodBodyKind::Expr(*expr),
@@ -1983,7 +1975,6 @@ fn generated_unsupported_required_methods<'db>(
         .filter_map(|method| {
             let required_method = required.get(&method.name)?;
             match method.body {
-                GeneratedMethodBodyKind::MissingGeneratedBody => Some(method.name),
                 GeneratedMethodBodyKind::Expr(expr) => {
                     let expected =
                         generated_required_method_return_ty(db, generated, *required_method);
@@ -2903,65 +2894,6 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     }
 
     #[test]
-    fn generated_method_placeholders_are_not_supported_bodies() {
-        let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(
-            "generated_method_placeholders_are_not_supported_bodies.fe".into(),
-            r#"
-trait Eq {
-    fn eq(self, other: Self) -> bool
-}
-
-#[derive(Eq)]
-struct Foo {}
-
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
-}
-"#,
-        );
-        let (top_mod, _) = db.top_mod(file);
-        let context = first_builder_context(&db, top_mod);
-        let output = provider_output_for_context(&db, context);
-        assert!(matches!(
-            output.status(&db),
-            ProviderOutputStatus::Succeeded { .. }
-        ));
-        let eq_trait = find_trait(&db, top_mod, "Eq");
-        let method_name = *eq_trait
-            .method_defs(&db)
-            .keys()
-            .next()
-            .expect("missing required method");
-
-        let commands = BuilderCommandListId::new(
-            &db,
-            vec![
-                BuilderCommand::EmitMethodStub { name: method_name },
-                BuilderCommand::Finish,
-            ],
-        );
-        let generated = generated_impl_from_builder_commands(
-            &db,
-            context,
-            GeneratedImplSource::ProviderOutput(output),
-            commands,
-        )
-        .unwrap();
-
-        assert!(generated_missing_required_methods(&db, generated).is_empty());
-        assert_eq!(
-            generated_unsupported_required_methods(&db, generated),
-            vec![method_name]
-        );
-        assert_eq!(generated.methods.list(&db).len(), 1);
-    }
-
-    #[test]
     fn generated_bool_method_body_satisfies_bool_required_method() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
@@ -3013,9 +2945,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 
         assert!(generated_missing_required_methods(&db, generated).is_empty());
         assert!(generated_unsupported_required_methods(&db, generated).is_empty());
-        let GeneratedMethodBodyKind::Expr(expr) = generated.methods.list(&db)[0].body else {
-            panic!("expected generated expression body");
-        };
+        let GeneratedMethodBodyKind::Expr(expr) = generated.methods.list(&db)[0].body;
         assert!(matches!(
             expr.kind(&db),
             GeneratedExprKind::BoolLiteral(true)
