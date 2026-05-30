@@ -2055,7 +2055,6 @@ fn generated_expr_static_ty<'db>(
         GeneratedExprKind::StructInit { target, fields } => {
             generated_struct_init_ty(db, target, fields)
         }
-        GeneratedExprKind::TypedPlaceholder { .. } => None,
     }
 }
 
@@ -3162,65 +3161,6 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 
         assert!(generated_missing_required_methods(&db, generated).is_empty());
         assert!(generated_unsupported_required_methods(&db, generated).is_empty());
-    }
-
-    #[test]
-    fn generated_placeholder_body_is_not_a_supported_method_body() {
-        let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(
-            "generated_placeholder_body_is_not_a_supported_method_body.fe".into(),
-            r#"
-trait Default {
-    fn default() -> Self
-}
-
-#[derive(Default)]
-struct Foo {}
-
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (builder: mut ImplBuilder<Default<T>>)
-{
-    builder.finish()
-    ev
-}
-"#,
-        );
-        let (top_mod, _) = db.top_mod(file);
-        let context = first_builder_context(&db, top_mod);
-        let output = provider_output_for_context(&db, context);
-        let default_trait = find_trait(&db, top_mod, "Default");
-        let method_name = *default_trait
-            .method_defs(&db)
-            .keys()
-            .next()
-            .expect("missing required method");
-        let target_ty = context.request(&db).target(&db).ty(&db);
-        let expr = GeneratedExprId::new(&db, GeneratedExprKind::TypedPlaceholder { ty: target_ty });
-
-        let commands = BuilderCommandListId::new(
-            &db,
-            vec![
-                BuilderCommand::EmitMethodExpr {
-                    name: method_name,
-                    expr,
-                },
-                BuilderCommand::Finish,
-            ],
-        );
-        let generated = generated_impl_from_builder_commands(
-            &db,
-            context,
-            GeneratedImplSource::ProviderOutput(output),
-            commands,
-        )
-        .unwrap();
-
-        assert!(generated_missing_required_methods(&db, generated).is_empty());
-        assert_eq!(
-            generated_unsupported_required_methods(&db, generated),
-            vec![method_name]
-        );
     }
 
     #[test]

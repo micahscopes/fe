@@ -505,11 +505,6 @@ pub(crate) enum GeneratedExprKind<'db> {
         target: TyId<'db>,
         fields: GeneratedStructFieldInitListId<'db>,
     },
-    /// Internal scaffold marker used by tests while generated-body IR is still
-    /// growing. It is intentionally rejected by generated method validation.
-    TypedPlaceholder {
-        ty: TyId<'db>,
-    },
 }
 
 #[salsa::interned]
@@ -1067,7 +1062,6 @@ impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
                 target.visit_with(visitor);
                 fields.visit_with(visitor);
             }
-            Self::TypedPlaceholder { ty } => ty.visit_with(visitor),
         }
     }
 }
@@ -1104,9 +1098,6 @@ impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
             Self::StructInit { target, fields } => Self::StructInit {
                 target: target.fold_with(db, folder),
                 fields: fields.fold_with(db, folder),
-            },
-            Self::TypedPlaceholder { ty } => Self::TypedPlaceholder {
-                ty: ty.fold_with(db, folder),
             },
         }
     }
