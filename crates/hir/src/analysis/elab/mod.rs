@@ -1988,7 +1988,7 @@ fn generated_expr_static_ty<'db>(
         // Temporary Eq-specific sugar retained while provider surface syntax
         // moves toward self/arg refs, field_get, and eq expression builders.
         GeneratedExprKind::FieldEq { .. } => Some(TyId::bool(db)),
-        GeneratedExprKind::TypedPlaceholder { ty } => Some(ty),
+        GeneratedExprKind::TypedPlaceholder { .. } => None,
     }
 }
 
@@ -3133,10 +3133,10 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     }
 
     #[test]
-    fn generated_method_body_instantiates_self_return_type() {
+    fn generated_placeholder_body_is_not_a_supported_method_body() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
-            "generated_method_body_instantiates_self_return_type.fe".into(),
+            "generated_placeholder_body_is_not_a_supported_method_body.fe".into(),
             r#"
 trait Default {
     fn default() -> Self
@@ -3185,7 +3185,10 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
         .unwrap();
 
         assert!(generated_missing_required_methods(&db, generated).is_empty());
-        assert!(generated_unsupported_required_methods(&db, generated).is_empty());
+        assert_eq!(
+            generated_unsupported_required_methods(&db, generated),
+            vec![method_name]
+        );
     }
 
     #[test]

@@ -488,6 +488,8 @@ pub(crate) enum GeneratedExprKind<'db> {
     FieldEq {
         field: ReflectedField<'db>,
     },
+    /// Internal scaffold marker used by tests while generated-body IR is still
+    /// growing. It is intentionally rejected by generated method validation.
     TypedPlaceholder {
         ty: TyId<'db>,
     },
