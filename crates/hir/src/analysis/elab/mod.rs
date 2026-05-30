@@ -1136,6 +1136,7 @@ fn count_builder_method_calls_in_expr<'db>(
                 method
                     .to_opt()
                     .is_some_and(|method| method.data(db) == method_name)
+                    && args.is_empty()
                     && expr_is_path_named_any(db, body, *receiver, builder_names),
             ) + count_builder_method_calls_in_expr(db, body, *receiver, builder_names, method_name)
                 + args
@@ -1829,6 +1830,37 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
             output.status(&db),
             ProviderOutputStatus::Skipped {
                 reason: ProviderSkipReason::MissingReflectCapability
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_output_ignores_malformed_builder_finish_call() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provider_output_ignores_malformed_builder_finish_call.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish(1)
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::MissingFinish
             }
         ));
     }
