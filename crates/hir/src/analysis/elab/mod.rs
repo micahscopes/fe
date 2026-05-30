@@ -171,6 +171,7 @@ impl<'db> CapabilityEnv<'db> {
 pub(crate) struct ElaborationCtfeContextId<'db> {
     request: ElaborationRequestId<'db>,
     provider: EvidenceProviderId<'db>,
+    derive_evidence: ConstraintId<'db>,
 
     #[return_ref]
     capabilities: Vec<ElaborationCapabilityWitness<'db>>,
@@ -467,7 +468,7 @@ impl<'db> ElaborationCtfeContextId<'db> {
         format!(
             "{} using {} evidence from {} with [{}]",
             self.request(db).pretty_print(db),
-            self.provider(db).derive_goal(db).pretty_print(db),
+            self.derive_evidence(db).pretty_print(db),
             provider,
             capabilities
         )
@@ -1705,7 +1706,7 @@ fn generated_trace_facts<'db>(
     let mut facts = vec![
         GeneratedTraceFact::RequestedBy(generated.context.request(db)),
         GeneratedTraceFact::GeneratedBy(generated.context),
-        GeneratedTraceFact::ConsumesDeriveEvidence(generated.context.provider(db).derive_goal(db)),
+        GeneratedTraceFact::ConsumesDeriveEvidence(generated.context.derive_evidence(db)),
         GeneratedTraceFact::Source(generated.source),
         GeneratedTraceFact::ProvidesEvidence(ConstraintId::from_trait(db, generated.trait_inst)),
     ];
@@ -2204,9 +2205,14 @@ fn elaborate_provider_context<'db>(
 
     let instantiated_goal = instantiated.first().copied()?;
     table.unify(instantiated_goal, request.goal(db)).ok()?;
+    let derive_evidence = instantiated.get(1).copied()?.fold_with(db, &mut table);
+    let expected_derive_evidence = derive_evidence_for_goal(db, request.goal(db))?;
+    if !constraints_match(db, derive_evidence, expected_derive_evidence) {
+        return None;
+    }
 
     let capabilities: Vec<ElaborationCapabilityWitness<'db>> = instantiated
-        .drain(1..)
+        .drain(2..)
         .filter_map(|constraint| {
             let folded = constraint.fold_with(db, &mut table);
             let ConstraintKind::EffectCapability(capability) = folded.kind(db) else {
@@ -2223,8 +2229,20 @@ fn elaborate_provider_context<'db>(
         db,
         request,
         provider,
+        derive_evidence,
         capabilities,
     ))
+}
+
+fn derive_evidence_for_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    goal: ConstraintId<'db>,
+) -> Option<ConstraintId<'db>> {
+    let ConstraintKind::Trait(inst) = goal.kind(db) else {
+        return None;
+    };
+    let head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(inst.def(db)));
+    Some(ConstraintId::new(db, ConstraintKind::Derive(head)))
 }
 
 fn provider_goal_and_capabilities<'db>(
@@ -2232,8 +2250,9 @@ fn provider_goal_and_capabilities<'db>(
     provider: EvidenceProviderId<'db>,
     capabilities: &[ConstraintId<'db>],
 ) -> Vec<ConstraintId<'db>> {
-    let mut constraints = Vec::with_capacity(capabilities.len() + 1);
+    let mut constraints = Vec::with_capacity(capabilities.len() + 2);
     constraints.push(provider.goal(db));
+    constraints.push(provider.derive_goal(db));
     constraints.extend(capabilities.iter().copied());
     constraints
 }
