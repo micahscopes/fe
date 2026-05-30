@@ -770,6 +770,20 @@ fn bad<V>(field: Field<Foo, V>) -> TypeInfo<V> {
 }
 
 #[test]
+fn generated_expr_values_cannot_escape_runtime_functions() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_expr_values_cannot_escape_runtime_functions.fe".into(),
+        r#"
+fn bad(expr: GeneratedExpr<bool>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
 fn compile_time_only_type_constructors_cannot_escape_enum_variant_fields() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -1817,6 +1831,67 @@ where
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         vec!["generated provider Pair<A, B>: Eq with obligations {A: Eq, B: Eq}".to_string()]
+    );
+}
+
+#[test]
+fn provider_outside_core_can_derive_core_eq() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_outside_core_can_derive_core_eq.fe".into(),
+        r#"
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    let mut acc = builder.bool(true)
+    for field in reflect.fields() {
+        builder.require<Eq>(field.ty())
+        acc = builder.and(acc, builder.eq(
+            builder.field_get(builder.self_ref(), field),
+            builder.field_get(builder.other_ref(), field),
+        ))
+    }
+    builder.emit_method(acc)
+    builder.finish()
+    ev
+}
+
+fn caller<A, B>()
+where
+    A: Eq,
+    B: Eq
+{
+    require_eq<Pair<A, B>>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Pair<A, B>: Eq with obligations {A: Eq, B: Eq}".to_string()]
+    );
+    assert_eq!(
+        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        vec!["provider derive_eq for Eq via Derive<Eq> -> T: Eq<T>".to_string()]
     );
 }
 

@@ -1,7 +1,6 @@
 use crate::core::hir_def::{
-    ConstGenericArgValue, GenericArg, GenericParam, GenericParamOwner, GenericParamView, ItemKind,
-    Partial, Trait, TraitRefId, TypeBound, TypeKind, scope_graph::ScopeId,
-    types::TypeId as HirTypeId,
+    GenericArg, GenericParam, GenericParamOwner, GenericParamView, ItemKind, Partial, Trait,
+    TraitRefId, TypeBound, TypeKind, scope_graph::ScopeId, types::TypeId as HirTypeId,
 };
 use crate::hir_def::CallableDef;
 use common::indexmap::{IndexMap, IndexSet};
@@ -13,7 +12,7 @@ use crate::analysis::{
     ty::{
         adt_def::AdtDef,
         binder::Binder,
-        const_ty::ConstTyId,
+        const_ty::LayoutHoleArgSite,
         constraint::{
             CapabilityMode, ConstPredicateInstId, ConstPredicateRef, ConstraintApplicationId,
             ConstraintHeadId, ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
@@ -29,7 +28,10 @@ use crate::analysis::{
         trait_lower::{lower_impl_trait, lower_trait_ref},
         trait_resolution::PredicateListId,
         ty_def::{Kind, PrimTy, TyBase, TyData, TyId, TyVarSort},
-        ty_lower::{collect_generic_params, lower_hir_ty, lower_opt_hir_ty},
+        ty_lower::{
+            ConstDefaultCompletion, collect_generic_params, lower_generic_arg_for_expected,
+            lower_hir_ty,
+        },
         unify::InferenceKey,
     },
 };
@@ -679,28 +681,48 @@ fn lower_concrete_trait_constraint_predicate<'db>(
     let trait_ = inst.def(db);
     let trait_params = trait_.params(db);
     let args = generic_args.data(db);
-    if args.len() != trait_params.len() {
+    if args.is_empty() || args.len() > trait_params.len() {
         return Some(ConstraintId::new(db, ConstraintKind::Invalid));
     }
 
-    let mut lowered_args = Vec::with_capacity(args.len());
-    for arg in args {
-        let lowered = match arg {
-            GenericArg::Type(ty_arg) => lower_opt_hir_ty(db, ty_arg.ty, scope, assumptions),
-            GenericArg::Const(const_arg) => match const_arg.value {
-                ConstGenericArgValue::Expr(body) => {
-                    TyId::const_ty(db, ConstTyId::from_opt_body(db, body))
-                }
-                ConstGenericArgValue::Hole => {
-                    return Some(ConstraintId::new(db, ConstraintKind::Invalid));
-                }
-            },
-            GenericArg::AssocType(_) => {
-                return Some(ConstraintId::new(db, ConstraintKind::Invalid));
-            }
+    // Constraint terms use the proposition shape `Trait<Self, Args...>`, unlike
+    // ordinary trait references where `Self` is supplied by the bound receiver.
+    // Complete any trailing explicit trait defaults after binding that self arg.
+    let mut lowered_provided = Vec::with_capacity(args.len());
+    for (arg_idx, arg) in args.iter().enumerate() {
+        let Some(param) = trait_params.get(arg_idx) else {
+            return Some(ConstraintId::new(db, ConstraintKind::Invalid));
         };
-        lowered_args.push(lowered);
+        let expected = super::super::ty_def::ApplicableTyProp {
+            kind: param.kind(db).clone(),
+            const_ty: param.const_ty_ty(db),
+        };
+        lowered_provided.push(lower_generic_arg_for_expected(
+            db,
+            arg,
+            arg_idx,
+            scope,
+            assumptions,
+            LayoutHoleArgSite::GenericArgList(generic_args),
+            Some(&expected),
+        ));
     }
+
+    let self_ty = lowered_provided[0];
+    let completed_explicit = trait_.param_set(db).complete_explicit_args(
+        db,
+        Some(self_ty),
+        &lowered_provided[1..],
+        assumptions,
+        ConstDefaultCompletion::evaluate(Some(path)),
+    );
+    if completed_explicit.len() != trait_params.len().saturating_sub(1) {
+        return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+    }
+
+    let mut lowered_args = Vec::with_capacity(trait_params.len());
+    lowered_args.push(self_ty);
+    lowered_args.extend(completed_explicit);
 
     for (expected_ty, actual_ty) in trait_params.iter().zip(lowered_args.iter_mut()) {
         if !expected_ty.kind(db).does_match(actual_ty.kind(db)) {
