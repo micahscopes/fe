@@ -25,6 +25,7 @@ pub(crate) enum ConstraintKind<'db> {
     TypeEqual(TypeEqualId<'db>),
     AssocTypeEqual(AssocTypeEqualId<'db>),
     ConstraintApplication(ConstraintApplicationId<'db>),
+    Derive(ConstraintHeadId<'db>),
     WellFormed(TyId<'db>),
     Invalid,
 }
@@ -275,6 +276,7 @@ impl<'db> ConstraintId<'db> {
             ConstraintKind::TypeEqual(equal) => equal.pretty_print(db),
             ConstraintKind::AssocTypeEqual(equal) => equal.pretty_print(db),
             ConstraintKind::ConstraintApplication(application) => application.pretty_print(db),
+            ConstraintKind::Derive(head) => format!("Derive<{}>", head.pretty_print(db)),
             ConstraintKind::WellFormed(ty) => format!("WellFormed<{}>", ty.pretty_print(db)),
             ConstraintKind::Invalid => "<invalid constraint>".to_string(),
         }
@@ -758,6 +760,7 @@ impl<'db> TyVisitable<'db> for ConstraintKind<'db> {
             Self::TypeEqual(equal) => equal.visit_with(visitor),
             Self::AssocTypeEqual(equal) => equal.visit_with(visitor),
             Self::ConstraintApplication(application) => application.visit_with(visitor),
+            Self::Derive(head) => head.visit_with(visitor),
             Self::WellFormed(ty) => ty.visit_with(visitor),
             Self::Invalid => {}
         }
@@ -780,6 +783,7 @@ impl<'db> TyFoldable<'db> for ConstraintKind<'db> {
             Self::ConstraintApplication(application) => {
                 Self::ConstraintApplication(application.fold_with(db, folder))
             }
+            Self::Derive(head) => Self::Derive(head.fold_with(db, folder)),
             Self::WellFormed(ty) => Self::WellFormed(ty.fold_with(db, folder)),
             Self::Invalid => Self::Invalid,
         }

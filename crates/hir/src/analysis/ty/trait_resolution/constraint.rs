@@ -28,7 +28,7 @@ use crate::analysis::{
         trait_def::TraitInstId,
         trait_lower::{lower_impl_trait, lower_trait_ref},
         trait_resolution::PredicateListId,
-        ty_def::{Kind, TyBase, TyData, TyId, TyVarSort},
+        ty_def::{Kind, PrimTy, TyBase, TyData, TyId, TyVarSort},
         ty_lower::{collect_generic_params, lower_hir_ty, lower_opt_hir_ty},
         unify::InferenceKey,
     },
@@ -578,6 +578,9 @@ pub(crate) fn lower_hir_constraint_predicate<'db>(
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
 ) -> ConstraintId<'db> {
+    if let Some(constraint) = lower_derive_constraint_predicate(db, hir_ty, scope, assumptions) {
+        return constraint;
+    }
     if let Some(constraint) =
         lower_concrete_trait_constraint_predicate(db, hir_ty, scope, assumptions)
     {
@@ -591,6 +594,65 @@ pub(crate) fn lower_hir_constraint_predicate<'db>(
             TyId::invalid(db, crate::analysis::ty::ty_def::InvalidCause::ParseError)
         });
     lower_constraint_application_predicate(db, ty)
+}
+
+fn lower_derive_constraint_predicate<'db>(
+    db: &'db dyn HirAnalysisDb,
+    hir_ty: Partial<HirTypeId<'db>>,
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+) -> Option<ConstraintId<'db>> {
+    let hir_ty = hir_ty.to_opt()?;
+    let TypeKind::Path(path) = hir_ty.data(db) else {
+        return None;
+    };
+    let path = path.to_opt()?;
+    let generic_args = path.generic_args(db);
+    if generic_args.is_empty(db) {
+        return None;
+    }
+
+    let Ok(PathRes::Ty(base)) =
+        resolve_path(db, path.strip_generic_args(db), scope, assumptions, false)
+    else {
+        return None;
+    };
+    if !matches!(base.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Derive))) {
+        return None;
+    }
+
+    let [GenericArg::Type(arg)] = generic_args.data(db).as_slice() else {
+        return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+    };
+    let Some(arg_ty) = arg.ty.to_opt() else {
+        return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+    };
+    let TypeKind::Path(arg_path) = arg_ty.data(db) else {
+        return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+    };
+    let Some(arg_path) = arg_path.to_opt() else {
+        return Some(ConstraintId::new(db, ConstraintKind::Invalid));
+    };
+
+    let head = match resolve_path(db, arg_path, scope, assumptions, false) {
+        Ok(PathRes::Trait(inst)) => ConstraintHeadKind::ConcreteTrait(inst.def(db)),
+        Ok(PathRes::Ty(ty)) if is_unary_constraint_constructor_kind(&ty.kind(db)) => {
+            ConstraintHeadKind::GenericParam(ty)
+        }
+        _ => return Some(ConstraintId::new(db, ConstraintKind::Invalid)),
+    };
+    let head = ConstraintHeadId::new(db, head);
+    Some(ConstraintId::new(db, ConstraintKind::Derive(head)))
+}
+
+fn is_unary_constraint_constructor_kind(kind: &Kind) -> bool {
+    match kind {
+        Kind::Abs(inner) => {
+            inner.0.does_match(&Kind::Star) && inner.1.does_match(&Kind::Constraint)
+        }
+        Kind::Any => true,
+        _ => false,
+    }
 }
 
 fn lower_concrete_trait_constraint_predicate<'db>(

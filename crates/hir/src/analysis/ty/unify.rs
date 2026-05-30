@@ -690,6 +690,13 @@ impl<'db> Unifiable<'db> for ConstraintId<'db> {
                 }
                 Ok(())
             }
+            (ConstraintKind::Derive(lhs), ConstraintKind::Derive(rhs)) => {
+                if lhs == rhs {
+                    Ok(())
+                } else {
+                    Err(UnificationError::TypeMismatch)
+                }
+            }
             (ConstraintKind::WellFormed(lhs), ConstraintKind::WellFormed(rhs)) => {
                 table.unify_ty(lhs, rhs)
             }

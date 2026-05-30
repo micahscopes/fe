@@ -1753,6 +1753,7 @@ impl<'db> TyBase<'db> {
                 PrimTy::Reflect => "Reflect",
                 PrimTy::TypeInfo => "TypeInfo",
                 PrimTy::Field => "Field",
+                PrimTy::Derive => "Derive",
                 PrimTy::FieldList => "FieldList",
             }
             .to_string(),
@@ -1823,6 +1824,7 @@ impl From<HirPrimTy> for TyBase<'_> {
             HirPrimTy::Reflect => Self::Prim(PrimTy::Reflect),
             HirPrimTy::TypeInfo => Self::Prim(PrimTy::TypeInfo),
             HirPrimTy::Field => Self::Prim(PrimTy::Field),
+            HirPrimTy::Derive => Self::Prim(PrimTy::Derive),
         }
     }
 }
@@ -1856,6 +1858,7 @@ pub enum PrimTy {
     Reflect,
     TypeInfo,
     Field,
+    Derive,
     FieldList,
 }
 
@@ -2020,6 +2023,7 @@ impl HasKind for PrimTy {
             Self::Evidence | Self::ImplBuilder => Kind::abs(Kind::Constraint, Kind::Star),
             Self::Reflect | Self::TypeInfo | Self::FieldList => Kind::abs(Kind::Star, Kind::Star),
             Self::Field => Kind::abs(Kind::Star, Kind::abs(Kind::Star, Kind::Star)),
+            Self::Derive => Kind::abs(Kind::abs(Kind::Star, Kind::Constraint), Kind::Constraint),
             _ => Kind::Star,
         }
     }

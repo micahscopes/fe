@@ -445,6 +445,38 @@ where
 }
 
 #[test]
+fn derive_constraint_can_be_type_constructor_arg() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_constraint_can_be_type_constructor_arg.fe".into(),
+        r#"
+trait Eq {}
+
+const fn accepts<P: * -> Constraint>(
+    concrete: Evidence<Derive<Eq>>,
+    generic: Evidence<Derive<P>>,
+) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn derive_constraint_rejects_star_kind_argument() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_constraint_rejects_star_kind_argument.fe".into(),
+        r#"
+fn bad<T>(ev: Evidence<Derive<T>>) {}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid type argument kind");
+}
+
+#[test]
 fn star_kind_arg_cannot_fill_constraint_constructor_slot() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
