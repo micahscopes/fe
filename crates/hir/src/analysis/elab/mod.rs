@@ -1491,7 +1491,7 @@ impl<'db> ProviderBodyExecutor<'db> {
             BUILDER_BOOL_METHOD
             | BUILDER_AND_METHOD
             | BUILDER_SELF_REF_METHOD
-            | BUILDER_OTHER_REF_METHOD
+            | BUILDER_ARG_REF_METHOD
             | BUILDER_FIELD_GET_METHOD
             | BUILDER_EQ_METHOD
             | BUILDER_DEFAULT_METHOD
@@ -1692,18 +1692,19 @@ impl<'db> ProviderBodyExecutor<'db> {
                     },
                 )))
             }
-            BUILDER_OTHER_REF_METHOD
+            BUILDER_ARG_REF_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
             {
-                if !args.is_empty() {
+                let [arg] = args.as_slice() else {
                     return None;
-                }
+                };
+                let name = self.string_literal_ident_arg(body, arg.expr)?;
+                let ty = self
+                    .required_method_arg_ty(name)
+                    .unwrap_or_else(|| self.context.request(self.db).target(self.db).ty(self.db));
                 Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
                     self.db,
-                    GeneratedExprKind::MethodArgRef {
-                        name: IdentId::new(self.db, "other".to_string()),
-                        ty: self.context.request(self.db).target(self.db).ty(self.db),
-                    },
+                    GeneratedExprKind::MethodArgRef { name, ty },
                 )))
             }
             BUILDER_FIELD_GET_METHOD
@@ -1858,6 +1859,32 @@ impl<'db> ProviderBodyExecutor<'db> {
             _ => None,
         }
     }
+
+    fn string_literal_ident_arg(
+        &self,
+        body: Body<'db>,
+        expr: crate::hir_def::ExprId,
+    ) -> Option<IdentId<'db>> {
+        let Partial::Present(Expr::Lit(LitKind::String(value))) = expr.data(self.db, body) else {
+            return None;
+        };
+        Some(IdentId::new(self.db, value.data(self.db).to_string()))
+    }
+
+    fn required_method_arg_ty(&self, name: IdentId<'db>) -> Option<TyId<'db>> {
+        let ConstraintKind::Trait(trait_inst) =
+            self.context.request(self.db).goal(self.db).kind(self.db)
+        else {
+            return None;
+        };
+        let required = required_methods(self.db, ConstraintId::from_trait(self.db, trait_inst));
+        let mut methods = required.values().copied();
+        let method = methods.next()?;
+        if methods.next().is_some() {
+            return None;
+        }
+        required_method_arg_ty_for_trait_inst(self.db, trait_inst, method, name)
+    }
 }
 
 fn is_unary_constraint_constructor_kind(kind: &Kind) -> bool {
@@ -2007,7 +2034,7 @@ const BUILDER_FINISH_METHOD: &str = "finish";
 const BUILDER_BOOL_METHOD: &str = "bool";
 const BUILDER_AND_METHOD: &str = "and";
 const BUILDER_SELF_REF_METHOD: &str = "self_ref";
-const BUILDER_OTHER_REF_METHOD: &str = "other_ref";
+const BUILDER_ARG_REF_METHOD: &str = "arg_ref";
 const BUILDER_FIELD_GET_METHOD: &str = "field_get";
 const BUILDER_EQ_METHOD: &str = "eq";
 const BUILDER_DEFAULT_METHOD: &str = "default";
@@ -2158,25 +2185,53 @@ fn generated_required_method_param_ty<'db>(
     cx: GeneratedMethodValidationContext<'db>,
     name: IdentId<'db>,
 ) -> Option<TyId<'db>> {
-    let method = cx.required_method.as_callable(db)?;
+    required_method_arg_ty_for_trait_inst(db, cx.generated.trait_inst, cx.required_method, name)
+}
+
+fn required_method_arg_ty_for_trait_inst<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_inst: TraitInstId<'db>,
+    required_method: crate::hir_def::Func<'db>,
+    name: IdentId<'db>,
+) -> Option<TyId<'db>> {
+    let method = required_method.as_callable(db)?;
     let arg_tys = method.arg_tys(db);
-    if name.data(db) == "other" && cx.required_method.is_method(db) {
+
+    // Temporary compatibility path for Eq-shaped methods. The public builder
+    // API is `arg_ref("other")`; normal generated-method conformance should
+    // eventually own this Self-argument typing.
+    if name.data(db) == "other" && required_method.is_method(db) {
         arg_tys.get(1)?;
-        return Some(generated_method_target_ty(db, cx));
+        return trait_inst.args(db).first().copied();
     }
 
-    for (idx, ty) in arg_tys.into_iter().enumerate() {
-        if cx
-            .required_method
+    for (idx, ty) in arg_tys.iter().copied().enumerate() {
+        if required_method
             .param_label_or_name(db, idx)
             .is_some_and(|param_name| {
                 matches!(param_name, crate::hir_def::FuncParamName::Ident(id) if id == name)
             })
         {
             let ty = ty.instantiate_identity();
-            return Some(instantiate_required_method_ty(db, cx, ty));
+            return Some(instantiate_required_method_ty_for_trait_inst(
+                db,
+                trait_inst,
+                required_method,
+                ty,
+            ));
         }
     }
+
+    if name.data(db) == "other" && required_method.is_method(db) {
+        let ty = arg_tys.get(1)?.instantiate_identity();
+        return Some(instantiate_required_method_ty_for_trait_inst(
+            db,
+            trait_inst,
+            required_method,
+            ty,
+        ));
+    }
+
     None
 }
 
@@ -2192,9 +2247,22 @@ fn instantiate_required_method_ty<'db>(
     cx: GeneratedMethodValidationContext<'db>,
     ty: TyId<'db>,
 ) -> TyId<'db> {
-    let trait_inst = cx.generated.trait_inst;
+    instantiate_required_method_ty_for_trait_inst(
+        db,
+        cx.generated.trait_inst,
+        cx.required_method,
+        ty,
+    )
+}
+
+fn instantiate_required_method_ty_for_trait_inst<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_inst: TraitInstId<'db>,
+    required_method: crate::hir_def::Func<'db>,
+    ty: TyId<'db>,
+) -> TyId<'db> {
     let mut mappings = Vec::new();
-    let method = cx.required_method.as_callable(db).unwrap();
+    let method = required_method.as_callable(db).unwrap();
     for (idx, &arg) in trait_inst.args(db).iter().enumerate() {
         if let Some(&method_param) = method.params(db).get(idx) {
             mappings.push((method_param, arg));

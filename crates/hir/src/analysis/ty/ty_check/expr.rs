@@ -3185,7 +3185,7 @@ impl<'db> TyChecker<'db> {
                 self.check_expr(args[1].expr, bool_expr_ty);
                 Some(ExprProp::new(bool_expr_ty, true))
             }
-            "self_ref" | "other_ref" => {
+            "self_ref" => {
                 if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || !args.is_empty() {
                     return None;
                 }
@@ -3193,6 +3193,13 @@ impl<'db> TyChecker<'db> {
                     self.generated_expr_ty(self.impl_builder_target_from_goal(goal)?),
                     true,
                 ))
+            }
+            "arg_ref" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
+                    return None;
+                }
+                let arg_ty = self.fresh_ty();
+                Some(ExprProp::new(self.generated_expr_ty(arg_ty), true))
             }
             "field_get" => {
                 if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 2 {

@@ -1932,7 +1932,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder.require<Eq>(field.ty())
         acc = builder.and(acc, builder.eq(
             builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.other_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
         ))
     }
     builder.emit_method(acc)
@@ -1992,7 +1992,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder.require<Eq>(field.ty())
         acc = builder.and(acc, builder.eq(
             builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.other_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
         ))
     }
     builder.emit_method(acc)
@@ -2606,7 +2606,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     for field in reflect.fields() {
         builder.emit_method(builder.eq(
             builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.other_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
         ))
     }
     builder.finish()
@@ -2652,7 +2652,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     for field in reflect.fields() {
         builder.emit_method(builder.eq(
             builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.other_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
         ))
     }
     builder.finish()
@@ -2702,7 +2702,7 @@ const fn derive_test_eq<T>(ev: own Evidence<TestEq<T>>) -> Evidence<TestEq<T>>
         builder.require<TestEq>(field.ty())
         acc = builder.and(acc, builder.eq(
             builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.other_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
         ))
     }
     builder.emit_method(acc)
