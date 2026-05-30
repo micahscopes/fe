@@ -1896,6 +1896,58 @@ where
 }
 
 #[test]
+fn provider_outside_core_derives_concrete_core_eq_struct() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_outside_core_derives_concrete_core_eq_struct.fe".into(),
+        r#"
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    let mut acc = builder.bool(true)
+    for field in reflect.fields() {
+        builder.require<Eq>(field.ty())
+        acc = builder.and(acc, builder.eq(
+            builder.field_get(builder.self_ref(), field),
+            builder.field_get(builder.other_ref(), field),
+        ))
+    }
+    builder.emit_method(acc)
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {u256: Eq}".to_string()]
+    );
+}
+
+#[test]
 fn provider_generated_marker_derive_end_to_end() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
