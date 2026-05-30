@@ -382,7 +382,7 @@ fn generated_impl_from_builder_commands<'db>(
             }
             BuilderCommand::EmitMethodStub { name } => methods.push(GeneratedMethod {
                 name: *name,
-                body: GeneratedMethodBodyKind::UnsupportedStub,
+                body: GeneratedMethodBodyKind::MissingGeneratedBody,
             }),
             BuilderCommand::Finish => finished = true,
         }
@@ -1413,7 +1413,7 @@ fn generated_unsupported_required_methods<'db>(
             required
                 .contains(&method.name)
                 .then_some(match method.body {
-                    GeneratedMethodBodyKind::UnsupportedStub => method.name,
+                    GeneratedMethodBodyKind::MissingGeneratedBody => method.name,
                 })
         })
         .collect()
@@ -2116,10 +2116,10 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     }
 
     #[test]
-    fn generated_method_stubs_are_not_supported_bodies() {
+    fn generated_method_placeholders_are_not_supported_bodies() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
-            "generated_method_stubs_are_not_supported_bodies.fe".into(),
+            "generated_method_placeholders_are_not_supported_bodies.fe".into(),
             r#"
 trait Eq {
     fn eq(self, other: Self) -> bool
