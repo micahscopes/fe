@@ -5,8 +5,9 @@ use rustc_hash::FxHashMap;
 use smallvec1::SmallVec;
 
 use crate::core::hir_def::{
-    ArithBinOp, BinOp, CallableDef, Cond, CondId, Expr, ExprId, FieldIndex, IdentId, IntegerId,
-    LitKind, LogicalBinOp, Partial, PatId, PathId, Stmt, UnOp, VariantKind, WithBinding,
+    ArithBinOp, BinOp, CallableDef, Cond, CondId, Expr, ExprId, FieldIndex, GenericArg,
+    GenericArgListId, IdentId, IntegerId, LitKind, LogicalBinOp, Partial, PatId, PathId, Stmt,
+    TypeKind, UnOp, VariantKind, WithBinding,
 };
 use crate::span::DynLazySpan;
 
@@ -2929,9 +2930,12 @@ impl<'db> TyChecker<'db> {
             return ExprProp::invalid(self.db);
         }
 
-        if let Some(prop) =
-            self.check_impl_builder_intrinsic_method_call(method_name, &receiver_prop, args)
-        {
+        if let Some(prop) = self.check_impl_builder_intrinsic_method_call(
+            method_name,
+            &receiver_prop,
+            *generic_args,
+            args,
+        ) {
             self.env.type_expr(expr, prop.clone());
             return prop;
         }
@@ -3134,19 +3138,20 @@ impl<'db> TyChecker<'db> {
         &mut self,
         method_name: IdentId<'db>,
         receiver_prop: &ExprProp<'db>,
+        generic_args: GenericArgListId<'db>,
         args: &[crate::hir_def::CallArg<'db>],
     ) -> Option<ExprProp<'db>> {
         let goal = self.impl_builder_goal_from_receiver_ty(receiver_prop.ty)?;
         let method = method_name.data(self.db);
 
         match method.as_str() {
-            "require_field" => {
+            "require" => {
                 if !receiver_prop.is_mut || args.len() != 1 {
                     return None;
                 }
-                let target = self.impl_builder_field_obligation_target(goal)?;
+                self.impl_builder_requirement_trait_arg(generic_args)?;
                 let value = self.fresh_ty();
-                self.check_expr(args[0].expr, self.field_ty(target, value));
+                self.check_expr(args[0].expr, self.type_info_ty(value));
                 Some(ExprProp::new(TyId::unit(self.db), true))
             }
             "finish" => {
@@ -3165,6 +3170,32 @@ impl<'db> TyChecker<'db> {
         }
     }
 
+    fn impl_builder_requirement_trait_arg(
+        &self,
+        generic_args: GenericArgListId<'db>,
+    ) -> Option<crate::hir_def::Trait<'db>> {
+        let [GenericArg::Type(type_arg)] = generic_args.data(self.db).as_slice() else {
+            return None;
+        };
+        let hir_ty = type_arg.ty.to_opt()?;
+        let TypeKind::Path(path) = hir_ty.data(self.db) else {
+            return None;
+        };
+        let path = path.to_opt()?;
+        match crate::analysis::name_resolution::resolve_path(
+            self.db,
+            path,
+            self.env.scope(),
+            self.env.assumptions(),
+            false,
+        )
+        .ok()?
+        {
+            PathRes::Trait(inst) => Some(inst.def(self.db)),
+            _ => None,
+        }
+    }
+
     fn impl_builder_goal_from_receiver_ty(
         &self,
         receiver_ty: TyId<'db>,
@@ -3177,18 +3208,6 @@ impl<'db> TyChecker<'db> {
                     _ => None,
                 },
             )
-    }
-
-    fn impl_builder_field_obligation_target(
-        &self,
-        goal: crate::analysis::ty::constraint::ConstraintId<'db>,
-    ) -> Option<TyId<'db>> {
-        match goal.kind(self.db) {
-            crate::analysis::ty::constraint::ConstraintKind::Trait(trait_inst) => {
-                Some(trait_inst.self_ty(self.db))
-            }
-            _ => None,
-        }
     }
 
     fn check_reflect_intrinsic_method_call(
@@ -3261,11 +3280,6 @@ impl<'db> TyChecker<'db> {
     fn type_info_ty(&self, target: TyId<'db>) -> TyId<'db> {
         let type_info_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::TypeInfo)));
         TyId::app(self.db, type_info_ctor, target)
-    }
-
-    fn field_ty(&self, parent: TyId<'db>, value: TyId<'db>) -> TyId<'db> {
-        let field_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Field)));
-        TyId::app(self.db, TyId::app(self.db, field_ctor, parent), value)
     }
 
     fn field_list_ty(&self, target: TyId<'db>) -> TyId<'db> {

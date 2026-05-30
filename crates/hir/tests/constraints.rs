@@ -1264,7 +1264,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -1315,7 +1315,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -1411,7 +1411,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -1435,6 +1435,57 @@ fn caller() {
             "Pair: Eq requirement #0 requires FieldTy: Eq from field Pair.a".to_string(),
             "Pair: Eq requirement #1 requires FieldTy: Eq from field Pair.b".to_string(),
         ]
+    );
+}
+
+#[test]
+fn builder_require_records_arbitrary_field_constraints() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "builder_require_records_arbitrary_field_constraints.fe".into(),
+        r#"
+trait Eq {}
+trait Default {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct FieldTy {}
+
+impl Default for FieldTy {}
+
+#[derive(Eq)]
+struct Box {
+    value: FieldTy,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    for field in reflect.fields() {
+        builder.require<Default>(field.ty())
+    }
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Box>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Box: Eq with obligations {FieldTy: Default}".to_string()]
     );
 }
 
@@ -1500,7 +1551,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -1548,7 +1599,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -1605,7 +1656,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -1656,7 +1707,7 @@ const fn derive_marker<T>(ev: own Evidence<DeriveMarker<T>>) -> Evidence<DeriveM
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<DeriveMarker>(field.ty())
     }
     builder.finish()
     ev
@@ -1724,7 +1775,7 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Default>(field.ty())
     }
     builder.finish()
     ev
@@ -1952,7 +2003,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -1994,7 +2045,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -2041,7 +2092,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev

@@ -34,8 +34,8 @@ use crate::{
         },
     },
     hir_def::{
-        Attr, Body, Enum, Expr, FieldParent, HirIngot, IdentId, ItemKind, NormalAttr, Partial, Pat,
-        Stmt, Struct, TopLevelMod, Trait,
+        Attr, Body, Enum, Expr, FieldParent, GenericArg, GenericArgListId, HirIngot, IdentId,
+        ItemKind, NormalAttr, Partial, Pat, Stmt, Struct, TopLevelMod, Trait, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -899,6 +899,12 @@ enum ProviderExecutionFailure {
     Failed,
 }
 
+#[derive(Clone, Copy)]
+enum ElabValue<'db> {
+    Field(ReflectedField<'db>),
+    Type(TyId<'db>),
+}
+
 struct ProviderBodyExecutor<'db> {
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
@@ -1023,8 +1029,8 @@ impl<'db> ProviderBodyExecutor<'db> {
                     self.execute_expr(body, arg.expr)?;
                 }
             }
-            Expr::MethodCall(receiver, method, _, args) => {
-                if !self.execute_method_call(body, *receiver, *method, args)? {
+            Expr::MethodCall(receiver, method, generic_args, args) => {
+                if !self.execute_method_call(body, *receiver, *method, *generic_args, args)? {
                     self.execute_expr(body, *receiver)?;
                     for arg in args {
                         self.execute_expr(body, arg.expr)?;
@@ -1074,6 +1080,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         body: Body<'db>,
         receiver: crate::hir_def::ExprId,
         method: Partial<IdentId<'db>>,
+        generic_args: GenericArgListId<'db>,
         args: &[crate::hir_def::CallArg<'db>],
     ) -> Result<bool, ProviderExecutionFailure> {
         if !expr_is_path_named_any(self.db, body, receiver, &self.builder_names) {
@@ -1083,11 +1090,11 @@ impl<'db> ProviderBodyExecutor<'db> {
             return Ok(false);
         };
         match method.data(self.db).as_str() {
-            BUILDER_FIELD_REQUIRE_METHOD => {
+            BUILDER_REQUIRE_METHOD => {
                 let [arg] = args else {
                     return Ok(false);
                 };
-                self.execute_require_field(body, arg.expr)?;
+                self.execute_require(body, generic_args, arg.expr)?;
                 Ok(true)
             }
             BUILDER_FINISH_METHOD => {
@@ -1103,23 +1110,32 @@ impl<'db> ProviderBodyExecutor<'db> {
         }
     }
 
-    fn execute_require_field(
+    fn execute_require(
         &mut self,
         body: Body<'db>,
-        field_arg: crate::hir_def::ExprId,
+        generic_args: GenericArgListId<'db>,
+        constraint_arg: crate::hir_def::ExprId,
     ) -> Result<(), ProviderExecutionFailure> {
-        let Some(field) = self.field_value_for_expr(body, field_arg) else {
+        let Some(trait_) = self.resolve_trait_generic_arg(generic_args) else {
             return Err(ProviderExecutionFailure::Skipped(
                 ProviderSkipReason::UnsupportedProviderBody,
             ));
         };
-        let Some(requirement) = derive_requirement_for_field(self.db, self.context, field) else {
+        let Some(ElabValue::Type(arg_ty)) = self.eval_expr_value(body, constraint_arg) else {
             return Err(ProviderExecutionFailure::Skipped(
                 ProviderSkipReason::UnsupportedProviderBody,
             ));
         };
+
+        let constraint = ConstraintId::from_trait(
+            self.db,
+            TraitInstId::new_simple(self.db, trait_, vec![arg_ty]),
+        );
+        let origin = self
+            .requirement_origin_for_expr(body, constraint_arg)
+            .unwrap_or(RequirementOrigin::ProviderCode);
         self.builder
-            .require_with_origin(requirement.constraint, requirement.origin)
+            .require_with_origin(constraint, origin)
             .map_err(|_| ProviderExecutionFailure::Failed)
     }
 
@@ -1159,9 +1175,77 @@ impl<'db> ProviderBodyExecutor<'db> {
         body: Body<'db>,
         expr: crate::hir_def::ExprId,
     ) -> Option<ReflectedField<'db>> {
-        self.field_bindings.iter().rev().find_map(|(name, field)| {
+        match self.eval_expr_value(body, expr)? {
+            ElabValue::Field(field) => Some(field),
+            ElabValue::Type(_) => None,
+        }
+    }
+
+    fn eval_expr_value(
+        &self,
+        body: Body<'db>,
+        expr: crate::hir_def::ExprId,
+    ) -> Option<ElabValue<'db>> {
+        if let Some(field) = self.field_bindings.iter().rev().find_map(|(name, field)| {
             expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*field)
-        })
+        }) {
+            return Some(ElabValue::Field(field));
+        }
+
+        let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
+            expr.data(self.db, body)
+        else {
+            return None;
+        };
+        if !args.is_empty()
+            || method
+                .to_opt()
+                .is_none_or(|method| method.data(self.db) != FIELD_TY_METHOD)
+        {
+            return None;
+        }
+        let ElabValue::Field(field) = self.eval_expr_value(body, *receiver)? else {
+            return None;
+        };
+        Some(ElabValue::Type(field.ty))
+    }
+
+    fn requirement_origin_for_expr(
+        &self,
+        body: Body<'db>,
+        expr: crate::hir_def::ExprId,
+    ) -> Option<RequirementOrigin<'db>> {
+        let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
+            expr.data(self.db, body)
+        else {
+            return None;
+        };
+        if !args.is_empty()
+            || method
+                .to_opt()
+                .is_none_or(|method| method.data(self.db) != FIELD_TY_METHOD)
+        {
+            return None;
+        }
+        self.field_value_for_expr(body, *receiver)
+            .map(RequirementOrigin::ReflectedField)
+    }
+
+    fn resolve_trait_generic_arg(&self, generic_args: GenericArgListId<'db>) -> Option<Trait<'db>> {
+        let [GenericArg::Type(type_arg)] = generic_args.data(self.db).as_slice() else {
+            return None;
+        };
+        let hir_ty = type_arg.ty.to_opt()?;
+        let TypeKind::Path(path) = hir_ty.data(self.db) else {
+            return None;
+        };
+        let path = path.to_opt()?;
+        let assumptions = PredicateListId::empty_list(self.db);
+        let scope = self.context.provider(self.db).func(self.db).scope();
+        match resolve_path(self.db, path, scope, assumptions, false).ok()? {
+            PathRes::Trait(inst) => Some(inst.def(self.db)),
+            _ => None,
+        }
     }
 }
 
@@ -1276,21 +1360,6 @@ fn derive_requirements_for_reflected_target<'db>(
     )
 }
 
-fn derive_requirement_for_field<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: ElaborationCtfeContextId<'db>,
-    field: ReflectedField<'db>,
-) -> Option<GeneratedRequirement<'db>> {
-    let ConstraintKind::Trait(trait_inst) = context.request(db).goal(db).kind(db) else {
-        return None;
-    };
-    Some(derive_requirement_for_trait_field(
-        db,
-        trait_inst.def(db),
-        field,
-    ))
-}
-
 fn derive_requirement_for_trait_field<'db>(
     db: &'db dyn HirAnalysisDb,
     trait_: Trait<'db>,
@@ -1304,9 +1373,10 @@ fn derive_requirement_for_trait_field<'db>(
     }
 }
 
-const BUILDER_FIELD_REQUIRE_METHOD: &str = "require_field";
+const BUILDER_REQUIRE_METHOD: &str = "require";
 const BUILDER_FINISH_METHOD: &str = "finish";
 const REFLECT_FIELDS_METHOD: &str = "fields";
+const FIELD_TY_METHOD: &str = "ty";
 
 fn provider_impl_builder_effect_names<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -2000,7 +2070,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     builder.finish()
     ev
@@ -2101,7 +2171,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 {
     builder.finish()
     for field in reflect.fields() {
-        builder.require_field(field)
+        builder.require<Eq>(field.ty())
     }
     ev
 }
