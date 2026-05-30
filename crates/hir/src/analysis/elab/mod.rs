@@ -114,18 +114,6 @@ impl<'db> ElaborationRequestId<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-#[allow(dead_code)]
-pub(crate) enum ElaborationError {
-    ProviderExecutionNotImplemented,
-}
-
-#[salsa::interned]
-#[derive(Debug)]
-pub(crate) struct ElaborationOutputId<'db> {
-    request: ElaborationRequestId<'db>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum ElaborationCapabilityOrigin {
     ProviderUsesParam,
 }
@@ -347,15 +335,22 @@ impl<'db> ImplBuilderSession<'db> {
         )
     }
 
-    fn finish_commands(
-        mut self,
-        db: &'db dyn HirAnalysisDb,
-    ) -> Result<BuilderCommandListId<'db>, BuilderError<'db>> {
+    fn finish_explicit(&mut self) -> Result<(), BuilderError<'db>> {
         if self.finished {
             return Err(BuilderError::AlreadyFinished);
         }
         self.finished = true;
         self.commands.push(BuilderCommand::Finish);
+        Ok(())
+    }
+
+    fn into_commands(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Result<BuilderCommandListId<'db>, BuilderError<'db>> {
+        if !self.finished {
+            return Err(BuilderError::NotFinished);
+        }
         Ok(BuilderCommandListId::new(db, self.commands))
     }
 }
@@ -559,14 +554,6 @@ impl ElaborationOrigin {
             Self::DeriveAttr { .. } => "derive attribute",
         }
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn elaborate_request<'db>(
-    _db: &'db dyn HirAnalysisDb,
-    _request: ElaborationRequestId<'db>,
-) -> Result<ElaborationOutputId<'db>, ElaborationError> {
-    Err(ElaborationError::ProviderExecutionNotImplemented)
 }
 
 #[salsa::tracked(return_ref)]
@@ -903,80 +890,240 @@ fn provider_output_for_context<'db>(
         );
     }
 
-    let mut builder = ImplBuilderSession::new(db, context);
-    if builder.emit_impl(db, goal).is_err() {
-        return ProviderOutputId::new(db, request, provider, context, ProviderOutputStatus::Failed);
+    let status = execute_provider_body(db, context, env);
+    ProviderOutputId::new(db, request, provider, context, status)
+}
+
+enum ProviderExecutionFailure {
+    Skipped(ProviderSkipReason),
+    Failed,
+}
+
+struct ProviderBodyExecutor<'db> {
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+    env: CapabilityEnv<'db>,
+    builder: ImplBuilderSession<'db>,
+    builder_names: Vec<IdentId<'db>>,
+    reflect_names: Vec<IdentId<'db>>,
+}
+
+impl<'db> ProviderBodyExecutor<'db> {
+    fn new(
+        db: &'db dyn HirAnalysisDb,
+        context: ElaborationCtfeContextId<'db>,
+        env: CapabilityEnv<'db>,
+    ) -> Self {
+        let provider = context.provider(db);
+        Self {
+            db,
+            context,
+            env,
+            builder: ImplBuilderSession::new(db, context),
+            builder_names: provider_impl_builder_effect_names(db, provider),
+            reflect_names: provider_reflect_effect_names(db, provider),
+        }
     }
 
-    match provider_body_finish_count(db, provider) {
-        0 => {
-            return ProviderOutputId::new(
-                db,
-                request,
-                provider,
-                context,
-                ProviderOutputStatus::Skipped {
+    fn execute_body(mut self) -> ProviderOutputStatus<'db> {
+        let request = self.context.request(self.db);
+        let provider = self.context.provider(self.db);
+        if self
+            .builder
+            .emit_impl(self.db, request.goal(self.db))
+            .is_err()
+        {
+            return ProviderOutputStatus::Failed;
+        }
+
+        let Some(body) = provider.func(self.db).body(self.db) else {
+            return ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::MissingFinish,
+            };
+        };
+
+        match self.execute_expr(body, body.expr(self.db)) {
+            Ok(()) => match self.builder.into_commands(self.db) {
+                Ok(commands) => ProviderOutputStatus::Succeeded { commands },
+                Err(BuilderError::NotFinished) => ProviderOutputStatus::Skipped {
                     reason: ProviderSkipReason::MissingFinish,
                 },
-            );
-        }
-        1 => {}
-        _ => {
-            return ProviderOutputId::new(
-                db,
-                request,
-                provider,
-                context,
-                ProviderOutputStatus::Failed,
-            );
+                Err(_) => ProviderOutputStatus::Failed,
+            },
+            Err(ProviderExecutionFailure::Skipped(reason)) => {
+                ProviderOutputStatus::Skipped { reason }
+            }
+            Err(ProviderExecutionFailure::Failed) => ProviderOutputStatus::Failed,
         }
     }
 
-    if provider_body_requests_field_obligations(db, provider) {
-        let target_ty = request.target(db).ty(db);
-        if !env.has_reflect_target(db, target_ty) {
-            return ProviderOutputId::new(
-                db,
-                request,
-                provider,
-                context,
-                ProviderOutputStatus::Skipped {
-                    reason: ProviderSkipReason::MissingReflectCapability,
-                },
-            );
+    fn execute_stmt(
+        &mut self,
+        body: Body<'db>,
+        stmt: crate::hir_def::StmtId,
+    ) -> Result<(), ProviderExecutionFailure> {
+        let Partial::Present(stmt_data) = stmt.data(self.db, body) else {
+            return Ok(());
+        };
+        match stmt_data {
+            Stmt::Let(_, _, init) => {
+                if let Some(init) = init {
+                    self.execute_expr(body, *init)?;
+                }
+            }
+            Stmt::For(_, iterable, loop_body, _) => {
+                self.execute_expr(body, *iterable)?;
+                self.execute_expr(body, *loop_body)?;
+            }
+            Stmt::While(_, loop_body) => self.execute_expr(body, *loop_body)?,
+            Stmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    self.execute_expr(body, *expr)?;
+                }
+            }
+            Stmt::Expr(expr) => self.execute_expr(body, *expr)?,
+            Stmt::Continue | Stmt::Break => {}
         }
-        let Some(requirements) = derive_requirements_for_context(db, context) else {
-            return ProviderOutputId::new(
-                db,
-                request,
-                provider,
-                context,
-                ProviderOutputStatus::Skipped {
-                    reason: ProviderSkipReason::UnsupportedProviderBody,
-                },
-            );
+        Ok(())
+    }
+
+    fn execute_expr(
+        &mut self,
+        body: Body<'db>,
+        expr: crate::hir_def::ExprId,
+    ) -> Result<(), ProviderExecutionFailure> {
+        let Partial::Present(expr_data) = expr.data(self.db, body) else {
+            return Ok(());
+        };
+
+        match expr_data {
+            Expr::Block(stmts) => {
+                for &stmt in stmts {
+                    self.execute_stmt(body, stmt)?;
+                }
+            }
+            Expr::Call(callee, args) => {
+                self.execute_expr(body, *callee)?;
+                for arg in args {
+                    self.execute_expr(body, arg.expr)?;
+                }
+            }
+            Expr::MethodCall(receiver, method, _, args) => {
+                if !self.execute_method_call(body, *receiver, *method, args)? {
+                    self.execute_expr(body, *receiver)?;
+                    for arg in args {
+                        self.execute_expr(body, arg.expr)?;
+                    }
+                }
+            }
+            Expr::Bin(lhs, rhs, _) | Expr::Assign(lhs, rhs) | Expr::AugAssign(lhs, rhs, _) => {
+                self.execute_expr(body, *lhs)?;
+                self.execute_expr(body, *rhs)?;
+            }
+            Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
+                self.execute_expr(body, *inner)?;
+            }
+            Expr::Tuple(items) | Expr::Array(items) => {
+                for &item in items {
+                    self.execute_expr(body, item)?;
+                }
+            }
+            Expr::ArrayRep(value, _) => self.execute_expr(body, *value)?,
+            Expr::If(_, then_expr, else_expr) => {
+                self.execute_expr(body, *then_expr)?;
+                if let Some(else_expr) = else_expr {
+                    self.execute_expr(body, *else_expr)?;
+                }
+            }
+            Expr::Match(scrutinee, arms) => {
+                self.execute_expr(body, *scrutinee)?;
+                if let Partial::Present(arms) = arms {
+                    for arm in arms {
+                        self.execute_expr(body, arm.body)?;
+                    }
+                }
+            }
+            Expr::RecordInit(_, fields) => {
+                for field in fields {
+                    self.execute_expr(body, field.expr)?;
+                }
+            }
+            Expr::With(_, inner) => self.execute_expr(body, *inner)?,
+            Expr::Lit(_) | Expr::Path(_) => {}
+        }
+        Ok(())
+    }
+
+    fn execute_method_call(
+        &mut self,
+        body: Body<'db>,
+        receiver: crate::hir_def::ExprId,
+        method: Partial<IdentId<'db>>,
+        args: &[crate::hir_def::CallArg<'db>],
+    ) -> Result<bool, ProviderExecutionFailure> {
+        if !expr_is_path_named_any(self.db, body, receiver, &self.builder_names) {
+            return Ok(false);
+        }
+        let Some(method) = method.to_opt() else {
+            return Ok(false);
+        };
+        match method.data(self.db).as_str() {
+            BUILDER_FIELD_OBLIGATION_METHOD => {
+                let [arg] = args else {
+                    return Ok(false);
+                };
+                self.execute_require_fields(body, arg.expr)?;
+                Ok(true)
+            }
+            BUILDER_FINISH_METHOD => {
+                if !args.is_empty() {
+                    return Ok(false);
+                }
+                self.builder
+                    .finish_explicit()
+                    .map_err(|_| ProviderExecutionFailure::Failed)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn execute_require_fields(
+        &mut self,
+        body: Body<'db>,
+        reflect_arg: crate::hir_def::ExprId,
+    ) -> Result<(), ProviderExecutionFailure> {
+        let target_ty = self.context.request(self.db).target(self.db).ty(self.db);
+        if !self.env.has_reflect_target(self.db, target_ty)
+            || !expr_is_path_named_any(self.db, body, reflect_arg, &self.reflect_names)
+        {
+            return Err(ProviderExecutionFailure::Skipped(
+                ProviderSkipReason::MissingReflectCapability,
+            ));
+        }
+
+        let Some(requirements) =
+            derive_requirements_for_reflected_target(self.db, self.context, target_ty)
+        else {
+            return Err(ProviderExecutionFailure::Skipped(
+                ProviderSkipReason::UnsupportedProviderBody,
+            ));
         };
         for requirement in requirements {
-            if builder
+            self.builder
                 .require_with_origin(requirement.constraint, requirement.origin)
-                .is_err()
-            {
-                return ProviderOutputId::new(
-                    db,
-                    request,
-                    provider,
-                    context,
-                    ProviderOutputStatus::Failed,
-                );
-            }
+                .map_err(|_| ProviderExecutionFailure::Failed)?;
         }
+        Ok(())
     }
+}
 
-    let status = match builder.finish_commands(db) {
-        Ok(commands) => ProviderOutputStatus::Succeeded { commands },
-        Err(_) => ProviderOutputStatus::Failed,
-    };
-    ProviderOutputId::new(db, request, provider, context, status)
+fn execute_provider_body<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+    env: CapabilityEnv<'db>,
+) -> ProviderOutputStatus<'db> {
+    ProviderBodyExecutor::new(db, context, env).execute_body()
 }
 
 #[allow(dead_code)]
@@ -1052,20 +1199,29 @@ fn derive_requirements_for_context<'db>(
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<Vec<GeneratedRequirement<'db>>> {
     let request = context.request(db);
+    let target_ty = request.target(db).ty(db);
+    if !context_has_reflect_target(db, context, target_ty) {
+        return None;
+    }
+    derive_requirements_for_reflected_target(db, context, target_ty)
+}
+
+fn derive_requirements_for_reflected_target<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+    target_ty: TyId<'db>,
+) -> Option<Vec<GeneratedRequirement<'db>>> {
+    let request = context.request(db);
     let ElaborationTarget::Struct(_) = request.target(db) else {
         return None;
     };
     let ConstraintKind::Trait(trait_inst) = request.goal(db).kind(db) else {
         return None;
     };
-    let target_ty = request.target(db).ty(db);
-    if !context_has_reflect_target(db, context, target_ty) {
-        return None;
-    }
 
     let trait_ = trait_inst.def(db);
     Some(
-        reflected_fields_for_context(db, context)
+        reflect_struct_fields(db, target_ty)
             .into_iter()
             .filter(|field| tys_match(db, field.parent, target_ty))
             .map(|field| {
@@ -1084,43 +1240,6 @@ fn derive_requirements_for_context<'db>(
 
 const BUILDER_FIELD_OBLIGATION_METHOD: &str = "require_fields";
 const BUILDER_FINISH_METHOD: &str = "finish";
-
-fn provider_body_requests_field_obligations<'db>(
-    db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
-) -> bool {
-    provider_body_builder_method_count(db, provider, BUILDER_FIELD_OBLIGATION_METHOD, Some(&[])) > 0
-}
-
-fn provider_body_finish_count<'db>(
-    db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
-) -> usize {
-    provider_body_builder_method_count(db, provider, BUILDER_FINISH_METHOD, None)
-}
-
-fn provider_body_builder_method_count<'db>(
-    db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
-    method_name: &str,
-    required_arg_names: Option<&[IdentId<'db>]>,
-) -> usize {
-    let Some(body) = provider.func(db).body(db) else {
-        return 0;
-    };
-    let builder_names = provider_impl_builder_effect_names(db, provider);
-    if builder_names.is_empty() {
-        return 0;
-    }
-    count_builder_method_calls_in_expr(
-        db,
-        body,
-        body.expr(db),
-        &builder_names,
-        method_name,
-        required_arg_names,
-    )
-}
 
 fn provider_impl_builder_effect_names<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -1142,6 +1261,25 @@ fn provider_impl_builder_effect_names<'db>(
         .collect()
 }
 
+fn provider_reflect_effect_names<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider: EvidenceProviderId<'db>,
+) -> Vec<IdentId<'db>> {
+    provider
+        .func(db)
+        .effect_params(db)
+        .filter_map(|param| {
+            let name = param.name(db)?;
+            let key_path = param.key_path(db)?;
+            key_path
+                .ident(db)
+                .to_opt()
+                .is_some_and(|ident| ident.data(db) == "Reflect")
+                .then_some(name)
+        })
+        .collect()
+}
+
 fn expr_is_path_named_any<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
@@ -1157,294 +1295,6 @@ fn expr_is_path_named_any<'db>(
     path.ident(db)
         .to_opt()
         .is_some_and(|ident| names.contains(&ident))
-}
-
-fn count_builder_method_calls_in_expr<'db>(
-    db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
-    expr: crate::hir_def::ExprId,
-    builder_names: &[IdentId<'db>],
-    method_name: &str,
-    required_arg_names: Option<&[IdentId<'db>]>,
-) -> usize {
-    let Partial::Present(expr_data) = expr.data(db, body) else {
-        return 0;
-    };
-
-    match expr_data {
-        Expr::Block(stmts) => stmts
-            .iter()
-            .map(|stmt| {
-                count_builder_method_calls_in_stmt(
-                    db,
-                    body,
-                    *stmt,
-                    builder_names,
-                    method_name,
-                    required_arg_names,
-                )
-            })
-            .sum::<usize>(),
-        Expr::Call(callee, args) => {
-            count_builder_method_calls_in_expr(
-                db,
-                body,
-                *callee,
-                builder_names,
-                method_name,
-                required_arg_names,
-            ) + args
-                .iter()
-                .map(|arg| {
-                    count_builder_method_calls_in_expr(
-                        db,
-                        body,
-                        arg.expr,
-                        builder_names,
-                        method_name,
-                        required_arg_names,
-                    )
-                })
-                .sum::<usize>()
-        }
-        Expr::MethodCall(receiver, method, _, args) => {
-            usize::from(
-                method
-                    .to_opt()
-                    .is_some_and(|method| method.data(db) == method_name)
-                    && builder_method_args_match(db, body, args, required_arg_names)
-                    && expr_is_path_named_any(db, body, *receiver, builder_names),
-            ) + count_builder_method_calls_in_expr(
-                db,
-                body,
-                *receiver,
-                builder_names,
-                method_name,
-                required_arg_names,
-            ) + args
-                .iter()
-                .map(|arg| {
-                    count_builder_method_calls_in_expr(
-                        db,
-                        body,
-                        arg.expr,
-                        builder_names,
-                        method_name,
-                        required_arg_names,
-                    )
-                })
-                .sum::<usize>()
-        }
-        Expr::Bin(lhs, rhs, _) | Expr::Assign(lhs, rhs) | Expr::AugAssign(lhs, rhs, _) => {
-            count_builder_method_calls_in_expr(
-                db,
-                body,
-                *lhs,
-                builder_names,
-                method_name,
-                required_arg_names,
-            ) + count_builder_method_calls_in_expr(
-                db,
-                body,
-                *rhs,
-                builder_names,
-                method_name,
-                required_arg_names,
-            )
-        }
-        Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
-            count_builder_method_calls_in_expr(
-                db,
-                body,
-                *inner,
-                builder_names,
-                method_name,
-                required_arg_names,
-            )
-        }
-        Expr::Tuple(items) | Expr::Array(items) => items
-            .iter()
-            .map(|item| {
-                count_builder_method_calls_in_expr(
-                    db,
-                    body,
-                    *item,
-                    builder_names,
-                    method_name,
-                    required_arg_names,
-                )
-            })
-            .sum(),
-        Expr::ArrayRep(value, _) => count_builder_method_calls_in_expr(
-            db,
-            body,
-            *value,
-            builder_names,
-            method_name,
-            required_arg_names,
-        ),
-        Expr::If(_, then_expr, else_expr) => {
-            count_builder_method_calls_in_expr(
-                db,
-                body,
-                *then_expr,
-                builder_names,
-                method_name,
-                required_arg_names,
-            ) + else_expr
-                .map(|else_expr| {
-                    count_builder_method_calls_in_expr(
-                        db,
-                        body,
-                        else_expr,
-                        builder_names,
-                        method_name,
-                        required_arg_names,
-                    )
-                })
-                .unwrap_or_default()
-        }
-        Expr::Match(scrutinee, arms) => {
-            count_builder_method_calls_in_expr(
-                db,
-                body,
-                *scrutinee,
-                builder_names,
-                method_name,
-                required_arg_names,
-            ) + match arms {
-                Partial::Present(arms) => arms
-                    .iter()
-                    .map(|arm| {
-                        count_builder_method_calls_in_expr(
-                            db,
-                            body,
-                            arm.body,
-                            builder_names,
-                            method_name,
-                            required_arg_names,
-                        )
-                    })
-                    .sum(),
-                Partial::Absent => 0,
-            }
-        }
-        Expr::RecordInit(_, fields) => fields
-            .iter()
-            .map(|field| {
-                count_builder_method_calls_in_expr(
-                    db,
-                    body,
-                    field.expr,
-                    builder_names,
-                    method_name,
-                    required_arg_names,
-                )
-            })
-            .sum(),
-        Expr::With(_, inner) => count_builder_method_calls_in_expr(
-            db,
-            body,
-            *inner,
-            builder_names,
-            method_name,
-            required_arg_names,
-        ),
-        Expr::Lit(_) | Expr::Path(_) => 0,
-    }
-}
-
-fn count_builder_method_calls_in_stmt<'db>(
-    db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
-    stmt: crate::hir_def::StmtId,
-    builder_names: &[IdentId<'db>],
-    method_name: &str,
-    required_arg_names: Option<&[IdentId<'db>]>,
-) -> usize {
-    let Partial::Present(stmt_data) = stmt.data(db, body) else {
-        return 0;
-    };
-    match stmt_data {
-        Stmt::Let(_, _, init) => init
-            .map(|init| {
-                count_builder_method_calls_in_expr(
-                    db,
-                    body,
-                    init,
-                    builder_names,
-                    method_name,
-                    required_arg_names,
-                )
-            })
-            .unwrap_or_default(),
-        Stmt::For(_, iterable, loop_body, _) => {
-            count_builder_method_calls_in_expr(
-                db,
-                body,
-                *iterable,
-                builder_names,
-                method_name,
-                required_arg_names,
-            ) + count_builder_method_calls_in_expr(
-                db,
-                body,
-                *loop_body,
-                builder_names,
-                method_name,
-                required_arg_names,
-            )
-        }
-        Stmt::While(_, loop_body) => count_builder_method_calls_in_expr(
-            db,
-            body,
-            *loop_body,
-            builder_names,
-            method_name,
-            required_arg_names,
-        ),
-        Stmt::Return(expr) => expr
-            .map(|expr| {
-                count_builder_method_calls_in_expr(
-                    db,
-                    body,
-                    expr,
-                    builder_names,
-                    method_name,
-                    required_arg_names,
-                )
-            })
-            .unwrap_or_default(),
-        Stmt::Expr(expr) => count_builder_method_calls_in_expr(
-            db,
-            body,
-            *expr,
-            builder_names,
-            method_name,
-            required_arg_names,
-        ),
-        Stmt::Continue | Stmt::Break => 0,
-    }
-}
-
-fn builder_method_args_match<'db>(
-    db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
-    args: &[crate::hir_def::CallArg<'db>],
-    required_arg_names: Option<&[IdentId<'db>]>,
-) -> bool {
-    match required_arg_names {
-        None => args.is_empty(),
-        Some(names) => {
-            let [arg] = args else {
-                return false;
-            };
-            if names.is_empty() {
-                return true;
-            }
-            expr_is_path_named_any(db, body, arg.expr, names)
-        }
-    }
 }
 
 fn generated_stub_trait_has_required_methods<'db>(
@@ -2137,6 +1987,40 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 {
     builder.finish()
     builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(output.status(&db), ProviderOutputStatus::Failed));
+    }
+
+    #[test]
+    fn provider_output_rejects_commands_after_finish() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provider_output_rejects_commands_after_finish.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {
+    x: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    builder.finish()
+    builder.require_fields(reflect)
     ev
 }
 "#,
