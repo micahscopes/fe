@@ -9,7 +9,8 @@ use crate::analysis::{
     ty::{
         diagnostics::{
             BodyDiag, CallConstraintDiagInfo, ConstPredicateDiagInfo,
-            ConstPredicateProofFailureKind, DefConflictError, FuncBodyDiag, ImplDiag,
+            ConstPredicateProofFailureKind, DefConflictError, FuncBodyDiag,
+            GeneratedRequirementDiagInfo, ImplDiag, TraitBoundRequirementDiagInfo,
             TraitConstraintDiag, TraitLowerDiag, TyDiagCollection, TyLowerDiag,
         },
         trait_def::TraitInstId,
@@ -228,6 +229,33 @@ fn format_call_constraint_source<'db>(
         .map(|name| name.data(db).to_string())
         .unwrap_or_else(|| "callable".to_string());
     format!("required by this bound on `{callable_name}`")
+}
+
+fn generated_requirement_subdiag<'db>(
+    db: &'db dyn SpannedHirAnalysisDb,
+    required_by: &GeneratedRequirementDiagInfo<'db>,
+) -> SubDiagnostic {
+    SubDiagnostic {
+        style: LabelStyle::Secondary,
+        message: required_by.message.clone(),
+        span: required_by.span.resolve(db),
+    }
+}
+
+fn trait_bound_required_by_subdiag<'db>(
+    db: &'db dyn SpannedHirAnalysisDb,
+    required_by: &TraitBoundRequirementDiagInfo<'db>,
+) -> SubDiagnostic {
+    match required_by {
+        TraitBoundRequirementDiagInfo::CallConstraint(required_by) => SubDiagnostic {
+            style: LabelStyle::Secondary,
+            message: format_call_constraint_source(db, required_by),
+            span: required_by.bound_span.resolve(db),
+        },
+        TraitBoundRequirementDiagInfo::GeneratedRequirement(required_by) => {
+            generated_requirement_subdiag(db, required_by)
+        }
+    }
 }
 
 fn const_predicate_required_by_subdiag<'db>(
@@ -4577,11 +4605,7 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
                 }
 
                 if let Some(required_by) = required_by {
-                    sub_diagnostics.push(SubDiagnostic {
-                        style: LabelStyle::Secondary,
-                        message: format_call_constraint_source(db, required_by),
-                        span: required_by.bound_span.resolve(db),
-                    });
+                    sub_diagnostics.push(trait_bound_required_by_subdiag(db, required_by));
                 }
 
                 CompleteDiagnostic {

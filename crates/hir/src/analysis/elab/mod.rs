@@ -499,7 +499,7 @@ impl<'db> TyFoldable<'db> for RequirementOrigin<'db> {
 }
 
 impl<'db> RequirementOrigin<'db> {
-    fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
+    pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
         match self {
             RequirementOrigin::ReflectedField(field) => {
                 format!(
@@ -510,6 +510,16 @@ impl<'db> RequirementOrigin<'db> {
             }
             RequirementOrigin::ProviderCode => "from provider code".to_string(),
             RequirementOrigin::Synthetic => "from synthetic requirement".to_string(),
+        }
+    }
+
+    pub(crate) fn diagnostic_span(self, db: &'db dyn HirAnalysisDb) -> Option<DynLazySpan<'db>> {
+        match self {
+            RequirementOrigin::ReflectedField(field) => field
+                .parent
+                .field_parent(db)
+                .map(|parent| parent.field_name_span(field.index as usize)),
+            RequirementOrigin::ProviderCode | RequirementOrigin::Synthetic => None,
         }
     }
 }

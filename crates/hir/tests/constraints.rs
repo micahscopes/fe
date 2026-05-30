@@ -68,6 +68,17 @@ fn assert_required_by_bound(diags: &[CompleteDiagnostic], callable_name: &str) {
     );
 }
 
+fn assert_generated_requirement_note(diags: &[CompleteDiagnostic], expected: &str) {
+    assert!(
+        diags.iter().any(|diag| {
+            diag.sub_diagnostics
+                .iter()
+                .any(|sub| sub.message.contains(expected))
+        }),
+        "expected generated requirement note containing `{expected}`, got diagnostics: {diags:#?}"
+    );
+}
+
 fn assert_const_predicate_diag(diags: &[CompleteDiagnostic]) {
     assert!(
         diags.iter().any(|diag| {
@@ -2017,6 +2028,10 @@ fn caller() {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_unsatisfied_bound(&diags, "FieldTy: Eq");
+    assert_generated_requirement_note(
+        &diags,
+        "required by generated obligation FieldTy: Eq from field Box.value",
+    );
 }
 
 #[test]

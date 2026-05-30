@@ -52,6 +52,7 @@ pub use stmt::ForLoopSeq;
 use rustc_hash::FxHashSet;
 use salsa::Update;
 
+use crate::analysis::elab::generated_impls_for_ingot;
 use crate::analysis::place::{Place, PlaceBase};
 
 use super::{
@@ -59,11 +60,12 @@ use super::{
     canonical::Canonical,
     diagnostics::{
         BodyDiag, CallConstraintDiagInfo, CompilerCapabilityModeError, ConstPredicateDiagInfo,
-        ConstPredicateProofFailureKind, FuncBodyDiag, RuntimeTypeContext,
-        StaticAssertComparisonValues, TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
+        ConstPredicateProofFailureKind, FuncBodyDiag, GeneratedRequirementDiagInfo,
+        RuntimeTypeContext, StaticAssertComparisonValues, TraitBoundRequirementDiagInfo,
+        TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
-    trait_def::TraitInstId,
+    trait_def::{ImplementorId, ImplementorOrigin, TraitInstId},
     trait_resolution::{
         CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx,
         constraint::ty_constraints, is_goal_query_satisfiable, is_goal_satisfiable,
@@ -969,6 +971,61 @@ impl<'db> TyChecker<'db> {
         })
     }
 
+    fn generated_requirement_diag_info(
+        &self,
+        implementor: ImplementorId<'db>,
+        constraint_idx: usize,
+        fallback_span: DynLazySpan<'db>,
+    ) -> Option<TraitBoundRequirementDiagInfo<'db>> {
+        let ImplementorOrigin::Generated(generated) = implementor.origin(self.db) else {
+            return None;
+        };
+        let requirement = generated.requirements.list(self.db).get(constraint_idx)?;
+        let message = format!(
+            "required by generated obligation {} {}",
+            requirement.constraint.pretty_print(self.db),
+            requirement.origin.pretty_print(self.db)
+        );
+        let span = requirement
+            .origin
+            .diagnostic_span(self.db)
+            .unwrap_or(fallback_span);
+        Some(TraitBoundRequirementDiagInfo::GeneratedRequirement(
+            GeneratedRequirementDiagInfo { message, span },
+        ))
+    }
+
+    fn generated_requirement_diag_info_for_unsat(
+        &self,
+        primary_goal: TraitInstId<'db>,
+        unsat_subgoal: Option<TraitInstId<'db>>,
+        fallback_span: DynLazySpan<'db>,
+    ) -> Option<GeneratedRequirementDiagInfo<'db>> {
+        let unsat_subgoal = unsat_subgoal?;
+        let ingot = self.env.scope().top_mod(self.db).ingot(self.db);
+        generated_impls_for_ingot(self.db, ingot)
+            .iter()
+            .filter(|generated| generated.trait_inst == primary_goal)
+            .flat_map(|generated| generated.requirements.list(self.db).iter())
+            .find_map(|requirement| {
+                let ConstraintKind::Trait(required) = requirement.constraint.kind(self.db) else {
+                    return None;
+                };
+                (required == unsat_subgoal).then(|| {
+                    let message = format!(
+                        "required by generated obligation {} {}",
+                        requirement.constraint.pretty_print(self.db),
+                        requirement.origin.pretty_print(self.db)
+                    );
+                    let span = requirement
+                        .origin
+                        .diagnostic_span(self.db)
+                        .unwrap_or_else(|| fallback_span.clone());
+                    GeneratedRequirementDiagInfo { message, span }
+                })
+            })
+    }
+
     fn const_predicate_diag_info(
         &self,
         pred: ConstPredicateInstId<'db>,
@@ -1347,16 +1404,34 @@ impl<'db> TyChecker<'db> {
             }
             GoalSatisfiability::UnSat(subgoal) => {
                 if final_pass && self.trait_goal_is_concrete_for_diagnostics(goal) {
+                    let unsat = subgoal.map(|goal| query.extract_subgoal(&mut self.table, goal));
                     let required_by = match obligation.origin {
                         env::TraitObligationOrigin::CallConstraint {
                             callable_def,
                             constraint_idx,
                             ..
-                        } => self.call_constraint_diag_info(callable_def, constraint_idx),
-                        env::TraitObligationOrigin::ImplCandidateConstraint { .. } => None,
+                        } => self
+                            .generated_requirement_diag_info_for_unsat(
+                                goal,
+                                unsat,
+                                obligation.span.clone(),
+                            )
+                            .map(TraitBoundRequirementDiagInfo::GeneratedRequirement)
+                            .or_else(|| {
+                                self.call_constraint_diag_info(callable_def, constraint_idx)
+                                    .map(TraitBoundRequirementDiagInfo::CallConstraint)
+                            }),
+                        env::TraitObligationOrigin::ImplCandidateConstraint {
+                            implementor,
+                            constraint_idx,
+                            ..
+                        } => self.generated_requirement_diag_info(
+                            implementor,
+                            constraint_idx,
+                            obligation.span.clone(),
+                        ),
                         env::TraitObligationOrigin::GenericConfirmation => None,
                     };
-                    let unsat = subgoal.map(|goal| query.extract_subgoal(&mut self.table, goal));
                     let const_predicate_failures =
                         self.check_const_predicate_failures_for_diag(goal);
                     self.push_diag(TyDiagCollection::from(
@@ -1607,7 +1682,7 @@ impl<'db> TyChecker<'db> {
 
     fn check_const_predicate_failures_for_diag(&mut self, goal: TraitInstId<'db>) -> Vec<String> {
         use crate::analysis::semantic::{CtfeError, eval_body_owner_const};
-        use crate::analysis::ty::trait_def::{ImplementorOrigin, impls_for_trait_def};
+        use crate::analysis::ty::trait_def::impls_for_trait_def;
         use crate::hir_def::WhereClauseOwner;
 
         let db = self.db;

@@ -283,6 +283,18 @@ pub struct CallConstraintDiagInfo<'db> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
+pub struct GeneratedRequirementDiagInfo<'db> {
+    pub message: String,
+    pub span: DynLazySpan<'db>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
+pub enum TraitBoundRequirementDiagInfo<'db> {
+    CallConstraint(CallConstraintDiagInfo<'db>),
+    GeneratedRequirement(GeneratedRequirementDiagInfo<'db>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
 pub struct ConstPredicateDiagInfo<'db> {
     pub predicate_span: DynLazySpan<'db>,
     pub message: String,
@@ -982,7 +994,7 @@ pub enum TraitConstraintDiag<'db> {
         span: DynLazySpan<'db>,
         primary_goal: TraitInstId<'db>,
         unsat_subgoal: Option<TraitInstId<'db>>,
-        required_by: Option<CallConstraintDiagInfo<'db>>,
+        required_by: Option<TraitBoundRequirementDiagInfo<'db>>,
         const_predicate_failures: Vec<String>,
     },
 
