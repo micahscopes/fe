@@ -1129,6 +1129,29 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
 }
 
 #[test]
+fn field_descriptor_methods_return_type_info() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "field_descriptor_methods_return_type_info.fe".into(),
+        r#"
+struct Foo {
+    x: u256,
+}
+
+const fn field_ty<V>(field: Field<Foo, V>) -> TypeInfo<V> {
+    field.ty()
+}
+
+const fn field_parent<V>(field: Field<Foo, V>) -> TypeInfo<Foo> {
+    field.parent()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn generated_derive_evidence_is_visible_to_trait_solver() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

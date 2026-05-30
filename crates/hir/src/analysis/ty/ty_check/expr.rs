@@ -2935,6 +2935,12 @@ impl<'db> TyChecker<'db> {
             self.env.type_expr(expr, prop.clone());
             return prop;
         }
+        if let Some(prop) =
+            self.check_field_descriptor_intrinsic_method_call(method_name, receiver_prop.ty, args)
+        {
+            self.env.type_expr(expr, prop.clone());
+            return prop;
+        }
 
         let receiver_tys = self.method_receiver_tys(*receiver, &receiver_prop);
         let method_assumptions = self.env.assumptions();
@@ -3165,6 +3171,48 @@ impl<'db> TyChecker<'db> {
                     _ => None,
                 },
             )
+    }
+
+    fn check_field_descriptor_intrinsic_method_call(
+        &mut self,
+        method_name: IdentId<'db>,
+        receiver_ty: TyId<'db>,
+        args: &[crate::hir_def::CallArg<'db>],
+    ) -> Option<ExprProp<'db>> {
+        if !args.is_empty() {
+            return None;
+        }
+
+        let (parent, value) = self.field_descriptor_parts_from_receiver_ty(receiver_ty)?;
+        let target = match method_name.data(self.db).as_str() {
+            "parent" => parent,
+            "ty" => value,
+            _ => return None,
+        };
+        Some(ExprProp::new(self.type_info_ty(target), true))
+    }
+
+    fn field_descriptor_parts_from_receiver_ty(
+        &self,
+        receiver_ty: TyId<'db>,
+    ) -> Option<(TyId<'db>, TyId<'db>)> {
+        self.capability_fallback_candidates(receiver_ty)
+            .into_iter()
+            .find_map(|candidate| {
+                let (base, args) = candidate.decompose_ty_app(self.db);
+                let TyData::TyBase(TyBase::Prim(PrimTy::Field)) = base.data(self.db) else {
+                    return None;
+                };
+                let [parent, value] = args else {
+                    return None;
+                };
+                Some((*parent, *value))
+            })
+    }
+
+    fn type_info_ty(&self, target: TyId<'db>) -> TyId<'db> {
+        let type_info_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::TypeInfo)));
+        TyId::app(self.db, type_info_ctor, target)
     }
 
     fn method_receiver_tys(
