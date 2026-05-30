@@ -463,6 +463,7 @@ pub(crate) struct GeneratedRequirementListId<'db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum GeneratedMethodBodyKind {
     MissingGeneratedBody,
+    BoolLiteral(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]

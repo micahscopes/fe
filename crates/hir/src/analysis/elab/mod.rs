@@ -213,6 +213,11 @@ pub(crate) enum BuilderCommand<'db> {
     EmitMethodStub {
         name: IdentId<'db>,
     },
+    #[allow(dead_code)]
+    EmitBoolMethod {
+        name: IdentId<'db>,
+        value: bool,
+    },
     Finish,
 }
 
@@ -387,6 +392,10 @@ fn generated_impl_from_builder_commands<'db>(
             BuilderCommand::EmitMethodStub { name } => methods.push(GeneratedMethod {
                 name: *name,
                 body: GeneratedMethodBodyKind::MissingGeneratedBody,
+            }),
+            BuilderCommand::EmitBoolMethod { name, value } => methods.push(GeneratedMethod {
+                name: *name,
+                body: GeneratedMethodBodyKind::BoolLiteral(*value),
             }),
             BuilderCommand::Finish => finished = true,
         }
@@ -1504,19 +1513,19 @@ fn generated_unsupported_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
 ) -> Vec<IdentId<'db>> {
-    let required = required_method_names(db, ConstraintId::from_trait(db, generated.trait_inst))
-        .into_iter()
-        .collect::<IndexSet<_>>();
+    let required = required_methods(db, ConstraintId::from_trait(db, generated.trait_inst));
     generated
         .methods
         .list(db)
         .iter()
         .filter_map(|method| {
-            required
-                .contains(&method.name)
-                .then_some(match method.body {
-                    GeneratedMethodBodyKind::MissingGeneratedBody => method.name,
-                })
+            let required_method = required.get(&method.name)?;
+            match method.body {
+                GeneratedMethodBodyKind::MissingGeneratedBody => Some(method.name),
+                GeneratedMethodBodyKind::BoolLiteral(_) => {
+                    (required_method.return_ty(db) != TyId::bool(db)).then_some(method.name)
+                }
+            }
         })
         .collect()
 }
@@ -1554,14 +1563,21 @@ fn required_method_names<'db>(
     db: &'db dyn HirAnalysisDb,
     goal: ConstraintId<'db>,
 ) -> Vec<IdentId<'db>> {
+    required_methods(db, goal).keys().copied().collect()
+}
+
+fn required_methods<'db>(
+    db: &'db dyn HirAnalysisDb,
+    goal: ConstraintId<'db>,
+) -> IndexMap<IdentId<'db>, crate::hir_def::Func<'db>> {
     let ConstraintKind::Trait(trait_inst) = goal.kind(db) else {
-        return Vec::new();
+        return IndexMap::new();
     };
     trait_inst
         .def(db)
         .method_defs(db)
         .into_iter()
-        .filter_map(|(name, method)| method.body(db).is_none().then_some(name))
+        .filter(|(_, method)| method.body(db).is_none())
         .collect()
 }
 
@@ -2321,5 +2337,120 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
             vec![method_name]
         );
         assert_eq!(generated.methods.list(&db).len(), 1);
+    }
+
+    #[test]
+    fn generated_bool_method_body_satisfies_bool_required_method() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_bool_method_body_satisfies_bool_required_method.fe".into(),
+            r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let eq_trait = find_trait(&db, top_mod, "Eq");
+        let method_name = *eq_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitBoolMethod {
+                    name: method_name,
+                    value: true,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert!(generated_unsupported_required_methods(&db, generated).is_empty());
+        assert!(matches!(
+            generated.methods.list(&db)[0].body,
+            GeneratedMethodBodyKind::BoolLiteral(true)
+        ));
+    }
+
+    #[test]
+    fn generated_bool_method_body_rejects_non_bool_required_method() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_bool_method_body_rejects_non_bool_required_method.fe".into(),
+            r#"
+trait Count {
+    fn count(self) -> u256
+}
+
+#[derive(Count)]
+struct Foo {}
+
+#[evidence_provider(Count)]
+const fn derive_count<T>(ev: own Evidence<Count<T>>) -> Evidence<Count<T>>
+    uses (builder: mut ImplBuilder<Count<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let count_trait = find_trait(&db, top_mod, "Count");
+        let method_name = *count_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitBoolMethod {
+                    name: method_name,
+                    value: true,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert_eq!(
+            generated_unsupported_required_methods(&db, generated),
+            vec![method_name]
+        );
     }
 }
