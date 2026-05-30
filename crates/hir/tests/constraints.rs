@@ -717,6 +717,26 @@ struct Bad {
 }
 
 #[test]
+fn reflected_type_witnesses_cannot_escape_runtime_functions() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "reflected_type_witnesses_cannot_escape_runtime_functions.fe".into(),
+        r#"
+struct Foo {
+    x: u256,
+}
+
+fn bad<V>(field: Field<Foo, V>) -> TypeInfo<V> {
+    field.ty()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "compile-time-only type cannot be used at runtime");
+}
+
+#[test]
 fn compile_time_only_type_constructors_cannot_escape_enum_variant_fields() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

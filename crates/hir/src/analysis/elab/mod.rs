@@ -1005,7 +1005,14 @@ enum ProviderExecutionFailure {
 #[derive(Clone, Copy)]
 enum ElabValue<'db> {
     Field(ReflectedField<'db>),
-    Type(TyId<'db>),
+
+    /// Internal provider-CTFE type witness produced by reflection operations
+    /// such as `field.ty()`.
+    ///
+    /// This is not a public runtime value. If type witnesses become part of
+    /// Fe's surface language, they should be modeled as explicit
+    /// compile-time-only values instead of exposing raw `TyId`.
+    TypeWitness(TyId<'db>),
 }
 
 #[derive(Clone, Copy)]
@@ -1249,7 +1256,8 @@ impl<'db> ProviderBodyExecutor<'db> {
                 ProviderSkipReason::InvalidBuilderRequirement,
             ));
         };
-        let Some(ElabValue::Type(arg_ty)) = self.eval_expr_value(body, constraint_arg) else {
+        let Some(ElabValue::TypeWitness(arg_ty)) = self.eval_expr_value(body, constraint_arg)
+        else {
             return Err(ProviderExecutionFailure::Skipped(
                 ProviderSkipReason::InvalidBuilderRequirement,
             ));
@@ -1307,7 +1315,7 @@ impl<'db> ProviderBodyExecutor<'db> {
     ) -> Option<ReflectedField<'db>> {
         match self.eval_expr_value(body, expr)? {
             ElabValue::Field(field) => Some(field),
-            ElabValue::Type(_) => None,
+            ElabValue::TypeWitness(_) => None,
         }
     }
 
@@ -1337,7 +1345,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         let ElabValue::Field(field) = self.eval_expr_value(body, *receiver)? else {
             return None;
         };
-        Some(ElabValue::Type(field.ty))
+        Some(ElabValue::TypeWitness(field.ty))
     }
 
     fn requirement_origin_for_expr(
