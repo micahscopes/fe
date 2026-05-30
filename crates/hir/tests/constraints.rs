@@ -2513,6 +2513,45 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
+fn explicitly_selected_duplicate_generated_derives_conflict() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "explicitly_selected_duplicate_generated_derives_conflict.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+derive Eq for Foo using derive_eq1
+derive Eq for Foo using derive_eq2
+
+#[evidence_provider(Eq)]
+const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn generated_stub_impls_reject_traits_with_required_methods() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
