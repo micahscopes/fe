@@ -993,18 +993,27 @@ impl<'db> ProviderBodyExecutor<'db> {
                         self.field_bindings.pop();
                     }
                 } else {
-                    self.execute_expr(body, *iterable)?;
-                    self.execute_expr(body, *loop_body)?;
+                    return Err(ProviderExecutionFailure::Skipped(
+                        ProviderSkipReason::UnsupportedProviderBody,
+                    ));
                 }
             }
-            Stmt::While(_, loop_body) => self.execute_expr(body, *loop_body)?,
+            Stmt::While(_, _) => {
+                return Err(ProviderExecutionFailure::Skipped(
+                    ProviderSkipReason::UnsupportedProviderBody,
+                ));
+            }
             Stmt::Return(expr) => {
                 if let Some(expr) = expr {
                     self.execute_expr(body, *expr)?;
                 }
             }
             Stmt::Expr(expr) => self.execute_expr(body, *expr)?,
-            Stmt::Continue | Stmt::Break => {}
+            Stmt::Continue | Stmt::Break => {
+                return Err(ProviderExecutionFailure::Skipped(
+                    ProviderSkipReason::UnsupportedProviderBody,
+                ));
+            }
         }
         Ok(())
     }
@@ -1024,53 +1033,37 @@ impl<'db> ProviderBodyExecutor<'db> {
                     self.execute_stmt(body, stmt)?;
                 }
             }
-            Expr::Call(callee, args) => {
-                self.execute_expr(body, *callee)?;
-                for arg in args {
-                    self.execute_expr(body, arg.expr)?;
-                }
+            Expr::Call(_, _) => {
+                return Err(ProviderExecutionFailure::Skipped(
+                    ProviderSkipReason::UnsupportedProviderBody,
+                ));
             }
             Expr::MethodCall(receiver, method, generic_args, args) => {
                 if !self.execute_method_call(body, *receiver, *method, *generic_args, args)? {
-                    self.execute_expr(body, *receiver)?;
-                    for arg in args {
-                        self.execute_expr(body, arg.expr)?;
+                    if self.eval_expr_value(body, expr).is_none() {
+                        return Err(ProviderExecutionFailure::Skipped(
+                            ProviderSkipReason::UnsupportedProviderBody,
+                        ));
                     }
                 }
             }
-            Expr::Bin(lhs, rhs, _) | Expr::Assign(lhs, rhs) | Expr::AugAssign(lhs, rhs, _) => {
-                self.execute_expr(body, *lhs)?;
-                self.execute_expr(body, *rhs)?;
+            Expr::Bin(_, _, _)
+            | Expr::Assign(_, _)
+            | Expr::AugAssign(_, _, _)
+            | Expr::Un(_, _)
+            | Expr::Cast(_, _)
+            | Expr::Field(_, _)
+            | Expr::Tuple(_)
+            | Expr::Array(_)
+            | Expr::ArrayRep(_, _)
+            | Expr::If(_, _, _)
+            | Expr::Match(_, _)
+            | Expr::RecordInit(_, _)
+            | Expr::With(_, _) => {
+                return Err(ProviderExecutionFailure::Skipped(
+                    ProviderSkipReason::UnsupportedProviderBody,
+                ));
             }
-            Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
-                self.execute_expr(body, *inner)?;
-            }
-            Expr::Tuple(items) | Expr::Array(items) => {
-                for &item in items {
-                    self.execute_expr(body, item)?;
-                }
-            }
-            Expr::ArrayRep(value, _) => self.execute_expr(body, *value)?,
-            Expr::If(_, then_expr, else_expr) => {
-                self.execute_expr(body, *then_expr)?;
-                if let Some(else_expr) = else_expr {
-                    self.execute_expr(body, *else_expr)?;
-                }
-            }
-            Expr::Match(scrutinee, arms) => {
-                self.execute_expr(body, *scrutinee)?;
-                if let Partial::Present(arms) = arms {
-                    for arm in arms {
-                        self.execute_expr(body, arm.body)?;
-                    }
-                }
-            }
-            Expr::RecordInit(_, fields) => {
-                for field in fields {
-                    self.execute_expr(body, field.expr)?;
-                }
-            }
-            Expr::With(_, inner) => self.execute_expr(body, *inner)?,
             Expr::Lit(_) | Expr::Path(_) => {}
         }
         Ok(())
@@ -1088,26 +1081,34 @@ impl<'db> ProviderBodyExecutor<'db> {
             return Ok(false);
         }
         let Some(method) = method.to_opt() else {
-            return Ok(false);
+            return Err(ProviderExecutionFailure::Skipped(
+                ProviderSkipReason::UnsupportedProviderBody,
+            ));
         };
         match method.data(self.db).as_str() {
             BUILDER_REQUIRE_METHOD => {
                 let [arg] = args else {
-                    return Ok(false);
+                    return Err(ProviderExecutionFailure::Skipped(
+                        ProviderSkipReason::UnsupportedProviderBody,
+                    ));
                 };
                 self.execute_require(body, generic_args, arg.expr)?;
                 Ok(true)
             }
             BUILDER_FINISH_METHOD => {
                 if !args.is_empty() {
-                    return Ok(false);
+                    return Err(ProviderExecutionFailure::Skipped(
+                        ProviderSkipReason::UnsupportedProviderBody,
+                    ));
                 }
                 self.builder
                     .finish_explicit()
                     .map_err(|_| ProviderExecutionFailure::Failed)?;
                 Ok(true)
             }
-            _ => Ok(false),
+            _ => Err(ProviderExecutionFailure::Skipped(
+                ProviderSkipReason::UnsupportedProviderBody,
+            )),
         }
     }
 
@@ -2104,10 +2105,10 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     }
 
     #[test]
-    fn provider_output_ignores_malformed_builder_finish_call() {
+    fn provider_output_reports_malformed_builder_finish_call_as_unsupported() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
-            "provider_output_ignores_malformed_builder_finish_call.fe".into(),
+            "provider_output_reports_malformed_builder_finish_call_as_unsupported.fe".into(),
             r#"
 trait Eq {}
 
@@ -2129,7 +2130,40 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         assert!(matches!(
             output.status(&db),
             ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::MissingFinish
+                reason: ProviderSkipReason::UnsupportedProviderBody
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_output_reports_unsupported_control_flow() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provider_output_reports_unsupported_control_flow.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    while true {
+        builder.finish()
+    }
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::UnsupportedProviderBody
             }
         ));
     }
