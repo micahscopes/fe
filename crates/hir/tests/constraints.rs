@@ -1765,6 +1765,39 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
+fn generated_default_derive_with_required_method_waits_for_body_ir() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_default_derive_with_required_method_waits_for_body_ir.fe".into(),
+        r#"
+trait Default {
+    fn default() -> Self
+}
+
+#[derive(Default)]
+struct Foo {}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (
+        builder: mut ImplBuilder<Default<T>>,
+    )
+{
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Default` does not generate required methods yet",
+    );
+    assert_diag_message(&diags, "missing default");
+}
+
+#[test]
 fn generated_derive_reports_missing_field_obligation() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
