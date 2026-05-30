@@ -1155,7 +1155,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    finish_derive_impl<T>()
+    builder.finish()
     ev
 }
 
@@ -1281,8 +1281,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    require_derive_field_obligations<T>()
-    finish_derive_impl<T>()
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
     ev
 }
 
@@ -1331,7 +1331,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    finish_derive_impl<T>()
+    builder.finish()
     ev
 }
 
@@ -1421,8 +1421,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    require_derive_field_obligations<T>()
-    finish_derive_impl<T>()
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
     ev
 }
 "#,
@@ -1478,8 +1478,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    require_derive_field_obligations<T>()
-    finish_derive_impl<T>()
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
     ev
 }
 "#,
@@ -1537,8 +1537,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    require_derive_field_obligations<T>()
-    finish_derive_impl<T>()
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
     ev
 }
 
@@ -1600,8 +1600,8 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
         builder: mut ImplBuilder<Default<T>>,
     )
 {
-    require_derive_field_obligations<T>()
-    finish_derive_impl<T>()
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
     ev
 }
 
@@ -1680,7 +1680,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    finish_derive_impl<T>()
+    builder.finish()
     ev
 }
 "#,
@@ -1760,8 +1760,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    require_derive_field_obligations<T>()
-    finish_derive_impl<T>()
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
     ev
 }
 
@@ -1811,8 +1811,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    require_derive_field_obligations<T>()
-    finish_derive_impl<T>()
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
     ev
 }
 

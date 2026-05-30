@@ -27,6 +27,7 @@ use crate::analysis::ty::{
     adt_def::AdtRef,
     assoc_const::AssocConstUse,
     canonical::{Canonicalized, Solution},
+    constraint::{CompilerCapabilityKind, compiler_capability_for_ty},
     corelib::{
         resolve_core_range_types, resolve_core_trait, resolve_lib_func_path, resolve_lib_type_path,
     },
@@ -2928,6 +2929,13 @@ impl<'db> TyChecker<'db> {
             return ExprProp::invalid(self.db);
         }
 
+        if let Some(prop) =
+            self.check_impl_builder_intrinsic_method_call(method_name, &receiver_prop, args)
+        {
+            self.env.type_expr(expr, prop.clone());
+            return prop;
+        }
+
         let receiver_tys = self.method_receiver_tys(*receiver, &receiver_prop);
         let method_assumptions = self.env.assumptions();
 
@@ -3108,6 +3116,55 @@ impl<'db> TyChecker<'db> {
             self.env.register_semantic_call(expr, callable);
         }
         ExprProp::new(normalized_ret_ty, true)
+    }
+
+    fn check_impl_builder_intrinsic_method_call(
+        &mut self,
+        method_name: IdentId<'db>,
+        receiver_prop: &ExprProp<'db>,
+        args: &[crate::hir_def::CallArg<'db>],
+    ) -> Option<ExprProp<'db>> {
+        let goal = self.impl_builder_goal_from_receiver_ty(receiver_prop.ty)?;
+        let method = method_name.data(self.db);
+
+        match method.as_str() {
+            // Temporary raw-builder bridge for provider CTFE. This lets provider
+            // bodies route field-derived requirements through the builder
+            // receiver before first-class constraint values are available.
+            "require_derive_field_obligations" => {
+                for arg in args {
+                    self.check_expr_unknown(arg.expr);
+                }
+                Some(ExprProp::new(TyId::unit(self.db), true))
+            }
+            "finish" => {
+                for arg in args {
+                    self.check_expr_unknown(arg.expr);
+                }
+                let evidence_ctor =
+                    TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Evidence)));
+                let goal_ty = TyId::new(self.db, TyData::ConstraintTerm(goal));
+                Some(ExprProp::new(
+                    TyId::app(self.db, evidence_ctor, goal_ty),
+                    true,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn impl_builder_goal_from_receiver_ty(
+        &self,
+        receiver_ty: TyId<'db>,
+    ) -> Option<crate::analysis::ty::constraint::ConstraintId<'db>> {
+        self.capability_fallback_candidates(receiver_ty)
+            .into_iter()
+            .find_map(
+                |candidate| match compiler_capability_for_ty(self.db, candidate) {
+                    Some(CompilerCapabilityKind::ImplBuilder(goal)) => Some(goal),
+                    _ => None,
+                },
+            )
     }
 
     fn method_receiver_tys(
