@@ -2608,11 +2608,10 @@ fn derive_requests_for_attr<'db>(
                 ));
             };
             let trait_ = resolve_derive_trait(db, target, path)?;
-            let goal = derive_goal(db, target, trait_);
-            Ok(ElaborationRequestId::new(
+            Ok(make_derive_request(
                 db,
                 target,
-                goal,
+                trait_,
                 selected_provider,
                 ElaborationOrigin::DeriveAttr {
                     attr_index: attr_index as u32,
@@ -2669,14 +2668,29 @@ fn derive_request_for_decl<'db>(
         }
     };
 
-    let goal = derive_goal(db, target, trait_);
-    Ok(ElaborationRequestId::new(
+    Ok(make_derive_request(
         db,
         target,
-        goal,
+        trait_,
         selected_provider,
         ElaborationOrigin::DeriveDecl(decl),
     ))
+}
+
+fn make_derive_request<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+    trait_: Trait<'db>,
+    selected_provider: Option<IdentId<'db>>,
+    origin: ElaborationOrigin<'db>,
+) -> ElaborationRequestId<'db> {
+    ElaborationRequestId::new(
+        db,
+        target,
+        derive_goal(db, target, trait_),
+        selected_provider,
+        origin,
+    )
 }
 
 fn parse_derive_provider_selection<'db>(
