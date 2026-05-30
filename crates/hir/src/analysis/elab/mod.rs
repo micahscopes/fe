@@ -499,6 +499,22 @@ impl<'db> TyFoldable<'db> for RequirementOrigin<'db> {
     }
 }
 
+impl<'db> RequirementOrigin<'db> {
+    fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
+        match self {
+            RequirementOrigin::ReflectedField(field) => {
+                format!(
+                    "from field {}.{}",
+                    field.parent.pretty_print(db),
+                    field.name.data(db)
+                )
+            }
+            RequirementOrigin::ProviderCode => "from provider code".to_string(),
+            RequirementOrigin::Synthetic => "from synthetic requirement".to_string(),
+        }
+    }
+}
+
 impl<'db> GeneratedTraceFact<'db> {
     fn pretty_print(self, db: &'db dyn HirAnalysisDb, generated: GeneratedImplId<'db>) -> String {
         let prefix = generated.trait_inst.pretty_print(db, true);
@@ -526,26 +542,13 @@ impl<'db> GeneratedTraceFact<'db> {
             Self::ProvidesEvidence(constraint) => {
                 format!("{prefix} provides {}", constraint.pretty_print(db))
             }
-            Self::RequiresConstraint { constraint, origin } => match origin {
-                RequirementOrigin::ReflectedField(field) => format!(
-                    "{prefix} requires {} from field {}.{}",
+            Self::RequiresConstraint { constraint, origin } => {
+                format!(
+                    "{prefix} requires {} {}",
                     constraint.pretty_print(db),
-                    field.parent.pretty_print(db),
-                    field.name.data(db)
-                ),
-                RequirementOrigin::ProviderCode => {
-                    format!(
-                        "{prefix} requires {} from provider code",
-                        constraint.pretty_print(db)
-                    )
-                }
-                RequirementOrigin::Synthetic => {
-                    format!(
-                        "{prefix} requires {} from synthetic requirement",
-                        constraint.pretty_print(db)
-                    )
-                }
-            },
+                    origin.pretty_print(db)
+                )
+            }
         }
     }
 }
@@ -811,6 +814,33 @@ pub fn generated_trace_summaries_for_top_mod<'db>(
             generated_trace_facts(db, generated)
                 .into_iter()
                 .map(move |fact| fact.pretty_print(db, generated))
+        })
+        .collect()
+}
+
+pub fn generated_requirement_artifact_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    generated_impls_for_ingot(db, top_mod.ingot(db))
+        .iter()
+        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
+        .flat_map(|&generated| {
+            generated
+                .requirements
+                .list(db)
+                .iter()
+                .enumerate()
+                .map(move |(index, requirement)| {
+                    format!(
+                        "{} requirement #{} requires {} {}",
+                        generated.trait_inst.pretty_print(db, true),
+                        index,
+                        requirement.constraint.pretty_print(db),
+                        requirement.origin.pretty_print(db)
+                    )
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }

@@ -7,6 +7,7 @@ use fe_hir::{
         elab::{
             elaboration_ctfe_context_summaries_for_top_mod,
             elaboration_request_summaries_for_top_mod, generated_impl_summaries_for_top_mod,
+            generated_requirement_artifact_summaries_for_top_mod,
             generated_trace_summaries_for_top_mod, reflected_field_summaries_for_top_mod,
         },
         initialize_analysis_pass,
@@ -1500,6 +1501,13 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
             "Pair: Eq provides Pair: Eq".to_string(),
             "Pair: Eq requires FieldTy: Eq from field Pair.a".to_string(),
             "Pair: Eq requires FieldTy: Eq from field Pair.b".to_string(),
+        ]
+    );
+    assert_eq!(
+        generated_requirement_artifact_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "Pair: Eq requirement #0 requires FieldTy: Eq from field Pair.a".to_string(),
+            "Pair: Eq requirement #1 requires FieldTy: Eq from field Pair.b".to_string(),
         ]
     );
 }
