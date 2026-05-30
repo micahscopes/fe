@@ -2101,23 +2101,73 @@ fn generated_unsupported_required_methods<'db>(
             let required_method = required.get(&method.name)?;
             match method.body {
                 GeneratedMethodBodyKind::Expr(expr) => {
-                    let expected =
-                        generated_required_method_return_ty(db, generated, *required_method);
-                    (!generated_expr_ty_matches(db, expr, expected)).then_some(method.name)
+                    let cx = GeneratedMethodValidationContext {
+                        generated,
+                        required_method: *required_method,
+                    };
+                    let expected = generated_required_method_return_ty(db, cx);
+                    (!generated_expr_ty_matches(db, expr, expected, cx)).then_some(method.name)
                 }
             }
         })
         .collect()
 }
 
-fn generated_required_method_return_ty<'db>(
-    db: &'db dyn HirAnalysisDb,
+#[derive(Clone, Copy)]
+struct GeneratedMethodValidationContext<'db> {
     generated: GeneratedImplId<'db>,
     required_method: crate::hir_def::Func<'db>,
+}
+
+fn generated_required_method_return_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    cx: GeneratedMethodValidationContext<'db>,
 ) -> TyId<'db> {
-    let trait_inst = generated.trait_inst;
+    instantiate_required_method_ty(db, cx, cx.required_method.return_ty(db))
+}
+
+fn generated_required_method_param_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    cx: GeneratedMethodValidationContext<'db>,
+    name: IdentId<'db>,
+) -> Option<TyId<'db>> {
+    let method = cx.required_method.as_callable(db)?;
+    let arg_tys = method.arg_tys(db);
+    if name.data(db) == "other" && cx.required_method.is_method(db) {
+        arg_tys.get(1)?;
+        return Some(generated_method_target_ty(db, cx));
+    }
+
+    for (idx, ty) in arg_tys.into_iter().enumerate() {
+        if cx
+            .required_method
+            .param_label_or_name(db, idx)
+            .is_some_and(|param_name| {
+                matches!(param_name, crate::hir_def::FuncParamName::Ident(id) if id == name)
+            })
+        {
+            let ty = ty.instantiate_identity();
+            return Some(instantiate_required_method_ty(db, cx, ty));
+        }
+    }
+    None
+}
+
+fn generated_method_target_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    cx: GeneratedMethodValidationContext<'db>,
+) -> TyId<'db> {
+    cx.generated.context.request(db).target(db).ty(db)
+}
+
+fn instantiate_required_method_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    cx: GeneratedMethodValidationContext<'db>,
+    ty: TyId<'db>,
+) -> TyId<'db> {
+    let trait_inst = cx.generated.trait_inst;
     let mut mappings = Vec::new();
-    let method = required_method.as_callable(db).unwrap();
+    let method = cx.required_method.as_callable(db).unwrap();
     for (idx, &arg) in trait_inst.args(db).iter().enumerate() {
         if let Some(&method_param) = method.params(db).get(idx) {
             mappings.push((method_param, arg));
@@ -2126,7 +2176,7 @@ fn generated_required_method_return_ty<'db>(
             mappings.push((trait_param, arg));
         }
     }
-    Binder::bind(required_method.return_ty(db)).instantiate_with(db, |ty| {
+    Binder::bind(ty).instantiate_with(db, |ty| {
         mappings
             .iter()
             .find_map(|(param, arg)| (*param == ty).then_some(*arg))
@@ -2138,38 +2188,50 @@ fn generated_expr_ty_matches<'db>(
     db: &'db dyn HirAnalysisDb,
     expr: GeneratedExprId<'db>,
     expected: TyId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
 ) -> bool {
-    generated_expr_static_ty(db, expr).is_some_and(|ty| tys_match(db, ty, expected))
+    generated_expr_static_ty(db, expr, cx).is_some_and(|ty| tys_match(db, ty, expected))
 }
 
 fn generated_expr_static_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     expr: GeneratedExprId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
 ) -> Option<TyId<'db>> {
     match expr.kind(db) {
         GeneratedExprKind::BoolLiteral(_) => Some(TyId::bool(db)),
         GeneratedExprKind::BoolAnd { lhs, rhs } => {
-            if generated_expr_ty_matches(db, lhs, TyId::bool(db))
-                && generated_expr_ty_matches(db, rhs, TyId::bool(db))
+            if generated_expr_ty_matches(db, lhs, TyId::bool(db), cx)
+                && generated_expr_ty_matches(db, rhs, TyId::bool(db), cx)
             {
                 Some(TyId::bool(db))
             } else {
                 None
             }
         }
-        GeneratedExprKind::SelfRef { ty } | GeneratedExprKind::MethodArgRef { ty, .. } => Some(ty),
+        GeneratedExprKind::SelfRef { ty } => {
+            if !cx.required_method.is_method(db) {
+                return None;
+            }
+            let self_ty = generated_method_target_ty(db, cx);
+            tys_match(db, self_ty, ty).then_some(ty)
+        }
+        GeneratedExprKind::MethodArgRef { name, ty } => {
+            let arg_ty = generated_required_method_param_ty(db, cx, name)?;
+            tys_match(db, arg_ty, ty).then_some(ty)
+        }
         GeneratedExprKind::FieldGet { base, field } => {
-            let base_ty = generated_expr_static_ty(db, base)?;
+            let base_ty = generated_expr_static_ty(db, base, cx)?;
             tys_match(db, base_ty, field.parent).then_some(field.ty)
         }
         GeneratedExprKind::EqExpr { lhs, rhs } => {
-            let lhs_ty = generated_expr_static_ty(db, lhs)?;
-            let rhs_ty = generated_expr_static_ty(db, rhs)?;
+            let lhs_ty = generated_expr_static_ty(db, lhs, cx)?;
+            let rhs_ty = generated_expr_static_ty(db, rhs, cx)?;
             tys_match(db, lhs_ty, rhs_ty).then_some(TyId::bool(db))
         }
         GeneratedExprKind::DefaultCall { ty } => Some(ty),
         GeneratedExprKind::StructInit { target, fields } => {
-            generated_struct_init_ty(db, target, fields)
+            generated_struct_init_ty(db, target, fields, cx)
         }
     }
 }
@@ -2178,6 +2240,7 @@ fn generated_struct_init_ty<'db>(
     db: &'db dyn HirAnalysisDb,
     target: TyId<'db>,
     fields: GeneratedStructFieldInitListId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
 ) -> Option<TyId<'db>> {
     let expected_fields = reflect_struct_fields(db, target);
     let field_inits = fields.list(db);
@@ -2192,7 +2255,7 @@ fn generated_struct_init_ty<'db>(
         if !tys_match(db, init.field.parent, target) || !tys_match(db, init.field.ty, expected.ty) {
             return None;
         }
-        let value_ty = generated_expr_static_ty(db, init.value)?;
+        let value_ty = generated_expr_static_ty(db, init.value, cx)?;
         if !tys_match(db, value_ty, expected.ty) {
             return None;
         }
