@@ -2344,6 +2344,35 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
+fn derive_using_reports_wrong_provider_head() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_using_reports_wrong_provider_head.fe".into(),
+        r#"
+trait Eq {}
+trait Default {}
+
+#[derive(Eq, using = derive_default)]
+struct Foo {}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (builder: mut ImplBuilder<Default<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `derive_default` does not provide `Derive<Eq>` evidence",
+    );
+}
+
+#[test]
 fn derive_declaration_using_reports_missing_provider() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -2369,6 +2398,36 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     assert_diag_message(
         &diags,
         "selected evidence provider `missing_provider` for `Eq` was not found",
+    );
+}
+
+#[test]
+fn derive_declaration_using_reports_wrong_provider_head() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_using_reports_wrong_provider_head.fe".into(),
+        r#"
+trait Eq {}
+trait Default {}
+
+struct Foo {}
+
+derive Eq for Foo using derive_default
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (builder: mut ImplBuilder<Default<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `derive_default` does not provide `Derive<Eq>` evidence",
     );
 }
 

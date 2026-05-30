@@ -775,16 +775,22 @@ fn selected_evidence_provider_diags_for_top_mod<'db>(
             if matches.len() == 1 {
                 return None;
             }
+            let selected_name = selected.data(db);
             let message = if matches.is_empty() {
-                format!(
-                    "selected evidence provider `{}` for `{}` was not found",
-                    selected.data(db),
-                    trait_name(db, head)
-                )
+                if !providers_named_in_ingot(db, top_mod.ingot(db), selected).is_empty() {
+                    format!(
+                        "selected evidence provider `{selected_name}` does not provide `Derive<{}>` evidence",
+                        trait_name(db, head)
+                    )
+                } else {
+                    format!(
+                        "selected evidence provider `{selected_name}` for `{}` was not found",
+                        trait_name(db, head)
+                    )
+                }
             } else {
                 format!(
-                    "selected evidence provider `{}` for `{}` is ambiguous",
-                    selected.data(db),
+                    "selected evidence provider `{selected_name}` for `{}` is ambiguous",
                     trait_name(db, head)
                 )
             };
@@ -928,6 +934,24 @@ fn matching_selected_providers<'db>(
     selected: IdentId<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
     providers_for_constraint_head(db, ingot, head)
+        .into_iter()
+        .filter(|provider| {
+            provider
+                .identity(db)
+                .func(db)
+                .name(db)
+                .to_opt()
+                .is_some_and(|name| name == selected)
+        })
+        .collect()
+}
+
+fn providers_named_in_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    selected: IdentId<'db>,
+) -> Vec<EvidenceProviderId<'db>> {
+    validated_evidence_providers_for_ingot(db, ingot)
         .into_iter()
         .filter(|provider| {
             provider
