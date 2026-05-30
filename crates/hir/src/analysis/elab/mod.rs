@@ -256,11 +256,16 @@ impl ProviderSkipReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum ProviderOutputStatus<'db> {
-    Succeeded { commands: BuilderCommandListId<'db> },
+    Succeeded {
+        commands: BuilderCommandListId<'db>,
+    },
     Failed,
-    Skipped { reason: ProviderSkipReason },
+    Skipped {
+        reason: ProviderSkipReason,
+        span: DynLazySpan<'db>,
+    },
 }
 
 #[salsa::interned]
@@ -760,13 +765,19 @@ fn provider_output_diag<'db>(
     let message = match output.status(db) {
         ProviderOutputStatus::Succeeded { .. } => return None,
         ProviderOutputStatus::Failed => "provider execution failed".to_string(),
-        ProviderOutputStatus::Skipped { reason } => reason.diagnostic_message().to_string(),
+        ProviderOutputStatus::Skipped { reason, .. } => reason.diagnostic_message().to_string(),
     };
 
     let request = output.request(db);
     let provider = output.provider(db).identity(db).pretty_print(db);
+    let span = match output.status(db) {
+        ProviderOutputStatus::Skipped { span, .. } => span,
+        ProviderOutputStatus::Failed | ProviderOutputStatus::Succeeded { .. } => {
+            output.provider(db).func(db).span().name().into()
+        }
+    };
     Some(invalid_request(
-        request.target(db).attr_span(),
+        span,
         format!(
             "evidence provider `{provider}` for `{}` did not produce generated evidence: {message}",
             request.goal(db).pretty_print(db)
@@ -983,9 +994,10 @@ fn provider_output_for_context<'db>(
             request,
             provider,
             context,
-            ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::MissingBuilderCapability,
-            },
+            skipped_status(
+                ProviderSkipReason::MissingBuilderCapability,
+                provider.func(db).span().effects().into(),
+            ),
         );
     }
 
@@ -993,9 +1005,26 @@ fn provider_output_for_context<'db>(
     ProviderOutputId::new(db, request, provider, context, status)
 }
 
-enum ProviderExecutionFailure {
-    Skipped(ProviderSkipReason),
+enum ProviderExecutionFailure<'db> {
+    Skipped {
+        reason: ProviderSkipReason,
+        span: DynLazySpan<'db>,
+    },
     Failed,
+}
+
+fn skipped_status<'db>(
+    reason: ProviderSkipReason,
+    span: DynLazySpan<'db>,
+) -> ProviderOutputStatus<'db> {
+    ProviderOutputStatus::Skipped { reason, span }
+}
+
+fn skipped_failure<'db>(
+    reason: ProviderSkipReason,
+    span: DynLazySpan<'db>,
+) -> ProviderExecutionFailure<'db> {
+    ProviderExecutionFailure::Skipped { reason, span }
 }
 
 #[derive(Clone, Copy)]
@@ -1072,22 +1101,22 @@ impl<'db> ProviderBodyExecutor<'db> {
         }
 
         let Some(body) = provider.func(self.db).body(self.db) else {
-            return ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::MissingFinish,
-            };
+            return skipped_status(
+                ProviderSkipReason::MissingFinish,
+                provider.func(self.db).span().name().into(),
+            );
         };
 
         match self.execute_expr(body, body.expr(self.db)) {
             Ok(()) => match self.builder.into_commands(self.db) {
                 Ok(commands) => ProviderOutputStatus::Succeeded { commands },
-                Err(BuilderError::NotFinished) => ProviderOutputStatus::Skipped {
-                    reason: ProviderSkipReason::MissingFinish,
-                },
+                Err(BuilderError::NotFinished) => skipped_status(
+                    ProviderSkipReason::MissingFinish,
+                    body.expr(self.db).span(body).into(),
+                ),
                 Err(_) => ProviderOutputStatus::Failed,
             },
-            Err(ProviderExecutionFailure::Skipped(reason)) => {
-                ProviderOutputStatus::Skipped { reason }
-            }
+            Err(ProviderExecutionFailure::Skipped { reason, span }) => skipped_status(reason, span),
             Err(ProviderExecutionFailure::Failed) => ProviderOutputStatus::Failed,
         }
     }
@@ -1096,7 +1125,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         &mut self,
         body: Body<'db>,
         stmt: crate::hir_def::StmtId,
-    ) -> Result<(), ProviderExecutionFailure> {
+    ) -> Result<(), ProviderExecutionFailure<'db>> {
         let Partial::Present(stmt_data) = stmt.data(self.db, body) else {
             return Ok(());
         };
@@ -1109,8 +1138,9 @@ impl<'db> ProviderBodyExecutor<'db> {
             Stmt::For(pat, iterable, loop_body, _) => {
                 if let Some(fields) = self.reflect_fields_iterable(body, *iterable)? {
                     let Some(binding) = simple_pat_binding_name(self.db, body, *pat) else {
-                        return Err(ProviderExecutionFailure::Skipped(
+                        return Err(skipped_failure(
                             ProviderSkipReason::UnsupportedProviderBody,
+                            stmt.span(body).into(),
                         ));
                     };
                     for field in fields {
@@ -1119,14 +1149,16 @@ impl<'db> ProviderBodyExecutor<'db> {
                         self.field_bindings.pop();
                     }
                 } else {
-                    return Err(ProviderExecutionFailure::Skipped(
+                    return Err(skipped_failure(
                         ProviderSkipReason::UnsupportedProviderBody,
+                        (*iterable).span(body).into(),
                     ));
                 }
             }
             Stmt::While(_, _) => {
-                return Err(ProviderExecutionFailure::Skipped(
+                return Err(skipped_failure(
                     ProviderSkipReason::UnsupportedProviderBody,
+                    stmt.span(body).into(),
                 ));
             }
             Stmt::Return(expr) => {
@@ -1136,8 +1168,9 @@ impl<'db> ProviderBodyExecutor<'db> {
             }
             Stmt::Expr(expr) => self.execute_expr(body, *expr)?,
             Stmt::Continue | Stmt::Break => {
-                return Err(ProviderExecutionFailure::Skipped(
+                return Err(skipped_failure(
                     ProviderSkipReason::UnsupportedProviderBody,
+                    stmt.span(body).into(),
                 ));
             }
         }
@@ -1148,7 +1181,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         &mut self,
         body: Body<'db>,
         expr: crate::hir_def::ExprId,
-    ) -> Result<(), ProviderExecutionFailure> {
+    ) -> Result<(), ProviderExecutionFailure<'db>> {
         let Partial::Present(expr_data) = expr.data(self.db, body) else {
             return Ok(());
         };
@@ -1160,15 +1193,17 @@ impl<'db> ProviderBodyExecutor<'db> {
                 }
             }
             Expr::Call(_, _) => {
-                return Err(ProviderExecutionFailure::Skipped(
+                return Err(skipped_failure(
                     ProviderSkipReason::UnsupportedProviderBody,
+                    expr.span(body).into(),
                 ));
             }
             Expr::MethodCall(receiver, method, generic_args, args) => {
                 if !self.execute_method_call(body, *receiver, *method, *generic_args, args)? {
                     if self.eval_expr_value(body, expr).is_none() {
-                        return Err(ProviderExecutionFailure::Skipped(
+                        return Err(skipped_failure(
                             ProviderSkipReason::UnsupportedProviderBody,
+                            expr.span(body).into(),
                         ));
                     }
                 }
@@ -1186,8 +1221,9 @@ impl<'db> ProviderBodyExecutor<'db> {
             | Expr::Match(_, _)
             | Expr::RecordInit(_, _)
             | Expr::With(_, _) => {
-                return Err(ProviderExecutionFailure::Skipped(
+                return Err(skipped_failure(
                     ProviderSkipReason::UnsupportedProviderBody,
+                    expr.span(body).into(),
                 ));
             }
             Expr::Lit(_) | Expr::Path(_) => {}
@@ -1202,20 +1238,22 @@ impl<'db> ProviderBodyExecutor<'db> {
         method: Partial<IdentId<'db>>,
         generic_args: GenericArgListId<'db>,
         args: &[crate::hir_def::CallArg<'db>],
-    ) -> Result<bool, ProviderExecutionFailure> {
+    ) -> Result<bool, ProviderExecutionFailure<'db>> {
         if !expr_is_path_named_any(self.db, body, receiver, &self.builder_names) {
             return Ok(false);
         }
         let Some(method) = method.to_opt() else {
-            return Err(ProviderExecutionFailure::Skipped(
+            return Err(skipped_failure(
                 ProviderSkipReason::UnsupportedProviderBody,
+                receiver.span(body).into(),
             ));
         };
         match method.data(self.db).as_str() {
             BUILDER_REQUIRE_METHOD => {
                 let [arg] = args else {
-                    return Err(ProviderExecutionFailure::Skipped(
+                    return Err(skipped_failure(
                         ProviderSkipReason::UnsupportedProviderBody,
+                        receiver.span(body).into(),
                     ));
                 };
                 self.execute_require(body, generic_args, arg.expr)?;
@@ -1223,20 +1261,23 @@ impl<'db> ProviderBodyExecutor<'db> {
             }
             BUILDER_FINISH_METHOD => {
                 if !args.is_empty() {
-                    return Err(ProviderExecutionFailure::Skipped(
+                    return Err(skipped_failure(
                         ProviderSkipReason::UnsupportedProviderBody,
+                        receiver.span(body).into(),
                     ));
                 }
                 self.builder.finish_explicit().map_err(|err| match err {
-                    BuilderError::AlreadyFinished => {
-                        ProviderExecutionFailure::Skipped(ProviderSkipReason::DuplicateFinish)
-                    }
+                    BuilderError::AlreadyFinished => skipped_failure(
+                        ProviderSkipReason::DuplicateFinish,
+                        receiver.span(body).into(),
+                    ),
                     _ => ProviderExecutionFailure::Failed,
                 })?;
                 Ok(true)
             }
-            _ => Err(ProviderExecutionFailure::Skipped(
+            _ => Err(skipped_failure(
                 ProviderSkipReason::UnsupportedProviderBody,
+                receiver.span(body).into(),
             )),
         }
     }
@@ -1246,16 +1287,18 @@ impl<'db> ProviderBodyExecutor<'db> {
         body: Body<'db>,
         generic_args: GenericArgListId<'db>,
         constraint_arg: crate::hir_def::ExprId,
-    ) -> Result<(), ProviderExecutionFailure> {
+    ) -> Result<(), ProviderExecutionFailure<'db>> {
         let Some(head) = self.resolve_requirement_head_generic_arg(generic_args) else {
-            return Err(ProviderExecutionFailure::Skipped(
+            return Err(skipped_failure(
                 ProviderSkipReason::InvalidBuilderRequirement,
+                constraint_arg.span(body).into(),
             ));
         };
         let Some(ElabValue::TypeWitness(arg_ty)) = self.eval_expr_value(body, constraint_arg)
         else {
-            return Err(ProviderExecutionFailure::Skipped(
+            return Err(skipped_failure(
                 ProviderSkipReason::InvalidBuilderRequirement,
+                constraint_arg.span(body).into(),
             ));
         };
 
@@ -1266,9 +1309,10 @@ impl<'db> ProviderBodyExecutor<'db> {
         self.builder
             .require_with_origin(constraint, origin)
             .map_err(|err| match err {
-                BuilderError::AlreadyFinished => {
-                    ProviderExecutionFailure::Skipped(ProviderSkipReason::CommandAfterFinish)
-                }
+                BuilderError::AlreadyFinished => skipped_failure(
+                    ProviderSkipReason::CommandAfterFinish,
+                    constraint_arg.span(body).into(),
+                ),
                 _ => ProviderExecutionFailure::Failed,
             })
     }
@@ -1277,7 +1321,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         &self,
         body: Body<'db>,
         iterable: crate::hir_def::ExprId,
-    ) -> Result<Option<Vec<ReflectedField<'db>>>, ProviderExecutionFailure> {
+    ) -> Result<Option<Vec<ReflectedField<'db>>>, ProviderExecutionFailure<'db>> {
         let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
             iterable.data(self.db, body)
         else {
@@ -1297,8 +1341,9 @@ impl<'db> ProviderBodyExecutor<'db> {
         if !self.env.has_reflect_target(self.db, target_ty)
             || !expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names)
         {
-            return Err(ProviderExecutionFailure::Skipped(
+            return Err(skipped_failure(
                 ProviderSkipReason::MissingReflectCapability,
+                iterable.span(body).into(),
             ));
         }
         Ok(Some(reflect_struct_fields(self.db, target_ty)))
@@ -2042,6 +2087,7 @@ mod tests {
     use crate::{
         analysis::ty::{constraint::ConstraintId, trait_def::TraitInstId, ty_def::TyId},
         hir_def::ItemKind,
+        span::LazySpan,
         test_db::HirAnalysisTestDb,
     };
 
@@ -2077,6 +2123,18 @@ mod tests {
         *elaboration_ctfe_contexts_for_request(db, request)
             .first()
             .expect("missing elaboration context")
+    }
+
+    fn skipped_output_span_text<'db>(
+        db: &'db HirAnalysisTestDb,
+        output: ProviderOutputId<'db>,
+    ) -> String {
+        let ProviderOutputStatus::Skipped { span, .. } = output.status(db) else {
+            panic!("expected skipped provider output");
+        };
+        let resolved = span.resolve(db).expect("skip span should resolve");
+        let text = resolved.file.text(db);
+        text[resolved.range.start().into()..resolved.range.end().into()].to_string()
     }
 
     #[test]
@@ -2257,7 +2315,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         assert!(matches!(
             output.status(&db),
             ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::MissingFinish
+                reason: ProviderSkipReason::MissingFinish,
+                ..
             }
         ));
     }
@@ -2292,9 +2351,11 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         assert!(matches!(
             output.status(&db),
             ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::MissingReflectCapability
+                reason: ProviderSkipReason::MissingReflectCapability,
+                ..
             }
         ));
+        assert_eq!(skipped_output_span_text(&db, output), "reflect.fields()");
     }
 
     #[test]
@@ -2323,9 +2384,11 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         assert!(matches!(
             output.status(&db),
             ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::UnsupportedProviderBody
+                reason: ProviderSkipReason::UnsupportedProviderBody,
+                ..
             }
         ));
+        assert_eq!(skipped_output_span_text(&db, output), "builder");
     }
 
     #[test]
@@ -2356,9 +2419,11 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         assert!(matches!(
             output.status(&db),
             ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::UnsupportedProviderBody
+                reason: ProviderSkipReason::UnsupportedProviderBody,
+                ..
             }
         ));
+        assert!(skipped_output_span_text(&db, output).starts_with("while true"));
     }
 
     #[test]
@@ -2390,7 +2455,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         assert!(matches!(
             output.status(&db),
             ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::DuplicateFinish
+                reason: ProviderSkipReason::DuplicateFinish,
+                ..
             }
         ));
     }
@@ -2431,7 +2497,8 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         assert!(matches!(
             output.status(&db),
             ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::CommandAfterFinish
+                reason: ProviderSkipReason::CommandAfterFinish,
+                ..
             }
         ));
     }
