@@ -17,6 +17,7 @@ use crate::{
                 EffectCapabilityKey, GeneratedExprId, GeneratedExprKind, GeneratedImplId,
                 GeneratedImplSource, GeneratedMethod, GeneratedMethodBodyKind,
                 GeneratedMethodListId, GeneratedRequirement, GeneratedRequirementListId,
+                GeneratedStructFieldInitListId,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{
@@ -1985,11 +1986,42 @@ fn generated_expr_static_ty<'db>(
             let rhs_ty = generated_expr_static_ty(db, rhs)?;
             tys_match(db, lhs_ty, rhs_ty).then_some(TyId::bool(db))
         }
+        GeneratedExprKind::DefaultCall { ty } => Some(ty),
+        GeneratedExprKind::StructInit { target, fields } => {
+            generated_struct_init_ty(db, target, fields)
+        }
         // Temporary Eq-specific sugar retained while provider surface syntax
         // moves toward self/arg refs, field_get, and eq expression builders.
         GeneratedExprKind::FieldEq { .. } => Some(TyId::bool(db)),
         GeneratedExprKind::TypedPlaceholder { .. } => None,
     }
+}
+
+fn generated_struct_init_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: TyId<'db>,
+    fields: GeneratedStructFieldInitListId<'db>,
+) -> Option<TyId<'db>> {
+    let expected_fields = reflect_struct_fields(db, target);
+    let field_inits = fields.list(db);
+    if expected_fields.len() != field_inits.len() {
+        return None;
+    }
+
+    for expected in expected_fields {
+        let init = field_inits
+            .iter()
+            .find(|init| init.field.index == expected.index)?;
+        if !tys_match(db, init.field.parent, target) || !tys_match(db, init.field.ty, expected.ty) {
+            return None;
+        }
+        let value_ty = generated_expr_static_ty(db, init.value)?;
+        if !tys_match(db, value_ty, expected.ty) {
+            return None;
+        }
+    }
+
+    Some(target)
 }
 
 fn generated_method_error_summary<'db>(
@@ -2391,7 +2423,11 @@ impl ModuleAnalysisPass for ElaborationRequestAnalysisPass {
 mod tests {
     use super::*;
     use crate::{
-        analysis::ty::{constraint::ConstraintId, trait_def::TraitInstId, ty_def::TyId},
+        analysis::ty::{
+            constraint::{ConstraintId, GeneratedStructFieldInit},
+            trait_def::TraitInstId,
+            ty_def::TyId,
+        },
         hir_def::ItemKind,
         span::LazySpan,
         test_db::HirAnalysisTestDb,
@@ -3165,6 +3201,223 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
             .expect("missing required method");
         let target_ty = context.request(&db).target(&db).ty(&db);
         let expr = GeneratedExprId::new(&db, GeneratedExprKind::TypedPlaceholder { ty: target_ty });
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitMethodExpr {
+                    name: method_name,
+                    expr,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert_eq!(
+            generated_unsupported_required_methods(&db, generated),
+            vec![method_name]
+        );
+    }
+
+    #[test]
+    fn generated_struct_init_body_satisfies_self_returning_method() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_struct_init_body_satisfies_self_returning_method.fe".into(),
+            r#"
+trait Default {
+    fn default() -> Self
+}
+
+#[derive(Default)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (builder: mut ImplBuilder<Default<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let default_trait = find_trait(&db, top_mod, "Default");
+        let method_name = *default_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+        let target_ty = context.request(&db).target(&db).ty(&db);
+        let field = reflect_struct_fields(&db, target_ty)
+            .into_iter()
+            .next()
+            .expect("missing reflected field");
+        let value = GeneratedExprId::new(&db, GeneratedExprKind::DefaultCall { ty: field.ty });
+        let fields = GeneratedStructFieldInitListId::new(
+            &db,
+            vec![GeneratedStructFieldInit { field, value }],
+        );
+        let expr = GeneratedExprId::new(
+            &db,
+            GeneratedExprKind::StructInit {
+                target: target_ty,
+                fields,
+            },
+        );
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitMethodExpr {
+                    name: method_name,
+                    expr,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert!(generated_unsupported_required_methods(&db, generated).is_empty());
+    }
+
+    #[test]
+    fn generated_struct_init_body_rejects_missing_fields() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_struct_init_body_rejects_missing_fields.fe".into(),
+            r#"
+trait Default {
+    fn default() -> Self
+}
+
+#[derive(Default)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (builder: mut ImplBuilder<Default<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let default_trait = find_trait(&db, top_mod, "Default");
+        let method_name = *default_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+        let target_ty = context.request(&db).target(&db).ty(&db);
+        let fields = GeneratedStructFieldInitListId::new(&db, Vec::new());
+        let expr = GeneratedExprId::new(
+            &db,
+            GeneratedExprKind::StructInit {
+                target: target_ty,
+                fields,
+            },
+        );
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitMethodExpr {
+                    name: method_name,
+                    expr,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert_eq!(
+            generated_unsupported_required_methods(&db, generated),
+            vec![method_name]
+        );
+    }
+
+    #[test]
+    fn generated_struct_init_body_rejects_wrong_field_type() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_struct_init_body_rejects_wrong_field_type.fe".into(),
+            r#"
+trait Default {
+    fn default() -> Self
+}
+
+#[derive(Default)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Default)]
+const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+    uses (builder: mut ImplBuilder<Default<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let default_trait = find_trait(&db, top_mod, "Default");
+        let method_name = *default_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+        let target_ty = context.request(&db).target(&db).ty(&db);
+        let field = reflect_struct_fields(&db, target_ty)
+            .into_iter()
+            .next()
+            .expect("missing reflected field");
+        let value = GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(false));
+        let fields = GeneratedStructFieldInitListId::new(
+            &db,
+            vec![GeneratedStructFieldInit { field, value }],
+        );
+        let expr = GeneratedExprId::new(
+            &db,
+            GeneratedExprKind::StructInit {
+                target: target_ty,
+                fields,
+            },
+        );
 
         let commands = BuilderCommandListId::new(
             &db,

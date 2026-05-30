@@ -464,6 +464,19 @@ pub(crate) struct GeneratedRequirementListId<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) struct GeneratedStructFieldInit<'db> {
+    pub(crate) field: ReflectedField<'db>,
+    pub(crate) value: GeneratedExprId<'db>,
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct GeneratedStructFieldInitListId<'db> {
+    #[return_ref]
+    pub(crate) list: Vec<GeneratedStructFieldInit<'db>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum GeneratedExprKind<'db> {
     BoolLiteral(bool),
     BoolAnd {
@@ -484,6 +497,13 @@ pub(crate) enum GeneratedExprKind<'db> {
     EqExpr {
         lhs: GeneratedExprId<'db>,
         rhs: GeneratedExprId<'db>,
+    },
+    DefaultCall {
+        ty: TyId<'db>,
+    },
+    StructInit {
+        target: TyId<'db>,
+        fields: GeneratedStructFieldInitListId<'db>,
     },
     FieldEq {
         field: ReflectedField<'db>,
@@ -976,6 +996,54 @@ impl<'db> TyFoldable<'db> for GeneratedRequirementListId<'db> {
     }
 }
 
+impl<'db> TyVisitable<'db> for GeneratedStructFieldInit<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        self.field.visit_with(visitor);
+        self.value.visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedStructFieldInit<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self {
+            field: self.field.fold_with(db, folder),
+            value: self.value.fold_with(db, folder),
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for GeneratedStructFieldInitListId<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        for field in self.list(visitor.db()) {
+            field.visit_with(visitor);
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedStructFieldInitListId<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self::new(
+            db,
+            self.list(db)
+                .iter()
+                .map(|field| field.fold_with(db, folder))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
 impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
     fn visit_with<V>(&self, visitor: &mut V)
     where
@@ -996,6 +1064,11 @@ impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
             Self::EqExpr { lhs, rhs } => {
                 lhs.visit_with(visitor);
                 rhs.visit_with(visitor);
+            }
+            Self::DefaultCall { ty } => ty.visit_with(visitor),
+            Self::StructInit { target, fields } => {
+                target.visit_with(visitor);
+                fields.visit_with(visitor);
             }
             Self::FieldEq { field } => field.visit_with(visitor),
             Self::TypedPlaceholder { ty } => ty.visit_with(visitor),
@@ -1028,6 +1101,13 @@ impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
             Self::EqExpr { lhs, rhs } => Self::EqExpr {
                 lhs: lhs.fold_with(db, folder),
                 rhs: rhs.fold_with(db, folder),
+            },
+            Self::DefaultCall { ty } => Self::DefaultCall {
+                ty: ty.fold_with(db, folder),
+            },
+            Self::StructInit { target, fields } => Self::StructInit {
+                target: target.fold_with(db, folder),
+                fields: fields.fold_with(db, folder),
             },
             Self::FieldEq { field } => Self::FieldEq {
                 field: field.fold_with(db, folder),
