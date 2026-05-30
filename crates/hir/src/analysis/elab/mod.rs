@@ -2302,22 +2302,18 @@ fn required_method_arg_ty_for_trait_inst<'db>(
     let method = required_method.as_callable(db)?;
     let arg_tys = method.arg_tys(db);
 
-    // Temporary compatibility path for Eq-shaped methods. The public builder
-    // API is `arg_ref("other")`; normal generated-method conformance should
-    // eventually own this Self-argument typing.
-    if name.data(db) == "other" && required_method.is_method(db) {
-        arg_tys.get(1)?;
-        return trait_inst.args(db).first().copied();
-    }
-
-    for (idx, ty) in arg_tys.iter().copied().enumerate() {
-        if required_method
-            .param_label_or_name(db, idx)
-            .is_some_and(|param_name| {
-                matches!(param_name, crate::hir_def::FuncParamName::Ident(id) if id == name)
-            })
-        {
+    for (idx, param) in required_method.params(db).enumerate() {
+        if param.is_self_param(db) {
+            continue;
+        }
+        if param.name(db).is_some_and(|param_name| param_name == name) {
+            let ty = arg_tys.get(idx).copied()?;
             let ty = ty.instantiate_identity();
+            if ty_is_named_self(db, ty)
+                && let Some(&target_ty) = trait_inst.args(db).first()
+            {
+                return Some(target_ty);
+            }
             return Some(instantiate_required_method_ty_for_trait_inst(
                 db,
                 trait_inst,
@@ -2325,16 +2321,6 @@ fn required_method_arg_ty_for_trait_inst<'db>(
                 ty,
             ));
         }
-    }
-
-    if name.data(db) == "other" && required_method.is_method(db) {
-        let ty = arg_tys.get(1)?.instantiate_identity();
-        return Some(instantiate_required_method_ty_for_trait_inst(
-            db,
-            trait_inst,
-            required_method,
-            ty,
-        ));
     }
 
     None
@@ -2345,6 +2331,19 @@ fn generated_method_target_ty<'db>(
     cx: GeneratedMethodValidationContext<'db>,
 ) -> TyId<'db> {
     cx.generated.context.request(db).target(db).ty(db)
+}
+
+fn ty_is_named_self<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> bool {
+    if let Some(inner) = ty.as_view(db) {
+        return ty_is_named_self(db, inner);
+    }
+    if let Some((_, inner)) = ty.as_capability(db) {
+        return ty_is_named_self(db, inner);
+    }
+    matches!(
+        ty.base_ty(db).data(db),
+        TyData::TyParam(param) if param.name.is_self_ty(db)
+    )
 }
 
 fn instantiate_required_method_ty<'db>(
@@ -2366,8 +2365,19 @@ fn instantiate_required_method_ty_for_trait_inst<'db>(
     required_method: crate::hir_def::Func<'db>,
     ty: TyId<'db>,
 ) -> TyId<'db> {
+    if ty_is_named_self(db, ty)
+        && let Some(&target_ty) = trait_inst.args(db).first()
+    {
+        return target_ty;
+    }
+
     let mut mappings = Vec::new();
     let method = required_method.as_callable(db).unwrap();
+    if let Some(self_ty) = required_method.expected_self_ty(db)
+        && let Some(&target_ty) = trait_inst.args(db).first()
+    {
+        mappings.push((self_ty, target_ty));
+    }
     for (idx, &arg) in trait_inst.args(db).iter().enumerate() {
         if let Some(&method_param) = method.params(db).get(idx) {
             mappings.push((method_param, arg));
