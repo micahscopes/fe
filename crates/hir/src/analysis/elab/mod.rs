@@ -45,9 +45,13 @@ use crate::{
     span::DynLazySpan,
 };
 
+mod capability;
 mod cycles;
 mod trace;
 
+pub(crate) use capability::{
+    CapabilityEnv, ElaborationCapabilityOrigin, ElaborationCapabilityWitness,
+};
 pub use trace::{
     generated_impl_summaries_for_top_mod, generated_requirement_artifact_summaries_for_top_mod,
     generated_trace_summaries_for_top_mod,
@@ -144,58 +148,6 @@ impl<'db> ElaborationRequestId<'db> {
             ElaborationOrigin::DeriveAttr { .. } => self.target(db).attr_span(),
             ElaborationOrigin::DeriveDecl(decl) => decl.span().into(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum ElaborationCapabilityOrigin {
-    ProviderUsesParam,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) struct ElaborationCapabilityWitness<'db> {
-    capability: crate::analysis::ty::constraint::EffectCapabilityId<'db>,
-    origin: ElaborationCapabilityOrigin,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) struct CapabilityEnv<'db> {
-    witnesses: Vec<ElaborationCapabilityWitness<'db>>,
-}
-
-impl<'db> CapabilityEnv<'db> {
-    fn from_context(db: &'db dyn HirAnalysisDb, context: ElaborationCtfeContextId<'db>) -> Self {
-        Self {
-            witnesses: context.capabilities(db).clone(),
-        }
-    }
-
-    fn has_impl_builder(&self, db: &'db dyn HirAnalysisDb, goal: ConstraintId<'db>) -> bool {
-        self.witnesses.iter().any(|witness| {
-            if witness.capability.mode(db) != CapabilityMode::Mut {
-                return false;
-            }
-            match witness.capability.key(db) {
-                EffectCapabilityKey::Compiler(CompilerCapabilityKind::ImplBuilder(
-                    capability_goal,
-                )) => constraints_match(db, capability_goal, goal),
-                _ => false,
-            }
-        })
-    }
-
-    fn has_reflect_target(&self, db: &'db dyn HirAnalysisDb, target: TyId<'db>) -> bool {
-        self.witnesses.iter().any(|witness| {
-            if witness.capability.mode(db) != CapabilityMode::Read {
-                return false;
-            }
-            match witness.capability.key(db) {
-                EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(reflected)) => {
-                    tys_match(db, reflected, target)
-                }
-                _ => false,
-            }
-        })
     }
 }
 
@@ -2474,7 +2426,7 @@ pub(super) fn constraints_match<'db>(
     table.unify(lhs, rhs).is_ok()
 }
 
-fn tys_match<'db>(db: &'db dyn HirAnalysisDb, lhs: TyId<'db>, rhs: TyId<'db>) -> bool {
+pub(super) fn tys_match<'db>(db: &'db dyn HirAnalysisDb, lhs: TyId<'db>, rhs: TyId<'db>) -> bool {
     let mut table = UnificationTable::new(db);
     table.unify(lhs, rhs).is_ok()
 }
