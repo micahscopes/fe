@@ -2936,6 +2936,12 @@ impl<'db> TyChecker<'db> {
             return prop;
         }
         if let Some(prop) =
+            self.check_reflect_intrinsic_method_call(method_name, receiver_prop.ty, args)
+        {
+            self.env.type_expr(expr, prop.clone());
+            return prop;
+        }
+        if let Some(prop) =
             self.check_field_descriptor_intrinsic_method_call(method_name, receiver_prop.ty, args)
         {
             self.env.type_expr(expr, prop.clone());
@@ -3168,6 +3174,31 @@ impl<'db> TyChecker<'db> {
             .find_map(
                 |candidate| match compiler_capability_for_ty(self.db, candidate) {
                     Some(CompilerCapabilityKind::ImplBuilder(goal)) => Some(goal),
+                    _ => None,
+                },
+            )
+    }
+
+    fn check_reflect_intrinsic_method_call(
+        &mut self,
+        method_name: IdentId<'db>,
+        receiver_ty: TyId<'db>,
+        args: &[crate::hir_def::CallArg<'db>],
+    ) -> Option<ExprProp<'db>> {
+        if method_name.data(self.db) != "type_info" || !args.is_empty() {
+            return None;
+        }
+
+        let target = self.reflect_target_from_receiver_ty(receiver_ty)?;
+        Some(ExprProp::new(self.type_info_ty(target), true))
+    }
+
+    fn reflect_target_from_receiver_ty(&self, receiver_ty: TyId<'db>) -> Option<TyId<'db>> {
+        self.capability_fallback_candidates(receiver_ty)
+            .into_iter()
+            .find_map(
+                |candidate| match compiler_capability_for_ty(self.db, candidate) {
+                    Some(CompilerCapabilityKind::Reflect(target)) => Some(target),
                     _ => None,
                 },
             )

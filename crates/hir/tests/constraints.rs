@@ -1152,6 +1152,21 @@ const fn field_parent<V>(field: Field<Foo, V>) -> TypeInfo<Foo> {
 }
 
 #[test]
+fn reflect_type_info_method_returns_type_info() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "reflect_type_info_method_returns_type_info.fe".into(),
+        r#"
+const fn reflected_type<T>(reflect: Reflect<T>) -> TypeInfo<T> {
+    reflect.type_info()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn generated_derive_evidence_is_visible_to_trait_solver() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
