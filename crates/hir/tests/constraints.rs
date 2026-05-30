@@ -1249,6 +1249,10 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider does not declare mutable ImplBuilder capability",
+    );
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
 }
 
@@ -1289,6 +1293,7 @@ fn caller() {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "undefined variable `reflect`");
+    assert_diag_message(&diags, "provider body requires Reflect capability");
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -1530,6 +1535,7 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "provider did not call builder.finish()");
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),

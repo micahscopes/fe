@@ -239,6 +239,22 @@ pub(crate) enum ProviderSkipReason {
     UnsupportedProviderBody,
 }
 
+impl ProviderSkipReason {
+    fn diagnostic_message(self) -> &'static str {
+        match self {
+            Self::MissingBuilderCapability => {
+                "provider does not declare mutable ImplBuilder capability"
+            }
+            Self::MissingReflectCapability => "provider body requires Reflect capability",
+            Self::MissingFinish => "provider did not call builder.finish()",
+            Self::DuplicateFinish => "provider called builder.finish() more than once",
+            Self::CommandAfterFinish => "provider emitted a builder command after finish",
+            Self::InvalidBuilderRequirement => "provider emitted an invalid builder requirement",
+            Self::UnsupportedProviderBody => "provider body uses unsupported elaboration CTFE",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum ProviderOutputStatus<'db> {
     Succeeded { commands: BuilderCommandListId<'db> },
@@ -678,7 +694,13 @@ fn generated_overlay_diags_for_top_mod<'db>(
     let mut diags = Vec::new();
     for &request in elaboration_requests_for_top_mod(db, top_mod) {
         for &context in elaboration_ctfe_contexts_for_request(db, request) {
-            let Some(generated) = provider_generated_impl_candidate_for_context(db, context) else {
+            let output = provider_output_for_context(db, context);
+            if let Some(diag) = provider_output_diag(db, output) {
+                diags.push(diag);
+                continue;
+            }
+
+            let Some(generated) = provider_generated_impl_for_output(db, output) else {
                 continue;
             };
             let missing_methods = generated_missing_required_methods(db, generated);
@@ -720,6 +742,39 @@ fn generated_overlay_diags_for_top_mod<'db>(
         }
     }
     diags
+}
+
+fn provider_output_diag<'db>(
+    db: &'db dyn HirAnalysisDb,
+    output: ProviderOutputId<'db>,
+) -> Option<TyDiagCollection<'db>> {
+    let message = match output.status(db) {
+        ProviderOutputStatus::Succeeded { .. } => return None,
+        ProviderOutputStatus::Failed => "provider execution failed".to_string(),
+        ProviderOutputStatus::Skipped { reason } => reason.diagnostic_message().to_string(),
+    };
+
+    let request = output.request(db);
+    let provider = evidence_provider_name(db, output.provider(db));
+    Some(invalid_request(
+        request.target(db).attr_span(),
+        format!(
+            "evidence provider `{provider}` for `{}` did not produce generated evidence: {message}",
+            request.goal(db).pretty_print(db)
+        ),
+    ))
+}
+
+fn evidence_provider_name<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider: EvidenceProviderId<'db>,
+) -> String {
+    provider
+        .func(db)
+        .name(db)
+        .to_opt()
+        .map(|name| name.data(db).to_string())
+        .unwrap_or_else(|| "<anonymous provider>".to_string())
 }
 
 fn trait_name<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> String {
