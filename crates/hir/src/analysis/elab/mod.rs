@@ -1086,6 +1086,7 @@ struct ProviderBodyExecutor<'db> {
     builder_names: Vec<IdentId<'db>>,
     reflect_names: Vec<IdentId<'db>>,
     field_bindings: Vec<(IdentId<'db>, ReflectedField<'db>)>,
+    value_bindings: Vec<(IdentId<'db>, ElabValue<'db>)>,
 }
 
 impl<'db> ProviderBodyExecutor<'db> {
@@ -1103,6 +1104,7 @@ impl<'db> ProviderBodyExecutor<'db> {
             builder_names: provider_impl_builder_effect_names(db, provider),
             reflect_names: provider_reflect_effect_names(db, provider),
             field_bindings: Vec::new(),
+            value_bindings: Vec::new(),
         }
     }
 
@@ -1149,6 +1151,13 @@ impl<'db> ProviderBodyExecutor<'db> {
         match stmt_data {
             Stmt::Let(_, _, init) => {
                 if let Some(init) = init {
+                    if let Stmt::Let(pat, _, _) = stmt_data
+                        && let Some(binding) = simple_pat_binding_name(self.db, body, *pat)
+                        && let Some(value) = self.eval_expr_value(body, *init)
+                    {
+                        self.value_bindings.push((binding, value));
+                        return Ok(());
+                    }
                     self.execute_expr(body, *init)?;
                 }
             }
@@ -1205,8 +1214,28 @@ impl<'db> ProviderBodyExecutor<'db> {
 
         match expr_data {
             Expr::Block(stmts) => {
-                for &stmt in stmts {
-                    self.execute_stmt(body, stmt)?;
+                let old_value_bindings = self.value_bindings.len();
+                let result = (|| {
+                    for &stmt in stmts {
+                        self.execute_stmt(body, stmt)?;
+                    }
+                    Ok(())
+                })();
+                self.value_bindings.truncate(old_value_bindings);
+                result?;
+            }
+            Expr::Assign(lhs, rhs) => {
+                let Some(value) = self.eval_expr_value(body, *rhs) else {
+                    return Err(skipped_failure(
+                        ProviderSkipReason::UnsupportedProviderBody,
+                        (*rhs).span(body).into(),
+                    ));
+                };
+                if !self.assign_value_binding(body, *lhs, value) {
+                    return Err(skipped_failure(
+                        ProviderSkipReason::UnsupportedProviderBody,
+                        (*lhs).span(body).into(),
+                    ));
                 }
             }
             Expr::Call(_, _) => {
@@ -1226,7 +1255,6 @@ impl<'db> ProviderBodyExecutor<'db> {
                 }
             }
             Expr::Bin(_, _, _)
-            | Expr::Assign(_, _)
             | Expr::AugAssign(_, _, _)
             | Expr::Un(_, _)
             | Expr::Cast(_, _)
@@ -1246,6 +1274,28 @@ impl<'db> ProviderBodyExecutor<'db> {
             Expr::Lit(_) | Expr::Path(_) => {}
         }
         Ok(())
+    }
+
+    fn assign_value_binding(
+        &mut self,
+        body: Body<'db>,
+        lhs: crate::hir_def::ExprId,
+        value: ElabValue<'db>,
+    ) -> bool {
+        let Some(name) = simple_expr_path_ident(self.db, body, lhs) else {
+            return false;
+        };
+        if let Some((_, binding)) = self
+            .value_bindings
+            .iter_mut()
+            .rev()
+            .find(|(candidate, _)| *candidate == name)
+        {
+            *binding = value;
+            true
+        } else {
+            false
+        }
     }
 
     fn execute_method_call(
@@ -1431,6 +1481,11 @@ impl<'db> ProviderBodyExecutor<'db> {
             expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*field)
         }) {
             return Some(ElabValue::Field(field));
+        }
+        if let Some(value) = self.value_bindings.iter().rev().find_map(|(name, value)| {
+            expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*value)
+        }) {
+            return Some(value);
         }
 
         let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
@@ -1796,15 +1851,21 @@ fn expr_is_path_named_any<'db>(
     expr: crate::hir_def::ExprId,
     names: &[IdentId<'db>],
 ) -> bool {
+    simple_expr_path_ident(db, body, expr).is_some_and(|ident| names.contains(&ident))
+}
+
+fn simple_expr_path_ident<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    expr: crate::hir_def::ExprId,
+) -> Option<IdentId<'db>> {
     let Partial::Present(Expr::Path(path)) = expr.data(db, body) else {
-        return false;
+        return None;
     };
     let Partial::Present(path) = path else {
-        return false;
+        return None;
     };
-    path.ident(db)
-        .to_opt()
-        .is_some_and(|ident| names.contains(&ident))
+    path.as_ident(db)
 }
 
 fn simple_pat_binding_name<'db>(

@@ -2246,6 +2246,68 @@ fn caller() {
 }
 
 #[test]
+fn provider_generated_eq_like_derive_accumulates_field_method_body() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_eq_like_derive_accumulates_field_method_body.fe".into(),
+        r#"
+trait TestEq {
+    fn eq(self, other: Self) -> bool
+}
+
+fn require_test_eq<T>()
+where
+    T: TestEq
+{}
+
+#[derive(TestEq)]
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+#[evidence_provider(TestEq)]
+const fn derive_test_eq<T>(ev: own Evidence<TestEq<T>>) -> Evidence<TestEq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<TestEq<T>>,
+    )
+{
+    let mut acc = builder.bool(true)
+    for field in reflect.fields() {
+        builder.require<TestEq>(field.ty())
+        acc = builder.and(acc, builder.eq(
+            builder.field_get(builder.self_ref(), field),
+            builder.field_get(builder.other_ref(), field),
+        ))
+    }
+    builder.emit_method(acc)
+    builder.finish()
+    ev
+}
+
+fn caller<A, B>()
+where
+    A: TestEq,
+    B: TestEq
+{
+    require_test_eq<Pair<A, B>>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Pair<A, B>: TestEq with obligations {A: TestEq, B: TestEq}"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn generated_default_derive_with_required_method_waits_for_body_ir() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
