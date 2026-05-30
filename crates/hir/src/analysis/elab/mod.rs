@@ -32,15 +32,15 @@ use crate::{
             trait_resolution::{
                 PredicateListId, constraint::collect_func_effect_capability_constraints,
             },
-            ty_def::{Kind, PrimTy, TyBase, TyData, TyId},
+            ty_def::{Kind, TyData, TyId},
             ty_lower::ConstDefaultCompletion,
             unify::UnificationTable,
             visitor::{TyVisitable, TyVisitor},
         },
     },
     hir_def::{
-        Body, Expr, FieldParent, GenericArg, GenericArgListId, IdentId, LitKind, Partial, Pat,
-        Stmt, TopLevelMod, Trait, TypeKind,
+        Body, Expr, GenericArg, GenericArgListId, IdentId, LitKind, Partial, Pat, Stmt,
+        TopLevelMod, Trait, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -48,6 +48,7 @@ use crate::{
 mod builder;
 mod capability;
 mod cycles;
+mod reflect;
 mod request;
 mod trace;
 
@@ -58,6 +59,8 @@ pub(crate) use builder::{BuilderCommandListId, BuilderError, ImplBuilderSession}
 pub(crate) use capability::{
     CapabilityEnv, ElaborationCapabilityOrigin, ElaborationCapabilityWitness,
 };
+pub(crate) use reflect::ReflectedField;
+use reflect::reflect_struct_fields;
 pub(crate) use request::{
     ElaborationRequestId, elaboration_requests_for_ingot, elaboration_requests_for_top_mod,
 };
@@ -75,14 +78,6 @@ pub(crate) struct ElaborationCtfeContextId<'db> {
 
     #[return_ref]
     capabilities: Vec<ElaborationCapabilityWitness<'db>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) struct ReflectedField<'db> {
-    parent: TyId<'db>,
-    index: u32,
-    name: IdentId<'db>,
-    ty: TyId<'db>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
@@ -157,46 +152,6 @@ impl<'db> ElaborationCtfeContextId<'db> {
             provider,
             capabilities
         )
-    }
-}
-
-impl<'db> ReflectedField<'db> {
-    pub(crate) fn field_ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
-        let field_ctor = TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::Field)));
-        TyId::app(db, TyId::app(db, field_ctor, self.parent), self.ty)
-    }
-
-    pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
-        format!(
-            "{}.{}: {}",
-            self.parent.pretty_print(db),
-            self.name.data(db),
-            self.field_ty(db).pretty_print(db)
-        )
-    }
-}
-
-impl<'db> TyVisitable<'db> for ReflectedField<'db> {
-    fn visit_with<V>(&self, visitor: &mut V)
-    where
-        V: TyVisitor<'db> + ?Sized,
-    {
-        self.parent.visit_with(visitor);
-        self.ty.visit_with(visitor);
-    }
-}
-
-impl<'db> TyFoldable<'db> for ReflectedField<'db> {
-    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
-    where
-        F: TyFolder<'db>,
-    {
-        Self {
-            parent: self.parent.fold_with(db, folder),
-            index: self.index,
-            name: self.name,
-            ty: self.ty.fold_with(db, folder),
-        }
     }
 }
 
@@ -2048,29 +2003,6 @@ fn context_has_reflect_target<'db>(
             _ => false,
         }
     })
-}
-
-fn reflect_struct_fields<'db>(
-    db: &'db dyn HirAnalysisDb,
-    target: TyId<'db>,
-) -> Vec<ReflectedField<'db>> {
-    let Some(FieldParent::Struct(struct_)) = target.field_parent(db) else {
-        return Vec::new();
-    };
-
-    let field_tys = target.field_types(db);
-    FieldParent::Struct(struct_)
-        .fields(db)
-        .zip(field_tys)
-        .filter_map(|(field, ty)| {
-            Some(ReflectedField {
-                parent: target,
-                index: field.idx as u32,
-                name: field.name(db)?,
-                ty,
-            })
-        })
-        .collect()
 }
 
 pub(super) fn constraints_match<'db>(
