@@ -10,7 +10,6 @@ use crate::{
         diagnostics::DiagnosticVoucher,
         name_resolution::{PathRes, resolve_path},
         ty::{
-            adt_def::AdtRef,
             binder::Binder,
             constraint::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintApplicationId, ConstraintHeadId,
@@ -41,118 +40,26 @@ use crate::{
         },
     },
     hir_def::{
-        Attr, AttrArg, AttrArgValue, Body, DeriveDecl, Enum, Expr, FieldParent, GenericArg,
-        GenericArgListId, HirIngot, IdentId, ItemKind, LitKind, NormalAttr, Partial, Pat, Stmt,
-        Struct, TopLevelMod, Trait, TypeKind,
+        Attr, AttrArg, AttrArgValue, Body, DeriveDecl, Expr, FieldParent, GenericArg,
+        GenericArgListId, HirIngot, IdentId, LitKind, NormalAttr, Partial, Pat, Stmt, TopLevelMod,
+        Trait, TypeKind,
     },
     span::DynLazySpan,
 };
 
 mod capability;
 mod cycles;
+mod request;
 mod trace;
 
 pub(crate) use capability::{
     CapabilityEnv, ElaborationCapabilityOrigin, ElaborationCapabilityWitness,
 };
+pub(crate) use request::{ElaborationOrigin, ElaborationRequestId, ElaborationTarget};
 pub use trace::{
     generated_impl_summaries_for_top_mod, generated_requirement_artifact_summaries_for_top_mod,
     generated_trace_summaries_for_top_mod,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum ElaborationTarget<'db> {
-    Struct(Struct<'db>),
-    Enum(Enum<'db>),
-}
-
-impl<'db> ElaborationTarget<'db> {
-    fn from_item(item: ItemKind<'db>) -> Option<Self> {
-        match item {
-            ItemKind::Struct(struct_) => Some(Self::Struct(struct_)),
-            ItemKind::Enum(enum_) => Some(Self::Enum(enum_)),
-            _ => None,
-        }
-    }
-
-    fn from_adt_ref(adt: AdtRef<'db>) -> Self {
-        match adt {
-            AdtRef::Struct(struct_) => Self::Struct(struct_),
-            AdtRef::Enum(enum_) => Self::Enum(enum_),
-        }
-    }
-
-    fn item(self) -> ItemKind<'db> {
-        match self {
-            Self::Struct(struct_) => ItemKind::Struct(struct_),
-            Self::Enum(enum_) => ItemKind::Enum(enum_),
-        }
-    }
-
-    fn scope(self) -> crate::hir_def::scope_graph::ScopeId<'db> {
-        self.item().scope()
-    }
-
-    fn attrs(self, db: &'db dyn HirAnalysisDb) -> Option<crate::hir_def::AttrListId<'db>> {
-        self.item().attrs(db)
-    }
-
-    fn attr_span(self) -> DynLazySpan<'db> {
-        match self {
-            Self::Struct(struct_) => struct_.span().attributes().into(),
-            Self::Enum(enum_) => enum_.span().attributes().into(),
-        }
-    }
-
-    fn ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
-        let adt = match self {
-            Self::Struct(struct_) => struct_.as_adt(db),
-            Self::Enum(enum_) => enum_.as_adt(db),
-        };
-        let mut ty = TyId::adt(db, adt);
-        for &param in adt.params(db) {
-            ty = TyId::app(db, ty, param);
-        }
-        ty
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum ElaborationOrigin<'db> {
-    DeriveAttr { attr_index: u32, arg_index: u32 },
-    DeriveDecl(DeriveDecl<'db>),
-}
-
-#[salsa::interned]
-#[derive(Debug)]
-pub(crate) struct ElaborationRequestId<'db> {
-    target: ElaborationTarget<'db>,
-    goal: ConstraintId<'db>,
-    selected_provider: Option<IdentId<'db>>,
-    origin: ElaborationOrigin<'db>,
-}
-
-impl<'db> ElaborationRequestId<'db> {
-    pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
-        let mut summary = format!(
-            "{} requested for {}",
-            self.goal(db).pretty_print(db),
-            self.target(db).ty(db).pretty_print(db)
-        );
-        if let Some(provider) = self.selected_provider(db) {
-            summary.push_str(" using ");
-            summary.push_str(provider.data(db));
-        }
-        summary
-    }
-
-    fn span(self, db: &'db dyn HirAnalysisDb) -> DynLazySpan<'db> {
-        match self.origin(db) {
-            ElaborationOrigin::DeriveAttr { .. } => self.target(db).attr_span(),
-            ElaborationOrigin::DeriveDecl(decl) => decl.span().into(),
-        }
-    }
-}
 
 #[salsa::interned]
 #[derive(Debug)]
@@ -537,15 +444,6 @@ impl<'db> RequirementOrigin<'db> {
                 .field_parent(db)
                 .map(|parent| parent.field_name_span(field.index as usize)),
             RequirementOrigin::ProviderCode | RequirementOrigin::Synthetic => None,
-        }
-    }
-}
-
-impl<'db> ElaborationOrigin<'db> {
-    fn pretty_print(self) -> &'static str {
-        match self {
-            Self::DeriveAttr { .. } => "derive attribute",
-            Self::DeriveDecl(_) => "derive declaration",
         }
     }
 }
