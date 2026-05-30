@@ -1,11 +1,23 @@
 use crate::{
     analysis::{
         HirAnalysisDb,
+        name_resolution::{PathRes, resolve_path},
         ty::{adt_def::AdtRef, constraint::ConstraintId, ty_def::TyId},
     },
-    hir_def::{DeriveDecl, Enum, IdentId, ItemKind, Struct},
+    hir_def::{
+        Attr, AttrArg, AttrArgValue, DeriveDecl, Enum, HirIngot, IdentId, ItemKind, NormalAttr,
+        Struct, TopLevelMod, Trait,
+    },
     span::DynLazySpan,
 };
+use common::ingot::Ingot;
+
+use crate::analysis::ty::{
+    constraint::ConstraintKind, diagnostics::TyDiagCollection, trait_def::TraitInstId,
+    trait_resolution::PredicateListId,
+};
+
+use super::invalid_request;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum ElaborationTarget<'db> {
@@ -111,4 +123,338 @@ impl<'db> ElaborationOrigin<'db> {
             Self::DeriveDecl(_) => "derive declaration",
         }
     }
+}
+
+#[salsa::tracked(return_ref)]
+pub(crate) fn elaboration_requests_for_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+) -> Vec<ElaborationRequestId<'db>> {
+    ingot
+        .all_modules(db)
+        .iter()
+        .flat_map(|&top_mod| {
+            elaboration_requests_for_top_mod(db, top_mod)
+                .iter()
+                .copied()
+        })
+        .collect()
+}
+
+#[salsa::tracked(return_ref)]
+pub(crate) fn elaboration_requests_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<ElaborationRequestId<'db>> {
+    top_mod
+        .all_items(db)
+        .iter()
+        .filter_map(|&item| ElaborationTarget::from_item(item))
+        .flat_map(|target| {
+            derive_requests_for_target(db, target)
+                .into_iter()
+                .filter_map(|result| result.ok())
+        })
+        .chain(top_mod.all_derive_decls(db).iter().flat_map(|&decl| {
+            derive_requests_for_decl(db, decl)
+                .into_iter()
+                .filter_map(|result| result.ok())
+        }))
+        .collect()
+}
+
+pub(super) fn elaboration_request_parse_diags_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<TyDiagCollection<'db>> {
+    let mut diags: Vec<_> = top_mod
+        .all_items(db)
+        .iter()
+        .filter_map(|&item| ElaborationTarget::from_item(item))
+        .flat_map(|target| {
+            derive_requests_for_target(db, target)
+                .into_iter()
+                .filter_map(|result| result.err())
+        })
+        .collect();
+    diags.extend(top_mod.all_derive_decls(db).iter().flat_map(|&decl| {
+        derive_requests_for_decl(db, decl)
+            .into_iter()
+            .filter_map(|result| result.err())
+    }));
+    diags
+}
+
+fn derive_requests_for_target<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+) -> Vec<Result<ElaborationRequestId<'db>, TyDiagCollection<'db>>> {
+    derive_attrs(db, target)
+        .into_iter()
+        .flat_map(|(attr_index, attr)| derive_requests_for_attr(db, target, attr_index, attr))
+        .collect()
+}
+
+fn derive_attrs<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+) -> Vec<(usize, &'db NormalAttr<'db>)> {
+    let Some(attrs) = target.attrs(db) else {
+        return Vec::new();
+    };
+
+    attrs
+        .data(db)
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, attr)| {
+            let Attr::Normal(normal_attr) = attr else {
+                return None;
+            };
+            let is_derive = normal_attr
+                .path
+                .to_opt()
+                .and_then(|path| path.as_ident(db))
+                .is_some_and(|ident| ident.data(db) == "derive");
+            is_derive.then_some((idx, normal_attr))
+        })
+        .collect()
+}
+
+fn derive_requests_for_attr<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+    attr_index: usize,
+    attr: &NormalAttr<'db>,
+) -> Vec<Result<ElaborationRequestId<'db>, TyDiagCollection<'db>>> {
+    if attr.has_value || !attr.has_args || attr.args.is_empty() {
+        return vec![Err(invalid_request(
+            target.attr_span(),
+            "expected `#[derive(TraitName)]`",
+        ))];
+    }
+
+    let mut selected_provider = None;
+    let mut trait_args = Vec::new();
+    let mut errors = Vec::new();
+    for arg in &attr.args {
+        if arg.has_value || arg.value.is_some() {
+            match parse_derive_provider_selection(db, target, arg) {
+                Ok(provider) if selected_provider.replace(provider).is_none() => {}
+                Ok(_) => errors.push(invalid_request(
+                    target.attr_span(),
+                    "`#[derive(...)]` may only select one provider",
+                )),
+                Err(diag) => errors.push(diag),
+            }
+        } else {
+            trait_args.push(arg);
+        }
+    }
+
+    if let Some(selected) = selected_provider {
+        if trait_args.len() != 1 {
+            errors.push(invalid_request(
+                target.attr_span(),
+                format!(
+                    "`using = {}` requires exactly one derived trait",
+                    selected.data(db)
+                ),
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        return errors.into_iter().map(Err).collect();
+    }
+
+    trait_args
+        .iter()
+        .enumerate()
+        .map(|(arg_index, arg)| {
+            let Some(path) = arg.key.to_opt() else {
+                return Err(invalid_request(
+                    target.attr_span(),
+                    "derive arguments must be trait paths",
+                ));
+            };
+            let trait_ = resolve_derive_trait(db, target, path)?;
+            Ok(make_derive_request(
+                db,
+                target,
+                trait_,
+                selected_provider,
+                ElaborationOrigin::DeriveAttr {
+                    attr_index: attr_index as u32,
+                    arg_index: arg_index as u32,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn derive_requests_for_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: DeriveDecl<'db>,
+) -> Vec<Result<ElaborationRequestId<'db>, TyDiagCollection<'db>>> {
+    vec![derive_request_for_decl(db, decl)]
+}
+
+fn derive_request_for_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: DeriveDecl<'db>,
+) -> Result<ElaborationRequestId<'db>, TyDiagCollection<'db>> {
+    let span: DynLazySpan<'db> = decl.span().into();
+    let Some(head_path) = decl.head_path(db).to_opt() else {
+        return Err(invalid_request(
+            span.clone(),
+            "derive declarations require a trait head",
+        ));
+    };
+    let Some(target_path) = decl.target_path(db).to_opt() else {
+        return Err(invalid_request(
+            span.clone(),
+            "derive declarations require a target after `for`",
+        ));
+    };
+
+    let target = resolve_derive_target(db, decl, target_path)?;
+    let trait_ = resolve_derive_trait_in_scope(db, decl.scope(), span.clone(), head_path)?;
+    let selected_provider = match decl.selected_provider_path(db) {
+        None => None,
+        Some(path) => {
+            let Some(path) = path.to_opt() else {
+                return Err(invalid_request(
+                    span.clone(),
+                    "`using` must name an evidence provider",
+                ));
+            };
+            let Some(provider) = path.as_ident(db) else {
+                return Err(invalid_request(
+                    span.clone(),
+                    "`using` must name one evidence provider",
+                ));
+            };
+            Some(provider)
+        }
+    };
+
+    Ok(make_derive_request(
+        db,
+        target,
+        trait_,
+        selected_provider,
+        ElaborationOrigin::DeriveDecl(decl),
+    ))
+}
+
+fn make_derive_request<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+    trait_: Trait<'db>,
+    selected_provider: Option<IdentId<'db>>,
+    origin: ElaborationOrigin<'db>,
+) -> ElaborationRequestId<'db> {
+    ElaborationRequestId::new(
+        db,
+        target,
+        derive_goal(db, target, trait_),
+        selected_provider,
+        origin,
+    )
+}
+
+fn parse_derive_provider_selection<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+    arg: &AttrArg<'db>,
+) -> Result<IdentId<'db>, TyDiagCollection<'db>> {
+    if arg.key_str(db) != Some("using") {
+        return Err(invalid_request(
+            target.attr_span(),
+            "derive keyword arguments currently only support `using = Provider`",
+        ));
+    }
+    match arg.value.as_ref() {
+        Some(AttrArgValue::Ident(provider)) => Ok(*provider),
+        _ => Err(invalid_request(
+            target.attr_span(),
+            "`using` must name an evidence provider",
+        )),
+    }
+}
+
+fn resolve_derive_trait<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+    path: crate::hir_def::PathId<'db>,
+) -> Result<Trait<'db>, TyDiagCollection<'db>> {
+    resolve_derive_trait_in_scope(db, target.scope(), target.attr_span(), path)
+}
+
+fn resolve_derive_trait_in_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: crate::hir_def::scope_graph::ScopeId<'db>,
+    span: DynLazySpan<'db>,
+    path: crate::hir_def::PathId<'db>,
+) -> Result<Trait<'db>, TyDiagCollection<'db>> {
+    let assumptions = PredicateListId::empty_list(db);
+    match resolve_path(db, path, scope, assumptions, false) {
+        Ok(PathRes::Trait(inst)) => Ok(inst.def(db)),
+        Ok(res) => Err(invalid_request(
+            span,
+            format!(
+                "derive head must resolve to a trait, but resolved to {}",
+                res.kind_name()
+            ),
+        )),
+        Err(_) => Err(invalid_request(span, "derive head must resolve to a trait")),
+    }
+}
+
+fn resolve_derive_target<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: DeriveDecl<'db>,
+    path: crate::hir_def::PathId<'db>,
+) -> Result<ElaborationTarget<'db>, TyDiagCollection<'db>> {
+    let span: DynLazySpan<'db> = decl.span().into();
+    let assumptions = PredicateListId::empty_list(db);
+    match resolve_path(db, path, decl.scope(), assumptions, false) {
+        Ok(PathRes::Ty(ty)) => {
+            let Some(adt) = ty.adt_ref(db) else {
+                return Err(invalid_request(
+                    span,
+                    "derive target must resolve to a struct or enum",
+                ));
+            };
+            Ok(ElaborationTarget::from_adt_ref(adt))
+        }
+        Ok(PathRes::TyAlias(..)) => Err(invalid_request(
+            span,
+            "derive target must be a nominal struct or enum, not a type alias",
+        )),
+        Ok(res) => Err(invalid_request(
+            span,
+            format!(
+                "derive target must resolve to a struct or enum, but resolved to {}",
+                res.kind_name()
+            ),
+        )),
+        Err(_) => Err(invalid_request(
+            span,
+            "derive target must resolve to a struct or enum",
+        )),
+    }
+}
+
+fn derive_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    target: ElaborationTarget<'db>,
+    trait_: Trait<'db>,
+) -> ConstraintId<'db> {
+    let target_ty = target.ty(db);
+    ConstraintId::new(
+        db,
+        ConstraintKind::Trait(TraitInstId::new_simple(db, trait_, vec![target_ty])),
+    )
 }
