@@ -432,6 +432,8 @@ pub(crate) struct ConstProofId<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum GeneratedImplSource<'db> {
+    /// Test/scaffold source only. Normal generated evidence must come from a
+    /// provider output artifact so provider bodies control emitted obligations.
     StubDerivedFieldObligations,
     ProviderOutput(crate::analysis::elab::ProviderOutputId<'db>),
 }

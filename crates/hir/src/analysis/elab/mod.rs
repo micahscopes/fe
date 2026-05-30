@@ -316,6 +316,7 @@ impl<'db> ImplBuilderSession<'db> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn finish(
         mut self,
         db: &'db dyn HirAnalysisDb,
@@ -1257,6 +1258,7 @@ fn execute_provider_body<'db>(
     ProviderBodyExecutor::new(db, context, env).execute_body()
 }
 
+#[cfg(test)]
 #[allow(dead_code)]
 fn stub_generated_impl_candidate_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -1325,6 +1327,8 @@ pub(crate) fn reflected_fields_for_context<'db>(
         .collect()
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn derive_requirements_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
@@ -1337,6 +1341,8 @@ fn derive_requirements_for_context<'db>(
     derive_requirements_for_reflected_target(db, context, target_ty)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn derive_requirements_for_reflected_target<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
@@ -1360,6 +1366,8 @@ fn derive_requirements_for_reflected_target<'db>(
     )
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn derive_requirement_for_trait_field<'db>(
     db: &'db dyn HirAnalysisDb,
     trait_: Trait<'db>,
@@ -1445,6 +1453,8 @@ fn simple_pat_binding_name<'db>(
     path.as_ident(db)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn generated_stub_trait_has_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     goal: ConstraintId<'db>,
@@ -1555,6 +1565,8 @@ fn generated_conflicts_with_authored_impl<'db>(
         .any(|&authored| does_impl_trait_conflict(db, authored, generated_impl))
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn context_has_impl_builder<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
@@ -1573,6 +1585,8 @@ fn context_has_impl_builder<'db>(
     })
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn context_has_reflect_target<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
