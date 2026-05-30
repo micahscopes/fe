@@ -230,6 +230,8 @@ pub(crate) struct BuilderCommandListId<'db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum ProviderSkipReason {
     MissingBuilderCapability,
+    MissingReflectCapability,
+    MissingFinish,
     UnsupportedProviderBody,
 }
 
@@ -861,7 +863,7 @@ fn provider_output_for_context<'db>(
                 provider,
                 context,
                 ProviderOutputStatus::Skipped {
-                    reason: ProviderSkipReason::UnsupportedProviderBody,
+                    reason: ProviderSkipReason::MissingFinish,
                 },
             );
         }
@@ -886,7 +888,7 @@ fn provider_output_for_context<'db>(
                 provider,
                 context,
                 ProviderOutputStatus::Skipped {
-                    reason: ProviderSkipReason::UnsupportedProviderBody,
+                    reason: ProviderSkipReason::MissingReflectCapability,
                 },
             );
         }
@@ -1892,6 +1894,72 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
     }
 
     #[test]
+    fn provider_output_reports_missing_finish() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provider_output_reports_missing_finish.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::MissingFinish
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_output_reports_missing_reflect_capability() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provider_output_reports_missing_reflect_capability.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.require_derive_field_obligations<T>()
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::MissingReflectCapability
+            }
+        ));
+    }
+
+    #[test]
     fn provider_output_rejects_duplicate_finish_calls() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
@@ -1902,16 +1970,12 @@ trait Eq {}
 #[derive(Eq)]
 struct Foo {}
 
-const fn finish_derive_impl<T>()
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{}
-
 #[evidence_provider(Eq)]
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
-    finish_derive_impl<T>()
-    finish_derive_impl<T>()
+    builder.finish()
+    builder.finish()
     ev
 }
 "#,

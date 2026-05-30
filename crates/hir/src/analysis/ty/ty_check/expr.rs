@@ -3132,12 +3132,18 @@ impl<'db> TyChecker<'db> {
             // bodies route field-derived requirements through the builder
             // receiver before first-class constraint values are available.
             "require_derive_field_obligations" => {
+                if !receiver_prop.is_mut {
+                    return None;
+                }
                 for arg in args {
                     self.check_expr_unknown(arg.expr);
                 }
                 Some(ExprProp::new(TyId::unit(self.db), true))
             }
             "finish" => {
+                if !receiver_prop.is_mut {
+                    return None;
+                }
                 for arg in args {
                     self.check_expr_unknown(arg.expr);
                 }
