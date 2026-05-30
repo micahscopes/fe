@@ -1029,8 +1029,6 @@ fn derive_requirements_for_context<'db>(
     )
 }
 
-const FIELD_OBLIGATION_INTRINSIC: &str = "require_derive_field_obligations";
-const FINISH_IMPL_INTRINSIC: &str = "finish_derive_impl";
 const BUILDER_FIELD_OBLIGATION_METHOD: &str = "require_derive_field_obligations";
 const BUILDER_FINISH_METHOD: &str = "finish";
 
@@ -1038,28 +1036,14 @@ fn provider_body_requests_field_obligations<'db>(
     db: &'db dyn HirAnalysisDb,
     provider: EvidenceProviderId<'db>,
 ) -> bool {
-    provider_body_intrinsic_count(db, provider, FIELD_OBLIGATION_INTRINSIC)
-        + provider_body_builder_method_count(db, provider, BUILDER_FIELD_OBLIGATION_METHOD)
-        > 0
+    provider_body_builder_method_count(db, provider, BUILDER_FIELD_OBLIGATION_METHOD) > 0
 }
 
 fn provider_body_finish_count<'db>(
     db: &'db dyn HirAnalysisDb,
     provider: EvidenceProviderId<'db>,
 ) -> usize {
-    provider_body_intrinsic_count(db, provider, FINISH_IMPL_INTRINSIC)
-        + provider_body_builder_method_count(db, provider, BUILDER_FINISH_METHOD)
-}
-
-fn provider_body_intrinsic_count<'db>(
-    db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
-    intrinsic: &str,
-) -> usize {
-    let Some(body) = provider.func(db).body(db) else {
-        return 0;
-    };
-    count_intrinsic_calls_in_expr(db, body, body.expr(db), intrinsic)
+    provider_body_builder_method_count(db, provider, BUILDER_FINISH_METHOD)
 }
 
 fn provider_body_builder_method_count<'db>(
@@ -1267,116 +1251,6 @@ fn count_builder_method_calls_in_stmt<'db>(
         }
         Stmt::Continue | Stmt::Break => 0,
     }
-}
-
-fn count_intrinsic_calls_in_expr<'db>(
-    db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
-    expr: crate::hir_def::ExprId,
-    intrinsic: &str,
-) -> usize {
-    let Partial::Present(expr_data) = expr.data(db, body) else {
-        return 0;
-    };
-    match expr_data {
-        Expr::Block(stmts) => stmts
-            .iter()
-            .map(|stmt| count_intrinsic_calls_in_stmt(db, body, *stmt, intrinsic))
-            .sum(),
-        Expr::Call(callee, args) => {
-            usize::from(expr_is_path_ident(db, body, *callee, intrinsic))
-                + count_intrinsic_calls_in_expr(db, body, *callee, intrinsic)
-                + args
-                    .iter()
-                    .map(|arg| count_intrinsic_calls_in_expr(db, body, arg.expr, intrinsic))
-                    .sum::<usize>()
-        }
-        Expr::MethodCall(receiver, method, _, args) => {
-            usize::from(
-                method
-                    .to_opt()
-                    .is_some_and(|method| method.data(db) == intrinsic),
-            ) + count_intrinsic_calls_in_expr(db, body, *receiver, intrinsic)
-                + args
-                    .iter()
-                    .map(|arg| count_intrinsic_calls_in_expr(db, body, arg.expr, intrinsic))
-                    .sum::<usize>()
-        }
-        Expr::Bin(lhs, rhs, _) | Expr::Assign(lhs, rhs) | Expr::AugAssign(lhs, rhs, _) => {
-            count_intrinsic_calls_in_expr(db, body, *lhs, intrinsic)
-                + count_intrinsic_calls_in_expr(db, body, *rhs, intrinsic)
-        }
-        Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
-            count_intrinsic_calls_in_expr(db, body, *inner, intrinsic)
-        }
-        Expr::Tuple(items) | Expr::Array(items) => items
-            .iter()
-            .map(|item| count_intrinsic_calls_in_expr(db, body, *item, intrinsic))
-            .sum(),
-        Expr::ArrayRep(value, _) => count_intrinsic_calls_in_expr(db, body, *value, intrinsic),
-        Expr::If(_, then_expr, else_expr) => {
-            count_intrinsic_calls_in_expr(db, body, *then_expr, intrinsic)
-                + else_expr
-                    .map(|else_expr| count_intrinsic_calls_in_expr(db, body, else_expr, intrinsic))
-                    .unwrap_or_default()
-        }
-        Expr::Match(scrutinee, arms) => {
-            count_intrinsic_calls_in_expr(db, body, *scrutinee, intrinsic)
-                + match arms {
-                    Partial::Present(arms) => arms
-                        .iter()
-                        .map(|arm| count_intrinsic_calls_in_expr(db, body, arm.body, intrinsic))
-                        .sum(),
-                    Partial::Absent => 0,
-                }
-        }
-        Expr::RecordInit(_, fields) => fields
-            .iter()
-            .map(|field| count_intrinsic_calls_in_expr(db, body, field.expr, intrinsic))
-            .sum(),
-        Expr::With(_, inner) => count_intrinsic_calls_in_expr(db, body, *inner, intrinsic),
-        Expr::Lit(_) | Expr::Path(_) => 0,
-    }
-}
-
-fn count_intrinsic_calls_in_stmt<'db>(
-    db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
-    stmt: crate::hir_def::StmtId,
-    intrinsic: &str,
-) -> usize {
-    let Partial::Present(stmt_data) = stmt.data(db, body) else {
-        return 0;
-    };
-    match stmt_data {
-        Stmt::Let(_, _, init) => init
-            .map(|init| count_intrinsic_calls_in_expr(db, body, init, intrinsic))
-            .unwrap_or_default(),
-        Stmt::For(_, iterable, loop_body, _) => {
-            count_intrinsic_calls_in_expr(db, body, *iterable, intrinsic)
-                + count_intrinsic_calls_in_expr(db, body, *loop_body, intrinsic)
-        }
-        Stmt::While(_, loop_body) => count_intrinsic_calls_in_expr(db, body, *loop_body, intrinsic),
-        Stmt::Return(expr) => expr
-            .map(|expr| count_intrinsic_calls_in_expr(db, body, expr, intrinsic))
-            .unwrap_or_default(),
-        Stmt::Expr(expr) => count_intrinsic_calls_in_expr(db, body, *expr, intrinsic),
-        Stmt::Continue | Stmt::Break => 0,
-    }
-}
-
-fn expr_is_path_ident<'db>(
-    db: &'db dyn HirAnalysisDb,
-    body: Body<'db>,
-    expr: crate::hir_def::ExprId,
-    expected: &str,
-) -> bool {
-    let Partial::Present(Expr::Path(Partial::Present(path))) = expr.data(db, body) else {
-        return false;
-    };
-    path.ident(db)
-        .to_opt()
-        .is_some_and(|ident| ident.data(db) == expected)
 }
 
 fn generated_stub_trait_has_required_methods<'db>(
