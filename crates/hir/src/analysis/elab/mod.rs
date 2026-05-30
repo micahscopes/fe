@@ -14,9 +14,9 @@ use crate::{
             constraint::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintApplicationId, ConstraintHeadId,
                 ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
-                EffectCapabilityKey, GeneratedImplId, GeneratedImplSource, GeneratedMethod,
-                GeneratedMethodBodyKind, GeneratedMethodListId, GeneratedRequirement,
-                GeneratedRequirementListId,
+                EffectCapabilityKey, GeneratedExprId, GeneratedExprKind, GeneratedImplId,
+                GeneratedImplSource, GeneratedMethod, GeneratedMethodBodyKind,
+                GeneratedMethodListId, GeneratedRequirement, GeneratedRequirementListId,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{
@@ -412,7 +412,10 @@ fn generated_impl_from_builder_commands<'db>(
             }),
             BuilderCommand::EmitBoolMethod { name, value } => methods.push(GeneratedMethod {
                 name: *name,
-                body: GeneratedMethodBodyKind::BoolLiteral(*value),
+                body: GeneratedMethodBodyKind::Expr(GeneratedExprId::new(
+                    db,
+                    GeneratedExprKind::BoolLiteral(*value),
+                )),
             }),
             BuilderCommand::Finish => finished = true,
         }
@@ -1637,12 +1640,23 @@ fn generated_unsupported_required_methods<'db>(
             let required_method = required.get(&method.name)?;
             match method.body {
                 GeneratedMethodBodyKind::MissingGeneratedBody => Some(method.name),
-                GeneratedMethodBodyKind::BoolLiteral(_) => {
-                    (required_method.return_ty(db) != TyId::bool(db)).then_some(method.name)
+                GeneratedMethodBodyKind::Expr(expr) => {
+                    (!generated_expr_ty_matches(db, expr, required_method.return_ty(db)))
+                        .then_some(method.name)
                 }
             }
         })
         .collect()
+}
+
+fn generated_expr_ty_matches<'db>(
+    db: &'db dyn HirAnalysisDb,
+    expr: GeneratedExprId<'db>,
+    expected: TyId<'db>,
+) -> bool {
+    match expr.kind(db) {
+        GeneratedExprKind::BoolLiteral(_) => expected == TyId::bool(db),
+    }
 }
 
 fn generated_method_error_summary<'db>(
@@ -2533,9 +2547,12 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 
         assert!(generated_missing_required_methods(&db, generated).is_empty());
         assert!(generated_unsupported_required_methods(&db, generated).is_empty());
+        let GeneratedMethodBodyKind::Expr(expr) = generated.methods.list(&db)[0].body else {
+            panic!("expected generated expression body");
+        };
         assert!(matches!(
-            generated.methods.list(&db)[0].body,
-            GeneratedMethodBodyKind::BoolLiteral(true)
+            expr.kind(&db),
+            GeneratedExprKind::BoolLiteral(true)
         ));
     }
 

@@ -463,15 +463,26 @@ pub(crate) struct GeneratedRequirementListId<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum GeneratedMethodBodyKind {
-    MissingGeneratedBody,
+pub(crate) enum GeneratedExprKind {
     BoolLiteral(bool),
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct GeneratedExprId<'db> {
+    pub(crate) kind: GeneratedExprKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum GeneratedMethodBodyKind<'db> {
+    MissingGeneratedBody,
+    Expr(GeneratedExprId<'db>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) struct GeneratedMethod<'db> {
     pub(crate) name: IdentId<'db>,
-    pub(crate) body: GeneratedMethodBodyKind,
+    pub(crate) body: GeneratedMethodBodyKind<'db>,
 }
 
 #[salsa::interned]
