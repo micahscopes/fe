@@ -1737,11 +1737,17 @@ impl<'db> OwnerKindInference<'db> {
     }
 
     fn infer_path(&mut self, path: PathId<'db>) -> InferKind {
-        let mut kind = if let Some(parent) = path.parent(self.db) {
-            self.infer_path(parent)
-        } else {
-            self.path_head_kind(path)
-        };
+        if let Some(parent) = path.parent(self.db) {
+            let parent_kind = self.infer_path(parent);
+            let _ = self.table.expect(parent_kind, Kind::Star);
+            for arg in path.generic_args(self.db).data(self.db) {
+                let arg_kind = self.infer_generic_arg(arg);
+                let _ = self.table.expect(arg_kind, Kind::Star);
+            }
+            return InferKind::Known(Kind::Star);
+        }
+
+        let mut kind = self.path_head_kind(path);
 
         for arg in path.generic_args(self.db).data(self.db) {
             let arg_kind = self.infer_generic_arg(arg);
@@ -2274,6 +2280,32 @@ extern {
             Kind::Abs(inner) if inner.0 == Kind::Star && inner.1 == Kind::Star
         ));
         assert_eq!(*t_kind, Kind::Star);
+    }
+
+    #[test]
+    fn associated_type_constructor_args_do_not_infer_parent_as_constructor() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "associated_type_constructor_args_do_not_infer_parent_as_constructor.fe".into(),
+            r#"
+trait Abi {
+    type Decoder: * -> *
+}
+
+extern {
+    fn runtime_decoder<A: Abi, I>() -> A::Decoder<I>
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let func = find_func(&db, top_mod, "runtime_decoder");
+        let param_set = collect_generic_params(&db, func.into());
+        let a_kind = param_set.params(&db)[0].kind(&db);
+        let i_kind = param_set.params(&db)[1].kind(&db);
+
+        assert_eq!(*a_kind, Kind::Star);
+        assert_eq!(*i_kind, Kind::Star);
     }
 
     #[test]
