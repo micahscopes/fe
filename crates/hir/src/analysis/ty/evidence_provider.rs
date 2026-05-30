@@ -3,7 +3,10 @@ use crate::{
         HirAnalysisDb,
         name_resolution::{PathRes, resolve_path},
         ty::{
-            constraint::{ConstraintId, ConstraintKind, evidence_goal_for_ty},
+            constraint::{
+                ConstraintHeadId, ConstraintHeadKind, ConstraintId, ConstraintKind,
+                evidence_goal_for_ty,
+            },
             diagnostics::{TyDiagCollection, TyLowerDiag},
         },
     },
@@ -34,6 +37,7 @@ pub(crate) struct EvidenceProviderId<'db> {
     pub(crate) func: Func<'db>,
     pub(crate) head: Trait<'db>,
     pub(crate) goal: ConstraintId<'db>,
+    pub(crate) derive_goal: ConstraintId<'db>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
@@ -106,13 +110,11 @@ pub(crate) fn validate_evidence_provider<'db>(
 
     if diags.is_empty() {
         let identity = EvidenceProviderIdentityId::new(db, func);
-        let provider = EvidenceProviderId::new(
-            db,
-            identity,
-            func,
-            head.expect("validated head"),
-            goal.unwrap(),
-        );
+        let head = head.expect("validated head");
+        let derive_head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(head));
+        let derive_goal = ConstraintId::new(db, ConstraintKind::Derive(derive_head));
+        let provider =
+            EvidenceProviderId::new(db, identity, func, head, goal.unwrap(), derive_goal);
         (EvidenceProviderValidationResult::Valid(provider), diags)
     } else {
         (EvidenceProviderValidationResult::Invalid, diags)
