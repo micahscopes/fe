@@ -1292,7 +1292,12 @@ impl<'db> ProviderBodyExecutor<'db> {
                 })?;
                 Ok(true)
             }
-            BUILDER_BOOL_METHOD | BUILDER_AND_METHOD => Ok(false),
+            BUILDER_BOOL_METHOD
+            | BUILDER_AND_METHOD
+            | BUILDER_SELF_REF_METHOD
+            | BUILDER_OTHER_REF_METHOD
+            | BUILDER_FIELD_GET_METHOD
+            | BUILDER_EQ_METHOD => Ok(false),
             BUILDER_EMIT_METHOD => {
                 let [arg] = args else {
                     return Err(skipped_failure(
@@ -1468,6 +1473,70 @@ impl<'db> ProviderBodyExecutor<'db> {
                 Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
                     self.db,
                     GeneratedExprKind::BoolAnd { lhs, rhs },
+                )))
+            }
+            BUILDER_SELF_REF_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                if !args.is_empty() {
+                    return None;
+                }
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::SelfRef {
+                        ty: self.context.request(self.db).target(self.db).ty(self.db),
+                    },
+                )))
+            }
+            BUILDER_OTHER_REF_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                if !args.is_empty() {
+                    return None;
+                }
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::MethodArgRef {
+                        name: IdentId::new(self.db, "other".to_string()),
+                        ty: self.context.request(self.db).target(self.db).ty(self.db),
+                    },
+                )))
+            }
+            BUILDER_FIELD_GET_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                let [base_arg, field_arg] = args.as_slice() else {
+                    return None;
+                };
+                let ElabValue::GeneratedExpr(base) = self.eval_expr_value(body, base_arg.expr)?
+                else {
+                    return None;
+                };
+                let ElabValue::Field(field) = self.eval_expr_value(body, field_arg.expr)? else {
+                    return None;
+                };
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::FieldGet { base, field },
+                )))
+            }
+            BUILDER_EQ_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                let [lhs_arg, rhs_arg] = args.as_slice() else {
+                    return None;
+                };
+                let ElabValue::GeneratedExpr(lhs) = self.eval_expr_value(body, lhs_arg.expr)?
+                else {
+                    return None;
+                };
+                let ElabValue::GeneratedExpr(rhs) = self.eval_expr_value(body, rhs_arg.expr)?
+                else {
+                    return None;
+                };
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::EqExpr { lhs, rhs },
                 )))
             }
             FIELD_TY_METHOD => {
@@ -1674,6 +1743,10 @@ const BUILDER_REQUIRE_METHOD: &str = "require";
 const BUILDER_FINISH_METHOD: &str = "finish";
 const BUILDER_BOOL_METHOD: &str = "bool";
 const BUILDER_AND_METHOD: &str = "and";
+const BUILDER_SELF_REF_METHOD: &str = "self_ref";
+const BUILDER_OTHER_REF_METHOD: &str = "other_ref";
+const BUILDER_FIELD_GET_METHOD: &str = "field_get";
+const BUILDER_EQ_METHOD: &str = "eq";
 const BUILDER_EMIT_METHOD: &str = "emit_method";
 const REFLECT_FIELDS_METHOD: &str = "fields";
 const FIELD_TY_METHOD: &str = "ty";
@@ -1822,15 +1895,38 @@ fn generated_expr_ty_matches<'db>(
     expr: GeneratedExprId<'db>,
     expected: TyId<'db>,
 ) -> bool {
+    generated_expr_static_ty(db, expr).is_some_and(|ty| tys_match(db, ty, expected))
+}
+
+fn generated_expr_static_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    expr: GeneratedExprId<'db>,
+) -> Option<TyId<'db>> {
     match expr.kind(db) {
-        GeneratedExprKind::BoolLiteral(_) => expected == TyId::bool(db),
+        GeneratedExprKind::BoolLiteral(_) => Some(TyId::bool(db)),
         GeneratedExprKind::BoolAnd { lhs, rhs } => {
-            expected == TyId::bool(db)
-                && generated_expr_ty_matches(db, lhs, TyId::bool(db))
+            if generated_expr_ty_matches(db, lhs, TyId::bool(db))
                 && generated_expr_ty_matches(db, rhs, TyId::bool(db))
+            {
+                Some(TyId::bool(db))
+            } else {
+                None
+            }
         }
-        GeneratedExprKind::FieldEq { .. } => expected == TyId::bool(db),
-        GeneratedExprKind::TypedPlaceholder { ty } => tys_match(db, ty, expected),
+        GeneratedExprKind::SelfRef { ty } | GeneratedExprKind::MethodArgRef { ty, .. } => Some(ty),
+        GeneratedExprKind::FieldGet { base, field } => {
+            let base_ty = generated_expr_static_ty(db, base)?;
+            tys_match(db, base_ty, field.parent).then_some(field.ty)
+        }
+        GeneratedExprKind::EqExpr { lhs, rhs } => {
+            let lhs_ty = generated_expr_static_ty(db, lhs)?;
+            let rhs_ty = generated_expr_static_ty(db, rhs)?;
+            tys_match(db, lhs_ty, rhs_ty).then_some(TyId::bool(db))
+        }
+        // Temporary Eq-specific sugar retained while provider surface syntax
+        // moves toward self/arg refs, field_get, and eq expression builders.
+        GeneratedExprKind::FieldEq { .. } => Some(TyId::bool(db)),
+        GeneratedExprKind::TypedPlaceholder { ty } => Some(ty),
     }
 }
 
@@ -2849,6 +2945,90 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
             .next()
             .expect("missing reflected field");
         let expr = GeneratedExprId::new(&db, GeneratedExprKind::FieldEq { field });
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitMethodExpr {
+                    name: method_name,
+                    expr,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert!(generated_unsupported_required_methods(&db, generated).is_empty());
+    }
+
+    #[test]
+    fn generated_field_get_eq_expr_satisfies_bool_required_method() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_field_get_eq_expr_satisfies_bool_required_method.fe".into(),
+            r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+#[derive(Eq)]
+struct Foo {
+    x: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let eq_trait = find_trait(&db, top_mod, "Eq");
+        let method_name = *eq_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+        let target_ty = context.request(&db).target(&db).ty(&db);
+        let field = reflect_struct_fields(&db, target_ty)
+            .into_iter()
+            .next()
+            .expect("missing reflected field");
+        let self_ref = GeneratedExprId::new(&db, GeneratedExprKind::SelfRef { ty: target_ty });
+        let other_ref = GeneratedExprId::new(
+            &db,
+            GeneratedExprKind::MethodArgRef {
+                name: IdentId::new(&db, "other".to_string()),
+                ty: target_ty,
+            },
+        );
+        let lhs = GeneratedExprId::new(
+            &db,
+            GeneratedExprKind::FieldGet {
+                base: self_ref,
+                field,
+            },
+        );
+        let rhs = GeneratedExprId::new(
+            &db,
+            GeneratedExprKind::FieldGet {
+                base: other_ref,
+                field,
+            },
+        );
+        let expr = GeneratedExprId::new(&db, GeneratedExprKind::EqExpr { lhs, rhs });
 
         let commands = BuilderCommandListId::new(
             &db,

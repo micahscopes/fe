@@ -470,6 +470,21 @@ pub(crate) enum GeneratedExprKind<'db> {
         lhs: GeneratedExprId<'db>,
         rhs: GeneratedExprId<'db>,
     },
+    SelfRef {
+        ty: TyId<'db>,
+    },
+    MethodArgRef {
+        name: IdentId<'db>,
+        ty: TyId<'db>,
+    },
+    FieldGet {
+        base: GeneratedExprId<'db>,
+        field: ReflectedField<'db>,
+    },
+    EqExpr {
+        lhs: GeneratedExprId<'db>,
+        rhs: GeneratedExprId<'db>,
+    },
     FieldEq {
         field: ReflectedField<'db>,
     },
@@ -970,6 +985,16 @@ impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
                 lhs.visit_with(visitor);
                 rhs.visit_with(visitor);
             }
+            Self::SelfRef { ty } => ty.visit_with(visitor),
+            Self::MethodArgRef { ty, .. } => ty.visit_with(visitor),
+            Self::FieldGet { base, field } => {
+                base.visit_with(visitor);
+                field.visit_with(visitor);
+            }
+            Self::EqExpr { lhs, rhs } => {
+                lhs.visit_with(visitor);
+                rhs.visit_with(visitor);
+            }
             Self::FieldEq { field } => field.visit_with(visitor),
             Self::TypedPlaceholder { ty } => ty.visit_with(visitor),
         }
@@ -984,6 +1009,21 @@ impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
         match self {
             Self::BoolLiteral(_) => self,
             Self::BoolAnd { lhs, rhs } => Self::BoolAnd {
+                lhs: lhs.fold_with(db, folder),
+                rhs: rhs.fold_with(db, folder),
+            },
+            Self::SelfRef { ty } => Self::SelfRef {
+                ty: ty.fold_with(db, folder),
+            },
+            Self::MethodArgRef { name, ty } => Self::MethodArgRef {
+                name,
+                ty: ty.fold_with(db, folder),
+            },
+            Self::FieldGet { base, field } => Self::FieldGet {
+                base: base.fold_with(db, folder),
+                field: field.fold_with(db, folder),
+            },
+            Self::EqExpr { lhs, rhs } => Self::EqExpr {
                 lhs: lhs.fold_with(db, folder),
                 rhs: rhs.fold_with(db, folder),
             },

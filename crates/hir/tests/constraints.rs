@@ -2195,6 +2195,57 @@ fn caller() {
 }
 
 #[test]
+fn provider_generated_field_eq_method_satisfies_required_method_trait() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_field_eq_method_satisfies_required_method_trait.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    for field in reflect.fields() {
+        builder.emit_method(builder.eq(
+            builder.field_get(builder.self_ref(), field),
+            builder.field_get(builder.other_ref(), field),
+        ))
+    }
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
 fn generated_default_derive_with_required_method_waits_for_body_ir() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

@@ -3185,6 +3185,38 @@ impl<'db> TyChecker<'db> {
                 self.check_expr(args[1].expr, bool_expr_ty);
                 Some(ExprProp::new(bool_expr_ty, true))
             }
+            "self_ref" | "other_ref" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || !args.is_empty() {
+                    return None;
+                }
+                Some(ExprProp::new(
+                    self.generated_expr_ty(self.impl_builder_target_from_goal(goal)?),
+                    true,
+                ))
+            }
+            "field_get" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 2 {
+                    return None;
+                }
+                let parent = self.fresh_ty();
+                let value = self.fresh_ty();
+                self.check_expr(args[0].expr, self.generated_expr_ty(parent));
+                self.check_expr(args[1].expr, self.field_ty(parent, value));
+                Some(ExprProp::new(self.generated_expr_ty(value), true))
+            }
+            "eq" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 2 {
+                    return None;
+                }
+                let value = self.fresh_ty();
+                let expr_ty = self.generated_expr_ty(value);
+                self.check_expr(args[0].expr, expr_ty);
+                self.check_expr(args[1].expr, expr_ty);
+                Some(ExprProp::new(
+                    self.generated_expr_ty(TyId::bool(self.db)),
+                    true,
+                ))
+            }
             "emit_method" => {
                 if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
                     return None;
@@ -3233,6 +3265,18 @@ impl<'db> TyChecker<'db> {
                     _ => None,
                 },
             )
+    }
+
+    fn impl_builder_target_from_goal(
+        &self,
+        goal: crate::analysis::ty::constraint::ConstraintId<'db>,
+    ) -> Option<TyId<'db>> {
+        match goal.kind(self.db) {
+            crate::analysis::ty::constraint::ConstraintKind::Trait(inst) => {
+                Some(inst.self_ty(self.db))
+            }
+            _ => None,
+        }
     }
 
     fn check_reflect_intrinsic_method_call(
@@ -3310,6 +3354,11 @@ impl<'db> TyChecker<'db> {
     fn field_list_ty(&self, target: TyId<'db>) -> TyId<'db> {
         let field_list_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::FieldList)));
         TyId::app(self.db, field_list_ctor, target)
+    }
+
+    fn field_ty(&self, parent: TyId<'db>, value: TyId<'db>) -> TyId<'db> {
+        let field_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Field)));
+        TyId::app(self.db, TyId::app(self.db, field_ctor, parent), value)
     }
 
     fn generated_expr_ty(&self, target: TyId<'db>) -> TyId<'db> {
