@@ -1,7 +1,10 @@
 use crate::{
     analysis::{
         HirAnalysisDb,
-        ty::constraint::{ConstraintId, GeneratedImplId, GeneratedImplSource},
+        ty::{
+            constraint::ConstraintId,
+            generated::{GeneratedImplId, GeneratedImplSource},
+        },
     },
     hir_def::TopLevelMod,
 };

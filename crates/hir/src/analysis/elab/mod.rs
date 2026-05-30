@@ -15,10 +15,7 @@ use crate::{
             constraint::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintApplicationId, ConstraintHeadId,
                 ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
-                EffectCapabilityKey, GeneratedExprId, GeneratedExprKind, GeneratedImplId,
-                GeneratedImplSource, GeneratedMethod, GeneratedMethodBodyKind,
-                GeneratedMethodListId, GeneratedRequirement, GeneratedRequirementListId,
-                GeneratedStructFieldInit, GeneratedStructFieldInitListId,
+                EffectCapabilityKey,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{
@@ -26,6 +23,12 @@ use crate::{
                 validated_evidence_providers_for_ingot,
             },
             fold::{TyFoldable, TyFolder},
+            generated::{
+                GeneratedExprId, GeneratedExprKind, GeneratedImplId, GeneratedImplSource,
+                GeneratedMethod, GeneratedMethodBodyKind, GeneratedMethodListId,
+                GeneratedRequirement, GeneratedRequirementListId, GeneratedStructFieldInit,
+                GeneratedStructFieldInitListId,
+            },
             trait_def::{ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict},
             trait_lower::collect_trait_impls,
             trait_resolution::{

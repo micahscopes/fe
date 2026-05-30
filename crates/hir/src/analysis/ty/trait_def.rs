@@ -18,9 +18,10 @@ use salsa::Update;
 use super::{
     binder::Binder,
     canonical::Canonical,
-    constraint::{ConstraintListId, GeneratedImplId},
+    constraint::ConstraintListId,
     diagnostics::{ImplDiag, TyDiagCollection},
     fold::TyFoldable as _,
+    generated::GeneratedImplId,
     trait_lower::collect_implementor_methods,
     trait_resolution::{
         TraitSolveCx,

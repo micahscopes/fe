@@ -3,10 +3,7 @@ use common::indexmap::IndexSet;
 use crate::{
     analysis::{
         HirAnalysisDb,
-        ty::{
-            constraint::{ConstraintId, GeneratedImplId},
-            diagnostics::TyDiagCollection,
-        },
+        ty::{constraint::ConstraintId, diagnostics::TyDiagCollection, generated::GeneratedImplId},
     },
     hir_def::TopLevelMod,
 };
