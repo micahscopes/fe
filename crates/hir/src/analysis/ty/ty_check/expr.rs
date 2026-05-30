@@ -59,7 +59,7 @@ use crate::analysis::ty::{
     trait_def::TraitInstId,
     trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx},
     ty_check::callable::{Callable, EffectProviderProvenance, EffectProviderSpecialization},
-    ty_def::{CapabilityKind, PrimTy, TyBase, TyData, prim_int_bits},
+    ty_def::{CapabilityKind, Kind, PrimTy, TyBase, TyData, prim_int_bits},
     unify::UnificationTable,
 };
 use crate::analysis::{
@@ -3149,7 +3149,7 @@ impl<'db> TyChecker<'db> {
                 if !receiver_prop.is_mut || args.len() != 1 {
                     return None;
                 }
-                self.impl_builder_requirement_trait_arg(generic_args)?;
+                self.impl_builder_requirement_head_arg(generic_args)?;
                 let value = self.fresh_ty();
                 self.check_expr(args[0].expr, self.type_info_ty(value));
                 Some(ExprProp::new(TyId::unit(self.db), true))
@@ -3170,10 +3170,7 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn impl_builder_requirement_trait_arg(
-        &self,
-        generic_args: GenericArgListId<'db>,
-    ) -> Option<crate::hir_def::Trait<'db>> {
+    fn impl_builder_requirement_head_arg(&self, generic_args: GenericArgListId<'db>) -> Option<()> {
         let [GenericArg::Type(type_arg)] = generic_args.data(self.db).as_slice() else {
             return None;
         };
@@ -3191,7 +3188,8 @@ impl<'db> TyChecker<'db> {
         )
         .ok()?
         {
-            PathRes::Trait(inst) => Some(inst.def(self.db)),
+            PathRes::Trait(_) => Some(()),
+            PathRes::Ty(ty) if is_unary_constraint_constructor_kind(&ty.kind(self.db)) => Some(()),
             _ => None,
         }
     }
@@ -4836,5 +4834,15 @@ impl TraitOps for AugAssignOp {
             // Range doesn't have an augmented assignment form
             Range => unreachable!("Range operator cannot be used in augmented assignment"),
         }
+    }
+}
+
+fn is_unary_constraint_constructor_kind(kind: &Kind) -> bool {
+    match kind {
+        Kind::Abs(inner) => {
+            inner.0.does_match(&Kind::Star) && inner.1.does_match(&Kind::Constraint)
+        }
+        Kind::Any => true,
+        _ => false,
     }
 }

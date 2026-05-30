@@ -12,10 +12,11 @@ use crate::{
         ty::{
             binder::Binder,
             constraint::{
-                CapabilityMode, CompilerCapabilityKind, ConstraintId, ConstraintKind,
-                ConstraintListId, EffectCapabilityKey, GeneratedImplId, GeneratedImplSource,
-                GeneratedMethod, GeneratedMethodBodyKind, GeneratedMethodListId,
-                GeneratedRequirement, GeneratedRequirementListId,
+                CapabilityMode, CompilerCapabilityKind, ConstraintApplicationId, ConstraintHeadId,
+                ConstraintHeadKind, ConstraintId, ConstraintKind, ConstraintListId,
+                EffectCapabilityKey, GeneratedImplId, GeneratedImplSource, GeneratedMethod,
+                GeneratedMethodBodyKind, GeneratedMethodListId, GeneratedRequirement,
+                GeneratedRequirementListId,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{
@@ -28,7 +29,7 @@ use crate::{
             trait_resolution::{
                 PredicateListId, constraint::collect_func_effect_capability_constraints,
             },
-            ty_def::{PrimTy, TyBase, TyData, TyId},
+            ty_def::{Kind, PrimTy, TyBase, TyData, TyId},
             unify::UnificationTable,
             visitor::{TyVisitable, TyVisitor},
         },
@@ -1007,6 +1008,27 @@ enum ElabValue<'db> {
     Type(TyId<'db>),
 }
 
+#[derive(Clone, Copy)]
+enum BuilderRequirementHead<'db> {
+    ConcreteTrait(Trait<'db>),
+    GenericConstraint(TyId<'db>),
+}
+
+impl<'db> BuilderRequirementHead<'db> {
+    fn apply(self, db: &'db dyn HirAnalysisDb, arg: TyId<'db>) -> ConstraintId<'db> {
+        match self {
+            Self::ConcreteTrait(trait_) => {
+                ConstraintId::from_trait(db, TraitInstId::new_simple(db, trait_, vec![arg]))
+            }
+            Self::GenericConstraint(head_ty) => {
+                let head = ConstraintHeadId::new(db, ConstraintHeadKind::GenericParam(head_ty));
+                let application = ConstraintApplicationId::new(db, head, vec![arg]);
+                ConstraintId::new(db, ConstraintKind::ConstraintApplication(application))
+            }
+        }
+    }
+}
+
 struct ProviderBodyExecutor<'db> {
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
@@ -1222,7 +1244,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         generic_args: GenericArgListId<'db>,
         constraint_arg: crate::hir_def::ExprId,
     ) -> Result<(), ProviderExecutionFailure> {
-        let Some(trait_) = self.resolve_trait_generic_arg(generic_args) else {
+        let Some(head) = self.resolve_requirement_head_generic_arg(generic_args) else {
             return Err(ProviderExecutionFailure::Skipped(
                 ProviderSkipReason::InvalidBuilderRequirement,
             ));
@@ -1233,10 +1255,7 @@ impl<'db> ProviderBodyExecutor<'db> {
             ));
         };
 
-        let constraint = ConstraintId::from_trait(
-            self.db,
-            TraitInstId::new_simple(self.db, trait_, vec![arg_ty]),
-        );
+        let constraint = head.apply(self.db, arg_ty);
         let origin = self
             .requirement_origin_for_expr(body, constraint_arg)
             .unwrap_or(RequirementOrigin::ProviderCode);
@@ -1342,7 +1361,10 @@ impl<'db> ProviderBodyExecutor<'db> {
             .map(RequirementOrigin::ReflectedField)
     }
 
-    fn resolve_trait_generic_arg(&self, generic_args: GenericArgListId<'db>) -> Option<Trait<'db>> {
+    fn resolve_requirement_head_generic_arg(
+        &self,
+        generic_args: GenericArgListId<'db>,
+    ) -> Option<BuilderRequirementHead<'db>> {
         let [GenericArg::Type(type_arg)] = generic_args.data(self.db).as_slice() else {
             return None;
         };
@@ -1354,9 +1376,22 @@ impl<'db> ProviderBodyExecutor<'db> {
         let assumptions = PredicateListId::empty_list(self.db);
         let scope = self.context.provider(self.db).func(self.db).scope();
         match resolve_path(self.db, path, scope, assumptions, false).ok()? {
-            PathRes::Trait(inst) => Some(inst.def(self.db)),
+            PathRes::Trait(inst) => Some(BuilderRequirementHead::ConcreteTrait(inst.def(self.db))),
+            PathRes::Ty(ty) if is_unary_constraint_constructor_kind(&ty.kind(self.db)) => {
+                Some(BuilderRequirementHead::GenericConstraint(ty))
+            }
             _ => None,
         }
+    }
+}
+
+fn is_unary_constraint_constructor_kind(kind: &Kind) -> bool {
+    match kind {
+        Kind::Abs(inner) => {
+            inner.0.does_match(&Kind::Star) && inner.1.does_match(&Kind::Constraint)
+        }
+        Kind::Any => true,
+        _ => false,
     }
 }
 

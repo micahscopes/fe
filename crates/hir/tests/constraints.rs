@@ -1506,6 +1506,45 @@ fn caller() {
 }
 
 #[test]
+fn builder_require_accepts_generic_constraint_heads() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "builder_require_accepts_generic_constraint_heads.fe".into(),
+        r#"
+trait Eq {}
+trait Marker {}
+
+struct FieldTy {}
+
+#[derive(Eq)]
+struct Box {
+    value: FieldTy,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<P, T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    ) where P<T>
+{
+    for field in reflect.fields() {
+        builder.require<P>(field.ty())
+    }
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Box: Eq with obligations {P<FieldTy>}".to_string()]
+    );
+}
+
+#[test]
 fn provider_body_must_finish_generated_impl() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
