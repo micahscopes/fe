@@ -912,11 +912,17 @@ fn generated_evidence_cycle_diags<'db>(
             continue;
         };
         reported.extend(cycle.iter().copied());
-        let message = cycle
+        let mut message = cycle
             .iter()
             .map(|&idx| goals[idx].pretty_print(db))
             .collect::<Vec<_>>()
             .join(" -> ");
+        let edge_summaries =
+            generated_evidence_cycle_edge_summaries(db, &local_candidates, &goals, &cycle);
+        if !edge_summaries.is_empty() {
+            message.push_str("; generated obligations: ");
+            message.push_str(&edge_summaries.join(", "));
+        }
         let request = local_candidates[start].context.request(db);
         diags.push(invalid_request(
             request.span(db),
@@ -948,6 +954,35 @@ fn find_generated_evidence_cycle(
         path.pop();
     }
     None
+}
+
+fn generated_evidence_cycle_edge_summaries<'db>(
+    db: &'db dyn HirAnalysisDb,
+    candidates: &[GeneratedImplId<'db>],
+    goals: &[ConstraintId<'db>],
+    cycle: &[usize],
+) -> Vec<String> {
+    cycle
+        .windows(2)
+        .filter_map(|edge| {
+            let &[from, to] = edge else {
+                return None;
+            };
+            let target_goal = goals[to];
+            candidates[from]
+                .requirements
+                .list(db)
+                .iter()
+                .find(|requirement| constraints_match(db, requirement.constraint, target_goal))
+                .map(|requirement| {
+                    format!(
+                        "{} {}",
+                        target_goal.pretty_print(db),
+                        requirement.origin.pretty_print(db)
+                    )
+                })
+        })
+        .collect()
 }
 
 fn provider_output_diag<'db>(

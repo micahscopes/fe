@@ -3127,6 +3127,7 @@ fn caller() {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "recursive generated evidence request");
     assert_diag_message(&diags, "Loop: Eq -> Loop: Eq");
+    assert_diag_message(&diags, "Loop: Eq from field Loop.next");
     assert_unsatisfied_bound(&diags, "Loop: Eq");
 }
 
@@ -3176,6 +3177,8 @@ fn caller() {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "recursive generated evidence request");
     assert_diag_message(&diags, "Left: Eq -> Right: Eq -> Left: Eq");
+    assert_diag_message(&diags, "Right: Eq from field Left.right");
+    assert_diag_message(&diags, "Left: Eq from field Right.left");
     assert_unsatisfied_bound(&diags, "Right: Eq");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
