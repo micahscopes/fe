@@ -1,4 +1,7 @@
-use common::{indexmap::IndexMap, ingot::Ingot};
+use common::{
+    indexmap::{IndexMap, IndexSet},
+    ingot::Ingot,
+};
 
 use crate::{
     analysis::{
@@ -11,6 +14,7 @@ use crate::{
             constraint::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintId, ConstraintKind,
                 ConstraintListId, EffectCapabilityKey, GeneratedImplId, GeneratedImplSource,
+                GeneratedMethod, GeneratedMethodBodyKind, GeneratedMethodListId,
                 GeneratedRequirement, GeneratedRequirementListId,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
@@ -217,6 +221,10 @@ pub(crate) enum BuilderCommand<'db> {
         constraint: ConstraintId<'db>,
         origin: RequirementOrigin<'db>,
     },
+    #[allow(dead_code)]
+    EmitMethodStub {
+        name: IdentId<'db>,
+    },
     Finish,
 }
 
@@ -365,6 +373,7 @@ fn generated_impl_from_builder_commands<'db>(
 
     let mut finished = false;
     let mut requirements = Vec::new();
+    let mut methods = Vec::new();
     for command in commands.commands(db) {
         if finished {
             return Err(BuilderError::CommandAfterFinish);
@@ -376,6 +385,10 @@ fn generated_impl_from_builder_commands<'db>(
                     origin: *origin,
                 })
             }
+            BuilderCommand::EmitMethodStub { name } => methods.push(GeneratedMethod {
+                name: *name,
+                body: GeneratedMethodBodyKind::UnsupportedStub,
+            }),
             BuilderCommand::Finish => finished = true,
         }
     }
@@ -393,6 +406,7 @@ fn generated_impl_from_builder_commands<'db>(
         trait_inst,
         source,
         requirements: GeneratedRequirementListId::new(db, requirements),
+        methods: GeneratedMethodListId::new(db, methods),
         obligations: ConstraintListId::new(db, obligations),
     })
 }
@@ -653,17 +667,24 @@ fn generated_overlay_diags_for_top_mod<'db>(
             elaboration_ctfe_contexts_for_request(db, request)
                 .into_iter()
                 .filter_map(move |context| {
-                    let goal = request.goal(db);
-                    if provider_output_trait_has_required_methods(db, goal) {
+                    let generated = provider_generated_impl_candidate_for_context(db, *context)?;
+                    let missing_methods = generated_missing_required_methods(db, generated);
+                    let unsupported_methods =
+                        generated_unsupported_required_methods(db, generated);
+                    if !missing_methods.is_empty() || !unsupported_methods.is_empty() {
                         return Some(invalid_request(
                             request.target(db).attr_span(),
                             format!(
-                                "provider output for `{}` does not generate required methods yet",
-                                trait_name(db, concrete_trait_head(db, goal)?)
+                                "provider output for `{}` does not generate required methods yet: {}",
+                                trait_name(db, concrete_trait_head(db, request.goal(db))?),
+                                generated_method_error_summary(
+                                    db,
+                                    &missing_methods,
+                                    &unsupported_methods
+                                )
                             ),
                         ));
                     }
-                    let generated = provider_generated_impl_candidate_for_context(db, *context)?;
                     generated_conflicts_with_authored_impl(db, generated).then(|| {
                         invalid_request(
                             request.target(db).attr_span(),
@@ -799,6 +820,11 @@ fn provider_generated_impl_for_context<'db>(
     context: ElaborationCtfeContextId<'db>,
 ) -> Option<GeneratedImplId<'db>> {
     let generated = provider_generated_impl_candidate_for_context(db, context)?;
+    if !generated_missing_required_methods(db, generated).is_empty()
+        || !generated_unsupported_required_methods(db, generated).is_empty()
+    {
+        return None;
+    }
     (!generated_conflicts_with_authored_impl(db, generated)).then_some(generated)
 }
 
@@ -817,9 +843,6 @@ fn provider_generated_impl_for_output<'db>(
     let ProviderOutputStatus::Succeeded { commands } = output.status(db) else {
         return None;
     };
-    if provider_output_trait_has_required_methods(db, output.request(db).goal(db)) {
-        return None;
-    }
     generated_impl_from_builder_commands(
         db,
         output.context(db),
@@ -1398,25 +1421,88 @@ fn generated_stub_trait_has_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     goal: ConstraintId<'db>,
 ) -> bool {
-    trait_has_required_methods(db, goal)
+    !required_method_names(db, goal).is_empty()
 }
 
-fn provider_output_trait_has_required_methods<'db>(
+fn generated_missing_required_methods<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> Vec<IdentId<'db>> {
+    let provided = generated
+        .methods
+        .list(db)
+        .iter()
+        .map(|method| method.name)
+        .collect::<IndexSet<_>>();
+    required_method_names(db, ConstraintId::from_trait(db, generated.trait_inst))
+        .into_iter()
+        .filter(|name| !provided.contains(name))
+        .collect()
+}
+
+fn generated_unsupported_required_methods<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> Vec<IdentId<'db>> {
+    let required = required_method_names(db, ConstraintId::from_trait(db, generated.trait_inst))
+        .into_iter()
+        .collect::<IndexSet<_>>();
+    generated
+        .methods
+        .list(db)
+        .iter()
+        .filter_map(|method| {
+            required
+                .contains(&method.name)
+                .then_some(match method.body {
+                    GeneratedMethodBodyKind::UnsupportedStub => method.name,
+                })
+        })
+        .collect()
+}
+
+fn generated_method_error_summary<'db>(
+    db: &'db dyn HirAnalysisDb,
+    missing_methods: &[IdentId<'db>],
+    unsupported_methods: &[IdentId<'db>],
+) -> String {
+    let mut parts = Vec::new();
+    if !missing_methods.is_empty() {
+        parts.push(format!(
+            "missing {}",
+            missing_methods
+                .iter()
+                .map(|name| name.data(db).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !unsupported_methods.is_empty() {
+        parts.push(format!(
+            "unsupported {}",
+            unsupported_methods
+                .iter()
+                .map(|name| name.data(db).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    parts.join("; ")
+}
+
+fn required_method_names<'db>(
     db: &'db dyn HirAnalysisDb,
     goal: ConstraintId<'db>,
-) -> bool {
-    trait_has_required_methods(db, goal)
-}
-
-fn trait_has_required_methods<'db>(db: &'db dyn HirAnalysisDb, goal: ConstraintId<'db>) -> bool {
+) -> Vec<IdentId<'db>> {
     let ConstraintKind::Trait(trait_inst) = goal.kind(db) else {
-        return false;
+        return Vec::new();
     };
     trait_inst
         .def(db)
         .method_defs(db)
-        .values()
-        .any(|method| method.body(db).is_none())
+        .into_iter()
+        .filter_map(|(name, method)| method.body(db).is_none().then_some(name))
+        .collect()
 }
 
 fn generated_conflicts_with_authored_impl<'db>(
@@ -2031,5 +2117,64 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         let context = first_builder_context(&db, top_mod);
         let output = provider_output_for_context(&db, context);
         assert!(matches!(output.status(&db), ProviderOutputStatus::Failed));
+    }
+
+    #[test]
+    fn generated_method_stubs_are_not_supported_bodies() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_method_stubs_are_not_supported_bodies.fe".into(),
+            r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Succeeded { .. }
+        ));
+        let eq_trait = find_trait(&db, top_mod, "Eq");
+        let method_name = *eq_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitMethodStub { name: method_name },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert_eq!(
+            generated_unsupported_required_methods(&db, generated),
+            vec![method_name]
+        );
+        assert_eq!(generated.methods.list(&db).len(), 1);
     }
 }

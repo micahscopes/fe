@@ -459,11 +459,30 @@ pub(crate) struct GeneratedRequirementListId<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum GeneratedMethodBodyKind {
+    UnsupportedStub,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) struct GeneratedMethod<'db> {
+    pub(crate) name: IdentId<'db>,
+    pub(crate) body: GeneratedMethodBodyKind,
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct GeneratedMethodListId<'db> {
+    #[return_ref]
+    pub(crate) list: Vec<GeneratedMethod<'db>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) struct GeneratedImplId<'db> {
     pub(crate) context: crate::analysis::elab::ElaborationCtfeContextId<'db>,
     pub(crate) trait_inst: TraitInstId<'db>,
     pub(crate) source: GeneratedImplSource<'db>,
     pub(crate) requirements: GeneratedRequirementListId<'db>,
+    pub(crate) methods: GeneratedMethodListId<'db>,
     pub(crate) obligations: ConstraintListId<'db>,
 }
 
@@ -920,6 +939,7 @@ impl<'db> TyFoldable<'db> for GeneratedImplId<'db> {
             trait_inst: self.trait_inst.fold_with(db, folder),
             source: self.source,
             requirements: self.requirements.fold_with(db, folder),
+            methods: self.methods,
             obligations: self.obligations.fold_with(db, folder),
         }
     }

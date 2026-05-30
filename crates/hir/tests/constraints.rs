@@ -1751,6 +1751,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
+    builder.finish()
     ev
 }
 "#,
