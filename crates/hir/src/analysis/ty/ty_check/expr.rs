@@ -3153,6 +3153,15 @@ impl<'db> TyChecker<'db> {
                 self.check_expr(args[0].expr, reflect_ty);
                 Some(ExprProp::new(TyId::unit(self.db), true))
             }
+            "require_field" => {
+                if !receiver_prop.is_mut || args.len() != 1 {
+                    return None;
+                }
+                let target = self.impl_builder_field_obligation_target(goal)?;
+                let value = self.fresh_ty();
+                self.check_expr(args[0].expr, self.field_ty(target, value));
+                Some(ExprProp::new(TyId::unit(self.db), true))
+            }
             "finish" => {
                 if !receiver_prop.is_mut || !args.is_empty() {
                     return None;
@@ -3201,12 +3210,17 @@ impl<'db> TyChecker<'db> {
         receiver_ty: TyId<'db>,
         args: &[crate::hir_def::CallArg<'db>],
     ) -> Option<ExprProp<'db>> {
-        if method_name.data(self.db) != "type_info" || !args.is_empty() {
+        if !args.is_empty() {
             return None;
         }
 
         let target = self.reflect_target_from_receiver_ty(receiver_ty)?;
-        Some(ExprProp::new(self.type_info_ty(target), true))
+        let result = match method_name.data(self.db).as_str() {
+            "type_info" => self.type_info_ty(target),
+            "fields" => self.field_list_ty(target),
+            _ => return None,
+        };
+        Some(ExprProp::new(result, true))
     }
 
     fn reflect_target_from_receiver_ty(&self, receiver_ty: TyId<'db>) -> Option<TyId<'db>> {
@@ -3260,6 +3274,16 @@ impl<'db> TyChecker<'db> {
     fn type_info_ty(&self, target: TyId<'db>) -> TyId<'db> {
         let type_info_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::TypeInfo)));
         TyId::app(self.db, type_info_ctor, target)
+    }
+
+    fn field_ty(&self, parent: TyId<'db>, value: TyId<'db>) -> TyId<'db> {
+        let field_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Field)));
+        TyId::app(self.db, TyId::app(self.db, field_ctor, parent), value)
+    }
+
+    fn field_list_ty(&self, target: TyId<'db>) -> TyId<'db> {
+        let field_list_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::FieldList)));
+        TyId::app(self.db, field_list_ctor, target)
     }
 
     fn reflect_ty(&self, target: TyId<'db>) -> TyId<'db> {

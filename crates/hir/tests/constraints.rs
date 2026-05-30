@@ -1377,6 +1377,64 @@ fn caller() {
 }
 
 #[test]
+fn provider_body_can_emit_field_obligations_from_reflect_fields_loop() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_body_can_emit_field_obligations_from_reflect_fields_loop.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct FieldTy {}
+
+impl Eq for FieldTy {}
+
+#[derive(Eq)]
+struct Pair {
+    a: FieldTy,
+    b: FieldTy,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Pair>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Pair: Eq with obligations {FieldTy: Eq, FieldTy: Eq}".to_string()]
+    );
+    assert_eq!(
+        generated_requirement_artifact_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "Pair: Eq requirement #0 requires FieldTy: Eq from field Pair.a".to_string(),
+            "Pair: Eq requirement #1 requires FieldTy: Eq from field Pair.b".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn provider_body_must_finish_generated_impl() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

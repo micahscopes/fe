@@ -34,7 +34,7 @@ use crate::{
         },
     },
     hir_def::{
-        Attr, Body, Enum, Expr, FieldParent, HirIngot, IdentId, ItemKind, NormalAttr, Partial,
+        Attr, Body, Enum, Expr, FieldParent, HirIngot, IdentId, ItemKind, NormalAttr, Partial, Pat,
         Stmt, Struct, TopLevelMod, Trait,
     },
     span::DynLazySpan,
@@ -906,6 +906,7 @@ struct ProviderBodyExecutor<'db> {
     builder: ImplBuilderSession<'db>,
     builder_names: Vec<IdentId<'db>>,
     reflect_names: Vec<IdentId<'db>>,
+    field_bindings: Vec<(IdentId<'db>, ReflectedField<'db>)>,
 }
 
 impl<'db> ProviderBodyExecutor<'db> {
@@ -922,6 +923,7 @@ impl<'db> ProviderBodyExecutor<'db> {
             builder: ImplBuilderSession::new(db, context),
             builder_names: provider_impl_builder_effect_names(db, provider),
             reflect_names: provider_reflect_effect_names(db, provider),
+            field_bindings: Vec::new(),
         }
     }
 
@@ -971,9 +973,22 @@ impl<'db> ProviderBodyExecutor<'db> {
                     self.execute_expr(body, *init)?;
                 }
             }
-            Stmt::For(_, iterable, loop_body, _) => {
-                self.execute_expr(body, *iterable)?;
-                self.execute_expr(body, *loop_body)?;
+            Stmt::For(pat, iterable, loop_body, _) => {
+                if let Some(fields) = self.reflect_fields_iterable(body, *iterable)? {
+                    let Some(binding) = simple_pat_binding_name(self.db, body, *pat) else {
+                        return Err(ProviderExecutionFailure::Skipped(
+                            ProviderSkipReason::UnsupportedProviderBody,
+                        ));
+                    };
+                    for field in fields {
+                        self.field_bindings.push((binding, field));
+                        self.execute_expr(body, *loop_body)?;
+                        self.field_bindings.pop();
+                    }
+                } else {
+                    self.execute_expr(body, *iterable)?;
+                    self.execute_expr(body, *loop_body)?;
+                }
             }
             Stmt::While(_, loop_body) => self.execute_expr(body, *loop_body)?,
             Stmt::Return(expr) => {
@@ -1075,6 +1090,13 @@ impl<'db> ProviderBodyExecutor<'db> {
                 self.execute_require_fields(body, arg.expr)?;
                 Ok(true)
             }
+            BUILDER_FIELD_REQUIRE_METHOD => {
+                let [arg] = args else {
+                    return Ok(false);
+                };
+                self.execute_require_field(body, arg.expr)?;
+                Ok(true)
+            }
             BUILDER_FINISH_METHOD => {
                 if !args.is_empty() {
                     return Ok(false);
@@ -1115,6 +1137,67 @@ impl<'db> ProviderBodyExecutor<'db> {
                 .map_err(|_| ProviderExecutionFailure::Failed)?;
         }
         Ok(())
+    }
+
+    fn execute_require_field(
+        &mut self,
+        body: Body<'db>,
+        field_arg: crate::hir_def::ExprId,
+    ) -> Result<(), ProviderExecutionFailure> {
+        let Some(field) = self.field_value_for_expr(body, field_arg) else {
+            return Err(ProviderExecutionFailure::Skipped(
+                ProviderSkipReason::UnsupportedProviderBody,
+            ));
+        };
+        let Some(requirement) = derive_requirement_for_field(self.db, self.context, field) else {
+            return Err(ProviderExecutionFailure::Skipped(
+                ProviderSkipReason::UnsupportedProviderBody,
+            ));
+        };
+        self.builder
+            .require_with_origin(requirement.constraint, requirement.origin)
+            .map_err(|_| ProviderExecutionFailure::Failed)
+    }
+
+    fn reflect_fields_iterable(
+        &self,
+        body: Body<'db>,
+        iterable: crate::hir_def::ExprId,
+    ) -> Result<Option<Vec<ReflectedField<'db>>>, ProviderExecutionFailure> {
+        let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
+            iterable.data(self.db, body)
+        else {
+            return Ok(None);
+        };
+        if method
+            .to_opt()
+            .is_none_or(|method| method.data(self.db) != REFLECT_FIELDS_METHOD)
+        {
+            return Ok(None);
+        }
+        if !args.is_empty() {
+            return Ok(None);
+        }
+
+        let target_ty = self.context.request(self.db).target(self.db).ty(self.db);
+        if !self.env.has_reflect_target(self.db, target_ty)
+            || !expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names)
+        {
+            return Err(ProviderExecutionFailure::Skipped(
+                ProviderSkipReason::MissingReflectCapability,
+            ));
+        }
+        Ok(Some(reflect_struct_fields(self.db, target_ty)))
+    }
+
+    fn field_value_for_expr(
+        &self,
+        body: Body<'db>,
+        expr: crate::hir_def::ExprId,
+    ) -> Option<ReflectedField<'db>> {
+        self.field_bindings.iter().rev().find_map(|(name, field)| {
+            expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*field)
+        })
     }
 }
 
@@ -1224,22 +1307,43 @@ fn derive_requirements_for_reflected_target<'db>(
         reflect_struct_fields(db, target_ty)
             .into_iter()
             .filter(|field| tys_match(db, field.parent, target_ty))
-            .map(|field| {
-                let constraint = ConstraintId::from_trait(
-                    db,
-                    TraitInstId::new_simple(db, trait_, vec![field.ty]),
-                );
-                GeneratedRequirement {
-                    constraint,
-                    origin: RequirementOrigin::ReflectedField(field),
-                }
-            })
+            .map(|field| derive_requirement_for_trait_field(db, trait_, field))
             .collect(),
     )
 }
 
+fn derive_requirement_for_field<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+    field: ReflectedField<'db>,
+) -> Option<GeneratedRequirement<'db>> {
+    let ConstraintKind::Trait(trait_inst) = context.request(db).goal(db).kind(db) else {
+        return None;
+    };
+    Some(derive_requirement_for_trait_field(
+        db,
+        trait_inst.def(db),
+        field,
+    ))
+}
+
+fn derive_requirement_for_trait_field<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_: Trait<'db>,
+    field: ReflectedField<'db>,
+) -> GeneratedRequirement<'db> {
+    let constraint =
+        ConstraintId::from_trait(db, TraitInstId::new_simple(db, trait_, vec![field.ty]));
+    GeneratedRequirement {
+        constraint,
+        origin: RequirementOrigin::ReflectedField(field),
+    }
+}
+
 const BUILDER_FIELD_OBLIGATION_METHOD: &str = "require_fields";
+const BUILDER_FIELD_REQUIRE_METHOD: &str = "require_field";
 const BUILDER_FINISH_METHOD: &str = "finish";
+const REFLECT_FIELDS_METHOD: &str = "fields";
 
 fn provider_impl_builder_effect_names<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -1295,6 +1399,17 @@ fn expr_is_path_named_any<'db>(
     path.ident(db)
         .to_opt()
         .is_some_and(|ident| names.contains(&ident))
+}
+
+fn simple_pat_binding_name<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    pat: crate::hir_def::PatId,
+) -> Option<IdentId<'db>> {
+    let Partial::Present(Pat::Path(Partial::Present(path), _)) = pat.data(db, body) else {
+        return None;
+    };
+    path.as_ident(db)
 }
 
 fn generated_stub_trait_has_required_methods<'db>(
@@ -1922,6 +2037,41 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
     builder.require_fields(reflect)
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        assert!(matches!(
+            output.status(&db),
+            ProviderOutputStatus::Skipped {
+                reason: ProviderSkipReason::MissingReflectCapability
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_output_reports_missing_reflect_capability_for_fields_loop() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provider_output_reports_missing_reflect_capability_for_fields_loop.fe".into(),
+            r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }

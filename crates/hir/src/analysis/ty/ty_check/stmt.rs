@@ -10,7 +10,7 @@ use crate::analysis::ty::{
     diagnostics::BodyDiag,
     fold::{TyFoldable, TyFolder},
     trait_def::{TraitInstId, impls_for_ty},
-    ty_def::{InvalidCause, TyId},
+    ty_def::{InvalidCause, PrimTy, TyBase, TyData, TyId},
     visitor::TyVisitable,
 };
 
@@ -227,6 +227,10 @@ impl<'db> TyChecker<'db> {
             return (TyId::invalid(self.db, InvalidCause::Other), None);
         }
 
+        if let Some(elem_ty) = self.field_list_elem_ty(iterable_ty) {
+            return (elem_ty, None);
+        }
+
         // Look up Seq trait (if missing, treat as invalid).
         let Some(seq_trait) = resolve_core_trait(self.db, self.env.scope(), &["seq", "Seq"]) else {
             return (TyId::invalid(self.db, InvalidCause::Other), None);
@@ -356,6 +360,27 @@ impl<'db> TyChecker<'db> {
         };
         self.push_diag(diag);
         (TyId::invalid(self.db, InvalidCause::Other), None)
+    }
+
+    fn field_list_elem_ty(&mut self, iterable_ty: TyId<'db>) -> Option<TyId<'db>> {
+        let (base, args) = iterable_ty.decompose_ty_app(self.db);
+        let TyData::TyBase(TyBase::Prim(PrimTy::FieldList)) = base.data(self.db) else {
+            return None;
+        };
+        let [parent] = args else {
+            return None;
+        };
+        // Field lists are heterogenous. Until provider CTFE carries dependent
+        // element types through type checking, use the parent as a conservative
+        // concrete placeholder and let elaboration execution recover each
+        // actual field type.
+        let value = *parent;
+        let field_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Field)));
+        Some(TyId::app(
+            self.db,
+            TyId::app(self.db, field_ctor, *parent),
+            value,
+        ))
     }
 
     fn check_while(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {

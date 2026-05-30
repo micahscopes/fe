@@ -246,6 +246,7 @@ impl<'db> TyId<'db> {
             TyData::TyBase(TyBase::Prim(PrimTy::Reflect)) => Some(CompileTimeOnlyKind::Reflect),
             TyData::TyBase(TyBase::Prim(PrimTy::TypeInfo)) => Some(CompileTimeOnlyKind::TypeInfo),
             TyData::TyBase(TyBase::Prim(PrimTy::Field)) => Some(CompileTimeOnlyKind::Field),
+            TyData::TyBase(TyBase::Prim(PrimTy::FieldList)) => Some(CompileTimeOnlyKind::FieldList),
             _ => None,
         }
     }
@@ -1752,6 +1753,7 @@ impl<'db> TyBase<'db> {
                 PrimTy::Reflect => "Reflect",
                 PrimTy::TypeInfo => "TypeInfo",
                 PrimTy::Field => "Field",
+                PrimTy::FieldList => "FieldList",
             }
             .to_string(),
 
@@ -1854,6 +1856,7 @@ pub enum PrimTy {
     Reflect,
     TypeInfo,
     Field,
+    FieldList,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1886,6 +1889,7 @@ pub enum CompileTimeOnlyKind {
     Reflect,
     TypeInfo,
     Field,
+    FieldList,
 }
 
 impl CompileTimeOnlyKind {
@@ -1896,6 +1900,7 @@ impl CompileTimeOnlyKind {
             Self::Reflect => "Reflect",
             Self::TypeInfo => "TypeInfo",
             Self::Field => "Field",
+            Self::FieldList => "FieldList",
         }
     }
 }
@@ -2013,7 +2018,7 @@ impl HasKind for PrimTy {
             Self::String => Kind::abs(Kind::Star, Kind::Star),
             Self::View | Self::BorrowMut | Self::BorrowRef => Kind::abs(Kind::Star, Kind::Star),
             Self::Evidence | Self::ImplBuilder => Kind::abs(Kind::Constraint, Kind::Star),
-            Self::Reflect | Self::TypeInfo => Kind::abs(Kind::Star, Kind::Star),
+            Self::Reflect | Self::TypeInfo | Self::FieldList => Kind::abs(Kind::Star, Kind::Star),
             Self::Field => Kind::abs(Kind::Star, Kind::abs(Kind::Star, Kind::Star)),
             _ => Kind::Star,
         }
