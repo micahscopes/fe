@@ -215,9 +215,9 @@ pub(crate) enum BuilderCommand<'db> {
         name: IdentId<'db>,
     },
     #[allow(dead_code)]
-    EmitBoolMethod {
+    EmitMethodExpr {
         name: IdentId<'db>,
-        value: bool,
+        expr: GeneratedExprId<'db>,
     },
     Finish,
 }
@@ -415,12 +415,9 @@ fn generated_impl_from_builder_commands<'db>(
                 name: *name,
                 body: GeneratedMethodBodyKind::MissingGeneratedBody,
             }),
-            BuilderCommand::EmitBoolMethod { name, value } => methods.push(GeneratedMethod {
+            BuilderCommand::EmitMethodExpr { name, expr } => methods.push(GeneratedMethod {
                 name: *name,
-                body: GeneratedMethodBodyKind::Expr(GeneratedExprId::new(
-                    db,
-                    GeneratedExprKind::BoolLiteral(*value),
-                )),
+                body: GeneratedMethodBodyKind::Expr(*expr),
             }),
             BuilderCommand::Finish => finished = true,
         }
@@ -1701,6 +1698,11 @@ fn generated_expr_ty_matches<'db>(
 ) -> bool {
     match expr.kind(db) {
         GeneratedExprKind::BoolLiteral(_) => expected == TyId::bool(db),
+        GeneratedExprKind::BoolAnd { lhs, rhs } => {
+            expected == TyId::bool(db)
+                && generated_expr_ty_matches(db, lhs, TyId::bool(db))
+                && generated_expr_ty_matches(db, rhs, TyId::bool(db))
+        }
     }
 }
 
@@ -2597,9 +2599,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         let commands = BuilderCommandListId::new(
             &db,
             vec![
-                BuilderCommand::EmitBoolMethod {
+                BuilderCommand::EmitMethodExpr {
                     name: method_name,
-                    value: true,
+                    expr: GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
                 },
                 BuilderCommand::Finish,
             ],
@@ -2621,6 +2623,63 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
             expr.kind(&db),
             GeneratedExprKind::BoolLiteral(true)
         ));
+    }
+
+    #[test]
+    fn generated_bool_and_method_body_satisfies_bool_required_method() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "generated_bool_and_method_body_satisfies_bool_required_method.fe".into(),
+            r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.finish()
+    ev
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let context = first_builder_context(&db, top_mod);
+        let output = provider_output_for_context(&db, context);
+        let eq_trait = find_trait(&db, top_mod, "Eq");
+        let method_name = *eq_trait
+            .method_defs(&db)
+            .keys()
+            .next()
+            .expect("missing required method");
+        let lhs = GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true));
+        let rhs = GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(false));
+        let expr = GeneratedExprId::new(&db, GeneratedExprKind::BoolAnd { lhs, rhs });
+
+        let commands = BuilderCommandListId::new(
+            &db,
+            vec![
+                BuilderCommand::EmitMethodExpr {
+                    name: method_name,
+                    expr,
+                },
+                BuilderCommand::Finish,
+            ],
+        );
+        let generated = generated_impl_from_builder_commands(
+            &db,
+            context,
+            GeneratedImplSource::ProviderOutput(output),
+            commands,
+        )
+        .unwrap();
+
+        assert!(generated_missing_required_methods(&db, generated).is_empty());
+        assert!(generated_unsupported_required_methods(&db, generated).is_empty());
     }
 
     #[test]
@@ -2658,9 +2717,9 @@ const fn derive_count<T>(ev: own Evidence<Count<T>>) -> Evidence<Count<T>>
         let commands = BuilderCommandListId::new(
             &db,
             vec![
-                BuilderCommand::EmitBoolMethod {
+                BuilderCommand::EmitMethodExpr {
                     name: method_name,
-                    value: true,
+                    expr: GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
                 },
                 BuilderCommand::Finish,
             ],

@@ -463,14 +463,18 @@ pub(crate) struct GeneratedRequirementListId<'db> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum GeneratedExprKind {
+pub(crate) enum GeneratedExprKind<'db> {
     BoolLiteral(bool),
+    BoolAnd {
+        lhs: GeneratedExprId<'db>,
+        rhs: GeneratedExprId<'db>,
+    },
 }
 
 #[salsa::interned]
 #[derive(Debug)]
 pub(crate) struct GeneratedExprId<'db> {
-    pub(crate) kind: GeneratedExprKind,
+    pub(crate) kind: GeneratedExprKind<'db>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
