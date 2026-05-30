@@ -4,6 +4,7 @@ use common::indexmap::IndexSet;
 
 use crate::analysis::{
     HirAnalysisDb,
+    elab::ReflectedField,
     ty::{
         fold::{TyFoldable, TyFolder},
         trait_def::{ImplementorId, TraitInstId},
@@ -469,6 +470,9 @@ pub(crate) enum GeneratedExprKind<'db> {
         lhs: GeneratedExprId<'db>,
         rhs: GeneratedExprId<'db>,
     },
+    FieldEq {
+        field: ReflectedField<'db>,
+    },
 }
 
 #[salsa::interned]
@@ -899,6 +903,7 @@ impl<'db> TyVisitable<'db> for GeneratedImplId<'db> {
         for requirement in self.requirements.list(visitor.db()) {
             requirement.visit_with(visitor);
         }
+        self.methods.visit_with(visitor);
         self.obligations.visit_with(visitor);
     }
 }
@@ -951,6 +956,129 @@ impl<'db> TyFoldable<'db> for GeneratedRequirementListId<'db> {
     }
 }
 
+impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        match self {
+            Self::BoolLiteral(_) => {}
+            Self::BoolAnd { lhs, rhs } => {
+                lhs.visit_with(visitor);
+                rhs.visit_with(visitor);
+            }
+            Self::FieldEq { field } => field.visit_with(visitor),
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        match self {
+            Self::BoolLiteral(_) => self,
+            Self::BoolAnd { lhs, rhs } => Self::BoolAnd {
+                lhs: lhs.fold_with(db, folder),
+                rhs: rhs.fold_with(db, folder),
+            },
+            Self::FieldEq { field } => Self::FieldEq {
+                field: field.fold_with(db, folder),
+            },
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for GeneratedExprId<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        self.kind(visitor.db()).visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedExprId<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self::new(db, self.kind(db).fold_with(db, folder))
+    }
+}
+
+impl<'db> TyVisitable<'db> for GeneratedMethodBodyKind<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        match self {
+            Self::MissingGeneratedBody => {}
+            Self::Expr(expr) => expr.visit_with(visitor),
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedMethodBodyKind<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        match self {
+            Self::MissingGeneratedBody => self,
+            Self::Expr(expr) => Self::Expr(expr.fold_with(db, folder)),
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for GeneratedMethod<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        self.body.visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedMethod<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self {
+            name: self.name,
+            body: self.body.fold_with(db, folder),
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for GeneratedMethodListId<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: TyVisitor<'db> + ?Sized,
+    {
+        for method in self.list(visitor.db()) {
+            method.visit_with(visitor);
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for GeneratedMethodListId<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: TyFolder<'db>,
+    {
+        Self::new(
+            db,
+            self.list(db)
+                .iter()
+                .map(|method| method.fold_with(db, folder))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
 impl<'db> TyFoldable<'db> for GeneratedImplId<'db> {
     fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
     where
@@ -961,7 +1089,7 @@ impl<'db> TyFoldable<'db> for GeneratedImplId<'db> {
             trait_inst: self.trait_inst.fold_with(db, folder),
             source: self.source,
             requirements: self.requirements.fold_with(db, folder),
-            methods: self.methods,
+            methods: self.methods.fold_with(db, folder),
             obligations: self.obligations.fold_with(db, folder),
         }
     }
