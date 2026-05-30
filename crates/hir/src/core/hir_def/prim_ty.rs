@@ -14,6 +14,7 @@ pub enum PrimTy {
     Reflect,
     TypeInfo,
     Field,
+    GeneratedExpr,
     Derive,
 }
 
@@ -29,6 +30,7 @@ impl PrimTy {
             PrimTy::Reflect => IdentId::new(db, "Reflect".to_string()),
             PrimTy::TypeInfo => IdentId::new(db, "TypeInfo".to_string()),
             PrimTy::Field => IdentId::new(db, "Field".to_string()),
+            PrimTy::GeneratedExpr => IdentId::new(db, "GeneratedExpr".to_string()),
             PrimTy::Derive => IdentId::new(db, "Derive".to_string()),
         }
     }
@@ -56,6 +58,7 @@ impl PrimTy {
             PrimTy::Reflect,
             PrimTy::TypeInfo,
             PrimTy::Field,
+            PrimTy::GeneratedExpr,
             PrimTy::Derive,
         ]
     }

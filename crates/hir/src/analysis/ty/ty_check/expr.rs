@@ -3166,11 +3166,31 @@ impl<'db> TyChecker<'db> {
                     true,
                 ))
             }
-            "emit_bool_method" => {
+            "bool" => {
                 if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
                     return None;
                 }
                 self.check_expr(args[0].expr, TyId::bool(self.db));
+                Some(ExprProp::new(
+                    self.generated_expr_ty(TyId::bool(self.db)),
+                    true,
+                ))
+            }
+            "and" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 2 {
+                    return None;
+                }
+                let bool_expr_ty = self.generated_expr_ty(TyId::bool(self.db));
+                self.check_expr(args[0].expr, bool_expr_ty);
+                self.check_expr(args[1].expr, bool_expr_ty);
+                Some(ExprProp::new(bool_expr_ty, true))
+            }
+            "emit_method" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
+                    return None;
+                }
+                let value = self.fresh_ty();
+                self.check_expr(args[0].expr, self.generated_expr_ty(value));
                 Some(ExprProp::new(TyId::unit(self.db), true))
             }
             _ => None,
@@ -3290,6 +3310,11 @@ impl<'db> TyChecker<'db> {
     fn field_list_ty(&self, target: TyId<'db>) -> TyId<'db> {
         let field_list_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::FieldList)));
         TyId::app(self.db, field_list_ctor, target)
+    }
+
+    fn generated_expr_ty(&self, target: TyId<'db>) -> TyId<'db> {
+        let expr_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::GeneratedExpr)));
+        TyId::app(self.db, expr_ctor, target)
     }
 
     fn method_receiver_tys(

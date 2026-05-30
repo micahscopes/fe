@@ -2128,7 +2128,48 @@ struct Foo {}
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
-    builder.emit_bool_method(true)
+    builder.emit_method(builder.bool(true))
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn provider_generated_bool_and_method_satisfies_required_method_trait() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_bool_and_method_satisfies_required_method_trait.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (builder: mut ImplBuilder<Eq<T>>)
+{
+    builder.emit_method(builder.and(builder.bool(true), builder.bool(true)))
     builder.finish()
     ev
 }

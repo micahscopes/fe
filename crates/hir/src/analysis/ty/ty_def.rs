@@ -246,6 +246,9 @@ impl<'db> TyId<'db> {
             TyData::TyBase(TyBase::Prim(PrimTy::Reflect)) => Some(CompileTimeOnlyKind::Reflect),
             TyData::TyBase(TyBase::Prim(PrimTy::TypeInfo)) => Some(CompileTimeOnlyKind::TypeInfo),
             TyData::TyBase(TyBase::Prim(PrimTy::Field)) => Some(CompileTimeOnlyKind::Field),
+            TyData::TyBase(TyBase::Prim(PrimTy::GeneratedExpr)) => {
+                Some(CompileTimeOnlyKind::GeneratedExpr)
+            }
             TyData::TyBase(TyBase::Prim(PrimTy::FieldList)) => Some(CompileTimeOnlyKind::FieldList),
             _ => None,
         }
@@ -1753,6 +1756,7 @@ impl<'db> TyBase<'db> {
                 PrimTy::Reflect => "Reflect",
                 PrimTy::TypeInfo => "TypeInfo",
                 PrimTy::Field => "Field",
+                PrimTy::GeneratedExpr => "GeneratedExpr",
                 PrimTy::Derive => "Derive",
                 PrimTy::FieldList => "FieldList",
             }
@@ -1824,6 +1828,7 @@ impl From<HirPrimTy> for TyBase<'_> {
             HirPrimTy::Reflect => Self::Prim(PrimTy::Reflect),
             HirPrimTy::TypeInfo => Self::Prim(PrimTy::TypeInfo),
             HirPrimTy::Field => Self::Prim(PrimTy::Field),
+            HirPrimTy::GeneratedExpr => Self::Prim(PrimTy::GeneratedExpr),
             HirPrimTy::Derive => Self::Prim(PrimTy::Derive),
         }
     }
@@ -1858,6 +1863,7 @@ pub enum PrimTy {
     Reflect,
     TypeInfo,
     Field,
+    GeneratedExpr,
     Derive,
     FieldList,
 }
@@ -1892,6 +1898,7 @@ pub enum CompileTimeOnlyKind {
     Reflect,
     TypeInfo,
     Field,
+    GeneratedExpr,
     FieldList,
 }
 
@@ -1903,6 +1910,7 @@ impl CompileTimeOnlyKind {
             Self::Reflect => "Reflect",
             Self::TypeInfo => "TypeInfo",
             Self::Field => "Field",
+            Self::GeneratedExpr => "GeneratedExpr",
             Self::FieldList => "FieldList",
         }
     }
@@ -2021,7 +2029,9 @@ impl HasKind for PrimTy {
             Self::String => Kind::abs(Kind::Star, Kind::Star),
             Self::View | Self::BorrowMut | Self::BorrowRef => Kind::abs(Kind::Star, Kind::Star),
             Self::Evidence | Self::ImplBuilder => Kind::abs(Kind::Constraint, Kind::Star),
-            Self::Reflect | Self::TypeInfo | Self::FieldList => Kind::abs(Kind::Star, Kind::Star),
+            Self::Reflect | Self::TypeInfo | Self::FieldList | Self::GeneratedExpr => {
+                Kind::abs(Kind::Star, Kind::Star)
+            }
             Self::Field => Kind::abs(Kind::Star, Kind::abs(Kind::Star, Kind::Star)),
             Self::Derive => Kind::abs(Kind::abs(Kind::Star, Kind::Constraint), Kind::Constraint),
             _ => Kind::Star,

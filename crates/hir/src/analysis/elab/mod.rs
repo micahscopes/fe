@@ -1048,6 +1048,7 @@ enum ElabValue<'db> {
     /// Fe's surface language, they should be modeled as explicit
     /// compile-time-only values instead of exposing raw `TyId`.
     TypeWitness(TyId<'db>),
+    GeneratedExpr(GeneratedExprId<'db>),
 }
 
 #[derive(Clone, Copy)]
@@ -1285,14 +1286,15 @@ impl<'db> ProviderBodyExecutor<'db> {
                 })?;
                 Ok(true)
             }
-            BUILDER_EMIT_BOOL_METHOD => {
+            BUILDER_BOOL_METHOD | BUILDER_AND_METHOD => Ok(false),
+            BUILDER_EMIT_METHOD => {
                 let [arg] = args else {
                     return Err(skipped_failure(
                         ProviderSkipReason::UnsupportedProviderBody,
                         receiver.span(body).into(),
                     ));
                 };
-                self.execute_emit_bool_method(body, arg.expr)?;
+                self.execute_emit_method(body, arg.expr)?;
                 Ok(true)
             }
             _ => Err(skipped_failure(
@@ -1337,32 +1339,30 @@ impl<'db> ProviderBodyExecutor<'db> {
             })
     }
 
-    fn execute_emit_bool_method(
+    fn execute_emit_method(
         &mut self,
         body: Body<'db>,
-        value_expr: crate::hir_def::ExprId,
+        expr_arg: crate::hir_def::ExprId,
     ) -> Result<(), ProviderExecutionFailure<'db>> {
         let required = required_method_names(self.db, self.context.request(self.db).goal(self.db));
         let [method_name] = required.as_slice() else {
             return Err(skipped_failure(
                 ProviderSkipReason::UnsupportedProviderBody,
-                value_expr.span(body).into(),
+                expr_arg.span(body).into(),
             ));
         };
-        let Partial::Present(Expr::Lit(LitKind::Bool(value))) = value_expr.data(self.db, body)
-        else {
+        let Some(ElabValue::GeneratedExpr(expr)) = self.eval_expr_value(body, expr_arg) else {
             return Err(skipped_failure(
                 ProviderSkipReason::UnsupportedProviderBody,
-                value_expr.span(body).into(),
+                expr_arg.span(body).into(),
             ));
         };
-        let expr = GeneratedExprId::new(self.db, GeneratedExprKind::BoolLiteral(*value));
         self.builder
             .emit_method_expr(*method_name, expr)
             .map_err(|err| match err {
                 BuilderError::AlreadyFinished => skipped_failure(
                     ProviderSkipReason::CommandAfterFinish,
-                    value_expr.span(body).into(),
+                    expr_arg.span(body).into(),
                 ),
                 _ => ProviderExecutionFailure::Failed,
             })
@@ -1407,7 +1407,7 @@ impl<'db> ProviderBodyExecutor<'db> {
     ) -> Option<ReflectedField<'db>> {
         match self.eval_expr_value(body, expr)? {
             ElabValue::Field(field) => Some(field),
-            ElabValue::TypeWitness(_) => None,
+            ElabValue::TypeWitness(_) | ElabValue::GeneratedExpr(_) => None,
         }
     }
 
@@ -1427,17 +1427,54 @@ impl<'db> ProviderBodyExecutor<'db> {
         else {
             return None;
         };
-        if !args.is_empty()
-            || method
-                .to_opt()
-                .is_none_or(|method| method.data(self.db) != FIELD_TY_METHOD)
-        {
-            return None;
+        let method = method.to_opt()?;
+        match method.data(self.db).as_str() {
+            BUILDER_BOOL_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                let [arg] = args.as_slice() else {
+                    return None;
+                };
+                let Partial::Present(Expr::Lit(LitKind::Bool(value))) =
+                    arg.expr.data(self.db, body)
+                else {
+                    return None;
+                };
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::BoolLiteral(*value),
+                )))
+            }
+            BUILDER_AND_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                let [lhs_arg, rhs_arg] = args.as_slice() else {
+                    return None;
+                };
+                let ElabValue::GeneratedExpr(lhs) = self.eval_expr_value(body, lhs_arg.expr)?
+                else {
+                    return None;
+                };
+                let ElabValue::GeneratedExpr(rhs) = self.eval_expr_value(body, rhs_arg.expr)?
+                else {
+                    return None;
+                };
+                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
+                    self.db,
+                    GeneratedExprKind::BoolAnd { lhs, rhs },
+                )))
+            }
+            FIELD_TY_METHOD => {
+                if !args.is_empty() {
+                    return None;
+                }
+                let ElabValue::Field(field) = self.eval_expr_value(body, *receiver)? else {
+                    return None;
+                };
+                Some(ElabValue::TypeWitness(field.ty))
+            }
+            _ => None,
         }
-        let ElabValue::Field(field) = self.eval_expr_value(body, *receiver)? else {
-            return None;
-        };
-        Some(ElabValue::TypeWitness(field.ty))
     }
 
     fn requirement_origin_for_expr(
@@ -1628,7 +1665,9 @@ fn derive_requirement_for_trait_field<'db>(
 
 const BUILDER_REQUIRE_METHOD: &str = "require";
 const BUILDER_FINISH_METHOD: &str = "finish";
-const BUILDER_EMIT_BOOL_METHOD: &str = "emit_bool_method";
+const BUILDER_BOOL_METHOD: &str = "bool";
+const BUILDER_AND_METHOD: &str = "and";
+const BUILDER_EMIT_METHOD: &str = "emit_method";
 const REFLECT_FIELDS_METHOD: &str = "fields";
 const FIELD_TY_METHOD: &str = "ty";
 
