@@ -1083,13 +1083,6 @@ impl<'db> ProviderBodyExecutor<'db> {
             return Ok(false);
         };
         match method.data(self.db).as_str() {
-            BUILDER_FIELD_OBLIGATION_METHOD => {
-                let [arg] = args else {
-                    return Ok(false);
-                };
-                self.execute_require_fields(body, arg.expr)?;
-                Ok(true)
-            }
             BUILDER_FIELD_REQUIRE_METHOD => {
                 let [arg] = args else {
                     return Ok(false);
@@ -1108,35 +1101,6 @@ impl<'db> ProviderBodyExecutor<'db> {
             }
             _ => Ok(false),
         }
-    }
-
-    fn execute_require_fields(
-        &mut self,
-        body: Body<'db>,
-        reflect_arg: crate::hir_def::ExprId,
-    ) -> Result<(), ProviderExecutionFailure> {
-        let target_ty = self.context.request(self.db).target(self.db).ty(self.db);
-        if !self.env.has_reflect_target(self.db, target_ty)
-            || !expr_is_path_named_any(self.db, body, reflect_arg, &self.reflect_names)
-        {
-            return Err(ProviderExecutionFailure::Skipped(
-                ProviderSkipReason::MissingReflectCapability,
-            ));
-        }
-
-        let Some(requirements) =
-            derive_requirements_for_reflected_target(self.db, self.context, target_ty)
-        else {
-            return Err(ProviderExecutionFailure::Skipped(
-                ProviderSkipReason::UnsupportedProviderBody,
-            ));
-        };
-        for requirement in requirements {
-            self.builder
-                .require_with_origin(requirement.constraint, requirement.origin)
-                .map_err(|_| ProviderExecutionFailure::Failed)?;
-        }
-        Ok(())
     }
 
     fn execute_require_field(
@@ -1340,7 +1304,6 @@ fn derive_requirement_for_trait_field<'db>(
     }
 }
 
-const BUILDER_FIELD_OBLIGATION_METHOD: &str = "require_fields";
 const BUILDER_FIELD_REQUIRE_METHOD: &str = "require_field";
 const BUILDER_FINISH_METHOD: &str = "finish";
 const REFLECT_FIELDS_METHOD: &str = "fields";
@@ -2036,39 +1999,6 @@ struct Foo {}
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
-    builder.require_fields(reflect)
-    builder.finish()
-    ev
-}
-"#,
-        );
-        let (top_mod, _) = db.top_mod(file);
-
-        let context = first_builder_context(&db, top_mod);
-        let output = provider_output_for_context(&db, context);
-        assert!(matches!(
-            output.status(&db),
-            ProviderOutputStatus::Skipped {
-                reason: ProviderSkipReason::MissingReflectCapability
-            }
-        ));
-    }
-
-    #[test]
-    fn provider_output_reports_missing_reflect_capability_for_fields_loop() {
-        let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(
-            "provider_output_reports_missing_reflect_capability_for_fields_loop.fe".into(),
-            r#"
-trait Eq {}
-
-#[derive(Eq)]
-struct Foo {}
-
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
     for field in reflect.fields() {
         builder.require_field(field)
     }
@@ -2170,7 +2100,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     )
 {
     builder.finish()
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     ev
 }
 "#,

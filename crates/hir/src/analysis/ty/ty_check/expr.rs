@@ -3140,19 +3140,6 @@ impl<'db> TyChecker<'db> {
         let method = method_name.data(self.db);
 
         match method.as_str() {
-            // Temporary raw-builder bridge for provider CTFE. This lets provider
-            // bodies route field-derived requirements through explicit builder
-            // and reflection receivers before first-class constraint values are
-            // available.
-            "require_fields" => {
-                if !receiver_prop.is_mut || args.len() != 1 {
-                    return None;
-                }
-                let target = self.impl_builder_field_obligation_target(goal)?;
-                let reflect_ty = self.reflect_ty(target);
-                self.check_expr(args[0].expr, reflect_ty);
-                Some(ExprProp::new(TyId::unit(self.db), true))
-            }
             "require_field" => {
                 if !receiver_prop.is_mut || args.len() != 1 {
                     return None;
@@ -3284,11 +3271,6 @@ impl<'db> TyChecker<'db> {
     fn field_list_ty(&self, target: TyId<'db>) -> TyId<'db> {
         let field_list_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::FieldList)));
         TyId::app(self.db, field_list_ctor, target)
-    }
-
-    fn reflect_ty(&self, target: TyId<'db>) -> TyId<'db> {
-        let reflect_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Reflect)));
-        TyId::app(self.db, reflect_ctor, target)
     }
 
     fn method_receiver_tys(

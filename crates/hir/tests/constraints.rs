@@ -1263,7 +1263,9 @@ struct Foo {
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1312,7 +1314,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1495,7 +1499,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1541,7 +1547,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1596,7 +1604,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1645,7 +1655,9 @@ const fn derive_marker<T>(ev: own Evidence<DeriveMarker<T>>) -> Evidence<DeriveM
         builder: mut ImplBuilder<DeriveMarker<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1711,7 +1723,9 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
         builder: mut ImplBuilder<Default<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1937,7 +1951,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -1977,7 +1993,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
@@ -2022,7 +2040,9 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_fields(reflect)
+    for field in reflect.fields() {
+        builder.require_field(field)
+    }
     builder.finish()
     ev
 }
