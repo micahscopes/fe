@@ -1241,10 +1241,10 @@ fn caller() {
 }
 
 #[test]
-fn provider_field_builder_method_requires_reflect_capability_for_output() {
+fn provider_field_builder_method_requires_declared_reflect_receiver() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "provider_field_builder_method_requires_reflect_capability_for_output.fe".into(),
+        "provider_field_builder_method_requires_declared_reflect_receiver.fe".into(),
         r#"
 trait Eq {}
 
@@ -1262,7 +1262,7 @@ struct Foo {
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
@@ -1274,6 +1274,7 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "undefined variable `reflect`");
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -1310,7 +1311,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
@@ -1435,7 +1436,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
@@ -1481,7 +1482,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
@@ -1529,7 +1530,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
@@ -1581,7 +1582,7 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
         builder: mut ImplBuilder<Default<T>>,
     )
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
@@ -1726,7 +1727,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
@@ -1766,7 +1767,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         builder: mut ImplBuilder<Eq<T>>,
     )
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }

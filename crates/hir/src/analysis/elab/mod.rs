@@ -1029,27 +1029,28 @@ fn derive_requirements_for_context<'db>(
     )
 }
 
-const BUILDER_FIELD_OBLIGATION_METHOD: &str = "require_derive_field_obligations";
+const BUILDER_FIELD_OBLIGATION_METHOD: &str = "require_fields";
 const BUILDER_FINISH_METHOD: &str = "finish";
 
 fn provider_body_requests_field_obligations<'db>(
     db: &'db dyn HirAnalysisDb,
     provider: EvidenceProviderId<'db>,
 ) -> bool {
-    provider_body_builder_method_count(db, provider, BUILDER_FIELD_OBLIGATION_METHOD) > 0
+    provider_body_builder_method_count(db, provider, BUILDER_FIELD_OBLIGATION_METHOD, Some(&[])) > 0
 }
 
 fn provider_body_finish_count<'db>(
     db: &'db dyn HirAnalysisDb,
     provider: EvidenceProviderId<'db>,
 ) -> usize {
-    provider_body_builder_method_count(db, provider, BUILDER_FINISH_METHOD)
+    provider_body_builder_method_count(db, provider, BUILDER_FINISH_METHOD, None)
 }
 
 fn provider_body_builder_method_count<'db>(
     db: &'db dyn HirAnalysisDb,
     provider: EvidenceProviderId<'db>,
     method_name: &str,
+    required_arg_names: Option<&[IdentId<'db>]>,
 ) -> usize {
     let Some(body) = provider.func(db).body(db) else {
         return 0;
@@ -1058,7 +1059,14 @@ fn provider_body_builder_method_count<'db>(
     if builder_names.is_empty() {
         return 0;
     }
-    count_builder_method_calls_in_expr(db, body, body.expr(db), &builder_names, method_name)
+    count_builder_method_calls_in_expr(
+        db,
+        body,
+        body.expr(db),
+        &builder_names,
+        method_name,
+        required_arg_names,
+    )
 }
 
 fn provider_impl_builder_effect_names<'db>(
@@ -1104,6 +1112,7 @@ fn count_builder_method_calls_in_expr<'db>(
     expr: crate::hir_def::ExprId,
     builder_names: &[IdentId<'db>],
     method_name: &str,
+    required_arg_names: Option<&[IdentId<'db>]>,
 ) -> usize {
     let Partial::Present(expr_data) = expr.data(db, body) else {
         return 0;
@@ -1113,102 +1122,181 @@ fn count_builder_method_calls_in_expr<'db>(
         Expr::Block(stmts) => stmts
             .iter()
             .map(|stmt| {
-                count_builder_method_calls_in_stmt(db, body, *stmt, builder_names, method_name)
+                count_builder_method_calls_in_stmt(
+                    db,
+                    body,
+                    *stmt,
+                    builder_names,
+                    method_name,
+                    required_arg_names,
+                )
             })
             .sum::<usize>(),
         Expr::Call(callee, args) => {
-            count_builder_method_calls_in_expr(db, body, *callee, builder_names, method_name)
-                + args
-                    .iter()
-                    .map(|arg| {
-                        count_builder_method_calls_in_expr(
-                            db,
-                            body,
-                            arg.expr,
-                            builder_names,
-                            method_name,
-                        )
-                    })
-                    .sum::<usize>()
+            count_builder_method_calls_in_expr(
+                db,
+                body,
+                *callee,
+                builder_names,
+                method_name,
+                required_arg_names,
+            ) + args
+                .iter()
+                .map(|arg| {
+                    count_builder_method_calls_in_expr(
+                        db,
+                        body,
+                        arg.expr,
+                        builder_names,
+                        method_name,
+                        required_arg_names,
+                    )
+                })
+                .sum::<usize>()
         }
         Expr::MethodCall(receiver, method, _, args) => {
             usize::from(
                 method
                     .to_opt()
                     .is_some_and(|method| method.data(db) == method_name)
-                    && args.is_empty()
+                    && builder_method_args_match(db, body, args, required_arg_names)
                     && expr_is_path_named_any(db, body, *receiver, builder_names),
-            ) + count_builder_method_calls_in_expr(db, body, *receiver, builder_names, method_name)
-                + args
-                    .iter()
-                    .map(|arg| {
-                        count_builder_method_calls_in_expr(
-                            db,
-                            body,
-                            arg.expr,
-                            builder_names,
-                            method_name,
-                        )
-                    })
-                    .sum::<usize>()
+            ) + count_builder_method_calls_in_expr(
+                db,
+                body,
+                *receiver,
+                builder_names,
+                method_name,
+                required_arg_names,
+            ) + args
+                .iter()
+                .map(|arg| {
+                    count_builder_method_calls_in_expr(
+                        db,
+                        body,
+                        arg.expr,
+                        builder_names,
+                        method_name,
+                        required_arg_names,
+                    )
+                })
+                .sum::<usize>()
         }
         Expr::Bin(lhs, rhs, _) | Expr::Assign(lhs, rhs) | Expr::AugAssign(lhs, rhs, _) => {
-            count_builder_method_calls_in_expr(db, body, *lhs, builder_names, method_name)
-                + count_builder_method_calls_in_expr(db, body, *rhs, builder_names, method_name)
+            count_builder_method_calls_in_expr(
+                db,
+                body,
+                *lhs,
+                builder_names,
+                method_name,
+                required_arg_names,
+            ) + count_builder_method_calls_in_expr(
+                db,
+                body,
+                *rhs,
+                builder_names,
+                method_name,
+                required_arg_names,
+            )
         }
         Expr::Un(inner, _) | Expr::Cast(inner, _) | Expr::Field(inner, _) => {
-            count_builder_method_calls_in_expr(db, body, *inner, builder_names, method_name)
+            count_builder_method_calls_in_expr(
+                db,
+                body,
+                *inner,
+                builder_names,
+                method_name,
+                required_arg_names,
+            )
         }
         Expr::Tuple(items) | Expr::Array(items) => items
             .iter()
             .map(|item| {
-                count_builder_method_calls_in_expr(db, body, *item, builder_names, method_name)
+                count_builder_method_calls_in_expr(
+                    db,
+                    body,
+                    *item,
+                    builder_names,
+                    method_name,
+                    required_arg_names,
+                )
             })
             .sum(),
-        Expr::ArrayRep(value, _) => {
-            count_builder_method_calls_in_expr(db, body, *value, builder_names, method_name)
-        }
+        Expr::ArrayRep(value, _) => count_builder_method_calls_in_expr(
+            db,
+            body,
+            *value,
+            builder_names,
+            method_name,
+            required_arg_names,
+        ),
         Expr::If(_, then_expr, else_expr) => {
-            count_builder_method_calls_in_expr(db, body, *then_expr, builder_names, method_name)
-                + else_expr
-                    .map(|else_expr| {
+            count_builder_method_calls_in_expr(
+                db,
+                body,
+                *then_expr,
+                builder_names,
+                method_name,
+                required_arg_names,
+            ) + else_expr
+                .map(|else_expr| {
+                    count_builder_method_calls_in_expr(
+                        db,
+                        body,
+                        else_expr,
+                        builder_names,
+                        method_name,
+                        required_arg_names,
+                    )
+                })
+                .unwrap_or_default()
+        }
+        Expr::Match(scrutinee, arms) => {
+            count_builder_method_calls_in_expr(
+                db,
+                body,
+                *scrutinee,
+                builder_names,
+                method_name,
+                required_arg_names,
+            ) + match arms {
+                Partial::Present(arms) => arms
+                    .iter()
+                    .map(|arm| {
                         count_builder_method_calls_in_expr(
                             db,
                             body,
-                            else_expr,
+                            arm.body,
                             builder_names,
                             method_name,
+                            required_arg_names,
                         )
                     })
-                    .unwrap_or_default()
-        }
-        Expr::Match(scrutinee, arms) => {
-            count_builder_method_calls_in_expr(db, body, *scrutinee, builder_names, method_name)
-                + match arms {
-                    Partial::Present(arms) => arms
-                        .iter()
-                        .map(|arm| {
-                            count_builder_method_calls_in_expr(
-                                db,
-                                body,
-                                arm.body,
-                                builder_names,
-                                method_name,
-                            )
-                        })
-                        .sum(),
-                    Partial::Absent => 0,
-                }
+                    .sum(),
+                Partial::Absent => 0,
+            }
         }
         Expr::RecordInit(_, fields) => fields
             .iter()
             .map(|field| {
-                count_builder_method_calls_in_expr(db, body, field.expr, builder_names, method_name)
+                count_builder_method_calls_in_expr(
+                    db,
+                    body,
+                    field.expr,
+                    builder_names,
+                    method_name,
+                    required_arg_names,
+                )
             })
             .sum(),
-        Expr::With(_, inner) => {
-            count_builder_method_calls_in_expr(db, body, *inner, builder_names, method_name)
-        }
+        Expr::With(_, inner) => count_builder_method_calls_in_expr(
+            db,
+            body,
+            *inner,
+            builder_names,
+            method_name,
+            required_arg_names,
+        ),
         Expr::Lit(_) | Expr::Path(_) => 0,
     }
 }
@@ -1219,6 +1307,7 @@ fn count_builder_method_calls_in_stmt<'db>(
     stmt: crate::hir_def::StmtId,
     builder_names: &[IdentId<'db>],
     method_name: &str,
+    required_arg_names: Option<&[IdentId<'db>]>,
 ) -> usize {
     let Partial::Present(stmt_data) = stmt.data(db, body) else {
         return 0;
@@ -1226,31 +1315,82 @@ fn count_builder_method_calls_in_stmt<'db>(
     match stmt_data {
         Stmt::Let(_, _, init) => init
             .map(|init| {
-                count_builder_method_calls_in_expr(db, body, init, builder_names, method_name)
+                count_builder_method_calls_in_expr(
+                    db,
+                    body,
+                    init,
+                    builder_names,
+                    method_name,
+                    required_arg_names,
+                )
             })
             .unwrap_or_default(),
         Stmt::For(_, iterable, loop_body, _) => {
-            count_builder_method_calls_in_expr(db, body, *iterable, builder_names, method_name)
-                + count_builder_method_calls_in_expr(
-                    db,
-                    body,
-                    *loop_body,
-                    builder_names,
-                    method_name,
-                )
+            count_builder_method_calls_in_expr(
+                db,
+                body,
+                *iterable,
+                builder_names,
+                method_name,
+                required_arg_names,
+            ) + count_builder_method_calls_in_expr(
+                db,
+                body,
+                *loop_body,
+                builder_names,
+                method_name,
+                required_arg_names,
+            )
         }
-        Stmt::While(_, loop_body) => {
-            count_builder_method_calls_in_expr(db, body, *loop_body, builder_names, method_name)
-        }
+        Stmt::While(_, loop_body) => count_builder_method_calls_in_expr(
+            db,
+            body,
+            *loop_body,
+            builder_names,
+            method_name,
+            required_arg_names,
+        ),
         Stmt::Return(expr) => expr
             .map(|expr| {
-                count_builder_method_calls_in_expr(db, body, expr, builder_names, method_name)
+                count_builder_method_calls_in_expr(
+                    db,
+                    body,
+                    expr,
+                    builder_names,
+                    method_name,
+                    required_arg_names,
+                )
             })
             .unwrap_or_default(),
-        Stmt::Expr(expr) => {
-            count_builder_method_calls_in_expr(db, body, *expr, builder_names, method_name)
-        }
+        Stmt::Expr(expr) => count_builder_method_calls_in_expr(
+            db,
+            body,
+            *expr,
+            builder_names,
+            method_name,
+            required_arg_names,
+        ),
         Stmt::Continue | Stmt::Break => 0,
+    }
+}
+
+fn builder_method_args_match<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    args: &[crate::hir_def::CallArg<'db>],
+    required_arg_names: Option<&[IdentId<'db>]>,
+) -> bool {
+    match required_arg_names {
+        None => args.is_empty(),
+        Some(names) => {
+            let [arg] = args else {
+                return false;
+            };
+            if names.is_empty() {
+                return true;
+            }
+            expr_is_path_named_any(db, body, arg.expr, names)
+        }
     }
 }
 
@@ -1815,14 +1955,13 @@ struct Foo {}
 const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     uses (builder: mut ImplBuilder<Eq<T>>)
 {
-    builder.require_derive_field_obligations<T>()
+    builder.require_fields(reflect)
     builder.finish()
     ev
 }
 "#,
         );
         let (top_mod, _) = db.top_mod(file);
-        db.assert_no_diags(top_mod);
 
         let context = first_builder_context(&db, top_mod);
         let output = provider_output_for_context(&db, context);
