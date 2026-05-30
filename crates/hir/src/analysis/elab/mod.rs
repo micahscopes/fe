@@ -22,7 +22,7 @@ use crate::{
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             evidence_provider::{
-                EvidenceProviderId, providers_for_constraint_head,
+                EvidenceProviderId, providers_for_derive_goal,
                 validated_evidence_providers_for_ingot,
             },
             fold::{TyFoldable, TyFolder},
@@ -644,23 +644,27 @@ fn duplicate_evidence_provider_diags_for_top_mod<'db>(
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let providers = validated_evidence_providers_for_ingot(db, top_mod.ingot(db));
-    let implicit_heads = elaboration_requests_for_top_mod(db, top_mod)
+    let implicit_derive_goals = elaboration_requests_for_top_mod(db, top_mod)
         .iter()
         .filter(|request| request.selected_provider(db).is_none())
-        .filter_map(|request| concrete_trait_head(db, request.goal(db)))
+        .filter_map(|request| derive_evidence_for_goal(db, request.goal(db)))
         .collect::<IndexSet<_>>();
-    let mut by_head: IndexMap<Trait<'db>, Vec<EvidenceProviderId<'db>>> = IndexMap::new();
+    let mut by_derive_goal: IndexMap<ConstraintId<'db>, Vec<EvidenceProviderId<'db>>> =
+        IndexMap::new();
     for provider in providers {
-        by_head.entry(provider.head(db)).or_default().push(provider);
+        by_derive_goal
+            .entry(provider.derive_goal(db))
+            .or_default()
+            .push(provider);
     }
 
-    by_head
+    by_derive_goal
         .into_iter()
-        .filter_map(|(head, providers)| {
+        .filter_map(|(derive_goal, providers)| {
             if providers.len() <= 1 {
                 return None;
             }
-            if !implicit_heads.contains(&head) {
+            if !implicit_derive_goals.contains(&derive_goal) {
                 return None;
             }
             let span = providers[0].func(db).span().attributes().into();
@@ -668,7 +672,7 @@ fn duplicate_evidence_provider_diags_for_top_mod<'db>(
                 span,
                 format!(
                     "multiple evidence providers for `{}` are not supported yet",
-                    trait_name(db, head)
+                    derive_goal.pretty_print(db)
                 ),
             ))
         })
@@ -683,8 +687,9 @@ fn selected_evidence_provider_diags_for_top_mod<'db>(
         .iter()
         .filter_map(|request| {
             let selected = request.selected_provider(db)?;
-            let head = concrete_trait_head(db, request.goal(db))?;
-            let matches = matching_selected_providers(db, top_mod.ingot(db), head, selected);
+            let derive_goal = derive_evidence_for_goal(db, request.goal(db))?;
+            let matches =
+                matching_selected_providers(db, top_mod.ingot(db), derive_goal, selected);
             if matches.len() == 1 {
                 return None;
             }
@@ -692,19 +697,19 @@ fn selected_evidence_provider_diags_for_top_mod<'db>(
             let message = if matches.is_empty() {
                 if !providers_named_in_ingot(db, top_mod.ingot(db), selected).is_empty() {
                     format!(
-                        "selected evidence provider `{selected_name}` does not provide `Derive<{}>` evidence",
-                        trait_name(db, head)
+                        "selected evidence provider `{selected_name}` does not provide `{}` evidence",
+                        derive_goal.pretty_print(db)
                     )
                 } else {
                     format!(
                         "selected evidence provider `{selected_name}` for `{}` was not found",
-                        trait_name(db, head)
+                        derive_goal.pretty_print(db)
                     )
                 }
             } else {
                 format!(
                     "selected evidence provider `{selected_name}` for `{}` is ambiguous",
-                    trait_name(db, head)
+                    derive_goal.pretty_print(db)
                 )
             };
             Some(invalid_request(request.span(db), message))
@@ -827,14 +832,14 @@ pub(crate) fn elaboration_ctfe_contexts_for_request<'db>(
     db: &'db dyn HirAnalysisDb,
     request: ElaborationRequestId<'db>,
 ) -> Vec<ElaborationCtfeContextId<'db>> {
-    let Some(head) = concrete_trait_head(db, request.goal(db)) else {
+    let Some(derive_goal) = derive_evidence_for_goal(db, request.goal(db)) else {
         return Vec::new();
     };
     let ingot = request.target(db).item().top_mod(db).ingot(db);
     let providers = if let Some(selected) = request.selected_provider(db) {
-        matching_selected_providers(db, ingot, head, selected)
+        matching_selected_providers(db, ingot, derive_goal, selected)
     } else {
-        providers_for_constraint_head(db, ingot, head)
+        providers_for_derive_goal(db, ingot, derive_goal)
     };
     if providers.len() != 1 {
         return Vec::new();
@@ -848,10 +853,10 @@ pub(crate) fn elaboration_ctfe_contexts_for_request<'db>(
 fn matching_selected_providers<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
-    head: Trait<'db>,
+    derive_goal: ConstraintId<'db>,
     selected: IdentId<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
-    providers_for_constraint_head(db, ingot, head)
+    providers_for_derive_goal(db, ingot, derive_goal)
         .into_iter()
         .filter(|provider| provider.identity(db).name(db) == selected)
         .collect()

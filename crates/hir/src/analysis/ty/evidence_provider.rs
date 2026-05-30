@@ -138,14 +138,14 @@ pub(crate) fn validated_evidence_providers_for_ingot<'db>(
         .collect()
 }
 
-pub(crate) fn providers_for_constraint_head<'db>(
+pub(crate) fn providers_for_derive_goal<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
-    head: Trait<'db>,
+    derive_goal: ConstraintId<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
     validated_evidence_providers_for_ingot(db, ingot)
         .into_iter()
-        .filter(|provider| provider.head(db) == head)
+        .filter(|provider| provider.derive_goal(db) == derive_goal)
         .collect()
 }
 

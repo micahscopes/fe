@@ -2212,7 +2212,7 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "multiple evidence providers for `Eq`");
+    assert_diag_message(&diags, "multiple evidence providers for `Derive<Eq>`");
 }
 
 #[test]
@@ -2254,7 +2254,7 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "multiple evidence providers for `Eq`");
+    assert_diag_message(&diags, "multiple evidence providers for `Derive<Eq>`");
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -2433,7 +2433,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `missing_provider` for `Eq` was not found",
+        "selected evidence provider `missing_provider` for `Derive<Eq>` was not found",
     );
 }
 
@@ -2491,7 +2491,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `missing_provider` for `Eq` was not found",
+        "selected evidence provider `missing_provider` for `Derive<Eq>` was not found",
     );
 }
 
