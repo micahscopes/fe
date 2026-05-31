@@ -1407,7 +1407,7 @@ impl LocalEq: Derive for Eq {
                 builder.field_get(builder.arg_ref("other"), field),
             ))
         }
-        builder.emit_method(acc)
+        builder.emit_method("eq", acc)
         builder.finish()
         ev
     }
@@ -1469,7 +1469,7 @@ impl LocalEq: Derive for Eq {
                 builder.field_get(builder.arg_ref("other"), field),
             ))
         }
-        builder.emit_method(acc)
+        builder.emit_method("eq", acc)
         builder.finish()
         ev
     }
@@ -1726,7 +1726,7 @@ impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(true))
+        builder.emit_method("eq", builder.bool(true))
         builder.finish()
         ev
     }
@@ -1817,7 +1817,7 @@ impl FastEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(true))
+        builder.emit_method("eq", builder.bool(true))
         builder.finish()
         ev
     }
@@ -1870,7 +1870,7 @@ impl FastEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(false))
+        builder.emit_method("eq", builder.bool(false))
         builder.finish()
         ev
     }
@@ -2021,7 +2021,7 @@ impl FastEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(true))
+        builder.emit_method("eq", builder.bool(true))
         builder.finish()
         ev
     }
@@ -2069,7 +2069,7 @@ impl FastEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(true))
+        builder.emit_method("eq", builder.bool(true))
         builder.finish()
         ev
     }
@@ -2123,7 +2123,7 @@ impl FastEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(false))
+        builder.emit_method("eq", builder.bool(false))
         builder.finish()
         ev
     }
@@ -2984,7 +2984,7 @@ impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(true))
+        builder.emit_method("eq", builder.bool(true))
         builder.finish()
         ev
     }
@@ -3027,7 +3027,7 @@ impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.and(builder.bool(true), builder.bool(true)))
+        builder.emit_method("eq", builder.and(builder.bool(true), builder.bool(true)))
         builder.finish()
         ev
     }
@@ -3044,6 +3044,42 @@ fn caller() {
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn provider_emit_method_accepts_explicit_method_names() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_emit_method_accepts_explicit_method_names.fe".into(),
+        r#"
+trait TestPair {
+    fn first(self) -> bool
+    fn second(self) -> bool
+}
+
+struct Foo {}
+
+derive TestPair for Foo using StableTestPair
+
+impl StableTestPair: Derive for TestPair {
+    const fn derive<T>(ev: own Evidence<TestPair<T>>) -> Evidence<TestPair<T>>
+        uses (builder: mut ImplBuilder<TestPair<T>>)
+    {
+        builder.emit_method("first", builder.bool(true))
+        builder.emit_method("second", builder.bool(false))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: TestPair with obligations {}".to_string()]
     );
 }
 
@@ -3065,8 +3101,8 @@ impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (builder: mut ImplBuilder<Eq<T>>)
     {
-        builder.emit_method(builder.bool(true))
-        builder.emit_method(builder.bool(false))
+        builder.emit_method("eq", builder.bool(true))
+        builder.emit_method("eq", builder.bool(false))
         builder.finish()
         ev
     }
@@ -3108,7 +3144,7 @@ impl StableEq: Derive for Eq {
         )
     {
         for field in reflect.fields() {
-            builder.emit_method(builder.eq(
+            builder.emit_method("eq", builder.eq(
                 builder.field_get(builder.self_ref(), field),
                 builder.field_get(builder.arg_ref("other"), field),
             ))
@@ -3161,7 +3197,7 @@ impl StableEq: Derive for Eq {
         )
     {
         for field in reflect.fields() {
-            builder.emit_method(builder.eq(
+            builder.emit_method("eq", builder.eq(
                 builder.field_get(builder.self_ref(), field),
                 builder.field_get(builder.arg_ref("rhs"), field),
             ))
@@ -3209,7 +3245,7 @@ impl StableEq: Derive for Eq {
         )
     {
         for field in reflect.fields() {
-            builder.emit_method(builder.eq(
+            builder.emit_method("eq", builder.eq(
                 builder.field_get(builder.self_ref(), field),
                 builder.field_get(builder.arg_ref("other"), field),
             ))
@@ -3257,7 +3293,7 @@ impl StableEq: Derive for Eq {
         )
     {
         for field in reflect.fields() {
-            builder.emit_method(builder.eq(
+            builder.emit_method("eq", builder.eq(
                 builder.field_get(builder.self_ref(), field),
                 builder.field_get(builder.arg_ref("other"), field),
             ))
@@ -3300,7 +3336,7 @@ impl StableEq: Derive for Eq {
         )
     {
         for field in reflect.fields() {
-            builder.emit_method(builder.eq(
+            builder.emit_method("eq", builder.eq(
                 builder.field_get(builder.self_ref(), field),
                 builder.field_get(builder.arg_ref("other"), field),
             ))
@@ -3348,7 +3384,7 @@ impl StableEq: Derive for Eq {
         )
     {
         for field in reflect.fields() {
-            builder.emit_method(builder.eq(
+            builder.emit_method("eq", builder.eq(
                 builder.field_get(builder.self_ref(), field),
                 builder.field_get(builder.arg_ref("other"), field),
             ))
@@ -3409,7 +3445,7 @@ impl StableTestEq: Derive for TestEq {
                 builder.field_get(builder.arg_ref("other"), field),
             ))
         }
-        builder.emit_method(acc)
+        builder.emit_method("eq", acc)
         builder.finish()
         ev
     }
@@ -3509,7 +3545,7 @@ impl StableDefault: Derive for Default {
             builder.require<Default>(field.ty())
             init = builder.with_field(init, field, builder.default(field.ty()))
         }
-        builder.emit_method(init)
+        builder.emit_method("default", init)
         builder.finish()
         ev
     }
@@ -3567,7 +3603,7 @@ impl LocalDefault: Derive for Default {
             builder.require<Default>(field.ty())
             init = builder.with_field(init, field, builder.default(field.ty()))
         }
-        builder.emit_method(init)
+        builder.emit_method("default", init)
         builder.finish()
         ev
     }

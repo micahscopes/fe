@@ -16,7 +16,7 @@ impl StableEq: Derive for Eq {
                 builder.field_get(builder.arg_ref("other"), field),
             ))
         }
-        builder.emit_method(acc)
+        builder.emit_method("eq", acc)
         builder.finish()
         ev
     }
@@ -34,7 +34,7 @@ impl StableDefault: Derive for Default {
             builder.require<Default>(field.ty())
             init = builder.with_field(init, field, builder.default(field.ty()))
         }
-        builder.emit_method(init)
+        builder.emit_method("default", init)
         builder.finish()
         ev
     }

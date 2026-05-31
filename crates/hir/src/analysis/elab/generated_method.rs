@@ -370,13 +370,6 @@ pub(super) fn generated_method_error_summary<'db>(
     parts.join("; ")
 }
 
-pub(super) fn required_method_names<'db>(
-    db: &'db dyn HirAnalysisDb,
-    goal: ConstraintId<'db>,
-) -> Vec<IdentId<'db>> {
-    required_methods(db, goal).keys().copied().collect()
-}
-
 pub(super) fn required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     goal: ConstraintId<'db>,

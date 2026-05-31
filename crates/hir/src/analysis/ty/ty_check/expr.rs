@@ -3253,11 +3253,12 @@ impl<'db> TyChecker<'db> {
                 Some(ExprProp::new(self.generated_expr_ty(parent), true))
             }
             "emit_method" => {
-                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 2 {
                     return None;
                 }
                 let value = self.fresh_ty();
-                self.check_expr(args[0].expr, self.generated_expr_ty(value));
+                self.check_expr_unknown(args[0].expr);
+                self.check_expr(args[1].expr, self.generated_expr_ty(value));
                 Some(ExprProp::new(TyId::unit(self.db), true))
             }
             _ => None,
