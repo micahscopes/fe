@@ -48,7 +48,7 @@ pub(super) fn duplicate_evidence_provider_diags_for_top_mod<'db>(
             Some(invalid_request(
                 span,
                 format!(
-                    "multiple evidence providers for `{}` are not supported yet",
+                    "implicit derive request for `{}` is ambiguous; select a provider with `using`",
                     derive_goal.pretty_print(db)
                 ),
             ))

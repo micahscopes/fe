@@ -266,7 +266,10 @@ impl FastEq: Derive for Eq {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
 
-    assert_diag_message(&diags, "multiple evidence providers for `Derive<Eq>`");
+    assert_diag_message(
+        &diags,
+        "implicit derive request for `Derive<Eq>` is ambiguous",
+    );
 }
 
 #[test]
@@ -1476,7 +1479,10 @@ impl FastEq: Derive for Eq {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "multiple evidence providers for `Derive<Eq>`");
+    assert_diag_message(
+        &diags,
+        "implicit derive request for `Derive<Eq>` is ambiguous",
+    );
     assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
 }
 
@@ -1688,7 +1694,10 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "multiple evidence providers for `Derive<Eq>`");
+    assert_diag_message(
+        &diags,
+        "implicit derive request for `Derive<Eq>` is ambiguous",
+    );
 }
 
 #[test]
@@ -1730,7 +1739,10 @@ fn caller() {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "multiple evidence providers for `Derive<Eq>`");
+    assert_diag_message(
+        &diags,
+        "implicit derive request for `Derive<Eq>` is ambiguous",
+    );
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
