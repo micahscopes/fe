@@ -43,7 +43,9 @@ define_scope! {
         TypeKw,
         PubKw,
         UnsafeKw,
-        Ident,
+        // `derive` declarations are lexed as identifiers, but accepting every
+        // identifier as an item-list recovery token lets nested recovery stop
+        // before consuming invalid type/generic-bound identifiers.
         DocComment,
         Pound
     )
