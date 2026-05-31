@@ -72,8 +72,8 @@ pub use trace::{
 #[salsa::interned]
 #[derive(Debug)]
 pub(crate) struct ElaborationCtfeContextId<'db> {
-    request: ElaborationRequestId<'db>,
-    provider: EvidenceProviderId<'db>,
+    pub(crate) request: ElaborationRequestId<'db>,
+    pub(crate) provider: EvidenceProviderId<'db>,
     derive_evidence: ConstraintId<'db>,
 
     #[return_ref]
