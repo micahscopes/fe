@@ -3084,6 +3084,47 @@ impl StableTestPair: Derive for TestPair {
 }
 
 #[test]
+fn provider_emit_method_reports_unknown_method_name() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_emit_method_reports_unknown_method_name.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self) -> bool
+}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method("missing", builder.bool(true))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "derive provider `StableEq` for `Foo: Eq` did not produce generated evidence",
+    );
+    assert_diag_message(&diags, "provider emitted an invalid generated method name");
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "provider emitted an invalid generated method name",
+        "\"missing\"",
+    );
+    assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
+}
+
+#[test]
 fn provider_generated_duplicate_method_emission_is_rejected() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
