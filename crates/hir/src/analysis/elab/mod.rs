@@ -50,8 +50,8 @@ use diagnostics::{
     selected_evidence_provider_diags_for_top_mod,
 };
 use generated_method::{
-    generated_method_error_summary, generated_missing_required_methods,
-    generated_unsupported_required_methods,
+    generated_invalid_required_method_bodies, generated_method_error_summary,
+    generated_missing_required_methods,
 };
 use provider_context::{
     derive_evidence_for_goal, elaborate_provider_context, matching_selected_providers,
@@ -173,8 +173,8 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 }
             };
             let missing_methods = generated_missing_required_methods(db, generated);
-            let unsupported_methods = generated_unsupported_required_methods(db, generated);
-            if !missing_methods.is_empty() || !unsupported_methods.is_empty() {
+            let invalid_body_methods = generated_invalid_required_method_bodies(db, generated);
+            if !missing_methods.is_empty() || !invalid_body_methods.is_empty() {
                 if let Some(head) = concrete_trait_head(db, request.goal(db)) {
                     diags.push(invalid_request(
                         request.span(db),
@@ -184,7 +184,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                             generated_method_error_summary(
                                 db,
                                 &missing_methods,
-                                &unsupported_methods
+                                &invalid_body_methods
                             ),
                             context.provider(db).identity(db).pretty_print(db),
                             request.pretty_print(db)
@@ -333,8 +333,8 @@ fn generated_impl_is_admissible<'db>(
     candidates: &[GeneratedImplId<'db>],
 ) -> bool {
     let missing = generated_missing_required_methods(db, generated);
-    let unsupported = generated_unsupported_required_methods(db, generated);
-    if !missing.is_empty() || !unsupported.is_empty() {
+    let invalid_bodies = generated_invalid_required_method_bodies(db, generated);
+    if !missing.is_empty() || !invalid_bodies.is_empty() {
         return false;
     }
     !generated_conflicts_with_authored_impl(db, generated)

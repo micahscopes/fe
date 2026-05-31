@@ -34,7 +34,7 @@ pub(super) fn generated_missing_required_methods<'db>(
     )
 }
 
-pub(super) fn generated_unsupported_required_methods<'db>(
+pub(super) fn generated_invalid_required_method_bodies<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
 ) -> Vec<IdentId<'db>> {
@@ -344,7 +344,7 @@ fn generated_struct_init_ty<'db>(
 pub(super) fn generated_method_error_summary<'db>(
     db: &'db dyn HirAnalysisDb,
     missing_methods: &[IdentId<'db>],
-    unsupported_methods: &[IdentId<'db>],
+    invalid_body_methods: &[IdentId<'db>],
 ) -> String {
     let mut parts = Vec::new();
     if !missing_methods.is_empty() {
@@ -357,10 +357,10 @@ pub(super) fn generated_method_error_summary<'db>(
                 .join(", ")
         ));
     }
-    if !unsupported_methods.is_empty() {
+    if !invalid_body_methods.is_empty() {
         parts.push(format!(
-            "unsupported {}",
-            unsupported_methods
+            "invalid generated body for {}",
+            invalid_body_methods
                 .iter()
                 .map(|name| name.data(db).to_string())
                 .collect::<Vec<_>>()
