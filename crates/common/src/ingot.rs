@@ -29,6 +29,9 @@ pub enum IngotKind {
     /// Core library ingot.
     Core,
 
+    /// Canonical derive providers for core traits.
+    CoreDerives,
+
     /// Standard library ingot.
     Std,
 }
@@ -285,12 +288,21 @@ impl<'db> Ingot<'db> {
         let std_url = workspace_member_url("std").unwrap_or_else(|| {
             Url::parse(BUILTIN_STD_BASE_URL).expect("couldn't parse std ingot URL")
         });
+        let core_derives_url = workspace_member_url("core_derives").unwrap_or_else(|| {
+            Url::parse(BUILTIN_CORE_DERIVES_BASE_URL)
+                .expect("couldn't parse core_derives ingot URL")
+        });
 
         if kind != IngotKind::Core && !deps.iter().any(|(alias, _)| alias == "core") {
             deps.push(("core".into(), core_url));
         }
-        if !matches!(kind, IngotKind::Core | IngotKind::Std)
-            && !deps.iter().any(|(alias, _)| alias == "std")
+        if kind == IngotKind::Std && !deps.iter().any(|(alias, _)| alias == "core_derives") {
+            deps.push(("core_derives".into(), core_derives_url));
+        }
+        if !matches!(
+            kind,
+            IngotKind::Core | IngotKind::CoreDerives | IngotKind::Std
+        ) && !deps.iter().any(|(alias, _)| alias == "std")
         {
             deps.push(("std".into(), std_url));
         }
@@ -363,6 +375,7 @@ impl Workspace {
 
             let mut kind = match base_url.scheme() {
                 "builtin-core" => IngotKind::Core,
+                "builtin-core-derives" => IngotKind::CoreDerives,
                 "builtin-std" => IngotKind::Std,
                 _ => IngotKind::Local,
             };
@@ -371,6 +384,7 @@ impl Workspace {
             {
                 match config.metadata.name.as_deref() {
                     Some("core") => kind = IngotKind::Core,
+                    Some("core_derives") => kind = IngotKind::CoreDerives,
                     Some("std") => kind = IngotKind::Std,
                     _ => {}
                 }

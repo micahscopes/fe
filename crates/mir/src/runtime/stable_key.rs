@@ -601,6 +601,7 @@ fn ingot_logical_name<'db>(
         .and_then(|config| config.metadata.name.map(|name| name.to_string()))
         .unwrap_or_else(|| match ingot.kind(db) {
             IngotKind::Core => "core".to_string(),
+            IngotKind::CoreDerives => "core_derives".to_string(),
             IngotKind::Std => "std".to_string(),
             IngotKind::StandAlone => format!("standalone${}", top_mod.name(db).data(db)),
             IngotKind::Local => format!("local${}", top_mod.name(db).data(db)),

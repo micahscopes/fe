@@ -222,7 +222,7 @@ impl<'db> FileLowerCtxt<'db> {
         // core::prelude. If std lacks a prelude module (e.g. a user-defined
         // package aliased as "std"), the synthetic import fails silently and
         // we still have core::prelude as fallback.
-        if kind != IngotKind::Std {
+        if !matches!(kind, IngotKind::CoreDerives | IngotKind::Std) {
             let std = IdentId::new(db, "std".to_string());
             let prelude = IdentId::new(db, "prelude".to_string());
             self.insert_synthetic_use(vec![std, prelude]);

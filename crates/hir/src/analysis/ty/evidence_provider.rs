@@ -17,6 +17,7 @@ use crate::{
     span::DynLazySpan,
 };
 use common::ingot::Ingot;
+use rustc_hash::FxHashSet;
 
 #[salsa::interned]
 #[derive(Debug)]
@@ -117,11 +118,26 @@ pub(crate) fn visible_evidence_providers_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
-    let mut providers = validated_evidence_providers_for_ingot(db, ingot);
-    for &(_, dependency) in ingot.resolved_external_ingots(db) {
-        providers.extend(validated_evidence_providers_for_ingot(db, dependency));
-    }
+    let mut providers = Vec::new();
+    let mut visited = FxHashSet::default();
+    collect_visible_evidence_providers(db, ingot, &mut visited, &mut providers);
     providers
+}
+
+fn collect_visible_evidence_providers<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+    visited: &mut FxHashSet<Ingot<'db>>,
+    providers: &mut Vec<EvidenceProviderId<'db>>,
+) {
+    if !visited.insert(ingot) {
+        return;
+    }
+
+    providers.extend(validated_evidence_providers_for_ingot(db, ingot));
+    for &(_, dependency) in ingot.resolved_external_ingots(db) {
+        collect_visible_evidence_providers(db, dependency, visited, providers);
+    }
 }
 
 pub(crate) fn providers_for_derive_goal<'db>(

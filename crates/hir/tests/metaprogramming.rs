@@ -1368,9 +1368,9 @@ struct Pair<A, B> {
     b: B,
 }
 
-derive Eq for Pair using StableEq
+derive Eq for Pair using LocalEq
 
-impl StableEq: Derive for Eq {
+impl LocalEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (
             reflect: Reflect<T>,
@@ -1409,7 +1409,7 @@ where
     );
     assert_eq!(
         evidence_provider_summaries_for_top_mod(&db, top_mod),
-        vec!["provider StableEq via Derive<Eq> -> T: Eq<T>".to_string()]
+        vec!["provider LocalEq via Derive<Eq> -> T: Eq<T>".to_string()]
     );
 }
 
@@ -1430,9 +1430,9 @@ struct Foo {
     value: u256,
 }
 
-derive Eq for Foo using StableEq
+derive Eq for Foo using LocalEq
 
-impl StableEq: Derive for Eq {
+impl LocalEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (
             reflect: Reflect<T>,
@@ -1588,33 +1588,48 @@ fn caller() {
 }
 
 #[test]
-fn core_derives_provider_is_not_visible_without_dependency_activation() {
+fn std_dependency_activates_core_derives_providers_transitively() {
     let mut db = HirAnalysisTestDb::default();
     let file = project_file(
         &mut db,
-        "core_derives_provider_is_not_visible_without_dependency_activation",
+        "std_dependency_activates_core_derives_providers_transitively",
         r#"
 [ingot]
-name = "core_derives_provider_is_not_visible_without_dependency_activation"
+name = "std_dependency_activates_core_derives_providers_transitively"
 version = "0.1.0"
+
+[dependencies]
+std = true
 "#,
         r#"
 use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
 
 struct Foo {
     value: u256,
 }
 
 derive Eq for Foo using StableEq
+
+fn caller() {
+    require_eq<Foo>()
+}
 "#,
     );
     let (top_mod, _) = db.top_mod(file);
-    let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(
-        &diags,
-        "selected evidence provider `StableEq` for `Derive<Eq>` was not found",
+    db.assert_no_diags(top_mod);
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
     );
-    assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {u256: Eq}".to_string()]
+    );
 }
 
 #[test]
@@ -3105,9 +3120,9 @@ struct Foo {
     value: u256,
 }
 
-derive Default for Foo using StableDefault
+derive Default for Foo using LocalDefault
 
-impl StableDefault: Derive for Default {
+impl LocalDefault: Derive for Default {
     const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
         uses (
             reflect: Reflect<T>,
