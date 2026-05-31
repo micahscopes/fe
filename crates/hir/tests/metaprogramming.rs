@@ -1661,10 +1661,10 @@ fn caller() {
 }
 
 #[test]
-fn duplicate_evidence_providers_for_head_are_diagnosed() {
+fn implicit_attr_provider_ambiguity_is_diagnosed() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "duplicate_evidence_providers_for_head_are_diagnosed.fe".into(),
+        "implicit_attr_provider_ambiguity_is_diagnosed.fe".into(),
         r#"
 trait Eq {}
 
@@ -1701,10 +1701,10 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
-fn duplicate_evidence_providers_do_not_generate_ambiguous_impls() {
+fn implicit_attr_provider_ambiguity_does_not_generate_impls() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "duplicate_evidence_providers_do_not_generate_ambiguous_impls.fe".into(),
+        "implicit_attr_provider_ambiguity_does_not_generate_impls.fe".into(),
         r#"
 trait Eq {}
 
