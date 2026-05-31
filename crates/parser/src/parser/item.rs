@@ -1054,6 +1054,7 @@ impl super::Parse for TypeAliasScope {
 
         parser.pop_recovery_stack();
         parse_generic_params_opt(parser, true)?;
+        parse_where_clause_opt(parser)?;
 
         if parser.find_and_pop(SyntaxKind::Eq, ExpectedKind::Unspecified)? {
             parser.bump();

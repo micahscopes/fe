@@ -1045,6 +1045,33 @@ mod tests {
 
     #[test]
     #[wasm_bindgen_test]
+    fn derive_decl() {
+        let source = r#"
+                derive Eq for Foo using StableEq
+            "#;
+        let decl: DeriveDecl = parse_item(source);
+        assert_eq!(decl.head_path().unwrap().to_string(), "Eq");
+        assert_eq!(decl.target_path().unwrap().to_string(), "Foo");
+        assert_eq!(decl.provider_path().unwrap().to_string(), "StableEq");
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn named_derive_provider() {
+        let source = r#"
+                impl StableEq: Derive for Eq {
+                    const fn derive<T>() -> Evidence<Eq<T>>
+                }
+            "#;
+        let provider: DeriveProvider = parse_item(source);
+        assert_eq!(provider.name().unwrap().text(), "StableEq");
+        assert_eq!(provider.derive_path().unwrap().to_string(), "Derive");
+        assert_eq!(provider.head_path().unwrap().to_string(), "Eq");
+        assert_eq!(provider.item_list().unwrap().iter().count(), 1);
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
     fn impl_() {
         let source = r#"
                 impl Foo {
