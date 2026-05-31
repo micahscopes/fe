@@ -45,12 +45,12 @@ pub(crate) enum DeriveProviderValidationResult<'db> {
     Invalid,
 }
 
-pub(crate) fn obsolete_evidence_provider_attr_diags<'db>(
+pub(crate) fn obsolete_attr_derive_provider_diags<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let mut diags = Vec::new();
-    let attrs = obsolete_evidence_provider_attrs(db, func);
+    let attrs = obsolete_attr_derive_provider_attrs(db, func);
     if attrs.is_empty() {
         return diags;
     }
@@ -116,7 +116,7 @@ pub(crate) fn providers_for_derive_goal<'db>(
         .collect()
 }
 
-fn obsolete_evidence_provider_attrs<'db>(
+fn obsolete_attr_derive_provider_attrs<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
 ) -> Vec<&'db NormalAttr<'db>> {

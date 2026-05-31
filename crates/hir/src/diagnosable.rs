@@ -388,7 +388,7 @@ impl<'db> Func<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Vec<TyDiagCollection<'db>> {
-        ty::derive_provider::obsolete_evidence_provider_attr_diags(db, self)
+        ty::derive_provider::obsolete_attr_derive_provider_diags(db, self)
     }
 }
 
