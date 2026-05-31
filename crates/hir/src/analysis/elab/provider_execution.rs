@@ -391,16 +391,16 @@ impl<'db> ProviderBodyExecutor<'db> {
             | BUILDER_STRUCT_INIT_METHOD
             | BUILDER_WITH_FIELD_METHOD => Ok(false),
             BUILDER_EMIT_METHOD => {
-                let (method_name, expr_arg) = match args {
+                let (method_name, method_name_span, expr_arg) = match args {
                     [name_arg, expr_arg] => {
                         let Some(method_name) = self.string_literal_ident_arg(body, name_arg.expr)
                         else {
                             return Err(skipped_failure(
-                                ProviderSkipReason::UnsupportedProviderBody,
+                                ProviderSkipReason::InvalidGeneratedMethodName,
                                 name_arg.expr.span(body).into(),
                             ));
                         };
-                        (method_name, expr_arg.expr)
+                        (method_name, name_arg.expr.span(body).into(), expr_arg.expr)
                     }
                     _ => {
                         return Err(skipped_failure(
@@ -409,7 +409,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                         ));
                     }
                 };
-                self.execute_emit_method(body, method_name, expr_arg)?;
+                self.execute_emit_method(body, method_name, method_name_span, expr_arg)?;
                 Ok(true)
             }
             _ => Err(skipped_failure(
@@ -458,18 +458,19 @@ impl<'db> ProviderBodyExecutor<'db> {
         &mut self,
         body: Body<'db>,
         method_name: IdentId<'db>,
+        method_name_span: DynLazySpan<'db>,
         expr_arg: crate::hir_def::ExprId,
     ) -> Result<(), ProviderExecutionFailure<'db>> {
         let required = required_methods(self.db, self.context.request(self.db).goal(self.db));
         if !required.contains_key(&method_name) {
             return Err(skipped_failure(
-                ProviderSkipReason::UnsupportedProviderBody,
-                expr_arg.span(body).into(),
+                ProviderSkipReason::InvalidGeneratedMethodName,
+                method_name_span,
             ));
         }
         let Some(ElabValue::GeneratedExpr(expr)) = self.eval_expr_value(body, expr_arg) else {
             return Err(skipped_failure(
-                ProviderSkipReason::UnsupportedProviderBody,
+                ProviderSkipReason::InvalidGeneratedMethodBody,
                 expr_arg.span(body).into(),
             ));
         };

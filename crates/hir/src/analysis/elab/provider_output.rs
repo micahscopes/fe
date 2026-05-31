@@ -10,6 +10,8 @@ pub(crate) enum ProviderSkipReason {
     DuplicateFinish,
     CommandAfterFinish,
     InvalidBuilderRequirement,
+    InvalidGeneratedMethodName,
+    InvalidGeneratedMethodBody,
     UnsupportedProviderBody,
 }
 
@@ -24,6 +26,8 @@ impl ProviderSkipReason {
             Self::DuplicateFinish => "provider called builder.finish() more than once",
             Self::CommandAfterFinish => "provider emitted a builder command after finish",
             Self::InvalidBuilderRequirement => "provider emitted an invalid builder requirement",
+            Self::InvalidGeneratedMethodName => "provider emitted an invalid generated method name",
+            Self::InvalidGeneratedMethodBody => "provider emitted an invalid generated method body",
             Self::UnsupportedProviderBody => "provider body uses unsupported elaboration CTFE",
         }
     }

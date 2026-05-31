@@ -343,6 +343,82 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn provider_output_rejects_unknown_generated_method_name() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_output_rejects_unknown_generated_method_name.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self) -> bool
+}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method("missing", builder.bool(true))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let context = first_builder_context(&db, top_mod);
+    let output = provider_output_for_context(&db, context);
+    assert!(matches!(
+        output.status(&db),
+        ProviderOutputStatus::Skipped {
+            reason: ProviderSkipReason::InvalidGeneratedMethodName,
+            ..
+        }
+    ));
+    assert_eq!(skipped_output_span_text(&db, output), "\"missing\"");
+}
+
+#[test]
+fn provider_output_rejects_non_name_generated_method_arg() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_output_rejects_non_name_generated_method_arg.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self) -> bool
+}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.bool(true), builder.bool(false))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let context = first_builder_context(&db, top_mod);
+    let output = provider_output_for_context(&db, context);
+    assert!(matches!(
+        output.status(&db),
+        ProviderOutputStatus::Skipped {
+            reason: ProviderSkipReason::InvalidGeneratedMethodName,
+            ..
+        }
+    ));
+    assert_eq!(skipped_output_span_text(&db, output), "builder.bool(true)");
+}
+
+#[test]
 fn provider_output_reports_unsupported_control_flow() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
