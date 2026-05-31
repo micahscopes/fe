@@ -1526,6 +1526,66 @@ fn caller() {
 }
 
 #[test]
+fn core_derives_dependency_allows_implicit_canonical_provider_selection() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "core_derives_dependency_allows_implicit_canonical_provider_selection",
+        r#"
+[ingot]
+name = "core_derives_dependency_allows_implicit_canonical_provider_selection"
+version = "0.1.0"
+
+[dependencies]
+core_derives = true
+"#,
+        r#"
+use core::Default
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+fn require_default<T>()
+where
+    T: Default
+{}
+
+struct Foo {
+    value: u256,
+}
+
+derive Eq for Foo
+derive Default for Foo
+
+fn caller() {
+    require_eq<Foo>()
+    require_default<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "Foo: Eq requested for Foo using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string(),
+            "Foo: Default requested for Foo using Derive<Default> evidence from StableDefault with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Default>]".to_string(),
+        ]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Foo: Eq with obligations {u256: Eq}".to_string(),
+            "generated provider Foo: Default with obligations {u256: Default}".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn core_derives_provider_is_not_visible_without_dependency_activation() {
     let mut db = HirAnalysisTestDb::default();
     let file = project_file(
