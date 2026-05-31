@@ -44,7 +44,7 @@ pub(crate) use builder::{BuilderCommandListId, BuilderError, ImplBuilderSession}
 pub(crate) use capability::{
     CapabilityEnv, ElaborationCapabilityOrigin, ElaborationCapabilityWitness,
 };
-use coherence::{generated_conflicts_with_authored_impl, generated_conflicts_with_generated_impl};
+use coherence::{generated_conflicting_generated_impl, generated_conflicts_with_authored_impl};
 use diagnostics::{
     implicit_provider_ambiguity_diags_for_top_mod, provider_output_diag,
     selected_evidence_provider_diags_for_top_mod,
@@ -201,12 +201,17 @@ fn generated_overlay_diags_for_top_mod<'db>(
                         generated.trait_inst.pretty_print(db, true)
                     ),
                 ));
-            } else if generated_conflicts_with_generated_impl(db, generated, &candidates) {
+            } else if let Some(other) =
+                generated_conflicting_generated_impl(db, generated, &candidates)
+            {
                 diags.push(invalid_request(
                     request.span(db),
                     format!(
-                        "generated implementation for `{}` conflicts with another generated implementation",
-                        generated.trait_inst.pretty_print(db, true)
+                        "generated implementation for `{}` from provider `{}` conflicts with another generated implementation from provider `{}` for `{}`",
+                        generated.trait_inst.pretty_print(db, true),
+                        generated_provider_name(db, generated),
+                        generated_provider_name(db, other),
+                        other.context.request(db).pretty_print(db),
                     ),
                 ));
             }
@@ -221,6 +226,13 @@ fn trait_name<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> String {
         .to_opt()
         .map(|name| name.data(db).to_string())
         .unwrap_or_else(|| "<anonymous trait>".to_string())
+}
+
+fn generated_provider_name<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> String {
+    generated.context.provider(db).identity(db).pretty_print(db)
 }
 
 #[salsa::tracked(return_ref)]
@@ -326,7 +338,7 @@ fn generated_impl_is_admissible<'db>(
         return false;
     }
     !generated_conflicts_with_authored_impl(db, generated)
-        && !generated_conflicts_with_generated_impl(db, generated, candidates)
+        && generated_conflicting_generated_impl(db, generated, candidates).is_none()
 }
 
 fn provider_generated_impl_candidate_for_context<'db>(

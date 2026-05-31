@@ -32,11 +32,11 @@ pub(super) fn generated_conflicts_with_authored_impl<'db>(
         .any(|&authored| does_impl_trait_conflict(db, authored, generated_impl))
 }
 
-pub(super) fn generated_conflicts_with_generated_impl<'db>(
+pub(super) fn generated_conflicting_generated_impl<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
     candidates: &[GeneratedImplId<'db>],
-) -> bool {
+) -> Option<GeneratedImplId<'db>> {
     let generated_impl = Binder::bind(ImplementorId::new(
         db,
         generated.trait_inst,
@@ -44,7 +44,7 @@ pub(super) fn generated_conflicts_with_generated_impl<'db>(
         IndexMap::new(),
         ImplementorOrigin::Generated(generated),
     ));
-    candidates.iter().copied().any(|other| {
+    candidates.iter().copied().find(|&other| {
         if other == generated {
             return false;
         }

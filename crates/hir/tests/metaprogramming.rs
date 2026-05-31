@@ -2721,6 +2721,7 @@ impl StableEq: Derive for Eq {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_diag_message(&diags, "from provider `StableEq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         Vec::<String>::new()
@@ -2762,6 +2763,8 @@ impl FastEq: Derive for Eq {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_diag_message(&diags, "from provider `StableEq`");
+    assert_diag_message(&diags, "from provider `FastEq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         Vec::<String>::new()
@@ -2803,6 +2806,8 @@ impl FastEq: Derive for Eq {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_diag_message(&diags, "from provider `StableEq`");
+    assert_diag_message(&diags, "from provider `FastEq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         Vec::<String>::new()
