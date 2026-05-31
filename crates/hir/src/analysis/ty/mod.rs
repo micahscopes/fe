@@ -45,6 +45,7 @@ pub mod fold;
 pub(crate) mod generated;
 pub(crate) mod layout_holes;
 pub(crate) mod method_cmp;
+pub(crate) mod method_conformance;
 pub mod method_table;
 pub mod normalize;
 pub mod pattern_analysis;

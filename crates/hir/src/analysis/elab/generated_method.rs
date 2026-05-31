@@ -10,6 +10,7 @@ use crate::{
                 GeneratedExprId, GeneratedExprKind, GeneratedImplId, GeneratedMethodBodyKind,
                 GeneratedStructFieldInitListId,
             },
+            method_conformance::{missing_required_method_names, required_trait_methods},
             trait_def::TraitInstId,
             trait_resolution::PredicateListId,
             ty_def::{TyData, TyId},
@@ -26,16 +27,11 @@ pub(super) fn generated_missing_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
 ) -> Vec<IdentId<'db>> {
-    let provided = generated
-        .methods
-        .list(db)
-        .iter()
-        .map(|method| method.name)
-        .collect::<IndexSet<_>>();
-    required_method_names(db, ConstraintId::from_trait(db, generated.trait_inst))
-        .into_iter()
-        .filter(|name| !provided.contains(name))
-        .collect()
+    missing_required_method_names(
+        db,
+        generated.trait_inst.def(db),
+        generated.methods.list(db).iter().map(|method| method.name),
+    )
 }
 
 pub(super) fn generated_unsupported_required_methods<'db>(
@@ -388,10 +384,5 @@ pub(super) fn required_methods<'db>(
     let ConstraintKind::Trait(trait_inst) = goal.kind(db) else {
         return IndexMap::new();
     };
-    trait_inst
-        .def(db)
-        .method_defs(db)
-        .into_iter()
-        .filter(|(_, method)| method.body(db).is_none())
-        .collect()
+    required_trait_methods(db, trait_inst.def(db))
 }

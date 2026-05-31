@@ -3,6 +3,7 @@
 use crate::{
     analysis::ty::{
         method_cmp::compare_impl_method,
+        method_conformance::missing_required_method_names,
         trait_lower::collect_trait_impls,
         trait_resolution::{GoalSatisfiability, PredicateListId, Selection},
     },
@@ -622,10 +623,6 @@ impl<'db> ImplementorId<'db> {
         let impl_methods = self.methods(db);
         let hir_trait = self.trait_def(db);
         let trait_methods = self.trait_def(db).method_defs(db);
-        let mut required_methods: IndexSet<_> = trait_methods
-            .iter()
-            .filter_map(|(name, &trait_method)| trait_method.body(db).is_none().then_some(*name))
-            .collect();
 
         for (name, impl_m) in impl_methods {
             let Some(trait_m) = trait_methods.get(name) else {
@@ -646,14 +643,15 @@ impl<'db> ImplementorId<'db> {
                 self.trait_(db),
                 &mut diags,
             );
-            required_methods.remove(name);
         }
 
+        let required_methods =
+            missing_required_method_names(db, hir_trait, impl_methods.keys().copied());
         if !required_methods.is_empty() {
             diags.push(
                 ImplDiag::NotAllTraitItemsImplemented {
                     primary: self.hir_impl_trait(db).span().ty().into(),
-                    not_implemented: required_methods.into_iter().collect(),
+                    not_implemented: required_methods.into(),
                 }
                 .into(),
             );
