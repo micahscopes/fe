@@ -241,8 +241,9 @@ fn implicit_derive_is_ambiguous_with_two_named_derive_providers() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
+
+derive Eq for Foo
 
 impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
@@ -499,10 +500,11 @@ fn elaboration_ctfe_context_seeds_declared_provider_capabilities() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {
     x: u256,
 }
+
+derive Eq for Foo
 
 impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
@@ -536,8 +538,9 @@ fn elaboration_ctfe_context_only_seeds_declared_provider_capabilities() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
+
+derive Eq for Foo
 
 impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
@@ -566,10 +569,11 @@ fn typed_reflection_exposes_struct_fields_from_reflect_capability() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Box<T> {
     value: T,
 }
+
+derive Eq for Box<T>
 
 impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
@@ -597,10 +601,11 @@ fn typed_reflection_requires_reflect_capability() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {
     x: u256,
 }
+
+derive Eq for Foo
 
 impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
@@ -712,8 +717,9 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {}
+
+derive Eq for Foo
 
 impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
@@ -750,10 +756,11 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {
     x: u256,
 }
+
+derive Eq for Foo
 
 impl StableEq: Derive for Eq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
