@@ -1751,10 +1751,10 @@ fn caller() {
 }
 
 #[test]
-fn derive_using_selects_named_provider_when_multiple_match() {
+fn derive_attr_using_selects_named_provider_when_multiple_match() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "derive_using_selects_named_provider_when_multiple_match.fe".into(),
+        "derive_attr_using_selects_named_provider_when_multiple_match.fe".into(),
         r#"
 trait Eq {}
 
@@ -1763,23 +1763,25 @@ where
     T: Eq
 {}
 
-#[derive(Eq, using = derive_eq2)]
+#[derive(Eq, using = FastEq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 
 fn caller() {
@@ -1792,7 +1794,7 @@ fn caller() {
 
     assert_eq!(
         elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
-        vec!["Foo: Eq requested for Foo using derive_eq2 using Derive<Eq> evidence from derive_eq2 with [mut capability ImplBuilder<Foo: Eq>]".to_string()]
+        vec!["Foo: Eq requested for Foo using FastEq using Derive<Eq> evidence from FastEq with [mut capability ImplBuilder<Foo: Eq>]".to_string()]
     );
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -1815,22 +1817,24 @@ where
 
 struct Foo {}
 
-derive Eq for Foo using derive_eq2
+derive Eq for Foo using FastEq
 
-#[evidence_provider(Eq)]
-const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 
 fn caller() {
@@ -1843,7 +1847,7 @@ fn caller() {
 
     assert_eq!(
         elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
-        vec!["Foo: Eq requested for Foo using derive_eq2 using Derive<Eq> evidence from derive_eq2 with [mut capability ImplBuilder<Foo: Eq>]".to_string()]
+        vec!["Foo: Eq requested for Foo using FastEq using Derive<Eq> evidence from FastEq with [mut capability ImplBuilder<Foo: Eq>]".to_string()]
     );
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -1852,10 +1856,10 @@ fn caller() {
 }
 
 #[test]
-fn derive_declaration_using_selects_provider_identity() {
+fn derive_declaration_using_selects_attr_provider_identity() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "derive_declaration_using_selects_provider_identity.fe".into(),
+        "derive_declaration_using_selects_attr_provider_identity.fe".into(),
         r#"
 trait Eq {}
 
@@ -1908,12 +1912,13 @@ trait Eq {}
 #[derive(Eq, using = missing_provider)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -1934,15 +1939,16 @@ fn derive_using_reports_wrong_provider_head() {
 trait Eq {}
 trait Default {}
 
-#[derive(Eq, using = derive_default)]
+#[derive(Eq, using = StableDefault)]
 struct Foo {}
 
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (builder: mut ImplBuilder<Default<T>>)
-{
-    builder.finish()
-    ev
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -1950,7 +1956,7 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `derive_default` does not provide `Derive<Eq>` evidence",
+        "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
     );
 }
 
@@ -1966,12 +1972,13 @@ struct Foo {}
 
 derive Eq for Foo using missing_provider
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -1994,14 +2001,15 @@ trait Default {}
 
 struct Foo {}
 
-derive Eq for Foo using derive_default
+derive Eq for Foo using StableDefault
 
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (builder: mut ImplBuilder<Default<T>>)
-{
-    builder.finish()
-    ev
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -2009,7 +2017,7 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `derive_default` does not provide `Derive<Eq>` evidence",
+        "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
     );
 }
 
@@ -2021,20 +2029,22 @@ fn generated_derive_conflicts_with_authored_impl() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
+
+derive Eq for Foo using StableEq
 
 impl Eq for Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -2082,23 +2092,25 @@ trait Eq {}
 
 struct Foo {}
 
-derive Eq for Foo using derive_eq1
-derive Eq for Foo using derive_eq2
+derive Eq for Foo using StableEq
+derive Eq for Foo using FastEq
 
-#[evidence_provider(Eq)]
-const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
