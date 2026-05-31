@@ -2136,6 +2136,10 @@ impl StableDefault: Derive for Default {
         &diags,
         "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
     );
+    assert_diag_message(
+        &diags,
+        "visible provider(s) named `StableDefault` provide `Derive<Default>`",
+    );
 }
 
 #[test]
@@ -2197,6 +2201,50 @@ impl StableDefault: Derive for Default {
         &diags,
         "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
     );
+    assert_diag_message(
+        &diags,
+        "visible provider(s) named `StableDefault` provide `Derive<Default>`",
+    );
+}
+
+#[test]
+fn derive_declaration_using_reports_ambiguous_duplicate_provider_name() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_using_reports_ambiguous_duplicate_provider_name.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `StableEq` for `Derive<Eq>` is ambiguous",
+    );
+    assert_diag_message(&diags, "matches 2 visible providers");
 }
 
 #[test]

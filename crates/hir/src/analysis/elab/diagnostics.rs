@@ -71,10 +71,16 @@ pub(super) fn selected_evidence_provider_diags_for_top_mod<'db>(
             }
             let selected_name = selected.data(db);
             let message = if matches.is_empty() {
-                if !providers_named_in_ingot(db, top_mod.ingot(db), selected).is_empty() {
+                let named_providers = providers_named_in_ingot(db, top_mod.ingot(db), selected);
+                if !named_providers.is_empty() {
+                    let provided_goals = named_providers
+                        .iter()
+                        .map(|provider| format!("`{}`", provider.derive_goal(db).pretty_print(db)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     format!(
-                        "selected evidence provider `{selected_name}` does not provide `{}` evidence",
-                        derive_goal.pretty_print(db)
+                        "selected evidence provider `{selected_name}` does not provide `{}` evidence; visible provider(s) named `{selected_name}` provide {provided_goals}",
+                        derive_goal.pretty_print(db),
                     )
                 } else {
                     format!(
@@ -83,8 +89,9 @@ pub(super) fn selected_evidence_provider_diags_for_top_mod<'db>(
                     )
                 }
             } else {
+                let count = matches.len();
                 format!(
-                    "selected evidence provider `{selected_name}` for `{}` is ambiguous",
+                    "selected evidence provider `{selected_name}` for `{}` is ambiguous; it matches {count} visible providers",
                     derive_goal.pretty_print(db)
                 )
             };
