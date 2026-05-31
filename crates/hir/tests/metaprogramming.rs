@@ -2878,7 +2878,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Eq` does not generate required methods yet",
+        "provider output for `Eq` does not satisfy required methods",
     );
 }
 
@@ -3236,7 +3236,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Eq` does not generate required methods yet",
+        "provider output for `Eq` does not satisfy required methods",
     );
     assert_diag_message(&diags, "unsupported eq");
     assert_diag_message(
@@ -3284,7 +3284,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Eq` does not generate required methods yet",
+        "provider output for `Eq` does not satisfy required methods",
     );
     assert_diag_message(&diags, "unsupported eq");
     assert_diag_message(
@@ -3358,10 +3358,10 @@ where
 }
 
 #[test]
-fn generated_default_derive_with_required_method_waits_for_body_ir() {
+fn generated_default_derive_missing_required_body_is_rejected() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "generated_default_derive_with_required_method_waits_for_body_ir.fe".into(),
+        "generated_default_derive_missing_required_body_is_rejected.fe".into(),
         r#"
 trait Default {
     fn default() -> Self
@@ -3387,7 +3387,7 @@ impl StableDefault: Derive for Default {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Default` does not generate required methods yet",
+        "provider output for `Default` does not satisfy required methods",
     );
     assert_diag_message(&diags, "missing default");
     assert_diag_message(
