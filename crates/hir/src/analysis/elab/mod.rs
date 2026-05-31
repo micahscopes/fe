@@ -50,6 +50,7 @@ mod builder;
 mod capability;
 mod cycles;
 mod generated_method;
+mod provider_output;
 mod reflect;
 mod request;
 mod trace;
@@ -68,6 +69,7 @@ use generated_method::{
     generated_unsupported_required_methods, required_method_arg_ty_for_trait_inst,
     required_method_names, required_methods,
 };
+pub(crate) use provider_output::{ProviderOutputId, ProviderOutputStatus, ProviderSkipReason};
 pub(crate) use reflect::ReflectedField;
 use reflect::reflect_struct_fields;
 pub(crate) use request::{
@@ -95,54 +97,6 @@ pub(crate) enum RequirementOrigin<'db> {
     ReflectedField(ReflectedField<'db>),
     ProviderCode,
     Synthetic,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum ProviderSkipReason {
-    MissingBuilderCapability,
-    MissingReflectCapability,
-    MissingFinish,
-    DuplicateFinish,
-    CommandAfterFinish,
-    InvalidBuilderRequirement,
-    UnsupportedProviderBody,
-}
-
-impl ProviderSkipReason {
-    fn diagnostic_message(self) -> &'static str {
-        match self {
-            Self::MissingBuilderCapability => {
-                "provider does not declare mutable ImplBuilder capability"
-            }
-            Self::MissingReflectCapability => "provider body requires Reflect capability",
-            Self::MissingFinish => "provider did not call builder.finish()",
-            Self::DuplicateFinish => "provider called builder.finish() more than once",
-            Self::CommandAfterFinish => "provider emitted a builder command after finish",
-            Self::InvalidBuilderRequirement => "provider emitted an invalid builder requirement",
-            Self::UnsupportedProviderBody => "provider body uses unsupported elaboration CTFE",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum ProviderOutputStatus<'db> {
-    Succeeded {
-        commands: BuilderCommandListId<'db>,
-    },
-    Failed,
-    Skipped {
-        reason: ProviderSkipReason,
-        span: DynLazySpan<'db>,
-    },
-}
-
-#[salsa::interned]
-#[derive(Debug)]
-pub(crate) struct ProviderOutputId<'db> {
-    request: ElaborationRequestId<'db>,
-    provider: EvidenceProviderId<'db>,
-    context: ElaborationCtfeContextId<'db>,
-    status: ProviderOutputStatus<'db>,
 }
 
 impl<'db> ElaborationCtfeContextId<'db> {

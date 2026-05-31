@@ -1,0 +1,51 @@
+use crate::{analysis::ty::evidence_provider::EvidenceProviderId, span::DynLazySpan};
+
+use super::{BuilderCommandListId, ElaborationCtfeContextId, ElaborationRequestId};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum ProviderSkipReason {
+    MissingBuilderCapability,
+    MissingReflectCapability,
+    MissingFinish,
+    DuplicateFinish,
+    CommandAfterFinish,
+    InvalidBuilderRequirement,
+    UnsupportedProviderBody,
+}
+
+impl ProviderSkipReason {
+    pub(super) fn diagnostic_message(self) -> &'static str {
+        match self {
+            Self::MissingBuilderCapability => {
+                "provider does not declare mutable ImplBuilder capability"
+            }
+            Self::MissingReflectCapability => "provider body requires Reflect capability",
+            Self::MissingFinish => "provider did not call builder.finish()",
+            Self::DuplicateFinish => "provider called builder.finish() more than once",
+            Self::CommandAfterFinish => "provider emitted a builder command after finish",
+            Self::InvalidBuilderRequirement => "provider emitted an invalid builder requirement",
+            Self::UnsupportedProviderBody => "provider body uses unsupported elaboration CTFE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
+pub(crate) enum ProviderOutputStatus<'db> {
+    Succeeded {
+        commands: BuilderCommandListId<'db>,
+    },
+    Failed,
+    Skipped {
+        reason: ProviderSkipReason,
+        span: DynLazySpan<'db>,
+    },
+}
+
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct ProviderOutputId<'db> {
+    pub(crate) request: ElaborationRequestId<'db>,
+    pub(crate) provider: EvidenceProviderId<'db>,
+    pub(crate) context: ElaborationCtfeContextId<'db>,
+    pub(crate) status: ProviderOutputStatus<'db>,
+}
