@@ -190,6 +190,105 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn named_derive_provider_must_use_derive_marker() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_must_use_derive_marker.fe".into(),
+        r#"
+trait Eq {}
+trait NotDerive {}
+
+impl StableEq: NotDerive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(
+        &diags,
+        "derive provider declarations must use `Derive` after `:`",
+    );
+}
+
+#[test]
+fn named_derive_provider_head_must_resolve_to_trait() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_head_must_resolve_to_trait.fe".into(),
+        r#"
+trait Eq {}
+struct NotATrait {}
+
+impl StableEq: Derive for NotATrait {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "derive provider head must resolve to a trait");
+}
+
+#[test]
+fn named_derive_provider_must_contain_derive_function() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_must_contain_derive_function.fe".into(),
+        r#"
+trait Eq {}
+
+impl StableEq: Derive for Eq {
+    const fn build<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(
+        &diags,
+        "derive provider declarations must contain one `derive` function",
+    );
+}
+
+#[test]
+fn named_derive_provider_rejects_multiple_derive_functions() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_rejects_multiple_derive_functions.fe".into(),
+        r#"
+trait Eq {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
+
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(
+        &diags,
+        "derive provider declarations may contain only one `derive` function",
+    );
+}
+
+#[test]
 fn derive_declaration_using_selects_named_derive_provider() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
