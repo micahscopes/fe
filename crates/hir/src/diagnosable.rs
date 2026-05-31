@@ -385,7 +385,7 @@ impl<'db> Func<'db> {
     }
 
     pub fn diags_evidence_provider(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
-        let (_, diags) = ty::evidence_provider::validate_evidence_provider(db, self);
+        let (_, diags) = ty::evidence_provider::validate_attr_evidence_provider(db, self);
         diags
     }
 }

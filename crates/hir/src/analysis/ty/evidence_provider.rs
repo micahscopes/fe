@@ -48,7 +48,7 @@ pub(crate) enum EvidenceProviderValidationResult<'db> {
     NotProvider,
 }
 
-pub(crate) fn validate_evidence_provider<'db>(
+pub(crate) fn validate_attr_evidence_provider<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
 ) -> (
@@ -99,26 +99,27 @@ pub(crate) fn validated_evidence_providers_for_ingot<'db>(
     ingot: Ingot<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
     let mut providers: Vec<_> = ingot
-        .all_funcs(db)
+        .all_derive_providers(db)
         .iter()
-        .filter_map(|&func| match validate_evidence_provider(db, func).0 {
+        .filter_map(
+            |&provider| match validate_named_derive_provider(db, provider).0 {
+                EvidenceProviderValidationResult::Valid(provider) => Some(provider),
+                EvidenceProviderValidationResult::Invalid
+                | EvidenceProviderValidationResult::NotProvider => None,
+            },
+        )
+        .collect();
+
+    // Compatibility path for staged `#[evidence_provider(...)]` functions. The
+    // named `impl Provider: Derive for Head { .. }` item above is the primary
+    // provider declaration surface.
+    providers.extend(ingot.all_funcs(db).iter().filter_map(|&func| {
+        match validate_attr_evidence_provider(db, func).0 {
             EvidenceProviderValidationResult::Valid(provider) => Some(provider),
             EvidenceProviderValidationResult::Invalid
             | EvidenceProviderValidationResult::NotProvider => None,
-        })
-        .collect();
-    providers.extend(
-        ingot
-            .all_derive_providers(db)
-            .iter()
-            .filter_map(
-                |&provider| match validate_named_derive_provider(db, provider).0 {
-                    EvidenceProviderValidationResult::Valid(provider) => Some(provider),
-                    EvidenceProviderValidationResult::Invalid
-                    | EvidenceProviderValidationResult::NotProvider => None,
-                },
-            ),
-    );
+        }
+    }));
     providers
 }
 
