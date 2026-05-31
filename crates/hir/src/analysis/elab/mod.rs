@@ -31,9 +31,7 @@ use crate::{
             },
             trait_def::{ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict},
             trait_lower::collect_trait_impls,
-            trait_resolution::{
-                PredicateListId, constraint::collect_func_effect_capability_constraints,
-            },
+            trait_resolution::PredicateListId,
             ty_def::{Kind, TyId},
             unify::UnificationTable,
             visitor::{TyVisitable, TyVisitor},
@@ -50,6 +48,7 @@ mod builder;
 mod capability;
 mod cycles;
 mod generated_method;
+mod provider_context;
 mod provider_output;
 mod reflect;
 mod request;
@@ -68,6 +67,10 @@ use generated_method::{
     generated_method_error_summary, generated_missing_required_methods,
     generated_unsupported_required_methods, required_method_arg_ty_for_trait_inst,
     required_method_names, required_methods,
+};
+use provider_context::{
+    derive_evidence_for_goal, elaborate_provider_context, matching_selected_providers,
+    providers_named_in_ingot,
 };
 pub(crate) use provider_output::{ProviderOutputId, ProviderOutputStatus, ProviderSkipReason};
 pub(crate) use reflect::ReflectedField;
@@ -416,29 +419,6 @@ pub(crate) fn elaboration_ctfe_contexts_for_request<'db>(
     providers
         .into_iter()
         .filter_map(|provider| elaborate_provider_context(db, request, provider))
-        .collect()
-}
-
-fn matching_selected_providers<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ingot: Ingot<'db>,
-    derive_goal: ConstraintId<'db>,
-    selected: IdentId<'db>,
-) -> Vec<EvidenceProviderId<'db>> {
-    providers_for_derive_goal(db, ingot, derive_goal)
-        .into_iter()
-        .filter(|provider| provider.identity(db).name(db) == selected)
-        .collect()
-}
-
-fn providers_named_in_ingot<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ingot: Ingot<'db>,
-    selected: IdentId<'db>,
-) -> Vec<EvidenceProviderId<'db>> {
-    validated_evidence_providers_for_ingot(db, ingot)
-        .into_iter()
-        .filter(|provider| provider.identity(db).name(db) == selected)
         .collect()
 }
 
@@ -1650,74 +1630,6 @@ fn concrete_trait_head<'db>(
         ConstraintKind::Trait(inst) => Some(inst.def(db)),
         _ => None,
     }
-}
-
-fn elaborate_provider_context<'db>(
-    db: &'db dyn HirAnalysisDb,
-    request: ElaborationRequestId<'db>,
-    provider: EvidenceProviderId<'db>,
-) -> Option<ElaborationCtfeContextId<'db>> {
-    let capability_constraints = collect_func_effect_capability_constraints(db, provider.func(db));
-    let mut table = UnificationTable::new(db);
-    let mut instantiated = Binder::bind(provider_goal_and_capabilities(
-        db,
-        provider,
-        &capability_constraints,
-    ))
-    .instantiate_with(db, |ty| table.new_var_from_param(ty));
-
-    let instantiated_goal = instantiated.first().copied()?;
-    table.unify(instantiated_goal, request.goal(db)).ok()?;
-    let derive_evidence = instantiated.get(1).copied()?.fold_with(db, &mut table);
-    let expected_derive_evidence = derive_evidence_for_goal(db, request.goal(db))?;
-    if !constraints_match(db, derive_evidence, expected_derive_evidence) {
-        return None;
-    }
-
-    let capabilities: Vec<ElaborationCapabilityWitness<'db>> = instantiated
-        .drain(2..)
-        .filter_map(|constraint| {
-            let folded = constraint.fold_with(db, &mut table);
-            let ConstraintKind::EffectCapability(capability) = folded.kind(db) else {
-                return None;
-            };
-            Some(ElaborationCapabilityWitness {
-                capability,
-                origin: ElaborationCapabilityOrigin::ProviderUsesParam,
-            })
-        })
-        .collect();
-
-    Some(ElaborationCtfeContextId::new(
-        db,
-        request,
-        provider,
-        derive_evidence,
-        capabilities,
-    ))
-}
-
-fn derive_evidence_for_goal<'db>(
-    db: &'db dyn HirAnalysisDb,
-    goal: ConstraintId<'db>,
-) -> Option<ConstraintId<'db>> {
-    let ConstraintKind::Trait(inst) = goal.kind(db) else {
-        return None;
-    };
-    let head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(inst.def(db)));
-    Some(ConstraintId::new(db, ConstraintKind::Derive(head)))
-}
-
-fn provider_goal_and_capabilities<'db>(
-    db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
-    capabilities: &[ConstraintId<'db>],
-) -> Vec<ConstraintId<'db>> {
-    let mut constraints = Vec::with_capacity(capabilities.len() + 2);
-    constraints.push(provider.goal(db));
-    constraints.push(provider.derive_goal(db));
-    constraints.extend(capabilities.iter().copied());
-    constraints
 }
 
 pub(super) fn invalid_request<'db>(
