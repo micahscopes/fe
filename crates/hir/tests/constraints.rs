@@ -2624,10 +2624,10 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
-fn generated_stub_impls_reject_traits_with_required_methods() {
+fn provider_outputs_reject_traits_with_required_methods_without_generated_methods() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "generated_stub_impls_reject_traits_with_required_methods.fe".into(),
+        "provider_outputs_reject_traits_with_required_methods_without_generated_methods.fe".into(),
         r#"
 trait Eq {
     fn eq(self, other: Self) -> bool

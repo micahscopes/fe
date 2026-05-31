@@ -595,7 +595,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         .next()
         .expect("missing reflected field");
     let self_ref = GeneratedExprId::new(&db, GeneratedExprKind::SelfRef { ty: target_ty });
-    let other_ref = GeneratedExprId::new(
+    let method_arg_ref = GeneratedExprId::new(
         &db,
         GeneratedExprKind::MethodArgRef {
             name: IdentId::new(&db, "other".to_string()),
@@ -612,7 +612,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     let rhs = GeneratedExprId::new(
         &db,
         GeneratedExprKind::FieldGet {
-            base: other_ref,
+            base: method_arg_ref,
             field,
         },
     );
