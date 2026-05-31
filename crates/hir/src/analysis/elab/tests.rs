@@ -82,12 +82,14 @@ fn raw_impl_builder_records_required_obligations() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
 }
 "#,
     );
@@ -114,12 +116,14 @@ fn raw_impl_builder_rejects_wrong_target() {
 trait Eq {}
 trait Default {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
 }
 "#,
     );
@@ -148,12 +152,14 @@ fn builder_command_validation_requires_finish() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
 }
 "#,
     );
@@ -189,12 +195,14 @@ fn builder_command_validation_rejects_commands_after_finish() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
 }
 "#,
     );
@@ -233,14 +241,16 @@ fn provider_output_reports_missing_finish() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        ev
+    }
 }
 "#,
     );
@@ -266,18 +276,20 @@ fn provider_output_reports_missing_reflect_capability() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 "#,
     );
@@ -303,15 +315,17 @@ fn provider_output_reports_malformed_builder_finish_call_as_unsupported() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish(1)
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish(1)
+        ev
+    }
 }
 "#,
     );
@@ -336,17 +350,19 @@ fn provider_output_reports_unsupported_control_flow() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    while true {
-        builder.finish()
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        while true {
+            builder.finish()
+        }
+        ev
     }
-    ev
 }
 "#,
     );
@@ -371,16 +387,18 @@ fn provider_output_rejects_duplicate_finish_calls() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -406,23 +424,25 @@ fn provider_output_rejects_commands_after_finish() {
         r#"
 trait Eq {}
 
-#[derive(Eq)]
 struct Foo {
     x: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    builder.finish()
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        builder.finish()
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        ev
     }
-    ev
 }
 "#,
     );
@@ -450,15 +470,17 @@ trait Eq {
     fn eq(self, other: Self) -> bool
 }
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -509,15 +531,17 @@ trait Eq {
     fn eq(self, other: Self) -> bool
 }
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -566,17 +590,19 @@ trait Eq {
     fn eq(self, other: Self) -> bool
 }
 
-#[derive(Eq)]
 struct Foo {
     x: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -650,17 +676,19 @@ trait Default {
     fn default() -> Self
 }
 
-#[derive(Default)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (builder: mut ImplBuilder<Default<T>>)
-{
-    builder.finish()
-    ev
+derive Default for Foo using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -721,17 +749,19 @@ trait Default {
     fn default() -> Self
 }
 
-#[derive(Default)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (builder: mut ImplBuilder<Default<T>>)
-{
-    builder.finish()
-    ev
+derive Default for Foo using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -789,17 +819,19 @@ trait Default {
     fn default() -> Self
 }
 
-#[derive(Default)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (builder: mut ImplBuilder<Default<T>>)
-{
-    builder.finish()
-    ev
+derive Default for Foo using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -863,15 +895,17 @@ trait Count {
     fn count(self) -> u256
 }
 
-#[derive(Count)]
 struct Foo {}
 
-#[evidence_provider(Count)]
-const fn derive_count<T>(ev: own Evidence<Count<T>>) -> Evidence<Count<T>>
-    uses (builder: mut ImplBuilder<Count<T>>)
-{
-    builder.finish()
-    ev
+derive Count for Foo using StableCount
+
+impl StableCount: Derive for Count {
+    const fn derive<T>(ev: own Evidence<Count<T>>) -> Evidence<Count<T>>
+        uses (builder: mut ImplBuilder<Count<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
