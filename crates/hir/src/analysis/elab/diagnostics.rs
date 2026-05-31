@@ -1,4 +1,4 @@
-use common::indexmap::{IndexMap, IndexSet};
+use common::indexmap::IndexMap;
 
 use crate::{
     analysis::{
@@ -22,11 +22,6 @@ pub(super) fn implicit_provider_ambiguity_diags_for_top_mod<'db>(
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let providers = visible_evidence_providers_for_ingot(db, top_mod.ingot(db));
-    let implicit_derive_goals = elaboration_requests_for_top_mod(db, top_mod)
-        .iter()
-        .filter(|request| request.selected_provider(db).is_none())
-        .filter_map(|request| derive_evidence_for_goal(db, request.goal(db)))
-        .collect::<IndexSet<_>>();
     let mut by_derive_goal: IndexMap<_, Vec<_>> = IndexMap::new();
     for provider in providers {
         by_derive_goal
@@ -35,20 +30,24 @@ pub(super) fn implicit_provider_ambiguity_diags_for_top_mod<'db>(
             .push(provider);
     }
 
-    by_derive_goal
-        .into_iter()
-        .filter_map(|(derive_goal, providers)| {
+    elaboration_requests_for_top_mod(db, top_mod)
+        .iter()
+        .filter(|request| request.selected_provider(db).is_none())
+        .filter_map(|request| {
+            let derive_goal = derive_evidence_for_goal(db, request.goal(db))?;
+            let providers = by_derive_goal.get(&derive_goal)?;
             if providers.len() <= 1 {
                 return None;
             }
-            if !implicit_derive_goals.contains(&derive_goal) {
-                return None;
-            }
-            let span = providers[0].func(db).span().name().into();
+            let names = providers
+                .iter()
+                .map(|provider| provider.identity(db).pretty_print(db))
+                .collect::<Vec<_>>()
+                .join(", ");
             Some(invalid_request(
-                span,
+                request.span(db),
                 format!(
-                    "implicit derive request for `{}` is ambiguous; select a provider with `using`",
+                    "implicit derive request for `{}` is ambiguous between providers {names}; select a provider with `using`",
                     derive_goal.pretty_print(db)
                 ),
             ))

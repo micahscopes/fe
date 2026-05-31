@@ -370,6 +370,8 @@ impl FastEq: Derive for Eq {
         &diags,
         "implicit derive request for `Derive<Eq>` is ambiguous",
     );
+    assert_diag_message(&diags, "StableEq");
+    assert_diag_message(&diags, "FastEq");
 }
 
 #[test]
@@ -1653,6 +1655,8 @@ impl FastEq: Derive for Eq {
         &diags,
         "implicit derive request for `Derive<Eq>` is ambiguous",
     );
+    assert_diag_message(&diags, "StableEq");
+    assert_diag_message(&diags, "FastEq");
     assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
 }
 
@@ -1868,6 +1872,8 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         &diags,
         "implicit derive request for `Derive<Eq>` is ambiguous",
     );
+    assert_diag_message(&diags, "derive_eq1");
+    assert_diag_message(&diags, "derive_eq2");
 }
 
 #[test]
@@ -1913,6 +1919,8 @@ fn caller() {
         &diags,
         "implicit derive request for `Derive<Eq>` is ambiguous",
     );
+    assert_diag_message(&diags, "derive_eq1");
+    assert_diag_message(&diags, "derive_eq2");
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
