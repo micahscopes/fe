@@ -2,8 +2,6 @@ use common::ingot::Ingot;
 
 #[cfg(test)]
 use crate::analysis::ty::generated::GeneratedMethodBodyKind;
-#[cfg(test)]
-use crate::analysis::ty::generated::GeneratedRequirement;
 use crate::{
     analysis::{
         HirAnalysisDb,
@@ -62,8 +60,6 @@ use diagnostics::{
     duplicate_evidence_provider_diags_for_top_mod, provider_output_diag,
     selected_evidence_provider_diags_for_top_mod,
 };
-#[cfg(test)]
-use generated_method::generated_stub_trait_has_required_methods;
 use generated_method::{
     generated_method_error_summary, generated_missing_required_methods,
     generated_unsupported_required_methods, required_method_arg_ty_for_trait_inst,
@@ -1165,34 +1161,6 @@ fn execute_provider_body<'db>(
     ProviderBodyExecutor::new(db, context, env).execute_body()
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-fn stub_generated_impl_candidate_for_context<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: ElaborationCtfeContextId<'db>,
-) -> Option<GeneratedImplId<'db>> {
-    // This is still a typed overlay stub, not general CTFE execution. The
-    // context must explicitly declare builder authority, and the only emitted
-    // commands here are the derive-field obligations we can compute from typed
-    // reflection.
-    let goal = context.request(db).goal(db);
-    if !context_has_impl_builder(db, context, goal) {
-        return None;
-    }
-    if generated_stub_trait_has_required_methods(db, goal) {
-        return None;
-    }
-
-    let mut builder = ImplBuilderSession::new(db, context);
-    builder.emit_impl(db, goal).ok()?;
-    for requirement in derive_requirements_for_context(db, context)? {
-        builder
-            .require_with_origin(requirement.constraint, requirement.origin)
-            .ok()?;
-    }
-    builder.finish(db).ok()
-}
-
 pub(crate) fn reflected_fields_for_context<'db>(
     db: &'db dyn HirAnalysisDb,
     context: ElaborationCtfeContextId<'db>,
@@ -1213,60 +1181,6 @@ pub(crate) fn reflected_fields_for_context<'db>(
         })
         .flat_map(|target| reflect_struct_fields(db, target))
         .collect()
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn derive_requirements_for_context<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: ElaborationCtfeContextId<'db>,
-) -> Option<Vec<GeneratedRequirement<'db>>> {
-    let request = context.request(db);
-    let target_ty = request.target(db).ty(db);
-    if !context_has_reflect_target(db, context, target_ty) {
-        return None;
-    }
-    derive_requirements_for_reflected_target(db, context, target_ty)
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn derive_requirements_for_reflected_target<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: ElaborationCtfeContextId<'db>,
-    target_ty: TyId<'db>,
-) -> Option<Vec<GeneratedRequirement<'db>>> {
-    let request = context.request(db);
-    let request::ElaborationTarget::Struct(_) = request.target(db) else {
-        return None;
-    };
-    let ConstraintKind::Trait(trait_inst) = request.goal(db).kind(db) else {
-        return None;
-    };
-
-    let trait_ = trait_inst.def(db);
-    Some(
-        reflect_struct_fields(db, target_ty)
-            .into_iter()
-            .filter(|field| tys_match(db, field.parent, target_ty))
-            .map(|field| derive_requirement_for_trait_field(db, trait_, field))
-            .collect(),
-    )
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn derive_requirement_for_trait_field<'db>(
-    db: &'db dyn HirAnalysisDb,
-    trait_: Trait<'db>,
-    field: ReflectedField<'db>,
-) -> GeneratedRequirement<'db> {
-    let constraint =
-        ConstraintId::from_trait(db, TraitInstId::new_simple(db, trait_, vec![field.ty]));
-    GeneratedRequirement {
-        constraint,
-        origin: RequirementOrigin::ReflectedField(field),
-    }
 }
 
 const BUILDER_REQUIRE_METHOD: &str = "require";
@@ -1355,46 +1269,6 @@ fn simple_pat_binding_name<'db>(
         return None;
     };
     path.as_ident(db)
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn context_has_impl_builder<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: ElaborationCtfeContextId<'db>,
-    goal: ConstraintId<'db>,
-) -> bool {
-    context.capabilities(db).iter().any(|witness| {
-        if witness.capability.mode(db) != CapabilityMode::Mut {
-            return false;
-        }
-        match witness.capability.key(db) {
-            EffectCapabilityKey::Compiler(CompilerCapabilityKind::ImplBuilder(capability_goal)) => {
-                constraints_match(db, capability_goal, goal)
-            }
-            _ => false,
-        }
-    })
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn context_has_reflect_target<'db>(
-    db: &'db dyn HirAnalysisDb,
-    context: ElaborationCtfeContextId<'db>,
-    target: TyId<'db>,
-) -> bool {
-    context.capabilities(db).iter().any(|witness| {
-        if witness.capability.mode(db) != CapabilityMode::Read {
-            return false;
-        }
-        match witness.capability.key(db) {
-            EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(reflected)) => {
-                tys_match(db, reflected, target)
-            }
-            _ => false,
-        }
-    })
 }
 
 pub(super) fn constraints_match<'db>(
@@ -1503,6 +1377,20 @@ mod tests {
         text[resolved.range.start().into()..resolved.range.end().into()].to_string()
     }
 
+    fn provider_output_source_for_commands<'db>(
+        db: &'db HirAnalysisTestDb,
+        context: ElaborationCtfeContextId<'db>,
+        commands: BuilderCommandListId<'db>,
+    ) -> GeneratedImplSource<'db> {
+        GeneratedImplSource::ProviderOutput(ProviderOutputId::new(
+            db,
+            context.request(db),
+            context.provider(db),
+            context,
+            ProviderOutputStatus::Succeeded { commands },
+        ))
+    }
+
     #[test]
     fn raw_impl_builder_records_required_obligations() {
         let mut db = HirAnalysisTestDb::default();
@@ -1603,7 +1491,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
         let err = generated_impl_from_builder_commands(
             &db,
             context,
-            GeneratedImplSource::StubDerivedFieldObligations,
+            provider_output_source_for_commands(&db, context, commands),
             commands,
         )
         .unwrap_err();
@@ -1647,7 +1535,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
         let err = generated_impl_from_builder_commands(
             &db,
             context,
-            GeneratedImplSource::StubDerivedFieldObligations,
+            provider_output_source_for_commands(&db, context, commands),
             commands,
         )
         .unwrap_err();

@@ -15,18 +15,12 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum GeneratedImplSource<'db> {
-    /// Test/scaffold source only. Normal generated evidence must come from a
-    /// provider output artifact so provider bodies control emitted obligations.
-    #[cfg(test)]
-    StubDerivedFieldObligations,
     ProviderOutput(ProviderOutputId<'db>),
 }
 
 impl<'db> GeneratedImplSource<'db> {
     pub(crate) fn pretty_print(self, _db: &'db dyn HirAnalysisDb) -> &'static str {
         match self {
-            #[cfg(test)]
-            Self::StubDerivedFieldObligations => "stub",
             Self::ProviderOutput(_) => "provider",
         }
     }

@@ -16,6 +16,8 @@ use crate::{
 };
 
 use super::{ElaborationCtfeContextId, RequirementOrigin, constraints_match};
+#[cfg(test)]
+use super::{ProviderOutputId, ProviderOutputStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum BuilderCommand<'db> {
@@ -135,10 +137,17 @@ impl<'db> ImplBuilderSession<'db> {
         self.finished = true;
         self.commands.push(BuilderCommand::Finish);
         let commands = BuilderCommandListId::new(db, self.commands);
+        let output = ProviderOutputId::new(
+            db,
+            self.context.request(db),
+            self.context.provider(db),
+            self.context,
+            ProviderOutputStatus::Succeeded { commands },
+        );
         generated_impl_from_builder_commands(
             db,
             self.context,
-            GeneratedImplSource::StubDerivedFieldObligations,
+            GeneratedImplSource::ProviderOutput(output),
             commands,
         )
     }

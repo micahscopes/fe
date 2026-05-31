@@ -21,15 +21,6 @@ use crate::{
 
 use super::{reflect::reflect_struct_fields, tys_match};
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(super) fn generated_stub_trait_has_required_methods<'db>(
-    db: &'db dyn HirAnalysisDb,
-    goal: ConstraintId<'db>,
-) -> bool {
-    !required_method_names(db, goal).is_empty()
-}
-
 pub(super) fn generated_missing_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
