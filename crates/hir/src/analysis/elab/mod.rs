@@ -1,4 +1,4 @@
-use common::{indexmap::IndexMap, ingot::Ingot};
+use common::ingot::Ingot;
 
 #[cfg(test)]
 use crate::analysis::ty::generated::GeneratedMethodBodyKind;
@@ -11,7 +11,6 @@ use crate::{
         diagnostics::DiagnosticVoucher,
         name_resolution::{PathRes, resolve_path},
         ty::{
-            binder::Binder,
             constraint::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintApplicationId, ConstraintHeadId,
                 ConstraintHeadKind, ConstraintId, ConstraintKind, EffectCapabilityKey,
@@ -26,8 +25,7 @@ use crate::{
                 GeneratedExprId, GeneratedExprKind, GeneratedImplId, GeneratedImplSource,
                 GeneratedStructFieldInit, GeneratedStructFieldInitListId,
             },
-            trait_def::{ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict},
-            trait_lower::collect_trait_impls,
+            trait_def::TraitInstId,
             trait_resolution::PredicateListId,
             ty_def::{Kind, TyId},
             unify::UnificationTable,
@@ -43,6 +41,7 @@ use crate::{
 
 mod builder;
 mod capability;
+mod coherence;
 mod cycles;
 mod diagnostics;
 mod generated_method;
@@ -59,6 +58,7 @@ pub(crate) use builder::{BuilderCommandListId, BuilderError, ImplBuilderSession}
 pub(crate) use capability::{
     CapabilityEnv, ElaborationCapabilityOrigin, ElaborationCapabilityWitness,
 };
+use coherence::{generated_conflicts_with_authored_impl, generated_conflicts_with_generated_impl};
 use diagnostics::{
     duplicate_evidence_provider_diags_for_top_mod, provider_output_diag,
     selected_evidence_provider_diags_for_top_mod,
@@ -1413,55 +1413,6 @@ fn simple_pat_binding_name<'db>(
         return None;
     };
     path.as_ident(db)
-}
-
-fn generated_conflicts_with_authored_impl<'db>(
-    db: &'db dyn HirAnalysisDb,
-    generated: GeneratedImplId<'db>,
-) -> bool {
-    let request = generated.context.request(db);
-    let ingot = request.target(db).item().top_mod(db).ingot(db);
-    let Some(authored_impls) = collect_trait_impls(db, ingot).get(&generated.trait_inst.def(db))
-    else {
-        return false;
-    };
-    let generated_impl = Binder::bind(ImplementorId::new(
-        db,
-        generated.trait_inst,
-        generated.trait_inst.self_ty(db).generic_args(db).to_vec(),
-        IndexMap::new(),
-        ImplementorOrigin::Generated(generated),
-    ));
-    authored_impls
-        .iter()
-        .any(|&authored| does_impl_trait_conflict(db, authored, generated_impl))
-}
-
-fn generated_conflicts_with_generated_impl<'db>(
-    db: &'db dyn HirAnalysisDb,
-    generated: GeneratedImplId<'db>,
-    candidates: &[GeneratedImplId<'db>],
-) -> bool {
-    let generated_impl = Binder::bind(ImplementorId::new(
-        db,
-        generated.trait_inst,
-        generated.trait_inst.self_ty(db).generic_args(db).to_vec(),
-        IndexMap::new(),
-        ImplementorOrigin::Generated(generated),
-    ));
-    candidates.iter().copied().any(|other| {
-        if other == generated {
-            return false;
-        }
-        let other_impl = Binder::bind(ImplementorId::new(
-            db,
-            other.trait_inst,
-            other.trait_inst.self_ty(db).generic_args(db).to_vec(),
-            IndexMap::new(),
-            ImplementorOrigin::Generated(other),
-        ));
-        does_impl_trait_conflict(db, other_impl, generated_impl)
-    })
 }
 
 #[cfg(test)]
