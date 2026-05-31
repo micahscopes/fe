@@ -122,12 +122,23 @@ pub(crate) fn validated_evidence_providers_for_ingot<'db>(
     providers
 }
 
+pub(crate) fn visible_evidence_providers_for_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+) -> Vec<EvidenceProviderId<'db>> {
+    let mut providers = validated_evidence_providers_for_ingot(db, ingot);
+    for &(_, dependency) in ingot.resolved_external_ingots(db) {
+        providers.extend(validated_evidence_providers_for_ingot(db, dependency));
+    }
+    providers
+}
+
 pub(crate) fn providers_for_derive_goal<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     derive_goal: ConstraintId<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
-    validated_evidence_providers_for_ingot(db, ingot)
+    visible_evidence_providers_for_ingot(db, ingot)
         .into_iter()
         .filter(|provider| provider.derive_goal(db) == derive_goal)
         .collect()

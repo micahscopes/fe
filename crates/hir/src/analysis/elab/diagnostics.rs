@@ -4,8 +4,7 @@ use crate::{
     analysis::{
         HirAnalysisDb,
         ty::{
-            diagnostics::TyDiagCollection,
-            evidence_provider::validated_evidence_providers_for_ingot,
+            diagnostics::TyDiagCollection, evidence_provider::visible_evidence_providers_for_ingot,
         },
     },
     hir_def::TopLevelMod,
@@ -22,7 +21,7 @@ pub(super) fn duplicate_evidence_provider_diags_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
-    let providers = validated_evidence_providers_for_ingot(db, top_mod.ingot(db));
+    let providers = visible_evidence_providers_for_ingot(db, top_mod.ingot(db));
     let implicit_derive_goals = elaboration_requests_for_top_mod(db, top_mod)
         .iter()
         .filter(|request| request.selected_provider(db).is_none())
@@ -45,7 +44,7 @@ pub(super) fn duplicate_evidence_provider_diags_for_top_mod<'db>(
             if !implicit_derive_goals.contains(&derive_goal) {
                 return None;
             }
-            let span = providers[0].func(db).span().attributes().into();
+            let span = providers[0].func(db).span().name().into();
             Some(invalid_request(
                 span,
                 format!(

@@ -44,7 +44,7 @@ use common::{
     file::File,
     indexmap::IndexMap,
     paths::absolute_utf8,
-    stdlib::{HasBuiltinCore, HasBuiltinStd},
+    stdlib::{HasBuiltinCore, HasBuiltinCoreDerives, HasBuiltinStd},
 };
 use derive_more::TryIntoError;
 use rustc_hash::FxHashMap;
@@ -226,6 +226,7 @@ impl HirAnalysisTestDb {
             absolute_utf8(file_path.as_path()).expect("resolve absolute standalone path");
         let index = self.workspace();
         self.initialize_builtin_core();
+        self.initialize_builtin_core_derives();
         self.initialize_builtin_std();
         index.touch(
             self,

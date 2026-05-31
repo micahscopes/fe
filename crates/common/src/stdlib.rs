@@ -77,14 +77,19 @@ fn load_library_dir(db: &mut dyn InputDb, base_url: &str, root: &Utf8Path) -> Re
 
 pub fn load_library_from_path(db: &mut dyn InputDb, library_root: &Utf8Path) -> Result<(), String> {
     let core_root = library_root.join("core");
+    let core_derives_root = library_root.join("core_derives");
     let std_root = library_root.join("std");
 
     // Clear embedded builtins first so stale files from the embedded version
     // don't leak into the index when the on-disk version has fewer files.
     clear_library(db, BUILTIN_CORE_BASE_URL);
+    clear_library(db, BUILTIN_CORE_DERIVES_BASE_URL);
     clear_library(db, BUILTIN_STD_BASE_URL);
 
     load_library_dir(db, BUILTIN_CORE_BASE_URL, &core_root)?;
+    if core_derives_root.exists() {
+        load_library_dir(db, BUILTIN_CORE_DERIVES_BASE_URL, &core_derives_root)?;
+    }
     load_library_dir(db, BUILTIN_STD_BASE_URL, &std_root)?;
     Ok(())
 }
@@ -172,7 +177,7 @@ impl<T: InputDb> HasBuiltinStd for T {
 mod tests {
     use camino::Utf8Path;
 
-    use super::{HasBuiltinCore, HasBuiltinStd, is_library_file};
+    use super::{HasBuiltinCore, HasBuiltinCoreDerives, HasBuiltinStd, is_library_file};
     use crate::define_input_db;
 
     define_input_db!(TestDb);
@@ -190,7 +195,6 @@ mod tests {
     fn builtin_ingots_are_indexed_under_their_lookup_urls() {
         let db = TestDb::default();
         let core = db.builtin_core();
-        db.initialize_builtin_core_derives();
         let core_derives = db.builtin_core_derives();
         let std = db.builtin_std();
 

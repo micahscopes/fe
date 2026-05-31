@@ -7,8 +7,7 @@ use crate::{
             binder::Binder,
             constraint::{ConstraintHeadId, ConstraintHeadKind, ConstraintId, ConstraintKind},
             evidence_provider::{
-                EvidenceProviderId, providers_for_derive_goal,
-                validated_evidence_providers_for_ingot,
+                EvidenceProviderId, providers_for_derive_goal, visible_evidence_providers_for_ingot,
             },
             fold::TyFoldable,
             trait_resolution::constraint::collect_func_effect_capability_constraints,
@@ -40,7 +39,7 @@ pub(super) fn providers_named_in_ingot<'db>(
     ingot: Ingot<'db>,
     selected: IdentId<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
-    validated_evidence_providers_for_ingot(db, ingot)
+    visible_evidence_providers_for_ingot(db, ingot)
         .into_iter()
         .filter(|provider| provider.identity(db).name(db) == selected)
         .collect()

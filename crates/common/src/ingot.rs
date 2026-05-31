@@ -10,7 +10,7 @@ use crate::{
     config::{ArithmeticMode, Config, IngotConfig, WorkspaceConfig, resolve_arithmetic_mode},
     dependencies::DependencyLocation,
     file::{File, Workspace},
-    stdlib::{BUILTIN_CORE_BASE_URL, BUILTIN_STD_BASE_URL},
+    stdlib::{BUILTIN_CORE_BASE_URL, BUILTIN_CORE_DERIVES_BASE_URL, BUILTIN_STD_BASE_URL},
     urlext::UrlExt,
 };
 
@@ -228,24 +228,35 @@ impl<'db> Ingot<'db> {
                                     DependencyLocation::Local(local) => local.url.clone(),
                                     DependencyLocation::WorkspaceCurrent => {
                                         let name = dependency.arguments.name.clone()?;
-                                        let workspace_root = db
+                                        let workspace_member = db
                                             .dependency_graph()
-                                            .workspace_root_for_member(db, &base_url)?;
-                                        let candidates = db
-                                            .dependency_graph()
-                                            .workspace_members_by_name(db, &workspace_root, &name);
-                                        let selected =
-                                            if let Some(version) = &dependency.arguments.version {
-                                                candidates.iter().find(|member| {
-                                                    member.version.as_ref() == Some(version)
-                                                })
-                                            } else if candidates.len() == 1 {
-                                                candidates.first()
-                                            } else {
-                                                None
-                                            };
-                                        let member = selected?;
-                                        member.url.clone()
+                                            .workspace_root_for_member(db, &base_url)
+                                            .and_then(|workspace_root| {
+                                                let candidates = db
+                                                    .dependency_graph()
+                                                    .workspace_members_by_name(
+                                                        db,
+                                                        &workspace_root,
+                                                        &name,
+                                                    );
+                                                if let Some(version) = &dependency.arguments.version
+                                                {
+                                                    candidates
+                                                        .iter()
+                                                        .find(|member| {
+                                                            member.version.as_ref() == Some(version)
+                                                        })
+                                                        .map(|member| member.url.clone())
+                                                } else if candidates.len() == 1 {
+                                                    candidates
+                                                        .first()
+                                                        .map(|member| member.url.clone())
+                                                } else {
+                                                    None
+                                                }
+                                            });
+                                        workspace_member
+                                            .or_else(|| builtin_dependency_url(name.as_str()))?
                                     }
                                 };
                                 Some((dependency.alias.clone(), url))
@@ -286,6 +297,16 @@ impl<'db> Ingot<'db> {
 
         deps
     }
+}
+
+fn builtin_dependency_url(name: &str) -> Option<Url> {
+    let base = match name {
+        "core" => BUILTIN_CORE_BASE_URL,
+        "core_derives" => BUILTIN_CORE_DERIVES_BASE_URL,
+        "std" => BUILTIN_STD_BASE_URL,
+        _ => return None,
+    };
+    Some(Url::parse(base).expect("builtin library URL should parse"))
 }
 
 pub type Version = serde_semver::semver::Version;

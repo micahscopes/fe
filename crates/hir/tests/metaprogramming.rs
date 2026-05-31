@@ -1,4 +1,7 @@
-use common::diagnostics::{CompleteDiagnostic, cmp_complete_diagnostics};
+use common::{
+    InputDb,
+    diagnostics::{CompleteDiagnostic, cmp_complete_diagnostics},
+};
 use fe_hir::{
     analysis::{
         elab::{
@@ -13,6 +16,21 @@ use fe_hir::{
     hir_def::TopLevelMod,
     test_db::HirAnalysisTestDb,
 };
+use url::Url;
+
+fn project_file(
+    db: &mut HirAnalysisTestDb,
+    root: &str,
+    config: &str,
+    source: &str,
+) -> common::file::File {
+    let config_url = Url::parse(&format!("file:///{root}/fe.toml")).unwrap();
+    db.workspace()
+        .touch(db, config_url, Some(config.to_string()));
+    let source_url = Url::parse(&format!("file:///{root}/src/lib.fe")).unwrap();
+    db.workspace()
+        .touch(db, source_url, Some(source.to_string()))
+}
 
 fn diagnostics_for<'db>(
     db: &'db HirAnalysisTestDb,
@@ -1300,6 +1318,96 @@ fn caller() {
         generated_impl_summaries_for_top_mod(&db, top_mod),
         vec!["generated provider Foo: Eq with obligations {u256: Eq}".to_string()]
     );
+}
+
+#[test]
+fn core_derives_dependency_activates_canonical_eq_and_default_providers() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "core_derives_dependency_activates_canonical_eq_and_default_providers",
+        r#"
+[ingot]
+name = "core_derives_dependency_activates_canonical_eq_and_default_providers"
+version = "0.1.0"
+
+[dependencies]
+core_derives = true
+"#,
+        r#"
+use core::Default
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+fn require_default<T>()
+where
+    T: Default
+{}
+
+struct Foo {
+    value: u256,
+}
+
+derive Eq for Foo using StableEq
+derive Default for Foo using StableDefault
+
+fn caller() {
+    require_eq<Foo>()
+    require_default<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Foo: Eq with obligations {u256: Eq}".to_string(),
+            "generated provider Foo: Default with obligations {u256: Default}".to_string(),
+        ]
+    );
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string(),
+            "Foo: Default requested for Foo using StableDefault using Derive<Default> evidence from StableDefault with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Default>]".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn core_derives_provider_is_not_visible_without_dependency_activation() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "core_derives_provider_is_not_visible_without_dependency_activation",
+        r#"
+[ingot]
+name = "core_derives_provider_is_not_visible_without_dependency_activation"
+version = "0.1.0"
+"#,
+        r#"
+use core::ops::Eq
+
+struct Foo {
+    value: u256,
+}
+
+derive Eq for Foo using StableEq
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `StableEq` for `Derive<Eq>` was not found",
+    );
+    assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
 }
 
 #[test]
