@@ -8,14 +8,14 @@ use crate::{
     },
     hir_def::{
         Body, CallArg, Cond, CondId, Const, ConstGenericArgValue, Contract, ContractRecv,
-        ContractRecvArm, ContractRecvArmListId, DeriveDecl, EffectParam, EffectParamListId, Enum,
-        EnumVariant, Expr, ExprId, Field, FieldDef, FieldDefListId, FieldIndex, FieldParent, Func,
-        FuncParam, FuncParamListId, FuncParamName, GenericArg, GenericArgListId, GenericParam,
-        GenericParamListId, IdentId, Impl, ImplTrait, ItemKind, KindBound, LitKind, MatchArm, Mod,
-        Partial, Pat, PatId, PathId, PathKind, StaticAssert, Stmt, StmtId, Struct, TopLevelMod,
-        Trait, TraitRefId, TupleTypeId, TypeAlias, TypeBound, TypeId, TypeKind, Use, UseAlias,
-        UsePathId, UsePathSegment, VariantDef, VariantDefListId, VariantKind, WhereClauseId,
-        WherePredicate,
+        ContractRecvArm, ContractRecvArmListId, DeriveDecl, DeriveProvider, EffectParam,
+        EffectParamListId, Enum, EnumVariant, Expr, ExprId, Field, FieldDef, FieldDefListId,
+        FieldIndex, FieldParent, Func, FuncParam, FuncParamListId, FuncParamName, GenericArg,
+        GenericArgListId, GenericParam, GenericParamListId, IdentId, Impl, ImplTrait, ItemKind,
+        KindBound, LitKind, MatchArm, Mod, Partial, Pat, PatId, PathId, PathKind, StaticAssert,
+        Stmt, StmtId, Struct, TopLevelMod, Trait, TraitRefId, TupleTypeId, TypeAlias, TypeBound,
+        TypeId, TypeKind, Use, UseAlias, UsePathId, UsePathSegment, VariantDef, VariantDefListId,
+        VariantKind, WhereClauseId, WherePredicate,
         attr::{self, AttrArgValue},
         scope_graph::ScopeId,
     },
@@ -25,15 +25,15 @@ pub mod prelude {
     pub use super::{
         Visitor, VisitorCtxt, walk_arm, walk_attribute, walk_attribute_list, walk_body,
         walk_call_arg, walk_call_arg_list, walk_const, walk_contract, walk_contract_recv,
-        walk_contract_recv_arm, walk_contract_recv_arm_list, walk_derive_decl, walk_effect_param,
-        walk_effect_param_list, walk_enum, walk_expr, walk_field, walk_field_def,
-        walk_field_def_list, walk_field_list, walk_func, walk_func_param, walk_func_param_list,
-        walk_generic_arg, walk_generic_arg_list, walk_generic_param, walk_generic_param_list,
-        walk_impl, walk_impl_trait, walk_item, walk_kind_bound, walk_mod, walk_pat, walk_path,
-        walk_static_assert, walk_stmt, walk_struct, walk_super_trait_list, walk_top_mod,
-        walk_trait, walk_trait_ref, walk_type, walk_type_alias, walk_type_bound,
-        walk_type_bound_list, walk_use, walk_use_path, walk_variant_def, walk_variant_def_list,
-        walk_where_clause, walk_where_predicate,
+        walk_contract_recv_arm, walk_contract_recv_arm_list, walk_derive_decl,
+        walk_derive_provider, walk_effect_param, walk_effect_param_list, walk_enum, walk_expr,
+        walk_field, walk_field_def, walk_field_def_list, walk_field_list, walk_func,
+        walk_func_param, walk_func_param_list, walk_generic_arg, walk_generic_arg_list,
+        walk_generic_param, walk_generic_param_list, walk_impl, walk_impl_trait, walk_item,
+        walk_kind_bound, walk_mod, walk_pat, walk_path, walk_static_assert, walk_stmt, walk_struct,
+        walk_super_trait_list, walk_top_mod, walk_trait, walk_trait_ref, walk_type,
+        walk_type_alias, walk_type_bound, walk_type_bound_list, walk_use, walk_use_path,
+        walk_variant_def, walk_variant_def_list, walk_where_clause, walk_where_predicate,
     };
     pub use crate::core::span::lazy_spans::*;
 }
@@ -142,6 +142,14 @@ pub trait Visitor<'db> {
         impl_trait: ImplTrait<'db>,
     ) {
         walk_impl_trait(self, ctxt, impl_trait)
+    }
+
+    fn visit_derive_provider(
+        &mut self,
+        ctxt: &mut VisitorCtxt<'db, LazyDeriveProviderSpan<'db>>,
+        provider: DeriveProvider<'db>,
+    ) {
+        walk_derive_provider(self, ctxt, provider)
     }
 
     fn visit_derive_decl(
@@ -466,6 +474,10 @@ pub fn walk_item<'db, V>(
         ItemKind::ImplTrait(impl_trait) => {
             let mut new_ctxt = VisitorCtxt::with_impl_trait(ctxt.db, impl_trait);
             visitor.visit_impl_trait(&mut new_ctxt, impl_trait)
+        }
+        ItemKind::DeriveProvider(provider) => {
+            let mut new_ctxt = VisitorCtxt::with_derive_provider(ctxt.db, provider);
+            visitor.visit_derive_provider(&mut new_ctxt, provider)
         }
         ItemKind::DeriveDecl(decl) => {
             let mut new_ctxt = VisitorCtxt::with_derive_decl(ctxt.db, decl);
@@ -1079,6 +1091,53 @@ pub fn walk_impl_trait<'db, V>(
     );
 
     for item in impl_trait.children_non_nested(ctxt.db) {
+        visitor.visit_item(&mut VisitorCtxt::with_item(ctxt.db, item), item);
+    }
+}
+
+pub fn walk_derive_provider<'db, V>(
+    visitor: &mut V,
+    ctxt: &mut VisitorCtxt<'db, LazyDeriveProviderSpan<'db>>,
+    provider: DeriveProvider<'db>,
+) where
+    V: Visitor<'db> + ?Sized,
+{
+    if let Some(name) = provider.name(ctxt.db).to_opt() {
+        ctxt.with_new_ctxt(
+            |span| span.name(),
+            |ctxt| {
+                visitor.visit_ident(ctxt, name);
+            },
+        );
+    }
+
+    if let Some(path) = provider.derive_path(ctxt.db).to_opt() {
+        ctxt.with_new_ctxt(
+            |span| span.derive_path(),
+            |ctxt| {
+                visitor.visit_path(ctxt, path);
+            },
+        );
+    }
+
+    if let Some(path) = provider.head_path(ctxt.db).to_opt() {
+        ctxt.with_new_ctxt(
+            |span| span.head_path(),
+            |ctxt| {
+                visitor.visit_path(ctxt, path);
+            },
+        );
+    }
+
+    ctxt.with_new_ctxt(
+        |span| span.attributes(),
+        |ctxt| {
+            let id = provider.attributes(ctxt.db);
+            visitor.visit_attribute_list(ctxt, id);
+        },
+    );
+
+    for item in provider.children_non_nested(ctxt.db) {
         visitor.visit_item(&mut VisitorCtxt::with_item(ctxt.db, item), item);
     }
 }
@@ -2428,6 +2487,7 @@ where
             ChainRoot::Impl(impl_) => impl_.top_mod(self.db),
             ChainRoot::Trait(trait_) => trait_.top_mod(self.db),
             ChainRoot::ImplTrait(impl_trait) => impl_trait.top_mod(self.db),
+            ChainRoot::DeriveProvider(provider) => provider.top_mod(self.db),
             ChainRoot::DeriveDecl(decl) => decl.top_mod(self.db),
             ChainRoot::Const(const_) => const_.top_mod(self.db),
             ChainRoot::StaticAssert(assert_) => assert_.top_mod(self.db),
@@ -2605,6 +2665,7 @@ define_item_ctxt_ctor! {
     (LazyImplSpan<'db>, with_impl(impl_: Impl<'db>)),
     (LazyTraitSpan<'db>, with_trait(trait_: Trait<'db>)),
     (LazyImplTraitSpan<'db>, with_impl_trait(impl_trait: ImplTrait<'db>)),
+    (LazyDeriveProviderSpan<'db>, with_derive_provider(provider: DeriveProvider<'db>)),
     (LazyDeriveDeclSpan<'db>, with_derive_decl(decl: DeriveDecl<'db>)),
     (LazyConstSpan<'db>, with_const(const_: Const<'db>)),
     (LazyStaticAssertSpan<'db>, with_static_assert(assert_: StaticAssert<'db>)),

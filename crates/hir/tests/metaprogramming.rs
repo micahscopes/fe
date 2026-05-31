@@ -142,6 +142,113 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
+fn named_derive_provider_summaries_include_provider_identity() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_summaries_include_provider_identity.fe".into(),
+        r#"
+trait Eq {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        vec!["provider StableEq for Eq via Derive<Eq> -> T: Eq".to_string()]
+    );
+}
+
+#[test]
+fn derive_declaration_using_selects_named_derive_provider() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_declaration_using_selects_named_derive_provider.fe".into(),
+        r#"
+trait Eq {}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [mut capability ImplBuilder<Foo: Eq>]".to_string()]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn implicit_derive_is_ambiguous_with_two_named_derive_providers() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "implicit_derive_is_ambiguous_with_two_named_derive_providers.fe".into(),
+        r#"
+trait Eq {}
+
+#[derive(Eq)]
+struct Foo {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+
+    assert_diag_message(&diags, "multiple evidence providers for `Derive<Eq>`");
+}
+
+#[test]
 fn evidence_provider_must_be_const_fn() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

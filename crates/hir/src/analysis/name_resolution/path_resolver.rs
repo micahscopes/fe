@@ -1584,7 +1584,8 @@ pub fn resolve_name_res<'db>(
                     }
                 }
 
-                ItemKind::DeriveDecl(_)
+                ItemKind::DeriveProvider(_)
+                | ItemKind::DeriveDecl(_)
                 | ItemKind::StaticAssert(_)
                 | ItemKind::Use(_)
                 | ItemKind::Body(_) => unreachable!(),

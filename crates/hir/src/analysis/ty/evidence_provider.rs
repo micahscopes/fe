@@ -8,9 +8,13 @@ use crate::{
                 evidence_goal_for_ty,
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
+            trait_resolution::PredicateListId,
         },
     },
-    hir_def::{Attr, AttrArgValue, Func, HirIngot, IdentId, ItemKind, NormalAttr, Trait},
+    hir_def::{
+        Attr, AttrArgValue, DeriveProvider, Func, HirIngot, IdentId, ItemKind, NormalAttr, Trait,
+    },
+    span::DynLazySpan,
 };
 use common::ingot::Ingot;
 
@@ -73,50 +77,17 @@ pub(crate) fn validate_evidence_provider<'db>(
         }
     };
 
-    if !func.is_const(db) {
-        diags.push(invalid_provider(
-            attr_span.clone(),
-            "evidence provider functions must be `const fn`",
-        ));
-    }
-
-    let goal = match evidence_goal_for_ty(db, func.return_ty(db)) {
-        Some(goal) => Some(goal),
-        None => {
-            diags.push(invalid_provider(
-                func.span().ret_ty().into(),
-                "evidence provider functions must return `Evidence<C>`",
-            ));
-            None
-        }
-    };
-
-    if let (Some(head), Some(goal)) = (head, goal) {
-        match goal.kind(db) {
-            ConstraintKind::Trait(inst) if inst.def(db) == head => {}
-            ConstraintKind::Trait(_) => diags.push(invalid_provider(
-                func.span().ret_ty().into(),
-                "returned evidence constraint does not match the provider head",
-            )),
-            _ => diags.push(invalid_provider(
-                func.span().ret_ty().into(),
-                "evidence providers currently support concrete trait evidence only",
-            )),
-        }
-    }
+    let provider = validate_provider_function(
+        db,
+        func,
+        head,
+        explicit_name,
+        &mut diags,
+        "evidence provider",
+    );
 
     if diags.is_empty() {
-        let name = explicit_name.unwrap_or_else(|| {
-            func.name(db)
-                .to_opt()
-                .unwrap_or_else(|| IdentId::new(db, "<anonymous provider>".to_string()))
-        });
-        let identity = EvidenceProviderIdentityId::new(db, name, func);
-        let head = head.expect("validated head");
-        let derive_head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(head));
-        let derive_goal = ConstraintId::new(db, ConstraintKind::Derive(derive_head));
-        let provider =
-            EvidenceProviderId::new(db, identity, func, head, goal.unwrap(), derive_goal);
+        let provider = provider.expect("validated provider");
         (EvidenceProviderValidationResult::Valid(provider), diags)
     } else {
         (EvidenceProviderValidationResult::Invalid, diags)
@@ -127,7 +98,7 @@ pub(crate) fn validated_evidence_providers_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
-    ingot
+    let mut providers: Vec<_> = ingot
         .all_funcs(db)
         .iter()
         .filter_map(|&func| match validate_evidence_provider(db, func).0 {
@@ -135,7 +106,20 @@ pub(crate) fn validated_evidence_providers_for_ingot<'db>(
             EvidenceProviderValidationResult::Invalid
             | EvidenceProviderValidationResult::NotProvider => None,
         })
-        .collect()
+        .collect();
+    providers.extend(
+        ingot
+            .all_derive_providers(db)
+            .iter()
+            .filter_map(
+                |&provider| match validate_named_derive_provider(db, provider).0 {
+                    EvidenceProviderValidationResult::Valid(provider) => Some(provider),
+                    EvidenceProviderValidationResult::Invalid
+                    | EvidenceProviderValidationResult::NotProvider => None,
+                },
+            ),
+    );
+    providers
 }
 
 pub(crate) fn providers_for_derive_goal<'db>(
@@ -172,6 +156,169 @@ fn evidence_provider_attrs<'db>(
             is_provider_attr.then_some(normal_attr)
         })
         .collect()
+}
+
+pub(crate) fn validate_named_derive_provider<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider: DeriveProvider<'db>,
+) -> (
+    EvidenceProviderValidationResult<'db>,
+    Vec<TyDiagCollection<'db>>,
+) {
+    let mut diags = Vec::new();
+    let span: DynLazySpan<'db> = provider.span().into();
+
+    let name = match provider.name(db).to_opt() {
+        Some(name) => Some(name),
+        None => {
+            diags.push(invalid_provider(
+                span.clone(),
+                "derive provider declarations must have a provider name",
+            ));
+            None
+        }
+    };
+
+    let derives_derivation = provider
+        .derive_path(db)
+        .to_opt()
+        .and_then(|path| path.as_ident(db))
+        .is_some_and(|ident| ident.data(db) == "Derive");
+    if !derives_derivation {
+        diags.push(invalid_provider(
+            provider.span().derive_path().into(),
+            "derive provider declarations must use `Derive` after `:`",
+        ));
+    }
+
+    let head = match provider.head_path(db).to_opt() {
+        Some(path) => match resolve_path(
+            db,
+            path,
+            provider.scope(),
+            PredicateListId::empty_list(db),
+            false,
+        ) {
+            Ok(PathRes::Trait(inst)) => Some(inst.def(db)),
+            _ => {
+                diags.push(invalid_provider(
+                    provider.span().head_path().into(),
+                    "derive provider head must resolve to a trait",
+                ));
+                None
+            }
+        },
+        None => {
+            diags.push(invalid_provider(
+                span.clone(),
+                "derive provider declarations must specify a trait head after `for`",
+            ));
+            None
+        }
+    };
+
+    let derive_methods: Vec<_> = provider
+        .methods(db)
+        .filter(|func| {
+            func.name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == "derive")
+        })
+        .collect();
+    let func = match derive_methods.as_slice() {
+        [func] => Some(*func),
+        [] => {
+            diags.push(invalid_provider(
+                provider.span().item_list().into(),
+                "derive provider declarations must contain one `derive` function",
+            ));
+            None
+        }
+        _ => {
+            diags.push(invalid_provider(
+                provider.span().item_list().into(),
+                "derive provider declarations may contain only one `derive` function",
+            ));
+            None
+        }
+    };
+
+    let Some(func) = func else {
+        return (EvidenceProviderValidationResult::Invalid, diags);
+    };
+
+    let provider = validate_provider_function(db, func, head, name, &mut diags, "derive provider");
+
+    if diags.is_empty() {
+        let provider = provider.expect("validated provider");
+        (EvidenceProviderValidationResult::Valid(provider), diags)
+    } else {
+        (EvidenceProviderValidationResult::Invalid, diags)
+    }
+}
+
+fn validate_provider_function<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+    head: Option<Trait<'db>>,
+    explicit_name: Option<IdentId<'db>>,
+    diags: &mut Vec<TyDiagCollection<'db>>,
+    label: &'static str,
+) -> Option<EvidenceProviderId<'db>> {
+    if !func.is_const(db) {
+        diags.push(invalid_provider(
+            func.span().name().into(),
+            format!("{label} functions must be `const fn`"),
+        ));
+    }
+
+    let goal = match evidence_goal_for_ty(db, func.return_ty(db)) {
+        Some(goal) => Some(goal),
+        None => {
+            diags.push(invalid_provider(
+                func.span().ret_ty().into(),
+                format!("{label} functions must return `Evidence<C>`"),
+            ));
+            None
+        }
+    };
+
+    if let (Some(head), Some(goal)) = (head, goal) {
+        match goal.kind(db) {
+            ConstraintKind::Trait(inst) if inst.def(db) == head => {}
+            ConstraintKind::Trait(_) => diags.push(invalid_provider(
+                func.span().ret_ty().into(),
+                "returned evidence constraint does not match the provider head",
+            )),
+            _ => diags.push(invalid_provider(
+                func.span().ret_ty().into(),
+                format!("{label}s currently support concrete trait evidence only"),
+            )),
+        }
+    }
+
+    if !diags.is_empty() {
+        return None;
+    }
+
+    let name = explicit_name.unwrap_or_else(|| {
+        func.name(db)
+            .to_opt()
+            .unwrap_or_else(|| IdentId::new(db, "<anonymous provider>".to_string()))
+    });
+    let head = head?;
+    let goal = goal?;
+    let identity = EvidenceProviderIdentityId::new(db, name, func);
+    let derive_head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(head));
+    let derive_goal = ConstraintId::new(db, ConstraintKind::Derive(derive_head));
+    Some(EvidenceProviderId::new(
+        db,
+        identity,
+        func,
+        head,
+        goal,
+        derive_goal,
+    ))
 }
 
 fn parse_provider_attr<'db>(

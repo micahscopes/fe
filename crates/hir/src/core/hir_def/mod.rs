@@ -44,6 +44,7 @@ pub trait HirIngot<'db> {
     fn all_items(self, db: &'db dyn HirDb) -> &'db Vec<ItemKind<'db>>;
     fn all_enums(self, db: &'db dyn HirDb) -> &'db Vec<Enum<'db>>;
     fn all_impl_traits(self, db: &'db dyn HirDb) -> &'db Vec<ImplTrait<'db>>;
+    fn all_derive_providers(self, db: &'db dyn HirDb) -> &'db Vec<DeriveProvider<'db>>;
     fn all_funcs(self, db: &'db dyn HirDb) -> &'db Vec<Func<'db>>;
     fn all_impls(self, db: &'db dyn HirDb) -> &'db Vec<Impl<'db>>;
     fn is_core(&self, db: &'db dyn HirDb) -> bool;
@@ -119,6 +120,17 @@ impl<'db> HirIngot<'db> for Ingot<'db> {
             .flat_map(|top_mod| {
                 let impl_traits = top_mod.all_impl_traits(db);
                 impl_traits.to_vec()
+            })
+            .collect()
+    }
+
+    #[salsa::tracked(return_ref)]
+    fn all_derive_providers(self, db: &'db dyn HirDb) -> Vec<DeriveProvider<'db>> {
+        self.all_modules(db)
+            .iter()
+            .flat_map(|top_mod| {
+                let providers = top_mod.all_derive_providers(db);
+                providers.to_vec()
             })
             .collect()
     }

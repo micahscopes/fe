@@ -191,6 +191,29 @@ impl<'db> ItemKind<'db> {
                 );
                 Impl::lower_ast(ctxt, impl_);
             }
+            ast::ItemKind::DeriveProvider(provider) => {
+                super::arithmetic::report_arithmetic_attr_on_unsupported_item(
+                    ctxt,
+                    provider.attr_list(),
+                    "derive provider",
+                );
+                super::event::report_event_attr_on_non_struct_item(
+                    ctxt,
+                    provider.attr_list(),
+                    "derive provider",
+                );
+                super::error::report_error_attr_on_non_struct_item(
+                    ctxt,
+                    provider.attr_list(),
+                    "derive provider",
+                );
+                super::payable::report_payable_attr_on_unsupported_item(
+                    ctxt,
+                    provider.attr_list(),
+                    "derive provider",
+                );
+                DeriveProvider::lower_ast(ctxt, provider);
+            }
             ast::ItemKind::Trait(trait_) => {
                 super::arithmetic::report_arithmetic_attr_on_unsupported_item(
                     ctxt,
@@ -883,6 +906,50 @@ impl<'db> AssocConstDef<'db> {
             ty: TypeId::lower_ast_partial(ctxt, ast.ty()),
             value,
         }
+    }
+}
+
+impl<'db> DeriveProvider<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveProvider) -> Self {
+        let name = IdentId::lower_token_partial(ctxt, ast.name());
+        let id = ctxt.joined_id(TrackedItemVariant::DeriveProvider(name));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let derive_path = ast
+            .derive_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let head_path = ast
+            .head_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let origin = HirOrigin::raw(&ast);
+
+        if let Some(item_list) = ast.item_list() {
+            for item in item_list {
+                if let ast::TraitItemKind::Func(func) = item.kind() {
+                    super::payable::report_payable_attr_on_unsupported_item(
+                        ctxt,
+                        func.attr_list(),
+                        "fn",
+                    );
+                    Func::lower_ast(ctxt, func);
+                }
+            }
+        }
+
+        let provider = Self::new(
+            ctxt.db(),
+            id,
+            name,
+            attributes,
+            derive_path,
+            head_path,
+            ctxt.top_mod(),
+            origin,
+        );
+        ctxt.leave_item_scope(provider)
     }
 }
 

@@ -19,9 +19,9 @@ use crate::analysis::ty::ty_check::check_anon_const_body;
 use crate::analysis::ty::ty_def::{InvalidCause, TyId};
 use crate::hir_def::scope_graph::ScopeId;
 use crate::hir_def::{
-    Contract, Enum, EnumVariant, FieldParent, Func, GenericParam, GenericParamOwner,
-    GenericParamView, IdentId, Impl, ImplTrait, ItemKind, Partial, PathId, Struct, Trait,
-    TypeAlias, TypeBound, VariantKind, WhereClauseOwner,
+    Contract, DeriveProvider, Enum, EnumVariant, FieldParent, Func, GenericParam,
+    GenericParamOwner, GenericParamView, IdentId, Impl, ImplTrait, ItemKind, Partial, PathId,
+    Struct, Trait, TypeAlias, TypeBound, VariantKind, WhereClauseOwner,
 };
 use crate::span::DynLazySpan;
 
@@ -1502,5 +1502,13 @@ impl<'db> Diagnosable<'db> for ImplTrait<'db> {
         out.extend(self.diags_assoc_consts(db));
         out.extend(GenericParamOwner::ImplTrait(self).diags(db));
         out
+    }
+}
+
+impl<'db> Diagnosable<'db> for DeriveProvider<'db> {
+    type Diagnostic = TyDiagCollection<'db>;
+
+    fn diags(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
+        ty::evidence_provider::validate_named_derive_provider(db, self).1
     }
 }

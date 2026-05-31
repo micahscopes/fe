@@ -45,6 +45,7 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Impl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Trait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::ImplTrait))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveProvider))
             .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveDecl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Const))
             .or_else(|| support::child(self.syntax()).map(ItemKind::StaticAssert))
@@ -472,6 +473,30 @@ impl ImplTrait {
 }
 
 ast_node! {
+    /// `impl StableEq: Derive for Eq { .. }`
+    pub struct DeriveProvider,
+    SK::DeriveProvider,
+}
+impl super::AttrListOwner for DeriveProvider {}
+impl DeriveProvider {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Ident)
+    }
+
+    pub fn derive_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).next()
+    }
+
+    pub fn head_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).nth(1)
+    }
+
+    pub fn item_list(&self) -> Option<TraitItemList> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
     /// `derive Eq for Foo using StableEq`
     pub struct DeriveDecl,
     SK::DeriveDecl,
@@ -766,6 +791,7 @@ pub enum ItemKind {
     Impl(Impl),
     Trait(Trait),
     ImplTrait(ImplTrait),
+    DeriveProvider(DeriveProvider),
     DeriveDecl(DeriveDecl),
     Const(Const),
     StaticAssert(StaticAssert),
