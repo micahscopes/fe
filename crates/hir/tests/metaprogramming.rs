@@ -2246,34 +2246,36 @@ fn caller() {
 }
 
 #[test]
-fn implicit_attr_provider_ambiguity_is_diagnosed() {
+fn implicit_named_provider_ambiguity_is_diagnosed() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "implicit_attr_provider_ambiguity_is_diagnosed.fe".into(),
+        "implicit_named_provider_ambiguity_is_diagnosed.fe".into(),
         r#"
 trait Eq {}
 
 #[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        ev
+    }
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    ev
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        ev
+    }
 }
 "#,
     );
@@ -2283,15 +2285,15 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         &diags,
         "implicit derive request for `Derive<Eq>` is ambiguous",
     );
-    assert_diag_message(&diags, "derive_eq1");
-    assert_diag_message(&diags, "derive_eq2");
+    assert_diag_message(&diags, "StableEq");
+    assert_diag_message(&diags, "FastEq");
 }
 
 #[test]
-fn implicit_attr_provider_ambiguity_does_not_generate_impls() {
+fn implicit_named_provider_ambiguity_does_not_generate_impls() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "implicit_attr_provider_ambiguity_does_not_generate_impls.fe".into(),
+        "implicit_named_provider_ambiguity_does_not_generate_impls.fe".into(),
         r#"
 trait Eq {}
 
@@ -2303,20 +2305,22 @@ where
 #[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq1<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 
 fn caller() {
@@ -2330,8 +2334,8 @@ fn caller() {
         &diags,
         "implicit derive request for `Derive<Eq>` is ambiguous",
     );
-    assert_diag_message(&diags, "derive_eq1");
-    assert_diag_message(&diags, "derive_eq2");
+    assert_diag_message(&diags, "StableEq");
+    assert_diag_message(&diags, "FastEq");
     assert_unsatisfied_bound(&diags, "`Foo` doesn't implement `Eq`");
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -2446,6 +2450,9 @@ fn caller() {
 
 #[test]
 fn derive_declaration_using_selects_attr_provider_identity() {
+    // Compatibility coverage for selecting staged attribute providers by an
+    // explicit identity. Normal provider-selection tests should use named
+    // `impl Provider: Derive for Head` declarations.
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
         "derive_declaration_using_selects_attr_provider_identity.fe".into(),
