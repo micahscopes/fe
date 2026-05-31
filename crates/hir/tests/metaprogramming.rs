@@ -2061,22 +2061,23 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
-fn duplicate_generated_derives_conflict() {
+fn duplicate_derive_attr_generated_derives_conflict() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "duplicate_generated_derives_conflict.fe".into(),
+        "duplicate_derive_attr_generated_derives_conflict.fe".into(),
         r#"
 trait Eq {}
 
 #[derive(Eq, Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.finish()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -3051,8 +3052,9 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {}
+
+derive Eq for Foo
 
 fn caller() {
     require_eq<Foo>()
