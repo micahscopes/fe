@@ -95,7 +95,7 @@ pub(super) fn selected_evidence_provider_diags_for_top_mod<'db>(
                     derive_goal.pretty_print(db)
                 )
             };
-            Some(invalid_request(request.span(db), message))
+            Some(invalid_request(request.selected_provider_span(db), message))
         })
         .collect()
 }

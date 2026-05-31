@@ -114,6 +114,20 @@ impl<'db> ElaborationRequestId<'db> {
             ElaborationOrigin::DeriveDecl(decl) => decl.span().into(),
         }
     }
+
+    pub(super) fn selected_provider_span(self, db: &'db dyn HirAnalysisDb) -> DynLazySpan<'db> {
+        match self.origin(db) {
+            ElaborationOrigin::DeriveDecl(decl) if decl.selected_provider_path(db).is_some() => {
+                decl.span().provider_path().into()
+            }
+            // Attribute-origin requests currently retain the derive argument
+            // index, not the keyword argument index, so use the full attribute
+            // span until selected-provider arguments are carried explicitly.
+            ElaborationOrigin::DeriveAttr { .. } | ElaborationOrigin::DeriveDecl(_) => {
+                self.span(db)
+            }
+        }
+    }
 }
 
 impl<'db> ElaborationOrigin<'db> {
