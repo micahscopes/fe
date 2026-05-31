@@ -47,7 +47,7 @@ pub(crate) use capability::{
 use coherence::{generated_conflicting_generated_impl, generated_conflicts_with_authored_impl};
 use diagnostics::{
     implicit_provider_ambiguity_diags_for_top_mod, provider_output_diag,
-    selected_evidence_provider_diags_for_top_mod,
+    selected_derive_provider_diags_for_top_mod,
 };
 use generated_method::{
     generated_invalid_required_method_bodies, generated_method_error_summary,
@@ -106,7 +106,7 @@ pub(crate) fn elaboration_request_diags_for_top_mod<'db>(
 ) -> Vec<TyDiagCollection<'db>> {
     let mut diags = request::elaboration_request_parse_diags_for_top_mod(db, top_mod);
     diags.extend(implicit_provider_ambiguity_diags_for_top_mod(db, top_mod));
-    diags.extend(selected_evidence_provider_diags_for_top_mod(db, top_mod));
+    diags.extend(selected_derive_provider_diags_for_top_mod(db, top_mod));
     diags.extend(generated_overlay_diags_for_top_mod(db, top_mod));
     diags
 }
@@ -121,7 +121,7 @@ pub fn elaboration_request_summaries_for_top_mod<'db>(
         .collect()
 }
 
-pub fn evidence_provider_summaries_for_top_mod<'db>(
+pub fn derive_provider_summaries_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<String> {

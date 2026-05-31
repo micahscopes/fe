@@ -2,7 +2,7 @@ use common::InputDb;
 use common::indexmap::IndexMap;
 use common::stdlib::{HasBuiltinCore, HasBuiltinCoreDerives, HasBuiltinStd};
 use driver::{DriverDataBase, db::DiagnosticsCollection};
-use fe_hir::analysis::elab::evidence_provider_summaries_for_top_mod;
+use fe_hir::analysis::elab::derive_provider_summaries_for_top_mod;
 use fe_hir::analysis::ty::ty_check::ReturnProvenance;
 use fe_hir::analysis::ty::{
     corelib::{resolve_core_trait, resolve_lib_func_path, resolve_lib_type_path},
@@ -61,7 +61,7 @@ fn analyze_core_derives() {
         .expect("core_derives should have a root file");
     let top_mod = db.top_mod(root_file);
     assert_eq!(
-        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        derive_provider_summaries_for_top_mod(&db, top_mod),
         vec![
             "provider StableEq via Derive<Eq> -> T: Eq<T>".to_string(),
             "provider StableDefault via Derive<Default> -> T: Default".to_string(),

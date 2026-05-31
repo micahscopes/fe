@@ -55,7 +55,7 @@ pub(super) fn implicit_provider_ambiguity_diags_for_top_mod<'db>(
         .collect()
 }
 
-pub(super) fn selected_evidence_provider_diags_for_top_mod<'db>(
+pub(super) fn selected_derive_provider_diags_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
@@ -79,19 +79,19 @@ pub(super) fn selected_evidence_provider_diags_for_top_mod<'db>(
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!(
-                        "selected evidence provider `{selected_name}` does not provide `{}` evidence; visible provider(s) named `{selected_name}` provide {provided_goals}",
+                        "selected derive provider `{selected_name}` does not provide `{}` evidence; visible provider(s) named `{selected_name}` provide {provided_goals}",
                         derive_goal.pretty_print(db),
                     )
                 } else {
                     format!(
-                        "selected evidence provider `{selected_name}` for `{}` was not found",
+                        "selected derive provider `{selected_name}` for `{}` was not found",
                         derive_goal.pretty_print(db)
                     )
                 }
             } else {
                 let count = matches.len();
                 format!(
-                    "selected evidence provider `{selected_name}` for `{}` is ambiguous; it matches {count} visible providers",
+                    "selected derive provider `{selected_name}` for `{}` is ambiguous; it matches {count} visible providers",
                     derive_goal.pretty_print(db)
                 )
             };
@@ -121,7 +121,7 @@ pub(super) fn provider_output_diag<'db>(
     Some(invalid_request(
         span,
         format!(
-            "evidence provider `{provider}` for `{}` did not produce generated evidence: {message}",
+            "derive provider `{provider}` for `{}` did not produce generated evidence: {message}",
             request.goal(db).pretty_print(db)
         ),
     ))

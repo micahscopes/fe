@@ -5,9 +5,8 @@ use common::{
 use fe_hir::{
     analysis::{
         elab::{
-            elaboration_ctfe_context_summaries_for_top_mod,
-            elaboration_request_summaries_for_top_mod, evidence_provider_summaries_for_top_mod,
-            generated_impl_summaries_for_top_mod,
+            derive_provider_summaries_for_top_mod, elaboration_ctfe_context_summaries_for_top_mod,
+            elaboration_request_summaries_for_top_mod, generated_impl_summaries_for_top_mod,
             generated_requirement_artifact_summaries_for_top_mod,
             generated_trace_summaries_for_top_mod, reflected_field_summaries_for_top_mod,
         },
@@ -131,7 +130,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     db.assert_no_diags(top_mod);
 
     assert_eq!(
-        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        derive_provider_summaries_for_top_mod(&db, top_mod),
         vec!["provider derive_eq via Derive<Eq> -> T: Eq".to_string()]
     );
 }
@@ -157,7 +156,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     db.assert_no_diags(top_mod);
 
     assert_eq!(
-        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        derive_provider_summaries_for_top_mod(&db, top_mod),
         vec!["provider StableEq via Derive<Eq> -> T: Eq".to_string()]
     );
 }
@@ -184,7 +183,7 @@ impl StableEq: Derive for Eq {
     db.assert_no_diags(top_mod);
 
     assert_eq!(
-        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        derive_provider_summaries_for_top_mod(&db, top_mod),
         vec!["provider StableEq via Derive<Eq> -> T: Eq".to_string()]
     );
 }
@@ -1408,7 +1407,7 @@ where
         vec!["generated provider Pair<A, B>: Eq with obligations {A: Eq, B: Eq}".to_string()]
     );
     assert_eq!(
-        evidence_provider_summaries_for_top_mod(&db, top_mod),
+        derive_provider_summaries_for_top_mod(&db, top_mod),
         vec!["provider LocalEq via Derive<Eq> -> T: Eq<T>".to_string()]
     );
 }
@@ -1715,7 +1714,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `StableEq` for `Derive<Eq>` is ambiguous",
+        "selected derive provider `StableEq` for `Derive<Eq>` is ambiguous",
     );
     assert_diag_message(&diags, "matches 2 visible providers");
     assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
@@ -1900,7 +1899,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `missing_provider` for `Derive<Eq>` was not found",
+        "selected derive provider `missing_provider` for `Derive<Eq>` was not found",
     );
     assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
 }
@@ -1934,7 +1933,7 @@ impl StableDefault: Derive for Default {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
+        "selected derive provider `StableDefault` does not provide `Derive<Eq>` evidence",
     );
     assert_diag_message(
         &diags,
@@ -2522,7 +2521,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `missing_provider` for `Derive<Eq>` was not found",
+        "selected derive provider `missing_provider` for `Derive<Eq>` was not found",
     );
 }
 
@@ -2552,7 +2551,7 @@ impl StableDefault: Derive for Default {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
+        "selected derive provider `StableDefault` does not provide `Derive<Eq>` evidence",
     );
     assert_diag_message(
         &diags,
@@ -2586,7 +2585,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `missing_provider` for `Derive<Eq>` was not found",
+        "selected derive provider `missing_provider` for `Derive<Eq>` was not found",
     );
 }
 
@@ -2617,7 +2616,7 @@ impl StableDefault: Derive for Default {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
+        "selected derive provider `StableDefault` does not provide `Derive<Eq>` evidence",
     );
     assert_diag_message(
         &diags,
@@ -2660,7 +2659,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "selected evidence provider `StableEq` for `Derive<Eq>` is ambiguous",
+        "selected derive provider `StableEq` for `Derive<Eq>` is ambiguous",
     );
     assert_diag_message(&diags, "matches 2 visible providers");
 }
