@@ -1715,6 +1715,60 @@ fn caller() {
 }
 
 #[test]
+fn core_derives_dependency_allows_explicit_canonical_provider_selection_with_local_provider() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "core_derives_dependency_allows_explicit_canonical_provider_selection_with_local_provider",
+        r#"
+[ingot]
+name = "core_derives_dependency_allows_explicit_canonical_provider_selection_with_local_provider"
+version = "0.1.0"
+
+[dependencies]
+core_derives = true
+"#,
+        r#"
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.bool(false))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
 fn provider_generated_marker_derive_end_to_end() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
