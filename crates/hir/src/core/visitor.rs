@@ -2728,7 +2728,7 @@ mod tests {
         let text = r#"
             #[attr1]
             #[attr2]
-            fn foo<T: 'static, V: Add>() {
+            fn foo<T: Trait, V: Add>() {
                 1
                 "foo"
                 42
@@ -2749,7 +2749,7 @@ mod tests {
         visitor.visit_func(&mut ctxt, func);
 
         assert_eq!(
-            "<T: 'static, V: Add>",
+            "<T: Trait, V: Add>",
             db.text_at(top_mod, &visitor.generic_param_list.unwrap())
         );
 
