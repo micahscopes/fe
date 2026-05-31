@@ -83,6 +83,35 @@ fn assert_diag_message(diags: &[CompleteDiagnostic], expected: &str) {
     );
 }
 
+fn assert_diag_primary_span_text(
+    db: &HirAnalysisTestDb,
+    diags: &[CompleteDiagnostic],
+    expected: &str,
+    expected_text: &str,
+) {
+    let diag = diags
+        .iter()
+        .find(|diag| {
+            diag.message.contains(expected)
+                || diag
+                    .sub_diagnostics
+                    .iter()
+                    .any(|sub| sub.message.contains(expected))
+                || diag.notes.iter().any(|note| note.contains(expected))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected diagnostic message containing `{expected}`, got diagnostics: {diags:#?}"
+            )
+        });
+    let span = diag
+        .primary_span()
+        .unwrap_or_else(|| panic!("expected diagnostic `{expected}` to have a primary span"));
+    let text = span.file.text(db);
+    let actual = &text[span.range.start().into()..span.range.end().into()];
+    assert_eq!(actual, expected_text);
+}
+
 #[test]
 fn named_derive_provider_signature_validation_accepts_const_evidence_return() {
     let mut db = HirAnalysisTestDb::default();
@@ -2514,6 +2543,12 @@ impl StableEq: Derive for Eq {
         &diags,
         "selected derive provider `missing_provider` for `Derive<Eq>` was not found",
     );
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "selected derive provider `missing_provider`",
+        "using = missing_provider",
+    );
 }
 
 #[test]
@@ -2547,6 +2582,12 @@ impl StableDefault: Derive for Default {
     assert_diag_message(
         &diags,
         "visible provider(s) named `StableDefault` provide `Derive<Default>`",
+    );
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "selected derive provider `StableDefault`",
+        "using = StableDefault",
     );
 }
 

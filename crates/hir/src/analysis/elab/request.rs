@@ -66,6 +66,27 @@ impl<'db> ElaborationTarget<'db> {
         }
     }
 
+    pub(super) fn attr_arg_span(self, attr_index: u32, arg_index: u32) -> DynLazySpan<'db> {
+        match self {
+            Self::Struct(struct_) => struct_
+                .span()
+                .attributes()
+                .attr(attr_index as usize)
+                .into_normal_attr()
+                .args()
+                .arg(arg_index as usize)
+                .into(),
+            Self::Enum(enum_) => enum_
+                .span()
+                .attributes()
+                .attr(attr_index as usize)
+                .into_normal_attr()
+                .args()
+                .arg(arg_index as usize)
+                .into(),
+        }
+    }
+
     pub(super) fn ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
         let adt = match self {
             Self::Struct(struct_) => struct_.as_adt(db),
@@ -81,7 +102,11 @@ impl<'db> ElaborationTarget<'db> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum ElaborationOrigin<'db> {
-    DeriveAttr { attr_index: u32, arg_index: u32 },
+    DeriveAttr {
+        attr_index: u32,
+        arg_index: u32,
+        selected_provider_arg_index: Option<u32>,
+    },
     DeriveDecl(DeriveDecl<'db>),
 }
 
@@ -117,15 +142,17 @@ impl<'db> ElaborationRequestId<'db> {
 
     pub(super) fn selected_provider_span(self, db: &'db dyn HirAnalysisDb) -> DynLazySpan<'db> {
         match self.origin(db) {
+            ElaborationOrigin::DeriveAttr {
+                attr_index,
+                selected_provider_arg_index: Some(arg_index),
+                ..
+            } => self.target(db).attr_arg_span(attr_index, arg_index),
             ElaborationOrigin::DeriveDecl(decl)
                 if decl.selected_provider_path(db).is_some()
                     && !decl.selected_provider_is_scoped(db) =>
             {
                 decl.span().provider_path().into()
             }
-            // Attribute-origin requests currently retain the derive argument
-            // index, not the keyword argument index, so use the full attribute
-            // span until selected-provider arguments are carried explicitly.
             ElaborationOrigin::DeriveAttr { .. } | ElaborationOrigin::DeriveDecl(_) => {
                 self.span(db)
             }
@@ -252,12 +279,15 @@ fn derive_requests_for_attr<'db>(
     }
 
     let mut selected_provider = None;
+    let mut selected_provider_arg_index = None;
     let mut trait_args = Vec::new();
     let mut errors = Vec::new();
-    for arg in &attr.args {
+    for (raw_arg_index, arg) in attr.args.iter().enumerate() {
         if arg.has_value || arg.value.is_some() {
             match parse_derive_provider_selection(db, target, arg) {
-                Ok(provider) if selected_provider.replace(provider).is_none() => {}
+                Ok(provider) if selected_provider.replace(provider).is_none() => {
+                    selected_provider_arg_index = Some(raw_arg_index as u32);
+                }
                 Ok(_) => errors.push(invalid_request(
                     target.attr_span(),
                     "`#[derive(...)]` may only select one provider",
@@ -304,6 +334,7 @@ fn derive_requests_for_attr<'db>(
                 ElaborationOrigin::DeriveAttr {
                     attr_index: attr_index as u32,
                     arg_index: arg_index as u32,
+                    selected_provider_arg_index,
                 },
             ))
         })
