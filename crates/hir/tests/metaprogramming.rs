@@ -92,14 +92,15 @@ fn evidence_provider_signature_validation_accepts_const_evidence_return() {
         r#"
 trait Eq {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        ev
+    }
 }
 "#,
     );
@@ -498,14 +499,15 @@ struct Foo {
     x: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        ev
+    }
 }
 "#,
     );
@@ -516,7 +518,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     assert_eq!(
         summaries,
         vec![
-            "Foo: Eq requested for Foo using Derive<Eq> evidence from derive_eq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq>]".to_string(),
+            "Foo: Eq requested for Foo using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq>]".to_string(),
         ]
     );
 }
@@ -532,9 +534,10 @@ trait Eq {}
 #[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
 }
 "#,
     );
@@ -545,8 +548,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
     assert_eq!(
         summaries,
         vec![
-            "Foo: Eq requested for Foo using Derive<Eq> evidence from derive_eq with []"
-                .to_string()
+            "Foo: Eq requested for Foo using Derive<Eq> evidence from StableEq with []".to_string()
         ]
     );
 }
@@ -564,11 +566,12 @@ struct Box<T> {
     value: T,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (reflect: Reflect<T>)
-{
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (reflect: Reflect<T>)
+    {
+        ev
+    }
 }
 "#,
     );
@@ -594,9 +597,10 @@ struct Foo {
     x: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
 }
 "#,
     );
@@ -706,11 +710,12 @@ where
 #[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (reflect: Reflect<T>)
-{
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (reflect: Reflect<T>)
+    {
+        ev
+    }
 }
 
 fn caller() {
@@ -745,15 +750,16 @@ struct Foo {
     x: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
