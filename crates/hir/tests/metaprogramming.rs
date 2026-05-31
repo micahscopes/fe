@@ -2846,6 +2846,54 @@ impl FastEq: Derive for Eq {
 }
 
 #[test]
+fn with_provider_scopes_for_same_global_target_conflict() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "with_provider_scopes_for_same_global_target_conflict.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+with StableEq {
+    derive Eq for Foo
+}
+
+with FastEq {
+    derive Eq for Foo
+}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_diag_message(&diags, "from provider `StableEq`");
+    assert_diag_message(&diags, "from provider `FastEq`");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn selected_named_provider_conflicts_with_authored_impl() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
