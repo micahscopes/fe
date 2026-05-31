@@ -47,7 +47,7 @@ pub(super) fn implicit_provider_ambiguity_diags_for_top_mod<'db>(
             Some(invalid_request(
                 request.span(db),
                 format!(
-                    "implicit derive request for `{}` is ambiguous between providers {names}; select a provider with `using`",
+                    "implicit derive request for `{}` is ambiguous between providers {names}; select a provider with `using` or a `with Provider {{ ... }}` scope",
                     derive_goal.pretty_print(db)
                 ),
             ))

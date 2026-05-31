@@ -1873,6 +1873,108 @@ fn caller() {
 }
 
 #[test]
+fn with_provider_scope_reports_missing_provider() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "with_provider_scope_reports_missing_provider.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+with missing_provider {
+    derive Eq for Foo
+}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `missing_provider` for `Derive<Eq>` was not found",
+    );
+    assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
+}
+
+#[test]
+fn with_provider_scope_reports_wrong_provider_head() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "with_provider_scope_reports_wrong_provider_head.fe".into(),
+        r#"
+trait Eq {}
+trait Default {}
+
+struct Foo {}
+
+with StableDefault {
+    derive Eq for Foo
+}
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `StableDefault` does not provide `Derive<Eq>` evidence",
+    );
+    assert_diag_message(
+        &diags,
+        "visible provider(s) named `StableDefault` provide `Derive<Default>`",
+    );
+    assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
+}
+
+#[test]
+fn with_provider_scope_rejects_non_derive_items() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "with_provider_scope_rejects_non_derive_items.fe".into(),
+        r#"
+trait Eq {}
+
+with StableEq {
+    struct Foo {}
+}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "derive provider selection scopes may only contain derive declarations",
+    );
+    assert!(elaboration_request_summaries_for_top_mod(&db, top_mod).is_empty());
+}
+
+#[test]
 fn core_derives_dependency_makes_implicit_derive_ambiguous_with_local_provider() {
     let mut db = HirAnalysisTestDb::default();
     let file = project_file(

@@ -1053,7 +1053,11 @@ impl<'db> DeriveDecl<'db> {
                     Some(ast::ItemKind::DeriveDecl(decl)) => {
                         Self::lower_ast_with_scoped_provider(ctxt, decl, scoped_provider_path);
                     }
-                    Some(_) => ItemKind::lower_ast(ctxt, item),
+                    // The parser reports non-derive items inside this block.
+                    // Do not lower recovery items as ordinary module items,
+                    // otherwise an invalid provider-selection block would still
+                    // leak definitions into the surrounding module.
+                    Some(_) => {}
                     None => {}
                 }
             }
