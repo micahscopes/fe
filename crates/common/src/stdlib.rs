@@ -13,6 +13,7 @@ use crate::{
 // `Url::join` normalizes children under `builtin-core:/...`, so lookups must
 // use the same base form or builtin ingots appear empty.
 pub static BUILTIN_CORE_BASE_URL: &str = "builtin-core:/";
+pub static BUILTIN_CORE_DERIVES_BASE_URL: &str = "builtin-core-derives:/";
 pub static BUILTIN_STD_BASE_URL: &str = "builtin-std:/";
 
 fn is_library_file(path: &Utf8Path) -> bool {
@@ -124,6 +125,28 @@ impl<T: InputDb> HasBuiltinCore for T {
 }
 
 #[derive(Embed)]
+#[folder = "../../ingots/core_derives"]
+pub struct CoreDerives;
+
+pub trait HasBuiltinCoreDerives: InputDb {
+    fn initialize_builtin_core_derives(&mut self);
+    fn builtin_core_derives(&self) -> Ingot<'_>;
+}
+
+impl<T: InputDb> HasBuiltinCoreDerives for T {
+    fn initialize_builtin_core_derives(&mut self) {
+        initialize_builtin::<CoreDerives>(self, BUILTIN_CORE_DERIVES_BASE_URL);
+    }
+
+    fn builtin_core_derives(&self) -> Ingot<'_> {
+        let core_derives = self
+            .workspace()
+            .containing_ingot(self, Url::parse(BUILTIN_CORE_DERIVES_BASE_URL).unwrap());
+        core_derives.expect("Built-in core_derives ingot failed to initialize")
+    }
+}
+
+#[derive(Embed)]
 #[folder = "../../ingots/std"]
 pub struct Std;
 
@@ -167,11 +190,17 @@ mod tests {
     fn builtin_ingots_are_indexed_under_their_lookup_urls() {
         let db = TestDb::default();
         let core = db.builtin_core();
+        db.initialize_builtin_core_derives();
+        let core_derives = db.builtin_core_derives();
         let std = db.builtin_std();
 
         assert!(
             core.files(&db).iter().next().is_some(),
             "builtin core ingot should contain indexed files"
+        );
+        assert!(
+            core_derives.files(&db).iter().next().is_some(),
+            "builtin core_derives ingot should contain indexed files"
         );
         assert!(
             std.files(&db).iter().next().is_some(),

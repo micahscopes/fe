@@ -1,0 +1,41 @@
+use core::Default
+use core::ops::Eq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        let mut acc = builder.bool(true)
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+            acc = builder.and(acc, builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.emit_method(acc)
+        builder.finish()
+        ev
+    }
+}
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Default<T>>,
+        )
+    {
+        let mut init = builder.struct_init()
+        for field in reflect.fields() {
+            builder.require<Default>(field.ty())
+            init = builder.with_field(init, field, builder.default(field.ty()))
+        }
+        builder.emit_method(init)
+        builder.finish()
+        ev
+    }
+}
