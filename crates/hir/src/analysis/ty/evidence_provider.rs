@@ -48,6 +48,12 @@ pub(crate) enum EvidenceProviderValidationResult<'db> {
     NotProvider,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum EvidenceProviderDecl<'db> {
+    Named(DeriveProvider<'db>),
+    Attr(Func<'db>),
+}
+
 pub(crate) fn validate_attr_evidence_provider<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
@@ -98,29 +104,14 @@ pub(crate) fn validated_evidence_providers_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
-    let mut providers: Vec<_> = ingot
-        .all_derive_providers(db)
-        .iter()
-        .filter_map(
-            |&provider| match validate_named_derive_provider(db, provider).0 {
-                EvidenceProviderValidationResult::Valid(provider) => Some(provider),
-                EvidenceProviderValidationResult::Invalid
-                | EvidenceProviderValidationResult::NotProvider => None,
-            },
-        )
-        .collect();
-
-    // Compatibility path for staged `#[evidence_provider(...)]` functions. The
-    // named `impl Provider: Derive for Head { .. }` item above is the primary
-    // provider declaration surface.
-    providers.extend(ingot.all_funcs(db).iter().filter_map(|&func| {
-        match validate_attr_evidence_provider(db, func).0 {
+    evidence_provider_decls_for_ingot(db, ingot)
+        .into_iter()
+        .filter_map(|decl| match validate_evidence_provider_decl(db, decl).0 {
             EvidenceProviderValidationResult::Valid(provider) => Some(provider),
             EvidenceProviderValidationResult::Invalid
             | EvidenceProviderValidationResult::NotProvider => None,
-        }
-    }));
-    providers
+        })
+        .collect()
 }
 
 pub(crate) fn visible_evidence_providers_for_ingot<'db>(
@@ -143,6 +134,41 @@ pub(crate) fn providers_for_derive_goal<'db>(
         .into_iter()
         .filter(|provider| provider.derive_goal(db) == derive_goal)
         .collect()
+}
+
+fn evidence_provider_decls_for_ingot<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ingot: Ingot<'db>,
+) -> Vec<EvidenceProviderDecl<'db>> {
+    let named = ingot
+        .all_derive_providers(db)
+        .iter()
+        .copied()
+        .map(EvidenceProviderDecl::Named);
+
+    // Compatibility path for staged `#[evidence_provider(...)]` functions. The
+    // named `impl Provider: Derive for Head { .. }` item above is the primary
+    // provider declaration surface.
+    let attr = ingot
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .map(EvidenceProviderDecl::Attr);
+
+    named.chain(attr).collect()
+}
+
+fn validate_evidence_provider_decl<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: EvidenceProviderDecl<'db>,
+) -> (
+    EvidenceProviderValidationResult<'db>,
+    Vec<TyDiagCollection<'db>>,
+) {
+    match decl {
+        EvidenceProviderDecl::Named(provider) => validate_named_derive_provider(db, provider),
+        EvidenceProviderDecl::Attr(func) => validate_attr_evidence_provider(db, func),
+    }
 }
 
 fn evidence_provider_attrs<'db>(
