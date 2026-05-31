@@ -43,20 +43,16 @@ pub(crate) struct EvidenceProviderId<'db> {
 pub(crate) enum EvidenceProviderValidationResult<'db> {
     Valid(EvidenceProviderId<'db>),
     Invalid,
-    NotProvider,
 }
 
-pub(crate) fn validate_attr_evidence_provider<'db>(
+pub(crate) fn obsolete_attr_evidence_provider_diags<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
-) -> (
-    EvidenceProviderValidationResult<'db>,
-    Vec<TyDiagCollection<'db>>,
-) {
+) -> Vec<TyDiagCollection<'db>> {
     let mut diags = Vec::new();
     let attrs = evidence_provider_attrs(db, func);
     if attrs.is_empty() {
-        return (EvidenceProviderValidationResult::NotProvider, diags);
+        return diags;
     }
 
     let attr_span: crate::span::DynLazySpan<'db> = func.span().attributes().into();
@@ -64,7 +60,7 @@ pub(crate) fn validate_attr_evidence_provider<'db>(
         attr_span,
         "`#[evidence_provider(...)]` is obsolete; use `impl Provider: Derive for Head { const fn derive(...) { ... } }`",
     ));
-    (EvidenceProviderValidationResult::Invalid, diags)
+    diags
 }
 
 pub(crate) fn validated_evidence_providers_for_ingot<'db>(
@@ -77,8 +73,7 @@ pub(crate) fn validated_evidence_providers_for_ingot<'db>(
         .filter_map(
             |&provider| match validate_named_derive_provider(db, provider).0 {
                 EvidenceProviderValidationResult::Valid(provider) => Some(provider),
-                EvidenceProviderValidationResult::Invalid
-                | EvidenceProviderValidationResult::NotProvider => None,
+                EvidenceProviderValidationResult::Invalid => None,
             },
         )
         .collect()
