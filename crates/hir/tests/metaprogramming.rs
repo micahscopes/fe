@@ -660,18 +660,20 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        builder.finish()
+        ev
+    }
 }
 
 fn caller() {
@@ -2167,18 +2169,20 @@ trait Eq {
     fn eq(self, other: Self) -> bool
 }
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -2205,16 +2209,18 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.emit_method(builder.bool(true))
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.bool(true))
+        builder.finish()
+        ev
+    }
 }
 
 fn caller() {
@@ -2246,16 +2252,18 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.emit_method(builder.and(builder.bool(true), builder.bool(true)))
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.and(builder.bool(true), builder.bool(true)))
+        builder.finish()
+        ev
+    }
 }
 
 fn caller() {
@@ -2282,17 +2290,19 @@ trait Eq {
     fn eq(self, other: Self) -> bool
 }
 
-#[derive(Eq)]
 struct Foo {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (builder: mut ImplBuilder<Eq<T>>)
-{
-    builder.emit_method(builder.bool(true))
-    builder.emit_method(builder.bool(false))
-    builder.finish()
-    ev
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.bool(true))
+        builder.emit_method(builder.bool(false))
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -2317,26 +2327,28 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.emit_method(builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("other"), field),
-        ))
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.emit_method(builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2368,26 +2380,28 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.emit_method(builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("rhs"), field),
-        ))
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.emit_method(builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("rhs"), field),
+            ))
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2414,26 +2428,28 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.emit_method(builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("other"), field),
-        ))
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.emit_method(builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2460,26 +2476,28 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.emit_method(builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("other"), field),
-        ))
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.emit_method(builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2501,26 +2519,28 @@ trait Eq {
     fn eq(self, other: u256) -> bool
 }
 
-#[derive(Eq)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.emit_method(builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("other"), field),
-        ))
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.emit_method(builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 "#,
     );
@@ -2533,7 +2553,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     assert_diag_message(&diags, "unsupported eq");
     assert_diag_message(
         &diags,
-        "generated by derive_eq for `Foo: Eq requested for Foo`",
+        "generated by StableEq for `Foo: Eq requested for Foo using StableEq`",
     );
 }
 
@@ -2547,26 +2567,28 @@ trait Eq {
     fn eq(self) -> bool
 }
 
-#[derive(Eq)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.emit_method(builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("other"), field),
-        ))
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.emit_method(builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 "#,
     );
@@ -2579,7 +2601,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
     assert_diag_message(&diags, "unsupported eq");
     assert_diag_message(
         &diags,
-        "generated by derive_eq for `Foo: Eq requested for Foo`",
+        "generated by StableEq for `Foo: Eq requested for Foo using StableEq`",
     );
 }
 
@@ -2657,17 +2679,19 @@ trait Default {
     fn default() -> Self
 }
 
-#[derive(Default)]
 struct Foo {}
 
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (
-        builder: mut ImplBuilder<Default<T>>,
-    )
-{
-    builder.finish()
-    ev
+derive Default for Foo using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (
+            builder: mut ImplBuilder<Default<T>>,
+        )
+    {
+        builder.finish()
+        ev
+    }
 }
 "#,
     );
@@ -2680,7 +2704,7 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
     assert_diag_message(&diags, "missing default");
     assert_diag_message(
         &diags,
-        "generated by derive_default for `Foo: Default requested for Foo`",
+        "generated by StableDefault for `Foo: Default requested for Foo using StableDefault`",
     );
 }
 
