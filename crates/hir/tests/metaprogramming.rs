@@ -2106,6 +2106,52 @@ fn caller() {
 }
 
 #[test]
+fn provider_generated_method_arg_ref_uses_defaulted_self_arg() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_method_arg_ref_uses_defaulted_self_arg.fe".into(),
+        r#"
+trait Eq<Other = Self> {
+    fn eq(self, other: Other) -> bool
+}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    for field in reflect.fields() {
+        builder.emit_method(builder.eq(
+            builder.field_get(builder.self_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
+        ))
+    }
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn provider_generated_method_rejects_unavailable_method_arg() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

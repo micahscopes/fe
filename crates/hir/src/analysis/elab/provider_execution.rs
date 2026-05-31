@@ -28,7 +28,8 @@ use super::{
     BuilderError, CapabilityEnv, ElaborationCtfeContextId, ImplBuilderSession, ProviderOutputId,
     ProviderOutputStatus, ProviderSkipReason, ReflectedField, RequirementOrigin,
     generated_method::{
-        required_method_arg_ty_for_trait_inst, required_method_names, required_methods,
+        generated_method_default_assumptions, required_method_arg_ty_for_trait_inst,
+        required_method_names, required_methods,
     },
     reflect::reflect_struct_fields,
 };
@@ -775,7 +776,13 @@ impl<'db> ProviderBodyExecutor<'db> {
         if methods.next().is_some() {
             return None;
         }
-        required_method_arg_ty_for_trait_inst(self.db, trait_inst, method, name)
+        required_method_arg_ty_for_trait_inst(
+            self.db,
+            trait_inst,
+            method,
+            name,
+            generated_method_default_assumptions(self.db, self.context),
+        )
     }
 }
 

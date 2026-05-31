@@ -16,10 +16,11 @@ use crate::{
             ty_lower::ConstDefaultCompletion,
         },
     },
+    core::semantic::constraints_for,
     hir_def::{Func, IdentId},
 };
 
-use super::{reflect::reflect_struct_fields, tys_match};
+use super::{ElaborationCtfeContextId, reflect::reflect_struct_fields, tys_match};
 
 pub(super) fn generated_missing_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -80,7 +81,13 @@ fn generated_required_method_param_ty<'db>(
     cx: GeneratedMethodValidationContext<'db>,
     name: IdentId<'db>,
 ) -> Option<TyId<'db>> {
-    required_method_arg_ty_for_trait_inst(db, cx.generated.trait_inst, cx.required_method, name)
+    required_method_arg_ty_for_trait_inst(
+        db,
+        cx.generated.trait_inst,
+        cx.required_method,
+        name,
+        generated_method_default_assumptions(db, cx.generated.context),
+    )
 }
 
 pub(super) fn required_method_arg_ty_for_trait_inst<'db>(
@@ -88,10 +95,11 @@ pub(super) fn required_method_arg_ty_for_trait_inst<'db>(
     trait_inst: TraitInstId<'db>,
     required_method: Func<'db>,
     name: IdentId<'db>,
+    assumptions: PredicateListId<'db>,
 ) -> Option<TyId<'db>> {
     let method = required_method.as_callable(db)?;
     let arg_tys = method.arg_tys(db);
-    let trait_args = trait_inst_args_with_defaults(db, trait_inst);
+    let trait_args = trait_inst_args_with_defaults(db, trait_inst, assumptions);
 
     for (idx, param) in required_method.params(db).enumerate() {
         if param.is_self_param(db) {
@@ -110,6 +118,7 @@ pub(super) fn required_method_arg_ty_for_trait_inst<'db>(
                 trait_inst,
                 required_method,
                 ty,
+                assumptions,
             ));
         }
     }
@@ -147,6 +156,7 @@ fn instantiate_required_method_ty<'db>(
         cx.generated.trait_inst,
         cx.required_method,
         ty,
+        generated_method_default_assumptions(db, cx.generated.context),
     )
 }
 
@@ -155,8 +165,9 @@ fn instantiate_required_method_ty_for_trait_inst<'db>(
     trait_inst: TraitInstId<'db>,
     required_method: Func<'db>,
     ty: TyId<'db>,
+    assumptions: PredicateListId<'db>,
 ) -> TyId<'db> {
-    let trait_args = trait_inst_args_with_defaults(db, trait_inst);
+    let trait_args = trait_inst_args_with_defaults(db, trait_inst, assumptions);
     if ty_is_named_self(db, ty)
         && let Some(&target_ty) = trait_args.first()
     {
@@ -189,6 +200,7 @@ fn instantiate_required_method_ty_for_trait_inst<'db>(
 fn trait_inst_args_with_defaults<'db>(
     db: &'db dyn HirAnalysisDb,
     trait_inst: TraitInstId<'db>,
+    assumptions: PredicateListId<'db>,
 ) -> Vec<TyId<'db>> {
     let args = trait_inst.args(db);
     if args.len() >= trait_inst.def(db).params(db).len() {
@@ -201,13 +213,42 @@ fn trait_inst_args_with_defaults<'db>(
         db,
         Some(self_ty),
         provided_explicit,
-        PredicateListId::empty_list(db),
+        assumptions,
         ConstDefaultCompletion::evaluate(None),
     );
     let mut full_args = Vec::with_capacity(1 + completed.len());
     full_args.push(self_ty);
     full_args.extend(completed);
     full_args
+}
+
+pub(super) fn generated_method_default_assumptions<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> PredicateListId<'db> {
+    let mut assumptions = IndexSet::new();
+
+    // Defaulted trait arguments for generated methods are completed in the
+    // provider/request environment, not in an empty world. Trait-owned projection
+    // defaults still need a cycle-safe ParamEnv path before we include the required
+    // method's own assumptions here.
+    assumptions.extend(
+        context
+            .provider(db)
+            .func(db)
+            .assumptions(db)
+            .list(db)
+            .iter()
+            .copied(),
+    );
+    assumptions.extend(
+        constraints_for(db, context.request(db).target(db).item())
+            .list(db)
+            .iter()
+            .copied(),
+    );
+
+    PredicateListId::new(db, assumptions.into_iter().collect::<Vec<_>>())
 }
 
 fn generated_expr_ty_matches<'db>(
