@@ -1187,24 +1187,26 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Pair<A, B> {
     a: A,
     b: B,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
+derive Eq for Pair using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller<A, B>()
@@ -1238,30 +1240,32 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Pair<A, B> {
     a: A,
     b: B,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    let mut acc = builder.bool(true)
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
-        acc = builder.and(acc, builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("other"), field),
-        ))
+derive Eq for Pair using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        let mut acc = builder.bool(true)
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+            acc = builder.and(acc, builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.emit_method(acc)
+        builder.finish()
+        ev
     }
-    builder.emit_method(acc)
-    builder.finish()
-    ev
 }
 
 fn caller<A, B>()
@@ -1282,7 +1286,7 @@ where
     );
     assert_eq!(
         evidence_provider_summaries_for_top_mod(&db, top_mod),
-        vec!["provider derive_eq for Eq via Derive<Eq> -> T: Eq<T>".to_string()]
+        vec!["provider StableEq for Eq via Derive<Eq> -> T: Eq<T>".to_string()]
     );
 }
 
@@ -1299,29 +1303,31 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    let mut acc = builder.bool(true)
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
-        acc = builder.and(acc, builder.eq(
-            builder.field_get(builder.self_ref(), field),
-            builder.field_get(builder.arg_ref("other"), field),
-        ))
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        let mut acc = builder.bool(true)
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+            acc = builder.and(acc, builder.eq(
+                builder.field_get(builder.self_ref(), field),
+                builder.field_get(builder.arg_ref("other"), field),
+            ))
+        }
+        builder.emit_method(acc)
+        builder.finish()
+        ev
     }
-    builder.emit_method(acc)
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2782,26 +2788,28 @@ where
     T: Default
 {}
 
-#[derive(Default)]
 struct Foo {
     value: u256,
 }
 
-#[evidence_provider(Default)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Default<T>>,
-    )
-{
-    let mut init = builder.struct_init()
-    for field in reflect.fields() {
-        builder.require<Default>(field.ty())
-        init = builder.with_field(init, field, builder.default(field.ty()))
+derive Default for Foo using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Default<T>>,
+        )
+    {
+        let mut init = builder.struct_init()
+        for field in reflect.fields() {
+            builder.require<Default>(field.ty())
+            init = builder.with_field(init, field, builder.default(field.ty()))
+        }
+        builder.emit_method(init)
+        builder.finish()
+        ev
     }
-    builder.emit_method(init)
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2833,23 +2841,25 @@ where
 
 struct FieldTy {}
 
-#[derive(Eq)]
 struct Box {
     value: FieldTy,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
+derive Eq for Box using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2866,7 +2876,7 @@ fn caller() {
     );
     assert_generated_requirement_note(
         &diags,
-        "generated by derive_eq for `Box: Eq requested for Box`",
+        "generated by StableEq for `Box: Eq requested for Box using StableEq`",
     );
 }
 
@@ -2883,23 +2893,25 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Loop {
     next: Loop,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
+derive Eq for Loop using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2913,7 +2925,7 @@ fn caller() {
     assert_diag_message(&diags, "Loop: Eq -> Loop: Eq");
     assert_diag_message(
         &diags,
-        "requests: Loop: Eq requested for Loop generated by derive_eq",
+        "requests: Loop: Eq requested for Loop using StableEq generated by StableEq",
     );
     assert_diag_message(&diags, "Loop: Eq from field Loop.next");
     assert_unsatisfied_bound(&diags, "Loop: Eq");
@@ -2932,28 +2944,30 @@ where
     T: Eq
 {}
 
-#[derive(Eq)]
 struct Left {
     right: Right,
 }
 
-#[derive(Eq)]
 struct Right {
     left: Left,
 }
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-    uses (
-        reflect: Reflect<T>,
-        builder: mut ImplBuilder<Eq<T>>,
-    )
-{
-    for field in reflect.fields() {
-        builder.require<Eq>(field.ty())
+derive Eq for Left using StableEq
+derive Eq for Right using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        builder.finish()
+        ev
     }
-    builder.finish()
-    ev
 }
 
 fn caller() {
@@ -2965,10 +2979,13 @@ fn caller() {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "recursive generated evidence request");
     assert_diag_message(&diags, "Left: Eq -> Right: Eq -> Left: Eq");
-    assert_diag_message(&diags, "Left: Eq requested for Left generated by derive_eq");
     assert_diag_message(
         &diags,
-        "Right: Eq requested for Right generated by derive_eq",
+        "Left: Eq requested for Left using StableEq generated by StableEq",
+    );
+    assert_diag_message(
+        &diags,
+        "Right: Eq requested for Right using StableEq generated by StableEq",
     );
     assert_diag_message(&diags, "Right: Eq from field Left.right");
     assert_diag_message(&diags, "Left: Eq from field Right.left");
