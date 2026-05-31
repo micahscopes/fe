@@ -417,10 +417,10 @@ derive Default for Pair
 }
 
 #[test]
-fn derive_head_must_resolve_to_trait() {
+fn derive_attr_head_must_resolve_to_trait() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "derive_head_must_resolve_to_trait.fe".into(),
+        "derive_attr_head_must_resolve_to_trait.fe".into(),
         r#"
 struct NotATrait {}
 
@@ -1909,10 +1909,10 @@ fn caller() {
 }
 
 #[test]
-fn derive_using_reports_missing_provider() {
+fn derive_attr_using_reports_missing_provider() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "derive_using_reports_missing_provider.fe".into(),
+        "derive_attr_using_reports_missing_provider.fe".into(),
         r#"
 trait Eq {}
 
@@ -1938,10 +1938,10 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
-fn derive_using_reports_wrong_provider_head() {
+fn derive_attr_using_reports_wrong_provider_head() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "derive_using_reports_wrong_provider_head.fe".into(),
+        "derive_attr_using_reports_wrong_provider_head.fe".into(),
         r#"
 trait Eq {}
 trait Default {}
