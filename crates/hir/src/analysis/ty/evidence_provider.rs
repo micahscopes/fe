@@ -83,14 +83,8 @@ pub(crate) fn validate_attr_evidence_provider<'db>(
         }
     };
 
-    let provider = validate_provider_function(
-        db,
-        func,
-        head,
-        explicit_name,
-        &mut diags,
-        "evidence provider",
-    );
+    let provider =
+        validate_provider_function(db, func, head, explicit_name, &mut diags, "derive provider");
 
     if diags.is_empty() {
         let provider = provider.expect("validated provider");
@@ -383,15 +377,15 @@ fn parse_provider_attr<'db>(
     }
     let arg = &attr.args[0];
     if arg.has_value || arg.value.is_some() {
-        return Err("evidence provider head must be a trait path");
+        return Err("derive provider head must be a trait path");
     }
     let Some(path) = arg.key.to_opt() else {
-        return Err("evidence provider head must be a trait path");
+        return Err("derive provider head must be a trait path");
     };
 
     let head = match resolve_path(db, path, func.scope(), func.assumptions(db), false) {
         Ok(PathRes::Trait(inst)) => Ok(inst.def(db)),
-        _ => Err("evidence provider head must resolve to a trait"),
+        _ => Err("derive provider head must resolve to a trait"),
     }?;
 
     let name = match attr.args.get(1) {
@@ -408,12 +402,12 @@ fn parse_provider_identity_arg<'db>(
 ) -> Result<IdentId<'db>, &'static str> {
     if arg.key_str(db) != Some("name") {
         return Err(
-            "evidence provider keyword arguments currently only support `name = ProviderName`",
+            "`#[evidence_provider]` keyword arguments currently only support `name = ProviderName`",
         );
     }
     match arg.value.as_ref() {
         Some(AttrArgValue::Ident(name)) => Ok(*name),
-        _ => Err("evidence provider name must be an identifier"),
+        _ => Err("derive provider name must be an identifier"),
     }
 }
 

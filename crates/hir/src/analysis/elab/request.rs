@@ -343,13 +343,13 @@ fn derive_request_for_decl<'db>(
             let Some(path) = path.to_opt() else {
                 return Err(invalid_request(
                     span.clone(),
-                    "`using` must name an evidence provider",
+                    "`using` must name a derive provider",
                 ));
             };
             let Some(provider) = path.as_ident(db) else {
                 return Err(invalid_request(
                     span.clone(),
-                    "`using` must name one evidence provider",
+                    "`using` must name one derive provider",
                 ));
             };
             Some(provider)
@@ -396,7 +396,7 @@ fn parse_derive_provider_selection<'db>(
         Some(AttrArgValue::Ident(provider)) => Ok(*provider),
         _ => Err(invalid_request(
             target.attr_span(),
-            "`using` must name an evidence provider",
+            "`using` must name a derive provider",
         )),
     }
 }

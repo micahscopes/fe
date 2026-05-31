@@ -2065,7 +2065,7 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
 
             Self::InvalidEvidenceProvider { span, message } => CompleteDiagnostic {
                 severity: Severity::Error,
-                message: "invalid evidence provider".to_string(),
+                message: "invalid derive provider".to_string(),
                 sub_diagnostics: vec![SubDiagnostic {
                     style: LabelStyle::Primary,
                     message: message.clone(),

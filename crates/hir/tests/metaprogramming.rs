@@ -110,10 +110,10 @@ impl StableEq: Derive for Eq {
 // Compatibility coverage for staged `#[evidence_provider(...)]` syntax. The
 // preferred provider declaration surface is `impl Provider: Derive for Head`.
 #[test]
-fn evidence_provider_summaries_include_provider_identity() {
+fn attr_derive_provider_summaries_include_provider_identity() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "evidence_provider_summaries_include_provider_identity.fe".into(),
+        "attr_derive_provider_summaries_include_provider_identity.fe".into(),
         r#"
 trait Eq {}
 
@@ -136,10 +136,10 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
-fn evidence_provider_can_declare_named_identity() {
+fn attr_derive_provider_can_declare_named_identity() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "evidence_provider_can_declare_named_identity.fe".into(),
+        "attr_derive_provider_can_declare_named_identity.fe".into(),
         r#"
 trait Eq {}
 
@@ -206,7 +206,7 @@ impl StableEq: NotDerive for Eq {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(
         &diags,
         "derive provider declarations must use `Derive` after `:`",
@@ -231,7 +231,7 @@ impl StableEq: Derive for NotATrait {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(&diags, "derive provider head must resolve to a trait");
 }
 
@@ -252,7 +252,7 @@ impl StableEq: Derive for Eq {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(
         &diags,
         "derive provider declarations must contain one `derive` function",
@@ -280,7 +280,7 @@ impl StableEq: Derive for Eq {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(
         &diags,
         "derive provider declarations may contain only one `derive` function",
@@ -390,7 +390,7 @@ impl StableEq: Derive for Eq {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(&diags, "must be `const fn`");
 }
 
@@ -411,7 +411,7 @@ impl StableEq: Derive for Eq {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(&diags, "must return `Evidence<C>`");
 }
 
@@ -433,7 +433,7 @@ impl StableEq: Derive for Eq {
     );
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "invalid evidence provider");
+    assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(&diags, "does not match the provider head");
 }
 
