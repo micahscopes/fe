@@ -3,9 +3,7 @@ use common::indexmap::IndexMap;
 use crate::{
     analysis::{
         HirAnalysisDb,
-        ty::{
-            diagnostics::TyDiagCollection, evidence_provider::visible_evidence_providers_for_ingot,
-        },
+        ty::{derive_provider::visible_derive_providers_for_ingot, diagnostics::TyDiagCollection},
     },
     hir_def::TopLevelMod,
 };
@@ -21,7 +19,7 @@ pub(super) fn implicit_provider_ambiguity_diags_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
-    let providers = visible_evidence_providers_for_ingot(db, top_mod.ingot(db));
+    let providers = visible_derive_providers_for_ingot(db, top_mod.ingot(db));
     let mut by_derive_goal: IndexMap<_, Vec<_>> = IndexMap::new();
     for provider in providers {
         by_derive_goal

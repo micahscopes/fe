@@ -388,7 +388,7 @@ impl<'db> Func<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Vec<TyDiagCollection<'db>> {
-        ty::evidence_provider::obsolete_attr_evidence_provider_diags(db, self)
+        ty::derive_provider::obsolete_evidence_provider_attr_diags(db, self)
     }
 }
 
@@ -1511,6 +1511,6 @@ impl<'db> Diagnosable<'db> for DeriveProvider<'db> {
     type Diagnostic = TyDiagCollection<'db>;
 
     fn diags(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
-        ty::evidence_provider::validate_named_derive_provider(db, self).1
+        ty::derive_provider::validate_named_derive_provider(db, self).1
     }
 }

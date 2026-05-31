@@ -6,8 +6,8 @@ use crate::{
         ty::{
             binder::Binder,
             constraint::{ConstraintHeadId, ConstraintHeadKind, ConstraintId, ConstraintKind},
-            evidence_provider::{
-                EvidenceProviderId, providers_for_derive_goal, visible_evidence_providers_for_ingot,
+            derive_provider::{
+                DeriveProviderId, providers_for_derive_goal, visible_derive_providers_for_ingot,
             },
             fold::TyFoldable,
             trait_resolution::constraint::collect_func_effect_capability_constraints,
@@ -27,7 +27,7 @@ pub(super) fn matching_selected_providers<'db>(
     ingot: Ingot<'db>,
     derive_goal: ConstraintId<'db>,
     selected: IdentId<'db>,
-) -> Vec<EvidenceProviderId<'db>> {
+) -> Vec<DeriveProviderId<'db>> {
     providers_for_derive_goal(db, ingot, derive_goal)
         .into_iter()
         .filter(|provider| provider.identity(db).name(db) == selected)
@@ -38,8 +38,8 @@ pub(super) fn providers_named_in_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     selected: IdentId<'db>,
-) -> Vec<EvidenceProviderId<'db>> {
-    visible_evidence_providers_for_ingot(db, ingot)
+) -> Vec<DeriveProviderId<'db>> {
+    visible_derive_providers_for_ingot(db, ingot)
         .into_iter()
         .filter(|provider| provider.identity(db).name(db) == selected)
         .collect()
@@ -48,7 +48,7 @@ pub(super) fn providers_named_in_ingot<'db>(
 pub(super) fn elaborate_provider_context<'db>(
     db: &'db dyn HirAnalysisDb,
     request: ElaborationRequestId<'db>,
-    provider: EvidenceProviderId<'db>,
+    provider: DeriveProviderId<'db>,
 ) -> Option<ElaborationCtfeContextId<'db>> {
     let capability_constraints = collect_func_effect_capability_constraints(db, provider.func(db));
     let mut table = UnificationTable::new(db);
@@ -103,7 +103,7 @@ pub(super) fn derive_evidence_for_goal<'db>(
 
 fn provider_goal_and_capabilities<'db>(
     db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
+    provider: DeriveProviderId<'db>,
     capabilities: &[ConstraintId<'db>],
 ) -> Vec<ConstraintId<'db>> {
     let mut constraints = Vec::with_capacity(capabilities.len() + 2);

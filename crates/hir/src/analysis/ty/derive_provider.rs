@@ -19,12 +19,12 @@ use rustc_hash::FxHashSet;
 
 #[salsa::interned]
 #[derive(Debug)]
-pub(crate) struct EvidenceProviderIdentityId<'db> {
+pub(crate) struct DeriveProviderIdentityId<'db> {
     pub(crate) name: IdentId<'db>,
     pub(crate) func: Func<'db>,
 }
 
-impl<'db> EvidenceProviderIdentityId<'db> {
+impl<'db> DeriveProviderIdentityId<'db> {
     pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
         self.name(db).data(db).to_string()
     }
@@ -32,25 +32,25 @@ impl<'db> EvidenceProviderIdentityId<'db> {
 
 #[salsa::interned]
 #[derive(Debug)]
-pub(crate) struct EvidenceProviderId<'db> {
-    pub(crate) identity: EvidenceProviderIdentityId<'db>,
+pub(crate) struct DeriveProviderId<'db> {
+    pub(crate) identity: DeriveProviderIdentityId<'db>,
     pub(crate) func: Func<'db>,
     pub(crate) goal: ConstraintId<'db>,
     pub(crate) derive_goal: ConstraintId<'db>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum EvidenceProviderValidationResult<'db> {
-    Valid(EvidenceProviderId<'db>),
+pub(crate) enum DeriveProviderValidationResult<'db> {
+    Valid(DeriveProviderId<'db>),
     Invalid,
 }
 
-pub(crate) fn obsolete_attr_evidence_provider_diags<'db>(
+pub(crate) fn obsolete_evidence_provider_attr_diags<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let mut diags = Vec::new();
-    let attrs = evidence_provider_attrs(db, func);
+    let attrs = obsolete_evidence_provider_attrs(db, func);
     if attrs.is_empty() {
         return diags;
     }
@@ -63,45 +63,45 @@ pub(crate) fn obsolete_attr_evidence_provider_diags<'db>(
     diags
 }
 
-pub(crate) fn validated_evidence_providers_for_ingot<'db>(
+pub(crate) fn validated_derive_providers_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
-) -> Vec<EvidenceProviderId<'db>> {
+) -> Vec<DeriveProviderId<'db>> {
     ingot
         .all_derive_providers(db)
         .iter()
         .filter_map(
             |&provider| match validate_named_derive_provider(db, provider).0 {
-                EvidenceProviderValidationResult::Valid(provider) => Some(provider),
-                EvidenceProviderValidationResult::Invalid => None,
+                DeriveProviderValidationResult::Valid(provider) => Some(provider),
+                DeriveProviderValidationResult::Invalid => None,
             },
         )
         .collect()
 }
 
-pub(crate) fn visible_evidence_providers_for_ingot<'db>(
+pub(crate) fn visible_derive_providers_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
-) -> Vec<EvidenceProviderId<'db>> {
+) -> Vec<DeriveProviderId<'db>> {
     let mut providers = Vec::new();
     let mut visited = FxHashSet::default();
-    collect_visible_evidence_providers(db, ingot, &mut visited, &mut providers);
+    collect_visible_derive_providers(db, ingot, &mut visited, &mut providers);
     providers
 }
 
-fn collect_visible_evidence_providers<'db>(
+fn collect_visible_derive_providers<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     visited: &mut FxHashSet<Ingot<'db>>,
-    providers: &mut Vec<EvidenceProviderId<'db>>,
+    providers: &mut Vec<DeriveProviderId<'db>>,
 ) {
     if !visited.insert(ingot) {
         return;
     }
 
-    providers.extend(validated_evidence_providers_for_ingot(db, ingot));
+    providers.extend(validated_derive_providers_for_ingot(db, ingot));
     for &(_, dependency) in ingot.resolved_external_ingots(db) {
-        collect_visible_evidence_providers(db, dependency, visited, providers);
+        collect_visible_derive_providers(db, dependency, visited, providers);
     }
 }
 
@@ -109,14 +109,14 @@ pub(crate) fn providers_for_derive_goal<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
     derive_goal: ConstraintId<'db>,
-) -> Vec<EvidenceProviderId<'db>> {
-    visible_evidence_providers_for_ingot(db, ingot)
+) -> Vec<DeriveProviderId<'db>> {
+    visible_derive_providers_for_ingot(db, ingot)
         .into_iter()
         .filter(|provider| provider.derive_goal(db) == derive_goal)
         .collect()
 }
 
-fn evidence_provider_attrs<'db>(
+fn obsolete_evidence_provider_attrs<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
 ) -> Vec<&'db NormalAttr<'db>> {
@@ -145,7 +145,7 @@ pub(crate) fn validate_named_derive_provider<'db>(
     db: &'db dyn HirAnalysisDb,
     provider: DeriveProvider<'db>,
 ) -> (
-    EvidenceProviderValidationResult<'db>,
+    DeriveProviderValidationResult<'db>,
     Vec<TyDiagCollection<'db>>,
 ) {
     let mut diags = Vec::new();
@@ -227,16 +227,16 @@ pub(crate) fn validate_named_derive_provider<'db>(
     };
 
     let Some(func) = func else {
-        return (EvidenceProviderValidationResult::Invalid, diags);
+        return (DeriveProviderValidationResult::Invalid, diags);
     };
 
     let provider = validate_provider_function(db, func, head, name, &mut diags, "derive provider");
 
     if diags.is_empty() {
         let provider = provider.expect("validated provider");
-        (EvidenceProviderValidationResult::Valid(provider), diags)
+        (DeriveProviderValidationResult::Valid(provider), diags)
     } else {
-        (EvidenceProviderValidationResult::Invalid, diags)
+        (DeriveProviderValidationResult::Invalid, diags)
     }
 }
 
@@ -247,7 +247,7 @@ fn validate_provider_function<'db>(
     explicit_name: Option<IdentId<'db>>,
     diags: &mut Vec<TyDiagCollection<'db>>,
     label: &'static str,
-) -> Option<EvidenceProviderId<'db>> {
+) -> Option<DeriveProviderId<'db>> {
     if !func.is_const(db) {
         diags.push(invalid_provider(
             func.span().name().into(),
@@ -291,23 +291,17 @@ fn validate_provider_function<'db>(
     });
     let head = head?;
     let goal = goal?;
-    let identity = EvidenceProviderIdentityId::new(db, name, func);
+    let identity = DeriveProviderIdentityId::new(db, name, func);
     let derive_head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(head));
     let derive_goal = ConstraintId::new(db, ConstraintKind::Derive(derive_head));
-    Some(EvidenceProviderId::new(
-        db,
-        identity,
-        func,
-        goal,
-        derive_goal,
-    ))
+    Some(DeriveProviderId::new(db, identity, func, goal, derive_goal))
 }
 
 fn invalid_provider<'db>(
     span: crate::span::DynLazySpan<'db>,
     message: impl Into<String>,
 ) -> TyDiagCollection<'db> {
-    TyLowerDiag::InvalidEvidenceProvider {
+    TyLowerDiag::InvalidDeriveProvider {
         span,
         message: message.into(),
     }

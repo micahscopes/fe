@@ -7,7 +7,7 @@ use crate::{
                 ConstraintApplicationId, ConstraintHeadId, ConstraintHeadKind, ConstraintId,
                 ConstraintKind,
             },
-            evidence_provider::EvidenceProviderId,
+            derive_provider::DeriveProviderId,
             generated::{
                 GeneratedExprId, GeneratedExprKind, GeneratedStructFieldInit,
                 GeneratedStructFieldInitListId,
@@ -806,7 +806,7 @@ fn execute_provider_body<'db>(
 
 fn provider_impl_builder_effect_names<'db>(
     db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
+    provider: DeriveProviderId<'db>,
 ) -> Vec<IdentId<'db>> {
     provider
         .func(db)
@@ -826,7 +826,7 @@ fn provider_impl_builder_effect_names<'db>(
 
 fn provider_reflect_effect_names<'db>(
     db: &'db dyn HirAnalysisDb,
-    provider: EvidenceProviderId<'db>,
+    provider: DeriveProviderId<'db>,
 ) -> Vec<IdentId<'db>> {
     provider
         .func(db)

@@ -2063,7 +2063,7 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
-            Self::InvalidEvidenceProvider { span, message } => CompleteDiagnostic {
+            Self::InvalidDeriveProvider { span, message } => CompleteDiagnostic {
                 severity: Severity::Error,
                 message: "invalid derive provider".to_string(),
                 sub_diagnostics: vec![SubDiagnostic {

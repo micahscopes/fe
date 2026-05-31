@@ -1,4 +1,4 @@
-use crate::{analysis::ty::evidence_provider::EvidenceProviderId, span::DynLazySpan};
+use crate::{analysis::ty::derive_provider::DeriveProviderId, span::DynLazySpan};
 
 use super::{BuilderCommandListId, ElaborationCtfeContextId, ElaborationRequestId};
 
@@ -45,7 +45,7 @@ pub(crate) enum ProviderOutputStatus<'db> {
 #[derive(Debug)]
 pub(crate) struct ProviderOutputId<'db> {
     pub(crate) request: ElaborationRequestId<'db>,
-    pub(crate) provider: EvidenceProviderId<'db>,
+    pub(crate) provider: DeriveProviderId<'db>,
     pub(crate) context: ElaborationCtfeContextId<'db>,
     pub(crate) status: ProviderOutputStatus<'db>,
 }

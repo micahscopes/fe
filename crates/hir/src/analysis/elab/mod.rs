@@ -8,11 +8,10 @@ use crate::{
                 CapabilityMode, CompilerCapabilityKind, ConstraintId, ConstraintKind,
                 EffectCapabilityKey,
             },
-            diagnostics::{TyDiagCollection, TyLowerDiag},
-            evidence_provider::{
-                EvidenceProviderId, providers_for_derive_goal,
-                validated_evidence_providers_for_ingot,
+            derive_provider::{
+                DeriveProviderId, providers_for_derive_goal, validated_derive_providers_for_ingot,
             },
+            diagnostics::{TyDiagCollection, TyLowerDiag},
             generated::{GeneratedImplId, GeneratedImplSource},
             ty_def::TyId,
             unify::UnificationTable,
@@ -73,7 +72,7 @@ pub use trace::{
 #[derive(Debug)]
 pub(crate) struct ElaborationCtfeContextId<'db> {
     pub(crate) request: ElaborationRequestId<'db>,
-    pub(crate) provider: EvidenceProviderId<'db>,
+    pub(crate) provider: DeriveProviderId<'db>,
     derive_evidence: ConstraintId<'db>,
 
     #[return_ref]
@@ -125,7 +124,7 @@ pub fn derive_provider_summaries_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<String> {
-    validated_evidence_providers_for_ingot(db, top_mod.ingot(db))
+    validated_derive_providers_for_ingot(db, top_mod.ingot(db))
         .into_iter()
         .map(|provider| {
             format!(

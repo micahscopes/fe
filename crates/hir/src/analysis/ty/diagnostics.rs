@@ -143,7 +143,7 @@ pub enum TyLowerDiag<'db> {
         context: RuntimeTypeContext,
     },
 
-    InvalidEvidenceProvider {
+    InvalidDeriveProvider {
         span: DynLazySpan<'db>,
         message: String,
     },
@@ -212,7 +212,7 @@ impl TyLowerDiag<'_> {
             Self::NormalTypeExpected { .. } => 13,
             Self::ConstHoleInValuePosition { .. } => 32,
             Self::CompileTimeOnlyTypeInRuntimeContext { .. } => 36,
-            Self::InvalidEvidenceProvider { .. } => 37,
+            Self::InvalidDeriveProvider { .. } => 37,
             Self::InvalidElaborationRequest { .. } => 38,
             Self::OwnParamCannotBeBorrow { .. } => 14,
             Self::InvalidMutParamPrefixWithoutOwnType { .. } => 31,
