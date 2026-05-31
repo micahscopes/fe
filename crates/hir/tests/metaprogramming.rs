@@ -1864,6 +1864,80 @@ const fn derive_eq2<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 }
 
 #[test]
+fn selected_named_providers_for_same_global_target_conflict() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "selected_named_providers_for_same_global_target_conflict.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+derive Eq for Foo using FastEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn selected_named_provider_conflicts_with_authored_impl() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "selected_named_provider_conflicts_with_authored_impl.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+impl Eq for Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "conflicts with an authored implementation");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn provider_outputs_reject_traits_with_required_methods_without_generated_methods() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
