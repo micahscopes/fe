@@ -2152,6 +2152,94 @@ fn caller() {
 }
 
 #[test]
+fn provider_generated_field_get_normalizes_ref_receiver() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_field_get_normalizes_ref_receiver.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: ref Self) -> bool
+}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+#[derive(Eq)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    for field in reflect.fields() {
+        builder.emit_method(builder.eq(
+            builder.field_get(builder.self_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
+        ))
+    }
+    builder.finish()
+    ev
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn provider_generated_field_get_rejects_unrelated_receiver() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_field_get_rejects_unrelated_receiver.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: u256) -> bool
+}
+
+#[derive(Eq)]
+struct Foo {
+    value: u256,
+}
+
+#[evidence_provider(Eq)]
+const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+    uses (
+        reflect: Reflect<T>,
+        builder: mut ImplBuilder<Eq<T>>,
+    )
+{
+    for field in reflect.fields() {
+        builder.emit_method(builder.eq(
+            builder.field_get(builder.self_ref(), field),
+            builder.field_get(builder.arg_ref("other"), field),
+        ))
+    }
+    builder.finish()
+    ev
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Eq` does not generate required methods yet",
+    );
+    assert_diag_message(&diags, "unsupported eq");
+}
+
+#[test]
 fn provider_generated_method_rejects_unavailable_method_arg() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

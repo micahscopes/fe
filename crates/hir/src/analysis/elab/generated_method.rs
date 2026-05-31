@@ -289,7 +289,7 @@ fn generated_expr_static_ty<'db>(
         }
         GeneratedExprKind::FieldGet { base, field } => {
             let base_ty = generated_expr_static_ty(db, base, cx)?;
-            let base_ty = field_access_base_ty(db, base_ty);
+            let base_ty = generated_field_access_receiver_ty(db, base_ty);
             tys_match(db, base_ty, field.parent).then_some(field.ty)
         }
         GeneratedExprKind::EqExpr { lhs, rhs } => {
@@ -304,12 +304,15 @@ fn generated_expr_static_ty<'db>(
     }
 }
 
-fn field_access_base_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+fn generated_field_access_receiver_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+    // Generated field access is checked against the nominal reflected parent.
+    // Receiver wrappers are access modes for the generated expression, not a
+    // different field owner.
     if let Some(inner) = ty.as_view(db) {
-        return field_access_base_ty(db, inner);
+        return generated_field_access_receiver_ty(db, inner);
     }
     if let Some((_, inner)) = ty.as_capability(db) {
-        return field_access_base_ty(db, inner);
+        return generated_field_access_receiver_ty(db, inner);
     }
     ty
 }
