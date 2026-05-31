@@ -274,16 +274,17 @@ impl FastEq: Derive for Eq {
 }
 
 #[test]
-fn evidence_provider_must_be_const_fn() {
+fn named_derive_provider_must_be_const_fn() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "evidence_provider_must_be_const_fn.fe".into(),
+        "named_derive_provider_must_be_const_fn.fe".into(),
         r#"
 trait Eq {}
 
-#[evidence_provider(Eq)]
-fn derive_eq<T>() -> bool {
-    true
+impl StableEq: Derive for Eq {
+    fn derive<T>() -> bool {
+        true
+    }
 }
 "#,
     );
@@ -294,16 +295,17 @@ fn derive_eq<T>() -> bool {
 }
 
 #[test]
-fn evidence_provider_must_return_evidence() {
+fn named_derive_provider_must_return_evidence() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "evidence_provider_must_return_evidence.fe".into(),
+        "named_derive_provider_must_return_evidence.fe".into(),
         r#"
 trait Eq {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>() -> bool {
-    true
+impl StableEq: Derive for Eq {
+    const fn derive<T>() -> bool {
+        true
+    }
 }
 "#,
     );
@@ -314,17 +316,18 @@ const fn derive_eq<T>() -> bool {
 }
 
 #[test]
-fn evidence_provider_head_must_match_returned_constraint() {
+fn named_derive_provider_head_must_match_returned_constraint() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "evidence_provider_head_must_match_returned_constraint.fe".into(),
+        "named_derive_provider_head_must_match_returned_constraint.fe".into(),
         r#"
 trait Eq {}
 trait Default {}
 
-#[evidence_provider(Eq)]
-const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>> {
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>> {
+        ev
+    }
 }
 "#,
     );
@@ -335,19 +338,20 @@ const fn derive_default<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
 }
 
 #[test]
-fn evidence_provider_body_must_declare_forwarded_capabilities() {
+fn named_derive_provider_body_must_declare_forwarded_capabilities() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "evidence_provider_body_must_declare_forwarded_capabilities.fe".into(),
+        "named_derive_provider_body_must_declare_forwarded_capabilities.fe".into(),
         r#"
 trait Eq {}
 
 const fn helper<T>() uses (reflect: Reflect<T>) {}
 
-#[evidence_provider(Eq)]
-const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
-    helper<T>()
-    ev
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        helper<T>()
+        ev
+    }
 }
 "#,
     );

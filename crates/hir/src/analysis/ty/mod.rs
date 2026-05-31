@@ -767,6 +767,23 @@ impl ModuleAnalysisPass for FuncAnalysisPass {
     }
 }
 
+pub struct DeriveProviderAnalysisPass {}
+
+impl ModuleAnalysisPass for DeriveProviderAnalysisPass {
+    fn run_on_module<'db>(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        top_mod: TopLevelMod<'db>,
+    ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
+        top_mod
+            .all_derive_providers(db)
+            .iter()
+            .flat_map(|provider| provider.diags(db))
+            .map(|diag| diag.to_voucher())
+            .collect()
+    }
+}
+
 /// An analysis pass for type aliases.
 pub struct TypeAliasAnalysisPass {}
 
