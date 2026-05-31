@@ -85,10 +85,10 @@ fn assert_diag_message(diags: &[CompleteDiagnostic], expected: &str) {
 }
 
 #[test]
-fn evidence_provider_signature_validation_accepts_const_evidence_return() {
+fn named_derive_provider_signature_validation_accepts_const_evidence_return() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
-        "evidence_provider_signature_validation_accepts_const_evidence_return.fe".into(),
+        "named_derive_provider_signature_validation_accepts_const_evidence_return.fe".into(),
         r#"
 trait Eq {}
 
@@ -108,6 +108,8 @@ impl StableEq: Derive for Eq {
     db.assert_no_diags(top_mod);
 }
 
+// Compatibility coverage for staged `#[evidence_provider(...)]` syntax. The
+// preferred provider declaration surface is `impl Provider: Derive for Head`.
 #[test]
 fn evidence_provider_summaries_include_provider_identity() {
     let mut db = HirAnalysisTestDb::default();
