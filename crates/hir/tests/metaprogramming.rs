@@ -1633,6 +1633,95 @@ fn caller() {
 }
 
 #[test]
+fn automatic_std_dependency_activates_core_derives_providers() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "automatic_std_dependency_activates_core_derives_providers",
+        r#"
+[ingot]
+name = "automatic_std_dependency_activates_core_derives_providers"
+version = "0.1.0"
+"#,
+        r#"
+use core::Default
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+fn require_default<T>()
+where
+    T: Default
+{}
+
+struct Foo {
+    value: u256,
+}
+
+derive Eq for Foo
+derive Default for Foo
+
+fn caller() {
+    require_eq<Foo>()
+    require_default<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Foo: Eq with obligations {u256: Eq}".to_string(),
+            "generated provider Foo: Default with obligations {u256: Default}".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn automatic_std_provider_names_make_same_name_local_selection_ambiguous() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "automatic_std_provider_names_make_same_name_local_selection_ambiguous",
+        r#"
+[ingot]
+name = "automatic_std_provider_names_make_same_name_local_selection_ambiguous"
+version = "0.1.0"
+"#,
+        r#"
+use core::ops::Eq
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.bool(true))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "selected evidence provider `StableEq` for `Derive<Eq>` is ambiguous",
+    );
+    assert_diag_message(&diags, "matches 2 visible providers");
+    assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
+}
+
+#[test]
 fn core_derives_dependency_makes_implicit_derive_ambiguous_with_local_provider() {
     let mut db = HirAnalysisTestDb::default();
     let file = project_file(
