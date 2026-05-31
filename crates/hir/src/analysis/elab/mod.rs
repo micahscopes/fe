@@ -20,7 +20,6 @@ use crate::{
                 EvidenceProviderId, providers_for_derive_goal,
                 validated_evidence_providers_for_ingot,
             },
-            fold::{TyFoldable, TyFolder},
             generated::{
                 GeneratedExprId, GeneratedExprKind, GeneratedImplId, GeneratedImplSource,
                 GeneratedStructFieldInit, GeneratedStructFieldInitListId,
@@ -29,7 +28,6 @@ use crate::{
             trait_resolution::PredicateListId,
             ty_def::{Kind, TyId},
             unify::UnificationTable,
-            visitor::{TyVisitable, TyVisitor},
         },
     },
     hir_def::{
@@ -49,6 +47,7 @@ mod provider_context;
 mod provider_output;
 mod reflect;
 mod request;
+mod requirement_origin;
 mod trace;
 
 #[cfg(test)]
@@ -79,6 +78,7 @@ use reflect::reflect_struct_fields;
 pub(crate) use request::{
     ElaborationRequestId, elaboration_requests_for_ingot, elaboration_requests_for_top_mod,
 };
+pub(crate) use requirement_origin::RequirementOrigin;
 pub use trace::{
     generated_impl_summaries_for_top_mod, generated_requirement_artifact_summaries_for_top_mod,
     generated_trace_summaries_for_top_mod,
@@ -93,14 +93,6 @@ pub(crate) struct ElaborationCtfeContextId<'db> {
 
     #[return_ref]
     capabilities: Vec<ElaborationCapabilityWitness<'db>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-#[allow(dead_code)]
-pub(crate) enum RequirementOrigin<'db> {
-    ReflectedField(ReflectedField<'db>),
-    ProviderCode,
-    Synthetic,
 }
 
 impl<'db> ElaborationCtfeContextId<'db> {
@@ -119,56 +111,6 @@ impl<'db> ElaborationCtfeContextId<'db> {
             provider,
             capabilities
         )
-    }
-}
-
-impl<'db> TyVisitable<'db> for RequirementOrigin<'db> {
-    fn visit_with<V>(&self, visitor: &mut V)
-    where
-        V: TyVisitor<'db> + ?Sized,
-    {
-        match self {
-            Self::ReflectedField(field) => field.visit_with(visitor),
-            Self::ProviderCode | Self::Synthetic => {}
-        }
-    }
-}
-
-impl<'db> TyFoldable<'db> for RequirementOrigin<'db> {
-    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
-    where
-        F: TyFolder<'db>,
-    {
-        match self {
-            Self::ReflectedField(field) => Self::ReflectedField(field.fold_with(db, folder)),
-            Self::ProviderCode | Self::Synthetic => self,
-        }
-    }
-}
-
-impl<'db> RequirementOrigin<'db> {
-    pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
-        match self {
-            RequirementOrigin::ReflectedField(field) => {
-                format!(
-                    "from field {}.{}",
-                    field.parent.pretty_print(db),
-                    field.name.data(db)
-                )
-            }
-            RequirementOrigin::ProviderCode => "from provider code".to_string(),
-            RequirementOrigin::Synthetic => "from synthetic requirement".to_string(),
-        }
-    }
-
-    pub(crate) fn diagnostic_span(self, db: &'db dyn HirAnalysisDb) -> Option<DynLazySpan<'db>> {
-        match self {
-            RequirementOrigin::ReflectedField(field) => field
-                .parent
-                .field_parent(db)
-                .map(|parent| parent.field_name_span(field.index as usize)),
-            RequirementOrigin::ProviderCode | RequirementOrigin::Synthetic => None,
-        }
     }
 }
 
