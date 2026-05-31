@@ -36,7 +36,6 @@ impl<'db> EvidenceProviderIdentityId<'db> {
 pub(crate) struct EvidenceProviderId<'db> {
     pub(crate) identity: EvidenceProviderIdentityId<'db>,
     pub(crate) func: Func<'db>,
-    pub(crate) head: Trait<'db>,
     pub(crate) goal: ConstraintId<'db>,
     pub(crate) derive_goal: ConstraintId<'db>,
 }
@@ -353,7 +352,6 @@ fn validate_provider_function<'db>(
         db,
         identity,
         func,
-        head,
         goal,
         derive_goal,
     ))

@@ -132,7 +132,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 
     assert_eq!(
         evidence_provider_summaries_for_top_mod(&db, top_mod),
-        vec!["provider derive_eq for Eq via Derive<Eq> -> T: Eq".to_string()]
+        vec!["provider derive_eq via Derive<Eq> -> T: Eq".to_string()]
     );
 }
 
@@ -158,7 +158,7 @@ const fn derive_eq<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
 
     assert_eq!(
         evidence_provider_summaries_for_top_mod(&db, top_mod),
-        vec!["provider StableEq for Eq via Derive<Eq> -> T: Eq".to_string()]
+        vec!["provider StableEq via Derive<Eq> -> T: Eq".to_string()]
     );
 }
 
@@ -185,7 +185,7 @@ impl StableEq: Derive for Eq {
 
     assert_eq!(
         evidence_provider_summaries_for_top_mod(&db, top_mod),
-        vec!["provider StableEq for Eq via Derive<Eq> -> T: Eq".to_string()]
+        vec!["provider StableEq via Derive<Eq> -> T: Eq".to_string()]
     );
 }
 
@@ -1409,7 +1409,7 @@ where
     );
     assert_eq!(
         evidence_provider_summaries_for_top_mod(&db, top_mod),
-        vec!["provider StableEq for Eq via Derive<Eq> -> T: Eq<T>".to_string()]
+        vec!["provider StableEq via Derive<Eq> -> T: Eq<T>".to_string()]
     );
 }
 

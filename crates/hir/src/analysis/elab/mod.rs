@@ -129,9 +129,8 @@ pub fn evidence_provider_summaries_for_top_mod<'db>(
         .into_iter()
         .map(|provider| {
             format!(
-                "provider {} for {} via {} -> {}",
+                "provider {} via {} -> {}",
                 provider.identity(db).pretty_print(db),
-                trait_name(db, provider.head(db)),
                 provider.derive_goal(db).pretty_print(db),
                 provider.goal(db).pretty_print(db)
             )
