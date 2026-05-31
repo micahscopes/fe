@@ -11,9 +11,7 @@ use crate::{
             trait_resolution::PredicateListId,
         },
     },
-    hir_def::{
-        Attr, AttrArgValue, DeriveProvider, Func, HirIngot, IdentId, ItemKind, NormalAttr, Trait,
-    },
+    hir_def::{Attr, DeriveProvider, Func, HirIngot, IdentId, ItemKind, NormalAttr, Trait},
     span::DynLazySpan,
 };
 use common::ingot::Ingot;
@@ -48,12 +46,6 @@ pub(crate) enum EvidenceProviderValidationResult<'db> {
     NotProvider,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum EvidenceProviderDecl<'db> {
-    Named(DeriveProvider<'db>),
-    Attr(Func<'db>),
-}
-
 pub(crate) fn validate_attr_evidence_provider<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
@@ -68,43 +60,27 @@ pub(crate) fn validate_attr_evidence_provider<'db>(
     }
 
     let attr_span: crate::span::DynLazySpan<'db> = func.span().attributes().into();
-    if attrs.len() > 1 {
-        diags.push(invalid_provider(
-            attr_span.clone(),
-            "`#[evidence_provider(...)]` may only appear once on a function",
-        ));
-    }
-
-    let (head, explicit_name) = match parse_provider_attr(db, func, attrs[0]) {
-        Ok((head, name)) => (Some(head), name),
-        Err(message) => {
-            diags.push(invalid_provider(attr_span.clone(), message));
-            (None, None)
-        }
-    };
-
-    let provider =
-        validate_provider_function(db, func, head, explicit_name, &mut diags, "derive provider");
-
-    if diags.is_empty() {
-        let provider = provider.expect("validated provider");
-        (EvidenceProviderValidationResult::Valid(provider), diags)
-    } else {
-        (EvidenceProviderValidationResult::Invalid, diags)
-    }
+    diags.push(invalid_provider(
+        attr_span,
+        "`#[evidence_provider(...)]` is obsolete; use `impl Provider: Derive for Head { const fn derive(...) { ... } }`",
+    ));
+    (EvidenceProviderValidationResult::Invalid, diags)
 }
 
 pub(crate) fn validated_evidence_providers_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
 ) -> Vec<EvidenceProviderId<'db>> {
-    evidence_provider_decls_for_ingot(db, ingot)
-        .into_iter()
-        .filter_map(|decl| match validate_evidence_provider_decl(db, decl).0 {
-            EvidenceProviderValidationResult::Valid(provider) => Some(provider),
-            EvidenceProviderValidationResult::Invalid
-            | EvidenceProviderValidationResult::NotProvider => None,
-        })
+    ingot
+        .all_derive_providers(db)
+        .iter()
+        .filter_map(
+            |&provider| match validate_named_derive_provider(db, provider).0 {
+                EvidenceProviderValidationResult::Valid(provider) => Some(provider),
+                EvidenceProviderValidationResult::Invalid
+                | EvidenceProviderValidationResult::NotProvider => None,
+            },
+        )
         .collect()
 }
 
@@ -143,41 +119,6 @@ pub(crate) fn providers_for_derive_goal<'db>(
         .into_iter()
         .filter(|provider| provider.derive_goal(db) == derive_goal)
         .collect()
-}
-
-fn evidence_provider_decls_for_ingot<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ingot: Ingot<'db>,
-) -> Vec<EvidenceProviderDecl<'db>> {
-    let named = ingot
-        .all_derive_providers(db)
-        .iter()
-        .copied()
-        .map(EvidenceProviderDecl::Named);
-
-    // Compatibility path for staged `#[evidence_provider(...)]` functions. The
-    // named `impl Provider: Derive for Head { .. }` item above is the primary
-    // provider declaration surface.
-    let attr = ingot
-        .all_funcs(db)
-        .iter()
-        .copied()
-        .map(EvidenceProviderDecl::Attr);
-
-    named.chain(attr).collect()
-}
-
-fn validate_evidence_provider_decl<'db>(
-    db: &'db dyn HirAnalysisDb,
-    decl: EvidenceProviderDecl<'db>,
-) -> (
-    EvidenceProviderValidationResult<'db>,
-    Vec<TyDiagCollection<'db>>,
-) {
-    match decl {
-        EvidenceProviderDecl::Named(provider) => validate_named_derive_provider(db, provider),
-        EvidenceProviderDecl::Attr(func) => validate_attr_evidence_provider(db, func),
-    }
 }
 
 fn evidence_provider_attrs<'db>(
@@ -365,50 +306,6 @@ fn validate_provider_function<'db>(
         goal,
         derive_goal,
     ))
-}
-
-fn parse_provider_attr<'db>(
-    db: &'db dyn HirAnalysisDb,
-    func: Func<'db>,
-    attr: &NormalAttr<'db>,
-) -> Result<(Trait<'db>, Option<IdentId<'db>>), &'static str> {
-    if attr.has_value || !attr.has_args || !matches!(attr.args.len(), 1 | 2) {
-        return Err("expected `#[evidence_provider(TraitName)]`");
-    }
-    let arg = &attr.args[0];
-    if arg.has_value || arg.value.is_some() {
-        return Err("derive provider head must be a trait path");
-    }
-    let Some(path) = arg.key.to_opt() else {
-        return Err("derive provider head must be a trait path");
-    };
-
-    let head = match resolve_path(db, path, func.scope(), func.assumptions(db), false) {
-        Ok(PathRes::Trait(inst)) => Ok(inst.def(db)),
-        _ => Err("derive provider head must resolve to a trait"),
-    }?;
-
-    let name = match attr.args.get(1) {
-        None => None,
-        Some(arg) => Some(parse_provider_identity_arg(db, arg)?),
-    };
-
-    Ok((head, name))
-}
-
-fn parse_provider_identity_arg<'db>(
-    db: &'db dyn HirAnalysisDb,
-    arg: &crate::hir_def::AttrArg<'db>,
-) -> Result<IdentId<'db>, &'static str> {
-    if arg.key_str(db) != Some("name") {
-        return Err(
-            "`#[evidence_provider]` keyword arguments currently only support `name = ProviderName`",
-        );
-    }
-    match arg.value.as_ref() {
-        Some(AttrArgValue::Ident(name)) => Ok(*name),
-        _ => Err("derive provider name must be an identifier"),
-    }
 }
 
 fn invalid_provider<'db>(
