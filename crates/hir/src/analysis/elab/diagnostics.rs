@@ -17,7 +17,7 @@ use super::{
     },
 };
 
-pub(super) fn duplicate_evidence_provider_diags_for_top_mod<'db>(
+pub(super) fn implicit_provider_ambiguity_diags_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {

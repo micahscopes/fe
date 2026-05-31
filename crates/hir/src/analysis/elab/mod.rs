@@ -46,7 +46,7 @@ pub(crate) use capability::{
 };
 use coherence::{generated_conflicts_with_authored_impl, generated_conflicts_with_generated_impl};
 use diagnostics::{
-    duplicate_evidence_provider_diags_for_top_mod, provider_output_diag,
+    implicit_provider_ambiguity_diags_for_top_mod, provider_output_diag,
     selected_evidence_provider_diags_for_top_mod,
 };
 use generated_method::{
@@ -105,7 +105,7 @@ pub(crate) fn elaboration_request_diags_for_top_mod<'db>(
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let mut diags = request::elaboration_request_parse_diags_for_top_mod(db, top_mod);
-    diags.extend(duplicate_evidence_provider_diags_for_top_mod(db, top_mod));
+    diags.extend(implicit_provider_ambiguity_diags_for_top_mod(db, top_mod));
     diags.extend(selected_evidence_provider_diags_for_top_mod(db, top_mod));
     diags.extend(generated_overlay_diags_for_top_mod(db, top_mod));
     diags
