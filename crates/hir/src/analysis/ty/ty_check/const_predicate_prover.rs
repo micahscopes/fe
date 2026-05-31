@@ -1,10 +1,8 @@
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::semantic::{SemConstScalar, SemConstValue, eval_body_owner_const};
 use crate::analysis::ty::{
-    constraint::{
-        ConstPredicateInstId, ConstProofId, ConstraintId, ConstraintKind, EvidenceId, EvidenceKind,
-        ParamEnv,
-    },
+    constraint::{ConstPredicateInstId, ConstraintId, ConstraintKind, ParamEnv},
+    evidence::{ConstProofId, EvidenceId, EvidenceKind},
     ty_def::{TyData, TyFlags, TyId},
     ty_lower::collect_generic_params,
     visitor::collect_flags,
