@@ -700,9 +700,18 @@ fn semantic_ty_to_abi_desc(db: &DriverDataBase, ty: TyId<'_>) -> Result<AbiTypeD
             PrimTy::I128 => Ok(AbiTypeDesc::simple("int128")),
             PrimTy::I256 | PrimTy::Isize => Ok(AbiTypeDesc::simple("int256")),
             PrimTy::String | PrimTy::Array | PrimTy::Tuple(_) => unreachable!(),
-            PrimTy::Ptr | PrimTy::View | PrimTy::BorrowMut | PrimTy::BorrowRef => {
-                Err(format!("unsupported ABI type `{}`", ty.pretty_print(db)))
-            }
+            PrimTy::Ptr
+            | PrimTy::View
+            | PrimTy::BorrowMut
+            | PrimTy::BorrowRef
+            | PrimTy::Evidence
+            | PrimTy::ImplBuilder
+            | PrimTy::Reflect
+            | PrimTy::TypeInfo
+            | PrimTy::Field
+            | PrimTy::GeneratedExpr
+            | PrimTy::Derive
+            | PrimTy::FieldList => Err(format!("unsupported ABI type `{}`", ty.pretty_print(db))),
         },
         TyData::TyBase(TyBase::Adt(adt)) => {
             let adt_ref = adt.adt_ref(db);

@@ -257,13 +257,17 @@ pub fn generate_docs(
 
     // Append builtin ingot docs when --builtins is set
     if builtins {
-        use common::stdlib::{HasBuiltinCore, HasBuiltinStd};
+        use common::stdlib::{HasBuiltinCore, HasBuiltinCoreDerives, HasBuiltinStd};
 
         // Skip builtins that are already present (e.g. workspace that includes core/std)
         let existing_roots: std::collections::HashSet<String> =
             index.modules.iter().map(|m| m.name.clone()).collect();
 
-        for (label, builtin_ingot) in [("core", db.builtin_core()), ("std", db.builtin_std())] {
+        for (label, builtin_ingot) in [
+            ("core", db.builtin_core()),
+            ("core_derives", db.builtin_core_derives()),
+            ("std", db.builtin_std()),
+        ] {
             if existing_roots.contains(label) {
                 continue;
             }

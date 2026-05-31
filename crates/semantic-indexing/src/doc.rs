@@ -1,5 +1,5 @@
 use common::InputDb;
-use common::stdlib::{HasBuiltinCore, HasBuiltinStd};
+use common::stdlib::{HasBuiltinCore, HasBuiltinCoreDerives, HasBuiltinStd};
 
 use crate::extract::DocExtractor;
 use crate::scip_batch;
@@ -13,13 +13,17 @@ use crate::tracked;
 /// Returns `(doc_json, scip_json)`.
 pub fn regenerate(db: &driver::DriverDataBase) -> (String, Option<String>) {
     let builtin_core_url = url::Url::parse(common::stdlib::BUILTIN_CORE_BASE_URL).unwrap();
+    let builtin_core_derives_url =
+        url::Url::parse(common::stdlib::BUILTIN_CORE_DERIVES_BASE_URL).unwrap();
     let builtin_std_url = url::Url::parse(common::stdlib::BUILTIN_STD_BASE_URL).unwrap();
 
     let ingot_urls: Vec<url::Url> = db
         .dependency_graph()
         .petgraph(db)
         .node_weights()
-        .filter(|u| *u != &builtin_core_url && *u != &builtin_std_url)
+        .filter(|u| {
+            *u != &builtin_core_url && *u != &builtin_core_derives_url && *u != &builtin_std_url
+        })
         .cloned()
         .collect();
 
@@ -71,7 +75,11 @@ pub fn regenerate(db: &driver::DriverDataBase) -> (String, Option<String>) {
     // Builtins — salsa-cached, never recompute after first call
     let existing: std::collections::HashSet<_> =
         index.modules.iter().map(|m| m.name.clone()).collect();
-    for (label, builtin) in [("core", db.builtin_core()), ("std", db.builtin_std())] {
+    for (label, builtin) in [
+        ("core", db.builtin_core()),
+        ("core_derives", db.builtin_core_derives()),
+        ("std", db.builtin_std()),
+    ] {
         if existing.contains(label) {
             continue;
         }
@@ -85,7 +93,7 @@ pub fn regenerate(db: &driver::DriverDataBase) -> (String, Option<String>) {
     }
 
     // Generate SCIP via salsa-cached scip_batch path
-    let builtin_urls = [builtin_core_url, builtin_std_url];
+    let builtin_urls = [builtin_core_url, builtin_core_derives_url, builtin_std_url];
     let all_scip_urls: Vec<_> = ingot_urls.iter().chain(builtin_urls.iter()).collect();
     let mut combined_scip = scip::types::Index::default();
     let mut combined_doc_urls = std::collections::HashMap::new();

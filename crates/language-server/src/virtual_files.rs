@@ -1,5 +1,8 @@
 use anyhow::Context;
-use common::stdlib::{BUILTIN_CORE_BASE_URL, BUILTIN_STD_BASE_URL, HasBuiltinCore, HasBuiltinStd};
+use common::stdlib::{
+    BUILTIN_CORE_BASE_URL, BUILTIN_CORE_DERIVES_BASE_URL, BUILTIN_STD_BASE_URL, HasBuiltinCore,
+    HasBuiltinCoreDerives, HasBuiltinStd,
+};
 use driver::DriverDataBase;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
@@ -136,10 +139,14 @@ impl VirtualFiles {
     }
 }
 
-/// Materialize the built-in core/std ingots into the virtual files directory.
+/// Materialize the built-in core/core_derives/std ingots into the virtual files directory.
 pub fn materialize_builtins(vfs: &mut VirtualFiles, db: &DriverDataBase) -> anyhow::Result<()> {
     let core = db.builtin_core();
     materialize_ingot(vfs, db, core, "core").context("materialize builtin core")?;
+
+    let core_derives = db.builtin_core_derives();
+    materialize_ingot(vfs, db, core_derives, "core_derives")
+        .context("materialize builtin core_derives")?;
 
     let std_ingot = db.builtin_std();
     materialize_ingot(vfs, db, std_ingot, "std").context("materialize builtin std")?;
@@ -155,6 +162,9 @@ fn materialize_ingot<'db>(
 ) -> anyhow::Result<()> {
     let base = match name {
         "core" => Url::parse(BUILTIN_CORE_BASE_URL).expect("builtin core url parse"),
+        "core_derives" => {
+            Url::parse(BUILTIN_CORE_DERIVES_BASE_URL).expect("builtin core_derives url parse")
+        }
         "std" => Url::parse(BUILTIN_STD_BASE_URL).expect("builtin std url parse"),
         _ => unreachable!("unknown builtin ingot {name}"),
     };

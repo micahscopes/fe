@@ -4379,7 +4379,11 @@ fn intrinsic_value_type(prim: PrimTy) -> Type {
         | PrimTy::Evidence
         | PrimTy::ImplBuilder
         | PrimTy::Reflect
-        | PrimTy::TypeInfo => Type::I256,
+        | PrimTy::TypeInfo
+        | PrimTy::Field
+        | PrimTy::GeneratedExpr
+        | PrimTy::Derive
+        | PrimTy::FieldList => Type::I256,
     }
 }
 

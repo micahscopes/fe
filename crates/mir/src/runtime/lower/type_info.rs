@@ -503,7 +503,11 @@ fn scalar_class_from_repr_ty<'db>(db: &'db dyn MirDb, ty: TyId<'db>) -> Option<S
             | PrimTy::Evidence
             | PrimTy::ImplBuilder
             | PrimTy::Reflect
-            | PrimTy::TypeInfo => return None,
+            | PrimTy::TypeInfo
+            | PrimTy::Field
+            | PrimTy::GeneratedExpr
+            | PrimTy::Derive
+            | PrimTy::FieldList => return None,
         },
         TyData::TyBase(TyBase::Contract(_)) => ScalarRepr::Address { bits: 256 },
         TyData::TyVar(var) if matches!(var.sort, TyVarSort::Integral) => ScalarRepr::Int {

@@ -63,8 +63,8 @@ fn analyze_core_derives() {
     assert_eq!(
         evidence_provider_summaries_for_top_mod(&db, top_mod),
         vec![
-            "provider StableEq for Eq via Derive<Eq> -> T: Eq<T>".to_string(),
-            "provider StableDefault for Default via Derive<Default> -> T: Default".to_string(),
+            "provider StableEq via Derive<Eq> -> T: Eq<T>".to_string(),
+            "provider StableDefault via Derive<Default> -> T: Default".to_string(),
         ]
     );
 }
