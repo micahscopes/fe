@@ -1722,6 +1722,157 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn with_provider_scope_selects_canonical_provider_for_contained_derive() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "with_provider_scope_selects_canonical_provider_for_contained_derive",
+        r#"
+[ingot]
+name = "with_provider_scope_selects_canonical_provider_for_contained_derive"
+version = "0.1.0"
+"#,
+        r#"
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Foo {
+    value: u256,
+}
+
+with StableEq {
+    derive Eq for Foo
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {u256: Eq}".to_string()]
+    );
+}
+
+#[test]
+fn with_provider_scope_selects_local_provider_for_contained_derive() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "with_provider_scope_selects_local_provider_for_contained_derive",
+        r#"
+[ingot]
+name = "with_provider_scope_selects_local_provider_for_contained_derive"
+version = "0.1.0"
+"#,
+        r#"
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Foo {}
+
+with FastEq {
+    derive Eq for Foo
+}
+
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.bool(true))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using FastEq using Derive<Eq> evidence from FastEq with [mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn explicit_using_inside_with_provider_scope_overrides_scope_provider() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "explicit_using_inside_with_provider_scope_overrides_scope_provider",
+        r#"
+[ingot]
+name = "explicit_using_inside_with_provider_scope_overrides_scope_provider"
+version = "0.1.0"
+"#,
+        r#"
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Foo {}
+
+with FastEq {
+    derive Eq for Foo using StableEq
+}
+
+impl FastEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method(builder.bool(false))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
 fn core_derives_dependency_makes_implicit_derive_ambiguous_with_local_provider() {
     let mut db = HirAnalysisTestDb::default();
     let file = project_file(

@@ -214,6 +214,29 @@ impl<'db> ItemKind<'db> {
                 );
                 DeriveProvider::lower_ast(ctxt, provider);
             }
+            ast::ItemKind::DeriveProviderScope(scope) => {
+                super::arithmetic::report_arithmetic_attr_on_unsupported_item(
+                    ctxt,
+                    scope.attr_list(),
+                    "derive provider selection scope",
+                );
+                super::event::report_event_attr_on_non_struct_item(
+                    ctxt,
+                    scope.attr_list(),
+                    "derive provider selection scope",
+                );
+                super::error::report_error_attr_on_non_struct_item(
+                    ctxt,
+                    scope.attr_list(),
+                    "derive provider selection scope",
+                );
+                super::payable::report_payable_attr_on_unsupported_item(
+                    ctxt,
+                    scope.attr_list(),
+                    "derive provider selection scope",
+                );
+                DeriveDecl::lower_provider_scope_ast(ctxt, scope);
+            }
             ast::ItemKind::Trait(trait_) => {
                 super::arithmetic::report_arithmetic_attr_on_unsupported_item(
                     ctxt,
@@ -1013,6 +1036,35 @@ impl<'db> StaticAssert<'db> {
 
 impl<'db> DeriveDecl<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveDecl) -> Self {
+        Self::lower_ast_with_scoped_provider(ctxt, ast, None)
+    }
+
+    pub(super) fn lower_provider_scope_ast(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::DeriveProviderScope,
+    ) {
+        let scoped_provider_path = ast
+            .provider_path()
+            .map(|path| PathId::lower_ast(ctxt, path));
+
+        if let Some(item_list) = ast.item_list() {
+            for item in item_list {
+                match item.kind() {
+                    Some(ast::ItemKind::DeriveDecl(decl)) => {
+                        Self::lower_ast_with_scoped_provider(ctxt, decl, scoped_provider_path);
+                    }
+                    Some(_) => ItemKind::lower_ast(ctxt, item),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    fn lower_ast_with_scoped_provider(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::DeriveDecl,
+        scoped_provider_path: Option<PathId<'db>>,
+    ) -> Self {
         let idx = ctxt.next_derive_decl_idx();
         let id = ctxt.joined_id(TrackedItemVariant::DeriveDecl(idx));
         ctxt.enter_item_scope(id, false);
@@ -1026,9 +1078,13 @@ impl<'db> DeriveDecl<'db> {
             .target_path()
             .map(|path| PathId::lower_ast(ctxt, path))
             .into();
-        let selected_provider_path = ast
+        let explicit_provider_path = ast
             .provider_path()
-            .map(|path| PathId::lower_ast(ctxt, path))
+            .map(|path| PathId::lower_ast(ctxt, path));
+        let selected_provider_is_scoped =
+            explicit_provider_path.is_none() && scoped_provider_path.is_some();
+        let selected_provider_path = explicit_provider_path
+            .or(scoped_provider_path)
             .map(Partial::Present);
         let origin = HirOrigin::raw(&ast);
 
@@ -1039,6 +1095,7 @@ impl<'db> DeriveDecl<'db> {
             head_path,
             target_path,
             selected_provider_path,
+            selected_provider_is_scoped,
             ctxt.top_mod(),
             origin,
         );

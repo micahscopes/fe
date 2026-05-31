@@ -1370,6 +1370,7 @@ pub struct DeriveDecl<'db> {
     pub head_path: Partial<PathId<'db>>,
     pub target_path: Partial<PathId<'db>>,
     pub selected_provider_path: Option<Partial<PathId<'db>>>,
+    pub selected_provider_is_scoped: bool,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]

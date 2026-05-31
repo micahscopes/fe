@@ -46,6 +46,7 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Trait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::ImplTrait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveProvider))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveProviderScope))
             .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveDecl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Const))
             .or_else(|| support::child(self.syntax()).map(ItemKind::StaticAssert))
@@ -497,6 +498,22 @@ impl DeriveProvider {
 }
 
 ast_node! {
+    /// `with StableEq { derive Eq for Foo }`
+    pub struct DeriveProviderScope,
+    SK::DeriveProviderScope,
+}
+impl super::AttrListOwner for DeriveProviderScope {}
+impl DeriveProviderScope {
+    pub fn provider_path(&self) -> Option<super::Path> {
+        support::child(self.syntax())
+    }
+
+    pub fn item_list(&self) -> Option<ItemList> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
     /// `derive Eq for Foo using StableEq`
     pub struct DeriveDecl,
     SK::DeriveDecl,
@@ -792,6 +809,7 @@ pub enum ItemKind {
     Trait(Trait),
     ImplTrait(ImplTrait),
     DeriveProvider(DeriveProvider),
+    DeriveProviderScope(DeriveProviderScope),
     DeriveDecl(DeriveDecl),
     Const(Const),
     StaticAssert(StaticAssert),
@@ -1068,6 +1086,19 @@ mod tests {
         assert_eq!(provider.derive_path().unwrap().to_string(), "Derive");
         assert_eq!(provider.head_path().unwrap().to_string(), "Eq");
         assert_eq!(provider.item_list().unwrap().iter().count(), 1);
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn derive_provider_scope() {
+        let source = r#"
+                with StableEq {
+                    derive Eq for Foo
+                }
+            "#;
+        let scope: DeriveProviderScope = parse_item(source);
+        assert_eq!(scope.provider_path().unwrap().to_string(), "StableEq");
+        assert_eq!(scope.item_list().unwrap().into_iter().count(), 1);
     }
 
     #[test]

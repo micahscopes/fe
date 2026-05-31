@@ -140,6 +140,14 @@ impl super::Parse for ItemScope {
             return Ok(());
         }
 
+        if parser.is_ident("with") {
+            if modifiers.is_pub || modifiers.is_unsafe {
+                parser.error("derive provider selection scopes do not support item modifiers");
+            }
+            parser.parse_cp(DeriveProviderScopeScope::default(), checkpoint)?;
+            return Ok(());
+        }
+
         parser.expect(
             &[
                 ModKw,
@@ -980,6 +988,23 @@ impl super::Parse for DeriveDeclScope {
             parser.bump();
             parser.parse_or_recover(PathScope::default())?;
         }
+
+        Ok(())
+    }
+}
+
+define_scope! { DeriveProviderScopeScope, DeriveProviderScope }
+impl super::Parse for DeriveProviderScopeScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        debug_assert!(parser.is_ident("with"));
+        parser.bump();
+        parser.set_newline_as_trivia(false);
+        parser.set_scope_recovery_stack(&[SyntaxKind::LBrace, SyntaxKind::RBrace]);
+
+        parser.parse_or_recover(PathScope::default())?;
+        parser.parse(ItemListScope::new(true))?;
 
         Ok(())
     }

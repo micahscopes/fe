@@ -355,6 +355,7 @@ impl ToDoc for ast::Item {
             Some(ItemKind::TypeAlias(type_alias)) => type_alias.to_doc(ctx),
             Some(ItemKind::Impl(impl_)) => impl_.to_doc(ctx),
             Some(ItemKind::DeriveProvider(provider)) => provider.to_doc(ctx),
+            Some(ItemKind::DeriveProviderScope(scope)) => scope.to_doc(ctx),
             Some(ItemKind::DeriveDecl(decl)) => decl.to_doc(ctx),
             Some(ItemKind::Trait(trait_)) => trait_.to_doc(ctx),
             Some(ItemKind::ImplTrait(impl_trait)) => impl_trait.to_doc(ctx),
@@ -399,6 +400,29 @@ impl ToDoc for ast::DeriveProvider {
             .append(derive_path)
             .append(alloc.text(" for "))
             .append(head_path)
+            .append(items_doc)
+    }
+}
+
+impl ToDoc for ast::DeriveProviderScope {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        let alloc = &ctx.alloc;
+
+        token_doc_item_like_if_comments!(self, ctx);
+
+        let attrs = attrs_doc(self, ctx);
+        let provider_path = self
+            .provider_path()
+            .map(|path| path.to_doc(ctx))
+            .unwrap_or_else(|| alloc.nil());
+        let items_doc = self
+            .item_list()
+            .map(|items| alloc.text(" ").append(items.to_doc(ctx)))
+            .unwrap_or_else(|| alloc.text(" {}"));
+
+        attrs
+            .append(alloc.text("with "))
+            .append(provider_path)
             .append(items_doc)
     }
 }
