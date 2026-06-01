@@ -646,6 +646,67 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn generated_method_validation_rejects_unknown_trait_method() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_method_validation_rejects_unknown_trait_method.fe".into(),
+        r#"
+trait Marker {}
+
+struct Foo {}
+
+derive Marker for Foo using StableMarker
+
+impl StableMarker: Derive for Marker {
+    const fn derive<T>(ev: own Evidence<Marker<T>>) -> Evidence<Marker<T>>
+        uses (builder: mut ImplBuilder<Marker<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let context = first_builder_context(&db, top_mod);
+    let output = provider_output_for_context(&db, context);
+    let missing_method = IdentId::new(&db, "missing".to_string());
+
+    let commands = BuilderCommandListId::new(
+        &db,
+        vec![
+            emit_method_expr_command(
+                &db,
+                context,
+                missing_method,
+                generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(true)),
+            ),
+            finish_command(&db, context),
+        ],
+    );
+    let generated = generated_impl_from_builder_commands(
+        &db,
+        context,
+        GeneratedImplSource::ProviderOutput(output),
+        commands,
+    )
+    .unwrap();
+
+    assert!(generated_missing_required_methods(&db, generated).is_empty());
+    assert_eq!(
+        generated_invalid_method_bodies(&db, generated)
+            .iter()
+            .map(|invalid| invalid.name)
+            .collect::<Vec<_>>(),
+        vec![missing_method]
+    );
+    assert_eq!(
+        generated_method_error_summary(&db, &[], &generated_invalid_method_bodies(&db, generated)),
+        "invalid generated body for missing (not a trait method)"
+    );
+}
+
+#[test]
 fn generated_bool_and_method_body_satisfies_bool_required_method() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

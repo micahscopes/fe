@@ -46,7 +46,14 @@ pub(super) fn generated_invalid_method_bodies<'db>(
         .list(db)
         .iter()
         .filter_map(|method| {
-            let required_method = trait_methods.get(&method.name)?;
+            let Some(required_method) = trait_methods.get(&method.name) else {
+                return Some(GeneratedInvalidMethodBody {
+                    name: method.name,
+                    expected: None,
+                    actual: None,
+                    span: method.span.clone(),
+                });
+            };
             match method.body {
                 GeneratedMethodBodyKind::Expr(expr) => {
                     let cx = GeneratedMethodValidationContext {
@@ -58,13 +65,13 @@ pub(super) fn generated_invalid_method_bodies<'db>(
                         Ok(actual) if tys_match(db, actual, expected) => None,
                         Ok(actual) => Some(GeneratedInvalidMethodBody {
                             name: method.name,
-                            expected,
+                            expected: Some(expected),
                             actual: Some(actual),
                             span: expr.span(db).clone(),
                         }),
                         Err(span) => Some(GeneratedInvalidMethodBody {
                             name: method.name,
-                            expected,
+                            expected: Some(expected),
                             actual: None,
                             span,
                         }),
@@ -78,7 +85,7 @@ pub(super) fn generated_invalid_method_bodies<'db>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GeneratedInvalidMethodBody<'db> {
     pub(super) name: IdentId<'db>,
-    expected: TyId<'db>,
+    expected: Option<TyId<'db>>,
     actual: Option<TyId<'db>>,
     pub(super) span: DynLazySpan<'db>,
 }
@@ -291,6 +298,9 @@ pub(super) fn generated_method_error_summary<'db>(
 
 impl<'db> GeneratedInvalidMethodBody<'db> {
     fn pretty_print(&self, db: &'db dyn HirAnalysisDb) -> String {
+        let Some(expected) = self.expected else {
+            return format!("{} (not a trait method)", self.name.data(db));
+        };
         let actual = self
             .actual
             .map(|ty| ty.pretty_print(db).to_string())
@@ -298,7 +308,7 @@ impl<'db> GeneratedInvalidMethodBody<'db> {
         format!(
             "{} (expected {}, got {})",
             self.name.data(db),
-            self.expected.pretty_print(db),
+            expected.pretty_print(db),
             actual
         )
     }
