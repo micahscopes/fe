@@ -12,6 +12,7 @@ use crate::{
                 GeneratedExprId, GeneratedExprKind, GeneratedStructFieldInit,
                 GeneratedStructFieldInitListId,
             },
+            method_conformance::required_method_arg_ty_for_trait_inst,
             trait_def::TraitInstId,
             trait_resolution::PredicateListId,
             ty_def::{Kind, TyId},
@@ -27,10 +28,7 @@ use crate::{
 use super::{
     BuilderError, CapabilityEnv, ElaborationCtfeContextId, ImplBuilderSession, ProviderOutputId,
     ProviderOutputStatus, ProviderSkipReason, ReflectedField, RequirementOrigin,
-    generated_method::{
-        generated_method_default_assumptions, required_method_arg_ty_for_trait_inst,
-        required_methods,
-    },
+    generated_method::{generated_method_default_assumptions, required_methods},
     reflect::reflect_struct_fields,
 };
 

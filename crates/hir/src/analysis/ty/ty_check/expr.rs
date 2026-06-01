@@ -28,7 +28,7 @@ use crate::analysis::ty::{
     adt_def::AdtRef,
     assoc_const::AssocConstUse,
     canonical::{Canonicalized, Solution},
-    constraint::{CompilerCapabilityKind, compiler_capability_for_ty},
+    constraint::{CompilerCapabilityKind, ConstraintKind, compiler_capability_for_ty},
     corelib::{
         resolve_core_range_types, resolve_core_trait, resolve_lib_func_path, resolve_lib_type_path,
     },
@@ -55,6 +55,7 @@ use crate::analysis::ty::{
         stored_value_contains_out_of_scope_params,
     },
     fold::{AssocTySubst, TyFoldable as _, TyFolder},
+    method_conformance::instantiate_required_method_ty_for_trait_inst,
     provider::{ProviderTransport, provider_semantics_for_specialized_call},
     trait_def::TraitInstId,
     trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx},
@@ -3256,8 +3257,10 @@ impl<'db> TyChecker<'db> {
                 if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 2 {
                     return None;
                 }
-                let value = self.fresh_ty();
                 self.check_expr_unknown(args[0].expr);
+                let value = self
+                    .impl_builder_method_return_ty(goal, args[0].expr)
+                    .unwrap_or_else(|| self.fresh_ty());
                 self.check_expr(args[1].expr, self.generated_expr_ty(value));
                 Some(ExprProp::new(TyId::unit(self.db), true))
             }
@@ -3313,6 +3316,33 @@ impl<'db> TyChecker<'db> {
             }
             _ => None,
         }
+    }
+
+    fn impl_builder_method_return_ty(
+        &self,
+        goal: crate::analysis::ty::constraint::ConstraintId<'db>,
+        method_name_expr: ExprId,
+    ) -> Option<TyId<'db>> {
+        let method_name = self.string_literal_ident(method_name_expr)?;
+        let ConstraintKind::Trait(inst) = goal.kind(self.db) else {
+            return None;
+        };
+        let methods = inst.def(self.db).method_defs(self.db);
+        let method = methods.get(&method_name)?;
+        Some(instantiate_required_method_ty_for_trait_inst(
+            self.db,
+            inst,
+            *method,
+            method.return_ty(self.db),
+            self.env.assumptions(),
+        ))
+    }
+
+    fn string_literal_ident(&self, expr: ExprId) -> Option<IdentId<'db>> {
+        let Partial::Present(Expr::Lit(LitKind::String(value))) = self.env.expr_data(expr) else {
+            return None;
+        };
+        Some(IdentId::new(self.db, value.data(self.db).to_string()))
     }
 
     fn check_reflect_intrinsic_method_call(

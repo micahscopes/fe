@@ -3553,6 +3553,87 @@ impl StableDefault: Derive for Default {
 }
 
 #[test]
+fn provider_generated_static_method_can_use_named_arg_ref() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_static_method_can_use_named_arg_ref.fe".into(),
+        r#"
+trait CloneFrom {
+    fn clone_from(other: Self) -> Self
+}
+
+fn require_clone_from<T>()
+where
+    T: CloneFrom
+{}
+
+struct Foo {}
+
+derive CloneFrom for Foo using StableCloneFrom
+
+impl StableCloneFrom: Derive for CloneFrom {
+    const fn derive<T>(ev: own Evidence<CloneFrom<T>>) -> Evidence<CloneFrom<T>>
+        uses (builder: mut ImplBuilder<CloneFrom<T>>)
+    {
+        builder.emit_method("clone_from", builder.arg_ref("other"))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_clone_from<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: CloneFrom with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn provider_generated_static_method_rejects_self_ref() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_static_method_rejects_self_ref.fe".into(),
+        r#"
+trait Default {
+    fn default() -> Self
+}
+
+struct Foo {}
+
+derive Default for Foo using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.emit_method("default", builder.self_ref())
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Default` does not satisfy required methods",
+    );
+    assert_diag_message(&diags, "invalid generated body for default");
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn provider_generated_default_like_derive_builds_struct_init_body() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
