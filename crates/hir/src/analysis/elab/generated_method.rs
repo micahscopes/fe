@@ -19,6 +19,7 @@ use crate::{
     },
     core::semantic::constraints_for,
     hir_def::{Func, IdentId},
+    span::DynLazySpan,
 };
 
 use super::{ElaborationCtfeContextId, reflect::reflect_struct_fields, tys_match};
@@ -59,6 +60,7 @@ pub(super) fn generated_invalid_required_method_bodies<'db>(
                             name: method.name,
                             expected,
                             actual,
+                            span: method.span.clone(),
                         })
                 }
             }
@@ -66,11 +68,12 @@ pub(super) fn generated_invalid_required_method_bodies<'db>(
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GeneratedInvalidMethodBody<'db> {
     pub(super) name: IdentId<'db>,
     expected: TyId<'db>,
     actual: Option<TyId<'db>>,
+    pub(super) span: DynLazySpan<'db>,
 }
 
 #[derive(Clone, Copy)]
@@ -274,7 +277,7 @@ pub(super) fn generated_method_error_summary<'db>(
 }
 
 impl<'db> GeneratedInvalidMethodBody<'db> {
-    fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
+    fn pretty_print(&self, db: &'db dyn HirAnalysisDb) -> String {
         let actual = self
             .actual
             .map(|ty| ty.pretty_print(db).to_string())

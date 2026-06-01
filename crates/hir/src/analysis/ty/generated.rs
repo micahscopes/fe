@@ -11,6 +11,7 @@ use crate::{
         },
     },
     hir_def::IdentId,
+    span::DynLazySpan,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
@@ -93,10 +94,11 @@ pub(crate) enum GeneratedMethodBodyKind<'db> {
     Expr(GeneratedExprId<'db>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) struct GeneratedMethod<'db> {
     pub(crate) name: IdentId<'db>,
     pub(crate) body: GeneratedMethodBodyKind<'db>,
+    pub(crate) span: DynLazySpan<'db>,
 }
 
 #[salsa::interned]
@@ -347,6 +349,7 @@ impl<'db> TyFoldable<'db> for GeneratedMethod<'db> {
         Self {
             name: self.name,
             body: self.body.fold_with(db, folder),
+            span: self.span.clone(),
         }
     }
 }
@@ -371,7 +374,7 @@ impl<'db> TyFoldable<'db> for GeneratedMethodListId<'db> {
             db,
             self.list(db)
                 .iter()
-                .map(|method| method.fold_with(db, folder))
+                .map(|method| method.clone().fold_with(db, folder))
                 .collect::<Vec<_>>(),
         )
     }

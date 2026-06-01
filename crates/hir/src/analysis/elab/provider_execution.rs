@@ -479,7 +479,7 @@ impl<'db> ProviderBodyExecutor<'db> {
             ));
         };
         self.builder
-            .emit_method_expr(method_name, expr)
+            .emit_method_expr(method_name, expr, expr_arg.span(body).into())
             .map_err(|err| match err {
                 BuilderError::AlreadyFinished => failed_execution(
                     ProviderFailureReason::CommandAfterFinish,

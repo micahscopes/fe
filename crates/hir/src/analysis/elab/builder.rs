@@ -13,6 +13,7 @@ use crate::{
         },
     },
     hir_def::IdentId,
+    span::DynLazySpan,
 };
 
 use super::{ElaborationCtfeContextId, RequirementOrigin, constraints_match};
@@ -26,6 +27,7 @@ pub(crate) enum BuilderCommand<'db> {
     EmitMethodExpr {
         name: IdentId<'db>,
         expr: GeneratedExprId<'db>,
+        span: DynLazySpan<'db>,
     },
     Finish,
 }
@@ -87,12 +89,13 @@ impl<'db> ImplBuilderSession<'db> {
         &mut self,
         name: IdentId<'db>,
         expr: GeneratedExprId<'db>,
+        span: DynLazySpan<'db>,
     ) -> Result<(), BuilderError<'db>> {
         if self.finished {
             return Err(BuilderError::AlreadyFinished);
         }
         self.commands
-            .push(BuilderCommand::EmitMethodExpr { name, expr });
+            .push(BuilderCommand::EmitMethodExpr { name, expr, span });
         Ok(())
     }
 
@@ -159,7 +162,7 @@ pub(super) fn generated_impl_from_builder_commands<'db>(
                     origin: *origin,
                 })
             }
-            BuilderCommand::EmitMethodExpr { name, expr } => methods.push(GeneratedMethod {
+            BuilderCommand::EmitMethodExpr { name, expr, span } => methods.push(GeneratedMethod {
                 name: {
                     if !method_names.insert(*name) {
                         return Err(BuilderError::DuplicateMethod { name: *name });
@@ -167,6 +170,7 @@ pub(super) fn generated_impl_from_builder_commands<'db>(
                     *name
                 },
                 body: GeneratedMethodBodyKind::Expr(*expr),
+                span: span.clone(),
             }),
             BuilderCommand::Finish => finished = true,
         }

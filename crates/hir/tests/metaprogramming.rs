@@ -3780,6 +3780,12 @@ impl StableDefault: Derive for Default {
     );
     assert_diag_message(&diags, "invalid generated body for default");
     assert_diag_message(&diags, "expected Foo, got <unavailable>");
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "provider output for `Default` does not satisfy required methods",
+        "builder.self_ref()",
+    );
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         Vec::<String>::new()

@@ -74,6 +74,19 @@ fn provider_output_source_for_commands<'db>(
     ))
 }
 
+fn emit_method_expr_command<'db>(
+    db: &'db HirAnalysisTestDb,
+    context: ElaborationCtfeContextId<'db>,
+    name: IdentId<'db>,
+    expr: GeneratedExprId<'db>,
+) -> BuilderCommand<'db> {
+    BuilderCommand::EmitMethodExpr {
+        name,
+        expr,
+        span: context.provider(db).func(db).span().name().into(),
+    }
+}
+
 #[test]
 fn raw_impl_builder_records_required_obligations() {
     let mut db = HirAnalysisTestDb::default();
@@ -586,10 +599,12 @@ impl StableEq: Derive for Eq {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::EmitMethodExpr {
-                name: method_name,
-                expr: GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
-            },
+            emit_method_expr_command(
+                &db,
+                context,
+                method_name,
+                GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
+            ),
             BuilderCommand::Finish,
         ],
     );
@@ -650,10 +665,7 @@ impl StableEq: Derive for Eq {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::EmitMethodExpr {
-                name: method_name,
-                expr,
-            },
+            emit_method_expr_command(&db, context, method_name, expr),
             BuilderCommand::Finish,
         ],
     );
@@ -735,10 +747,7 @@ impl StableEq: Derive for Eq {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::EmitMethodExpr {
-                name: method_name,
-                expr,
-            },
+            emit_method_expr_command(&db, context, method_name, expr),
             BuilderCommand::Finish,
         ],
     );
@@ -808,10 +817,7 @@ impl StableDefault: Derive for Default {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::EmitMethodExpr {
-                name: method_name,
-                expr,
-            },
+            emit_method_expr_command(&db, context, method_name, expr),
             BuilderCommand::Finish,
         ],
     );
@@ -875,10 +881,7 @@ impl StableDefault: Derive for Default {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::EmitMethodExpr {
-                name: method_name,
-                expr,
-            },
+            emit_method_expr_command(&db, context, method_name, expr),
             BuilderCommand::Finish,
         ],
     );
@@ -954,10 +957,7 @@ impl StableDefault: Derive for Default {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::EmitMethodExpr {
-                name: method_name,
-                expr,
-            },
+            emit_method_expr_command(&db, context, method_name, expr),
             BuilderCommand::Finish,
         ],
     );
@@ -1016,10 +1016,12 @@ impl StableCount: Derive for Count {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::EmitMethodExpr {
-                name: method_name,
-                expr: GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
-            },
+            emit_method_expr_command(
+                &db,
+                context,
+                method_name,
+                GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
+            ),
             BuilderCommand::Finish,
         ],
     );
