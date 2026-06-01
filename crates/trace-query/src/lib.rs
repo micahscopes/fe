@@ -14,9 +14,9 @@ use introspection_config::FeToolingConfig;
 use serde::{Deserialize, Serialize};
 use trace_facts::{
     CompilerEventKind, CompilerPhase, GasKind, InstructionCategory, InstructionFact, LoopBlockRole,
-    OriginEdgeLabel, OriginEdgeTraversalClass, RuntimePcJoinConfidence, RuntimeValue,
-    StorageAccessKind, StorageFact, StorageLocation, TraceDataSource, TraceFact, TraceMetadata,
-    TraceSnapshot,
+    OriginEdgeFact, OriginEdgeLabel, OriginEdgeTraversalClass, RuntimePcJoinConfidence,
+    RuntimeValue, StorageAccessKind, StorageFact, StorageLocation, TraceDataSource, TraceFact,
+    TraceMetadata, TraceSnapshot,
 };
 
 pub type QueryResult<T> = Result<T, QueryError>;
@@ -2472,6 +2472,7 @@ struct TraceWorkbenchBytecodeParitySummary {
     total_pcs: usize,
     source_exact_pcs: usize,
     missing_source_evidence_pcs: usize,
+    contextual_bytecode_pcs: usize,
     optimized_sonatina_linked_pcs: usize,
     prepared_linked_pcs: usize,
     unmapped_pcs: usize,
@@ -2560,6 +2561,9 @@ fn trace_workbench_projection_parity_summary(
                 .unwrap_or_default(),
             missing_source_evidence_pcs: attribution_audit
                 .map(|audit| audit.missing_source_evidence_pcs)
+                .unwrap_or_default(),
+            contextual_bytecode_pcs: attribution_audit
+                .map(|audit| audit.contextual_bytecode_pcs)
                 .unwrap_or_default(),
             optimized_sonatina_linked_pcs: attribution_audit
                 .map(|audit| audit.optimized_sonatina_linked_pcs)
@@ -4578,6 +4582,7 @@ pub struct AttributionAuditReport {
     pub source_exact_pcs: usize,
     pub source_ambiguous_pcs: usize,
     pub missing_source_evidence_pcs: usize,
+    pub contextual_bytecode_pcs: usize,
     pub unmapped_pcs: usize,
     pub optimized_sonatina_linked_pcs: usize,
     pub prepared_linked_pcs: usize,
@@ -4681,6 +4686,7 @@ pub struct MissingLinkSummary {
     pub top_blockers: Vec<LinkBoundaryKind>,
     pub exact_source_to_bytecode_pcs: usize,
     pub missing_source_evidence_bytecode_pcs: usize,
+    pub contextual_bytecode_pcs: usize,
     pub prepared_linked_bytecode_pcs: usize,
     pub unmapped_bytecode_pcs: usize,
     pub missing_required_count: usize,
@@ -6416,6 +6422,7 @@ fn missing_link_audit_report(
     snapshot: &TraceSnapshot,
     source_exact_pcs: usize,
     missing_source_evidence_pcs: usize,
+    contextual_bytecode_pcs: usize,
     prepared_linked_pcs: usize,
     unmapped_pcs: usize,
     prepared_target_count: usize,
@@ -7094,6 +7101,7 @@ fn missing_link_audit_report(
             top_blockers,
             exact_source_to_bytecode_pcs: source_exact_pcs,
             missing_source_evidence_bytecode_pcs: missing_source_evidence_pcs,
+            contextual_bytecode_pcs,
             prepared_linked_bytecode_pcs: prepared_linked_pcs,
             unmapped_bytecode_pcs: unmapped_pcs,
             missing_required_count,
@@ -8087,6 +8095,13 @@ fn non_exact_postopt_lineage_for_prepared(
     })
 }
 
+fn contextual_frontend_edge_from_bytecode(edge: &OriginEdgeFact) -> bool {
+    edge.from.kind() == "bytecode.pc"
+        && matches!(edge.traversal_class(), OriginEdgeTraversalClass::Contextual)
+        && edge.has_transform_claim_label()
+        && (is_hir_audit_origin(&edge.to) || is_mir_audit_origin(&edge.to))
+}
+
 fn attribution_audit_report(snapshot: &TraceSnapshot) -> AttributionAuditReport {
     let index = TraceIndex::new(snapshot);
     let semantic_index = trace_index::TraceIndex::new(snapshot);
@@ -8120,6 +8135,7 @@ fn attribution_audit_report(snapshot: &TraceSnapshot) -> AttributionAuditReport 
     let mut source_exact_pcs = 0usize;
     let mut source_ambiguous_pcs = 0usize;
     let mut missing_source_evidence_pcs = 0usize;
+    let mut contextual_bytecode_pcs = 0usize;
     let mut unmapped_pcs = 0usize;
     let mut optimized_sonatina_linked_pcs = 0usize;
     let mut prepared_linked_pcs = 0usize;
@@ -8175,6 +8191,13 @@ fn attribution_audit_report(snapshot: &TraceSnapshot) -> AttributionAuditReport 
             .filter(|target| is_prepared_sonatina_audit_origin(target))
             .cloned()
             .collect::<Vec<_>>();
+        let has_contextual_frontend_evidence = snapshot.facts().iter().any(|fact| {
+            matches!(
+                fact,
+                TraceFact::OriginEdge(edge)
+                    if edge.from == instruction && contextual_frontend_edge_from_bytecode(edge)
+            )
+        });
         let has_optimized_sonatina_targets = !optimized_targets_for_pc.is_empty();
         let has_prepared_targets = !prepared_targets_for_pc.is_empty();
 
@@ -8306,6 +8329,8 @@ fn attribution_audit_report(snapshot: &TraceSnapshot) -> AttributionAuditReport 
                 // Counted by the optimized→prepared lineage buckets above.
             } else if has_optimized_sonatina_targets {
                 missing_source_evidence_pcs += 1;
+            } else if has_contextual_frontend_evidence {
+                contextual_bytecode_pcs += 1;
             } else if !has_prepared_targets {
                 unmapped_pcs += 1;
             }
@@ -8418,6 +8443,7 @@ fn attribution_audit_report(snapshot: &TraceSnapshot) -> AttributionAuditReport 
         snapshot,
         source_exact_pcs,
         missing_source_evidence_pcs,
+        contextual_bytecode_pcs,
         prepared_linked_pcs,
         unmapped_pcs,
         prepared_target_total_count,
@@ -8450,6 +8476,7 @@ fn attribution_audit_report(snapshot: &TraceSnapshot) -> AttributionAuditReport 
         source_exact_pcs,
         source_ambiguous_pcs,
         missing_source_evidence_pcs,
+        contextual_bytecode_pcs,
         unmapped_pcs,
         optimized_sonatina_linked_pcs,
         prepared_linked_pcs,
@@ -9569,6 +9596,57 @@ mod tests {
         let direct_source_candidates = index.source_candidates_for_instruction(&exact_hir);
         assert_eq!(direct_source_candidates.len(), 1);
         assert_eq!(direct_source_candidates[0].origin, exact_hir);
+    }
+
+    #[test]
+    fn attribution_audit_reports_contextual_frontend_bytecode_without_unmapping() {
+        let function = key("function", "demo", "recv");
+        let source_file = key("source.file", "demo", "demo.fe");
+        let contextual_hir = key("hir.expr", "demo", "expr:context");
+        let pc = key("bytecode.pc", "demo", "pc:0");
+        let snapshot = snapshot(vec![
+            node(function.clone()),
+            node(source_file.clone()),
+            node(contextual_hir.clone()),
+            node(pc.clone()),
+            TraceFact::SourceFile(SourceFileFact::new(
+                source_file.clone(),
+                "file:///demo.fe",
+                "demo.fe",
+                "blake3:0000000000000000000000000000000000000000000000000000000000000001",
+                Some(0),
+            )),
+            TraceFact::SourceSpan(SourceSpanFact::new(
+                contextual_hir.clone(),
+                source_file,
+                0,
+                1,
+                1,
+                1,
+                1,
+                2,
+            )),
+            TraceFact::Instruction(InstructionFact::new(pc.clone(), function, 0, "ADD")),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                pc,
+                contextual_hir,
+                OriginEdgeLabel::LoweredFrom,
+                Some(CompilerPhase::BytecodeEmission),
+            )),
+        ]);
+        let report = TraceIntrospectionService::new(snapshot)
+            .attribution_audit()
+            .unwrap();
+        let missing_links = report.missing_links.as_ref().unwrap();
+
+        assert_eq!(report.source_exact_pcs, 0);
+        assert_eq!(report.contextual_bytecode_pcs, 1);
+        assert_eq!(report.unmapped_pcs, 0);
+        assert_eq!(report.suspicious_edges.len(), 1);
+        assert_eq!(missing_links.summary.exact_source_to_bytecode_pcs, 0);
+        assert_eq!(missing_links.summary.contextual_bytecode_pcs, 1);
+        assert_eq!(missing_links.summary.unmapped_bytecode_pcs, 0);
+        assert!(missing_links.summary.top_blockers.is_empty());
     }
 
     #[test]
@@ -13051,6 +13129,7 @@ mod tests {
             source_exact_pcs: 0,
             source_ambiguous_pcs: 0,
             missing_source_evidence_pcs: 0,
+            contextual_bytecode_pcs: 0,
             unmapped_pcs: 1,
             optimized_sonatina_linked_pcs: 0,
             prepared_linked_pcs: 1,
