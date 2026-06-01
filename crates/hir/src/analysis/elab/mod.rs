@@ -67,7 +67,11 @@ pub(crate) use request::{
 pub(crate) use requirement_origin::RequirementOrigin;
 pub use trace::{
     generated_impl_summaries_for_top_mod, generated_method_artifact_summaries_for_top_mod,
-    generated_requirement_artifact_summaries_for_top_mod, generated_trace_summaries_for_top_mod,
+    generated_requirement_artifact_summaries_for_top_mod,
+    generated_scoped_impl_summaries_for_top_mod,
+    generated_scoped_method_artifact_summaries_for_top_mod,
+    generated_scoped_requirement_artifact_summaries_for_top_mod,
+    generated_scoped_trace_summaries_for_top_mod, generated_trace_summaries_for_top_mod,
 };
 
 #[salsa::interned]

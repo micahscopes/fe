@@ -6,12 +6,12 @@ use crate::{
             generated::{GeneratedImplId, GeneratedImplSource},
         },
     },
-    hir_def::{IdentId, TopLevelMod},
+    hir_def::{DeriveProviderScope, IdentId, TopLevelMod},
 };
 
 use super::{
     ElaborationCtfeContextId, ElaborationRequestId, RequirementOrigin, generated_impls_for_ingot,
-    request::ElaborationOrigin,
+    generated_impls_for_provider_scope, request::ElaborationOrigin,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
@@ -89,12 +89,29 @@ pub fn generated_impl_summaries_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<String> {
-    generated_impls_for_ingot(db, top_mod.ingot(db))
-        .iter()
-        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
+    global_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
         .map(|generated| {
             format!(
                 "generated {} {} with obligations {}",
+                generated.source.pretty_print(db),
+                generated.trait_inst.pretty_print(db, true),
+                generated.obligations.pretty_print(db),
+            )
+        })
+        .collect()
+}
+
+pub fn generated_scoped_impl_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    scoped_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
+        .map(|(provider_scope, generated)| {
+            format!(
+                "scoped {} generated {} {} with obligations {}",
+                provider_scope.pretty_print(db),
                 generated.source.pretty_print(db),
                 generated.trait_inst.pretty_print(db, true),
                 generated.obligations.pretty_print(db),
@@ -107,13 +124,32 @@ pub fn generated_trace_summaries_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<String> {
-    generated_impls_for_ingot(db, top_mod.ingot(db))
-        .iter()
-        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
-        .flat_map(|&generated| {
+    global_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
+        .flat_map(|generated| {
             generated_trace_facts(db, generated)
                 .into_iter()
                 .map(move |fact| fact.pretty_print(db, generated))
+        })
+        .collect()
+}
+
+pub fn generated_scoped_trace_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    scoped_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
+        .flat_map(|(provider_scope, generated)| {
+            generated_trace_facts(db, generated)
+                .into_iter()
+                .map(move |fact| {
+                    format!(
+                        "scoped {}: {}",
+                        provider_scope.pretty_print(db),
+                        fact.pretty_print(db, generated)
+                    )
+                })
         })
         .collect()
 }
@@ -122,10 +158,9 @@ pub fn generated_requirement_artifact_summaries_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<String> {
-    generated_impls_for_ingot(db, top_mod.ingot(db))
-        .iter()
-        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
-        .flat_map(|&generated| {
+    global_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
+        .flat_map(|generated| {
             generated
                 .requirements
                 .list(db)
@@ -145,14 +180,40 @@ pub fn generated_requirement_artifact_summaries_for_top_mod<'db>(
         .collect()
 }
 
+pub fn generated_scoped_requirement_artifact_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    scoped_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
+        .flat_map(|(provider_scope, generated)| {
+            generated
+                .requirements
+                .list(db)
+                .iter()
+                .enumerate()
+                .map(move |(index, requirement)| {
+                    format!(
+                        "scoped {}: {} requirement #{} requires {} {}",
+                        provider_scope.pretty_print(db),
+                        generated.trait_inst.pretty_print(db, true),
+                        index,
+                        requirement.constraint.pretty_print(db),
+                        requirement.origin.pretty_print(db)
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub fn generated_method_artifact_summaries_for_top_mod<'db>(
     db: &'db dyn HirAnalysisDb,
     top_mod: TopLevelMod<'db>,
 ) -> Vec<String> {
-    generated_impls_for_ingot(db, top_mod.ingot(db))
-        .iter()
-        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
-        .flat_map(|&generated| {
+    global_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
+        .flat_map(|generated| {
             generated
                 .methods
                 .list(db)
@@ -166,6 +227,64 @@ pub fn generated_method_artifact_summaries_for_top_mod<'db>(
                         method.name.data(db)
                     )
                 })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+pub fn generated_scoped_method_artifact_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    scoped_generated_impls_for_top_mod(db, top_mod)
+        .into_iter()
+        .flat_map(|(provider_scope, generated)| {
+            generated
+                .methods
+                .list(db)
+                .iter()
+                .enumerate()
+                .map(move |(index, method)| {
+                    format!(
+                        "scoped {}: {} method #{} emits {}",
+                        provider_scope.pretty_print(db),
+                        generated.trait_inst.pretty_print(db, true),
+                        index,
+                        method.name.data(db)
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn global_generated_impls_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<GeneratedImplId<'db>> {
+    generated_impls_for_ingot(db, top_mod.ingot(db))
+        .iter()
+        .copied()
+        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
+        .collect()
+}
+
+fn scoped_generated_impls_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<(DeriveProviderScope<'db>, GeneratedImplId<'db>)> {
+    top_mod
+        .all_derive_provider_scopes(db)
+        .iter()
+        .copied()
+        .flat_map(|provider_scope| {
+            generated_impls_for_provider_scope(db, provider_scope)
+                .iter()
+                .copied()
+                .filter(move |generated| {
+                    generated.context.request(db).target(db).item().top_mod(db) == top_mod
+                })
+                .map(move |generated| (provider_scope, generated))
                 .collect::<Vec<_>>()
         })
         .collect()
