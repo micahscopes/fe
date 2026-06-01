@@ -6293,6 +6293,8 @@ fn missing_link_audit_report(
         .iter()
         .filter(|entry| entry.boundary == LinkBoundaryKind::BytecodeToRuntime)
         .count();
+    let runtime_missing_steps = runtime_join_missing_steps(snapshot);
+    let missing_runtime_join_count = runtime_missing_steps.len();
     let expected_absent_postopt_to_prepared_count = expected_absent
         .iter()
         .filter(|entry| entry.boundary == LinkBoundaryKind::PostOptToPrepared)
@@ -6340,7 +6342,8 @@ fn missing_link_audit_report(
         + missing_hir_to_mir_count
         + missing_mir_to_preopt_count
         + missing_preopt_to_postopt_count
-        + missing_prepared_to_bytecode_count;
+        + missing_prepared_to_bytecode_count
+        + missing_runtime_join_count;
     let overall_status = if !invalid.is_empty() {
         LinkOverallStatus::Invalid
     } else if missing_required_count > 0 || non_exact_postopt_to_prepared_count > 0 {
@@ -6365,6 +6368,9 @@ fn missing_link_audit_report(
     }
     if missing_prepared_to_bytecode_count > 0 {
         top_blockers.push(LinkBoundaryKind::PreparedToBytecode);
+    }
+    if missing_runtime_join_count > 0 {
+        top_blockers.push(LinkBoundaryKind::BytecodeToRuntime);
     }
 
     let mut boundary_summaries = Vec::new();
@@ -6575,16 +6581,28 @@ fn missing_link_audit_report(
         });
     }
 
-    if expected_absent_runtime_count > 0 {
+    if expected_absent_runtime_count > 0 || missing_runtime_join_count > 0 {
         let mut runtime_counts = BTreeMap::new();
-        runtime_counts.insert(LinkStatus::ExpectedAbsent, expected_absent_runtime_count);
+        if expected_absent_runtime_count > 0 {
+            runtime_counts.insert(LinkStatus::ExpectedAbsent, expected_absent_runtime_count);
+        }
+        if missing_runtime_join_count > 0 {
+            runtime_counts.insert(LinkStatus::MissingRequired, missing_runtime_join_count);
+        }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::BytecodeToRuntime,
             owner_phase: CompilerPhase::BytecodeEmission,
             status_counts: runtime_counts,
-            affected_origins: expected_absent_runtime_count,
+            affected_origins: expected_absent_runtime_count + missing_runtime_join_count,
             affected_bytecode_pcs: 0,
-            top_issue_codes: vec![LinkIssueCode::ExpectedAbsentNoRuntimeSession],
+            top_issue_codes: [
+                (expected_absent_runtime_count > 0)
+                    .then_some(LinkIssueCode::ExpectedAbsentNoRuntimeSession),
+                (missing_runtime_join_count > 0).then_some(LinkIssueCode::MissingRuntimeJoin),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         });
     }
 
@@ -6733,6 +6751,31 @@ fn missing_link_audit_report(
                 candidate_hints: Vec::new(),
                 required_evidence: required_prepared_to_bytecode_evidence(),
                 cluster_id: Some("prepared-to-bytecode:missing-pc-extent".to_string()),
+            }),
+    );
+    details.extend(
+        runtime_missing_steps
+            .iter()
+            .take(MISSING_LINK_DETAIL_LIMIT.saturating_sub(details.len()))
+            .map(|step| LinkGap {
+                gap_id: stable_short_id(&format!(
+                    "{:?}\n{}",
+                    LinkBoundaryKind::BytecodeToRuntime,
+                    step.step.canonical_storage_key()
+                )),
+                boundary: LinkBoundaryKind::BytecodeToRuntime,
+                status: LinkStatus::MissingRequired,
+                issue_code: LinkIssueCode::MissingRuntimeJoin,
+                severity: LinkSeverity::Warning,
+                from_origin: step.step.clone(),
+                from_representation: Some("runtime.trace".to_string()),
+                expected_to_phase: "bytecode.pc".to_string(),
+                reached_frontier: "runtime.step".to_string(),
+                source_context: None,
+                bytecode_context: None,
+                candidate_hints: Vec::new(),
+                required_evidence: required_runtime_join_evidence(),
+                cluster_id: Some("bytecode-to-runtime:missing-runtime-join".to_string()),
             }),
     );
 
@@ -6939,6 +6982,38 @@ fn missing_link_audit_report(
                 .collect(),
             candidate_hints: Vec::new(),
             required_evidence: required_prepared_to_bytecode_evidence(),
+        });
+    }
+    if missing_runtime_join_count > 0 {
+        clusters.push(LinkGapCluster {
+            cluster_id: "bytecode-to-runtime:missing-runtime-join".to_string(),
+            boundary: LinkBoundaryKind::BytecodeToRuntime,
+            status: LinkStatus::MissingRequired,
+            issue_code: LinkIssueCode::MissingRuntimeJoin,
+            severity: LinkSeverity::Warning,
+            owner_phase: CompilerPhase::BytecodeEmission,
+            headline: "Runtime trace step did not resolve to static bytecode".to_string(),
+            explanation: "Runtime traces with captured steps should resolve each executable step to a static bytecode instruction using code object/hash and PC evidence. Missing joins are runtime trace integration gaps, not expected absences.".to_string(),
+            affected_origins: runtime_missing_steps
+                .iter()
+                .take(25)
+                .map(|step| AttributionAuditTargetCount {
+                    target: step.step.clone(),
+                    count: 1,
+                })
+                .collect(),
+            affected_source_ranges: Vec::new(),
+            affected_bytecode_pcs: Vec::new(),
+            affected_bytecode_ranges: Vec::new(),
+            gap_count: missing_runtime_join_count,
+            sample_gap_ids: details
+                .iter()
+                .filter(|gap| gap.boundary == LinkBoundaryKind::BytecodeToRuntime)
+                .take(MISSING_LINK_CLUSTER_SAMPLE_LIMIT)
+                .map(|gap| gap.gap_id.clone())
+                .collect(),
+            candidate_hints: Vec::new(),
+            required_evidence: required_runtime_join_evidence(),
         });
     }
 
@@ -7422,6 +7497,23 @@ fn has_runtime_trace_evidence(snapshot: &TraceSnapshot) -> bool {
     })
 }
 
+fn runtime_join_missing_steps(snapshot: &TraceSnapshot) -> Vec<&trace_facts::ExecutionStepFact> {
+    snapshot
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            TraceFact::ExecutionStep(step)
+                if step.instruction.is_none()
+                    || step.join_confidence
+                        == RuntimePcJoinConfidence::MissingStaticInstruction =>
+            {
+                Some(step)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn static_bytecode_runtime_expected_absences(snapshot: &TraceSnapshot) -> Vec<ExpectedAbsentLink> {
     let mut code_objects = snapshot
         .facts()
@@ -7520,6 +7612,14 @@ fn required_prepared_to_bytecode_evidence() -> Vec<RequiredEvidence> {
         kind: RequiredEvidenceKind::PcExtentFact,
         owner_phase: CompilerPhase::BytecodeEmission,
         description: "Emit bytecode PC extent evidence linking final bytecode PCs to the prepared/codegen instruction that emitted them.".to_string(),
+    }]
+}
+
+fn required_runtime_join_evidence() -> Vec<RequiredEvidence> {
+    vec![RequiredEvidence {
+        kind: RequiredEvidenceKind::RuntimeCodeHashJoin,
+        owner_phase: CompilerPhase::BytecodeEmission,
+        description: "Join runtime trace steps to static bytecode instructions using code object/hash and PC evidence.".to_string(),
     }]
 }
 
@@ -10617,6 +10717,96 @@ mod tests {
             missing_links.expected_absent[0].issue_code,
             LinkIssueCode::ExpectedAbsentNoRuntimeSession
         );
+    }
+
+    #[test]
+    fn missing_link_audit_reports_runtime_trace_join_gaps() {
+        let session = key("runtime.session", "tx:1", "session");
+        let code_object = key("code.object", "demo", "runtime");
+        let step = key("runtime.step", "tx:1", "step:0");
+        let snapshot = snapshot(vec![
+            node(session.clone()),
+            node(code_object.clone()),
+            node(step.clone()),
+            TraceFact::ExecutionTraceSession(ExecutionTraceSessionFact {
+                session: session.clone(),
+                source: RuntimeTraceDataSource::RevmInspector,
+                capture_mode: RuntimeCaptureMode::Standard,
+                value_policy: RuntimeValuePolicy::HashOnly,
+                transaction_hash: Some("0xabc".to_string()),
+                chain_id: Some(31337),
+                block_number: Some(1),
+                entry_code_object: Some(code_object.clone()),
+            }),
+            TraceFact::ExecutionStep(ExecutionStepFact {
+                step: step.clone(),
+                session,
+                step_index: 0,
+                code_object,
+                pc: 4096,
+                opcode: "ADD".to_string(),
+                instruction: None,
+                gas_before: 100,
+                gas_after: 97,
+                gas_cost: 3,
+                depth: 1,
+                join_confidence: RuntimePcJoinConfidence::MissingStaticInstruction,
+            }),
+        ]);
+        let report = TraceIntrospectionService::new(snapshot)
+            .attribution_audit()
+            .unwrap();
+        let missing_links = report.missing_links.as_ref().unwrap();
+
+        assert_eq!(missing_links.summary.status, LinkOverallStatus::Warning);
+        assert_eq!(
+            missing_links.summary.top_blockers,
+            vec![LinkBoundaryKind::BytecodeToRuntime]
+        );
+        assert_eq!(missing_links.summary.missing_required_count, 1);
+        assert_eq!(missing_links.summary.expected_absent_count, 0);
+        let runtime_boundary = missing_links
+            .boundary_summaries
+            .iter()
+            .find(|summary| summary.boundary == LinkBoundaryKind::BytecodeToRuntime)
+            .expect("bytecode to runtime boundary summary");
+        assert_eq!(
+            runtime_boundary
+                .status_counts
+                .get(&LinkStatus::MissingRequired),
+            Some(&1)
+        );
+        assert_eq!(
+            runtime_boundary
+                .status_counts
+                .get(&LinkStatus::ExpectedAbsent),
+            None
+        );
+        assert!(
+            runtime_boundary
+                .top_issue_codes
+                .contains(&LinkIssueCode::MissingRuntimeJoin)
+        );
+        assert_eq!(missing_links.gaps.len(), 1);
+        assert_eq!(
+            missing_links.gaps[0].boundary,
+            LinkBoundaryKind::BytecodeToRuntime
+        );
+        assert_eq!(
+            missing_links.gaps[0].issue_code,
+            LinkIssueCode::MissingRuntimeJoin
+        );
+        assert_eq!(missing_links.gaps[0].from_origin, step);
+        assert_eq!(
+            missing_links.gaps[0].required_evidence[0].kind,
+            RequiredEvidenceKind::RuntimeCodeHashJoin
+        );
+        assert!(missing_links.expected_absent.is_empty());
+        assert!(missing_links.clusters.iter().any(|cluster| {
+            cluster.boundary == LinkBoundaryKind::BytecodeToRuntime
+                && cluster.issue_code == LinkIssueCode::MissingRuntimeJoin
+                && cluster.gap_count == 1
+        }));
     }
 
     #[test]
