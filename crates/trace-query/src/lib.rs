@@ -7189,16 +7189,25 @@ fn hir_to_mir_boundary_audit(
             TraceFact::OriginNode(node) if is_mir_audit_origin(&node.key) => {
                 has_mir_origin = true;
             }
-            TraceFact::OriginEdge(edge)
-                if is_mir_audit_origin(&edge.from) && is_hir_audit_origin(&edge.to) =>
-            {
+            TraceFact::OriginEdge(edge) => {
+                let lowered_hir =
+                    if is_mir_audit_origin(&edge.from) && is_hir_audit_origin(&edge.to) {
+                        Some(&edge.to)
+                    } else if is_hir_audit_origin(&edge.from) && is_mir_audit_origin(&edge.to) {
+                        Some(&edge.from)
+                    } else {
+                        None
+                    };
+                let Some(lowered_hir) = lowered_hir else {
+                    continue;
+                };
                 match edge.traversal_class() {
                     OriginEdgeTraversalClass::ExactAttribution
                     | OriginEdgeTraversalClass::SnapshotAlias => {
-                        exact.insert(edge.to.clone());
+                        exact.insert(lowered_hir.clone());
                     }
                     OriginEdgeTraversalClass::Synthetic => {
-                        generated.insert(edge.to.clone());
+                        generated.insert(lowered_hir.clone());
                     }
                     _ => {}
                 }
@@ -7247,17 +7256,28 @@ fn mir_to_preopt_boundary_audit(snapshot: &TraceSnapshot) -> MirToPreoptBoundary
             TraceFact::OriginNode(node) if is_sonatina_preopt_inst_audit_origin(&node.key) => {
                 has_preopt_origin = true;
             }
-            TraceFact::OriginEdge(edge)
-                if is_sonatina_preopt_inst_audit_origin(&edge.from)
-                    && is_mir_audit_origin(&edge.to) =>
-            {
+            TraceFact::OriginEdge(edge) => {
+                let lowered_mir = if is_sonatina_preopt_inst_audit_origin(&edge.from)
+                    && is_mir_audit_origin(&edge.to)
+                {
+                    Some(&edge.to)
+                } else if is_mir_audit_origin(&edge.from)
+                    && is_sonatina_preopt_inst_audit_origin(&edge.to)
+                {
+                    Some(&edge.from)
+                } else {
+                    None
+                };
+                let Some(lowered_mir) = lowered_mir else {
+                    continue;
+                };
                 match edge.traversal_class() {
                     OriginEdgeTraversalClass::ExactAttribution
                     | OriginEdgeTraversalClass::SnapshotAlias => {
-                        exact.insert(edge.to.clone());
+                        exact.insert(lowered_mir.clone());
                     }
                     OriginEdgeTraversalClass::Synthetic => {
-                        generated.insert(edge.to.clone());
+                        generated.insert(lowered_mir.clone());
                     }
                     _ => {}
                 }
@@ -7309,17 +7329,28 @@ fn preopt_to_postopt_boundary_audit(
             TraceFact::OriginNode(node) if is_sonatina_postopt_inst_audit_origin(&node.key) => {
                 has_postopt_origin = true;
             }
-            TraceFact::OriginEdge(edge)
-                if is_sonatina_postopt_inst_audit_origin(&edge.from)
-                    && is_sonatina_preopt_inst_audit_origin(&edge.to) =>
-            {
+            TraceFact::OriginEdge(edge) => {
+                let lowered_preopt = if is_sonatina_postopt_inst_audit_origin(&edge.from)
+                    && is_sonatina_preopt_inst_audit_origin(&edge.to)
+                {
+                    Some(&edge.to)
+                } else if is_sonatina_preopt_inst_audit_origin(&edge.from)
+                    && is_sonatina_postopt_inst_audit_origin(&edge.to)
+                {
+                    Some(&edge.from)
+                } else {
+                    None
+                };
+                let Some(lowered_preopt) = lowered_preopt else {
+                    continue;
+                };
                 match edge.traversal_class() {
                     OriginEdgeTraversalClass::ExactAttribution
                     | OriginEdgeTraversalClass::SnapshotAlias => {
-                        exact.insert(edge.to.clone());
+                        exact.insert(lowered_preopt.clone());
                     }
                     OriginEdgeTraversalClass::Synthetic => {
-                        generated.insert(edge.to.clone());
+                        generated.insert(lowered_preopt.clone());
                     }
                     _ => {}
                 }
@@ -11035,6 +11066,128 @@ mod tests {
                 .iter()
                 .any(|summary| summary.boundary == LinkBoundaryKind::PostOptToPrepared)
         );
+    }
+
+    #[test]
+    fn missing_link_audit_accepts_reverse_direction_phase_evidence() {
+        let source_file = key("source.file", "demo", "demo.fe");
+        let hir_exact = key("hir.expr", "demo", "expr:exact");
+        let hir_generated = key("hir.expr", "demo", "expr:generated");
+        let mir_exact = key("runtime.stmt", "demo", "block:0:stmt:exact");
+        let mir_generated = key("runtime.stmt", "demo", "block:0:stmt:generated");
+        let preopt_exact = key("sonatina.preopt.inst", "demo", "inst:exact");
+        let preopt_generated = key("sonatina.preopt.inst", "demo", "inst:generated");
+        let postopt_exact = key("sonatina.postopt.inst", "demo", "inst:exact");
+        let postopt_generated = key("sonatina.postopt.inst", "demo", "inst:generated");
+        let snapshot = snapshot(vec![
+            node(source_file.clone()),
+            node(hir_exact.clone()),
+            node(hir_generated.clone()),
+            node(mir_exact.clone()),
+            node(mir_generated.clone()),
+            node(preopt_exact.clone()),
+            node(preopt_generated.clone()),
+            node(postopt_exact.clone()),
+            node(postopt_generated.clone()),
+            TraceFact::SourceFile(SourceFileFact::new(
+                source_file.clone(),
+                "file:///demo.fe",
+                "demo.fe",
+                "blake3:0000000000000000000000000000000000000000000000000000000000000001",
+                Some(0),
+            )),
+            TraceFact::SourceSpan(SourceSpanFact::new(
+                hir_exact.clone(),
+                source_file.clone(),
+                0,
+                1,
+                1,
+                1,
+                1,
+                2,
+            )),
+            TraceFact::SourceSpan(SourceSpanFact::new(
+                hir_generated.clone(),
+                source_file,
+                2,
+                3,
+                2,
+                1,
+                2,
+                2,
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                hir_exact,
+                mir_exact.clone(),
+                OriginEdgeLabel::LoweredFrom,
+                Some(CompilerPhase::Mir),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                hir_generated,
+                mir_generated.clone(),
+                OriginEdgeLabel::SyntheticFor,
+                Some(CompilerPhase::Mir),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                mir_exact,
+                preopt_exact.clone(),
+                OriginEdgeLabel::LoweredFrom,
+                Some(CompilerPhase::SonatinaPreOpt),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                mir_generated,
+                preopt_generated.clone(),
+                OriginEdgeLabel::SyntheticFor,
+                Some(CompilerPhase::SonatinaPreOpt),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                preopt_exact,
+                postopt_exact,
+                OriginEdgeLabel::PreservedSnapshotIdentity,
+                Some(CompilerPhase::SonatinaPostOpt),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                preopt_generated,
+                postopt_generated,
+                OriginEdgeLabel::SyntheticFor,
+                Some(CompilerPhase::SonatinaPostOpt),
+            )),
+        ]);
+        let report = TraceIntrospectionService::new(snapshot)
+            .attribution_audit()
+            .unwrap();
+        let missing_links = report.missing_links.as_ref().unwrap();
+
+        assert_eq!(missing_links.summary.status, LinkOverallStatus::Pass);
+        assert_eq!(missing_links.summary.missing_required_count, 0);
+        assert!(missing_links.summary.top_blockers.is_empty());
+        for boundary in [
+            LinkBoundaryKind::HirToMir,
+            LinkBoundaryKind::MirToSonatinaPreOpt,
+            LinkBoundaryKind::PreOptToPostOpt,
+        ] {
+            let summary = missing_links
+                .boundary_summaries
+                .iter()
+                .find(|summary| summary.boundary == boundary)
+                .expect("boundary summary");
+            assert_eq!(
+                summary.status_counts.get(&LinkStatus::SatisfiedExact),
+                Some(&1),
+                "{boundary:?} exact evidence should count despite reverse edge direction",
+            );
+            assert_eq!(
+                summary.status_counts.get(&LinkStatus::SatisfiedGenerated),
+                Some(&1),
+                "{boundary:?} generated evidence should count despite reverse edge direction",
+            );
+            assert!(
+                !summary
+                    .status_counts
+                    .contains_key(&LinkStatus::MissingRequired),
+                "{boundary:?} should not report a false missing link",
+            );
+        }
     }
 
     #[test]
