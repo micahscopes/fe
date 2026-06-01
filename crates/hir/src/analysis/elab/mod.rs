@@ -151,6 +151,15 @@ fn generated_overlay_diags_for_top_mod<'db>(
         top_mod,
         &method_valid_candidates,
     ));
+    for &provider_scope in top_mod.all_derive_provider_scopes(db) {
+        let candidates = generated_impl_candidates_for_provider_scope(db, provider_scope);
+        let method_valid_candidates = generated_impl_method_valid_candidates(db, &candidates);
+        diags.extend(cycles::generated_evidence_cycle_diags(
+            db,
+            top_mod,
+            &method_valid_candidates,
+        ));
+    }
     for &request in elaboration_requests_for_top_mod(db, top_mod) {
         for &context in elaboration_ctfe_contexts_for_request(db, request) {
             let output = provider_output_for_context(db, context);
