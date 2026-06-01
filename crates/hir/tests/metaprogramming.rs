@@ -501,6 +501,30 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn named_derive_provider_return_target_must_be_derive_param() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_return_target_must_be_derive_param.fe".into(),
+        r#"
+trait Eq {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<u256>>) -> Evidence<Eq<u256>> {
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid derive provider");
+    assert_diag_message(
+        &diags,
+        "returned evidence target must be a type parameter of the `derive` function",
+    );
+}
+
+#[test]
 fn named_derive_provider_body_must_declare_forwarded_capabilities() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

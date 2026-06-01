@@ -9,7 +9,7 @@ use crate::{
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             trait_resolution::PredicateListId,
-            ty_def::{PrimTy, TyBase, TyData},
+            ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
     hir_def::{Attr, DeriveProvider, Func, HirIngot, IdentId, ItemKind, NormalAttr, Trait},
@@ -276,7 +276,14 @@ fn validate_provider_function<'db>(
 
     if let (Some(head), Some(goal)) = (head, goal) {
         match goal.kind(db) {
-            ConstraintKind::Trait(inst) if inst.def(db) == head => {}
+            ConstraintKind::Trait(inst) if inst.def(db) == head => {
+                if !provider_target_is_derive_function_param(db, func, inst.self_ty(db)) {
+                    diags.push(invalid_provider(
+                        func.span().ret_ty().into(),
+                        "derive provider returned evidence target must be a type parameter of the `derive` function",
+                    ));
+                }
+            }
             ConstraintKind::Trait(_) => diags.push(invalid_provider(
                 func.span().ret_ty().into(),
                 "returned evidence constraint does not match the provider head",
@@ -298,6 +305,17 @@ fn validate_provider_function<'db>(
     let derive_head = ConstraintHeadId::new(db, ConstraintHeadKind::ConcreteTrait(head));
     let derive_goal = ConstraintId::new(db, ConstraintKind::Derive(derive_head));
     Some(DeriveProviderId::new(db, identity, func, goal, derive_goal))
+}
+
+fn provider_target_is_derive_function_param<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: Func<'db>,
+    ty: TyId<'db>,
+) -> bool {
+    let TyData::TyParam(param) = ty.data(db) else {
+        return false;
+    };
+    param.is_normal() && param.owner == func.scope()
 }
 
 fn invalid_provider<'db>(
