@@ -1924,6 +1924,12 @@ impl StableEq: Derive for Eq {
         &diags,
         "selected derive provider `missing_provider` for `Derive<Eq>` was not found",
     );
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "selected derive provider `missing_provider`",
+        "missing_provider",
+    );
     assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
 }
 
@@ -1961,6 +1967,12 @@ impl StableDefault: Derive for Default {
     assert_diag_message(
         &diags,
         "visible provider(s) named `StableDefault` provide `Derive<Default>`",
+    );
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "selected derive provider `StableDefault`",
+        "StableDefault",
     );
     assert!(generated_impl_summaries_for_top_mod(&db, top_mod).is_empty());
 }

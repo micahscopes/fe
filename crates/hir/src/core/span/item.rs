@@ -448,6 +448,23 @@ impl<'db> LazyDeriveDeclSpan<'db> {
     pub fn new(d: DeriveDecl<'db>) -> Self {
         Self(crate::span::transition::SpanTransitionChain::new(d))
     }
+
+    pub fn scoped_provider_path(mut self) -> LazyPathSpan<'db> {
+        fn f(origin: ResolvedOrigin, _: LazyArg) -> ResolvedOrigin {
+            origin.map(|node| {
+                let scope = node.ancestors().find_map(ast::DeriveProviderScope::cast)?;
+                scope
+                    .provider_path()
+                    .map(|path| path.syntax().clone().into())
+            })
+        }
+
+        self.0.push(LazyTransitionFn {
+            f,
+            arg: LazyArg::None,
+        });
+        LazyPathSpan(self.0)
+    }
 }
 
 define_lazy_span_node!(
