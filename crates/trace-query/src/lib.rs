@@ -4574,6 +4574,28 @@ pub enum LinkBoundaryKind {
     BytecodeToRuntime,
 }
 
+impl LinkBoundaryKind {
+    pub const ALL: [Self; 6] = [
+        Self::HirToMir,
+        Self::MirToSonatinaPreOpt,
+        Self::PreOptToPostOpt,
+        Self::PostOptToPrepared,
+        Self::PreparedToBytecode,
+        Self::BytecodeToRuntime,
+    ];
+
+    pub fn owner_phase(self) -> CompilerPhase {
+        match self {
+            Self::HirToMir => CompilerPhase::Mir,
+            Self::MirToSonatinaPreOpt => CompilerPhase::SonatinaPreOpt,
+            Self::PreOptToPostOpt => CompilerPhase::SonatinaPostOpt,
+            Self::PostOptToPrepared => CompilerPhase::Backend,
+            Self::PreparedToBytecode => CompilerPhase::BytecodeEmission,
+            Self::BytecodeToRuntime => CompilerPhase::RuntimeTrace,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkStatus {
@@ -6390,7 +6412,7 @@ fn missing_link_audit_report(
         }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::HirToMir,
-            owner_phase: CompilerPhase::Mir,
+            owner_phase: LinkBoundaryKind::HirToMir.owner_phase(),
             status_counts,
             affected_origins: hir_to_mir.total(),
             affected_bytecode_pcs: 0,
@@ -6418,7 +6440,7 @@ fn missing_link_audit_report(
         }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::MirToSonatinaPreOpt,
-            owner_phase: CompilerPhase::SonatinaPreOpt,
+            owner_phase: LinkBoundaryKind::MirToSonatinaPreOpt.owner_phase(),
             status_counts,
             affected_origins: mir_to_preopt.total(),
             affected_bytecode_pcs: 0,
@@ -6452,7 +6474,7 @@ fn missing_link_audit_report(
         }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::PreOptToPostOpt,
-            owner_phase: CompilerPhase::SonatinaPostOpt,
+            owner_phase: LinkBoundaryKind::PreOptToPostOpt.owner_phase(),
             status_counts,
             affected_origins: preopt_to_postopt.total(),
             affected_bytecode_pcs: 0,
@@ -6537,7 +6559,7 @@ fn missing_link_audit_report(
         );
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::PostOptToPrepared,
-            owner_phase: CompilerPhase::Backend,
+            owner_phase: LinkBoundaryKind::PostOptToPrepared.owner_phase(),
             status_counts,
             affected_origins: prepared_target_count + direct_postopt_bytecode_invalid_count,
             affected_bytecode_pcs: prepared_linked_pcs + direct_postopt_bytecode_invalid_count,
@@ -6565,7 +6587,7 @@ fn missing_link_audit_report(
         }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::PreparedToBytecode,
-            owner_phase: CompilerPhase::BytecodeEmission,
+            owner_phase: LinkBoundaryKind::PreparedToBytecode.owner_phase(),
             status_counts: prepared_to_bytecode_counts,
             affected_origins: prepared_to_bytecode.affected_origins(),
             affected_bytecode_pcs: prepared_to_bytecode.linked_pcs,
@@ -6591,7 +6613,7 @@ fn missing_link_audit_report(
         }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::BytecodeToRuntime,
-            owner_phase: CompilerPhase::RuntimeTrace,
+            owner_phase: LinkBoundaryKind::BytecodeToRuntime.owner_phase(),
             status_counts: runtime_counts,
             affected_origins: expected_absent_runtime_count + missing_runtime_join_count,
             affected_bytecode_pcs: 0,
@@ -6787,7 +6809,7 @@ fn missing_link_audit_report(
             status: LinkStatus::MissingRequired,
             issue_code: LinkIssueCode::MissingHirToMirLowering,
             severity: LinkSeverity::Warning,
-            owner_phase: CompilerPhase::Mir,
+            owner_phase: LinkBoundaryKind::HirToMir.owner_phase(),
             headline: "HIR source origin has no MIR lowering evidence".to_string(),
             explanation: "Executable HIR origins should be connected to MIR statements or terminators by exact lowering or generated/synthetic explanation edges.".to_string(),
             affected_origins: hir_to_mir
@@ -6822,7 +6844,7 @@ fn missing_link_audit_report(
             status: LinkStatus::MissingRequired,
             issue_code: LinkIssueCode::MissingMirToPreoptLowering,
             severity: LinkSeverity::Warning,
-            owner_phase: CompilerPhase::SonatinaPreOpt,
+            owner_phase: LinkBoundaryKind::MirToSonatinaPreOpt.owner_phase(),
             headline: "MIR origin has no Sonatina pre-opt lowering evidence".to_string(),
             explanation: "Runtime MIR statements and terminators should be connected to Sonatina pre-opt instructions by exact lowering or generated/synthetic explanation edges.".to_string(),
             affected_origins: mir_to_preopt
@@ -6857,7 +6879,7 @@ fn missing_link_audit_report(
             status: LinkStatus::MissingRequired,
             issue_code: LinkIssueCode::MissingOptimizerLineage,
             severity: LinkSeverity::Warning,
-            owner_phase: CompilerPhase::SonatinaPostOpt,
+            owner_phase: LinkBoundaryKind::PreOptToPostOpt.owner_phase(),
             headline: "Sonatina pre-opt origin has no optimizer lineage".to_string(),
             explanation: "Codegen-relevant Sonatina pre-opt instructions should either connect to optimized Sonatina output or have an explicit optimizer elision/rewrite reason.".to_string(),
             affected_origins: preopt_to_postopt
@@ -6924,7 +6946,7 @@ fn missing_link_audit_report(
             status: cluster_status,
             issue_code: cluster_issue_code,
             severity: LinkSeverity::Warning,
-            owner_phase: CompilerPhase::Backend,
+            owner_phase: LinkBoundaryKind::PostOptToPrepared.owner_phase(),
             headline: "Optimized Sonatina reaches no EVM prepared lineage".to_string(),
             explanation: "Source and optimized Sonatina evidence may exist, and EVM prepared/bytecode evidence exists, but no explicit optimized→prepared lineage edge is present for these prepared origins. Candidate hints are diagnostic only and never satisfy provenance.".to_string(),
             affected_origins,
@@ -6956,7 +6978,7 @@ fn missing_link_audit_report(
             status: LinkStatus::MissingRequired,
             issue_code: LinkIssueCode::MissingPreparedPcExtent,
             severity: LinkSeverity::Warning,
-            owner_phase: CompilerPhase::BytecodeEmission,
+            owner_phase: LinkBoundaryKind::PreparedToBytecode.owner_phase(),
             headline: "EVM prepared origin has no bytecode PC extent".to_string(),
             explanation: "Prepared/codegen instructions should be linked to final bytecode PCs when they emit code, or have explicit non-emitting/elision evidence.".to_string(),
             affected_origins: prepared_to_bytecode
@@ -6991,7 +7013,7 @@ fn missing_link_audit_report(
             status: LinkStatus::MissingRequired,
             issue_code: LinkIssueCode::MissingRuntimeJoin,
             severity: LinkSeverity::Warning,
-            owner_phase: CompilerPhase::RuntimeTrace,
+            owner_phase: LinkBoundaryKind::BytecodeToRuntime.owner_phase(),
             headline: "Runtime trace step did not resolve to static bytecode".to_string(),
             explanation: "Runtime traces with captured steps should resolve each executable step to a static bytecode instruction using code object/hash and PC evidence. Missing joins are runtime trace integration gaps, not expected absences.".to_string(),
             affected_origins: runtime_missing_steps
@@ -7578,7 +7600,7 @@ fn trace_metadata_flag_value(metadata: &TraceMetadata, name: &str) -> Option<Str
 fn required_optimized_to_prepared_evidence() -> Vec<RequiredEvidence> {
     vec![RequiredEvidence {
         kind: RequiredEvidenceKind::PreparedLineageFact,
-        owner_phase: CompilerPhase::Backend,
+        owner_phase: LinkBoundaryKind::PostOptToPrepared.owner_phase(),
         description: "Emit explicit EVM prepared/codegen → optimized Sonatina lineage with exact, backend-prepared, synthetic, debug-context, split/merge, or elision semantics.".to_string(),
     }]
 }
@@ -7586,7 +7608,7 @@ fn required_optimized_to_prepared_evidence() -> Vec<RequiredEvidence> {
 fn required_hir_to_mir_evidence() -> Vec<RequiredEvidence> {
     vec![RequiredEvidence {
         kind: RequiredEvidenceKind::ExactOriginEdge,
-        owner_phase: CompilerPhase::Mir,
+        owner_phase: LinkBoundaryKind::HirToMir.owner_phase(),
         description: "Emit MIR statement/terminator → HIR origin evidence as exact lowering or generated/synthetic explanation.".to_string(),
     }]
 }
@@ -7594,7 +7616,7 @@ fn required_hir_to_mir_evidence() -> Vec<RequiredEvidence> {
 fn required_mir_to_preopt_evidence() -> Vec<RequiredEvidence> {
     vec![RequiredEvidence {
         kind: RequiredEvidenceKind::ExactOriginEdge,
-        owner_phase: CompilerPhase::SonatinaPreOpt,
+        owner_phase: LinkBoundaryKind::MirToSonatinaPreOpt.owner_phase(),
         description: "Emit Sonatina pre-opt instruction → MIR statement/terminator evidence as exact lowering or generated/synthetic explanation.".to_string(),
     }]
 }
@@ -7602,7 +7624,7 @@ fn required_mir_to_preopt_evidence() -> Vec<RequiredEvidence> {
 fn required_preopt_to_postopt_evidence() -> Vec<RequiredEvidence> {
     vec![RequiredEvidence {
         kind: RequiredEvidenceKind::OptimizerLineageFact,
-        owner_phase: CompilerPhase::SonatinaPostOpt,
+        owner_phase: LinkBoundaryKind::PreOptToPostOpt.owner_phase(),
         description: "Emit optimizer lineage from optimized Sonatina output to pre-opt input, or emit an explicit optimizer elision/rewrite reason.".to_string(),
     }]
 }
@@ -7610,7 +7632,7 @@ fn required_preopt_to_postopt_evidence() -> Vec<RequiredEvidence> {
 fn required_prepared_to_bytecode_evidence() -> Vec<RequiredEvidence> {
     vec![RequiredEvidence {
         kind: RequiredEvidenceKind::PcExtentFact,
-        owner_phase: CompilerPhase::BytecodeEmission,
+        owner_phase: LinkBoundaryKind::PreparedToBytecode.owner_phase(),
         description: "Emit bytecode PC extent evidence linking final bytecode PCs to the prepared/codegen instruction that emitted them.".to_string(),
     }]
 }
@@ -7618,7 +7640,7 @@ fn required_prepared_to_bytecode_evidence() -> Vec<RequiredEvidence> {
 fn required_runtime_join_evidence() -> Vec<RequiredEvidence> {
     vec![RequiredEvidence {
         kind: RequiredEvidenceKind::RuntimeCodeHashJoin,
-        owner_phase: CompilerPhase::RuntimeTrace,
+        owner_phase: LinkBoundaryKind::BytecodeToRuntime.owner_phase(),
         description: "Join runtime trace steps to static bytecode instructions using code object/hash and PC evidence.".to_string(),
     }]
 }
@@ -8737,6 +8759,45 @@ mod tests {
         .unwrap()
     }
 
+    fn assert_missing_link_owner_phases_follow_boundary_contract(
+        report: &super::MissingLinkAuditReport,
+    ) {
+        for summary in &report.boundary_summaries {
+            assert_eq!(
+                summary.owner_phase,
+                summary.boundary.owner_phase(),
+                "boundary summary owner phase should match {:?}",
+                summary.boundary
+            );
+        }
+        for cluster in &report.clusters {
+            assert_eq!(
+                cluster.owner_phase,
+                cluster.boundary.owner_phase(),
+                "gap cluster owner phase should match {:?}",
+                cluster.boundary
+            );
+            for evidence in &cluster.required_evidence {
+                assert_eq!(
+                    evidence.owner_phase,
+                    cluster.boundary.owner_phase(),
+                    "cluster required evidence owner phase should match {:?}",
+                    cluster.boundary
+                );
+            }
+        }
+        for gap in &report.gaps {
+            for evidence in &gap.required_evidence {
+                assert_eq!(
+                    evidence.owner_phase,
+                    gap.boundary.owner_phase(),
+                    "gap required evidence owner phase should match {:?}",
+                    gap.boundary
+                );
+            }
+        }
+    }
+
     fn shape_policy() -> ShapeHashPolicy {
         ShapeHashPolicy::with_dimensions(
             "trace-candidate",
@@ -9367,6 +9428,41 @@ mod tests {
         ))
         .unwrap();
         TraceIntrospectionService::new(snapshot)
+    }
+
+    #[test]
+    fn link_boundary_owner_phase_contract_covers_phase_matrix() {
+        let expected = [
+            (LinkBoundaryKind::HirToMir, CompilerPhase::Mir),
+            (
+                LinkBoundaryKind::MirToSonatinaPreOpt,
+                CompilerPhase::SonatinaPreOpt,
+            ),
+            (
+                LinkBoundaryKind::PreOptToPostOpt,
+                CompilerPhase::SonatinaPostOpt,
+            ),
+            (LinkBoundaryKind::PostOptToPrepared, CompilerPhase::Backend),
+            (
+                LinkBoundaryKind::PreparedToBytecode,
+                CompilerPhase::BytecodeEmission,
+            ),
+            (
+                LinkBoundaryKind::BytecodeToRuntime,
+                CompilerPhase::RuntimeTrace,
+            ),
+        ];
+        assert_eq!(LinkBoundaryKind::ALL.len(), expected.len());
+        assert_eq!(
+            LinkBoundaryKind::ALL.into_iter().collect::<BTreeSet<_>>(),
+            expected
+                .iter()
+                .map(|(boundary, _)| *boundary)
+                .collect::<BTreeSet<_>>()
+        );
+        for (boundary, phase) in expected {
+            assert_eq!(boundary.owner_phase(), phase);
+        }
     }
 
     #[test]
@@ -10252,6 +10348,7 @@ mod tests {
             .attribution_audit()
             .unwrap();
         let missing_links = report.missing_links.as_ref().unwrap();
+        assert_missing_link_owner_phases_follow_boundary_contract(missing_links);
 
         assert_eq!(report.total_bytecode_pcs, 1);
         assert_eq!(report.source_exact_pcs, 1);
@@ -10839,6 +10936,7 @@ mod tests {
             .attribution_audit()
             .unwrap();
         let missing_links = report.missing_links.as_ref().unwrap();
+        assert_missing_link_owner_phases_follow_boundary_contract(missing_links);
 
         assert_eq!(missing_links.summary.status, LinkOverallStatus::Warning);
         assert_eq!(
