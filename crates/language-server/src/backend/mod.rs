@@ -131,7 +131,6 @@ impl Backend {
     pub fn set_document_version(&mut self, uri: Url, version: i32) {
         self.document_versions.insert(uri.clone(), version);
         self.clear_trace_cache_for_uri(&uri);
-        self.clear_trace_viewer_model_cache_for_uri(&uri);
     }
 
     pub fn clear_document_version(&mut self, uri: &Url) {
@@ -277,6 +276,15 @@ impl Backend {
             .map(|entry| entry.manifest.clone())
     }
 
+    pub(crate) fn cached_trace_workbench_manifest_for_digest(
+        &self,
+        session_id: &str,
+        model_digest: &str,
+    ) -> Option<serde_json::Value> {
+        self.cached_trace_workbench_entry_for_model_digest(session_id, model_digest)
+            .map(|entry| entry.manifest.clone())
+    }
+
     pub(crate) fn cached_trace_workbench_chunk(
         &self,
         session_id: &str,
@@ -288,6 +296,16 @@ impl Backend {
             .and_then(|entry| entry.chunks.get(digest).cloned())
     }
 
+    pub(crate) fn cached_trace_workbench_chunk_for_digest(
+        &self,
+        session_id: &str,
+        model_digest: &str,
+        digest: &str,
+    ) -> Option<serde_json::Value> {
+        self.cached_trace_workbench_entry_for_model_digest(session_id, model_digest)
+            .and_then(|entry| entry.chunks.get(digest).cloned())
+    }
+
     pub(crate) fn cached_trace_workbench_chunks_response(
         &self,
         session_id: &str,
@@ -296,18 +314,17 @@ impl Backend {
         digests: Vec<String>,
     ) -> Option<serde_json::Value> {
         let entry = self.cached_trace_workbench_entry(session_id, document_version, config_hash)?;
-        let mut chunks = Vec::new();
-        let mut missing = Vec::new();
-        for digest in digests {
-            match entry.chunks.get(&digest) {
-                Some(payload) => chunks.push(payload.clone()),
-                None => missing.push(digest),
-            }
-        }
-        Some(serde_json::json!({
-            "chunks": chunks,
-            "missing": missing,
-        }))
+        Some(trace_workbench_chunks_response(entry, digests))
+    }
+
+    pub(crate) fn cached_trace_workbench_chunks_response_for_digest(
+        &self,
+        session_id: &str,
+        model_digest: &str,
+        digests: Vec<String>,
+    ) -> Option<serde_json::Value> {
+        let entry = self.cached_trace_workbench_entry_for_model_digest(session_id, model_digest)?;
+        Some(trace_workbench_chunks_response(entry, digests))
     }
 
     pub(crate) fn cache_trace_workbench_model(
@@ -347,6 +364,20 @@ impl Backend {
         let entry = self.trace_viewer_models.get(session_id)?;
         (entry.document_version == document_version && entry.config_hash == config_hash)
             .then_some(entry)
+    }
+
+    fn cached_trace_workbench_entry_for_model_digest(
+        &self,
+        session_id: &str,
+        model_digest: &str,
+    ) -> Option<&TraceViewerModelCacheEntry> {
+        let entry = self.trace_viewer_models.get(session_id)?;
+        (entry
+            .manifest
+            .get("rootDigest")
+            .and_then(serde_json::Value::as_str)
+            == Some(model_digest))
+        .then_some(entry)
     }
 
     fn clear_trace_viewer_model_cache_for_uri(&mut self, uri: &Url) {
@@ -469,6 +500,24 @@ impl Backend {
             }
         }
     }
+}
+
+fn trace_workbench_chunks_response(
+    entry: &TraceViewerModelCacheEntry,
+    digests: Vec<String>,
+) -> serde_json::Value {
+    let mut chunks = Vec::new();
+    let mut missing = Vec::new();
+    for digest in digests {
+        match entry.chunks.get(&digest) {
+            Some(payload) => chunks.push(payload.clone()),
+            None => missing.push(digest),
+        }
+    }
+    serde_json::json!({
+        "chunks": chunks,
+        "missing": missing,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -655,7 +704,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn trace_viewer_model_cache_is_revision_scoped_and_invalidated_on_change() {
+    async fn trace_viewer_model_cache_is_revision_scoped_and_retained_on_change() {
         let mut backend = test_backend();
         let uri = Url::parse("file:///workspace/src/lib.fe").unwrap();
         backend.set_document_version(uri.clone(), 7);
@@ -731,11 +780,34 @@ mod tests {
             backend.cached_trace_workbench_model(&session.id, Some(8), "config-a"),
             None
         );
+        assert_eq!(
+            backend
+                .cached_trace_workbench_manifest_for_digest(&session.id, "blake3:model")
+                .and_then(|manifest| manifest["revision"].as_u64()),
+            Some(7)
+        );
+        assert_eq!(
+            backend
+                .cached_trace_workbench_chunk_for_digest(
+                    &session.id,
+                    "blake3:model",
+                    "blake3:summary",
+                )
+                .and_then(|chunk| chunk["kind"].as_str().map(str::to_string)),
+            Some("summary".to_string())
+        );
 
         backend.set_document_version(uri, 8);
         assert_eq!(
-            backend.cached_trace_workbench_model(&session.id, Some(7), "config-a"),
+            backend.cached_trace_workbench_model(&session.id, Some(8), "config-a"),
             None
+        );
+        assert_eq!(
+            backend
+                .cached_trace_workbench_manifest_for_digest(&session.id, "blake3:model")
+                .and_then(|manifest| manifest["revision"].as_u64()),
+            Some(7),
+            "previous ready workbench payload must remain available for failed-revision fallback"
         );
 
         tokio::task::spawn_blocking(move || drop(backend))
