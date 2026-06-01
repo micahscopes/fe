@@ -8,7 +8,7 @@ use shape_address::{
     ShapeCyclePolicy, ShapeDimension, ShapeGraph, ShapeGraphKey, ShapeHashPolicy, ShapeNodeKey,
     ShapeViewMode, hash_shape_graph,
 };
-use sonatina_codegen::object::SectionObservability;
+use sonatina_codegen::object::{PcMapEntry, SectionObservability};
 use sonatina_ir::{
     CfgEdgeKind as SonatinaCfgEdgeKind, FrontendOriginKind, FrontendOriginRecord, SonatinaTraceView,
 };
@@ -375,7 +375,7 @@ pub fn emit_bytecode_instruction_facts_with_observability(
             OriginEdgeLabel::EmittedFrom,
             Some(CompilerPhase::BytecodeEmission),
         )));
-        if let Some(entry) = pc_map.get(&(pc as u32)) {
+        if let Some(entry) = pc_map_entry_for_pc(&pc_map, pc as u32) {
             let mut prepared_inst = None;
             if let Some(sonatina_owner_key) = sonatina_owner_key {
                 let vcode_key =
@@ -470,6 +470,16 @@ pub fn emit_bytecode_instruction_facts_with_observability(
         index += 1;
     }
     facts
+}
+
+fn pc_map_entry_for_pc<'a>(
+    pc_map: &'a BTreeMap<u32, &'a PcMapEntry>,
+    pc: u32,
+) -> Option<&'a PcMapEntry> {
+    pc_map
+        .range(..=pc)
+        .next_back()
+        .and_then(|(_, entry)| (pc < entry.pc_end).then_some(*entry))
 }
 
 pub fn emit_bytecode_shape_facts(
@@ -2068,11 +2078,105 @@ mod tests {
                     && event.inputs == vec![postopt.clone()]
                     && event.outputs.iter().any(|output| output.kind() == SONATINA_EVM_PREPARED_INST_KIND)
         )));
-        assert!(!facts.iter().any(|fact| matches!(
+        assert!(!facts.iter().any(|fact| {
+            matches!(
+                fact,
+                TraceFact::OriginEdge(edge)
+                    if edge.from.kind() == "bytecode.pc"
+                        && edge.to.kind() == SONATINA_POSTOPT_INST_KIND
+            )
+        }));
+    }
+
+    #[test]
+    fn bytecode_observability_applies_pc_map_ranges_to_each_instruction_start() {
+        use sonatina_codegen::{
+            machinst::vcode::VCodeInst,
+            object::{OBSERVABILITY_SCHEMA_VERSION, PcMapEntry, SectionObservability},
+        };
+        use sonatina_ir::{
+            BlockId, InstId, Linkage, Signature, builder::ModuleBuilder, isa::evm::Evm,
+            module::ModuleCtx,
+        };
+        use sonatina_triple::{Architecture, EvmVersion, OperatingSystem, TargetTriple, Vendor};
+
+        let evm = Evm::new(TargetTriple::new(
+            Architecture::Evm,
+            Vendor::Ethereum,
+            OperatingSystem::Evm(EvmVersion::London),
+        ));
+        let mb = ModuleBuilder::new(ModuleCtx::new(&evm));
+        let func = mb
+            .declare_function(Signature::new_unit("runtime", Linkage::Public, &[]))
+            .unwrap();
+
+        let sonatina_owner = "package:fib:module:fib:sonatina";
+        let vcode = evm_vcode_inst_key(sonatina_owner, func, VCodeInst(0));
+        let prepared = super::sonatina_trace_inst_key(
+            SONATINA_EVM_PREPARED_INST_KIND,
+            sonatina_owner,
+            func,
+            InstId(37),
+        );
+        let pc0 =
+            OriginExportKey::try_from_raw_parts("bytecode.pc", "contract:Fib", "pc:0").unwrap();
+        let pc1 =
+            OriginExportKey::try_from_raw_parts("bytecode.pc", "contract:Fib", "pc:1").unwrap();
+        let observability = SectionObservability {
+            schema_version: OBSERVABILITY_SCHEMA_VERSION,
+            section: "runtime".into(),
+            section_bytes: 2,
+            code_bytes: 2,
+            data_bytes: 0,
+            embed_bytes: 0,
+            mapped_code_bytes: 2,
+            unmapped_code_bytes: 0,
+            unmapped_reason_coverage: Default::default(),
+            pc_map: vec![PcMapEntry {
+                pc_start: 0,
+                pc_end: 2,
+                func,
+                func_name: "runtime".to_string(),
+                block: BlockId(0),
+                vcode_inst: VCodeInst(0),
+                ir_inst: Some(InstId(37)),
+                frontend_provenance: None,
+                unmapped_reason: None,
+            }],
+        };
+
+        let facts = emit_bytecode_instruction_facts_with_observability(
+            "contract:Fib",
+            "runtime",
+            &[0x5f, 0x01],
+            Some(sonatina_owner),
+            Some(&observability),
+            None,
+            None,
+        );
+        TraceValidator::validate(&facts).unwrap();
+
+        for pc in [&pc0, &pc1] {
+            assert!(
+                facts.iter().any(|fact| matches!(
+                    fact,
+                    TraceFact::OriginEdge(edge)
+                        if edge.from == pc.clone()
+                            && edge.to == vcode
+                            && edge.label == trace_facts::OriginEdgeLabel::EmittedFrom
+                            && edge.introduced_by == Some(trace_facts::CompilerPhase::BytecodeEmission)
+                )),
+                "bytecode PC {} should inherit the containing PC-map range",
+                pc.display_label()
+            );
+        }
+        assert!(facts.iter().any(|fact| matches!(
             fact,
             TraceFact::OriginEdge(edge)
-                if edge.from.kind() == "bytecode.pc"
-                    && edge.to.kind() == SONATINA_POSTOPT_INST_KIND
+                if edge.from == vcode
+                    && edge.to == prepared
+                    && edge.label == trace_facts::OriginEdgeLabel::LoweredFrom
+                    && edge.introduced_by == Some(trace_facts::CompilerPhase::Backend)
         )));
     }
 
