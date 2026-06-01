@@ -10,7 +10,7 @@ use crate::{
         ty_def::TyId,
     },
     hir_def::{IdentId, ItemKind},
-    span::LazySpan,
+    span::{DynLazySpan, LazySpan},
     test_db::HirAnalysisTestDb,
 };
 
@@ -85,6 +85,15 @@ fn emit_method_expr_command<'db>(
         expr,
         span: context.provider(db).func(db).span().name().into(),
     }
+}
+
+fn generated_expr_id<'db>(
+    db: &'db HirAnalysisTestDb,
+    context: ElaborationCtfeContextId<'db>,
+    kind: GeneratedExprKind<'db>,
+) -> GeneratedExprId<'db> {
+    let span: DynLazySpan<'db> = context.provider(db).func(db).span().name().into();
+    GeneratedExprId::new(db, kind, span)
 }
 
 #[test]
@@ -603,7 +612,7 @@ impl StableEq: Derive for Eq {
                 &db,
                 context,
                 method_name,
-                GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
+                generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(true)),
             ),
             BuilderCommand::Finish,
         ],
@@ -658,9 +667,9 @@ impl StableEq: Derive for Eq {
         .keys()
         .next()
         .expect("missing required method");
-    let lhs = GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true));
-    let rhs = GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(false));
-    let expr = GeneratedExprId::new(&db, GeneratedExprKind::BoolAnd { lhs, rhs });
+    let lhs = generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(true));
+    let rhs = generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(false));
+    let expr = generated_expr_id(&db, context, GeneratedExprKind::BoolAnd { lhs, rhs });
 
     let commands = BuilderCommandListId::new(
         &db,
@@ -721,28 +730,31 @@ impl StableEq: Derive for Eq {
         .into_iter()
         .next()
         .expect("missing reflected field");
-    let self_ref = GeneratedExprId::new(&db, GeneratedExprKind::SelfRef { ty: target_ty });
-    let method_arg_ref = GeneratedExprId::new(
+    let self_ref = generated_expr_id(&db, context, GeneratedExprKind::SelfRef { ty: target_ty });
+    let method_arg_ref = generated_expr_id(
         &db,
+        context,
         GeneratedExprKind::MethodArgRef {
             name: IdentId::new(&db, "other".to_string()),
         },
     );
-    let lhs = GeneratedExprId::new(
+    let lhs = generated_expr_id(
         &db,
+        context,
         GeneratedExprKind::FieldGet {
             base: self_ref,
             field,
         },
     );
-    let rhs = GeneratedExprId::new(
+    let rhs = generated_expr_id(
         &db,
+        context,
         GeneratedExprKind::FieldGet {
             base: method_arg_ref,
             field,
         },
     );
-    let expr = GeneratedExprId::new(&db, GeneratedExprKind::EqExpr { lhs, rhs });
+    let expr = generated_expr_id(&db, context, GeneratedExprKind::EqExpr { lhs, rhs });
 
     let commands = BuilderCommandListId::new(
         &db,
@@ -803,11 +815,16 @@ impl StableDefault: Derive for Default {
         .into_iter()
         .next()
         .expect("missing reflected field");
-    let value = GeneratedExprId::new(&db, GeneratedExprKind::DefaultCall { ty: field.ty });
+    let value = generated_expr_id(
+        &db,
+        context,
+        GeneratedExprKind::DefaultCall { ty: field.ty },
+    );
     let fields =
         GeneratedStructFieldInitListId::new(&db, vec![GeneratedStructFieldInit { field, value }]);
-    let expr = GeneratedExprId::new(
+    let expr = generated_expr_id(
         &db,
+        context,
         GeneratedExprKind::StructInit {
             target: target_ty,
             fields,
@@ -870,8 +887,9 @@ impl StableDefault: Derive for Default {
         .expect("missing required method");
     let target_ty = context.request(&db).target(&db).ty(&db);
     let fields = GeneratedStructFieldInitListId::new(&db, Vec::new());
-    let expr = GeneratedExprId::new(
+    let expr = generated_expr_id(
         &db,
+        context,
         GeneratedExprKind::StructInit {
             target: target_ty,
             fields,
@@ -943,11 +961,12 @@ impl StableDefault: Derive for Default {
         .into_iter()
         .next()
         .expect("missing reflected field");
-    let value = GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(false));
+    let value = generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(false));
     let fields =
         GeneratedStructFieldInitListId::new(&db, vec![GeneratedStructFieldInit { field, value }]);
-    let expr = GeneratedExprId::new(
+    let expr = generated_expr_id(
         &db,
+        context,
         GeneratedExprKind::StructInit {
             target: target_ty,
             fields,
@@ -1020,7 +1039,7 @@ impl StableCount: Derive for Count {
                 &db,
                 context,
                 method_name,
-                GeneratedExprId::new(&db, GeneratedExprKind::BoolLiteral(true)),
+                generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(true)),
             ),
             BuilderCommand::Finish,
         ],

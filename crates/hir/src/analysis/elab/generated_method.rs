@@ -53,15 +53,21 @@ pub(super) fn generated_invalid_required_method_bodies<'db>(
                         required_method: *required_method,
                     };
                     let expected = generated_required_method_return_ty(db, cx);
-                    let actual = generated_expr_static_ty(db, expr, cx);
-                    actual
-                        .is_none_or(|actual| !tys_match(db, actual, expected))
-                        .then_some(GeneratedInvalidMethodBody {
+                    match generated_expr_static_ty_result(db, expr, cx) {
+                        Ok(actual) if tys_match(db, actual, expected) => None,
+                        Ok(actual) => Some(GeneratedInvalidMethodBody {
                             name: method.name,
                             expected,
-                            actual,
-                            span: method.span.clone(),
-                        })
+                            actual: Some(actual),
+                            span: expr.span(db).clone(),
+                        }),
+                        Err(span) => Some(GeneratedInvalidMethodBody {
+                            name: method.name,
+                            expected,
+                            actual: None,
+                            span,
+                        }),
+                    }
                 }
             }
         })
@@ -153,55 +159,59 @@ pub(super) fn generated_method_default_assumptions<'db>(
     PredicateListId::new(db, assumptions.into_iter().collect::<Vec<_>>())
 }
 
-fn generated_expr_ty_matches<'db>(
-    db: &'db dyn HirAnalysisDb,
-    expr: GeneratedExprId<'db>,
-    expected: TyId<'db>,
-    cx: GeneratedMethodValidationContext<'db>,
-) -> bool {
-    generated_expr_static_ty(db, expr, cx).is_some_and(|ty| tys_match(db, ty, expected))
-}
-
-fn generated_expr_static_ty<'db>(
+fn generated_expr_static_ty_result<'db>(
     db: &'db dyn HirAnalysisDb,
     expr: GeneratedExprId<'db>,
     cx: GeneratedMethodValidationContext<'db>,
-) -> Option<TyId<'db>> {
+) -> Result<TyId<'db>, DynLazySpan<'db>> {
     match expr.kind(db) {
-        GeneratedExprKind::BoolLiteral(_) => Some(TyId::bool(db)),
+        GeneratedExprKind::BoolLiteral(_) => Ok(TyId::bool(db)),
         GeneratedExprKind::BoolAnd { lhs, rhs } => {
-            if generated_expr_ty_matches(db, lhs, TyId::bool(db), cx)
-                && generated_expr_ty_matches(db, rhs, TyId::bool(db), cx)
-            {
-                Some(TyId::bool(db))
-            } else {
-                None
+            let lhs_ty = generated_expr_static_ty_result(db, lhs, cx)?;
+            if !tys_match(db, lhs_ty, TyId::bool(db)) {
+                return Err(lhs.span(db).clone());
             }
+            let rhs_ty = generated_expr_static_ty_result(db, rhs, cx)?;
+            if !tys_match(db, rhs_ty, TyId::bool(db)) {
+                return Err(rhs.span(db).clone());
+            }
+            Ok(TyId::bool(db))
         }
         GeneratedExprKind::SelfRef { ty } => {
             if !cx.required_method.is_method(db) {
-                return None;
+                return Err(expr.span(db).clone());
             }
             let self_ty = generated_method_target_ty(db, cx);
-            tys_match(db, self_ty, ty).then_some(ty)
+            if tys_match(db, self_ty, ty) {
+                Ok(ty)
+            } else {
+                Err(expr.span(db).clone())
+            }
         }
         GeneratedExprKind::MethodArgRef { name } => {
-            let arg_ty = generated_required_method_param_ty(db, cx, name)?;
-            Some(arg_ty)
+            generated_required_method_param_ty(db, cx, name).ok_or_else(|| expr.span(db).clone())
         }
         GeneratedExprKind::FieldGet { base, field } => {
-            let base_ty = generated_expr_static_ty(db, base, cx)?;
+            let base_ty = generated_expr_static_ty_result(db, base, cx)?;
             let base_ty = generated_field_access_receiver_ty(db, base_ty);
-            tys_match(db, base_ty, field.parent).then_some(field.ty)
+            if tys_match(db, base_ty, field.parent) {
+                Ok(field.ty)
+            } else {
+                Err(base.span(db).clone())
+            }
         }
         GeneratedExprKind::EqExpr { lhs, rhs } => {
-            let lhs_ty = generated_expr_static_ty(db, lhs, cx)?;
-            let rhs_ty = generated_expr_static_ty(db, rhs, cx)?;
-            tys_match(db, lhs_ty, rhs_ty).then_some(TyId::bool(db))
+            let lhs_ty = generated_expr_static_ty_result(db, lhs, cx)?;
+            let rhs_ty = generated_expr_static_ty_result(db, rhs, cx)?;
+            if tys_match(db, lhs_ty, rhs_ty) {
+                Ok(TyId::bool(db))
+            } else {
+                Err(rhs.span(db).clone())
+            }
         }
-        GeneratedExprKind::DefaultCall { ty } => Some(ty),
+        GeneratedExprKind::DefaultCall { ty } => Ok(ty),
         GeneratedExprKind::StructInit { target, fields } => {
-            generated_struct_init_ty(db, target, fields, cx)
+            generated_struct_init_ty(db, expr, target, fields, cx)
         }
     }
 }
@@ -221,30 +231,32 @@ fn generated_field_access_receiver_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<
 
 fn generated_struct_init_ty<'db>(
     db: &'db dyn HirAnalysisDb,
+    expr: GeneratedExprId<'db>,
     target: TyId<'db>,
     fields: GeneratedStructFieldInitListId<'db>,
     cx: GeneratedMethodValidationContext<'db>,
-) -> Option<TyId<'db>> {
+) -> Result<TyId<'db>, DynLazySpan<'db>> {
     let expected_fields = reflect_struct_fields(db, target);
     let field_inits = fields.list(db);
     if expected_fields.len() != field_inits.len() {
-        return None;
+        return Err(expr.span(db).clone());
     }
 
     for expected in expected_fields {
         let init = field_inits
             .iter()
-            .find(|init| init.field.index == expected.index)?;
+            .find(|init| init.field.index == expected.index)
+            .ok_or_else(|| expr.span(db).clone())?;
         if !tys_match(db, init.field.parent, target) || !tys_match(db, init.field.ty, expected.ty) {
-            return None;
+            return Err(expr.span(db).clone());
         }
-        let value_ty = generated_expr_static_ty(db, init.value, cx)?;
+        let value_ty = generated_expr_static_ty_result(db, init.value, cx)?;
         if !tys_match(db, value_ty, expected.ty) {
-            return None;
+            return Err(init.value.span(db).clone());
         }
     }
 
-    Some(target)
+    Ok(target)
 }
 
 pub(super) fn generated_method_error_summary<'db>(

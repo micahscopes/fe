@@ -569,10 +569,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                 else {
                     return None;
                 };
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
-                    GeneratedExprKind::BoolLiteral(*value),
-                )))
+                Some(self.generated_expr_value(body, expr, GeneratedExprKind::BoolLiteral(*value)))
             }
             BUILDER_AND_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -588,10 +585,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                 else {
                     return None;
                 };
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
-                    GeneratedExprKind::BoolAnd { lhs, rhs },
-                )))
+                Some(self.generated_expr_value(body, expr, GeneratedExprKind::BoolAnd { lhs, rhs }))
             }
             BUILDER_SELF_REF_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -599,12 +593,13 @@ impl<'db> ProviderBodyExecutor<'db> {
                 if !args.is_empty() {
                     return None;
                 }
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
+                Some(self.generated_expr_value(
+                    body,
+                    expr,
                     GeneratedExprKind::SelfRef {
                         ty: self.context.request(self.db).target(self.db).ty(self.db),
                     },
-                )))
+                ))
             }
             BUILDER_ARG_REF_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -613,10 +608,11 @@ impl<'db> ProviderBodyExecutor<'db> {
                     return None;
                 };
                 let name = self.string_literal_ident_arg(body, arg.expr)?;
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
+                Some(self.generated_expr_value(
+                    body,
+                    expr,
                     GeneratedExprKind::MethodArgRef { name },
-                )))
+                ))
             }
             BUILDER_FIELD_GET_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -631,10 +627,11 @@ impl<'db> ProviderBodyExecutor<'db> {
                 let ElabValue::Field(field) = self.eval_expr_value(body, field_arg.expr)? else {
                     return None;
                 };
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
+                Some(self.generated_expr_value(
+                    body,
+                    expr,
                     GeneratedExprKind::FieldGet { base, field },
-                )))
+                ))
             }
             BUILDER_EQ_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -650,10 +647,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                 else {
                     return None;
                 };
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
-                    GeneratedExprKind::EqExpr { lhs, rhs },
-                )))
+                Some(self.generated_expr_value(body, expr, GeneratedExprKind::EqExpr { lhs, rhs }))
             }
             BUILDER_DEFAULT_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -664,10 +658,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                 let ElabValue::TypeWitness(ty) = self.eval_expr_value(body, ty_arg.expr)? else {
                     return None;
                 };
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
-                    GeneratedExprKind::DefaultCall { ty },
-                )))
+                Some(self.generated_expr_value(body, expr, GeneratedExprKind::DefaultCall { ty }))
             }
             BUILDER_STRUCT_INIT_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -676,13 +667,14 @@ impl<'db> ProviderBodyExecutor<'db> {
                     return None;
                 }
                 let target = self.context.request(self.db).target(self.db).ty(self.db);
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
+                Some(self.generated_expr_value(
+                    body,
+                    expr,
                     GeneratedExprKind::StructInit {
                         target,
                         fields: GeneratedStructFieldInitListId::new(self.db, Vec::new()),
                     },
-                )))
+                ))
             }
             BUILDER_WITH_FIELD_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
@@ -706,13 +698,14 @@ impl<'db> ProviderBodyExecutor<'db> {
                 };
                 let mut field_inits = fields.list(self.db).to_vec();
                 field_inits.push(GeneratedStructFieldInit { field, value });
-                Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
-                    self.db,
+                Some(self.generated_expr_value(
+                    body,
+                    expr,
                     GeneratedExprKind::StructInit {
                         target,
                         fields: GeneratedStructFieldInitListId::new(self.db, field_inits),
                     },
-                )))
+                ))
             }
             FIELD_TY_METHOD => {
                 if !args.is_empty() {
@@ -725,6 +718,16 @@ impl<'db> ProviderBodyExecutor<'db> {
             }
             _ => None,
         }
+    }
+
+    fn generated_expr_value(
+        &self,
+        body: Body<'db>,
+        expr: crate::hir_def::ExprId,
+        kind: GeneratedExprKind<'db>,
+    ) -> ElabValue<'db> {
+        let span: DynLazySpan<'db> = expr.span(body).into();
+        ElabValue::GeneratedExpr(GeneratedExprId::new(self.db, kind, span))
     }
 
     fn requirement_origin_for_expr(

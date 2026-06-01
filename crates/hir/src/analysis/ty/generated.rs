@@ -87,6 +87,7 @@ pub(crate) enum GeneratedExprKind<'db> {
 #[derive(Debug)]
 pub(crate) struct GeneratedExprId<'db> {
     pub(crate) kind: GeneratedExprKind<'db>,
+    pub(crate) span: DynLazySpan<'db>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
@@ -306,7 +307,11 @@ impl<'db> TyFoldable<'db> for GeneratedExprId<'db> {
     where
         F: TyFolder<'db>,
     {
-        Self::new(db, self.kind(db).fold_with(db, folder))
+        Self::new(
+            db,
+            self.kind(db).fold_with(db, folder),
+            self.span(db).clone(),
+        )
     }
 }
 
