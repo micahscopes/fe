@@ -4147,6 +4147,49 @@ where
 }
 
 #[test]
+fn provider_generated_generic_default_requires_field_obligation() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_generic_default_requires_field_obligation.fe".into(),
+        r#"
+trait Default {
+    fn default() -> Self
+}
+
+struct Box<A> {
+    value: A,
+}
+
+derive Default for Box using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Default<T>>,
+        )
+    {
+        let mut init = builder.struct_init()
+        for field in reflect.fields() {
+            init = builder.with_field(init, field, builder.default(field.ty()))
+        }
+        builder.emit_method("default", init)
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Default` does not satisfy trait method contract",
+    );
+    assert_diag_message(&diags, "missing generated requirement A: Default");
+}
+
+#[test]
 fn provider_outside_core_derives_concrete_core_default_struct() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

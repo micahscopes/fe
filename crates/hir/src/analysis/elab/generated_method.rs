@@ -283,7 +283,14 @@ fn generated_expr_static_ty_result<'db>(
                 Err(invalid_expr(rhs.span(db).clone()))
             }
         }
-        GeneratedExprKind::DefaultCall { ty } => Ok(ty),
+        GeneratedExprKind::DefaultCall { ty } => {
+            if let Some(required) = generated_generic_default_requirement(db, ty, cx)
+                && !generated_has_requirement(db, cx.generated, required)
+            {
+                return Err(missing_requirement(expr.span(db).clone(), required));
+            }
+            Ok(ty)
+        }
         GeneratedExprKind::StructInit { target, fields } => {
             generated_struct_init_ty(db, expr, target, fields, cx)
         }
@@ -432,6 +439,21 @@ fn generated_generic_field_eq_requirement<'db>(
     Some(ConstraintId::from_trait(
         db,
         TraitInstId::new_simple(db, cx.generated.trait_inst.def(db), vec![lhs_field.ty]),
+    ))
+}
+
+fn generated_generic_default_requirement<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
+) -> Option<ConstraintId<'db>> {
+    if !ty.has_param(db) {
+        return None;
+    }
+
+    Some(ConstraintId::from_trait(
+        db,
+        TraitInstId::new_simple(db, cx.generated.trait_inst.def(db), vec![ty]),
     ))
 }
 
