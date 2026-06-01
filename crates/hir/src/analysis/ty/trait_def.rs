@@ -441,18 +441,14 @@ impl<'db> TraitEnv<'db> {
         {
             // Raw impl collection only lowers visible implementors. Any overlap diagnostics run
             // separately on top of this assembled environment.
-            for (trait_def, implementors) in impl_map.iter() {
-                impls
-                    .entry(*trait_def)
-                    .or_default()
-                    .extend(implementors.iter().copied());
-
-                for implementor in implementors {
-                    let self_ty = implementor.instantiate_identity().self_ty(db);
-                    ty_to_implementors
-                        .entry(Binder::bind(self_ty.base_ty(db)))
-                        .or_default()
-                        .push(*implementor);
+            for implementors in impl_map.values() {
+                for &implementor in implementors {
+                    insert_implementor_candidate(
+                        db,
+                        implementor,
+                        &mut impls,
+                        &mut ty_to_implementors,
+                    );
                 }
             }
         }
@@ -464,23 +460,12 @@ impl<'db> TraitEnv<'db> {
         // The proof forest must not call back into providers or builders while
         // solving obligations.
         for &generated in crate::analysis::elab::generated_impls_for_ingot(db, ingot) {
-            let params = generated.trait_inst.self_ty(db).generic_args(db).to_vec();
-            let implementor = ImplementorId::new(
+            insert_implementor_candidate(
                 db,
-                generated.trait_inst,
-                params,
-                IndexMap::new(),
-                ImplementorOrigin::Generated(generated),
+                generated_implementor_candidate(db, generated),
+                &mut impls,
+                &mut ty_to_implementors,
             );
-            let binder = Binder::bind(implementor);
-            impls
-                .entry(implementor.trait_def(db))
-                .or_default()
-                .push(binder);
-            ty_to_implementors
-                .entry(Binder::bind(implementor.self_ty(db).base_ty(db)))
-                .or_default()
-                .push(binder);
         }
 
         Self {
@@ -489,6 +474,37 @@ impl<'db> TraitEnv<'db> {
             ingot,
         }
     }
+}
+
+fn insert_implementor_candidate<'db>(
+    db: &'db dyn HirAnalysisDb,
+    binder: Binder<ImplementorId<'db>>,
+    impls: &mut FxHashMap<Trait<'db>, Vec<Binder<ImplementorId<'db>>>>,
+    ty_to_implementors: &mut FxHashMap<Binder<TyId<'db>>, Vec<Binder<ImplementorId<'db>>>>,
+) {
+    let implementor = binder.instantiate_identity();
+    impls
+        .entry(implementor.trait_def(db))
+        .or_default()
+        .push(binder);
+    ty_to_implementors
+        .entry(Binder::bind(implementor.self_ty(db).base_ty(db)))
+        .or_default()
+        .push(binder);
+}
+
+pub(crate) fn generated_implementor_candidate<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> Binder<ImplementorId<'db>> {
+    let params = generated.trait_inst.self_ty(db).generic_args(db).to_vec();
+    Binder::bind(ImplementorId::new(
+        db,
+        generated.trait_inst,
+        params,
+        IndexMap::new(),
+        ImplementorOrigin::Generated(generated),
+    ))
 }
 
 /// Represents a slim, internal view of a trait impl, derived from an
