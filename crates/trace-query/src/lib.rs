@@ -11154,6 +11154,62 @@ mod tests {
     }
 
     #[test]
+    fn missing_link_audit_treats_explicit_non_emitting_vcode_as_expected_absent() {
+        let vcode = key("evm.vcode.inst", "demo", "inst:non-emitting");
+        let event = key("compiler.event", "demo", "event:non-emitting-vcode");
+        let snapshot = snapshot(vec![
+            node(vcode.clone()),
+            node(event.clone()),
+            TraceFact::CompilerEvent(CompilerEventFact::new(
+                event,
+                CompilerPhase::BytecodeEmission,
+                CompilerEventKind::OptimizerElidedOrRewritten,
+                vec![vcode.clone()],
+                Vec::new(),
+                Some(CompilerReason::new("VCode pseudo-op emitted no bytes")),
+            )),
+        ]);
+        let report = TraceIntrospectionService::new(snapshot)
+            .attribution_audit()
+            .unwrap();
+        let missing_links = report.missing_links.as_ref().unwrap();
+
+        assert_eq!(
+            missing_links.summary.status,
+            LinkOverallStatus::PassWithExpectedAbsences
+        );
+        assert_eq!(missing_links.summary.expected_absent_count, 1);
+        assert_eq!(missing_links.summary.missing_required_count, 0);
+        assert!(missing_links.summary.top_blockers.is_empty());
+        assert_eq!(missing_links.expected_absent[0].origin, vcode);
+        assert_eq!(
+            missing_links.expected_absent[0].boundary,
+            LinkBoundaryKind::PreparedToBytecode
+        );
+        assert_eq!(
+            missing_links.expected_absent[0].issue_code,
+            LinkIssueCode::ExpectedAbsentPreparedElision
+        );
+        assert!(missing_links.gaps.is_empty());
+        let prepared_to_bytecode = missing_links
+            .boundary_summaries
+            .iter()
+            .find(|summary| summary.boundary == LinkBoundaryKind::PreparedToBytecode)
+            .expect("prepared to bytecode boundary summary");
+        assert_eq!(
+            prepared_to_bytecode
+                .status_counts
+                .get(&LinkStatus::ExpectedAbsent),
+            Some(&1)
+        );
+        assert!(
+            prepared_to_bytecode
+                .top_issue_codes
+                .contains(&LinkIssueCode::ExpectedAbsentPreparedElision)
+        );
+    }
+
+    #[test]
     fn missing_link_audit_reports_hir_to_mir_exact_generated_and_missing() {
         let source_file = key("source.file", "demo", "demo.fe");
         let hir_exact = key("hir.expr", "demo", "expr:exact");
