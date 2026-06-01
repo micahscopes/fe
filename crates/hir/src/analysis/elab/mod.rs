@@ -50,7 +50,7 @@ use diagnostics::{
     selected_derive_provider_diags_for_top_mod,
 };
 use generated_method::{
-    generated_invalid_required_method_bodies, generated_method_error_summary,
+    generated_invalid_method_bodies, generated_method_error_summary,
     generated_missing_required_methods,
 };
 use provider_context::{
@@ -180,7 +180,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 }
             };
             let missing_methods = generated_missing_required_methods(db, generated);
-            let invalid_body_methods = generated_invalid_required_method_bodies(db, generated);
+            let invalid_body_methods = generated_invalid_method_bodies(db, generated);
             if !missing_methods.is_empty() || !invalid_body_methods.is_empty() {
                 if let Some(head) = concrete_trait_head(db, request.goal(db)) {
                     let primary_span = invalid_body_methods
@@ -397,7 +397,7 @@ fn generated_impl_methods_are_valid<'db>(
     generated: GeneratedImplId<'db>,
 ) -> bool {
     generated_missing_required_methods(db, generated).is_empty()
-        && generated_invalid_required_method_bodies(db, generated).is_empty()
+        && generated_invalid_method_bodies(db, generated).is_empty()
 }
 
 fn generated_impl_is_admissible<'db>(

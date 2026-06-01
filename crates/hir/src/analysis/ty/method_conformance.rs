@@ -18,11 +18,17 @@ pub(crate) fn required_trait_methods<'db>(
     db: &'db dyn HirAnalysisDb,
     trait_: Trait<'db>,
 ) -> IndexMap<IdentId<'db>, Func<'db>> {
-    trait_
-        .method_defs(db)
+    trait_methods(db, trait_)
         .into_iter()
         .filter(|(_, method)| method.body(db).is_none())
         .collect()
+}
+
+pub(crate) fn trait_methods<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_: Trait<'db>,
+) -> IndexMap<IdentId<'db>, Func<'db>> {
+    trait_.method_defs(db).into_iter().collect()
 }
 
 pub(crate) fn missing_required_method_names<'db>(

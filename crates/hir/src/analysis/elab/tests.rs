@@ -637,7 +637,7 @@ impl StableEq: Derive for Eq {
     .unwrap();
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
-    assert!(generated_invalid_required_method_bodies(&db, generated).is_empty());
+    assert!(generated_invalid_method_bodies(&db, generated).is_empty());
     let GeneratedMethodBodyKind::Expr(expr) = generated.methods.list(&db)[0].body;
     assert!(matches!(
         expr.kind(&db),
@@ -698,7 +698,7 @@ impl StableEq: Derive for Eq {
     .unwrap();
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
-    assert!(generated_invalid_required_method_bodies(&db, generated).is_empty());
+    assert!(generated_invalid_method_bodies(&db, generated).is_empty());
 }
 
 #[test]
@@ -783,7 +783,7 @@ impl StableEq: Derive for Eq {
     .unwrap();
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
-    assert!(generated_invalid_required_method_bodies(&db, generated).is_empty());
+    assert!(generated_invalid_method_bodies(&db, generated).is_empty());
 }
 
 #[test]
@@ -858,7 +858,7 @@ impl StableDefault: Derive for Default {
     .unwrap();
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
-    assert!(generated_invalid_required_method_bodies(&db, generated).is_empty());
+    assert!(generated_invalid_method_bodies(&db, generated).is_empty());
 }
 
 #[test]
@@ -924,7 +924,7 @@ impl StableDefault: Derive for Default {
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
     assert_eq!(
-        generated_invalid_required_method_bodies(&db, generated)
+        generated_invalid_method_bodies(&db, generated)
             .iter()
             .map(|invalid| invalid.name)
             .collect::<Vec<_>>(),
@@ -1001,7 +1001,7 @@ impl StableDefault: Derive for Default {
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
     assert_eq!(
-        generated_invalid_required_method_bodies(&db, generated)
+        generated_invalid_method_bodies(&db, generated)
             .iter()
             .map(|invalid| invalid.name)
             .collect::<Vec<_>>(),
@@ -1065,7 +1065,7 @@ impl StableCount: Derive for Count {
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
     assert_eq!(
-        generated_invalid_required_method_bodies(&db, generated)
+        generated_invalid_method_bodies(&db, generated)
             .iter()
             .map(|invalid| invalid.name)
             .collect::<Vec<_>>(),

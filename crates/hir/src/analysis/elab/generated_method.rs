@@ -11,7 +11,7 @@ use crate::{
             },
             method_conformance::{
                 instantiate_required_method_ty_for_trait_inst, missing_required_method_names,
-                required_method_arg_ty_for_trait_inst, required_trait_methods,
+                required_method_arg_ty_for_trait_inst, trait_methods,
             },
             trait_resolution::PredicateListId,
             ty_def::TyId,
@@ -35,17 +35,18 @@ pub(super) fn generated_missing_required_methods<'db>(
     )
 }
 
-pub(super) fn generated_invalid_required_method_bodies<'db>(
+pub(super) fn generated_invalid_method_bodies<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
 ) -> Vec<GeneratedInvalidMethodBody<'db>> {
-    let required = required_methods(db, ConstraintId::from_trait(db, generated.trait_inst));
+    let trait_methods =
+        trait_methods_for_goal(db, ConstraintId::from_trait(db, generated.trait_inst));
     generated
         .methods
         .list(db)
         .iter()
         .filter_map(|method| {
-            let required_method = required.get(&method.name)?;
+            let required_method = trait_methods.get(&method.name)?;
             match method.body {
                 GeneratedMethodBodyKind::Expr(expr) => {
                     let cx = GeneratedMethodValidationContext {
@@ -303,12 +304,12 @@ impl<'db> GeneratedInvalidMethodBody<'db> {
     }
 }
 
-pub(super) fn required_methods<'db>(
+pub(super) fn trait_methods_for_goal<'db>(
     db: &'db dyn HirAnalysisDb,
     goal: ConstraintId<'db>,
 ) -> IndexMap<IdentId<'db>, Func<'db>> {
     let ConstraintKind::Trait(trait_inst) = goal.kind(db) else {
         return IndexMap::new();
     };
-    required_trait_methods(db, trait_inst.def(db))
+    trait_methods(db, trait_inst.def(db))
 }

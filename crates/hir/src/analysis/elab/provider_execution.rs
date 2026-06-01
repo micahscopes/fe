@@ -27,7 +27,7 @@ use crate::{
 use super::{
     BuilderError, CapabilityEnv, ElaborationCtfeContextId, ImplBuilderSession,
     ProviderFailureReason, ProviderOutputId, ProviderOutputStatus, ReflectedField,
-    RequirementOrigin, generated_method::required_methods, reflect::reflect_struct_fields,
+    RequirementOrigin, generated_method::trait_methods_for_goal, reflect::reflect_struct_fields,
 };
 
 #[salsa::tracked]
@@ -468,8 +468,9 @@ impl<'db> ProviderBodyExecutor<'db> {
         method_name_span: DynLazySpan<'db>,
         expr_arg: crate::hir_def::ExprId,
     ) -> Result<(), ProviderExecutionError<'db>> {
-        let required = required_methods(self.db, self.context.request(self.db).goal(self.db));
-        if !required.contains_key(&method_name) {
+        let trait_methods =
+            trait_methods_for_goal(self.db, self.context.request(self.db).goal(self.db));
+        if !trait_methods.contains_key(&method_name) {
             return Err(failed_execution(
                 ProviderFailureReason::InvalidGeneratedMethodName,
                 method_name_span,

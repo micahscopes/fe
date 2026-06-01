@@ -3250,6 +3250,56 @@ impl StableTestPair: Derive for TestPair {
 }
 
 #[test]
+fn provider_can_emit_defaulted_trait_method_override() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_can_emit_defaulted_trait_method_override.fe".into(),
+        r#"
+trait TestEq {
+    fn eq(self) -> bool
+    fn ne(self) -> bool {
+        false
+    }
+}
+
+fn require_test_eq<T>()
+where
+    T: TestEq
+{}
+
+struct Foo {}
+
+derive TestEq for Foo using StableTestEq
+
+impl StableTestEq: Derive for TestEq {
+    const fn derive<T>(ev: own Evidence<TestEq<T>>) -> Evidence<TestEq<T>>
+        uses (builder: mut ImplBuilder<TestEq<T>>)
+    {
+        builder.emit_method("eq", builder.bool(true))
+        builder.emit_method("ne", builder.bool(false))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_test_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_method_artifact_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "Foo: TestEq method #0 emits eq".to_string(),
+            "Foo: TestEq method #1 emits ne".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn provider_emit_method_reports_unknown_method_name() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
