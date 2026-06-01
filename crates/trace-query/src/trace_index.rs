@@ -835,6 +835,61 @@ mod tests {
     }
 
     #[test]
+    fn compiler_explanation_requires_lineage_event_for_synthetic_prepared_postopt_bridge() {
+        let prepared = key("sonatina.evm.prepared.inst", "demo", "inst:prepared");
+        let postopt = key("sonatina.postopt.inst", "demo", "inst:postopt");
+        let event = key("compiler.event", "demo", "event:prepared-lineage");
+
+        let missing_event_snapshot = snapshot(vec![
+            node(&prepared),
+            node(&postopt),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                prepared.clone(),
+                postopt.clone(),
+                OriginEdgeLabel::SyntheticFor,
+                Some(CompilerPhase::Backend),
+            )),
+        ]);
+        let missing_event_index = TraceIndex::new(&missing_event_snapshot);
+        assert!(!missing_event_index.origin_reaches(
+            &prepared,
+            &postopt,
+            TraceReachabilityPolicy::CompilerExplanation
+        ));
+
+        let explained_snapshot = snapshot(vec![
+            node(&prepared),
+            node(&postopt),
+            node(&event),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                prepared.clone(),
+                postopt.clone(),
+                OriginEdgeLabel::SyntheticFor,
+                Some(CompilerPhase::Backend),
+            )),
+            TraceFact::CompilerEvent(CompilerEventFact::new(
+                event,
+                CompilerPhase::Backend,
+                CompilerEventKind::PreparedLineage,
+                vec![postopt.clone()],
+                vec![prepared.clone()],
+                Some(CompilerReason::new("fixture generated prepared lineage")),
+            )),
+        ]);
+        let explained_index = TraceIndex::new(&explained_snapshot);
+        assert!(explained_index.origin_reaches(
+            &prepared,
+            &postopt,
+            TraceReachabilityPolicy::CompilerExplanation
+        ));
+        assert!(!explained_index.origin_reaches(
+            &prepared,
+            &postopt,
+            TraceReachabilityPolicy::ExactOnly
+        ));
+    }
+
+    #[test]
     fn exact_policy_crosses_snapshot_alias_for_optimized_attribution_continuity() {
         let post = key("sonatina.postopt.inst", "demo", "inst:post");
         let pre = key("sonatina.preopt.inst", "demo", "inst:pre");
