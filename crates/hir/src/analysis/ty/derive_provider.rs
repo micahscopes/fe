@@ -226,11 +226,11 @@ pub(crate) fn validate_named_derive_provider<'db>(
         }
     };
 
-    let Some(func) = func else {
+    let (Some(func), Some(name)) = (func, name) else {
         return (DeriveProviderValidationResult::Invalid, diags);
     };
 
-    let provider = validate_provider_function(db, func, head, name, &mut diags, "derive provider");
+    let provider = validate_provider_function(db, func, head, name, &mut diags);
 
     if diags.is_empty() {
         let provider = provider.expect("validated provider");
@@ -244,14 +244,13 @@ fn validate_provider_function<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
     head: Option<Trait<'db>>,
-    explicit_name: Option<IdentId<'db>>,
+    name: IdentId<'db>,
     diags: &mut Vec<TyDiagCollection<'db>>,
-    label: &'static str,
 ) -> Option<DeriveProviderId<'db>> {
     if !func.is_const(db) {
         diags.push(invalid_provider(
             func.span().name().into(),
-            format!("{label} functions must be `const fn`"),
+            "derive provider functions must be `const fn`",
         ));
     }
 
@@ -260,7 +259,7 @@ fn validate_provider_function<'db>(
         None => {
             diags.push(invalid_provider(
                 func.span().ret_ty().into(),
-                format!("{label} functions must return `Evidence<C>`"),
+                "derive provider functions must return `Evidence<C>`",
             ));
             None
         }
@@ -275,7 +274,7 @@ fn validate_provider_function<'db>(
             )),
             _ => diags.push(invalid_provider(
                 func.span().ret_ty().into(),
-                format!("{label}s currently support concrete trait evidence only"),
+                "derive providers currently support concrete trait evidence only",
             )),
         }
     }
@@ -284,11 +283,6 @@ fn validate_provider_function<'db>(
         return None;
     }
 
-    let name = explicit_name.unwrap_or_else(|| {
-        func.name(db)
-            .to_opt()
-            .unwrap_or_else(|| IdentId::new(db, "<anonymous provider>".to_string()))
-    });
     let head = head?;
     let goal = goal?;
     let identity = DeriveProviderIdentityId::new(db, name, func);
