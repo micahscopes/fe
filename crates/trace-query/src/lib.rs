@@ -13144,6 +13144,38 @@ mod tests {
     }
 
     #[test]
+    fn trace_workbench_browser_badges_do_not_derive_from_rail_classes() {
+        let js_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../fe-web/assets/fe-origin-trace.js");
+        let js = fs::read_to_string(&js_path).expect("read trace workbench browser client");
+        let badges_start = js.find("    _badges(").expect("find badge renderer");
+        let badges_tail = &js[badges_start..];
+        let badges_end = badges_tail
+            .find("    _rowDisplayStatus(")
+            .expect("find badge renderer end");
+        let badges_body = &badges_tail[..badges_end];
+
+        for forbidden in [
+            "Array.isArray",
+            "_auditForClasses",
+            "_displayStatus",
+            "generated-c-",
+            "prepared-c-",
+            "context-c-",
+            "structural-c-",
+        ] {
+            assert!(
+                !badges_body.contains(forbidden),
+                "badge renderer must not derive row status from rail/audit classes via {forbidden:?}"
+            );
+        }
+        assert!(
+            !js.contains("_railStatus("),
+            "row badge rendering must not have a rail-class status fallback"
+        );
+    }
+
+    #[test]
     fn trace_workbench_source_exact_status_requires_visible_source_row() {
         let source = serde_json::json!({
             "lines": [

@@ -1950,18 +1950,9 @@
 
     _badges(rowOrClasses) {
       var rowStatus = this._rowDisplayStatus(rowOrClasses);
-      var classes = Array.isArray(rowOrClasses) ? rowOrClasses : ((rowOrClasses && rowOrClasses.classes) || []);
       var wrap = el("span", "badges");
-      if (!rowStatus && rowOrClasses && rowOrClasses.suppress_rail_status) return wrap;
-      if (!Array.isArray(rowOrClasses)) {
-        if (!rowStatus) return wrap;
-        wrap.append(el("span", "badge " + rowStatus.kind, rowStatus.label));
-        return wrap;
-      }
-      var entries = this._auditForClasses(classes);
-      var status = this._displayStatus(entries, this._railStatus(classes), { suppressExact: true });
-      if (!status) return wrap;
-      wrap.append(el("span", "badge " + status.kind, status.label));
+      if (!rowStatus) return wrap;
+      wrap.append(el("span", "badge " + rowStatus.kind, rowStatus.label));
       return wrap;
     }
 
@@ -1982,18 +1973,6 @@
       if (kind === "unmapped") return { kind: "warn", label: "unmapped" };
       if (kind === "ambiguous") return { kind: "warn", label: "ambiguous" };
       if (kind === "invalid") return { kind: "warn", label: "invalid" };
-      return null;
-    }
-
-    _railStatus(classes) {
-      classes = classes || [];
-      if (classes.indexOf("origin-generated") >= 0) return { kind: "generated", label: "generated" };
-      if (classes.some(function (name) { return name.indexOf("generated-c-") === 0; })) return { kind: "generated", label: "generated downstream" };
-      if (classes.some(function (name) { return name.indexOf("prepared-c-") === 0; })) return { kind: "context", label: "prepared-linked" };
-      if (classes.some(function (name) { return name.indexOf("context-c-") === 0; })) return { kind: "context", label: "context" };
-      if (classes.indexOf("origin-contextual") >= 0) return { kind: "context", label: "context" };
-      if (classes.some(function (name) { return name.indexOf("structural-c-") === 0; })) return { kind: "structural", label: "boundary" };
-      if (classes.indexOf("origin-structural") >= 0) return { kind: "structural", label: "boundary" };
       return null;
     }
 
