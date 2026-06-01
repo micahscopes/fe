@@ -457,9 +457,12 @@ impl<'db> TraitEnv<'db> {
             }
         }
 
-        // Solver boundary: generated impls are consumed here as ordinary
-        // implementor candidates. The proof forest must not call back into
-        // providers or builders while solving obligations.
+        // Solver boundary: generated impls are consumed here as ingot-global
+        // ordinary implementor candidates. A `with Provider { derive ... }`
+        // block currently scopes provider selection for the contained derive
+        // declarations; it does not create a local generated-evidence overlay.
+        // The proof forest must not call back into providers or builders while
+        // solving obligations.
         for &generated in crate::analysis::elab::generated_impls_for_ingot(db, ingot) {
             let params = generated.trait_inst.self_ty(db).generic_args(db).to_vec();
             let implementor = ImplementorId::new(

@@ -149,13 +149,13 @@ impl<'db> ElaborationRequestId<'db> {
             } => self.target(db).attr_arg_span(attr_index, arg_index),
             ElaborationOrigin::DeriveDecl(decl)
                 if decl.selected_provider_path(db).is_some()
-                    && !decl.selected_provider_is_scoped(db) =>
+                    && !decl.selected_provider_from_scope(db) =>
             {
                 decl.span().provider_path().into()
             }
             ElaborationOrigin::DeriveDecl(decl)
                 if decl.selected_provider_path(db).is_some()
-                    && decl.selected_provider_is_scoped(db) =>
+                    && decl.selected_provider_from_scope(db) =>
             {
                 decl.span().scoped_provider_path().into()
             }

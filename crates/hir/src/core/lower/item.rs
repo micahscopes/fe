@@ -1085,7 +1085,7 @@ impl<'db> DeriveDecl<'db> {
         let explicit_provider_path = ast
             .provider_path()
             .map(|path| PathId::lower_ast(ctxt, path));
-        let selected_provider_is_scoped =
+        let selected_provider_from_scope =
             explicit_provider_path.is_none() && scoped_provider_path.is_some();
         let selected_provider_path = explicit_provider_path
             .or(scoped_provider_path)
@@ -1099,7 +1099,7 @@ impl<'db> DeriveDecl<'db> {
             head_path,
             target_path,
             selected_provider_path,
-            selected_provider_is_scoped,
+            selected_provider_from_scope,
             ctxt.top_mod(),
             origin,
         );

@@ -1370,7 +1370,13 @@ pub struct DeriveDecl<'db> {
     pub head_path: Partial<PathId<'db>>,
     pub target_path: Partial<PathId<'db>>,
     pub selected_provider_path: Option<Partial<PathId<'db>>>,
-    pub selected_provider_is_scoped: bool,
+    /// True when `selected_provider_path` came from an enclosing
+    /// `with Provider { ... }` selector rather than an explicit `using`.
+    ///
+    /// This is provider-selection provenance only. Generated evidence from
+    /// derive declarations is still emitted into the ingot-global generated
+    /// overlay until the solver grows a local generated-evidence environment.
+    pub selected_provider_from_scope: bool,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
