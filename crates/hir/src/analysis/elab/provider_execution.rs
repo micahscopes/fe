@@ -56,11 +56,9 @@ pub(super) fn provider_output_for_context<'db>(
     ProviderOutputId::new(db, request, provider, context, status)
 }
 
-enum ProviderExecutionFailure<'db> {
-    Failed {
-        reason: ProviderFailureReason,
-        span: DynLazySpan<'db>,
-    },
+struct ProviderExecutionError<'db> {
+    reason: ProviderFailureReason,
+    span: DynLazySpan<'db>,
 }
 
 fn failed_status<'db>(
@@ -73,8 +71,8 @@ fn failed_status<'db>(
 fn failed_execution<'db>(
     reason: ProviderFailureReason,
     span: DynLazySpan<'db>,
-) -> ProviderExecutionFailure<'db> {
-    ProviderExecutionFailure::Failed { reason, span }
+) -> ProviderExecutionError<'db> {
+    ProviderExecutionError { reason, span }
 }
 
 #[derive(Clone, Copy)]
@@ -175,7 +173,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                     body.expr(self.db).span(body).into(),
                 ),
             },
-            Err(ProviderExecutionFailure::Failed { reason, span }) => failed_status(reason, span),
+            Err(err) => failed_status(err.reason, err.span),
         }
     }
 
@@ -183,7 +181,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         &mut self,
         body: Body<'db>,
         stmt: crate::hir_def::StmtId,
-    ) -> Result<(), ProviderExecutionFailure<'db>> {
+    ) -> Result<(), ProviderExecutionError<'db>> {
         let Partial::Present(stmt_data) = stmt.data(self.db, body) else {
             return Ok(());
         };
@@ -246,7 +244,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         &mut self,
         body: Body<'db>,
         expr: crate::hir_def::ExprId,
-    ) -> Result<(), ProviderExecutionFailure<'db>> {
+    ) -> Result<(), ProviderExecutionError<'db>> {
         let Partial::Present(expr_data) = expr.data(self.db, body) else {
             return Ok(());
         };
@@ -344,7 +342,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         method: Partial<IdentId<'db>>,
         generic_args: GenericArgListId<'db>,
         args: &[crate::hir_def::CallArg<'db>],
-    ) -> Result<bool, ProviderExecutionFailure<'db>> {
+    ) -> Result<bool, ProviderExecutionError<'db>> {
         if !expr_is_path_named_any(self.db, body, receiver, &self.builder_names) {
             return Ok(false);
         }
@@ -427,7 +425,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         body: Body<'db>,
         generic_args: GenericArgListId<'db>,
         constraint_arg: crate::hir_def::ExprId,
-    ) -> Result<(), ProviderExecutionFailure<'db>> {
+    ) -> Result<(), ProviderExecutionError<'db>> {
         let Some(head) = self.resolve_requirement_head_generic_arg(generic_args) else {
             return Err(failed_execution(
                 ProviderFailureReason::InvalidBuilderRequirement,
@@ -466,7 +464,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         method_name: IdentId<'db>,
         method_name_span: DynLazySpan<'db>,
         expr_arg: crate::hir_def::ExprId,
-    ) -> Result<(), ProviderExecutionFailure<'db>> {
+    ) -> Result<(), ProviderExecutionError<'db>> {
         let required = required_methods(self.db, self.context.request(self.db).goal(self.db));
         if !required.contains_key(&method_name) {
             return Err(failed_execution(
@@ -498,7 +496,7 @@ impl<'db> ProviderBodyExecutor<'db> {
         &self,
         body: Body<'db>,
         iterable: crate::hir_def::ExprId,
-    ) -> Result<Option<Vec<ReflectedField<'db>>>, ProviderExecutionFailure<'db>> {
+    ) -> Result<Option<Vec<ReflectedField<'db>>>, ProviderExecutionError<'db>> {
         let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
             iterable.data(self.db, body)
         else {
