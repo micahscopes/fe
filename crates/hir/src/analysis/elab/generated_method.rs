@@ -19,7 +19,7 @@ use crate::{
         },
     },
     core::semantic::constraints_for,
-    hir_def::{Func, IdentId},
+    hir_def::{FieldParent, Func, IdentId},
     span::DynLazySpan,
 };
 
@@ -326,6 +326,10 @@ fn generated_struct_init_ty<'db>(
     fields: GeneratedStructFieldInitListId<'db>,
     cx: GeneratedMethodValidationContext<'db>,
 ) -> Result<TyId<'db>, GeneratedExprStaticTyError<'db>> {
+    if !matches!(target.field_parent(db), Some(FieldParent::Struct(_))) {
+        return Err(invalid_expr(expr.span(db).clone()));
+    }
+
     let expected_fields = reflect_struct_fields(db, target);
     let field_inits = fields.list(db);
     if expected_fields.len() != field_inits.len() {

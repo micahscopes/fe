@@ -4493,6 +4493,43 @@ where
 }
 
 #[test]
+fn provider_generated_struct_init_default_rejects_enum_target() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_struct_init_default_rejects_enum_target.fe".into(),
+        r#"
+trait Default {
+    fn default() -> Self
+}
+
+enum Choice {
+    Empty,
+}
+
+derive Default for Choice using StableDefault
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (builder: mut ImplBuilder<Default<T>>)
+    {
+        builder.emit_method("default", builder.struct_init())
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Default` does not satisfy trait method contract",
+    );
+    assert_diag_message(&diags, "invalid generated body for default");
+    assert_diag_message(&diags, "expected Choice, got <unavailable>");
+}
+
+#[test]
 fn provider_generated_generic_default_requires_field_obligation() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
