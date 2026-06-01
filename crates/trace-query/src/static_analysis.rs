@@ -1365,6 +1365,61 @@ mod tests {
     }
 
     #[test]
+    fn static_analysis_rejects_synthetic_prepared_postopt_without_lineage_event() {
+        let function = key("function", "demo", "recv");
+        let prepared = key("sonatina.evm.prepared.inst", "demo", "inst:prepared");
+        let postopt = key("sonatina.postopt.inst", "demo", "inst:postopt");
+        let pc = key("bytecode.pc", "demo", "pc:0");
+        let facts = vec![
+            node(function.clone()),
+            node(prepared.clone()),
+            node(postopt.clone()),
+            node(pc.clone()),
+            TraceFact::Instruction(InstructionFact::new(pc.clone(), function, 0, "ADD")),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                pc,
+                prepared.clone(),
+                OriginEdgeLabel::EmittedFrom,
+                Some(CompilerPhase::BytecodeEmission),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                prepared,
+                postopt.clone(),
+                OriginEdgeLabel::SyntheticFor,
+                Some(CompilerPhase::Backend),
+            )),
+        ];
+
+        let report = static_analysis_report(&snapshot(facts));
+        let coverage = &report.checks[0].evidence["coverage"];
+        let postopt_check = report
+            .checks
+            .iter()
+            .find(|check| check.check_id == "postopt_attribution_gap")
+            .expect("postopt attribution check");
+
+        assert_eq!(coverage["total_instructions"], 1);
+        assert_eq!(coverage["primary_prepared_sonatina_pcs"], 1);
+        assert_eq!(coverage["prepared_only_pcs"], 1);
+        assert_eq!(coverage["primary_optimized_sonatina_pcs"], 0);
+        assert_eq!(coverage["optimized_sonatina_pcs"], 0);
+        assert_eq!(
+            postopt_check.evidence["postopt_attribution"]["bytecode_attributed_origins"],
+            0
+        );
+        assert_eq!(
+            postopt_check.evidence["postopt_attribution"]["gap_count"],
+            1
+        );
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|gap| gap.involved_origins == vec![postopt.clone()])
+        );
+    }
+
+    #[test]
     fn empty_bytecode_trace_is_inconclusive_not_pass() {
         let source_file = key("source.file", "demo", "demo.fe");
         let facts = vec![
