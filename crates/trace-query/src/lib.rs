@@ -11712,6 +11712,10 @@ mod tests {
             projection["attribution_audit"]["total_bytecode_pcs"]
         );
         assert_eq!(
+            projection["parity_summary"]["bytecode"]["contextual_bytecode_pcs"],
+            projection["attribution_audit"]["contextual_bytecode_pcs"]
+        );
+        assert_eq!(
             projection["parity_summary"]["facts"]["source_files"],
             serde_json::json!(1)
         );
