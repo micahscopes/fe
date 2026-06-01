@@ -3,7 +3,10 @@ use super::{
     canonical::{Canonical, Canonicalized, Solution},
     constraint::ConstraintListId,
     fold::{AssocTySubst, TyFoldable},
-    trait_def::{ImplementorId, TraitInstId, impls_for_trait_in_ingots},
+    generated::GeneratedImplId,
+    trait_def::{
+        ImplementorId, TraitInstId, generated_implementor_candidate, impls_for_trait_in_ingots,
+    },
     ty_def::{TyData, TyFlags, TyId},
 };
 use crate::analysis::{
@@ -29,6 +32,24 @@ mod proof_forest;
 pub struct TraitSolverQuery<'db> {
     pub goal: TraitInstId<'db>,
     pub assumptions: PredicateListId<'db>,
+}
+
+/// Generated impls visible only to one solver context.
+///
+/// The current derive pipeline still feeds generated impls into the ingot-global trait
+/// environment. This overlay is the solver-side insertion point for later local generated
+/// evidence without making the proof forest call back into provider execution.
+#[salsa::interned]
+#[derive(Debug)]
+pub(crate) struct GeneratedImplOverlayId<'db> {
+    #[return_ref]
+    generated_impls: Vec<GeneratedImplId<'db>>,
+}
+
+impl<'db> GeneratedImplOverlayId<'db> {
+    fn empty(db: &'db dyn HirAnalysisDb) -> Self {
+        Self::new(db, Vec::new())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +130,8 @@ pub(crate) enum Selection<T> {
 pub struct TraitSolveCx<'db> {
     origin_ingot: Ingot<'db>,
     assumptions: PredicateListId<'db>,
+    /// Additional generated candidates scoped to this solve, separate from ingot-global evidence.
+    generated_overlay: GeneratedImplOverlayId<'db>,
 }
 
 impl<'db> TraitSolveCx<'db> {
@@ -116,6 +139,7 @@ impl<'db> TraitSolveCx<'db> {
         Self {
             origin_ingot: scope.ingot(db),
             assumptions: PredicateListId::empty_list(db),
+            generated_overlay: GeneratedImplOverlayId::empty(db),
         }
     }
 
@@ -132,6 +156,10 @@ impl<'db> TraitSolveCx<'db> {
 
     pub(crate) fn origin_ingot(self) -> Ingot<'db> {
         self.origin_ingot
+    }
+
+    pub(crate) fn generated_overlay(self) -> GeneratedImplOverlayId<'db> {
+        self.generated_overlay
     }
 
     pub(crate) fn select_impl(
@@ -188,14 +216,18 @@ impl<'db> TraitSolveCx<'db> {
         }
     }
 
-    pub(crate) fn implementor_candidates_for_trait_inst_with_origin(
+    pub(crate) fn implementor_candidates_for_trait_inst_with_origin_and_overlay(
         db: &'db dyn HirAnalysisDb,
         origin_ingot: Ingot<'db>,
+        generated_overlay: GeneratedImplOverlayId<'db>,
         inst: TraitInstId<'db>,
     ) -> &'db [Binder<ImplementorId<'db>>] {
-        let (primary, secondary) =
-            Self::search_ingots_for_trait_inst_with_origin(db, origin_ingot, inst);
-        impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, inst))
+        implementor_candidates_for_trait_inst_with_overlay(
+            db,
+            origin_ingot,
+            generated_overlay,
+            inst,
+        )
     }
 
     pub(crate) fn normalization_scope_for_trait_inst(
@@ -222,6 +254,31 @@ impl<'db> TraitSolveCx<'db> {
     pub(crate) fn origin_scope(self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
         self.origin_ingot.root_mod(db).scope()
     }
+}
+
+#[salsa::tracked(return_ref)]
+fn implementor_candidates_for_trait_inst_with_overlay<'db>(
+    db: &'db dyn HirAnalysisDb,
+    origin_ingot: Ingot<'db>,
+    generated_overlay: GeneratedImplOverlayId<'db>,
+    inst: TraitInstId<'db>,
+) -> Vec<Binder<ImplementorId<'db>>> {
+    let (primary, secondary) =
+        TraitSolveCx::search_ingots_for_trait_inst_with_origin(db, origin_ingot, inst);
+    let mut dedup: IndexSet<Binder<ImplementorId<'db>>> =
+        impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, inst))
+            .iter()
+            .copied()
+            .collect();
+
+    let trait_def = inst.def(db);
+    for &generated in generated_overlay.generated_impls(db) {
+        if generated.trait_inst.def(db) == trait_def {
+            dedup.insert(generated_implementor_candidate(db, generated));
+        }
+    }
+
+    dedup.into_iter().collect()
 }
 
 pub(crate) fn normalize_trait_inst_preserving_validity<'db>(
@@ -258,13 +315,14 @@ pub(crate) fn normalize_trait_inst_preserving_validity<'db>(
 fn is_query_satisfiable<'db>(
     db: &'db dyn HirAnalysisDb,
     origin_ingot: Ingot<'db>,
+    generated_overlay: GeneratedImplOverlayId<'db>,
     query: Canonical<TraitSolverQuery<'db>>,
 ) -> GoalSatisfiability<'db> {
     if query.flags(db).contains(TyFlags::HAS_INVALID) {
         return GoalSatisfiability::ContainsInvalid;
     };
 
-    ProofForest::new(db, origin_ingot, query).solve()
+    ProofForest::new(db, origin_ingot, generated_overlay, query).solve()
 }
 
 pub fn is_goal_query_satisfiable<'db>(
@@ -272,7 +330,13 @@ pub fn is_goal_query_satisfiable<'db>(
     solve_cx: TraitSolveCx<'db>,
     query: &CanonicalGoalQuery<'db>,
 ) -> GoalSatisfiability<'db> {
-    is_query_satisfiable(db, solve_cx.origin_ingot(), query.canonical()).clone()
+    is_query_satisfiable(
+        db,
+        solve_cx.origin_ingot(),
+        solve_cx.generated_overlay(),
+        query.canonical(),
+    )
+    .clone()
 }
 
 pub fn is_goal_satisfiable<'db>(

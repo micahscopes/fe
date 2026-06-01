@@ -8,8 +8,8 @@ use cranelift_entity::{PrimaryMap, entity_impl};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    CanonicalGoalQuery, GoalSatisfiability, TraitGoalSolution, TraitSolveCx, TraitSolverQuery,
-    normalize_trait_inst_preserving_validity,
+    CanonicalGoalQuery, GeneratedImplOverlayId, GoalSatisfiability, TraitGoalSolution,
+    TraitSolveCx, TraitSolverQuery, normalize_trait_inst_preserving_validity,
 };
 use crate::analysis::{
     HirAnalysisDb,
@@ -51,6 +51,7 @@ type UnsatSubgoal<'db> = crate::analysis::ty::canonical::Solution<TraitInstId<'d
 /// goals to generator nodes to avoid redundant computations.
 pub(super) struct ProofForest<'db> {
     origin_ingot: crate::Ingot<'db>,
+    generated_overlay: GeneratedImplOverlayId<'db>,
 
     /// The root generator node.
     root: GeneratorNode,
@@ -119,10 +120,12 @@ impl<'db> ProofForest<'db> {
     pub(super) fn new(
         db: &'db dyn HirAnalysisDb,
         origin_ingot: crate::Ingot<'db>,
+        generated_overlay: GeneratedImplOverlayId<'db>,
         query: Query<'db>,
     ) -> Self {
         let mut forest = Self {
             origin_ingot,
+            generated_overlay,
             root: GeneratorNode(0), // Set temporary root.
             g_nodes: PrimaryMap::new(),
             c_nodes: PrimaryMap::new(),
@@ -189,7 +192,8 @@ impl<'db> ProofForest<'db> {
     }
 
     fn new_generator_node(&mut self, query: Query<'db>) -> GeneratorNode {
-        let g_node_data = GeneratorNodeData::new(self.db, self.origin_ingot, query);
+        let g_node_data =
+            GeneratorNodeData::new(self.db, self.origin_ingot, self.generated_overlay, query);
         let g_node = self.g_nodes.push(g_node_data);
         self.query_to_node.insert(query, g_node);
         self.g_stack.push(g_node);
@@ -281,13 +285,19 @@ struct GeneratorNode(u32);
 entity_impl!(GeneratorNode);
 
 impl<'db> GeneratorNodeData<'db> {
-    fn new(db: &'db dyn HirAnalysisDb, origin_ingot: crate::Ingot<'db>, query: Query<'db>) -> Self {
+    fn new(
+        db: &'db dyn HirAnalysisDb,
+        origin_ingot: crate::Ingot<'db>,
+        generated_overlay: GeneratedImplOverlayId<'db>,
+        query: Query<'db>,
+    ) -> Self {
         let mut table = PersistentUnificationTable::new(db);
         let extracted_query = query.extract_identity(&mut table);
         let extracted_goal = extracted_query.goal;
-        let cands = TraitSolveCx::implementor_candidates_for_trait_inst_with_origin(
+        let cands = TraitSolveCx::implementor_candidates_for_trait_inst_with_origin_and_overlay(
             db,
             origin_ingot,
+            generated_overlay,
             extracted_goal,
         );
 
