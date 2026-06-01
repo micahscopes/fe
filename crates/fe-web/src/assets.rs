@@ -270,6 +270,25 @@ pub fn origin_trace_live_html_shell(title: &str) -> String {
     var modelRefresh = null;
     var manifestCache = null;
     var revisionHistoryCache = null;
+    function cleanTraceAuthFromUrl() {{
+      var nextParams = new URLSearchParams(window.location.search || "");
+      var nextHash = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
+      var changed = false;
+      if (nextParams.has("token")) {{
+        nextParams.delete("token");
+        changed = true;
+      }}
+      if (nextHash.has("token")) {{
+        nextHash.delete("token");
+        changed = true;
+      }}
+      if (!changed || !window.history || !window.history.replaceState) return;
+      var next = window.location.pathname
+        + (nextParams.toString() ? "?" + nextParams.toString() : "")
+        + (nextHash.toString() ? String.fromCharCode(35) + nextHash.toString() : "");
+      window.history.replaceState(null, "", next);
+    }}
+    cleanTraceAuthFromUrl();
     function fail(message) {{
       if (loading) loading.textContent = message;
       console.error("[fe trace workbench]", message);
@@ -436,7 +455,6 @@ pub fn origin_trace_live_html_shell(title: &str) -> String {
       current.delete("node");
       current.delete("source");
       current.set("row", rowId);
-      if (token && !current.get("token")) current.set("token", token);
       window.location.hash = current.toString();
     }}
     function fetchAndRenderModel() {{
@@ -789,6 +807,24 @@ mod tests {
         assert!(html.contains("stale_but_usable"));
         assert!(html.contains("pending"));
         assert!(html.contains("selection_remap"));
+    }
+
+    #[test]
+    fn live_trace_shell_cleans_auth_token_from_visible_url() {
+        let html = origin_trace_live_html_shell("Trace");
+
+        assert!(html.contains("function cleanTraceAuthFromUrl()"));
+        assert!(html.contains("nextParams.delete(\"token\")"));
+        assert!(html.contains("nextHash.delete(\"token\")"));
+        assert!(html.contains("window.history.replaceState(null, \"\", next)"));
+        assert!(
+            !html.contains("current.set(\"token\", token)"),
+            "hash navigation must not reinsert the auth token after it has been read"
+        );
+        assert!(
+            html.contains("/events?token="),
+            "native EventSource still needs a query token because it cannot set Authorization headers"
+        );
     }
 
     #[test]
