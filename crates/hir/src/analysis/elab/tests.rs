@@ -714,7 +714,6 @@ impl StableEq: Derive for Eq {
         &db,
         GeneratedExprKind::MethodArgRef {
             name: IdentId::new(&db, "other".to_string()),
-            ty: target_ty,
         },
     );
     let lhs = GeneratedExprId::new(

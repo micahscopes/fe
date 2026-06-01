@@ -3700,6 +3700,51 @@ fn caller() {
 }
 
 #[test]
+fn provider_generated_arg_ref_is_typed_by_each_required_method_context() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_arg_ref_is_typed_by_each_required_method_context.fe".into(),
+        r#"
+trait PairArg {
+    fn take_u(value: own u256) -> u256
+    fn take_self(value: Self) -> Self
+}
+
+fn require_pair_arg<T>()
+where
+    T: PairArg
+{}
+
+struct Foo {}
+
+derive PairArg for Foo using StablePairArg
+
+impl StablePairArg: Derive for PairArg {
+    const fn derive<T>(ev: own Evidence<PairArg<T>>) -> Evidence<PairArg<T>>
+        uses (builder: mut ImplBuilder<PairArg<T>>)
+    {
+        builder.emit_method("take_u", builder.arg_ref("value"))
+        builder.emit_method("take_self", builder.arg_ref("value"))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_pair_arg<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: PairArg with obligations {}".to_string()]
+    );
+}
+
+#[test]
 fn provider_generated_static_method_rejects_self_ref() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

@@ -12,7 +12,6 @@ use crate::{
                 GeneratedExprId, GeneratedExprKind, GeneratedStructFieldInit,
                 GeneratedStructFieldInitListId,
             },
-            method_conformance::required_method_arg_ty_for_trait_inst,
             trait_def::TraitInstId,
             trait_resolution::PredicateListId,
             ty_def::{Kind, TyId},
@@ -28,8 +27,7 @@ use crate::{
 use super::{
     BuilderError, CapabilityEnv, ElaborationCtfeContextId, ImplBuilderSession, ProviderOutputId,
     ProviderOutputStatus, ProviderSkipReason, ReflectedField, RequirementOrigin,
-    generated_method::{generated_method_default_assumptions, required_methods},
-    reflect::reflect_struct_fields,
+    generated_method::required_methods, reflect::reflect_struct_fields,
 };
 
 #[salsa::tracked]
@@ -617,12 +615,9 @@ impl<'db> ProviderBodyExecutor<'db> {
                     return None;
                 };
                 let name = self.string_literal_ident_arg(body, arg.expr)?;
-                let ty = self
-                    .required_method_arg_ty(name)
-                    .unwrap_or_else(|| self.context.request(self.db).target(self.db).ty(self.db));
                 Some(ElabValue::GeneratedExpr(GeneratedExprId::new(
                     self.db,
-                    GeneratedExprKind::MethodArgRef { name, ty },
+                    GeneratedExprKind::MethodArgRef { name },
                 )))
             }
             BUILDER_FIELD_GET_METHOD
@@ -787,27 +782,6 @@ impl<'db> ProviderBodyExecutor<'db> {
             return None;
         };
         Some(IdentId::new(self.db, value.data(self.db).to_string()))
-    }
-
-    fn required_method_arg_ty(&self, name: IdentId<'db>) -> Option<TyId<'db>> {
-        let ConstraintKind::Trait(trait_inst) =
-            self.context.request(self.db).goal(self.db).kind(self.db)
-        else {
-            return None;
-        };
-        let required = required_methods(self.db, ConstraintId::from_trait(self.db, trait_inst));
-        let mut methods = required.values().copied();
-        let method = methods.next()?;
-        if methods.next().is_some() {
-            return None;
-        }
-        required_method_arg_ty_for_trait_inst(
-            self.db,
-            trait_inst,
-            method,
-            name,
-            generated_method_default_assumptions(self.db, self.context),
-        )
     }
 }
 

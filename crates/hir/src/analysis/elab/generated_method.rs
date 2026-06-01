@@ -168,9 +168,9 @@ fn generated_expr_static_ty<'db>(
             let self_ty = generated_method_target_ty(db, cx);
             tys_match(db, self_ty, ty).then_some(ty)
         }
-        GeneratedExprKind::MethodArgRef { name, ty } => {
+        GeneratedExprKind::MethodArgRef { name } => {
             let arg_ty = generated_required_method_param_ty(db, cx, name)?;
-            tys_match(db, arg_ty, ty).then_some(ty)
+            Some(arg_ty)
         }
         GeneratedExprKind::FieldGet { base, field } => {
             let base_ty = generated_expr_static_ty(db, base, cx)?;

@@ -64,7 +64,6 @@ pub(crate) enum GeneratedExprKind<'db> {
     },
     MethodArgRef {
         name: IdentId<'db>,
-        ty: TyId<'db>,
     },
     FieldGet {
         base: GeneratedExprId<'db>,
@@ -239,7 +238,7 @@ impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
                 rhs.visit_with(visitor);
             }
             Self::SelfRef { ty } => ty.visit_with(visitor),
-            Self::MethodArgRef { ty, .. } => ty.visit_with(visitor),
+            Self::MethodArgRef { .. } => {}
             Self::FieldGet { base, field } => {
                 base.visit_with(visitor);
                 field.visit_with(visitor);
@@ -271,10 +270,7 @@ impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
             Self::SelfRef { ty } => Self::SelfRef {
                 ty: ty.fold_with(db, folder),
             },
-            Self::MethodArgRef { name, ty } => Self::MethodArgRef {
-                name,
-                ty: ty.fold_with(db, folder),
-            },
+            Self::MethodArgRef { name } => Self::MethodArgRef { name },
             Self::FieldGet { base, field } => Self::FieldGet {
                 base: base.fold_with(db, folder),
                 field: field.fold_with(db, folder),
