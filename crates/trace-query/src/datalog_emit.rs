@@ -1217,6 +1217,7 @@ mod tests {
     fn semantic_edge_views_reject_prepared_postopt_without_lineage_event() {
         let postopt = key("sonatina.postopt.inst", "demo", "inst:0");
         let prepared = key("sonatina.evm.prepared.inst", "demo", "inst:0");
+        let generated = key("sonatina.evm.prepared.inst", "demo", "inst:generated");
         let snapshot = TraceSnapshot::new(TraceBundle::new(
             TraceMetadata::compiler_emitted(
                 "abc123",
@@ -1228,10 +1229,17 @@ mod tests {
             vec![
                 node(postopt.clone()),
                 node(prepared.clone()),
+                node(generated.clone()),
                 TraceFact::OriginEdge(OriginEdgeFact::new(
                     prepared.clone(),
                     postopt.clone(),
                     OriginEdgeLabel::LoweredFrom,
+                    Some(CompilerPhase::Backend),
+                )),
+                TraceFact::OriginEdge(OriginEdgeFact::new(
+                    generated.clone(),
+                    postopt.clone(),
+                    OriginEdgeLabel::SyntheticFor,
                     Some(CompilerPhase::Backend),
                 )),
             ],
@@ -1254,6 +1262,31 @@ mod tests {
                 prepared.canonical_storage_key(),
                 postopt.canonical_storage_key(),
                 "raw_local_join_without_prepared_lineage".to_string(),
+            ]
+        ));
+        assert!(!relation_row_exists(
+            &export,
+            "synthetic_edge",
+            &[
+                generated.canonical_storage_key(),
+                postopt.canonical_storage_key()
+            ]
+        ));
+        assert!(!relation_row_exists(
+            &export,
+            "prepared_codegen_edge",
+            &[
+                generated.canonical_storage_key(),
+                postopt.canonical_storage_key()
+            ]
+        ));
+        assert!(relation_row_exists(
+            &export,
+            "suspicious_edge",
+            &[
+                generated.canonical_storage_key(),
+                postopt.canonical_storage_key(),
+                "phase_contract_rejected".to_string(),
             ]
         ));
         assert!(relation_row_exists(
