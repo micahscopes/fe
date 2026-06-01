@@ -1081,6 +1081,10 @@ impl<'db> EnumVariant<'db> {
         self.def(db).kind
     }
 
+    pub fn attributes(self, db: &'db dyn HirDb) -> AttrListId<'db> {
+        self.def(db).attributes
+    }
+
     pub fn name(self, db: &'db dyn HirDb) -> Option<&'db str> {
         Some(self.def(db).name.to_opt()?.data(db))
     }

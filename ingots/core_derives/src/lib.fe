@@ -29,12 +29,21 @@ impl StableDefault: Derive for Default {
             builder: mut ImplBuilder<Default<T>>,
         )
     {
-        let mut init = builder.struct_init()
-        for field in reflect.fields() {
-            builder.require<Default>(field.ty())
-            init = builder.with_field(init, field, builder.default(field.ty()))
+        if reflect.is_struct() {
+            let mut init = builder.struct_init()
+            for field in reflect.fields() {
+                builder.require<Default>(field.ty())
+                init = builder.with_field(init, field, builder.default(field.ty()))
+            }
+            builder.emit_method("default", init)
         }
-        builder.emit_method("default", init)
+        if reflect.is_enum() {
+            for variant in reflect.variants() {
+                if variant.is_default() {
+                    builder.emit_method("default", builder.variant_init(variant))
+                }
+            }
+        }
         builder.finish()
         ev
     }

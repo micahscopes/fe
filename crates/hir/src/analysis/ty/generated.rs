@@ -10,6 +10,7 @@ use crate::{
             visitor::{TyVisitable, TyVisitor},
         },
     },
+    hir_def::EnumVariant,
     hir_def::IdentId,
     span::DynLazySpan,
 };
@@ -80,6 +81,10 @@ pub(crate) enum GeneratedExprKind<'db> {
     StructInit {
         target: TyId<'db>,
         fields: GeneratedStructFieldInitListId<'db>,
+    },
+    VariantInit {
+        target: TyId<'db>,
+        variant: EnumVariant<'db>,
     },
 }
 
@@ -255,6 +260,7 @@ impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
                 target.visit_with(visitor);
                 fields.visit_with(visitor);
             }
+            Self::VariantInit { target, .. } => target.visit_with(visitor),
         }
     }
 }
@@ -288,6 +294,10 @@ impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
             Self::StructInit { target, fields } => Self::StructInit {
                 target: target.fold_with(db, folder),
                 fields: fields.fold_with(db, folder),
+            },
+            Self::VariantInit { target, variant } => Self::VariantInit {
+                target: target.fold_with(db, folder),
+                variant,
             },
         }
     }

@@ -19,7 +19,7 @@ use crate::{
         },
     },
     core::semantic::constraints_for,
-    hir_def::{FieldParent, Func, IdentId},
+    hir_def::{FieldParent, Func, IdentId, VariantKind},
     span::DynLazySpan,
 };
 
@@ -306,6 +306,9 @@ fn generated_expr_static_ty_result<'db>(
         GeneratedExprKind::StructInit { target, fields } => {
             generated_struct_init_ty(db, expr, target, fields, cx)
         }
+        GeneratedExprKind::VariantInit { target, variant } => {
+            generated_variant_init_ty(db, expr, target, variant)
+        }
     }
 }
 
@@ -353,6 +356,21 @@ fn generated_struct_init_ty<'db>(
         }
     }
 
+    Ok(target)
+}
+
+fn generated_variant_init_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    expr: GeneratedExprId<'db>,
+    target: TyId<'db>,
+    variant: crate::hir_def::EnumVariant<'db>,
+) -> Result<TyId<'db>, GeneratedExprStaticTyError<'db>> {
+    let Some(crate::analysis::ty::adt_def::AdtRef::Enum(enum_)) = target.adt_ref(db) else {
+        return Err(invalid_expr(expr.span(db).clone()));
+    };
+    if variant.enum_ != enum_ || !matches!(variant.kind(db), VariantKind::Unit) {
+        return Err(invalid_expr(expr.span(db).clone()));
+    }
     Ok(target)
 }
 

@@ -94,6 +94,10 @@ pub(crate) struct ReflectedVariant<'db> {
 }
 
 impl<'db> ReflectedVariant<'db> {
+    pub(crate) fn is_default(self, db: &'db dyn HirAnalysisDb) -> bool {
+        self.variant.attributes(db).has_marker_attr(db, "default")
+    }
+
     pub(crate) fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
         format!("{}::{}", self.parent.pretty_print(db), self.name.data(db))
     }

@@ -3248,6 +3248,14 @@ impl<'db> TyChecker<'db> {
                     true,
                 ))
             }
+            "variant_init" => {
+                if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 1 {
+                    return None;
+                }
+                let parent = self.impl_builder_target_from_goal(goal)?;
+                self.check_expr(args[0].expr, self.variant_ty(parent));
+                Some(ExprProp::new(self.generated_expr_ty(parent), true))
+            }
             "with_field" => {
                 if !receiver_prop.is_mut || !generic_args.is_empty(self.db) || args.len() != 3 {
                     return None;
@@ -3366,6 +3374,8 @@ impl<'db> TyChecker<'db> {
             "type_info" => self.type_info_ty(target),
             "fields" => self.field_list_ty(target),
             "variants" => self.variant_list_ty(target),
+            "is_struct" => TyId::bool(self.db),
+            "is_enum" => TyId::bool(self.db),
             _ => return None,
         };
         Some(ExprProp::new(result, true))
@@ -3432,6 +3442,7 @@ impl<'db> TyChecker<'db> {
         let parent = self.variant_descriptor_parent_from_receiver_ty(receiver_ty)?;
         let target = match method_name.data(self.db).as_str() {
             "fields" => self.field_list_ty(parent),
+            "is_default" => TyId::bool(self.db),
             _ => return None,
         };
         Some(ExprProp::new(target, true))
@@ -3469,6 +3480,11 @@ impl<'db> TyChecker<'db> {
         let variant_list_ctor =
             TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::VariantList)));
         TyId::app(self.db, variant_list_ctor, target)
+    }
+
+    fn variant_ty(&self, target: TyId<'db>) -> TyId<'db> {
+        let variant_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Variant)));
+        TyId::app(self.db, variant_ctor, target)
     }
 
     fn field_ty(&self, parent: TyId<'db>, value: TyId<'db>) -> TyId<'db> {

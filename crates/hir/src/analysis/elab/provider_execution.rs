@@ -18,8 +18,8 @@ use crate::{
         },
     },
     hir_def::{
-        Body, Expr, GenericArg, GenericArgListId, IdentId, LitKind, Partial, Pat, Stmt,
-        Trait as TraitDef, TypeKind,
+        Body, Cond, CondId, Expr, GenericArg, GenericArgListId, IdentId, LitKind, LogicalBinOp,
+        Partial, Pat, Stmt, Trait as TraitDef, TypeKind,
     },
     span::DynLazySpan,
 };
@@ -79,6 +79,7 @@ fn failed_execution<'db>(
 
 #[derive(Clone, Copy)]
 enum ElabValue<'db> {
+    Bool(bool),
     Field(ReflectedField<'db>),
     Variant(ReflectedVariant<'db>),
 
@@ -306,6 +307,13 @@ impl<'db> ProviderBodyExecutor<'db> {
                     }
                 }
             }
+            Expr::If(cond, then_expr, else_expr) => {
+                if self.eval_cond_bool(body, *cond)? {
+                    self.execute_expr(body, *then_expr)?;
+                } else if let Some(else_expr) = else_expr {
+                    self.execute_expr(body, *else_expr)?;
+                }
+            }
             Expr::Bin(_, _, _)
             | Expr::AugAssign(_, _, _)
             | Expr::Un(_, _)
@@ -314,7 +322,6 @@ impl<'db> ProviderBodyExecutor<'db> {
             | Expr::Tuple(_)
             | Expr::Array(_)
             | Expr::ArrayRep(_, _)
-            | Expr::If(_, _, _)
             | Expr::Match(_, _)
             | Expr::RecordInit(_, _)
             | Expr::With(_, _) => {
@@ -326,6 +333,38 @@ impl<'db> ProviderBodyExecutor<'db> {
             Expr::Lit(_) | Expr::Path(_) => {}
         }
         Ok(())
+    }
+
+    fn eval_cond_bool(
+        &self,
+        body: Body<'db>,
+        cond: CondId,
+    ) -> Result<bool, ProviderExecutionError<'db>> {
+        let Partial::Present(cond_data) = cond.data(self.db, body) else {
+            return Err(failed_execution(
+                ProviderFailureReason::UnsupportedProviderBody,
+                body.span().into(),
+            ));
+        };
+        match cond_data {
+            Cond::Expr(expr) => match self.eval_expr_value(body, *expr) {
+                Some(ElabValue::Bool(value)) => Ok(value),
+                _ => Err(failed_execution(
+                    ProviderFailureReason::UnsupportedProviderBody,
+                    expr.span(body).into(),
+                )),
+            },
+            Cond::Bin(lhs, rhs, LogicalBinOp::And) => {
+                Ok(self.eval_cond_bool(body, *lhs)? && self.eval_cond_bool(body, *rhs)?)
+            }
+            Cond::Bin(lhs, rhs, LogicalBinOp::Or) => {
+                Ok(self.eval_cond_bool(body, *lhs)? || self.eval_cond_bool(body, *rhs)?)
+            }
+            Cond::Let(_, _) => Err(failed_execution(
+                ProviderFailureReason::UnsupportedProviderBody,
+                body.span().into(),
+            )),
+        }
     }
 
     fn assign_value_binding(
@@ -408,6 +447,7 @@ impl<'db> ProviderBodyExecutor<'db> {
             | BUILDER_EQ_METHOD
             | BUILDER_DEFAULT_METHOD
             | BUILDER_STRUCT_INIT_METHOD
+            | BUILDER_VARIANT_INIT_METHOD
             | BUILDER_WITH_FIELD_METHOD => Ok(false),
             BUILDER_EMIT_METHOD => {
                 let (method_name, method_name_span, expr_arg) = match args {
@@ -643,7 +683,10 @@ impl<'db> ProviderBodyExecutor<'db> {
     ) -> Option<ReflectedField<'db>> {
         match self.eval_expr_value(body, expr)? {
             ElabValue::Field(field) => Some(field),
-            ElabValue::Variant(_) | ElabValue::TypeWitness(_) | ElabValue::GeneratedExpr(_) => None,
+            ElabValue::Bool(_)
+            | ElabValue::Variant(_)
+            | ElabValue::TypeWitness(_)
+            | ElabValue::GeneratedExpr(_) => None,
         }
     }
 
@@ -654,7 +697,10 @@ impl<'db> ProviderBodyExecutor<'db> {
     ) -> Option<ReflectedVariant<'db>> {
         match self.eval_expr_value(body, expr)? {
             ElabValue::Variant(variant) => Some(variant),
-            ElabValue::Field(_) | ElabValue::TypeWitness(_) | ElabValue::GeneratedExpr(_) => None,
+            ElabValue::Bool(_)
+            | ElabValue::Field(_)
+            | ElabValue::TypeWitness(_)
+            | ElabValue::GeneratedExpr(_) => None,
         }
     }
 
@@ -682,6 +728,10 @@ impl<'db> ProviderBodyExecutor<'db> {
             expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*value)
         }) {
             return Some(value);
+        }
+
+        if let Partial::Present(Expr::Lit(LitKind::Bool(value))) = expr.data(self.db, body) {
+            return Some(ElabValue::Bool(*value));
         }
 
         let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
@@ -809,6 +859,26 @@ impl<'db> ProviderBodyExecutor<'db> {
                     },
                 ))
             }
+            BUILDER_VARIANT_INIT_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
+            {
+                let [variant_arg] = args.as_slice() else {
+                    return None;
+                };
+                let ElabValue::Variant(variant) = self.eval_expr_value(body, variant_arg.expr)?
+                else {
+                    return None;
+                };
+                let target = self.context.request(self.db).target(self.db).ty(self.db);
+                Some(self.generated_expr_value(
+                    body,
+                    expr,
+                    GeneratedExprKind::VariantInit {
+                        target,
+                        variant: variant.variant,
+                    },
+                ))
+            }
             BUILDER_WITH_FIELD_METHOD
                 if expr_is_path_named_any(self.db, body, *receiver, &self.builder_names) =>
             {
@@ -848,6 +918,39 @@ impl<'db> ProviderBodyExecutor<'db> {
                     return None;
                 };
                 Some(ElabValue::TypeWitness(field.ty))
+            }
+            REFLECT_IS_STRUCT_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names) =>
+            {
+                if !args.is_empty() {
+                    return None;
+                }
+                let target = self.context.request(self.db).target(self.db).ty(self.db);
+                Some(ElabValue::Bool(matches!(
+                    target.field_parent(self.db),
+                    Some(crate::hir_def::FieldParent::Struct(_))
+                )))
+            }
+            REFLECT_IS_ENUM_METHOD
+                if expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names) =>
+            {
+                if !args.is_empty() {
+                    return None;
+                }
+                let target = self.context.request(self.db).target(self.db).ty(self.db);
+                Some(ElabValue::Bool(matches!(
+                    target.adt_ref(self.db),
+                    Some(crate::analysis::ty::adt_def::AdtRef::Enum(_))
+                )))
+            }
+            VARIANT_IS_DEFAULT_METHOD => {
+                if !args.is_empty() {
+                    return None;
+                }
+                let ElabValue::Variant(variant) = self.eval_expr_value(body, *receiver)? else {
+                    return None;
+                };
+                Some(ElabValue::Bool(variant.is_default(self.db)))
             }
             _ => None,
         }
@@ -1029,11 +1132,15 @@ const BUILDER_FIELD_GET_METHOD: &str = "field_get";
 const BUILDER_EQ_METHOD: &str = "eq";
 const BUILDER_DEFAULT_METHOD: &str = "default";
 const BUILDER_STRUCT_INIT_METHOD: &str = "struct_init";
+const BUILDER_VARIANT_INIT_METHOD: &str = "variant_init";
 const BUILDER_WITH_FIELD_METHOD: &str = "with_field";
 const BUILDER_EMIT_METHOD: &str = "emit_method";
 const REFLECT_FIELDS_METHOD: &str = "fields";
 const REFLECT_VARIANTS_METHOD: &str = "variants";
+const REFLECT_IS_STRUCT_METHOD: &str = "is_struct";
+const REFLECT_IS_ENUM_METHOD: &str = "is_enum";
 const VARIANT_FIELDS_METHOD: &str = "fields";
+const VARIANT_IS_DEFAULT_METHOD: &str = "is_default";
 const FIELD_TY_METHOD: &str = "ty";
 
 enum ProviderIterable<'db> {
