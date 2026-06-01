@@ -40,7 +40,12 @@ impl StableDefault: Derive for Default {
         if reflect.is_enum() {
             for variant in reflect.variants() {
                 if variant.is_default() {
-                    builder.emit_method("default", builder.variant_init(variant))
+                    let mut init = builder.variant_init(variant)
+                    for field in variant.fields() {
+                        builder.require<Default>(field.ty())
+                        init = builder.with_field(init, field, builder.default(field.ty()))
+                    }
+                    builder.emit_method("default", init)
                 }
             }
         }

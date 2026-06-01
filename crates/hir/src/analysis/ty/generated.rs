@@ -85,6 +85,7 @@ pub(crate) enum GeneratedExprKind<'db> {
     VariantInit {
         target: TyId<'db>,
         variant: EnumVariant<'db>,
+        fields: GeneratedStructFieldInitListId<'db>,
     },
 }
 
@@ -260,7 +261,10 @@ impl<'db> TyVisitable<'db> for GeneratedExprKind<'db> {
                 target.visit_with(visitor);
                 fields.visit_with(visitor);
             }
-            Self::VariantInit { target, .. } => target.visit_with(visitor),
+            Self::VariantInit { target, fields, .. } => {
+                target.visit_with(visitor);
+                fields.visit_with(visitor);
+            }
         }
     }
 }
@@ -295,9 +299,14 @@ impl<'db> TyFoldable<'db> for GeneratedExprKind<'db> {
                 target: target.fold_with(db, folder),
                 fields: fields.fold_with(db, folder),
             },
-            Self::VariantInit { target, variant } => Self::VariantInit {
+            Self::VariantInit {
+                target,
+                variant,
+                fields,
+            } => Self::VariantInit {
                 target: target.fold_with(db, folder),
                 variant,
+                fields: fields.fold_with(db, folder),
             },
         }
     }

@@ -876,6 +876,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                     GeneratedExprKind::VariantInit {
                         target,
                         variant: variant.variant,
+                        fields: GeneratedStructFieldInitListId::new(self.db, Vec::new()),
                     },
                 ))
             }
@@ -889,8 +890,14 @@ impl<'db> ProviderBodyExecutor<'db> {
                 else {
                     return None;
                 };
-                let GeneratedExprKind::StructInit { target, fields } = init.kind(self.db) else {
-                    return None;
+                let (target, fields, variant) = match init.kind(self.db) {
+                    GeneratedExprKind::StructInit { target, fields } => (target, fields, None),
+                    GeneratedExprKind::VariantInit {
+                        target,
+                        variant,
+                        fields,
+                    } => (target, fields, Some(variant)),
+                    _ => return None,
                 };
                 let ElabValue::Field(field) = self.eval_expr_value(body, field_arg.expr)? else {
                     return None;
@@ -901,14 +908,17 @@ impl<'db> ProviderBodyExecutor<'db> {
                 };
                 let mut field_inits = fields.list(self.db).to_vec();
                 field_inits.push(GeneratedStructFieldInit { field, value });
-                Some(self.generated_expr_value(
-                    body,
-                    expr,
-                    GeneratedExprKind::StructInit {
+                let fields = GeneratedStructFieldInitListId::new(self.db, field_inits);
+                let kind = if let Some(variant) = variant {
+                    GeneratedExprKind::VariantInit {
                         target,
-                        fields: GeneratedStructFieldInitListId::new(self.db, field_inits),
-                    },
-                ))
+                        variant,
+                        fields,
+                    }
+                } else {
+                    GeneratedExprKind::StructInit { target, fields }
+                };
+                Some(self.generated_expr_value(body, expr, kind))
             }
             FIELD_TY_METHOD => {
                 if !args.is_empty() {

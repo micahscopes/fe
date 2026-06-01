@@ -19,7 +19,7 @@ use crate::{
         },
     },
     core::semantic::constraints_for,
-    hir_def::{FieldParent, Func, IdentId, VariantKind},
+    hir_def::{FieldParent, Func, IdentId},
     span::DynLazySpan,
 };
 
@@ -306,9 +306,11 @@ fn generated_expr_static_ty_result<'db>(
         GeneratedExprKind::StructInit { target, fields } => {
             generated_struct_init_ty(db, expr, target, fields, cx)
         }
-        GeneratedExprKind::VariantInit { target, variant } => {
-            generated_variant_init_ty(db, expr, target, variant)
-        }
+        GeneratedExprKind::VariantInit {
+            target,
+            variant,
+            fields,
+        } => generated_variant_init_ty(db, expr, target, variant, fields, cx),
     }
 }
 
@@ -364,13 +366,44 @@ fn generated_variant_init_ty<'db>(
     expr: GeneratedExprId<'db>,
     target: TyId<'db>,
     variant: crate::hir_def::EnumVariant<'db>,
+    fields: GeneratedStructFieldInitListId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
 ) -> Result<TyId<'db>, GeneratedExprStaticTyError<'db>> {
     let Some(crate::analysis::ty::adt_def::AdtRef::Enum(enum_)) = target.adt_ref(db) else {
         return Err(invalid_expr(expr.span(db).clone()));
     };
-    if variant.enum_ != enum_ || !matches!(variant.kind(db), VariantKind::Unit) {
+    if variant.enum_ != enum_ {
         return Err(invalid_expr(expr.span(db).clone()));
     }
+    let Some(name) = variant.ident(db) else {
+        return Err(invalid_expr(expr.span(db).clone()));
+    };
+    let reflected_variant = super::ReflectedVariant {
+        parent: target,
+        index: variant.idx as u32,
+        name,
+        variant,
+    };
+    let expected_fields = reflect_variant_fields(db, reflected_variant);
+    let field_inits = fields.list(db);
+    if expected_fields.len() != field_inits.len() {
+        return Err(invalid_expr(expr.span(db).clone()));
+    }
+
+    for expected in expected_fields {
+        let init = field_inits
+            .iter()
+            .find(|init| init.field.index == expected.index && init.field.origin == expected.origin)
+            .ok_or_else(|| invalid_expr(expr.span(db).clone()))?;
+        if !tys_match(db, init.field.parent, target) || !tys_match(db, init.field.ty, expected.ty) {
+            return Err(invalid_expr(expr.span(db).clone()));
+        }
+        let value_ty = generated_expr_static_ty_result(db, init.value, cx)?;
+        if !tys_match(db, value_ty, expected.ty) {
+            return Err(invalid_expr(init.value.span(db).clone()));
+        }
+    }
+
     Ok(target)
 }
 

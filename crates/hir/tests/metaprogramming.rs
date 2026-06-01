@@ -2082,14 +2082,14 @@ derive Default for Choice using StableDefault
 }
 
 #[test]
-fn core_derives_default_rejects_payload_default_variant_until_variant_init_fields_exist() {
+fn core_derives_default_builds_payload_default_variant_fields() {
     let mut db = HirAnalysisTestDb::default();
     let file = project_file(
         &mut db,
-        "core_derives_default_rejects_payload_default_variant_until_variant_init_fields_exist",
+        "core_derives_default_builds_payload_default_variant_fields",
         r#"
 [ingot]
-name = "core_derives_default_rejects_payload_default_variant_until_variant_init_fields_exist"
+name = "core_derives_default_builds_payload_default_variant_fields"
 version = "0.1.0"
 
 [dependencies]
@@ -2098,21 +2098,30 @@ core_derives = true
         r#"
 use core::Default
 
+fn require_default<T>()
+where
+    T: Default
+{}
+
 enum Choice {
     #[default]
     One(u256),
 }
 
 derive Default for Choice using StableDefault
+
+fn caller() {
+    require_default<Choice>()
+}
 "#,
     );
     let (top_mod, _) = db.top_mod(file);
-    let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(
-        &diags,
-        "provider output for `Default` does not satisfy trait method contract",
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Choice: Default with obligations {u256: Default}".to_string()]
     );
-    assert_diag_message(&diags, "invalid generated body for default");
 }
 
 #[test]
