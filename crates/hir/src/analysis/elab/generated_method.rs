@@ -23,7 +23,11 @@ use crate::{
     span::DynLazySpan,
 };
 
-use super::{ElaborationCtfeContextId, reflect::reflect_struct_fields, tys_match};
+use super::{
+    ElaborationCtfeContextId,
+    reflect::{reflect_enum_variants, reflect_struct_fields, reflect_variant_fields},
+    tys_match,
+};
 
 pub(super) fn generated_missing_required_methods<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -278,6 +282,11 @@ fn generated_expr_static_ty_result<'db>(
                 {
                     return Err(missing_requirement(expr.span(db).clone(), required));
                 }
+                for required in generated_enum_target_eq_requirements(db, lhs_ty, cx) {
+                    if !generated_has_requirement(db, cx.generated, required) {
+                        return Err(missing_requirement(expr.span(db).clone(), required));
+                    }
+                }
                 Ok(TyId::bool(db))
             } else {
                 Err(invalid_expr(rhs.span(db).clone()))
@@ -440,6 +449,33 @@ fn generated_generic_field_eq_requirement<'db>(
         db,
         TraitInstId::new_simple(db, cx.generated.trait_inst.def(db), vec![lhs_field.ty]),
     ))
+}
+
+fn generated_enum_target_eq_requirements<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
+) -> Vec<ConstraintId<'db>> {
+    let target = generated_method_target_ty(db, cx);
+    if !tys_match(db, ty, target) {
+        return Vec::new();
+    }
+
+    let variants = reflect_enum_variants(db, target);
+    if variants.is_empty() {
+        return Vec::new();
+    }
+
+    variants
+        .into_iter()
+        .flat_map(|variant| reflect_variant_fields(db, variant))
+        .map(|field| {
+            ConstraintId::from_trait(
+                db,
+                TraitInstId::new_simple(db, cx.generated.trait_inst.def(db), vec![field.ty]),
+            )
+        })
+        .collect()
 }
 
 fn generated_generic_default_requirement<'db>(

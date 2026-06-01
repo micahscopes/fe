@@ -917,6 +917,111 @@ impl StableMarker: Derive for Marker {
 }
 
 #[test]
+fn provider_generated_enum_eq_method_requires_variant_field_obligations() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_enum_eq_method_requires_variant_field_obligations.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+struct Second {}
+struct Third {}
+
+enum Choice<T> {
+    Empty,
+    One { value: T },
+    Two(Second, Third),
+}
+
+derive Eq for Choice using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for variant in reflect.variants() {
+            for field in variant.fields() {
+                builder.require<Eq>(field.ty())
+            }
+        }
+        builder.emit_method("eq", builder.eq(builder.self_ref(), builder.arg_ref("other")))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Choice<T>: Eq with obligations {T: Eq, Second: Eq, Third: Eq}"
+                .to_string(),
+        ]
+    );
+    assert_eq!(
+        generated_method_artifact_summaries_for_top_mod(&db, top_mod),
+        vec!["Choice<T>: Eq method #0 emits eq".to_string()]
+    );
+    assert_eq!(
+        generated_trace_summaries_for_top_mod(&db, top_mod)
+            .into_iter()
+            .filter(|summary| summary.contains("requires"))
+            .collect::<Vec<_>>(),
+        vec![
+            "Choice<T>: Eq requires T: Eq from field Choice::One.value".to_string(),
+            "Choice<T>: Eq requires Second: Eq from field Choice::Two.0".to_string(),
+            "Choice<T>: Eq requires Third: Eq from field Choice::Two.1".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn provider_generated_enum_eq_method_rejects_missing_variant_field_obligation() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_enum_eq_method_rejects_missing_variant_field_obligation.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+enum Choice<T> {
+    Empty,
+    One { value: T },
+}
+
+derive Eq for Choice using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method("eq", builder.eq(builder.self_ref(), builder.arg_ref("other")))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Eq` does not satisfy trait method contract",
+    );
+    assert_diag_message(&diags, "invalid generated body for eq");
+    assert_diag_message(&diags, "missing generated requirement T: Eq");
+}
+
+#[test]
 fn typed_reflection_requires_reflect_capability() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
