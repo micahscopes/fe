@@ -6591,7 +6591,7 @@ fn missing_link_audit_report(
         }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::BytecodeToRuntime,
-            owner_phase: CompilerPhase::BytecodeEmission,
+            owner_phase: CompilerPhase::RuntimeTrace,
             status_counts: runtime_counts,
             affected_origins: expected_absent_runtime_count + missing_runtime_join_count,
             affected_bytecode_pcs: 0,
@@ -6991,7 +6991,7 @@ fn missing_link_audit_report(
             status: LinkStatus::MissingRequired,
             issue_code: LinkIssueCode::MissingRuntimeJoin,
             severity: LinkSeverity::Warning,
-            owner_phase: CompilerPhase::BytecodeEmission,
+            owner_phase: CompilerPhase::RuntimeTrace,
             headline: "Runtime trace step did not resolve to static bytecode".to_string(),
             explanation: "Runtime traces with captured steps should resolve each executable step to a static bytecode instruction using code object/hash and PC evidence. Missing joins are runtime trace integration gaps, not expected absences.".to_string(),
             affected_origins: runtime_missing_steps
@@ -7618,7 +7618,7 @@ fn required_prepared_to_bytecode_evidence() -> Vec<RequiredEvidence> {
 fn required_runtime_join_evidence() -> Vec<RequiredEvidence> {
     vec![RequiredEvidence {
         kind: RequiredEvidenceKind::RuntimeCodeHashJoin,
-        owner_phase: CompilerPhase::BytecodeEmission,
+        owner_phase: CompilerPhase::RuntimeTrace,
         description: "Join runtime trace steps to static bytecode instructions using code object/hash and PC evidence.".to_string(),
     }]
 }
@@ -10787,6 +10787,7 @@ mod tests {
             .iter()
             .find(|summary| summary.boundary == LinkBoundaryKind::BytecodeToRuntime)
             .expect("bytecode to runtime boundary summary");
+        assert_eq!(bytecode_to_runtime.owner_phase, CompilerPhase::RuntimeTrace);
         assert_eq!(bytecode_to_runtime.affected_origins, 1);
         assert_eq!(
             bytecode_to_runtime
@@ -10851,6 +10852,7 @@ mod tests {
             .iter()
             .find(|summary| summary.boundary == LinkBoundaryKind::BytecodeToRuntime)
             .expect("bytecode to runtime boundary summary");
+        assert_eq!(runtime_boundary.owner_phase, CompilerPhase::RuntimeTrace);
         assert_eq!(
             runtime_boundary
                 .status_counts
@@ -10882,12 +10884,21 @@ mod tests {
             missing_links.gaps[0].required_evidence[0].kind,
             RequiredEvidenceKind::RuntimeCodeHashJoin
         );
+        assert_eq!(
+            missing_links.gaps[0].required_evidence[0].owner_phase,
+            CompilerPhase::RuntimeTrace
+        );
         assert!(missing_links.expected_absent.is_empty());
-        assert!(missing_links.clusters.iter().any(|cluster| {
-            cluster.boundary == LinkBoundaryKind::BytecodeToRuntime
-                && cluster.issue_code == LinkIssueCode::MissingRuntimeJoin
-                && cluster.gap_count == 1
-        }));
+        let runtime_cluster = missing_links
+            .clusters
+            .iter()
+            .find(|cluster| {
+                cluster.boundary == LinkBoundaryKind::BytecodeToRuntime
+                    && cluster.issue_code == LinkIssueCode::MissingRuntimeJoin
+                    && cluster.gap_count == 1
+            })
+            .expect("runtime missing-join cluster");
+        assert_eq!(runtime_cluster.owner_phase, CompilerPhase::RuntimeTrace);
     }
 
     #[test]
