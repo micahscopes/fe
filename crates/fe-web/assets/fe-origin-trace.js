@@ -46,27 +46,8 @@
       node[cacheKey] = [];
       return node[cacheKey];
     }
-    node[cacheKey] = fallbackScopedTraceClasses(node, datasetKey);
+    node[cacheKey] = [];
     return node[cacheKey];
-  }
-
-  function fallbackScopedTraceClasses(node, datasetKey) {
-    var groups = traceClasses(node);
-    var exact = [];
-    var generated = [];
-    var prepared = [];
-    groups.forEach(function (group) {
-      if (group.indexOf("exact-c-") === 0) exact.push(group);
-      else if (group.indexOf("generated-c-") === 0) generated.push(group);
-      else if (group.indexOf("prepared-c-") === 0) prepared.push(group);
-    });
-    if (datasetKey === "hoverGroups") {
-      if (exact.length) return exact;
-      if (prepared.length) return prepared;
-      if (generated.length) return generated.slice(0, 1);
-      return [];
-    }
-    return exact.concat(generated, prepared);
   }
 
   function isTraceGroup(name) {
@@ -769,7 +750,15 @@
         this._bindStableIdentities(row, line.stable_identities || []);
         row.append(el("span", "ln", line.number), el("code", "", line.text), this._badges(line));
         body.append(row);
-        var marker = this._overviewMarker(classes, markerIndex, markerTotal, "source line " + line.number, row.id);
+        var marker = this._overviewMarker(
+          classes,
+          markerIndex,
+          markerTotal,
+          "source line " + line.number,
+          row.id,
+          line.hover_groups,
+          line.selection_groups
+        );
         if (marker) markers.push(marker);
         markerIndex += 1;
       }, this);
@@ -792,7 +781,15 @@
           this._bindStableIdentities(row, line.stable_identities || []);
           row.append(el("span", "ln", line.number), el("code", "", line.text), this._badges(line));
           body.append(row);
-          var marker = this._overviewMarker(classes, markerIndex, markerTotal, row.dataset.traceLabel, row.id);
+          var marker = this._overviewMarker(
+            classes,
+            markerIndex,
+            markerTotal,
+            row.dataset.traceLabel,
+            row.id,
+            line.hover_groups,
+            line.selection_groups
+          );
           if (marker) markers.push(marker);
           markerIndex += 1;
         }, this);
@@ -841,7 +838,15 @@
           this._badges(rowData)
         );
         rows.append(row);
-        var marker = this._overviewMarker(classes, index, panelRows.length, rowData.label || text || rowData.key || "", row.id);
+        var marker = this._overviewMarker(
+          classes,
+          index,
+          panelRows.length,
+          rowData.label || text || rowData.key || "",
+          row.id,
+          rowData.hover_groups,
+          rowData.selection_groups
+        );
         if (marker) markers.push(marker);
       }, this);
       if (!panelRows.length) {
@@ -862,12 +867,17 @@
       return shell;
     }
 
-    _overviewMarker(classes, index, total, label, targetRowId) {
+    _overviewMarker(classes, index, total, label, targetRowId, hoverGroups, selectionGroups) {
       var trace = (classes || []).filter(isTraceGroup);
       if (!trace.length || !total) return null;
       var markerClasses = ["overview-marker", "trace-region"].concat(this._overviewMarkerKinds(classes || [])).concat(classes || []);
       var marker = el("button", markerClasses.join(" "));
-      this._bindTraceGroups(marker, classes || []);
+      this._bindTraceGroups(
+        marker,
+        classes || [],
+        this._explicitInteractionGroups(hoverGroups),
+        this._explicitInteractionGroups(selectionGroups)
+      );
       marker.type = "button";
       marker.title = label || "evidence match";
       marker.dataset.traceLabel = label || "evidence match";
@@ -898,30 +908,14 @@
       var groups = (classes || []).filter(isTraceGroup);
       node.__traceClasses = groups;
       if (groups.length) node.dataset.traceGroups = groups.join(" ");
-      var hover = (hoverGroups || this._preferredHoverGroups(groups)).filter(isTraceGroup);
+      var hover = this._explicitInteractionGroups(hoverGroups).filter(isTraceGroup);
       node.__hoverClasses = hover;
-      var selection = (selectionGroups || this._preferredSelectionGroups(groups)).filter(isTraceGroup);
+      var selection = this._explicitInteractionGroups(selectionGroups).filter(isTraceGroup);
       node.__selectionClasses = selection;
       if (groups.length) {
         node.dataset.hoverGroups = hover.join(" ");
         node.dataset.selectionGroups = selection.join(" ");
       }
-    }
-
-    _preferredHoverGroups(groups) {
-      var rails = this._groupsByRail(groups);
-      if (rails.exact.length) return rails.exact;
-      if (rails.prepared.length) return rails.prepared;
-      if (rails.generated.length) return rails.generated.slice(0, 1);
-      return rails.fallback;
-    }
-
-    _preferredSelectionGroups(groups) {
-      var rails = this._groupsByRail(groups);
-      var scoped = rails.exact.concat(rails.generated, rails.prepared);
-      if (scoped.length) return scoped;
-      if (rails.context.length) return rails.context;
-      return rails.fallback;
     }
 
     _bindStableIdentities(node, identities) {

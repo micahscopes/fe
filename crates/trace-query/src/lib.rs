@@ -13176,6 +13176,57 @@ mod tests {
     }
 
     #[test]
+    fn trace_workbench_browser_interaction_groups_are_projection_driven() {
+        let js_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../fe-web/assets/fe-origin-trace.js");
+        let js = fs::read_to_string(&js_path).expect("read trace workbench browser client");
+
+        for forbidden in [
+            "fallbackScopedTraceClasses",
+            "_preferredHoverGroups",
+            "_preferredSelectionGroups",
+        ] {
+            assert!(
+                !js.contains(forbidden),
+                "browser interactions must not synthesize rail groups through {forbidden:?}"
+            );
+        }
+
+        let scoped_start = js
+            .find("  function scopedTraceClasses(")
+            .expect("find scoped trace class reader");
+        let scoped_tail = &js[scoped_start..];
+        let scoped_end = scoped_tail
+            .find("  function isTraceGroup(")
+            .expect("find scoped trace class reader end");
+        let scoped_body = &scoped_tail[..scoped_end];
+        assert!(
+            !scoped_body.contains("traceClasses("),
+            "hover/selection lookup must not fall back to broad trace class scanning"
+        );
+
+        let bind_start = js
+            .find("    _bindTraceGroups(")
+            .expect("find trace group binder");
+        let bind_tail = &js[bind_start..];
+        let bind_end = bind_tail
+            .find("    _bindStableIdentities(")
+            .expect("find trace group binder end");
+        let bind_body = &bind_tail[..bind_end];
+        for forbidden in ["_groupsByRail", "exact-c-", "generated-c-", "prepared-c-"] {
+            assert!(
+                !bind_body.contains(forbidden),
+                "trace group binding must use projection groups, not rail-class policy via {forbidden:?}"
+            );
+        }
+        assert!(
+            bind_body.contains("_explicitInteractionGroups(hoverGroups)")
+                && bind_body.contains("_explicitInteractionGroups(selectionGroups)"),
+            "trace group binding must consume explicit projection hover/selection groups"
+        );
+    }
+
+    #[test]
     fn trace_workbench_source_exact_status_requires_visible_source_row() {
         let source = serde_json::json!({
             "lines": [
