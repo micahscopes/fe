@@ -247,7 +247,32 @@ impl StableEq: NotDerive for Eq {
     assert_diag_message(&diags, "invalid derive provider");
     assert_diag_message(
         &diags,
-        "derive provider declarations must use `Derive` after `:`",
+        "derive provider declarations must use built-in `Derive` after `:`",
+    );
+}
+
+#[test]
+fn named_derive_provider_marker_must_resolve_to_builtin_derive() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_marker_must_resolve_to_builtin_derive.fe".into(),
+        r#"
+trait Eq {}
+trait Derive {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>> {
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid derive provider");
+    assert_diag_message(
+        &diags,
+        "derive provider declarations must use built-in `Derive` after `:`",
     );
 }
 

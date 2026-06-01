@@ -9,6 +9,7 @@ use crate::{
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             trait_resolution::PredicateListId,
+            ty_def::{PrimTy, TyBase, TyData},
         },
     },
     hir_def::{Attr, DeriveProvider, Func, HirIngot, IdentId, ItemKind, NormalAttr, Trait},
@@ -162,15 +163,23 @@ pub(crate) fn validate_named_derive_provider<'db>(
         }
     };
 
-    let derives_derivation = provider
-        .derive_path(db)
-        .to_opt()
-        .and_then(|path| path.as_ident(db))
-        .is_some_and(|ident| ident.data(db) == "Derive");
+    let derives_derivation = provider.derive_path(db).to_opt().is_some_and(|path| {
+        matches!(
+            resolve_path(
+                db,
+                path,
+                provider.scope(),
+                PredicateListId::empty_list(db),
+                false
+            ),
+            Ok(PathRes::Ty(ty))
+                if matches!(ty.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Derive)))
+        )
+    });
     if !derives_derivation {
         diags.push(invalid_provider(
             provider.span().derive_path().into(),
-            "derive provider declarations must use `Derive` after `:`",
+            "derive provider declarations must use built-in `Derive` after `:`",
         ));
     }
 
