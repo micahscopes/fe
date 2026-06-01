@@ -16,11 +16,11 @@ use trace_facts::{
 };
 use trace_query::{
     AttributionAuditReport, IntrospectionService, LoopContentsRequest, TraceIntrospectionService,
-    TraceWorkbenchProjectionRequest,
+    TraceWorkbenchProjectionRequest, component_classes_by_origin_key,
     origin_closure::{
         ClosureAuditReport, OriginClosure as DemoClosure, OriginClosureSourceLine,
         audit_origin_closures, build_origin_closure_set, classes_by_origin_key,
-        component_classes_by_origin_key, source_owner_matches_input,
+        source_owner_matches_input_among,
     },
     static_analysis::{StaticAnalysisReport, static_analysis_report},
     trace_workbench_report_projection,
@@ -1109,10 +1109,11 @@ fn source_lines(
 ) -> Vec<DemoSourceLine> {
     let mut exact_classes_by_line = BTreeMap::<u32, BTreeSet<String>>::new();
     let mut enclosing_classes_by_line = BTreeMap::<u32, BTreeSet<String>>::new();
+    let source_owners = demo_closure_source_owners(closures);
     for closure in closures {
         for span in &closure.source_spans {
             if span.confidence != "direct"
-                || !source_owner_matches_input(&span.file_owner, input_path)
+                || !demo_source_owner_matches_input(&span.file_owner, input_path, &source_owners)
             {
                 continue;
             }
@@ -1224,10 +1225,11 @@ fn related_source_sections(
 ) -> Vec<DemoRelatedSource> {
     let mut classes_by_file_line =
         BTreeMap::<OriginExportKey, BTreeMap<u32, BTreeSet<String>>>::new();
+    let source_owners = demo_closure_source_owners(closures);
     for closure in closures {
         for span in &closure.source_spans {
             if span.confidence != "direct"
-                || source_owner_matches_input(&span.file_owner, input_path)
+                || demo_source_owner_matches_input(&span.file_owner, input_path, &source_owners)
             {
                 continue;
             }
@@ -1298,6 +1300,39 @@ fn source_file_key_for_owner(index: &DemoIndex<'_>, owner: &str) -> Option<Origi
         .keys()
         .find(|file_key| file_key.owner_key() == owner)
         .cloned()
+}
+
+fn demo_source_owner_matches_input(
+    owner: &str,
+    input_path: &str,
+    source_owners: &[String],
+) -> bool {
+    source_owner_matches_input_among(owner, input_path, source_owners.iter().map(String::as_str))
+}
+
+fn demo_closure_source_owners(closures: &[DemoClosure]) -> Vec<String> {
+    closures
+        .iter()
+        .flat_map(|closure| closure.source_spans.iter())
+        .map(|span| span.file_owner.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn snapshot_source_owners(snapshot: &TraceSnapshot) -> Vec<String> {
+    snapshot
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            TraceFact::SourceFile(source_file) => Some(source_file.file_key.owner_key()),
+            TraceFact::SourceSpan(span) => Some(span.file.owner_key()),
+            _ => None,
+        })
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn truncate_for_report(value: &str, max_chars: usize) -> String {
@@ -2062,11 +2097,16 @@ fn source_texts_by_file(
     input_source_text: &str,
 ) -> BTreeMap<OriginExportKey, String> {
     let mut texts = BTreeMap::new();
+    let source_owners = snapshot_source_owners(snapshot);
     for fact in snapshot.facts() {
         let TraceFact::SourceFile(source_file) = fact else {
             continue;
         };
-        if source_owner_matches_input(source_file.file_key.owner_key(), input_path) {
+        if demo_source_owner_matches_input(
+            source_file.file_key.owner_key(),
+            input_path,
+            &source_owners,
+        ) {
             texts.insert(source_file.file_key.clone(), input_source_text.to_string());
             continue;
         }

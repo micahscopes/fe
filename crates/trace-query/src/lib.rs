@@ -26,6 +26,7 @@ use trace_facts::{
 pub use projection_manifest::{
     TraceViewManifest, trace_workbench_manifest, trace_workbench_summary_chunk,
 };
+pub use rail_components::component_classes_by_origin_key;
 
 pub type QueryResult<T> = Result<T, QueryError>;
 
@@ -2302,7 +2303,11 @@ fn trace_workbench_origin_span_text<'a>(
         TraceFact::SourceSpan(span) if span.origin == *origin => Some(span),
         _ => None,
     })?;
-    let text = if origin_closure::source_owner_matches_input(span.file.owner_key(), input_path) {
+    let text = if trace_workbench_source_owner_matches_input(
+        snapshot,
+        input_path,
+        span.file.owner_key(),
+    ) {
         source_text
     } else {
         trace_workbench_related_source_text_for_span(snapshot, related_source_texts, span)
@@ -2313,6 +2318,35 @@ fn trace_workbench_origin_span_text<'a>(
         return None;
     }
     text.get(start..end)
+}
+
+fn trace_workbench_source_owner_matches_input(
+    snapshot: &TraceSnapshot,
+    input_path: &str,
+    owner: &str,
+) -> bool {
+    origin_closure::source_owner_matches_input_among(
+        owner,
+        input_path,
+        trace_workbench_source_owners(snapshot)
+            .iter()
+            .map(String::as_str),
+    )
+}
+
+fn trace_workbench_source_owners(snapshot: &TraceSnapshot) -> Vec<String> {
+    snapshot
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            TraceFact::SourceFile(source_file) => Some(source_file.file_key.owner_key()),
+            TraceFact::SourceSpan(span) => Some(span.file.owner_key()),
+            _ => None,
+        })
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn trace_workbench_related_source_text_for_span<'a>(
@@ -2907,7 +2941,7 @@ fn trace_workbench_related_sources(
         let TraceFact::SourceSpan(span) = fact else {
             continue;
         };
-        if origin_closure::source_owner_matches_input(span.file.owner_key(), input_path) {
+        if trace_workbench_source_owner_matches_input(snapshot, input_path, span.file.owner_key()) {
             continue;
         }
         let classes = component_classes_by_key
@@ -3083,7 +3117,8 @@ fn trace_workbench_source_lines(
         let TraceFact::SourceSpan(span) = fact else {
             continue;
         };
-        if !origin_closure::source_owner_matches_input(span.file.owner_key(), input_path) {
+        if !trace_workbench_source_owner_matches_input(snapshot, input_path, span.file.owner_key())
+        {
             continue;
         }
         let target = if span.start_line == span.end_line {
@@ -3447,6 +3482,7 @@ impl<'a> TraceWorkbenchProjectionIndex<'a> {
                 TraceFact::SourceSpan(span) => {
                     source_spans.insert(span.origin.clone(), span);
                     if let Some(snippet) = trace_workbench_source_snippet(
+                        snapshot,
                         input_path,
                         source_text,
                         related_source_texts,
@@ -3473,24 +3509,28 @@ impl<'a> TraceWorkbenchProjectionIndex<'a> {
 }
 
 fn trace_workbench_source_snippet(
+    snapshot: &TraceSnapshot,
     input_path: &str,
     source_text: Option<&str>,
     related_source_texts: &BTreeMap<String, String>,
     span: &trace_facts::SourceSpanFact,
 ) -> Option<String> {
-    let source_text =
-        if origin_closure::source_owner_matches_input(span.file.owner_key(), input_path) {
-            source_text
-        } else {
-            related_source_texts
-                .get(&span.file.canonical_storage_key())
-                .map(String::as_str)
-                .or_else(|| {
-                    related_source_texts
-                        .get(span.file.owner_key())
-                        .map(String::as_str)
-                })
-        }?;
+    let source_text = if trace_workbench_source_owner_matches_input(
+        snapshot,
+        input_path,
+        span.file.owner_key(),
+    ) {
+        source_text
+    } else {
+        related_source_texts
+            .get(&span.file.canonical_storage_key())
+            .map(String::as_str)
+            .or_else(|| {
+                related_source_texts
+                    .get(span.file.owner_key())
+                    .map(String::as_str)
+            })
+    }?;
     let start = span.start_byte as usize;
     let end = span.end_byte as usize;
     if start >= end || end > source_text.len() {
@@ -12707,6 +12747,104 @@ mod tests {
         assert_eq!(related[0]["source_text_available"], true);
         assert_eq!(related[0]["lines"][0]["number"], 7);
         assert_eq!(related[0]["lines"][0]["text"], "abi line");
+    }
+
+    #[test]
+    fn trace_workbench_source_projection_rejects_ambiguous_relative_source_suffixes() {
+        let entry_file = key(
+            "source.file",
+            "file:///workspace/contracts/main.fe",
+            "file:entry",
+        );
+        let helper_file = key(
+            "source.file",
+            "file:///workspace/std/contracts/main.fe",
+            "file:helper",
+        );
+        let entry_hir = key("hir.expr", entry_file.owner_key(), "expr:entry");
+        let helper_hir = key("hir.expr", helper_file.owner_key(), "expr:helper");
+        let snapshot = snapshot(vec![
+            node(entry_file.clone()),
+            node(helper_file.clone()),
+            node(entry_hir.clone()),
+            node(helper_hir.clone()),
+            TraceFact::SourceFile(SourceFileFact::new(
+                entry_file.clone(),
+                "file:///workspace/contracts/main.fe",
+                "contracts/main.fe",
+                "blake3:entry",
+                None,
+            )),
+            TraceFact::SourceFile(SourceFileFact::new(
+                helper_file.clone(),
+                "file:///workspace/std/contracts/main.fe",
+                "std/contracts/main.fe",
+                "blake3:helper",
+                None,
+            )),
+            TraceFact::SourceSpan(SourceSpanFact::new(
+                entry_hir.clone(),
+                entry_file.clone(),
+                0,
+                10,
+                1,
+                1,
+                1,
+                11,
+            )),
+            TraceFact::SourceSpan(SourceSpanFact::new(
+                helper_hir.clone(),
+                helper_file.clone(),
+                0,
+                11,
+                1,
+                1,
+                1,
+                12,
+            )),
+        ]);
+        let mut classes = BTreeMap::new();
+        classes.insert(
+            entry_hir.canonical_storage_key(),
+            vec!["exact-c-entry".to_string()],
+        );
+        classes.insert(
+            helper_hir.canonical_storage_key(),
+            vec!["exact-c-helper".to_string()],
+        );
+        let mut related_source_texts = BTreeMap::new();
+        related_source_texts.insert(
+            entry_file.canonical_storage_key(),
+            "entry line\n".to_string(),
+        );
+        related_source_texts.insert(
+            helper_file.canonical_storage_key(),
+            "helper line\n".to_string(),
+        );
+
+        let source = trace_workbench_source_projection(
+            "contracts/main.fe",
+            Some("visible entry text\n"),
+            &related_source_texts,
+            &snapshot,
+            &classes,
+            &BTreeMap::new(),
+        );
+
+        assert!(
+            source["lines"][0]["classes"].as_array().unwrap().is_empty(),
+            "ambiguous relative input must not paint entry rows from suffix-matched spans"
+        );
+        let related = source["related_sources"].as_array().unwrap();
+        assert_eq!(related.len(), 2);
+        assert!(related.iter().any(|section| {
+            section["origin"] == serde_json::json!(entry_file.canonical_storage_key())
+                && section["lines"][0]["text"] == "entry line"
+        }));
+        assert!(related.iter().any(|section| {
+            section["origin"] == serde_json::json!(helper_file.canonical_storage_key())
+                && section["lines"][0]["text"] == "helper line"
+        }));
     }
 
     #[test]

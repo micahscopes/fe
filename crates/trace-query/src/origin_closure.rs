@@ -310,6 +310,43 @@ pub fn classes_by_origin_key(closures: &[OriginClosure]) -> BTreeMap<String, Vec
 }
 
 pub fn source_owner_matches_input(owner: &str, input_path: &str) -> bool {
+    if source_owner_matches_input_exact(owner, input_path) {
+        return true;
+    }
+    let input_path = normalized_source_owner_path(input_path);
+    if source_path_is_basename_only(&input_path) {
+        return false;
+    }
+    let owner_path = normalized_source_owner_path(owner);
+    source_path_suffix_matches(&owner_path, &input_path)
+}
+
+pub fn source_owner_matches_input_among<'a>(
+    owner: &str,
+    input_path: &str,
+    source_owners: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    if source_owner_matches_input_exact(owner, input_path) {
+        return true;
+    }
+    let input_path = normalized_source_owner_path(input_path);
+    if source_path_is_basename_only(&input_path) {
+        return false;
+    }
+    let owner_path = normalized_source_owner_path(owner);
+    if !source_path_suffix_matches(&owner_path, &input_path) {
+        return false;
+    }
+    let matching_owners = source_owners
+        .into_iter()
+        .map(normalized_source_owner_path)
+        .filter(|candidate| source_path_suffix_matches(candidate, &input_path))
+        .map(|candidate| candidate.into_owned())
+        .collect::<BTreeSet<_>>();
+    matching_owners.len() == 1 && matching_owners.contains(owner_path.as_ref())
+}
+
+fn source_owner_matches_input_exact(owner: &str, input_path: &str) -> bool {
     let owner = owner.trim();
     let input_path = input_path.trim();
     if owner == input_path {
@@ -323,10 +360,7 @@ pub fn source_owner_matches_input(owner: &str, input_path: &str) -> bool {
     if owner_path == input_path {
         return true;
     }
-    if source_path_is_basename_only(&input_path) {
-        return false;
-    }
-    source_path_suffix_matches(&owner_path, &input_path)
+    false
 }
 
 fn normalized_source_owner_path(value: &str) -> Cow<'_, str> {
@@ -379,7 +413,8 @@ pub fn audit_origin_closures(
     source_lines: &[OriginClosureSourceLine],
     snapshot: &TraceSnapshot,
 ) -> ClosureAuditReport {
-    let span_groups = SourceSpanGroupIndex::new(input_path, closures, source_lines);
+    let source_owners = closure_source_owners(closures);
+    let span_groups = SourceSpanGroupIndex::new(input_path, closures, source_lines, &source_owners);
     let explained_postopt_origins = explicit_postopt_explanations(snapshot)
         .into_iter()
         .map(|key| key.canonical_storage_key())
@@ -488,7 +523,7 @@ fn closure_roots(
     let mut roots = BTreeMap::<String, OriginExportKey>::new();
     for span in index.source_spans.values() {
         if matches!(span.origin.kind(), "hir.expr" | "hir.stmt")
-            && source_span_matches_input(span, input_path)
+            && source_span_matches_input(span, input_path, index)
         {
             roots.insert(span.origin.canonical_storage_key(), span.origin.clone());
         }
@@ -527,8 +562,19 @@ fn has_precise_audit_edge(key: &OriginExportKey, index: &OriginClosureIndex<'_>)
     })
 }
 
-fn source_span_matches_input(span: &SourceSpanFact, input_path: &str) -> bool {
-    source_owner_matches_input(span.file.owner_key(), input_path)
+fn source_span_matches_input(
+    span: &SourceSpanFact,
+    input_path: &str,
+    index: &OriginClosureIndex<'_>,
+) -> bool {
+    source_owner_matches_input_among(
+        span.file.owner_key(),
+        input_path,
+        index
+            .source_spans
+            .values()
+            .map(|span| span.file.owner_key()),
+    )
 }
 
 fn build_closures(
@@ -724,6 +770,7 @@ struct SourceSpanGroup {
 
 struct SourceSpanGroupIndex {
     groups: BTreeMap<SourceSpanSignature, SourceSpanGroup>,
+    source_owners: Vec<String>,
 }
 
 impl SourceSpanGroupIndex {
@@ -731,6 +778,7 @@ impl SourceSpanGroupIndex {
         input_path: &str,
         closures: &[OriginClosure],
         source_lines: &[OriginClosureSourceLine],
+        source_owners: &[String],
     ) -> Self {
         let mut groups = BTreeMap::<SourceSpanSignature, SourceSpanGroup>::new();
         for closure in closures {
@@ -741,7 +789,7 @@ impl SourceSpanGroupIndex {
                 + closure.counts.bytecode
                 > 0;
             for span in &closure.source_spans {
-                let Some(signature) = source_span_signature(span, input_path) else {
+                let Some(signature) = source_span_signature(span, input_path, source_owners) else {
                     continue;
                 };
                 let group = groups.entry(signature).or_default();
@@ -764,7 +812,10 @@ impl SourceSpanGroupIndex {
                 }
             }
         }
-        Self { groups }
+        Self {
+            groups,
+            source_owners: source_owners.to_vec(),
+        }
     }
 
     fn summary(&self) -> ClosureAuditSpanGroupSummary {
@@ -800,14 +851,19 @@ impl SourceSpanGroupIndex {
 fn source_span_signature(
     span: &OriginClosureSourceSpan,
     input_path: &str,
+    source_owners: &[String],
 ) -> Option<SourceSpanSignature> {
-    (span.confidence == "direct" && source_owner_matches_input(&span.file_owner, input_path)).then(
-        || SourceSpanSignature {
-            file_owner: span.file_owner.clone(),
-            start_byte: span.start_byte,
-            end_byte: span.end_byte,
-        },
-    )
+    (span.confidence == "direct"
+        && source_owner_matches_input_among(
+            &span.file_owner,
+            input_path,
+            source_owners.iter().map(String::as_str),
+        ))
+    .then(|| SourceSpanSignature {
+        file_owner: span.file_owner.clone(),
+        start_byte: span.start_byte,
+        end_byte: span.end_byte,
+    })
 }
 
 fn source_text_for_span(
@@ -837,14 +893,24 @@ fn audit_closure(
         .source_spans
         .iter()
         .filter(|span| {
-            span.confidence == "direct" && source_owner_matches_input(&span.file_owner, input_path)
+            span.confidence == "direct"
+                && source_owner_matches_input_among(
+                    &span.file_owner,
+                    input_path,
+                    span_groups.source_owners.iter().map(String::as_str),
+                )
         })
         .collect::<Vec<_>>();
     let foreign_spans = closure
         .source_spans
         .iter()
         .filter(|span| {
-            span.confidence == "direct" && !source_owner_matches_input(&span.file_owner, input_path)
+            span.confidence == "direct"
+                && !source_owner_matches_input_among(
+                    &span.file_owner,
+                    input_path,
+                    span_groups.source_owners.iter().map(String::as_str),
+                )
         })
         .collect::<Vec<_>>();
 
@@ -903,7 +969,7 @@ fn audit_closure(
         > 0;
     let same_span_sibling_reaches_target = !has_lowering_target
         && direct_input_spans.iter().any(|span| {
-            source_span_signature(span, input_path)
+            source_span_signature(span, input_path, &span_groups.source_owners)
                 .and_then(|signature| span_groups.groups.get(&signature))
                 .is_some_and(|group| group.closures_with_targets > 0)
         });
@@ -1006,6 +1072,16 @@ fn audit_closure(
             .collect(),
         notes,
     }
+}
+
+fn closure_source_owners(closures: &[OriginClosure]) -> Vec<String> {
+    closures
+        .iter()
+        .flat_map(|closure| closure.source_spans.iter())
+        .map(|span| span.file_owner.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn closure_postopt_origins_are_explained(
@@ -1269,6 +1345,39 @@ mod tests {
         assert!(!source_owner_matches_input(
             "package:std/fib_demo.fe",
             "fib_demo.fe"
+        ));
+    }
+
+    #[test]
+    fn source_owner_matching_rejects_ambiguous_relative_suffixes() {
+        assert!(!source_owner_matches_input_among(
+            "file:///workspace/contracts/main.fe",
+            "contracts/main.fe",
+            [
+                "file:///workspace/contracts/main.fe",
+                "file:///workspace/std/contracts/main.fe",
+            ]
+        ));
+        assert!(source_owner_matches_input_among(
+            "file:///workspace/contracts/main.fe",
+            "file:///workspace/contracts/main.fe",
+            [
+                "file:///workspace/contracts/main.fe",
+                "file:///workspace/std/contracts/main.fe",
+            ]
+        ));
+        assert!(!source_owner_matches_input_among(
+            "file:///workspace/std/contracts/main.fe",
+            "contracts/main.fe",
+            [
+                "file:///workspace/contracts/main.fe",
+                "file:///workspace/std/contracts/main.fe",
+            ]
+        ));
+        assert!(source_owner_matches_input_among(
+            "file:///workspace/std/contracts/main.fe",
+            "contracts/main.fe",
+            ["file:///workspace/std/contracts/main.fe"]
         ));
     }
 
@@ -1744,7 +1853,13 @@ mod tests {
         lowered.root_key = "lowered".to_string();
         lowered.counts.bytecode = 1;
         let closures = vec![source_only.clone(), lowered];
-        let groups = SourceSpanGroupIndex::new("fib_demo.fe", &closures, &test_source_lines());
+        let source_owners = closure_source_owners(&closures);
+        let groups = SourceSpanGroupIndex::new(
+            "fib_demo.fe",
+            &closures,
+            &test_source_lines(),
+            &source_owners,
+        );
 
         let entry = audit_closure("fib_demo.fe", 24, &source_only, &groups, &BTreeSet::new());
 
@@ -2098,10 +2213,12 @@ mod tests {
     }
 
     fn groups_for_closure(closure: &OriginClosure) -> SourceSpanGroupIndex {
+        let source_owners = closure_source_owners(std::slice::from_ref(closure));
         SourceSpanGroupIndex::new(
             "fib_demo.fe",
             std::slice::from_ref(closure),
             &test_source_lines(),
+            &source_owners,
         )
     }
 
