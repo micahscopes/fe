@@ -5,8 +5,8 @@ use common::origin::OriginExportKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trace_facts::{
-    CompilerEventKind, OriginEdgeTraversalClass, RelationBundleData, RelationColumn,
-    RelationColumnKind, RelationRow, RelationSchema, TraceFact, TraceSnapshot,
+    OriginEdgeTraversalClass, RelationBundleData, RelationColumn, RelationColumnKind, RelationRow,
+    RelationSchema, TraceFact, TraceSnapshot,
 };
 
 use crate::{
@@ -349,36 +349,20 @@ fn append_prepared_lineage_views(snapshot: &TraceSnapshot, rows: &mut Vec<Relati
             _ => None,
         })
         .collect::<Vec<_>>();
-    for fact in snapshot.facts() {
-        let TraceFact::CompilerEvent(event) = fact else {
-            continue;
-        };
-        if event.kind != CompilerEventKind::PreparedLineage {
-            continue;
-        }
-        for postopt in &event.inputs {
-            if postopt.kind() != "sonatina.postopt.inst" {
-                continue;
-            }
-            for prepared in &event.outputs {
-                if prepared.kind() != "sonatina.evm.prepared.inst" {
-                    continue;
-                }
-                let kind = origin_edges
-                    .iter()
-                    .find(|edge| edge.from == *prepared && edge.to == *postopt)
-                    .and_then(|edge| prepared_lineage_kind_for_edge(edge))
-                    .unwrap_or("unknown");
-                rows.push(RelationRow {
-                    relation: "prepared_lineage_fact",
-                    values: vec![
-                        prepared.canonical_storage_key(),
-                        postopt.canonical_storage_key(),
-                        kind.to_string(),
-                    ],
-                });
-            }
-        }
+    for (prepared, postopt) in prepared_lineage_event_pairs(snapshot) {
+        let kind = origin_edges
+            .iter()
+            .find(|edge| edge.from == prepared && edge.to == postopt)
+            .and_then(|edge| prepared_lineage_kind_for_edge(edge))
+            .unwrap_or("unknown");
+        rows.push(RelationRow {
+            relation: "prepared_lineage_fact",
+            values: vec![
+                prepared.canonical_storage_key(),
+                postopt.canonical_storage_key(),
+                kind.to_string(),
+            ],
+        });
     }
 }
 
@@ -1208,6 +1192,61 @@ mod tests {
             "backend_prepared_edge",
             &[
                 backend.canonical_storage_key(),
+                postopt.canonical_storage_key(),
+            ]
+        ));
+    }
+
+    #[test]
+    fn prepared_lineage_fact_view_uses_trace_index_codegen_contract() {
+        let postopt = key("sonatina.postopt.inst", "demo", "inst:0");
+        let vcode = key("evm.vcode.inst", "demo", "inst:0");
+        let event = key("compiler.event", "demo", "prepared-lineage:vcode");
+        let snapshot = TraceSnapshot::new(TraceBundle::new(
+            TraceMetadata::compiler_emitted(
+                "abc123",
+                "evm/sonatina",
+                vec!["fe".to_string(), "trace".to_string()],
+                "demo.fe",
+                vec![],
+            ),
+            vec![
+                node(postopt.clone()),
+                node(vcode.clone()),
+                node(event.clone()),
+                TraceFact::CompilerEvent(CompilerEventFact::new(
+                    event,
+                    CompilerPhase::Backend,
+                    CompilerEventKind::PreparedLineage,
+                    vec![postopt.clone()],
+                    vec![vcode.clone()],
+                    None,
+                )),
+                TraceFact::OriginEdge(OriginEdgeFact::new(
+                    vcode.clone(),
+                    postopt.clone(),
+                    OriginEdgeLabel::LoweredFrom,
+                    Some(CompilerPhase::Backend),
+                )),
+            ],
+        ))
+        .unwrap();
+        let export = emit_base_relations(&snapshot);
+
+        assert!(relation_row_exists(
+            &export,
+            "prepared_lineage_fact",
+            &[
+                vcode.canonical_storage_key(),
+                postopt.canonical_storage_key(),
+                "exact_lowering".to_string(),
+            ]
+        ));
+        assert!(relation_row_exists(
+            &export,
+            "exact_attribution_edge",
+            &[
+                vcode.canonical_storage_key(),
                 postopt.canonical_storage_key(),
             ]
         ));
