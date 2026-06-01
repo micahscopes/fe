@@ -3021,7 +3021,7 @@ fn caller() {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Eq` does not satisfy required methods",
+        "provider output for `Eq` does not satisfy trait method contract",
     );
     assert_diag_message(&diags, "invalid generated body for eq");
     assert_diag_message(&diags, "expected bool, got Foo");
@@ -3100,12 +3100,12 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Eq` does not satisfy required methods",
+        "provider output for `Eq` does not satisfy trait method contract",
     );
     assert_diag_primary_span_text(
         &db,
         &diags,
-        "provider output for `Eq` does not satisfy required methods",
+        "provider output for `Eq` does not satisfy trait method contract",
         "builder.finish()",
     );
 }
@@ -3296,6 +3296,51 @@ fn caller() {
             "Foo: TestEq method #0 emits eq".to_string(),
             "Foo: TestEq method #1 emits ne".to_string(),
         ]
+    );
+}
+
+#[test]
+fn provider_rejects_invalid_defaulted_trait_method_override() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_rejects_invalid_defaulted_trait_method_override.fe".into(),
+        r#"
+trait TestEq {
+    fn eq(self) -> bool
+    fn ne(self) -> bool {
+        false
+    }
+}
+
+struct Foo {}
+
+derive TestEq for Foo using StableTestEq
+
+impl StableTestEq: Derive for TestEq {
+    const fn derive<T>(ev: own Evidence<TestEq<T>>) -> Evidence<TestEq<T>>
+        uses (builder: mut ImplBuilder<TestEq<T>>)
+    {
+        builder.emit_method("eq", builder.bool(true))
+        builder.emit_method("ne", builder.self_ref())
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `TestEq` does not satisfy trait method contract",
+    );
+    assert_diag_message(&diags, "invalid generated body for ne");
+    assert_diag_message(&diags, "expected bool, got Foo");
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "provider output for `TestEq` does not satisfy trait method contract",
+        "builder.self_ref()",
     );
 }
 
@@ -3609,7 +3654,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Eq` does not satisfy required methods",
+        "provider output for `Eq` does not satisfy trait method contract",
     );
     assert_diag_message(&diags, "invalid generated body for eq");
     assert_diag_message(&diags, "expected bool, got <unavailable>");
@@ -3620,7 +3665,7 @@ impl StableEq: Derive for Eq {
     assert_diag_primary_span_text(
         &db,
         &diags,
-        "provider output for `Eq` does not satisfy required methods",
+        "provider output for `Eq` does not satisfy trait method contract",
         r#"builder.arg_ref("other")"#,
     );
 }
@@ -3664,7 +3709,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Eq` does not satisfy required methods",
+        "provider output for `Eq` does not satisfy trait method contract",
     );
     assert_diag_message(&diags, "invalid generated body for eq");
     assert_diag_message(&diags, "expected bool, got <unavailable>");
@@ -3768,7 +3813,7 @@ impl StableDefault: Derive for Default {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Default` does not satisfy required methods",
+        "provider output for `Default` does not satisfy trait method contract",
     );
     assert_diag_message(&diags, "missing default");
     assert_diag_message(
@@ -3894,14 +3939,14 @@ impl StableDefault: Derive for Default {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "provider output for `Default` does not satisfy required methods",
+        "provider output for `Default` does not satisfy trait method contract",
     );
     assert_diag_message(&diags, "invalid generated body for default");
     assert_diag_message(&diags, "expected Foo, got <unavailable>");
     assert_diag_primary_span_text(
         &db,
         &diags,
-        "provider output for `Default` does not satisfy required methods",
+        "provider output for `Default` does not satisfy trait method contract",
         "builder.self_ref()",
     );
     assert_eq!(
