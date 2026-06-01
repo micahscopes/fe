@@ -27,7 +27,8 @@ pub(crate) enum BuilderCommand<'db> {
     EmitMethodExpr {
         name: IdentId<'db>,
         expr: GeneratedExprId<'db>,
-        span: DynLazySpan<'db>,
+        name_span: DynLazySpan<'db>,
+        body_span: DynLazySpan<'db>,
     },
     Finish {
         span: DynLazySpan<'db>,
@@ -52,6 +53,7 @@ pub(crate) enum BuilderError<'db> {
     NotFinished,
     DuplicateMethod {
         name: IdentId<'db>,
+        span: DynLazySpan<'db>,
     },
     UnsupportedTarget(ConstraintId<'db>),
 }
@@ -90,14 +92,19 @@ impl<'db> ImplBuilderSession<'db> {
     pub(super) fn emit_method_expr(
         &mut self,
         name: IdentId<'db>,
+        name_span: DynLazySpan<'db>,
         expr: GeneratedExprId<'db>,
-        span: DynLazySpan<'db>,
+        body_span: DynLazySpan<'db>,
     ) -> Result<(), BuilderError<'db>> {
         if self.finished {
             return Err(BuilderError::AlreadyFinished);
         }
-        self.commands
-            .push(BuilderCommand::EmitMethodExpr { name, expr, span });
+        self.commands.push(BuilderCommand::EmitMethodExpr {
+            name,
+            expr,
+            name_span,
+            body_span,
+        });
         Ok(())
     }
 
@@ -167,15 +174,23 @@ pub(super) fn generated_impl_from_builder_commands<'db>(
                     origin: *origin,
                 })
             }
-            BuilderCommand::EmitMethodExpr { name, expr, span } => methods.push(GeneratedMethod {
+            BuilderCommand::EmitMethodExpr {
+                name,
+                expr,
+                name_span,
+                body_span,
+            } => methods.push(GeneratedMethod {
                 name: {
                     if !method_names.insert(*name) {
-                        return Err(BuilderError::DuplicateMethod { name: *name });
+                        return Err(BuilderError::DuplicateMethod {
+                            name: *name,
+                            span: name_span.clone(),
+                        });
                     }
                     *name
                 },
                 body: GeneratedMethodBodyKind::Expr(*expr),
-                span: span.clone(),
+                span: body_span.clone(),
             }),
             BuilderCommand::Finish { .. } => finished = true,
         }

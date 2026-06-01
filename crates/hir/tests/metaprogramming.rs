@@ -3265,6 +3265,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "provider output for `Foo: Eq` is invalid");
     assert_diag_message(&diags, "duplicate generated method `eq`");
+    assert_diag_primary_span_text(&db, &diags, "duplicate generated method `eq`", "\"eq\"");
 }
 
 #[test]

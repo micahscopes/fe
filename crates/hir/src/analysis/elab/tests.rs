@@ -80,10 +80,12 @@ fn emit_method_expr_command<'db>(
     name: IdentId<'db>,
     expr: GeneratedExprId<'db>,
 ) -> BuilderCommand<'db> {
+    let span: DynLazySpan<'db> = context.provider(db).func(db).span().name().into();
     BuilderCommand::EmitMethodExpr {
         name,
         expr,
-        span: context.provider(db).func(db).span().name().into(),
+        name_span: span.clone(),
+        body_span: span,
     }
 }
 

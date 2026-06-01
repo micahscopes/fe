@@ -169,7 +169,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 Ok(None) => continue,
                 Err(err) => {
                     diags.push(invalid_request(
-                        request.span(db),
+                        builder_error_span(&err).unwrap_or_else(|| request.span(db)),
                         format!(
                             "provider output for `{}` is invalid: {}",
                             request.goal(db).pretty_print(db),
@@ -446,7 +446,7 @@ fn builder_error_message<'db>(db: &'db dyn HirAnalysisDb, err: &BuilderError<'db
         BuilderError::AlreadyFinished => "builder was already finished".to_string(),
         BuilderError::CommandAfterFinish => "builder emitted a command after finish".to_string(),
         BuilderError::NotFinished => "builder did not finish".to_string(),
-        BuilderError::DuplicateMethod { name } => {
+        BuilderError::DuplicateMethod { name, .. } => {
             format!("duplicate generated method `{}`", name.data(db))
         }
         BuilderError::UnsupportedTarget(target) => {
@@ -455,6 +455,13 @@ fn builder_error_message<'db>(db: &'db dyn HirAnalysisDb, err: &BuilderError<'db
                 target.pretty_print(db)
             )
         }
+    }
+}
+
+fn builder_error_span<'db>(err: &BuilderError<'db>) -> Option<DynLazySpan<'db>> {
+    match err {
+        BuilderError::DuplicateMethod { span, .. } => Some(span.clone()),
+        _ => None,
     }
 }
 
