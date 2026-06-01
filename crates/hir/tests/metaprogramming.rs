@@ -7,6 +7,7 @@ use fe_hir::{
         elab::{
             derive_provider_summaries_for_top_mod, elaboration_ctfe_context_summaries_for_top_mod,
             elaboration_request_summaries_for_top_mod, generated_impl_summaries_for_top_mod,
+            generated_method_artifact_summaries_for_top_mod,
             generated_requirement_artifact_summaries_for_top_mod,
             generated_trace_summaries_for_top_mod, reflected_field_summaries_for_top_mod,
         },
@@ -3191,6 +3192,23 @@ impl StableTestPair: Derive for TestPair {
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         vec!["generated provider Foo: TestPair with obligations {}".to_string()]
+    );
+    assert_eq!(
+        generated_method_artifact_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "Foo: TestPair method #0 emits first".to_string(),
+            "Foo: TestPair method #1 emits second".to_string(),
+        ]
+    );
+    assert_eq!(
+        generated_trace_summaries_for_top_mod(&db, top_mod)
+            .into_iter()
+            .filter(|summary| summary.contains("emits method"))
+            .collect::<Vec<_>>(),
+        vec![
+            "Foo: TestPair emits method first".to_string(),
+            "Foo: TestPair emits method second".to_string(),
+        ]
     );
 }
 

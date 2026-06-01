@@ -6,7 +6,7 @@ use crate::{
             generated::{GeneratedImplId, GeneratedImplSource},
         },
     },
-    hir_def::TopLevelMod,
+    hir_def::{IdentId, TopLevelMod},
 };
 
 use super::{
@@ -20,6 +20,9 @@ pub(crate) enum GeneratedTraceFact<'db> {
     ConsumesDeriveEvidence(ConstraintId<'db>),
     Source(GeneratedImplSource<'db>),
     ProvidesEvidence(ConstraintId<'db>),
+    EmitsMethod {
+        name: IdentId<'db>,
+    },
     RequiresConstraint {
         constraint: ConstraintId<'db>,
         origin: RequirementOrigin<'db>,
@@ -49,6 +52,9 @@ impl<'db> GeneratedTraceFact<'db> {
             ),
             Self::ProvidesEvidence(constraint) => {
                 format!("{prefix} provides {}", constraint.pretty_print(db))
+            }
+            Self::EmitsMethod { name } => {
+                format!("{prefix} emits method {}", name.data(db))
             }
             Self::RequiresConstraint { constraint, origin } => {
                 format!(
@@ -121,6 +127,32 @@ pub fn generated_requirement_artifact_summaries_for_top_mod<'db>(
         .collect()
 }
 
+pub fn generated_method_artifact_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    generated_impls_for_ingot(db, top_mod.ingot(db))
+        .iter()
+        .filter(|generated| generated.context.request(db).target(db).item().top_mod(db) == top_mod)
+        .flat_map(|&generated| {
+            generated
+                .methods
+                .list(db)
+                .iter()
+                .enumerate()
+                .map(move |(index, method)| {
+                    format!(
+                        "{} method #{} emits {}",
+                        generated.trait_inst.pretty_print(db, true),
+                        index,
+                        method.name.data(db)
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn generated_trace_facts<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
@@ -138,5 +170,12 @@ fn generated_trace_facts<'db>(
             origin: requirement.origin,
         }
     }));
+    facts.extend(
+        generated
+            .methods
+            .list(db)
+            .iter()
+            .map(|method| GeneratedTraceFact::EmitsMethod { name: method.name }),
+    );
     facts
 }
