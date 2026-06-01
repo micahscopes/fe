@@ -192,7 +192,10 @@ impl Backend {
         let target = target.into();
         let opt_level = opt_level.into();
         let view = view.into();
-        let config_hash = self.trace_viewer_config_hash(&target, &opt_level, &view);
+        let compiler_config_hash = self.tooling_config.stable_hash();
+        let target_config_hash = trace_viewer_target_config_hash(&target, &opt_level, &view);
+        let config_hash =
+            trace_viewer_service_config_hash(&compiler_config_hash, &target_config_hash);
         let document_version = self.document_version(&uri);
         let session = TraceViewerSession {
             id: id.clone(),
@@ -209,16 +212,6 @@ impl Backend {
             .insert(session.id.clone(), Vec::new());
         self.trace_viewer_models.remove(&session.id);
         session
-    }
-
-    fn trace_viewer_config_hash(&self, target: &str, opt_level: &str, view: &str) -> String {
-        let compiler_config_hash = self.tooling_config.stable_hash();
-        let target_config_hash = trace_viewer_digest_text(&format!(
-            "target={target}\nopt_level={opt_level}\nview={view}\n"
-        ));
-        trace_viewer_digest_text(&format!(
-            "compiler_config={compiler_config_hash}\ntarget_config={target_config_hash}\n"
-        ))
     }
 
     pub(crate) fn trace_viewer_session(&self, session_id: &str) -> Option<TraceViewerSession> {
@@ -515,7 +508,22 @@ impl Backend {
     }
 }
 
-fn trace_viewer_digest_text(text: &str) -> String {
+pub(crate) fn trace_viewer_target_config_hash(target: &str, opt_level: &str, view: &str) -> String {
+    trace_viewer_digest_text(&format!(
+        "target={target}\nopt_level={opt_level}\nview={view}\n"
+    ))
+}
+
+pub(crate) fn trace_viewer_service_config_hash(
+    compiler_config_hash: &str,
+    target_config_hash: &str,
+) -> String {
+    trace_viewer_digest_text(&format!(
+        "compiler_config={compiler_config_hash}\ntarget_config={target_config_hash}\n"
+    ))
+}
+
+pub(crate) fn trace_viewer_digest_text(text: &str) -> String {
     format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
 }
 

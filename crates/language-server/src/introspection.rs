@@ -15,7 +15,12 @@ use trace_query::{
 };
 use url::Url;
 
-use crate::backend::{Backend, TraceViewerRevisionRecord, TraceViewerSession};
+use crate::backend::{
+    Backend, TraceViewerRevisionRecord, TraceViewerSession,
+    trace_viewer_digest_text as trace_workbench_digest_text,
+    trace_viewer_service_config_hash as trace_workbench_service_config_hash,
+    trace_viewer_target_config_hash as trace_workbench_target_config_hash,
+};
 
 const DEFAULT_TRACE_TARGET: &str = "evm";
 const DEFAULT_TRACE_VIEW: &str = "source-postopt-bytecode";
@@ -451,23 +456,8 @@ pub(crate) async fn handle_trace_workbench_model(
     Ok(projection)
 }
 
-fn trace_workbench_target_config_hash(target: &str, opt_level: &str, view: &str) -> String {
-    trace_workbench_digest_text(&format!(
-        "target={target}\nopt_level={opt_level}\nview={view}\n"
-    ))
-}
-
 fn trace_workbench_opt_level_label(opt_level: codegen::OptLevel) -> String {
     format!("O{opt_level}")
-}
-
-fn trace_workbench_service_config_hash(
-    compiler_config_hash: &str,
-    target_config_hash: &str,
-) -> String {
-    trace_workbench_digest_text(&format!(
-        "compiler_config={compiler_config_hash}\ntarget_config={target_config_hash}\n"
-    ))
 }
 
 fn trace_workbench_parse_opt_level(input: &str) -> Result<codegen::OptLevel, String> {
@@ -477,10 +467,6 @@ fn trace_workbench_parse_opt_level(input: &str) -> Result<codegen::OptLevel, Str
         .or_else(|| input.trim().strip_prefix('o'))
         .unwrap_or_else(|| input.trim());
     codegen::OptLevel::from_str(normalized)
-}
-
-fn trace_workbench_digest_text(text: &str) -> String {
-    format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
 }
 
 fn trace_workbench_source_file_display_name(uri: &Url) -> String {
