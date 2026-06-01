@@ -208,10 +208,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
             if generated_conflicts_with_authored_impl(db, generated) {
                 diags.push(invalid_request(
                     generated_conflict_span(db, generated),
-                    format!(
-                        "generated implementation for `{}` conflicts with an authored implementation",
-                        generated.trait_inst.pretty_print(db, true)
-                    ),
+                    generated_authored_conflict_message(db, generated),
                 ));
             } else if let Some(other) =
                 generated_conflicting_generated_impl(db, generated, &method_valid_candidates)
@@ -229,6 +226,22 @@ fn generated_overlay_diags_for_top_mod<'db>(
     diags
 }
 
+fn generated_authored_conflict_message<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> String {
+    let mut message = format!(
+        "generated implementation for `{}` conflicts with an authored implementation",
+        generated.trait_inst.pretty_print(db, true)
+    );
+
+    if generated_selected_from_scope(db, generated) {
+        message.push_str(scoped_selection_global_evidence_note());
+    }
+
+    message
+}
+
 fn generated_conflict_message<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
@@ -243,12 +256,14 @@ fn generated_conflict_message<'db>(
     );
 
     if generated_selected_from_scope(db, generated) || generated_selected_from_scope(db, other) {
-        message.push_str(
-            "; `with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global",
-        );
+        message.push_str(scoped_selection_global_evidence_note());
     }
 
     message
+}
+
+fn scoped_selection_global_evidence_note() -> &'static str {
+    "; `with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global"
 }
 
 fn generated_selected_from_scope<'db>(

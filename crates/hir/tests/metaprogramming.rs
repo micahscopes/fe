@@ -2864,6 +2864,47 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn with_provider_scope_conflicts_with_authored_impl_as_global_evidence() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "with_provider_scope_conflicts_with_authored_impl_as_global_evidence.fe".into(),
+        r#"
+trait Eq {}
+
+struct Foo {}
+
+with StableEq {
+    derive Eq for Foo
+}
+
+impl Eq for Foo {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "conflicts with an authored implementation");
+    assert_diag_message(
+        &diags,
+        "`with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global",
+    );
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "conflicts with an authored implementation",
+        "StableEq",
+    );
+}
+
+#[test]
 fn duplicate_derive_attr_generated_derives_conflict() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
