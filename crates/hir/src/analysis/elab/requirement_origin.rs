@@ -12,10 +12,10 @@ use crate::{
 use super::ReflectedField;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-#[allow(dead_code)]
 pub(crate) enum RequirementOrigin<'db> {
     ReflectedField(ReflectedField<'db>),
     ProviderCode,
+    #[cfg(test)]
     Synthetic,
 }
 
@@ -26,7 +26,9 @@ impl<'db> TyVisitable<'db> for RequirementOrigin<'db> {
     {
         match self {
             Self::ReflectedField(field) => field.visit_with(visitor),
-            Self::ProviderCode | Self::Synthetic => {}
+            Self::ProviderCode => {}
+            #[cfg(test)]
+            Self::Synthetic => {}
         }
     }
 }
@@ -38,7 +40,9 @@ impl<'db> TyFoldable<'db> for RequirementOrigin<'db> {
     {
         match self {
             Self::ReflectedField(field) => Self::ReflectedField(field.fold_with(db, folder)),
-            Self::ProviderCode | Self::Synthetic => self,
+            Self::ProviderCode => self,
+            #[cfg(test)]
+            Self::Synthetic => self,
         }
     }
 }
@@ -54,6 +58,7 @@ impl<'db> RequirementOrigin<'db> {
                 )
             }
             RequirementOrigin::ProviderCode => "from provider code".to_string(),
+            #[cfg(test)]
             RequirementOrigin::Synthetic => "from synthetic requirement".to_string(),
         }
     }
@@ -64,7 +69,9 @@ impl<'db> RequirementOrigin<'db> {
                 .parent
                 .field_parent(db)
                 .map(|parent| parent.field_name_span(field.index as usize)),
-            RequirementOrigin::ProviderCode | RequirementOrigin::Synthetic => None,
+            RequirementOrigin::ProviderCode => None,
+            #[cfg(test)]
+            RequirementOrigin::Synthetic => None,
         }
     }
 }
