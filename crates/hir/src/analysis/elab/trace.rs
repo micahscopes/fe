@@ -11,11 +11,13 @@ use crate::{
 
 use super::{
     ElaborationCtfeContextId, ElaborationRequestId, RequirementOrigin, generated_impls_for_ingot,
+    request::ElaborationOrigin,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum GeneratedTraceFact<'db> {
     RequestedBy(ElaborationRequestId<'db>),
+    SelectedProvider(ElaborationRequestId<'db>),
     GeneratedBy(ElaborationCtfeContextId<'db>),
     ConsumesDeriveEvidence(ConstraintId<'db>),
     Source(GeneratedImplSource<'db>),
@@ -38,6 +40,22 @@ impl<'db> GeneratedTraceFact<'db> {
                     "{prefix} requested by {}",
                     request.origin(db).pretty_print()
                 )
+            }
+            Self::SelectedProvider(request) => {
+                let provider = request
+                    .selected_provider(db)
+                    .map(|provider| provider.data(db).to_string())
+                    .unwrap_or_else(|| "<unknown provider>".to_string());
+                let selection = match request.origin(db) {
+                    ElaborationOrigin::DeriveAttr { .. } => "derive attribute",
+                    ElaborationOrigin::DeriveDecl(decl)
+                        if decl.selected_provider_from_scope(db) =>
+                    {
+                        "with scope"
+                    }
+                    ElaborationOrigin::DeriveDecl(_) => "using clause",
+                };
+                format!("{prefix} selected provider {provider} via {selection}")
             }
             Self::GeneratedBy(context) => {
                 let provider = context.provider(db).identity(db).pretty_print(db);
@@ -164,6 +182,17 @@ fn generated_trace_facts<'db>(
         GeneratedTraceFact::Source(generated.source),
         GeneratedTraceFact::ProvidesEvidence(ConstraintId::from_trait(db, generated.trait_inst)),
     ];
+    if generated
+        .context
+        .request(db)
+        .selected_provider(db)
+        .is_some()
+    {
+        facts.insert(
+            1,
+            GeneratedTraceFact::SelectedProvider(generated.context.request(db)),
+        );
+    }
     facts.extend(generated.requirements.list(db).iter().map(|requirement| {
         GeneratedTraceFact::RequiresConstraint {
             constraint: requirement.constraint,
