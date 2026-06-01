@@ -53,7 +53,7 @@ impl<'db> RequirementOrigin<'db> {
             RequirementOrigin::ReflectedField(field) => {
                 format!(
                     "from field {}.{}",
-                    field.parent.pretty_print(db),
+                    field.pretty_parent(db),
                     field.name.data(db)
                 )
             }
@@ -63,12 +63,11 @@ impl<'db> RequirementOrigin<'db> {
         }
     }
 
-    pub(crate) fn diagnostic_span(self, db: &'db dyn HirAnalysisDb) -> Option<DynLazySpan<'db>> {
+    pub(crate) fn diagnostic_span(self, _db: &'db dyn HirAnalysisDb) -> Option<DynLazySpan<'db>> {
         match self {
-            RequirementOrigin::ReflectedField(field) => field
-                .parent
-                .field_parent(db)
-                .map(|parent| parent.field_name_span(field.index as usize)),
+            RequirementOrigin::ReflectedField(field) => {
+                Some(field.origin.field_span(field.index as usize))
+            }
             RequirementOrigin::ProviderCode => None,
             #[cfg(test)]
             RequirementOrigin::Synthetic => None,

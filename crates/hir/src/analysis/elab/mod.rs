@@ -59,8 +59,8 @@ use provider_context::{
 };
 use provider_execution::provider_output_for_context;
 pub(crate) use provider_output::{ProviderFailureReason, ProviderOutputId, ProviderOutputStatus};
-pub(crate) use reflect::ReflectedField;
-use reflect::reflect_struct_fields;
+pub(crate) use reflect::{ReflectedField, ReflectedVariant};
+use reflect::{reflect_enum_variants, reflect_struct_fields};
 pub(crate) use request::{
     ElaborationRequestId, elaboration_requests_for_ingot, elaboration_requests_for_top_mod,
 };
@@ -389,6 +389,26 @@ pub fn reflected_field_summaries_for_top_mod<'db>(
         .collect()
 }
 
+pub fn reflected_variant_summaries_for_top_mod<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+) -> Vec<String> {
+    elaboration_requests_for_top_mod(db, top_mod)
+        .iter()
+        .flat_map(|&request| {
+            elaboration_ctfe_contexts_for_request(db, request)
+                .iter()
+                .flat_map(|&context| {
+                    reflected_variants_for_context(db, context)
+                        .into_iter()
+                        .map(|variant| variant.pretty_print(db))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[salsa::tracked(return_ref)]
 pub(crate) fn generated_impls_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -620,6 +640,28 @@ pub(crate) fn reflected_fields_for_context<'db>(
             }
         })
         .flat_map(|target| reflect_struct_fields(db, target))
+        .collect()
+}
+
+pub(crate) fn reflected_variants_for_context<'db>(
+    db: &'db dyn HirAnalysisDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> Vec<ReflectedVariant<'db>> {
+    context
+        .capabilities(db)
+        .iter()
+        .filter_map(|witness| {
+            if witness.capability.mode(db) != CapabilityMode::Read {
+                return None;
+            }
+            match witness.capability.key(db) {
+                EffectCapabilityKey::Compiler(CompilerCapabilityKind::Reflect(target)) => {
+                    Some(target)
+                }
+                _ => None,
+            }
+        })
+        .flat_map(|target| reflect_enum_variants(db, target))
         .collect()
 }
 

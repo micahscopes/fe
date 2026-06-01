@@ -230,6 +230,9 @@ impl<'db> TyChecker<'db> {
         if let Some(elem_ty) = self.field_list_elem_ty(iterable_ty) {
             return (elem_ty, None);
         }
+        if let Some(elem_ty) = self.variant_list_elem_ty(iterable_ty) {
+            return (elem_ty, None);
+        }
 
         // Look up Seq trait (if missing, treat as invalid).
         let Some(seq_trait) = resolve_core_trait(self.db, self.env.scope(), &["seq", "Seq"]) else {
@@ -381,6 +384,18 @@ impl<'db> TyChecker<'db> {
             TyId::app(self.db, field_ctor, *parent),
             value,
         ))
+    }
+
+    fn variant_list_elem_ty(&mut self, iterable_ty: TyId<'db>) -> Option<TyId<'db>> {
+        let (base, args) = iterable_ty.decompose_ty_app(self.db);
+        let TyData::TyBase(TyBase::Prim(PrimTy::VariantList)) = base.data(self.db) else {
+            return None;
+        };
+        let [parent] = args else {
+            return None;
+        };
+        let variant_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::Variant)));
+        Some(TyId::app(self.db, variant_ctor, *parent))
     }
 
     fn check_while(&mut self, stmt: StmtId, stmt_data: &Stmt<'db>) -> TyId<'db> {

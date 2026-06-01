@@ -13,7 +13,7 @@ use fe_hir::{
             generated_scoped_method_artifact_summaries_for_top_mod,
             generated_scoped_requirement_artifact_summaries_for_top_mod,
             generated_scoped_trace_summaries_for_top_mod, generated_trace_summaries_for_top_mod,
-            reflected_field_summaries_for_top_mod,
+            reflected_field_summaries_for_top_mod, reflected_variant_summaries_for_top_mod,
         },
         initialize_analysis_pass,
     },
@@ -809,6 +809,110 @@ impl StableEq: Derive for Eq {
     assert_eq!(
         reflected_field_summaries_for_top_mod(&db, top_mod),
         vec!["Box<T>.value: Field<Box<T>, T>".to_string()]
+    );
+}
+
+#[test]
+fn typed_reflection_exposes_enum_variants_from_reflect_capability() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "typed_reflection_exposes_enum_variants_from_reflect_capability.fe".into(),
+        r#"
+trait Marker {}
+
+enum Choice<T> {
+    Empty,
+    One { value: T },
+    Two(T, u256),
+}
+
+derive Marker for Choice<T>
+
+impl StableMarker: Derive for Marker {
+    const fn derive<T>(ev: own Evidence<Marker<T>>) -> Evidence<Marker<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Marker<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        reflected_variant_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "Choice<T>::Empty".to_string(),
+            "Choice<T>::One".to_string(),
+            "Choice<T>::Two".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn provider_can_emit_obligations_from_reflected_enum_variant_fields() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_can_emit_obligations_from_reflected_enum_variant_fields.fe".into(),
+        r#"
+trait Marker {}
+
+struct Second {}
+struct Third {}
+
+enum Choice<T> {
+    Empty,
+    One { value: T },
+    Two(Second, Third),
+}
+
+derive Marker for Choice
+
+impl StableMarker: Derive for Marker {
+    const fn derive<T>(ev: own Evidence<Marker<T>>) -> Evidence<Marker<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Marker<T>>,
+        )
+    {
+        for variant in reflect.variants() {
+            for field in variant.fields() {
+                builder.require<Marker>(field.ty())
+            }
+        }
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
+        vec!["Choice<T>: Marker requested for Choice<T> using Derive<Marker> evidence from StableMarker with [read capability Reflect<Choice<T>>, mut capability ImplBuilder<Choice<T>: Marker>]".to_string()]
+    );
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec![
+            "generated provider Choice<T>: Marker with obligations {T: Marker, Second: Marker, Third: Marker}"
+                .to_string(),
+        ]
+    );
+    assert_eq!(
+        generated_trace_summaries_for_top_mod(&db, top_mod)
+            .into_iter()
+            .filter(|summary| summary.contains("requires"))
+            .collect::<Vec<_>>(),
+        vec![
+            "Choice<T>: Marker requires T: Marker from field Choice::One.value".to_string(),
+            "Choice<T>: Marker requires Second: Marker from field Choice::Two.0".to_string(),
+            "Choice<T>: Marker requires Third: Marker from field Choice::Two.1".to_string(),
+        ]
     );
 }
 

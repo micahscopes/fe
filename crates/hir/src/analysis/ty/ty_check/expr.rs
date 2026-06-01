@@ -2952,6 +2952,12 @@ impl<'db> TyChecker<'db> {
             self.env.type_expr(expr, prop.clone());
             return prop;
         }
+        if let Some(prop) =
+            self.check_variant_descriptor_intrinsic_method_call(method_name, receiver_prop.ty, args)
+        {
+            self.env.type_expr(expr, prop.clone());
+            return prop;
+        }
 
         let receiver_tys = self.method_receiver_tys(*receiver, &receiver_prop);
         let method_assumptions = self.env.assumptions();
@@ -3359,6 +3365,7 @@ impl<'db> TyChecker<'db> {
         let result = match method_name.data(self.db).as_str() {
             "type_info" => self.type_info_ty(target),
             "fields" => self.field_list_ty(target),
+            "variants" => self.variant_list_ty(target),
             _ => return None,
         };
         Some(ExprProp::new(result, true))
@@ -3412,6 +3419,42 @@ impl<'db> TyChecker<'db> {
             })
     }
 
+    fn check_variant_descriptor_intrinsic_method_call(
+        &mut self,
+        method_name: IdentId<'db>,
+        receiver_ty: TyId<'db>,
+        args: &[crate::hir_def::CallArg<'db>],
+    ) -> Option<ExprProp<'db>> {
+        if !args.is_empty() {
+            return None;
+        }
+
+        let parent = self.variant_descriptor_parent_from_receiver_ty(receiver_ty)?;
+        let target = match method_name.data(self.db).as_str() {
+            "fields" => self.field_list_ty(parent),
+            _ => return None,
+        };
+        Some(ExprProp::new(target, true))
+    }
+
+    fn variant_descriptor_parent_from_receiver_ty(
+        &self,
+        receiver_ty: TyId<'db>,
+    ) -> Option<TyId<'db>> {
+        self.capability_fallback_candidates(receiver_ty)
+            .into_iter()
+            .find_map(|candidate| {
+                let (base, args) = candidate.decompose_ty_app(self.db);
+                let TyData::TyBase(TyBase::Prim(PrimTy::Variant)) = base.data(self.db) else {
+                    return None;
+                };
+                let [parent] = args else {
+                    return None;
+                };
+                Some(*parent)
+            })
+    }
+
     fn type_info_ty(&self, target: TyId<'db>) -> TyId<'db> {
         let type_info_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::TypeInfo)));
         TyId::app(self.db, type_info_ctor, target)
@@ -3420,6 +3463,12 @@ impl<'db> TyChecker<'db> {
     fn field_list_ty(&self, target: TyId<'db>) -> TyId<'db> {
         let field_list_ctor = TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::FieldList)));
         TyId::app(self.db, field_list_ctor, target)
+    }
+
+    fn variant_list_ty(&self, target: TyId<'db>) -> TyId<'db> {
+        let variant_list_ctor =
+            TyId::new(self.db, TyData::TyBase(TyBase::Prim(PrimTy::VariantList)));
+        TyId::app(self.db, variant_list_ctor, target)
     }
 
     fn field_ty(&self, parent: TyId<'db>, value: TyId<'db>) -> TyId<'db> {

@@ -27,7 +27,9 @@ use crate::{
 use super::{
     BuilderError, CapabilityEnv, ElaborationCtfeContextId, ImplBuilderSession,
     ProviderFailureReason, ProviderOutputId, ProviderOutputStatus, ReflectedField,
-    RequirementOrigin, generated_method::trait_methods_for_goal, reflect::reflect_struct_fields,
+    ReflectedVariant, RequirementOrigin,
+    generated_method::trait_methods_for_goal,
+    reflect::{reflect_enum_variants, reflect_struct_fields, reflect_variant_fields},
 };
 
 #[salsa::tracked]
@@ -78,6 +80,7 @@ fn failed_execution<'db>(
 #[derive(Clone, Copy)]
 enum ElabValue<'db> {
     Field(ReflectedField<'db>),
+    Variant(ReflectedVariant<'db>),
 
     /// Internal provider-CTFE type witness produced by reflection operations
     /// such as `field.ty()`.
@@ -118,6 +121,7 @@ struct ProviderBodyExecutor<'db> {
     builder_names: Vec<IdentId<'db>>,
     reflect_names: Vec<IdentId<'db>>,
     field_bindings: Vec<(IdentId<'db>, ReflectedField<'db>)>,
+    variant_bindings: Vec<(IdentId<'db>, ReflectedVariant<'db>)>,
     value_bindings: Vec<(IdentId<'db>, ElabValue<'db>)>,
 }
 
@@ -136,6 +140,7 @@ impl<'db> ProviderBodyExecutor<'db> {
             builder_names: provider_impl_builder_effect_names(db, provider),
             reflect_names: provider_reflect_effect_names(db, provider),
             field_bindings: Vec::new(),
+            variant_bindings: Vec::new(),
             value_bindings: Vec::new(),
         }
     }
@@ -199,23 +204,33 @@ impl<'db> ProviderBodyExecutor<'db> {
                 }
             }
             Stmt::For(pat, iterable, loop_body, _) => {
-                if let Some(fields) = self.reflect_fields_iterable(body, *iterable)? {
-                    let Some(binding) = simple_pat_binding_name(self.db, body, *pat) else {
-                        return Err(failed_execution(
-                            ProviderFailureReason::UnsupportedProviderBody,
-                            stmt.span(body).into(),
-                        ));
-                    };
-                    for field in fields {
-                        self.field_bindings.push((binding, field));
-                        self.execute_expr(body, *loop_body)?;
-                        self.field_bindings.pop();
-                    }
-                } else {
+                let Some(binding) = simple_pat_binding_name(self.db, body, *pat) else {
                     return Err(failed_execution(
                         ProviderFailureReason::UnsupportedProviderBody,
-                        (*iterable).span(body).into(),
+                        stmt.span(body).into(),
                     ));
+                };
+                match self.provider_iterable(body, *iterable)? {
+                    Some(ProviderIterable::Fields(fields)) => {
+                        for field in fields {
+                            self.field_bindings.push((binding, field));
+                            self.execute_expr(body, *loop_body)?;
+                            self.field_bindings.pop();
+                        }
+                    }
+                    Some(ProviderIterable::Variants(variants)) => {
+                        for variant in variants {
+                            self.variant_bindings.push((binding, variant));
+                            self.execute_expr(body, *loop_body)?;
+                            self.variant_bindings.pop();
+                        }
+                    }
+                    None => {
+                        return Err(failed_execution(
+                            ProviderFailureReason::UnsupportedProviderBody,
+                            (*iterable).span(body).into(),
+                        ));
+                    }
                 }
             }
             Stmt::While(_, _) => {
@@ -501,6 +516,23 @@ impl<'db> ProviderBodyExecutor<'db> {
             })
     }
 
+    fn provider_iterable(
+        &self,
+        body: Body<'db>,
+        iterable: crate::hir_def::ExprId,
+    ) -> Result<Option<ProviderIterable<'db>>, ProviderExecutionError<'db>> {
+        if let Some(fields) = self.reflect_fields_iterable(body, iterable)? {
+            return Ok(Some(ProviderIterable::Fields(fields)));
+        }
+        if let Some(variants) = self.reflect_variants_iterable(body, iterable)? {
+            return Ok(Some(ProviderIterable::Variants(variants)));
+        }
+        if let Some(fields) = self.variant_fields_iterable(body, iterable)? {
+            return Ok(Some(ProviderIterable::Fields(fields)));
+        }
+        Ok(None)
+    }
+
     fn reflect_fields_iterable(
         &self,
         body: Body<'db>,
@@ -522,15 +554,86 @@ impl<'db> ProviderBodyExecutor<'db> {
         }
 
         let target_ty = self.context.request(self.db).target(self.db).ty(self.db);
-        if !self.env.has_reflect_target(self.db, target_ty)
-            || !expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names)
-        {
+        if !expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names) {
+            if expr_is_path_named(self.db, body, *receiver, "reflect") {
+                return Err(failed_execution(
+                    ProviderFailureReason::MissingReflectCapability,
+                    iterable.span(body).into(),
+                ));
+            }
+            return Ok(None);
+        }
+        if !self.env.has_reflect_target(self.db, target_ty) {
             return Err(failed_execution(
                 ProviderFailureReason::MissingReflectCapability,
                 iterable.span(body).into(),
             ));
         }
         Ok(Some(reflect_struct_fields(self.db, target_ty)))
+    }
+
+    fn reflect_variants_iterable(
+        &self,
+        body: Body<'db>,
+        iterable: crate::hir_def::ExprId,
+    ) -> Result<Option<Vec<ReflectedVariant<'db>>>, ProviderExecutionError<'db>> {
+        let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
+            iterable.data(self.db, body)
+        else {
+            return Ok(None);
+        };
+        if method
+            .to_opt()
+            .is_none_or(|method| method.data(self.db) != REFLECT_VARIANTS_METHOD)
+        {
+            return Ok(None);
+        }
+        if !args.is_empty() {
+            return Ok(None);
+        }
+
+        let target_ty = self.context.request(self.db).target(self.db).ty(self.db);
+        if !expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names) {
+            if expr_is_path_named(self.db, body, *receiver, "reflect") {
+                return Err(failed_execution(
+                    ProviderFailureReason::MissingReflectCapability,
+                    iterable.span(body).into(),
+                ));
+            }
+            return Ok(None);
+        }
+        if !self.env.has_reflect_target(self.db, target_ty) {
+            return Err(failed_execution(
+                ProviderFailureReason::MissingReflectCapability,
+                iterable.span(body).into(),
+            ));
+        }
+        Ok(Some(reflect_enum_variants(self.db, target_ty)))
+    }
+
+    fn variant_fields_iterable(
+        &self,
+        body: Body<'db>,
+        iterable: crate::hir_def::ExprId,
+    ) -> Result<Option<Vec<ReflectedField<'db>>>, ProviderExecutionError<'db>> {
+        let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
+            iterable.data(self.db, body)
+        else {
+            return Ok(None);
+        };
+        if method
+            .to_opt()
+            .is_none_or(|method| method.data(self.db) != VARIANT_FIELDS_METHOD)
+        {
+            return Ok(None);
+        }
+        if !args.is_empty() {
+            return Ok(None);
+        }
+        let Some(variant) = self.variant_value_for_expr(body, *receiver) else {
+            return Ok(None);
+        };
+        Ok(Some(reflect_variant_fields(self.db, variant)))
     }
 
     fn field_value_for_expr(
@@ -540,7 +643,18 @@ impl<'db> ProviderBodyExecutor<'db> {
     ) -> Option<ReflectedField<'db>> {
         match self.eval_expr_value(body, expr)? {
             ElabValue::Field(field) => Some(field),
-            ElabValue::TypeWitness(_) | ElabValue::GeneratedExpr(_) => None,
+            ElabValue::Variant(_) | ElabValue::TypeWitness(_) | ElabValue::GeneratedExpr(_) => None,
+        }
+    }
+
+    fn variant_value_for_expr(
+        &self,
+        body: Body<'db>,
+        expr: crate::hir_def::ExprId,
+    ) -> Option<ReflectedVariant<'db>> {
+        match self.eval_expr_value(body, expr)? {
+            ElabValue::Variant(variant) => Some(variant),
+            ElabValue::Field(_) | ElabValue::TypeWitness(_) | ElabValue::GeneratedExpr(_) => None,
         }
     }
 
@@ -553,6 +667,16 @@ impl<'db> ProviderBodyExecutor<'db> {
             expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*field)
         }) {
             return Some(ElabValue::Field(field));
+        }
+        if let Some(variant) = self
+            .variant_bindings
+            .iter()
+            .rev()
+            .find_map(|(name, variant)| {
+                expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*variant)
+            })
+        {
+            return Some(ElabValue::Variant(variant));
         }
         if let Some(value) = self.value_bindings.iter().rev().find_map(|(name, value)| {
             expr_is_path_named_any(self.db, body, expr, &[*name]).then_some(*value)
@@ -861,6 +985,15 @@ fn expr_is_path_named_any<'db>(
     simple_expr_path_ident(db, body, expr).is_some_and(|ident| names.contains(&ident))
 }
 
+fn expr_is_path_named<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+    expr: crate::hir_def::ExprId,
+    name: &str,
+) -> bool {
+    simple_expr_path_ident(db, body, expr).is_some_and(|ident| ident.data(db) == name)
+}
+
 fn simple_expr_path_ident<'db>(
     db: &'db dyn HirAnalysisDb,
     body: Body<'db>,
@@ -899,4 +1032,11 @@ const BUILDER_STRUCT_INIT_METHOD: &str = "struct_init";
 const BUILDER_WITH_FIELD_METHOD: &str = "with_field";
 const BUILDER_EMIT_METHOD: &str = "emit_method";
 const REFLECT_FIELDS_METHOD: &str = "fields";
+const REFLECT_VARIANTS_METHOD: &str = "variants";
+const VARIANT_FIELDS_METHOD: &str = "fields";
 const FIELD_TY_METHOD: &str = "ty";
+
+enum ProviderIterable<'db> {
+    Fields(Vec<ReflectedField<'db>>),
+    Variants(Vec<ReflectedVariant<'db>>),
+}

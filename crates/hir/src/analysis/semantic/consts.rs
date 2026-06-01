@@ -650,9 +650,11 @@ pub fn int_ty_shape<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<(u
         | PrimTy::Reflect
         | PrimTy::TypeInfo
         | PrimTy::Field
+        | PrimTy::Variant
         | PrimTy::GeneratedExpr
         | PrimTy::Derive
-        | PrimTy::FieldList => return None,
+        | PrimTy::FieldList
+        | PrimTy::VariantList => return None,
     })
 }
 
