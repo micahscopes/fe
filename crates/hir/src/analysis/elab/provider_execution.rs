@@ -25,9 +25,9 @@ use crate::{
 };
 
 use super::{
-    BuilderError, CapabilityEnv, ElaborationCtfeContextId, ImplBuilderSession, ProviderOutputId,
-    ProviderOutputStatus, ProviderSkipReason, ReflectedField, RequirementOrigin,
-    generated_method::required_methods, reflect::reflect_struct_fields,
+    BuilderError, CapabilityEnv, ElaborationCtfeContextId, ImplBuilderSession,
+    ProviderFailureReason, ProviderOutputId, ProviderOutputStatus, ReflectedField,
+    RequirementOrigin, generated_method::required_methods, reflect::reflect_struct_fields,
 };
 
 #[salsa::tracked]
@@ -45,8 +45,8 @@ pub(super) fn provider_output_for_context<'db>(
             request,
             provider,
             context,
-            skipped_status(
-                ProviderSkipReason::MissingBuilderCapability,
+            failed_status(
+                ProviderFailureReason::MissingBuilderCapability,
                 provider.func(db).span().effects().into(),
             ),
         );
@@ -57,24 +57,24 @@ pub(super) fn provider_output_for_context<'db>(
 }
 
 enum ProviderExecutionFailure<'db> {
-    Skipped {
-        reason: ProviderSkipReason,
+    Failed {
+        reason: ProviderFailureReason,
         span: DynLazySpan<'db>,
     },
 }
 
-fn skipped_status<'db>(
-    reason: ProviderSkipReason,
+fn failed_status<'db>(
+    reason: ProviderFailureReason,
     span: DynLazySpan<'db>,
 ) -> ProviderOutputStatus<'db> {
-    ProviderOutputStatus::Skipped { reason, span }
+    ProviderOutputStatus::Failed { reason, span }
 }
 
-fn skipped_failure<'db>(
-    reason: ProviderSkipReason,
+fn failed_execution<'db>(
+    reason: ProviderFailureReason,
     span: DynLazySpan<'db>,
 ) -> ProviderExecutionFailure<'db> {
-    ProviderExecutionFailure::Skipped { reason, span }
+    ProviderExecutionFailure::Failed { reason, span }
 }
 
 #[derive(Clone, Copy)]
@@ -150,15 +150,15 @@ impl<'db> ProviderBodyExecutor<'db> {
             .emit_impl(self.db, request.goal(self.db))
             .is_err()
         {
-            return skipped_status(
-                ProviderSkipReason::InvalidBuilderState,
+            return failed_status(
+                ProviderFailureReason::InvalidBuilderState,
                 provider.func(self.db).span().name().into(),
             );
         }
 
         let Some(body) = provider.func(self.db).body(self.db) else {
-            return skipped_status(
-                ProviderSkipReason::MissingFinish,
+            return failed_status(
+                ProviderFailureReason::MissingFinish,
                 provider.func(self.db).span().name().into(),
             );
         };
@@ -166,16 +166,16 @@ impl<'db> ProviderBodyExecutor<'db> {
         match self.execute_expr(body, body.expr(self.db)) {
             Ok(()) => match self.builder.into_commands(self.db) {
                 Ok(commands) => ProviderOutputStatus::Succeeded { commands },
-                Err(BuilderError::NotFinished) => skipped_status(
-                    ProviderSkipReason::MissingFinish,
+                Err(BuilderError::NotFinished) => failed_status(
+                    ProviderFailureReason::MissingFinish,
                     body.expr(self.db).span(body).into(),
                 ),
-                Err(_) => skipped_status(
-                    ProviderSkipReason::InvalidBuilderState,
+                Err(_) => failed_status(
+                    ProviderFailureReason::InvalidBuilderState,
                     body.expr(self.db).span(body).into(),
                 ),
             },
-            Err(ProviderExecutionFailure::Skipped { reason, span }) => skipped_status(reason, span),
+            Err(ProviderExecutionFailure::Failed { reason, span }) => failed_status(reason, span),
         }
     }
 
@@ -203,8 +203,8 @@ impl<'db> ProviderBodyExecutor<'db> {
             Stmt::For(pat, iterable, loop_body, _) => {
                 if let Some(fields) = self.reflect_fields_iterable(body, *iterable)? {
                     let Some(binding) = simple_pat_binding_name(self.db, body, *pat) else {
-                        return Err(skipped_failure(
-                            ProviderSkipReason::UnsupportedProviderBody,
+                        return Err(failed_execution(
+                            ProviderFailureReason::UnsupportedProviderBody,
                             stmt.span(body).into(),
                         ));
                     };
@@ -214,15 +214,15 @@ impl<'db> ProviderBodyExecutor<'db> {
                         self.field_bindings.pop();
                     }
                 } else {
-                    return Err(skipped_failure(
-                        ProviderSkipReason::UnsupportedProviderBody,
+                    return Err(failed_execution(
+                        ProviderFailureReason::UnsupportedProviderBody,
                         (*iterable).span(body).into(),
                     ));
                 }
             }
             Stmt::While(_, _) => {
-                return Err(skipped_failure(
-                    ProviderSkipReason::UnsupportedProviderBody,
+                return Err(failed_execution(
+                    ProviderFailureReason::UnsupportedProviderBody,
                     stmt.span(body).into(),
                 ));
             }
@@ -233,8 +233,8 @@ impl<'db> ProviderBodyExecutor<'db> {
             }
             Stmt::Expr(expr) => self.execute_expr(body, *expr)?,
             Stmt::Continue | Stmt::Break => {
-                return Err(skipped_failure(
-                    ProviderSkipReason::UnsupportedProviderBody,
+                return Err(failed_execution(
+                    ProviderFailureReason::UnsupportedProviderBody,
                     stmt.span(body).into(),
                 ));
             }
@@ -265,29 +265,29 @@ impl<'db> ProviderBodyExecutor<'db> {
             }
             Expr::Assign(lhs, rhs) => {
                 let Some(value) = self.eval_expr_value(body, *rhs) else {
-                    return Err(skipped_failure(
-                        ProviderSkipReason::UnsupportedProviderBody,
+                    return Err(failed_execution(
+                        ProviderFailureReason::UnsupportedProviderBody,
                         (*rhs).span(body).into(),
                     ));
                 };
                 if !self.assign_value_binding(body, *lhs, value) {
-                    return Err(skipped_failure(
-                        ProviderSkipReason::UnsupportedProviderBody,
+                    return Err(failed_execution(
+                        ProviderFailureReason::UnsupportedProviderBody,
                         (*lhs).span(body).into(),
                     ));
                 }
             }
             Expr::Call(_, _) => {
-                return Err(skipped_failure(
-                    ProviderSkipReason::UnsupportedProviderBody,
+                return Err(failed_execution(
+                    ProviderFailureReason::UnsupportedProviderBody,
                     expr.span(body).into(),
                 ));
             }
             Expr::MethodCall(receiver, method, generic_args, args) => {
                 if !self.execute_method_call(body, *receiver, *method, *generic_args, args)? {
                     if self.eval_expr_value(body, expr).is_none() {
-                        return Err(skipped_failure(
-                            ProviderSkipReason::UnsupportedProviderBody,
+                        return Err(failed_execution(
+                            ProviderFailureReason::UnsupportedProviderBody,
                             expr.span(body).into(),
                         ));
                     }
@@ -305,8 +305,8 @@ impl<'db> ProviderBodyExecutor<'db> {
             | Expr::Match(_, _)
             | Expr::RecordInit(_, _)
             | Expr::With(_, _) => {
-                return Err(skipped_failure(
-                    ProviderSkipReason::UnsupportedProviderBody,
+                return Err(failed_execution(
+                    ProviderFailureReason::UnsupportedProviderBody,
                     expr.span(body).into(),
                 ));
             }
@@ -349,16 +349,16 @@ impl<'db> ProviderBodyExecutor<'db> {
             return Ok(false);
         }
         let Some(method) = method.to_opt() else {
-            return Err(skipped_failure(
-                ProviderSkipReason::UnsupportedProviderBody,
+            return Err(failed_execution(
+                ProviderFailureReason::UnsupportedProviderBody,
                 receiver.span(body).into(),
             ));
         };
         match method.data(self.db).as_str() {
             BUILDER_REQUIRE_METHOD => {
                 let [arg] = args else {
-                    return Err(skipped_failure(
-                        ProviderSkipReason::UnsupportedProviderBody,
+                    return Err(failed_execution(
+                        ProviderFailureReason::UnsupportedProviderBody,
                         receiver.span(body).into(),
                     ));
                 };
@@ -367,18 +367,18 @@ impl<'db> ProviderBodyExecutor<'db> {
             }
             BUILDER_FINISH_METHOD => {
                 if !args.is_empty() {
-                    return Err(skipped_failure(
-                        ProviderSkipReason::UnsupportedProviderBody,
+                    return Err(failed_execution(
+                        ProviderFailureReason::UnsupportedProviderBody,
                         receiver.span(body).into(),
                     ));
                 }
                 self.builder.finish_explicit().map_err(|err| match err {
-                    BuilderError::AlreadyFinished => skipped_failure(
-                        ProviderSkipReason::DuplicateFinish,
+                    BuilderError::AlreadyFinished => failed_execution(
+                        ProviderFailureReason::DuplicateFinish,
                         receiver.span(body).into(),
                     ),
-                    _ => skipped_failure(
-                        ProviderSkipReason::InvalidBuilderState,
+                    _ => failed_execution(
+                        ProviderFailureReason::InvalidBuilderState,
                         receiver.span(body).into(),
                     ),
                 })?;
@@ -398,16 +398,16 @@ impl<'db> ProviderBodyExecutor<'db> {
                     [name_arg, expr_arg] => {
                         let Some(method_name) = self.string_literal_ident_arg(body, name_arg.expr)
                         else {
-                            return Err(skipped_failure(
-                                ProviderSkipReason::InvalidGeneratedMethodName,
+                            return Err(failed_execution(
+                                ProviderFailureReason::InvalidGeneratedMethodName,
                                 name_arg.expr.span(body).into(),
                             ));
                         };
                         (method_name, name_arg.expr.span(body).into(), expr_arg.expr)
                     }
                     _ => {
-                        return Err(skipped_failure(
-                            ProviderSkipReason::UnsupportedProviderBody,
+                        return Err(failed_execution(
+                            ProviderFailureReason::UnsupportedProviderBody,
                             receiver.span(body).into(),
                         ));
                     }
@@ -415,8 +415,8 @@ impl<'db> ProviderBodyExecutor<'db> {
                 self.execute_emit_method(body, method_name, method_name_span, expr_arg)?;
                 Ok(true)
             }
-            _ => Err(skipped_failure(
-                ProviderSkipReason::UnsupportedProviderBody,
+            _ => Err(failed_execution(
+                ProviderFailureReason::UnsupportedProviderBody,
                 receiver.span(body).into(),
             )),
         }
@@ -429,15 +429,15 @@ impl<'db> ProviderBodyExecutor<'db> {
         constraint_arg: crate::hir_def::ExprId,
     ) -> Result<(), ProviderExecutionFailure<'db>> {
         let Some(head) = self.resolve_requirement_head_generic_arg(generic_args) else {
-            return Err(skipped_failure(
-                ProviderSkipReason::InvalidBuilderRequirement,
+            return Err(failed_execution(
+                ProviderFailureReason::InvalidBuilderRequirement,
                 constraint_arg.span(body).into(),
             ));
         };
         let Some(ElabValue::TypeWitness(arg_ty)) = self.eval_expr_value(body, constraint_arg)
         else {
-            return Err(skipped_failure(
-                ProviderSkipReason::InvalidBuilderRequirement,
+            return Err(failed_execution(
+                ProviderFailureReason::InvalidBuilderRequirement,
                 constraint_arg.span(body).into(),
             ));
         };
@@ -449,12 +449,12 @@ impl<'db> ProviderBodyExecutor<'db> {
         self.builder
             .require_with_origin(constraint, origin)
             .map_err(|err| match err {
-                BuilderError::AlreadyFinished => skipped_failure(
-                    ProviderSkipReason::CommandAfterFinish,
+                BuilderError::AlreadyFinished => failed_execution(
+                    ProviderFailureReason::CommandAfterFinish,
                     constraint_arg.span(body).into(),
                 ),
-                _ => skipped_failure(
-                    ProviderSkipReason::InvalidBuilderState,
+                _ => failed_execution(
+                    ProviderFailureReason::InvalidBuilderState,
                     constraint_arg.span(body).into(),
                 ),
             })
@@ -469,26 +469,26 @@ impl<'db> ProviderBodyExecutor<'db> {
     ) -> Result<(), ProviderExecutionFailure<'db>> {
         let required = required_methods(self.db, self.context.request(self.db).goal(self.db));
         if !required.contains_key(&method_name) {
-            return Err(skipped_failure(
-                ProviderSkipReason::InvalidGeneratedMethodName,
+            return Err(failed_execution(
+                ProviderFailureReason::InvalidGeneratedMethodName,
                 method_name_span,
             ));
         }
         let Some(ElabValue::GeneratedExpr(expr)) = self.eval_expr_value(body, expr_arg) else {
-            return Err(skipped_failure(
-                ProviderSkipReason::InvalidGeneratedMethodBody,
+            return Err(failed_execution(
+                ProviderFailureReason::InvalidGeneratedMethodBody,
                 expr_arg.span(body).into(),
             ));
         };
         self.builder
             .emit_method_expr(method_name, expr)
             .map_err(|err| match err {
-                BuilderError::AlreadyFinished => skipped_failure(
-                    ProviderSkipReason::CommandAfterFinish,
+                BuilderError::AlreadyFinished => failed_execution(
+                    ProviderFailureReason::CommandAfterFinish,
                     expr_arg.span(body).into(),
                 ),
-                _ => skipped_failure(
-                    ProviderSkipReason::InvalidBuilderState,
+                _ => failed_execution(
+                    ProviderFailureReason::InvalidBuilderState,
                     expr_arg.span(body).into(),
                 ),
             })
@@ -518,8 +518,8 @@ impl<'db> ProviderBodyExecutor<'db> {
         if !self.env.has_reflect_target(self.db, target_ty)
             || !expr_is_path_named_any(self.db, body, *receiver, &self.reflect_names)
         {
-            return Err(skipped_failure(
-                ProviderSkipReason::MissingReflectCapability,
+            return Err(failed_execution(
+                ProviderFailureReason::MissingReflectCapability,
                 iterable.span(body).into(),
             ));
         }

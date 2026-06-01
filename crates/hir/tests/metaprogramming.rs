@@ -3216,7 +3216,7 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(
         &diags,
-        "derive provider `StableEq` for `Foo: Eq` did not produce generated evidence",
+        "derive provider `StableEq` for `Foo: Eq` failed to produce generated evidence",
     );
     assert_diag_message(&diags, "provider emitted an invalid generated method name");
     assert_diag_primary_span_text(

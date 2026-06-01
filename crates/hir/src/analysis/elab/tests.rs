@@ -48,14 +48,14 @@ fn first_builder_context<'db>(
         .expect("missing elaboration context")
 }
 
-fn skipped_output_span_text<'db>(
+fn failed_output_span_text<'db>(
     db: &'db HirAnalysisTestDb,
     output: ProviderOutputId<'db>,
 ) -> String {
-    let ProviderOutputStatus::Skipped { span, .. } = output.status(db) else {
-        panic!("expected skipped provider output");
+    let ProviderOutputStatus::Failed { span, .. } = output.status(db) else {
+        panic!("expected failed provider output");
     };
-    let resolved = span.resolve(db).expect("skip span should resolve");
+    let resolved = span.resolve(db).expect("failure span should resolve");
     let text = resolved.file.text(db);
     text[resolved.range.start().into()..resolved.range.end().into()].to_string()
 }
@@ -274,8 +274,8 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::MissingFinish,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::MissingFinish,
             ..
         }
     ));
@@ -312,12 +312,12 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::MissingReflectCapability,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::MissingReflectCapability,
             ..
         }
     ));
-    assert_eq!(skipped_output_span_text(&db, output), "reflect.fields()");
+    assert_eq!(failed_output_span_text(&db, output), "reflect.fields()");
 }
 
 #[test]
@@ -347,12 +347,12 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::UnsupportedProviderBody,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::UnsupportedProviderBody,
             ..
         }
     ));
-    assert_eq!(skipped_output_span_text(&db, output), "builder");
+    assert_eq!(failed_output_span_text(&db, output), "builder");
 }
 
 #[test]
@@ -385,12 +385,12 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::InvalidGeneratedMethodName,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::InvalidGeneratedMethodName,
             ..
         }
     ));
-    assert_eq!(skipped_output_span_text(&db, output), "\"missing\"");
+    assert_eq!(failed_output_span_text(&db, output), "\"missing\"");
 }
 
 #[test]
@@ -423,12 +423,12 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::InvalidGeneratedMethodName,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::InvalidGeneratedMethodName,
             ..
         }
     ));
-    assert_eq!(skipped_output_span_text(&db, output), "builder.bool(true)");
+    assert_eq!(failed_output_span_text(&db, output), "builder.bool(true)");
 }
 
 #[test]
@@ -460,12 +460,12 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::UnsupportedProviderBody,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::UnsupportedProviderBody,
             ..
         }
     ));
-    assert!(skipped_output_span_text(&db, output).starts_with("while true"));
+    assert!(failed_output_span_text(&db, output).starts_with("while true"));
 }
 
 #[test]
@@ -498,8 +498,8 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::DuplicateFinish,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::DuplicateFinish,
             ..
         }
     ));
@@ -542,8 +542,8 @@ impl StableEq: Derive for Eq {
     let output = provider_output_for_context(&db, context);
     assert!(matches!(
         output.status(&db),
-        ProviderOutputStatus::Skipped {
-            reason: ProviderSkipReason::CommandAfterFinish,
+        ProviderOutputStatus::Failed {
+            reason: ProviderFailureReason::CommandAfterFinish,
             ..
         }
     ));

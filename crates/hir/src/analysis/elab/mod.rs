@@ -56,7 +56,7 @@ use provider_context::{
     derive_evidence_for_goal, elaborate_provider_context, matching_selected_providers,
 };
 use provider_execution::provider_output_for_context;
-pub(crate) use provider_output::{ProviderOutputId, ProviderOutputStatus, ProviderSkipReason};
+pub(crate) use provider_output::{ProviderFailureReason, ProviderOutputId, ProviderOutputStatus};
 pub(crate) use reflect::ReflectedField;
 use reflect::reflect_struct_fields;
 pub(crate) use request::{

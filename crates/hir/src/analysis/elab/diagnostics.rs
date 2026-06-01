@@ -104,19 +104,19 @@ pub(super) fn provider_output_diag<'db>(
 ) -> Option<TyDiagCollection<'db>> {
     let message = match output.status(db) {
         ProviderOutputStatus::Succeeded { .. } => return None,
-        ProviderOutputStatus::Skipped { reason, .. } => reason.diagnostic_message().to_string(),
+        ProviderOutputStatus::Failed { reason, .. } => reason.diagnostic_message().to_string(),
     };
 
     let request = output.request(db);
     let provider = output.provider(db).identity(db).pretty_print(db);
     let span = match output.status(db) {
-        ProviderOutputStatus::Skipped { span, .. } => span,
+        ProviderOutputStatus::Failed { span, .. } => span,
         ProviderOutputStatus::Succeeded { .. } => output.provider(db).func(db).span().name().into(),
     };
     Some(invalid_request(
         span,
         format!(
-            "derive provider `{provider}` for `{}` did not produce generated evidence: {message}",
+            "derive provider `{provider}` for `{}` failed to produce generated evidence: {message}",
             request.goal(db).pretty_print(db)
         ),
     ))

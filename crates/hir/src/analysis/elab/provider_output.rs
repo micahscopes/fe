@@ -3,7 +3,7 @@ use crate::{analysis::ty::derive_provider::DeriveProviderId, span::DynLazySpan};
 use super::{BuilderCommandListId, ElaborationCtfeContextId, ElaborationRequestId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum ProviderSkipReason {
+pub(crate) enum ProviderFailureReason {
     MissingBuilderCapability,
     MissingReflectCapability,
     MissingFinish,
@@ -16,7 +16,7 @@ pub(crate) enum ProviderSkipReason {
     UnsupportedProviderBody,
 }
 
-impl ProviderSkipReason {
+impl ProviderFailureReason {
     pub(super) fn diagnostic_message(self) -> &'static str {
         match self {
             Self::MissingBuilderCapability => {
@@ -40,8 +40,8 @@ pub(crate) enum ProviderOutputStatus<'db> {
     Succeeded {
         commands: BuilderCommandListId<'db>,
     },
-    Skipped {
-        reason: ProviderSkipReason,
+    Failed {
+        reason: ProviderFailureReason,
         span: DynLazySpan<'db>,
     },
 }
