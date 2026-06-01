@@ -2935,6 +2935,69 @@ impl FastEq: Derive for Eq {
 }
 
 #[test]
+fn invalid_generated_method_candidate_does_not_conflict_with_valid_provider() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "invalid_generated_method_candidate_does_not_conflict_with_valid_provider.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self) -> bool
+}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Foo {}
+
+derive Eq for Foo using BadEq
+derive Eq for Foo using StableEq
+
+impl BadEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method("eq", builder.self_ref())
+        builder.finish()
+        ev
+    }
+}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method("eq", builder.bool(true))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller() {
+    require_eq<Foo>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Eq` does not satisfy required methods",
+    );
+    assert_diag_message(&diags, "invalid generated body for eq");
+    assert_eq!(
+        diag_message_count(&diags, "conflicts with another generated implementation"),
+        0,
+        "invalid generated method candidates should not participate in generated/global coherence: {diags:#?}"
+    );
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
 fn selected_named_provider_conflicts_with_authored_impl() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

@@ -142,7 +142,8 @@ fn generated_overlay_diags_for_top_mod<'db>(
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let candidates = generated_impl_candidates_for_ingot(db, top_mod.ingot(db));
-    let candidate_indices = candidates
+    let method_valid_candidates = generated_impl_method_valid_candidates(db, &candidates);
+    let candidate_indices = method_valid_candidates
         .iter()
         .copied()
         .enumerate()
@@ -152,7 +153,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
     diags.extend(cycles::generated_evidence_cycle_diags(
         db,
         top_mod,
-        &candidates,
+        &method_valid_candidates,
     ));
     for &request in elaboration_requests_for_top_mod(db, top_mod) {
         for &context in elaboration_ctfe_contexts_for_request(db, request) {
@@ -207,7 +208,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                     ),
                 ));
             } else if let Some(other) =
-                generated_conflicting_generated_impl(db, generated, &candidates)
+                generated_conflicting_generated_impl(db, generated, &method_valid_candidates)
             {
                 if !should_report_generated_conflict(&candidate_indices, generated, other) {
                     continue;
@@ -325,10 +326,11 @@ pub(crate) fn generated_impls_for_ingot<'db>(
     // output later, but provider execution/builders must not be invoked from
     // inside the proof search itself.
     let candidates = generated_impl_candidates_for_ingot(db, ingot);
-    candidates
+    let method_valid_candidates = generated_impl_method_valid_candidates(db, &candidates);
+    method_valid_candidates
         .iter()
         .copied()
-        .filter(|&generated| generated_impl_is_admissible(db, generated, &candidates))
+        .filter(|&generated| generated_impl_is_admissible(db, generated, &method_valid_candidates))
         .collect()
 }
 
@@ -349,14 +351,31 @@ fn generated_impl_candidates_for_ingot<'db>(
         .collect()
 }
 
+fn generated_impl_method_valid_candidates<'db>(
+    db: &'db dyn HirAnalysisDb,
+    candidates: &[GeneratedImplId<'db>],
+) -> Vec<GeneratedImplId<'db>> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&generated| generated_impl_methods_are_valid(db, generated))
+        .collect()
+}
+
+fn generated_impl_methods_are_valid<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> bool {
+    generated_missing_required_methods(db, generated).is_empty()
+        && generated_invalid_required_method_bodies(db, generated).is_empty()
+}
+
 fn generated_impl_is_admissible<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
     candidates: &[GeneratedImplId<'db>],
 ) -> bool {
-    let missing = generated_missing_required_methods(db, generated);
-    let invalid_bodies = generated_invalid_required_method_bodies(db, generated);
-    if !missing.is_empty() || !invalid_bodies.is_empty() {
+    if !generated_impl_methods_are_valid(db, generated) {
         return false;
     }
     !generated_conflicts_with_authored_impl(db, generated)
