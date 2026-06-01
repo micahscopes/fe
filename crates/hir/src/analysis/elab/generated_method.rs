@@ -13,6 +13,7 @@ use crate::{
                 instantiate_required_method_ty_for_trait_inst, missing_required_method_names,
                 required_method_arg_ty_for_trait_inst, trait_methods,
             },
+            trait_def::TraitInstId,
             trait_resolution::PredicateListId,
             ty_def::TyId,
         },
@@ -78,13 +79,22 @@ pub(super) fn generated_invalid_method_bodies<'db>(
                             },
                             span: expr.span(db).clone(),
                         }),
-                        Err(span) => Some(GeneratedInvalidMethodBody {
+                        Err(err) => Some(GeneratedInvalidMethodBody {
                             name: method.name,
-                            reason: GeneratedInvalidMethodBodyReason::InvalidBody {
-                                expected,
-                                actual: None,
+                            reason: match err.reason {
+                                GeneratedExprStaticTyErrorReason::MissingRequirement(required) => {
+                                    GeneratedInvalidMethodBodyReason::MissingRequirement {
+                                        required,
+                                    }
+                                }
+                                GeneratedExprStaticTyErrorReason::InvalidExpression => {
+                                    GeneratedInvalidMethodBodyReason::InvalidBody {
+                                        expected,
+                                        actual: None,
+                                    }
+                                }
                             },
-                            span,
+                            span: err.span,
                         }),
                     }
                 }
@@ -104,10 +114,40 @@ pub(super) struct GeneratedInvalidMethodBody<'db> {
 enum GeneratedInvalidMethodBodyReason<'db> {
     UnknownMethod,
     DuplicateMethod,
+    MissingRequirement {
+        required: ConstraintId<'db>,
+    },
     InvalidBody {
         expected: TyId<'db>,
         actual: Option<TyId<'db>>,
     },
+}
+
+struct GeneratedExprStaticTyError<'db> {
+    span: DynLazySpan<'db>,
+    reason: GeneratedExprStaticTyErrorReason<'db>,
+}
+
+enum GeneratedExprStaticTyErrorReason<'db> {
+    InvalidExpression,
+    MissingRequirement(ConstraintId<'db>),
+}
+
+fn invalid_expr<'db>(span: DynLazySpan<'db>) -> GeneratedExprStaticTyError<'db> {
+    GeneratedExprStaticTyError {
+        span,
+        reason: GeneratedExprStaticTyErrorReason::InvalidExpression,
+    }
+}
+
+fn missing_requirement<'db>(
+    span: DynLazySpan<'db>,
+    required: ConstraintId<'db>,
+) -> GeneratedExprStaticTyError<'db> {
+    GeneratedExprStaticTyError {
+        span,
+        reason: GeneratedExprStaticTyErrorReason::MissingRequirement(required),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -191,33 +231,34 @@ fn generated_expr_static_ty_result<'db>(
     db: &'db dyn HirAnalysisDb,
     expr: GeneratedExprId<'db>,
     cx: GeneratedMethodValidationContext<'db>,
-) -> Result<TyId<'db>, DynLazySpan<'db>> {
+) -> Result<TyId<'db>, GeneratedExprStaticTyError<'db>> {
     match expr.kind(db) {
         GeneratedExprKind::BoolLiteral(_) => Ok(TyId::bool(db)),
         GeneratedExprKind::BoolAnd { lhs, rhs } => {
             let lhs_ty = generated_expr_static_ty_result(db, lhs, cx)?;
             if !tys_match(db, lhs_ty, TyId::bool(db)) {
-                return Err(lhs.span(db).clone());
+                return Err(invalid_expr(lhs.span(db).clone()));
             }
             let rhs_ty = generated_expr_static_ty_result(db, rhs, cx)?;
             if !tys_match(db, rhs_ty, TyId::bool(db)) {
-                return Err(rhs.span(db).clone());
+                return Err(invalid_expr(rhs.span(db).clone()));
             }
             Ok(TyId::bool(db))
         }
         GeneratedExprKind::SelfRef { ty } => {
             if !cx.required_method.is_method(db) {
-                return Err(expr.span(db).clone());
+                return Err(invalid_expr(expr.span(db).clone()));
             }
             let self_ty = generated_method_target_ty(db, cx);
             if tys_match(db, self_ty, ty) {
                 Ok(ty)
             } else {
-                Err(expr.span(db).clone())
+                Err(invalid_expr(expr.span(db).clone()))
             }
         }
         GeneratedExprKind::MethodArgRef { name } => {
-            generated_required_method_param_ty(db, cx, name).ok_or_else(|| expr.span(db).clone())
+            generated_required_method_param_ty(db, cx, name)
+                .ok_or_else(|| invalid_expr(expr.span(db).clone()))
         }
         GeneratedExprKind::FieldGet { base, field } => {
             let base_ty = generated_expr_static_ty_result(db, base, cx)?;
@@ -225,16 +266,21 @@ fn generated_expr_static_ty_result<'db>(
             if tys_match(db, base_ty, field.parent) {
                 Ok(field.ty)
             } else {
-                Err(base.span(db).clone())
+                Err(invalid_expr(base.span(db).clone()))
             }
         }
         GeneratedExprKind::EqExpr { lhs, rhs } => {
             let lhs_ty = generated_expr_static_ty_result(db, lhs, cx)?;
             let rhs_ty = generated_expr_static_ty_result(db, rhs, cx)?;
             if tys_match(db, lhs_ty, rhs_ty) {
+                if let Some(required) = generated_generic_field_eq_requirement(db, lhs, rhs, cx)
+                    && !generated_has_requirement(db, cx.generated, required)
+                {
+                    return Err(missing_requirement(expr.span(db).clone(), required));
+                }
                 Ok(TyId::bool(db))
             } else {
-                Err(rhs.span(db).clone())
+                Err(invalid_expr(rhs.span(db).clone()))
             }
         }
         GeneratedExprKind::DefaultCall { ty } => Ok(ty),
@@ -263,24 +309,24 @@ fn generated_struct_init_ty<'db>(
     target: TyId<'db>,
     fields: GeneratedStructFieldInitListId<'db>,
     cx: GeneratedMethodValidationContext<'db>,
-) -> Result<TyId<'db>, DynLazySpan<'db>> {
+) -> Result<TyId<'db>, GeneratedExprStaticTyError<'db>> {
     let expected_fields = reflect_struct_fields(db, target);
     let field_inits = fields.list(db);
     if expected_fields.len() != field_inits.len() {
-        return Err(expr.span(db).clone());
+        return Err(invalid_expr(expr.span(db).clone()));
     }
 
     for expected in expected_fields {
         let init = field_inits
             .iter()
             .find(|init| init.field.index == expected.index)
-            .ok_or_else(|| expr.span(db).clone())?;
+            .ok_or_else(|| invalid_expr(expr.span(db).clone()))?;
         if !tys_match(db, init.field.parent, target) || !tys_match(db, init.field.ty, expected.ty) {
-            return Err(expr.span(db).clone());
+            return Err(invalid_expr(expr.span(db).clone()));
         }
         let value_ty = generated_expr_static_ty_result(db, init.value, cx)?;
         if !tys_match(db, value_ty, expected.ty) {
-            return Err(init.value.span(db).clone());
+            return Err(invalid_expr(init.value.span(db).clone()));
         }
     }
 
@@ -325,6 +371,13 @@ impl<'db> GeneratedInvalidMethodBody<'db> {
             GeneratedInvalidMethodBodyReason::DuplicateMethod => {
                 format!("{} (duplicate generated method)", self.name.data(db))
             }
+            GeneratedInvalidMethodBodyReason::MissingRequirement { required } => {
+                format!(
+                    "{} (missing generated requirement {})",
+                    self.name.data(db),
+                    required.pretty_print(db)
+                )
+            }
             GeneratedInvalidMethodBodyReason::InvalidBody { expected, actual } => {
                 let actual = actual
                     .map(|ty| ty.pretty_print(db).to_string())
@@ -348,4 +401,48 @@ pub(super) fn trait_methods_for_goal<'db>(
         return IndexMap::new();
     };
     trait_methods(db, trait_inst.def(db))
+}
+
+fn generated_generic_field_eq_requirement<'db>(
+    db: &'db dyn HirAnalysisDb,
+    lhs: GeneratedExprId<'db>,
+    rhs: GeneratedExprId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
+) -> Option<ConstraintId<'db>> {
+    let (
+        GeneratedExprKind::FieldGet {
+            field: lhs_field, ..
+        },
+        GeneratedExprKind::FieldGet {
+            field: rhs_field, ..
+        },
+    ) = (lhs.kind(db), rhs.kind(db))
+    else {
+        return None;
+    };
+
+    if lhs_field.index != rhs_field.index
+        || !tys_match(db, lhs_field.parent, rhs_field.parent)
+        || !tys_match(db, lhs_field.ty, rhs_field.ty)
+        || !lhs_field.ty.has_param(db)
+    {
+        return None;
+    }
+
+    Some(ConstraintId::from_trait(
+        db,
+        TraitInstId::new_simple(db, cx.generated.trait_inst.def(db), vec![lhs_field.ty]),
+    ))
+}
+
+fn generated_has_requirement<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+    required: ConstraintId<'db>,
+) -> bool {
+    generated
+        .requirements
+        .list(db)
+        .iter()
+        .any(|requirement| super::constraints_match(db, requirement.constraint, required))
 }
