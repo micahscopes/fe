@@ -37,7 +37,7 @@ pub(super) fn generated_missing_required_methods<'db>(
 pub(super) fn generated_invalid_required_method_bodies<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
-) -> Vec<IdentId<'db>> {
+) -> Vec<GeneratedInvalidMethodBody<'db>> {
     let required = required_methods(db, ConstraintId::from_trait(db, generated.trait_inst));
     generated
         .methods
@@ -52,11 +52,25 @@ pub(super) fn generated_invalid_required_method_bodies<'db>(
                         required_method: *required_method,
                     };
                     let expected = generated_required_method_return_ty(db, cx);
-                    (!generated_expr_ty_matches(db, expr, expected, cx)).then_some(method.name)
+                    let actual = generated_expr_static_ty(db, expr, cx);
+                    actual
+                        .is_none_or(|actual| !tys_match(db, actual, expected))
+                        .then_some(GeneratedInvalidMethodBody {
+                            name: method.name,
+                            expected,
+                            actual,
+                        })
                 }
             }
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GeneratedInvalidMethodBody<'db> {
+    pub(super) name: IdentId<'db>,
+    expected: TyId<'db>,
+    actual: Option<TyId<'db>>,
 }
 
 #[derive(Clone, Copy)]
@@ -233,7 +247,7 @@ fn generated_struct_init_ty<'db>(
 pub(super) fn generated_method_error_summary<'db>(
     db: &'db dyn HirAnalysisDb,
     missing_methods: &[IdentId<'db>],
-    invalid_body_methods: &[IdentId<'db>],
+    invalid_body_methods: &[GeneratedInvalidMethodBody<'db>],
 ) -> String {
     let mut parts = Vec::new();
     if !missing_methods.is_empty() {
@@ -251,12 +265,27 @@ pub(super) fn generated_method_error_summary<'db>(
             "invalid generated body for {}",
             invalid_body_methods
                 .iter()
-                .map(|name| name.data(db).to_string())
+                .map(|method| method.pretty_print(db))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
     }
     parts.join("; ")
+}
+
+impl<'db> GeneratedInvalidMethodBody<'db> {
+    fn pretty_print(self, db: &'db dyn HirAnalysisDb) -> String {
+        let actual = self
+            .actual
+            .map(|ty| ty.pretty_print(db).to_string())
+            .unwrap_or_else(|| "<unavailable>".to_string());
+        format!(
+            "{} (expected {}, got {})",
+            self.name.data(db),
+            self.expected.pretty_print(db),
+            actual
+        )
+    }
 }
 
 pub(super) fn required_methods<'db>(

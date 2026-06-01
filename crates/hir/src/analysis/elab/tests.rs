@@ -892,7 +892,10 @@ impl StableDefault: Derive for Default {
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
     assert_eq!(
-        generated_invalid_required_method_bodies(&db, generated),
+        generated_invalid_required_method_bodies(&db, generated)
+            .iter()
+            .map(|invalid| invalid.name)
+            .collect::<Vec<_>>(),
         vec![method_name]
     );
 }
@@ -968,7 +971,10 @@ impl StableDefault: Derive for Default {
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
     assert_eq!(
-        generated_invalid_required_method_bodies(&db, generated),
+        generated_invalid_required_method_bodies(&db, generated)
+            .iter()
+            .map(|invalid| invalid.name)
+            .collect::<Vec<_>>(),
         vec![method_name]
     );
 }
@@ -1027,7 +1033,10 @@ impl StableCount: Derive for Count {
 
     assert!(generated_missing_required_methods(&db, generated).is_empty());
     assert_eq!(
-        generated_invalid_required_method_bodies(&db, generated),
+        generated_invalid_required_method_bodies(&db, generated)
+            .iter()
+            .map(|invalid| invalid.name)
+            .collect::<Vec<_>>(),
         vec![method_name]
     );
 }
