@@ -231,8 +231,10 @@ fn generated_authored_conflict_message<'db>(
     generated: GeneratedImplId<'db>,
 ) -> String {
     let mut message = format!(
-        "generated implementation for `{}` conflicts with an authored implementation",
-        generated.trait_inst.pretty_print(db, true)
+        "generated implementation for `{}` from provider `{}` for `{}` conflicts with an authored implementation",
+        generated.trait_inst.pretty_print(db, true),
+        generated_provider_name(db, generated),
+        generated.context.request(db).pretty_print(db),
     );
 
     if generated_selected_from_scope(db, generated) {
