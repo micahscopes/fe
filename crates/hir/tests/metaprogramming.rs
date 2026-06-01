@@ -1022,6 +1022,99 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn provider_generated_struct_target_eq_method_requires_field_obligations() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_struct_target_eq_method_requires_field_obligations.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+derive Eq for Pair using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.require<Eq>(field.ty())
+        }
+        builder.emit_method("eq", builder.eq(builder.self_ref(), builder.arg_ref("other")))
+        builder.finish()
+        ev
+    }
+}
+
+fn caller<A, B>()
+where
+    A: Eq,
+    B: Eq
+{
+    require_eq<Pair<A, B>>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Pair<A, B>: Eq with obligations {A: Eq, B: Eq}".to_string()]
+    );
+}
+
+#[test]
+fn provider_generated_struct_target_eq_method_rejects_missing_field_obligation() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_generated_struct_target_eq_method_rejects_missing_field_obligation.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self, other: Self) -> bool
+}
+
+struct Pair<A> {
+    value: A,
+}
+
+derive Eq for Pair using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.emit_method("eq", builder.eq(builder.self_ref(), builder.arg_ref("other")))
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "provider output for `Eq` does not satisfy trait method contract",
+    );
+    assert_diag_message(&diags, "invalid generated body for eq");
+    assert_diag_message(&diags, "missing generated requirement A: Eq");
+}
+
+#[test]
 fn typed_reflection_requires_reflect_capability() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -1862,6 +1955,52 @@ fn caller() {
             "Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string(),
             "Foo: Default requested for Foo using StableDefault using Derive<Default> evidence from StableDefault with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Default>]".to_string(),
         ]
+    );
+}
+
+#[test]
+fn core_derives_dependency_activates_canonical_eq_for_enum() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = project_file(
+        &mut db,
+        "core_derives_dependency_activates_canonical_eq_for_enum",
+        r#"
+[ingot]
+name = "core_derives_dependency_activates_canonical_eq_for_enum"
+version = "0.1.0"
+
+[dependencies]
+core_derives = true
+"#,
+        r#"
+use core::ops::Eq
+
+fn require_eq<T>()
+where
+    T: Eq
+{}
+
+enum Choice<T> {
+    Empty,
+    One { value: T },
+}
+
+derive Eq for Choice using StableEq
+
+fn caller<T>()
+where
+    T: Eq
+{
+    require_eq<Choice<T>>()
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    assert_eq!(
+        generated_impl_summaries_for_top_mod(&db, top_mod),
+        vec!["generated provider Choice<T>: Eq with obligations {T: Eq}".to_string()]
     );
 }
 

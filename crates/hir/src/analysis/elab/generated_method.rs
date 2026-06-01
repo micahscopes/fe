@@ -276,16 +276,19 @@ fn generated_expr_static_ty_result<'db>(
         GeneratedExprKind::EqExpr { lhs, rhs } => {
             let lhs_ty = generated_expr_static_ty_result(db, lhs, cx)?;
             let rhs_ty = generated_expr_static_ty_result(db, rhs, cx)?;
+            if generated_eq_expr_matches_target(db, lhs_ty, rhs_ty, cx) {
+                for required in generated_adt_target_eq_requirements(db, cx) {
+                    if !generated_has_requirement(db, cx.generated, required) {
+                        return Err(missing_requirement(expr.span(db).clone(), required));
+                    }
+                }
+                return Ok(TyId::bool(db));
+            }
             if tys_match(db, lhs_ty, rhs_ty) {
                 if let Some(required) = generated_generic_field_eq_requirement(db, lhs, rhs, cx)
                     && !generated_has_requirement(db, cx.generated, required)
                 {
                     return Err(missing_requirement(expr.span(db).clone(), required));
-                }
-                for required in generated_enum_target_eq_requirements(db, lhs_ty, cx) {
-                    if !generated_has_requirement(db, cx.generated, required) {
-                        return Err(missing_requirement(expr.span(db).clone(), required));
-                    }
                 }
                 Ok(TyId::bool(db))
             } else {
@@ -455,24 +458,29 @@ fn generated_generic_field_eq_requirement<'db>(
     ))
 }
 
-fn generated_enum_target_eq_requirements<'db>(
+fn generated_eq_expr_matches_target<'db>(
     db: &'db dyn HirAnalysisDb,
-    ty: TyId<'db>,
+    lhs_ty: TyId<'db>,
+    rhs_ty: TyId<'db>,
+    cx: GeneratedMethodValidationContext<'db>,
+) -> bool {
+    let target = generated_method_target_ty(db, cx);
+    tys_match(db, generated_field_access_receiver_ty(db, lhs_ty), target)
+        && tys_match(db, generated_field_access_receiver_ty(db, rhs_ty), target)
+}
+
+fn generated_adt_target_eq_requirements<'db>(
+    db: &'db dyn HirAnalysisDb,
     cx: GeneratedMethodValidationContext<'db>,
 ) -> Vec<ConstraintId<'db>> {
     let target = generated_method_target_ty(db, cx);
-    if !tys_match(db, ty, target) {
-        return Vec::new();
-    }
-
-    let variants = reflect_enum_variants(db, target);
-    if variants.is_empty() {
-        return Vec::new();
-    }
-
-    variants
+    reflect_struct_fields(db, target)
         .into_iter()
-        .flat_map(|variant| reflect_variant_fields(db, variant))
+        .chain(
+            reflect_enum_variants(db, target)
+                .into_iter()
+                .flat_map(|variant| reflect_variant_fields(db, variant)),
+        )
         .map(|field| {
             ConstraintId::from_trait(
                 db,

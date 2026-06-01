@@ -8,15 +8,15 @@ impl StableEq: Derive for Eq {
             builder: mut ImplBuilder<Eq<T>>,
         )
     {
-        let mut acc = builder.bool(true)
         for field in reflect.fields() {
             builder.require<Eq>(field.ty())
-            acc = builder.and(acc, builder.eq(
-                builder.field_get(builder.self_ref(), field),
-                builder.field_get(builder.arg_ref("other"), field),
-            ))
         }
-        builder.emit_method("eq", acc)
+        for variant in reflect.variants() {
+            for field in variant.fields() {
+                builder.require<Eq>(field.ty())
+            }
+        }
+        builder.emit_method("eq", builder.eq(builder.self_ref(), builder.arg_ref("other")))
         builder.finish()
         ev
     }
