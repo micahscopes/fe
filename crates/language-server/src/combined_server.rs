@@ -1051,10 +1051,15 @@ async fn handle_trace_workbench_select_http(
                 );
             }
         };
-    let model = trace_workbench_model_for_event(session_id.clone(), actor_rx)
-        .await
-        .ok();
-    let resolved_rows = trace_workbench_resolved_rows_for_selection(&selection, model.as_ref());
+    let resolved_rows =
+        if let Some(rows) = trace_workbench_resolved_rows_for_selection_without_model(&selection) {
+            rows
+        } else {
+            let model = trace_workbench_model_for_event(session_id.clone(), actor_rx)
+                .await
+                .ok();
+            trace_workbench_resolved_rows_for_selection(&selection, model.as_ref())
+        };
     let event = trace_workbench_selection_event(
         &session_id,
         bootstrap.revision.id,
@@ -1078,6 +1083,35 @@ fn trace_workbench_selection_event(
         "selection": selection,
         "resolvedRows": resolved_rows,
     })
+}
+
+fn trace_workbench_resolved_rows_for_selection_without_model(
+    selection: &serde_json::Value,
+) -> Option<Vec<String>> {
+    if let Some(row) = selection.get("row").and_then(serde_json::Value::as_str)
+        && !row.trim().is_empty()
+    {
+        return Some(vec![row.to_string()]);
+    }
+    if let Some(source_ref) = selection
+        .get("sourceRef")
+        .or_else(|| selection.get("source_ref"))
+        .and_then(serde_json::Value::as_str)
+        && let Some((source, line)) = trace_workbench_parse_source_ref(source_ref)
+        && source == "main"
+    {
+        return Some(vec![trace_workbench_source_row_id(line)]);
+    }
+    if let Some(line) = selection
+        .get("range")
+        .and_then(|range| range.get("start"))
+        .and_then(|start| start.get("line"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| selection.get("line").and_then(serde_json::Value::as_u64))
+    {
+        return Some(vec![trace_workbench_source_row_id(line.saturating_add(1))]);
+    }
+    None
 }
 
 fn trace_workbench_resolved_rows_for_selection(
@@ -1398,7 +1432,8 @@ mod tests {
     use super::{
         trace_auth_token, trace_workbench_query_backend_request,
         trace_workbench_requested_chunk_digests, trace_workbench_resolved_rows_for_selection,
-        trace_workbench_revision_cursor, trace_workbench_selection_event, validate_trace_auth,
+        trace_workbench_resolved_rows_for_selection_without_model, trace_workbench_revision_cursor,
+        trace_workbench_selection_event, validate_trace_auth,
     };
     use crate::introspection::trace_workbench_chunk_payload;
     use axum::http::{HeaderMap, header};
@@ -1495,6 +1530,42 @@ mod tests {
         assert_eq!(
             trace_workbench_resolved_rows_for_selection(&selection, None),
             vec!["origin-abc123".to_string()]
+        );
+    }
+
+    #[test]
+    fn trace_workbench_selection_fast_path_avoids_projection_when_safe() {
+        assert_eq!(
+            trace_workbench_resolved_rows_for_selection_without_model(
+                &serde_json::json!({ "row": "origin-bytecode-68" }),
+            ),
+            Some(vec!["origin-bytecode-68".to_string()])
+        );
+        assert_eq!(
+            trace_workbench_resolved_rows_for_selection_without_model(
+                &serde_json::json!({ "sourceRef": "main:94" }),
+            ),
+            Some(vec!["source-main-line-94".to_string()])
+        );
+        assert_eq!(
+            trace_workbench_resolved_rows_for_selection_without_model(
+                &serde_json::json!({ "range": { "start": { "line": 16 } } }),
+            ),
+            Some(vec!["source-main-line-17".to_string()])
+        );
+        assert!(
+            trace_workbench_resolved_rows_for_selection_without_model(
+                &serde_json::json!({ "sourceRef": "library:source:7" }),
+            )
+            .is_none(),
+            "related-source selections need projection indexes; do not guess a main-source row"
+        );
+        assert!(
+            trace_workbench_resolved_rows_for_selection_without_model(
+                &serde_json::json!({ "pc": 68 }),
+            )
+            .is_none(),
+            "bytecode selections need projection indexes or PC intervals"
         );
     }
 
