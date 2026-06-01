@@ -100,10 +100,23 @@ impl StableEq: Derive for Eq {
     let field_obligation =
         ConstraintId::from_trait(&db, TraitInstId::new_simple(&db, eq, vec![TyId::u256(&db)]));
     let context = first_builder_context(&db, top_mod);
-    let mut builder = ImplBuilderSession::new(&db, context);
-    builder.require(field_obligation).unwrap();
-
-    let generated = builder.finish(&db).unwrap();
+    let commands = BuilderCommandListId::new(
+        &db,
+        vec![
+            BuilderCommand::Require {
+                constraint: field_obligation,
+                origin: RequirementOrigin::Synthetic,
+            },
+            BuilderCommand::Finish,
+        ],
+    );
+    let generated = generated_impl_from_builder_commands(
+        &db,
+        context,
+        provider_output_source_for_commands(&db, context, commands),
+        commands,
+    )
+    .unwrap();
     assert_eq!(generated.obligations.list(&db), &[field_obligation]);
 }
 

@@ -16,8 +16,6 @@ use crate::{
 };
 
 use super::{ElaborationCtfeContextId, RequirementOrigin, constraints_match};
-#[cfg(test)]
-use super::{ProviderOutputId, ProviderOutputStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub(crate) enum BuilderCommand<'db> {
@@ -25,7 +23,6 @@ pub(crate) enum BuilderCommand<'db> {
         constraint: ConstraintId<'db>,
         origin: RequirementOrigin<'db>,
     },
-    #[allow(dead_code)]
     EmitMethodExpr {
         name: IdentId<'db>,
         expr: GeneratedExprId<'db>,
@@ -73,14 +70,6 @@ impl<'db> ImplBuilderSession<'db> {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn require(
-        &mut self,
-        constraint: ConstraintId<'db>,
-    ) -> Result<(), BuilderError<'db>> {
-        self.require_with_origin(constraint, RequirementOrigin::Synthetic)
-    }
-
     pub(crate) fn require_with_origin(
         &mut self,
         constraint: ConstraintId<'db>,
@@ -107,7 +96,6 @@ impl<'db> ImplBuilderSession<'db> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn emit_impl(
         &mut self,
         db: &'db dyn HirAnalysisDb,
@@ -123,33 +111,6 @@ impl<'db> ImplBuilderSession<'db> {
             });
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn finish(
-        mut self,
-        db: &'db dyn HirAnalysisDb,
-    ) -> Result<GeneratedImplId<'db>, BuilderError<'db>> {
-        if self.finished {
-            return Err(BuilderError::AlreadyFinished);
-        }
-
-        self.finished = true;
-        self.commands.push(BuilderCommand::Finish);
-        let commands = BuilderCommandListId::new(db, self.commands);
-        let output = ProviderOutputId::new(
-            db,
-            self.context.request(db),
-            self.context.provider(db),
-            self.context,
-            ProviderOutputStatus::Succeeded { commands },
-        );
-        generated_impl_from_builder_commands(
-            db,
-            self.context,
-            GeneratedImplSource::ProviderOutput(output),
-            commands,
-        )
     }
 
     pub(super) fn finish_explicit(&mut self) -> Result<(), BuilderError<'db>> {
