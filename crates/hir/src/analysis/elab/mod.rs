@@ -20,7 +20,7 @@ use crate::{
     hir_def::{TopLevelMod, Trait},
     span::DynLazySpan,
 };
-use common::ingot::Ingot;
+use common::{indexmap::IndexMap, ingot::Ingot};
 
 mod builder;
 mod capability;
@@ -142,6 +142,12 @@ fn generated_overlay_diags_for_top_mod<'db>(
     top_mod: TopLevelMod<'db>,
 ) -> Vec<TyDiagCollection<'db>> {
     let candidates = generated_impl_candidates_for_ingot(db, top_mod.ingot(db));
+    let candidate_indices = candidates
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(idx, generated)| (generated, idx))
+        .collect::<IndexMap<_, _>>();
     let mut diags = Vec::new();
     diags.extend(cycles::generated_evidence_cycle_diags(
         db,
@@ -203,6 +209,9 @@ fn generated_overlay_diags_for_top_mod<'db>(
             } else if let Some(other) =
                 generated_conflicting_generated_impl(db, generated, &candidates)
             {
+                if !should_report_generated_conflict(&candidate_indices, generated, other) {
+                    continue;
+                }
                 diags.push(invalid_request(
                     request.span(db),
                     format!(
@@ -217,6 +226,20 @@ fn generated_overlay_diags_for_top_mod<'db>(
         }
     }
     diags
+}
+
+fn should_report_generated_conflict<'db>(
+    candidate_indices: &IndexMap<GeneratedImplId<'db>, usize>,
+    generated: GeneratedImplId<'db>,
+    other: GeneratedImplId<'db>,
+) -> bool {
+    match (
+        candidate_indices.get(&generated),
+        candidate_indices.get(&other),
+    ) {
+        (Some(current), Some(previous)) => current > previous,
+        _ => true,
+    }
 }
 
 fn trait_name<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> String {

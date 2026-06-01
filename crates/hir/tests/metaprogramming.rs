@@ -83,6 +83,20 @@ fn assert_diag_message(diags: &[CompleteDiagnostic], expected: &str) {
     );
 }
 
+fn diag_message_count(diags: &[CompleteDiagnostic], expected: &str) -> usize {
+    diags
+        .iter()
+        .filter(|diag| {
+            diag.message.contains(expected)
+                || diag
+                    .sub_diagnostics
+                    .iter()
+                    .any(|sub| sub.message.contains(expected))
+                || diag.notes.iter().any(|note| note.contains(expected))
+        })
+        .count()
+}
+
 fn assert_diag_primary_span_text(
     db: &HirAnalysisTestDb,
     diags: &[CompleteDiagnostic],
@@ -2806,6 +2820,11 @@ impl FastEq: Derive for Eq {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_eq!(
+        diag_message_count(&diags, "conflicts with another generated implementation"),
+        1,
+        "expected one generated/generated conflict diagnostic, got {diags:#?}"
+    );
     assert_diag_message(&diags, "from provider `StableEq`");
     assert_diag_message(&diags, "from provider `FastEq`");
     assert_eq!(
@@ -2849,6 +2868,11 @@ impl FastEq: Derive for Eq {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_eq!(
+        diag_message_count(&diags, "conflicts with another generated implementation"),
+        1,
+        "expected one generated/generated conflict diagnostic, got {diags:#?}"
+    );
     assert_diag_message(&diags, "from provider `StableEq`");
     assert_diag_message(&diags, "from provider `FastEq`");
     assert_eq!(
@@ -2897,6 +2921,11 @@ impl FastEq: Derive for Eq {
     let (top_mod, _) = db.top_mod(file);
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "conflicts with another generated implementation");
+    assert_eq!(
+        diag_message_count(&diags, "conflicts with another generated implementation"),
+        1,
+        "expected one generated/generated conflict diagnostic, got {diags:#?}"
+    );
     assert_diag_message(&diags, "from provider `StableEq`");
     assert_diag_message(&diags, "from provider `FastEq`");
     assert_eq!(
