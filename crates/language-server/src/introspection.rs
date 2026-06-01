@@ -1713,7 +1713,11 @@ pub fn main() -> u64 {
             Some(11),
             config_hash,
             serde_json::json!({ "revision": { "id": 11 } }),
-            serde_json::json!({ "revision": 11, "summaryDigest": "blake3:summary" }),
+            serde_json::json!({
+                "revision": 11,
+                "rootDigest": "blake3:model",
+                "summaryDigest": "blake3:summary"
+            }),
             BTreeMap::from([(
                 "blake3:summary".to_string(),
                 serde_json::json!({
@@ -1737,17 +1741,38 @@ pub fn main() -> u64 {
         assert_eq!(chunk["kind"], "summary");
         assert_eq!(chunk["value"]["revision"]["id"], 11);
 
+        let full_model_chunk = handle_trace_workbench_chunk(
+            &mut backend,
+            TraceWorkbenchChunkRequest {
+                session_id: session.id.clone(),
+                digest: "blake3:model".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            full_model_chunk.is_none(),
+            "rootDigest must identify the projection, not a materialized chunk"
+        );
+
         let response = handle_trace_workbench_chunks(
             &mut backend,
             TraceWorkbenchChunksRequest {
                 session_id: session.id.clone(),
-                digests: vec!["blake3:summary".to_string(), "blake3:missing".to_string()],
+                digests: vec![
+                    "blake3:summary".to_string(),
+                    "blake3:model".to_string(),
+                    "blake3:missing".to_string(),
+                ],
             },
         )
         .await
         .unwrap();
         assert_eq!(response["chunks"].as_array().unwrap().len(), 1);
-        assert_eq!(response["missing"], serde_json::json!(["blake3:missing"]));
+        assert_eq!(
+            response["missing"],
+            serde_json::json!(["blake3:model", "blake3:missing"])
+        );
 
         tokio::task::spawn_blocking(move || drop(backend))
             .await
