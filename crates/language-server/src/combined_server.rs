@@ -1304,13 +1304,12 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> axum::response
     (status, Json(value)).into_response()
 }
 
-fn trace_auth_token(headers: &HeaderMap, query: &BTreeMap<String, String>) -> Option<String> {
+fn trace_auth_token(headers: &HeaderMap, _query: &BTreeMap<String, String>) -> Option<String> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::to_string)
-        .or_else(|| query.get("token").cloned())
 }
 
 async fn ready_actor(
@@ -1450,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_workbench_auth_accepts_bearer_or_query_token() {
+    fn trace_workbench_auth_accepts_bearer_and_rejects_query_token() {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -1465,9 +1464,9 @@ mod tests {
         );
 
         let headers = HeaderMap::new();
-        assert_eq!(
-            trace_auth_token(&headers, &query).as_deref(),
-            Some("query-secret")
+        assert!(
+            trace_auth_token(&headers, &query).is_none(),
+            "non-SSE trace endpoints must not accept query-token auth"
         );
     }
 
