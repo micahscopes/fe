@@ -6,6 +6,7 @@ use std::time::Instant;
 
 pub mod datalog_emit;
 pub mod origin_closure;
+mod rail_components;
 pub mod static_analysis;
 pub mod trace_index;
 
@@ -1848,7 +1849,7 @@ pub fn trace_workbench_report_projection(
         stage_started,
     );
     let stage_started = Instant::now();
-    let component_classes_by_key = origin_closure::component_classes_by_origin_key(snapshot);
+    let component_classes_by_key = rail_components::component_classes_by_origin_key(snapshot);
     trace_workbench_record_timing(&mut projection_timings, "rail_components_ms", stage_started);
     let stage_started = Instant::now();
     let mut classes_by_key = closure_set
@@ -8641,7 +8642,7 @@ fn format_storage_location(location: &StorageLocation) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::{origin_closure, trace_index};
+    use crate::{rail_components, trace_index};
 
     use common::origin::OriginExportKey;
     use shape_address::{
@@ -12448,7 +12449,8 @@ mod tests {
                 .is_empty(),
             "TraceIndex must not bridge prepared bytecode to source without a PreparedLineage event",
         );
-        let component_classes = origin_closure::component_classes_by_origin_key(service.snapshot());
+        let component_classes =
+            rail_components::component_classes_by_origin_key(service.snapshot());
         let source_classes = component_classes
             .get(&source_expr.canonical_storage_key())
             .cloned()
