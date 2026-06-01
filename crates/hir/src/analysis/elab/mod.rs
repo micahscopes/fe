@@ -265,7 +265,7 @@ fn generated_conflict_message<'db>(
 }
 
 fn scoped_selection_global_evidence_note() -> &'static str {
-    "; `with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global"
+    "; `with Provider { derive ... }` selects a provider for the contained derive declaration, but it does not yet create a local consumer scope, so generated evidence is still ingot-global"
 }
 
 fn generated_selected_from_scope<'db>(

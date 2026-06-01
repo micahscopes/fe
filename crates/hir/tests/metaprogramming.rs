@@ -2951,7 +2951,7 @@ impl StableEq: Derive for Eq {
     assert_diag_message(&diags, "for `Foo: Eq requested for Foo with StableEq`");
     assert_diag_message(
         &diags,
-        "`with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global",
+        "`with Provider { derive ... }` selects a provider for the contained derive declaration, but it does not yet create a local consumer scope, so generated evidence is still ingot-global",
     );
     assert_diag_primary_span_text(
         &db,
@@ -3095,7 +3095,7 @@ impl FastEq: Derive for Eq {
     assert_diag_message(&diags, "from provider `FastEq`");
     assert_diag_message(
         &diags,
-        "`with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global",
+        "`with Provider { derive ... }` selects a provider for the contained derive declaration, but it does not yet create a local consumer scope, so generated evidence is still ingot-global",
     );
     assert_diag_primary_span_text(
         &db,

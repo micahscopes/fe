@@ -1375,7 +1375,8 @@ pub struct DeriveDecl<'db> {
     ///
     /// This is provider-selection provenance only. Generated evidence from
     /// derive declarations is still emitted into the ingot-global generated
-    /// overlay until the solver grows a local generated-evidence environment.
+    /// overlay until `with` blocks lower a local consumer scope that can feed
+    /// the solver's generated-evidence overlay.
     pub selected_provider_from_scope: bool,
     pub top_mod: TopLevelMod<'db>,
 
