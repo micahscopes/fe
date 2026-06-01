@@ -1,10 +1,11 @@
 use super::*;
 use crate::{
     analysis::ty::{
-        constraint::ConstraintId,
+        constraint::{ConstraintId, ConstraintKind, ConstraintListId},
         generated::{
-            GeneratedExprId, GeneratedExprKind, GeneratedMethodBodyKind, GeneratedStructFieldInit,
-            GeneratedStructFieldInitListId,
+            GeneratedExprId, GeneratedExprKind, GeneratedImplId, GeneratedMethod,
+            GeneratedMethodBodyKind, GeneratedMethodListId, GeneratedRequirementListId,
+            GeneratedStructFieldInit, GeneratedStructFieldInitListId,
         },
         trait_def::TraitInstId,
         ty_def::TyId,
@@ -703,6 +704,91 @@ impl StableMarker: Derive for Marker {
     assert_eq!(
         generated_method_error_summary(&db, &[], &generated_invalid_method_bodies(&db, generated)),
         "invalid generated body for missing (not a trait method)"
+    );
+}
+
+#[test]
+fn generated_method_validation_rejects_duplicate_trait_method() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "generated_method_validation_rejects_duplicate_trait_method.fe".into(),
+        r#"
+trait Eq {
+    fn eq(self) -> bool
+}
+
+struct Foo {}
+
+derive Eq for Foo using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let context = first_builder_context(&db, top_mod);
+    let eq_trait = find_trait(&db, top_mod, "Eq");
+    let method_name = *eq_trait
+        .method_defs(&db)
+        .keys()
+        .next()
+        .expect("missing required method");
+
+    let first_body = generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(true));
+    let second_body = generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(false));
+    let commands = BuilderCommandListId::new(
+        &db,
+        vec![
+            emit_method_expr_command(&db, context, method_name, first_body),
+            emit_method_expr_command(&db, context, method_name, second_body),
+            finish_command(&db, context),
+        ],
+    );
+    let source = provider_output_source_for_commands(&db, context, commands);
+    let ConstraintKind::Trait(trait_inst) = context.request(&db).goal(&db).kind(&db) else {
+        panic!("expected trait goal");
+    };
+    let span: DynLazySpan<'_> = context.provider(&db).func(&db).span().name().into();
+    let generated = GeneratedImplId {
+        context,
+        trait_inst,
+        source,
+        requirements: GeneratedRequirementListId::new(&db, Vec::new()),
+        methods: GeneratedMethodListId::new(
+            &db,
+            vec![
+                GeneratedMethod {
+                    name: method_name,
+                    body: GeneratedMethodBodyKind::Expr(first_body),
+                    span: span.clone(),
+                },
+                GeneratedMethod {
+                    name: method_name,
+                    body: GeneratedMethodBodyKind::Expr(second_body),
+                    span,
+                },
+            ],
+        ),
+        obligations: ConstraintListId::empty(&db),
+    };
+
+    assert!(generated_missing_required_methods(&db, generated).is_empty());
+    assert_eq!(
+        generated_invalid_method_bodies(&db, generated)
+            .iter()
+            .map(|invalid| invalid.name)
+            .collect::<Vec<_>>(),
+        vec![method_name]
+    );
+    assert_eq!(
+        generated_method_error_summary(&db, &[], &generated_invalid_method_bodies(&db, generated)),
+        "invalid generated body for eq (duplicate generated method)"
     );
 }
 

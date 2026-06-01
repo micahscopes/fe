@@ -41,16 +41,23 @@ pub(super) fn generated_invalid_method_bodies<'db>(
 ) -> Vec<GeneratedInvalidMethodBody<'db>> {
     let trait_methods =
         trait_methods_for_goal(db, ConstraintId::from_trait(db, generated.trait_inst));
+    let mut seen_methods = IndexSet::new();
     generated
         .methods
         .list(db)
         .iter()
         .filter_map(|method| {
+            if !seen_methods.insert(method.name) {
+                return Some(GeneratedInvalidMethodBody {
+                    name: method.name,
+                    reason: GeneratedInvalidMethodBodyReason::DuplicateMethod,
+                    span: method.span.clone(),
+                });
+            }
             let Some(required_method) = trait_methods.get(&method.name) else {
                 return Some(GeneratedInvalidMethodBody {
                     name: method.name,
-                    expected: None,
-                    actual: None,
+                    reason: GeneratedInvalidMethodBodyReason::UnknownMethod,
                     span: method.span.clone(),
                 });
             };
@@ -65,14 +72,18 @@ pub(super) fn generated_invalid_method_bodies<'db>(
                         Ok(actual) if tys_match(db, actual, expected) => None,
                         Ok(actual) => Some(GeneratedInvalidMethodBody {
                             name: method.name,
-                            expected: Some(expected),
-                            actual: Some(actual),
+                            reason: GeneratedInvalidMethodBodyReason::InvalidBody {
+                                expected,
+                                actual: Some(actual),
+                            },
                             span: expr.span(db).clone(),
                         }),
                         Err(span) => Some(GeneratedInvalidMethodBody {
                             name: method.name,
-                            expected: Some(expected),
-                            actual: None,
+                            reason: GeneratedInvalidMethodBodyReason::InvalidBody {
+                                expected,
+                                actual: None,
+                            },
                             span,
                         }),
                     }
@@ -85,9 +96,18 @@ pub(super) fn generated_invalid_method_bodies<'db>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GeneratedInvalidMethodBody<'db> {
     pub(super) name: IdentId<'db>,
-    expected: Option<TyId<'db>>,
-    actual: Option<TyId<'db>>,
+    reason: GeneratedInvalidMethodBodyReason<'db>,
     pub(super) span: DynLazySpan<'db>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GeneratedInvalidMethodBodyReason<'db> {
+    UnknownMethod,
+    DuplicateMethod,
+    InvalidBody {
+        expected: TyId<'db>,
+        actual: Option<TyId<'db>>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -298,19 +318,25 @@ pub(super) fn generated_method_error_summary<'db>(
 
 impl<'db> GeneratedInvalidMethodBody<'db> {
     fn pretty_print(&self, db: &'db dyn HirAnalysisDb) -> String {
-        let Some(expected) = self.expected else {
-            return format!("{} (not a trait method)", self.name.data(db));
-        };
-        let actual = self
-            .actual
-            .map(|ty| ty.pretty_print(db).to_string())
-            .unwrap_or_else(|| "<unavailable>".to_string());
-        format!(
-            "{} (expected {}, got {})",
-            self.name.data(db),
-            expected.pretty_print(db),
-            actual
-        )
+        match self.reason {
+            GeneratedInvalidMethodBodyReason::UnknownMethod => {
+                format!("{} (not a trait method)", self.name.data(db))
+            }
+            GeneratedInvalidMethodBodyReason::DuplicateMethod => {
+                format!("{} (duplicate generated method)", self.name.data(db))
+            }
+            GeneratedInvalidMethodBodyReason::InvalidBody { expected, actual } => {
+                let actual = actual
+                    .map(|ty| ty.pretty_print(db).to_string())
+                    .unwrap_or_else(|| "<unavailable>".to_string());
+                format!(
+                    "{} (expected {}, got {})",
+                    self.name.data(db),
+                    expected.pretty_print(db),
+                    actual
+                )
+            }
+        }
     }
 }
 
