@@ -221,18 +221,44 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 }
                 diags.push(invalid_request(
                     generated_conflict_span(db, generated),
-                    format!(
-                        "generated implementation for `{}` from provider `{}` conflicts with another generated implementation from provider `{}` for `{}`",
-                        generated.trait_inst.pretty_print(db, true),
-                        generated_provider_name(db, generated),
-                        generated_provider_name(db, other),
-                        other.context.request(db).pretty_print(db),
-                    ),
+                    generated_conflict_message(db, generated, other),
                 ));
             }
         }
     }
     diags
+}
+
+fn generated_conflict_message<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+    other: GeneratedImplId<'db>,
+) -> String {
+    let mut message = format!(
+        "generated implementation for `{}` from provider `{}` conflicts with another generated implementation from provider `{}` for `{}`",
+        generated.trait_inst.pretty_print(db, true),
+        generated_provider_name(db, generated),
+        generated_provider_name(db, other),
+        other.context.request(db).pretty_print(db),
+    );
+
+    if generated_selected_from_scope(db, generated) || generated_selected_from_scope(db, other) {
+        message.push_str(
+            "; `with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global",
+        );
+    }
+
+    message
+}
+
+fn generated_selected_from_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> bool {
+    match generated.context.request(db).origin(db) {
+        request::ElaborationOrigin::DeriveDecl(decl) => decl.selected_provider_from_scope(db),
+        request::ElaborationOrigin::DeriveAttr { .. } => false,
+    }
 }
 
 fn generated_conflict_span<'db>(

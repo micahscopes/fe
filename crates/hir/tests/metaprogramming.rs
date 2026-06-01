@@ -2971,6 +2971,10 @@ impl FastEq: Derive for Eq {
     );
     assert_diag_message(&diags, "from provider `StableEq`");
     assert_diag_message(&diags, "from provider `FastEq`");
+    assert_diag_message(
+        &diags,
+        "`with Provider { derive ... }` selects a provider for the contained derive declaration, but generated evidence is still ingot-global",
+    );
     assert_diag_primary_span_text(
         &db,
         &diags,
