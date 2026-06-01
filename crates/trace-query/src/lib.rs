@@ -5,12 +5,14 @@ use std::str::FromStr;
 use std::time::Instant;
 
 pub mod datalog_emit;
+mod display_status;
 pub mod origin_closure;
 mod rail_components;
 pub mod static_analysis;
 pub mod trace_index;
 
 use common::origin::OriginExportKey;
+use display_status::{TraceWorkbenchDisplayStatus, TraceWorkbenchMissingLineageIndex};
 use introspection_config::FeToolingConfig;
 use serde::{Deserialize, Serialize};
 use trace_facts::{
@@ -1877,7 +1879,7 @@ pub fn trace_workbench_report_projection(
         stage_started,
     );
     let stage_started = Instant::now();
-    let missing_lineage = trace_workbench_missing_lineage_index(attribution_audit.as_ref());
+    let missing_lineage = display_status::missing_lineage_index(attribution_audit.as_ref());
     trace_workbench_record_timing(
         &mut projection_timings,
         "missing_lineage_index_ms",
@@ -2770,26 +2772,6 @@ enum TraceWorkbenchPaneRowKind {
     Blank,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[allow(dead_code)]
-#[serde(rename_all = "snake_case")]
-enum TraceWorkbenchDisplayStatus {
-    Exact,
-    SourceExact,
-    Generated,
-    GeneratedDownstream,
-    Context,
-    PreparedLinked,
-    MissingOptimizedToPrepared,
-    MissingDownstreamLineage,
-    MissingSourceEvidence,
-    SourceOnly,
-    CompilerGenerated,
-    Unmapped,
-    Ambiguous,
-    Invalid,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 struct TraceWorkbenchRailClasses {
     exact: Vec<String>,
@@ -2868,36 +2850,6 @@ struct TraceWorkbenchRowDebugInfo {
     local_key: Option<String>,
     instruction_index: Option<u32>,
     raw_text: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TraceWorkbenchMissingLineageIndex {
-    origins: BTreeSet<String>,
-}
-
-impl TraceWorkbenchMissingLineageIndex {
-    fn contains(&self, key: &OriginExportKey) -> bool {
-        self.origins.contains(&key.canonical_storage_key())
-    }
-}
-
-fn trace_workbench_missing_lineage_index(
-    attribution_audit: Option<&AttributionAuditReport>,
-) -> TraceWorkbenchMissingLineageIndex {
-    let mut origins = BTreeSet::new();
-    if let Some(attribution_audit) = attribution_audit {
-        origins.extend(
-            attribution_audit
-                .missing_optimized_to_prepared_lineage_pc_keys
-                .iter()
-                .map(OriginExportKey::canonical_storage_key),
-        );
-        for gap in &attribution_audit.lineage_gaps {
-            origins.insert(gap.bytecode_pc.canonical_storage_key());
-            origins.insert(gap.prepared_origin.canonical_storage_key());
-        }
-    }
-    TraceWorkbenchMissingLineageIndex { origins }
 }
 
 fn trace_workbench_source_projection(
@@ -2998,7 +2950,7 @@ fn trace_workbench_related_sources(
                             "classes": classes,
                         "hover_groups": trace_workbench_hover_groups(&classes),
                         "selection_groups": trace_workbench_selection_groups_with_prepared(&classes, prepared_groups_by_exact_group),
-                        "display_status": trace_workbench_status_for_source_line(&classes),
+                        "display_status": display_status::status_for_source_line(&classes),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -3193,7 +3145,7 @@ fn trace_workbench_source_lines(
                 ),
                 suppress_rail_status,
                 display_status: exact_classes
-                    .map(|_| trace_workbench_status_for_source_line(&classes))
+                    .map(|_| display_status::status_for_source_line(&classes))
                     .unwrap_or_default(),
                 classes: display_classes,
             }
@@ -3689,7 +3641,7 @@ fn trace_workbench_panel_row(
         .get(&storage_key)
         .cloned()
         .unwrap_or_default();
-    if trace_workbench_origin_key_is_generated(key) {
+    if display_status::origin_key_is_generated(key) {
         classes.push("origin-generated".to_string());
     }
     classes.sort();
@@ -3713,9 +3665,9 @@ fn trace_workbench_panel_row(
         text: compact_text.clone(),
         compact_text,
         stable_identities: trace_workbench_panel_row_stable_identities(key),
-        display_status: trace_workbench_status_for_row(
+        display_status: display_status::status_for_row(
             key,
-            kind,
+            kind == TraceWorkbenchPaneRowKind::Instruction,
             &classes,
             &selection_groups,
             exact_groups_with_source_spans,
@@ -3801,50 +3753,6 @@ fn trace_workbench_row_indent(kind: TraceWorkbenchPaneRowKind) -> u8 {
         | TraceWorkbenchPaneRowKind::Statement
         | TraceWorkbenchPaneRowKind::Terminator => 2,
     }
-}
-
-fn trace_workbench_status_for_source_line(
-    _classes: &[String],
-) -> Option<TraceWorkbenchDisplayStatus> {
-    None
-}
-
-fn trace_workbench_status_for_row(
-    key: &OriginExportKey,
-    kind: TraceWorkbenchPaneRowKind,
-    classes: &[String],
-    selection_groups: &[String],
-    exact_groups_with_source_spans: &BTreeSet<String>,
-    missing_lineage: &TraceWorkbenchMissingLineageIndex,
-) -> Option<TraceWorkbenchDisplayStatus> {
-    if missing_lineage.contains(key) {
-        return Some(TraceWorkbenchDisplayStatus::MissingOptimizedToPrepared);
-    }
-    if kind == TraceWorkbenchPaneRowKind::Instruction && key.kind() == "bytecode.pc" {
-        let has_prepared = classes.iter().any(|class| class.starts_with("prepared-c-"));
-        let has_exact = selection_groups
-            .iter()
-            .any(|class| class.starts_with("exact-c-"));
-        let has_source_exact = selection_groups
-            .iter()
-            .filter(|group| group.starts_with("exact-c-"))
-            .any(|group| exact_groups_with_source_spans.contains(group));
-        if has_source_exact {
-            return Some(TraceWorkbenchDisplayStatus::SourceExact);
-        }
-        if has_exact {
-            return Some(TraceWorkbenchDisplayStatus::MissingSourceEvidence);
-        }
-        if has_prepared {
-            return Some(TraceWorkbenchDisplayStatus::PreparedLinked);
-        }
-    }
-    if trace_workbench_origin_key_is_generated(key)
-        || classes.iter().any(|class| class == "origin-generated")
-    {
-        return Some(TraceWorkbenchDisplayStatus::Generated);
-    }
-    None
 }
 
 fn trace_workbench_split_rail_classes(classes: &[String]) -> TraceWorkbenchRailClasses {
@@ -4062,7 +3970,7 @@ fn trace_workbench_compact_origin_text(
     }
     if key.kind().contains(".block") {
         trace_workbench_compact_block_label(key)
-    } else if trace_workbench_origin_key_is_generated(key) {
+    } else if display_status::origin_key_is_generated(key) {
         match key.kind() {
             "runtime.terminator" => "generated terminator".to_string(),
             "runtime.stmt" => "generated statement".to_string(),
@@ -4290,10 +4198,6 @@ fn trace_workbench_key_belongs_to_panel(key: &OriginExportKey, panel: &str) -> b
         "bytecode" => key.kind() == "bytecode.pc",
         _ => false,
     }
-}
-
-fn trace_workbench_origin_key_is_generated(key: &OriginExportKey) -> bool {
-    key.owner_key().contains("__synthetic") || key.local_key().contains("__synthetic")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -8642,6 +8546,9 @@ fn format_storage_location(location: &StorageLocation) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::display_status::{
+        self, TraceWorkbenchDisplayStatus, TraceWorkbenchMissingLineageIndex,
+    };
     use crate::{rail_components, trace_index};
 
     use common::origin::OriginExportKey;
@@ -8677,19 +8584,17 @@ mod tests {
         LoopCostRequest, MISSING_LINK_AUDIT_SCHEMA_VERSION, OptimizedCodeHonestyRequest,
         ReportMetadata, RequiredEvidenceKind, RuntimeGasBySourceRequest, RuntimeTraceFilterRequest,
         StorageAccessesBySlotRequest, TraceIntrospectionService, TraceQueryHttpRequest,
-        TraceQueryHttpResponse, TraceQueryReport, TraceQueryRequest, TraceWorkbenchDisplayStatus,
-        TraceWorkbenchMissingLineageIndex, TraceWorkbenchPaneRowKind,
-        TraceWorkbenchProjectionIndex, TraceWorkbenchProjectionRequest, ValueFlowAtPcRequest,
-        VariablesAtPcRequest, run_trace_query, trace_workbench_compact_mir_text,
+        TraceQueryHttpResponse, TraceQueryReport, TraceQueryRequest, TraceWorkbenchProjectionIndex,
+        TraceWorkbenchProjectionRequest, ValueFlowAtPcRequest, VariablesAtPcRequest,
+        run_trace_query, trace_workbench_compact_mir_text,
         trace_workbench_compact_origin_fallback_text, trace_workbench_compact_origin_label,
         trace_workbench_compact_origin_meta, trace_workbench_compact_origin_text,
         trace_workbench_exact_groups_with_visible_source_rows,
         trace_workbench_exact_prepared_selection_bridge, trace_workbench_hover_groups,
         trace_workbench_key_belongs_to_panel, trace_workbench_manifest,
-        trace_workbench_missing_lineage_index, trace_workbench_natural_key_cmp,
-        trace_workbench_report_projection, trace_workbench_selection_groups,
-        trace_workbench_source_lines, trace_workbench_source_projection,
-        trace_workbench_status_for_row, trace_workbench_status_for_source_line,
+        trace_workbench_natural_key_cmp, trace_workbench_report_projection,
+        trace_workbench_selection_groups, trace_workbench_source_lines,
+        trace_workbench_source_projection,
     };
 
     fn scan_trace_query_sources_for_line(
@@ -13102,9 +13007,9 @@ mod tests {
         let classes = vec!["prepared-c-demo".to_string()];
 
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &bytecode,
-                TraceWorkbenchPaneRowKind::Instruction,
+                true,
                 &classes,
                 &classes,
                 &BTreeSet::new(),
@@ -13113,9 +13018,9 @@ mod tests {
             Some(TraceWorkbenchDisplayStatus::MissingOptimizedToPrepared)
         );
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &bytecode,
-                TraceWorkbenchPaneRowKind::Instruction,
+                true,
                 &classes,
                 &classes,
                 &BTreeSet::new(),
@@ -13156,7 +13061,7 @@ mod tests {
             missing_links: None,
         };
 
-        let index = trace_workbench_missing_lineage_index(Some(&audit));
+        let index = display_status::missing_lineage_index(Some(&audit));
 
         assert!(index.contains(&bytecode));
     }
@@ -13166,11 +13071,11 @@ mod tests {
         let bytecode = key("bytecode.pc", "demo", "pc:68");
         let classes = vec!["exact-c-demo".to_string()];
 
-        assert_eq!(trace_workbench_status_for_source_line(&classes), None);
+        assert_eq!(display_status::status_for_source_line(&classes), None);
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &bytecode,
-                TraceWorkbenchPaneRowKind::Instruction,
+                true,
                 &classes,
                 &classes,
                 &BTreeSet::new(),
@@ -13179,9 +13084,9 @@ mod tests {
             Some(TraceWorkbenchDisplayStatus::MissingSourceEvidence)
         );
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &bytecode,
-                TraceWorkbenchPaneRowKind::Instruction,
+                true,
                 &classes,
                 &classes,
                 &BTreeSet::from(["exact-c-demo".to_string()]),
@@ -13194,11 +13099,11 @@ mod tests {
     #[test]
     fn trace_workbench_generated_source_line_classes_do_not_badge_authored_source() {
         assert_eq!(
-            trace_workbench_status_for_source_line(&["generated-c-helper".to_string()]),
+            display_status::status_for_source_line(&["generated-c-helper".to_string()]),
             None
         );
         assert_eq!(
-            trace_workbench_status_for_source_line(&["context-c-helper".to_string()]),
+            display_status::status_for_source_line(&["context-c-helper".to_string()]),
             None
         );
     }
@@ -13213,9 +13118,9 @@ mod tests {
         ];
 
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &mir_stmt,
-                TraceWorkbenchPaneRowKind::Statement,
+                false,
                 &classes,
                 &classes,
                 &BTreeSet::new(),
@@ -13226,9 +13131,9 @@ mod tests {
 
         let synthetic = key("runtime.stmt", "demo", "block:0:stmt:0:__synthetic");
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &synthetic,
-                TraceWorkbenchPaneRowKind::Statement,
+                false,
                 &classes,
                 &classes,
                 &BTreeSet::new(),
@@ -13267,9 +13172,9 @@ mod tests {
         assert!(visible_groups.contains("exact-c-lib"));
         assert!(!visible_groups.contains("exact-c-hidden"));
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &bytecode,
-                TraceWorkbenchPaneRowKind::Instruction,
+                true,
                 &missing_source_classes,
                 &missing_source_selection,
                 &visible_groups,
@@ -13278,9 +13183,9 @@ mod tests {
             Some(TraceWorkbenchDisplayStatus::MissingSourceEvidence)
         );
         assert_eq!(
-            trace_workbench_status_for_row(
+            display_status::status_for_row(
                 &bytecode,
-                TraceWorkbenchPaneRowKind::Instruction,
+                true,
                 &visible_source_classes,
                 &visible_source_selection,
                 &visible_groups,
