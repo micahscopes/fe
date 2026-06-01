@@ -16,8 +16,8 @@ use super::{
 };
 use crate::{
     hir_def::{
-        Body, Const, Contract, DeriveDecl, DeriveProvider, Enum, Func, Impl, ImplTrait, ItemKind,
-        Mod, StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
+        Body, Const, Contract, DeriveDecl, DeriveProvider, DeriveProviderScope, Enum, Func, Impl,
+        ImplTrait, ItemKind, Mod, StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
     },
     span::{
         DesugaredOrigin, DesugaredUseFocus, MsgDesugaredFocus,
@@ -431,6 +431,20 @@ define_lazy_span_node!(
 impl<'db> LazyDeriveProviderSpan<'db> {
     pub fn new(p: DeriveProvider<'db>) -> Self {
         Self(crate::span::transition::SpanTransitionChain::new(p))
+    }
+}
+
+define_lazy_span_node!(
+    LazyDeriveProviderScopeSpan,
+    ast::DeriveProviderScope,
+    @node {
+        (attributes, attr_list, LazyAttrListSpan),
+        (provider_path, provider_path, LazyPathSpan),
+    }
+);
+impl<'db> LazyDeriveProviderScopeSpan<'db> {
+    pub fn new(s: DeriveProviderScope<'db>) -> Self {
+        Self(crate::span::transition::SpanTransitionChain::new(s))
     }
 }
 

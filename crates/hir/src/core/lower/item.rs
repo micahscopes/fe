@@ -235,7 +235,7 @@ impl<'db> ItemKind<'db> {
                     scope.attr_list(),
                     "derive provider selection scope",
                 );
-                DeriveDecl::lower_provider_scope_ast(ctxt, scope);
+                DeriveProviderScope::lower_ast(ctxt, scope);
             }
             ast::ItemKind::Trait(trait_) => {
                 super::arithmetic::report_arithmetic_attr_on_unsupported_item(
@@ -976,6 +976,44 @@ impl<'db> DeriveProvider<'db> {
     }
 }
 
+impl<'db> DeriveProviderScope<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveProviderScope) -> Self {
+        let idx = ctxt.next_derive_provider_scope_idx();
+        let id = ctxt.joined_id(TrackedItemVariant::DeriveProviderScope(idx));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let provider_path = ast
+            .provider_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let origin = HirOrigin::raw(&ast);
+
+        let scope = Self::new(
+            ctxt.db(),
+            id,
+            attributes,
+            provider_path,
+            ctxt.top_mod(),
+            origin,
+        );
+
+        if let Some(item_list) = ast.item_list() {
+            for item in item_list {
+                match item.kind() {
+                    Some(ast::ItemKind::DeriveDecl(decl)) => {
+                        DeriveDecl::lower_ast_with_provider_scope(ctxt, decl, scope);
+                    }
+                    Some(_) => ItemKind::lower_ast(ctxt, item),
+                    None => {}
+                }
+            }
+        }
+
+        ctxt.leave_item_scope(scope)
+    }
+}
+
 impl<'db> Const<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Const) -> Self {
         let name = IdentId::lower_token_partial(ctxt, ast.name());
@@ -1036,38 +1074,21 @@ impl<'db> StaticAssert<'db> {
 
 impl<'db> DeriveDecl<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveDecl) -> Self {
-        Self::lower_ast_with_scoped_provider(ctxt, ast, None)
+        Self::lower_ast_with_provider_scope_opt(ctxt, ast, None)
     }
 
-    pub(super) fn lower_provider_scope_ast(
-        ctxt: &mut FileLowerCtxt<'db>,
-        ast: ast::DeriveProviderScope,
-    ) {
-        let scoped_provider_path = ast
-            .provider_path()
-            .map(|path| PathId::lower_ast(ctxt, path));
-
-        if let Some(item_list) = ast.item_list() {
-            for item in item_list {
-                match item.kind() {
-                    Some(ast::ItemKind::DeriveDecl(decl)) => {
-                        Self::lower_ast_with_scoped_provider(ctxt, decl, scoped_provider_path);
-                    }
-                    // The parser reports non-derive items inside this block.
-                    // Do not lower recovery items as ordinary module items,
-                    // otherwise an invalid provider-selection block would still
-                    // leak definitions into the surrounding module.
-                    Some(_) => {}
-                    None => {}
-                }
-            }
-        }
-    }
-
-    fn lower_ast_with_scoped_provider(
+    pub(super) fn lower_ast_with_provider_scope(
         ctxt: &mut FileLowerCtxt<'db>,
         ast: ast::DeriveDecl,
-        scoped_provider_path: Option<PathId<'db>>,
+        provider_scope: DeriveProviderScope<'db>,
+    ) -> Self {
+        Self::lower_ast_with_provider_scope_opt(ctxt, ast, Some(provider_scope))
+    }
+
+    fn lower_ast_with_provider_scope_opt(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::DeriveDecl,
+        provider_scope: Option<DeriveProviderScope<'db>>,
     ) -> Self {
         let idx = ctxt.next_derive_decl_idx();
         let id = ctxt.joined_id(TrackedItemVariant::DeriveDecl(idx));
@@ -1085,6 +1106,8 @@ impl<'db> DeriveDecl<'db> {
         let explicit_provider_path = ast
             .provider_path()
             .map(|path| PathId::lower_ast(ctxt, path));
+        let scoped_provider_path =
+            provider_scope.and_then(|scope| scope.provider_path(ctxt.db()).to_opt());
         let selected_provider_from_scope =
             explicit_provider_path.is_none() && scoped_provider_path.is_some();
         let selected_provider_path = explicit_provider_path
@@ -1099,6 +1122,7 @@ impl<'db> DeriveDecl<'db> {
             head_path,
             target_path,
             selected_provider_path,
+            provider_scope,
             selected_provider_from_scope,
             ctxt.top_mod(),
             origin,

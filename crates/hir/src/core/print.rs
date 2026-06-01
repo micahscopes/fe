@@ -1099,6 +1099,7 @@ impl<'db> ItemKind<'db> {
             ItemKind::Trait(t) => t.pretty_print(db),
             ItemKind::ImplTrait(i) => i.pretty_print(db),
             ItemKind::DeriveProvider(p) => p.pretty_print(db),
+            ItemKind::DeriveProviderScope(s) => s.pretty_print(db),
             ItemKind::DeriveDecl(d) => d.pretty_print(db),
             ItemKind::Const(c) => c.pretty_print(db),
             ItemKind::StaticAssert(a) => a.pretty_print(db),
@@ -1637,6 +1638,17 @@ impl<'db> DeriveProvider<'db> {
         result.push_str(" for ");
         let head = unwrap_partial(self.head_path(db), "DeriveProvider::head_path");
         result.push_str(&head.pretty_print(db));
+        result
+    }
+}
+
+impl<'db> DeriveProviderScope<'db> {
+    pub fn pretty_print(self, db: &'db dyn HirDb) -> String {
+        let mut result = String::new();
+        result.push_str(&self.attributes(db).pretty_print_with_newline(db));
+        result.push_str("with ");
+        let provider = unwrap_partial(self.provider_path(db), "DeriveProviderScope::provider_path");
+        result.push_str(&provider.pretty_print(db));
         result
     }
 }

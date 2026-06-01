@@ -1004,76 +1004,8 @@ impl super::Parse for DeriveProviderScopeScope {
         parser.set_scope_recovery_stack(&[SyntaxKind::LBrace, SyntaxKind::RBrace]);
 
         parser.parse_or_recover(PathScope::default())?;
-        parser.parse(DeriveProviderScopeItemListScope::new(true))?;
+        parser.parse(ItemListScope::new(true))?;
 
-        Ok(())
-    }
-}
-
-define_scope! {
-    #[doc(hidden)]
-    DeriveProviderScopeItemListScope {inside_mod: bool},
-    ItemList,
-    (
-        // `derive` declarations are contextual identifiers.
-        DocComment,
-        Pound
-    )
-}
-impl super::Parse for DeriveProviderScopeItemListScope {
-    type Error = Recovery<ErrProof>;
-
-    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
-        use crate::SyntaxKind::*;
-
-        if self.inside_mod {
-            parser.bump_expected(LBrace);
-            parser.set_scope_recovery_stack(&[RBrace]);
-        }
-
-        parse_inner_attr_list(parser)?;
-
-        loop {
-            parser.set_newline_as_trivia(true);
-            if self.inside_mod && parser.bump_if(RBrace) {
-                break;
-            }
-            if parser.current_kind().is_none() {
-                if self.inside_mod {
-                    parser.add_error(crate::ParseError::expected(
-                        &[RBrace],
-                        Some(ExpectedKind::ClosingBracket {
-                            bracket: RBrace,
-                            parent: DeriveProviderScope,
-                        }),
-                        parser.current_pos,
-                    ));
-                }
-                break;
-            }
-
-            if !parser.is_ident("derive") {
-                parser
-                    .error("derive provider selection scopes may only contain derive declarations");
-            }
-
-            let ok = parser.parse_ok(ItemScope::default())?;
-            if parser.current_kind().is_none() || (self.inside_mod && parser.bump_if(RBrace)) {
-                break;
-            }
-            if ok {
-                parser.set_newline_as_trivia(false);
-                if parser.find(
-                    Newline,
-                    ExpectedKind::Separator {
-                        separator: Newline,
-                        element: Item,
-                    },
-                )? {
-                    parser.bump();
-                }
-            }
-        }
         Ok(())
     }
 }

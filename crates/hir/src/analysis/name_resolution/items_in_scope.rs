@@ -1,4 +1,6 @@
-use crate::core::hir_def::{Body, ExprId, ItemKind, Mod, TopLevelMod, scope_graph::ScopeId};
+use crate::core::hir_def::{
+    Body, DeriveProviderScope, ExprId, ItemKind, Mod, TopLevelMod, scope_graph::ScopeId,
+};
 use common::indexmap::IndexMap;
 
 use crate::analysis::{
@@ -140,6 +142,7 @@ pub struct ItemScope<'db> {
 pub enum ItemScopeKind<'db> {
     TopLevelMod(TopLevelMod<'db>),
     Module(Mod<'db>),
+    DeriveProviderScope(DeriveProviderScope<'db>),
     Block(Body<'db>, ExprId),
 }
 
@@ -153,6 +156,9 @@ impl<'db> ItemScopeKind<'db> {
                     }
                     ItemKind::Mod(mod_) => {
                         return ItemScopeKind::Module(mod_);
+                    }
+                    ItemKind::DeriveProviderScope(scope) => {
+                        return ItemScopeKind::DeriveProviderScope(scope);
                     }
                     _ => {}
                 },
@@ -171,6 +177,9 @@ impl<'db> ItemScopeKind<'db> {
                 ScopeId::Item(ItemKind::TopMod(*top_level_mod))
             }
             ItemScopeKind::Module(mod_) => ScopeId::Item(ItemKind::Mod(*mod_)),
+            ItemScopeKind::DeriveProviderScope(scope) => {
+                ScopeId::Item(ItemKind::DeriveProviderScope(*scope))
+            }
             ItemScopeKind::Block(body, expr_id) => ScopeId::Block(*body, *expr_id),
         }
     }

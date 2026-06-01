@@ -270,6 +270,7 @@ pub fn resolved_item_scope_targets<'db>(
         ItemKind::TopMod(_)
         | ItemKind::Mod(_)
         | ItemKind::DeriveProvider(_)
+        | ItemKind::DeriveProviderScope(_)
         | ItemKind::DeriveDecl(_) => EMPTY_RESOLVED,
     }
 }

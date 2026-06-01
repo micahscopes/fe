@@ -22,10 +22,10 @@ use crate::{
     span::{
         DynLazySpan, HirOrigin,
         item::{
-            LazyConstSpan, LazyContractSpan, LazyDeriveDeclSpan, LazyDeriveProviderSpan,
-            LazyEnumSpan, LazyFuncSpan, LazyImplSpan, LazyImplTraitSpan, LazyItemSpan, LazyModSpan,
-            LazyStaticAssertSpan, LazyStructSpan, LazyTopModSpan, LazyTraitSpan, LazyTraitTypeSpan,
-            LazyTypeAliasSpan, LazyUseSpan, LazyVariantDefSpan,
+            LazyConstSpan, LazyContractSpan, LazyDeriveDeclSpan, LazyDeriveProviderScopeSpan,
+            LazyDeriveProviderSpan, LazyEnumSpan, LazyFuncSpan, LazyImplSpan, LazyImplTraitSpan,
+            LazyItemSpan, LazyModSpan, LazyStaticAssertSpan, LazyStructSpan, LazyTopModSpan,
+            LazyTraitSpan, LazyTraitTypeSpan, LazyTypeAliasSpan, LazyUseSpan, LazyVariantDefSpan,
         },
         params::LazyGenericParamListSpan,
     },
@@ -56,6 +56,7 @@ pub enum ItemKind<'db> {
     Trait(Trait<'db>),
     ImplTrait(ImplTrait<'db>),
     DeriveProvider(DeriveProvider<'db>),
+    DeriveProviderScope(DeriveProviderScope<'db>),
     DeriveDecl(DeriveDecl<'db>),
     Const(Const<'db>),
     StaticAssert(StaticAssert<'db>),
@@ -87,7 +88,13 @@ impl<'db> ItemKind<'db> {
             Trait(trait_) => trait_.name(db).to_opt(),
             DeriveProvider(provider) => provider.name(db).to_opt(),
             Const(const_) => const_.name(db).to_opt(),
-            Use(_) | StaticAssert(_) | Body(_) | Impl(_) | ImplTrait(_) | DeriveDecl(_) => None,
+            Use(_)
+            | StaticAssert(_)
+            | Body(_)
+            | Impl(_)
+            | ImplTrait(_)
+            | DeriveProviderScope(_)
+            | DeriveDecl(_) => None,
         }
     }
 
@@ -105,6 +112,7 @@ impl<'db> ItemKind<'db> {
             Self::Trait(trait_) => trait_.attributes(db),
             Self::ImplTrait(impl_trait) => impl_trait.attributes(db),
             Self::DeriveProvider(provider) => provider.attributes(db),
+            Self::DeriveProviderScope(scope) => scope.attributes(db),
             Self::DeriveDecl(decl) => decl.attributes(db),
             Self::Const(const_) => const_.attributes(db),
             Self::StaticAssert(assert_) => assert_.attributes(db),
@@ -128,6 +136,7 @@ impl<'db> ItemKind<'db> {
             Impl(_) => "impl",
             ImplTrait(_) => "impl trait",
             DeriveProvider(_) => "derive provider",
+            DeriveProviderScope(_) => "derive provider selection scope",
             DeriveDecl(_) => "derive",
             Const(_) => "const",
             StaticAssert(_) => "static_assert",
@@ -148,7 +157,13 @@ impl<'db> ItemKind<'db> {
             Trait(trait_) => Some(trait_.span().name().into()),
             DeriveProvider(provider) => Some(provider.span().name().into()),
             Const(const_) => Some(const_.span().name().into()),
-            TopMod(_) | StaticAssert(_) | Use(_) | Body(_) | Impl(_) | ImplTrait(_)
+            TopMod(_)
+            | StaticAssert(_)
+            | Use(_)
+            | Body(_)
+            | Impl(_)
+            | ImplTrait(_)
+            | DeriveProviderScope(_)
             | DeriveDecl(_) => None,
         }
     }
@@ -167,9 +182,12 @@ impl<'db> ItemKind<'db> {
             DeriveProvider(_) => Visibility::Private,
             Const(const_) => const_.vis(db),
             Use(use_) => use_.vis(db),
-            StaticAssert(_) | Impl(_) | ImplTrait(_) | DeriveDecl(_) | Body(_) => {
-                Visibility::Private
-            }
+            StaticAssert(_)
+            | Impl(_)
+            | ImplTrait(_)
+            | DeriveProviderScope(_)
+            | DeriveDecl(_)
+            | Body(_) => Visibility::Private,
         }
     }
 
@@ -186,6 +204,7 @@ impl<'db> ItemKind<'db> {
             ItemKind::Impl(impl_) => impl_.top_mod(db),
             ItemKind::ImplTrait(impl_trait) => impl_trait.top_mod(db),
             ItemKind::DeriveProvider(provider) => provider.top_mod(db),
+            ItemKind::DeriveProviderScope(scope) => scope.top_mod(db),
             ItemKind::DeriveDecl(decl) => decl.top_mod(db),
             ItemKind::Const(const_) => const_.top_mod(db),
             ItemKind::StaticAssert(assert_) => assert_.top_mod(db),
@@ -589,6 +608,17 @@ impl<'db> TopLevelMod<'db> {
             .iter()
             .filter_map(|item| match item {
                 ItemKind::DeriveProvider(provider) => Some(*provider),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[salsa::tracked(return_ref)]
+    pub fn all_derive_provider_scopes(self, db: &'db dyn HirDb) -> Vec<DeriveProviderScope<'db>> {
+        self.all_items(db)
+            .iter()
+            .filter_map(|item| match item {
+                ItemKind::DeriveProviderScope(scope) => Some(*scope),
                 _ => None,
             })
             .collect()
@@ -1362,6 +1392,46 @@ impl<'db> DeriveProvider<'db> {
 
 #[salsa::tracked]
 #[derive(Debug)]
+pub struct DeriveProviderScope<'db> {
+    #[id]
+    id: TrackedItemId<'db>,
+
+    pub(in crate::core) attributes: AttrListId<'db>,
+    pub provider_path: Partial<PathId<'db>>,
+    pub top_mod: TopLevelMod<'db>,
+
+    #[return_ref]
+    pub(crate) origin: HirOrigin<ast::DeriveProviderScope>,
+}
+
+impl<'db> DeriveProviderScope<'db> {
+    pub fn span(self) -> LazyDeriveProviderScopeSpan<'db> {
+        LazyDeriveProviderScopeSpan::new(self)
+    }
+
+    pub fn scope(self) -> ScopeId<'db> {
+        ScopeId::from_item(self.into())
+    }
+
+    pub fn children_non_nested(
+        self,
+        db: &'db dyn HirDb,
+    ) -> impl Iterator<Item = ItemKind<'db>> + 'db {
+        let scope = ScopeId::from_item(self.into());
+        let s_graph = scope.scope_graph(db);
+        s_graph.child_items(scope)
+    }
+
+    pub fn derive_decls(self, db: &'db dyn HirDb) -> impl Iterator<Item = DeriveDecl<'db>> + 'db {
+        self.children_non_nested(db).filter_map(|item| match item {
+            ItemKind::DeriveDecl(decl) => Some(decl),
+            _ => None,
+        })
+    }
+}
+
+#[salsa::tracked]
+#[derive(Debug)]
 pub struct DeriveDecl<'db> {
     #[id]
     id: TrackedItemId<'db>,
@@ -1370,13 +1440,13 @@ pub struct DeriveDecl<'db> {
     pub head_path: Partial<PathId<'db>>,
     pub target_path: Partial<PathId<'db>>,
     pub selected_provider_path: Option<Partial<PathId<'db>>>,
+    pub provider_scope: Option<DeriveProviderScope<'db>>,
     /// True when `selected_provider_path` came from an enclosing
     /// `with Provider { ... }` selector rather than an explicit `using`.
     ///
-    /// This is provider-selection provenance only. Generated evidence from
-    /// derive declarations is still emitted into the ingot-global generated
-    /// overlay until `with` blocks lower a local consumer scope that can feed
-    /// the solver's generated-evidence overlay.
+    /// Generated evidence from derive declarations inside a provider scope is
+    /// local to that scope's solver overlay. This flag only records whether the
+    /// provider identity itself came from the scope selector.
     pub selected_provider_from_scope: bool,
     pub top_mod: TopLevelMod<'db>,
 
@@ -1775,6 +1845,7 @@ pub enum TrackedItemVariant<'db> {
     Trait(Partial<IdentId<'db>>),
     ImplTrait(u32),
     DeriveProvider(Partial<IdentId<'db>>),
+    DeriveProviderScope(u32),
     DeriveDecl(u32),
     Const(Partial<IdentId<'db>>),
     StaticAssert(u32),

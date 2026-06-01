@@ -13,11 +13,12 @@ use crate::{
             },
             diagnostics::{TyDiagCollection, TyLowerDiag},
             generated::{GeneratedImplId, GeneratedImplSource},
+            trait_resolution::GeneratedImplOverlayId,
             ty_def::TyId,
             unify::UnificationTable,
         },
     },
-    hir_def::{TopLevelMod, Trait},
+    hir_def::{ItemKind, TopLevelMod, Trait, scope_graph::ScopeId},
     span::DynLazySpan,
 };
 use common::{indexmap::IndexMap, ingot::Ingot};
@@ -144,12 +145,6 @@ fn generated_overlay_diags_for_top_mod<'db>(
 ) -> Vec<TyDiagCollection<'db>> {
     let candidates = generated_impl_candidates_for_ingot(db, top_mod.ingot(db));
     let method_valid_candidates = generated_impl_method_valid_candidates(db, &candidates);
-    let candidate_indices = method_valid_candidates
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(idx, generated)| (generated, idx))
-        .collect::<IndexMap<_, _>>();
     let mut diags = Vec::new();
     diags.extend(cycles::generated_evidence_cycle_diags(
         db,
@@ -205,13 +200,27 @@ fn generated_overlay_diags_for_top_mod<'db>(
                 }
                 continue;
             }
-            if generated_conflicts_with_authored_impl(db, generated) {
+            let conflict_candidates = request
+                .provider_scope(db)
+                .map(|scope| {
+                    let candidates = generated_impl_candidates_for_provider_scope(db, scope);
+                    generated_impl_method_valid_candidates(db, &candidates)
+                })
+                .unwrap_or_else(|| method_valid_candidates.clone());
+            let candidate_indices = conflict_candidates
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(idx, generated)| (generated, idx))
+                .collect::<IndexMap<_, _>>();
+
+            if !request.is_scoped(db) && generated_conflicts_with_authored_impl(db, generated) {
                 diags.push(invalid_request(
                     generated_conflict_span(db, generated),
                     generated_authored_conflict_message(db, generated),
                 ));
             } else if let Some(other) =
-                generated_conflicting_generated_impl(db, generated, &method_valid_candidates)
+                generated_conflicting_generated_impl(db, generated, &conflict_candidates)
             {
                 if !should_report_generated_conflict(&candidate_indices, generated, other) {
                     continue;
@@ -230,16 +239,12 @@ fn generated_authored_conflict_message<'db>(
     db: &'db dyn HirAnalysisDb,
     generated: GeneratedImplId<'db>,
 ) -> String {
-    let mut message = format!(
+    let message = format!(
         "generated implementation for `{}` from provider `{}` for `{}` conflicts with an authored implementation",
         generated.trait_inst.pretty_print(db, true),
         generated_provider_name(db, generated),
         generated.context.request(db).pretty_print(db),
     );
-
-    if generated_selected_from_scope(db, generated) {
-        message.push_str(scoped_selection_global_evidence_note());
-    }
 
     message
 }
@@ -249,7 +254,7 @@ fn generated_conflict_message<'db>(
     generated: GeneratedImplId<'db>,
     other: GeneratedImplId<'db>,
 ) -> String {
-    let mut message = format!(
+    let message = format!(
         "generated implementation for `{}` from provider `{}` conflicts with another generated implementation from provider `{}` for `{}`",
         generated.trait_inst.pretty_print(db, true),
         generated_provider_name(db, generated),
@@ -257,25 +262,7 @@ fn generated_conflict_message<'db>(
         other.context.request(db).pretty_print(db),
     );
 
-    if generated_selected_from_scope(db, generated) || generated_selected_from_scope(db, other) {
-        message.push_str(scoped_selection_global_evidence_note());
-    }
-
     message
-}
-
-fn scoped_selection_global_evidence_note() -> &'static str {
-    "; `with Provider { derive ... }` selects a provider for the contained derive declaration, but it does not yet create a local consumer scope, so generated evidence is still ingot-global"
-}
-
-fn generated_selected_from_scope<'db>(
-    db: &'db dyn HirAnalysisDb,
-    generated: GeneratedImplId<'db>,
-) -> bool {
-    match generated.context.request(db).origin(db) {
-        request::ElaborationOrigin::DeriveDecl(decl) => decl.selected_provider_from_scope(db),
-        request::ElaborationOrigin::DeriveAttr { .. } => false,
-    }
 }
 
 fn generated_conflict_span<'db>(
@@ -407,13 +394,83 @@ pub(crate) fn generated_impls_for_ingot<'db>(
         .collect()
 }
 
+pub(crate) fn generated_impl_overlay_for_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> GeneratedImplOverlayId<'db> {
+    let generated_impls = generated_impls_for_scope_chain(db, scope);
+    if generated_impls.is_empty() {
+        GeneratedImplOverlayId::empty(db)
+    } else {
+        GeneratedImplOverlayId::new(db, generated_impls)
+    }
+}
+
+pub(crate) fn generated_impls_for_scope_chain<'db>(
+    db: &'db dyn HirAnalysisDb,
+    mut scope: ScopeId<'db>,
+) -> Vec<GeneratedImplId<'db>> {
+    let mut provider_scopes = Vec::new();
+    loop {
+        if let ScopeId::Item(ItemKind::DeriveProviderScope(provider_scope)) = scope {
+            provider_scopes.push(provider_scope);
+        }
+        let Some(parent) = scope.parent(db) else {
+            break;
+        };
+        scope = parent;
+    }
+
+    provider_scopes.reverse();
+    provider_scopes
+        .into_iter()
+        .flat_map(|provider_scope| generated_impls_for_provider_scope(db, provider_scope).to_vec())
+        .collect()
+}
+
+#[salsa::tracked(return_ref)]
+pub(crate) fn generated_impls_for_provider_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider_scope: crate::hir_def::DeriveProviderScope<'db>,
+) -> Vec<GeneratedImplId<'db>> {
+    let candidates = generated_impl_candidates_for_provider_scope(db, provider_scope);
+    let method_valid_candidates = generated_impl_method_valid_candidates(db, &candidates);
+    method_valid_candidates
+        .iter()
+        .copied()
+        .filter(|&generated| {
+            generated_impl_is_locally_admissible(db, generated, &method_valid_candidates)
+        })
+        .collect()
+}
+
 fn generated_impl_candidates_for_ingot<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
 ) -> Vec<GeneratedImplId<'db>> {
     elaboration_requests_for_ingot(db, ingot)
         .iter()
+        .filter(|&&request| !request.is_scoped(db))
         .flat_map(|&request| {
+            elaboration_ctfe_contexts_for_request(db, request)
+                .iter()
+                .filter_map(move |&context| {
+                    provider_generated_impl_candidate_for_context(db, context)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn generated_impl_candidates_for_provider_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    provider_scope: crate::hir_def::DeriveProviderScope<'db>,
+) -> Vec<GeneratedImplId<'db>> {
+    elaboration_requests_for_top_mod(db, provider_scope.top_mod(db))
+        .iter()
+        .copied()
+        .filter(move |request| request.provider_scope(db) == Some(provider_scope))
+        .flat_map(|request| {
             elaboration_ctfe_contexts_for_request(db, request)
                 .iter()
                 .filter_map(move |&context| {
@@ -453,6 +510,17 @@ fn generated_impl_is_admissible<'db>(
     }
     !generated_conflicts_with_authored_impl(db, generated)
         && generated_conflicting_generated_impl(db, generated, candidates).is_none()
+}
+
+fn generated_impl_is_locally_admissible<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+    candidates: &[GeneratedImplId<'db>],
+) -> bool {
+    if !generated_impl_methods_are_valid(db, generated) {
+        return false;
+    }
+    generated_conflicting_generated_impl(db, generated, candidates).is_none()
 }
 
 fn provider_generated_impl_candidate_for_context<'db>(

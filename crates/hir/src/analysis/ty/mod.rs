@@ -356,6 +356,7 @@ fn walk<'db>(
                 | ItemKind::Impl(_)
                 | ItemKind::ImplTrait(_)
                 | ItemKind::DeriveProvider(_)
+                | ItemKind::DeriveProviderScope(_)
                 | ItemKind::DeriveDecl(_)
                 | ItemKind::Body(_) => continue,
             };

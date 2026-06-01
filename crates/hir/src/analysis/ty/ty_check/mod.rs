@@ -52,7 +52,7 @@ pub use stmt::ForLoopSeq;
 use rustc_hash::FxHashSet;
 use salsa::Update;
 
-use crate::analysis::elab::generated_impls_for_ingot;
+use crate::analysis::elab::{generated_impls_for_ingot, generated_impls_for_scope_chain};
 use crate::analysis::place::{Place, PlaceBase};
 
 use super::{
@@ -1000,7 +1000,9 @@ impl<'db> TyChecker<'db> {
     ) -> Option<GeneratedRequirementDiagInfo<'db>> {
         let unsat_subgoal = unsat_subgoal?;
         let ingot = self.env.scope().top_mod(self.db).ingot(self.db);
-        generated_impls_for_ingot(self.db, ingot)
+        let mut generated_impls = generated_impls_for_scope_chain(self.db, self.env.scope());
+        generated_impls.extend(generated_impls_for_ingot(self.db, ingot).iter().copied());
+        generated_impls
             .iter()
             .filter(|generated| generated.trait_inst == primary_goal)
             .find_map(|generated| {

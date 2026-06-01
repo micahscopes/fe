@@ -5,8 +5,8 @@ use salsa::Update;
 use crate::{
     HirDb, SpannedHirDb,
     core::hir_def::{
-        Body, Const, Contract, DeriveDecl, DeriveProvider, Enum, Func, Impl, ImplTrait, Mod,
-        StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
+        Body, Const, Contract, DeriveDecl, DeriveProvider, DeriveProviderScope, Enum, Func, Impl,
+        ImplTrait, Mod, StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
     },
     core::lower::top_mod_ast,
 };
@@ -39,11 +39,11 @@ pub mod lazy_spans {
         },
         item::{
             LazyBodySpan, LazyConstSpan, LazyContractRecvSpan, LazyContractSpan,
-            LazyDeriveDeclSpan, LazyDeriveProviderSpan, LazyEnumSpan, LazyFieldDefListSpan,
-            LazyFieldDefSpan, LazyFuncSignatureSpan, LazyFuncSpan, LazyImplSpan, LazyImplTraitSpan,
-            LazyItemSpan, LazyModSpan, LazyRecvArmListSpan, LazyRecvArmSpan, LazyStaticAssertSpan,
-            LazyStructSpan, LazyTopModSpan, LazyTraitSpan, LazyTypeAliasSpan, LazyUseSpan,
-            LazyVariantDefListSpan, LazyVariantDefSpan,
+            LazyDeriveDeclSpan, LazyDeriveProviderScopeSpan, LazyDeriveProviderSpan, LazyEnumSpan,
+            LazyFieldDefListSpan, LazyFieldDefSpan, LazyFuncSignatureSpan, LazyFuncSpan,
+            LazyImplSpan, LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyRecvArmListSpan,
+            LazyRecvArmSpan, LazyStaticAssertSpan, LazyStructSpan, LazyTopModSpan, LazyTraitSpan,
+            LazyTypeAliasSpan, LazyUseSpan, LazyVariantDefListSpan, LazyVariantDefSpan,
         },
         params::{
             LazyConstGenericParamSpan, LazyFuncParamListSpan, LazyFuncParamSpan,
@@ -160,6 +160,13 @@ pub fn derive_provider_ast<'db>(
     db: &'db dyn SpannedHirDb,
     item: DeriveProvider<'db>,
 ) -> &'db HirOrigin<ast::DeriveProvider> {
+    item.origin(db)
+}
+
+pub fn derive_provider_scope_ast<'db>(
+    db: &'db dyn SpannedHirDb,
+    item: DeriveProviderScope<'db>,
+) -> &'db HirOrigin<ast::DeriveProviderScope> {
     item.origin(db)
 }
 

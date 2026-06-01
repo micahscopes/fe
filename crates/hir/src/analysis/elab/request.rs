@@ -5,8 +5,8 @@ use crate::{
         ty::{adt_def::AdtRef, constraint::ConstraintId, ty_def::TyId},
     },
     hir_def::{
-        Attr, AttrArg, AttrArgValue, DeriveDecl, Enum, HirIngot, IdentId, ItemKind, NormalAttr,
-        Struct, TopLevelMod, Trait,
+        Attr, AttrArg, AttrArgValue, DeriveDecl, DeriveProviderScope, Enum, HirIngot, IdentId,
+        ItemKind, NormalAttr, Struct, TopLevelMod, Trait,
     },
     span::DynLazySpan,
 };
@@ -171,6 +171,20 @@ impl<'db> ElaborationRequestId<'db> {
                 self.span(db)
             }
         }
+    }
+
+    pub(crate) fn provider_scope(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Option<DeriveProviderScope<'db>> {
+        match self.origin(db) {
+            ElaborationOrigin::DeriveDecl(decl) => decl.provider_scope(db),
+            ElaborationOrigin::DeriveAttr { .. } => None,
+        }
+    }
+
+    pub(crate) fn is_scoped(self, db: &'db dyn HirAnalysisDb) -> bool {
+        self.provider_scope(db).is_some()
     }
 }
 

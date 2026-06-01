@@ -36,9 +36,9 @@ pub struct TraitSolverQuery<'db> {
 
 /// Generated impls visible only to one solver context.
 ///
-/// The current derive pipeline still feeds generated impls into the ingot-global trait
-/// environment. This overlay is the solver-side insertion point for later local generated
-/// evidence without making the proof forest call back into provider execution.
+/// Unscoped derives still feed generated impls into the ingot-global trait environment.
+/// Local `with Provider` scopes use this overlay so the proof forest can consume scoped
+/// generated evidence without calling back into provider execution.
 #[salsa::interned]
 #[derive(Debug)]
 pub(crate) struct GeneratedImplOverlayId<'db> {
@@ -47,7 +47,7 @@ pub(crate) struct GeneratedImplOverlayId<'db> {
 }
 
 impl<'db> GeneratedImplOverlayId<'db> {
-    fn empty(db: &'db dyn HirAnalysisDb) -> Self {
+    pub(crate) fn empty(db: &'db dyn HirAnalysisDb) -> Self {
         Self::new(db, Vec::new())
     }
 }
@@ -139,7 +139,7 @@ impl<'db> TraitSolveCx<'db> {
         Self {
             origin_ingot: scope.ingot(db),
             assumptions: PredicateListId::empty_list(db),
-            generated_overlay: GeneratedImplOverlayId::empty(db),
+            generated_overlay: crate::analysis::elab::generated_impl_overlay_for_scope(db, scope),
         }
     }
 
