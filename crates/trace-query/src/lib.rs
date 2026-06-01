@@ -11728,6 +11728,56 @@ mod tests {
     }
 
     #[test]
+    fn trace_workbench_default_projection_omits_legacy_closure_groups() {
+        let service = demo_service();
+        let projection = trace_workbench_report_projection(
+            &service,
+            service.snapshot(),
+            TraceWorkbenchProjectionRequest {
+                input_path: "file:///tmp/fib.fe".to_string(),
+                target: "evm".to_string(),
+                opt_level: "O2".to_string(),
+                view: "source-postopt-bytecode".to_string(),
+                include_legacy_closure_debug: false,
+                source_text: Some("fn fib() {\n  b + c\n}\n".to_string()),
+                related_source_texts: BTreeMap::new(),
+                document_version: Some(3),
+                query_duration_ms: 9,
+                compiler_commit: "test".to_string(),
+                data_source: "lsp-live".to_string(),
+            },
+        );
+
+        assert_eq!(projection["metadata"]["legacy_closure_debug"], false);
+        assert!(projection["audit"].is_null());
+        assert!(projection["closures"].as_array().unwrap().is_empty());
+        assert_no_legacy_trace_component_strings(&projection, "$");
+    }
+
+    fn assert_no_legacy_trace_component_strings(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::String(value) => {
+                assert!(
+                    !value.starts_with("trace-c-"),
+                    "default workbench projection leaked legacy closure group at {path}: {value}"
+                );
+            }
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    assert_no_legacy_trace_component_strings(value, &format!("{path}[{index}]"));
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for (key, value) in values {
+                    assert_no_legacy_trace_component_strings(value, &format!("{path}.{key}"));
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+    }
+
+    #[test]
     fn trace_workbench_compact_listing_fields_do_not_leak_debug_jargon() {
         let service = demo_service();
         let projection = trace_workbench_report_projection(
