@@ -639,17 +639,78 @@ mod tests {
     use common::indexmap::IndexMap;
 
     use super::{
-        CanonicalGoalQuery, GoalSatisfiability, TraitInstId, TraitSolveCx,
-        is_goal_query_satisfiable,
+        CanonicalGoalQuery, GeneratedImplOverlayId, GoalSatisfiability, TraitInstId, TraitSolveCx,
+        is_goal_query_satisfiable, is_goal_satisfiable,
     };
     use crate::{
-        analysis::ty::{
-            trait_resolution::constraint::collect_func_def_trait_constraints, ty_def::TyId,
-            ty_lower::collect_generic_params,
+        analysis::{
+            elab::{
+                BuilderCommandListId, ProviderOutputId, ProviderOutputStatus,
+                elaboration_ctfe_contexts_for_request, elaboration_requests_for_top_mod,
+            },
+            ty::{
+                adt_def::AdtRef,
+                constraint::ConstraintListId,
+                generated::{
+                    GeneratedImplId, GeneratedImplSource, GeneratedMethodListId,
+                    GeneratedRequirementListId,
+                },
+                trait_def::ImplementorOrigin,
+                trait_resolution::{
+                    PredicateListId, constraint::collect_func_def_trait_constraints,
+                },
+                ty_def::TyId,
+                ty_lower::collect_generic_params,
+            },
         },
-        hir_def::{Func, Trait},
+        hir_def::{Func, ItemKind, TopLevelMod, Trait},
         test_db::HirAnalysisTestDb,
     };
+
+    fn find_trait<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> Trait<'db> {
+        top_mod
+            .all_items(db)
+            .iter()
+            .find_map(|item| match item {
+                ItemKind::Trait(trait_)
+                    if trait_
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(db) == name) =>
+                {
+                    Some(*trait_)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing `{name}` trait"))
+    }
+
+    fn named_struct_ty<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> TyId<'db> {
+        let struct_ = top_mod
+            .all_items(db)
+            .iter()
+            .find_map(|item| match item {
+                ItemKind::Struct(struct_)
+                    if struct_
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(db) == name) =>
+                {
+                    Some(*struct_)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing `{name}` struct"));
+        TyId::adt(db, AdtRef::from(struct_).as_adt(db))
+    }
 
     #[test]
     fn solver_query_includes_assumptions() {
@@ -736,6 +797,83 @@ fn without_a<T>() -> bool {
         assert!(matches!(
             is_goal_query_satisfiable(&db, without_cx, &without_query),
             GoalSatisfiability::UnSat(_)
+        ));
+    }
+
+    #[test]
+    fn solver_generated_overlay_satisfies_goal_without_global_candidate() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "solver_generated_overlay_satisfies_goal_without_global_candidate.fe".into(),
+            r#"
+trait Eq {}
+
+struct Foo {}
+struct Bar {}
+
+derive Eq for Bar using StableEq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let eq = find_trait(&db, top_mod, "Eq");
+        let foo = named_struct_ty(&db, top_mod, "Foo");
+        let foo_eq = TraitInstId::new_simple(&db, eq, vec![foo]);
+        let assumptions = PredicateListId::empty_list(&db);
+        let global_solve_cx = TraitSolveCx::new(&db, top_mod.scope()).with_assumptions(assumptions);
+
+        assert!(matches!(
+            is_goal_satisfiable(&db, global_solve_cx, foo_eq),
+            GoalSatisfiability::UnSat(_)
+        ));
+
+        let request = *elaboration_requests_for_top_mod(&db, top_mod)
+            .first()
+            .expect("missing elaboration request");
+        let context = *elaboration_ctfe_contexts_for_request(&db, request)
+            .first()
+            .expect("missing elaboration context");
+        let commands = BuilderCommandListId::new(&db, Vec::new());
+        let output = ProviderOutputId::new(
+            &db,
+            request,
+            context.provider(&db),
+            context,
+            ProviderOutputStatus::Succeeded { commands },
+        );
+        let generated = GeneratedImplId {
+            context,
+            trait_inst: foo_eq,
+            source: GeneratedImplSource::ProviderOutput(output),
+            requirements: GeneratedRequirementListId::new(&db, Vec::new()),
+            methods: GeneratedMethodListId::new(&db, Vec::new()),
+            obligations: ConstraintListId::empty(&db),
+        };
+        let overlay = GeneratedImplOverlayId::new(&db, vec![generated]);
+        let overlay_solve_cx = TraitSolveCx {
+            origin_ingot: top_mod.ingot(&db),
+            assumptions,
+            generated_overlay: overlay,
+        };
+
+        let GoalSatisfiability::Satisfied(solution) =
+            is_goal_satisfiable(&db, overlay_solve_cx, foo_eq)
+        else {
+            panic!("expected local generated overlay to satisfy Foo: Eq");
+        };
+        assert!(matches!(
+            solution.value.implementor.origin(&db),
+            ImplementorOrigin::Generated(found) if found == generated
         ));
     }
 }
