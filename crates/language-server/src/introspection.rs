@@ -15,7 +15,7 @@ use trace_query::{
 };
 use url::Url;
 
-use crate::backend::{Backend, TraceViewerRevisionRecord};
+use crate::backend::{Backend, TraceViewerRevisionRecord, TraceViewerSession};
 
 const DEFAULT_TRACE_TARGET: &str = "evm";
 const DEFAULT_TRACE_VIEW: &str = "source-postopt-bytecode";
@@ -155,13 +155,108 @@ fn trace_workbench_revision_status(
     {
         return (
             "ready".to_string(),
-            Some(latest_revision.model_digest.clone()),
+            non_empty_digest(&latest_revision.model_digest),
         );
     }
-    (
-        "stale_but_usable".to_string(),
-        Some(latest_revision.model_digest.clone()),
-    )
+    if latest_revision.document_version == document_version
+        && latest_revision.config_hash == config_hash
+        && latest_revision.status != "ready"
+    {
+        return (
+            latest_revision.status.clone(),
+            non_empty_digest(&latest_revision.model_digest),
+        );
+    }
+    if let Some(model_digest) = non_empty_digest(&latest_revision.model_digest) {
+        return ("stale_but_usable".to_string(), Some(model_digest));
+    }
+    ("pending".to_string(), None)
+}
+
+fn non_empty_digest(digest: &str) -> Option<String> {
+    (!digest.is_empty()).then(|| digest.to_string())
+}
+
+fn latest_ready_trace_workbench_revision(
+    backend: &Backend,
+    session_id: &str,
+) -> Option<TraceViewerRevisionRecord> {
+    backend
+        .trace_viewer_revisions(session_id)?
+        .into_iter()
+        .rev()
+        .find(|revision| revision.status == "ready")
+}
+
+struct FailedTraceWorkbenchRevision<'a> {
+    session_id: &'a str,
+    session: &'a TraceViewerSession,
+    document_version: Option<i32>,
+    status: &'a str,
+    compiler_config_hash: &'a str,
+    target_config_hash: &'a str,
+    service_config_hash: &'a str,
+    source_hash: Option<String>,
+}
+
+fn record_failed_trace_workbench_revision(
+    backend: &mut Backend,
+    failure: FailedTraceWorkbenchRevision<'_>,
+) {
+    let fallback = latest_ready_trace_workbench_revision(backend, failure.session_id);
+    let revision = failure
+        .document_version
+        .map(|version| version.max(0) as u64)
+        .or_else(|| fallback.as_ref().map(|revision| revision.revision + 1))
+        .unwrap_or_default();
+    backend.record_trace_viewer_revision(
+        failure.session_id,
+        TraceViewerRevisionRecord {
+            revision,
+            previous_revision: None,
+            document_version: failure.document_version,
+            status: failure.status.to_string(),
+            config_hash: failure.service_config_hash.to_string(),
+            compiler_config_hash: failure.compiler_config_hash.to_string(),
+            target_config_hash: failure.target_config_hash.to_string(),
+            target: failure.session.target.clone(),
+            opt_level: failure.session.opt_level.clone(),
+            view: failure.session.view.clone(),
+            source_hash: failure.source_hash,
+            trace_snapshot_digest: fallback
+                .as_ref()
+                .map(|revision| revision.trace_snapshot_digest.clone())
+                .unwrap_or_default(),
+            model_digest: fallback
+                .as_ref()
+                .map(|revision| revision.model_digest.clone())
+                .unwrap_or_default(),
+            summary_digest: fallback
+                .as_ref()
+                .map(|revision| revision.summary_digest.clone())
+                .unwrap_or_default(),
+            source_digest: fallback
+                .as_ref()
+                .map(|revision| revision.source_digest.clone())
+                .unwrap_or_default(),
+            indexes_digest: fallback
+                .as_ref()
+                .map(|revision| revision.indexes_digest.clone())
+                .unwrap_or_default(),
+            rail_components_digest: fallback
+                .as_ref()
+                .map(|revision| revision.rail_components_digest.clone())
+                .unwrap_or_default(),
+            pane_digests: fallback
+                .as_ref()
+                .map(|revision| revision.pane_digests.clone())
+                .unwrap_or_default(),
+            report_digests: fallback
+                .as_ref()
+                .map(|revision| revision.report_digests.clone())
+                .unwrap_or_default(),
+        },
+    );
 }
 
 pub(crate) async fn handle_trace_workbench_model(
@@ -217,11 +312,65 @@ pub(crate) async fn handle_trace_workbench_model(
             )?
             .ok_or_else(|| format!("no Fe source file is loaded for URI {worker_uri}"))
         });
-        let result = tokio::time::timeout(Duration::from_secs(30), worker)
-            .await
-            .map_err(|_| internal_error("live trace workbench model exceeded 30s budget"))?
-            .map_err(internal_error)?;
-        let service = result.map_err(internal_error)?;
+        let result = match tokio::time::timeout(Duration::from_secs(30), worker).await {
+            Ok(result) => result,
+            Err(_) => {
+                record_failed_trace_workbench_revision(
+                    backend,
+                    FailedTraceWorkbenchRevision {
+                        session_id: &request.session_id,
+                        session: &session,
+                        document_version,
+                        status: "timed_out",
+                        compiler_config_hash: &compiler_config_hash,
+                        target_config_hash: &target_config_hash,
+                        service_config_hash: &service_config_hash,
+                        source_hash,
+                    },
+                );
+                return Err(internal_error(
+                    "live trace workbench model exceeded 30s budget",
+                ));
+            }
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                record_failed_trace_workbench_revision(
+                    backend,
+                    FailedTraceWorkbenchRevision {
+                        session_id: &request.session_id,
+                        session: &session,
+                        document_version,
+                        status: "failed_lowering",
+                        compiler_config_hash: &compiler_config_hash,
+                        target_config_hash: &target_config_hash,
+                        service_config_hash: &service_config_hash,
+                        source_hash,
+                    },
+                );
+                return Err(internal_error(err));
+            }
+        };
+        let service = match result {
+            Ok(service) => service,
+            Err(err) => {
+                record_failed_trace_workbench_revision(
+                    backend,
+                    FailedTraceWorkbenchRevision {
+                        session_id: &request.session_id,
+                        session: &session,
+                        document_version,
+                        status: "failed_lowering",
+                        compiler_config_hash: &compiler_config_hash,
+                        target_config_hash: &target_config_hash,
+                        service_config_hash: &service_config_hash,
+                        source_hash,
+                    },
+                );
+                return Err(internal_error(err));
+            }
+        };
         if let Some(version) = document_version {
             backend.cache_trace_service(
                 uri.clone(),
@@ -1840,6 +1989,114 @@ pub fn main() -> u64 {
         assert_eq!(response.revision.status, "stale_but_usable");
         assert_eq!(
             response.revision.model_digest.as_deref(),
+            Some("blake3:model")
+        );
+
+        tokio::task::spawn_blocking(move || drop(backend))
+            .await
+            .expect("backend drop task panicked");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn trace_workbench_model_failure_records_failed_revision_with_last_ready_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = introspection_config::FeToolingConfig::default();
+        config.lsp.trace.attached_trace = Some(
+            dir.path()
+                .join("missing-live-trace.jsonl")
+                .display()
+                .to_string(),
+        );
+        let mut backend = test_backend_with_config(config);
+        let uri = Url::parse("file:///workspace/src/failing_live_trace.fe").unwrap();
+        backend.db.workspace().update(
+            &mut backend.db,
+            uri.clone(),
+            "pub fn main() -> u64 { 1 }".to_string(),
+        );
+        backend.set_document_version(uri.clone(), 7);
+        let session = backend.create_trace_viewer_session(
+            uri.clone(),
+            "evm",
+            "O2",
+            "source-postopt-bytecode",
+            None,
+        );
+        let compiler_config_hash = backend.tooling_config().stable_hash();
+        let target_config_hash =
+            trace_workbench_target_config_hash("evm", "O2", "source-postopt-bytecode");
+        let config_hash =
+            trace_workbench_service_config_hash(&compiler_config_hash, &target_config_hash);
+        backend.record_trace_viewer_revision(
+            &session.id,
+            TraceViewerRevisionRecord {
+                revision: 7,
+                previous_revision: None,
+                document_version: Some(7),
+                status: "ready".to_string(),
+                config_hash: config_hash.clone(),
+                compiler_config_hash: compiler_config_hash.clone(),
+                target_config_hash: target_config_hash.clone(),
+                target: "evm".to_string(),
+                opt_level: "O2".to_string(),
+                view: "source-postopt-bytecode".to_string(),
+                source_hash: Some("blake3:source-text".to_string()),
+                trace_snapshot_digest: "blake3:trace".to_string(),
+                model_digest: "blake3:model".to_string(),
+                summary_digest: "blake3:summary".to_string(),
+                source_digest: "blake3:source".to_string(),
+                indexes_digest: "blake3:indexes".to_string(),
+                rail_components_digest: "blake3:rails".to_string(),
+                pane_digests: BTreeMap::from([(
+                    "bytecode".to_string(),
+                    "blake3:pane-bytecode".to_string(),
+                )]),
+                report_digests: BTreeMap::from([(
+                    "attribution".to_string(),
+                    "blake3:report-attribution".to_string(),
+                )]),
+            },
+        );
+        backend.set_document_version(uri, 8);
+
+        let result = handle_trace_workbench_model(
+            &mut backend,
+            TraceWorkbenchSessionRequest {
+                session_id: session.id.clone(),
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "missing attached trace should fail model build"
+        );
+
+        let revisions = backend.trace_viewer_revisions(&session.id).unwrap();
+        let failed = revisions.last().expect("failed revision record");
+        assert_eq!(failed.revision, 8);
+        assert_eq!(failed.previous_revision, Some(7));
+        assert_eq!(failed.document_version, Some(8));
+        assert_eq!(failed.status, "failed_lowering");
+        assert_eq!(failed.model_digest, "blake3:model");
+        assert_eq!(failed.summary_digest, "blake3:summary");
+        assert_eq!(failed.pane_digests["bytecode"], "blake3:pane-bytecode");
+        assert_eq!(
+            failed.report_digests["attribution"],
+            "blake3:report-attribution"
+        );
+
+        let bootstrap = handle_trace_workbench_bootstrap(
+            &mut backend,
+            TraceWorkbenchSessionRequest {
+                session_id: session.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bootstrap.revision.id, 8);
+        assert_eq!(bootstrap.revision.status, "failed_lowering");
+        assert_eq!(
+            bootstrap.revision.model_digest.as_deref(),
             Some("blake3:model")
         );
 
