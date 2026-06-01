@@ -1,11 +1,8 @@
-use common::indexmap::IndexMap;
-
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
-        binder::Binder,
         generated::GeneratedImplId,
-        trait_def::{ImplementorId, ImplementorOrigin, does_impl_trait_conflict},
+        trait_def::{does_impl_trait_conflict, generated_implementor_candidate},
         trait_lower::collect_trait_impls,
     },
 };
@@ -20,13 +17,7 @@ pub(super) fn generated_conflicts_with_authored_impl<'db>(
     else {
         return false;
     };
-    let generated_impl = Binder::bind(ImplementorId::new(
-        db,
-        generated.trait_inst,
-        generated.trait_inst.self_ty(db).generic_args(db).to_vec(),
-        IndexMap::new(),
-        ImplementorOrigin::Generated(generated),
-    ));
+    let generated_impl = generated_implementor_candidate(db, generated);
     authored_impls
         .iter()
         .any(|&authored| does_impl_trait_conflict(db, authored, generated_impl))
@@ -37,24 +28,12 @@ pub(super) fn generated_conflicting_generated_impl<'db>(
     generated: GeneratedImplId<'db>,
     candidates: &[GeneratedImplId<'db>],
 ) -> Option<GeneratedImplId<'db>> {
-    let generated_impl = Binder::bind(ImplementorId::new(
-        db,
-        generated.trait_inst,
-        generated.trait_inst.self_ty(db).generic_args(db).to_vec(),
-        IndexMap::new(),
-        ImplementorOrigin::Generated(generated),
-    ));
+    let generated_impl = generated_implementor_candidate(db, generated);
     candidates.iter().copied().find(|&other| {
         if other == generated {
             return false;
         }
-        let other_impl = Binder::bind(ImplementorId::new(
-            db,
-            other.trait_inst,
-            other.trait_inst.self_ty(db).generic_args(db).to_vec(),
-            IndexMap::new(),
-            ImplementorOrigin::Generated(other),
-        ));
+        let other_impl = generated_implementor_candidate(db, other);
         does_impl_trait_conflict(db, other_impl, generated_impl)
     })
 }
