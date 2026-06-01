@@ -1956,7 +1956,7 @@
       if (kind === "exact") return null;
       if (kind === "source_exact") return { kind: "ok", label: "source-exact" };
       if (kind === "generated") return { kind: "generated", label: "generated" };
-      if (kind === "generated_downstream") return { kind: "generated", label: "generated downstream" };
+      if (kind === "generated_downstream") return null;
       if (kind === "context") return { kind: "context", label: "context" };
       if (kind === "prepared_linked") return { kind: "context", label: "prepared-linked" };
       if (kind === "missing_optimized_to_prepared") return { kind: "warn", label: "missing link" };

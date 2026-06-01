@@ -9,10 +9,8 @@ use crate::AttributionAuditReport;
 #[allow(dead_code)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TraceWorkbenchDisplayStatus {
-    Exact,
     SourceExact,
     Generated,
-    GeneratedDownstream,
     Context,
     PreparedLinked,
     MissingOptimizedToPrepared,

@@ -13879,6 +13879,34 @@ mod tests {
     }
 
     #[test]
+    fn trace_workbench_browser_ignores_stale_broad_status_badges() {
+        let js_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../fe-web/assets/fe-origin-trace.js");
+        let js = fs::read_to_string(&js_path).expect("read trace workbench browser client");
+        let status_start = js
+            .find("    _rowDisplayStatus(")
+            .expect("find row display status mapper");
+        let status_tail = &js[status_start..];
+        let status_end = status_tail
+            .find("    _displayStatus(")
+            .expect("find row display status mapper end");
+        let status_body = &status_tail[..status_end];
+
+        assert!(
+            status_body.contains("if (kind === \"exact\") return null;"),
+            "generic exact statuses must not render compact row badges"
+        );
+        assert!(
+            status_body.contains("if (kind === \"generated_downstream\") return null;"),
+            "generated-downstream is explanation context, not a compact source-row badge"
+        );
+        assert!(
+            !status_body.contains("generated downstream"),
+            "browser must not render generated-downstream as visible compact badge text"
+        );
+    }
+
+    #[test]
     fn trace_workbench_browser_interaction_groups_are_projection_driven() {
         let js_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../fe-web/assets/fe-origin-trace.js");
