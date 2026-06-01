@@ -18,7 +18,7 @@ use crate::analysis::{
         canonical::Canonical,
         constraint::{ConstraintId, ConstraintKind, ConstraintListId, ParamEnv},
         fold::TyFoldable,
-        trait_def::{ImplementorId, TraitInstId, impls_for_trait_in_ingots},
+        trait_def::{ImplementorId, TraitInstId},
         ty_check::const_predicate_prover::{ConstProveResult, prove_const_predicate},
         ty_def::{TyData, TyId},
         unify::PersistentUnificationTable,
@@ -285,13 +285,11 @@ impl<'db> GeneratorNodeData<'db> {
         let mut table = PersistentUnificationTable::new(db);
         let extracted_query = query.extract_identity(&mut table);
         let extracted_goal = extracted_query.goal;
-        let (primary, secondary) = TraitSolveCx::search_ingots_for_trait_inst_with_origin(
+        let cands = TraitSolveCx::implementor_candidates_for_trait_inst_with_origin(
             db,
             origin_ingot,
             extracted_goal,
         );
-        let cands =
-            impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, extracted_goal));
 
         Self {
             table,
@@ -299,7 +297,7 @@ impl<'db> GeneratorNodeData<'db> {
             extracted_query,
             solutions: IndexSet::default(),
             dependents: Vec::new(),
-            cands: cands.as_slice(),
+            cands,
             next_cand: 0,
             children: Vec::new(),
         }

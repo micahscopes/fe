@@ -1,8 +1,9 @@
 use super::{
+    binder::Binder,
     canonical::{Canonical, Canonicalized, Solution},
     constraint::ConstraintListId,
     fold::{AssocTySubst, TyFoldable},
-    trait_def::{ImplementorId, TraitInstId},
+    trait_def::{ImplementorId, TraitInstId, impls_for_trait_in_ingots},
     ty_def::{TyData, TyFlags, TyId},
 };
 use crate::analysis::{
@@ -185,6 +186,16 @@ impl<'db> TraitSolveCx<'db> {
         } else {
             (primary, Some(trait_ingot))
         }
+    }
+
+    pub(crate) fn implementor_candidates_for_trait_inst_with_origin(
+        db: &'db dyn HirAnalysisDb,
+        origin_ingot: Ingot<'db>,
+        inst: TraitInstId<'db>,
+    ) -> &'db [Binder<ImplementorId<'db>>] {
+        let (primary, secondary) =
+            Self::search_ingots_for_trait_inst_with_origin(db, origin_ingot, inst);
+        impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, inst))
     }
 
     pub(crate) fn normalization_scope_for_trait_inst(
