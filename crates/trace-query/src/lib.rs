@@ -8164,10 +8164,11 @@ fn attribution_audit_report(snapshot: &TraceSnapshot) -> AttributionAuditReport 
             for target in &prepared_targets_for_pc {
                 *prepared_targets.entry(target.clone()).or_default() += 1;
             }
-            for prepared in prepared_targets_for_pc
-                .into_iter()
-                .filter(is_postopt_lineage_carrier_origin)
-            {
+            for prepared in prepared_targets_requiring_postopt_lineage(
+                &prepared_targets_for_pc,
+                &exact_postopt_lineage_by_prepared,
+                snapshot,
+            ) {
                 if let Some(exact_postopt_targets) =
                     exact_postopt_lineage_by_prepared.get(&prepared)
                     && !exact_postopt_targets.is_empty()
@@ -8462,6 +8463,33 @@ fn is_prepared_sonatina_audit_origin(key: &OriginExportKey) -> bool {
 
 fn is_postopt_lineage_carrier_origin(key: &OriginExportKey) -> bool {
     key.kind().starts_with("sonatina.evm.prepared.") || key.kind().starts_with("sonatina.codegen.")
+}
+
+fn is_vcode_audit_origin(key: &OriginExportKey) -> bool {
+    key.kind().starts_with("evm.vcode.") || key.kind().starts_with("vcode.")
+}
+
+fn prepared_targets_requiring_postopt_lineage(
+    targets: &[OriginExportKey],
+    exact_postopt_lineage_by_prepared: &BTreeMap<OriginExportKey, BTreeSet<OriginExportKey>>,
+    snapshot: &TraceSnapshot,
+) -> Vec<OriginExportKey> {
+    let has_canonical_carrier = targets.iter().any(is_postopt_lineage_carrier_origin);
+    let mut selected = BTreeSet::<OriginExportKey>::new();
+    for target in targets {
+        if is_postopt_lineage_carrier_origin(target) {
+            selected.insert(target.clone());
+            continue;
+        }
+        if is_vcode_audit_origin(target)
+            && (!has_canonical_carrier
+                || exact_postopt_lineage_by_prepared.contains_key(target)
+                || non_exact_postopt_lineage_for_prepared(snapshot, target).is_some())
+        {
+            selected.insert(target.clone());
+        }
+    }
+    selected.into_iter().collect()
 }
 
 fn is_sonatina_preopt_inst_audit_origin(key: &OriginExportKey) -> bool {
@@ -10094,6 +10122,59 @@ mod tests {
         assert_eq!(missing_links.invalid.len(), 0);
         assert_eq!(missing_links.summary.prepared_linked_bytecode_pcs, 1);
         assert_eq!(missing_links.summary.missing_required_count, 0);
+    }
+
+    #[test]
+    fn attribution_audit_reports_missing_lineage_for_vcode_only_bytecode() {
+        let function = key("function", "demo", "recv");
+        let vcode = key("evm.vcode.inst", "demo", "inst:vcode-only");
+        let pc = key("bytecode.pc", "demo", "pc:0");
+        let snapshot = snapshot(vec![
+            node(function.clone()),
+            node(vcode.clone()),
+            node(pc.clone()),
+            TraceFact::Instruction(InstructionFact::new(pc.clone(), function, 0, "ADD")),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                pc.clone(),
+                vcode.clone(),
+                OriginEdgeLabel::EmittedFrom,
+                Some(CompilerPhase::BytecodeEmission),
+            )),
+        ]);
+
+        let report = TraceIntrospectionService::new(snapshot)
+            .attribution_audit()
+            .unwrap();
+
+        assert_eq!(report.total_bytecode_pcs, 1);
+        assert_eq!(report.source_exact_pcs, 0);
+        assert_eq!(report.prepared_linked_pcs, 1);
+        assert_eq!(report.unmapped_pcs, 0);
+        assert_eq!(report.missing_optimized_to_prepared_lineage_pcs, 1);
+        assert_eq!(report.lineage_gaps.len(), 1);
+        assert_eq!(report.lineage_gaps[0].bytecode_pc, pc);
+        assert_eq!(report.lineage_gaps[0].prepared_origin, vcode);
+        assert_eq!(
+            report.lineage_gaps[0].issue_code,
+            LinkIssueCode::MissingOptimizedToPreparedLineage
+        );
+
+        let missing_links = report.missing_links.as_ref().unwrap();
+        assert_eq!(
+            missing_links.summary.top_blockers,
+            vec![LinkBoundaryKind::PostOptToPrepared]
+        );
+        assert_eq!(missing_links.summary.prepared_linked_bytecode_pcs, 1);
+        assert_eq!(missing_links.summary.missing_required_count, 1);
+        assert_eq!(missing_links.gaps.len(), 1);
+        assert_eq!(
+            missing_links.gaps[0].from_origin,
+            report.lineage_gaps[0].prepared_origin
+        );
+        assert_eq!(
+            missing_links.gaps[0].required_evidence[0].kind,
+            RequiredEvidenceKind::PreparedLineageFact
+        );
     }
 
     #[test]
