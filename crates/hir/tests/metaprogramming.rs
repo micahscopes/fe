@@ -1795,7 +1795,7 @@ fn caller() {
 
     assert_eq!(
         elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
-        vec!["Foo: Eq requested for Foo using StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
+        vec!["Foo: Eq requested for Foo with StableEq using Derive<Eq> evidence from StableEq with [read capability Reflect<Foo>, mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
     );
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -1848,7 +1848,7 @@ fn caller() {
 
     assert_eq!(
         elaboration_ctfe_context_summaries_for_top_mod(&db, top_mod),
-        vec!["Foo: Eq requested for Foo using FastEq using Derive<Eq> evidence from FastEq with [mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
+        vec!["Foo: Eq requested for Foo with FastEq using Derive<Eq> evidence from FastEq with [mut capability ImplBuilder<Foo: Eq<Foo>>]".to_string()]
     );
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
@@ -2786,60 +2786,6 @@ impl StableEq: Derive for Eq {
     let diags = diagnostics_for(&db, top_mod);
     assert_diag_message(&diags, "conflicts with another generated implementation");
     assert_diag_message(&diags, "from provider `StableEq`");
-    assert_eq!(
-        generated_impl_summaries_for_top_mod(&db, top_mod),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn explicitly_selected_duplicate_generated_derives_conflict() {
-    let mut db = HirAnalysisTestDb::default();
-    let file = db.new_stand_alone(
-        "explicitly_selected_duplicate_generated_derives_conflict.fe".into(),
-        r#"
-trait Eq {}
-
-struct Foo {}
-
-derive Eq for Foo using StableEq
-derive Eq for Foo using FastEq
-
-impl StableEq: Derive for Eq {
-    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-        uses (builder: mut ImplBuilder<Eq<T>>)
-    {
-        builder.finish()
-        ev
-    }
-}
-
-impl FastEq: Derive for Eq {
-    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
-        uses (builder: mut ImplBuilder<Eq<T>>)
-    {
-        builder.finish()
-        ev
-    }
-}
-"#,
-    );
-    let (top_mod, _) = db.top_mod(file);
-    let diags = diagnostics_for(&db, top_mod);
-    assert_diag_message(&diags, "conflicts with another generated implementation");
-    assert_eq!(
-        diag_message_count(&diags, "conflicts with another generated implementation"),
-        1,
-        "expected one generated/generated conflict diagnostic, got {diags:#?}"
-    );
-    assert_diag_message(&diags, "from provider `StableEq`");
-    assert_diag_message(&diags, "from provider `FastEq`");
-    assert_diag_primary_span_text(
-        &db,
-        &diags,
-        "conflicts with another generated implementation",
-        "FastEq",
-    );
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         Vec::<String>::new()

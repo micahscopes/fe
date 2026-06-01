@@ -127,7 +127,15 @@ impl<'db> ElaborationRequestId<'db> {
             self.target(db).ty(db).pretty_print(db)
         );
         if let Some(provider) = self.selected_provider(db) {
-            summary.push_str(" using ");
+            let selection = match self.origin(db) {
+                ElaborationOrigin::DeriveDecl(decl) if decl.selected_provider_from_scope(db) => {
+                    " with "
+                }
+                ElaborationOrigin::DeriveAttr { .. } | ElaborationOrigin::DeriveDecl(_) => {
+                    " using "
+                }
+            };
+            summary.push_str(selection);
             summary.push_str(provider.data(db));
         }
         summary
