@@ -3064,6 +3064,12 @@ impl StableEq: Derive for Eq {
         &diags,
         "provider output for `Eq` does not satisfy required methods",
     );
+    assert_diag_primary_span_text(
+        &db,
+        &diags,
+        "provider output for `Eq` does not satisfy required methods",
+        "builder.finish()",
+    );
 }
 
 #[test]

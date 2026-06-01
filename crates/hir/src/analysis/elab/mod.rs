@@ -38,6 +38,7 @@ mod trace;
 
 #[cfg(test)]
 pub(crate) use builder::BuilderCommand;
+use builder::builder_command_list_finish_span;
 use builder::generated_impl_from_builder_commands;
 pub(crate) use builder::{BuilderCommandListId, BuilderError, ImplBuilderSession};
 pub(crate) use capability::{
@@ -185,6 +186,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                     let primary_span = invalid_body_methods
                         .first()
                         .map(|method| method.span.clone())
+                        .or_else(|| provider_output_finish_span(db, output))
                         .unwrap_or_else(|| request.span(db));
                     diags.push(invalid_request(
                         primary_span,
@@ -231,6 +233,18 @@ fn generated_overlay_diags_for_top_mod<'db>(
         }
     }
     diags
+}
+
+fn provider_output_finish_span<'db>(
+    db: &'db dyn HirAnalysisDb,
+    output: ProviderOutputId<'db>,
+) -> Option<DynLazySpan<'db>> {
+    match output.status(db) {
+        ProviderOutputStatus::Succeeded { commands } => {
+            builder_command_list_finish_span(db, commands)
+        }
+        ProviderOutputStatus::Failed { .. } => None,
+    }
 }
 
 fn should_report_generated_conflict<'db>(

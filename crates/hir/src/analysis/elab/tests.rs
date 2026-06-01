@@ -96,6 +96,15 @@ fn generated_expr_id<'db>(
     GeneratedExprId::new(db, kind, span)
 }
 
+fn finish_command<'db>(
+    db: &'db HirAnalysisTestDb,
+    context: ElaborationCtfeContextId<'db>,
+) -> BuilderCommand<'db> {
+    BuilderCommand::Finish {
+        span: context.provider(db).func(db).span().name().into(),
+    }
+}
+
 #[test]
 fn raw_impl_builder_records_required_obligations() {
     let mut db = HirAnalysisTestDb::default();
@@ -129,7 +138,7 @@ impl StableEq: Derive for Eq {
                 constraint: field_obligation,
                 origin: RequirementOrigin::Synthetic,
             },
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(
@@ -251,7 +260,7 @@ impl StableEq: Derive for Eq {
     let commands = BuilderCommandListId::new(
         &db,
         vec![
-            BuilderCommand::Finish,
+            finish_command(&db, context),
             BuilderCommand::Require {
                 constraint: requirement,
                 origin: RequirementOrigin::Synthetic,
@@ -614,7 +623,7 @@ impl StableEq: Derive for Eq {
                 method_name,
                 generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(true)),
             ),
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(
@@ -675,7 +684,7 @@ impl StableEq: Derive for Eq {
         &db,
         vec![
             emit_method_expr_command(&db, context, method_name, expr),
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(
@@ -760,7 +769,7 @@ impl StableEq: Derive for Eq {
         &db,
         vec![
             emit_method_expr_command(&db, context, method_name, expr),
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(
@@ -835,7 +844,7 @@ impl StableDefault: Derive for Default {
         &db,
         vec![
             emit_method_expr_command(&db, context, method_name, expr),
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(
@@ -900,7 +909,7 @@ impl StableDefault: Derive for Default {
         &db,
         vec![
             emit_method_expr_command(&db, context, method_name, expr),
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(
@@ -977,7 +986,7 @@ impl StableDefault: Derive for Default {
         &db,
         vec![
             emit_method_expr_command(&db, context, method_name, expr),
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(
@@ -1041,7 +1050,7 @@ impl StableCount: Derive for Count {
                 method_name,
                 generated_expr_id(&db, context, GeneratedExprKind::BoolLiteral(true)),
             ),
-            BuilderCommand::Finish,
+            finish_command(&db, context),
         ],
     );
     let generated = generated_impl_from_builder_commands(

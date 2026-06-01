@@ -282,7 +282,7 @@ impl<'db> ProviderBodyExecutor<'db> {
                 ));
             }
             Expr::MethodCall(receiver, method, generic_args, args) => {
-                if !self.execute_method_call(body, *receiver, *method, *generic_args, args)? {
+                if !self.execute_method_call(body, expr, *receiver, *method, *generic_args, args)? {
                     if self.eval_expr_value(body, expr).is_none() {
                         return Err(failed_execution(
                             ProviderFailureReason::UnsupportedProviderBody,
@@ -338,6 +338,7 @@ impl<'db> ProviderBodyExecutor<'db> {
     fn execute_method_call(
         &mut self,
         body: Body<'db>,
+        expr: crate::hir_def::ExprId,
         receiver: crate::hir_def::ExprId,
         method: Partial<IdentId<'db>>,
         generic_args: GenericArgListId<'db>,
@@ -370,16 +371,18 @@ impl<'db> ProviderBodyExecutor<'db> {
                         receiver.span(body).into(),
                     ));
                 }
-                self.builder.finish_explicit().map_err(|err| match err {
-                    BuilderError::AlreadyFinished => failed_execution(
-                        ProviderFailureReason::DuplicateFinish,
-                        receiver.span(body).into(),
-                    ),
-                    _ => failed_execution(
-                        ProviderFailureReason::InvalidBuilderState,
-                        receiver.span(body).into(),
-                    ),
-                })?;
+                self.builder
+                    .finish_explicit(expr.span(body).into())
+                    .map_err(|err| match err {
+                        BuilderError::AlreadyFinished => failed_execution(
+                            ProviderFailureReason::DuplicateFinish,
+                            receiver.span(body).into(),
+                        ),
+                        _ => failed_execution(
+                            ProviderFailureReason::InvalidBuilderState,
+                            receiver.span(body).into(),
+                        ),
+                    })?;
                 Ok(true)
             }
             BUILDER_BOOL_METHOD

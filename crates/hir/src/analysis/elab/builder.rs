@@ -29,7 +29,9 @@ pub(crate) enum BuilderCommand<'db> {
         expr: GeneratedExprId<'db>,
         span: DynLazySpan<'db>,
     },
-    Finish,
+    Finish {
+        span: DynLazySpan<'db>,
+    },
 }
 
 #[salsa::interned]
@@ -116,12 +118,15 @@ impl<'db> ImplBuilderSession<'db> {
         Ok(())
     }
 
-    pub(super) fn finish_explicit(&mut self) -> Result<(), BuilderError<'db>> {
+    pub(super) fn finish_explicit(
+        &mut self,
+        span: DynLazySpan<'db>,
+    ) -> Result<(), BuilderError<'db>> {
         if self.finished {
             return Err(BuilderError::AlreadyFinished);
         }
         self.finished = true;
-        self.commands.push(BuilderCommand::Finish);
+        self.commands.push(BuilderCommand::Finish { span });
         Ok(())
     }
 
@@ -172,7 +177,7 @@ pub(super) fn generated_impl_from_builder_commands<'db>(
                 body: GeneratedMethodBodyKind::Expr(*expr),
                 span: span.clone(),
             }),
-            BuilderCommand::Finish => finished = true,
+            BuilderCommand::Finish { .. } => finished = true,
         }
     }
 
@@ -192,4 +197,17 @@ pub(super) fn generated_impl_from_builder_commands<'db>(
         methods: GeneratedMethodListId::new(db, methods),
         obligations: ConstraintListId::new(db, obligations),
     })
+}
+
+pub(super) fn builder_command_list_finish_span<'db>(
+    db: &'db dyn HirAnalysisDb,
+    commands: BuilderCommandListId<'db>,
+) -> Option<DynLazySpan<'db>> {
+    commands
+        .commands(db)
+        .iter()
+        .find_map(|command| match command {
+            BuilderCommand::Finish { span } => Some(span.clone()),
+            _ => None,
+        })
 }
