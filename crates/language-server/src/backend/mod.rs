@@ -189,14 +189,17 @@ impl Backend {
     ) -> TraceViewerSession {
         self.trace_viewer_generation = self.trace_viewer_generation.saturating_add(1);
         let id = format!("trace-session-{:x}", self.trace_viewer_generation);
-        let config_hash = self.tooling_config.stable_hash();
+        let target = target.into();
+        let opt_level = opt_level.into();
+        let view = view.into();
+        let config_hash = self.trace_viewer_config_hash(&target, &opt_level, &view);
         let document_version = self.document_version(&uri);
         let session = TraceViewerSession {
             id: id.clone(),
             uri: uri.to_string(),
-            target: target.into(),
-            opt_level: opt_level.into(),
-            view: view.into(),
+            target,
+            opt_level,
+            view,
             config_hash,
             document_version,
             initial_selection,
@@ -206,6 +209,16 @@ impl Backend {
             .insert(session.id.clone(), Vec::new());
         self.trace_viewer_models.remove(&session.id);
         session
+    }
+
+    fn trace_viewer_config_hash(&self, target: &str, opt_level: &str, view: &str) -> String {
+        let compiler_config_hash = self.tooling_config.stable_hash();
+        let target_config_hash = trace_viewer_digest_text(&format!(
+            "target={target}\nopt_level={opt_level}\nview={view}\n"
+        ));
+        trace_viewer_digest_text(&format!(
+            "compiler_config={compiler_config_hash}\ntarget_config={target_config_hash}\n"
+        ))
     }
 
     pub(crate) fn trace_viewer_session(&self, session_id: &str) -> Option<TraceViewerSession> {
@@ -500,6 +513,10 @@ impl Backend {
             }
         }
     }
+}
+
+fn trace_viewer_digest_text(text: &str) -> String {
+    format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
 }
 
 fn trace_workbench_chunks_response(

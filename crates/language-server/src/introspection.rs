@@ -1595,22 +1595,44 @@ pub fn main() -> u64 {
         );
         let o2 =
             backend.create_trace_viewer_session(uri, "evm", "O2", "source-postopt-bytecode", None);
+        let o1_initial_config_hash = o1.config_hash.clone();
+        let o2_initial_config_hash = o2.config_hash.clone();
 
         let o1_response = handle_trace_workbench_bootstrap(
             &mut backend,
-            TraceWorkbenchSessionRequest { session_id: o1.id },
+            TraceWorkbenchSessionRequest {
+                session_id: o1.id.clone(),
+            },
         )
         .await
         .unwrap();
         let o2_response = handle_trace_workbench_bootstrap(
             &mut backend,
-            TraceWorkbenchSessionRequest { session_id: o2.id },
+            TraceWorkbenchSessionRequest {
+                session_id: o2.id.clone(),
+            },
         )
         .await
         .unwrap();
 
         assert_ne!(
             o1_response.revision.config_hash,
+            o2_response.revision.config_hash
+        );
+        assert_eq!(
+            o1_initial_config_hash, o1_response.revision.config_hash,
+            "session config hash should include target/opt/view before bootstrap"
+        );
+        assert_eq!(
+            o2_initial_config_hash, o2_response.revision.config_hash,
+            "session config hash should include target/opt/view before bootstrap"
+        );
+        assert_eq!(
+            o1_response.session.config_hash,
+            o1_response.revision.config_hash
+        );
+        assert_eq!(
+            o2_response.session.config_hash,
             o2_response.revision.config_hash
         );
         assert_eq!(o1_response.session.opt_level, "O1");

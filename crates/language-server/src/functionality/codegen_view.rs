@@ -534,6 +534,15 @@ mod tests {
 
         let session = backend.trace_viewer_session(session_id).unwrap();
         assert_eq!(session.uri, uri.as_str());
+        assert_eq!(
+            result["configHash"].as_str(),
+            Some(session.config_hash.as_str())
+        );
+        assert_ne!(
+            session.config_hash,
+            backend.tooling_config().stable_hash(),
+            "trace session config hash must include target/opt-level/view, not just compiler tooling config"
+        );
         assert_eq!(session.document_version, Some(12));
         assert_eq!(session.initial_selection.unwrap().start_line, 3);
 
