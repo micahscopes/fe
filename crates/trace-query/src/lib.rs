@@ -13072,6 +13072,198 @@ mod tests {
     }
 
     #[test]
+    fn trace_workbench_consumers_keep_each_range_expanded_bytecode_pc_prepared_linked() {
+        let source_file = key("source.file", "demo", "fib.fe");
+        let source_expr = key("hir.expr", "demo", "expr:x");
+        let postopt = key("sonatina.postopt.inst", "demo", "inst:0");
+        let vcode = key("evm.vcode.inst", "demo", "inst:range");
+        let prepared = key("sonatina.evm.prepared.inst", "demo", "inst:range");
+        let function = key("bytecode.function", "demo", "runtime");
+        let pc0 = key("bytecode.pc", "demo", "pc:0");
+        let pc1 = key("bytecode.pc", "demo", "pc:1");
+        let snapshot = snapshot(vec![
+            node(source_file.clone()),
+            node(source_expr.clone()),
+            node(postopt.clone()),
+            node(vcode.clone()),
+            node(prepared.clone()),
+            node(function.clone()),
+            node(pc0.clone()),
+            node(pc1.clone()),
+            TraceFact::SourceFile(SourceFileFact::new(
+                source_file.clone(),
+                "file:///demo/fib.fe",
+                "fib.fe",
+                "blake3:000000000000000000000000000000000000000000000000000000000000abcd",
+                Some(0),
+            )),
+            TraceFact::SourceSpan(SourceSpanFact::new(
+                source_expr.clone(),
+                source_file,
+                11,
+                12,
+                2,
+                3,
+                2,
+                4,
+            )),
+            TraceFact::Instruction(InstructionFact::new(
+                pc0.clone(),
+                function.clone(),
+                0,
+                "PUSH0",
+            )),
+            TraceFact::Instruction(InstructionFact::new(pc1.clone(), function, 1, "ADD")),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                postopt,
+                source_expr.clone(),
+                OriginEdgeLabel::LoweredFrom,
+                Some(CompilerPhase::SonatinaPostOpt),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                pc0.clone(),
+                vcode.clone(),
+                OriginEdgeLabel::EmittedFrom,
+                Some(CompilerPhase::BytecodeEmission),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                pc1.clone(),
+                vcode.clone(),
+                OriginEdgeLabel::EmittedFrom,
+                Some(CompilerPhase::BytecodeEmission),
+            )),
+            TraceFact::OriginEdge(OriginEdgeFact::new(
+                vcode.clone(),
+                prepared.clone(),
+                OriginEdgeLabel::LoweredFrom,
+                Some(CompilerPhase::Backend),
+            )),
+        ]);
+        let service = TraceIntrospectionService::new(snapshot);
+        let semantic_index = trace_index::TraceIndex::new(service.snapshot());
+        for pc in [&pc0, &pc1] {
+            assert!(
+                semantic_index
+                    .source_candidates_for_instruction(
+                        pc,
+                        trace_index::TraceReachabilityPolicy::ExactOnly,
+                    )
+                    .is_empty(),
+                "range-expanded bytecode PC must not bridge to source without PreparedLineage"
+            );
+        }
+
+        let component_classes =
+            rail_components::component_classes_by_origin_key(service.snapshot());
+        let source_classes = component_classes
+            .get(&source_expr.canonical_storage_key())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            source_classes
+                .iter()
+                .any(|class| class.starts_with("exact-c-")),
+            "source/postopt side should keep exact local phase evidence",
+        );
+        assert!(
+            source_classes
+                .iter()
+                .all(|class| !class.starts_with("prepared-c-")),
+            "source rows must not gain prepared rails through range-expanded VCode without lineage",
+        );
+        for pc in [&pc0, &pc1] {
+            let bytecode_classes = component_classes
+                .get(&pc.canonical_storage_key())
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                bytecode_classes
+                    .iter()
+                    .any(|class| class.starts_with("prepared-c-")),
+                "each range-expanded bytecode PC should expose prepared-code linkage",
+            );
+            assert!(
+                bytecode_classes
+                    .iter()
+                    .all(|class| !class.starts_with("exact-c-")),
+                "range-expanded bytecode PCs must not acquire exact source/IR rail membership",
+            );
+        }
+
+        let audit = service.attribution_audit().unwrap();
+        assert_eq!(audit.total_bytecode_pcs, 2);
+        assert_eq!(audit.source_exact_pcs, 0);
+        assert_eq!(audit.prepared_linked_pcs, 2);
+        assert_eq!(audit.missing_optimized_to_prepared_lineage_pcs, 2);
+        assert_eq!(
+            audit
+                .lineage_gaps
+                .iter()
+                .map(|gap| gap.bytecode_pc.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([pc0.clone(), pc1.clone()])
+        );
+        assert!(
+            audit
+                .lineage_gaps
+                .iter()
+                .all(|gap| gap.prepared_origin == prepared)
+        );
+
+        let static_report = crate::static_analysis::static_analysis_report(service.snapshot());
+        let coverage = &static_report.checks[0].evidence["coverage"];
+        assert_eq!(coverage["primary_prepared_sonatina_pcs"], 2);
+        assert_eq!(coverage["prepared_only_pcs"], 2);
+        assert_eq!(coverage["unmapped_pcs"], 0);
+
+        let projection = trace_workbench_report_projection(
+            &service,
+            service.snapshot(),
+            TraceWorkbenchProjectionRequest {
+                input_path: "demo".to_string(),
+                target: "evm".to_string(),
+                opt_level: "O2".to_string(),
+                view: "source-postopt-bytecode".to_string(),
+                include_legacy_closure_debug: false,
+                source_text: Some("fn f() {\n  x\n}\n".to_string()),
+                related_source_texts: BTreeMap::new(),
+                document_version: Some(3),
+                query_duration_ms: 9,
+                compiler_commit: "test".to_string(),
+                data_source: "test".to_string(),
+            },
+        );
+        let bytecode_panel = projection["panels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|panel| panel["id"] == "bytecode")
+            .unwrap();
+        assert_eq!(bytecode_panel["rows"].as_array().unwrap().len(), 2);
+        for row in bytecode_panel["rows"].as_array().unwrap() {
+            let groups = row["selection_groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+                .unwrap();
+            assert!(
+                groups.iter().any(|group| group.starts_with("prepared-c-")),
+                "each range-expanded bytecode row should expose prepared-code selection"
+            );
+            assert!(
+                groups.iter().all(|group| !group.starts_with("exact-c-")),
+                "range-expanded bytecode selection must not include exact source/IR rails across the missing seam"
+            );
+            assert_eq!(
+                row["display_status"],
+                serde_json::json!("missing_optimized_to_prepared")
+            );
+        }
+    }
+
+    #[test]
     fn trace_workbench_provenance_does_not_claim_preopt_as_optimized() {
         let closure_set = crate::origin_closure::OriginClosureSet {
             closures: vec![crate::origin_closure::OriginClosure {
