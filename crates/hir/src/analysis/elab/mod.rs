@@ -207,7 +207,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
             }
             if generated_conflicts_with_authored_impl(db, generated) {
                 diags.push(invalid_request(
-                    request.span(db),
+                    generated_conflict_span(db, generated),
                     format!(
                         "generated implementation for `{}` conflicts with an authored implementation",
                         generated.trait_inst.pretty_print(db, true)
@@ -220,7 +220,7 @@ fn generated_overlay_diags_for_top_mod<'db>(
                     continue;
                 }
                 diags.push(invalid_request(
-                    request.span(db),
+                    generated_conflict_span(db, generated),
                     format!(
                         "generated implementation for `{}` from provider `{}` conflicts with another generated implementation from provider `{}` for `{}`",
                         generated.trait_inst.pretty_print(db, true),
@@ -233,6 +233,18 @@ fn generated_overlay_diags_for_top_mod<'db>(
         }
     }
     diags
+}
+
+fn generated_conflict_span<'db>(
+    db: &'db dyn HirAnalysisDb,
+    generated: GeneratedImplId<'db>,
+) -> DynLazySpan<'db> {
+    let request = generated.context.request(db);
+    if request.selected_provider(db).is_some() {
+        request.selected_provider_span(db)
+    } else {
+        request.span(db)
+    }
 }
 
 fn provider_output_finish_span<'db>(
