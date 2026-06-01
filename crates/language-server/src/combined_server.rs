@@ -1647,6 +1647,11 @@ mod tests {
         });
         let manifest = trace_workbench_manifest(&model);
 
+        assert!(
+            trace_workbench_chunk_payload(&model, &manifest.root_digest).is_none(),
+            "root digest is a model identity, not a materialized full-model chunk"
+        );
+
         let summary = trace_workbench_chunk_payload(&model, &manifest.summary_digest).unwrap();
         assert_eq!(summary["kind"], "summary");
         assert_eq!(summary["value"]["revision"]["id"], 7);

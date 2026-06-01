@@ -473,8 +473,7 @@ fn trace_workbench_chunk_payloads(
     manifest: &trace_query::TraceViewManifest,
 ) -> BTreeMap<String, serde_json::Value> {
     let mut chunks = BTreeMap::new();
-    let digests = std::iter::once(manifest.root_digest.clone())
-        .chain(std::iter::once(manifest.summary_digest.clone()))
+    let digests = std::iter::once(manifest.summary_digest.clone())
         .chain(std::iter::once(manifest.metadata_digest.clone()))
         .chain(std::iter::once(manifest.source_digest.clone()))
         .chain(std::iter::once(manifest.indexes_digest.clone()))
@@ -494,13 +493,6 @@ pub(crate) fn trace_workbench_chunk_payload(
     digest: &str,
 ) -> Option<serde_json::Value> {
     let manifest = trace_workbench_manifest(model);
-    if manifest.root_digest == digest {
-        return Some(serde_json::json!({
-            "kind": "model",
-            "digest": digest,
-            "value": model,
-        }));
-    }
     if manifest.summary_digest == digest {
         return Some(serde_json::json!({
             "kind": "summary",
@@ -857,8 +849,9 @@ mod tests {
         handle_trace_query, handle_trace_workbench_bootstrap, handle_trace_workbench_chunk,
         handle_trace_workbench_chunks, handle_trace_workbench_manifest,
         handle_trace_workbench_model, service_for_file_with_options,
-        trace_workbench_parse_opt_level, trace_workbench_service_config_hash,
-        trace_workbench_source_file_display_name, trace_workbench_target_config_hash,
+        trace_workbench_chunk_payloads, trace_workbench_parse_opt_level,
+        trace_workbench_service_config_hash, trace_workbench_source_file_display_name,
+        trace_workbench_target_config_hash,
     };
     use crate::backend::{Backend, TraceViewerRevisionRecord};
 
@@ -1572,6 +1565,37 @@ pub fn main() -> u64 {
         tokio::task::spawn_blocking(move || drop(backend))
             .await
             .expect("backend drop task panicked");
+    }
+
+    #[test]
+    fn trace_workbench_chunk_cache_does_not_materialize_full_model_chunk() {
+        let model = serde_json::json!({
+            "revision": { "id": 19 },
+            "metadata": { "input_path": "cached_chunks.fe" },
+            "source": { "lines": [] },
+            "indexes": {},
+            "rail_components": {},
+            "panels": [
+                { "id": "bytecode", "rows": [] }
+            ],
+            "attribution_audit": { "prepared_linked_pcs": 0 },
+            "static_analysis": { "checks": [] }
+        });
+        let manifest = trace_query::trace_workbench_manifest(&model);
+        let chunks = trace_workbench_chunk_payloads(&model, &manifest);
+
+        assert!(
+            !chunks.contains_key(&manifest.root_digest),
+            "root digest identifies the full projection; it must not be cached as a chunk"
+        );
+        assert!(
+            chunks.contains_key(&manifest.summary_digest),
+            "summary remains available as the lightweight entry chunk"
+        );
+        assert!(
+            chunks.values().all(|chunk| chunk["kind"] != "model"),
+            "chunk cache must not duplicate the full projection payload"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
