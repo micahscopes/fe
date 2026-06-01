@@ -434,7 +434,7 @@ fn parse_derive_provider_selection<'db>(
     if arg.key_str(db) != Some("using") {
         return Err(invalid_request(
             target.attr_span(),
-            "derive keyword arguments currently only support `using = Provider`",
+            "derive keyword arguments must be `using = Provider`",
         ));
     }
     match arg.value.as_ref() {

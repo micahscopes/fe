@@ -501,6 +501,30 @@ impl StableEq: Derive for Eq {
 }
 
 #[test]
+fn named_derive_provider_must_return_concrete_trait_evidence() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "named_derive_provider_must_return_concrete_trait_evidence.fe".into(),
+        r#"
+trait Eq {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Derive<Eq>>) -> Evidence<Derive<Eq>> {
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(&diags, "invalid derive provider");
+    assert_diag_message(
+        &diags,
+        "returned evidence must be a concrete trait application matching the provider head",
+    );
+}
+
+#[test]
 fn named_derive_provider_return_target_must_be_derive_param() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
@@ -2596,6 +2620,35 @@ fn caller() {
     assert_eq!(
         generated_impl_summaries_for_top_mod(&db, top_mod),
         vec!["generated provider Foo: Eq with obligations {}".to_string()]
+    );
+}
+
+#[test]
+fn derive_attr_rejects_unknown_keyword_argument() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "derive_attr_rejects_unknown_keyword_argument.fe".into(),
+        r#"
+trait Eq {}
+
+#[derive(Eq, provider = StableEq)]
+struct Foo {}
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (builder: mut ImplBuilder<Eq<T>>)
+    {
+        builder.finish()
+        ev
+    }
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_diag_message(
+        &diags,
+        "derive keyword arguments must be `using = Provider`",
     );
 }
 

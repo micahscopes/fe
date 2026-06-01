@@ -290,7 +290,7 @@ fn validate_provider_function<'db>(
             )),
             _ => diags.push(invalid_provider(
                 func.span().ret_ty().into(),
-                "derive providers currently support concrete trait evidence only",
+                "derive provider returned evidence must be a concrete trait application matching the provider head",
             )),
         }
     }
