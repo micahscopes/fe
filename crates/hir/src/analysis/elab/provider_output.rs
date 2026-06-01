@@ -12,6 +12,7 @@ pub(crate) enum ProviderSkipReason {
     InvalidBuilderRequirement,
     InvalidGeneratedMethodName,
     InvalidGeneratedMethodBody,
+    InvalidBuilderState,
     UnsupportedProviderBody,
 }
 
@@ -28,6 +29,7 @@ impl ProviderSkipReason {
             Self::InvalidBuilderRequirement => "provider emitted an invalid builder requirement",
             Self::InvalidGeneratedMethodName => "provider emitted an invalid generated method name",
             Self::InvalidGeneratedMethodBody => "provider emitted an invalid generated method body",
+            Self::InvalidBuilderState => "provider left the impl builder in an invalid state",
             Self::UnsupportedProviderBody => "provider body uses unsupported elaboration CTFE",
         }
     }
@@ -38,7 +40,6 @@ pub(crate) enum ProviderOutputStatus<'db> {
     Succeeded {
         commands: BuilderCommandListId<'db>,
     },
-    Failed,
     Skipped {
         reason: ProviderSkipReason,
         span: DynLazySpan<'db>,

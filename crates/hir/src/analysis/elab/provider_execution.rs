@@ -63,7 +63,6 @@ enum ProviderExecutionFailure<'db> {
         reason: ProviderSkipReason,
         span: DynLazySpan<'db>,
     },
-    Failed,
 }
 
 fn skipped_status<'db>(
@@ -153,7 +152,10 @@ impl<'db> ProviderBodyExecutor<'db> {
             .emit_impl(self.db, request.goal(self.db))
             .is_err()
         {
-            return ProviderOutputStatus::Failed;
+            return skipped_status(
+                ProviderSkipReason::InvalidBuilderState,
+                provider.func(self.db).span().name().into(),
+            );
         }
 
         let Some(body) = provider.func(self.db).body(self.db) else {
@@ -170,10 +172,12 @@ impl<'db> ProviderBodyExecutor<'db> {
                     ProviderSkipReason::MissingFinish,
                     body.expr(self.db).span(body).into(),
                 ),
-                Err(_) => ProviderOutputStatus::Failed,
+                Err(_) => skipped_status(
+                    ProviderSkipReason::InvalidBuilderState,
+                    body.expr(self.db).span(body).into(),
+                ),
             },
             Err(ProviderExecutionFailure::Skipped { reason, span }) => skipped_status(reason, span),
-            Err(ProviderExecutionFailure::Failed) => ProviderOutputStatus::Failed,
         }
     }
 
@@ -375,7 +379,10 @@ impl<'db> ProviderBodyExecutor<'db> {
                         ProviderSkipReason::DuplicateFinish,
                         receiver.span(body).into(),
                     ),
-                    _ => ProviderExecutionFailure::Failed,
+                    _ => skipped_failure(
+                        ProviderSkipReason::InvalidBuilderState,
+                        receiver.span(body).into(),
+                    ),
                 })?;
                 Ok(true)
             }
@@ -448,7 +455,10 @@ impl<'db> ProviderBodyExecutor<'db> {
                     ProviderSkipReason::CommandAfterFinish,
                     constraint_arg.span(body).into(),
                 ),
-                _ => ProviderExecutionFailure::Failed,
+                _ => skipped_failure(
+                    ProviderSkipReason::InvalidBuilderState,
+                    constraint_arg.span(body).into(),
+                ),
             })
     }
 
@@ -479,7 +489,10 @@ impl<'db> ProviderBodyExecutor<'db> {
                     ProviderSkipReason::CommandAfterFinish,
                     expr_arg.span(body).into(),
                 ),
-                _ => ProviderExecutionFailure::Failed,
+                _ => skipped_failure(
+                    ProviderSkipReason::InvalidBuilderState,
+                    expr_arg.span(body).into(),
+                ),
             })
     }
 

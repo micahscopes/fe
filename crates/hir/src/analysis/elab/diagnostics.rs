@@ -104,7 +104,6 @@ pub(super) fn provider_output_diag<'db>(
 ) -> Option<TyDiagCollection<'db>> {
     let message = match output.status(db) {
         ProviderOutputStatus::Succeeded { .. } => return None,
-        ProviderOutputStatus::Failed => "provider execution failed".to_string(),
         ProviderOutputStatus::Skipped { reason, .. } => reason.diagnostic_message().to_string(),
     };
 
@@ -112,9 +111,7 @@ pub(super) fn provider_output_diag<'db>(
     let provider = output.provider(db).identity(db).pretty_print(db);
     let span = match output.status(db) {
         ProviderOutputStatus::Skipped { span, .. } => span,
-        ProviderOutputStatus::Failed | ProviderOutputStatus::Succeeded { .. } => {
-            output.provider(db).func(db).span().name().into()
-        }
+        ProviderOutputStatus::Succeeded { .. } => output.provider(db).func(db).span().name().into(),
     };
     Some(invalid_request(
         span,
