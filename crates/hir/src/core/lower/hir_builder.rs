@@ -462,38 +462,6 @@ where
         self.impl_trait_with_children(trait_ref, ty, vec![], vec![], build_children)
     }
 
-    /// Builds a generic `impl<..> Trait for Ty<..> where ..` item. The
-    /// generic parameters are registered in the impl's scope by the scope
-    /// graph builder (from the item data), so types inside `build_children`
-    /// can reference them by name.
-    pub(super) fn impl_trait_generic(
-        &mut self,
-        trait_ref: TraitRefId<'db>,
-        ty: TypeId<'db>,
-        generic_params: GenericParamListId<'db>,
-        where_clause: WhereClauseId<'db>,
-        build_children: impl FnOnce(&mut Self),
-    ) -> ImplTrait<'db> {
-        let trait_ref = Partial::Present(trait_ref);
-        let ty = Partial::Present(ty);
-
-        let idx = self.ctxt.next_impl_trait_idx();
-        self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
-            let impl_trait = this.new_impl_trait_generic(
-                id,
-                trait_ref,
-                ty,
-                generic_params,
-                where_clause,
-                vec![],
-                vec![],
-                this.origin(),
-            );
-            build_children(this);
-            impl_trait
-        })
-    }
-
     pub(super) fn impl_trait_assocs_build(
         &mut self,
         trait_ref: TraitRefId<'db>,
@@ -508,6 +476,87 @@ where
             let (types, consts) = build_assocs(this);
             this.new_impl_trait(id, trait_ref, ty, types, consts, this.origin())
         })
+    }
+
+    /// Builds a generic `impl<..> Trait for Ty<..> where ..` item with
+    /// associated types and consts built inside the impl scope (so their
+    /// value bodies are tracked as children of the impl, like `#[event]`'s
+    /// `TOPIC0`), followed by child items. The generic parameters are
+    /// registered in the impl's scope by the scope graph builder (from the
+    /// item data), so types inside the closures can reference them by name.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn impl_trait_generic_assocs_build(
+        &mut self,
+        trait_ref: TraitRefId<'db>,
+        ty: TypeId<'db>,
+        generic_params: GenericParamListId<'db>,
+        where_clause: WhereClauseId<'db>,
+        build_assocs: impl FnOnce(&mut Self) -> (Vec<AssocTyDef<'db>>, Vec<AssocConstDef<'db>>),
+        build_children: impl FnOnce(&mut Self),
+    ) -> ImplTrait<'db> {
+        let trait_ref = Partial::Present(trait_ref);
+        let ty = Partial::Present(ty);
+
+        let idx = self.ctxt.next_impl_trait_idx();
+        self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
+            let (types, consts) = build_assocs(this);
+            let impl_trait = this.new_impl_trait_generic(
+                id,
+                trait_ref,
+                ty,
+                generic_params,
+                where_clause,
+                types,
+                consts,
+                this.origin(),
+            );
+            build_children(this);
+            impl_trait
+        })
+    }
+
+    /// Builds an anonymous single-expression body (e.g. the value of an
+    /// associated const, or a const generic argument). The closure builds
+    /// the root expression through a [`BodyBuilder`].
+    pub(super) fn anonymous_expr_body(
+        &mut self,
+        build: impl FnOnce(&mut BodyBuilder<'_, 'db, O>) -> ExprId,
+    ) -> Body<'db> {
+        let mut body_builder = BodyBuilder::new(
+            self.ctxt,
+            self.roots,
+            self.desugared.clone(),
+            TrackedItemVariant::NamelessBody,
+        );
+        let root = build(&mut body_builder);
+        body_builder.finish_anonymous(root)
+    }
+
+    /// The type `String<len>`: an exact-width inline string. The const
+    /// generic argument is an anonymous integer-literal body.
+    pub(super) fn string_n_ty(&mut self, len: usize) -> TypeId<'db> {
+        let db = self.db();
+        let len_body = self.anonymous_expr_body(|body| {
+            body.push_expr(Expr::Lit(LitKind::Int(crate::hir_def::IntegerId::new(
+                db,
+                num_bigint::BigUint::from(len),
+            ))))
+        });
+        let args = GenericArgListId::given(
+            db,
+            vec![GenericArg::Const(crate::hir_def::ConstGenericArg {
+                value: crate::hir_def::ConstGenericArgValue::Expr(Partial::Present(len_body)),
+            })],
+        );
+        let path = PathId::new(
+            db,
+            PathKind::Ident {
+                ident: Partial::Present(self.ident("String")),
+                generic_args: args,
+            },
+            None,
+        );
+        self.ty_path(path)
     }
 
     pub(super) fn impl_trait_with_children(
@@ -775,6 +824,15 @@ where
         self.call_expr(callee, vec![])
     }
 
+    /// `core::keccak(arg)` — the core keccak helper, resolved through the
+    /// caller's core ingot alias.
+    pub(super) fn core_keccak_call(&mut self, arg: ExprId) -> ExprId {
+        let db = self.db();
+        let path = PathId::from_ident(db, self.roots.core).push_str(db, "keccak");
+        let callee = self.path_expr(path);
+        self.call_expr(callee, vec![arg])
+    }
+
     pub(super) fn call_expr(&mut self, callee: ExprId, args: Vec<ExprId>) -> ExprId {
         self.call_expr_with_args(
             callee,
@@ -1020,5 +1078,15 @@ where
         let root_expr = self.push_expr(Expr::Block(stmts));
         self.body.f_ctxt.leave_block_scope(root_expr);
         self.body.build(None, root_expr, BodyKind::FuncBody)
+    }
+
+    /// Finishes as an anonymous single-expression body (no statement
+    /// block); used for associated-const values and const generic args.
+    fn finish_anonymous(self, root: ExprId) -> Body<'db> {
+        debug_assert!(
+            self.stmts.is_empty(),
+            "anonymous bodies must be single expressions"
+        );
+        self.body.build(None, root, BodyKind::Anonymous)
     }
 }

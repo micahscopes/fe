@@ -18,15 +18,17 @@ use super::{
     hir_builder::{BodyBuilder, HirBuilder},
     provider::{FieldName, ReflectedVariantKind, TargetReflection},
     provider_executor::{
-        BuilderCommand, FieldKey, GenExpr, GenExprId, GenPat, GenPatId, ProviderOutput,
+        BuilderCommand, FieldKey, GenExpr, GenExprId, GenPat, GenPatId, GenTy, GenTyId,
+        ProviderOutput,
     },
 };
 use crate::{
     HirDb,
     hir_def::{
-        BinOp, CompBinOp, Expr, ExprId, Field, FieldIndex, FuncModifiers, GenericArg, IdentId,
-        IntegerId, LogicalBinOp, MatchArm, Partial, PathId, PathKind, RecordPatField, TraitRefId,
-        TypeBound, TypeId, TypeKind, Visibility, WhereClauseId, WherePredicate,
+        AssocConstDef, AssocTyDef, BinOp, CompBinOp, Expr, ExprId, Field, FieldIndex,
+        FuncModifiers, GenericArg, IdentId, IntegerId, LitKind, LogicalBinOp, MatchArm, Partial,
+        PathId, PathKind, RecordPatField, TraitRefId, TupleTypeId, TypeBound, TypeId, TypeKind,
+        Visibility, WhereClauseId, WherePredicate,
     },
     span::DeriveDesugared,
 };
@@ -46,12 +48,49 @@ pub(super) fn synthesize_provider_impl<'db>(
 ) {
     let db = builder.db();
     let where_clause = requirement_where_clause(db, generics, output);
+    let replay = ReplayCtxt {
+        target_name,
+        trait_ref,
+        reflection,
+        output,
+    };
 
-    builder.impl_trait_generic(
+    builder.impl_trait_generic_assocs_build(
         trait_ref,
         self_ty,
         generics.impl_params,
         where_clause,
+        |builder| {
+            let mut types = Vec::new();
+            let mut consts = Vec::new();
+            for command in &output.commands {
+                match command {
+                    BuilderCommand::EmitAssocTy { name, ty } => {
+                        let ty = replay.materialize_ty(builder, *ty);
+                        types.push(AssocTyDef {
+                            attributes: builder.empty_attrs(),
+                            name: Partial::Present(*name),
+                            type_ref: Partial::Present(ty),
+                        });
+                    }
+                    BuilderCommand::EmitConst { name, ty, value } => {
+                        let ty = replay.materialize_ty(builder, *ty);
+                        let value_expr = *value;
+                        let value_body = builder.anonymous_expr_body(|body| {
+                            replay.replay_expr(body, value_expr)
+                        });
+                        consts.push(AssocConstDef {
+                            attributes: builder.empty_attrs(),
+                            name: Partial::Present(*name),
+                            ty: Partial::Present(ty),
+                            value: Partial::Present(value_body),
+                        });
+                    }
+                    BuilderCommand::Require { .. } | BuilderCommand::EmitMethod { .. } => {}
+                }
+            }
+            (types, consts)
+        },
         |builder| {
             for command in &output.commands {
                 let BuilderCommand::EmitMethod { sig, body } = command else {
@@ -69,12 +108,6 @@ pub(super) fn synthesize_provider_impl<'db>(
                 let params = builder.params(params);
 
                 let body_expr = *body;
-                let replay = ReplayCtxt {
-                    target_name,
-                    trait_ref,
-                    reflection,
-                    output,
-                };
                 builder.func_with_body_inline_always(
                     sig.name,
                     builder.empty_generic_params(),
@@ -239,18 +272,50 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let rhs = self.replay_expr(body, *rhs);
                 body.push_expr(Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)))
             }
-            GenExpr::TraitCall { ty, method } => {
-                let qualified = PathId::new(
-                    db,
-                    PathKind::QualifiedType {
-                        type_: *ty,
-                        trait_: self.trait_ref,
-                    },
-                    None,
-                )
-                .push_ident(db, *method);
-                let callee = body.path_expr(qualified);
-                body.call_expr(callee, vec![])
+            GenExpr::TraitCall { ty, method, args } => {
+                let callee_path = self.goal_item_path(db, *ty, *method);
+                let callee = body.path_expr(callee_path);
+                let args = args
+                    .iter()
+                    .map(|arg| self.replay_expr(body, *arg))
+                    .collect();
+                body.call_expr(callee, args)
+            }
+            GenExpr::TraitConst { ty, name } => {
+                let path = self.goal_item_path(db, *ty, *name);
+                body.path_expr(path)
+            }
+            GenExpr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => {
+                let receiver = self.replay_expr(body, *receiver);
+                let args = args
+                    .iter()
+                    .map(|arg| self.replay_expr(body, *arg))
+                    .collect();
+                body.method_call_expr(receiver, *method, args)
+            }
+            GenExpr::StaticCall { path, args } => {
+                let callee = body.path_expr(*path);
+                let args = args
+                    .iter()
+                    .map(|arg| self.replay_expr(body, *arg))
+                    .collect();
+                body.call_expr(callee, args)
+            }
+            GenExpr::StrLit(value) => body.push_expr(Expr::Lit(LitKind::String(*value))),
+            GenExpr::Tuple(elems) => {
+                let elems = elems
+                    .iter()
+                    .map(|elem| self.replay_expr(body, *elem))
+                    .collect();
+                body.push_expr(Expr::Tuple(elems))
+            }
+            GenExpr::Keccak(arg) => {
+                let arg = self.replay_expr(body, *arg);
+                body.core_keccak_call(arg)
             }
             GenExpr::StructInit { fields } => {
                 let field_inits = fields
@@ -396,6 +461,56 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                     }
                 }
             }
+        }
+    }
+
+    /// The path of an associated item of the goal trait on `ty`:
+    /// `<ty as Trait>::name`, or `Self::name` when `ty` is the `Self` type
+    /// (resolving through the surrounding impl, which implements the goal
+    /// trait by construction).
+    fn goal_item_path(
+        &self,
+        db: &'db dyn HirDb,
+        ty: TypeId<'db>,
+        name: IdentId<'db>,
+    ) -> PathId<'db> {
+        if ty == TypeId::fallback_self_ty(db) {
+            return PathId::from_ident(db, IdentId::make_self_ty(db)).push_ident(db, name);
+        }
+        PathId::new(
+            db,
+            PathKind::QualifiedType {
+                type_: ty,
+                trait_: self.trait_ref,
+            },
+            None,
+        )
+        .push_ident(db, name)
+    }
+
+    /// Materializes a generated type into a real [`TypeId`]. Exact-width
+    /// string types need an anonymous const-argument body, hence the
+    /// builder.
+    fn materialize_ty(
+        &self,
+        builder: &mut HirBuilder<'_, 'db, DeriveDesugared>,
+        ty: GenTyId,
+    ) -> TypeId<'db> {
+        let db = builder.db();
+        match &self.output.tys[ty.0] {
+            GenTy::StringN(len) => builder.string_n_ty(*len),
+            GenTy::Tuple(elems) => {
+                let elems: Vec<Partial<TypeId<'db>>> = elems
+                    .iter()
+                    .map(|elem| Partial::Present(self.materialize_ty(builder, *elem)))
+                    .collect();
+                TupleTypeId::new(db, elems).to_ty(db)
+            }
+            GenTy::Projection { ty, name } => {
+                let path = self.goal_item_path(db, *ty, *name);
+                TypeId::new(db, TypeKind::Path(Partial::Present(path)))
+            }
+            GenTy::Concrete(ty) => *ty,
         }
     }
 

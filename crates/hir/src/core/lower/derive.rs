@@ -709,7 +709,7 @@ fn execute_requests<'db>(
             }
         };
 
-        match ProviderExecutor::run(db, provider, reflection, self_ty) {
+        match ProviderExecutor::run(db, provider, reflection, self_ty, target_name) {
             Ok(output) => {
                 let trait_ref = TraitRefId::new(db, Partial::Present(provider.trait_path));
                 let mut builder = HirBuilder::new(ctxt, request.desugared.clone());

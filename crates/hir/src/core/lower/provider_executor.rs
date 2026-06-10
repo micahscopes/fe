@@ -25,9 +25,10 @@ use super::{
 };
 use crate::{
     HirDb,
+    analysis::ty::ty_def::MAX_INLINE_STRING_BYTES,
     hir_def::{
         Body, Cond, CondId, Expr, ExprId, GenericArg, GenericArgListId, IdentId, LitKind,
-        LogicalBinOp, Partial, Pat, PatId, Stmt, StmtId, TypeId,
+        LogicalBinOp, Partial, Pat, PatId, PathId, Stmt, StmtId, StringId, TypeId, TypeKind,
     },
     span::HirOrigin,
 };
@@ -56,6 +57,12 @@ pub enum ProviderFailureKind {
     /// A method-emission command was malformed (bad signature value, body
     /// value, or duplicate method name).
     InvalidMethod { detail: String },
+    /// An associated-item emission command (`emit_const`, `emit_assoc_ty`)
+    /// was malformed (bad name, type, or value, or a duplicate name).
+    InvalidAssoc { detail: String },
+    /// A compile-time string operation was malformed (non-string operand,
+    /// or a piece exceeding the inline string capacity).
+    InvalidString { detail: String },
     /// The interpreter step budget or command cap was exceeded.
     BudgetExceeded,
 }
@@ -73,6 +80,12 @@ impl ProviderFailureKind {
             }
             Self::InvalidRequirement => "invalid `require` command".into(),
             Self::InvalidMethod { detail } => format!("invalid method emission: {detail}"),
+            Self::InvalidAssoc { detail } => {
+                format!("invalid associated item emission: {detail}")
+            }
+            Self::InvalidString { detail } => {
+                format!("invalid compile-time string operation: {detail}")
+            }
             Self::BudgetExceeded => {
                 "the provider exceeded its compile-time execution budget".into()
             }
@@ -103,12 +116,39 @@ pub(super) enum GenExpr<'db> {
     FieldGet(GenExprId, FieldKey),
     /// `lhs == rhs`
     EqCmp(GenExprId, GenExprId),
-    /// `<ty as GoalishTrait>::method()` — a qualified call of the request's
-    /// goal trait method on `ty`.
+    /// `<ty as GoalishTrait>::method(args..)` — a qualified call of the
+    /// request's goal trait method on `ty` (`Self::method(args..)` when `ty`
+    /// is the `Self` type).
     TraitCall {
         ty: TypeId<'db>,
         method: IdentId<'db>,
+        args: Vec<GenExprId>,
     },
+    /// `<ty as GoalishTrait>::NAME` — a qualified reference to an associated
+    /// const of the request's goal trait on `ty` (`Self::NAME` when `ty` is
+    /// the `Self` type).
+    TraitConst {
+        ty: TypeId<'db>,
+        name: IdentId<'db>,
+    },
+    /// `receiver.method(args..)` — a method call on a generated expression.
+    MethodCall {
+        receiver: GenExprId,
+        method: IdentId<'db>,
+        args: Vec<GenExprId>,
+    },
+    /// `path(args..)` — a call through a path built from a type as written
+    /// with an associated-function name appended (e.g. `Hash712::new()`).
+    StaticCall {
+        path: PathId<'db>,
+        args: Vec<GenExprId>,
+    },
+    /// A string literal with the exact inline width of its text.
+    StrLit(StringId<'db>),
+    /// `(elem0, elem1, ..)`
+    Tuple(Vec<GenExprId>),
+    /// `core::keccak(arg)`
+    Keccak(GenExprId),
     /// `Self { field: value, .. }`
     StructInit {
         fields: Vec<(FieldKey, GenExprId)>,
@@ -130,6 +170,26 @@ pub(super) enum GenExpr<'db> {
         field: usize,
         prefix: IdentId<'db>,
     },
+}
+
+/// A generated type, built by builder type commands and materialized into a
+/// real [`TypeId`] by the synthesis module (some forms, like exact-width
+/// string types, need a lowering context to build their const-argument
+/// bodies, so materialization cannot happen during execution).
+#[derive(Debug, Clone)]
+pub(super) enum GenTy<'db> {
+    /// `String<LEN>` — an exact-width inline string type.
+    StringN(usize),
+    /// A tuple of generated types.
+    Tuple(Vec<GenTyId>),
+    /// `<ty as GoalishTrait>::name` — a projection of the goal trait's
+    /// associated type on `ty`.
+    Projection {
+        ty: TypeId<'db>,
+        name: IdentId<'db>,
+    },
+    /// A type as written (e.g. from `ty<T>()` or `field.ty()`).
+    Concrete(TypeId<'db>),
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +226,8 @@ pub(super) struct GenExprId(pub(super) usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct GenPatId(pub(super) usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GenTyId(pub(super) usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SigId(pub(super) usize);
 
 /// A builder command recorded during provider execution.
@@ -180,6 +242,16 @@ pub(super) enum BuilderCommand<'db> {
     },
     /// `builder.emit_method(sig, body)`.
     EmitMethod { sig: SigId, body: GenExprId },
+    /// `builder.emit_assoc_ty(name, ty)`: `type name = ty` in the generated
+    /// impl.
+    EmitAssocTy { name: IdentId<'db>, ty: GenTyId },
+    /// `builder.emit_const(name, ty, value)`: `const name: ty = value` in
+    /// the generated impl.
+    EmitConst {
+        name: IdentId<'db>,
+        ty: GenTyId,
+        value: GenExprId,
+    },
 }
 
 /// The successful result of running a provider body: the recorded commands
@@ -189,6 +261,7 @@ pub(super) enum BuilderCommand<'db> {
 pub(super) struct ProviderOutput<'db> {
     pub(super) exprs: Vec<GenExpr<'db>>,
     pub(super) pats: Vec<GenPat<'db>>,
+    pub(super) tys: Vec<GenTy<'db>>,
     pub(super) sigs: Vec<GenMethodSig<'db>>,
     pub(super) commands: Vec<BuilderCommand<'db>>,
 }
@@ -197,12 +270,17 @@ pub(super) struct ProviderOutput<'db> {
 #[derive(Debug, Clone, Copy)]
 enum Value<'db> {
     Bool(bool),
+    /// A compile-time string (string literals, reflected names, and
+    /// `concat` results).
+    Str(StringId<'db>),
     /// A reflected field handle.
     Field(FieldKey),
     /// A reflected variant handle (index into the target's variants).
     Variant(usize),
     /// A type witness (e.g. the result of `field.ty()`).
     Ty(TypeId<'db>),
+    /// A generated type (e.g. the result of `str_ty` / `tuple_ty`).
+    GenTy(GenTyId),
     /// A generated expression.
     Expr(GenExprId),
     /// A generated pattern.
@@ -237,6 +315,9 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     /// The impl self type with generic args applied (`Pair<A, B>`), exposed
     /// as `builder.target_ty()`.
     target_ty: TypeId<'db>,
+    /// The target item's bare name (`Mail`), exposed as
+    /// `reflect.target_name()`.
+    target_name: IdentId<'db>,
     /// The provider's module, for canonicalizing `require<Trait>` paths.
     provider_top_mod: crate::hir_def::TopLevelMod<'db>,
     /// Lexically scoped value bindings; the innermost binding of a name
@@ -245,9 +326,11 @@ pub(super) struct ProviderExecutor<'a, 'db> {
 
     exprs: Vec<GenExpr<'db>>,
     pats: Vec<GenPat<'db>>,
+    tys: Vec<GenTy<'db>>,
     sigs: Vec<GenMethodSig<'db>>,
     commands: Vec<BuilderCommand<'db>>,
     emitted_methods: Vec<IdentId<'db>>,
+    emitted_assocs: Vec<IdentId<'db>>,
     finished: bool,
 
     steps: usize,
@@ -262,6 +345,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         provider: &ValidatedProvider<'db>,
         reflection: &'a TargetReflection<'db>,
         target_ty: TypeId<'db>,
+        target_name: IdentId<'db>,
     ) -> Result<ProviderOutput<'db>, ExecError> {
         let mut initial_scope = Vec::new();
         for &name in &provider.param_names {
@@ -280,13 +364,16 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             body: provider.body,
             reflection,
             target_ty,
+            target_name,
             provider_top_mod: provider.provider.top_mod(db),
             scopes: vec![initial_scope],
             exprs: Vec::new(),
             pats: Vec::new(),
+            tys: Vec::new(),
             sigs: Vec::new(),
             commands: Vec::new(),
             emitted_methods: Vec::new(),
+            emitted_assocs: Vec::new(),
             finished: false,
             steps: 0,
             root: None,
@@ -304,6 +391,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         Ok(ProviderOutput {
             exprs: executor.exprs,
             pats: executor.pats,
+            tys: executor.tys,
             sigs: executor.sigs,
             commands: executor.commands,
         })
@@ -584,6 +672,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         };
         match expr_data {
             Expr::Lit(LitKind::Bool(value)) => Ok(Value::Bool(*value)),
+            Expr::Lit(LitKind::String(value)) => Ok(Value::Str(*value)),
             Expr::Path(_) => {
                 let Some(name) = self.simple_expr_path_ident(expr) else {
                     return Err(self.unsupported_expr(expr));
@@ -619,6 +708,10 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Value::Reflect => match (method_name.as_str(), args.as_slice()) {
                 ("is_struct", []) => Ok(Value::Bool(self.reflection.is_struct())),
                 ("is_enum", []) => Ok(Value::Bool(self.reflection.is_enum())),
+                ("target_name", []) => Ok(Value::Str(StringId::new(
+                    self.db,
+                    self.target_name.data(self.db).clone(),
+                ))),
                 // `fields()` / `variants()` are only meaningful as `for`
                 // iterables, which are intercepted before evaluation.
                 _ => Err(self.unsupported_expr(expr)),
@@ -629,6 +722,18 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         return Err(self.unsupported_expr(expr));
                     };
                     Ok(Value::Ty(reflected.ty))
+                }
+                ("name", []) => {
+                    let Some(reflected) = self.reflection.field(field.variant, field.index) else {
+                        return Err(self.unsupported_expr(expr));
+                    };
+                    let text = match reflected.name {
+                        super::provider::FieldName::Named(name) => {
+                            name.data(self.db).clone()
+                        }
+                        super::provider::FieldName::Positional(idx) => idx.to_string(),
+                    };
+                    Ok(Value::Str(StringId::new(self.db, text)))
                 }
                 _ => Err(self.unsupported_expr(expr)),
             },
@@ -696,6 +801,28 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 self.commands.push(BuilderCommand::EmitMethod { sig, body });
                 Ok(Value::Unit)
             }
+            ("emit_assoc_ty", [name_arg, ty_arg]) => {
+                self.check_not_finished(expr)?;
+                let name = self.string_value_ident(name_arg.expr)?;
+                let ty = self.gen_ty_arg(ty_arg.expr)?;
+                self.check_fresh_assoc(name_arg.expr, name)?;
+                self.commands.push(BuilderCommand::EmitAssocTy { name, ty });
+                Ok(Value::Unit)
+            }
+            ("emit_const", [name_arg, ty_arg, value_arg]) => {
+                self.check_not_finished(expr)?;
+                let name = self.string_value_ident(name_arg.expr)?;
+                let ty = self.gen_ty_arg(ty_arg.expr)?;
+                let Value::Expr(value) = self.eval_expr(value_arg.expr)? else {
+                    return Err(
+                        self.invalid_assoc(value_arg.expr, "expected a generated expression")
+                    );
+                };
+                self.check_fresh_assoc(name_arg.expr, name)?;
+                self.commands
+                    .push(BuilderCommand::EmitConst { name, ty, value });
+                Ok(Value::Unit)
+            }
             ("finish", []) => {
                 if self.finished {
                     return Err(ExecError {
@@ -721,7 +848,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             ("self_ref", []) => Ok(self.push_expr(GenExpr::SelfRef)),
             ("arg_ref", [arg]) => {
-                let name = self.string_literal_ident(arg.expr)?;
+                let name = self.string_value_ident(arg.expr)?;
                 Ok(self.push_expr(GenExpr::ArgRef(name)))
             }
             ("field_get", [base, field]) => {
@@ -736,12 +863,134 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let rhs = self.gen_expr_arg(rhs.expr)?;
                 Ok(self.push_expr(GenExpr::EqCmp(lhs, rhs)))
             }
-            ("trait_call", [ty_arg, method_arg]) => {
+            ("trait_call", [ty_arg, method_arg, extra @ ..]) => {
                 let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
                     return Err(self.unsupported_expr(ty_arg.expr));
                 };
-                let method = self.string_literal_ident(method_arg.expr)?;
-                Ok(self.push_expr(GenExpr::TraitCall { ty, method }))
+                let method = self.string_value_ident(method_arg.expr)?;
+                let mut call_args = Vec::with_capacity(extra.len());
+                for arg in extra {
+                    call_args.push(self.gen_expr_arg(arg.expr)?);
+                }
+                Ok(self.push_expr(GenExpr::TraitCall {
+                    ty,
+                    method,
+                    args: call_args,
+                }))
+            }
+            ("trait_const", [ty_arg, name_arg]) => {
+                let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
+                    return Err(self.unsupported_expr(ty_arg.expr));
+                };
+                let name = self.string_value_ident(name_arg.expr)?;
+                Ok(self.push_expr(GenExpr::TraitConst { ty, name }))
+            }
+            ("call", [receiver_arg, method_arg, extra @ ..]) => {
+                let receiver = self.gen_expr_arg(receiver_arg.expr)?;
+                let method = self.string_value_ident(method_arg.expr)?;
+                let mut call_args = Vec::with_capacity(extra.len());
+                for arg in extra {
+                    call_args.push(self.gen_expr_arg(arg.expr)?);
+                }
+                Ok(self.push_expr(GenExpr::MethodCall {
+                    receiver,
+                    method,
+                    args: call_args,
+                }))
+            }
+            ("static_call", [ty_arg, method_arg, extra @ ..]) => {
+                let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
+                    return Err(self.unsupported_expr(ty_arg.expr));
+                };
+                // The callee path is the type as written with the function
+                // name appended, so only path types can be call targets.
+                let TypeKind::Path(Partial::Present(ty_path)) = ty.data(self.db) else {
+                    return Err(self.unsupported_expr(ty_arg.expr));
+                };
+                let method = self.string_value_ident(method_arg.expr)?;
+                let path = ty_path.push_ident(self.db, method);
+                let mut call_args = Vec::with_capacity(extra.len());
+                for arg in extra {
+                    call_args.push(self.gen_expr_arg(arg.expr)?);
+                }
+                Ok(self.push_expr(GenExpr::StaticCall {
+                    path,
+                    args: call_args,
+                }))
+            }
+            // --- compile-time strings ----------------------------------
+            ("concat", [lhs, rhs]) => {
+                let lhs = self.str_value(lhs.expr)?;
+                let rhs = self.str_value(rhs.expr)?;
+                let joined = format!("{}{}", lhs.data(self.db), rhs.data(self.db));
+                Ok(Value::Str(StringId::new(self.db, joined)))
+            }
+            ("str", [arg]) => {
+                let value = self.checked_inline_str(arg.expr)?;
+                Ok(self.push_expr(GenExpr::StrLit(value)))
+            }
+            ("str_ty", [arg]) => {
+                let value = self.checked_inline_str(arg.expr)?;
+                Ok(self.push_ty(GenTy::StringN(value.data(self.db).len())))
+            }
+            // --- tuples ------------------------------------------------
+            ("tuple_expr", []) => Ok(self.push_expr(GenExpr::Tuple(Vec::new()))),
+            ("with_elem", [tuple_arg, elem_arg]) => {
+                let tuple = self.gen_expr_arg(tuple_arg.expr)?;
+                let elem = self.gen_expr_arg(elem_arg.expr)?;
+                let GenExpr::Tuple(elems) = &self.exprs[tuple.0] else {
+                    return Err(
+                        self.invalid_method(tuple_arg.expr, "`with_elem` expects a tuple")
+                    );
+                };
+                let mut elems = elems.clone();
+                elems.push(elem);
+                Ok(self.push_expr(GenExpr::Tuple(elems)))
+            }
+            ("tuple_ty", []) => Ok(self.push_ty(GenTy::Tuple(Vec::new()))),
+            ("with_elem_ty", [tuple_arg, elem_arg]) => {
+                let tuple = self.gen_ty_arg(tuple_arg.expr)?;
+                let elem = self.gen_ty_arg(elem_arg.expr)?;
+                let GenTy::Tuple(elems) = &self.tys[tuple.0] else {
+                    return Err(
+                        self.invalid_method(tuple_arg.expr, "`with_elem_ty` expects a tuple type")
+                    );
+                };
+                let mut elems = elems.clone();
+                elems.push(elem);
+                Ok(self.push_ty(GenTy::Tuple(elems)))
+            }
+            ("trait_assoc_ty", [ty_arg, name_arg]) => {
+                let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
+                    return Err(self.unsupported_expr(ty_arg.expr));
+                };
+                let name = self.string_value_ident(name_arg.expr)?;
+                Ok(self.push_ty(GenTy::Projection { ty, name }))
+            }
+            // --- misc --------------------------------------------------
+            ("keccak", [arg]) => {
+                let arg = self.gen_expr_arg(arg.expr)?;
+                Ok(self.push_expr(GenExpr::Keccak(arg)))
+            }
+            // Syntactic type identity (types are compared as written, after
+            // interning); used e.g. to deduplicate referenced struct types.
+            ("same_ty", [lhs, rhs]) => {
+                let Value::Ty(lhs) = self.eval_expr(lhs.expr)? else {
+                    return Err(self.unsupported_expr(lhs.expr));
+                };
+                let Value::Ty(rhs) = self.eval_expr(rhs.expr)? else {
+                    return Err(self.unsupported_expr(rhs.expr));
+                };
+                Ok(Value::Bool(lhs == rhs))
+            }
+            ("same_field", [lhs, rhs]) => {
+                let Value::Field(lhs) = self.eval_expr(lhs.expr)? else {
+                    return Err(self.unsupported_expr(lhs.expr));
+                };
+                let Value::Field(rhs) = self.eval_expr(rhs.expr)? else {
+                    return Err(self.unsupported_expr(rhs.expr));
+                };
+                Ok(Value::Bool(lhs == rhs))
             }
             ("struct_init", []) => {
                 if !self.reflection.is_struct() {
@@ -826,7 +1075,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let Value::Variant(variant) = self.eval_expr(variant_arg.expr)? else {
                     return Err(self.unsupported_expr(variant_arg.expr));
                 };
-                let prefix = self.string_literal_ident(prefix_arg.expr)?;
+                let prefix = self.string_value_ident(prefix_arg.expr)?;
                 Ok(self.push_pat(GenPat::Variant { variant, prefix }))
             }
             ("variant_binder", [variant_arg, field_arg, prefix_arg]) => {
@@ -842,7 +1091,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         "field does not belong to the named variant",
                     ));
                 }
-                let prefix = self.string_literal_ident(prefix_arg.expr)?;
+                let prefix = self.string_value_ident(prefix_arg.expr)?;
                 Ok(self.push_expr(GenExpr::VariantBinder {
                     variant,
                     field: field.index,
@@ -850,7 +1099,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 }))
             }
             ("method", [name_arg]) => {
-                let name = self.string_literal_ident(name_arg.expr)?;
+                let name = self.string_value_ident(name_arg.expr)?;
                 self.sigs.push(GenMethodSig {
                     name,
                     takes_self: false,
@@ -868,7 +1117,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             ("with_arg", [sig_arg, name_arg, ty_arg]) => {
                 let sig = self.sig_arg(sig_arg.expr)?;
-                let name = self.string_literal_ident(name_arg.expr)?;
+                let name = self.string_value_ident(name_arg.expr)?;
                 let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
                     return Err(self.unsupported_expr(ty_arg.expr));
                 };
@@ -918,6 +1167,41 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
     }
 
+    fn invalid_assoc(&mut self, expr: ExprId, detail: &str) -> ExecError {
+        ExecError {
+            kind: ProviderFailureKind::InvalidAssoc {
+                detail: detail.to_string(),
+            },
+            range: self.expr_range(expr),
+        }
+    }
+
+    fn invalid_string(&mut self, expr: ExprId, detail: &str) -> ExecError {
+        ExecError {
+            kind: ProviderFailureKind::InvalidString {
+                detail: detail.to_string(),
+            },
+            range: self.expr_range(expr),
+        }
+    }
+
+    /// Rejects a second `emit_const` / `emit_assoc_ty` / method-name reuse
+    /// for `name` (the generated impl namespaces consts, types, and methods
+    /// together for simplicity; EIP-712-style providers never collide).
+    fn check_fresh_assoc(&mut self, expr: ExprId, name: IdentId<'db>) -> Result<(), ExecError> {
+        if self.emitted_assocs.contains(&name) {
+            return Err(self.invalid_assoc(
+                expr,
+                &format!(
+                    "duplicate generated associated item `{}`",
+                    name.data(self.db)
+                ),
+            ));
+        }
+        self.emitted_assocs.push(name);
+        Ok(())
+    }
+
     fn push_expr(&mut self, expr: GenExpr<'db>) -> Value<'db> {
         self.exprs.push(expr);
         Value::Expr(GenExprId(self.exprs.len() - 1))
@@ -928,9 +1212,30 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         Value::Pat(GenPatId(self.pats.len() - 1))
     }
 
+    fn push_ty(&mut self, ty: GenTy<'db>) -> Value<'db> {
+        self.tys.push(ty);
+        Value::GenTy(GenTyId(self.tys.len() - 1))
+    }
+
     fn gen_expr_arg(&mut self, expr: ExprId) -> Result<GenExprId, ExecError> {
         match self.eval_expr(expr)? {
             Value::Expr(id) => Ok(id),
+            _ => Err(self.unsupported_expr(expr)),
+        }
+    }
+
+    /// A generated-type argument. Concrete `Ty` witnesses (from `ty<T>()` /
+    /// `field.ty()` / `target_ty()`) are accepted and wrapped, so type
+    /// commands take either currency.
+    fn gen_ty_arg(&mut self, expr: ExprId) -> Result<GenTyId, ExecError> {
+        match self.eval_expr(expr)? {
+            Value::GenTy(id) => Ok(id),
+            Value::Ty(ty) => {
+                let Value::GenTy(id) = self.push_ty(GenTy::Concrete(ty)) else {
+                    unreachable!("push_ty returns a GenTy value");
+                };
+                Ok(id)
+            }
             _ => Err(self.unsupported_expr(expr)),
         }
     }
@@ -942,11 +1247,34 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
     }
 
-    fn string_literal_ident(&mut self, expr: ExprId) -> Result<IdentId<'db>, ExecError> {
-        let Partial::Present(Expr::Lit(LitKind::String(value))) = expr.data(self.db, self.body)
-        else {
-            return Err(self.unsupported_expr(expr));
-        };
+    /// A compile-time string operand: a string literal, a reflected name,
+    /// or a `concat` result.
+    fn str_value(&mut self, expr: ExprId) -> Result<StringId<'db>, ExecError> {
+        match self.eval_expr(expr)? {
+            Value::Str(value) => Ok(value),
+            _ => Err(self.invalid_string(expr, "expected a compile-time string")),
+        }
+    }
+
+    /// A compile-time string destined for a generated string literal or
+    /// exact-width string type; enforces the inline string capacity.
+    fn checked_inline_str(&mut self, expr: ExprId) -> Result<StringId<'db>, ExecError> {
+        let value = self.str_value(expr)?;
+        let len = value.data(self.db).len();
+        if len > MAX_INLINE_STRING_BYTES {
+            return Err(self.invalid_string(
+                expr,
+                &format!(
+                    "string piece is {len} bytes; inline strings hold at most \
+                     {MAX_INLINE_STRING_BYTES}"
+                ),
+            ));
+        }
+        Ok(value)
+    }
+
+    fn string_value_ident(&mut self, expr: ExprId) -> Result<IdentId<'db>, ExecError> {
+        let value = self.str_value(expr)?;
         Ok(IdentId::new(self.db, value.data(self.db).to_string()))
     }
 
