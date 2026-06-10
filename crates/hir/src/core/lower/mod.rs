@@ -22,6 +22,7 @@ use crate::{
 };
 pub use abi_field::{AbiFieldContext, AbiFieldDiagnostic};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
+pub use derive::{DeriveError, DeriveErrorKind};
 pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
 pub use event::{EventError, EventErrorKind};
 pub use item::{SelectorError, SelectorErrorKind};
@@ -33,6 +34,7 @@ mod abi_field;
 mod attr;
 mod body;
 mod contract;
+mod derive;
 mod error;
 mod event;
 mod expr;

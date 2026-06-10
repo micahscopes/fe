@@ -71,6 +71,7 @@ const MUST_USE_EXPECTED: &str = "`#[must_use]`";
 const ARITHMETIC_TARGETS: &str = "functions and modules";
 const EVENT_TARGETS: &str = "structs";
 const ERROR_TARGETS: &str = "structs";
+const DERIVE_TARGETS: &str = "structs";
 const MUST_USE_TARGETS: &str = "functions, structs, and enums";
 const PAYABLE_TARGETS: &str = "init blocks and recv arms";
 const INDEXED_TARGETS: &str = "event fields";
@@ -92,6 +93,7 @@ fn validate_mod_attrs<'db>(
             AttrRule::supported("arithmetic", ARITHMETIC_FORM, ARITHMETIC_EXPECTED),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
@@ -136,6 +138,7 @@ fn validate_func_attrs<'db>(
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
     );
@@ -173,6 +176,7 @@ fn validate_enum_attrs<'db>(
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
@@ -193,6 +197,7 @@ fn validate_unsupported_item_attrs<'db>(
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
@@ -450,9 +455,13 @@ impl<'db> Struct<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Struct) -> Self {
         let is_event_struct = super::event::is_event_struct(&ast);
         let is_error_struct = super::error::is_error_struct(&ast);
+        let has_derive_attr = super::derive::has_derive_attr(&ast);
 
         if is_event_struct && is_error_struct {
             super::error::report_event_error_attr_conflict(ctxt, &ast);
+        }
+        if has_derive_attr && (is_event_struct || is_error_struct) {
+            super::derive::report_derive_on_event_or_error_struct(ctxt, &ast);
         }
         if is_event_struct {
             return super::event::lower_event_struct(ctxt, ast);
@@ -468,7 +477,13 @@ impl<'db> Struct<'db> {
         let id = ctxt.joined_id(TrackedItemVariant::Struct(name));
         ctxt.enter_item_scope(id, false);
 
-        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        // Strip the compiler-consumed `#[derive(..)]` attribute, like
+        // `#[event]` / `#[error]` are stripped from their structs.
+        let attributes = if has_derive_attr {
+            super::attr::lower_attrs_without_named(ctxt, ast.attr_list(), "derive")
+        } else {
+            AttrListId::lower_ast_opt(ctxt, ast.attr_list())
+        };
         let vis = super::lower_visibility(&ast);
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
@@ -487,7 +502,14 @@ impl<'db> Struct<'db> {
             ctxt.top_mod(),
             origin,
         );
-        ctxt.leave_item_scope(struct_)
+        let struct_ = ctxt.leave_item_scope(struct_);
+
+        // Generate derived trait impls as siblings of the struct.
+        if has_derive_attr {
+            super::derive::lower_derive_impls(ctxt, &ast, struct_);
+        }
+
+        struct_
     }
 }
 

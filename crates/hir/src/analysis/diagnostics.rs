@@ -608,6 +608,65 @@ impl DiagnosticVoucher for crate::AbiFieldDiagnostic {
     }
 }
 
+impl DiagnosticVoucher for crate::DeriveError {
+    fn to_complete(&self, _db: &dyn SpannedHirAnalysisDb) -> CompleteDiagnostic {
+        use crate::DeriveErrorKind;
+
+        let primary_span = Span::new(self.file, self.primary_range, SpanKind::Original);
+        let struct_name = self.struct_name.as_deref().unwrap_or("<unknown>");
+
+        let (code, message, label, notes) = match &self.kind {
+            DeriveErrorKind::GenericStruct => (
+                1,
+                "`#[derive(..)]` on generic structs is not yet supported".to_string(),
+                format!("`{struct_name}` is generic"),
+                vec!["remove the generic parameters or implement the trait manually".to_string()],
+            ),
+            DeriveErrorKind::UnknownTrait { name } => (
+                2,
+                format!("cannot derive `{name}`"),
+                format!("`{name}` is not a derivable trait"),
+                vec!["derivable traits are `Eq` and `Default`".to_string()],
+            ),
+            DeriveErrorKind::InvalidForm => (
+                3,
+                "invalid `derive` attribute form".to_string(),
+                "expected `#[derive(Trait, ..)]`".to_string(),
+                vec!["use e.g. `#[derive(Eq)]` or `#[derive(Eq, Default)]`".to_string()],
+            ),
+            DeriveErrorKind::DuplicateTrait { name } => (
+                4,
+                format!("`{name}` is derived more than once"),
+                format!("duplicate `{name}` here"),
+                vec![format!("remove the extra `{name}` from the derive list")],
+            ),
+            DeriveErrorKind::EventErrorStruct => (
+                5,
+                "`#[derive(..)]` cannot be combined with `#[event]` or `#[error]`".to_string(),
+                "remove this `derive` attribute".to_string(),
+                vec![
+                    "deriving traits for `#[event]`/`#[error]` structs is not supported"
+                        .to_string(),
+                ],
+            ),
+        };
+
+        let error_code = GlobalErrorCode::new(DiagnosticPass::DeriveLower, code);
+
+        CompleteDiagnostic::new(
+            Severity::Error,
+            message,
+            vec![SubDiagnostic::new(
+                LabelStyle::Primary,
+                label,
+                Some(primary_span),
+            )],
+            notes,
+            error_code,
+        )
+    }
+}
+
 impl DiagnosticVoucher for crate::ErrorDiagnostic {
     fn to_complete(&self, _db: &dyn SpannedHirAnalysisDb) -> CompleteDiagnostic {
         use crate::ErrorDiagnosticKind;

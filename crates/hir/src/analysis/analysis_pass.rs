@@ -4,8 +4,8 @@ use crate::analysis::{
     ty::{adt_def::AdtRef, ty_lower::lower_hir_ty},
 };
 use crate::{
-    AbiFieldContext, AbiFieldDiagnostic, AttrMisuseError, ErrorDiagnostic, EventError, ParserError,
-    SelectorError,
+    AbiFieldContext, AbiFieldDiagnostic, AttrMisuseError, DeriveError, ErrorDiagnostic, EventError,
+    ParserError, SelectorError,
     hir_def::{ModuleTree, TopLevelMod},
     lower::{parse_file_impl, scope_graph_impl, top_mod_ast},
     semantic::constraints_for,
@@ -234,6 +234,23 @@ fn abi_field_struct(
             Some(error_origin.error_struct.clone())
         }
         _ => None,
+    }
+}
+
+/// Analysis pass that collects derive lowering errors from `#[derive(..)]`
+/// struct desugaring.
+pub struct DeriveLowerPass {}
+
+impl ModuleAnalysisPass for DeriveLowerPass {
+    fn run_on_module<'db>(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        top_mod: TopLevelMod<'db>,
+    ) -> Vec<Box<dyn DiagnosticVoucher>> {
+        scope_graph_impl::accumulated::<DeriveError>(db, top_mod)
+            .into_iter()
+            .map(|d| Box::new(d.clone()) as _)
+            .collect()
     }
 }
 
