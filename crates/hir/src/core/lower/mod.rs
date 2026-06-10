@@ -25,6 +25,8 @@ pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
 pub use derive::{DeriveError, DeriveErrorKind};
 pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
 pub use event::{EventError, EventErrorKind};
+pub(crate) use expansion::expanded_items_impl;
+pub use expansion::generated_hir_items;
 pub use item::{SelectorError, SelectorErrorKind};
 pub use parse::parse_file_impl;
 
@@ -37,6 +39,7 @@ mod contract;
 mod derive;
 mod error;
 mod event;
+mod expansion;
 mod expr;
 mod hir_builder;
 mod item;
@@ -128,8 +131,15 @@ pub(crate) fn map_file_to_mod_impl<'db>(db: &'db dyn HirDb, file: File) -> TopLe
     TopLevelMod::new(db, mod_name, file)
 }
 
+/// Lowers the AST of `top_mod` into the *base* scope graph: every item
+/// written in (or desugared from) the source file, but none of the items
+/// synthesized by the post-lowering expansion stage (see [`expansion`]).
+///
+/// The expansion stage consumes this query, so it must never read
+/// [`scope_graph_impl`] (directly or transitively) — that would be a query
+/// cycle.
 #[salsa::tracked(return_ref)]
-pub(crate) fn scope_graph_impl<'db>(
+pub(crate) fn base_scope_graph_impl<'db>(
     db: &'db dyn HirDb,
     top_mod: TopLevelMod<'db>,
 ) -> ScopeGraph<'db> {
@@ -145,6 +155,61 @@ pub(crate) fn scope_graph_impl<'db>(
     ctxt.leave_item_scope(top_mod);
 
     ctxt.build()
+}
+
+/// The complete scope graph of `top_mod`: the base graph produced by AST
+/// lowering, plus the items synthesized by the post-lowering expansion stage
+/// (currently the compiler-internal `#[derive(..)]` impls).
+///
+/// Generated items are merged in as ordinary scopes — children of the same
+/// parent scope as the item they were derived from — so every downstream
+/// consumer (name resolution, `all_items`/`all_funcs`/`all_impl_traits`,
+/// type checking, MIR lowering) sees them exactly like hand-written items
+/// without any special casing.
+///
+/// For modules where the expansion stage generates nothing (the common
+/// case), this returns the base graph directly instead of storing a merged
+/// copy.
+pub(crate) fn scope_graph_impl<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+) -> &'db ScopeGraph<'db> {
+    if expansion::expanded_items_impl(db, top_mod)
+        .graph
+        .scopes
+        .is_empty()
+    {
+        base_scope_graph_impl(db, top_mod)
+    } else {
+        merged_scope_graph_impl(db, top_mod)
+    }
+}
+
+/// The base scope graph with the expansion stage's partial graph merged in.
+/// Only consulted (via [`scope_graph_impl`]) for modules where the expansion
+/// stage generated items.
+#[salsa::tracked(return_ref)]
+pub(crate) fn merged_scope_graph_impl<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+) -> ScopeGraph<'db> {
+    let base = base_scope_graph_impl(db, top_mod);
+    let generated = &expansion::expanded_items_impl(db, top_mod).graph;
+
+    let mut merged = base.clone();
+    for (scope_id, scope) in &generated.scopes {
+        if let Some(existing) = merged.scopes.get_mut(scope_id) {
+            // A shim scope mirroring an existing scope of the base graph:
+            // union the generated parent-to-child edges into it.
+            existing.edges.extend(scope.edges.iter().cloned());
+        } else {
+            merged.scopes.insert(*scope_id, scope.clone());
+        }
+    }
+    merged
+        .unresolved_uses
+        .extend(generated.unresolved_uses.iter().copied());
+    merged
 }
 
 #[salsa::tracked]
@@ -181,6 +246,34 @@ impl<'db> FileLowerCtxt<'db> {
             next_impl_trait_idx: 0,
             next_static_assert_idx: 0,
         }
+    }
+
+    /// Creates a lowering context for the post-lowering expansion stage of
+    /// `top_mod`. Items built in this context get `TrackedItemId`s namespaced
+    /// under [`TrackedItemVariant::Expansion`], so the per-file impl counters
+    /// restarting from zero cannot collide with base items.
+    pub(super) fn enter_expansion(db: &'db dyn HirDb, top_mod: TopLevelMod<'db>) -> Self {
+        Self {
+            builder: ScopeGraphBuilder::enter_expansion(db, top_mod),
+            next_impl_idx: 0,
+            next_impl_trait_idx: 0,
+            next_static_assert_idx: 0,
+        }
+    }
+
+    /// Enters a shim for an *existing* scope of the base graph; generated
+    /// items built before the matching [`Self::leave_shim_scope`] become
+    /// children of that scope once the partial graph is merged.
+    pub(super) fn enter_shim_scope(
+        &mut self,
+        scope: crate::hir_def::scope_graph::ScopeId<'db>,
+        vis: Visibility,
+    ) {
+        self.builder.enter_shim_scope(scope, vis);
+    }
+
+    pub(super) fn leave_shim_scope(&mut self) {
+        self.builder.leave_shim_scope();
     }
 
     pub(super) fn build(self) -> ScopeGraph<'db> {

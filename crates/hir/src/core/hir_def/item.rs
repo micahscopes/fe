@@ -1680,6 +1680,12 @@ pub enum TrackedItemVariant<'db> {
     ContractInit,
     ContractRecvArm { recv_idx: u32, arm_idx: u32 },
     Use(Partial<super::UsePathId<'db>>),
+    /// Namespace marker for items synthesized by the post-lowering expansion
+    /// stage (e.g. `#[derive(..)]` impls). Joining this onto the top-level
+    /// module's id keeps expansion-generated `TrackedItemId`s disjoint from
+    /// the ids of items created during base lowering, whose per-file
+    /// `ImplTrait`/`Impl` counters restart from zero in the expansion pass.
+    Expansion,
     FuncBody,
     NamelessBody,
     StaticAssertCondition,

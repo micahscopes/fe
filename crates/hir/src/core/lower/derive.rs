@@ -1,9 +1,16 @@
-//! Lowering support for `#[derive(..)]` on structs and enums.
+//! Synthesis of `#[derive(..)]` impls for structs and enums.
 //!
 //! Each derived trait is synthesized as a real HIR `impl Trait for Item`
 //! item via [`HirBuilder`], exactly like `#[event]` / `#[error]` desugaring.
 //! Generated items carry [`DeriveDesugared`] origins so diagnostics and IDE
 //! features can map them back to the annotated item.
+//!
+//! Synthesis runs in the post-lowering expansion stage
+//! ([`super::expansion`]), not during AST lowering: the entry points here are
+//! invoked with an expansion [`FileLowerCtxt`] positioned at a shim for the
+//! annotated item's lexical parent scope, so the generated impls become
+//! siblings of the item once the expansion graph is merged into the base
+//! scope graph.
 
 use parser::ast::{self, prelude::*};
 use salsa::Accumulator as _;
@@ -304,9 +311,9 @@ fn derive_self_ty<'db>(
 }
 
 /// Generates `impl` items for the traits requested via `#[derive(..)]` on
-/// `struct_`. Must be called after the struct item itself has been lowered
-/// (i.e. its item scope has been left), so the generated impls become
-/// siblings of the struct in the scope graph.
+/// `struct_`. Called from the post-lowering expansion stage with `ctxt`
+/// positioned at the struct's lexical parent scope, so the generated impls
+/// become siblings of the struct in the merged scope graph.
 pub(super) fn lower_derive_impls<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     ast: &ast::Struct,
@@ -453,9 +460,9 @@ fn resolve_default_variant<'db>(
 }
 
 /// Generates `impl` items for the traits requested via `#[derive(..)]` on
-/// `enum_`. Must be called after the enum item itself has been lowered
-/// (i.e. its item scope has been left), so the generated impls become
-/// siblings of the enum in the scope graph.
+/// `enum_`. Called from the post-lowering expansion stage with `ctxt`
+/// positioned at the enum's lexical parent scope, so the generated impls
+/// become siblings of the enum in the merged scope graph.
 pub(super) fn lower_enum_derive_impls<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     ast: &ast::Enum,

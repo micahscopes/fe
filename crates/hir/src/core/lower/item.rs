@@ -463,9 +463,8 @@ impl<'db> Struct<'db> {
         if is_event_struct && is_error_struct {
             super::error::report_event_error_attr_conflict(ctxt, &ast);
         }
-        if has_derive_attr && (is_event_struct || is_error_struct) {
-            super::derive::report_derive_on_event_or_error_struct(ctxt, &ast);
-        }
+        // `#[derive(..)]` combined with `#[event]` / `#[error]` is reported by
+        // the post-lowering expansion stage (`lower::expansion`).
         if is_event_struct {
             return super::event::lower_event_struct(ctxt, ast);
         }
@@ -505,14 +504,9 @@ impl<'db> Struct<'db> {
             ctxt.top_mod(),
             origin,
         );
-        let struct_ = ctxt.leave_item_scope(struct_);
-
-        // Generate derived trait impls as siblings of the struct.
-        if has_derive_attr {
-            super::derive::lower_derive_impls(ctxt, &ast, struct_);
-        }
-
-        struct_
+        // Derived trait impls are synthesized as siblings of the struct by
+        // the post-lowering expansion stage (`lower::expansion`).
+        ctxt.leave_item_scope(struct_)
     }
 }
 
@@ -588,10 +582,10 @@ impl<'db> Enum<'db> {
         );
         let enum_ = ctxt.leave_item_scope(enum_);
 
-        // Generate derived trait impls as siblings of the enum.
-        if has_derive_attr {
-            super::derive::lower_enum_derive_impls(ctxt, &ast, enum_);
-        } else {
+        // Derived trait impls are synthesized as siblings of the enum by the
+        // post-lowering expansion stage (`lower::expansion`), which also
+        // validates the `#[default]` variant markers of derive enums.
+        if !has_derive_attr {
             // `#[default]` only means something on `#[derive(Default)]` enums.
             super::derive::report_misplaced_default_attrs(ctxt, &ast);
         }

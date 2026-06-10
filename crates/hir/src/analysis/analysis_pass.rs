@@ -7,7 +7,7 @@ use crate::{
     AbiFieldContext, AbiFieldDiagnostic, AttrMisuseError, DeriveError, ErrorDiagnostic, EventError,
     ParserError, SelectorError,
     hir_def::{ModuleTree, TopLevelMod},
-    lower::{parse_file_impl, scope_graph_impl, top_mod_ast},
+    lower::{base_scope_graph_impl, expanded_items_impl, parse_file_impl, top_mod_ast},
     semantic::constraints_for,
     span::{DesugaredOrigin, HirOrigin},
 };
@@ -99,7 +99,7 @@ impl ModuleAnalysisPass for MsgLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        scope_graph_impl::accumulated::<SelectorError>(db, top_mod)
+        base_scope_graph_impl::accumulated::<SelectorError>(db, top_mod)
             .into_iter()
             .map(|d| Box::new(d.clone()) as _)
             .collect::<Vec<_>>()
@@ -115,7 +115,7 @@ impl ModuleAnalysisPass for EventLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        let mut diags = scope_graph_impl::accumulated::<EventError>(db, top_mod)
+        let mut diags = base_scope_graph_impl::accumulated::<EventError>(db, top_mod)
             .into_iter()
             .map(|d| Box::new(d.clone()) as _)
             .collect::<Vec<_>>();
@@ -139,7 +139,7 @@ fn accumulated_abi_field_diagnostics<'db>(
     top_mod: TopLevelMod<'db>,
     context: AbiFieldContext,
 ) -> impl Iterator<Item = AbiFieldDiagnostic> {
-    scope_graph_impl::accumulated::<AbiFieldDiagnostic>(db, top_mod)
+    base_scope_graph_impl::accumulated::<AbiFieldDiagnostic>(db, top_mod)
         .into_iter()
         .filter(move |diag| diag.context == context)
         .cloned()
@@ -237,8 +237,9 @@ fn abi_field_struct(
     }
 }
 
-/// Analysis pass that collects derive lowering errors from `#[derive(..)]`
-/// struct desugaring.
+/// Analysis pass that collects derive errors from `#[derive(..)]` expansion.
+/// Derive impls are synthesized by the post-lowering expansion stage, so the
+/// errors are accumulated during the expansion query, not during lowering.
 pub struct DeriveLowerPass {}
 
 impl ModuleAnalysisPass for DeriveLowerPass {
@@ -247,7 +248,7 @@ impl ModuleAnalysisPass for DeriveLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        scope_graph_impl::accumulated::<DeriveError>(db, top_mod)
+        expanded_items_impl::accumulated::<DeriveError>(db, top_mod)
             .into_iter()
             .map(|d| Box::new(d.clone()) as _)
             .collect()
@@ -263,7 +264,7 @@ impl ModuleAnalysisPass for ErrorLowerPass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        let mut diags = scope_graph_impl::accumulated::<ErrorDiagnostic>(db, top_mod)
+        let mut diags = base_scope_graph_impl::accumulated::<ErrorDiagnostic>(db, top_mod)
             .into_iter()
             .map(|d| Box::new(d.clone()) as _)
             .collect::<Vec<_>>();
@@ -279,7 +280,10 @@ impl ModuleAnalysisPass for ErrorLowerPass {
     }
 }
 
-/// Analysis pass that collects generic attribute misuse diagnostics.
+/// Analysis pass that collects generic attribute misuse diagnostics. These
+/// are accumulated both during base lowering and during the post-lowering
+/// expansion stage (which validates the `#[default]` variant markers of
+/// `#[derive(Default)]` enums).
 pub struct AttrMisusePass {}
 
 impl ModuleAnalysisPass for AttrMisusePass {
@@ -288,8 +292,11 @@ impl ModuleAnalysisPass for AttrMisusePass {
         db: &'db dyn HirAnalysisDb,
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher>> {
-        scope_graph_impl::accumulated::<AttrMisuseError>(db, top_mod)
+        base_scope_graph_impl::accumulated::<AttrMisuseError>(db, top_mod)
             .into_iter()
+            .chain(expanded_items_impl::accumulated::<AttrMisuseError>(
+                db, top_mod,
+            ))
             .map(|d| Box::new(d.clone()) as _)
             .collect::<Vec<_>>()
     }
