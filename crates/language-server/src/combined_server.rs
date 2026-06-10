@@ -61,7 +61,9 @@ pub async fn run(
     capabilities: Vec<String>,
 ) {
     let html = Arc::new(tokio::sync::RwLock::new(doc_html));
-    let local_addr = listener.local_addr().ok().map(|addr| addr.to_string());
+    let bound_addr = listener.local_addr().ok();
+    let local_addr = bound_addr.map(|addr| addr.to_string());
+    let local_port = bound_addr.map(|addr| addr.port());
 
     // Spawn a task to rebuild the served HTML when doc data changes
     let html_for_reload = Arc::clone(&html);
@@ -394,14 +396,27 @@ pub async fn run(
                 let actor_rx = actor_rx.clone();
                 let doc_nav_tx = doc_nav_tx.clone();
                 let doc_reload_tx = doc_reload_tx.clone();
-                move |ws: WebSocketUpgrade| {
+                move |ws: WebSocketUpgrade, headers: HeaderMap| {
                     let actor_rx = actor_rx.clone();
                     let doc_nav_tx = doc_nav_tx.clone();
                     let doc_reload_tx = doc_reload_tx.clone();
                     async move {
+                        // The browser threat model: any web page can open a
+                        // WebSocket to 127.0.0.1:<port>/lsp and drive the LSP
+                        // (workspace symbols, hovers) to exfiltrate source
+                        // structure — WebSocket upgrades are not subject to
+                        // CORS. Browsers always send an Origin header on the
+                        // handshake and cannot forge it, so reject any request
+                        // whose Origin is present and not same-origin loopback.
+                        // Non-browser clients omit Origin and are allowed.
+                        if !ws_origin_allowed(&headers, local_port) {
+                            return (StatusCode::FORBIDDEN, "cross-origin WebSocket rejected")
+                                .into_response();
+                        }
                         ws.on_upgrade(|socket| {
                             handle_ws_lsp(socket, actor_rx, doc_nav_tx, doc_reload_tx)
                         })
+                        .into_response()
                     }
                 }
             }),
@@ -1338,6 +1353,41 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> axum::response
     (status, Json(value)).into_response()
 }
 
+/// Decide whether a WebSocket upgrade may proceed based on its `Origin` header.
+///
+/// Returns `true` when there is no `Origin` (non-browser clients, which are not
+/// subject to the cross-origin browser threat) or when the `Origin` is a
+/// loopback host on the server's own port. Any other present `Origin` — a real
+/// remote site, or a different local port attempting a DNS-rebinding / cross-app
+/// reach-in — is rejected.
+fn ws_origin_allowed(headers: &HeaderMap, server_port: Option<u16>) -> bool {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        // No Origin header: not a browser-initiated cross-origin request.
+        return true;
+    };
+    // Strip the scheme; we only care that the authority is loopback:server_port.
+    let authority = origin
+        .split_once("://")
+        .map(|(_scheme, rest)| rest)
+        .unwrap_or(origin);
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().ok()),
+        None => (authority, None),
+    };
+    let host_is_loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1");
+    let port_matches = match (port, server_port) {
+        (Some(p), Some(sp)) => p == sp,
+        // If we never learned our own port, fall back to host-only loopback check.
+        (_, None) => true,
+        // Origin without an explicit port can't match our high server port.
+        (None, Some(_)) => false,
+    };
+    host_is_loopback && port_matches
+}
+
 fn trace_auth_token(headers: &HeaderMap, _query: &BTreeMap<String, String>) -> Option<String> {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -1381,7 +1431,9 @@ fn validate_trace_auth(workspace_root: Option<&str>, token: &str) -> Result<(), 
     if token.is_empty() {
         return Err("missing LSP auth token".to_string());
     }
-    if token != expected {
+    // Constant-time comparison: blake3::Hash's PartialEq is constant-time, so
+    // comparing digests avoids leaking the token through early-exit timing.
+    if blake3::hash(token.as_bytes()) != blake3::hash(expected.as_bytes()) {
         return Err("invalid LSP auth token".to_string());
     }
     Ok(())

@@ -541,15 +541,13 @@ fn unix_time_ms() -> u128 {
         .unwrap_or_default()
 }
 
-fn lsp_auth_token(pid: u32) -> String {
+fn lsp_auth_token() -> String {
+    // 256 bits from the OS CSPRNG. A guessable fallback (pid + start time) would
+    // be brute-forceable by anything that can reach the loopback port, so refuse
+    // to start rather than mint a weak token if secure randomness is unavailable.
     let mut bytes = [0u8; 32];
-    if fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .is_ok()
-    {
-        return hex::encode(bytes);
-    }
-    format!("{pid:x}{:x}", unix_time_ms())
+    getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable; cannot mint a secure LSP auth token");
+    hex::encode(bytes)
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -1692,7 +1690,7 @@ async fn run_lsp_with_combined_server(resolved_root: Option<Utf8PathBuf>, port: 
 
     if tooling_config.lsp.live.write_server_info {
         let token_file = ".fe-lsp.token";
-        let token = lsp_auth_token(our_pid);
+        let token = lsp_auth_token();
         if let Err(err) = fs::write(workspace_root_path.join(token_file), token) {
             eprintln!("fe-language-server: could not write {token_file}: {err}");
         }
