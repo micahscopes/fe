@@ -2245,6 +2245,7 @@ version = "26.1.0"
 dependencies = [
  "fe-common",
  "fe-trace-facts",
+ "fe-trace-query",
  "gimli",
  "serde",
  "serde_json",
