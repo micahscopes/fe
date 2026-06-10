@@ -2265,6 +2265,7 @@ fn trace_workbench_recompute_missing_link_summary_status(
     let has_non_exact_warning = missing_links.boundary_summaries.iter().any(|summary| {
         trace_workbench_boundary_summary_count(summary, LinkStatus::ContextOnly) > 0
             || trace_workbench_boundary_summary_count(summary, LinkStatus::SatisfiedGenerated) > 0
+            || trace_workbench_boundary_summary_count(summary, LinkStatus::Ambiguous) > 0
             || trace_workbench_boundary_summary_count(
                 summary,
                 LinkStatus::MissingLineageButCandidatesExist,
@@ -4418,7 +4419,7 @@ pub struct SyntheticOverheadRow {
     pub confidence: Confidence,
 }
 
-const MISSING_LINK_AUDIT_SCHEMA_VERSION: &str = "missing_link_audit_v0";
+const MISSING_LINK_AUDIT_SCHEMA_VERSION: &str = "missing_link_audit_v1";
 const MISSING_LINK_QUERY_PACK: &str = "argot_static_checks_v0";
 const TRACE_SCHEMA_VERSION: &str = "trace_v0";
 const EDGE_SEMANTICS_VERSION: &str = "origin_edge_semantics_v0";
@@ -4638,6 +4639,7 @@ pub enum LinkIssueCode {
     MissingOptimizedToPreparedLineage,
     MissingPreparedPcExtent,
     MissingRuntimeJoin,
+    AmbiguousRuntimeJoin,
     ElidedWithoutReason,
     AmbiguousLineageCandidates,
     InvalidCrossRepresentationJoin,
@@ -6317,6 +6319,8 @@ fn missing_link_audit_report(
         .count();
     let runtime_missing_steps = runtime_join_missing_steps(snapshot);
     let missing_runtime_join_count = runtime_missing_steps.len();
+    let runtime_ambiguous_steps = runtime_join_ambiguous_steps(snapshot);
+    let ambiguous_runtime_join_count = runtime_ambiguous_steps.len();
     let expected_absent_postopt_to_prepared_count = expected_absent
         .iter()
         .filter(|entry| entry.boundary == LinkBoundaryKind::PostOptToPrepared)
@@ -6368,7 +6372,10 @@ fn missing_link_audit_report(
         + missing_runtime_join_count;
     let overall_status = if !invalid.is_empty() {
         LinkOverallStatus::Invalid
-    } else if missing_required_count > 0 || non_exact_postopt_to_prepared_count > 0 {
+    } else if missing_required_count > 0
+        || non_exact_postopt_to_prepared_count > 0
+        || ambiguous_runtime_join_count > 0
+    {
         LinkOverallStatus::Warning
     } else if !expected_absent.is_empty() {
         LinkOverallStatus::PassWithExpectedAbsences
@@ -6391,7 +6398,7 @@ fn missing_link_audit_report(
     if missing_prepared_to_bytecode_count > 0 {
         top_blockers.push(LinkBoundaryKind::PreparedToBytecode);
     }
-    if missing_runtime_join_count > 0 {
+    if missing_runtime_join_count > 0 || ambiguous_runtime_join_count > 0 {
         top_blockers.push(LinkBoundaryKind::BytecodeToRuntime);
     }
 
@@ -6603,7 +6610,10 @@ fn missing_link_audit_report(
         });
     }
 
-    if expected_absent_runtime_count > 0 || missing_runtime_join_count > 0 {
+    if expected_absent_runtime_count > 0
+        || missing_runtime_join_count > 0
+        || ambiguous_runtime_join_count > 0
+    {
         let mut runtime_counts = BTreeMap::new();
         if expected_absent_runtime_count > 0 {
             runtime_counts.insert(LinkStatus::ExpectedAbsent, expected_absent_runtime_count);
@@ -6611,16 +6621,23 @@ fn missing_link_audit_report(
         if missing_runtime_join_count > 0 {
             runtime_counts.insert(LinkStatus::MissingRequired, missing_runtime_join_count);
         }
+        if ambiguous_runtime_join_count > 0 {
+            runtime_counts.insert(LinkStatus::Ambiguous, ambiguous_runtime_join_count);
+        }
         boundary_summaries.push(LinkBoundarySummary {
             boundary: LinkBoundaryKind::BytecodeToRuntime,
             owner_phase: LinkBoundaryKind::BytecodeToRuntime.owner_phase(),
             status_counts: runtime_counts,
-            affected_origins: expected_absent_runtime_count + missing_runtime_join_count,
+            affected_origins: expected_absent_runtime_count
+                + missing_runtime_join_count
+                + ambiguous_runtime_join_count,
             affected_bytecode_pcs: 0,
             top_issue_codes: [
                 (expected_absent_runtime_count > 0)
                     .then_some(LinkIssueCode::ExpectedAbsentNoRuntimeSession),
                 (missing_runtime_join_count > 0).then_some(LinkIssueCode::MissingRuntimeJoin),
+                (ambiguous_runtime_join_count > 0)
+                    .then_some(LinkIssueCode::AmbiguousRuntimeJoin),
             ]
             .into_iter()
             .flatten()
@@ -6798,6 +6815,31 @@ fn missing_link_audit_report(
                 candidate_hints: Vec::new(),
                 required_evidence: required_runtime_join_evidence(),
                 cluster_id: Some("bytecode-to-runtime:missing-runtime-join".to_string()),
+            }),
+    );
+    details.extend(
+        runtime_ambiguous_steps
+            .iter()
+            .take(MISSING_LINK_DETAIL_LIMIT.saturating_sub(details.len()))
+            .map(|step| LinkGap {
+                gap_id: stable_short_id(&format!(
+                    "{:?}\nambiguous\n{}",
+                    LinkBoundaryKind::BytecodeToRuntime,
+                    step.step.canonical_storage_key()
+                )),
+                boundary: LinkBoundaryKind::BytecodeToRuntime,
+                status: LinkStatus::Ambiguous,
+                issue_code: LinkIssueCode::AmbiguousRuntimeJoin,
+                severity: LinkSeverity::Warning,
+                from_origin: step.step.clone(),
+                from_representation: Some("runtime.trace".to_string()),
+                expected_to_phase: "bytecode.pc".to_string(),
+                reached_frontier: "runtime.step".to_string(),
+                source_context: None,
+                bytecode_context: None,
+                candidate_hints: Vec::new(),
+                required_evidence: required_runtime_join_evidence(),
+                cluster_id: Some("bytecode-to-runtime:ambiguous-runtime-join".to_string()),
             }),
     );
 
@@ -7030,7 +7072,45 @@ fn missing_link_audit_report(
             gap_count: missing_runtime_join_count,
             sample_gap_ids: details
                 .iter()
-                .filter(|gap| gap.boundary == LinkBoundaryKind::BytecodeToRuntime)
+                .filter(|gap| {
+                    gap.boundary == LinkBoundaryKind::BytecodeToRuntime
+                        && gap.issue_code == LinkIssueCode::MissingRuntimeJoin
+                })
+                .take(MISSING_LINK_CLUSTER_SAMPLE_LIMIT)
+                .map(|gap| gap.gap_id.clone())
+                .collect(),
+            candidate_hints: Vec::new(),
+            required_evidence: required_runtime_join_evidence(),
+        });
+    }
+    if ambiguous_runtime_join_count > 0 {
+        clusters.push(LinkGapCluster {
+            cluster_id: "bytecode-to-runtime:ambiguous-runtime-join".to_string(),
+            boundary: LinkBoundaryKind::BytecodeToRuntime,
+            status: LinkStatus::Ambiguous,
+            issue_code: LinkIssueCode::AmbiguousRuntimeJoin,
+            severity: LinkSeverity::Warning,
+            owner_phase: LinkBoundaryKind::BytecodeToRuntime.owner_phase(),
+            headline: "Runtime trace step joined to bytecode by PC alone".to_string(),
+            explanation: "These runtime steps resolved to a static instruction by program counter, but the code identity was unverified (ambiguous PC) or contradicted (code hash mismatch). A trace captured against bytecode that differs from the local build lands each step on the wrong instruction at a matching PC, so these joins are not trustworthy attribution evidence.".to_string(),
+            affected_origins: runtime_ambiguous_steps
+                .iter()
+                .take(25)
+                .map(|step| AttributionAuditTargetCount {
+                    target: step.step.clone(),
+                    count: 1,
+                })
+                .collect(),
+            affected_source_ranges: Vec::new(),
+            affected_bytecode_pcs: Vec::new(),
+            affected_bytecode_ranges: Vec::new(),
+            gap_count: ambiguous_runtime_join_count,
+            sample_gap_ids: details
+                .iter()
+                .filter(|gap| {
+                    gap.boundary == LinkBoundaryKind::BytecodeToRuntime
+                        && gap.issue_code == LinkIssueCode::AmbiguousRuntimeJoin
+                })
                 .take(MISSING_LINK_CLUSTER_SAMPLE_LIMIT)
                 .map(|gap| gap.gap_id.clone())
                 .collect(),
@@ -7528,6 +7608,35 @@ fn runtime_join_missing_steps(snapshot: &TraceSnapshot) -> Vec<&trace_facts::Exe
                 if step.instruction.is_none()
                     || step.join_confidence
                         == RuntimePcJoinConfidence::MissingStaticInstruction =>
+            {
+                Some(step)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Steps that *did* join to a static instruction but only by PC, with the code
+/// identity unverified (`AmbiguousPc`) or contradicted (`CodeHashMismatch`).
+///
+/// These are not "missing" — they reached an instruction — but the join is
+/// untrustworthy: a trace captured against bytecode that differs from the local
+/// build (constructor args, metadata, a different optimizer run) lands every
+/// step on the wrong instruction at a matching PC. Surfacing them keeps the
+/// missing-link audit from reporting a clean BytecodeToRuntime boundary while
+/// the joins are silently wrong.
+fn runtime_join_ambiguous_steps(snapshot: &TraceSnapshot) -> Vec<&trace_facts::ExecutionStepFact> {
+    snapshot
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            TraceFact::ExecutionStep(step)
+                if step.instruction.is_some()
+                    && matches!(
+                        step.join_confidence,
+                        RuntimePcJoinConfidence::AmbiguousPc
+                            | RuntimePcJoinConfidence::CodeHashMismatch
+                    ) =>
             {
                 Some(step)
             }
@@ -10997,6 +11106,100 @@ mod tests {
             })
             .expect("runtime missing-join cluster");
         assert_eq!(runtime_cluster.owner_phase, CompilerPhase::RuntimeTrace);
+    }
+
+    #[test]
+    fn missing_link_audit_flags_ambiguous_runtime_join() {
+        let session = key("runtime.session", "tx:1", "session");
+        let code_object = key("code.object", "demo", "runtime");
+        let function = key("function", "demo", "recv");
+        let inst = key("bytecode.pc", "demo", "pc:0");
+        let step = key("runtime.step", "tx:1", "step:0");
+        let snapshot = snapshot(vec![
+            node(session.clone()),
+            node(code_object.clone()),
+            node(function.clone()),
+            node(inst.clone()),
+            node(step.clone()),
+            TraceFact::Instruction(InstructionFact::new(inst.clone(), function, 0, "ADD")),
+            TraceFact::ExecutionTraceSession(ExecutionTraceSessionFact {
+                session: session.clone(),
+                source: RuntimeTraceDataSource::RevmInspector,
+                capture_mode: RuntimeCaptureMode::Standard,
+                value_policy: RuntimeValuePolicy::HashOnly,
+                transaction_hash: Some("0xabc".to_string()),
+                chain_id: Some(31337),
+                block_number: Some(1),
+                entry_code_object: Some(code_object.clone()),
+            }),
+            // The step joined to an instruction, but only by PC with the code
+            // identity unverified. This must warn, not pass clean — and it is not
+            // "missing required" (it reached an instruction).
+            TraceFact::ExecutionStep(ExecutionStepFact {
+                step: step.clone(),
+                session,
+                step_index: 0,
+                code_object,
+                pc: 0,
+                opcode: "ADD".to_string(),
+                instruction: Some(inst.clone()),
+                gas_before: 100,
+                gas_after: 97,
+                gas_cost: 3,
+                depth: 1,
+                join_confidence: RuntimePcJoinConfidence::AmbiguousPc,
+            }),
+        ]);
+        let report = TraceIntrospectionService::new(snapshot)
+            .attribution_audit()
+            .unwrap();
+        let missing_links = report.missing_links.as_ref().unwrap();
+        assert_missing_link_owner_phases_follow_boundary_contract(missing_links);
+
+        assert_eq!(missing_links.summary.status, LinkOverallStatus::Warning);
+        assert!(
+            missing_links
+                .summary
+                .top_blockers
+                .contains(&LinkBoundaryKind::BytecodeToRuntime)
+        );
+        let runtime_boundary = missing_links
+            .boundary_summaries
+            .iter()
+            .find(|summary| summary.boundary == LinkBoundaryKind::BytecodeToRuntime)
+            .expect("bytecode to runtime boundary summary");
+        assert_eq!(
+            runtime_boundary.status_counts.get(&LinkStatus::Ambiguous),
+            Some(&1)
+        );
+        // Ambiguous joins are surfaced distinctly, not as missing-required.
+        assert_eq!(
+            runtime_boundary
+                .status_counts
+                .get(&LinkStatus::MissingRequired),
+            None
+        );
+        assert!(
+            runtime_boundary
+                .top_issue_codes
+                .contains(&LinkIssueCode::AmbiguousRuntimeJoin)
+        );
+        assert!(
+            missing_links.gaps.iter().any(|gap| {
+                gap.boundary == LinkBoundaryKind::BytecodeToRuntime
+                    && gap.issue_code == LinkIssueCode::AmbiguousRuntimeJoin
+                    && gap.from_origin == step
+            }),
+            "expected an ambiguous-runtime-join gap for the step"
+        );
+        assert!(
+            missing_links.clusters.iter().any(|cluster| {
+                cluster.boundary == LinkBoundaryKind::BytecodeToRuntime
+                    && cluster.issue_code == LinkIssueCode::AmbiguousRuntimeJoin
+                    && cluster.gap_count == 1
+            }),
+            "expected an ambiguous-runtime-join cluster"
+        );
     }
 
     #[test]
