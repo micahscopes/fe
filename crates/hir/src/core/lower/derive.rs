@@ -16,8 +16,10 @@ use super::{
 use crate::{
     hir_def::{
         BinOp, CompBinOp, Enum, Expr, ExprId, Field, FieldIndex, FuncModifiers, FuncParam,
-        FuncParamMode, FuncParamName, IdentId, LogicalBinOp, MatchArm, Partial, PathId, PathKind,
-        RecordPatField, Struct, TraitRefId, TypeId, TypeKind, VariantKind, Visibility,
+        FuncParamMode, FuncParamName, GenericArg, GenericArgListId, GenericParam,
+        GenericParamListId, IdentId, LogicalBinOp, MatchArm, Partial, PathId, PathKind,
+        RecordPatField, Struct, TraitRefId, TypeBound, TypeGenericArg, TypeGenericParam, TypeId,
+        TypeKind, VariantKind, Visibility, WhereClauseId, WherePredicate,
     },
     span::DeriveDesugared,
 };
@@ -40,8 +42,9 @@ pub struct DeriveError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeriveErrorKind {
-    /// `#[derive(..)]` on a generic struct or enum is not yet supported.
-    Generic { item_kind: &'static str },
+    /// `#[derive(..)]` on an item with const generic parameters is not yet
+    /// supported (type generic parameters are).
+    ConstGeneric { item_kind: &'static str },
     /// The derive argument is not a derivable trait (currently `Eq` and
     /// `Default`).
     UnknownTrait { name: String },
@@ -55,9 +58,7 @@ pub enum DeriveErrorKind {
     /// `#[derive(Default)]` on an enum with no `#[default]` variant.
     MissingDefaultVariant,
     /// More than one variant is marked `#[default]`.
-    MultipleDefaultVariants {
-        first_variant_name: Option<String>,
-    },
+    MultipleDefaultVariants { first_variant_name: Option<String> },
 }
 
 /// The set of traits the compiler knows how to derive.
@@ -178,6 +179,130 @@ fn parse_derive_traits<'db>(
     traits
 }
 
+/// Generic-parameter information for a `#[derive(..)]` item, used to put
+/// real generic params, generic args, and where clauses on the synthesized
+/// impls. For `struct Pair<A, B>` the derived `Eq` impl is
+///
+/// ```text
+/// impl<A, B> Eq for Pair<A, B> where A: Eq, B: Eq { .. }
+/// ```
+///
+/// The bound shape follows Rust's derive: one `P: DerivedTrait` predicate
+/// per type *parameter* (not per field type), emitted as a real where
+/// clause on the impl. The item's own inline param bounds and where-clause
+/// predicates are carried over so the impl self type stays well-formed.
+struct DeriveGenerics<'db> {
+    /// The impl's generic param list: the item's params with default types
+    /// stripped (defaults are not meaningful on an impl). Empty for
+    /// non-generic items.
+    impl_params: GenericParamListId<'db>,
+    /// The item's own where-clause predicates, copied onto each impl.
+    inherited_preds: Vec<WherePredicate<'db>>,
+    /// Each type param as a path type (`A`, `B`, ..); each derived impl
+    /// adds `P: DerivedTrait` for every entry to its where clause.
+    param_tys: Vec<TypeId<'db>>,
+    /// `<A, B>` argument list applied to the item's name in the impl self
+    /// type; `GenericArgListId::none` for non-generic items.
+    self_ty_args: GenericArgListId<'db>,
+}
+
+impl<'db> DeriveGenerics<'db> {
+    /// The where clause of a derived impl: the item's own predicates plus
+    /// `P: trait_ref` for every type param `P`.
+    fn where_clause(
+        &self,
+        ctxt: &FileLowerCtxt<'db>,
+        trait_ref: TraitRefId<'db>,
+    ) -> WhereClauseId<'db> {
+        let mut preds = self.inherited_preds.clone();
+        preds.extend(self.param_tys.iter().map(|ty| WherePredicate {
+            ty: Partial::Present(*ty),
+            bounds: vec![TypeBound::Trait(trait_ref)],
+        }));
+        WhereClauseId::new(ctxt.db(), preds)
+    }
+}
+
+/// Builds the [`DeriveGenerics`] for an item with the given generic params
+/// and where clause. Returns `None` (skipping impl generation) when the item
+/// has const generic params — reported with a precise diagnostic — or when a
+/// param name is missing due to a parser error (reported elsewhere).
+fn derive_generics<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    item_name: &Option<String>,
+    item_kind: &'static str,
+    generic_params: GenericParamListId<'db>,
+    where_clause: WhereClauseId<'db>,
+    generic_params_range: impl FnOnce() -> parser::TextRange,
+) -> Option<DeriveGenerics<'db>> {
+    let db = ctxt.db();
+
+    let mut impl_params = Vec::new();
+    let mut param_tys = Vec::new();
+    let mut args = Vec::new();
+    for param in generic_params.data(db) {
+        match param {
+            GenericParam::Type(ty_param) => {
+                let name = ty_param.name.to_opt()?;
+                let ty = TypeId::new(
+                    db,
+                    TypeKind::Path(Partial::Present(PathId::from_ident(db, name))),
+                );
+                impl_params.push(GenericParam::Type(TypeGenericParam {
+                    name: ty_param.name,
+                    bounds: ty_param.bounds.clone(),
+                    default_ty: None,
+                }));
+                param_tys.push(ty);
+                args.push(GenericArg::Type(TypeGenericArg {
+                    ty: Partial::Present(ty),
+                }));
+            }
+            GenericParam::Const(_) => {
+                accumulate_error(
+                    ctxt,
+                    item_name,
+                    DeriveErrorKind::ConstGeneric { item_kind },
+                    generic_params_range(),
+                );
+                return None;
+            }
+        }
+    }
+
+    let self_ty_args = if args.is_empty() {
+        GenericArgListId::none(db)
+    } else {
+        GenericArgListId::given(db, args)
+    };
+
+    Some(DeriveGenerics {
+        impl_params: GenericParamListId::new(db, impl_params),
+        inherited_preds: where_clause.data(db).clone(),
+        param_tys,
+        self_ty_args,
+    })
+}
+
+/// The impl self type: the item's name applied to its own generic params,
+/// e.g. `Pair<A, B>` (or just `Pair` for non-generic items).
+fn derive_self_ty<'db>(
+    ctxt: &FileLowerCtxt<'db>,
+    name: IdentId<'db>,
+    generics: &DeriveGenerics<'db>,
+) -> TypeId<'db> {
+    let db = ctxt.db();
+    let path = PathId::new(
+        db,
+        PathKind::Ident {
+            ident: Partial::Present(name),
+            generic_args: generics.self_ty_args,
+        },
+        None,
+    );
+    TypeId::new(db, TypeKind::Path(Partial::Present(path)))
+}
+
 /// Generates `impl` items for the traits requested via `#[derive(..)]` on
 /// `struct_`. Must be called after the struct item itself has been lowered
 /// (i.e. its item scope has been left), so the generated impls become
@@ -192,22 +317,20 @@ pub(super) fn lower_derive_impls<'db>(
 
     let db = ctxt.db();
 
-    // Derives on generic structs are not yet supported.
-    if !struct_.generic_params(db).data(db).is_empty() {
-        let range = ast
-            .generic_params()
-            .map(|g| g.syntax().text_range())
-            .unwrap_or_else(|| ast.syntax().text_range());
-        accumulate_error(
-            ctxt,
-            &item_name,
-            DeriveErrorKind::Generic {
-                item_kind: "struct",
-            },
-            range,
-        );
+    let Some(generics) = derive_generics(
+        ctxt,
+        &item_name,
+        "struct",
+        struct_.generic_params(db),
+        struct_.where_clause(db),
+        || {
+            ast.generic_params()
+                .map(|g| g.syntax().text_range())
+                .unwrap_or_else(|| ast.syntax().text_range())
+        },
+    ) else {
         return;
-    }
+    };
 
     let Some(struct_name_ident) = struct_.name(db).to_opt() else {
         // Parser error: missing name token. Avoid panics/cascades.
@@ -225,18 +348,17 @@ pub(super) fn lower_derive_impls<'db>(
         fields.push((name, ty));
     }
 
-    let self_ty = TypeId::new(
-        db,
-        TypeKind::Path(Partial::Present(PathId::from_ident(db, struct_name_ident))),
-    );
+    let self_ty = derive_self_ty(ctxt, struct_name_ident, &generics);
 
     let derive_desugared = DeriveDesugared::Struct(parser::ast::AstPtr::new(ast));
     let mut builder = HirBuilder::new(ctxt, derive_desugared);
 
     for derived in traits {
         match derived {
-            DerivableTrait::Eq => lower_derived_eq_impl(&mut builder, self_ty, &fields),
-            DerivableTrait::Default => lower_derived_default_impl(&mut builder, self_ty, &fields),
+            DerivableTrait::Eq => lower_derived_eq_impl(&mut builder, self_ty, &generics, &fields),
+            DerivableTrait::Default => {
+                lower_derived_default_impl(&mut builder, self_ty, &generics, &fields)
+            }
         }
     }
 }
@@ -347,20 +469,20 @@ pub(super) fn lower_enum_derive_impls<'db>(
 
     let db = ctxt.db();
 
-    // Derives on generic enums are not yet supported.
-    if !enum_.generic_params(db).data(db).is_empty() {
-        let range = ast
-            .generic_params()
-            .map(|g| g.syntax().text_range())
-            .unwrap_or_else(|| ast.syntax().text_range());
-        accumulate_error(
-            ctxt,
-            &item_name,
-            DeriveErrorKind::Generic { item_kind: "enum" },
-            range,
-        );
+    let Some(generics) = derive_generics(
+        ctxt,
+        &item_name,
+        "enum",
+        enum_.generic_params(db),
+        enum_.where_clause(db),
+        || {
+            ast.generic_params()
+                .map(|g| g.syntax().text_range())
+                .unwrap_or_else(|| ast.syntax().text_range())
+        },
+    ) else {
         return;
-    }
+    };
 
     let Some(enum_name_ident) = enum_.name(db).to_opt() else {
         // Parser error: missing name token. Avoid panics/cascades.
@@ -408,24 +530,26 @@ pub(super) fn lower_enum_derive_impls<'db>(
         .then(|| resolve_default_variant(ctxt, ast, &item_name))
         .flatten();
 
-    let self_ty = TypeId::new(
-        db,
-        TypeKind::Path(Partial::Present(PathId::from_ident(db, enum_name_ident))),
-    );
+    let self_ty = derive_self_ty(ctxt, enum_name_ident, &generics);
 
     let derive_desugared = DeriveDesugared::Enum(parser::ast::AstPtr::new(ast));
     let mut builder = HirBuilder::new(ctxt, derive_desugared);
 
     for derived in traits {
         match derived {
-            DerivableTrait::Eq => {
-                lower_derived_enum_eq_impl(&mut builder, self_ty, enum_name_ident, &variants)
-            }
+            DerivableTrait::Eq => lower_derived_enum_eq_impl(
+                &mut builder,
+                self_ty,
+                &generics,
+                enum_name_ident,
+                &variants,
+            ),
             DerivableTrait::Default => {
                 if let Some(idx) = default_variant {
                     lower_derived_enum_default_impl(
                         &mut builder,
                         self_ty,
+                        &generics,
                         enum_name_ident,
                         &variants[idx],
                     );
@@ -502,8 +626,8 @@ fn default_call_expr<'db>(
 /// Generates:
 ///
 /// ```text
-/// impl core::ops::Eq for Struct {
-///     fn eq(self, _ other: Struct) -> bool {
+/// impl<A, ..> core::ops::Eq for Struct<A, ..> where A: Eq, .. {
+///     fn eq(self, _ other: Struct<A, ..>) -> bool {
 ///         return self.f0 == other.f0 && self.f1 == other.f1 && ...
 ///     }
 /// }
@@ -514,9 +638,11 @@ fn default_call_expr<'db>(
 fn lower_derived_eq_impl<'db>(
     builder: &mut HirBuilder<'_, 'db, DeriveDesugared>,
     self_ty: TypeId<'db>,
+    generics: &DeriveGenerics<'db>,
     fields: &[(IdentId<'db>, TypeId<'db>)],
 ) {
     let trait_ref = eq_trait_ref(builder);
+    let where_clause = generics.where_clause(builder.ctxt(), trait_ref);
 
     let other_ident = builder.ident("other");
     let other_param = builder.param_underscore_named(other_ident, self_ty);
@@ -524,39 +650,45 @@ fn lower_derived_eq_impl<'db>(
     let bool_ty = builder.ty_ident(builder.ident("bool"));
 
     let fields = fields.to_vec();
-    builder.impl_trait(trait_ref, self_ty, |builder| {
-        let eq_ident = builder.ident("eq");
-        builder.func_with_body_inline_always(
-            eq_ident,
-            builder.empty_generic_params(),
-            params,
-            Some(bool_ty),
-            FuncModifiers::new(Visibility::Private, false, false, false),
-            move |body| {
-                let db = body.db();
-                let self_expr = body.path_expr(PathId::from_ident(db, IdentId::make_self(db)));
-                let other_expr = body.ident_expr(other_ident);
+    builder.impl_trait_generic(
+        trait_ref,
+        self_ty,
+        generics.impl_params,
+        where_clause,
+        |builder| {
+            let eq_ident = builder.ident("eq");
+            builder.func_with_body_inline_always(
+                eq_ident,
+                builder.empty_generic_params(),
+                params,
+                Some(bool_ty),
+                FuncModifiers::new(Visibility::Private, false, false, false),
+                move |body| {
+                    let db = body.db();
+                    let self_expr = body.path_expr(PathId::from_ident(db, IdentId::make_self(db)));
+                    let other_expr = body.ident_expr(other_ident);
 
-                let cmps: Vec<_> = fields
-                    .iter()
-                    .copied()
-                    .map(|(name, _ty)| {
-                        let lhs = field_expr(body, self_expr, name);
-                        let rhs = field_expr(body, other_expr, name);
-                        body.push_expr(Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)))
-                    })
-                    .collect();
-                let result = fold_and(body, cmps);
-                body.emit_return(Some(result));
-            },
-        );
-    });
+                    let cmps: Vec<_> = fields
+                        .iter()
+                        .copied()
+                        .map(|(name, _ty)| {
+                            let lhs = field_expr(body, self_expr, name);
+                            let rhs = field_expr(body, other_expr, name);
+                            body.push_expr(Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)))
+                        })
+                        .collect();
+                    let result = fold_and(body, cmps);
+                    body.emit_return(Some(result));
+                },
+            );
+        },
+    );
 }
 
 /// Generates:
 ///
 /// ```text
-/// impl core::default::Default for Struct {
+/// impl<A, ..> core::default::Default for Struct<A, ..> where A: Default, .. {
 ///     fn default() -> Self {
 ///         return Self {
 ///             f0: <F0Ty as core::default::Default>::default(),
@@ -568,42 +700,51 @@ fn lower_derived_eq_impl<'db>(
 fn lower_derived_default_impl<'db>(
     builder: &mut HirBuilder<'_, 'db, DeriveDesugared>,
     self_ty: TypeId<'db>,
+    generics: &DeriveGenerics<'db>,
     fields: &[(IdentId<'db>, TypeId<'db>)],
 ) {
     let trait_ref = default_trait_ref(builder);
+    let where_clause = generics.where_clause(builder.ctxt(), trait_ref);
 
     let params = builder.params([]);
     let ret_ty = builder.self_ty();
 
     let fields = fields.to_vec();
-    builder.impl_trait(trait_ref, self_ty, |builder| {
-        let default_ident = builder.ident("default");
-        builder.func_with_body_inline_always(
-            default_ident,
-            builder.empty_generic_params(),
-            params,
-            Some(ret_ty),
-            FuncModifiers::new(Visibility::Private, false, false, false),
-            move |body| {
-                let db = body.db();
-                let field_inits = fields
-                    .iter()
-                    .copied()
-                    .map(|(name, ty)| {
-                        let expr = default_call_expr(body, trait_ref, ty);
-                        Field {
-                            label: Some(name),
-                            expr,
-                        }
-                    })
-                    .collect();
+    builder.impl_trait_generic(
+        trait_ref,
+        self_ty,
+        generics.impl_params,
+        where_clause,
+        |builder| {
+            let default_ident = builder.ident("default");
+            builder.func_with_body_inline_always(
+                default_ident,
+                builder.empty_generic_params(),
+                params,
+                Some(ret_ty),
+                FuncModifiers::new(Visibility::Private, false, false, false),
+                move |body| {
+                    let db = body.db();
+                    let field_inits = fields
+                        .iter()
+                        .copied()
+                        .map(|(name, ty)| {
+                            let expr = default_call_expr(body, trait_ref, ty);
+                            Field {
+                                label: Some(name),
+                                expr,
+                            }
+                        })
+                        .collect();
 
-                let self_path = Partial::Present(PathId::from_ident(db, IdentId::make_self_ty(db)));
-                let record = body.push_expr(Expr::RecordInit(self_path, field_inits));
-                body.emit_return(Some(record));
-            },
-        );
-    });
+                    let self_path =
+                        Partial::Present(PathId::from_ident(db, IdentId::make_self_ty(db)));
+                    let record = body.push_expr(Expr::RecordInit(self_path, field_inits));
+                    body.emit_return(Some(record));
+                },
+            );
+        },
+    );
 }
 
 /// One outer `eq` match arm for `variant`:
@@ -729,8 +870,8 @@ fn binder_cmps<'db>(
 /// Generates:
 ///
 /// ```text
-/// impl core::ops::Eq for Enum {
-///     fn eq(self, _ other: Enum) -> bool {
+/// impl<A, ..> core::ops::Eq for Enum<A, ..> where A: Eq, .. {
+///     fn eq(self, _ other: Enum<A, ..>) -> bool {
 ///         return match self {
 ///             Enum::Unit => match other {
 ///                 Enum::Unit => true
@@ -752,10 +893,12 @@ fn binder_cmps<'db>(
 fn lower_derived_enum_eq_impl<'db>(
     builder: &mut HirBuilder<'_, 'db, DeriveDesugared>,
     self_ty: TypeId<'db>,
+    generics: &DeriveGenerics<'db>,
     enum_name: IdentId<'db>,
     variants: &[VariantInfo<'db>],
 ) {
     let trait_ref = eq_trait_ref(builder);
+    let where_clause = generics.where_clause(builder.ctxt(), trait_ref);
 
     let other_ident = builder.ident("other");
     let other_param = builder.param_underscore_named(other_ident, self_ty);
@@ -763,45 +906,51 @@ fn lower_derived_enum_eq_impl<'db>(
     let bool_ty = builder.ty_ident(builder.ident("bool"));
 
     let variants = variants.to_vec();
-    builder.impl_trait(trait_ref, self_ty, |builder| {
-        let eq_ident = builder.ident("eq");
-        builder.func_with_body_inline_always(
-            eq_ident,
-            builder.empty_generic_params(),
-            params,
-            Some(bool_ty),
-            FuncModifiers::new(Visibility::Private, false, false, false),
-            move |body| {
-                let db = body.db();
+    builder.impl_trait_generic(
+        trait_ref,
+        self_ty,
+        generics.impl_params,
+        where_clause,
+        |builder| {
+            let eq_ident = builder.ident("eq");
+            builder.func_with_body_inline_always(
+                eq_ident,
+                builder.empty_generic_params(),
+                params,
+                Some(bool_ty),
+                FuncModifiers::new(Visibility::Private, false, false, false),
+                move |body| {
+                    let db = body.db();
 
-                // An uninhabited enum has no values to compare; `eq` is
-                // trivially `true` (and can never be called).
-                if variants.is_empty() {
-                    let result = body.bool_lit_expr(true);
+                    // An uninhabited enum has no values to compare; `eq` is
+                    // trivially `true` (and can never be called).
+                    if variants.is_empty() {
+                        let result = body.bool_lit_expr(true);
+                        body.emit_return(Some(result));
+                        return;
+                    }
+
+                    let multi_variant = variants.len() > 1;
+                    let arms: Vec<_> = variants
+                        .iter()
+                        .map(|variant| {
+                            enum_eq_match_arm(body, enum_name, variant, other_ident, multi_variant)
+                        })
+                        .collect();
+
+                    let scrutinee = body.path_expr(PathId::from_ident(db, IdentId::make_self(db)));
+                    let result = body.match_expr(scrutinee, arms);
                     body.emit_return(Some(result));
-                    return;
-                }
-
-                let multi_variant = variants.len() > 1;
-                let arms: Vec<_> = variants
-                    .iter()
-                    .map(|variant| {
-                        enum_eq_match_arm(body, enum_name, variant, other_ident, multi_variant)
-                    })
-                    .collect();
-
-                let scrutinee = body.path_expr(PathId::from_ident(db, IdentId::make_self(db)));
-                let result = body.match_expr(scrutinee, arms);
-                body.emit_return(Some(result));
-            },
-        );
-    });
+                },
+            );
+        },
+    );
 }
 
 /// Generates:
 ///
 /// ```text
-/// impl core::default::Default for Enum {
+/// impl<A, ..> core::default::Default for Enum<A, ..> where A: Default, .. {
 ///     fn default() -> Self {
 ///         return Enum::DefaultVariant     // unit variant
 ///         return Enum::DefaultVariant(<T0 as Default>::default(), ..)
@@ -814,60 +963,69 @@ fn lower_derived_enum_eq_impl<'db>(
 fn lower_derived_enum_default_impl<'db>(
     builder: &mut HirBuilder<'_, 'db, DeriveDesugared>,
     self_ty: TypeId<'db>,
+    generics: &DeriveGenerics<'db>,
     enum_name: IdentId<'db>,
     variant: &VariantInfo<'db>,
 ) {
     let trait_ref = default_trait_ref(builder);
+    let where_clause = generics.where_clause(builder.ctxt(), trait_ref);
 
     let params = builder.params([]);
     let ret_ty = builder.self_ty();
 
     let variant = variant.clone();
-    builder.impl_trait(trait_ref, self_ty, |builder| {
-        let default_ident = builder.ident("default");
-        builder.func_with_body_inline_always(
-            default_ident,
-            builder.empty_generic_params(),
-            params,
-            Some(ret_ty),
-            FuncModifiers::new(Visibility::Private, false, false, false),
-            move |body| {
-                let db = body.db();
-                let variant_path = PathId::from_ident(db, enum_name).push_ident(db, variant.name);
+    builder.impl_trait_generic(
+        trait_ref,
+        self_ty,
+        generics.impl_params,
+        where_clause,
+        |builder| {
+            let default_ident = builder.ident("default");
+            builder.func_with_body_inline_always(
+                default_ident,
+                builder.empty_generic_params(),
+                params,
+                Some(ret_ty),
+                FuncModifiers::new(Visibility::Private, false, false, false),
+                move |body| {
+                    let db = body.db();
+                    let variant_path =
+                        PathId::from_ident(db, enum_name).push_ident(db, variant.name);
 
-                let value = match &variant.payload {
-                    VariantPayload::Unit => body.path_expr(variant_path),
-                    VariantPayload::Tuple(elems) => {
-                        let args = elems
-                            .iter()
-                            .copied()
-                            .map(|ty| default_call_expr(body, trait_ref, ty))
-                            .collect();
-                        let callee = body.path_expr(variant_path);
-                        body.call_expr(callee, args)
-                    }
-                    VariantPayload::Record(fields) => {
-                        let field_inits = fields
-                            .iter()
-                            .copied()
-                            .map(|(name, ty)| {
-                                let expr = default_call_expr(body, trait_ref, ty);
-                                Field {
-                                    label: Some(name),
-                                    expr,
-                                }
-                            })
-                            .collect();
-                        body.push_expr(Expr::RecordInit(
-                            Partial::Present(variant_path),
-                            field_inits,
-                        ))
-                    }
-                };
-                body.emit_return(Some(value));
-            },
-        );
-    });
+                    let value = match &variant.payload {
+                        VariantPayload::Unit => body.path_expr(variant_path),
+                        VariantPayload::Tuple(elems) => {
+                            let args = elems
+                                .iter()
+                                .copied()
+                                .map(|ty| default_call_expr(body, trait_ref, ty))
+                                .collect();
+                            let callee = body.path_expr(variant_path);
+                            body.call_expr(callee, args)
+                        }
+                        VariantPayload::Record(fields) => {
+                            let field_inits = fields
+                                .iter()
+                                .copied()
+                                .map(|(name, ty)| {
+                                    let expr = default_call_expr(body, trait_ref, ty);
+                                    Field {
+                                        label: Some(name),
+                                        expr,
+                                    }
+                                })
+                                .collect();
+                            body.push_expr(Expr::RecordInit(
+                                Partial::Present(variant_path),
+                                field_inits,
+                            ))
+                        }
+                    };
+                    body.emit_return(Some(value));
+                },
+            );
+        },
+    );
 }
 
 fn field_expr<'db>(

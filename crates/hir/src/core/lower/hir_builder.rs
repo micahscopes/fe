@@ -394,9 +394,34 @@ where
         consts: Vec<AssocConstDef<'db>>,
         origin: HirOrigin<ast::ImplTrait>,
     ) -> ImplTrait<'db> {
+        self.new_impl_trait_generic(
+            id,
+            trait_ref,
+            ty,
+            self.empty_generic_params(),
+            self.empty_where_clause(),
+            types,
+            consts,
+            origin,
+        )
+    }
+
+    /// Like [`Self::new_impl_trait`], but with explicit generic parameters
+    /// and a where clause on the synthesized `impl`, e.g.
+    /// `impl<A, B> Trait for Ty<A, B> where A: Trait, B: Trait`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_impl_trait_generic(
+        &mut self,
+        id: TrackedItemId<'db>,
+        trait_ref: Partial<TraitRefId<'db>>,
+        ty: Partial<TypeId<'db>>,
+        generic_params: GenericParamListId<'db>,
+        where_clause: WhereClauseId<'db>,
+        types: Vec<AssocTyDef<'db>>,
+        consts: Vec<AssocConstDef<'db>>,
+        origin: HirOrigin<ast::ImplTrait>,
+    ) -> ImplTrait<'db> {
         let attrs = self.empty_attrs();
-        let generic_params = self.empty_generic_params();
-        let where_clause = self.empty_where_clause();
 
         ImplTrait::new(
             self.db(),
@@ -420,6 +445,38 @@ where
         build_children: impl FnOnce(&mut Self),
     ) -> ImplTrait<'db> {
         self.impl_trait_with_children(trait_ref, ty, vec![], vec![], build_children)
+    }
+
+    /// Builds a generic `impl<..> Trait for Ty<..> where ..` item. The
+    /// generic parameters are registered in the impl's scope by the scope
+    /// graph builder (from the item data), so types inside `build_children`
+    /// can reference them by name.
+    pub(super) fn impl_trait_generic(
+        &mut self,
+        trait_ref: TraitRefId<'db>,
+        ty: TypeId<'db>,
+        generic_params: GenericParamListId<'db>,
+        where_clause: WhereClauseId<'db>,
+        build_children: impl FnOnce(&mut Self),
+    ) -> ImplTrait<'db> {
+        let trait_ref = Partial::Present(trait_ref);
+        let ty = Partial::Present(ty);
+
+        let idx = self.ctxt.next_impl_trait_idx();
+        self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
+            let impl_trait = this.new_impl_trait_generic(
+                id,
+                trait_ref,
+                ty,
+                generic_params,
+                where_clause,
+                vec![],
+                vec![],
+                this.origin(),
+            );
+            build_children(this);
+            impl_trait
+        })
     }
 
     pub(super) fn impl_trait_assocs_build(
