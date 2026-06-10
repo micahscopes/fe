@@ -315,13 +315,7 @@ pub fn emit_bytecode_instruction_facts_with_observability(
     let function = bytecode_function_key(owner_key, function_local_key);
     let code_object = bytecode_code_object_key(owner_key);
     let pc_map = observability
-        .map(|observability| {
-            observability
-                .pc_map
-                .iter()
-                .map(|entry| (entry.pc_start, entry))
-                .collect::<BTreeMap<_, _>>()
-        })
+        .map(|observability| build_pc_map(&observability.pc_map))
         .unwrap_or_default();
     let mut emitted_prepared_nodes = BTreeSet::new();
     let mut emitted_prepared_lineage_events = BTreeSet::new();
@@ -470,6 +464,45 @@ pub fn emit_bytecode_instruction_facts_with_observability(
         index += 1;
     }
     facts
+}
+
+/// Build the `pc_start`-keyed lookup used by [`pc_map_entry_for_pc`].
+///
+/// Two hazards are handled that a plain `.collect()` into a `BTreeMap` would
+/// silently get wrong:
+///   * Zero-length entries (`pc_end <= pc_start`) carry no range — the lookup's
+///     `pc < pc_end` guard can never match them — but if one shares a
+///     `pc_start` with a real `[start, end)` entry it would shadow it under the
+///     single key, dropping the lineage link for every pc in that range. We
+///     skip them entirely.
+///   * Two valid entries sharing a `pc_start` (overlap) would let the
+///     last-collected win arbitrarily. We keep the wider range deterministically
+///     so a narrow duplicate can't truncate a real one, and assert in debug
+///     builds that the surviving ranges don't overlap — the expected shape of a
+///     well-formed pc_map.
+fn build_pc_map(entries: &[PcMapEntry]) -> BTreeMap<u32, &PcMapEntry> {
+    let mut pc_map: BTreeMap<u32, &PcMapEntry> = BTreeMap::new();
+    for entry in entries {
+        if entry.pc_end <= entry.pc_start {
+            continue;
+        }
+        pc_map
+            .entry(entry.pc_start)
+            .and_modify(|existing| {
+                if entry.pc_end > existing.pc_end {
+                    *existing = entry;
+                }
+            })
+            .or_insert(entry);
+    }
+    debug_assert!(
+        pc_map
+            .values()
+            .zip(pc_map.values().skip(1))
+            .all(|(a, b)| a.pc_end <= b.pc_start),
+        "pc_map entries overlap after dedup: {pc_map:?}"
+    );
+    pc_map
 }
 
 fn pc_map_entry_for_pc<'a>(
@@ -1880,12 +1913,13 @@ mod tests {
         BytecodePcRange, BytecodeSourceMapEntry,
         trace::{
             EVM_VCODE_INST_KIND, SONATINA_EVM_PREPARED_INST_KIND, SONATINA_POSTOPT_INST_KIND,
-            bytecode_code_object_key, bytecode_runtime_owner_key, emit_bytecode_instruction_facts,
+            build_pc_map, bytecode_code_object_key, bytecode_runtime_owner_key,
+            emit_bytecode_instruction_facts,
             emit_bytecode_instruction_facts_with_observability, emit_codegen_facts,
             emit_sonatina_trace_view_facts, evm_vcode_inst_key,
-            frontend_origin_record_for_export_key, push_standalone_source_file_facts,
-            sonatina_postopt_inst_key, standalone_source_file_facts, trace_source_file_key,
-            whole_file_source_span,
+            frontend_origin_record_for_export_key, pc_map_entry_for_pc,
+            push_standalone_source_file_facts, sonatina_postopt_inst_key,
+            standalone_source_file_facts, trace_source_file_key, whole_file_source_span,
         },
     };
 
@@ -2086,6 +2120,56 @@ mod tests {
                         && edge.to.kind() == SONATINA_POSTOPT_INST_KIND
             )
         }));
+    }
+
+    #[test]
+    fn build_pc_map_skips_zero_length_and_keeps_widest_on_duplicate_start() {
+        use sonatina_codegen::{machinst::vcode::VCodeInst, object::PcMapEntry};
+        use sonatina_ir::{
+            BlockId, Linkage, Signature, builder::ModuleBuilder, isa::evm::Evm, module::ModuleCtx,
+        };
+        use sonatina_triple::{Architecture, EvmVersion, OperatingSystem, TargetTriple, Vendor};
+
+        let evm = Evm::new(TargetTriple::new(
+            Architecture::Evm,
+            Vendor::Ethereum,
+            OperatingSystem::Evm(EvmVersion::London),
+        ));
+        let mb = ModuleBuilder::new(ModuleCtx::new(&evm));
+        let func = mb
+            .declare_function(Signature::new_unit("runtime", Linkage::Public, &[]))
+            .unwrap();
+        let entry = |pc_start: u32, pc_end: u32| PcMapEntry {
+            pc_start,
+            pc_end,
+            func,
+            func_name: "runtime".to_string(),
+            block: BlockId(0),
+            vcode_inst: VCodeInst(0),
+            ir_inst: None,
+            frontend_provenance: None,
+            unmapped_reason: None,
+        };
+
+        // A zero-length entry sharing a real entry's start must not shadow it,
+        // regardless of order (a naive last-wins collect would drop the link).
+        let entries = vec![entry(0, 4), entry(0, 0)];
+        let map = build_pc_map(&entries);
+        assert_eq!(pc_map_entry_for_pc(&map, 0).map(|e| e.pc_end), Some(4));
+        assert_eq!(pc_map_entry_for_pc(&map, 3).map(|e| e.pc_end), Some(4));
+
+        // On a duplicate start the wider range wins, in either order.
+        for entries in [vec![entry(0, 2), entry(0, 6)], vec![entry(0, 6), entry(0, 2)]] {
+            let map = build_pc_map(&entries);
+            assert_eq!(pc_map_entry_for_pc(&map, 4).map(|e| e.pc_end), Some(6));
+        }
+
+        // Disjoint ranges still resolve, with pc == pc_end excluded (half-open).
+        let entries = vec![entry(0, 4), entry(4, 8)];
+        let map = build_pc_map(&entries);
+        assert_eq!(pc_map_entry_for_pc(&map, 3).map(|e| e.pc_end), Some(4));
+        assert_eq!(pc_map_entry_for_pc(&map, 4).map(|e| e.pc_end), Some(8));
+        assert_eq!(pc_map_entry_for_pc(&map, 8), None);
     }
 
     #[test]

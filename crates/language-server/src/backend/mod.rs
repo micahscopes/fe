@@ -233,9 +233,15 @@ impl Backend {
         if record.previous_revision.is_none() {
             record.previous_revision = revisions.last().map(|revision| revision.revision);
         }
+        // Coalesce only with a prior record of the SAME status. A failed
+        // rebuild reuses the fallback ready revision's model_digest, so without
+        // the status check it would collide on (revision, model_digest) and
+        // overwrite the ready record — after which latest_ready_* finds nothing
+        // and the history claims that revision never succeeded.
         if let Some(last) = revisions.last_mut()
             && last.revision == record.revision
             && last.model_digest == record.model_digest
+            && last.status == record.status
         {
             *last = record;
             return true;
