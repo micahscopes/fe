@@ -532,8 +532,11 @@ impl DesugaredOrigin {
             Self::Error(super::ErrorDesugared { error_struct }) => {
                 error_struct.to_node(&root).syntax().text_range()
             }
-            Self::Derive(super::DeriveDesugared { derive_struct }) => {
+            Self::Derive(super::DeriveDesugared::Struct(derive_struct)) => {
                 derive_struct.to_node(&root).syntax().text_range()
+            }
+            Self::Derive(super::DeriveDesugared::Enum(derive_enum)) => {
+                derive_enum.to_node(&root).syntax().text_range()
             }
         };
 

@@ -8,10 +8,11 @@ use crate::{
         ArithBinOp, AssocConstDef, AssocTyDef, Attr, AttrArg, AttrListId, BinOp, Body, BodyKind,
         EffectParamListId, Expr, ExprId, FieldDefListId, FieldIndex, Func, FuncModifiers,
         FuncParam, FuncParamListId, FuncParamMode, FuncParamName, GenericArg, GenericArgListId,
-        GenericParam, GenericParamListId, IdentId, ImplTrait, ItemKind, Mod, NormalAttr, Partial,
-        Pat, PatId, PathId, PathKind, Stmt, StmtId, Struct, TopLevelMod, TrackedItemId,
-        TrackedItemVariant, TraitRefId, TypeBound, TypeGenericArg, TypeGenericParam, TypeId,
-        TypeKind, TypeMode, UnOp, Visibility, WhereClauseId, expr::CallArg,
+        GenericParam, GenericParamListId, IdentId, ImplTrait, ItemKind, LitKind, MatchArm, Mod,
+        NormalAttr, Partial, Pat, PatId, PathId, PathKind, RecordPatField, Stmt, StmtId, Struct,
+        TopLevelMod, TrackedItemId, TrackedItemVariant, TraitRefId, TypeBound, TypeGenericArg,
+        TypeGenericParam, TypeId, TypeKind, TypeMode, UnOp, Visibility, WhereClauseId,
+        expr::CallArg,
     },
     span::{DesugaredOrigin, HirOrigin},
 };
@@ -637,6 +638,43 @@ where
             self.db(),
             ident,
         ))))
+    }
+
+    pub(super) fn bool_lit_expr(&mut self, value: bool) -> ExprId {
+        self.push_expr(Expr::Lit(LitKind::Bool(value)))
+    }
+
+    pub(super) fn match_expr(&mut self, scrutinee: ExprId, arms: Vec<MatchArm>) -> ExprId {
+        self.push_expr(Expr::Match(scrutinee, Partial::Present(arms)))
+    }
+
+    pub(super) fn wildcard_pat(&mut self) -> PatId {
+        self.push_pat(Pat::WildCard)
+    }
+
+    /// An irrefutable single-identifier binding pattern.
+    pub(super) fn bind_pat(&mut self, ident: IdentId<'db>) -> PatId {
+        let path = PathId::from_ident(self.db(), ident);
+        self.push_pat(Pat::Path(Partial::Present(path), false))
+    }
+
+    /// A path pattern, e.g. a unit enum variant like `Enum::Variant`.
+    pub(super) fn path_pat(&mut self, path: PathId<'db>) -> PatId {
+        self.push_pat(Pat::Path(Partial::Present(path), false))
+    }
+
+    /// A tuple-variant pattern, e.g. `Enum::Variant(a, b)`.
+    pub(super) fn path_tuple_pat(&mut self, path: PathId<'db>, elems: Vec<PatId>) -> PatId {
+        self.push_pat(Pat::PathTuple(Partial::Present(path), elems))
+    }
+
+    /// A record pattern, e.g. `Enum::Variant { x: a, y: b }`.
+    pub(super) fn record_pat(
+        &mut self,
+        path: PathId<'db>,
+        fields: Vec<RecordPatField<'db>>,
+    ) -> PatId {
+        self.push_pat(Pat::Record(Partial::Present(path), fields))
     }
 
     pub(super) fn path_expr(&mut self, path: PathId<'db>) -> ExprId {

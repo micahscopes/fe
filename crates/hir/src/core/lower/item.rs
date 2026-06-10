@@ -71,7 +71,8 @@ const MUST_USE_EXPECTED: &str = "`#[must_use]`";
 const ARITHMETIC_TARGETS: &str = "functions and modules";
 const EVENT_TARGETS: &str = "structs";
 const ERROR_TARGETS: &str = "structs";
-const DERIVE_TARGETS: &str = "structs";
+const DERIVE_TARGETS: &str = "structs and enums";
+const DEFAULT_TARGETS: &str = super::derive::DEFAULT_ATTR_TARGETS;
 const MUST_USE_TARGETS: &str = "functions, structs, and enums";
 const PAYABLE_TARGETS: &str = "init blocks and recv arms";
 const INDEXED_TARGETS: &str = "event fields";
@@ -159,6 +160,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported("error", BARE_FORM, "`#[error]`"),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("default", DEFAULT_TARGETS),
         ],
     );
 }
@@ -176,9 +178,10 @@ fn validate_enum_attrs<'db>(
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
-            AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            // `#[default]` marks a variant, not the enum itself.
+            AttrRule::unsupported("default", DEFAULT_TARGETS),
         ],
     );
 }
@@ -550,15 +553,25 @@ pub(super) fn lower_uses_clause_opt<'db>(
 
 impl<'db> Enum<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Enum) -> Self {
+        let has_derive_attr = super::derive::enum_has_derive_attr(&ast);
+
         let name = IdentId::lower_token_partial(ctxt, ast.name());
         let id = ctxt.joined_id(TrackedItemVariant::Enum(name));
         ctxt.enter_item_scope(id, false);
 
-        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        // Strip the compiler-consumed `#[derive(..)]` attribute, like
+        // `#[event]` / `#[error]` are stripped from their structs.
+        let attributes = if has_derive_attr {
+            super::attr::lower_attrs_without_named(ctxt, ast.attr_list(), "derive")
+        } else {
+            AttrListId::lower_ast_opt(ctxt, ast.attr_list())
+        };
         let vis = super::lower_visibility(&ast);
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
-        let variants = VariantDefListId::lower_ast_opt(ctxt, ast.variants());
+        // The `#[default]` variant markers are consumed by derive lowering;
+        // strip them from the lowered variants like the `derive` attribute.
+        let variants = VariantDefListId::lower_ast_opt(ctxt, ast.variants(), has_derive_attr);
         let origin = HirOrigin::raw(&ast);
 
         let enum_ = Self::new(
@@ -573,7 +586,17 @@ impl<'db> Enum<'db> {
             ctxt.top_mod(),
             origin,
         );
-        ctxt.leave_item_scope(enum_)
+        let enum_ = ctxt.leave_item_scope(enum_);
+
+        // Generate derived trait impls as siblings of the enum.
+        if has_derive_attr {
+            super::derive::lower_enum_derive_impls(ctxt, &ast, enum_);
+        } else {
+            // `#[default]` only means something on `#[derive(Default)]` enums.
+            super::derive::report_misplaced_default_attrs(ctxt, &ast);
+        }
+
+        enum_
     }
 }
 
@@ -982,24 +1005,40 @@ impl<'db> FieldDef<'db> {
 }
 
 impl<'db> VariantDefListId<'db> {
-    fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::VariantDefList) -> Self {
+    fn lower_ast(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::VariantDefList,
+        strip_default_attr: bool,
+    ) -> Self {
         let variants = ast
             .into_iter()
-            .map(|variant| VariantDef::lower_ast(ctxt, variant))
+            .map(|variant| VariantDef::lower_ast(ctxt, variant, strip_default_attr))
             .collect::<Vec<_>>();
         Self::new(ctxt.db(), variants)
     }
 
-    fn lower_ast_opt(ctxt: &mut FileLowerCtxt<'db>, ast: Option<ast::VariantDefList>) -> Self {
-        ast.map(|ast| Self::lower_ast(ctxt, ast))
+    fn lower_ast_opt(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: Option<ast::VariantDefList>,
+        strip_default_attr: bool,
+    ) -> Self {
+        ast.map(|ast| Self::lower_ast(ctxt, ast, strip_default_attr))
             .unwrap_or(Self::new(ctxt.db(), Vec::new()))
     }
 }
 
 impl<'db> VariantDef<'db> {
-    fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::VariantDef) -> Self {
+    fn lower_ast(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::VariantDef,
+        strip_default_attr: bool,
+    ) -> Self {
         report_payable_on_unsupported_target(ctxt, ast.attr_list(), "variant", None);
-        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let attributes = if strip_default_attr {
+            super::attr::lower_attrs_without_named(ctxt, ast.attr_list(), "default")
+        } else {
+            AttrListId::lower_ast_opt(ctxt, ast.attr_list())
+        };
         let name = IdentId::lower_token_partial(ctxt, ast.name());
         let kind = match ast.kind() {
             ast::VariantKind::Unit => VariantKind::Unit,

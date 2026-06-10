@@ -282,11 +282,13 @@ pub struct ErrorDesugared {
     pub error_struct: AstPtr<ast::Struct>,
 }
 
-/// Tracks the origin of HIR nodes desugared from a `#[derive(..)]` struct.
+/// Tracks the origin of HIR nodes desugared from a `#[derive(..)]` item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DeriveDesugared {
+pub enum DeriveDesugared {
     /// The original `struct` AST node annotated with `#[derive(..)]`.
-    pub derive_struct: AstPtr<ast::Struct>,
+    Struct(AstPtr<ast::Struct>),
+    /// The original `enum` AST node annotated with `#[derive(..)]`.
+    Enum(AstPtr<ast::Enum>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

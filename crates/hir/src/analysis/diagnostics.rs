@@ -613,13 +613,13 @@ impl DiagnosticVoucher for crate::DeriveError {
         use crate::DeriveErrorKind;
 
         let primary_span = Span::new(self.file, self.primary_range, SpanKind::Original);
-        let struct_name = self.struct_name.as_deref().unwrap_or("<unknown>");
+        let item_name = self.item_name.as_deref().unwrap_or("<unknown>");
 
         let (code, message, label, notes) = match &self.kind {
-            DeriveErrorKind::GenericStruct => (
+            DeriveErrorKind::Generic { item_kind } => (
                 1,
-                "`#[derive(..)]` on generic structs is not yet supported".to_string(),
-                format!("`{struct_name}` is generic"),
+                format!("`#[derive(..)]` on generic {item_kind}s is not yet supported"),
+                format!("`{item_name}` is generic"),
                 vec!["remove the generic parameters or implement the trait manually".to_string()],
             ),
             DeriveErrorKind::UnknownTrait { name } => (
@@ -648,6 +648,23 @@ impl DiagnosticVoucher for crate::DeriveError {
                     "deriving traits for `#[event]`/`#[error]` structs is not supported"
                         .to_string(),
                 ],
+            ),
+            DeriveErrorKind::MissingDefaultVariant => (
+                6,
+                format!("`#[derive(Default)]` on enum `{item_name}` requires a `#[default]` variant"),
+                "no variant is marked `#[default]`".to_string(),
+                vec!["mark exactly one variant with `#[default]`".to_string()],
+            ),
+            DeriveErrorKind::MultipleDefaultVariants { first_variant_name } => (
+                7,
+                format!("multiple `#[default]` variants on enum `{item_name}`"),
+                "extra `#[default]` marker here".to_string(),
+                vec![match first_variant_name {
+                    Some(first) => {
+                        format!("`{first}` is already marked `#[default]`; only one variant can be the default")
+                    }
+                    None => "only one variant can be marked `#[default]`".to_string(),
+                }],
             ),
         };
 
