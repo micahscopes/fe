@@ -1,6 +1,6 @@
 [ingot]
-name = "std"
+name = "core_derives"
 version = "0.1.0"
 
 [dependencies]
-core_derives = true
+core = true

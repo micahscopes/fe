@@ -22,7 +22,7 @@ use crate::{
 };
 pub use abi_field::{AbiFieldContext, AbiFieldDiagnostic};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
-pub use derive::{DeriveError, DeriveErrorKind, ProviderConstruct};
+pub use derive::{DeriveError, DeriveErrorKind, DeriveSecondarySpan};
 pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
 pub use event::{EventError, EventErrorKind};
 pub(crate) use expansion::expanded_items_impl;
@@ -48,6 +48,9 @@ mod params;
 mod pat;
 mod path;
 mod payable;
+mod provider;
+mod provider_executor;
+mod provider_synthesis;
 mod scope_builder;
 mod stmt;
 mod types;
@@ -159,7 +162,7 @@ pub(crate) fn base_scope_graph_impl<'db>(
 
 /// The complete scope graph of `top_mod`: the base graph produced by AST
 /// lowering, plus the items synthesized by the post-lowering expansion stage
-/// (currently the compiler-internal `#[derive(..)]` impls).
+/// (the provider-generated `#[derive(..)]` / `derive ..` impls).
 ///
 /// Generated items are merged in as ordinary scopes — children of the same
 /// parent scope as the item they were derived from — so every downstream

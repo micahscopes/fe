@@ -627,11 +627,15 @@ impl DiagnosticVoucher for crate::DeriveError {
                         .to_string(),
                 ],
             ),
-            DeriveErrorKind::UnknownTrait { name } => (
+            DeriveErrorKind::UnknownTrait { name, available } => (
                 2,
                 format!("cannot derive `{name}`"),
                 format!("`{name}` is not a derivable trait"),
-                vec!["derivable traits are `Eq` and `Default`".to_string()],
+                vec![if available.is_empty() {
+                    "no derive providers are available for this trait".to_string()
+                } else {
+                    format!("derivable traits are {}", join_quoted(available))
+                }],
             ),
             DeriveErrorKind::InvalidForm => (
                 3,
@@ -671,35 +675,66 @@ impl DiagnosticVoucher for crate::DeriveError {
                     None => "only one variant can be marked `#[default]`".to_string(),
                 }],
             ),
-            DeriveErrorKind::ProviderNotExecutable { construct } => match construct {
-                crate::ProviderConstruct::NamedSelection => (
-                    8,
-                    "named derive providers are not yet executable".to_string(),
-                    "cannot select a derive provider with `using` yet".to_string(),
-                    vec![
-                        "remove `using ..` to request the compiler-internal derive".to_string(),
-                    ],
+            DeriveErrorKind::ProviderNotFound {
+                provider,
+                trait_name,
+                wrong_goal_heads,
+            } => (
+                8,
+                format!("no derive provider named `{provider}` for `{trait_name}`"),
+                format!("`{provider}` does not provide `{trait_name}` evidence"),
+                vec![if wrong_goal_heads.is_empty() {
+                    format!("no visible derive provider is named `{provider}`")
+                } else {
+                    format!(
+                        "visible provider(s) named `{provider}` provide {}",
+                        join_quoted(wrong_goal_heads)
+                    )
+                }],
+            ),
+            DeriveErrorKind::ProviderAmbiguous {
+                provider,
+                trait_name,
+                count,
+            } => (
+                9,
+                format!("derive provider `{provider}` for `{trait_name}` is ambiguous"),
+                format!("`{provider}` matches {count} visible providers"),
+                vec!["rename one of the providers to disambiguate".to_string()],
+            ),
+            DeriveErrorKind::CanonicalProviderAmbiguous {
+                trait_name,
+                providers,
+            } => (
+                9,
+                format!("the derive request for `{trait_name}` is ambiguous"),
+                format!(
+                    "multiple canonical providers derive `{trait_name}`: {}",
+                    join_quoted(providers)
                 ),
-                crate::ProviderConstruct::Scope => (
-                    9,
-                    "scoped derive providers are not yet executable".to_string(),
-                    "`with ..` provider scopes cannot run yet".to_string(),
-                    vec![
-                        "derive declarations inside this scope are not expanded".to_string(),
-                        "move them to the top level to use the compiler-internal derive"
-                            .to_string(),
-                    ],
-                ),
-                crate::ProviderConstruct::Definition => (
-                    10,
-                    "derive provider definitions are not yet executable".to_string(),
-                    format!("provider `{item_name}` is never run"),
-                    vec![
-                        "the provider body is type-checked but cannot be selected by any derive yet"
-                            .to_string(),
-                    ],
-                ),
-            },
+                vec!["select a provider explicitly with `using`".to_string()],
+            ),
+            DeriveErrorKind::ProviderFailed {
+                provider,
+                trait_name,
+                message,
+            } => (
+                10,
+                format!("derive provider `{provider}` failed to derive `{trait_name}`"),
+                format!("requested here: {message}"),
+                vec![format!(
+                    "the provider `{provider}` ran at compile time and failed; the secondary label points at the failing provider code"
+                )],
+            ),
+            DeriveErrorKind::InvalidProvider { message } => (
+                14,
+                "invalid derive provider declaration".to_string(),
+                message.clone(),
+                vec![
+                    "expected `impl Name: Derive for Trait { const fn derive<T>(..) uses (reflect: Reflect<T>, builder: mut ImplBuilder<..>) { .. } }`"
+                        .to_string(),
+                ],
+            ),
             DeriveErrorKind::UnresolvedDeclTarget { path } => (
                 11,
                 format!("cannot resolve derive target `{path}`"),
@@ -728,17 +763,34 @@ impl DiagnosticVoucher for crate::DeriveError {
 
         let error_code = GlobalErrorCode::new(DiagnosticPass::DeriveLower, code);
 
-        CompleteDiagnostic::new(
-            Severity::Error,
-            message,
-            vec![SubDiagnostic::new(
-                LabelStyle::Primary,
-                label,
-                Some(primary_span),
-            )],
-            notes,
-            error_code,
-        )
+        let mut sub_diagnostics = vec![SubDiagnostic::new(
+            LabelStyle::Primary,
+            label,
+            Some(primary_span),
+        )];
+        if let Some(secondary) = &self.secondary {
+            sub_diagnostics.push(SubDiagnostic::new(
+                LabelStyle::Secondary,
+                secondary.label.clone(),
+                Some(Span::new(
+                    secondary.file,
+                    secondary.range,
+                    SpanKind::Original,
+                )),
+            ));
+        }
+
+        CompleteDiagnostic::new(Severity::Error, message, sub_diagnostics, notes, error_code)
+    }
+}
+
+/// Joins names for diagnostic notes, e.g. "A, B and C" with backticks.
+fn join_quoted(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+    match quoted.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
 }
 

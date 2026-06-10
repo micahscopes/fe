@@ -607,17 +607,13 @@ impl<'db> Enum<'db> {
             ctxt.top_mod(),
             origin,
         );
-        let enum_ = ctxt.leave_item_scope(enum_);
-
         // Derived trait impls are synthesized as siblings of the enum by the
         // post-lowering expansion stage (`lower::expansion`), which also
-        // validates the `#[default]` variant markers of derive enums.
-        if !has_derive_attr {
-            // `#[default]` only means something on `#[derive(Default)]` enums.
-            super::derive::report_misplaced_default_attrs(ctxt, &ast);
-        }
-
-        enum_
+        // validates the `#[default]` variant markers: the markers are
+        // meaningful exactly when some request (attribute or standalone
+        // declaration) derives `Default` for this enum, which only the
+        // expansion stage can see.
+        ctxt.leave_item_scope(enum_)
     }
 }
 

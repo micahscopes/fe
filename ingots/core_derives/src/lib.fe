@@ -1,0 +1,152 @@
+// Canonical derive providers for core traits.
+//
+// These providers are the ONLY place that knows how to derive `Eq` and
+// `Default`: the compiler knows how to run providers and how to synthesize
+// HIR from builder commands, but the shape of the generated impls is decided
+// here, in Fe.
+//
+// Provider bodies execute at compile time, inside the compiler's expansion
+// stage. They are written in a restricted command language: reflection
+// iteration (`reflect.fields()`, `reflect.variants()`, `variant.fields()`),
+// boolean locals, `if`/`else`, and `builder` commands that describe the
+// generated impl (requirements, method signatures, and method body
+// expressions).
+
+use core::default::Default
+use core::ops::Eq
+
+impl StableEq: Derive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        if reflect.is_struct() {
+            // self.f0 == other.f0 && self.f1 == other.f1 && ..
+            // (an empty struct compares as `true`)
+            let mut cmp = builder.bool(true)
+            let mut has_field = false
+            for field in reflect.fields() {
+                builder.require<Eq>(field.ty())
+                let field_cmp = builder.eq(
+                    builder.field_get(builder.self_ref(), field),
+                    builder.field_get(builder.arg_ref("other"), field),
+                )
+                if has_field {
+                    cmp = builder.and(cmp, field_cmp)
+                } else {
+                    cmp = field_cmp
+                    has_field = true
+                }
+            }
+            let mut sig = builder.method("eq")
+            sig = builder.with_self(sig)
+            sig = builder.with_arg(sig, "other", builder.target_ty())
+            sig = builder.returns(sig, builder.ty<bool>())
+            builder.emit_method(sig, cmp)
+        }
+        if reflect.is_enum() {
+            // Variant counting with plain bools: `multi` is true when the
+            // enum has more than one variant (the inner match then needs a
+            // `_ => false` arm; for a single variant it would be
+            // unreachable).
+            let mut multi = false
+            let mut seen = false
+            for variant in reflect.variants() {
+                if seen {
+                    multi = true
+                }
+                seen = true
+            }
+            let mut body = builder.bool(true)
+            if seen {
+                // match self {
+                //     Enum::V(__lhs_..) => match other {
+                //         Enum::V(__rhs_..) => __lhs_0 == __rhs_0 && ..
+                //         _ => false
+                //     }
+                //     ..
+                // }
+                let mut arms = builder.match_expr(builder.self_ref())
+                for variant in reflect.variants() {
+                    let mut cmp = builder.bool(true)
+                    let mut has_field = false
+                    for field in variant.fields() {
+                        builder.require<Eq>(field.ty())
+                        let field_cmp = builder.eq(
+                            builder.variant_binder(variant, field, "__lhs"),
+                            builder.variant_binder(variant, field, "__rhs"),
+                        )
+                        if has_field {
+                            cmp = builder.and(cmp, field_cmp)
+                        } else {
+                            cmp = field_cmp
+                            has_field = true
+                        }
+                    }
+                    let mut inner = builder.match_expr(builder.arg_ref("other"))
+                    inner = builder.with_arm(inner, builder.variant_pat(variant, "__rhs"), cmp)
+                    if multi {
+                        inner = builder.with_arm(inner, builder.wildcard_pat(), builder.bool(false))
+                    }
+                    arms = builder.with_arm(arms, builder.variant_pat(variant, "__lhs"), inner)
+                }
+                body = arms
+            }
+            // An uninhabited enum has no values to compare; `eq` is trivially
+            // `true` (and can never be called).
+            let mut sig = builder.method("eq")
+            sig = builder.with_self(sig)
+            sig = builder.with_arg(sig, "other", builder.target_ty())
+            sig = builder.returns(sig, builder.ty<bool>())
+            builder.emit_method(sig, body)
+        }
+        builder.finish()
+        ev
+    }
+}
+
+impl StableDefault: Derive for Default {
+    const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Default<T>>,
+        )
+    {
+        if reflect.is_struct() {
+            // Self { f0: <F0 as Default>::default(), .. }
+            let mut init = builder.struct_init()
+            for field in reflect.fields() {
+                builder.require<Default>(field.ty())
+                init = builder.with_field(init, field, builder.trait_call(field.ty(), "default"))
+            }
+            let mut sig = builder.method("default")
+            sig = builder.returns(sig, builder.self_ty())
+            builder.emit_method(sig, init)
+        }
+        if reflect.is_enum() {
+            // Enum::DefaultVariant / Enum::DefaultVariant(..defaults..) /
+            // Enum::DefaultVariant { f: ..default.., .. } for the variant
+            // marked `#[default]`.
+            for variant in reflect.variants() {
+                if variant.is_default() {
+                    let mut init = builder.variant_init(variant)
+                    for field in variant.fields() {
+                        builder.require<Default>(field.ty())
+                        init = builder.with_field(
+                            init,
+                            field,
+                            builder.trait_call(field.ty(), "default"),
+                        )
+                    }
+                    let mut sig = builder.method("default")
+                    sig = builder.returns(sig, builder.self_ty())
+                    builder.emit_method(sig, init)
+                }
+            }
+        }
+        builder.finish()
+        ev
+    }
+}

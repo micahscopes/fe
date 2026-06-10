@@ -230,6 +230,21 @@ where
         }
     }
 
+    /// Plain `self` receiver (view mode).
+    pub(super) fn param_view_self(&self) -> FuncParam<'db> {
+        let db = self.db();
+        FuncParam {
+            mode: FuncParamMode::View,
+            is_mut: false,
+            has_ref_prefix: false,
+            has_own_prefix: false,
+            is_label_suppressed: false,
+            name: Partial::Present(FuncParamName::Ident(IdentId::make_self(db))),
+            ty: Partial::Present(self.self_ty()),
+            self_ty_fallback: true,
+        }
+    }
+
     pub(super) fn param_mut_underscore_named(
         &self,
         name: IdentId<'db>,

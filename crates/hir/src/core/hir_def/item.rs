@@ -802,6 +802,18 @@ impl<'db> Func<'db> {
         self.modifiers(db).is_extern
     }
 
+    /// Whether this function is the `derive` function of a derive provider
+    /// (`impl Name: Derive for Trait { const fn derive .. }`). Provider
+    /// bodies are written in the compile-time command language and are
+    /// checked by the provider executor in the expansion stage, so the
+    /// ordinary signature/body analyses skip them.
+    pub fn is_derive_provider_fn(self, db: &dyn HirDb) -> bool {
+        matches!(
+            self.scope().parent_item(db),
+            Some(ItemKind::DeriveProvider(_))
+        )
+    }
+
     pub fn is_method(self, db: &dyn HirDb) -> bool {
         let Some(params) = self.params_list(db).to_opt() else {
             return false;

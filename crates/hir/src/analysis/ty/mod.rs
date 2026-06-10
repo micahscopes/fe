@@ -380,9 +380,12 @@ impl ModuleAnalysisPass for BodyAnalysisPass {
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         // Check function and const bodies; contract-specific analysis is handled separately.
+        // Derive provider bodies are written in the compile-time command
+        // language and are checked by the provider executor instead.
         let mut diags: Vec<Box<dyn DiagnosticVoucher + 'db>> = top_mod
             .all_funcs(db)
             .iter()
+            .filter(|func| !func.is_derive_provider_fn(db))
             .flat_map(|func| &ty_check::check_func_body(db, *func).0)
             .map(|diag| diag.to_voucher())
             .collect();
@@ -697,9 +700,11 @@ impl ModuleAnalysisPass for FuncAnalysisPass {
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         // Function diagnostics are handled here; contract-specific diagnostics are separate.
+        // Derive provider bodies are checked by the provider executor.
         top_mod
             .all_funcs(db)
             .iter()
+            .filter(|func| !func.is_derive_provider_fn(db))
             .flat_map(|func| func.diags(db))
             .map(|diag| diag.to_voucher())
             .collect()
