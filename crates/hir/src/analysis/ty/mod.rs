@@ -350,6 +350,9 @@ fn walk<'db>(
                 | ItemKind::Use(_)
                 | ItemKind::Impl(_)
                 | ItemKind::ImplTrait(_)
+                | ItemKind::DeriveProvider(_)
+                | ItemKind::DeriveProviderScope(_)
+                | ItemKind::DeriveDecl(_)
                 | ItemKind::Body(_) => continue,
             };
             defs.entry((domain, item.name(db).unwrap()))

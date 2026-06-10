@@ -66,13 +66,60 @@ pub enum DeriveErrorKind {
     MissingDefaultVariant,
     /// More than one variant is marked `#[default]`.
     MultipleDefaultVariants { first_variant_name: Option<String> },
+    /// Derive-provider machinery (`impl Name: Derive for Trait { .. }`,
+    /// `with Provider { .. }` scopes, `derive .. using Provider` selections)
+    /// parses and lowers to HIR but cannot run yet. This is the depth gate:
+    /// the syntax is accepted but never silently inert.
+    ProviderNotExecutable { construct: ProviderConstruct },
+    /// The target path of a standalone `derive Trait for Type` declaration
+    /// cannot be resolved to an item declared in the same file.
+    UnresolvedDeclTarget { path: String },
+    /// The target path of a standalone `derive Trait for Type` declaration
+    /// resolves to an item that is not a struct or enum.
+    InvalidDeclTarget {
+        path: String,
+        actual: &'static str,
+    },
+    /// The same trait is derived for the same target more than once, either
+    /// by combining `#[derive(..)]` with a `derive` declaration or by two
+    /// identical declarations.
+    ConflictingDerive { trait_name: String, target: String },
+}
+
+/// The derive-provider construct that a
+/// [`DeriveErrorKind::ProviderNotExecutable`] diagnostic points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderConstruct {
+    /// `derive Trait for Type using Provider`
+    NamedSelection,
+    /// `with Provider { .. }`
+    Scope,
+    /// `impl Provider: Derive for Trait { .. }`
+    Definition,
 }
 
 /// The set of traits the compiler knows how to derive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum DerivableTrait {
     Eq,
     Default,
+}
+
+impl DerivableTrait {
+    pub(super) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Eq" => Some(Self::Eq),
+            "Default" => Some(Self::Default),
+            _ => None,
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Eq => "Eq",
+            Self::Default => "Default",
+        }
+    }
 }
 
 pub(super) fn has_derive_attr(ast: &ast::Struct) -> bool {
@@ -83,7 +130,7 @@ pub(super) fn enum_has_derive_attr(ast: &ast::Enum) -> bool {
     has_named_attr(ast.attr_list(), "derive")
 }
 
-fn accumulate_error<'db>(
+pub(super) fn accumulate_error<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     item_name: &Option<String>,
     kind: DeriveErrorKind,
@@ -150,18 +197,14 @@ fn parse_derive_traits<'db>(
             };
 
             let name = key.text().to_string();
-            let derived = match name.as_str() {
-                "Eq" => DerivableTrait::Eq,
-                "Default" => DerivableTrait::Default,
-                _ => {
-                    accumulate_error(
-                        ctxt,
-                        item_name,
-                        DeriveErrorKind::UnknownTrait { name },
-                        arg_range,
-                    );
-                    continue;
-                }
+            let Some(derived) = DerivableTrait::from_name(&name) else {
+                accumulate_error(
+                    ctxt,
+                    item_name,
+                    DeriveErrorKind::UnknownTrait { name },
+                    arg_range,
+                );
+                continue;
             };
 
             if traits.contains(&derived) {
@@ -183,6 +226,34 @@ fn parse_derive_traits<'db>(
         }
     }
 
+    traits
+}
+
+/// Parses the `#[derive(..)]` attributes of an item into the set of traits
+/// it derives, without reporting any diagnostics (malformed arguments,
+/// unknown traits, and duplicates are silently skipped — they are reported
+/// by [`parse_derive_traits`] when the item itself is expanded). Used by the
+/// expansion stage to detect conflicts between attribute derives and
+/// standalone `derive` declarations.
+pub(super) fn attr_derive_traits_silent(attrs: Option<ast::AttrList>) -> Vec<DerivableTrait> {
+    let mut traits = Vec::new();
+    for attr in derive_attrs(attrs) {
+        let args = match attr.args() {
+            Some(args) if attr.value().is_none() => args,
+            _ => continue,
+        };
+        for arg in args {
+            let (Some(key), None) = (arg.key(), arg.value()) else {
+                continue;
+            };
+            let Some(derived) = DerivableTrait::from_name(&key.text().to_string()) else {
+                continue;
+            };
+            if !traits.contains(&derived) {
+                traits.push(derived);
+            }
+        }
+    }
     traits
 }
 
@@ -321,6 +392,22 @@ pub(super) fn lower_derive_impls<'db>(
 ) {
     let item_name = ast.name().map(|n| n.text().to_string());
     let traits = parse_derive_traits(ctxt, ast.attr_list(), &item_name);
+    let desugared = DeriveDesugared::Struct(parser::ast::AstPtr::new(ast));
+    lower_struct_derives(ctxt, ast, struct_, &traits, desugared);
+}
+
+/// Generates `impl` items for `traits` on `struct_`. `desugared` is the
+/// origin attached to the generated items: the annotated struct for
+/// attribute derives, the requesting declaration for standalone
+/// `derive Trait for Type` declarations.
+pub(super) fn lower_struct_derives<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    ast: &ast::Struct,
+    struct_: Struct<'db>,
+    traits: &[DerivableTrait],
+    desugared: DeriveDesugared,
+) {
+    let item_name = ast.name().map(|n| n.text().to_string());
 
     let db = ctxt.db();
 
@@ -357,10 +444,9 @@ pub(super) fn lower_derive_impls<'db>(
 
     let self_ty = derive_self_ty(ctxt, struct_name_ident, &generics);
 
-    let derive_desugared = DeriveDesugared::Struct(parser::ast::AstPtr::new(ast));
-    let mut builder = HirBuilder::new(ctxt, derive_desugared);
+    let mut builder = HirBuilder::new(ctxt, desugared);
 
-    for derived in traits {
+    for derived in traits.iter().copied() {
         match derived {
             DerivableTrait::Eq => lower_derived_eq_impl(&mut builder, self_ty, &generics, &fields),
             DerivableTrait::Default => {
@@ -474,6 +560,24 @@ pub(super) fn lower_enum_derive_impls<'db>(
     let derives_default = traits.contains(&DerivableTrait::Default);
     validate_variant_default_attrs(ctxt, ast, derives_default);
 
+    let desugared = DeriveDesugared::Enum(parser::ast::AstPtr::new(ast));
+    lower_enum_derives(ctxt, ast, enum_, &traits, desugared);
+}
+
+/// Generates `impl` items for `traits` on `enum_`. `desugared` is the
+/// origin attached to the generated items: the annotated enum for attribute
+/// derives, the requesting declaration for standalone
+/// `derive Trait for Type` declarations.
+pub(super) fn lower_enum_derives<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    ast: &ast::Enum,
+    enum_: Enum<'db>,
+    traits: &[DerivableTrait],
+    desugared: DeriveDesugared,
+) {
+    let item_name = ast.name().map(|n| n.text().to_string());
+    let derives_default = traits.contains(&DerivableTrait::Default);
+
     let db = ctxt.db();
 
     let Some(generics) = derive_generics(
@@ -539,10 +643,9 @@ pub(super) fn lower_enum_derive_impls<'db>(
 
     let self_ty = derive_self_ty(ctxt, enum_name_ident, &generics);
 
-    let derive_desugared = DeriveDesugared::Enum(parser::ast::AstPtr::new(ast));
-    let mut builder = HirBuilder::new(ctxt, derive_desugared);
+    let mut builder = HirBuilder::new(ctxt, desugared);
 
-    for derived in traits {
+    for derived in traits.iter().copied() {
         match derived {
             DerivableTrait::Eq => lower_derived_enum_eq_impl(
                 &mut builder,

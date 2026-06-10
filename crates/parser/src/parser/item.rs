@@ -129,6 +129,22 @@ impl super::Parse for ItemScope {
             parser.error(&error_msg);
         }
 
+        if parser.is_ident("derive") {
+            if modifiers.is_pub || modifiers.is_unsafe {
+                parser.error("derive declarations do not support item modifiers");
+            }
+            parser.parse_cp(DeriveDeclScope::default(), checkpoint)?;
+            return Ok(());
+        }
+
+        if parser.is_ident("with") {
+            if modifiers.is_pub || modifiers.is_unsafe {
+                parser.error("derive provider selection scopes do not support item modifiers");
+            }
+            parser.parse_cp(DeriveProviderScopeScope::default(), checkpoint)?;
+            return Ok(());
+        }
+
         parser.expect(
             &[
                 ModKw,
@@ -799,6 +815,39 @@ impl super::Parse for ImplScope {
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
         parser.bump_expected(SyntaxKind::ImplKw);
 
+        if is_named_derive_provider_head(parser) {
+            self.set_kind(SyntaxKind::DeriveProvider);
+            parser.set_scope_recovery_stack(&[
+                SyntaxKind::Ident,
+                SyntaxKind::Colon,
+                SyntaxKind::ForKw,
+                SyntaxKind::LBrace,
+            ]);
+
+            if parser.find_and_pop(
+                SyntaxKind::Ident,
+                ExpectedKind::Name(SyntaxKind::DeriveProvider),
+            )? {
+                parser.bump();
+            }
+            if parser.find_and_pop(SyntaxKind::Colon, ExpectedKind::Unspecified)? {
+                parser.bump();
+                parser.parse_or_recover(PathScope::default())?;
+            }
+            if parser.find_and_pop(SyntaxKind::ForKw, ExpectedKind::Unspecified)? {
+                parser.bump();
+                parser.parse_or_recover(PathScope::default())?;
+            }
+
+            if parser.find_and_pop(
+                SyntaxKind::LBrace,
+                ExpectedKind::Body(SyntaxKind::DeriveProvider),
+            )? {
+                parser.parse(ImplTraitItemListScope::default())?;
+            }
+            return Ok(());
+        }
+
         parse_generic_params_opt(parser, false)?;
 
         let is_impl_trait = parser.dry_run(|parser| {
@@ -841,6 +890,19 @@ impl super::Parse for ImplScope {
         }
         Ok(())
     }
+}
+
+fn is_named_derive_provider_head<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    parser.dry_run(|parser| {
+        if !parser.bump_if(SyntaxKind::Ident) {
+            return false;
+        }
+        if !parser.bump_if(SyntaxKind::Colon) {
+            return false;
+        }
+        parser.parse(PathScope::default()).is_ok()
+            && parser.current_kind() == Some(SyntaxKind::ForKw)
+    })
 }
 
 define_scope! { ImplTraitItemListScope, TraitItemList, (RBrace, FnKw, TypeKw, ConstKw) }
@@ -898,6 +960,49 @@ impl super::Parse for ConstScope {
             parser.bump();
             parse_expr(parser)?;
         }
+        Ok(())
+    }
+}
+
+define_scope! { DeriveDeclScope, DeriveDecl }
+impl super::Parse for DeriveDeclScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        debug_assert!(parser.is_ident("derive"));
+        parser.bump();
+        parser.set_newline_as_trivia(false);
+        parser.set_scope_recovery_stack(&[SyntaxKind::ForKw, SyntaxKind::Ident]);
+
+        parser.parse_or_recover(PathScope::default())?;
+
+        if parser.find_and_pop(SyntaxKind::ForKw, ExpectedKind::Unspecified)? {
+            parser.bump();
+            parser.parse_or_recover(PathScope::default())?;
+        }
+
+        if parser.is_ident("using") {
+            parser.bump();
+            parser.parse_or_recover(PathScope::default())?;
+        }
+
+        Ok(())
+    }
+}
+
+define_scope! { DeriveProviderScopeScope, DeriveProviderScope }
+impl super::Parse for DeriveProviderScopeScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        debug_assert!(parser.is_ident("with"));
+        parser.bump();
+        parser.set_newline_as_trivia(false);
+        parser.set_scope_recovery_stack(&[SyntaxKind::LBrace, SyntaxKind::RBrace]);
+
+        parser.parse_or_recover(PathScope::default())?;
+        parser.parse(ItemListScope::new(true))?;
+
         Ok(())
     }
 }

@@ -7,7 +7,7 @@ use super::{
 use crate::{
     hir_def::{
         AttrListId, Body, BodyKind, CompBinOp, EffectParamListId, FuncParamListId,
-        GenericParamListId, IdentId, PathId, TraitRefId, TupleTypeId, TypeBound, TypeId,
+        GenericParamListId, IdentId, Partial, PathId, TraitRefId, TupleTypeId, TypeBound, TypeId,
         WhereClauseId, item::*,
     },
     lower::msg::lower_msg_as_mod,
@@ -322,6 +322,24 @@ impl<'db> ItemKind<'db> {
                 validate_unsupported_item_attrs(ctxt, impl_.attr_list(), "impl", None);
                 Impl::lower_ast(ctxt, impl_);
             }
+            ast::ItemKind::DeriveProvider(provider) => {
+                validate_unsupported_item_attrs(
+                    ctxt,
+                    provider.attr_list(),
+                    "derive provider",
+                    provider.name().map(|name| name.text().to_string()),
+                );
+                DeriveProvider::lower_ast(ctxt, provider);
+            }
+            ast::ItemKind::DeriveProviderScope(scope) => {
+                validate_unsupported_item_attrs(
+                    ctxt,
+                    scope.attr_list(),
+                    "derive provider selection scope",
+                    None,
+                );
+                DeriveProviderScope::lower_ast(ctxt, scope);
+            }
             ast::ItemKind::Trait(trait_) => {
                 validate_unsupported_item_attrs(
                     ctxt,
@@ -334,6 +352,15 @@ impl<'db> ItemKind<'db> {
             ast::ItemKind::ImplTrait(impl_trait) => {
                 validate_unsupported_item_attrs(ctxt, impl_trait.attr_list(), "impl trait", None);
                 ImplTrait::lower_ast(ctxt, impl_trait);
+            }
+            ast::ItemKind::DeriveDecl(decl) => {
+                validate_unsupported_item_attrs(
+                    ctxt,
+                    decl.attr_list(),
+                    "derive declaration",
+                    None,
+                );
+                DeriveDecl::lower_ast(ctxt, decl);
             }
             ast::ItemKind::Const(const_) => {
                 validate_unsupported_item_attrs(
@@ -870,6 +897,153 @@ impl<'db> AssocConstDef<'db> {
             ty: TypeId::lower_ast_partial(ctxt, ast.ty()),
             value,
         }
+    }
+}
+
+impl<'db> DeriveProvider<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveProvider) -> Self {
+        let name = IdentId::lower_token_partial(ctxt, ast.name());
+        let id = ctxt.joined_id(TrackedItemVariant::DeriveProvider(name));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let derive_path = ast
+            .derive_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let head_path = ast
+            .head_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let origin = HirOrigin::raw(&ast);
+
+        if let Some(item_list) = ast.item_list() {
+            for item in item_list {
+                if let ast::TraitItemKind::Func(func) = item.kind() {
+                    validate_func_attrs(
+                        ctxt,
+                        func.attr_list(),
+                        "fn",
+                        func.sig().name().map(|name| name.text().to_string()),
+                        true,
+                    );
+                    Func::lower_ast(ctxt, func);
+                }
+            }
+        }
+
+        let provider = Self::new(
+            ctxt.db(),
+            id,
+            name,
+            attributes,
+            derive_path,
+            head_path,
+            ctxt.top_mod(),
+            origin,
+        );
+        ctxt.leave_item_scope(provider)
+    }
+}
+
+impl<'db> DeriveProviderScope<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveProviderScope) -> Self {
+        let idx = ctxt.next_derive_provider_scope_idx();
+        let id = ctxt.joined_id(TrackedItemVariant::DeriveProviderScope(idx));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let provider_path = ast
+            .provider_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let origin = HirOrigin::raw(&ast);
+
+        let scope = Self::new(
+            ctxt.db(),
+            id,
+            attributes,
+            provider_path,
+            ctxt.top_mod(),
+            origin,
+        );
+
+        if let Some(item_list) = ast.item_list() {
+            for item in item_list {
+                match item.kind() {
+                    Some(ast::ItemKind::DeriveDecl(decl)) => {
+                        validate_unsupported_item_attrs(
+                            ctxt,
+                            decl.attr_list(),
+                            "derive declaration",
+                            None,
+                        );
+                        DeriveDecl::lower_ast_with_provider_scope(ctxt, decl, scope);
+                    }
+                    Some(_) => ItemKind::lower_ast(ctxt, item),
+                    None => {}
+                }
+            }
+        }
+
+        ctxt.leave_item_scope(scope)
+    }
+}
+
+impl<'db> DeriveDecl<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::DeriveDecl) -> Self {
+        Self::lower_ast_with_provider_scope_opt(ctxt, ast, None)
+    }
+
+    pub(super) fn lower_ast_with_provider_scope(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::DeriveDecl,
+        provider_scope: DeriveProviderScope<'db>,
+    ) -> Self {
+        Self::lower_ast_with_provider_scope_opt(ctxt, ast, Some(provider_scope))
+    }
+
+    fn lower_ast_with_provider_scope_opt(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::DeriveDecl,
+        provider_scope: Option<DeriveProviderScope<'db>>,
+    ) -> Self {
+        let idx = ctxt.next_derive_decl_idx();
+        let id = ctxt.joined_id(TrackedItemVariant::DeriveDecl(idx));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let head_path = ast
+            .head_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let target_path = ast
+            .target_path()
+            .map(|path| PathId::lower_ast(ctxt, path))
+            .into();
+        let explicit_provider_path = ast.provider_path().map(|path| PathId::lower_ast(ctxt, path));
+        let scoped_provider_path =
+            provider_scope.and_then(|scope| scope.provider_path(ctxt.db()).to_opt());
+        let selected_provider_from_scope =
+            explicit_provider_path.is_none() && scoped_provider_path.is_some();
+        let selected_provider_path = explicit_provider_path
+            .or(scoped_provider_path)
+            .map(Partial::Present);
+        let origin = HirOrigin::raw(&ast);
+
+        let decl = Self::new(
+            ctxt.db(),
+            id,
+            attributes,
+            head_path,
+            target_path,
+            selected_provider_path,
+            provider_scope,
+            selected_provider_from_scope,
+            ctxt.top_mod(),
+            origin,
+        );
+        ctxt.leave_item_scope(decl)
     }
 }
 

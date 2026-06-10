@@ -16,8 +16,8 @@ use super::{
 };
 use crate::{
     hir_def::{
-        Body, Const, Contract, Enum, Func, Impl, ImplTrait, ItemKind, Mod, StaticAssert, Struct,
-        TopLevelMod, Trait, TypeAlias, Use,
+        Body, Const, Contract, DeriveDecl, DeriveProvider, DeriveProviderScope, Enum, Func, Impl,
+        ImplTrait, ItemKind, Mod, StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
     },
     span::{
         DesugaredOrigin, DesugaredUseFocus, MsgDesugaredFocus,
@@ -412,6 +412,72 @@ impl<'db> LazyImplTraitSpan<'db> {
 
     pub fn associated_const(self, idx: usize) -> LazyTraitConstSpan<'db> {
         self.item_list().assoc_const(idx)
+    }
+}
+
+define_lazy_span_node!(
+    LazyDeriveProviderSpan,
+    ast::DeriveProvider,
+    @token {
+        (name, name),
+    }
+    @node {
+        (attributes, attr_list, LazyAttrListSpan),
+        (derive_path, derive_path, LazyPathSpan),
+        (head_path, head_path, LazyPathSpan),
+        (item_list, item_list, LazyTraitItemListSpan),
+    }
+);
+impl<'db> LazyDeriveProviderSpan<'db> {
+    pub fn new(p: DeriveProvider<'db>) -> Self {
+        Self(crate::span::transition::SpanTransitionChain::new(p))
+    }
+}
+
+define_lazy_span_node!(
+    LazyDeriveProviderScopeSpan,
+    ast::DeriveProviderScope,
+    @node {
+        (attributes, attr_list, LazyAttrListSpan),
+        (provider_path, provider_path, LazyPathSpan),
+    }
+);
+impl<'db> LazyDeriveProviderScopeSpan<'db> {
+    pub fn new(s: DeriveProviderScope<'db>) -> Self {
+        Self(crate::span::transition::SpanTransitionChain::new(s))
+    }
+}
+
+define_lazy_span_node!(
+    LazyDeriveDeclSpan,
+    ast::DeriveDecl,
+    @node {
+        (attributes, attr_list, LazyAttrListSpan),
+        (head_path, head_path, LazyPathSpan),
+        (target_path, target_path, LazyPathSpan),
+        (provider_path, provider_path, LazyPathSpan),
+    }
+);
+impl<'db> LazyDeriveDeclSpan<'db> {
+    pub fn new(d: DeriveDecl<'db>) -> Self {
+        Self(crate::span::transition::SpanTransitionChain::new(d))
+    }
+
+    pub fn scoped_provider_path(mut self) -> LazyPathSpan<'db> {
+        fn f(origin: ResolvedOrigin, _: LazyArg) -> ResolvedOrigin {
+            origin.map(|node| {
+                let scope = node.ancestors().find_map(ast::DeriveProviderScope::cast)?;
+                scope
+                    .provider_path()
+                    .map(|path| path.syntax().clone().into())
+            })
+        }
+
+        self.0.push(LazyTransitionFn {
+            f,
+            arg: LazyArg::None,
+        });
+        LazyPathSpan(self.0)
     }
 }
 

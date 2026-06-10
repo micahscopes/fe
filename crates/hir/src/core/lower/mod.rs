@@ -22,7 +22,7 @@ use crate::{
 };
 pub use abi_field::{AbiFieldContext, AbiFieldDiagnostic};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
-pub use derive::{DeriveError, DeriveErrorKind};
+pub use derive::{DeriveError, DeriveErrorKind, ProviderConstruct};
 pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
 pub use event::{EventError, EventErrorKind};
 pub(crate) use expansion::expanded_items_impl;
@@ -235,6 +235,8 @@ pub(super) struct FileLowerCtxt<'db> {
     builder: ScopeGraphBuilder<'db>,
     next_impl_idx: u32,
     next_impl_trait_idx: u32,
+    next_derive_provider_scope_idx: u32,
+    next_derive_decl_idx: u32,
     next_static_assert_idx: u32,
 }
 
@@ -244,6 +246,8 @@ impl<'db> FileLowerCtxt<'db> {
             builder: ScopeGraphBuilder::enter_top_mod(db, top_mod),
             next_impl_idx: 0,
             next_impl_trait_idx: 0,
+            next_derive_provider_scope_idx: 0,
+            next_derive_decl_idx: 0,
             next_static_assert_idx: 0,
         }
     }
@@ -257,6 +261,8 @@ impl<'db> FileLowerCtxt<'db> {
             builder: ScopeGraphBuilder::enter_expansion(db, top_mod),
             next_impl_idx: 0,
             next_impl_trait_idx: 0,
+            next_derive_provider_scope_idx: 0,
+            next_derive_decl_idx: 0,
             next_static_assert_idx: 0,
         }
     }
@@ -402,6 +408,18 @@ impl<'db> FileLowerCtxt<'db> {
     pub(super) fn next_static_assert_idx(&mut self) -> u32 {
         let idx = self.next_static_assert_idx;
         self.next_static_assert_idx += 1;
+        idx
+    }
+
+    pub(super) fn next_derive_decl_idx(&mut self) -> u32 {
+        let idx = self.next_derive_decl_idx;
+        self.next_derive_decl_idx += 1;
+        idx
+    }
+
+    pub(super) fn next_derive_provider_scope_idx(&mut self) -> u32 {
+        let idx = self.next_derive_provider_scope_idx;
+        self.next_derive_provider_scope_idx += 1;
         idx
     }
 

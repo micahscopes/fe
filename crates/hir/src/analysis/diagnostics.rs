@@ -671,6 +671,59 @@ impl DiagnosticVoucher for crate::DeriveError {
                     None => "only one variant can be marked `#[default]`".to_string(),
                 }],
             ),
+            DeriveErrorKind::ProviderNotExecutable { construct } => match construct {
+                crate::ProviderConstruct::NamedSelection => (
+                    8,
+                    "named derive providers are not yet executable".to_string(),
+                    "cannot select a derive provider with `using` yet".to_string(),
+                    vec![
+                        "remove `using ..` to request the compiler-internal derive".to_string(),
+                    ],
+                ),
+                crate::ProviderConstruct::Scope => (
+                    9,
+                    "scoped derive providers are not yet executable".to_string(),
+                    "`with ..` provider scopes cannot run yet".to_string(),
+                    vec![
+                        "derive declarations inside this scope are not expanded".to_string(),
+                        "move them to the top level to use the compiler-internal derive"
+                            .to_string(),
+                    ],
+                ),
+                crate::ProviderConstruct::Definition => (
+                    10,
+                    "derive provider definitions are not yet executable".to_string(),
+                    format!("provider `{item_name}` is never run"),
+                    vec![
+                        "the provider body is type-checked but cannot be selected by any derive yet"
+                            .to_string(),
+                    ],
+                ),
+            },
+            DeriveErrorKind::UnresolvedDeclTarget { path } => (
+                11,
+                format!("cannot resolve derive target `{path}`"),
+                "not found in this file".to_string(),
+                vec![
+                    "`derive .. for ..` declarations currently support struct and enum targets declared in the same file"
+                        .to_string(),
+                ],
+            ),
+            DeriveErrorKind::InvalidDeclTarget { path, actual } => (
+                12,
+                format!("`{path}` is not a struct or enum"),
+                format!("this resolves to a {actual}"),
+                vec!["`derive .. for ..` targets must be structs or enums".to_string()],
+            ),
+            DeriveErrorKind::ConflictingDerive { trait_name, target } => (
+                13,
+                format!("`{trait_name}` is already derived for `{target}`"),
+                "duplicate derive here".to_string(),
+                vec![
+                    "remove this declaration or the other `derive` that requests the same trait"
+                        .to_string(),
+                ],
+            ),
         };
 
         let error_code = GlobalErrorCode::new(DiagnosticPass::DeriveLower, code);

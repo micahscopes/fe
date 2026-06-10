@@ -2,7 +2,7 @@ use common::InputDb;
 pub use core::lower::{
     AbiFieldContext, AbiFieldDiagnostic, AttrMisuseError, AttrMisuseErrorKind, DeriveError,
     DeriveErrorKind, ErrorDiagnostic, ErrorDiagnosticKind, EventError, EventErrorKind,
-    SelectorError, SelectorErrorKind, parse::ParserError,
+    ProviderConstruct, SelectorError, SelectorErrorKind, parse::ParserError,
 };
 
 pub mod analysis;

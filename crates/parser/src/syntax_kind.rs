@@ -407,6 +407,12 @@ pub enum SyntaxKind {
     TraitItemList,
     /// `impl Trait for Foo { .. }`
     ImplTrait,
+    /// `impl StableEq: Derive for Eq { .. }`
+    DeriveProvider,
+    /// `with StableEq { derive Eq for Foo }`
+    DeriveProviderScope,
+    /// `derive Trait for Foo`
+    DeriveDecl,
     /// `const FOO: i32 = 1`
     Const,
     /// `static_assert(expr)`
@@ -758,6 +764,9 @@ impl SyntaxKind {
             SyntaxKind::TraitTypeItem => "`trait` type item",
             SyntaxKind::TraitConstItem => "`trait` const item",
             SyntaxKind::ImplTrait => "`impl` trait block",
+            SyntaxKind::DeriveProvider => "derive provider block",
+            SyntaxKind::DeriveProviderScope => "derive provider selection scope",
+            SyntaxKind::DeriveDecl => "derive declaration",
             SyntaxKind::Const => "const definition",
             SyntaxKind::StaticAssert => "static assertion",
             SyntaxKind::Use => "`use` statement",

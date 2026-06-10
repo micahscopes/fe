@@ -45,6 +45,9 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Impl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Trait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::ImplTrait))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveProvider))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveProviderScope))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveDecl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Const))
             .or_else(|| support::child(self.syntax()).map(ItemKind::StaticAssert))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Use))
@@ -471,6 +474,66 @@ impl ImplTrait {
 }
 
 ast_node! {
+    /// `impl StableEq: Derive for Eq { .. }`
+    pub struct DeriveProvider,
+    SK::DeriveProvider,
+}
+impl super::AttrListOwner for DeriveProvider {}
+impl DeriveProvider {
+    pub fn name(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Ident)
+    }
+
+    pub fn derive_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).next()
+    }
+
+    pub fn head_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).nth(1)
+    }
+
+    pub fn item_list(&self) -> Option<TraitItemList> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `with StableEq { derive Eq for Foo }`
+    pub struct DeriveProviderScope,
+    SK::DeriveProviderScope,
+}
+impl super::AttrListOwner for DeriveProviderScope {}
+impl DeriveProviderScope {
+    pub fn provider_path(&self) -> Option<super::Path> {
+        support::child(self.syntax())
+    }
+
+    pub fn item_list(&self) -> Option<ItemList> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `derive Eq for Foo using StableEq`
+    pub struct DeriveDecl,
+    SK::DeriveDecl,
+}
+impl super::AttrListOwner for DeriveDecl {}
+impl DeriveDecl {
+    pub fn head_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).next()
+    }
+
+    pub fn target_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).nth(1)
+    }
+
+    pub fn provider_path(&self) -> Option<super::Path> {
+        support::children(self.syntax()).nth(2)
+    }
+}
+
+ast_node! {
     /// `const FOO: u32 = 42;`
     pub struct Const,
     SK::Const,
@@ -745,6 +808,9 @@ pub enum ItemKind {
     Impl(Impl),
     Trait(Trait),
     ImplTrait(ImplTrait),
+    DeriveProvider(DeriveProvider),
+    DeriveProviderScope(DeriveProviderScope),
+    DeriveDecl(DeriveDecl),
     Const(Const),
     StaticAssert(StaticAssert),
     Use(Use),
@@ -993,6 +1059,46 @@ mod tests {
         let t: TypeAlias = parse_item(source);
         assert_eq!(t.alias().unwrap().text(), "MyError");
         assert!(matches!(t.ty().unwrap().kind(), TypeKind::Path(_)));
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn derive_decl() {
+        let source = r#"
+                derive Eq for Foo using StableEq
+            "#;
+        let decl: DeriveDecl = parse_item(source);
+        assert_eq!(decl.head_path().unwrap().to_string(), "Eq");
+        assert_eq!(decl.target_path().unwrap().to_string(), "Foo");
+        assert_eq!(decl.provider_path().unwrap().to_string(), "StableEq");
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn named_derive_provider() {
+        let source = r#"
+                impl StableEq: Derive for Eq {
+                    const fn derive<T>() -> Evidence<Eq<T>>
+                }
+            "#;
+        let provider: DeriveProvider = parse_item(source);
+        assert_eq!(provider.name().unwrap().text(), "StableEq");
+        assert_eq!(provider.derive_path().unwrap().to_string(), "Derive");
+        assert_eq!(provider.head_path().unwrap().to_string(), "Eq");
+        assert_eq!(provider.item_list().unwrap().iter().count(), 1);
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn derive_provider_scope() {
+        let source = r#"
+                with StableEq {
+                    derive Eq for Foo
+                }
+            "#;
+        let scope: DeriveProviderScope = parse_item(source);
+        assert_eq!(scope.provider_path().unwrap().to_string(), "StableEq");
+        assert_eq!(scope.item_list().unwrap().into_iter().count(), 1);
     }
 
     #[test]

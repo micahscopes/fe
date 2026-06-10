@@ -311,6 +311,21 @@ impl<'db> ScopeGraphBuilder<'db> {
                 EdgeKind::anon()
             }
 
+            DeriveProvider(_) => {
+                self.graph.add_lex_edge(item_node, parent_node);
+                EdgeKind::anon()
+            }
+
+            DeriveProviderScope(_) => {
+                self.graph.add_lex_edge(item_node, parent_node);
+                EdgeKind::anon()
+            }
+
+            DeriveDecl(_) => {
+                self.graph.add_lex_edge(item_node, parent_node);
+                EdgeKind::anon()
+            }
+
             Const(inner) => {
                 self.graph.add_lex_edge(item_node, parent_node);
                 inner

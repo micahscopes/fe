@@ -10,15 +10,15 @@ use thin_vec::ThinVec;
 
 use super::{
     DesugaredOrigin, DesugaredUseFocus, HirOrigin, LazySpan, UseDesugared, body_ast, const_ast,
-    contract_ast, enum_ast, expr::ExprRoot, func_ast, impl_ast, impl_trait_ast, mod_ast,
-    pat::PatRoot, static_assert_ast, stmt::StmtRoot, struct_ast, trait_ast, type_alias_ast,
-    use_ast,
+    contract_ast, derive_decl_ast, derive_provider_ast, derive_provider_scope_ast, enum_ast,
+    expr::ExprRoot, func_ast, impl_ast, impl_trait_ast, mod_ast, pat::PatRoot, static_assert_ast,
+    stmt::StmtRoot, struct_ast, trait_ast, type_alias_ast, use_ast,
 };
 use crate::{
     HirDb, SpannedHirDb,
     hir_def::{
-        Body, Const, Contract, Enum, Func, Impl, ImplTrait, ItemKind, Mod, StaticAssert, Struct,
-        TopLevelMod, Trait, TypeAlias, Use,
+        Body, Const, Contract, DeriveDecl, DeriveProvider, DeriveProviderScope, Enum, Func, Impl,
+        ImplTrait, ItemKind, Mod, StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
     },
     lower::top_mod_ast,
 };
@@ -78,6 +78,9 @@ impl<'db> SpanTransitionChain<'db> {
             ChainRoot::Impl(i) => i.top_mod(db),
             ChainRoot::Trait(t) => t.top_mod(db),
             ChainRoot::ImplTrait(i) => i.top_mod(db),
+            ChainRoot::DeriveProvider(p) => p.top_mod(db),
+            ChainRoot::DeriveProviderScope(s) => s.top_mod(db),
+            ChainRoot::DeriveDecl(d) => d.top_mod(db),
             ChainRoot::Const(c) => c.top_mod(db),
             ChainRoot::StaticAssert(a) => a.top_mod(db),
             ChainRoot::Use(u) => u.top_mod(db),
@@ -106,6 +109,9 @@ pub(crate) enum ChainRoot<'db> {
     Impl(Impl<'db>),
     Trait(Trait<'db>),
     ImplTrait(ImplTrait<'db>),
+    DeriveProvider(DeriveProvider<'db>),
+    DeriveProviderScope(DeriveProviderScope<'db>),
+    DeriveDecl(DeriveDecl<'db>),
     Const(Const<'db>),
     StaticAssert(StaticAssert<'db>),
     Use(Use<'db>),
@@ -211,6 +217,9 @@ impl ChainInitiator for ChainRoot<'_> {
                 ItemKind::Impl(impl_) => impl_.init(db),
                 ItemKind::Trait(trait_) => trait_.init(db),
                 ItemKind::ImplTrait(impl_trait) => impl_trait.init(db),
+                ItemKind::DeriveProvider(provider) => provider.init(db),
+                ItemKind::DeriveProviderScope(scope) => scope.init(db),
+                ItemKind::DeriveDecl(decl) => decl.init(db),
                 ItemKind::Const(const_) => const_.init(db),
                 ItemKind::StaticAssert(assert_) => assert_.init(db),
                 ItemKind::Use(use_) => use_.init(db),
@@ -226,6 +235,9 @@ impl ChainInitiator for ChainRoot<'_> {
             Self::Impl(impl_) => impl_.init(db),
             Self::Trait(trait_) => trait_.init(db),
             Self::ImplTrait(impl_trait) => impl_trait.init(db),
+            Self::DeriveProvider(provider) => provider.init(db),
+            Self::DeriveProviderScope(scope) => scope.init(db),
+            Self::DeriveDecl(decl) => decl.init(db),
             Self::Const(const_) => const_.init(db),
             Self::StaticAssert(assert_) => assert_.init(db),
             Self::Use(use_) => use_.init(db),
@@ -300,6 +312,9 @@ impl_chain_root! {
     (Impl<'db>, impl_ast),
     (Trait<'db>, trait_ast),
     (ImplTrait<'db>, impl_trait_ast),
+    (DeriveProvider<'db>, derive_provider_ast),
+    (DeriveProviderScope<'db>, derive_provider_scope_ast),
+    (DeriveDecl<'db>, derive_decl_ast),
     (Const<'db>, const_ast),
     (StaticAssert<'db>, static_assert_ast),
     (Use<'db>, use_ast),
@@ -537,6 +552,9 @@ impl DesugaredOrigin {
             }
             Self::Derive(super::DeriveDesugared::Enum(derive_enum)) => {
                 derive_enum.to_node(&root).syntax().text_range()
+            }
+            Self::Derive(super::DeriveDesugared::Decl(derive_decl)) => {
+                derive_decl.to_node(&root).syntax().text_range()
             }
         };
 

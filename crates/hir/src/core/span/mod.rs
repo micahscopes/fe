@@ -5,8 +5,8 @@ use salsa::Update;
 use crate::{
     HirDb, SpannedHirDb,
     core::hir_def::{
-        Body, Const, Contract, Enum, Func, Impl, ImplTrait, Mod, StaticAssert, Struct, TopLevelMod,
-        Trait, TypeAlias, Use,
+        Body, Const, Contract, DeriveDecl, DeriveProvider, DeriveProviderScope, Enum, Func, Impl,
+        ImplTrait, Mod, StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
     },
     core::lower::top_mod_ast,
 };
@@ -38,7 +38,8 @@ pub mod lazy_spans {
             LazyRecordInitExprSpan, LazyUnExprSpan,
         },
         item::{
-            LazyBodySpan, LazyConstSpan, LazyContractRecvSpan, LazyContractSpan, LazyEnumSpan,
+            LazyBodySpan, LazyConstSpan, LazyContractRecvSpan, LazyContractSpan,
+            LazyDeriveDeclSpan, LazyDeriveProviderScopeSpan, LazyDeriveProviderSpan, LazyEnumSpan,
             LazyFieldDefListSpan, LazyFieldDefSpan, LazyFuncSignatureSpan, LazyFuncSpan,
             LazyImplSpan, LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyRecvArmListSpan,
             LazyRecvArmSpan, LazyStaticAssertSpan, LazyStructSpan, LazyTopModSpan, LazyTraitSpan,
@@ -152,6 +153,27 @@ pub fn impl_trait_ast<'db>(
     db: &'db dyn SpannedHirDb,
     item: ImplTrait<'db>,
 ) -> &'db HirOrigin<ast::ImplTrait> {
+    item.origin(db)
+}
+
+pub fn derive_provider_ast<'db>(
+    db: &'db dyn SpannedHirDb,
+    item: DeriveProvider<'db>,
+) -> &'db HirOrigin<ast::DeriveProvider> {
+    item.origin(db)
+}
+
+pub fn derive_provider_scope_ast<'db>(
+    db: &'db dyn SpannedHirDb,
+    item: DeriveProviderScope<'db>,
+) -> &'db HirOrigin<ast::DeriveProviderScope> {
+    item.origin(db)
+}
+
+pub fn derive_decl_ast<'db>(
+    db: &'db dyn SpannedHirDb,
+    item: DeriveDecl<'db>,
+) -> &'db HirOrigin<ast::DeriveDecl> {
     item.origin(db)
 }
 
@@ -289,6 +311,10 @@ pub enum DeriveDesugared {
     Struct(AstPtr<ast::Struct>),
     /// The original `enum` AST node annotated with `#[derive(..)]`.
     Enum(AstPtr<ast::Enum>),
+    /// The standalone `derive Trait for Type` declaration that requested the
+    /// impl. Diagnostics on decl-generated items point at the declaration,
+    /// not at the target type.
+    Decl(AstPtr<ast::DeriveDecl>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
