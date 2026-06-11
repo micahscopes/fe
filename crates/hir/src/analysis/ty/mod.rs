@@ -48,6 +48,7 @@ pub mod pattern_ir;
 pub mod pattern_types;
 pub mod provider;
 pub(crate) mod scratch;
+pub mod term;
 pub mod trait_def;
 pub mod trait_lower;
 pub mod trait_resolution; // This line was previously 'pub mod name_resolution;'
