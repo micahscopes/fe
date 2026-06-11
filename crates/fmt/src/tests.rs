@@ -117,3 +117,39 @@ fn test_quote_multiline_body_roundtrips() {
         "quote keyword/body shape lost! got:\n{result}"
     );
 }
+
+#[test]
+fn test_quote_arms_template_roundtrips() {
+    // The arm-fold line: a splice of the arms built so far plus one
+    // `${variant}(group) => body` arm; binder groups carry no singleton
+    // trailing comma.
+    assert_roundtrip(
+        "fn f() {\n    arms = quote {   ${arms} ,  ${variant}( lhs ) => ${inner}   }\n}\n",
+        "fn f() {\n    arms = quote { ${arms}, ${variant}(lhs) => ${inner} }\n}\n",
+    );
+}
+
+#[test]
+fn test_quote_match_with_pattern_holes_roundtrips() {
+    assert_roundtrip(
+        "fn f() {\n    inner = quote( other ) { match other { ${variant}(rhs) => ${cmp}, _ => false } }\n}\n",
+        "fn f() {\n    inner = quote(other) {\n        match other {\n            ${variant}(rhs) => ${cmp},\n            _ => false,\n        }\n    }\n}\n",
+    );
+}
+
+#[test]
+fn test_quote_match_arm_splice_roundtrips() {
+    assert_roundtrip(
+        "fn f() {\n    body = quote { match self { ${arms} } }\n}\n",
+        "fn f() {\n    body = quote {\n        match self {\n            ${arms},\n        }\n    }\n}\n",
+    );
+}
+
+#[test]
+fn test_empty_quote_roundtrips() {
+    // The empty quote is the seed of arm folds.
+    assert_roundtrip(
+        "fn f() {\n    let seed = quote {   }\n}\n",
+        "fn f() {\n    let seed = quote {}\n}\n",
+    );
+}

@@ -440,6 +440,13 @@ impl QuoteExpr {
     pub fn body(&self) -> Option<BlockExpr> {
         support::child(self.syntax())
     }
+
+    /// Returns the match-arm sequence body
+    /// (`quote { ${arms}, ${variant}(group) => expr }`), if the quote is an
+    /// arm-sequence template rather than an expression template.
+    pub fn arms(&self) -> Option<MatchArmList> {
+        support::child(self.syntax())
+    }
 }
 
 ast_node! {

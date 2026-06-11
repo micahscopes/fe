@@ -293,7 +293,38 @@ impl super::Parse for QuoteExprScope {
         if parser.current_kind() != Some(SyntaxKind::LBrace) {
             return parser.error_and_recover("`quote` requires a body `{ ... }`");
         }
-        parser.parse(BlockExprScope::default())?;
+        // Quote bodies come in two structural shapes: an expression body
+        // (a block, the v1 form) and a match-arm sequence (`pat => expr`
+        // items and `${...}` arm splices). A `=>` at brace depth zero can
+        // only belong to an arm of the quote body itself — arms of nested
+        // `match` expressions sit behind their own `{`.
+        let is_arms = parser.dry_run(|p| {
+            p.bump_expected(SyntaxKind::LBrace);
+            let mut depth = 0usize;
+            loop {
+                match p.current_kind() {
+                    None => break false,
+                    Some(SyntaxKind::LBrace | SyntaxKind::LParen | SyntaxKind::LBracket) => {
+                        depth += 1;
+                        p.bump();
+                    }
+                    Some(SyntaxKind::RBrace | SyntaxKind::RParen | SyntaxKind::RBracket) => {
+                        if depth == 0 {
+                            break false;
+                        }
+                        depth -= 1;
+                        p.bump();
+                    }
+                    Some(SyntaxKind::FatArrow) if depth == 0 => break true,
+                    Some(_) => p.bump(),
+                }
+            }
+        });
+        if is_arms {
+            parser.parse(MatchArmListScope::default())?;
+        } else {
+            parser.parse(BlockExprScope::default())?;
+        }
         Ok(())
     }
 }
@@ -405,6 +436,26 @@ impl super::Parse for MatchArmScope {
 
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
         parser.set_newline_as_trivia(false);
+
+        // `${arms}` standing alone (no binder group, no `=>`) is an arm
+        // splice inside a quote body: the hole is the arm's only content.
+        if parser.current_kind() == Some(SyntaxKind::Dollar) {
+            let is_splice = parser.dry_run(|p| {
+                if !p
+                    .parse_ok(QuoteHoleExprScope::default())
+                    .is_ok_and(identity)
+                {
+                    return false;
+                }
+                !matches!(
+                    p.current_kind(),
+                    Some(SyntaxKind::FatArrow | SyntaxKind::LParen)
+                )
+            });
+            if is_splice {
+                return parser.parse(QuoteHoleExprScope::default());
+            }
+        }
 
         parser.set_scope_recovery_stack(&[SyntaxKind::FatArrow]);
         parse_pat(parser)?;

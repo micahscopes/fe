@@ -537,6 +537,23 @@ impl<'db> Pat<'db> {
                     rhs_pat.pretty_print(db, body)
                 )
             }
+            Pat::QuoteHole(inner, binders) => {
+                let inner_ref = unwrap_partial_ref(inner.data(db, body), "Pat::QuoteHole expr");
+                let mut result = format!("${{{}}}", inner_ref.pretty_print(db, body, 0));
+                if !binders.is_empty() {
+                    let binders_str = binders
+                        .iter()
+                        .map(|p| {
+                            let pat =
+                                unwrap_partial_ref(p.data(db, body), "Pat::QuoteHole binder");
+                            pat.pretty_print(db, body)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    result.push_str(&format!("({})", binders_str));
+                }
+                result
+            }
         }
     }
 }
@@ -835,12 +852,41 @@ impl<'db> Expr<'db> {
                             .join(", ")
                     )
                 };
-                let template_ref = unwrap_partial_ref(template.data(db, body), "Quote::body");
-                // Quote bodies always carry braces.
-                let body_str = if matches!(template_ref, Expr::Block(_)) {
-                    template_ref.pretty_print(db, body, indent)
-                } else {
-                    format!("{{ {} }}", template_ref.pretty_print(db, body, indent))
+                let body_str = match template {
+                    QuoteBody::Expr(template) => {
+                        let template_ref =
+                            unwrap_partial_ref(template.data(db, body), "Quote::body");
+                        // Quote bodies always carry braces.
+                        if matches!(template_ref, Expr::Block(_)) {
+                            template_ref.pretty_print(db, body, indent)
+                        } else {
+                            format!("{{ {} }}", template_ref.pretty_print(db, body, indent))
+                        }
+                    }
+                    QuoteBody::Arms(arms) => {
+                        let arms_str = arms
+                            .iter()
+                            .map(|arm| {
+                                let arm_body = unwrap_partial_ref(
+                                    arm.body.data(db, body),
+                                    "Quote arm body",
+                                );
+                                let body_str = arm_body.pretty_print(db, body, indent);
+                                match arm.pat.data(db, body) {
+                                    // An arm splice: the hole is the arm's
+                                    // only content.
+                                    Partial::Absent => body_str,
+                                    Partial::Present(pat) => format!(
+                                        "{} => {}",
+                                        pat.pretty_print(db, body),
+                                        body_str
+                                    ),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("{{ {arms_str} }}")
+                    }
                 };
                 format!("quote{open_str} {body_str}")
             }

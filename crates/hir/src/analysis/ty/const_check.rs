@@ -143,6 +143,9 @@ impl<'db> ConstFnChecker<'db, '_> {
                 self.check_let_pat(*lhs);
                 self.check_let_pat(*rhs);
             }
+            // Splice hole pats only occur inside quote bodies, which this
+            // pass never enters (see the quote arms in `check_expr`).
+            Pat::QuoteHole(..) => {}
         }
     }
 
@@ -261,6 +264,9 @@ impl<'db> ConstFnChecker<'db, '_> {
                 self.check_match_pat(*lhs);
                 self.check_match_pat(*rhs);
             }
+            // Splice hole pats only occur inside quote bodies, which this
+            // pass never enters (see the quote arms in `check_expr`).
+            Pat::QuoteHole(..) => {}
         }
     }
 }

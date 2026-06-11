@@ -12,7 +12,10 @@
 // generated impl (requirements, method signatures, and method body
 // expressions). Method bodies can be spelled either as builder expression
 // commands or as `quote { .. }` templates; both elaborate into the same
-// generated expressions.
+// generated expressions. Templates cover `match` too: `${variant}(group)`
+// pattern holes bind a variant's payload under a group name, and arm lists
+// are folded as quotes of `pat => expr` arms spliced with a bare `${...}`
+// hole in arm position.
 
 use core::default::Default
 use core::ops::Eq
@@ -53,43 +56,49 @@ impl StableEq: Derive for Eq {
                 }
                 seen = true
             }
-            let mut body = builder.bool(true)
+            // An uninhabited enum has no values to compare; `eq` is trivially
+            // `true` (and can never be called).
+            let mut body = quote { true }
             if seen {
                 // match self {
-                //     Enum::V(__lhs_..) => match other {
-                //         Enum::V(__rhs_..) => __lhs_0 == __rhs_0 && ..
+                //     Enum::V(lhs_..) => match other {
+                //         Enum::V(rhs_..) => lhs_0 == rhs_0 && ..
                 //         _ => false
                 //     }
                 //     ..
                 // }
-                let mut arms = builder.match_expr(builder.self_ref())
+                // The arm list is folded as a quote of match arms: each
+                // iteration splices the arms built so far (`${arms}`, the
+                // empty quote seeds the fold) and appends one arm. The
+                // `${variant}(lhs)` pattern hole binds the variant's payload
+                // under the `lhs` group; `lhs.${field}` reaches one binder.
+                let mut arms = quote { }
                 for variant in reflect.variants() {
-                    let mut cmp = builder.bool(true)
+                    let mut cmp = quote { true }
                     let mut has_field = false
                     for field in variant.fields() {
                         builder.require<Eq>(field.ty())
-                        let field_cmp = builder.eq(
-                            builder.variant_binder(variant, field, "__lhs"),
-                            builder.variant_binder(variant, field, "__rhs"),
-                        )
+                        let field_cmp = quote(lhs, rhs) { lhs.${field} == rhs.${field} }
                         if has_field {
-                            cmp = builder.and(cmp, field_cmp)
+                            cmp = quote { ${cmp} && ${field_cmp} }
                         } else {
                             cmp = field_cmp
                             has_field = true
                         }
                     }
-                    let mut inner = builder.match_expr(builder.arg_ref("other"))
-                    inner = builder.with_arm(inner, builder.variant_pat(variant, "__rhs"), cmp)
+                    let mut inner = quote(other) { match other { ${variant}(rhs) => ${cmp} } }
                     if multi {
-                        inner = builder.with_arm(inner, builder.wildcard_pat(), builder.bool(false))
+                        inner = quote(other) {
+                            match other {
+                                ${variant}(rhs) => ${cmp},
+                                _ => false
+                            }
+                        }
                     }
-                    arms = builder.with_arm(arms, builder.variant_pat(variant, "__lhs"), inner)
+                    arms = quote { ${arms}, ${variant}(lhs) => ${inner} }
                 }
-                body = arms
+                body = quote { match self { ${arms} } }
             }
-            // An uninhabited enum has no values to compare; `eq` is trivially
-            // `true` (and can never be called).
             let mut sig = builder.method("eq")
             sig = builder.with_self(sig)
             sig = builder.with_arg(sig, "other", builder.target_ty())

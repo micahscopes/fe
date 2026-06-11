@@ -2095,7 +2095,7 @@ impl<'db> TyChecker<'db> {
             return false;
         };
         match pat_data {
-            Pat::WildCard | Pat::Rest | Pat::Lit(_) => false,
+            Pat::WildCard | Pat::Rest | Pat::Lit(_) | Pat::QuoteHole(..) => false,
             Pat::Path(..) => self
                 .env
                 .pat_binding(pat)
@@ -2147,7 +2147,7 @@ impl<'db> TyChecker<'db> {
                 self.retype_pattern_bindings_for_borrow(*lhs, kind);
                 self.retype_pattern_bindings_for_borrow(*rhs, kind);
             }
-            Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
+            Pat::WildCard | Pat::Rest | Pat::Lit(..) | Pat::QuoteHole(..) => {}
         }
     }
 
@@ -2187,7 +2187,7 @@ impl<'db> TyChecker<'db> {
                 self.seed_pat_bindings(*lhs);
                 self.seed_pat_bindings(*rhs);
             }
-            Pat::WildCard | Pat::Rest | Pat::Lit(..) => {}
+            Pat::WildCard | Pat::Rest | Pat::Lit(..) | Pat::QuoteHole(..) => {}
         }
     }
 
@@ -3036,7 +3036,9 @@ impl<'db> TypedBody<'db> {
                     _ => None,
                 }
             }
-            Partial::Present(Pat::WildCard | Pat::Rest | Pat::Lit(_) | Pat::Path(_, _))
+            Partial::Present(
+                Pat::WildCard | Pat::Rest | Pat::Lit(_) | Pat::Path(_, _) | Pat::QuoteHole(..),
+            )
             | Partial::Absent => None,
         }
     }

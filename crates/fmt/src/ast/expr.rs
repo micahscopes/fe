@@ -1196,7 +1196,14 @@ impl ToDoc for ast::MatchArm {
 
         let pat = match self.pat() {
             Some(p) => p.to_doc(ctx),
-            None => return alloc.nil(),
+            // An arm splice inside a quote body: `${arms}` has no pattern
+            // and no `=>` — the hole is the arm's whole content.
+            None => {
+                return self
+                    .body()
+                    .map(|b| b.to_doc(ctx))
+                    .unwrap_or_else(|| alloc.nil());
+            }
         };
 
         let body = match self.body() {
@@ -1319,9 +1326,12 @@ impl ToDoc for ast::QuoteExpr {
                 .map(|open| open.to_doc(ctx))
                 .unwrap_or_else(|| alloc.nil());
 
-            let body = match self.body() {
-                Some(b) => quote_body_doc(&b, ctx),
-                None => return alloc.text("quote").append(open_doc),
+            let body = if let Some(b) = self.body() {
+                quote_body_doc(&b, ctx)
+            } else if let Some(arms) = self.arms() {
+                quote_arms_doc(&arms, ctx)
+            } else {
+                return alloc.text("quote").append(open_doc);
             };
 
             return alloc
@@ -1341,6 +1351,9 @@ impl ToDoc for ast::QuoteExpr {
             |node| {
                 if let Some(open) = ast::QuoteOpenList::cast(node.clone()) {
                     return Some(TokenPiece::new(open.to_doc(ctx)).space_after());
+                }
+                if let Some(arms) = ast::MatchArmList::cast(node.clone()) {
+                    return Some(TokenPiece::new(arms.to_doc(ctx)));
                 }
                 ast::BlockExpr::cast(node).map(|body| TokenPiece::new(body.to_doc(ctx)))
             },
@@ -1372,6 +1385,35 @@ fn quote_body_doc<'a>(body: &ast::BlockExpr, ctx: &'a RewriteContext<'a>) -> Doc
     alloc
         .text("{")
         .append(alloc.line().append(only.to_doc(ctx)).nest(indent))
+        .append(alloc.line())
+        .append(alloc.text("}"))
+        .group()
+}
+
+/// Formats a quote arm-sequence body
+/// (`quote { ${arms}, ${variant}(group) => expr }`): arms stay inline,
+/// comma-separated, and break with indentation only when too wide.
+fn quote_arms_doc<'a>(arms: &ast::MatchArmList, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+    let alloc = &ctx.alloc;
+    let items: Vec<_> = arms
+        .syntax()
+        .children()
+        .filter_map(ast::MatchArm::cast)
+        .map(|arm| arm.to_doc(ctx))
+        .collect();
+    if items.is_empty() {
+        return alloc.text("{ }");
+    }
+    let indent = ctx.config.indent_width as isize;
+    let sep = alloc.text(",").append(alloc.line());
+    alloc
+        .text("{")
+        .append(
+            alloc
+                .line()
+                .append(alloc.intersperse(items, sep))
+                .nest(indent),
+        )
         .append(alloc.line())
         .append(alloc.text("}"))
         .group()

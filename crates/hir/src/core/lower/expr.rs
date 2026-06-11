@@ -233,10 +233,18 @@ impl<'db> Expr<'db> {
                             .collect()
                     })
                     .unwrap_or_default();
-                let body_expr = quote
-                    .body()
-                    .and_then(|b| ast::Expr::cast(b.syntax().clone()));
-                let body = Self::push_to_body_opt(ctxt, body_expr);
+                let body = if let Some(arms) = quote.arms() {
+                    QuoteBody::Arms(
+                        arms.into_iter()
+                            .map(|arm| MatchArm::lower_ast(ctxt, arm))
+                            .collect(),
+                    )
+                } else {
+                    let body_expr = quote
+                        .body()
+                        .and_then(|b| ast::Expr::cast(b.syntax().clone()));
+                    QuoteBody::Expr(Self::push_to_body_opt(ctxt, body_expr))
+                };
                 Self::Quote { open, body }
             }
 

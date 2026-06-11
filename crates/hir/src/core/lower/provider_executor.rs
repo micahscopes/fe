@@ -28,8 +28,8 @@ use crate::{
     analysis::ty::ty_def::MAX_INLINE_STRING_BYTES,
     hir_def::{
         BinOp, Body, CompBinOp, Cond, CondId, Expr, ExprId, GenericArg, GenericArgListId, IdentId,
-        LitKind, LogicalBinOp, Partial, Pat, PatId, PathId, Stmt, StmtId, StringId, TypeId,
-        TypeKind,
+        LitKind, LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId, QuoteBody, Stmt, StmtId,
+        StringId, TypeId, TypeKind,
     },
     span::HirOrigin,
 };
@@ -249,12 +249,19 @@ struct QuoteTemplate<'db> {
     /// Declared open names (`quote(other) { .. }`); `self` is implicitly
     /// open.
     open: Vec<IdentId<'db>>,
-    /// The template body (a block expression in the provider's body).
-    body: ExprId,
+    /// The template body: a block expression in the provider's body, or a
+    /// match-arm sequence.
+    body: QuoteBody,
     /// Captured hole values, keyed by the hole expression
-    /// (`Expr::QuoteHole` / `Expr::QuoteFieldHole`).
+    /// (`Expr::QuoteHole` / `Expr::QuoteFieldHole`) for expression holes,
+    /// and by the hole's inner expression for pattern holes
+    /// (`Pat::QuoteHole`).
     holes: Vec<(ExprId, Value<'db>)>,
 }
+
+/// A binder group introduced by a `${variant}(group)` arm pattern enclosing
+/// the elaboration point: the group name and the matched variant's index.
+type BinderGroup<'db> = (IdentId<'db>, usize);
 
 /// A builder command recorded during provider execution.
 #[derive(Debug, Clone)]
@@ -718,9 +725,15 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             },
             Expr::Quote { open, body } => {
                 let open = open.clone();
-                let body = *body;
+                let body = body.clone();
                 let mut holes = Vec::new();
-                self.capture_quote_holes(body, &mut holes)?;
+                match &body {
+                    QuoteBody::Expr(root) => self.capture_quote_holes(*root, &mut holes)?,
+                    QuoteBody::Arms(arms) => {
+                        let arms = arms.clone();
+                        self.capture_arm_holes(&arms, &mut holes)?;
+                    }
+                }
                 self.quotes.push(QuoteTemplate {
                     origin: expr,
                     open,
@@ -794,8 +807,17 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 }
                 Ok(())
             }
+            Expr::Match(scrutinee, arms) => {
+                let scrutinee = *scrutinee;
+                let arms = match arms {
+                    Partial::Present(arms) => arms.clone(),
+                    Partial::Absent => Vec::new(),
+                };
+                self.capture_quote_holes(scrutinee, holes)?;
+                self.capture_arm_holes(&arms, holes)
+            }
             // Leaves carry no holes; the remaining constructs are outside
-            // the v1 template vocabulary and are rejected at elaboration.
+            // the template vocabulary and are rejected at elaboration.
             Expr::Lit(..)
             | Expr::Path(..)
             | Expr::Un(..)
@@ -808,48 +830,138 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             | Expr::Array(..)
             | Expr::ArrayRep(..)
             | Expr::If(..)
-            | Expr::Match(..)
             | Expr::Assign(..)
             | Expr::AugAssign(..)
             | Expr::With(..) => Ok(()),
         }
     }
 
-    /// Elaborates a quote template into a generated expression for emission
-    /// under `sig`. Open names (the quote's own and those of every spliced
-    /// quote) must match the destination signature's parameter names.
-    fn elaborate_quote(&mut self, quote: QuoteId, sig: SigId) -> Result<GenExprId, ExecError> {
-        let template = self.quotes[quote.0].clone();
+    /// Captures hole values from a match-arm sequence: pattern holes in arm
+    /// patterns (keyed by the hole's inner expression) and expression holes
+    /// in arm bodies. Arm splices (`${arms}` standing alone) have an absent
+    /// pattern and their hole as the arm body, so the body walk covers them.
+    fn capture_arm_holes(
+        &mut self,
+        arms: &[MatchArm],
+        holes: &mut Vec<(ExprId, Value<'db>)>,
+    ) -> Result<(), ExecError> {
+        for arm in arms {
+            self.capture_pat_holes(arm.pat, holes)?;
+            self.capture_quote_holes(arm.body, holes)?;
+        }
+        Ok(())
+    }
 
+    fn capture_pat_holes(
+        &mut self,
+        pat: PatId,
+        holes: &mut Vec<(ExprId, Value<'db>)>,
+    ) -> Result<(), ExecError> {
+        let Partial::Present(data) = pat.data(self.db, self.body) else {
+            return Ok(());
+        };
+        match data {
+            Pat::QuoteHole(inner, _binders) => {
+                let inner = *inner;
+                let value = self.eval_expr(inner)?;
+                holes.push((inner, value));
+                Ok(())
+            }
+            // Other patterns carry no live holes; the ones outside the
+            // template vocabulary are rejected at elaboration.
+            Pat::WildCard
+            | Pat::Rest
+            | Pat::Lit(..)
+            | Pat::Tuple(..)
+            | Pat::Path(..)
+            | Pat::PathTuple(..)
+            | Pat::Record(..)
+            | Pat::Or(..) => Ok(()),
+        }
+    }
+
+    /// Validates a template's declared open names against the destination:
+    /// the emitted method's parameter names, plus the binder groups of the
+    /// match arms enclosing the splice point.
+    fn validate_open_names(
+        &mut self,
+        template: &QuoteTemplate<'db>,
+        sig: SigId,
+        binders: &[BinderGroup<'db>],
+    ) -> Result<(), ExecError> {
         let sig_data = &self.sigs[sig.0];
         let method_name = sig_data.name;
         let takes_self = sig_data.takes_self;
         let params: Vec<IdentId<'db>> = sig_data.args.iter().map(|(name, _)| *name).collect();
         for open in &template.open {
-            if !params.contains(open) {
-                let mut binds = Vec::new();
-                if takes_self {
-                    binds.push("`self`".to_string());
-                }
-                binds.extend(params.iter().map(|param| format!("`{}`", param.data(self.db))));
-                let detail = format!(
+            if params.contains(open) || binders.iter().any(|(group, _)| group == open) {
+                continue;
+            }
+            let mut binds = Vec::new();
+            if takes_self {
+                binds.push("`self`".to_string());
+            }
+            binds.extend(params.iter().map(|param| format!("`{}`", param.data(self.db))));
+            let binds = if binds.is_empty() {
+                "no names".to_string()
+            } else {
+                binds.join(", ")
+            };
+            let detail = if binders.is_empty() {
+                format!(
                     "the quote declares open name `{}`, but the emitted method `{}` binds {}; \
                      open names bind against the destination method's parameter names",
                     open.data(self.db),
                     method_name.data(self.db),
-                    if binds.is_empty() {
-                        "no names".to_string()
-                    } else {
-                        binds.join(", ")
-                    },
-                );
-                return Err(self.invalid_quote(template.origin, &detail));
-            }
+                    binds,
+                )
+            } else {
+                let groups = binders
+                    .iter()
+                    .map(|(group, _)| format!("`{}`", group.data(self.db)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "the quote declares open name `{}`, but the emitted method `{}` binds {} \
+                     and the enclosing match arms bind {}; open names bind against the \
+                     destination method's parameters or enclosing arm binder groups",
+                    open.data(self.db),
+                    method_name.data(self.db),
+                    binds,
+                    groups,
+                )
+            };
+            return Err(self.invalid_quote(template.origin, &detail));
         }
+        Ok(())
+    }
 
-        // v1 quotes are expression quotes: the body block must hold exactly
-        // one expression.
-        let Partial::Present(Expr::Block(stmts)) = template.body.data(self.db, self.body) else {
+    /// Elaborates a quote template into a generated expression for emission
+    /// under `sig`. Open names (the quote's own and those of every spliced
+    /// quote) must match the destination signature's parameter names or the
+    /// binder groups of enclosing match arms.
+    fn elaborate_quote(
+        &mut self,
+        quote: QuoteId,
+        sig: SigId,
+        binders: &[BinderGroup<'db>],
+    ) -> Result<GenExprId, ExecError> {
+        let template = self.quotes[quote.0].clone();
+        self.validate_open_names(&template, sig, binders)?;
+
+        // Expression quotes: the body block must hold exactly one
+        // expression.
+        let block = match &template.body {
+            QuoteBody::Expr(block) => *block,
+            QuoteBody::Arms(_) => {
+                return Err(self.invalid_quote(
+                    template.origin,
+                    "the quote holds match arms; expression positions need an expression \
+                     template (wrap the arms in a `match`)",
+                ));
+            }
+        };
+        let Partial::Present(Expr::Block(stmts)) = block.data(self.db, self.body) else {
             return Err(self.invalid_quote(template.origin, "malformed quote body"));
         };
         let root = match stmts.as_slice() {
@@ -858,18 +970,154 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 _ => {
                     return Err(self.invalid_quote(
                         template.origin,
-                        "v1 quote bodies must be a single expression",
+                        "quote bodies must be a single expression",
                     ));
                 }
             },
+            [] => {
+                return Err(self.invalid_quote(
+                    template.origin,
+                    "the quote is empty; an empty quote only splices in match-arm position",
+                ));
+            }
             _ => {
                 return Err(self.invalid_quote(
                     template.origin,
-                    "v1 quote bodies must be a single expression",
+                    "quote bodies must be a single expression",
                 ));
             }
         };
-        self.elab_template_expr(root, &template, sig)
+        self.elab_template_expr(root, &template, sig, binders)
+    }
+
+    /// Elaborates a quote spliced in match-arm position, appending its arms
+    /// to `out`. The spliced quote must be a match-arm template
+    /// (`quote { pat => expr, .. }`) or the empty quote (`quote { }`).
+    fn elaborate_quote_arms(
+        &mut self,
+        quote: QuoteId,
+        sig: SigId,
+        binders: &[BinderGroup<'db>],
+        out: &mut Vec<(GenPatId, GenExprId)>,
+    ) -> Result<(), ExecError> {
+        let template = self.quotes[quote.0].clone();
+        self.validate_open_names(&template, sig, binders)?;
+        match &template.body {
+            QuoteBody::Arms(arms) => {
+                let arms = arms.clone();
+                self.elab_arm_items(&arms, &template, sig, binders, out)
+            }
+            QuoteBody::Expr(block) => {
+                // The empty quote is the empty arm sequence — the natural
+                // seed for arm folds.
+                if let Partial::Present(Expr::Block(stmts)) = block.data(self.db, self.body)
+                    && stmts.is_empty()
+                {
+                    return Ok(());
+                }
+                Err(self.invalid_quote(
+                    template.origin,
+                    "the quote holds an expression template; arm splices need match arms \
+                     (`pat => expr` items) or an empty `quote { }`",
+                ))
+            }
+        }
+    }
+
+    /// Elaborates a match-arm sequence (the arms of a template `match` or
+    /// the items of a match-arm template) into generated (pattern, body)
+    /// pairs.
+    fn elab_arm_items(
+        &mut self,
+        arms: &[MatchArm],
+        template: &QuoteTemplate<'db>,
+        sig: SigId,
+        binders: &[BinderGroup<'db>],
+        out: &mut Vec<(GenPatId, GenExprId)>,
+    ) -> Result<(), ExecError> {
+        for arm in arms {
+            let range = self.expr_range(arm.body);
+            self.tick(range)?;
+            match arm.pat.data(self.db, self.body) {
+                // An arm splice: `${arms}` standing alone has no pattern
+                // and carries its hole as the arm body.
+                Partial::Absent => {
+                    let Partial::Present(Expr::QuoteHole(_)) = arm.body.data(self.db, self.body)
+                    else {
+                        return Err(
+                            self.invalid_quote(arm.body, "malformed match arm in quote body")
+                        );
+                    };
+                    let value = self.quote_hole_value(arm.body, template)?;
+                    let Value::Quote(inner) = value else {
+                        let detail = format!(
+                            "a {} cannot fill an arm splice; arm splices accept quote values \
+                             holding match arms",
+                            value_kind_name(&value),
+                        );
+                        return Err(self.invalid_quote(arm.body, &detail));
+                    };
+                    self.elaborate_quote_arms(inner, sig, binders, out)?;
+                }
+                Partial::Present(Pat::WildCard) => {
+                    let body = self.elab_template_expr(arm.body, template, sig, binders)?;
+                    let pat = self.push_gen_pat(GenPat::Wildcard);
+                    out.push((pat, body));
+                }
+                Partial::Present(Pat::QuoteHole(inner, groups)) => {
+                    let (inner, groups) = (*inner, groups.clone());
+                    let value = self.quote_hole_value(inner, template)?;
+                    let Value::Variant(variant) = value else {
+                        let detail = format!(
+                            "a {} cannot fill a pattern hole; pattern holes accept `Variant` \
+                             handles",
+                            value_kind_name(&value),
+                        );
+                        return Err(self.invalid_quote(inner, &detail));
+                    };
+                    let group = self.binder_group_name(inner, &groups)?;
+                    let pat = self.push_gen_pat(GenPat::Variant {
+                        variant,
+                        prefix: group,
+                    });
+                    let mut arm_binders = binders.to_vec();
+                    arm_binders.push((group, variant));
+                    let body = self.elab_template_expr(arm.body, template, sig, &arm_binders)?;
+                    out.push((pat, body));
+                }
+                Partial::Present(_) => {
+                    return Err(self.invalid_quote(
+                        arm.body,
+                        "this pattern is not supported in quote match arms (arms take \
+                         `${variant}(group)` pattern holes and `_`)",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The binder-group name of a `${variant}(group)` pattern hole.
+    fn binder_group_name(
+        &mut self,
+        hole_expr: ExprId,
+        groups: &[PatId],
+    ) -> Result<IdentId<'db>, ExecError> {
+        let group = match groups {
+            [group] => self.simple_pat_binding(*group),
+            _ => None,
+        };
+        let Some(name) = group else {
+            return Err(self.invalid_quote(
+                hole_expr,
+                "variant pattern holes bind their payload under a single group name: \
+                 `${variant}(group)`",
+            ));
+        };
+        if name.is_self(self.db) {
+            return Err(self.invalid_quote(hole_expr, "a binder group cannot be named `self`"));
+        }
+        Ok(name)
     }
 
     fn elab_template_expr(
@@ -877,6 +1125,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         expr: ExprId,
         template: &QuoteTemplate<'db>,
         sig: SigId,
+        binders: &[BinderGroup<'db>],
     ) -> Result<GenExprId, ExecError> {
         let range = self.expr_range(expr);
         self.tick(range)?;
@@ -892,37 +1141,37 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             Expr::Lit(LitKind::Int(_)) => Err(self.invalid_quote(
                 expr,
-                "integer literals are not supported in v1 quote bodies",
+                "integer literals are not supported in quote bodies",
             )),
             Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::And)) => {
                 let (lhs, rhs) = (*lhs, *rhs);
-                let lhs = self.elab_template_expr(lhs, template, sig)?;
-                let rhs = self.elab_template_expr(rhs, template, sig)?;
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
                 Ok(self.push_gen(GenExpr::And(lhs, rhs)))
             }
             Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)) => {
                 let (lhs, rhs) = (*lhs, *rhs);
-                let lhs = self.elab_template_expr(lhs, template, sig)?;
-                let rhs = self.elab_template_expr(rhs, template, sig)?;
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
                 Ok(self.push_gen(GenExpr::EqCmp(lhs, rhs)))
             }
             Expr::Bin(..) => Err(self.invalid_quote(
                 expr,
-                "this operator is not supported in v1 quote bodies (v1 supports `&&` and `==`)",
+                "this operator is not supported in quote bodies (quotes support `&&` and `==`)",
             )),
             Expr::Path(_) => {
                 let Some(name) = self.simple_expr_path_ident(expr) else {
                     return Err(self.invalid_quote(
                         expr,
-                        "paths in v1 quote bodies must be a single name",
+                        "paths in quote bodies must be a single name",
                     ));
                 };
-                self.elab_template_name(expr, name, template, sig)
+                self.elab_template_name(expr, name, template, sig, binders)
             }
             Expr::QuoteHole(_) => {
                 let value = self.quote_hole_value(expr, template)?;
                 match value {
-                    Value::Quote(inner) => self.elaborate_quote(inner, sig),
+                    Value::Quote(inner) => self.elaborate_quote(inner, sig, binders),
                     Value::Bool(value) => Ok(self.push_gen(GenExpr::Bool(value))),
                     Value::Str(value) => {
                         self.check_inline_capacity(expr, value)?;
@@ -947,6 +1196,45 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Expr::QuoteFieldHole(base, _) => {
                 let base = *base;
                 let value = self.quote_hole_value(expr, template)?;
+                // `group.${field}` — a payload-binder reference when the
+                // base is an open name bound by an enclosing arm pattern.
+                if let Some(name) = self.simple_expr_path_ident(base)
+                    && !name.is_self(self.db)
+                    && let Some(variant) = binders
+                        .iter()
+                        .rev()
+                        .find_map(|(group, variant)| (*group == name).then_some(*variant))
+                {
+                    if !template.open.contains(&name) {
+                        let detail = format!(
+                            "`{}` matches a binder group of an enclosing match arm but is \
+                             not declared open; declare it with `quote({}) {{ .. }}`",
+                            name.data(self.db),
+                            name.data(self.db),
+                        );
+                        return Err(self.invalid_quote(expr, &detail));
+                    }
+                    let Value::Field(field) = value else {
+                        let detail = format!(
+                            "member-access holes (`base.${{...}}`) accept `Field` handles, \
+                             found a {}",
+                            value_kind_name(&value),
+                        );
+                        return Err(self.invalid_quote(expr, &detail));
+                    };
+                    if field.variant != Some(variant) {
+                        let detail = format!(
+                            "the field does not belong to the variant matched by `{}`",
+                            name.data(self.db),
+                        );
+                        return Err(self.invalid_quote(expr, &detail));
+                    }
+                    return Ok(self.push_gen(GenExpr::VariantBinder {
+                        variant,
+                        field: field.index,
+                        prefix: name,
+                    }));
+                }
                 let Value::Field(field) = value else {
                     let detail = format!(
                         "member-access holes (`base.${{...}}`) accept `Field` handles, \
@@ -955,7 +1243,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     );
                     return Err(self.invalid_quote(expr, &detail));
                 };
-                let base = self.elab_template_expr(base, template, sig)?;
+                let base = self.elab_template_expr(base, template, sig, binders)?;
                 Ok(self.push_gen(GenExpr::FieldGet(base, field)))
             }
             Expr::MethodCall(receiver, method, generic_args, args) => {
@@ -965,21 +1253,31 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 if !generic_args.data(self.db).is_empty() {
                     return Err(self.invalid_quote(
                         expr,
-                        "generic method calls are not supported in v1 quote bodies",
+                        "generic method calls are not supported in quote bodies",
                     ));
                 }
                 let receiver = *receiver;
                 let arg_exprs: Vec<ExprId> = args.iter().map(|arg| arg.expr).collect();
-                let receiver = self.elab_template_expr(receiver, template, sig)?;
+                let receiver = self.elab_template_expr(receiver, template, sig, binders)?;
                 let mut call_args = Vec::with_capacity(arg_exprs.len());
                 for arg in arg_exprs {
-                    call_args.push(self.elab_template_expr(arg, template, sig)?);
+                    call_args.push(self.elab_template_expr(arg, template, sig, binders)?);
                 }
                 Ok(self.push_gen(GenExpr::MethodCall {
                     receiver,
                     method,
                     args: call_args,
                 }))
+            }
+            Expr::Match(scrutinee, arms) => {
+                let scrutinee = *scrutinee;
+                let arms = match arms {
+                    Partial::Present(arms) => arms.clone(),
+                    Partial::Absent => {
+                        return Err(self.invalid_quote(expr, "malformed quote body"));
+                    }
+                };
+                self.elab_template_match(expr, scrutinee, &arms, template, sig, binders)
             }
             Expr::Field(..) => Err(self.invalid_quote(
                 expr,
@@ -1001,30 +1299,105 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             | Expr::Array(..)
             | Expr::ArrayRep(..)
             | Expr::If(..)
-            | Expr::Match(..)
             | Expr::Assign(..)
             | Expr::AugAssign(..)
             | Expr::With(..) => Err(self.invalid_quote(
                 expr,
-                "this construct is not supported in v1 quote bodies (v1 supports literals, \
-                 `&&`, `==`, `self`, declared open names, method calls, and `${...}` holes)",
+                "this construct is not supported in quote bodies (quotes support literals, \
+                 `&&`, `==`, `self`, declared open names, method calls, `match`, and \
+                 `${...}` holes)",
             )),
         }
     }
 
+    /// Elaborates a `match` inside a quote body. Variant arm patterns name
+    /// the derive target's variants, so the scrutinee must be the target
+    /// value (`self` or a target-typed parameter), and the arms must cover
+    /// every reflected variant unless a `_` arm is present.
+    fn elab_template_match(
+        &mut self,
+        expr: ExprId,
+        scrutinee: ExprId,
+        arms: &[MatchArm],
+        template: &QuoteTemplate<'db>,
+        sig: SigId,
+        binders: &[BinderGroup<'db>],
+    ) -> Result<GenExprId, ExecError> {
+        let scrutinee_gen = self.elab_template_expr(scrutinee, template, sig, binders)?;
+        let is_target_value = match &self.exprs[scrutinee_gen.0] {
+            GenExpr::SelfRef => true,
+            GenExpr::ArgRef(name) => {
+                let name = *name;
+                self.sigs[sig.0].args.iter().any(|(arg, ty)| {
+                    *arg == name
+                        && (*ty == self.target_ty || *ty == TypeId::fallback_self_ty(self.db))
+                })
+            }
+            _ => false,
+        };
+        if !is_target_value {
+            return Err(self.invalid_quote(
+                scrutinee,
+                "match scrutinees in quote bodies must be `self` or a parameter of the \
+                 derive target's type (variant patterns name the target's variants)",
+            ));
+        }
+
+        let mut gen_arms = Vec::new();
+        self.elab_arm_items(arms, template, sig, binders, &mut gen_arms)?;
+
+        // Exhaustiveness over the target's variants, checked at the
+        // template so the failure names the provider's match rather than
+        // surfacing later from the generated code.
+        let has_wildcard = gen_arms
+            .iter()
+            .any(|(pat, _)| matches!(self.pats[pat.0], GenPat::Wildcard));
+        if !has_wildcard {
+            let mut uncovered = None;
+            for variant in self.reflection.variants() {
+                let covered = gen_arms.iter().any(|(pat, _)| {
+                    matches!(
+                        &self.pats[pat.0],
+                        GenPat::Variant { variant: v, .. } if *v == variant.index
+                    )
+                });
+                if !covered {
+                    uncovered = Some(variant.name);
+                    break;
+                }
+            }
+            if let Some(name) = uncovered {
+                let detail = format!(
+                    "the template match does not cover variant `{}`; add a \
+                     `${{variant}}(group)` arm for it or a `_` arm",
+                    name.data(self.db),
+                );
+                return Err(self.invalid_quote(expr, &detail));
+            }
+        }
+
+        Ok(self.push_gen(GenExpr::Match {
+            scrutinee: scrutinee_gen,
+            arms: gen_arms,
+        }))
+    }
+
     /// Resolves a bare name in a quote template: `self`, or a declared open
-    /// name bound by the destination method.
+    /// name bound at the destination — by the innermost enclosing arm's
+    /// binder group of that name, or by the emitted method's parameters.
     fn elab_template_name(
         &mut self,
         expr: ExprId,
         name: IdentId<'db>,
         template: &QuoteTemplate<'db>,
         sig: SigId,
+        binders: &[BinderGroup<'db>],
     ) -> Result<GenExprId, ExecError> {
         let sig_data = &self.sigs[sig.0];
         let method_name = sig_data.name;
         let takes_self = sig_data.takes_self;
         let is_param = sig_data.args.iter().any(|(arg, _)| *arg == name);
+        let is_group = binders.iter().any(|(group, _)| *group == name);
         if name.is_self(self.db) {
             if !takes_self {
                 let detail = format!(
@@ -1036,6 +1409,18 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             return Ok(self.push_gen(GenExpr::SelfRef));
         }
         if template.open.contains(&name) {
+            // Binder groups shadow method parameters; a bare group never
+            // names a value — its payload is reached field by field.
+            if is_group {
+                let detail = format!(
+                    "`{}` is bound by an enclosing `${{variant}}({})` arm pattern as a \
+                     binder group; payload fields are reached with `{}.${{field}}`",
+                    name.data(self.db),
+                    name.data(self.db),
+                    name.data(self.db),
+                );
+                return Err(self.invalid_quote(expr, &detail));
+            }
             // Validated against the destination signature when elaboration
             // started.
             return Ok(self.push_gen(GenExpr::ArgRef(name)));
@@ -1047,9 +1432,16 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 name.data(self.db),
                 name.data(self.db),
             )
+        } else if is_group {
+            format!(
+                "`{}` matches a binder group of an enclosing match arm but is not declared \
+                 open; declare it with `quote({}) {{ .. }}`",
+                name.data(self.db),
+                name.data(self.db),
+            )
         } else {
             format!(
-                "cannot resolve `{}` in a quote body; v1 quotes support `self`, declared \
+                "cannot resolve `{}` in a quote body; quotes support `self`, declared \
                  open names, and `${{...}}` holes",
                 name.data(self.db),
             )
@@ -1176,7 +1568,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     // Quotes land here: the template elaborates into the
                     // same generated-expression layer the explicit builder
                     // calls produce.
-                    Value::Quote(quote) => self.elaborate_quote(quote, sig)?,
+                    Value::Quote(quote) => self.elaborate_quote(quote, sig, &[])?,
                     _ => {
                         return Err(self.invalid_method(
                             body_arg.expr,
@@ -1615,8 +2007,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     }
 
     fn push_pat(&mut self, pat: GenPat<'db>) -> Value<'db> {
+        Value::Pat(self.push_gen_pat(pat))
+    }
+
+    fn push_gen_pat(&mut self, pat: GenPat<'db>) -> GenPatId {
         self.pats.push(pat);
-        Value::Pat(GenPatId(self.pats.len() - 1))
+        GenPatId(self.pats.len() - 1)
     }
 
     fn push_ty(&mut self, ty: GenTy<'db>) -> Value<'db> {

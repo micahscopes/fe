@@ -1,0 +1,31 @@
+// An arm splice (`${...}` standing alone in a match's arm list) takes a
+// quote of match arms; splicing an expression template there is a precise
+// executor failure.
+
+trait Tagged {
+    fn tag(self) -> bool
+}
+
+impl ExprAsArms: Derive for Tagged {
+    const fn derive<T>(ev: own Evidence<Tagged<T>>) -> Evidence<Tagged<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Tagged<T>>,
+        )
+    {
+        let not_arms = quote { true }
+        let mut sig = builder.method("tag")
+        sig = builder.with_self(sig)
+        sig = builder.returns(sig, builder.ty<bool>())
+        builder.emit_method(sig, quote { match self { ${not_arms} } })
+        builder.finish()
+        ev
+    }
+}
+
+enum Mode {
+    On,
+    Off,
+}
+
+derive Tagged for Mode using ExprAsArms

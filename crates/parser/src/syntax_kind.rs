@@ -370,6 +370,8 @@ pub enum SyntaxKind {
     RecordPatField,
     /// `pat1 | pat2`
     OrPat,
+    /// `${expr}(group)` splice hole in pattern position inside a quote body
+    QuoteHolePat,
 
     // MatchArms.
     // `pat => { stmtlist }`
@@ -753,6 +755,7 @@ impl SyntaxKind {
             SyntaxKind::RecordPatFieldList => "record pattern field list",
             SyntaxKind::RecordPatField => "record pattern field",
             SyntaxKind::OrPat => "`or` pattern",
+            SyntaxKind::QuoteHolePat => "`${...}` splice hole pattern",
             SyntaxKind::MatchArm => "`match` arm",
             SyntaxKind::MatchArmList => "`match` arm list",
             SyntaxKind::Item => "item",

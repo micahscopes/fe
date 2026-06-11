@@ -13,7 +13,8 @@ use crate::{
         Expr, ExprId, Field, FieldDef, FieldDefListId, FieldIndex, FieldParent, Func, FuncParam,
         FuncParamListId, FuncParamName, GenericArg, GenericArgListId, GenericParam,
         GenericParamListId, IdentId, Impl, ImplTrait, ItemKind, KindBound, LitKind, MatchArm, Mod,
-        Partial, Pat, PatId, PathId, PathKind, StaticAssert, Stmt, StmtId, Struct, TopLevelMod,
+        Partial, Pat, PatId, PathId, PathKind, QuoteBody, StaticAssert, Stmt, StmtId, Struct,
+        TopLevelMod,
         Trait, TraitRefId, TupleTypeId, TypeAlias, TypeBound, TypeId, TypeKind, Use, UseAlias,
         UsePathId, UsePathSegment, VariantDef, VariantDefListId, VariantKind, WhereClauseId,
         WherePredicate,
@@ -1600,9 +1601,17 @@ pub fn walk_expr<'db, V>(
             visit_node_in_body!(visitor, ctxt, body_expr, expr);
         }
 
-        Expr::Quote { open: _, body } => {
-            visit_node_in_body!(visitor, ctxt, body, expr);
-        }
+        Expr::Quote { open: _, body } => match body {
+            QuoteBody::Expr(body) => {
+                visit_node_in_body!(visitor, ctxt, body, expr);
+            }
+            QuoteBody::Arms(arms) => {
+                for arm in arms {
+                    visit_node_in_body!(visitor, ctxt, &arm.pat, pat);
+                    visit_node_in_body!(visitor, ctxt, &arm.body, expr);
+                }
+            }
+        },
 
         Expr::QuoteHole(inner) => {
             visit_node_in_body!(visitor, ctxt, inner, expr);
@@ -1740,6 +1749,13 @@ where
         Pat::Or(lhs, rhs) => {
             visit_node_in_body!(visitor, ctxt, lhs, pat);
             visit_node_in_body!(visitor, ctxt, rhs, pat);
+        }
+
+        Pat::QuoteHole(inner, binders) => {
+            visit_node_in_body!(visitor, ctxt, inner, expr);
+            for binder in binders {
+                visit_node_in_body!(visitor, ctxt, binder, pat);
+            }
         }
 
         Pat::WildCard | Pat::Rest => {}
