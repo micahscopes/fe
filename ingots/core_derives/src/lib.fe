@@ -10,7 +10,9 @@
 // iteration (`reflect.fields()`, `reflect.variants()`, `variant.fields()`),
 // boolean locals, `if`/`else`, and `builder` commands that describe the
 // generated impl (requirements, method signatures, and method body
-// expressions).
+// expressions). Method bodies can be spelled either as builder expression
+// commands or as `quote { .. }` templates; both elaborate into the same
+// generated expressions.
 
 use core::default::Default
 use core::ops::Eq
@@ -23,28 +25,20 @@ impl StableEq: Derive for Eq {
         )
     {
         if reflect.is_struct() {
-            // self.f0 == other.f0 && self.f1 == other.f1 && ..
-            // (an empty struct compares as `true`)
-            let mut cmp = builder.bool(true)
-            let mut has_field = false
+            // true && self.f0 == other.f0 && self.f1 == other.f1 && ..
+            // The comparison is spelled out as a quote fold; the leading
+            // `true` seed is folded away by MIR. `other` is an open name,
+            // bound by the `eq` method the quote is emitted into.
+            let mut body = quote { true }
             for field in reflect.fields() {
                 builder.require<Eq>(field.ty())
-                let field_cmp = builder.eq(
-                    builder.field_get(builder.self_ref(), field),
-                    builder.field_get(builder.arg_ref("other"), field),
-                )
-                if has_field {
-                    cmp = builder.and(cmp, field_cmp)
-                } else {
-                    cmp = field_cmp
-                    has_field = true
-                }
+                body = quote(other) { ${body} && self.${field} == other.${field} }
             }
             let mut sig = builder.method("eq")
             sig = builder.with_self(sig)
             sig = builder.with_arg(sig, "other", builder.target_ty())
             sig = builder.returns(sig, builder.ty<bool>())
-            builder.emit_method(sig, cmp)
+            builder.emit_method(sig, body)
         }
         if reflect.is_enum() {
             // Variant counting with plain bools: `multi` is true when the

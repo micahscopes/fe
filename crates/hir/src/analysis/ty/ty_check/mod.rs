@@ -3618,7 +3618,11 @@ impl<'db> TypedBody<'db> {
                     seen,
                 );
             }
-            Expr::Lit(_) | Expr::Path(_) => {}
+            Expr::Lit(_)
+            | Expr::Path(_)
+            | Expr::Quote { .. }
+            | Expr::QuoteHole(..)
+            | Expr::QuoteFieldHole(..) => {}
         }
     }
 

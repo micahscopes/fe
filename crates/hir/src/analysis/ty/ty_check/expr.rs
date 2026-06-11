@@ -314,6 +314,15 @@ impl<'db> TyChecker<'db> {
             Expr::With(bindings, body) => {
                 self.check_with(bindings, *body, expected, result_discarded)
             }
+            Expr::Quote { .. } => {
+                let diag = BodyDiag::QuoteOutsideProvider(expr.span(self.body()).into());
+                self.push_diag(diag);
+                ExprProp::invalid(self.db)
+            }
+            // Splice holes outside a quote body already carry a parse
+            // error; quote bodies themselves are only entered by the
+            // provider executor, never by this checker.
+            Expr::QuoteHole(..) | Expr::QuoteFieldHole(..) => ExprProp::invalid(self.db),
         };
         self.env.leave_expr();
 

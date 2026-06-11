@@ -217,6 +217,11 @@ impl<'db> ConstFnChecker<'db, '_> {
             Expr::Tuple(elems) | Expr::Array(elems) => {
                 elems.iter().for_each(|elem| self.check_expr(*elem));
             }
+
+            // Quotes outside derive provider bodies are rejected by the
+            // type checker (`QuoteOutsideProvider`); provider bodies are
+            // exempt from this pass entirely.
+            Expr::Quote { .. } | Expr::QuoteHole(..) | Expr::QuoteFieldHole(..) => {}
         }
     }
 

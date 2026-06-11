@@ -240,7 +240,10 @@ fn call_like_receiver_expr<'db>(expr_data: &Expr<'db>) -> Option<ExprId> {
         | Expr::Block(..)
         | Expr::If(..)
         | Expr::Match(..)
-        | Expr::With(..) => None,
+        | Expr::With(..)
+        | Expr::Quote { .. }
+        | Expr::QuoteHole(..)
+        | Expr::QuoteFieldHole(..) => None,
     }
 }
 

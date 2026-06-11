@@ -604,6 +604,12 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             }
             Expr::Match(scrutinee, arms) => self.lower_match_expr(expr, *scrutinee, arms),
             Expr::With(bindings, body) => self.lower_with_expr(bindings, *body),
+            // Quote templates only occur in derive provider bodies, which
+            // are never semantically lowered; elsewhere the type checker
+            // rejects them before lowering runs.
+            Expr::Quote { .. } | Expr::QuoteHole(..) | Expr::QuoteFieldHole(..) => {
+                panic!("quote expressions cannot reach semantic lowering")
+            }
         }
     }
 

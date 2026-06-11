@@ -4242,6 +4242,14 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 error_code,
             ),
 
+            BodyDiag::QuoteOutsideProvider(primary) => primary_diag(
+                severity,
+                "`quote` expressions are only allowed in derive provider bodies",
+                "`quote` builds a code template for a `mut ImplBuilder<..>` capability",
+                primary.resolve(db),
+                error_code,
+            ),
+
             BodyDiag::ConstFnNonConstCall { primary, callee } => {
                 let name = callee
                     .name(db)

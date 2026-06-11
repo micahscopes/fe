@@ -27,8 +27,9 @@ use crate::{
     HirDb,
     analysis::ty::ty_def::MAX_INLINE_STRING_BYTES,
     hir_def::{
-        Body, Cond, CondId, Expr, ExprId, GenericArg, GenericArgListId, IdentId, LitKind,
-        LogicalBinOp, Partial, Pat, PatId, PathId, Stmt, StmtId, StringId, TypeId, TypeKind,
+        BinOp, Body, CompBinOp, Cond, CondId, Expr, ExprId, GenericArg, GenericArgListId, IdentId,
+        LitKind, LogicalBinOp, Partial, Pat, PatId, PathId, Stmt, StmtId, StringId, TypeId,
+        TypeKind,
     },
     span::HirOrigin,
 };
@@ -63,6 +64,10 @@ pub enum ProviderFailureKind {
     /// A compile-time string operation was malformed (non-string operand,
     /// or a piece exceeding the inline string capacity).
     InvalidString { detail: String },
+    /// A quote template was malformed: an unsupported construct in the
+    /// body, an open name the destination method does not bind, or a hole
+    /// filled with a wrong-kind value.
+    InvalidQuote { detail: String },
     /// The interpreter step budget or command cap was exceeded.
     BudgetExceeded,
 }
@@ -86,6 +91,7 @@ impl ProviderFailureKind {
             Self::InvalidString { detail } => {
                 format!("invalid compile-time string operation: {detail}")
             }
+            Self::InvalidQuote { detail } => format!("invalid quote: {detail}"),
             Self::BudgetExceeded => {
                 "the provider exceeded its compile-time execution budget".into()
             }
@@ -229,6 +235,26 @@ pub(super) struct GenPatId(pub(super) usize);
 pub(super) struct GenTyId(pub(super) usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SigId(pub(super) usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuoteId(usize);
+
+/// A quote template value: the inert body of a `quote(open, ..) { .. }`
+/// expression plus the hole values captured when the quote expression was
+/// evaluated. Templates only become generated expressions when a builder
+/// emission command elaborates them (see [`ProviderExecutor::elaborate_quote`]).
+#[derive(Debug, Clone)]
+struct QuoteTemplate<'db> {
+    /// The `Expr::Quote` expression, for error spans.
+    origin: ExprId,
+    /// Declared open names (`quote(other) { .. }`); `self` is implicitly
+    /// open.
+    open: Vec<IdentId<'db>>,
+    /// The template body (a block expression in the provider's body).
+    body: ExprId,
+    /// Captured hole values, keyed by the hole expression
+    /// (`Expr::QuoteHole` / `Expr::QuoteFieldHole`).
+    holes: Vec<(ExprId, Value<'db>)>,
+}
 
 /// A builder command recorded during provider execution.
 #[derive(Debug, Clone)]
@@ -287,6 +313,8 @@ enum Value<'db> {
     Pat(GenPatId),
     /// A generated method signature.
     Sig(SigId),
+    /// A quote template (`quote { .. }`).
+    Quote(QuoteId),
     /// The `builder: mut ImplBuilder<..>` capability.
     Builder,
     /// The `reflect: Reflect<..>` capability.
@@ -328,6 +356,7 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     pats: Vec<GenPat<'db>>,
     tys: Vec<GenTy<'db>>,
     sigs: Vec<GenMethodSig<'db>>,
+    quotes: Vec<QuoteTemplate<'db>>,
     commands: Vec<BuilderCommand<'db>>,
     emitted_methods: Vec<IdentId<'db>>,
     emitted_assocs: Vec<IdentId<'db>>,
@@ -371,6 +400,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             pats: Vec::new(),
             tys: Vec::new(),
             sigs: Vec::new(),
+            quotes: Vec::new(),
             commands: Vec::new(),
             emitted_methods: Vec::new(),
             emitted_assocs: Vec::new(),
@@ -686,7 +716,363 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 Value::Bool(value) => Ok(Value::Bool(!value)),
                 _ => Err(self.unsupported_expr(expr)),
             },
+            Expr::Quote { open, body } => {
+                let open = open.clone();
+                let body = *body;
+                let mut holes = Vec::new();
+                self.capture_quote_holes(body, &mut holes)?;
+                self.quotes.push(QuoteTemplate {
+                    origin: expr,
+                    open,
+                    body,
+                    holes,
+                });
+                Ok(Value::Quote(QuoteId(self.quotes.len() - 1)))
+            }
+            Expr::QuoteHole(..) | Expr::QuoteFieldHole(..) => Err(self.invalid_quote(
+                expr,
+                "`${...}` splice holes are only meaningful inside a `quote` body",
+            )),
             _ => Err(self.unsupported_expr(expr)),
+        }
+    }
+
+    /// Walks a quote template at quote-construction time, evaluating every
+    /// hole's inner expression in the current environment and recording the
+    /// captured values. Only the v1 template vocabulary is walked; constructs
+    /// outside it cannot carry live holes because elaboration rejects them
+    /// before any hole beneath them is reached.
+    fn capture_quote_holes(
+        &mut self,
+        expr: ExprId,
+        holes: &mut Vec<(ExprId, Value<'db>)>,
+    ) -> Result<(), ExecError> {
+        let range = self.expr_range(expr);
+        self.tick(range)?;
+        let Partial::Present(data) = expr.data(self.db, self.body) else {
+            return Ok(());
+        };
+        match data {
+            Expr::QuoteHole(inner) => {
+                let value = self.eval_expr(*inner)?;
+                holes.push((expr, value));
+                Ok(())
+            }
+            Expr::QuoteFieldHole(base, inner) => {
+                let (base, inner) = (*base, *inner);
+                self.capture_quote_holes(base, holes)?;
+                let value = self.eval_expr(inner)?;
+                holes.push((expr, value));
+                Ok(())
+            }
+            Expr::Quote { .. } => Err(self.invalid_quote(
+                expr,
+                "`quote` inside a quote body is not supported; build the inner \
+                 fragment in a separate `let` and splice it with `${...}`",
+            )),
+            Expr::Block(stmts) => {
+                let stmts = stmts.clone();
+                for stmt in stmts {
+                    if let Partial::Present(Stmt::Expr(stmt_expr)) = stmt.data(self.db, self.body)
+                    {
+                        self.capture_quote_holes(*stmt_expr, holes)?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Bin(lhs, rhs, _) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                self.capture_quote_holes(lhs, holes)?;
+                self.capture_quote_holes(rhs, holes)
+            }
+            Expr::MethodCall(receiver, _, _, args) => {
+                let receiver = *receiver;
+                let args: Vec<ExprId> = args.iter().map(|arg| arg.expr).collect();
+                self.capture_quote_holes(receiver, holes)?;
+                for arg in args {
+                    self.capture_quote_holes(arg, holes)?;
+                }
+                Ok(())
+            }
+            // Leaves carry no holes; the remaining constructs are outside
+            // the v1 template vocabulary and are rejected at elaboration.
+            Expr::Lit(..)
+            | Expr::Path(..)
+            | Expr::Un(..)
+            | Expr::Cast(..)
+            | Expr::Call(..)
+            | Expr::Assert(..)
+            | Expr::RecordInit(..)
+            | Expr::Field(..)
+            | Expr::Tuple(..)
+            | Expr::Array(..)
+            | Expr::ArrayRep(..)
+            | Expr::If(..)
+            | Expr::Match(..)
+            | Expr::Assign(..)
+            | Expr::AugAssign(..)
+            | Expr::With(..) => Ok(()),
+        }
+    }
+
+    /// Elaborates a quote template into a generated expression for emission
+    /// under `sig`. Open names (the quote's own and those of every spliced
+    /// quote) must match the destination signature's parameter names.
+    fn elaborate_quote(&mut self, quote: QuoteId, sig: SigId) -> Result<GenExprId, ExecError> {
+        let template = self.quotes[quote.0].clone();
+
+        let sig_data = &self.sigs[sig.0];
+        let method_name = sig_data.name;
+        let takes_self = sig_data.takes_self;
+        let params: Vec<IdentId<'db>> = sig_data.args.iter().map(|(name, _)| *name).collect();
+        for open in &template.open {
+            if !params.contains(open) {
+                let mut binds = Vec::new();
+                if takes_self {
+                    binds.push("`self`".to_string());
+                }
+                binds.extend(params.iter().map(|param| format!("`{}`", param.data(self.db))));
+                let detail = format!(
+                    "the quote declares open name `{}`, but the emitted method `{}` binds {}; \
+                     open names bind against the destination method's parameter names",
+                    open.data(self.db),
+                    method_name.data(self.db),
+                    if binds.is_empty() {
+                        "no names".to_string()
+                    } else {
+                        binds.join(", ")
+                    },
+                );
+                return Err(self.invalid_quote(template.origin, &detail));
+            }
+        }
+
+        // v1 quotes are expression quotes: the body block must hold exactly
+        // one expression.
+        let Partial::Present(Expr::Block(stmts)) = template.body.data(self.db, self.body) else {
+            return Err(self.invalid_quote(template.origin, "malformed quote body"));
+        };
+        let root = match stmts.as_slice() {
+            [stmt] => match stmt.data(self.db, self.body) {
+                Partial::Present(Stmt::Expr(root)) => *root,
+                _ => {
+                    return Err(self.invalid_quote(
+                        template.origin,
+                        "v1 quote bodies must be a single expression",
+                    ));
+                }
+            },
+            _ => {
+                return Err(self.invalid_quote(
+                    template.origin,
+                    "v1 quote bodies must be a single expression",
+                ));
+            }
+        };
+        self.elab_template_expr(root, &template, sig)
+    }
+
+    fn elab_template_expr(
+        &mut self,
+        expr: ExprId,
+        template: &QuoteTemplate<'db>,
+        sig: SigId,
+    ) -> Result<GenExprId, ExecError> {
+        let range = self.expr_range(expr);
+        self.tick(range)?;
+        let Partial::Present(data) = expr.data(self.db, self.body) else {
+            return Err(self.invalid_quote(expr, "malformed quote body"));
+        };
+        match data {
+            Expr::Lit(LitKind::Bool(value)) => Ok(self.push_gen(GenExpr::Bool(*value))),
+            Expr::Lit(LitKind::String(value)) => {
+                let value = *value;
+                self.check_inline_capacity(expr, value)?;
+                Ok(self.push_gen(GenExpr::StrLit(value)))
+            }
+            Expr::Lit(LitKind::Int(_)) => Err(self.invalid_quote(
+                expr,
+                "integer literals are not supported in v1 quote bodies",
+            )),
+            Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::And)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig)?;
+                let rhs = self.elab_template_expr(rhs, template, sig)?;
+                Ok(self.push_gen(GenExpr::And(lhs, rhs)))
+            }
+            Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig)?;
+                let rhs = self.elab_template_expr(rhs, template, sig)?;
+                Ok(self.push_gen(GenExpr::EqCmp(lhs, rhs)))
+            }
+            Expr::Bin(..) => Err(self.invalid_quote(
+                expr,
+                "this operator is not supported in v1 quote bodies (v1 supports `&&` and `==`)",
+            )),
+            Expr::Path(_) => {
+                let Some(name) = self.simple_expr_path_ident(expr) else {
+                    return Err(self.invalid_quote(
+                        expr,
+                        "paths in v1 quote bodies must be a single name",
+                    ));
+                };
+                self.elab_template_name(expr, name, template, sig)
+            }
+            Expr::QuoteHole(_) => {
+                let value = self.quote_hole_value(expr, template)?;
+                match value {
+                    Value::Quote(inner) => self.elaborate_quote(inner, sig),
+                    Value::Bool(value) => Ok(self.push_gen(GenExpr::Bool(value))),
+                    Value::Str(value) => {
+                        self.check_inline_capacity(expr, value)?;
+                        Ok(self.push_gen(GenExpr::StrLit(value)))
+                    }
+                    Value::Field(_) => Err(self.invalid_quote(
+                        expr,
+                        "a `Field` handle only fills member-access holes (`self.${field}`); \
+                         expression holes accept quote values and compile-time bool/string \
+                         values",
+                    )),
+                    other => {
+                        let detail = format!(
+                            "a {} cannot fill an expression hole; expression holes accept \
+                             quote values and compile-time bool/string values",
+                            value_kind_name(&other),
+                        );
+                        Err(self.invalid_quote(expr, &detail))
+                    }
+                }
+            }
+            Expr::QuoteFieldHole(base, _) => {
+                let base = *base;
+                let value = self.quote_hole_value(expr, template)?;
+                let Value::Field(field) = value else {
+                    let detail = format!(
+                        "member-access holes (`base.${{...}}`) accept `Field` handles, \
+                         found a {}",
+                        value_kind_name(&value),
+                    );
+                    return Err(self.invalid_quote(expr, &detail));
+                };
+                let base = self.elab_template_expr(base, template, sig)?;
+                Ok(self.push_gen(GenExpr::FieldGet(base, field)))
+            }
+            Expr::MethodCall(receiver, method, generic_args, args) => {
+                let Some(method) = method.to_opt() else {
+                    return Err(self.invalid_quote(expr, "malformed method call in quote body"));
+                };
+                if !generic_args.data(self.db).is_empty() {
+                    return Err(self.invalid_quote(
+                        expr,
+                        "generic method calls are not supported in v1 quote bodies",
+                    ));
+                }
+                let receiver = *receiver;
+                let arg_exprs: Vec<ExprId> = args.iter().map(|arg| arg.expr).collect();
+                let receiver = self.elab_template_expr(receiver, template, sig)?;
+                let mut call_args = Vec::with_capacity(arg_exprs.len());
+                for arg in arg_exprs {
+                    call_args.push(self.elab_template_expr(arg, template, sig)?);
+                }
+                Ok(self.push_gen(GenExpr::MethodCall {
+                    receiver,
+                    method,
+                    args: call_args,
+                }))
+            }
+            Expr::Field(..) => Err(self.invalid_quote(
+                expr,
+                "field access in quote bodies goes through a member-access hole \
+                 (`self.${field}`)",
+            )),
+            Expr::Quote { .. } => Err(self.invalid_quote(
+                expr,
+                "`quote` inside a quote body is not supported; build the inner \
+                 fragment in a separate `let` and splice it with `${...}`",
+            )),
+            Expr::Block(..)
+            | Expr::Un(..)
+            | Expr::Cast(..)
+            | Expr::Call(..)
+            | Expr::Assert(..)
+            | Expr::RecordInit(..)
+            | Expr::Tuple(..)
+            | Expr::Array(..)
+            | Expr::ArrayRep(..)
+            | Expr::If(..)
+            | Expr::Match(..)
+            | Expr::Assign(..)
+            | Expr::AugAssign(..)
+            | Expr::With(..) => Err(self.invalid_quote(
+                expr,
+                "this construct is not supported in v1 quote bodies (v1 supports literals, \
+                 `&&`, `==`, `self`, declared open names, method calls, and `${...}` holes)",
+            )),
+        }
+    }
+
+    /// Resolves a bare name in a quote template: `self`, or a declared open
+    /// name bound by the destination method.
+    fn elab_template_name(
+        &mut self,
+        expr: ExprId,
+        name: IdentId<'db>,
+        template: &QuoteTemplate<'db>,
+        sig: SigId,
+    ) -> Result<GenExprId, ExecError> {
+        let sig_data = &self.sigs[sig.0];
+        let method_name = sig_data.name;
+        let takes_self = sig_data.takes_self;
+        let is_param = sig_data.args.iter().any(|(arg, _)| *arg == name);
+        if name.is_self(self.db) {
+            if !takes_self {
+                let detail = format!(
+                    "the quote uses `self`, but the emitted method `{}` does not bind `self`",
+                    method_name.data(self.db),
+                );
+                return Err(self.invalid_quote(expr, &detail));
+            }
+            return Ok(self.push_gen(GenExpr::SelfRef));
+        }
+        if template.open.contains(&name) {
+            // Validated against the destination signature when elaboration
+            // started.
+            return Ok(self.push_gen(GenExpr::ArgRef(name)));
+        }
+        let detail = if is_param {
+            format!(
+                "`{}` matches a parameter of the emitted method but is not declared open; \
+                 declare it with `quote({}) {{ .. }}`",
+                name.data(self.db),
+                name.data(self.db),
+            )
+        } else {
+            format!(
+                "cannot resolve `{}` in a quote body; v1 quotes support `self`, declared \
+                 open names, and `${{...}}` holes",
+                name.data(self.db),
+            )
+        };
+        Err(self.invalid_quote(expr, &detail))
+    }
+
+    /// The value captured for a hole expression when its quote was built.
+    fn quote_hole_value(
+        &mut self,
+        expr: ExprId,
+        template: &QuoteTemplate<'db>,
+    ) -> Result<Value<'db>, ExecError> {
+        match template
+            .holes
+            .iter()
+            .find_map(|(hole, value)| (*hole == expr).then_some(*value))
+        {
+            Some(value) => Ok(value),
+            None => Err(self.invalid_quote(
+                expr,
+                "splice hole was not captured when the quote was built",
+            )),
         }
     }
 
@@ -785,10 +1171,18 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let Value::Sig(sig) = self.eval_expr(sig_arg.expr)? else {
                     return Err(self.invalid_method(sig_arg.expr, "expected a method signature"));
                 };
-                let Value::Expr(body) = self.eval_expr(body_arg.expr)? else {
-                    return Err(
-                        self.invalid_method(body_arg.expr, "expected a generated expression")
-                    );
+                let body = match self.eval_expr(body_arg.expr)? {
+                    Value::Expr(body) => body,
+                    // Quotes land here: the template elaborates into the
+                    // same generated-expression layer the explicit builder
+                    // calls produce.
+                    Value::Quote(quote) => self.elaborate_quote(quote, sig)?,
+                    _ => {
+                        return Err(self.invalid_method(
+                            body_arg.expr,
+                            "expected a generated expression or a quote",
+                        ));
+                    }
                 };
                 let name = self.sigs[sig.0].name;
                 if self.emitted_methods.contains(&name) {
@@ -1185,6 +1579,15 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
     }
 
+    fn invalid_quote(&mut self, expr: ExprId, detail: &str) -> ExecError {
+        ExecError {
+            kind: ProviderFailureKind::InvalidQuote {
+                detail: detail.to_string(),
+            },
+            range: self.expr_range(expr),
+        }
+    }
+
     /// Rejects a second `emit_const` / `emit_assoc_ty` / method-name reuse
     /// for `name` (the generated impl namespaces consts, types, and methods
     /// together for simplicity; EIP-712-style providers never collide).
@@ -1203,8 +1606,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     }
 
     fn push_expr(&mut self, expr: GenExpr<'db>) -> Value<'db> {
+        Value::Expr(self.push_gen(expr))
+    }
+
+    fn push_gen(&mut self, expr: GenExpr<'db>) -> GenExprId {
         self.exprs.push(expr);
-        Value::Expr(GenExprId(self.exprs.len() - 1))
+        GenExprId(self.exprs.len() - 1)
     }
 
     fn push_pat(&mut self, pat: GenPat<'db>) -> Value<'db> {
@@ -1260,6 +1667,15 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     /// exact-width string type; enforces the inline string capacity.
     fn checked_inline_str(&mut self, expr: ExprId) -> Result<StringId<'db>, ExecError> {
         let value = self.str_value(expr)?;
+        self.check_inline_capacity(expr, value)?;
+        Ok(value)
+    }
+
+    fn check_inline_capacity(
+        &mut self,
+        expr: ExprId,
+        value: StringId<'db>,
+    ) -> Result<(), ExecError> {
         let len = value.data(self.db).len();
         if len > MAX_INLINE_STRING_BYTES {
             return Err(self.invalid_string(
@@ -1270,7 +1686,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 ),
             ));
         }
-        Ok(value)
+        Ok(())
     }
 
     fn string_value_ident(&mut self, expr: ExprId) -> Result<IdentId<'db>, ExecError> {
@@ -1340,5 +1756,24 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             return None;
         };
         path.as_ident(self.db)
+    }
+}
+
+/// A human-readable kind name for hole-value diagnostics.
+fn value_kind_name(value: &Value) -> &'static str {
+    match value {
+        Value::Bool(_) => "compile-time bool",
+        Value::Str(_) => "compile-time string",
+        Value::Field(_) => "`Field` handle",
+        Value::Variant(_) => "`Variant` handle",
+        Value::Ty(_) | Value::GenTy(_) => "type value",
+        Value::Expr(_) => "generated expression",
+        Value::Pat(_) => "generated pattern",
+        Value::Sig(_) => "method signature",
+        Value::Quote(_) => "quote value",
+        Value::Builder => "builder capability",
+        Value::Reflect => "reflect capability",
+        Value::Evidence => "evidence value",
+        Value::Unit => "unit value",
     }
 }

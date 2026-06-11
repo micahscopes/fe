@@ -683,6 +683,9 @@ pub enum BodyDiag<'db> {
     // Const fn / const-check diagnostics -----------------------------------
     ConstFnEffectsNotAllowed(DynLazySpan<'db>),
     ConstFnWithNotAllowed(DynLazySpan<'db>),
+    /// A `quote` expression (or `${...}` splice hole) outside a derive
+    /// provider body.
+    QuoteOutsideProvider(DynLazySpan<'db>),
     ConstFnNonConstCall {
         primary: DynLazySpan<'db>,
         callee: CallableDef<'db>,
@@ -850,6 +853,7 @@ impl<'db> BodyDiag<'db> {
             Self::RecvFallbackReturnTypeNotAllowed { .. } => 80,
             Self::ConstFnEffectsNotAllowed(_) => 55,
             Self::ConstFnWithNotAllowed(_) => 56,
+            Self::QuoteOutsideProvider(_) => 84,
             Self::ConstFnNonConstCall { .. } => 62,
             Self::ConstFnEffectfulCall { .. } => 63,
         }

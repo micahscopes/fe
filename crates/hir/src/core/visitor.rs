@@ -1599,6 +1599,19 @@ pub fn walk_expr<'db, V>(
             }
             visit_node_in_body!(visitor, ctxt, body_expr, expr);
         }
+
+        Expr::Quote { open: _, body } => {
+            visit_node_in_body!(visitor, ctxt, body, expr);
+        }
+
+        Expr::QuoteHole(inner) => {
+            visit_node_in_body!(visitor, ctxt, inner, expr);
+        }
+
+        Expr::QuoteFieldHole(base, inner) => {
+            visit_node_in_body!(visitor, ctxt, base, expr);
+            visit_node_in_body!(visitor, ctxt, inner, expr);
+        }
     }
 }
 

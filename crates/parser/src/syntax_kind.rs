@@ -74,6 +74,9 @@ pub enum SyntaxKind {
     /// `#`
     #[token("#")]
     Pound,
+    /// `$`
+    #[token("$")]
+    Dollar,
     /// `// Comment`
     #[regex(r"//[^\n\r]*")]
     Comment,
@@ -314,6 +317,12 @@ pub enum SyntaxKind {
     MatchExpr,
     /// `with (Effect = value, ..) { Block }`
     WithExpr,
+    /// `quote { expr }` / `quote(open, ..) { expr }`
+    QuoteExpr,
+    /// `(open, ..)` declared open names of a quote
+    QuoteOpenList,
+    /// `${expr}` splice hole inside a quote body
+    QuoteHoleExpr,
     /// `(1 + 2)`
     ParenExpr,
     /// x = 1
@@ -616,6 +625,7 @@ impl SyntaxKind {
             SyntaxKind::FatArrow => "`=>`",
             SyntaxKind::Underscore => "`_`",
             SyntaxKind::Pound => "`#`",
+            SyntaxKind::Dollar => "`$`",
             SyntaxKind::Plus => "`+`",
             SyntaxKind::Minus => "`-`",
             SyntaxKind::Star => "`*`",
@@ -720,6 +730,9 @@ impl SyntaxKind {
             SyntaxKind::IfExpr => "`if` expression",
             SyntaxKind::MatchExpr => "`match` expression",
             SyntaxKind::WithExpr => "`with` expression",
+            SyntaxKind::QuoteExpr => "`quote` expression",
+            SyntaxKind::QuoteOpenList => "`quote` open name list",
+            SyntaxKind::QuoteHoleExpr => "`${...}` splice hole",
             SyntaxKind::ParenExpr => "parenthesized expression",
             SyntaxKind::AssignExpr => "assignment expression",
             SyntaxKind::AugAssignExpr => "augmented assignment expression",
@@ -840,6 +853,7 @@ impl SyntaxKind {
                 | SyntaxKind::FatArrow
                 | SyntaxKind::Underscore
                 | SyntaxKind::Pound
+                | SyntaxKind::Dollar
                 | SyntaxKind::Plus
                 | SyntaxKind::Minus
                 | SyntaxKind::Star

@@ -69,3 +69,51 @@ fn test_with_shorthand_preserves_content() {
         "formatter deleted with-param content! got:\n{result}"
     );
 }
+
+/// Formats `source` twice and asserts the canonical form and idempotence —
+/// the roundtrip discipline for new syntax.
+#[cfg(test)]
+fn assert_roundtrip(source: &str, expected: &str) {
+    let config = crate::Config::default();
+    let once = crate::format_str(source, &config).unwrap();
+    assert_eq!(once, expected, "first format pass");
+    let twice = crate::format_str(&once, &config).unwrap();
+    assert_eq!(twice, expected, "format must be idempotent");
+}
+
+#[test]
+fn test_quote_expr_roundtrips() {
+    assert_roundtrip(
+        "fn f() {\n    let q = quote   {   true   }\n}\n",
+        "fn f() {\n    let q = quote { true }\n}\n",
+    );
+}
+
+#[test]
+fn test_quote_open_names_and_holes_roundtrip() {
+    assert_roundtrip
+        ("fn f() {\n    body = quote( other ) { ${ body } && self.${ field } == other.${ field } }\n}\n",
+        "fn f() {\n    body = quote(other) { ${body} && self.${field} == other.${field} }\n}\n",
+    );
+}
+
+#[test]
+fn test_quote_hole_method_call_chain_roundtrips() {
+    assert_roundtrip(
+        "fn f() {\n    body = quote(limit) { ${body} && self.${ field }.lte( limit.${field} ) }\n}\n",
+        "fn f() {\n    body = quote(limit) { ${body} && self.${field}.lte(limit.${field}) }\n}\n",
+    );
+}
+
+#[test]
+fn test_quote_multiline_body_roundtrips() {
+    let source = "fn f() {\n    let q = quote {\n        true\n    }\n}\n";
+    let config = crate::Config::default();
+    let result = crate::format_str(source, &config).unwrap();
+    let again = crate::format_str(&result, &config).unwrap();
+    assert_eq!(result, again, "format must be idempotent, got:\n{result}");
+    assert!(
+        result.contains("quote {"),
+        "quote keyword/body shape lost! got:\n{result}"
+    );
+}

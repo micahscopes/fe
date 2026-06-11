@@ -822,6 +822,43 @@ impl<'db> Expr<'db> {
                 };
                 format!("with ({}) {}", bindings_str, body_str)
             }
+
+            Expr::Quote { open, body: template } => {
+                let open_str = if open.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "({})",
+                        open.iter()
+                            .map(|name| name.data(db).as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let template_ref = unwrap_partial_ref(template.data(db, body), "Quote::body");
+                // Quote bodies always carry braces.
+                let body_str = if matches!(template_ref, Expr::Block(_)) {
+                    template_ref.pretty_print(db, body, indent)
+                } else {
+                    format!("{{ {} }}", template_ref.pretty_print(db, body, indent))
+                };
+                format!("quote{open_str} {body_str}")
+            }
+
+            Expr::QuoteHole(inner) => {
+                let inner_ref = unwrap_partial_ref(inner.data(db, body), "QuoteHole::expr");
+                format!("${{{}}}", inner_ref.pretty_print(db, body, indent))
+            }
+
+            Expr::QuoteFieldHole(base, inner) => {
+                let base_ref = unwrap_partial_ref(base.data(db, body), "QuoteFieldHole::base");
+                let inner_ref = unwrap_partial_ref(inner.data(db, body), "QuoteFieldHole::expr");
+                format!(
+                    "{}.${{{}}}",
+                    base_ref.pretty_print(db, body, indent),
+                    inner_ref.pretty_print(db, body, indent)
+                )
+            }
         }
     }
 }
