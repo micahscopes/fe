@@ -1,7 +1,7 @@
 use super::{
     canonical::{Canonical, Canonicalized, Solution},
     fold::{AssocTySubst, TyFoldable},
-    trait_def::{ImplementorId, TraitInstId},
+    trait_def::{ImplementorId, ImplementorOrigin, TraitInstId},
     ty_def::{TyData, TyFlags, TyId},
 };
 use crate::analysis::{
@@ -372,6 +372,46 @@ pub(crate) fn check_trait_inst_wf<'db>(
 pub struct TraitGoalSolution<'db> {
     pub(crate) inst: TraitInstId<'db>,
     pub(crate) implementor: ImplementorId<'db>,
+}
+
+impl<'db> TraitGoalSolution<'db> {
+    /// The trait instance the solver committed to when it discharged the
+    /// goal, instantiated in the environment the goal was raised in.
+    pub fn inst(&self) -> TraitInstId<'db> {
+        self.inst
+    }
+
+    /// Renders the impl that discharged the goal for human consumption, e.g.
+    /// `impl Eq for Point`.
+    ///
+    /// Compiler-generated impls carry their provenance: impls expanded from
+    /// `#[derive(..)]` or a standalone `derive` declaration are suffixed with
+    /// `(derived)`, and goals proven directly from bounds in scope render as
+    /// the assumed predicate instead of an impl.
+    pub fn describe_implementor(&self, db: &'db dyn HirAnalysisDb) -> String {
+        let trait_inst = self.implementor.trait_(db);
+        let trait_str = trait_inst.pretty_print(db, false);
+        let self_ty = trait_inst.self_ty(db).pretty_print(db);
+        match self.implementor.origin(db) {
+            ImplementorOrigin::Hir(impl_trait) => {
+                let is_derived = matches!(
+                    impl_trait.origin(db),
+                    crate::span::HirOrigin::Desugared(crate::span::DesugaredOrigin::Derive(_))
+                );
+                if is_derived {
+                    format!("impl {trait_str} for {self_ty} (derived)")
+                } else {
+                    format!("impl {trait_str} for {self_ty}")
+                }
+            }
+            ImplementorOrigin::VirtualContract(_) => {
+                format!("built-in impl {trait_str} for {self_ty}")
+            }
+            ImplementorOrigin::Assumption => {
+                format!("bound {}", trait_inst.pretty_print(db, true))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Update)]

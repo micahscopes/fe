@@ -42,6 +42,7 @@ use ena::unify::InPlace;
 use env::TyCheckEnv;
 pub use env::{
     EffectParamSite, ExprProp, LocalBinding, ParamSite, PatBindingMode, PathReadSemantics,
+    TraitObligationOrigin,
 };
 pub(super) use expr::TraitOps;
 pub use owner::BodyOwner;
@@ -63,7 +64,7 @@ use super::{
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
     trait_def::TraitInstId,
     trait_resolution::{
-        CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx,
+        CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx,
         is_goal_query_satisfiable, is_goal_satisfiable,
     },
     ty_contains_const_hole,
@@ -380,6 +381,7 @@ fn typed_body_for_bodyless_func<'db>(
         pattern_store: PatternStore::default(),
         pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
         for_loop_seq: SecondaryMap::new(),
+        discharged_obligations: Vec::new(),
         expr_place: SecondaryMap::new(),
         expr_places: PrimaryMap::new(),
     }
@@ -416,7 +418,11 @@ pub(crate) struct TyCheckerSnapshot<'db> {
 }
 
 enum TraitObligationOutcome<'db> {
-    Discharged,
+    /// The obligation was retired. Carries the solution the solver committed
+    /// to, or `None` when the obligation was retired without committing to
+    /// evidence (rolled-back inference, invalid goals, or ambiguity and
+    /// unsatisfiability that were reported as diagnostics instead).
+    Discharged(Option<TraitGoalSolution<'db>>),
     Progressed,
     Requeue(env::TraitObligation<'db>),
 }
@@ -849,13 +855,16 @@ impl<'db> TyChecker<'db> {
         !collect_flags(self.db, goal).intersects(TyFlags::HAS_VAR | TyFlags::HAS_INVALID)
     }
 
-    fn dedup_equivalent_trait_insts(&self, insts: Vec<TraitInstId<'db>>) -> Vec<TraitInstId<'db>> {
+    fn dedup_equivalent_trait_solutions(
+        &self,
+        solutions: Vec<TraitGoalSolution<'db>>,
+    ) -> Vec<TraitGoalSolution<'db>> {
         let db = self.db;
         let mut seen = FxHashSet::default();
         let mut unique = Vec::new();
-        for inst in insts {
-            if seen.insert(Canonical::new(db, inst)) {
-                unique.push(inst);
+        for solution in solutions {
+            if seen.insert(Canonical::new(db, solution.inst)) {
+                unique.push(solution);
             }
         }
         unique
@@ -1144,46 +1153,46 @@ impl<'db> TyChecker<'db> {
         let assumptions = self.env.assumptions();
 
         if self.has_dead_inference_keys(&obligation.goal) {
-            return TraitObligationOutcome::Discharged;
+            return TraitObligationOutcome::Discharged(None);
         }
 
         obligation.goal = self.normalize_trait_goal(obligation.goal);
         let goal = obligation.goal;
         let flags = collect_flags(db, goal);
         if flags.contains(TyFlags::HAS_INVALID) || self.has_dead_inference_keys(&goal) {
-            return TraitObligationOutcome::Discharged;
+            return TraitObligationOutcome::Discharged(None);
         }
 
         let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         match is_goal_query_satisfiable(db, solve_cx, &query) {
             GoalSatisfiability::Satisfied(solution) => {
-                let solved = query.extract_solution(&mut self.table, solution).inst;
+                let solved = query.extract_solution(&mut self.table, solution);
                 if self.has_dead_inference_keys(&solved) {
-                    return TraitObligationOutcome::Discharged;
+                    return TraitObligationOutcome::Discharged(None);
                 }
-                self.table.unify(goal, solved).unwrap();
+                self.table.unify(goal, solved.inst).unwrap();
                 if self.normalize_trait_goal(goal) != goal {
                     TraitObligationOutcome::Progressed
                 } else {
-                    TraitObligationOutcome::Discharged
+                    TraitObligationOutcome::Discharged(Some(solved))
                 }
             }
             GoalSatisfiability::NeedsConfirmation(ambiguous) => {
                 let mut candidates: Vec<_> = ambiguous
                     .iter()
-                    .map(|solution| query.extract_solution(&mut self.table, *solution).inst)
+                    .map(|solution| query.extract_solution(&mut self.table, *solution))
                     .collect();
                 candidates.retain(|candidate| !self.has_dead_inference_keys(candidate));
-                let candidates = self.dedup_equivalent_trait_insts(candidates);
+                let candidates = self.dedup_equivalent_trait_solutions(candidates);
 
                 if let [solution] = candidates.as_slice() {
-                    if self.table.unify(goal, *solution).is_ok()
-                        && self.normalize_trait_goal(goal) != goal
-                    {
+                    let solution = *solution;
+                    let unified = self.table.unify(goal, solution.inst).is_ok();
+                    if unified && self.normalize_trait_goal(goal) != goal {
                         TraitObligationOutcome::Progressed
                     } else {
-                        TraitObligationOutcome::Discharged
+                        TraitObligationOutcome::Discharged(unified.then_some(solution))
                     }
                 } else {
                     if final_pass && self.trait_goal_is_concrete_for_diagnostics(goal) {
@@ -1197,14 +1206,14 @@ impl<'db> TyChecker<'db> {
                         };
                         self.push_diag(BodyDiag::AmbiguousTraitInst {
                             primary: obligation.span.clone(),
-                            cands: candidates.into_iter().collect(),
+                            cands: candidates.into_iter().map(|solution| solution.inst).collect(),
                             required_by,
                         });
-                        return TraitObligationOutcome::Discharged;
+                        return TraitObligationOutcome::Discharged(None);
                     }
 
                     if final_pass {
-                        TraitObligationOutcome::Discharged
+                        TraitObligationOutcome::Discharged(None)
                     } else {
                         TraitObligationOutcome::Requeue(obligation)
                     }
@@ -1229,15 +1238,35 @@ impl<'db> TyChecker<'db> {
                             required_by,
                         },
                     ));
-                    TraitObligationOutcome::Discharged
+                    TraitObligationOutcome::Discharged(None)
                 } else if final_pass {
-                    TraitObligationOutcome::Discharged
+                    TraitObligationOutcome::Discharged(None)
                 } else {
                     TraitObligationOutcome::Requeue(obligation)
                 }
             }
-            GoalSatisfiability::ContainsInvalid => TraitObligationOutcome::Discharged,
+            GoalSatisfiability::ContainsInvalid => TraitObligationOutcome::Discharged(None),
         }
+    }
+
+    /// Records discharge evidence for a retired trait obligation so that
+    /// `finish` can move it onto the [`TypedBody`]. Goals that contain dead
+    /// inference keys are skipped: they belong to rolled-back inference and
+    /// cannot be folded with the final unification table.
+    fn record_discharged_obligation(
+        &mut self,
+        origin: env::TraitObligationOrigin<'db>,
+        goal: TraitInstId<'db>,
+        solution: Option<TraitGoalSolution<'db>>,
+    ) {
+        if self.has_dead_inference_keys(&goal) {
+            return;
+        }
+        self.env.record_discharged_obligation(DischargedObligation {
+            origin,
+            goal,
+            solution,
+        });
     }
 
     fn resolve_deferred(&mut self) {
@@ -1354,8 +1383,12 @@ impl<'db> TyChecker<'db> {
             for task in tasks {
                 match task {
                     env::DeferredTask::Obligation(obligation) => {
+                        let origin = obligation.origin;
+                        let goal = obligation.goal;
                         match self.process_trait_obligation(obligation, false) {
-                            TraitObligationOutcome::Discharged => {}
+                            TraitObligationOutcome::Discharged(solution) => {
+                                self.record_discharged_obligation(origin, goal, solution);
+                            }
                             TraitObligationOutcome::Progressed => progressed = true,
                             TraitObligationOutcome::Requeue(obligation) => {
                                 self.env.register_trait_obligation(obligation);
@@ -1519,7 +1552,13 @@ impl<'db> TyChecker<'db> {
         for task in self.env.take_deferred_tasks() {
             match task {
                 env::DeferredTask::Obligation(obligation) => {
-                    let _ = self.process_trait_obligation(obligation, true);
+                    let origin = obligation.origin;
+                    let goal = obligation.goal;
+                    if let TraitObligationOutcome::Discharged(solution) =
+                        self.process_trait_obligation(obligation, true)
+                    {
+                        self.record_discharged_obligation(origin, goal, solution);
+                    }
                 }
                 env::DeferredTask::Method(pending) => {
                     let Some(expr_prop) = self.env.typed_expr(pending.expr) else {
@@ -2493,6 +2532,9 @@ pub struct TypedBody<'db> {
     pattern_status: SecondaryMap<PatId, PatternAnalysisStatus>,
     /// Resolved Seq trait methods for for-loops
     for_loop_seq: SecondaryMap<StmtId, Option<ForLoopSeq<'db>>>,
+    /// Discharge evidence for trait obligations retired while checking this
+    /// body, in retirement order.
+    discharged_obligations: Vec<DischargedObligation<'db>>,
     expr_place: SecondaryMap<ExprId, PackedOption<ExprPlaceId>>,
     expr_places: PrimaryMap<ExprPlaceId, Place<'db>>,
 }
@@ -2641,6 +2683,51 @@ impl<'db> TyFoldable<'db> for RecordInitLowering<'db> {
     }
 }
 
+/// Evidence that a trait obligation raised while type checking a body was
+/// discharged.
+///
+/// One record is written per retired obligation, in retirement order. The
+/// inline [`TraitGoalSolution`] is the forerunner of an interned evidence id
+/// keyed on `(goal, route)`; consumers should treat it as opaque evidence
+/// describing how the goal was discharged rather than relying on its
+/// representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DischargedObligation<'db> {
+    /// Where the obligation was raised.
+    pub origin: TraitObligationOrigin<'db>,
+    /// The trait goal that was discharged.
+    pub goal: TraitInstId<'db>,
+    /// The solution the trait solver committed to, or `None` when the
+    /// obligation was retired without committing to evidence (e.g. ambiguity
+    /// or unsatisfiability already reported as a diagnostic).
+    pub solution: Option<TraitGoalSolution<'db>>,
+}
+
+impl<'db> TyVisitable<'db> for DischargedObligation<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized,
+    {
+        self.goal.visit_with(visitor);
+        if let Some(solution) = &self.solution {
+            solution.visit_with(visitor);
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for DischargedObligation<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: crate::analysis::ty::fold::TyFolder<'db>,
+    {
+        Self {
+            origin: self.origin,
+            goal: self.goal.fold_with(db, folder),
+            solution: self.solution.map(|solution| solution.fold_with(db, folder)),
+        }
+    }
+}
+
 impl<'db> TyVisitable<'db> for TypedBody<'db> {
     fn visit_with<V>(&self, visitor: &mut V)
     where
@@ -2672,6 +2759,9 @@ impl<'db> TyVisitable<'db> for TypedBody<'db> {
         self.pattern_store.visit_with(visitor);
         for seq in self.for_loop_seq.values().flatten() {
             seq.visit_with(visitor);
+        }
+        for obligation in &self.discharged_obligations {
+            obligation.visit_with(visitor);
         }
     }
 }
@@ -2725,6 +2815,9 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
             .values_mut()
             .flatten()
             .for_each(|seq| *seq = seq.clone().fold_with(db, folder));
+        this.discharged_obligations
+            .iter_mut()
+            .for_each(|obligation| *obligation = (*obligation).fold_with(db, folder));
         this.expr_places
             .values_mut()
             .for_each(|place| *place = place.clone().fold_with(db, folder));
@@ -2964,6 +3057,29 @@ impl<'db> TypedBody<'db> {
     /// Get the resolved Seq methods for a for-loop statement.
     pub fn for_loop_seq(&self, stmt: StmtId) -> Option<&ForLoopSeq<'db>> {
         self.for_loop_seq[stmt].as_ref()
+    }
+
+    /// All trait-obligation discharge records for this body, in the order the
+    /// obligations were retired by the type checker.
+    pub fn discharged_obligations(&self) -> &[DischargedObligation<'db>] {
+        &self.discharged_obligations
+    }
+
+    /// Discharge records for obligations raised by the constraints of the
+    /// given call expression.
+    pub fn discharged_obligations_for_call(
+        &self,
+        call_expr: ExprId,
+    ) -> impl Iterator<Item = &DischargedObligation<'db>> {
+        self.discharged_obligations
+            .iter()
+            .filter(move |obligation| match obligation.origin {
+                TraitObligationOrigin::CallConstraint {
+                    call_expr: origin_expr,
+                    ..
+                } => origin_expr == call_expr,
+                TraitObligationOrigin::GenericConfirmation => false,
+            })
     }
 
     pub fn binding_source(
@@ -3869,6 +3985,7 @@ impl<'db> TypedBody<'db> {
             pattern_store: PatternStore::default(),
             pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
             for_loop_seq: SecondaryMap::new(),
+            discharged_obligations: Vec::new(),
             expr_place: SecondaryMap::new(),
             expr_places: PrimaryMap::new(),
         }

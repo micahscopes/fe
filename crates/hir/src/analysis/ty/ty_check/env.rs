@@ -95,6 +95,10 @@ pub(crate) struct TyCheckEnv<'db> {
 
     /// Resolved Seq trait methods for for-loops, keyed by the for statement.
     for_loop_seq: SecondaryMap<StmtId, Option<ForLoopSeq<'db>>>,
+
+    /// Discharge evidence for trait obligations retired while checking this
+    /// body, in retirement order.
+    discharged_obligations: Vec<super::DischargedObligation<'db>>,
 }
 
 impl<'db> TyCheckEnv<'db> {
@@ -220,6 +224,7 @@ impl<'db> TyCheckEnv<'db> {
             pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
             call_effect_args: SecondaryMap::new(),
             for_loop_seq: SecondaryMap::new(),
+            discharged_obligations: Vec::new(),
         };
 
         env.enter_scope(body.expr(db));
@@ -835,6 +840,13 @@ impl<'db> TyCheckEnv<'db> {
         self.deferred.push(DeferredTask::Obligation(obligation))
     }
 
+    pub(super) fn record_discharged_obligation(
+        &mut self,
+        obligation: super::DischargedObligation<'db>,
+    ) {
+        self.discharged_obligations.push(obligation);
+    }
+
     pub(super) fn deferred_len(&self) -> usize {
         self.deferred.len()
     }
@@ -921,6 +933,10 @@ impl<'db> TyCheckEnv<'db> {
             .values_mut()
             .flatten()
             .for_each(|seq| *seq = seq.clone().fold_with(self.db, &mut prober));
+
+        self.discharged_obligations
+            .iter_mut()
+            .for_each(|obligation| *obligation = (*obligation).fold_with(self.db, &mut prober));
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -965,6 +981,7 @@ impl<'db> TyCheckEnv<'db> {
             pattern_store,
             pattern_status: self.pattern_status,
             for_loop_seq: self.for_loop_seq,
+            discharged_obligations: self.discharged_obligations,
             expr_place,
             expr_places,
         }
@@ -1551,13 +1568,21 @@ pub(super) enum DeferredTask<'db> {
     PrimitiveOp(PendingPrimitiveOp),
 }
 
+/// Where a trait obligation processed during type checking was raised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TraitObligationOrigin<'db> {
+pub enum TraitObligationOrigin<'db> {
+    /// The obligation was raised by a constraint on a callable at a call site.
     CallConstraint {
+        /// The call expression whose callable carries the constraint.
         call_expr: ExprId,
+        /// The callable whose declaration states the constraint.
         callable_def: CallableDef<'db>,
+        /// Index of the constraint in the callable's instantiated constraint
+        /// list.
         constraint_idx: usize,
     },
+    /// The obligation re-confirms an ambiguous trait method selection once
+    /// inference has progressed; it is not keyed to a specific constraint.
     GenericConfirmation,
 }
 
