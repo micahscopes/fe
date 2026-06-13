@@ -147,3 +147,333 @@ fn symbolic_assoc_const_lowers_and_forwards_without_error() {
         "a symbolic forwarded predicate is the caller's own assumption, not a CTFE discharge"
     );
 }
+
+/// Compiles `src` and returns the number of const-predicate discharges recorded
+/// in function `func`.
+fn discharges_in(name: &str, src: &str, func: &str) -> usize {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(format!("{name}.fe").into(), src);
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+    let func = func_named(&db, top_mod, func);
+    check_func_body(&db, func)
+        .1
+        .discharged_const_predicates()
+        .len()
+}
+
+/// Checks `src` and asserts at least one diagnostic carries `code`.
+fn assert_has_code(name: &str, src: &str, code: &str) -> Vec<CompleteDiagnostic> {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(format!("{name}.fe").into(), src);
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert!(
+        diags.iter().any(|d| d.error_code.to_string() == code),
+        "expected diagnostic {code}, got: {diags:#?}"
+    );
+    diags
+}
+
+// Pair 1: the real demo shape carries `B::Word` as a parameter/return type
+// alongside the const-predicate gate, proving associated-type projection in the
+// signature coexists with const-predicate discharge.
+#[test]
+fn assoc_type_word_param_discharges() {
+    let src = r#"
+trait Platform {
+    type Word
+    const WORD_BITS: u256
+}
+struct Evm {}
+impl Platform for Evm {
+    type Word = u256
+    const WORD_BITS: u256 = 256
+}
+fn word_op<B: Platform>(x: B::Word) -> B::Word where B::WORD_BITS == 256 {
+    x
+}
+fn ok(x: Evm::Word) -> Evm::Word {
+    word_op<Evm>(x)
+}
+"#;
+    assert_eq!(discharges_in("assoc_type_word_param", src, "ok"), 1);
+}
+
+// Pair 3: a relational predicate discharges correctly at the boundary — `>=` is
+// evaluated, not approximated.
+const FIELD: &str = r#"
+trait Field {
+    const TWO_ADICITY: u256
+}
+fn needs_fft_domain<F: Field>() where F::TWO_ADICITY >= 16 {
+}
+"#;
+
+#[test]
+fn relational_predicate_discharges_at_boundary() {
+    // 16 >= 16 holds.
+    let pos = format!(
+        "{FIELD}\nstruct GoodField {{}}\nimpl Field for GoodField {{\n    const TWO_ADICITY: u256 = 16\n}}\nfn ok() {{\n    needs_fft_domain<GoodField>()\n}}\n"
+    );
+    assert_eq!(discharges_in("relational_pos", &pos, "ok"), 1);
+
+    // 15 >= 16 is refuted.
+    let neg = format!(
+        "{FIELD}\nstruct SmallField {{}}\nimpl Field for SmallField {{\n    const TWO_ADICITY: u256 = 15\n}}\nfn bad() {{\n    needs_fft_domain<SmallField>()\n}}\n"
+    );
+    assert_has_code("relational_neg", &neg, "8-0085");
+}
+
+// Pair 5: the discharge path evaluates a const *expression* over an associated
+// const, not just a stored literal.
+const WORD_BYTES: &str = r#"
+trait Platform {
+    const WORD_BYTES: u256
+}
+fn word_sized<B: Platform>() where B::WORD_BYTES * 8 == 256 {
+}
+"#;
+
+#[test]
+fn arithmetic_predicate_is_evaluated() {
+    // 32 * 8 == 256 holds.
+    let pos = format!(
+        "{WORD_BYTES}\nstruct Evm {{}}\nimpl Platform for Evm {{\n    const WORD_BYTES: u256 = 32\n}}\nfn ok() {{\n    word_sized<Evm>()\n}}\n"
+    );
+    assert_eq!(discharges_in("arith_pos", &pos, "ok"), 1);
+
+    // 31 * 8 != 256 is refuted.
+    let neg = format!(
+        "{WORD_BYTES}\nstruct Weird {{}}\nimpl Platform for Weird {{\n    const WORD_BYTES: u256 = 31\n}}\nfn bad() {{\n    word_sized<Weird>()\n}}\n"
+    );
+    assert_has_code("arith_neg", &neg, "8-0085");
+}
+
+// Pair 6: multiple const predicates on one callee are discharged individually
+// (two evidence records) and diagnosed individually (the satisfied one still
+// discharges even when its sibling is refuted).
+const TWO_PREDS: &str = r#"
+trait Platform {
+    const WORD_BITS: u256
+    const HAS_STORAGE: bool
+}
+fn evm_like_only<B: Platform>() where B::WORD_BITS == 256, B::HAS_STORAGE == true {
+}
+"#;
+
+#[test]
+fn multiple_predicates_discharge_and_diagnose_individually() {
+    // Both hold -> two discharges.
+    let pos = format!(
+        "{TWO_PREDS}\nstruct Evm {{}}\nimpl Platform for Evm {{\n    const WORD_BITS: u256 = 256\n    const HAS_STORAGE: bool = true\n}}\nfn ok() {{\n    evm_like_only<Evm>()\n}}\n"
+    );
+    assert_eq!(discharges_in("two_preds_pos", &pos, "ok"), 2);
+
+    // WORD_BITS fails, HAS_STORAGE holds -> one 8-0085, and the satisfied
+    // predicate is still discharged (each obligation is independent).
+    let mut db = HirAnalysisTestDb::default();
+    let neg = format!(
+        "{TWO_PREDS}\nstruct TinyStorage {{}}\nimpl Platform for TinyStorage {{\n    const WORD_BITS: u256 = 16\n    const HAS_STORAGE: bool = true\n}}\nfn bad() {{\n    evm_like_only<TinyStorage>()\n}}\n"
+    );
+    let file = db.new_stand_alone("two_preds_neg.fe".into(), &neg);
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| d.error_code.to_string() == "8-0085")
+            .count(),
+        1,
+        "exactly the word-bits predicate is refuted: {diags:#?}"
+    );
+    let bad = func_named(&db, top_mod, "bad");
+    assert_eq!(
+        check_func_body(&db, bad)
+            .1
+            .discharged_const_predicates()
+            .len(),
+        1,
+        "the satisfied sibling predicate is still discharged"
+    );
+}
+
+// Pair 7: discharge is keyed to the concrete substitution at the use site, not
+// global by callee. The Evm call discharges; the Tiny call is refuted and
+// records no discharge — the Evm success is never reused for Tiny.
+#[test]
+fn per_call_substitution_no_stale_evidence() {
+    let mut db = HirAnalysisTestDb::default();
+    let src = r#"
+trait Platform {
+    const WORD_BITS: u256
+}
+struct Evm {}
+struct Tiny {}
+impl Platform for Evm {
+    const WORD_BITS: u256 = 256
+}
+impl Platform for Tiny {
+    const WORD_BITS: u256 = 16
+}
+fn word_op<B: Platform>() where B::WORD_BITS == 256 {
+}
+fn ok() {
+    word_op<Evm>()
+}
+fn bad() {
+    word_op<Tiny>()
+}
+"#;
+    let file = db.new_stand_alone("per_call.fe".into(), src);
+    let (top_mod, _) = db.top_mod(file);
+
+    let diags = diagnostics_for(&db, top_mod);
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| d.error_code.to_string() == "8-0085")
+            .count(),
+        1,
+        "only the Tiny call is refuted: {diags:#?}"
+    );
+
+    let ok = func_named(&db, top_mod, "ok");
+    let ok_call = only_call_expr(&db, ok);
+    let ok_typed = &check_func_body(&db, ok).1;
+    let ok_recs: Vec<_> = ok_typed
+        .discharged_const_predicates_for_call(ok_call)
+        .collect();
+    assert_eq!(ok_recs.len(), 1, "Evm call discharges");
+    assert_eq!(ok_recs[0].route, DischargeRoute::Ctfe);
+
+    let bad = func_named(&db, top_mod, "bad");
+    assert!(
+        check_func_body(&db, bad)
+            .1
+            .discharged_const_predicates()
+            .is_empty(),
+        "the refuted Tiny call records no discharge — Evm's success is not reused"
+    );
+}
+
+// Pair 9: associated-const identity includes the trait/instantiation, not just
+// the spelling `SIZE`. `X` impls both `A` (SIZE = 32) and `B` (SIZE = 64); a
+// predicate bound through `T: A` must read A::SIZE.
+const TWO_TRAITS: &str = r#"
+trait A {
+    const SIZE: u256
+}
+trait B {
+    const SIZE: u256
+}
+struct X {}
+impl A for X {
+    const SIZE: u256 = 32
+}
+impl B for X {
+    const SIZE: u256 = 64
+}
+"#;
+
+#[test]
+fn assoc_const_identity_includes_the_trait() {
+    // T: A reads A::SIZE = 32; T: B reads B::SIZE = 64. Both discharge.
+    let pos = format!(
+        "{TWO_TRAITS}\nfn needs_a<T: A>() where T::SIZE == 32 {{\n}}\nfn needs_b<T: B>() where T::SIZE == 64 {{\n}}\nfn ok() {{\n    needs_a<X>()\n    needs_b<X>()\n}}\n"
+    );
+    assert_eq!(discharges_in("two_traits_pos", &pos, "ok"), 2);
+
+    // Bound through `T: A` but asserting 64 must fail — A::SIZE is 32, not the
+    // sibling B::SIZE = 64.
+    let neg = format!(
+        "{TWO_TRAITS}\nfn needs_a_wrong<T: A>() where T::SIZE == 64 {{\n}}\nfn bad() {{\n    needs_a_wrong<X>()\n}}\n"
+    );
+    assert_has_code("two_traits_neg", &neg, "8-0085");
+}
+
+// Pair 10: a predicate over an associated const whose trait source is not in
+// scope is a *formation/resolution* failure (the const is unavailable), not a
+// silently-accepted predicate, an 8-0085 discharge failure, or an ICE.
+#[test]
+fn formation_requires_available_assoc_const() {
+    let src = r#"
+fn bad<T>() where T::SIZE >= 50 {
+}
+"#;
+    let diags = assert_has_code("formation_unavailable", src, "2-0002");
+    assert!(
+        !diags.iter().any(|d| d.error_code.to_string() == "8-0085"),
+        "an unavailable assoc const is a formation error, not a discharge failure"
+    );
+}
+
+// Pair 11: a deeper chained projection (`B::Memory::ADDRESS_SPACE`) is rejected
+// with a named diagnostic and never ICEs or silently mislowers. (Simple
+// single-segment projections are exercised by the passing demos above.)
+#[test]
+fn chained_projection_fails_safely() {
+    let src = r#"
+trait MemoryKind {
+    const ADDRESS_SPACE: u256
+}
+trait Platform {
+    type Memory
+}
+fn needs_linear<B: Platform>() where B::Memory::ADDRESS_SPACE == 1 {
+}
+"#;
+    assert_has_code("chained_projection", src, "2-0002");
+}
+
+// Pair 12: a predicate whose evaluation faults (division by zero) is a hard
+// error (3-0025), never an 8-0085 "not satisfied" and never a silently removed
+// candidate (anti-SFINAE).
+const DIVISOR: &str = r#"
+trait Divisor {
+    const DENOM: u256
+}
+fn divides_cleanly<T: Divisor>() where 100 / T::DENOM == 10 {
+}
+"#;
+
+#[test]
+fn ctfe_fault_is_hard_error_not_sfinae() {
+    // 100 / 10 == 10 holds.
+    let pos = format!(
+        "{DIVISOR}\nstruct Ten {{}}\nimpl Divisor for Ten {{\n    const DENOM: u256 = 10\n}}\nfn ok() {{\n    divides_cleanly<Ten>()\n}}\n"
+    );
+    assert_eq!(discharges_in("divisor_pos", &pos, "ok"), 1);
+
+    // 100 / 0 faults — hard error, not a discharge failure.
+    let neg = format!(
+        "{DIVISOR}\nstruct Zero {{}}\nimpl Divisor for Zero {{\n    const DENOM: u256 = 0\n}}\nfn bad() {{\n    divides_cleanly<Zero>()\n}}\n"
+    );
+    let diags = assert_has_code("divisor_neg", &neg, "3-0025");
+    assert!(
+        !diags.iter().any(|d| d.error_code.to_string() == "8-0085"),
+        "a CTFE fault is a hard error, not an unsatisfied-predicate result"
+    );
+}
+
+// Pair 8 (negative), QUARANTINED: assumption-route discharge is not implemented
+// yet. A generic caller forwarding its own type with a *mismatched* assumption
+// (`B::WORD_BITS == 128` calling a callee that requires `== 256`) should be
+// rejected once exact assumption matching lands — no implication, no fuzzy
+// matching. Today the symbolic predicate is left to the caller's assumption and
+// no error is raised, so this is ignored until the assumption route exists.
+#[test]
+#[ignore = "TODO: assumption-route discharge must reject a mismatched forwarded predicate by exact term identity"]
+fn assumption_route_mismatch_is_rejected() {
+    let src = r#"
+trait Platform {
+    const WORD_BITS: u256
+}
+fn word_op<B: Platform>() where B::WORD_BITS == 256 {
+}
+fn bad_forward<B: Platform>() where B::WORD_BITS == 128 {
+    word_op<B>()
+}
+"#;
+    assert_has_code("assumption_mismatch", src, "8-0085");
+}
