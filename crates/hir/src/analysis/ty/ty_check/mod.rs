@@ -62,6 +62,7 @@ use super::{
         TraitConstraintDiag, TyDiagCollection, TyLowerDiag,
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
+    term::{TermId, lower_hir_to_term, normalize_term, substitute_term},
     trait_def::TraitInstId,
     trait_resolution::{
         CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx,
@@ -1413,15 +1414,17 @@ impl<'db> TyChecker<'db> {
             };
         }
 
-        // Symbolic or invalid subject: the substitution still mentions a
-        // generic parameter (the caller is itself generic and forwards its own
-        // type), or an argument is already invalid. CTFE cannot decide a
-        // symbolic predicate — discharging it is the caller's own where-clause
-        // assumption (the verbatim-match route, not part of this slice), and
-        // invalid arguments carry their own diagnostics. Either way, do not
-        // evaluate and do not error.
-        if args.iter().any(|ty| ty.has_param(db) || ty.has_invalid(db)) {
+        // Invalid argument: it carries its own diagnostics; do not pile on.
+        if args.iter().any(|ty| ty.has_invalid(db)) {
             return ConstPredicateOutcome::Discharged;
+        }
+
+        // Symbolic subject: the substitution still mentions a generic parameter
+        // (the caller forwards its own type). CTFE cannot decide it; the only
+        // sound discharge is an exact matching assumption in the caller's own
+        // `where` clause, matched by normalized term identity.
+        if args.iter().any(|ty| ty.has_param(db)) {
+            return self.discharge_const_predicate_by_assumption(obligation, args);
         }
 
         let expected = TyId::bool(db);
@@ -1431,7 +1434,9 @@ impl<'db> TyChecker<'db> {
         };
         match eval_body_owner_const(db, owner, args.clone()) {
             Ok(value) => match static_assert_bool_value(db, value) {
-                Some(true) => self.record_discharged_const_predicate(obligation, args),
+                Some(true) => {
+                    self.record_discharged_const_predicate(obligation, args, DischargeRoute::Ctfe)
+                }
                 Some(false) => self.push_diag(BodyDiag::WhereConstPredicateFailed {
                     primary: obligation.span.clone(),
                 }),
@@ -1459,15 +1464,88 @@ impl<'db> TyChecker<'db> {
         &mut self,
         obligation: env::ConstPredicateObligation<'db>,
         generic_args: Vec<TyId<'db>>,
+        route: DischargeRoute,
     ) {
         self.env
             .record_discharged_const_predicate(DischargedConstPredicate {
                 origin: obligation.origin,
                 predicate: obligation.predicate,
                 generic_args,
-                route: DischargeRoute::Ctfe,
+                route,
                 premises: Vec::new(),
             });
+    }
+
+    /// Discharges a symbolic const predicate by matching it, by normalized term
+    /// identity, against the caller's own `where`-clause assumptions. The
+    /// callee predicate is lowered to a term, its parameters rewritten by the
+    /// call's arguments, and normalized; if it is identical to a normalized
+    /// caller assumption it discharges by the `Assumption` route. Matching is
+    /// exact: no implication, no direction flipping, no boolean splitting, and
+    /// no CTFE on the symbolic subject.
+    fn discharge_const_predicate_by_assumption(
+        &mut self,
+        obligation: env::ConstPredicateObligation<'db>,
+        args: Vec<TyId<'db>>,
+    ) -> ConstPredicateOutcome<'db> {
+        let db = self.db;
+        let env::ConstPredicateObligationOrigin::CallConstraint { callable_def, .. } =
+            obligation.origin;
+
+        // Lower the callee predicate to a term under the callee's own bounds,
+        // then rewrite its parameters by the call's arguments.
+        let callee_assumptions =
+            crate::analysis::ty::trait_resolution::constraint::collect_func_decl_constraints(
+                db,
+                callable_def,
+                true,
+            )
+            .instantiate_identity();
+        let predicate = obligation.predicate;
+        let Ok(goal_term) =
+            lower_hir_to_term(db, predicate, predicate.expr(db), callee_assumptions)
+        else {
+            // The predicate is outside the term fragment, so it cannot be
+            // matched by identity. Leave it to the form-limitation diagnostics
+            // rather than emitting a spurious failure.
+            return ConstPredicateOutcome::Discharged;
+        };
+        let goal_term = normalize_term(db, substitute_term(db, goal_term, &args));
+
+        if self
+            .const_predicate_assumption_terms()
+            .iter()
+            .any(|&assumption| assumption == goal_term)
+        {
+            self.record_discharged_const_predicate(obligation, args, DischargeRoute::Assumption);
+        } else {
+            // No in-scope assumption proves it and the subject is symbolic, so
+            // CTFE cannot decide it either: this is a hard failure.
+            self.push_diag(BodyDiag::WhereConstPredicateFailed {
+                primary: obligation.span.clone(),
+            });
+        }
+        ConstPredicateOutcome::Discharged
+    }
+
+    /// The caller's own `where`-clause const predicates, lowered to normalized
+    /// terms — the assumptions a symbolic obligation may discharge against.
+    fn const_predicate_assumption_terms(&self) -> Vec<TermId<'db>> {
+        let db = self.db;
+        let BodyOwner::Func(func) = self.env.owner() else {
+            return Vec::new();
+        };
+        let assumptions = self.env.assumptions();
+        WhereClauseOwner::from(func)
+            .where_clause(db)
+            .const_predicates(db)
+            .iter()
+            .filter_map(|&predicate| {
+                lower_hir_to_term(db, predicate, predicate.expr(db), assumptions)
+                    .ok()
+                    .map(|term| normalize_term(db, term))
+            })
+            .collect()
     }
 
     fn resolve_deferred(&mut self) {
@@ -2956,6 +3034,10 @@ pub enum DischargeRoute {
     /// A closed const predicate was evaluated to `true` by compile-time
     /// function evaluation under the call's type substitution.
     Ctfe,
+    /// A symbolic const predicate was matched, by normalized term identity,
+    /// against an in-scope `where`-clause assumption of the caller (no CTFE,
+    /// no implication, no direction flipping, no boolean splitting).
+    Assumption,
 }
 
 /// A discharge's dependency on another check's presence or result.

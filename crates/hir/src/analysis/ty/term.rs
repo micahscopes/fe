@@ -44,6 +44,7 @@ use crate::hir_def::{
     IntegerId, LitKind, LogicalBinOp, Partial, PathId, UnOp,
 };
 
+use super::binder::Binder;
 use super::const_ty::{ConstTyData, EvaluatedConstTy, LayoutHoleArgSite};
 use super::trait_def::TraitInstId;
 use super::trait_resolution::PredicateListId;
@@ -771,6 +772,66 @@ fn callee_from_func_ty<'db>(
             "enum variant constructor",
         )),
     }
+}
+
+/// Rewrites a term's parameters by `args`, mapping each generic parameter
+/// referenced in the term (by index) to the corresponding argument — the
+/// binder-folding the identity layer otherwise leaves to "the future prover".
+///
+/// This lets a callee's predicate term (over the callee's parameters) be
+/// expressed over the *call's* arguments, so it can be compared by identity
+/// against the caller's in-scope assumption terms. Embedded `TyId` and
+/// `TraitInstId` are substituted through the existing instantiation folder; the
+/// term structure is rebuilt and re-interned. Pure: no CTFE, no normalization
+/// (callers normalize afterwards).
+pub fn substitute_term<'db>(
+    db: &'db dyn HirAnalysisDb,
+    term: TermId<'db>,
+    args: &[TyId<'db>],
+) -> TermId<'db> {
+    let node = match term.data(db) {
+        TermNode::Int(_) | TermNode::Bool(_) | TermNode::ConstRef(_) => return term,
+        TermNode::ConstParam(ty) => TermNode::ConstParam(Binder::bind(*ty).instantiate(db, args)),
+        TermNode::AssocConst { inst, name } => TermNode::AssocConst {
+            inst: Binder::bind(*inst).instantiate(db, args),
+            name: *name,
+        },
+        TermNode::Arith { op, lhs, rhs } => TermNode::Arith {
+            op: *op,
+            lhs: substitute_term(db, *lhs, args),
+            rhs: substitute_term(db, *rhs, args),
+        },
+        TermNode::Cmp { op, lhs, rhs } => TermNode::Cmp {
+            op: *op,
+            lhs: substitute_term(db, *lhs, args),
+            rhs: substitute_term(db, *rhs, args),
+        },
+        TermNode::And(lhs, rhs) => TermNode::And(
+            substitute_term(db, *lhs, args),
+            substitute_term(db, *rhs, args),
+        ),
+        TermNode::Or(lhs, rhs) => TermNode::Or(
+            substitute_term(db, *lhs, args),
+            substitute_term(db, *rhs, args),
+        ),
+        TermNode::Not(inner) => TermNode::Not(substitute_term(db, *inner, args)),
+        TermNode::App {
+            callee,
+            generic_args,
+            args: call_args,
+        } => TermNode::App {
+            callee: *callee,
+            generic_args: generic_args
+                .iter()
+                .map(|ty| Binder::bind(*ty).instantiate(db, args))
+                .collect(),
+            args: call_args
+                .iter()
+                .map(|arg| substitute_term(db, *arg, args))
+                .collect(),
+        },
+    };
+    TermId::new(db, node)
 }
 
 /// Normalizes a term bottom-up. Idempotent: `normalize_term(normalize_term(t))

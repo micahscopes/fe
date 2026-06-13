@@ -126,11 +126,11 @@ fn platform_fact_fails_for_non_satisfying_backend() {
 }
 
 #[test]
-fn symbolic_assoc_const_lowers_and_forwards_without_error() {
+fn symbolic_forward_discharges_by_matching_assumption() {
     // A generic caller forwards its own type parameter `B`. The predicate
-    // `B::WORD_BITS == 256` stays symbolic at this call (it is `mid`'s own
-    // assumption); it must lower without ICE and must not be falsely discharged
-    // or falsely refuted.
+    // `B::WORD_BITS == 256` stays symbolic at this call, but `mid` carries the
+    // identical predicate as its own `where`-clause assumption, so it discharges
+    // by the Assumption route (term identity) — not CTFE — and does not error.
     let mut db = HirAnalysisTestDb::default();
     let src = format!(
         "{PLATFORM}\nfn mid<B: Platform>() where B::WORD_BITS == 256 {{\n    word_op<B>()\n}}\n"
@@ -142,9 +142,32 @@ fn symbolic_assoc_const_lowers_and_forwards_without_error() {
 
     let mid = func_named(&db, top_mod, "mid");
     let typed = &check_func_body(&db, mid).1;
+    let records = typed.discharged_const_predicates();
+    assert_eq!(
+        records.len(),
+        1,
+        "the forwarded predicate is discharged once"
+    );
+    assert_eq!(
+        records[0].route,
+        DischargeRoute::Assumption,
+        "a symbolic forwarded predicate discharges by assumption, not CTFE"
+    );
+    assert!(records[0].premises.is_empty());
+}
+
+#[test]
+fn assumption_route_requires_an_assumption() {
+    // A generic caller with *no* matching assumption cannot discharge the
+    // symbolic predicate (CTFE cannot decide it either) — hard failure.
+    let mut db = HirAnalysisTestDb::default();
+    let src = format!("{PLATFORM}\nfn naked<B: Platform>() {{\n    word_op<B>()\n}}\n");
+    let file = db.new_stand_alone("assumption_route_none.fe".into(), &src);
+    let (top_mod, _) = db.top_mod(file);
+    let diags = diagnostics_for(&db, top_mod);
     assert!(
-        typed.discharged_const_predicates().is_empty(),
-        "a symbolic forwarded predicate is the caller's own assumption, not a CTFE discharge"
+        diags.iter().any(|d| d.error_code.to_string() == "8-0085"),
+        "{diags:#?}"
     );
 }
 
@@ -456,14 +479,11 @@ fn ctfe_fault_is_hard_error_not_sfinae() {
     );
 }
 
-// Pair 8 (negative), QUARANTINED: assumption-route discharge is not implemented
-// yet. A generic caller forwarding its own type with a *mismatched* assumption
-// (`B::WORD_BITS == 128` calling a callee that requires `== 256`) should be
-// rejected once exact assumption matching lands — no implication, no fuzzy
-// matching. Today the symbolic predicate is left to the caller's assumption and
-// no error is raised, so this is ignored until the assumption route exists.
+// Pair 8 (negative): a generic caller forwarding its own type with a
+// *mismatched* assumption (`B::WORD_BITS == 128` calling a callee that requires
+// `== 256`) is rejected by exact term identity — no implication, no fuzzy
+// matching, no direction flipping, no boolean splitting.
 #[test]
-#[ignore = "TODO: assumption-route discharge must reject a mismatched forwarded predicate by exact term identity"]
 fn assumption_route_mismatch_is_rejected() {
     let src = r#"
 trait Platform {
