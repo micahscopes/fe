@@ -669,3 +669,24 @@ Remaining M5 surface, by ID: **I1/I2/I4** (impl gating — needs solver subst),
 The Z* uncertain nodes (Z0 codes, Z2 ConstraintKind necessity — we chose
 queue-level unification, Z3 projection depth, Z4 method exactness) line up with
 our recorded scope calls.
+
+---
+
+# Diagnostic taxonomy (D0 — canonical, reconciled)
+
+Decision (resolves Z0 / the exit-criteria `8-0082/83/84` references): the live
+codes are canonical; the exit-criteria's older numbers are superseded.
+
+| Class | Code | When |
+|---|---|---|
+| Const predicate formed and evaluated **false** | `8-0085` | call-site CTFE, WF positions, assumption mismatch, selected-impl residual |
+| **CTFE fault** during predicate evaluation (overflow, div-by-zero) | `3-0025` | a predicate's evaluation traps — a hard error, never SFINAE |
+| **Formation / unresolved** (assoc const unavailable; chained projection not resolvable) | `2-0002` | the predicate cannot be formed — name resolution failure, no ICE |
+| **Recognized but not yet expressible** | `8-0086` *(reserved)* | a form we recognize and intend to support later; not yet emitted — today such forms surface as `2-0002` |
+
+Rationale: `8-0085` (false), `3-0025` (fault), and `2-0002` (formation) are
+three *distinct* error classes and are each used correctly. `8-0086` is reserved
+for the future "recognized-but-deferred" case (D3): emitting it for chained
+projections etc. is a UX refinement over the current `2-0002`, not a soundness
+gap — every limit already fails by name and never ICEs (gate-9's core
+invariant holds). The exit-criteria doc should be updated to these codes.
