@@ -56,6 +56,7 @@ use crate::analysis::place::{Place, PlaceBase};
 
 use super::{
     assoc_const::AssocConstUse,
+    binder::Binder,
     canonical::Canonical,
     diagnostics::{
         BodyDiag, CallConstraintDiagInfo, FuncBodyDiag, StaticAssertComparisonValues,
@@ -63,7 +64,7 @@ use super::{
     },
     effects::{EffectKeyKind, ResolvedEffectKey, resolve_effect_key},
     term::{TermId, lower_hir_to_term, normalize_term, substitute_term},
-    trait_def::TraitInstId,
+    trait_def::{ImplementorOrigin, TraitInstId},
     trait_resolution::{
         CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx,
         is_goal_query_satisfiable, is_goal_satisfiable,
@@ -1548,6 +1549,78 @@ impl<'db> TyChecker<'db> {
             .collect()
     }
 
+    /// Gate-not-select: once the trait solver commits to an impl for `goal`,
+    /// that impl's own `where`-clause const predicates must hold for the
+    /// committing substitution. The substitution is re-derived by unifying the
+    /// freshly-instantiated impl's trait instance with the discharged goal, then
+    /// the impl's const predicates are evaluated by CTFE — at the obligation
+    /// level, outside the proof forest. A refuted predicate on the *selected*
+    /// impl is a hard error, never a silently-tried-elsewhere candidate;
+    /// coherence already rejects impls that differ only by a const predicate.
+    fn gate_selected_impl_const_predicates(
+        &mut self,
+        goal: TraitInstId<'db>,
+        solution: TraitGoalSolution<'db>,
+        span: DynLazySpan<'db>,
+    ) {
+        let db = self.db;
+        let implementor = solution.implementor;
+        let ImplementorOrigin::Hir(impl_trait) = implementor.origin(db) else {
+            return;
+        };
+        let predicates = WhereClauseOwner::from(impl_trait)
+            .where_clause(db)
+            .const_predicates(db);
+        if predicates.is_empty() {
+            return;
+        }
+
+        // Re-derive the impl's argument substitution for this goal.
+        let goal = goal.fold_with(db, &mut self.table);
+        let mut table = UnificationTable::new(db);
+        let implementor = table.instantiate_with_fresh_vars(Binder::bind(implementor));
+        if table.unify(implementor.trait_inst(db), goal).is_err() {
+            return;
+        }
+        let args: Vec<TyId<'db>> = implementor
+            .params(db)
+            .iter()
+            .map(|&ty| ty.fold_with(db, &mut table))
+            .collect();
+        // Only a concrete substitution can be CTFE-discharged; a symbolic one is
+        // the enclosing item's own assumption, gated at its own call site.
+        if args
+            .iter()
+            .any(|ty| ty.has_var(db) || ty.has_param(db) || ty.has_invalid(db))
+        {
+            return;
+        }
+
+        let expected = TyId::bool(db);
+        for &predicate in predicates {
+            let owner = BodyOwner::AnonConstBody {
+                body: predicate,
+                expected,
+            };
+            match eval_body_owner_const(db, owner, args.clone()) {
+                Ok(value) => {
+                    if static_assert_bool_value(db, value) == Some(false) {
+                        self.push_diag(BodyDiag::WhereConstPredicateFailed {
+                            primary: span.clone(),
+                        });
+                    }
+                }
+                Err(crate::analysis::semantic::CtfeError::NotConstEvaluable { .. }) => {}
+                Err(err) => {
+                    let invalid = TyId::invalid(db, invalid_cause_from_ctfe_error(db, owner, err));
+                    if let Some(diag) = invalid.emit_diag(db, span.clone()) {
+                        self.push_diag(diag);
+                    }
+                }
+            }
+        }
+    }
+
     fn resolve_deferred(&mut self) {
         let db = self.db;
         let body = self.env.body();
@@ -1664,9 +1737,13 @@ impl<'db> TyChecker<'db> {
                     env::DeferredTask::Obligation(obligation) => {
                         let origin = obligation.origin;
                         let goal = obligation.goal;
+                        let span = obligation.span.clone();
                         match self.process_trait_obligation(obligation, false) {
                             TraitObligationOutcome::Discharged(solution) => {
                                 self.record_discharged_obligation(origin, goal, solution);
+                                if let Some(solution) = solution {
+                                    self.gate_selected_impl_const_predicates(goal, solution, span);
+                                }
                             }
                             TraitObligationOutcome::Progressed => progressed = true,
                             TraitObligationOutcome::Requeue(obligation) => {
@@ -1841,10 +1918,14 @@ impl<'db> TyChecker<'db> {
                 env::DeferredTask::Obligation(obligation) => {
                     let origin = obligation.origin;
                     let goal = obligation.goal;
+                    let span = obligation.span.clone();
                     if let TraitObligationOutcome::Discharged(solution) =
                         self.process_trait_obligation(obligation, true)
                     {
                         self.record_discharged_obligation(origin, goal, solution);
+                        if let Some(solution) = solution {
+                            self.gate_selected_impl_const_predicates(goal, solution, span);
+                        }
                     }
                 }
                 env::DeferredTask::ConstPredicate(obligation) => {

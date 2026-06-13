@@ -634,6 +634,71 @@ fn wf_const_predicate_struct_field_no_body() {
     );
 }
 
+// Gate D: a selected impl's own `where`-clause const predicates gate it
+// (gate-not-select). Coherence already rejects impls differing only by a const
+// predicate; here the *selected* impl's residual is discharged after selection.
+const IMPL_GATED: &str = r#"
+trait Big {}
+struct Wrap<const N: u256> {}
+impl<const N: u256> Big for Wrap<N> where N >= 50 {}
+fn needs<T: Big>(_ t: T) {}
+"#;
+
+#[test]
+fn impl_const_predicate_gates_via_trait_bound() {
+    // Satisfying: Wrap<64> selects the impl and 64 >= 50 holds.
+    assert_compiles(
+        "impl_gate_ok",
+        &format!("{IMPL_GATED}\nfn ok(w: Wrap<64>) {{\n    needs(w)\n}}\n"),
+    );
+    // Violating: Wrap<10> selects the same impl, but 10 >= 50 is refuted — the
+    // selected impl's residual const predicate is gated, not silently accepted.
+    assert_has_code(
+        "impl_gate_bad",
+        &format!("{IMPL_GATED}\nfn bad(w: Wrap<10>) {{\n    needs(w)\n}}\n"),
+        "8-0085",
+    );
+}
+
+#[test]
+fn impls_differing_only_by_const_predicate_overlap() {
+    // Gate-not-select for coherence: const predicates do not discriminate
+    // candidates, so two impls differing only by one are an overlap error.
+    assert_has_code(
+        "impl_overlap",
+        r#"
+trait M {}
+struct Wrap<const N: u256> {}
+impl<const N: u256> M for Wrap<N> where N >= 50 {}
+impl<const N: u256> M for Wrap<N> where N < 50 {}
+"#,
+        "5-0001",
+    );
+}
+
+// Concrete method-call impl selection does not route through the deferred
+// obligation queue, so the selected impl's residual const predicate is not yet
+// gated there. Quarantined until method resolution enqueues the residual.
+#[test]
+#[ignore = "TODO: gate a selected impl's const predicate on concrete method calls (method resolution must enqueue the residual)"]
+fn impl_const_predicate_gates_method_call() {
+    let src = r#"
+trait Big {
+    fn big(self) -> u256
+}
+struct Wrap<const N: u256> {}
+impl<const N: u256> Big for Wrap<N> where N >= 50 {
+    fn big(self) -> u256 {
+        0
+    }
+}
+fn bad(w: Wrap<10>) -> u256 {
+    w.big()
+}
+"#;
+    assert_has_code("impl_gate_method", src, "8-0085");
+}
+
 #[test]
 fn wf_const_predicate_symbolic_generic_not_refuted() {
     // A symbolic application `Bounded<A, B>` under a matching assumption is the
