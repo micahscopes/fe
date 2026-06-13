@@ -498,6 +498,51 @@ fn bad_forward<B: Platform>() where B::WORD_BITS == 128 {
     assert_has_code("assumption_mismatch", src, "8-0085");
 }
 
+// A12: the assumption matcher is *exact* — it does not flip relation direction,
+// reason by implication, or split conjunctions. A trait carrying a relational
+// and a boolean fact, plus a callee that demands a specific shape.
+const RELATIONAL: &str = r#"
+trait HasSize {
+    const SIZE: u256
+    const DYN: bool
+}
+fn needs_ge16<T: HasSize>() where T::SIZE >= 16 {
+}
+fn needs_gt0<T: HasSize>() where T::SIZE > 0 {
+}
+fn needs_both<T: HasSize>() where T::SIZE == 16 && T::DYN == false {
+}
+"#;
+
+#[test]
+fn assumption_route_does_not_flip_direction() {
+    // Caller writes the logically-equivalent flip `16 <= T::SIZE`; it must NOT
+    // discharge the callee's `T::SIZE >= 16` (distinct relations stay distinct).
+    let src = format!(
+        "{RELATIONAL}\nfn fwd<T: HasSize>() where 16 <= T::SIZE {{\n    needs_ge16<T>()\n}}\n"
+    );
+    assert_has_code("assumption_flip", &src, "8-0085");
+}
+
+#[test]
+fn assumption_route_does_not_imply() {
+    // `T::SIZE >= 1` does not discharge `T::SIZE > 0`, even though it implies it.
+    let src = format!(
+        "{RELATIONAL}\nfn fwd<T: HasSize>() where T::SIZE >= 1 {{\n    needs_gt0<T>()\n}}\n"
+    );
+    assert_has_code("assumption_imply", &src, "8-0085");
+}
+
+#[test]
+fn assumption_route_does_not_split_conjunctions() {
+    // The caller proves only one conjunct; the callee's `A && B` is one term and
+    // is not satisfied by a single-conjunct assumption.
+    let src = format!(
+        "{RELATIONAL}\nfn fwd<T: HasSize>() where T::SIZE == 16 {{\n    needs_both<T>()\n}}\n"
+    );
+    assert_has_code("assumption_split", &src, "8-0085");
+}
+
 // ---------------------------------------------------------------------------
 // Gate 1 + 3: const predicates are first-class at every well-formedness
 // position, not only at call sites. A concrete ADT whose own `where`-clause
