@@ -4987,6 +4987,36 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                 notes: vec![],
                 error_code,
             },
+
+            Self::MethodConstPredicateMismatch { impl_m, trait_m } => {
+                let method_name = impl_m.name(db).expect("methods have names").data(db);
+                CompleteDiagnostic {
+                    severity,
+                    message: "method has different `where` const predicates than trait".to_string(),
+                    sub_diagnostics: vec![
+                        SubDiagnostic {
+                            style: LabelStyle::Primary,
+                            message: format!(
+                                "the `where` const predicates on method `{method_name}` must \
+                                 match the trait declaration exactly"
+                            ),
+                            span: impl_m.name_span().resolve(db),
+                        },
+                        SubDiagnostic {
+                            style: LabelStyle::Secondary,
+                            message: "trait declares the method's const predicates here"
+                                .to_string(),
+                            span: trait_m.name_span().resolve(db),
+                        },
+                    ],
+                    notes: vec![
+                        "const predicates are matched by exact term identity (after \
+                         normalization), not by logical implication"
+                            .to_string(),
+                    ],
+                    error_code,
+                }
+            }
         }
     }
 }

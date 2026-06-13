@@ -1045,6 +1045,11 @@ pub enum ImplDiag<'db> {
         const_name: IdentId<'db>,
         trait_: Trait<'db>,
     },
+
+    MethodConstPredicateMismatch {
+        impl_m: CallableDef<'db>,
+        trait_m: CallableDef<'db>,
+    },
 }
 
 impl ImplDiag<'_> {
@@ -1066,6 +1071,7 @@ impl ImplDiag<'_> {
             Self::MissingAssociatedConstValue { .. } => 13,
             Self::ConstNotDefinedInTrait { .. } => 14,
             Self::MissingAssociatedConst { .. } => 15,
+            Self::MethodConstPredicateMismatch { .. } => 16,
         }
     }
 }

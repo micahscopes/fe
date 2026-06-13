@@ -834,6 +834,78 @@ pub fn substitute_term<'db>(
     TermId::new(db, node)
 }
 
+/// Rewrites a term's embedded parameter types and trait instances through
+/// `subst`, an arbitrary substitution over generic-parameter types.
+///
+/// Where [`substitute_term`] rebases by *positional* generic arguments (a
+/// call's `generic_args`), this rebases by a caller-supplied mapping over
+/// parameter `TyId`s. Its purpose is method const-predicate conformance: a
+/// trait method's predicate term lives over the *trait* method's parameter
+/// frame, so to compare it by identity against the *impl* method's predicate
+/// terms it must first be re-expressed in the impl method's frame. The caller
+/// supplies the trait→impl parameter substitution (the same one used for the
+/// trait-bound comparison); `subst` returns its argument unchanged for any
+/// parameter it does not remap.
+///
+/// Embedded `TyId` (a [`TermNode::ConstParam`]) and `TraitInstId` (a
+/// [`TermNode::AssocConst`] receiver, and `App` generic args) are rewritten
+/// through the existing instantiation folder; the term structure is rebuilt and
+/// re-interned. Pure: no CTFE, no normalization (callers normalize afterwards).
+pub fn rebase_term_with<'db, F>(
+    db: &'db dyn HirAnalysisDb,
+    term: TermId<'db>,
+    subst: &F,
+) -> TermId<'db>
+where
+    F: Fn(TyId<'db>) -> TyId<'db>,
+{
+    let node = match term.data(db) {
+        TermNode::Int(_) | TermNode::Bool(_) | TermNode::ConstRef(_) => return term,
+        TermNode::ConstParam(ty) => {
+            TermNode::ConstParam(Binder::bind(*ty).instantiate_with(db, subst))
+        }
+        TermNode::AssocConst { inst, name } => TermNode::AssocConst {
+            inst: Binder::bind(*inst).instantiate_with(db, subst),
+            name: *name,
+        },
+        TermNode::Arith { op, lhs, rhs } => TermNode::Arith {
+            op: *op,
+            lhs: rebase_term_with(db, *lhs, subst),
+            rhs: rebase_term_with(db, *rhs, subst),
+        },
+        TermNode::Cmp { op, lhs, rhs } => TermNode::Cmp {
+            op: *op,
+            lhs: rebase_term_with(db, *lhs, subst),
+            rhs: rebase_term_with(db, *rhs, subst),
+        },
+        TermNode::And(lhs, rhs) => TermNode::And(
+            rebase_term_with(db, *lhs, subst),
+            rebase_term_with(db, *rhs, subst),
+        ),
+        TermNode::Or(lhs, rhs) => TermNode::Or(
+            rebase_term_with(db, *lhs, subst),
+            rebase_term_with(db, *rhs, subst),
+        ),
+        TermNode::Not(inner) => TermNode::Not(rebase_term_with(db, *inner, subst)),
+        TermNode::App {
+            callee,
+            generic_args,
+            args,
+        } => TermNode::App {
+            callee: *callee,
+            generic_args: generic_args
+                .iter()
+                .map(|ty| Binder::bind(*ty).instantiate_with(db, subst))
+                .collect(),
+            args: args
+                .iter()
+                .map(|arg| rebase_term_with(db, *arg, subst))
+                .collect(),
+        },
+    };
+    TermId::new(db, node)
+}
+
 /// Normalizes a term bottom-up. Idempotent: `normalize_term(normalize_term(t))
 /// == normalize_term(t)`.
 ///

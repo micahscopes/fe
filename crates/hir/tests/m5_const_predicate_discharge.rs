@@ -755,3 +755,191 @@ fn wf_const_predicate_symbolic_generic_not_refuted() {
         ),
     );
 }
+
+// =====================================================================
+// M0: method const-predicate conformance.
+//
+// An impl method's `where`-clause const predicates must match the trait
+// method's *exactly* (by normalized term identity) — not by logical
+// implication. This mirrors the obligation discharge path: a caller's
+// assumption discharges a callee predicate only by identity, so if the impl
+// could publish one predicate to trait-routed callers while its body relied
+// on another, the discharge guarantee would break. Reported as `6-0016`
+// (`ImplDiag::MethodConstPredicateMismatch`).
+// =====================================================================
+
+#[test]
+fn method_const_predicate_exact_match_conforms() {
+    assert_compiles(
+        "m0_exact",
+        r#"
+trait HasOp {
+    fn op<const N: u256>() where N >= 50
+}
+struct X {}
+impl HasOp for X {
+    fn op<const N: u256>() where N >= 50 {
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn method_const_predicate_stronger_is_rejected() {
+    // Stronger is unsound for trait-routed callers (they only guarantee the
+    // trait's predicate) — and, regardless, fails the exact-identity rule.
+    assert_has_code(
+        "m0_stronger",
+        r#"
+trait HasOp {
+    fn op<const N: u256>() where N >= 50
+}
+struct X {}
+impl HasOp for X {
+    fn op<const N: u256>() where N >= 100 {
+    }
+}
+"#,
+        "6-0016",
+    );
+}
+
+#[test]
+fn method_const_predicate_weaker_is_rejected() {
+    // Even a logically *weaker* predicate is rejected: matching is by identity,
+    // not implication (no `>=` entailment reasoning).
+    assert_has_code(
+        "m0_weaker",
+        r#"
+trait HasOp {
+    fn op<const N: u256>() where N >= 50
+}
+struct X {}
+impl HasOp for X {
+    fn op<const N: u256>() where N >= 10 {
+    }
+}
+"#,
+        "6-0016",
+    );
+}
+
+#[test]
+fn method_const_predicate_dropped_is_rejected() {
+    // Dropping the predicate entirely is a mismatch.
+    assert_has_code(
+        "m0_dropped",
+        r#"
+trait HasOp {
+    fn op<const N: u256>() where N >= 50
+}
+struct X {}
+impl HasOp for X {
+    fn op<const N: u256>() {
+    }
+}
+"#,
+        "6-0016",
+    );
+}
+
+#[test]
+fn method_const_predicate_added_is_rejected() {
+    // Adding a predicate the trait does not declare is a mismatch.
+    assert_has_code(
+        "m0_added",
+        r#"
+trait HasOp {
+    fn op<const N: u256>()
+}
+struct X {}
+impl HasOp for X {
+    fn op<const N: u256>() where N >= 50 {
+    }
+}
+"#,
+        "6-0016",
+    );
+}
+
+#[test]
+fn method_const_predicate_relation_flip_is_rejected() {
+    // `N >= 50` and `50 <= N` are logically equivalent but distinct terms:
+    // exact identity, no direction flipping (FV11/A1). The flipped form is a
+    // mismatch.
+    assert_has_code(
+        "m0_flip",
+        r#"
+trait HasOp {
+    fn op<const N: u256>() where N >= 50
+}
+struct X {}
+impl HasOp for X {
+    fn op<const N: u256>() where 50 <= N {
+    }
+}
+"#,
+        "6-0016",
+    );
+}
+
+#[test]
+fn method_const_predicate_order_independent() {
+    // The predicates form a set: declaration order does not matter.
+    assert_compiles(
+        "m0_order",
+        r#"
+trait HasOp {
+    fn op<const N: u256>() where N >= 50, N <= 100
+}
+struct X {}
+impl HasOp for X {
+    fn op<const N: u256>() where N <= 100, N >= 50 {
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn method_const_predicate_assoc_const_self_conforms() {
+    // `Self::SIZE` in the trait method is over the trait's `Self`; the impl's
+    // is over the concrete type. Rebasing the trait predicate through the
+    // trait→impl substitution makes the two assoc-const terms identical.
+    assert_compiles(
+        "m0_assoc_ok",
+        r#"
+trait HasSize {
+    const SIZE: u256
+    fn check() where Self::SIZE == 8
+}
+struct X {}
+impl HasSize for X {
+    const SIZE: u256 = 8
+    fn check() where Self::SIZE == 8 {
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn method_const_predicate_assoc_const_self_mismatch_is_rejected() {
+    assert_has_code(
+        "m0_assoc_bad",
+        r#"
+trait HasSize {
+    const SIZE: u256
+    fn check() where Self::SIZE == 8
+}
+struct X {}
+impl HasSize for X {
+    const SIZE: u256 = 16
+    fn check() where Self::SIZE == 16 {
+    }
+}
+"#,
+        "6-0016",
+    );
+}
