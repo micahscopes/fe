@@ -190,10 +190,7 @@ pub(super) enum GenTy<'db> {
     Tuple(Vec<GenTyId>),
     /// `<ty as GoalishTrait>::name` — a projection of the goal trait's
     /// associated type on `ty`.
-    Projection {
-        ty: TypeId<'db>,
-        name: IdentId<'db>,
-    },
+    Projection { ty: TypeId<'db>, name: IdentId<'db> },
     /// A type as written (e.g. from `ty<T>()` or `field.ty()`).
     Concrete(TypeId<'db>),
 }
@@ -786,8 +783,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Expr::Block(stmts) => {
                 let stmts = stmts.clone();
                 for stmt in stmts {
-                    if let Partial::Present(Stmt::Expr(stmt_expr)) = stmt.data(self.db, self.body)
-                    {
+                    if let Partial::Present(Stmt::Expr(stmt_expr)) = stmt.data(self.db, self.body) {
                         self.capture_quote_holes(*stmt_expr, holes)?;
                     }
                 }
@@ -901,7 +897,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             if takes_self {
                 binds.push("`self`".to_string());
             }
-            binds.extend(params.iter().map(|param| format!("`{}`", param.data(self.db))));
+            binds.extend(
+                params
+                    .iter()
+                    .map(|param| format!("`{}`", param.data(self.db))),
+            );
             let binds = if binds.is_empty() {
                 "no names".to_string()
             } else {
@@ -981,10 +981,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 ));
             }
             _ => {
-                return Err(self.invalid_quote(
-                    template.origin,
-                    "quote bodies must be a single expression",
-                ));
+                return Err(
+                    self.invalid_quote(template.origin, "quote bodies must be a single expression")
+                );
             }
         };
         self.elab_template_expr(root, &template, sig, binders)
@@ -1139,10 +1138,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 self.check_inline_capacity(expr, value)?;
                 Ok(self.push_gen(GenExpr::StrLit(value)))
             }
-            Expr::Lit(LitKind::Int(_)) => Err(self.invalid_quote(
-                expr,
-                "integer literals are not supported in quote bodies",
-            )),
+            Expr::Lit(LitKind::Int(_)) => {
+                Err(self.invalid_quote(expr, "integer literals are not supported in quote bodies"))
+            }
             Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::And)) => {
                 let (lhs, rhs) = (*lhs, *rhs);
                 let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
@@ -1161,10 +1159,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             )),
             Expr::Path(_) => {
                 let Some(name) = self.simple_expr_path_ident(expr) else {
-                    return Err(self.invalid_quote(
-                        expr,
-                        "paths in quote bodies must be a single name",
-                    ));
+                    return Err(
+                        self.invalid_quote(expr, "paths in quote bodies must be a single name")
+                    );
                 };
                 self.elab_template_name(expr, name, template, sig, binders)
             }
@@ -1506,9 +1503,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         return Err(self.unsupported_expr(expr));
                     };
                     let text = match reflected.name {
-                        super::provider::FieldName::Named(name) => {
-                            name.data(self.db).clone()
-                        }
+                        super::provider::FieldName::Named(name) => name.data(self.db).clone(),
                         super::provider::FieldName::Positional(idx) => idx.to_string(),
                     };
                     Ok(Value::Str(StringId::new(self.db, text)))
@@ -1725,9 +1720,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let tuple = self.gen_expr_arg(tuple_arg.expr)?;
                 let elem = self.gen_expr_arg(elem_arg.expr)?;
                 let GenExpr::Tuple(elems) = &self.exprs[tuple.0] else {
-                    return Err(
-                        self.invalid_method(tuple_arg.expr, "`with_elem` expects a tuple")
-                    );
+                    return Err(self.invalid_method(tuple_arg.expr, "`with_elem` expects a tuple"));
                 };
                 let mut elems = elems.clone();
                 elems.push(elem);

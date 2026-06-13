@@ -354,12 +354,7 @@ impl<'db> ItemKind<'db> {
                 ImplTrait::lower_ast(ctxt, impl_trait);
             }
             ast::ItemKind::DeriveDecl(decl) => {
-                validate_unsupported_item_attrs(
-                    ctxt,
-                    decl.attr_list(),
-                    "derive declaration",
-                    None,
-                );
+                validate_unsupported_item_attrs(ctxt, decl.attr_list(), "derive declaration", None);
                 DeriveDecl::lower_ast(ctxt, decl);
             }
             ast::ItemKind::Const(const_) => {
@@ -1017,7 +1012,9 @@ impl<'db> DeriveDecl<'db> {
             .target_path()
             .map(|path| PathId::lower_ast(ctxt, path))
             .into();
-        let explicit_provider_path = ast.provider_path().map(|path| PathId::lower_ast(ctxt, path));
+        let explicit_provider_path = ast
+            .provider_path()
+            .map(|path| PathId::lower_ast(ctxt, path));
         let scoped_provider_path =
             provider_scope.and_then(|scope| scope.provider_path(ctxt.db()).to_opt());
         let selected_provider_from_scope =

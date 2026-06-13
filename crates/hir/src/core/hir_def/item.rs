@@ -1871,7 +1871,10 @@ pub enum TrackedItemVariant<'db> {
     Const(Partial<IdentId<'db>>),
     StaticAssert(u32),
     ContractInit,
-    ContractRecvArm { recv_idx: u32, arm_idx: u32 },
+    ContractRecvArm {
+        recv_idx: u32,
+        arm_idx: u32,
+    },
     Use(Partial<super::UsePathId<'db>>),
     /// Namespace marker for items synthesized by the post-lowering expansion
     /// stage (e.g. `#[derive(..)]` impls). Joining this onto the top-level

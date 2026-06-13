@@ -91,8 +91,8 @@ fn test_quote_expr_roundtrips() {
 
 #[test]
 fn test_quote_open_names_and_holes_roundtrip() {
-    assert_roundtrip
-        ("fn f() {\n    body = quote( other ) { ${ body } && self.${ field } == other.${ field } }\n}\n",
+    assert_roundtrip(
+        "fn f() {\n    body = quote( other ) { ${ body } && self.${ field } == other.${ field } }\n}\n",
         "fn f() {\n    body = quote(other) { ${body} && self.${field} == other.${field} }\n}\n",
     );
 }

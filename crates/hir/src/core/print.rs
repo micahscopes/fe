@@ -546,8 +546,7 @@ impl<'db> Pat<'db> {
                     let binders_str = binders
                         .iter()
                         .map(|p| {
-                            let pat =
-                                unwrap_partial_ref(p.data(db, body), "Pat::QuoteHole binder");
+                            let pat = unwrap_partial_ref(p.data(db, body), "Pat::QuoteHole binder");
                             pat.pretty_print(db, body)
                         })
                         .collect::<Vec<_>>()
@@ -842,7 +841,10 @@ impl<'db> Expr<'db> {
                 format!("with ({}) {}", bindings_str, body_str)
             }
 
-            Expr::Quote { open, body: template } => {
+            Expr::Quote {
+                open,
+                body: template,
+            } => {
                 let open_str = if open.is_empty() {
                     String::new()
                 } else {
@@ -869,20 +871,16 @@ impl<'db> Expr<'db> {
                         let arms_str = arms
                             .iter()
                             .map(|arm| {
-                                let arm_body = unwrap_partial_ref(
-                                    arm.body.data(db, body),
-                                    "Quote arm body",
-                                );
+                                let arm_body =
+                                    unwrap_partial_ref(arm.body.data(db, body), "Quote arm body");
                                 let body_str = arm_body.pretty_print(db, body, indent);
                                 match arm.pat.data(db, body) {
                                     // An arm splice: the hole is the arm's
                                     // only content.
                                     Partial::Absent => body_str,
-                                    Partial::Present(pat) => format!(
-                                        "{} => {}",
-                                        pat.pretty_print(db, body),
-                                        body_str
-                                    ),
+                                    Partial::Present(pat) => {
+                                        format!("{} => {}", pat.pretty_print(db, body), body_str)
+                                    }
                                 }
                             })
                             .collect::<Vec<_>>()

@@ -31,9 +31,7 @@ impl Pat {
             }
             SK::RecordPat => PatKind::Record(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::OrPat => PatKind::Or(AstNode::cast(self.syntax().clone()).unwrap()),
-            SK::QuoteHolePat => {
-                PatKind::QuoteHole(AstNode::cast(self.syntax().clone()).unwrap())
-            }
+            SK::QuoteHolePat => PatKind::QuoteHole(AstNode::cast(self.syntax().clone()).unwrap()),
             _ => unreachable!(),
         }
     }

@@ -338,7 +338,9 @@ fn where_clause_owner_has_params_in_scope<'db>(
     let mut item = Some(ItemKind::from(owner));
     while let Some(cur) = item {
         if let Some(param_owner) = GenericParamOwner::from_item_opt(cur)
-            && !collect_generic_params(db, param_owner).params(db).is_empty()
+            && !collect_generic_params(db, param_owner)
+                .params(db)
+                .is_empty()
         {
             return true;
         }
@@ -1316,7 +1318,10 @@ impl<'db> TyChecker<'db> {
                         };
                         self.push_diag(BodyDiag::AmbiguousTraitInst {
                             primary: obligation.span.clone(),
-                            cands: candidates.into_iter().map(|solution| solution.inst).collect(),
+                            cands: candidates
+                                .into_iter()
+                                .map(|solution| solution.inst)
+                                .collect(),
                             required_by,
                         });
                         return TraitObligationOutcome::Discharged(None);

@@ -970,7 +970,12 @@ mod tests {
         assert_eq!(where_counts(&wc), (1, 2));
         assert!(func.body().is_some(), "real body must not be swallowed");
         // Exactly one func; the body must not have leaked out as an item.
-        assert!(root.descendants().filter_map(crate::ast::Func::cast).count() == 1);
+        assert!(
+            root.descendants()
+                .filter_map(crate::ast::Func::cast)
+                .count()
+                == 1
+        );
     }
 
     #[test]
@@ -1059,7 +1064,12 @@ mod tests {
         let wc = impl_trait.where_clause().expect("missing where clause");
         assert_eq!(where_counts(&wc), (1, 1));
         // The impl's member fn must still be present.
-        assert!(root.descendants().filter_map(crate::ast::Func::cast).count() == 1);
+        assert!(
+            root.descendants()
+                .filter_map(crate::ast::Func::cast)
+                .count()
+                == 1
+        );
     }
 
     #[test]
@@ -1150,7 +1160,10 @@ mod tests {
         let wc = trait_.where_clause().expect("missing trait where clause");
         assert_eq!(where_counts(&wc), (1, 1));
         assert!(
-            root.descendants().filter_map(crate::ast::Func::cast).count() == 1,
+            root.descendants()
+                .filter_map(crate::ast::Func::cast)
+                .count()
+                == 1,
             "trait item list must survive"
         );
     }

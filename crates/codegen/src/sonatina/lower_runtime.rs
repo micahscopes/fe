@@ -266,9 +266,7 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
                             .iter()
                             .cloned()
                             .zip(data.fields.iter())
-                            .map(|(field, class)| {
-                                self.gv_initializer_for_const(field, Some(class))
-                            })
+                            .map(|(field, class)| self.gv_initializer_for_const(field, Some(class)))
                             .collect::<Result<Vec<_>, _>>()?,
                     )
                 }

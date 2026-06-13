@@ -76,9 +76,8 @@ pub(super) fn synthesize_provider_impl<'db>(
                     BuilderCommand::EmitConst { name, ty, value } => {
                         let ty = replay.materialize_ty(builder, *ty);
                         let value_expr = *value;
-                        let value_body = builder.anonymous_expr_body(|body| {
-                            replay.replay_expr(body, value_expr)
-                        });
+                        let value_body = builder
+                            .anonymous_expr_body(|body| replay.replay_expr(body, value_expr));
                         consts.push(AssocConstDef {
                             attributes: builder.empty_attrs(),
                             name: Partial::Present(*name),

@@ -40,8 +40,8 @@ use salsa::plumbing::AsId;
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution::{PathRes, resolve_path};
 use crate::hir_def::{
-    ArithBinOp, BinOp, Body, CallableDef, CompBinOp, Const, Expr, ExprId, Func, IdentId,
-    IntegerId, LitKind, LogicalBinOp, Partial, PathId, UnOp,
+    ArithBinOp, BinOp, Body, CallableDef, CompBinOp, Const, Expr, ExprId, Func, IdentId, IntegerId,
+    LitKind, LogicalBinOp, Partial, PathId, UnOp,
 };
 
 use super::binder::Binder;
@@ -313,14 +313,7 @@ pub enum TermCmpOp {
 
 impl TermCmpOp {
     /// All comparison relations, in declaration order.
-    pub const ALL: [Self; 6] = [
-        Self::Eq,
-        Self::Ne,
-        Self::Lt,
-        Self::Le,
-        Self::Gt,
-        Self::Ge,
-    ];
+    pub const ALL: [Self; 6] = [Self::Eq, Self::Ne, Self::Lt, Self::Le, Self::Gt, Self::Ge];
 }
 
 /// A named, unsupported HIR expression construct encountered during
@@ -458,8 +451,7 @@ pub fn lower_hir_to_term<'db>(
         }
 
         Expr::Call(callee, args) => {
-            let (callee_func, generic_args) =
-                lower_callee(db, body, expr, *callee, assumptions)?;
+            let (callee_func, generic_args) = lower_callee(db, body, expr, *callee, assumptions)?;
             let mut term_args = Vec::with_capacity(args.len());
             for arg in args {
                 // Argument labels are dropped by design: see `TermNode::App`.
@@ -1072,7 +1064,11 @@ fn normalize_and<'db>(
     rhs: TermId<'db>,
 ) -> TermId<'db> {
     if let TermNode::Bool(lhs_lit) = *lhs.data(db) {
-        return if lhs_lit { rhs } else { TermId::bool(db, false) };
+        return if lhs_lit {
+            rhs
+        } else {
+            TermId::bool(db, false)
+        };
     }
     if let TermNode::Bool(true) = rhs.data(db) {
         return lhs;
@@ -1569,10 +1565,7 @@ mod tests {
 
     #[test]
     fn non_term_paths_name_resolved_domain() {
-        let (db, file) = setup(
-            "non_term_path_type",
-            "struct S {}\n\nconst P: u256 = S + 1",
-        );
+        let (db, file) = setup("non_term_path_type", "struct S {}\n\nconst P: u256 = S + 1");
         let (top_mod, _) = db.top_mod(file);
         let body = const_body(&db, top_mod, "P");
         match lower_root(&db, body) {
@@ -1938,10 +1931,7 @@ mod tests {
     }
 
     /// All binary nodes over the given operand pool, plus negations.
-    fn build_layer<'db>(
-        db: &'db HirAnalysisTestDb,
-        pool: &[TermId<'db>],
-    ) -> Vec<TermId<'db>> {
+    fn build_layer<'db>(db: &'db HirAnalysisTestDb, pool: &[TermId<'db>]) -> Vec<TermId<'db>> {
         let mut layer = Vec::new();
         for &lhs in pool {
             for &rhs in pool {
@@ -2161,12 +2151,18 @@ mod tests {
             op: TermCmpOp::Eq, ..
         } = *q_norm.data(&db)
         else {
-            panic!("1 / 0 == 0 must stay a comparison, got {:?}", q_norm.data(&db));
+            panic!(
+                "1 / 0 == 0 must stay a comparison, got {:?}",
+                q_norm.data(&db)
+            );
         };
 
         // 7/2 + 7%2 + (5-3)*2 = 3 + 1 + 4 = 8.
         let r = lower_root(&db, const_body(&db, top_mod, "R")).unwrap();
-        assert_eq!(normalize_term(&db, r), TermId::int(&db, BigUint::from(8u32)));
+        assert_eq!(
+            normalize_term(&db, r),
+            TermId::int(&db, BigUint::from(8u32))
+        );
 
         // Underflowing subtraction stays symbolic.
         let underflow = TermId::new(
@@ -2231,7 +2227,10 @@ mod tests {
         let not = |t| TermId::new(&db, TermNode::Not(t));
 
         assert_eq!(normalize_term(&db, not(not(x))), normalize_term(&db, x));
-        assert_eq!(normalize_term(&db, not(not(not(x)))), normalize_term(&db, not(x)));
+        assert_eq!(
+            normalize_term(&db, not(not(not(x)))),
+            normalize_term(&db, not(x))
+        );
         assert_eq!(
             normalize_term(&db, not(TermId::bool(&db, true))),
             TermId::bool(&db, false)
@@ -2271,7 +2270,10 @@ mod tests {
         );
 
         // Structural double-check on the same operands.
-        let TermNode::Cmp { lhs: x, rhs: fifty, .. } = *ge_term.data(&db) else {
+        let TermNode::Cmp {
+            lhs: x, rhs: fifty, ..
+        } = *ge_term.data(&db)
+        else {
             panic!("expected comparison");
         };
         let structural_ge = TermId::new(
@@ -2521,7 +2523,10 @@ mod tests {
             "TERM_LANG_SHAPE is out of sync with TermNode"
         );
 
-        let arith: Vec<_> = TermArithOp::ALL.iter().map(|&op| arith_op_shape(op)).collect();
+        let arith: Vec<_> = TermArithOp::ALL
+            .iter()
+            .map(|&op| arith_op_shape(op))
+            .collect();
         assert_eq!(arith, TERM_ARITH_OP_SHAPE.to_vec());
         let cmp: Vec<_> = TermCmpOp::ALL.iter().map(|&op| cmp_op_shape(op)).collect();
         assert_eq!(cmp, TERM_CMP_OP_SHAPE.to_vec());
@@ -2543,7 +2548,8 @@ mod tests {
              (version, fingerprint) entry instead of editing in place"
         );
         assert_eq!(
-            head_fingerprint, fingerprint,
+            head_fingerprint,
+            fingerprint,
             "term-language shape changed: bump TERM_LANG_VERSION to {} and append \
              ({}, {fingerprint:#018x}) to TERM_LANG_LEDGER",
             TERM_LANG_VERSION + 1,

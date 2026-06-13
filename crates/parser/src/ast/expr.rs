@@ -61,9 +61,7 @@ impl Expr {
             SK::MatchExpr => ExprKind::Match(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::WithExpr => ExprKind::With(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::QuoteExpr => ExprKind::Quote(AstNode::cast(self.syntax().clone()).unwrap()),
-            SK::QuoteHoleExpr => {
-                ExprKind::QuoteHole(AstNode::cast(self.syntax().clone()).unwrap())
-            }
+            SK::QuoteHoleExpr => ExprKind::QuoteHole(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::ParenExpr => ExprKind::Paren(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::AssignExpr => ExprKind::Assign(AstNode::cast(self.syntax().clone()).unwrap()),
             SK::AugAssignExpr => ExprKind::AugAssign(AstNode::cast(self.syntax().clone()).unwrap()),

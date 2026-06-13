@@ -11,8 +11,7 @@ use std::ops::Range;
 use crate::analysis::{
     analysis_pass::{
         AnalysisPassManager, AttrMisusePass, DeriveLowerPass, ErrorLowerPass, EventLowerPass,
-        MsgLowerPass,
-        ParsingPass,
+        MsgLowerPass, ParsingPass,
     },
     diagnostics::{DiagnosticVoucher, SpannedHirAnalysisDb},
     name_resolution::ImportAnalysisPass,
