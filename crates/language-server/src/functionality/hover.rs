@@ -5,7 +5,7 @@ use common::file::File;
 use hir::{
     HirDb,
     analysis::ty::{
-        ty_check::{EffectParamSite, LocalBinding, ParamSite},
+        ty_check::{DischargeRoute, EffectParamSite, LocalBinding, ParamSite},
         ty_def::TyId,
     },
     core::semantic::{
@@ -266,6 +266,47 @@ fn discharged_obligations_footer<'db>(
     ))
 }
 
+/// Renders the `where`-clause const predicates that type checking discharged
+/// for the call under the cursor: the route each took (CTFE evaluation or an
+/// in-scope assumption) and the type substitution it was discharged under. The
+/// `premises` slot is shown only when non-empty (always empty at M5). This is
+/// the user-facing consumer of the const-predicate evidence record.
+fn discharged_const_predicates_footer<'db>(
+    db: &'db DriverDataBase,
+    reference: &ReferenceView<'db>,
+) -> Option<String> {
+    let (body, call_expr) = call_expr_for_reference(db, reference)?;
+    let typed_body = typed_body_for_body(db, body)?;
+    let lines: Vec<String> = typed_body
+        .discharged_const_predicates_for_call(call_expr)
+        .map(|discharged| {
+            let route = match discharged.route {
+                DischargeRoute::Ctfe => "CTFE",
+                DischargeRoute::Assumption => "an assumption",
+            };
+            let args = discharged
+                .generic_args
+                .iter()
+                .map(|ty| ty.pretty_print(db).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let premises = if discharged.premises.is_empty() {
+                String::new()
+            } else {
+                format!(", premises: {}", discharged.premises.len())
+            };
+            format!("- const predicate discharged by {route} (with `{args}`){premises}")
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Const predicates discharged:\n{}",
+        lines.join("\n")
+    ))
+}
+
 pub fn hover_helper(
     db: &DriverDataBase,
     file: File,
@@ -344,6 +385,12 @@ pub fn hover_helper(
     };
 
     if let Some(footer) = discharged_obligations_footer(db, r) {
+        info.push('\n');
+        info.push_str(&footer);
+        info.push('\n');
+    }
+
+    if let Some(footer) = discharged_const_predicates_footer(db, r) {
         info.push('\n');
         info.push_str(&footer);
         info.push('\n');
