@@ -622,3 +622,50 @@ nothing in the executed M5 work contradicts it.
   parallel (or it drifts).
 
 Update the JSON when the structure changes; re-render the mermaid from it.
+
+---
+
+# FCO → CTCubFe consolidated graph (v1) — status reconciliation
+
+The architect's consolidated graph extends the FCO substrate through the
+CTCubFe Forms (C0–C6), their enablers (S0–S6), SMT/proof (Q*), Sonatina
+resources (V*), and provision unification (U*). It supersedes the v0 node IDs;
+the clean IDs below are canonical. (The full graph is the architect's JSON
+source of truth — vendor on request; this section is the live status overlay.)
+
+Strategic handoff: **CTCubFe `C1` "Bounds With Receipts" depends on
+F6 + W0 + A1 + R0 + L2 — all landed.** So the FCO substrate for Form 1 is
+complete; we are at the FCO→CTCubFe boundary.
+
+Live status (proven from code/tests on branch `first-class-obligations`):
+
+- **FCO substrate — done & tested:** F0 evidence schema, F1 term language,
+  F2 symbolic AssocConst, F3 where-pred lower, F4 shared queue,
+  F5 CTFE-outside-solver, F6 call-site discharge, F7 paired fixtures.
+- **Obligation surfaces:** W0 ADT/sig/WF ✅, W2 duplicate-diagnostic guard ✅,
+  W3 never-called sig/field ✅, W4 symbolic-not-false-rejected ✅;
+  **W1 WF evidence origins ❌** (WF positions reject but record no evidence).
+- **Assumptions:** A0 pool ✅, A1 exact term match ✅, A2 no flip/split/imply ✅;
+  **A3 assumption evidence w/ premises/origin 🟡** (route=Assumption + empty
+  premises recorded; premise/origin link not yet stored).
+- **Impl predicates:** I0 representable ✅, I3 B2b overlap ✅ (5-0001);
+  **I1/I2/I4 ❌** — gating a *selected* impl's residual needs re-deriving the
+  impl substitution from the goal (the generic impl's params are symbolic at the
+  discharge site). Deeper solver-path work; the cleanest remaining M5 item.
+- **Diagnostics:** D1 false-predicate ✅ (8-0085), D4 CTFE fault ✅ (3-0025);
+  **D0 taxonomy 🟡 (Z0)**, D2 formation 🟡 (2-0002), D3 unsupported-projection
+  named-limitation 🟡 (2-0002, not a dedicated code).
+- **Receipts:** R0 debug/HIR consumer ✅, R1 LSP hover ✅; R2 explain seed ❌,
+  R3 chain ❌ (M6).
+- **Platform/backend (CTCubFe-relevant):** L1 backend facts as assoc consts ✅,
+  L2 platform-fact obligations ✅, L3 storage/memory capability gates ✅ — these
+  are exactly the `where_const_predicate_platform_fact` / `bool_capability`
+  fixtures. L0 (HKT intrinsic prototype) and L4 (multi-backend pressure) future.
+- **CTCubFe Forms:** C1's FCO prerequisites met (see handoff). C0/C2–C6 and the
+  S*/Q*/V*/U* tracks are post-M7 architecture.
+
+Remaining M5 surface, by ID: **I1/I2/I4** (impl gating — needs solver subst),
+**W1** (WF evidence), **A3** (premise origin), **D0/D2/D3** (diagnostics).
+The Z* uncertain nodes (Z0 codes, Z2 ConstraintKind necessity — we chose
+queue-level unification, Z3 projection depth, Z4 method exactness) line up with
+our recorded scope calls.
