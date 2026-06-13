@@ -479,6 +479,50 @@ fn ctfe_fault_is_hard_error_not_sfinae() {
     );
 }
 
+// Gate 7: a named `const fn` call is a valid predicate, evaluated by CTFE at
+// concrete sites (`where fits(LEN, CAP)`). Term identity keys on the callee, so
+// a same-bodied "foreign twin" function does not match in the assumption route.
+const FITS: &str = r#"
+const fn fits(_ len: u256, _ cap: u256) -> bool {
+    len <= cap
+}
+const fn twin(_ len: u256, _ cap: u256) -> bool {
+    len <= cap
+}
+fn store<const LEN: u256, const CAP: u256>() where fits(LEN, CAP) {
+}
+"#;
+
+#[test]
+fn named_const_fn_bound_discharges_by_ctfe() {
+    // fits(3, 8) holds and records a CTFE discharge.
+    assert_eq!(
+        discharges_in(
+            "fits_ok",
+            &format!("{FITS}\nfn ok() {{\n    store<3, 8>()\n}}\n"),
+            "ok",
+        ),
+        1,
+    );
+    // fits(8, 3) is refuted.
+    assert_has_code(
+        "fits_bad",
+        &format!("{FITS}\nfn bad() {{\n    store<8, 3>()\n}}\n"),
+        "8-0085",
+    );
+}
+
+#[test]
+fn named_const_fn_bound_foreign_twin_does_not_match() {
+    // The caller proves `twin(LEN, CAP)`; the callee requires `fits(LEN, CAP)`.
+    // Same body, different callee — the `App` terms differ, so the symbolic
+    // forward is not discharged by assumption.
+    let src = format!(
+        "{FITS}\nfn fwd<const LEN: u256, const CAP: u256>() where twin(LEN, CAP) {{\n    store<LEN, CAP>()\n}}\n"
+    );
+    assert_has_code("fits_twin", &src, "8-0085");
+}
+
 // Pair 8 (negative): a generic caller forwarding its own type with a
 // *mismatched* assumption (`B::WORD_BITS == 128` calling a callee that requires
 // `== 256`) is rejected by exact term identity — no implication, no fuzzy
