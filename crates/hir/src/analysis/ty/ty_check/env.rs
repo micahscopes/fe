@@ -99,6 +99,10 @@ pub(crate) struct TyCheckEnv<'db> {
     /// Discharge evidence for trait obligations retired while checking this
     /// body, in retirement order.
     discharged_obligations: Vec<super::DischargedObligation<'db>>,
+
+    /// Discharge evidence for const-predicate obligations retired while
+    /// checking this body, in retirement order.
+    discharged_const_predicates: Vec<super::DischargedConstPredicate<'db>>,
 }
 
 impl<'db> TyCheckEnv<'db> {
@@ -236,6 +240,7 @@ impl<'db> TyCheckEnv<'db> {
             call_effect_args: SecondaryMap::new(),
             for_loop_seq: SecondaryMap::new(),
             discharged_obligations: Vec::new(),
+            discharged_const_predicates: Vec::new(),
         };
 
         env.enter_scope(body.expr(db));
@@ -851,11 +856,25 @@ impl<'db> TyCheckEnv<'db> {
         self.deferred.push(DeferredTask::Obligation(obligation))
     }
 
+    pub(super) fn register_const_predicate_obligation(
+        &mut self,
+        obligation: ConstPredicateObligation<'db>,
+    ) {
+        self.deferred.push(DeferredTask::ConstPredicate(obligation))
+    }
+
     pub(super) fn record_discharged_obligation(
         &mut self,
         obligation: super::DischargedObligation<'db>,
     ) {
         self.discharged_obligations.push(obligation);
+    }
+
+    pub(super) fn record_discharged_const_predicate(
+        &mut self,
+        discharged: super::DischargedConstPredicate<'db>,
+    ) {
+        self.discharged_const_predicates.push(discharged);
     }
 
     pub(super) fn deferred_len(&self) -> usize {
@@ -948,6 +967,11 @@ impl<'db> TyCheckEnv<'db> {
         self.discharged_obligations
             .iter_mut()
             .for_each(|obligation| *obligation = (*obligation).fold_with(self.db, &mut prober));
+        self.discharged_const_predicates
+            .iter_mut()
+            .for_each(|discharged| {
+                *discharged = discharged.clone().fold_with(self.db, &mut prober)
+            });
         let mut expr_place = SecondaryMap::new();
         let mut expr_places: PrimaryMap<super::ExprPlaceId, Place<'db>> = PrimaryMap::new();
         for expr in self.body.exprs(self.db).keys() {
@@ -993,6 +1017,7 @@ impl<'db> TyCheckEnv<'db> {
             pattern_status: self.pattern_status,
             for_loop_seq: self.for_loop_seq,
             discharged_obligations: self.discharged_obligations,
+            discharged_const_predicates: self.discharged_const_predicates,
             expr_place,
             expr_places,
         }
@@ -1575,6 +1600,7 @@ impl PendingPrimitiveOp {
 #[derive(Debug, Clone)]
 pub(super) enum DeferredTask<'db> {
     Obligation(TraitObligation<'db>),
+    ConstPredicate(ConstPredicateObligation<'db>),
     Method(PendingMethod<'db>),
     PrimitiveOp(PendingPrimitiveOp),
 }
@@ -1601,6 +1627,36 @@ pub enum TraitObligationOrigin<'db> {
 pub(super) struct TraitObligation<'db> {
     pub goal: TraitInstId<'db>,
     pub origin: TraitObligationOrigin<'db>,
+    pub span: DynLazySpan<'db>,
+}
+
+/// Where a const-predicate obligation processed during type checking was
+/// raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstPredicateObligationOrigin<'db> {
+    /// Raised by a `where`-clause const predicate on a callable at a call site.
+    CallConstraint {
+        /// The call expression whose callee carries the predicate.
+        call_expr: ExprId,
+        /// The callee whose declaration states the predicate.
+        callable_def: CallableDef<'db>,
+        /// Index of the predicate in the callee's `const_predicates` list.
+        predicate_idx: usize,
+    },
+}
+
+/// A `where`-clause const predicate that must be discharged at the obligation
+/// level (by CTFE under a call's type substitution), never inside the trait
+/// solver. Const predicates ride the same deferred queue as trait obligations.
+#[derive(Debug, Clone)]
+pub(super) struct ConstPredicateObligation<'db> {
+    /// The predicate body — an anonymous `bool` body on the callee's where
+    /// clause (e.g. `B::WORD_BITS == 256`).
+    pub predicate: Body<'db>,
+    /// The callee's type arguments at this call, against which the predicate
+    /// is evaluated (`B := Evm`).
+    pub generic_args: Vec<TyId<'db>>,
+    pub origin: ConstPredicateObligationOrigin<'db>,
     pub span: DynLazySpan<'db>,
 }
 

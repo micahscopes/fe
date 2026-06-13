@@ -56,6 +56,18 @@ jobs:
           if grep -n '_ =>' crates/codegen/src/function_symbols.rs; then
             echo "gate failed: wildcard arm in function_symbols.rs"; fail=1
           fi
+          # Gate: the discharge-evidence schema keeps its premises one-way
+          # door. A discharge that cannot record the checks it depended on
+          # cannot be retrofitted after `fe explain`/hover/cert formats ship;
+          # the slot is reserved inert at M5 (every route is premise-free).
+          if [ -f crates/hir/src/analysis/ty/ty_check/mod.rs ] && \
+             ! grep -q 'premises' crates/hir/src/analysis/ty/ty_check/mod.rs; then
+            echo "gate failed: evidence premises slot removed"; fail=1
+          fi
+          if [ -f crates/hir/src/analysis/ty/ty_check/mod.rs ] && \
+             ! grep -q 'CheckPremise' crates/hir/src/analysis/ty/ty_check/mod.rs; then
+            echo "gate failed: CheckPremise type removed"; fail=1
+          fi
           # Gate: every fixture path referenced from fe/tests and uitest
           # exists on disk. Seven tests referencing deleted fixtures passed
           # vacuously in a prior effort.

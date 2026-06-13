@@ -41,8 +41,8 @@ use cranelift_entity::{PrimaryMap, SecondaryMap, entity_impl, packed_option::Pac
 use ena::unify::InPlace;
 use env::TyCheckEnv;
 pub use env::{
-    EffectParamSite, ExprProp, LocalBinding, ParamSite, PatBindingMode, PathReadSemantics,
-    TraitObligationOrigin,
+    ConstPredicateObligationOrigin, EffectParamSite, ExprProp, LocalBinding, ParamSite,
+    PatBindingMode, PathReadSemantics, TraitObligationOrigin,
 };
 pub(super) use expr::TraitOps;
 pub use owner::BodyOwner;
@@ -481,6 +481,7 @@ fn typed_body_for_bodyless_func<'db>(
         pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
         for_loop_seq: SecondaryMap::new(),
         discharged_obligations: Vec::new(),
+        discharged_const_predicates: Vec::new(),
         expr_place: SecondaryMap::new(),
         expr_places: PrimaryMap::new(),
     }
@@ -524,6 +525,14 @@ enum TraitObligationOutcome<'db> {
     Discharged(Option<TraitGoalSolution<'db>>),
     Progressed,
     Requeue(env::TraitObligation<'db>),
+}
+
+enum ConstPredicateOutcome<'db> {
+    /// The obligation was retired (discharged with recorded evidence, reported
+    /// as a diagnostic, or left to the caller's own assumptions). Terminal.
+    Discharged,
+    /// The substitution is not yet concrete; try again after more inference.
+    Requeue(env::ConstPredicateObligation<'db>),
 }
 
 enum CallConstraintBoundOwner<'db> {
@@ -1368,6 +1377,99 @@ impl<'db> TyChecker<'db> {
         });
     }
 
+    /// Discharges a `where`-clause const predicate at the obligation level: the
+    /// predicate body is evaluated by CTFE under the call's resolved type
+    /// substitution (`B := Evm`), so a symbolic predicate becomes closed and
+    /// decidable. CTFE runs here, never inside the trait solver / proof forest
+    /// (hard rule: gate, do not select). A `false` predicate or an evaluation
+    /// fault is a hard error — the obligation is never silently dropped and no
+    /// impl candidate is ever removed (anti-SFINAE).
+    fn process_const_predicate_obligation(
+        &mut self,
+        obligation: env::ConstPredicateObligation<'db>,
+        final_pass: bool,
+    ) -> ConstPredicateOutcome<'db> {
+        let db = self.db;
+
+        // Resolve the callee's type arguments through the current inference
+        // table.
+        let args: Vec<TyId<'db>> = obligation
+            .generic_args
+            .iter()
+            .map(|&ty| {
+                let ty = ty.fold_with(db, &mut self.table);
+                self.normalize_ty(ty)
+            })
+            .collect();
+
+        // Not yet concrete: an unresolved inference variable means we cannot
+        // evaluate yet. Retry after more inference; on the final pass leave it
+        // (a genuinely unresolved type is reported elsewhere).
+        if args.iter().any(|ty| ty.has_var(db)) {
+            return if final_pass {
+                ConstPredicateOutcome::Discharged
+            } else {
+                ConstPredicateOutcome::Requeue(obligation)
+            };
+        }
+
+        // Symbolic or invalid subject: the substitution still mentions a
+        // generic parameter (the caller is itself generic and forwards its own
+        // type), or an argument is already invalid. CTFE cannot decide a
+        // symbolic predicate — discharging it is the caller's own where-clause
+        // assumption (the verbatim-match route, not part of this slice), and
+        // invalid arguments carry their own diagnostics. Either way, do not
+        // evaluate and do not error.
+        if args.iter().any(|ty| ty.has_param(db) || ty.has_invalid(db)) {
+            return ConstPredicateOutcome::Discharged;
+        }
+
+        let expected = TyId::bool(db);
+        let owner = BodyOwner::AnonConstBody {
+            body: obligation.predicate,
+            expected,
+        };
+        match eval_body_owner_const(db, owner, args.clone()) {
+            Ok(value) => match static_assert_bool_value(db, value) {
+                Some(true) => self.record_discharged_const_predicate(obligation, args),
+                Some(false) => self.push_diag(BodyDiag::WhereConstPredicateFailed {
+                    primary: obligation.span.clone(),
+                }),
+                // Type-checked as `bool` but not reducible to a concrete value.
+                None => self.push_diag(BodyDiag::ConstValueMustBeKnown(obligation.span.clone())),
+            },
+            Err(crate::analysis::semantic::CtfeError::NotConstEvaluable { .. }) => {
+                self.push_diag(BodyDiag::ConstValueMustBeKnown(obligation.span.clone()))
+            }
+            Err(err) => {
+                // A CTFE fault (overflow, divide-by-zero, ...) is a hard error
+                // on the chosen call — never a skipped candidate.
+                let ty = TyId::invalid(db, invalid_cause_from_ctfe_error(db, owner, err));
+                if let Some(diag) = ty.emit_diag(db, obligation.span.clone()) {
+                    self.push_diag(diag);
+                }
+            }
+        }
+
+        ConstPredicateOutcome::Discharged
+    }
+
+    /// Records discharge evidence for a retired const-predicate obligation.
+    fn record_discharged_const_predicate(
+        &mut self,
+        obligation: env::ConstPredicateObligation<'db>,
+        generic_args: Vec<TyId<'db>>,
+    ) {
+        self.env
+            .record_discharged_const_predicate(DischargedConstPredicate {
+                origin: obligation.origin,
+                predicate: obligation.predicate,
+                generic_args,
+                route: DischargeRoute::Ctfe,
+                premises: Vec::new(),
+            });
+    }
+
     fn resolve_deferred(&mut self) {
         let db = self.db;
         let body = self.env.body();
@@ -1491,6 +1593,14 @@ impl<'db> TyChecker<'db> {
                             TraitObligationOutcome::Progressed => progressed = true,
                             TraitObligationOutcome::Requeue(obligation) => {
                                 self.env.register_trait_obligation(obligation);
+                            }
+                        }
+                    }
+                    env::DeferredTask::ConstPredicate(obligation) => {
+                        match self.process_const_predicate_obligation(obligation, false) {
+                            ConstPredicateOutcome::Discharged => {}
+                            ConstPredicateOutcome::Requeue(obligation) => {
+                                self.env.register_const_predicate_obligation(obligation);
                             }
                         }
                     }
@@ -1658,6 +1768,9 @@ impl<'db> TyChecker<'db> {
                     {
                         self.record_discharged_obligation(origin, goal, solution);
                     }
+                }
+                env::DeferredTask::ConstPredicate(obligation) => {
+                    let _ = self.process_const_predicate_obligation(obligation, true);
                 }
                 env::DeferredTask::Method(pending) => {
                     let Some(expr_prop) = self.env.typed_expr(pending.expr) else {
@@ -2634,6 +2747,9 @@ pub struct TypedBody<'db> {
     /// Discharge evidence for trait obligations retired while checking this
     /// body, in retirement order.
     discharged_obligations: Vec<DischargedObligation<'db>>,
+    /// Discharge evidence for const-predicate obligations retired while
+    /// checking this body, in retirement order.
+    discharged_const_predicates: Vec<DischargedConstPredicate<'db>>,
     expr_place: SecondaryMap<ExprId, PackedOption<ExprPlaceId>>,
     expr_places: PrimaryMap<ExprPlaceId, Place<'db>>,
 }
@@ -2827,6 +2943,120 @@ impl<'db> TyFoldable<'db> for DischargedObligation<'db> {
     }
 }
 
+/// How a first-class obligation was discharged. This is the evidence *route*:
+/// it identifies the discharge mechanism that committed the goal.
+///
+/// Const predicates are discharged by CTFE at the obligation level
+/// ([`DischargeRoute::Ctfe`]). Other routes (trait-impl selection, in-scope
+/// assumption matching, compiler-known facts) land with their own producers;
+/// this enum is matched without a wildcard so a new route is a compile error
+/// rather than a silent fall-through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DischargeRoute {
+    /// A closed const predicate was evaluated to `true` by compile-time
+    /// function evaluation under the call's type substitution.
+    Ctfe,
+}
+
+/// A discharge's dependency on another check's presence or result.
+///
+/// No producer at M5 — every M5 route is premise-free (`Ctfe` evaluates a
+/// closed term and consults nothing else). The slot is reserved so the
+/// evidence schema is premise-extensible before it calcifies: future
+/// resource/proof discharges (frame conditions, ownership assumptions,
+/// optimizer-preserved facts) will depend on prior facts, and evidence that
+/// cannot record those edges cannot be retrofitted. Record-side only — never
+/// part of an interned evidence key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckPremise<'db> {
+    /// The goal whose discharge this one assumed. (Reserved; unpopulated at
+    /// M5.)
+    pub goal: TraitInstId<'db>,
+}
+
+impl<'db> TyVisitable<'db> for CheckPremise<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized,
+    {
+        self.goal.visit_with(visitor);
+    }
+}
+
+impl<'db> TyFoldable<'db> for CheckPremise<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: crate::analysis::ty::fold::TyFolder<'db>,
+    {
+        Self {
+            goal: self.goal.fold_with(db, folder),
+        }
+    }
+}
+
+/// Evidence that a `where`-clause const predicate raised while type checking a
+/// body was discharged.
+///
+/// One record is written per retired const-predicate obligation, in retirement
+/// order. Unlike a trait goal, a const predicate is a body (`B::WORD_BITS ==
+/// 256`) evaluated under a type substitution; the record keeps both the source
+/// body and the substitution so a receipt can be reconstructed, plus the
+/// [`DischargeRoute`] and an extensible [`premises`](Self::premises) slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DischargedConstPredicate<'db> {
+    /// Where the obligation was raised.
+    pub origin: env::ConstPredicateObligationOrigin<'db>,
+    /// The predicate body that was discharged.
+    pub predicate: Body<'db>,
+    /// The type arguments the predicate was evaluated under.
+    pub generic_args: Vec<TyId<'db>>,
+    /// How the predicate was discharged.
+    pub route: DischargeRoute,
+    /// Discharges this one depends on. Empty for every M5 route; reserved so
+    /// the evidence schema stays premise-extensible.
+    pub premises: Vec<CheckPremise<'db>>,
+}
+
+impl<'db> DischargedConstPredicate<'db> {
+    /// The call expression this discharge is keyed to.
+    pub fn call_expr(&self) -> ExprId {
+        match self.origin {
+            env::ConstPredicateObligationOrigin::CallConstraint { call_expr, .. } => call_expr,
+        }
+    }
+}
+
+impl<'db> TyVisitable<'db> for DischargedConstPredicate<'db> {
+    fn visit_with<V>(&self, visitor: &mut V)
+    where
+        V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized,
+    {
+        self.generic_args.visit_with(visitor);
+        for premise in &self.premises {
+            premise.visit_with(visitor);
+        }
+    }
+}
+
+impl<'db> TyFoldable<'db> for DischargedConstPredicate<'db> {
+    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    where
+        F: crate::analysis::ty::fold::TyFolder<'db>,
+    {
+        Self {
+            origin: self.origin,
+            predicate: self.predicate,
+            generic_args: self.generic_args.fold_with(db, folder),
+            route: self.route,
+            premises: self
+                .premises
+                .into_iter()
+                .map(|premise| premise.fold_with(db, folder))
+                .collect(),
+        }
+    }
+}
+
 impl<'db> TyVisitable<'db> for TypedBody<'db> {
     fn visit_with<V>(&self, visitor: &mut V)
     where
@@ -2861,6 +3091,9 @@ impl<'db> TyVisitable<'db> for TypedBody<'db> {
         }
         for obligation in &self.discharged_obligations {
             obligation.visit_with(visitor);
+        }
+        for discharged in &self.discharged_const_predicates {
+            discharged.visit_with(visitor);
         }
     }
 }
@@ -2917,6 +3150,9 @@ impl<'db> TyFoldable<'db> for TypedBody<'db> {
         this.discharged_obligations
             .iter_mut()
             .for_each(|obligation| *obligation = (*obligation).fold_with(db, folder));
+        this.discharged_const_predicates
+            .iter_mut()
+            .for_each(|discharged| *discharged = discharged.clone().fold_with(db, folder));
         this.expr_places
             .values_mut()
             .for_each(|place| *place = place.clone().fold_with(db, folder));
@@ -3179,6 +3415,22 @@ impl<'db> TypedBody<'db> {
                 } => origin_expr == call_expr,
                 TraitObligationOrigin::GenericConfirmation => false,
             })
+    }
+
+    /// All const-predicate discharge records for this body, in the order the
+    /// obligations were retired by the type checker.
+    pub fn discharged_const_predicates(&self) -> &[DischargedConstPredicate<'db>] {
+        &self.discharged_const_predicates
+    }
+
+    /// Const-predicate discharge records for the given call expression.
+    pub fn discharged_const_predicates_for_call(
+        &self,
+        call_expr: ExprId,
+    ) -> impl Iterator<Item = &DischargedConstPredicate<'db>> {
+        self.discharged_const_predicates
+            .iter()
+            .filter(move |discharged| discharged.call_expr() == call_expr)
     }
 
     pub fn binding_source(
@@ -4085,6 +4337,7 @@ impl<'db> TypedBody<'db> {
             pattern_status: SecondaryMap::with_default(PatternAnalysisStatus::Invalid),
             for_loop_seq: SecondaryMap::new(),
             discharged_obligations: Vec::new(),
+            discharged_const_predicates: Vec::new(),
             expr_place: SecondaryMap::new(),
             expr_places: PrimaryMap::new(),
         }
