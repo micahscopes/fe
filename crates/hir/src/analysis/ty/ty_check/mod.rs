@@ -1518,11 +1518,7 @@ impl<'db> TyChecker<'db> {
         };
         let goal_term = normalize_term(db, substitute_term(db, goal_term, &args));
 
-        if self
-            .const_predicate_assumption_terms()
-            .iter()
-            .any(|&assumption| assumption == goal_term)
-        {
+        if self.const_predicate_assumption_terms().contains(&goal_term) {
             self.record_discharged_const_predicate(obligation, args, DischargeRoute::Assumption);
         } else {
             // No in-scope assumption proves it and the subject is symbolic, so

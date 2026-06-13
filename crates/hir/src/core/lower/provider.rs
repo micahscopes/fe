@@ -293,9 +293,9 @@ pub(super) fn canonical_trait_path<'db>(
         let matches = match use_.alias(db) {
             Some(alias) => alias
                 .to_opt()
-                .and_then(|alias| match alias {
-                    crate::hir_def::UseAlias::Ident(ident) => Some(ident == name),
-                    crate::hir_def::UseAlias::Underscore => Some(false),
+                .map(|alias| match alias {
+                    crate::hir_def::UseAlias::Ident(ident) => ident == name,
+                    crate::hir_def::UseAlias::Underscore => false,
                 })
                 .unwrap_or(false),
             None => last == name,
