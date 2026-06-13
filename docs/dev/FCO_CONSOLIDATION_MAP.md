@@ -690,3 +690,34 @@ for the future "recognized-but-deferred" case (D3): emitting it for chained
 projections etc. is a UX refinement over the current `2-0002`, not a soundness
 gap — every limit already fails by name and never ICEs (gate-9's core
 invariant holds). The exit-criteria doc should be updated to these codes.
+
+---
+
+# M5 final scorecard
+
+8 of 10 exit gates fully landed; 2 partial with their core invariants met.
+
+| # | Gate | Status | Evidence |
+|---|---|---|---|
+| 1 | Concrete bound holds, with receipt | ✅ | call-site discharge + evidence + hover |
+| 2 | Refuted blames selected impl; B2b overlap | 🟡 | trait-bound gating ✅ (`b3de1b218`) + overlap `5-0001` ✅; concrete method-call quarantined |
+| 3 | Signature/WF well-formedness | ✅ | `70b0bbfdb` (all WF positions) |
+| 4 | No boolean splitting | ✅ | `6cd749037` |
+| 5 | No direction flipping | ✅ | `6cd749037` |
+| 6 | No implication | ✅ | `6cd749037` |
+| 7 | Named const-fn bounds | ✅ | `9dac9e1bd` (`fits(LEN,CAP)` + foreign-twin miss) |
+| 8 | Faults are hard errors | ✅ | `3-0025`, anti-SFINAE |
+| 9 | Every limit speaks its name | 🟡 | named + no-ICE via `2-0002`; dedicated `8-0086` reserved (D3 polish) |
+| 10 | Receipts render | ✅ | `41e4c2db2` (hover) |
+
+Remaining (all niche/polish; no soundness gap — enforcement, gate-not-select,
+exactness, and receipts are all in):
+- **Gate 2 tail** — concrete method-call impl-residual gating (needs a
+  method-resolution hook to reach the impl's `ImplementorId`; quarantined test).
+- **Gate 9 / D3** — dedicated `8-0086` for recognized-unsupported forms (UX over
+  the current `2-0002`).
+- **W1** — record evidence at WF positions (no evidence sink for item-level WF).
+- **A3** — assumption premise-origin link.
+
+FCO→CTCubFe: the C1 ("Bounds With Receipts") prerequisites (F6+W0+A1+R0+L2) are
+all met — the substrate is ready for the CTCubFe Forms.
