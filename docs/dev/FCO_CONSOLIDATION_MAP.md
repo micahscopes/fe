@@ -570,3 +570,42 @@ Caveat carried from B/C: WF-position discharges **reject correctly but do not
 record `DischargedConstPredicate` evidence** (only call-site + assumption routes
 do). Bodyless declarations (trait method sigs, externs) are not yet covered.
 Both are tracked follow-ups, not blockers.
+
+---
+
+# Reconciliation with the architect's dependency graph (v0)
+
+The full node-level decomposition lives in `docs/dev/fco_dependency_graph_v0.mmd`
+(the architect's draft). It is finer-grained than the layers above and is the
+canonical map; the coarse DAG above is the executive summary. We adopt its
+**node IDs and ready-frontier model** as the shared vocabulary. We do **not**
+(yet) adopt its Tooling (T*) / Governance (G*) apparatus or the deep
+Runtime/resource (RT*), SMT (S*), and Provision-unification (PV*) tracks — those
+stay post-M7 architecture until a concrete driver appears.
+
+Live status by node ID (proven from code/tests, not inherited):
+
+- **Done & tested:** F00 (evidence schema), F01 (term language), F02 (symbolic
+  AssocConst term), F03 (where-pred parse/lower), F04 (shared deferred queue),
+  F05 (CTFE-outside-solver, CI-gated), F06 (call-site spine), F07 (paired
+  fixtures); W00 (WhereClauseOwner), W11 (ADT/sig/WF discharge), W13 (WF
+  duplicate-diagnostic guard — the return-type double-report was found and
+  removed), W14 (generic symbolic WF guard), W15 (never-called signature/field);
+  A00 (const preds enter assumption pool), A10 (assumption-route exact match);
+  R00 (evidence sink / accessor), R10 (LSP hover seed); D10 (false-predicate
+  8-0085), D40 (CTFE-fault 3-0025).
+- **Partial:** A11 (route=Assumption + empty premises recorded; premise-*origin*
+  link to the matched assumption not yet stored), A12 (mismatch rejected;
+  explicit flip/split/implication fixtures pending), D20 (formation → 2-0002),
+  D30 (unsupported projection → 2-0002, not a dedicated "not yet expressible"
+  code), W12 (**WF-position discharges record no evidence** — the carried caveat).
+- **Next / ready frontier:** I00 (are impl `where` const predicates even
+  representable? — probe) → I10/I20/I30/I40 (gate-not-select + B2b overlap);
+  D00 (diagnostic taxonomy) + U10 (code-policy mismatch) — the 8-0082/83/84 vs
+  8-0085/2-0002/3-0025 reconciliation; D50 (actual-value rendering); W12.
+- **Uncertain zones acknowledged:** U10 (diag codes), U30 (full ConstraintKind
+  necessity — we deliberately did NOT do the UC* refactor; obligation-level
+  unification sufficed), U40/U50 (assoc-const/HKT depth), U80 (method exactness).
+
+The architect graph's `⚠` "uncertain" nodes line up with our open scope calls;
+nothing in the executed M5 work contradicts it.

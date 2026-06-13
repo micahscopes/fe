@@ -1,0 +1,356 @@
+flowchart TD
+  %% FCO dependency graph draft v0. Hard edges use -->; uncertainty/clarification edges use -.->.
+  subgraph Tooling["Tooling"]
+    T00["T00 Canonical dependency graph format<br/><small>tooling</small>"]
+    T10["T10 Topo sort and ready-frontier tool<br/><small>tooling</small>"]
+    T20["T20 Mermaid generator<br/><small>tooling</small>"]
+    T30["T30 Graph-driven agent prompt generator<br/><small>tooling</small>"]
+    T40["T40 Fixture / acceptance matrix tracker<br/><small>tooling</small>"]
+    T50["T50 Graph validation in CI<br/><small>tooling</small>"]
+  end
+
+  subgraph Governance["Governance"]
+    G00["G00 Repo capability audit per run<br/><small>process</small>"]
+    G10["G10 Release cuts as graph views<br/><small>process</small>"]
+    G20["G20 Ready-frontier based agent handoff<br/><small>process</small>"]
+    G30["G30 Status updates attached to graph nodes<br/><small>process</small>"]
+  end
+
+  subgraph FCO_substrate["FCO substrate"]
+    F00["F00 Evidence schema core<br/><small>schema</small>"]
+    F01["F01 Const term language core<br/><small>schema</small>"]
+    F02["F02 Symbolic AssocConst as neutral term<br/><small>capability</small>"]
+    F03["F03 Where const predicate parse/lower<br/><small>capability</small>"]
+    F04["F04 Shared deferred obligation queue<br/><small>capability</small>"]
+    F05["F05 CTFE discharge outside trait solver<br/><small>invariant</small>"]
+    F06["F06 Call-site const-predicate discharge spine<br/><small>capability</small>"]
+    F07["F07 Paired correctness fixture suite<br/><small>fixtures</small>"]
+  end
+
+  subgraph Obligation_surfaces["Obligation surfaces"]
+    W00["W00 WhereClauseOwner coverage<br/><small>inventory</small>"]
+    W10["W10 Type-use WF surface inventory<br/><small>inventory</small>"]
+    W11["W11 ADT/signature/WF const-predicate discharge<br/><small>capability</small>"]
+    W12["W12 WF evidence origins<br/><small>evidence</small>"]
+    W13["W13 WF duplicate diagnostic guard<br/><small>diagnostic</small>"]
+    W14["W14 Generic symbolic WF guard<br/><small>invariant</small>"]
+    W15["W15 Never-called declaration/signature coverage<br/><small>invariant</small>"]
+  end
+
+  subgraph Assumptions["Assumptions"]
+    A00["A00 Const predicates enter assumption pool<br/><small>capability</small>"]
+    A10["A10 Assumption-route exact term matching<br/><small>capability</small>"]
+    A11["A11 Assumption evidence and premise origin<br/><small>evidence</small>"]
+    A12["A12 No splitting / flipping / implication tests<br/><small>fixtures</small>"]
+  end
+
+  subgraph Impl_gating["Impl gating"]
+    I00["I00 Impl where const predicates represented<br/><small>capability</small>"]
+    I10["I10 Trait solver residual predicate carry<br/><small>capability</small>"]
+    I20["I20 Gate-not-select semantics<br/><small>invariant</small>"]
+    I30["I30 B2b overlap/coherence fixture<br/><small>fixtures</small>"]
+    I40["I40 Selected impl predicate fault hard error<br/><small>invariant</small>"]
+  end
+
+  subgraph Diagnostics["Diagnostics"]
+    D00["D00 Diagnostic taxonomy policy<br/><small>policy</small>"]
+    D10["D10 False predicate diagnostic<br/><small>diagnostic</small>"]
+    D20["D20 Formation / availability diagnostic<br/><small>diagnostic</small>"]
+    D30["D30 Unsupported projection/expression named limitation<br/><small>diagnostic</small>"]
+    D40["D40 CTFE fault diagnostic<br/><small>diagnostic</small>"]
+    D50["D50 Actual-value diagnostic rendering<br/><small>diagnostic</small>"]
+  end
+
+  subgraph Receipts["Receipts"]
+    R00["R00 Receipt/debug evidence sink<br/><small>consumer</small>"]
+    R10["R10 LSP hover or fe explain seed<br/><small>consumer</small>"]
+    R20["R20 Explain chain with origins/premises<br/><small>consumer</small>"]
+  end
+
+  subgraph End_to_end_draft["End-to-end draft"]
+    E00["E00 End-to-end draft acceptance harness<br/><small>fixtures</small>"]
+    E10["E10 Release-cut view over graph<br/><small>process</small>"]
+  end
+
+  subgraph AssocConst___term_hardening["AssocConst / term hardening"]
+    AC00["AC00 HKT / assoc-const ICE repro and fix ⚠<br/><small>capability</small>"]
+    AC10["AC10 Canonical associated-const projection identity<br/><small>schema</small>"]
+    AC20["AC20 Term identity migration / invalidation<br/><small>schema</small>"]
+    AC30["AC30 AssocConst projection depth policy ⚠<br/><small>policy</small>"]
+    AC40["AC40 Chained assoc-type / assoc-const projection support ⚠<br/><small>capability</small>"]
+    AC50["AC50 Generic-trait assoc-const identity fixtures<br/><small>fixtures</small>"]
+  end
+
+  subgraph Body_assertions["Body assertions"]
+    C00["C00 const_assert surface / VcSite<br/><small>capability</small>"]
+    C10["C10 Body assertion obligations<br/><small>capability</small>"]
+    C20["C20 Body assertion receipts<br/><small>evidence</small>"]
+    C30["C30 VC site origin model<br/><small>schema</small>"]
+  end
+
+  subgraph Method_conformance["Method conformance"]
+    MC00["MC00 Method const-predicate conformance semantics<br/><small>policy</small>"]
+    MC10["MC10 Method conformance queue routing<br/><small>capability</small>"]
+    MC20["MC20 Method conformance evidence origin<br/><small>evidence</small>"]
+  end
+
+  subgraph Unified_constraints["Unified constraints"]
+    UC00["UC00 Full ConstraintKind refactor decision ⚠<br/><small>policy</small>"]
+    UC10["UC10 Trait predicates as projection<br/><small>capability</small>"]
+    UC20["UC20 Unified constraints across all surfaces<br/><small>capability</small>"]
+  end
+
+  subgraph Providers["Providers"]
+    P00["P00 Provider capability current-state audit ⚠<br/><small>inventory</small>"]
+    P10["P10 Provider capability compile-time-only invariants<br/><small>invariant</small>"]
+    P20["P20 Provider capabilities as FCO provisions/evidence<br/><small>capability</small>"]
+    P30["P30 Retire string-keyed authority checks<br/><small>refactor</small>"]
+    P40["P40 Provider body / quote / reflection typing boundary<br/><small>policy</small>"]
+    P50["P50 Generated impl provenance evidence<br/><small>evidence</small>"]
+  end
+
+  subgraph High_level_generation["High-level generation"]
+    H00["H00 ABI/layout fact traits<br/><small>schema</small>"]
+    H10["H10 ABI/static-layout provider rewrite<br/><small>refactor</small>"]
+    H20["H20 Event/error/msg provider rewrite<br/><small>refactor</small>"]
+    H30["H30 EIP-712 / Hash712 provider rewrite<br/><small>refactor</small>"]
+    H40["H40 Core derives FCO integration<br/><small>refactor</small>"]
+    H50["H50 Generated code through normal HIR obligations<br/><small>invariant</small>"]
+  end
+
+  subgraph Platform___backend_facts["Platform / backend facts"]
+    B00["B00 Sonatina + multi-backend pressure note<br/><small>context</small>"]
+    B10["B10 Platform/HKT trait prototype<br/><small>capability</small>"]
+    B20["B20 Backend fact obligations<br/><small>capability</small>"]
+    B30["B30 Typed platform intrinsic capabilities ⚠<br/><small>capability</small>"]
+    B40["B40 Backend-generic demo fixtures<br/><small>fixtures</small>"]
+    B50["B50 Lowering gated by evidence<br/><small>invariant</small>"]
+  end
+
+  subgraph Runtime_resource["Runtime/resource"]
+    RT00["RT00 merge_runtime_class risk ledger ⚠<br/><small>risk</small>"]
+    RT10["RT10 Runtime-class reachability repro fixture ⚠<br/><small>fixtures</small>"]
+    RT20["RT20 Interim runtime-class materialization/error policy ⚠<br/><small>policy</small>"]
+    RT30["RT30 Sonatina v2 VSDG value/state model ⚠<br/><small>architecture</small>"]
+    RT40["RT40 Separation-logic resource proposition language ⚠<br/><small>architecture</small>"]
+    RT50["RT50 Resource proof evidence with non-empty premises ⚠<br/><small>evidence</small>"]
+    RT60["RT60 Cross-resource joins proven/materialized/rejected<br/><small>invariant</small>"]
+    RT70["RT70 merge_runtime_class supersession<br/><small>refactor</small>"]
+  end
+
+  subgraph SMT_proof["SMT/proof"]
+    S00["S00 VC / SMT goal classification<br/><small>inventory</small>"]
+    S10["S10 SMT discharge backend interface<br/><small>capability</small>"]
+    S20["S20 Premise closure / proof dependency graph<br/><small>schema</small>"]
+    S30["S30 Certificate/evidence serialization<br/><small>schema</small>"]
+    S40["S40 Law systems / proof transport ⚠<br/><small>architecture</small>"]
+    S50["S50 Unchecked arithmetic replacement policy<br/><small>policy</small>"]
+    S60["S60 Check elision from evidence<br/><small>capability</small>"]
+  end
+
+  subgraph Provision_unification["Provision unification"]
+    PV00["PV00 Scope-indexed provision environment design<br/><small>architecture</small>"]
+    PV10["PV10 Trait/env assumptions as provisions<br/><small>capability</small>"]
+    PV20["PV20 Effects/capabilities as obligations<br/><small>capability</small>"]
+    PV30["PV30 Generated impl overlays as provisions<br/><small>capability</small>"]
+    PV40["PV40 Provider capabilities in provision environment<br/><small>capability</small>"]
+    PV50["PV50 Const predicate assumptions as provisions<br/><small>capability</small>"]
+    PV60["PV60 Stable explain across provision routes<br/><small>consumer</small>"]
+  end
+
+  subgraph Uncertain_zones["Uncertain zones"]
+    U00["U00 Unclassified current repo status ⚠<br/><small>uncertainty</small>"]
+    U10["U10 Diagnostic code policy mismatch ⚠<br/><small>uncertainty</small>"]
+    U100["U100 Evidence format stability policy ⚠<br/><small>uncertainty</small>"]
+    U20["U20 Provider capability current-state ambiguity ⚠<br/><small>uncertainty</small>"]
+    U30["U30 Full ConstraintKind refactor necessity ⚠<br/><small>uncertainty</small>"]
+    U40["U40 AssocConst projection depth boundary ⚠<br/><small>uncertainty</small>"]
+    U50["U50 HKT expressibility boundary ⚠<br/><small>uncertainty</small>"]
+    U60["U60 Sonatina v2 sequencing ⚠<br/><small>uncertainty</small>"]
+    U70["U70 SMT trust model ⚠<br/><small>uncertainty</small>"]
+    U80["U80 Method exactness/variance policy ⚠<br/><small>uncertainty</small>"]
+    U90["U90 Runtime-class reachability ⚠<br/><small>uncertainty</small>"]
+  end
+
+  T00 --> T10
+  T00 --> T20
+  T00 --> T30
+  T00 --> T40
+  T00 --> T50
+  T10 --> G20
+  G00 --> G30
+  T00 --> G10
+  G30 --> G20
+  F01 --> F02
+  F02 --> F03
+  F03 --> F06
+  F04 --> F06
+  F05 --> F06
+  F00 --> F06
+  F06 --> F07
+  F00 --> R00
+  F03 --> W00
+  W00 --> W11
+  W10 --> W11
+  F04 --> W11
+  F05 --> W11
+  F00 --> W12
+  W11 --> W12
+  W11 --> W13
+  W11 --> W14
+  W11 --> W15
+  F03 --> A00
+  F01 --> A00
+  A00 --> A10
+  F01 --> A10
+  A10 --> A11
+  F00 --> A11
+  A10 --> A12
+  F03 --> I00
+  I00 --> I10
+  F04 --> I10
+  A10 --> I10
+  I10 --> I20
+  I20 --> I30
+  I20 --> I40
+  F05 --> I40
+  D00 --> D10
+  D00 --> D20
+  D00 --> D30
+  D00 --> D40
+  D10 --> D50
+  F05 --> D10
+  F02 --> D20
+  F02 --> D30
+  F05 --> D40
+  R00 --> R10
+  R10 --> R20
+  A11 --> R20
+  W12 --> R20
+  F07 --> E00
+  W11 --> E00
+  A10 --> E00
+  I20 --> E00
+  D00 --> E00
+  R10 --> E00
+  E00 --> E10
+  AC00 --> AC10
+  F02 --> AC10
+  A10 --> AC10
+  AC10 --> AC20
+  AC10 --> AC50
+  AC30 --> AC40
+  AC10 --> AC40
+  C00 --> C10
+  F04 --> C10
+  F05 --> C10
+  C10 --> C20
+  F00 --> C20
+  C20 --> C30
+  A10 --> C10
+  A10 --> MC00
+  F03 --> MC00
+  MC00 --> MC10
+  F04 --> MC10
+  MC10 --> MC20
+  F00 --> MC20
+  UC00 --> UC10
+  UC10 --> UC20
+  F04 --> UC00
+  P00 --> P10
+  P10 --> P20
+  F00 --> P20
+  P20 --> P30
+  P20 --> P50
+  P40 --> P50
+  H00 --> H10
+  P20 --> H10
+  P50 --> H10
+  R10 --> H10
+  B20 --> H10
+  H10 --> H20
+  H10 --> H30
+  H10 --> H40
+  H10 --> H50
+  H20 --> H50
+  H30 --> H50
+  H40 --> H50
+  B00 --> B10
+  B10 --> B20
+  F02 --> B20
+  F06 --> B20
+  B20 --> B40
+  B20 --> B50
+  R10 --> B50
+  B10 --> B30
+  P20 --> B30
+  RT00 --> RT10
+  RT10 --> RT20
+  B50 --> RT30
+  PV00 --> RT30
+  RT30 --> RT40
+  RT40 --> RT50
+  F00 --> RT50
+  S20 --> RT50
+  RT50 --> RT60
+  RT60 --> RT70
+  RT20 --> RT70
+  S00 --> S10
+  F00 --> S10
+  S10 --> S20
+  S20 --> S30
+  S30 --> S40
+  S20 --> S60
+  RT50 --> S60
+  S50 --> S60
+  C10 --> S00
+  PV00 --> PV10
+  PV00 --> PV20
+  PV00 --> PV30
+  PV00 --> PV40
+  PV00 --> PV50
+  A10 --> PV50
+  I10 --> PV10
+  P20 --> PV40
+  P50 --> PV30
+  R20 --> PV60
+  PV00 --> PV60
+  U00 -. "clarifies" .-> G00
+  U10 -. "clarifies" .-> D00
+  U20 -. "clarifies" .-> P00
+  U30 -. "clarifies" .-> UC00
+  U40 -. "clarifies" .-> AC30
+  U50 -. "clarifies" .-> AC00
+  U50 -. "clarifies" .-> B10
+  U60 -. "clarifies" .-> RT30
+  U70 -. "clarifies" .-> S10
+  U80 -. "clarifies" .-> MC00
+  U90 -. "clarifies" .-> RT10
+  U100 -. "clarifies" .-> AC20
+  U100 -. "clarifies" .-> S30
+
+  classDef uncertain stroke-dasharray: 5 5;
+  class AC00 uncertain;
+  class AC30 uncertain;
+  class AC40 uncertain;
+  class UC00 uncertain;
+  class P00 uncertain;
+  class B30 uncertain;
+  class RT00 uncertain;
+  class RT10 uncertain;
+  class RT20 uncertain;
+  class RT30 uncertain;
+  class RT40 uncertain;
+  class RT50 uncertain;
+  class S40 uncertain;
+  class U00 uncertain;
+  class U10 uncertain;
+  class U20 uncertain;
+  class U30 uncertain;
+  class U40 uncertain;
+  class U50 uncertain;
+  class U60 uncertain;
+  class U70 uncertain;
+  class U80 uncertain;
+  class U90 uncertain;
+  class U100 uncertain;
