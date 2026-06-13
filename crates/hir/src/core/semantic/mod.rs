@@ -749,6 +749,11 @@ impl<'db> Func<'db> {
             return Vec::new();
         };
         let assumptions = self.assumptions(db);
+        // The return type's const-predicate well-formedness is covered by the
+        // body checker, which checks the tail expression's type (unified with
+        // the declared return type) via `check_ty_wf`. (Bodyless declarations —
+        // trait method signatures, externs — are not yet covered; tracked as a
+        // follow-up alongside bodyless parameter types.)
         collect_ty_lower_errors(
             db,
             self.scope(),
@@ -1245,21 +1250,15 @@ impl<'db> FuncParamView<'db> {
             );
         }
 
-        // Well-formedness / trait-bound satisfaction for parameter type
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        // Well-formedness (trait bounds and const predicates) for parameter type
+        if let Some(diag) = check_ty_wf(
             db,
             TraitSolveCx::new(db, func.scope()).with_assumptions(assumptions),
             ty,
-        ) {
-            out.push(
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: ty_span.clone(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                }
-                .into(),
-            );
+        )
+        .into_diag(ty_span.clone())
+        {
+            out.push(diag);
         }
 
         // Self-parameter type shape check
@@ -3438,23 +3437,14 @@ impl<'db> TypeAlias<'db> {
         };
         let assumptions = constraints_for(db, self.into());
         let ty = lower_hir_ty(db, hir_ty, self.scope(), assumptions);
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        check_ty_wf(
             db,
             TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions),
             ty,
-        ) {
-            vec![
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: self.span().ty().into(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                }
-                .into(),
-            ]
-        } else {
-            Vec::new()
-        }
+        )
+        .into_diag(self.span().ty().into())
+        .into_iter()
+        .collect()
     }
 }
 
@@ -3809,6 +3799,10 @@ pub(crate) enum InherentImplAdmissibility<'db> {
         goal: TraitInstId<'db>,
         subgoal: Option<TraitInstId<'db>>,
     },
+    IllFormedConstPredicate {
+        ty: TyId<'db>,
+        predicate: Body<'db>,
+    },
 }
 
 impl<'db> Impl<'db> {
@@ -3863,6 +3857,9 @@ impl<'db> Impl<'db> {
             WellFormedness::IllFormed { goal, subgoal } => {
                 InherentImplAdmissibility::IllFormed { ty, goal, subgoal }
             }
+            WellFormedness::IllFormedConstPredicate { predicate } => {
+                InherentImplAdmissibility::IllFormedConstPredicate { ty, predicate }
+            }
         }
     }
 
@@ -3874,7 +3871,8 @@ impl<'db> Impl<'db> {
             InherentImplAdmissibility::Admissible { ty } => Some(ty),
             InherentImplAdmissibility::NotAllowed { .. }
             | InherentImplAdmissibility::InvalidTy { .. }
-            | InherentImplAdmissibility::IllFormed { .. } => None,
+            | InherentImplAdmissibility::IllFormed { .. }
+            | InherentImplAdmissibility::IllFormedConstPredicate { .. } => None,
         }
     }
 
@@ -4379,23 +4377,14 @@ impl<'db> ImplAssocTypeView<'db> {
         }
 
         let ty = lower_hir_ty(db, hir, self.owner.scope(), assumptions);
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        check_ty_wf(
             db,
             TraitSolveCx::new(db, self.owner.scope()).with_assumptions(assumptions),
             ty,
-        ) {
-            return vec![
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: ty_span.into(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                }
-                .into(),
-            ];
-        }
-
-        Vec::new()
+        )
+        .into_diag(ty_span.into())
+        .into_iter()
+        .collect()
     }
 }
 
@@ -4937,23 +4926,17 @@ impl<'db> FieldView<'db> {
             return out;
         }
 
-        // Trait-bound well-formedness for field type.
+        // Well-formedness (trait bounds and const predicates) for field type.
         let owner_item = self.owner_item();
         let assumptions = constraints_for(db, owner_item);
-        if let WellFormedness::IllFormed { goal, subgoal } = check_ty_wf(
+        if let Some(diag) = check_ty_wf(
             db,
             TraitSolveCx::new(db, owner_item.scope()).with_assumptions(assumptions),
             ty,
-        ) {
-            out.push(
-                TraitConstraintDiag::TraitBoundNotSat {
-                    span: span.clone(),
-                    primary_goal: goal,
-                    unsat_subgoal: subgoal,
-                    required_by: None,
-                }
-                .into(),
-            );
+        )
+        .into_diag(span.clone())
+        {
+            out.push(diag);
             return out;
         }
 

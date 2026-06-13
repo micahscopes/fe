@@ -12,8 +12,8 @@ use crate::{analysis::name_resolution::diagnostics::PathResDiag, hir_def::ItemKi
 use crate::{analysis::ty::ty_check::EffectParamOwner, span::DynLazySpan};
 use crate::{
     core::hir_def::{
-        CallableDef, CompBinOp, Enum, FieldIndex, FieldParent, Func, GenericParamOwner, IdentId,
-        ImplTrait,
+        Body, CallableDef, CompBinOp, Enum, FieldIndex, FieldParent, Func, GenericParamOwner,
+        IdentId, ImplTrait,
     },
     hir_def::TypeAlias,
 };
@@ -922,6 +922,14 @@ pub enum TraitConstraintDiag<'db> {
     ConcreteTypeBound(DynLazySpan<'db>, TyId<'db>),
 
     ConstTyBound(DynLazySpan<'db>, TyId<'db>),
+
+    /// A concrete ADT application whose `where`-clause const predicate is
+    /// refuted under its arguments (e.g. `Bounded<4, 1>` where `MIN <= MAX`).
+    /// Rendered identically to a call-site const-predicate failure (8-0085).
+    ConstPredicateNotSat {
+        span: DynLazySpan<'db>,
+        predicate: Body<'db>,
+    },
 }
 
 impl TraitConstraintDiag<'_> {
@@ -934,6 +942,10 @@ impl TraitConstraintDiag<'_> {
             Self::InfiniteBoundRecursion(..) => 4,
             Self::ConcreteTypeBound(..) => 5,
             Self::ConstTyBound(..) => 6,
+            // Rendered as 8-0085 (TyCheck) in `to_complete`, matching the
+            // call-site const-predicate failure; this local code is unused for
+            // the rendered code but kept for the enum's own numbering.
+            Self::ConstPredicateNotSat { .. } => 7,
         }
     }
 }

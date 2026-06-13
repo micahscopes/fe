@@ -4600,3 +4600,49 @@ impl<'db> TyCheckerFinalizer<'db> {
         }
     }
 }
+
+/// Returns the first `where`-clause const predicate of the ADT applied at the
+/// outermost level of `ty` that is *refuted* under its concrete type arguments,
+/// or `None` if every predicate holds, the application is still symbolic, or a
+/// predicate faults (faults are diagnosed where the value is evaluated, not at
+/// well-formedness time). Called from `check_ty_wf` so that a concrete ADT
+/// application violating its own bound is ill-formed wherever it appears —
+/// construction, signatures, locals, fields, never-called declarations. CTFE
+/// runs here, at the well-formedness/obligation layer, never inside the trait
+/// solver's proof forest. Nested applications are covered by `check_ty_wf`'s own
+/// recursion over type arguments.
+pub(crate) fn ty_const_predicate_violation<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<Body<'db>> {
+    let (base, args) = ty.decompose_ty_app(db);
+
+    // A symbolic application (an argument still mentioning a parameter or
+    // inference variable) is the enclosing item's own assumption; do not
+    // CTFE-evaluate it. Invalid arguments carry their own diagnostics.
+    if args
+        .iter()
+        .any(|arg| arg.has_var(db) || arg.has_param(db) || arg.has_invalid(db))
+    {
+        return None;
+    }
+
+    let TyData::TyBase(TyBase::Adt(adt)) = base.data(db) else {
+        return None;
+    };
+    let owner = WhereClauseOwner::from_item_opt(adt.adt_ref(db).as_item())?;
+
+    let expected = TyId::bool(db);
+    for &predicate in owner.where_clause(db).const_predicates(db) {
+        let pred_owner = BodyOwner::AnonConstBody {
+            body: predicate,
+            expected,
+        };
+        if let Ok(value) = eval_body_owner_const(db, pred_owner, args.to_vec())
+            && static_assert_bool_value(db, value) == Some(false)
+        {
+            return Some(predicate);
+        }
+    }
+    None
+}

@@ -477,3 +477,107 @@ fn bad_forward<B: Platform>() where B::WORD_BITS == 128 {
 "#;
     assert_has_code("assumption_mismatch", src, "8-0085");
 }
+
+// ---------------------------------------------------------------------------
+// Gate 1 + 3: const predicates are first-class at every well-formedness
+// position, not only at call sites. A concrete ADT whose own `where`-clause
+// const predicate is refuted is ill-formed wherever it appears, via the shared
+// `check_ty_wf`; the generic declaration itself is still accepted.
+// ---------------------------------------------------------------------------
+
+/// `Bounded<MIN, MAX>` is well-formed only when `MIN <= MAX`.
+const BOUNDED: &str = r#"
+struct Bounded<const MIN: u256, const MAX: u256> where MIN <= MAX {
+    value: u256
+}
+"#;
+
+fn assert_compiles(name: &str, src: &str) {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(format!("{name}.fe").into(), src);
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn wf_const_predicate_declaration_is_accepted() {
+    // The generic declaration is not refuted — only concrete instantiations are.
+    assert_compiles("bounded_decl", BOUNDED);
+}
+
+#[test]
+fn wf_const_predicate_construction() {
+    // Satisfying instantiation constructs; refuted instantiation is rejected.
+    assert_compiles(
+        "bounded_construct_ok",
+        &format!("{BOUNDED}\nfn m() {{\n    Bounded<1, 4> {{ value: 0 }}\n}}\n"),
+    );
+    assert_has_code(
+        "bounded_construct_bad",
+        &format!("{BOUNDED}\nfn m() {{\n    Bounded<4, 1> {{ value: 0 }}\n}}\n"),
+        "8-0085",
+    );
+}
+
+#[test]
+fn wf_const_predicate_local_binding() {
+    // A refuted ADT in a local binding is rejected without any call site.
+    assert_has_code(
+        "bounded_local_bad",
+        &format!("{BOUNDED}\nfn m() {{\n    let _x = Bounded<4, 1> {{ value: 0 }}\n}}\n"),
+        "8-0085",
+    );
+}
+
+#[test]
+fn wf_const_predicate_signature_param_never_called() {
+    // A refuted ADT in a parameter type is rejected at the declaration even
+    // though the function is never called.
+    assert_has_code(
+        "bounded_param_bad",
+        &format!("{BOUNDED}\nfn impossible(x: Bounded<4, 1>) {{\n}}\n"),
+        "8-0085",
+    );
+}
+
+#[test]
+fn wf_const_predicate_signature_return_never_called() {
+    // A refuted ADT in the return type is rejected at the declaration.
+    let diags = assert_has_code(
+        "bounded_return_bad",
+        &format!(
+            "{BOUNDED}\nextern {{\n    fn diverge() -> !\n}}\nfn impossible() -> Bounded<4, 1> {{\n    diverge()\n}}\n"
+        ),
+        "8-0085",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("const predicate is not satisfied")),
+        "{diags:#?}"
+    );
+}
+
+#[test]
+fn wf_const_predicate_struct_field_no_body() {
+    // A refuted ADT in a struct field is rejected with no function body in
+    // sight — this is the position a body-only check would miss.
+    assert_has_code(
+        "bounded_field_bad",
+        &format!("{BOUNDED}\nstruct Holder {{\n    x: Bounded<4, 1>\n}}\n"),
+        "8-0085",
+    );
+}
+
+#[test]
+fn wf_const_predicate_symbolic_generic_not_refuted() {
+    // A symbolic application `Bounded<A, B>` under a matching assumption is the
+    // enclosing item's own assumption; it must not be CTFE-evaluated or falsely
+    // rejected.
+    assert_compiles(
+        "bounded_generic_ok",
+        &format!(
+            "{BOUNDED}\nfn g<const A: u256, const B: u256>(x: Bounded<A, B>) where A <= B {{\n}}\n"
+        ),
+    );
+}
