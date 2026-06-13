@@ -721,3 +721,45 @@ exactness, and receipts are all in):
 
 FCO→CTCubFe: the C1 ("Bounds With Receipts") prerequisites (F6+W0+A1+R0+L2) are
 all met — the substrate is ready for the CTCubFe Forms.
+
+---
+
+# FV / assurance — the third layer
+
+Three layers, not three roadmaps:
+
+```
+FCO nodes      = implementation substrate
+CTCubFe nodes  = user-visible capability ladder
+FV nodes       = evidence a design decision / semantic invariant is sound
+```
+
+FV nodes attach to whichever production node they validate or constrain — they
+do **not** sit "after M5". Machine-readable layer: `fco_fv_layer.json`. New edge
+kinds (beyond hard/soft): **`assures`** (validates/constrains a node),
+**`blocks_bad`** (forbids an unsound design path), **`rearms`** (re-run when the
+target changes).
+
+Five buckets: **decision receipts** (answered once → "why we chose this":
+FV1, FV3, FV10, FV11), **standing harnesses** (re-runnable, pinned: FV0, FV6,
+FV7, FV8, FV9), **proto proof backends** (FV2→SMT, FV4/FV5→induction/term),
+**negative constraints** (FV3 no-Merkle-Monoid, FV6 no-fake-resource-join,
+FV11 no-specialization), **production seeds** (FV2→Q*, FV4/FV5→S3/T*, FV8→P*).
+
+## Decision receipts already discharged by landed M5 work
+
+- **FV1 (verbatim-vs-logical) `assures` A1/A2** — the exact-term-identity match
+  and the no-flip / no-implication / no-split tests (`6cd749037`) are the
+  implementation FV1 calibrates; the census is the recorded "why exact".
+- **FV11 (gate-vs-select) `blocks_bad` I2/I3/I4** — impl gating + B2b overlap
+  (`b3de1b218`) + the anti-SFINAE hard-fault behavior implement what FV11 backs.
+- **FV7 (term normalizer stability) `rearms` F1/T1** — `normalize_term` is the
+  standing target; the staleness fuse is `TERM_LANG_VERSION`. (Re-arm at AC1.)
+
+## Direction: lean conventional
+
+Per the steer, prioritize the *conventional* end of the spectrum — finishing the
+production substrate and the down-to-earth consolidations (M5 tail, method
+conformance, typed provider capabilities, ABI/static-layout) — over the exotic
+end (CTCubFe Forms, SMT, Sonatina), which stays design-led and FV-probed until a
+concrete driver appears. The FV layer rides alongside each, not after.
