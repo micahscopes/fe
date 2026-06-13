@@ -609,3 +609,16 @@ Live status by node ID (proven from code/tests, not inherited):
 
 The architect graph's `⚠` "uncertain" nodes line up with our open scope calls;
 nothing in the executed M5 work contradicts it.
+
+## Graph artifacts: which is canonical
+
+- `fco_dependency_graph_v0.json` — **canonical source of truth**. Carries edge
+  `reason`s, a precomputed `topological_layers_hard_edges` (12 ready-frontier
+  layers), node descriptions, and the `status_values_suggested` schema (= the
+  classification buckets we audit against). It is deliberately *status-light*;
+  the per-node status audit above is the overlay we maintain.
+- `fco_dependency_graph_v0.mmd` — a **rendered view** of the same graph. Treat as
+  generated/disposable: regenerate from the JSON, do not hand-maintain in
+  parallel (or it drifts).
+
+Update the JSON when the structure changes; re-render the mermaid from it.

@@ -1,0 +1,2337 @@
+{
+  "schema_version": "fco-dependency-graph.draft-v0",
+  "scope": "End-to-end FCO / Fe / Sonatina dependency structure distilled from bundle discussion",
+  "principles": [
+    "Milestone names are release-cut views, not dependency authorities.",
+    "Nodes represent capabilities, invariants, tests, decisions, or uncertain zones.",
+    "Hard edges participate in topological sort; soft edges mark uncertainty/clarification overlays.",
+    "Every status must be audited against the current repo before implementation.",
+    "This graph is deliberately status-light: it is a draft dependency structure, not a completion report."
+  ],
+  "edge_kinds": {
+    "hard": "Required dependency for safe/coherent implementation.",
+    "soft": "Uncertainty or clarification edge; useful for planning but not a topo-sort blocker."
+  },
+  "status_values_suggested": [
+    "UNCLASSIFIED",
+    "COMPLETE_AND_TESTED",
+    "COMPLETE_BUT_UNDERTESTED",
+    "PARTIAL",
+    "ABSENT",
+    "SUPERSEDED",
+    "BLOCKED_BY_DESIGN",
+    "NOT_EXPRESSIBLE_YET"
+  ],
+  "nodes": [
+    {
+      "id": "T00",
+      "title": "Canonical dependency graph format",
+      "group": "Tooling",
+      "kind": "tooling",
+      "description": "Canonical JSON/YAML schema for nodes, edges, edge kinds, release-cut views, acceptance tests, and repo evidence.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "T10",
+      "title": "Topo sort and ready-frontier tool",
+      "group": "Tooling",
+      "kind": "tooling",
+      "description": "Tooling to validate the DAG, detect cycles, and list ready nodes based on actual status.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "T20",
+      "title": "Mermaid generator",
+      "group": "Tooling",
+      "kind": "tooling",
+      "description": "Generated Mermaid diagram for human and agent communication.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "T30",
+      "title": "Graph-driven agent prompt generator",
+      "group": "Tooling",
+      "kind": "tooling",
+      "description": "Create compact implementor prompts from selected graph nodes and their acceptance criteria.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "T40",
+      "title": "Fixture / acceptance matrix tracker",
+      "group": "Tooling",
+      "kind": "tooling",
+      "description": "Track which fixtures prove which invariants and which nodes they satisfy.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "T50",
+      "title": "Graph validation in CI",
+      "group": "Tooling",
+      "kind": "tooling",
+      "description": "Optional CI check that validates graph shape, unknown nodes, and cycles.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "G00",
+      "title": "Repo capability audit per run",
+      "group": "Governance",
+      "kind": "process",
+      "description": "Each agent first classifies actual repo capability rather than inheriting stale status.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "G10",
+      "title": "Release cuts as graph views",
+      "group": "Governance",
+      "kind": "process",
+      "description": "M5/M6/M7 become named views over graph nodes, not dependency authorities.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "G20",
+      "title": "Ready-frontier based agent handoff",
+      "group": "Governance",
+      "kind": "process",
+      "description": "Agents work from ready graph nodes whose dependencies are satisfied.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "G30",
+      "title": "Status updates attached to graph nodes",
+      "group": "Governance",
+      "kind": "process",
+      "description": "After each implementation pass, node status/evidence is updated in the graph.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F00",
+      "title": "Evidence schema core",
+      "group": "FCO substrate",
+      "kind": "schema",
+      "description": "Structured evidence records contain goal, route, origin, premises/dependencies, and payload/fingerprint hooks.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F01",
+      "title": "Const term language core",
+      "group": "FCO substrate",
+      "kind": "schema",
+      "description": "Term nodes, interning, weak deterministic normalization, and internal term-language versioning.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F02",
+      "title": "Symbolic AssocConst as neutral term",
+      "group": "FCO substrate",
+      "kind": "capability",
+      "description": "Represent T::SIZE, B::WORD_BITS, Self::WIDTH as neutral const terms before concrete resolution.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F03",
+      "title": "Where const predicate parse/lower",
+      "group": "FCO substrate",
+      "kind": "capability",
+      "description": "Surface const predicates in where clauses parse, lower, preserve spans/origins, and enter semantic data.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F04",
+      "title": "Shared deferred obligation queue",
+      "group": "FCO substrate",
+      "kind": "capability",
+      "description": "Trait and const-predicate obligations can be carried through one deferred checking/discharge queue.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F05",
+      "title": "CTFE discharge outside trait solver",
+      "group": "FCO substrate",
+      "kind": "invariant",
+      "description": "Const predicate evaluation happens at obligation/discharge layer, never inside proof forest / trait selection.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F06",
+      "title": "Call-site const-predicate discharge spine",
+      "group": "FCO substrate",
+      "kind": "capability",
+      "description": "Concrete function calls discharge callee where const predicates by CTFE/assumption routes and record evidence.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "F07",
+      "title": "Paired correctness fixture suite",
+      "group": "FCO substrate",
+      "kind": "fixtures",
+      "description": "Positive/negative fixtures prove call-site discharge, diagnostics, evidence, no stale reuse, and no ICE categories.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "W00",
+      "title": "WhereClauseOwner coverage",
+      "group": "Obligation surfaces",
+      "kind": "inventory",
+      "description": "Inventory which owners can structurally carry where clauses: functions, structs/enums, impls, methods, etc.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "W10",
+      "title": "Type-use WF surface inventory",
+      "group": "Obligation surfaces",
+      "kind": "inventory",
+      "description": "Inventory all places where type well-formedness is required: construction, annotations, params, returns, fields, signatures.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "W11",
+      "title": "ADT/signature/WF const-predicate discharge",
+      "group": "Obligation surfaces",
+      "kind": "capability",
+      "description": "Concrete type/ADT uses whose own where const predicates are false fail at every WF surface.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "W12",
+      "title": "WF evidence origins",
+      "group": "Obligation surfaces",
+      "kind": "evidence",
+      "description": "Positive WF discharges record evidence keyed to type-use / signature / construction origin, not just call expression.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "W13",
+      "title": "WF duplicate diagnostic guard",
+      "group": "Obligation surfaces",
+      "kind": "diagnostic",
+      "description": "Centralize or dedupe WF diagnostics when item-level and body-level checks see the same type use.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "W14",
+      "title": "Generic symbolic WF guard",
+      "group": "Obligation surfaces",
+      "kind": "invariant",
+      "description": "Symbolic generic type uses are not falsely CTFE-rejected; they are carried as assumptions/residuals until matched.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "W15",
+      "title": "Never-called declaration/signature coverage",
+      "group": "Obligation surfaces",
+      "kind": "invariant",
+      "description": "Impossible signatures and item fields fail even when no function body or call site exercises them.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "A00",
+      "title": "Const predicates enter assumption pool",
+      "group": "Assumptions",
+      "kind": "capability",
+      "description": "Caller / declaration where const predicates are collected as assumptions alongside trait constraints.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "A10",
+      "title": "Assumption-route exact term matching",
+      "group": "Assumptions",
+      "kind": "capability",
+      "description": "Symbolic const obligations discharge only by exact normalized term identity against in-scope assumptions.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "A11",
+      "title": "Assumption evidence and premise origin",
+      "group": "Assumptions",
+      "kind": "evidence",
+      "description": "Assumption-route discharge records evidence linking the obligation to the caller/declaration assumption.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "A12",
+      "title": "No splitting / flipping / implication tests",
+      "group": "Assumptions",
+      "kind": "fixtures",
+      "description": "Fixtures prove no boolean splitting, no comparison-direction flipping, and no implication solver in the M5/M6 core.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "I00",
+      "title": "Impl where const predicates represented",
+      "group": "Impl gating",
+      "kind": "capability",
+      "description": "Impls can carry const-predicate where clauses as obligations/residuals.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "I10",
+      "title": "Trait solver residual predicate carry",
+      "group": "Impl gating",
+      "kind": "capability",
+      "description": "Trait selection returns selected impl plus residual const predicates instead of evaluating them inside the solver.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "I20",
+      "title": "Gate-not-select semantics",
+      "group": "Impl gating",
+      "kind": "invariant",
+      "description": "Const predicates gate selected candidates after selection; they do not select among impls.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "I30",
+      "title": "B2b overlap/coherence fixture",
+      "group": "Impl gating",
+      "kind": "fixtures",
+      "description": "Two impls differing only by const predicate overlap or are rejected; no predicate-based specialization.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "I40",
+      "title": "Selected impl predicate fault hard error",
+      "group": "Impl gating",
+      "kind": "invariant",
+      "description": "A false/faulting residual predicate is a hard diagnostic, not candidate removal or fallback.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "D00",
+      "title": "Diagnostic taxonomy policy",
+      "group": "Diagnostics",
+      "kind": "policy",
+      "description": "Decide and document error classes for false predicate, formation failure, unsupported form, and CTFE fault.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "D10",
+      "title": "False predicate diagnostic",
+      "group": "Diagnostics",
+      "kind": "diagnostic",
+      "description": "A formed predicate that evaluates false reports the agreed predicate-not-satisfied diagnostic.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "D20",
+      "title": "Formation / availability diagnostic",
+      "group": "Diagnostics",
+      "kind": "diagnostic",
+      "description": "Missing associated const, unavailable trait source, or unformed predicate reports a formation/name diagnostic, not false predicate.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "D30",
+      "title": "Unsupported projection/expression named limitation",
+      "group": "Diagnostics",
+      "kind": "diagnostic",
+      "description": "Recognized but intentionally unsupported forms fail with a named no-ICE limitation diagnostic.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "D40",
+      "title": "CTFE fault diagnostic",
+      "group": "Diagnostics",
+      "kind": "diagnostic",
+      "description": "Evaluation faults, such as division by zero, are hard CTFE diagnostics, not unsatisfied predicate and not SFINAE.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "D50",
+      "title": "Actual-value diagnostic rendering",
+      "group": "Diagnostics",
+      "kind": "diagnostic",
+      "description": "When possible, diagnostics show substituted/evaluated values such as 16 != 256.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "R00",
+      "title": "Receipt/debug evidence sink",
+      "group": "Receipts",
+      "kind": "consumer",
+      "description": "At least one debug or test-visible consumer exposes discharged const predicate evidence.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "R10",
+      "title": "LSP hover or fe explain seed",
+      "group": "Receipts",
+      "kind": "consumer",
+      "description": "Human-facing surface renders goal, route, origin, substitution, and premises.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "R20",
+      "title": "Explain chain with origins/premises",
+      "group": "Receipts",
+      "kind": "consumer",
+      "description": "Explain mode traces from use site through assumptions/providers/premises to discharge route.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "E00",
+      "title": "End-to-end draft acceptance harness",
+      "group": "End-to-end draft",
+      "kind": "fixtures",
+      "description": "A coherent demo harness proves backend/platform facts flow through obligations, evidence, diagnostics, and lowering gates.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "E10",
+      "title": "Release-cut view over graph",
+      "group": "End-to-end draft",
+      "kind": "process",
+      "description": "A named release cut, such as M5-finish, is a selected subset of graph nodes, not the primary dependency structure.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "AC00",
+      "title": "HKT / assoc-const ICE repro and fix",
+      "group": "AssocConst / term hardening",
+      "kind": "capability",
+      "description": "Track and fix known HKT-bound associated-const ICE path before richer projection evaluation depends on it.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "AC10",
+      "title": "Canonical associated-const projection identity",
+      "group": "AssocConst / term hardening",
+      "kind": "schema",
+      "description": "AssocConst identity moves toward subject TyId + canonical trait instantiation/args + assoc const def-id.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "AC20",
+      "title": "Term identity migration / invalidation",
+      "group": "AssocConst / term hardening",
+      "kind": "schema",
+      "description": "Bump TERM_LANG_VERSION or equivalent, invalidate stale evidence/caches, and document identity migration semantics.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "AC30",
+      "title": "AssocConst projection depth policy",
+      "group": "AssocConst / term hardening",
+      "kind": "policy",
+      "description": "Decide which projection forms are supported now, named-limited, or deferred.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "AC40",
+      "title": "Chained assoc-type / assoc-const projection support",
+      "group": "AssocConst / term hardening",
+      "kind": "capability",
+      "description": "Support forms like B::Memory::ADDRESS_SPACE or reject them with a principled limitation until ready.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "AC50",
+      "title": "Generic-trait assoc-const identity fixtures",
+      "group": "AssocConst / term hardening",
+      "kind": "fixtures",
+      "description": "Fixtures prove <T as Tr<A>>::C and <T as Tr<B>>::C stay distinct.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "C00",
+      "title": "const_assert surface / VcSite",
+      "group": "Body assertions",
+      "kind": "capability",
+      "description": "Introduce or verify a body-level const_assert / VC site representation.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "C10",
+      "title": "Body assertion obligations",
+      "group": "Body assertions",
+      "kind": "capability",
+      "description": "Body assertions produce obligations that use the same term/discharge/evidence path.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "C20",
+      "title": "Body assertion receipts",
+      "group": "Body assertions",
+      "kind": "evidence",
+      "description": "Successful const_assert discharges record receipts; failures produce hard diagnostics.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "C30",
+      "title": "VC site origin model",
+      "group": "Body assertions",
+      "kind": "schema",
+      "description": "Body assertions have stable origins usable by diagnostics, explain, and future SMT.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "MC00",
+      "title": "Method const-predicate conformance semantics",
+      "group": "Method conformance",
+      "kind": "policy",
+      "description": "Decide exactness/variance rules for method where const predicates absent general implication.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "MC10",
+      "title": "Method conformance queue routing",
+      "group": "Method conformance",
+      "kind": "capability",
+      "description": "Method signature comparison routes const-predicate obligations through queue/evidence rather than trait-only comparison.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "MC20",
+      "title": "Method conformance evidence origin",
+      "group": "Method conformance",
+      "kind": "evidence",
+      "description": "Diagnostics/evidence identify trait method, impl method, and mismatched/missing predicates.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "UC00",
+      "title": "Full ConstraintKind refactor decision",
+      "group": "Unified constraints",
+      "kind": "policy",
+      "description": "Decide whether/when to replace trait-only predicate lists with a full ConstraintKind::Trait/ConstPredicate structure.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "UC10",
+      "title": "Trait predicates as projection",
+      "group": "Unified constraints",
+      "kind": "capability",
+      "description": "Trait-specific consumers read a projection/view from a unified constraint list.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "UC20",
+      "title": "Unified constraints across all surfaces",
+      "group": "Unified constraints",
+      "kind": "capability",
+      "description": "Calls, WF, impls, methods, providers, and assumptions use one constraint substrate.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "P00",
+      "title": "Provider capability current-state audit",
+      "group": "Providers",
+      "kind": "inventory",
+      "description": "Audit whether Reflect, ImplBuilder, Evidence, Quote already exist as typed compile-time-only capabilities or remain string-keyed affordances.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "P10",
+      "title": "Provider capability compile-time-only invariants",
+      "group": "Providers",
+      "kind": "invariant",
+      "description": "Capabilities cannot be constructed by ordinary user code, stored at runtime, or escape codegen.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "P20",
+      "title": "Provider capabilities as FCO provisions/evidence",
+      "group": "Providers",
+      "kind": "capability",
+      "description": "Capability grants are checked through FCO provision/evidence machinery rather than ad hoc keys.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "P30",
+      "title": "Retire string-keyed authority checks",
+      "group": "Providers",
+      "kind": "refactor",
+      "description": "Reduce or eliminate REFLECT_KEY / IMPL_BUILDER_KEY style authority and derive-provider exemptions where safe.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "P40",
+      "title": "Provider body / quote / reflection typing boundary",
+      "group": "Providers",
+      "kind": "policy",
+      "description": "Clarify what provider bodies are typed by the normal compiler versus executor-only checks.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "P50",
+      "title": "Generated impl provenance evidence",
+      "group": "Providers",
+      "kind": "evidence",
+      "description": "Generated impls record derive/provider origin and required/discharged obligations.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "H00",
+      "title": "ABI/layout fact traits",
+      "group": "High-level generation",
+      "kind": "schema",
+      "description": "Model generated-code preconditions as facts such as IS_DYNAMIC, HEAD_WORDS, field count, and layout class.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "H10",
+      "title": "ABI/static-layout provider rewrite",
+      "group": "High-level generation",
+      "kind": "refactor",
+      "description": "First high-level generator rewritten or shadowed in Fe using provider capabilities and const-predicate evidence.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "H20",
+      "title": "Event/error/msg provider rewrite",
+      "group": "High-level generation",
+      "kind": "refactor",
+      "description": "Move Rust-hardcoded event/error/msg lowering toward Fe providers after ABI/static shape is proven.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "H30",
+      "title": "EIP-712 / Hash712 provider rewrite",
+      "group": "High-level generation",
+      "kind": "refactor",
+      "description": "Use evidence-backed layout/field facts to generate and explain hash/EIP-712 code.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "H40",
+      "title": "Core derives FCO integration",
+      "group": "High-level generation",
+      "kind": "refactor",
+      "description": "Generic derive providers consume/produce FCO obligations/evidence rather than parallel derive logic.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "H50",
+      "title": "Generated code through normal HIR obligations",
+      "group": "High-level generation",
+      "kind": "invariant",
+      "description": "Provider-generated code type-checks and discharges obligations through the same pipeline as handwritten Fe.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "B00",
+      "title": "Sonatina + multi-backend pressure note",
+      "group": "Platform / backend facts",
+      "kind": "context",
+      "description": "Record that Fe platform facts and Sonatina v2 resource modeling are north-star use cases for FCO.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "B10",
+      "title": "Platform/HKT trait prototype",
+      "group": "Platform / backend facts",
+      "kind": "capability",
+      "description": "Backend/platform abstraction traits expose Word, Ptr<T>, Storage<T>, and associated const facts.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "B20",
+      "title": "Backend fact obligations",
+      "group": "Platform / backend facts",
+      "kind": "capability",
+      "description": "Platform facts such as WORD_BITS, HAS_STORAGE, ADDRESS_WIDTH enter the FCO obligation path.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "B30",
+      "title": "Typed platform intrinsic capabilities",
+      "group": "Platform / backend facts",
+      "kind": "capability",
+      "description": "Low-level intrinsics are guarded by platform capability types/obligations rather than ad hoc lowering assumptions.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "B40",
+      "title": "Backend-generic demo fixtures",
+      "group": "Platform / backend facts",
+      "kind": "fixtures",
+      "description": "Fixtures demonstrate EVM-like, pure-memory, tiny-word, and crypto/ABI platform facts.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "B50",
+      "title": "Lowering gated by evidence",
+      "group": "Platform / backend facts",
+      "kind": "invariant",
+      "description": "Backend-specific lowering proceeds only after relevant source-level obligations are discharged or carried.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT00",
+      "title": "merge_runtime_class risk ledger",
+      "group": "Runtime/resource",
+      "kind": "risk",
+      "description": "Document latent order-dependent runtime-class merge behavior and its current reachability status.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT10",
+      "title": "Runtime-class reachability repro fixture",
+      "group": "Runtime/resource",
+      "kind": "fixtures",
+      "description": "Construct or rule out concrete Fe repros for storage/calldata/transient merge families.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT20",
+      "title": "Interim runtime-class materialization/error policy",
+      "group": "Runtime/resource",
+      "kind": "policy",
+      "description": "If reachable before Sonatina v2, decide deterministic/materialize/error behavior for cross-resource joins.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT30",
+      "title": "Sonatina v2 VSDG value/state model",
+      "group": "Runtime/resource",
+      "kind": "architecture",
+      "description": "VSDG explicitly models value/state dependencies instead of hiding them in ad hoc carrier merges.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT40",
+      "title": "Separation-logic resource proposition language",
+      "group": "Runtime/resource",
+      "kind": "architecture",
+      "description": "Resource propositions model ownership, frames, regions, disjointness, reads/writes, and backend storage classes.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT50",
+      "title": "Resource proof evidence with non-empty premises",
+      "group": "Runtime/resource",
+      "kind": "evidence",
+      "description": "Resource facts produce evidence whose premises close over frame/resource assumptions.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT60",
+      "title": "Cross-resource joins proven/materialized/rejected",
+      "group": "Runtime/resource",
+      "kind": "invariant",
+      "description": "Resource joins are explicit and safe rather than order-dependent.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "RT70",
+      "title": "merge_runtime_class supersession",
+      "group": "Runtime/resource",
+      "kind": "refactor",
+      "description": "Old runtime-class reconciliation shrinks or is replaced by VSDG/resource semantics.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "S00",
+      "title": "VC / SMT goal classification",
+      "group": "SMT/proof",
+      "kind": "inventory",
+      "description": "Classify which obligations can be discharged by exact match, CTFE, SMT, or future resource proof.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "S10",
+      "title": "SMT discharge backend interface",
+      "group": "SMT/proof",
+      "kind": "capability",
+      "description": "Add a solver-backed discharge route that consumes terms, emits evidence, and keeps CTFE out of solver selection.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "S20",
+      "title": "Premise closure / proof dependency graph",
+      "group": "SMT/proof",
+      "kind": "schema",
+      "description": "Evidence records non-empty premises and dependency closure for proof-producing routes.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "S30",
+      "title": "Certificate/evidence serialization",
+      "group": "SMT/proof",
+      "kind": "schema",
+      "description": "Durable certificates/fingerprints are tied to term/resource language versions and premise closure.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "S40",
+      "title": "Law systems / proof transport",
+      "group": "SMT/proof",
+      "kind": "architecture",
+      "description": "Transport proof/law artifacts across generated code, backends, and sessions.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "S50",
+      "title": "Unchecked arithmetic replacement policy",
+      "group": "SMT/proof",
+      "kind": "policy",
+      "description": "Distinguish compile-time layout facts from runtime pointer/range safety before replacing unchecked annotations.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "S60",
+      "title": "Check elision from evidence",
+      "group": "SMT/proof",
+      "kind": "capability",
+      "description": "Use evidence/premises to safely elide checks only when source, resource, and runtime facts justify it.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PV00",
+      "title": "Scope-indexed provision environment design",
+      "group": "Provision unification",
+      "kind": "architecture",
+      "description": "Unify traits, capabilities, generated impls, effects, and const assumptions as provision sources.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PV10",
+      "title": "Trait/env assumptions as provisions",
+      "group": "Provision unification",
+      "kind": "capability",
+      "description": "Trait impls and where assumptions become one class of scope-indexed provisions.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PV20",
+      "title": "Effects/capabilities as obligations",
+      "group": "Provision unification",
+      "kind": "capability",
+      "description": "Effect and capability requirements are expressed as obligations/provisions with evidence.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PV30",
+      "title": "Generated impl overlays as provisions",
+      "group": "Provision unification",
+      "kind": "capability",
+      "description": "Provider-generated impls enter scope as evidence-backed provisions.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PV40",
+      "title": "Provider capabilities in provision environment",
+      "group": "Provision unification",
+      "kind": "capability",
+      "description": "Provider capability grants are provided/resolved through the same environment model.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PV50",
+      "title": "Const predicate assumptions as provisions",
+      "group": "Provision unification",
+      "kind": "capability",
+      "description": "In-scope const-predicate assumptions are represented as provisions for exact-match discharge.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PV60",
+      "title": "Stable explain across provision routes",
+      "group": "Provision unification",
+      "kind": "consumer",
+      "description": "Explain can traverse trait, const, provider, capability, effect, and resource evidence uniformly.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U00",
+      "title": "Unclassified current repo status",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Every node needs actual repo classification before implementation.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U10",
+      "title": "Diagnostic code policy mismatch",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Old exit docs and live codes may differ; resolve by updating docs or implementation.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U20",
+      "title": "Provider capability current-state ambiguity",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Capabilities may already be typed; audit before planning to add them.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U30",
+      "title": "Full ConstraintKind refactor necessity",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Need decide if obligation-queue unification is enough or full ConstraintKind is required for future surfaces.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U40",
+      "title": "AssocConst projection depth boundary",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Decide which projection shapes to support now versus name-limit.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U50",
+      "title": "HKT expressibility boundary",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Current Fe/HKT syntax and lowering may limit platform/assoc-const fixtures.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U60",
+      "title": "Sonatina v2 sequencing",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Clarify which Sonatina v2 concepts must shape FCO now versus wait.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U70",
+      "title": "SMT trust model",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Decide how solver results are trusted, checked, cached, or certificate-backed.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U80",
+      "title": "Method exactness/variance policy",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Decide how method const predicates compare without implication solver.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U90",
+      "title": "Runtime-class reachability",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Determine if merge_runtime_class flaw is reachable in current source language.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "U100",
+      "title": "Evidence format stability policy",
+      "group": "Uncertain zones",
+      "kind": "uncertainty",
+      "description": "Decide when evidence/term/resource formats are cache-only versus durable compatibility surfaces.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    }
+  ],
+  "edges": [
+    {
+      "from": "T00",
+      "to": "T10",
+      "kind": "hard",
+      "reason": "graph format required for topo sort"
+    },
+    {
+      "from": "T00",
+      "to": "T20",
+      "kind": "hard",
+      "reason": "Mermaid generated from canonical graph"
+    },
+    {
+      "from": "T00",
+      "to": "T30",
+      "kind": "hard",
+      "reason": "prompts derived from graph metadata"
+    },
+    {
+      "from": "T00",
+      "to": "T40",
+      "kind": "hard",
+      "reason": "fixtures tracked against node ids"
+    },
+    {
+      "from": "T00",
+      "to": "T50",
+      "kind": "hard",
+      "reason": "CI validates graph schema"
+    },
+    {
+      "from": "T10",
+      "to": "G20",
+      "kind": "hard",
+      "reason": "ready-frontier handoff needs topo sort"
+    },
+    {
+      "from": "G00",
+      "to": "G30",
+      "kind": "hard",
+      "reason": "status updates follow repo audit"
+    },
+    {
+      "from": "T00",
+      "to": "G10",
+      "kind": "hard",
+      "reason": "release cuts are graph views"
+    },
+    {
+      "from": "G30",
+      "to": "G20",
+      "kind": "hard",
+      "reason": "handoff should include current graph status"
+    },
+    {
+      "from": "F01",
+      "to": "F02",
+      "kind": "hard",
+      "reason": "AssocConst terms are term-language nodes"
+    },
+    {
+      "from": "F02",
+      "to": "F03",
+      "kind": "hard",
+      "reason": "where predicates over assoc consts must lower to terms"
+    },
+    {
+      "from": "F03",
+      "to": "F06",
+      "kind": "hard",
+      "reason": "call-site discharge needs lowered predicates"
+    },
+    {
+      "from": "F04",
+      "to": "F06",
+      "kind": "hard",
+      "reason": "call-site discharge rides deferred queue"
+    },
+    {
+      "from": "F05",
+      "to": "F06",
+      "kind": "hard",
+      "reason": "call-site discharge evaluates outside solver"
+    },
+    {
+      "from": "F00",
+      "to": "F06",
+      "kind": "hard",
+      "reason": "call-site discharge records evidence"
+    },
+    {
+      "from": "F06",
+      "to": "F07",
+      "kind": "hard",
+      "reason": "fixtures prove call-site discharge"
+    },
+    {
+      "from": "F00",
+      "to": "R00",
+      "kind": "hard",
+      "reason": "receipts read structured evidence"
+    },
+    {
+      "from": "F03",
+      "to": "W00",
+      "kind": "hard",
+      "reason": "owner inventory depends on where-clause representation"
+    },
+    {
+      "from": "W00",
+      "to": "W11",
+      "kind": "hard",
+      "reason": "ADT/WF discharge needs owners to carry predicates"
+    },
+    {
+      "from": "W10",
+      "to": "W11",
+      "kind": "hard",
+      "reason": "must know all WF surfaces"
+    },
+    {
+      "from": "F04",
+      "to": "W11",
+      "kind": "hard",
+      "reason": "WF discharge enqueues/uses obligations"
+    },
+    {
+      "from": "F05",
+      "to": "W11",
+      "kind": "hard",
+      "reason": "WF discharge uses CTFE outside solver"
+    },
+    {
+      "from": "F00",
+      "to": "W12",
+      "kind": "hard",
+      "reason": "WF discharge produces evidence"
+    },
+    {
+      "from": "W11",
+      "to": "W12",
+      "kind": "hard",
+      "reason": "WF evidence follows WF discharge"
+    },
+    {
+      "from": "W11",
+      "to": "W13",
+      "kind": "hard",
+      "reason": "duplicate guard needed once multiple WF paths emit diagnostics"
+    },
+    {
+      "from": "W11",
+      "to": "W14",
+      "kind": "hard",
+      "reason": "symbolic cases need guard in WF discharge"
+    },
+    {
+      "from": "W11",
+      "to": "W15",
+      "kind": "hard",
+      "reason": "declaration/signature coverage is part of WF discharge"
+    },
+    {
+      "from": "F03",
+      "to": "A00",
+      "kind": "hard",
+      "reason": "declaration predicates must be collected"
+    },
+    {
+      "from": "F01",
+      "to": "A00",
+      "kind": "hard",
+      "reason": "assumption pool stores terms"
+    },
+    {
+      "from": "A00",
+      "to": "A10",
+      "kind": "hard",
+      "reason": "exact matching needs assumptions"
+    },
+    {
+      "from": "F01",
+      "to": "A10",
+      "kind": "hard",
+      "reason": "exact matching uses normalized term identity"
+    },
+    {
+      "from": "A10",
+      "to": "A11",
+      "kind": "hard",
+      "reason": "assumption match produces evidence"
+    },
+    {
+      "from": "F00",
+      "to": "A11",
+      "kind": "hard",
+      "reason": "assumption evidence uses schema"
+    },
+    {
+      "from": "A10",
+      "to": "A12",
+      "kind": "hard",
+      "reason": "negative tests pin exactness semantics"
+    },
+    {
+      "from": "F03",
+      "to": "I00",
+      "kind": "hard",
+      "reason": "impl predicates must be represented"
+    },
+    {
+      "from": "I00",
+      "to": "I10",
+      "kind": "hard",
+      "reason": "solver carries represented predicates as residuals"
+    },
+    {
+      "from": "F04",
+      "to": "I10",
+      "kind": "hard",
+      "reason": "residuals enter obligation queue"
+    },
+    {
+      "from": "A10",
+      "to": "I10",
+      "kind": "hard",
+      "reason": "symbolic residuals may discharge by assumptions"
+    },
+    {
+      "from": "I10",
+      "to": "I20",
+      "kind": "hard",
+      "reason": "gate-not-select uses residual carry"
+    },
+    {
+      "from": "I20",
+      "to": "I30",
+      "kind": "hard",
+      "reason": "coherence/overlap fixtures pin non-specialization"
+    },
+    {
+      "from": "I20",
+      "to": "I40",
+      "kind": "hard",
+      "reason": "faulting selected residual is hard error"
+    },
+    {
+      "from": "F05",
+      "to": "I40",
+      "kind": "hard",
+      "reason": "faults emerge from obligation-level CTFE"
+    },
+    {
+      "from": "D00",
+      "to": "D10",
+      "kind": "hard",
+      "reason": "taxonomy defines false predicate category"
+    },
+    {
+      "from": "D00",
+      "to": "D20",
+      "kind": "hard",
+      "reason": "taxonomy defines formation category"
+    },
+    {
+      "from": "D00",
+      "to": "D30",
+      "kind": "hard",
+      "reason": "taxonomy defines unsupported category"
+    },
+    {
+      "from": "D00",
+      "to": "D40",
+      "kind": "hard",
+      "reason": "taxonomy defines CTFE fault category"
+    },
+    {
+      "from": "D10",
+      "to": "D50",
+      "kind": "hard",
+      "reason": "actual value rendering decorates false predicate diagnostics"
+    },
+    {
+      "from": "F05",
+      "to": "D10",
+      "kind": "hard",
+      "reason": "false results arise from CTFE discharge"
+    },
+    {
+      "from": "F02",
+      "to": "D20",
+      "kind": "hard",
+      "reason": "formation depends on symbol/assoc-const resolution"
+    },
+    {
+      "from": "F02",
+      "to": "D30",
+      "kind": "hard",
+      "reason": "unsupported projections are term/lowering limits"
+    },
+    {
+      "from": "F05",
+      "to": "D40",
+      "kind": "hard",
+      "reason": "CTFE faults arise during discharge"
+    },
+    {
+      "from": "R00",
+      "to": "R10",
+      "kind": "hard",
+      "reason": "human-facing explain/hover builds on debug sink"
+    },
+    {
+      "from": "R10",
+      "to": "R20",
+      "kind": "hard",
+      "reason": "chain rendering builds on seed consumer"
+    },
+    {
+      "from": "A11",
+      "to": "R20",
+      "kind": "hard",
+      "reason": "assumption origins enable chained explanations"
+    },
+    {
+      "from": "W12",
+      "to": "R20",
+      "kind": "hard",
+      "reason": "WF origins enable chained explanations"
+    },
+    {
+      "from": "F07",
+      "to": "E00",
+      "kind": "hard",
+      "reason": "call fixtures feed end-to-end harness"
+    },
+    {
+      "from": "W11",
+      "to": "E00",
+      "kind": "hard",
+      "reason": "end-to-end draft should cover WF surfaces"
+    },
+    {
+      "from": "A10",
+      "to": "E00",
+      "kind": "hard",
+      "reason": "symbolic forwarding is part of coherent draft"
+    },
+    {
+      "from": "I20",
+      "to": "E00",
+      "kind": "hard",
+      "reason": "gate-not-select semantics part of draft"
+    },
+    {
+      "from": "D00",
+      "to": "E00",
+      "kind": "hard",
+      "reason": "diagnostic taxonomy part of draft"
+    },
+    {
+      "from": "R10",
+      "to": "E00",
+      "kind": "hard",
+      "reason": "receipts visible in draft"
+    },
+    {
+      "from": "E00",
+      "to": "E10",
+      "kind": "hard",
+      "reason": "release cut is selected acceptance harness"
+    },
+    {
+      "from": "AC00",
+      "to": "AC10",
+      "kind": "hard",
+      "reason": "known ICE path should not undermine projection identity"
+    },
+    {
+      "from": "F02",
+      "to": "AC10",
+      "kind": "hard",
+      "reason": "identity refines symbolic AssocConst term"
+    },
+    {
+      "from": "A10",
+      "to": "AC10",
+      "kind": "hard",
+      "reason": "exact matching exposes identity precision needs"
+    },
+    {
+      "from": "AC10",
+      "to": "AC20",
+      "kind": "hard",
+      "reason": "identity change requires version/invalidation"
+    },
+    {
+      "from": "AC10",
+      "to": "AC50",
+      "kind": "hard",
+      "reason": "canonical identity must be tested"
+    },
+    {
+      "from": "AC30",
+      "to": "AC40",
+      "kind": "hard",
+      "reason": "policy chooses projection depth before support"
+    },
+    {
+      "from": "AC10",
+      "to": "AC40",
+      "kind": "hard",
+      "reason": "richer projections build on canonical identity"
+    },
+    {
+      "from": "C00",
+      "to": "C10",
+      "kind": "hard",
+      "reason": "body assertions need a surface/origin"
+    },
+    {
+      "from": "F04",
+      "to": "C10",
+      "kind": "hard",
+      "reason": "assertions produce obligations"
+    },
+    {
+      "from": "F05",
+      "to": "C10",
+      "kind": "hard",
+      "reason": "assertions discharge via CTFE/assumption outside solver"
+    },
+    {
+      "from": "C10",
+      "to": "C20",
+      "kind": "hard",
+      "reason": "assertion obligations produce receipts"
+    },
+    {
+      "from": "F00",
+      "to": "C20",
+      "kind": "hard",
+      "reason": "receipts use evidence schema"
+    },
+    {
+      "from": "C20",
+      "to": "C30",
+      "kind": "hard",
+      "reason": "VC site origins stabilize receipt/explain/SMT handoff"
+    },
+    {
+      "from": "A10",
+      "to": "C10",
+      "kind": "hard",
+      "reason": "symbolic assertions can discharge by assumption"
+    },
+    {
+      "from": "A10",
+      "to": "MC00",
+      "kind": "hard",
+      "reason": "method predicate comparison requires exact symbolic matching absent implication"
+    },
+    {
+      "from": "F03",
+      "to": "MC00",
+      "kind": "hard",
+      "reason": "method predicates must be represented"
+    },
+    {
+      "from": "MC00",
+      "to": "MC10",
+      "kind": "hard",
+      "reason": "routing implements chosen semantics"
+    },
+    {
+      "from": "F04",
+      "to": "MC10",
+      "kind": "hard",
+      "reason": "method predicates route through obligation queue"
+    },
+    {
+      "from": "MC10",
+      "to": "MC20",
+      "kind": "hard",
+      "reason": "routed method obligations produce evidence/diagnostics"
+    },
+    {
+      "from": "F00",
+      "to": "MC20",
+      "kind": "hard",
+      "reason": "method evidence uses schema"
+    },
+    {
+      "from": "UC00",
+      "to": "UC10",
+      "kind": "hard",
+      "reason": "decision precedes projection implementation"
+    },
+    {
+      "from": "UC10",
+      "to": "UC20",
+      "kind": "hard",
+      "reason": "full use across surfaces builds on projection"
+    },
+    {
+      "from": "F04",
+      "to": "UC00",
+      "kind": "hard",
+      "reason": "queue-level unification informs whether full refactor is needed"
+    },
+    {
+      "from": "P00",
+      "to": "P10",
+      "kind": "hard",
+      "reason": "audit determines actual capability state"
+    },
+    {
+      "from": "P10",
+      "to": "P20",
+      "kind": "hard",
+      "reason": "compile-time-only invariants precede FCO integration"
+    },
+    {
+      "from": "F00",
+      "to": "P20",
+      "kind": "hard",
+      "reason": "capability grants record evidence"
+    },
+    {
+      "from": "P20",
+      "to": "P30",
+      "kind": "hard",
+      "reason": "ad hoc checks can retire after FCO integration"
+    },
+    {
+      "from": "P20",
+      "to": "P50",
+      "kind": "hard",
+      "reason": "provider outputs can record provenance"
+    },
+    {
+      "from": "P40",
+      "to": "P50",
+      "kind": "hard",
+      "reason": "body/quote boundary shapes provenance"
+    },
+    {
+      "from": "H00",
+      "to": "H10",
+      "kind": "hard",
+      "reason": "ABI provider rewrite needs layout facts"
+    },
+    {
+      "from": "P20",
+      "to": "H10",
+      "kind": "hard",
+      "reason": "provider rewrite needs capability/evidence integration"
+    },
+    {
+      "from": "P50",
+      "to": "H10",
+      "kind": "hard",
+      "reason": "generated impl provenance needed"
+    },
+    {
+      "from": "R10",
+      "to": "H10",
+      "kind": "hard",
+      "reason": "rewrite should be explainable"
+    },
+    {
+      "from": "B20",
+      "to": "H10",
+      "kind": "hard",
+      "reason": "backend/layout facts flow through obligations"
+    },
+    {
+      "from": "H10",
+      "to": "H20",
+      "kind": "hard",
+      "reason": "event/error can follow ABI/static-layout proof"
+    },
+    {
+      "from": "H10",
+      "to": "H30",
+      "kind": "hard",
+      "reason": "EIP712 should build on layout rewrite"
+    },
+    {
+      "from": "H10",
+      "to": "H40",
+      "kind": "hard",
+      "reason": "core derive integration can reuse provider/evidence path"
+    },
+    {
+      "from": "H10",
+      "to": "H50",
+      "kind": "hard",
+      "reason": "first rewrite demonstrates generated code through normal obligations"
+    },
+    {
+      "from": "H20",
+      "to": "H50",
+      "kind": "hard",
+      "reason": "additional generators use normal path"
+    },
+    {
+      "from": "H30",
+      "to": "H50",
+      "kind": "hard",
+      "reason": "hash generator use normal path"
+    },
+    {
+      "from": "H40",
+      "to": "H50",
+      "kind": "hard",
+      "reason": "core derives use normal path"
+    },
+    {
+      "from": "B00",
+      "to": "B10",
+      "kind": "hard",
+      "reason": "pressure note motivates prototype shape"
+    },
+    {
+      "from": "B10",
+      "to": "B20",
+      "kind": "hard",
+      "reason": "platform traits expose facts to obligations"
+    },
+    {
+      "from": "F02",
+      "to": "B20",
+      "kind": "hard",
+      "reason": "backend facts often use symbolic assoc consts"
+    },
+    {
+      "from": "F06",
+      "to": "B20",
+      "kind": "hard",
+      "reason": "call-site discharge proves backend facts"
+    },
+    {
+      "from": "B20",
+      "to": "B40",
+      "kind": "hard",
+      "reason": "fixtures demonstrate backend fact obligations"
+    },
+    {
+      "from": "B20",
+      "to": "B50",
+      "kind": "hard",
+      "reason": "lowering should be gated by discharged facts"
+    },
+    {
+      "from": "R10",
+      "to": "B50",
+      "kind": "hard",
+      "reason": "evidence/receipt can justify lowering gate"
+    },
+    {
+      "from": "B10",
+      "to": "B30",
+      "kind": "hard",
+      "reason": "intrinsic capabilities build on platform trait model"
+    },
+    {
+      "from": "P20",
+      "to": "B30",
+      "kind": "hard",
+      "reason": "intrinsics may be compile-time capability provisions"
+    },
+    {
+      "from": "RT00",
+      "to": "RT10",
+      "kind": "hard",
+      "reason": "risk ledger motivates reachability tests"
+    },
+    {
+      "from": "RT10",
+      "to": "RT20",
+      "kind": "hard",
+      "reason": "interim policy only if reachable before resource model"
+    },
+    {
+      "from": "B50",
+      "to": "RT30",
+      "kind": "hard",
+      "reason": "backend-gated lowering feeds Sonatina VSDG design"
+    },
+    {
+      "from": "PV00",
+      "to": "RT30",
+      "kind": "hard",
+      "reason": "resource model needs provision/obligation context"
+    },
+    {
+      "from": "RT30",
+      "to": "RT40",
+      "kind": "hard",
+      "reason": "separation logic builds on explicit VSDG dependencies"
+    },
+    {
+      "from": "RT40",
+      "to": "RT50",
+      "kind": "hard",
+      "reason": "resource propositions produce evidence"
+    },
+    {
+      "from": "F00",
+      "to": "RT50",
+      "kind": "hard",
+      "reason": "resource evidence uses premises schema"
+    },
+    {
+      "from": "S20",
+      "to": "RT50",
+      "kind": "hard",
+      "reason": "resource evidence participates in premise closure"
+    },
+    {
+      "from": "RT50",
+      "to": "RT60",
+      "kind": "hard",
+      "reason": "joins rely on resource proof/materialization"
+    },
+    {
+      "from": "RT60",
+      "to": "RT70",
+      "kind": "hard",
+      "reason": "old runtime class merge can be superseded"
+    },
+    {
+      "from": "RT20",
+      "to": "RT70",
+      "kind": "hard",
+      "reason": "interim policy is retired/superseded"
+    },
+    {
+      "from": "S00",
+      "to": "S10",
+      "kind": "hard",
+      "reason": "classify VCs before solver backend"
+    },
+    {
+      "from": "F00",
+      "to": "S10",
+      "kind": "hard",
+      "reason": "SMT route emits evidence"
+    },
+    {
+      "from": "S10",
+      "to": "S20",
+      "kind": "hard",
+      "reason": "solver results require premise closure"
+    },
+    {
+      "from": "S20",
+      "to": "S30",
+      "kind": "hard",
+      "reason": "certificates serialize closure"
+    },
+    {
+      "from": "S30",
+      "to": "S40",
+      "kind": "hard",
+      "reason": "law/proof transport builds on serialization"
+    },
+    {
+      "from": "S20",
+      "to": "S60",
+      "kind": "hard",
+      "reason": "check elision uses premise closure"
+    },
+    {
+      "from": "RT50",
+      "to": "S60",
+      "kind": "hard",
+      "reason": "runtime/resource proof needed for safe elision"
+    },
+    {
+      "from": "S50",
+      "to": "S60",
+      "kind": "hard",
+      "reason": "policy precedes actual check elision"
+    },
+    {
+      "from": "C10",
+      "to": "S00",
+      "kind": "hard",
+      "reason": "body VC/assertion sites produce SMT candidates"
+    },
+    {
+      "from": "PV00",
+      "to": "PV10",
+      "kind": "hard",
+      "reason": "scope env provides trait/env assumptions"
+    },
+    {
+      "from": "PV00",
+      "to": "PV20",
+      "kind": "hard",
+      "reason": "scope env provides effects/capabilities"
+    },
+    {
+      "from": "PV00",
+      "to": "PV30",
+      "kind": "hard",
+      "reason": "scope env provides generated impl overlays"
+    },
+    {
+      "from": "PV00",
+      "to": "PV40",
+      "kind": "hard",
+      "reason": "scope env provides provider capabilities"
+    },
+    {
+      "from": "PV00",
+      "to": "PV50",
+      "kind": "hard",
+      "reason": "scope env provides const assumptions"
+    },
+    {
+      "from": "A10",
+      "to": "PV50",
+      "kind": "hard",
+      "reason": "exact assumption matching becomes provision source"
+    },
+    {
+      "from": "I10",
+      "to": "PV10",
+      "kind": "hard",
+      "reason": "trait residuals/provisions align with env"
+    },
+    {
+      "from": "P20",
+      "to": "PV40",
+      "kind": "hard",
+      "reason": "provider capability grants integrate as provisions"
+    },
+    {
+      "from": "P50",
+      "to": "PV30",
+      "kind": "hard",
+      "reason": "generated impls become evidence-backed provisions"
+    },
+    {
+      "from": "R20",
+      "to": "PV60",
+      "kind": "hard",
+      "reason": "explain chain consumes provisions"
+    },
+    {
+      "from": "PV00",
+      "to": "PV60",
+      "kind": "hard",
+      "reason": "uniform provision env enables stable explain"
+    },
+    {
+      "from": "U00",
+      "to": "G00",
+      "kind": "soft",
+      "reason": "repo status must be audited for each node"
+    },
+    {
+      "from": "U10",
+      "to": "D00",
+      "kind": "soft",
+      "reason": "diagnostic taxonomy must resolve code/doc mismatch"
+    },
+    {
+      "from": "U20",
+      "to": "P00",
+      "kind": "soft",
+      "reason": "provider capabilities need audit before planning additions"
+    },
+    {
+      "from": "U30",
+      "to": "UC00",
+      "kind": "soft",
+      "reason": "constraint refactor is an uncertain design/necessity point"
+    },
+    {
+      "from": "U40",
+      "to": "AC30",
+      "kind": "soft",
+      "reason": "projection support depth policy is unsettled"
+    },
+    {
+      "from": "U50",
+      "to": "AC00",
+      "kind": "soft",
+      "reason": "HKT/assoc-const boundaries affect ICE path and repros"
+    },
+    {
+      "from": "U50",
+      "to": "B10",
+      "kind": "soft",
+      "reason": "HKT expressibility affects platform prototype"
+    },
+    {
+      "from": "U60",
+      "to": "RT30",
+      "kind": "soft",
+      "reason": "Sonatina v2 sequencing affects resource-model work"
+    },
+    {
+      "from": "U70",
+      "to": "S10",
+      "kind": "soft",
+      "reason": "solver trust model affects SMT backend"
+    },
+    {
+      "from": "U80",
+      "to": "MC00",
+      "kind": "soft",
+      "reason": "method exactness/variance needs human policy"
+    },
+    {
+      "from": "U90",
+      "to": "RT10",
+      "kind": "soft",
+      "reason": "runtime-class reachability controls whether interim fixes matter"
+    },
+    {
+      "from": "U100",
+      "to": "AC20",
+      "kind": "soft",
+      "reason": "evidence stability controls term identity migration"
+    },
+    {
+      "from": "U100",
+      "to": "S30",
+      "kind": "soft",
+      "reason": "evidence stability controls certificates"
+    }
+  ],
+  "topological_layers_hard_edges": [
+    [
+      "AC00",
+      "AC30",
+      "B00",
+      "C00",
+      "D00",
+      "F00",
+      "F01",
+      "F04",
+      "F05",
+      "G00",
+      "H00",
+      "P00",
+      "P40",
+      "PV00",
+      "RT00",
+      "S50",
+      "T00",
+      "U00",
+      "U10",
+      "U100",
+      "U20",
+      "U30",
+      "U40",
+      "U50",
+      "U60",
+      "U70",
+      "U80",
+      "U90",
+      "W10"
+    ],
+    [
+      "B10",
+      "D10",
+      "D40",
+      "F02",
+      "G10",
+      "G30",
+      "P10",
+      "PV20",
+      "R00",
+      "RT10",
+      "T10",
+      "T20",
+      "T30",
+      "T40",
+      "T50",
+      "UC00"
+    ],
+    [
+      "D20",
+      "D30",
+      "D50",
+      "F03",
+      "G20",
+      "P20",
+      "R10",
+      "RT20",
+      "UC10"
+    ],
+    [
+      "A00",
+      "B30",
+      "F06",
+      "I00",
+      "P30",
+      "P50",
+      "PV40",
+      "UC20",
+      "W00"
+    ],
+    [
+      "A10",
+      "B20",
+      "F07",
+      "PV30",
+      "W11"
+    ],
+    [
+      "A11",
+      "A12",
+      "AC10",
+      "B40",
+      "B50",
+      "C10",
+      "H10",
+      "I10",
+      "MC00",
+      "PV50",
+      "W12",
+      "W13",
+      "W14",
+      "W15"
+    ],
+    [
+      "AC20",
+      "AC40",
+      "AC50",
+      "C20",
+      "H20",
+      "H30",
+      "H40",
+      "I20",
+      "MC10",
+      "PV10",
+      "R20",
+      "RT30",
+      "S00"
+    ],
+    [
+      "C30",
+      "E00",
+      "H50",
+      "I30",
+      "I40",
+      "MC20",
+      "PV60",
+      "RT40",
+      "S10"
+    ],
+    [
+      "E10",
+      "S20"
+    ],
+    [
+      "RT50",
+      "S30"
+    ],
+    [
+      "RT60",
+      "S40",
+      "S60"
+    ],
+    [
+      "RT70"
+    ]
+  ],
+  "topological_order_hard_edges": [
+    "AC00",
+    "AC30",
+    "B00",
+    "C00",
+    "D00",
+    "F00",
+    "F01",
+    "F04",
+    "F05",
+    "G00",
+    "H00",
+    "P00",
+    "P40",
+    "PV00",
+    "RT00",
+    "S50",
+    "T00",
+    "U00",
+    "U10",
+    "U100",
+    "U20",
+    "U30",
+    "U40",
+    "U50",
+    "U60",
+    "U70",
+    "U80",
+    "U90",
+    "W10",
+    "B10",
+    "D10",
+    "D40",
+    "F02",
+    "G10",
+    "G30",
+    "P10",
+    "PV20",
+    "R00",
+    "RT10",
+    "T10",
+    "T20",
+    "T30",
+    "T40",
+    "T50",
+    "UC00",
+    "D20",
+    "D30",
+    "D50",
+    "F03",
+    "G20",
+    "P20",
+    "R10",
+    "RT20",
+    "UC10",
+    "A00",
+    "B30",
+    "F06",
+    "I00",
+    "P30",
+    "P50",
+    "PV40",
+    "UC20",
+    "W00",
+    "A10",
+    "B20",
+    "F07",
+    "PV30",
+    "W11",
+    "A11",
+    "A12",
+    "AC10",
+    "B40",
+    "B50",
+    "C10",
+    "H10",
+    "I10",
+    "MC00",
+    "PV50",
+    "W12",
+    "W13",
+    "W14",
+    "W15",
+    "AC20",
+    "AC40",
+    "AC50",
+    "C20",
+    "H20",
+    "H30",
+    "H40",
+    "I20",
+    "MC10",
+    "PV10",
+    "R20",
+    "RT30",
+    "S00",
+    "C30",
+    "E00",
+    "H50",
+    "I30",
+    "I40",
+    "MC20",
+    "PV60",
+    "RT40",
+    "S10",
+    "E10",
+    "S20",
+    "RT50",
+    "S30",
+    "RT60",
+    "S40",
+    "S60",
+    "RT70"
+  ]
+}
