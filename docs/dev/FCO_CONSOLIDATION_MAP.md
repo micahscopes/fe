@@ -489,3 +489,84 @@ The evidence key + `route` + origin + `premises` slot must stay non-breaking
 through AC1's `TERM_LANG_VERSION` change and the later `fe explain` / certificate
 consumers. The `premises` slot is reserved (empty at M5) precisely so the SMT /
 Sonatina futures remain reachable without a format migration.
+
+---
+
+# Dependency graph (the order is a DAG, not a line)
+
+The milestone ladder above is a reasonable default *reading* order, but it
+over-serializes the work. The real constraints form a DAG; within a layer,
+items are independent and may be done in any order or in parallel.
+
+```mermaid
+graph TD
+    FOUND["foundation: obligation queue + evidence record (DONE)"]
+    A["A · call-site discharge (DONE)"]
+    B["B · ADT/sig/WF discharge (DONE)"]
+    C["C · assumption route / term identity (DONE)"]
+    D["D · impl predicates gate-not-select"]
+    E["E · named expressibility diagnostics"]
+    F["F · receipts render in hover"]
+    X["X · diagnostic-code reconciliation"]
+    AC1["AC1 · canonical assoc-const identity (TERM_LANG_VERSION bump)"]
+    CA["const_assert / body receipts"]
+    MC["method-conformance routing"]
+    EX["fe explain / --chain"]
+    HKT["HKT assoc-const ICE fix"]
+    TP["typed provider capabilities (NEEDS_DESIGN)"]
+    ABI["ABI/static-layout provider rewrite"]
+    PV["generated-impl provenance evidence"]
+    PS["provision scoping"]
+    SMT["SMT discharge backend"]
+    SV["Sonatina v2 (VSDG + separation logic)"]
+    PT["proof transport / certificates"]
+
+    FOUND --> A & B & C & D & F
+    A -. evidence .-> F
+    C --> AC1
+    AC1 -. re-keys terms .-> C
+    F --> EX
+    C --> EX
+    A --> CA
+    FOUND --> MC
+    HKT --> AC1
+    TP --> ABI --> PV
+    A -. premises slot reserved .-> SMT
+    PS --> SMT
+    AC1 --> PT
+    SMT --> PT
+```
+
+## What the edges mean (and what they free)
+
+- **M5 remainder `{D, E, F, X}` are mutually independent.** They sit directly on
+  the done foundation; none blocks another. Do them in any order / in parallel.
+  F (hover receipts) is cheapest and READY_NOW; E and X are diagnostic/doc-local;
+  D is the only one needing a probe (are const predicates allowed on impls
+  syntactically?). Do **not** force a 1→2→3 sequence here.
+- **Real hard edges only:** `A → F` (hover renders evidence records — note WF
+  positions don't record evidence yet, a sub-dependency for *full* F);
+  `C ↔ AC1` (the assumption matcher uses term identity, so AC1's canonical
+  projection both builds on C and re-keys C's evidence — **co-design them**, do
+  not strictly sequence AC1 after C); `F → EX`; `TP → ABI → PV`; the reserved
+  `premises` slot → `SMT`; `SV` supersedes `merge_runtime_class`.
+- **Parallel tracks:** the M5-finish set, the AC1/term-identity track, and the
+  M7 provider-design track do not block each other until they converge at
+  `EX` / `PT`.
+
+## Live status (proven, not inherited)
+
+| Node | Status | Evidence |
+|---|---|---|
+| A call-site | COMPLETE_AND_TESTED | `d3df3cca1`, fe-hir tests |
+| B ADT/sig/WF | COMPLETE_AND_TESTED | `70b0bbfdb`, 7 paired fixtures + uitest snapshot |
+| C assumption route | COMPLETE_AND_TESTED | `6e6a5a9b0`, route=Assumption asserted; mismatch/none fail |
+| D impl gate-not-select | ABSENT (probe needed: impl const-pred syntax) | — |
+| E named diagnostics | PARTIAL (chained/unconstrained → 2-0002; 8-0086 reserved) | — |
+| F receipts in hover | ABSENT (evidence exists; hover doesn't read it) | hover.rs reads only trait evidence |
+| X diag-code reconcile | PARTIAL (live: 8-0085/3-0025/2-0002; exit-doc says 8-0082/83/84) | — |
+
+Caveat carried from B/C: WF-position discharges **reject correctly but do not
+record `DischargedConstPredicate` evidence** (only call-site + assumption routes
+do). Bodyless declarations (trait method sigs, externs) are not yet covered.
+Both are tracked follow-ups, not blockers.
