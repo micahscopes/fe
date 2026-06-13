@@ -72,7 +72,7 @@ use super::{
         BorrowKind, CapabilityKind, InvalidCause, Kind, MAX_INLINE_STRING_BYTES, StringFallback,
         TyId, TyVarSort,
     },
-    ty_lower::{lower_hir_ty, resolve_callable_input_effect_key},
+    ty_lower::{collect_generic_params, lower_hir_ty, resolve_callable_input_effect_key},
     unify::{InferenceKey, Snapshot, UnificationError, UnificationTable},
 };
 use crate::analysis::semantic::SemanticCodeRegionRef;
@@ -256,6 +256,105 @@ fn eval_static_assert_comparison_operand<'db>(
         return None;
     }
     eval_body_owner_const(db, owner, Vec::new()).ok()
+}
+
+/// Declaration-site checks for the bare const-expression predicates of an
+/// item's `where` clause.
+///
+/// Every predicate body is type-checked as a `bool`-expected anonymous const
+/// body, and the underlying body diagnostics are reported at the declaration.
+/// Predicates whose value CTFE can already decide here — they do not depend
+/// on any generic parameter — are additionally *evaluated*, so `where false`
+/// errors at the declaration instead of at every use site. Predicates over
+/// generic parameters are left to obligation-level discharge at their use
+/// sites.
+pub fn check_where_const_predicates<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: WhereClauseOwner<'db>,
+) -> Vec<FuncBodyDiag<'db>> {
+    let mut diags = Vec::new();
+    let expected = TyId::bool(db);
+    let params_in_scope = where_clause_owner_has_params_in_scope(db, owner);
+
+    for &body in owner.where_clause(db).const_predicates(db) {
+        let body_diags = &check_anon_const_body(db, body, expected).0;
+        if !body_diags.is_empty() && !const_predicate_ignorable_type_diags(body_diags) {
+            diags.extend(body_diags.iter().cloned());
+            continue;
+        }
+        // Ignorable diagnostics (unresolved integral inference vars, e.g.
+        // literal-only predicates) still evaluate, exactly like
+        // `check_static_assert` above.
+
+        // With generic parameters in scope the predicate's value depends on
+        // the instantiation; discharge happens at the use site. (CTFE of a
+        // body that references an unbound parameter is not attempted.)
+        if params_in_scope {
+            continue;
+        }
+
+        let body_owner = BodyOwner::AnonConstBody { body, expected };
+        match eval_body_owner_const(db, body_owner, Vec::new()) {
+            Ok(value) => match static_assert_bool_value(db, value) {
+                Some(true) => {}
+                Some(false) => diags.push(
+                    BodyDiag::WhereConstPredicateFailed {
+                        primary: body.span().into(),
+                    }
+                    .into(),
+                ),
+                // The body type-checked as `bool`, so a non-bool result can
+                // only be a not-yet-resolvable value.
+                None => {}
+            },
+            Err(err) => match err {
+                crate::analysis::semantic::CtfeError::NotConstEvaluable { .. } => {
+                    diags.push(BodyDiag::ConstValueMustBeKnown(body.span().into()).into())
+                }
+                err => {
+                    let ty = TyId::invalid(db, invalid_cause_from_ctfe_error(db, body_owner, err));
+                    if let Some(diag) = ty.emit_diag(db, body.span().into()) {
+                        diags.push(diag.into());
+                    }
+                }
+            },
+        }
+    }
+
+    diags
+}
+
+/// Whether any generic parameter (including a trait's implicit `Self` and a
+/// member function's inherited parameters) is in scope of `owner`'s `where`
+/// clause. Used as a conservative gate for declaration-site predicate
+/// evaluation: with no parameters in scope, every CTFE failure is a genuine
+/// fault rather than a not-yet-instantiated parameter.
+fn where_clause_owner_has_params_in_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: WhereClauseOwner<'db>,
+) -> bool {
+    let mut item = Some(ItemKind::from(owner));
+    while let Some(cur) = item {
+        if let Some(param_owner) = GenericParamOwner::from_item_opt(cur)
+            && !collect_generic_params(db, param_owner).params(db).is_empty()
+        {
+            return true;
+        }
+        item = cur.scope().parent_item(db);
+    }
+    false
+}
+
+/// Type diagnostics that do not indicate a malformed predicate at the
+/// declaration: unresolved inference variables can be an artifact of
+/// checking a generic predicate without its instantiation.
+fn const_predicate_ignorable_type_diags(diags: &[FuncBodyDiag<'_>]) -> bool {
+    diags.iter().all(|diag| {
+        matches!(
+            diag,
+            FuncBodyDiag::Body(BodyDiag::TypeAnnotationNeeded { .. })
+        )
+    })
 }
 
 pub(super) fn check_body<'db>(

@@ -414,6 +414,12 @@ pub enum BodyDiag<'db> {
         primary: DynLazySpan<'db>,
         comparison: Option<StaticAssertComparisonValues>,
     },
+    /// A `where` clause const predicate is statically known to be `false`.
+    /// At the declaration site this fires for parameter-free predicates
+    /// (e.g. `where false`), which CTFE can already decide.
+    WhereConstPredicateFailed {
+        primary: DynLazySpan<'db>,
+    },
 
     InvalidCast {
         primary: DynLazySpan<'db>,
@@ -805,6 +811,7 @@ impl<'db> BodyDiag<'db> {
             Self::InvalidCast { .. } => 55,
             Self::ConstValueMustBeKnown(..) => 64,
             Self::StaticAssertFailed { .. } => 81,
+            Self::WhereConstPredicateFailed { .. } => 85,
             Self::AccessedFieldNotFound { .. } => 15,
             Self::OpsTraitNotImplemented { .. } => 16,
             Self::UnsupportedUnaryPlus(..) => 52,

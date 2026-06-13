@@ -111,13 +111,24 @@ impl<'db> TyCheckEnv<'db> {
                 Some(ItemKind::Trait(trait_)) => {
                     let self_pred =
                         TraitInstId::new(db, trait_, trait_.params(db).to_vec(), IndexMap::new());
-                    PredicateListId::new(db, vec![self_pred])
+                    let mut preds = collect_constraints(db, trait_.into())
+                        .instantiate_identity()
+                        .list(db)
+                        .to_vec();
+                    preds.push(self_pred);
+                    PredicateListId::new(db, preds)
                 }
                 Some(ItemKind::ImplTrait(impl_trait)) => {
                     collect_constraints(db, impl_trait.into()).instantiate_identity()
                 }
                 Some(ItemKind::Impl(impl_)) => {
                     collect_constraints(db, impl_.into()).instantiate_identity()
+                }
+                Some(ItemKind::Struct(struct_)) => {
+                    collect_constraints(db, struct_.into()).instantiate_identity()
+                }
+                Some(ItemKind::Enum(enum_)) => {
+                    collect_constraints(db, enum_.into()).instantiate_identity()
                 }
                 _ => PredicateListId::empty_list(db),
             }

@@ -169,7 +169,7 @@ fn requirement_where_clause<'db>(
         }
     }
 
-    WhereClauseId::new(db, preds)
+    WhereClauseId::new(db, preds, vec![])
 }
 
 /// The identifier of `ty` when it is a bare single-segment path type.

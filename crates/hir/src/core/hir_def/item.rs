@@ -389,7 +389,7 @@ impl<'db> WhereClauseOwner<'db> {
         ItemKind::from(self).top_mod(db)
     }
 
-    pub(crate) fn where_clause(self, db: &'db dyn HirDb) -> WhereClauseId<'db> {
+    pub fn where_clause(self, db: &'db dyn HirDb) -> WhereClauseId<'db> {
         match self {
             Self::Func(func) => func.where_clause(db),
             Self::Struct(struct_) => struct_.where_clause(db),
@@ -1881,6 +1881,10 @@ pub enum TrackedItemVariant<'db> {
     Expansion,
     FuncBody,
     NamelessBody,
+    /// Anonymous `bool`-expected const body of a bare const-expression
+    /// predicate in a `where` clause, indexed by its position among the
+    /// clause's const predicates.
+    WhereConstPredicate(u32),
     StaticAssertCondition,
     StaticAssertComparisonLhs,
     StaticAssertComparisonRhs,
