@@ -184,6 +184,22 @@ flowchart TD
     K08["K08 Kinded evidence/provision integration<br/><small>integration</small>"]
   end
 
+  subgraph Bridge_placeholder_audit["Bridge placeholder audit (status orthogonal to implementation)"]
+    BR0["BR0 Derive marker bridge<br/><small>GRADUATION_TARGET</small>"]
+    BR1["BR1 Evidence/ImplBuilder special-casing<br/><small>BRIDGE_INTENTIONAL</small>"]
+    BR2["BR2 provider capability authority string-keyed + exempt<br/><small>BRIDGE_AT_RISK</small>"]
+    BR3["BR3 generated-item validation gap<br/><small>BRIDGE_AT_RISK</small>"]
+    BR4["BR4 reflection handle-based (method-name strings)<br/><small>BRIDGE_INTENTIONAL</small>"]
+    BR5["BR5 quote hygiene / fragment limits<br/><small>DIAGNOSTIC_GUARD</small>"]
+    BR6["BR6 hardcoded Rust ABI/event/error lowering<br/><small>BRIDGE_INTENTIONAL</small>"]
+    BR7["BR7 Kind::Any planned-form trap<br/><small>BRIDGE_AT_RISK</small>"]
+    BR8["BR8 diagnostic taxonomy drift<br/><small>DIAGNOSTIC_GUARD</small>"]
+    BR9["BR9 receipt rendering vs evidence schema<br/><small>FINAL</small>"]
+    BR10["BR10 premise model (CTFE empty / Assumption populated)<br/><small>FINAL</small>"]
+    BR11["BR11 merge_runtime_class pragmatic patch<br/><small>BRIDGE_INTENTIONAL</small>"]
+    BR12["BR12 NEEDS_DESIGN labels as permanent deferral<br/><small>UNKNOWN_NEEDS_AUDIT</small>"]
+  end
+
   T00 --> T10
   T00 --> T20
   T00 --> T30
@@ -373,6 +389,42 @@ flowchart TD
   H10 -. "pressure-tests" .-> K07
   S30 -. "reuses" .-> K08
   K03 -. "eases" .-> S40
+
+  %% Bridge placeholder audit edges
+  BR0 --> K04
+  BR0 --> K03
+  BR1 --> K04
+  BR2 --> K07
+  BR2 --> P10
+  BR2 --> P20
+  BR2 --> P30
+  BR3 --> K07
+  BR3 --> H50
+  BR3 --> P50
+  BR6 --> H10
+  BR6 --> H20
+  BR7 --> K01
+  BR7 --> K02
+  BR8 --> D00
+  BR10 --> A11
+  BR11 --> RT00
+  BR0 -. "graduates" .-> K02
+  BR1 -. "graduates" .-> K06
+  BR1 -. "graduates" .-> P20
+  BR4 -. "graduates" .-> K07
+  BR4 -. "graduates" .-> P40
+  BR5 -. "graduates" .-> D30
+  BR5 -. "graduates" .-> D00
+  BR6 -. "graduates" .-> H30
+  BR7 -. "graduates" .-> D00
+  BR8 -. "graduates" .-> U10
+  BR9 -. "graduates" .-> F00
+  BR9 -. "graduates" .-> R10
+  BR10 -. "graduates" .-> S20
+  BR11 -. "graduates" .-> RT10
+  BR11 -. "graduates" .-> RT70
+  BR12 -. "graduates" .-> K07
+  BR12 -. "graduates" .-> G00
 
   classDef uncertain stroke-dasharray: 5 5;
   class AC00 uncertain;

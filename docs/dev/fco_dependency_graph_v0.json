@@ -1260,6 +1260,249 @@
       "notes": [
         "architect id: K8"
       ]
+    },
+    {
+      "id": "BR0",
+      "title": "Derive compiler-known marker bridge",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Derive/Reflect/ImplBuilder/Evidence recognized by head-identifier string, not declared types; Eq<T> in Evidence<Eq<T>> is a nominal token, not a kinded application.",
+      "uncertain": false,
+      "acceptance": [
+        "Derive/Evidence re-expressed as ordinary kinded constructs once Constraint kind exists"
+      ],
+      "notes": [
+        "headline graduation target = K04"
+      ],
+      "bridge_status": "GRADUATION_TARGET",
+      "current_mechanism": "provider.rs:30-35,93-97,122-123,170-172; opaque binding provider_executor.rs:326-327,385; not a PrimTy/ingot decl",
+      "final_target": "K02->K03->K04: Constraint kind, traits as *->Constraint, Derive as kinded construct",
+      "risk_if_fossilized": "derive stays a bespoke lowering path; Derive/Evidence semantics pinned by executor behavior not a kind law",
+      "nearest_guard_fixture": "fe_test/quote_provider.fe; hir/tests/ty_check.rs:242 (behavioral only)"
+    },
+    {
+      "id": "BR1",
+      "title": "Evidence/ImplBuilder special-casing",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Capabilities are nominal Value markers carrying no data; Evidence is an opaque token, not a structured object.",
+      "uncertain": false,
+      "acceptance": [
+        "Evidence becomes a real evidence-bearing codomain (*->A<B>)"
+      ],
+      "notes": [
+        "graduates with BR0/K04"
+      ],
+      "bridge_status": "BRIDGE_INTENTIONAL",
+      "current_mechanism": "provider_executor.rs:299-330 (Value enum Builder/Reflect/Evidence carry no data), seeded by name :383-392",
+      "final_target": "K06 (evidence-bearing codomains), P20 (capabilities as FCO provisions/evidence)",
+      "risk_if_fossilized": "Evidence semantics defined by interpreter, not by the evidence schema/kind system",
+      "nearest_guard_fixture": "fe_test/derived_eq_default.fe; derived_eip712.fe"
+    },
+    {
+      "id": "BR2",
+      "title": "Provider capability authority is string-keyed + exempt from checking",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Capability authority keyed by REFLECT_KEY/IMPL_BUILDER_KEY; provider fn bodies exempt from normal type-check and borrowck via is_derive_provider_fn; grants produce no evidence/provenance.",
+      "uncertain": false,
+      "acceptance": [
+        "uses-signatures typed as compile-time-only capability obligations with evidence; string keys retired"
+      ],
+      "notes": [
+        "core K07 drift; NEEDS_DESIGN per consolidation map item 6"
+      ],
+      "bridge_status": "BRIDGE_AT_RISK",
+      "current_mechanism": "provider.rs:30-31,176-190; exemption analysis/ty/mod.rs:386-389,721 and semantic/borrowck/check.rs:185",
+      "final_target": "P10/P20/P30 then K07",
+      "risk_if_fossilized": "authority = whatever the executor accepts; permanent type/borrowck hole for provider bodies; no evidence trail for grants",
+      "nearest_guard_fixture": "fe_test/zero_sized_capability_provider.fe (behavioral; no authority/escape guard)"
+    },
+    {
+      "id": "BR3",
+      "title": "Generated-item validation gap",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Generated impls re-enter the normal pipeline (good); require<> becomes real where-preds; but provider bodies never re-enter checking and generation records no obligation/provenance evidence.",
+      "uncertain": false,
+      "acceptance": [
+        "generated impl with unmet generated obligation fails through normal diagnostics with a guard fixture; generation records provenance evidence"
+      ],
+      "notes": [
+        "impl-output path near-final; body exemption + provenance are the gap"
+      ],
+      "bridge_status": "BRIDGE_AT_RISK",
+      "current_mechanism": "lower/derive.rs:1-11; provider_synthesis.rs:40-63,135-172; expansion.rs:19; re-entry confirmed hir/tests/ty_check.rs:242-289; body exemption per BR2",
+      "final_target": "H50 (generated code through normal HIR obligations), P50 (provenance evidence)",
+      "risk_if_fossilized": "bad provider bodies caught only by ad-hoc executor checks; no evidence record for generation",
+      "nearest_guard_fixture": "NONE (no generated-impl-fails-through-normal-trait-diagnostics fixture)"
+    },
+    {
+      "id": "BR4",
+      "title": "Reflection binding (handle-based, method-name string-matched)",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Receivers/fields bind via typed handles (Value::Field FieldKey, Value::Reflect/Variant), NOT ident string; only the method-call vocabulary is string-matched. Reclassifies the architect's 'ident-string' framing.",
+      "uncertain": false,
+      "acceptance": [
+        "folds into typed-capability work; no separate soundness graduation needed"
+      ],
+      "notes": [
+        "reclassified: already handle-based, not ident-string"
+      ],
+      "bridge_status": "BRIDGE_INTENTIONAL",
+      "current_mechanism": "provider_executor.rs:11-14,307,1481-1524,2127-2129 (value-dispatch); FieldKey handle :307,1494-1512",
+      "final_target": "P40/K07 (typed capability boundary)",
+      "risk_if_fossilized": "low: small budget-guarded method vocabulary; not a soundness bridge",
+      "nearest_guard_fixture": "fe_test/quote_provider.fe; derived_eq_default_enum.fe"
+    },
+    {
+      "id": "BR5",
+      "title": "Quote hygiene / fragment limits",
+      "group": "Bridge placeholder audit",
+      "kind": "diagnostic_guard",
+      "description": "quote fragment deliberately restricted; unsupported forms rejected by named diagnostics (13-0010 ProviderFailed, 8-0084 QuoteOutsideProvider); open-name hygiene enforced.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "well-guarded"
+      ],
+      "bridge_status": "DIAGNOSTIC_GUARD",
+      "current_mechanism": "provider_executor.rs:778-786,1088,1142,1156,889-934,1117; code ty/diagnostics.rs:863 (8-0084)",
+      "final_target": "none for soundness; fragment richness is std/feature scope",
+      "risk_if_fossilized": "low",
+      "nearest_guard_fixture": "cli_output/single_files/quote_open_name_mismatch.snap (+4 quote_* snaps); uitest quote_outside_provider.snap"
+    },
+    {
+      "id": "BR6",
+      "title": "Hardcoded Rust ABI/event/error lowering (EIP-712 already Fe)",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "event/error/msg lowering hardcoded in Rust synthesizing HEAD_SIZE/IS_DYNAMIC HIR, bypassing provider/DeferredTask, no evidence; EIP-712 is already a Fe provider.",
+      "uncertain": false,
+      "acceptance": [
+        "ABI/static-layout rewritten as Fe provider; event/error/msg follow; layout consts verified by const predicates"
+      ],
+      "notes": [
+        "H10/H20 target; std-lib-adjacent but architecturally real"
+      ],
+      "bridge_status": "BRIDGE_INTENTIONAL",
+      "current_mechanism": "lower/error.rs:365,393; msg.rs:132,443,524; event.rs:44,400; contrast ingots/std/src/eip712.fe:248",
+      "final_target": "H10 (ABI/static-layout provider rewrite) -> H20 (event/error/msg) -> H50",
+      "risk_if_fossilized": "two parallel provision paths persist; layout facts stay unverified",
+      "nearest_guard_fixture": "where_const_predicate_abi_static_layout.fe (guards target, not current Rust path)"
+    },
+    {
+      "id": "BR7",
+      "title": "Kind::Any planned-form trap (no surface, no guard)",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Kind=Star|Abs|Any; does_match makes Any match bidirectionally. Planned forms A<B>->*, *->A<B>, *->Constraint are NOT parseable (KindBound=Mono|Abs) and have NO named not-yet-supported diagnostic.",
+      "uncertain": false,
+      "acceptance": [
+        "A<B>->*, *->A<B>, *->Constraint each emit a named diagnostic; no silent Kind::Any acceptance; fixtures pin each rejection"
+      ],
+      "notes": [
+        "latent: no surface today; Kind::Any is a fossilization trap the moment surface is added"
+      ],
+      "bridge_status": "BRIDGE_AT_RISK",
+      "current_mechanism": "ty_def.rs:1277-1304 (Kind, does_match Any-arms); hir_def/params.rs:307-313 (KindBound); ty_lower.rs:1629-1645 (Any only from absent sub-kinds)",
+      "final_target": "K01 (named planned-not-yet-supported diagnostics) + K02 (Constraint kind)",
+      "risk_if_fossilized": "Kind::Any silently swallows planned forms once surface syntax is added; K01 acceptance permanently unmet",
+      "nearest_guard_fixture": "NONE"
+    },
+    {
+      "id": "BR8",
+      "title": "Diagnostic taxonomy drift (code-as-SSOT, doc lags)",
+      "group": "Bridge placeholder audit",
+      "kind": "diagnostic_guard",
+      "description": "Codes defined per-enum local_code()+DiagnosticPass::code(); no central registry; validated only by snapshots+doc. Doc lags: method-conformance (6-0016) landed; 8-0084 live; 8-0086 doc-reserved only.",
+      "uncertain": false,
+      "acceptance": [
+        "taxonomy doc reconciled with live codes; decide whether to implement 8-0086"
+      ],
+      "notes": [
+        "6-0016 and 8-0084 already drifted ahead of the consolidation map"
+      ],
+      "bridge_status": "DIAGNOSTIC_GUARD",
+      "current_mechanism": "common/src/diagnostics.rs:97,208-229; ty/diagnostics.rs:814(8-0085),863(8-0084),207(3-0025),1074(6-0016); method_cmp.rs:1084; no '=> 86' arm",
+      "final_target": "D00 (taxonomy policy), keep code-as-SSOT and reconcile doc",
+      "risk_if_fossilized": "taxonomy lives in snapshots+doc not a registry; continues to drift",
+      "nearest_guard_fixture": "many *.snap pin individual codes; none pins the taxonomy as a whole"
+    },
+    {
+      "id": "BR9",
+      "title": "Receipt rendering cleanly separated from evidence schema",
+      "group": "Bridge placeholder audit",
+      "kind": "invariant",
+      "description": "DischargedConstPredicate/DischargeRoute/CheckPremise schema in ty_check; hover renders via accessor only, holds no schema logic.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "not a bridge; FINAL"
+      ],
+      "bridge_status": "FINAL",
+      "current_mechanism": "schema ty_check/mod.rs:3182-3268; rendering language-server/hover.rs:276-310 (accessor-only)",
+      "final_target": "R10/R20 build on the same accessor",
+      "risk_if_fossilized": "low: separation correct",
+      "nearest_guard_fixture": "hir/tests/ty_check.rs:242 + LSP hover tests"
+    },
+    {
+      "id": "BR10",
+      "title": "Premise model (CTFE empty, Assumption populated, intent documented)",
+      "group": "Bridge placeholder audit",
+      "kind": "invariant",
+      "description": "CTFE route premise-free (correct); Assumption route records CheckPremise::Assumption; intent 'premises = logical dependencies, not evaluation inputs' documented.",
+      "uncertain": false,
+      "acceptance": [
+        "non-term-fragment predicates eventually fail by named D30 limitation instead of silent Discharged"
+      ],
+      "notes": [
+        "landed; soft edge = silent discharge of non-term-fragment predicates"
+      ],
+      "bridge_status": "FINAL",
+      "current_mechanism": "ty_check/mod.rs:3193-3224 (CheckPremise + doc), :1534-1544 (population), :1516-1523 (silent-discharge soft spot)",
+      "final_target": "S20/S30 (premise closure / certificates)",
+      "risk_if_fossilized": "low: schema+intent documented",
+      "nearest_guard_fixture": "m5_const_predicate_discharge.rs (route=Assumption; assumption_route_mismatch_is_rejected)"
+    },
+    {
+      "id": "BR11",
+      "title": "merge_runtime_class as pragmatic lowering patch",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Order-sensitive class merge in MIR below type-checking, outside the obligation path; a lowering patch, not resource semantics.",
+      "uncertain": true,
+      "acceptance": [
+        "reachability repro built or ruled out (RT10); superseded by VSDG/separation logic (RT70)"
+      ],
+      "notes": [
+        "DO_NOT_REWRITE_YET; contain until a concrete repro forces a local fix"
+      ],
+      "bridge_status": "BRIDGE_INTENTIONAL",
+      "current_mechanism": "mir/src/runtime/lower/infer.rs:1132-1211 (preferred_address_space :1176,1204)",
+      "final_target": "RT30 (VSDG) -> RT40 (separation logic) -> RT70 (supersession)",
+      "risk_if_fossilized": "order-dependent merge becomes de-facto resource model via behavior-describing tests",
+      "nearest_guard_fixture": "infer.rs:1501,1541 unit tests (behavior, not bridge bound); RT10 repro open"
+    },
+    {
+      "id": "BR12",
+      "title": "NEEDS_DESIGN labels as permanent deferral",
+      "group": "Bridge placeholder audit",
+      "kind": "process",
+      "description": "Deferred labels (NEEDS_DESIGN/M6_OR_POST/DO_NOT_REWRITE_YET) and uncertain nodes mostly lack the triad: owner-question + smallest-probe + what-bridge-they-protect.",
+      "uncertain": true,
+      "acceptance": [
+        "each deferred node carries owner-question + smallest-probe + protected-bridge before graduation"
+      ],
+      "notes": [
+        "meta-node over the deferred labels"
+      ],
+      "bridge_status": "UNKNOWN_NEEDS_AUDIT",
+      "current_mechanism": "FCO_CONSOLIDATION_MAP.md:67,69,70,72,73,149,162,173,202,205,209,212,215,462; graph uncertain U00-U100",
+      "final_target": "triad attached to each deferred node",
+      "risk_if_fossilized": "NEEDS_DESIGN becomes permanent because no probe is ever scoped",
+      "nearest_guard_fixture": "N/A (process)"
     }
   ],
   "edges": [
@@ -2384,6 +2627,210 @@
       "to": "S40",
       "kind": "soft",
       "reason": "law systems / proof transport become cleaner once traits are propositions"
+    },
+    {
+      "from": "BR0",
+      "to": "K04",
+      "kind": "hard",
+      "reason": "Derive marker is exactly the bridge K04 graduates"
+    },
+    {
+      "from": "BR0",
+      "to": "K03",
+      "kind": "hard",
+      "reason": "Eq<T> can only be a real kinded application once traits are *->Constraint"
+    },
+    {
+      "from": "BR0",
+      "to": "K02",
+      "kind": "soft",
+      "reason": "no Constraint kind is the root cause of the name-marker bridge"
+    },
+    {
+      "from": "BR1",
+      "to": "K04",
+      "kind": "hard",
+      "reason": "Evidence/ImplBuilder special-casing graduates with Derive"
+    },
+    {
+      "from": "BR1",
+      "to": "K06",
+      "kind": "soft",
+      "reason": "Evidence is the evidence-bearing codomain (*->A<B>) target"
+    },
+    {
+      "from": "BR1",
+      "to": "P20",
+      "kind": "soft",
+      "reason": "capabilities should be FCO provisions/evidence not nominal tokens"
+    },
+    {
+      "from": "BR2",
+      "to": "K07",
+      "kind": "hard",
+      "reason": "string-keyed authority is a named K07 bridge-drift item"
+    },
+    {
+      "from": "BR2",
+      "to": "P10",
+      "kind": "hard",
+      "reason": "compile-time-only invariants must replace the is_derive_provider_fn exemption"
+    },
+    {
+      "from": "BR2",
+      "to": "P20",
+      "kind": "hard",
+      "reason": "capability grants must produce evidence/provisions"
+    },
+    {
+      "from": "BR2",
+      "to": "P30",
+      "kind": "hard",
+      "reason": "retire REFLECT_KEY/IMPL_BUILDER_KEY authority"
+    },
+    {
+      "from": "BR3",
+      "to": "K07",
+      "kind": "hard",
+      "reason": "generated items not re-entering validation below type-checking is a named K07 drift item"
+    },
+    {
+      "from": "BR3",
+      "to": "H50",
+      "kind": "hard",
+      "reason": "generated code must go through normal HIR obligations"
+    },
+    {
+      "from": "BR3",
+      "to": "P50",
+      "kind": "hard",
+      "reason": "generation must record provenance/obligation evidence"
+    },
+    {
+      "from": "BR4",
+      "to": "K07",
+      "kind": "soft",
+      "reason": "reflection binding folds into the typed-capability cleanup (already handle-based)"
+    },
+    {
+      "from": "BR4",
+      "to": "P40",
+      "kind": "soft",
+      "reason": "method-name vocabulary clarified by the provider typing boundary"
+    },
+    {
+      "from": "BR5",
+      "to": "D30",
+      "kind": "soft",
+      "reason": "quote fragment limits are named no-ICE limitation diagnostics"
+    },
+    {
+      "from": "BR5",
+      "to": "D00",
+      "kind": "soft",
+      "reason": "quote-failure codes (8-0084/13-0010) belong in the taxonomy"
+    },
+    {
+      "from": "BR6",
+      "to": "H10",
+      "kind": "hard",
+      "reason": "ABI/static-layout is the first hardcoded generator to rewrite as a Fe provider"
+    },
+    {
+      "from": "BR6",
+      "to": "H20",
+      "kind": "hard",
+      "reason": "event/error/msg Rust lowering is the H20 target"
+    },
+    {
+      "from": "BR6",
+      "to": "H30",
+      "kind": "soft",
+      "reason": "EIP-712 is already a Fe provider; remaining hash work is H30"
+    },
+    {
+      "from": "BR7",
+      "to": "K01",
+      "kind": "hard",
+      "reason": "named planned-not-yet-supported diagnostics are exactly the missing guard"
+    },
+    {
+      "from": "BR7",
+      "to": "K02",
+      "kind": "hard",
+      "reason": "Kind::Any trap resolves only once a Constraint kind and richer kind bounds exist"
+    },
+    {
+      "from": "BR7",
+      "to": "D00",
+      "kind": "soft",
+      "reason": "the named rejection reuses the diagnostic taxonomy"
+    },
+    {
+      "from": "BR8",
+      "to": "D00",
+      "kind": "hard",
+      "reason": "taxonomy policy must reconcile the live codes (6-0016/8-0084 drift, 8-0086 reserved)"
+    },
+    {
+      "from": "BR8",
+      "to": "U10",
+      "kind": "soft",
+      "reason": "diagnostic code/doc mismatch is the U10 uncertainty"
+    },
+    {
+      "from": "BR9",
+      "to": "F00",
+      "kind": "soft",
+      "reason": "rendering reads the F00 evidence schema via accessors only"
+    },
+    {
+      "from": "BR9",
+      "to": "R10",
+      "kind": "soft",
+      "reason": "hover seed already renders route/premises"
+    },
+    {
+      "from": "BR10",
+      "to": "A11",
+      "kind": "hard",
+      "reason": "assumption-route premise/origin recording is A11"
+    },
+    {
+      "from": "BR10",
+      "to": "S20",
+      "kind": "soft",
+      "reason": "the reserved premise slot is the one-way door to SMT premise closure"
+    },
+    {
+      "from": "BR11",
+      "to": "RT00",
+      "kind": "hard",
+      "reason": "merge_runtime_class risk ledger is RT00"
+    },
+    {
+      "from": "BR11",
+      "to": "RT10",
+      "kind": "soft",
+      "reason": "reachability repro decides whether an interim fix matters"
+    },
+    {
+      "from": "BR11",
+      "to": "RT70",
+      "kind": "soft",
+      "reason": "VSDG/separation logic eventually supersedes the merge"
+    },
+    {
+      "from": "BR12",
+      "to": "K07",
+      "kind": "soft",
+      "reason": "the typed-provider NEEDS_DESIGN deferral protects the BR2 bridge"
+    },
+    {
+      "from": "BR12",
+      "to": "G00",
+      "kind": "soft",
+      "reason": "deferred labels need the per-run repo-capability audit discipline"
     }
   ],
   "topological_layers_hard_edges": [

@@ -803,3 +803,34 @@ namespace (`K0–K8`, `F0`, `A1`, …); mapped 1:1 to v0 IDs (`K0n`, `F0n`, `A10
 v0** and were omitted pending v0 absorbing that layer: `K02 -> C4` ("Laws That
 Cost Nothing"), `K06 -> C6` ("Prove Once, Represent Freely"); the FV-layer
 `Q5 -> K08` was reconciled to `S30 -> K08` (certificate/evidence serialization).
+
+## Bridge Placeholder Audit (BR0–BR12)
+
+**Added 2026-06-14 (architect-directed; evidence-backed agent audit).** Bridge
+status is **orthogonal to implementation status**: a node can be a complete,
+working bridge yet architecturally non-final. Tracked in
+`fco_dependency_graph_v0.json` (group "Bridge placeholder audit", each carrying a
+`bridge_status` + `current_mechanism`/`final_target`/`risk_if_fossilized`/`nearest_guard_fixture`).
+
+| BR | what | bridge_status | guard fixture? |
+|---|---|---|---|
+| BR0 | `Derive` compiler-known marker; `Eq<T>` in `Evidence<Eq<T>>` a nominal token | GRADUATION_TARGET | behavioral only |
+| BR1 | `Evidence`/`ImplBuilder` nominal markers (no data) | BRIDGE_INTENTIONAL | yes (behavioral) |
+| BR2 | provider capability authority **string-keyed** + provider bodies **exempt** from type/borrowck (`is_derive_provider_fn`) | **BRIDGE_AT_RISK** | no authority guard |
+| BR3 | generated impls re-enter normal pipeline (good) but provider **bodies don't**, and generation records no provenance | **BRIDGE_AT_RISK** | **NONE** |
+| BR4 | reflection is **handle-based** (FieldKey), only method-name vocab is string-matched | BRIDGE_INTENTIONAL | yes |
+| BR5 | quote fragment restricted; unsupported → named diags (`8-0084`, `13-00xx`) | DIAGNOSTIC_GUARD | yes (5 snaps) |
+| BR6 | event/error/msg lowering hardcoded in Rust (EIP-712 already a Fe provider) | BRIDGE_INTENTIONAL | target only |
+| BR7 | `A<B> -> *` / `* -> A<B>` / `* -> Constraint` **not parseable** (`KindBound = Mono\|Abs`), no named rejection; `Kind::Any` is a latent swallow-trap | **BRIDGE_AT_RISK** | **NONE** |
+| BR8 | diagnostic taxonomy: code-as-SSOT, doc lags (`6-0016`/`8-0084` drifted ahead; `8-0086` doc-reserved only) | DIAGNOSTIC_GUARD | per-code snaps |
+| BR9 | evidence schema cleanly separated from hover rendering | FINAL | yes |
+| BR10 | premise model (CTFE empty / Assumption populated; intent documented) | FINAL | yes |
+| BR11 | `merge_runtime_class` pragmatic MIR patch, not resource semantics | BRIDGE_INTENTIONAL | behavioral |
+| BR12 | `NEEDS_DESIGN`/`M6_OR_POST` labels lack the triad (owner-question + smallest-probe + protected-bridge) | UNKNOWN_NEEDS_AUDIT | n/a |
+
+**The three that block `Constraint`-kind graduation (= K07 prerequisites): BR2,
+BR3, BR7.** Audit corrections to prior framing: BR4 is already handle-based (not
+ident-string); method-conformance (`6-0016`) and `8-0084` are **live** — this map
+was stale; `8-0086` is genuinely unimplemented (doc-reserved). Fixture gaps to
+close: BR3 (generated-impl-fails-through-normal-trait-diagnostics) and BR7 (named
+rejection of planned kind forms — the K01 acceptance).
