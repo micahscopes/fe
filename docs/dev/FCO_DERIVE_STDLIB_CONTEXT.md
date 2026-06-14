@@ -138,7 +138,10 @@ a general `(* -> Constraint)` application. HKT exists at the *type* level
 **Graduating the bridge** (architect-scoped, post-M5, HKT-family): add a
 `Constraint` kind to `Kind`, give traits the kind `* -> Constraint` (n-ary as
 `* -> … -> Constraint`), and re-express `Derive`/`Evidence`/`require<…>` as
-ordinary kinded constructs. This is a real kind-system extension, not a std-lib
+ordinary kinded constructs. This is now tracked explicitly as the **K00–K08
+north-star spine** in `fco_dependency_graph_v0.json` / `FCO_CONSOLIDATION_MAP.md`
+(graduation = K04, gated on K07 provider bridge-drift cleanup — *not* on std-lib
+provider polish). This is a real kind-system extension, not a std-lib
 change — but it is the reason the current surface looks "special-cased": it is,
 deliberately, until the kind system can carry it. Until then, **adding std
 providers does not require touching this** — the bridge fully supports new

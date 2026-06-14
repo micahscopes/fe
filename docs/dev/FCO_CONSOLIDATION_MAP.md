@@ -763,3 +763,43 @@ production substrate and the down-to-earth consolidations (M5 tail, method
 conformance, typed provider capabilities, ABI/static-layout) — over the exotic
 end (CTCubFe Forms, SMT, Sonatina), which stays design-led and FV-probed until a
 concrete driver appears. The FV layer rides alongside each, not after.
+
+## North-star spine: kinded obligations / `Constraint`-kind graduation (K00–K08)
+
+**Added 2026-06-14 per architect direction.** The originating impetus of the
+whole project — traits as kinded type constructors (`Eq : * -> Constraint`),
+and kind arrows whose *domains carry obligations* (`A<B> -> *`) and *codomains
+carry evidence* (`* -> A<B>`) — was live in the roadmap
+(`/workspace/fe-ct-cubical-compiler-roadmap-2026-06-10.md`) but **absent from
+this graph**, i.e. operationally at risk of becoming folklore. It is now an
+explicit cluster (`group: "Kinded obligations / Constraint-kind graduation"`).
+
+Reconciliation: the FCO substrate work is the *named prerequisite* for this
+spine, not a detour — `G1` (demand=obligation, result=evidence) lifted to the
+kind level. The cluster supersedes the vague `U30`/`UC00` "Full ConstraintKind
+refactor" stubs (`U30 --> K00`).
+
+| K | architect id | what | status |
+|---|---|---|---|
+| K00 | K0 | kinded obligations/evidence **north star** | tracked telos |
+| K01 | K1 | named "planned, not yet supported" diagnostics for `A<B> -> *` / `* -> A<B>` / `* -> Constraint` (no silent `Kind::Any`) | NEAR-TERM (may proceed if cheap; targeted, **not** a broad `Kind::Any` removal) |
+| K02 | K2 | add `Constraint` kind (today `Kind = Star \| Abs \| Any`) | DESIGN, post-M5 |
+| K03 | K3 | traits as `* -> Constraint` | post-K02 |
+| K04 | K4 | `Derive` bridge graduation (today a compiler-known marker) | post-K03 + K07 + K08 |
+| K05 | K5 | kind domains carry obligations (`A<B> -> *`) | post-K03 |
+| K06 | K6 | kind codomains carry evidence (`* -> A<B>`) | post-K03 |
+| K07 | K7 | provider bridge-drift cleanup (B1/B2, ident-string reflection, string-keyed authority) | the **actual** prerequisite for graduation (std-lib provider polish is **not**) |
+| K08 | K8 | kinded evidence/provision integration | post provision unification (`PV*`) |
+
+**Sequencing (architect):** track now; do **not** implement K02–K06 before M5
+semantic closure; K01 may be pulled early if cheap; K04 waits on K07 drift
+repair. Std-lib provider polish (`StableClone`/`StableOrd`/ABI derives) rides
+the existing bridge and is independent of K02–K04.
+
+**ID reconciliation / known gaps.** The architect's patch used a looser
+namespace (`K0–K8`, `F0`, `A1`, …); mapped 1:1 to v0 IDs (`K0n`, `F0n`, `A10`,
+`A11`, `P00/P10/P20/P50`, `D00`, `H10`, `H50`, `S40`, `AC10/AC20`, `PV00/PV50`,
+`S30`). Three architect soft edges target **CTCubFe product nodes not present in
+v0** and were omitted pending v0 absorbing that layer: `K02 -> C4` ("Laws That
+Cost Nothing"), `K06 -> C6` ("Prove Once, Represent Freely"); the FV-layer
+`Q5 -> K08` was reconciled to `S30 -> K08` (certificate/evidence serialization).

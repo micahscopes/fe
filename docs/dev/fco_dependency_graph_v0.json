@@ -1142,6 +1142,124 @@
       "uncertain": true,
       "acceptance": [],
       "notes": []
+    },
+    {
+      "id": "K00",
+      "title": "Kinded obligations/evidence north star",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "north_star",
+      "description": "The original project impetus, tracked explicitly: kinds become able to express obligation-bearing domains and evidence/proposition-bearing codomains (Derive : * -> Constraint; A<B> -> *; * -> A<B>). G1 'demand=obligation, result=evidence' lifted to the kind level.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "architect id: K0",
+        "Do NOT pull implementation into the M5 finish; this node tracks the telos so consolidation/refactors can answer how they preserve it."
+      ]
+    },
+    {
+      "id": "K01",
+      "title": "No-accept-and-ignore diagnostics for planned kind forms",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "diagnostic",
+      "description": "Forms such as A<B> -> *, * -> A<B>, and * -> Constraint are rejected by a named 'planned, not yet supported' diagnostic until supported; no silent Kind::Any fallback. Targeted safety rule, NOT a broad Kind::Any removal (Any still serves error recovery).",
+      "uncertain": false,
+      "acceptance": [
+        "A<B> -> *, * -> A<B>, * -> Constraint each emit a named diagnostic",
+        "no ICE, no Kind::Any silent acceptance, no nonsense lowering",
+        "fixtures pin each rejection"
+      ],
+      "notes": [
+        "architect id: K1",
+        "near-term; may proceed if cheap and it does not displace the M5 gate tail"
+      ]
+    },
+    {
+      "id": "K02",
+      "title": "Constraint kind design",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "design",
+      "description": "Add a Constraint/proposition kind alongside Star and Abs; define kind checking and erasure boundaries.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "architect id: K2",
+        "do not implement before M5 semantic closure unless architect reorders the draft"
+      ]
+    },
+    {
+      "id": "K03",
+      "title": "Traits as * -> Constraint",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "capability",
+      "description": "Traits become kinded constructors from types to constraints/propositions (n-ary as * -> ... -> Constraint), making Eq<T> a real kinded application.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "architect id: K3"
+      ]
+    },
+    {
+      "id": "K04",
+      "title": "Derive bridge graduation",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "refactor",
+      "description": "Re-express Derive, Evidence, ImplBuilder, and require-like mechanisms as ordinary kinded constructs rather than provider-special-cased bridge machinery (today Derive is a compiler-known marker; Eq<T> in Evidence<Eq<T>> is special-cased).",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "architect id: K4"
+      ]
+    },
+    {
+      "id": "K05",
+      "title": "Kind domains carry obligations (A<B> -> *)",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "capability",
+      "description": "Support domain-side kind bounds such as A<B> -> * once the obligation/provision substrate can represent them.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "architect id: K5"
+      ]
+    },
+    {
+      "id": "K06",
+      "title": "Kind codomains carry evidence (* -> A<B>)",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "capability",
+      "description": "Support evidence/proposition-bearing codomains such as * -> A<B> or * -> Constraint.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "architect id: K6"
+      ]
+    },
+    {
+      "id": "K07",
+      "title": "Provider bridge-drift cleanup",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "cleanup",
+      "description": "Quantify and repair bridge drift before graduation: provider/builder execution leaking into solving (B2), generated items not re-entering validation below type-checking (B1), reflection receiver binding by ident string, string-keyed capability authority.",
+      "uncertain": false,
+      "acceptance": [
+        "bridge-drift inventory with file refs for each of: solving-leak, sub-typecheck validation gap, ident-string reflection, string-keyed authority"
+      ],
+      "notes": [
+        "architect id: K7",
+        "actual prerequisite pressure for graduating the bridge (std-lib provider polish is NOT)"
+      ]
+    },
+    {
+      "id": "K08",
+      "title": "Kinded evidence/provision integration",
+      "group": "Kinded obligations / Constraint-kind graduation",
+      "kind": "integration",
+      "description": "Connect kinded constraints/evidence to the scope-indexed provision environment and durable evidence model.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "architect id: K8"
+      ]
     }
   ],
   "edges": [
@@ -2080,6 +2198,192 @@
       "to": "S30",
       "kind": "soft",
       "reason": "evidence stability controls certificates"
+    },
+    {
+      "from": "F00",
+      "to": "K00",
+      "kind": "hard",
+      "reason": "evidence schema is the carrier kinded codomains reuse"
+    },
+    {
+      "from": "F01",
+      "to": "K00",
+      "kind": "hard",
+      "reason": "const term language is the identity substrate for kinded obligations"
+    },
+    {
+      "from": "F02",
+      "to": "K00",
+      "kind": "hard",
+      "reason": "symbolic neutral terms are the obligation-bearing payloads"
+    },
+    {
+      "from": "F04",
+      "to": "K00",
+      "kind": "hard",
+      "reason": "the one obligation queue is the pathway lifted to the kind level"
+    },
+    {
+      "from": "A10",
+      "to": "K00",
+      "kind": "hard",
+      "reason": "exact obligation matching is the discharge model lifted to kinds"
+    },
+    {
+      "from": "P20",
+      "to": "K00",
+      "kind": "hard",
+      "reason": "provider-capabilities-as-provisions is the surface that graduates"
+    },
+    {
+      "from": "U30",
+      "to": "K00",
+      "kind": "hard",
+      "reason": "the 'full ConstraintKind refactor necessity' question resolves into this spine"
+    },
+    {
+      "from": "K00",
+      "to": "K01",
+      "kind": "hard",
+      "reason": "guard the planned syntax before designing the kind"
+    },
+    {
+      "from": "D00",
+      "to": "K01",
+      "kind": "hard",
+      "reason": "named rejection reuses the diagnostic taxonomy"
+    },
+    {
+      "from": "K00",
+      "to": "K02",
+      "kind": "hard",
+      "reason": "north star scopes the Constraint-kind design"
+    },
+    {
+      "from": "AC20",
+      "to": "K02",
+      "kind": "hard",
+      "reason": "kind/term identity changes need TERM_LANG_VERSION/invalidation discipline"
+    },
+    {
+      "from": "K02",
+      "to": "K03",
+      "kind": "hard",
+      "reason": "traits cannot be * -> Constraint until the Constraint kind exists"
+    },
+    {
+      "from": "K03",
+      "to": "K04",
+      "kind": "hard",
+      "reason": "Derive graduates once traits are real proposition constructors"
+    },
+    {
+      "from": "F00",
+      "to": "K04",
+      "kind": "hard",
+      "reason": "Evidence-over-real-constraints depends on the evidence schema"
+    },
+    {
+      "from": "K07",
+      "to": "K04",
+      "kind": "hard",
+      "reason": "graduation requires the provider bridge drift repaired first"
+    },
+    {
+      "from": "K08",
+      "to": "K04",
+      "kind": "hard",
+      "reason": "graduation requires kinded evidence wired into provisions"
+    },
+    {
+      "from": "K03",
+      "to": "K05",
+      "kind": "hard",
+      "reason": "obligation-bearing domains build on traits-as-propositions"
+    },
+    {
+      "from": "A11",
+      "to": "K05",
+      "kind": "hard",
+      "reason": "domain obligations need premise/origin evidence"
+    },
+    {
+      "from": "AC10",
+      "to": "K05",
+      "kind": "hard",
+      "reason": "obligation-bearing kinds need stable assoc-const projection identity"
+    },
+    {
+      "from": "K03",
+      "to": "K06",
+      "kind": "hard",
+      "reason": "evidence-bearing codomains build on traits-as-propositions"
+    },
+    {
+      "from": "A11",
+      "to": "K06",
+      "kind": "hard",
+      "reason": "evidence-bearing codomains need premise/origin evidence"
+    },
+    {
+      "from": "P00",
+      "to": "K07",
+      "kind": "hard",
+      "reason": "bridge cleanup needs the provider capability audit"
+    },
+    {
+      "from": "P10",
+      "to": "K07",
+      "kind": "hard",
+      "reason": "compile-time-only invariants are part of the cleanup"
+    },
+    {
+      "from": "P20",
+      "to": "K07",
+      "kind": "hard",
+      "reason": "capabilities-as-provisions is a cleanup precondition"
+    },
+    {
+      "from": "P50",
+      "to": "K07",
+      "kind": "hard",
+      "reason": "generated-impl provenance is part of the cleanup"
+    },
+    {
+      "from": "H50",
+      "to": "K07",
+      "kind": "hard",
+      "reason": "generated-code-through-normal-HIR-obligations is the core bridge-drift repair (B1)"
+    },
+    {
+      "from": "H10",
+      "to": "K07",
+      "kind": "soft",
+      "reason": "ABI/static-layout provider rewrite pressure-tests the bridge"
+    },
+    {
+      "from": "PV00",
+      "to": "K08",
+      "kind": "hard",
+      "reason": "kinded evidence rides the scope-indexed provision environment"
+    },
+    {
+      "from": "PV50",
+      "to": "K08",
+      "kind": "hard",
+      "reason": "const-predicate-assumptions-as-provisions is the model kinded obligations extend"
+    },
+    {
+      "from": "S30",
+      "to": "K08",
+      "kind": "soft",
+      "reason": "kinded evidence integration reuses certificate/evidence serialization"
+    },
+    {
+      "from": "K03",
+      "to": "S40",
+      "kind": "soft",
+      "reason": "law systems / proof transport become cleaner once traits are propositions"
     }
   ],
   "topological_layers_hard_edges": [

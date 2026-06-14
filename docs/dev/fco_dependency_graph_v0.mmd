@@ -172,6 +172,18 @@ flowchart TD
     U90["U90 Runtime-class reachability ⚠<br/><small>uncertainty</small>"]
   end
 
+  subgraph Kinded_obligations["Kinded obligations / Constraint-kind graduation (north-star spine)"]
+    K00["K00 Kinded obligations/evidence north star<br/><small>north_star</small>"]
+    K01["K01 No-accept-and-ignore diagnostics for planned kind forms<br/><small>diagnostic</small>"]
+    K02["K02 Constraint kind design<br/><small>design</small>"]
+    K03["K03 Traits as * -&gt; Constraint<br/><small>capability</small>"]
+    K04["K04 Derive bridge graduation<br/><small>refactor</small>"]
+    K05["K05 Kind domains carry obligations (A&lt;B&gt; -&gt; *)<br/><small>capability</small>"]
+    K06["K06 Kind codomains carry evidence (* -&gt; A&lt;B&gt;)<br/><small>capability</small>"]
+    K07["K07 Provider bridge-drift cleanup<br/><small>cleanup</small>"]
+    K08["K08 Kinded evidence/provision integration<br/><small>integration</small>"]
+  end
+
   T00 --> T10
   T00 --> T20
   T00 --> T30
@@ -329,6 +341,39 @@ flowchart TD
   U100 -. "clarifies" .-> AC20
   U100 -. "clarifies" .-> S30
 
+  %% Kinded-obligations north-star spine (architect K0-K8 = K00-K08)
+  F00 --> K00
+  F01 --> K00
+  F02 --> K00
+  F04 --> K00
+  A10 --> K00
+  P20 --> K00
+  U30 --> K00
+  K00 --> K01
+  D00 --> K01
+  K00 --> K02
+  AC20 --> K02
+  K02 --> K03
+  K03 --> K04
+  F00 --> K04
+  K07 --> K04
+  K08 --> K04
+  K03 --> K05
+  A11 --> K05
+  AC10 --> K05
+  K03 --> K06
+  A11 --> K06
+  P00 --> K07
+  P10 --> K07
+  P20 --> K07
+  P50 --> K07
+  H50 --> K07
+  PV00 --> K08
+  PV50 --> K08
+  H10 -. "pressure-tests" .-> K07
+  S30 -. "reuses" .-> K08
+  K03 -. "eases" .-> S40
+
   classDef uncertain stroke-dasharray: 5 5;
   class AC00 uncertain;
   class AC30 uncertain;
@@ -354,3 +399,9 @@ flowchart TD
   class U80 uncertain;
   class U90 uncertain;
   class U100 uncertain;
+  class K02 uncertain;
+  class K03 uncertain;
+  class K04 uncertain;
+  class K05 uncertain;
+  class K06 uncertain;
+  class K08 uncertain;
