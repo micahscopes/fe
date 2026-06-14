@@ -33,6 +33,38 @@ impl StableClone: Derive for Clone {
             sig = builder.returns(sig, builder.self_ty())
             builder.emit_method(sig, init)
         }
+        if reflect.is_enum() {
+            // match self {
+            //     V(lhs) => Self::V(lhs.0.clone(), ..),  // payload variants
+            //     U      => Self::U,                      // unit variants
+            //     ..
+            // }
+            // Built with the lower-level builder commands rather than a quote:
+            // `variant_pat` binds the matched payload under the `lhs` group,
+            // `variant_binder` reaches one bound field (the same machinery the
+            // StableEq enum arms use through `${variant}(lhs)` / `lhs.${field}`),
+            // and `variant_init` + `with_field` reconstruct the same variant with
+            // each field cloned. Unit variants take no fields, so they rebuild as
+            // the bare variant.
+            let mut body = builder.match_expr(builder.self_ref())
+            for variant in reflect.variants() {
+                let pat = builder.variant_pat(variant, "lhs")
+                let mut init = builder.variant_init(variant)
+                for field in variant.fields() {
+                    builder.require<Clone>(field.ty())
+                    init = builder.with_field(
+                        init,
+                        field,
+                        builder.call(builder.variant_binder(variant, field, "lhs"), "clone"),
+                    )
+                }
+                body = builder.with_arm(body, pat, init)
+            }
+            let mut sig = builder.method("clone")
+            sig = builder.with_self(sig)
+            sig = builder.returns(sig, builder.self_ty())
+            builder.emit_method(sig, body)
+        }
         builder.finish()
         ev
     }
@@ -80,4 +112,41 @@ fn generated_impl_satisfies_generic_bound() {
     let q = dup(p)
     assert!(q.x == 5)
     assert!(q.y == 6)
+}
+
+// --- enum support (expression-first pressure test) -------------------------
+// The SAME StableClone provider above also handles enums: it builds a
+// `match self` that reconstructs each variant with every payload field cloned.
+// Covers unit, tuple-payload, and record-payload variants. `Eq` is derived
+// (canonical) so the clones can be compared structurally.
+
+#[derive(Eq)]
+enum Shape {
+    Dot,
+    Circle(u256),
+    Rect { w: u256, h: u256 },
+}
+
+derive Clone for Shape using StableClone
+
+#[test]
+fn clone_enum_unit_variant() {
+    assert!(Shape::Dot.clone().eq(Shape::Dot))
+}
+
+#[test]
+fn clone_enum_tuple_payload() {
+    assert!(Shape::Circle(42).clone().eq(Shape::Circle(42)))
+    assert!(!Shape::Circle(42).clone().eq(Shape::Circle(7)))
+}
+
+#[test]
+fn clone_enum_record_payload() {
+    let r = Shape::Rect { w: 3, h: 5 }
+    assert!(r.clone().eq(Shape::Rect { w: 3, h: 5 }))
+}
+
+#[test]
+fn clone_enum_distinguishes_variants() {
+    assert!(!Shape::Dot.clone().eq(Shape::Circle(0)))
 }
