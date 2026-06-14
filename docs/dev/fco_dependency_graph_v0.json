@@ -3533,7 +3533,8 @@
       "enum Ord unit-only (OrderingLike, declaration order) + NEW primitive variant.precedes — 9a0826a3b",
       "BR7 guard kind_path_form_trap (path-in-kind-position loudly rejected, no silent Kind::Any) — 052ce0064",
       "BR2 guard provider_authority_outside_provider (capability authority gated to :Derive) — 918bd1edb",
-      "K02b/K03 classification constraint_kind_constructor — 1bc039278"
+      "K02b/K03 classification constraint_kind_constructor — 1bc039278",
+      "H10a ABI layout provider (StableAbiShape) + backend-agnostic builder.add/or fold primitives — 9b6558baf"
     ],
     "key_decisions_from_fable_logs": [
       "Construction stays in builder commands; quotes are for comparison/expression bodies. Do NOT grow quote surface for variant/struct construction (quote struct-init list-holes deferred indefinitely). builder vocabulary = bytecode, quotes = the language.",
@@ -3548,6 +3549,15 @@
     "findings_2026-06-14": {
       "K02b_not_bottleneck": "Motivating fixture shows <P: * -> Constraint> kind bound is ACCEPTED (K02a). The gap is K03: `where P<T>` (constraint-kind application) -> generic 8-0030 NotValue (no Kind::Any, no ICE). So K02b (kind INFERENCE) is NOT what's needed; do not implement it now. K03 named-diagnostic / impl is the real frontier; where-pred lowering (constraint.rs:355) only consumes TypeBound::Trait, so P<T> falls to a value-resolution path.",
       "H10_needs_integers": "PREDICTION (to verify): ABI layout facts like HEAD_WORDS:u256 require summing field head sizes, but the provider body has NO integer Value (Value enum = Bool/Str/Field/Variant/Ty/GenTy/Expr/Pat/Sig/Quote/Builder/Reflect/Evidence/Unit). Same wall as enum Ord (solved there via precedes for ORDERING, but counting/summing needs real integers). So H10 likely needs provider-body integer support OR composition via trait_const of field consts (like EIP-712 composes). Fable agent dispatched on the ABI design + whether arithmetic was planned. IS_DYNAMIC:bool may be expressible via || over <Field as AbiShape>::IS_DYNAMIC (trait_const exists); HEAD_WORDS is the arithmetic pressure point."
+    },
+    "multi_backend_actor_direction": {
+      "date": "2026-06-14",
+      "source": "Micah pointer + research agent",
+      "destination": "The contract interface generalizes (via HKTs) into an 'actor' interface for multi-backend (EVM+wasm+spirv). Branch `multi-backend` (worktree /workspace/fe-multi-backend/, tip argot/multi-backend ~2026-05-16). Thesis: 'ContractHost IS already the actor runtime interface'; parameterize storage with an HKT.",
+      "shape": "trait Backend { type Ptr<T> (* -> *); type Word; type Buffer<T> } impl for Evm(u256)/Native(u64)/Gpu(u32). Pluggable: ActorHost = Codec x StateBackend x Transport x Dispatch; Dispatch = Selector(EVM)/Export(WASM)/Kernel(GPU). `actor` keyword = parser alias for contract; identical EVM bytecode.",
+      "lineage": "Backend::Word (assoc TYPE) is the ancestor of Platform { const WORD_BITS } (assoc CONST). Independent thread from K00-K08 but shares kind substrate (* -> *, Kind::Abs).",
+      "live_gap": "COMPROMISES.md: HKT type-checker resolution INCOMPLETE — type Ptr<T> parses+round-trips HIR but kind computation + B::Ptr<u32> resolution DON'T work. => The actor interface is the compelling real fixture that RE-MOTIVATES ordinary * -> * HKT/kind resolution (load-bearing for multi-backend), distinct from the K02b/K03 * -> Constraint frontier.",
+      "alignment": "H10a AbiShape = EVM's projection of the actor Codec axis. add/or primitives = backend-agnostic infra. FCO reification work builds substrate the actor interface's EVM projection consumes. Keep layout providers backend-parameterized or backend-scoped; never hardcode EVM as universal."
     }
   }
 }
