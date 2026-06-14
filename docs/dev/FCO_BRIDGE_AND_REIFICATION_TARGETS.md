@@ -230,8 +230,10 @@ COMPLETE_BUT_UNDERTESTED ×2, NOT_EXPRESSIBLE_YET ×1, BLOCKED_BY_DESIGN ×1.
 ### 3. Top 10 fossilization risks (ranked)
 
 1. **TGT-PROVIDER-AUTHORITY-STRINGKEY** (BR2) — string-keyed authority + a
-   permanent type/borrowck hole for provider bodies; **blocks all of K04**. No
-   authority/escape guard fixture. *Highest leverage.*
+   permanent type/borrowck hole for provider bodies; **blocks all of K04**.
+   Interim escape guard now landed (`provider_authority_outside_provider`).
+   **K04a (resolved-type capability recognition) is the architect-selected fix —
+   in progress.** *Highest leverage.*
 2. **TGT-GLOBAL-COHERENCE-CHECKING** (BR13) — Rust-style global coherence quietly
    becoming the permanent model; the ~6 resolution pathways never collapse.
 3. **TGT-GENERATED-ITEM-VALIDATION** (BR3) — body exemption + zero provenance
@@ -354,7 +356,7 @@ regenerated/disposable and was left to the existing generator.
 | TGT-KIND-ANY-PLANNED-FORM-TRAP | tripwire pinning loud rejection of path-in-kind-position | yes (`kind_path_form_trap`; tripwire, not named-rejection — K01 not done) |
 | TGT-QUOTE-FRAGMENT-LIMITS | keep 5 `quote_*` snapshots | yes |
 | TGT-ASSUMPTION-ROUTE-EXACT-MATCH | keep `assumption_route_mismatch_is_rejected` | yes |
-| TGT-PROVIDER-AUTHORITY-STRINGKEY | **ADD** authority/escape guard (interim) | **NONE** |
+| TGT-PROVIDER-AUTHORITY-STRINGKEY | interim authority/escape guard | yes (`provider_authority_outside_provider`) |
 
 ### 9. Recommended next implementation node
 

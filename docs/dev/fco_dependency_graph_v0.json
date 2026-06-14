@@ -3463,5 +3463,64 @@
         "Recommended fco-native K04a: capabilities as resolved-type identities (e.g. opaque builtin/std types recognized by ADT identity), NOT PrimTy; rewire provider.rs recognition off the string keys. Keep body exemption; minimal provenance (P50). This is the big architect-domain load-bearing node — grounded + ready, awaiting the representation/stage confirmation before implementation."
       ]
     }
-  ]
+  ],
+  "standing_authorization": {
+    "date": "2026-06-14",
+    "source": "architect directive relayed by Micah",
+    "proceed_without_asking": [
+      "removes scaffolding",
+      "migrates an old special path into the provision/obligation/evidence structure",
+      "adds a regression guard for an already-identified bridge risk",
+      "fixes stale docs/status to match repo truth",
+      "implements an already-selected representation decision"
+    ],
+    "pause_and_ask_only_when": [
+      "changes public syntax",
+      "changes user-visible semantics",
+      "deletes an existing bridge mechanism before its replacement is proven",
+      "introduces a new permanent identity layer (e.g. new ConstraintId, TERM_LANG_VERSION bump)",
+      "changes evidence/provenance schema compatibility",
+      "makes a kind-system commitment beyond the agreed slice",
+      "rewrites high-level generation broadly instead of landing a thin slice"
+    ],
+    "note": "Do not ask for blessing merely because a change is important. Ask only when there is a real unresolved choice. Apply M5 semantic-verification standard (exact discharge counts, wrong-code absence, CTFE-vs-formation separation, per-call/no-stale evidence, assoc-const identity) to K04a/PS1/H10."
+  },
+  "k04a_decision": {
+    "date": "2026-06-14",
+    "status": "RESOLVED — architect representation nod received; matches relay default",
+    "representation": "capabilities-as-resolved-types / typed capability demands; NOT PrimTy. Recognize Reflect<T>/ImplBuilder<Goal>/Evidence<Goal>/Quote AFTER type resolution, not by string key.",
+    "keep": [
+      "provider body structural exemption (for now)",
+      "string-key path as fallback only if needed, marked compat-shim with removal target",
+      "BR3 generated-item-validation guard"
+    ],
+    "commit_plan": [
+      "C1 capability model prep — typed capability-demand representation; no behavior change; tests existing providers still resolve",
+      "C2 resolved-type recognition — recognize caps after type resolution; keep old string-key as fallback if needed; run StableEq/StableDefault/StableEip712/StableClone/StableOrd",
+      "C3 delete/quarantine string-key authority (REFLECT_KEY/IMPL_BUILDER_KEY) for covered paths; any remaining key marked compat-shim+removal target",
+      "C4 minimal provenance — provider id, derive site, generated item id, route=Provider, discharged provider reqs/premises if present (else precise P50 follow-up with code anchors)",
+      "C5 regression + docs — inventory BR2 BRIDGE_AT_RISK -> PARTIAL/COMPLETE_AND_TESTED for covered path; state what remains bridge-only"
+    ],
+    "complete_when": [
+      "1 provider capability authority no longer string-keyed for covered path",
+      "2 Reflect<T>/ImplBuilder<Goal>/Evidence<Goal>/Quote represented as typed compile-time-only capability demands",
+      "3 ordinary runtime code cannot construct/store/return/lower those capabilities",
+      "4 provider uses clauses checked structurally, not by raw string names",
+      "5 missing/mismatched capability => typed diagnostic",
+      "6 existing derive providers still work",
+      "7 StableClone+StableOrd pressure fixtures still work",
+      "8 BR3 guard still passes",
+      "9 minimal provenance recorded OR P50 follow-up with exact code anchors",
+      "10 final report lists which string-key paths were deleted/quarantined/left"
+    ],
+    "not_in_k04a": [
+      "full traits-as-*->Constraint (K03)",
+      "Derive bridge graduation (K04)",
+      "complete provider command-language checker",
+      "broad ABI/event/error providerization",
+      "K02b unless a K04a test proves required",
+      "moving StableClone/StableOrd into core_derives"
+    ],
+    "after_k04a": "P50 (if not complete) -> H10 tiny ABI/static-layout providerization slice -> K03 over existing constraint.rs/PredicateListId"
+  }
 }
