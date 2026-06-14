@@ -1185,7 +1185,8 @@
       "notes": [
         "architect id: K2",
         "do not implement before M5 semantic closure unless architect reorders the draft",
-        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield.",
+        "Revival plan: docs/dev/FCO_CONSTRAINT_KIND_REVIVAL.md (Layer1 cheap re-port: 1184fbbf0+e98cec695+7caf6343f+f6affe4f3+tree-sitter 1d009d576; ~34 Kind match sites; Layer2=re-integration on fco substrate)"
       ]
     },
     {
