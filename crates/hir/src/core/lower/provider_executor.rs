@@ -1542,6 +1542,18 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     };
                     Ok(Value::Bool(reflected.is_default))
                 }
+                ("precedes", [other]) => {
+                    let Value::Variant(other) = self.eval_expr(other.expr)? else {
+                        return Err(self.unsupported_expr(other.expr));
+                    };
+                    // Declaration-order precedence: a variant handle is its index
+                    // into the target's variant list (declaration order), so `<`
+                    // means "declared earlier". This is the minimal reflection
+                    // primitive an enum `Ord` derive needs to order variants — the
+                    // variant index is otherwise sealed inside the opaque handle
+                    // (there is no integer value in the provider command language).
+                    Ok(Value::Bool(variant < other))
+                }
                 // `fields()` is only meaningful as a `for` iterable.
                 _ => Err(self.unsupported_expr(expr)),
             },

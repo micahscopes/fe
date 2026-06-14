@@ -77,6 +77,97 @@ impl StableOrd: Derive for Ord {
             ge_sig = builder.returns(ge_sig, builder.ty<bool>())
             builder.emit_method(ge_sig, ge_body)
         }
+        if reflect.is_enum() {
+            // Unit-only enums order by DECLARATION POSITION via the new
+            // `variant.precedes(other)` reflection primitive. Each comparator is
+            // a nested `match self { Vi => match other { Vj => <const bool> } }`;
+            // the provider computes the boolean for each (Vi, Vj) pair at
+            // compile time and emits it as `builder.bool(..)`. For unit variants
+            // these constants are the whole comparison (no payload tie-break):
+            //   lt = i < j      gt = j < i
+            //   le = NOT(j < i) ge = NOT(i < j)
+            // Payload-carrying enums need a same-variant lexicographic tie-break
+            // (a follow-up); they are skipped here so we never emit a silently
+            // wrong comparison.
+            let mut has_payload = false
+            for variant in reflect.variants() {
+                for field in variant.fields() {
+                    has_payload = true
+                }
+            }
+            if !has_payload {
+                let mut lt_body = builder.match_expr(builder.self_ref())
+                let mut le_body = builder.match_expr(builder.self_ref())
+                let mut gt_body = builder.match_expr(builder.self_ref())
+                let mut ge_body = builder.match_expr(builder.self_ref())
+                for sv in reflect.variants() {
+                    let mut lt_inner = builder.match_expr(builder.arg_ref("other"))
+                    let mut le_inner = builder.match_expr(builder.arg_ref("other"))
+                    let mut gt_inner = builder.match_expr(builder.arg_ref("other"))
+                    let mut ge_inner = builder.match_expr(builder.arg_ref("other"))
+                    for ov in reflect.variants() {
+                        // le = not (other strictly precedes self); ge = not (self
+                        // strictly precedes other). Computed with `if` only — the
+                        // provider body has no `!`/`||`.
+                        let mut le_v = true
+                        if ov.precedes(sv) {
+                            le_v = false
+                        }
+                        let mut ge_v = true
+                        if sv.precedes(ov) {
+                            ge_v = false
+                        }
+                        lt_inner = builder.with_arm(
+                            lt_inner,
+                            builder.variant_pat(ov, "rhs"),
+                            builder.bool(sv.precedes(ov)),
+                        )
+                        gt_inner = builder.with_arm(
+                            gt_inner,
+                            builder.variant_pat(ov, "rhs"),
+                            builder.bool(ov.precedes(sv)),
+                        )
+                        le_inner = builder.with_arm(
+                            le_inner,
+                            builder.variant_pat(ov, "rhs"),
+                            builder.bool(le_v),
+                        )
+                        ge_inner = builder.with_arm(
+                            ge_inner,
+                            builder.variant_pat(ov, "rhs"),
+                            builder.bool(ge_v),
+                        )
+                    }
+                    lt_body = builder.with_arm(lt_body, builder.variant_pat(sv, "lhs"), lt_inner)
+                    le_body = builder.with_arm(le_body, builder.variant_pat(sv, "lhs"), le_inner)
+                    gt_body = builder.with_arm(gt_body, builder.variant_pat(sv, "lhs"), gt_inner)
+                    ge_body = builder.with_arm(ge_body, builder.variant_pat(sv, "lhs"), ge_inner)
+                }
+                let mut lt_sig = builder.method("lt")
+                lt_sig = builder.with_self(lt_sig)
+                lt_sig = builder.with_arg(lt_sig, "other", builder.target_ty())
+                lt_sig = builder.returns(lt_sig, builder.ty<bool>())
+                builder.emit_method(lt_sig, lt_body)
+
+                let mut le_sig = builder.method("le")
+                le_sig = builder.with_self(le_sig)
+                le_sig = builder.with_arg(le_sig, "other", builder.target_ty())
+                le_sig = builder.returns(le_sig, builder.ty<bool>())
+                builder.emit_method(le_sig, le_body)
+
+                let mut gt_sig = builder.method("gt")
+                gt_sig = builder.with_self(gt_sig)
+                gt_sig = builder.with_arg(gt_sig, "other", builder.target_ty())
+                gt_sig = builder.returns(gt_sig, builder.ty<bool>())
+                builder.emit_method(gt_sig, gt_body)
+
+                let mut ge_sig = builder.method("ge")
+                ge_sig = builder.with_self(ge_sig)
+                ge_sig = builder.with_arg(ge_sig, "other", builder.target_ty())
+                ge_sig = builder.returns(ge_sig, builder.ty<bool>())
+                builder.emit_method(ge_sig, ge_body)
+            }
+        }
         builder.finish()
         ev
     }
@@ -115,4 +206,49 @@ fn ord_equal_is_le_ge_not_lt_gt() {
     assert!(Point { x: 4, y: 4 }.ge(Point { x: 4, y: 4 }))
     assert!(!Point { x: 4, y: 4 }.lt(Point { x: 4, y: 4 }))
     assert!(!Point { x: 4, y: 4 }.gt(Point { x: 4, y: 4 }))
+}
+
+// --- unit-only enum support (expression-first pressure test) ----------------
+// Variants order by DECLARATION POSITION (Low < Mid < High). The provider builds
+// each comparator as a nested match driven by the new `variant.precedes`
+// reflection primitive.
+
+enum OrderingLike {
+    Low,
+    Mid,
+    High,
+}
+
+derive Ord for OrderingLike using StableOrd
+
+#[test]
+fn enum_ord_declaration_order_lt() {
+    assert!(OrderingLike::Low.lt(OrderingLike::Mid))
+    assert!(OrderingLike::Mid.lt(OrderingLike::High))
+    assert!(OrderingLike::Low.lt(OrderingLike::High))
+    assert!(!OrderingLike::Mid.lt(OrderingLike::Low))
+    assert!(!OrderingLike::High.lt(OrderingLike::Mid))
+}
+
+#[test]
+fn enum_ord_gt_is_mirror() {
+    assert!(OrderingLike::High.gt(OrderingLike::Mid))
+    assert!(OrderingLike::Mid.gt(OrderingLike::Low))
+    assert!(!OrderingLike::Low.gt(OrderingLike::High))
+}
+
+#[test]
+fn enum_ord_equal_is_le_ge_not_lt_gt() {
+    assert!(OrderingLike::Mid.le(OrderingLike::Mid))
+    assert!(OrderingLike::Mid.ge(OrderingLike::Mid))
+    assert!(!OrderingLike::Mid.lt(OrderingLike::Mid))
+    assert!(!OrderingLike::Mid.gt(OrderingLike::Mid))
+}
+
+#[test]
+fn enum_ord_le_ge_strict_pairs() {
+    assert!(OrderingLike::Low.le(OrderingLike::High))
+    assert!(!OrderingLike::High.le(OrderingLike::Low))
+    assert!(OrderingLike::High.ge(OrderingLike::Low))
+    assert!(!OrderingLike::Low.ge(OrderingLike::High))
 }
