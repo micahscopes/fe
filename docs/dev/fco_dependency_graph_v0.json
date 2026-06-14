@@ -3521,6 +3521,28 @@
       "K02b unless a K04a test proves required",
       "moving StableClone/StableOrd into core_derives"
     ],
-    "after_k04a": "P50 (if not complete) -> H10 tiny ABI/static-layout providerization slice -> K03 over existing constraint.rs/PredicateListId"
+    "after_k04a": "P50 (if not complete) -> H10 tiny ABI/static-layout providerization slice -> K03 over existing constraint.rs/PredicateListId",
+    "c2_cycle_finding_2026-06-14": "INVESTIGATION (Explore): validate_provider runs inside expanded_items_impl (expansion stage), which may read ONLY base_scope_graph_impl — resolving a type path needs the merged scope_graph_impl, which would cycle back into expansion. So recognition-by-resolved-identity CANNOT happen in provider.rs during expansion. 'Recognize after resolution' => move capability recognition OUT of expansion into type-lowering / a post-name-res pass (ty_lower lower_hir_ty or later), storing key_path verbatim at expansion and resolving later. Also: Reflect/ImplBuilder/Evidence/Quote are NOT types today (no TyId); Evidence/Quote are Value markers in provider_executor; closest existing opaque-builtin-by-identity model is TyBase::Contract (non-PrimTy base with scope identity). EffectParam (hir_def/effects.rs:11) carries key_path:Partial<PathId> + name + is_mut but NOT the goal generic arg (e.g. Ord<T> in ImplBuilder<Ord<T>>) — capturing the goal is a representation upgrade C1/C2 needs."
+  },
+  "lane_a_progress": {
+    "date": "2026-06-14",
+    "operating_model": "expression-first braided lanes (architect 2026-06-14): A=expressive fixtures, B=structure (K04a/P50/K03), C=deletion. Every cycle lands >=1 Lane A item. Drive by motivating fixtures, not meta-planning. Habit: mine fable logs (fe-sessions-bundle-2026-06-13 + May architect bundles + design docs) when unsure.",
+    "landed": [
+      "enum Clone concrete (Shape: unit/tuple/record) — 5ff92bb63",
+      "enum Clone generic Maybe<T> via 'derive ... using' (first generic-using-derive ever) — 2b9343818",
+      "enum Ord unit-only (OrderingLike, declaration order) + NEW primitive variant.precedes — 9a0826a3b",
+      "BR7 guard kind_path_form_trap (path-in-kind-position loudly rejected, no silent Kind::Any) — 052ce0064",
+      "BR2 guard provider_authority_outside_provider (capability authority gated to :Derive) — 918bd1edb"
+    ],
+    "key_decisions_from_fable_logs": [
+      "Construction stays in builder commands; quotes are for comparison/expression bodies. Do NOT grow quote surface for variant/struct construction (quote struct-init list-holes deferred indefinitely). builder vocabulary = bytecode, quotes = the language.",
+      "Enum Ord cross-variant ordering was the genuine open item (Reflect exposes no discriminant) — resolved by variant.precedes (declaration-order index comparison).",
+      "ABI family (AbiSize/Encode/Decode) = the headline next reification win + pressure-tests whether builder/quote needs arithmetic."
+    ],
+    "scoped_followups": [
+      "payload-carrying enum Ord (same-variant lexicographic tie-break over payload, doubly-nested match) — guarded out today, NOT silently wrong",
+      "negative: unsupported enum shape for Ord fails by name (needs a provider fail mechanism)",
+      "K02b/K03 motivating fixture: fn require_constraint<P: * -> Constraint, T>() where P<T> — classify current behavior (parse/recognize/reject-by-name; no Kind::Any; no ICE)"
+    ]
   }
 }
