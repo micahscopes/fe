@@ -27,7 +27,8 @@ flowchart TD
   classDef partial fill:#6d4c41,color:#fff,stroke:#a1887f;
   classDef star fill:#1a237e,color:#fff,stroke:#3949ab;
   class D,O,R,CTFE,ASM,EV,PREM,HOV,DIAG,GT,MC done;
-  class GC,UNS partial;
+  class GC done;
+  class UNS partial;
   class NS star;
 ```
 
@@ -38,7 +39,7 @@ flowchart TD
 | Hover / receipts | **COMPLETE_AND_TESTED** | gate 10 |
 | Gate-not-select — trait-bound path | **COMPLETE_AND_TESTED** | gate 2 |
 | M0 method const-predicate conformance (`6-0016`) | **COMPLETE_AND_TESTED** | `468bb69b7` |
-| Gate-not-select — **concrete `w.big()` path** | **PARTIAL** | Gate-2 tail — quarantined |
+| Gate-not-select — concrete `w.big()` path | **COMPLETE_AND_TESTED** | Gate-2 tail `0ebd3be8a` (shared adapter) |
 | Expressibility-limit diagnostic (dedicated `8-0086`) | **PARTIAL** | named-not-ICE holds (`2-0002`) |
 | WF-position evidence recording | **BLOCKED_BY_DESIGN** | — |
 | **Kinded obligations / `Constraint` kind (north star)** | **NOT_EXPRESSIBLE_YET (tracked)** | K00–K08; track-now-implement-later |
@@ -48,7 +49,7 @@ tracked code (`6207a808d`, `ed9754748`). The untracked
 `crates/contract-harness/tests/foundry_gas.rs` is parallel-session WIP, broken,
 and absent on a clean checkout.
 
-**Next:** Gate-2 tail (unify the concrete method-call path through the same
-selected-impl obligation emitter as the trait-bound path) → then `8-0086`
-expressibility polish. K01 (named diagnostics for planned kind forms) is the
+**Next:** `8-0086` expressibility-limit polish (dedicated diagnostic over the
+current `2-0002`) closes the M5 diagnostic tail. K01 (named diagnostics for
+planned kind forms — `A<B> -> *`, `* -> A<B>`, `* -> Constraint`) is the
 sanctioned early pull on the north-star spine.
