@@ -242,7 +242,7 @@ impl super::Parse for TypeBoundScope {
         let is_type_kind = matches!(
             parser.current_kind(),
             Some(SyntaxKind::LParen | SyntaxKind::Star)
-        );
+        ) || parser.is_ident("Constraint");
 
         if is_type_kind {
             parse_kind_bound(parser)
@@ -259,27 +259,32 @@ fn parse_kind_bound<S: TokenStream>(parser: &mut Parser<S>) -> Result<(), Recove
     let checkpoint = parser.checkpoint();
     let is_newline_trivia = parser.set_newline_as_trivia(false);
 
-    parser.expect(&[SyntaxKind::Star, SyntaxKind::LParen], None)?;
-
-    if parser.bump_if(SyntaxKind::LParen) {
-        parse_kind_bound(parser)?;
-        if parser.find(
-            SyntaxKind::RParen,
-            ExpectedKind::ClosingBracket {
-                bracket: SyntaxKind::RParen,
-                parent: SyntaxKind::TypeBound,
-            },
-        )? {
-            parser.bump();
-        }
-    } else if parser.current_kind() == Some(SyntaxKind::Star) {
+    if parser.is_ident("Constraint") {
         parser
-            .parse(KindBoundMonoScope::default())
+            .parse(KindBoundConstraintScope::default())
             .unwrap_infallible();
     } else {
-        // guaranteed by `expected`, unless other recovery
-        // other tokens are added to the current scope
-        unreachable!();
+        parser.expect(&[SyntaxKind::Star, SyntaxKind::LParen], None)?;
+        if parser.bump_if(SyntaxKind::LParen) {
+            parse_kind_bound(parser)?;
+            if parser.find(
+                SyntaxKind::RParen,
+                ExpectedKind::ClosingBracket {
+                    bracket: SyntaxKind::RParen,
+                    parent: SyntaxKind::TypeBound,
+                },
+            )? {
+                parser.bump();
+            }
+        } else if parser.current_kind() == Some(SyntaxKind::Star) {
+            parser
+                .parse(KindBoundMonoScope::default())
+                .unwrap_infallible();
+        } else {
+            // guaranteed by `expected`, unless other recovery
+            // other tokens are added to the current scope
+            unreachable!();
+        }
     }
 
     if parser.current_kind() == Some(SyntaxKind::Arrow) {
@@ -295,6 +300,16 @@ impl super::Parse for KindBoundMonoScope {
 
     fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
         parser.bump_expected(SyntaxKind::Star);
+        Ok(())
+    }
+}
+
+define_scope! { KindBoundConstraintScope, KindBoundConstraint }
+impl super::Parse for KindBoundConstraintScope {
+    type Error = Infallible;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.bump_expected(SyntaxKind::Ident);
         Ok(())
     }
 }

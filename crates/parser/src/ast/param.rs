@@ -476,7 +476,7 @@ impl TraitRef {
 
 ast_node! {
     pub struct KindBound,
-     SK::KindBoundAbs | SK::KindBoundMono
+     SK::KindBoundAbs | SK::KindBoundMono | SK::KindBoundConstraint
 }
 impl KindBound {
     pub fn mono(&self) -> Option<KindBoundMono> {
@@ -492,11 +492,25 @@ impl KindBound {
             _ => None,
         }
     }
+
+    pub fn constraint(&self) -> Option<KindBoundConstraint> {
+        match self.syntax().kind() {
+            SK::KindBoundConstraint => {
+                Some(KindBoundConstraint::cast(self.syntax().clone()).unwrap())
+            }
+            _ => None,
+        }
+    }
 }
 
 ast_node! {
     pub struct KindBoundMono,
     SK::KindBoundMono,
+}
+
+ast_node! {
+    pub struct KindBoundConstraint,
+    SK::KindBoundConstraint,
 }
 
 ast_node! {
@@ -523,6 +537,8 @@ pub enum KindBoundVariant {
     Mono(KindBoundMono),
     /// `KindBound -> KindBound`
     Abs(KindBoundAbs),
+    /// `Constraint`
+    Constraint(KindBoundConstraint),
 }
 
 /// A trait for AST nodes that can have generic parameters.
@@ -670,6 +686,26 @@ mod tests {
         };
         assert_eq!(p3.name().unwrap().text(), "N");
         assert!(p3.ty().is_some());
+    }
+
+    // K02a revival (re-port of effort2 1184fbbf0): `* -> Constraint` parses, with
+    // the codomain a `Constraint` kind bound.
+    #[test]
+    #[wasm_bindgen_test]
+    fn generic_param_with_constraint_kind_bound() {
+        let source = r#"<P: * -> Constraint>"#;
+        let gp = parse_generic_params(source);
+        let mut params = gp.into_iter();
+
+        let GenericParamKind::Type(param) = params.next().unwrap().kind() else {
+            panic!("expected type param");
+        };
+        let bound = param.bounds().unwrap().iter().next().unwrap();
+        let kind = bound.kind_bound().expect("expected kind bound");
+        let abs = kind.abs().expect("expected higher-kinded bound");
+
+        assert!(abs.lhs().unwrap().mono().is_some());
+        assert!(abs.rhs().unwrap().constraint().is_some());
     }
 
     #[test]

@@ -308,6 +308,8 @@ impl<'db> TraitRefId<'db> {
 pub enum KindBound {
     /// `*`
     Mono,
+    /// `Constraint`
+    Constraint,
     /// `* -> *`
     Abs(Partial<Box<KindBound>>, Partial<Box<KindBound>>),
 }
