@@ -1,0 +1,27 @@
+//! Compile-time derive-provider capability types.
+//!
+//! A derive provider's `derive` fn consumes capabilities through its `uses (..)`
+//! clause. These are their canonical types:
+//!   - `Reflect<T>`     — reflection over the derive target `T`.
+//!   - `ImplBuilder<G>` — the builder for the generated `impl G`.
+//!
+//! They exist so the compiler can recognize provider capabilities by RESOLVED
+//! identity (the canonical path `core::derive::*`) rather than by a bare
+//! head-identifier string match (K04a). A user type merely named `Reflect` no
+//! longer collides with the capability.
+//!
+//! These types are deliberately NOT in the prelude: ordinary code does not see
+//! them by a bare name. Each has only a private field and no constructor, so no
+//! runtime value of a capability can be built; provider bodies are checked by the
+//! provider executor (not ordinary type checking), and the capabilities are
+//! bound there as compile-time values.
+
+/// Reflection capability over a derive target `T`.
+pub struct Reflect<T> {
+    handle: u256
+}
+
+/// Generated-impl builder capability for the goal `G` (e.g. `Eq<T>`).
+pub struct ImplBuilder<G> {
+    handle: u256
+}

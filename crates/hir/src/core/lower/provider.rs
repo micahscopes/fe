@@ -33,6 +33,9 @@ const IMPL_BUILDER_KEY: &str = "ImplBuilder";
 const DERIVE_MARKER: &str = "Derive";
 /// The single function a provider must define.
 const DERIVE_FN: &str = "derive";
+/// The `core::derive` module that holds the canonical capability types
+/// (`Reflect`, `ImplBuilder`), used for resolved-identity recognition.
+const DERIVE_MODULE: &str = "derive";
 
 /// A compile-time capability a provider's `derive` fn consumes, declared in its
 /// `uses (..)` clause (`reflect: Reflect<T>`, `builder: mut ImplBuilder<Goal>`).
@@ -192,19 +195,38 @@ pub(super) fn validate_provider<'db>(
             let Some(param_name) = param.name else {
                 continue;
             };
-            let Some(key_head) = param
-                .key_path
-                .to_opt()
-                .and_then(|path| last_path_ident(db, path))
-            else {
+            let Some(key_path) = param.key_path.to_opt() else {
                 continue;
             };
-            match key_head.data(db).as_str() {
-                REFLECT_KEY => capabilities.push(Capability::Reflect(param_name)),
-                IMPL_BUILDER_KEY if param.is_mut => {
-                    capabilities.push(Capability::ImplBuilder(param_name))
+            let Some(key_head) = last_path_ident(db, key_path) else {
+                continue;
+            };
+            // Prefer resolved-identity recognition: canonicalize the capability
+            // key path (base-graph `use` resolution only — provider validation runs
+            // in the expansion stage and must not touch the merged graph) and
+            // accept it when it names a `core::derive` capability type. A user type
+            // merely named `Reflect` then no longer collides with the capability.
+            // The bare head-identifier string match remains as a compatibility
+            // shim for providers that name the capability by the unqualified ident
+            // with no import (K04a-C3 retires it once the canonical form is the
+            // only one in tree).
+            let canonical = if key_path.parent(db).is_some() {
+                key_path
+            } else {
+                canonical_trait_path(db, provider.top_mod(db), PathId::from_ident(db, key_head))
+            };
+            if path_names_derive_capability(db, canonical, REFLECT_KEY) {
+                capabilities.push(Capability::Reflect(param_name));
+            } else if param.is_mut && path_names_derive_capability(db, canonical, IMPL_BUILDER_KEY) {
+                capabilities.push(Capability::ImplBuilder(param_name));
+            } else {
+                match key_head.data(db).as_str() {
+                    REFLECT_KEY => capabilities.push(Capability::Reflect(param_name)),
+                    IMPL_BUILDER_KEY if param.is_mut => {
+                        capabilities.push(Capability::ImplBuilder(param_name))
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         // The minimal capability check: a provider must declare the
@@ -280,6 +302,26 @@ pub(super) fn provider_name_range<'db>(
 /// The last identifier segment of `path`, if every segment is present.
 fn last_path_ident<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> Option<IdentId<'db>> {
     path.ident(db).to_opt()
+}
+
+/// Whether `path` names a `core::derive` capability type by resolved (canonical-
+/// path) identity: its last segment is `name` and its parent segment is the
+/// `derive` module. This is the base-graph-safe form of identity recognition —
+/// it requires the `derive` module qualifier (so a bare user `struct Reflect`
+/// does not match) without needing the merged scope graph (unavailable during
+/// the expansion stage). The caller canonicalizes a bare ident through the
+/// provider module's `use` items before calling this.
+fn path_names_derive_capability<'db>(
+    db: &'db dyn HirDb,
+    path: PathId<'db>,
+    name: &str,
+) -> bool {
+    let last_matches = path.ident(db).to_opt().is_some_and(|ident| ident.data(db) == name);
+    let parent_is_derive = path
+        .parent(db)
+        .and_then(|parent| parent.ident(db).to_opt())
+        .is_some_and(|ident| ident.data(db) == DERIVE_MODULE);
+    last_matches && parent_is_derive
 }
 
 /// Resolves `path` (the head trait of a provider, or the trait argument of a
