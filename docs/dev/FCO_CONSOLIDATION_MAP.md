@@ -64,7 +64,7 @@ error lowering) is outside the pathway.
 |---|-----------|---------------|-------|------------------|-----------|------|-------|
 | 1 | Const predicates beyond call sites (ADT construction + signature/WF) | `callable.rs:797` (Func-only), `expr.rs:3634` `check_record_init` (no enqueue), `trait_resolution/mod.rs:278` `check_ty_wf` / `:338` `check_trait_inst_wf` (trait-only) | A `where MIN<=MAX` on a struct/enum parses and is accepted at decl, then is **never enforced** at construction or in signature positions | Enqueue ADT `const_predicates` at construction; check them in WF/signature positions; reuse `DeferredTask`/`DischargedConstPredicate` | M | Med | **CORE_M5_NEXT** |
 | 2 | Assumption-route discharge (generic caller restates a bound) | `mod.rs:1423-1425` stub returns `Discharged` silently; `term.rs:425` `lower_hir_to_term` + `:807` `normalize_term` unused by discharge | Symbolic args silently discharge with **no evidence and no exact-match diagnostic**; a mismatched forwarded bound is accepted | New `DischargeRoute::Assumption`; lower predicate to a normalized term; exact-match against caller's harvested const-predicate assumption set | M | Med | **CORE_M5_NEXT** |
-| 3 | Impl-method const-predicate conformance | `method_cmp.rs:62` `compare_impl_method`, `:964` `compare_constraints` (trait-only) | An impl method may weaken/strengthen the trait method's const predicates with **no error** | Compare const-predicate sets by normalized-term identity (reuses #2 machinery) | S–M | Low | **M6_OR_POST** |
+| 3 | Impl-method const-predicate conformance | `method_cmp.rs:62` `compare_impl_method`, `compare_const_predicates` (`:1050-1086`) | ~~An impl method may weaken/strengthen the trait method's const predicates with **no error**~~ | Compare const-predicate sets by normalized-term identity (reuses #2 machinery) | S–M | Low | **LANDED** (M0, `468bb69b7`; emits `6-0016`) |
 | 4 | Const-predicate WF in signature positions | `trait_resolution/mod.rs:278/338`; invoked via `ty_def.rs:630` `emit_wf_diag` | `check_ty_wf` runs trait constraints but **ignores** const predicates on the type's where clause | Fold const-predicate checking into WF (the signature half of #1) | M | Med | **CORE_M5_NEXT** (with #1) |
 | 5 | Hardcoded ABI/event/error lowering vs derive providers | `core/lower/event.rs`, `error.rs` (`lower_error_abi_size_impl`/`encode_impl` ~365-439), `msg.rs` (HEAD_SIZE/IS_DYNAMIC HIR), `crates/fe/src/abi.rs:~1452` | Parallel Rust provision path: bypasses `DeferredTask`, produces **no evidence**, not extensible from Fe; HEAD_SIZE/IS_DYNAMIC are exactly what const predicates could verify | Migrate to Fe derive providers; verify layout consts via const-predicate obligations | L | High | **M6_OR_POST** |
 | 6 | Typed provider `uses` capabilities | `core/lower/provider.rs` (`REFLECT_KEY`/`IMPL_BUILDER_KEY`/`DERIVE_*` string keys, `:30-35`), `provider_executor.rs` (string-keyed dispatch `:1485-1486`, budgets) | Capabilities are **string-keyed**, not typed; provider execution yields an impl but **no `DischargedObligation`** | Type `uses` signatures as compile-time-only capability obligations with evidence | L | High | **NEEDS_DESIGN** |
@@ -146,12 +146,16 @@ error lowering) is outside the pathway.
   predicates or fall back conservatively; must not regress the
   no-false-discharge invariant.
 
-#### 3. Impl-method const-predicate conformance — **M6_OR_POST**
-- `compare_impl_method` (`method_cmp.rs:62`) / `compare_constraints` (`:964`)
-  compare **trait constraints** only; an impl method can silently
-  weaken/strengthen const predicates. Once #2 lands the normalized-term identity
-  this is a small superset-check addition. Deferred because it depends on #2's
-  term machinery and has no demo pressure yet.
+#### 3. Impl-method const-predicate conformance — **LANDED (M0, `468bb69b7`)**
+- ~~`compare_constraints` compares trait constraints only; an impl method can
+  silently weaken/strengthen const predicates.~~ **Done.** `compare_impl_method`
+  (`method_cmp.rs:62`) now calls `compare_const_predicates`
+  (`method_cmp.rs:1050-1086`), which compares the impl-method vs trait-method
+  const-predicate sets by **normalized-term identity** (reusing #2's term
+  machinery, plus `func_predicate_assumptions` to supply the implicit
+  `Self: Trait` so a trait method's `Self::SIZE`-style predicate lowers) and
+  emits **`6-0016`** `MethodConstPredicateMismatch` (`diagnostics.rs:1074`,
+  TraitSatisfaction pass) on mismatch. Tracked as task M0 / graph node MC00.
 
 #### 4. Const-predicate WF in signatures — **CORE_M5_NEXT (folded into #1)**
 - This is the signature half of #1: `check_ty_wf` (`trait_resolution/mod.rs:278`,
@@ -449,8 +453,10 @@ to match, or implement the specific codes.
 3. Any obligation surface that slipped from M5 (e.g. bodyless signatures).
 4. **`const_assert` / body-assertion receipts** (`VcSite::ConstAssert`).
 5. **Method-conformance queue routing + evidence origin** (the bidirectional
-   check itself is M5/B8; `compare_constraints` is trait-only today — exact
-   matching, no implication solver).
+   check itself landed as M0/`6-0016`; `compare_const_predicates` uses **exact
+   normalized-term matching, no implication solver** — the remaining work is
+   routing conformance through the obligation queue with a proper evidence
+   origin, not the comparison itself).
 6. First useful **`fe explain` / hover** (and `--chain`).
 7. HKT assoc-const ICE fix (`body.rs:730`) if still open.
 

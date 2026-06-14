@@ -1338,7 +1338,7 @@
         "core K07 drift; NEEDS_DESIGN per consolidation map item 6"
       ],
       "bridge_status": "BRIDGE_AT_RISK",
-      "current_mechanism": "provider.rs:30-31,176-190; exemption analysis/ty/mod.rs:386-389,721 and semantic/borrowck/check.rs:185",
+      "current_mechanism": "provider.rs:30-31,176-190; exemption analysis/ty/mod.rs:386-389,718-721 and semantic/borrowck/check.rs:185",
       "final_target": "P10/P20/P30 then K07",
       "risk_if_fossilized": "authority = whatever the executor accepts; permanent type/borrowck hole for provider bodies; no evidence trail for grants",
       "nearest_guard_fixture": "fe_test/zero_sized_capability_provider.fe (behavioral; no authority/escape guard)",
@@ -1568,7 +1568,8 @@
       "uncertain": false,
       "acceptance": [],
       "notes": [
-        "architect: provider bridge PASS; method/provision resolution is the problem"
+        "architect: provider bridge PASS; method/provision resolution is the problem",
+        "REPO RECONCILE 2026-06-14: the FINDING is now FIXED (working tree, pending commit). method_selection.rs uses impls_for_ty_with_constraints (gate-not-erase fallback); trait_def.rs:296 folds the blanket guard to the concrete goal and drops UnSat candidates. The repro graduated to a PASSING fixture crates/fe/tests/fixtures/fe_test/derived_clone.fe (exit-0 glob). The original ambiguity description above is retained as the rationale for the gating. See PS2/PS3."
       ]
     },
     {
@@ -1663,10 +1664,11 @@
       "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
       "kind": "capability",
       "description": "Method-candidate assembly must discharge a candidate provision's conditions for the (concrete) receiver before reporting ambiguity / selecting. The StableClone `p.clone()` ambiguity lives here.",
-      "uncertain": true,
+      "uncertain": false,
       "acceptance": [],
       "notes": [
-        "PARTIALLY LANDED: method selection now uses impls_for_ty_with_constraints (drops unsatisfiable-guard blanket candidates for concrete receivers) — see STCLONE"
+        "LANDED 2026-06-14: method-candidate assembly prefers the constraint-gated impl set (impls_for_ty_with_constraints), dropping a conditional-blanket provision whose `where` clause is UnSat for the concrete receiver — kills the StableClone `p.clone()` ambiguity. trait_def.rs folds the blanket guard to the concrete goal before satisfiability (a `?T: Copy` guard was never judged UnSat before).",
+        "gate-not-erase: if no constraint-satisfied impl supplies the method, method_selection.rs falls back to the full structural set so a sole bound-failing impl still yields the precise `trait bound not satisfied` (6-0003), not a bare `no method named` (2-0010) — verified by run_trait_bound__occurence_check. Fixtures: STCLONE (derived_clone.fe, passing), occurence_check (6-0003 preserved)."
       ],
       "migration_class": "PROVISIONIZATION_TARGET"
     },

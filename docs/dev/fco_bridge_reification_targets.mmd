@@ -1,0 +1,99 @@
+flowchart TD
+  %% FCO bridge + reification target inventory (companion to fco_bridge_reification_targets.json)
+  %% Grouped by migration_class; edges are graduation dependencies (A --> B = A graduates via/after B).
+  %% Generated 2026-06-14 from a repo-grounded audit. Status suffix in brackets.
+
+  subgraph BRIDGE["BRIDGE (temporary stand-in; graduates away)"]
+    DERIVE["TGT-DERIVE-MARKER<br/>Derive compiler-known marker<br/><small>GRADUATION_TARGET · COMPLETE_AND_TESTED</small>"]
+    EVMARK["TGT-EVIDENCE-IMPLBUILDER-MARKERS<br/>Evidence/ImplBuilder/Reflect opaque markers<br/><small>BRIDGE_INTENTIONAL · COMPLETE_AND_TESTED</small>"]
+    REFL["TGT-REFLECTION-BINDING<br/>Reflection handle-based (method-name strings)<br/><small>BRIDGE_INTENTIONAL · COMPLETE_AND_TESTED</small>"]
+    TRAITSC["TGT-TRAITS-AS-STAR-TO-CONSTRAINT<br/>traits as * -> Constraint (ConstraintTerm)<br/><small>GRADUATION_TARGET · ABSENT</small>"]
+    EVREAL["TGT-EVIDENCE-OVER-REAL-CONSTRAINTS<br/>Evidence&lt;Goal&gt; as kinded application<br/><small>GRADUATION_TARGET · ABSENT</small>"]
+    KANY["TGT-KIND-ANY-PLANNED-FORM-TRAP<br/>Kind::Any accept-and-ignore hazard<br/><small>BRIDGE_AT_RISK · PARTIAL</small>"]
+  end
+
+  subgraph PROVIDERIZE["PROVIDERIZATION_TARGET (hardcoded Rust codegen -> Fe provider)"]
+    ABI["TGT-HARDCODED-ABI-EVENT-ERROR-MSG<br/>ABI/event/error/msg Rust lowering<br/><small>BRIDGE_INTENTIONAL · COMPLETE_AND_TESTED</small>"]
+    GENVAL["TGT-GENERATED-ITEM-VALIDATION<br/>generated-item validation + provenance gap<br/><small>BRIDGE_AT_RISK · PARTIAL</small>"]
+  end
+
+  subgraph PROVISIONIZE["PROVISIONIZATION_TARGET (resolution logic -> scoped ProvisionEnv)"]
+    AUTH["TGT-PROVIDER-AUTHORITY-STRINGKEY<br/>provider capability string-keyed + body-exempt<br/><small>BRIDGE_AT_RISK · COMPLETE_BUT_UNDERTESTED</small>"]
+    COHERE["TGT-GLOBAL-COHERENCE-CHECKING<br/>global coherence (5-0001) bridge<br/><small>BRIDGE_AT_RISK · COMPLETE_AND_TESTED</small>"]
+    CONDBLK["TGT-CONDITIONAL-BLANKET-PROVISIONS<br/>conditional blanket impls as provisions<br/><small>BRIDGE_AT_RISK · PARTIAL</small>"]
+    METHGATE["TGT-METHOD-RESOLUTION-CANDIDATE-GATING<br/>method gating by provision conditions (PS2/PS3)<br/><small>BRIDGE_AT_RISK · PARTIAL (working tree)</small>"]
+    PENV["TGT-SCOPE-TIERS-PROVISION-ENV<br/>scope-tiered ProvisionEnv (PS1)<br/><small>GRADUATION_TARGET · ABSENT</small>"]
+    CANON["TGT-CANONICAL-ONLY-TRAITS<br/>canonical-only traits safety valve (PS5)<br/><small>GRADUATION_TARGET · ABSENT</small>"]
+    WITNESS["TGT-WITNESS-CAPTURE-TYPE-IDENTITY<br/>witness capture in type identity (PS6)<br/><small>GRADUATION_TARGET · ABSENT</small>"]
+  end
+
+  subgraph KERNEL["KERNEL_PRIMITIVE (stays compiler primitive; gains Fe-facing spec)"]
+    MRC["TGT-MERGE-RUNTIME-CLASS<br/>merge_runtime_class MIR patch<br/><small>BRIDGE_INTENTIONAL · COMPLETE_BUT_UNDERTESTED</small>"]
+    UNCHK["TGT-ARITHMETIC-UNCHECKED<br/>unchecked arithmetic vs proof evidence<br/><small>BRIDGE_INTENTIONAL · NOT_EXPRESSIBLE_YET</small>"]
+  end
+
+  subgraph DIAG["DIAGNOSTIC_GUARD"]
+    QUOTE["TGT-QUOTE-FRAGMENT-LIMITS<br/>quote hygiene / fragment limits (8-0084,13-00xx)<br/><small>DIAGNOSTIC_GUARD · COMPLETE_AND_TESTED</small>"]
+    TAXO["TGT-DIAGNOSTIC-TAXONOMY-DRIFT<br/>code-as-SSOT, doc lag, 8-0086 reserved<br/><small>DIAGNOSTIC_GUARD · PARTIAL</small>"]
+  end
+
+  subgraph CONSUMER["EVIDENCE_CONSUMER"]
+    SCHEMA["TGT-EVIDENCE-SCHEMA-SEPARATION<br/>schema vs rendering separation<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+    RECEIPT["TGT-RECEIPT-RENDERING<br/>LSP hover reads evidence<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+  end
+
+  subgraph NATIVE["NATIVE (already in final form)"]
+    CKIND["TGT-CONSTRAINT-KIND<br/>Kind::Constraint (K02a landed)<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+    WFDISCH["TGT-ADT-WF-CONST-PREDICATE-DISCHARGE<br/>ADT/sig/WF discharge<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+    ASSUME["TGT-ASSUMPTION-ROUTE-EXACT-MATCH<br/>assumption-route exact match + evidence<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+    GATE["TGT-IMPL-PREDICATE-GATE-NOT-SELECT<br/>gate-not-select (trait + method-call)<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+    MCONF["TGT-METHOD-CONFORMANCE-CONST-PREDICATE<br/>M0 method conformance (6-0016)<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+    PREM["TGT-PREMISE-MODEL<br/>premise model (CTFE empty / Assumption populated)<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+    PLAT["TGT-BACKEND-PLATFORM-FACTS<br/>backend/platform facts as assoc-const obligations<br/><small>FINAL · COMPLETE_AND_TESTED</small>"]
+  end
+
+  subgraph REIFY["REIFICATION_TARGET (umbrella / future)"]
+    CTCUB["TGT-CTCUBFE-FORMS<br/>CTCubFe forms 0-6 / law / proof / transport<br/><small>GRADUATION_TARGET · BLOCKED_BY_DESIGN</small>"]
+  end
+
+  %% graduation-dependency edges (A --> B : A graduates via/after B)
+  DERIVE --> CKIND
+  DERIVE --> EVREAL
+  EVMARK --> EVREAL
+  EVREAL --> AUTH
+  TRAITSC --> CKIND
+  KANY --> CKIND
+  ABI --> AUTH
+  GENVAL --> AUTH
+  METHGATE --> CONDBLK
+  CONDBLK --> PENV
+  METHGATE --> PENV
+  COHERE --> PENV
+  CANON --> PENV
+  WITNESS --> CANON
+  WFDISCH --> SCHEMA
+  ASSUME --> PREM
+  UNCHK --> PREM
+  MRC --> UNCHK
+  CTCUB --> TRAITSC
+  CTCUB --> PENV
+  CTCUB --> UNCHK
+  RECEIPT --> SCHEMA
+
+  classDef bridge fill:#4a148c,color:#fff,stroke:#7b1fa2;
+  classDef providerize fill:#1b5e20,color:#fff,stroke:#2e7d32;
+  classDef provisionize fill:#b71c1c,color:#fff,stroke:#e53935;
+  classDef kernel fill:#3e2723,color:#fff,stroke:#6d4c41;
+  classDef diag fill:#e65100,color:#fff,stroke:#fb8c00;
+  classDef consumer fill:#01579b,color:#fff,stroke:#0288d1;
+  classDef native fill:#263238,color:#fff,stroke:#607d8b;
+  classDef reify fill:#880e4f,color:#fff,stroke:#c2185b;
+
+  class DERIVE,EVMARK,REFL,TRAITSC,EVREAL,KANY bridge;
+  class ABI,GENVAL providerize;
+  class AUTH,COHERE,CONDBLK,METHGATE,PENV,CANON,WITNESS provisionize;
+  class MRC,UNCHK kernel;
+  class QUOTE,TAXO diag;
+  class SCHEMA,RECEIPT consumer;
+  class CKIND,WFDISCH,ASSUME,GATE,MCONF,PREM,PLAT native;
+  class CTCUB reify;

@@ -202,20 +202,22 @@ flowchart TD
   end
 
 
-  subgraph Scoped_provision["Scoped provision / global-trait bridge"]
-    PS0["PS0 global trait env as bridge<br/><small>bridge</small>"]
-    PS1["PS1 conditional blanket provisions<br/><small>impl&lt;T:Copy&gt; Clone for T</small>"]
-    PS2["PS2 method-resolution candidate gating<br/><small>capability</small>"]
-    PS3["PS3 scoped provision priority<br/><small>with&gt;uses&gt;module&gt;import&gt;companion</small>"]
-    PS4["PS4 canonical-only traits<br/><small>Ord/Hash/ABI</small>"]
-    PS5["PS5 witness capture in type identity<br/><small>capability</small>"]
-    STCLONE["StableClone pressure-test<br/><small>provider PASS; method ambiguity</small>"]
-  end
   subgraph Original_draft_parity["Original draft parity"]
     OD0["OD0 kinded-obligation parsing parity<br/><small>ANSWERED: effort2 had it, port regression</small>"]
     OD1["OD1 A&lt;B&gt; -&gt; * named rejection<br/><small>diagnostic</small>"]
     OD2["OD2 * -&gt; A&lt;B&gt; / * -&gt; Constraint named rejection<br/><small>diagnostic</small>"]
     OD3["OD3 Derive : * -&gt; Constraint graduation<br/><small>= K04</small>"]
+  end
+
+  subgraph Scoped_provision["Scoped provision / global-trait bridge (ProvisionEnv)"]
+    PS0["PS0 global trait env as bridge<br/><small>companion provisions</small>"]
+    PS1["PS1 frame-based ProvisionEnv<br/><small>with&gt;uses/where&gt;module&gt;import&gt;companion</small>"]
+    PS2["PS2 conditional blanket provisions<br/><small>impl&lt;T:Copy&gt; Clone for T</small>"]
+    PS3["PS3 method-resolution candidate gating<br/><small>LANDED (StableClone green)</small>"]
+    PS4["PS4 effects/caps/generated impls as provisions<br/><small>capability</small>"]
+    PS5["PS5 canonical-only markers<br/><small>Ord/Hash/ABI</small>"]
+    PS6["PS6 witness capture in type identity<br/><small>capability</small>"]
+    STCLONE["StableClone pressure-test<br/><small>PS3 regression — green</small>"]
   end
 
   T00 --> T10
@@ -445,24 +447,21 @@ flowchart TD
   BR12 -. "graduates" .-> G00
 
 
-  %% Scoped-provision + original-draft-parity
-  F04 --> PS0
-  PV00 --> PS0
+
+  %% Scoped-provision (ProvisionEnv)
+  PV20 --> PS1
+  F04 --> PS1
   PS0 --> PS1
   PS1 --> PS2
-  PS0 --> PS3
-  PS3 --> PS4
-  PS4 --> PS5
-  STCLONE --> PS1
+  PS2 --> PS3
+  PS1 --> PS4
+  PS1 --> PS5
+  PS5 --> PS6
   STCLONE --> PS2
+  STCLONE --> PS3
   BR13 --> PS0
-  OD0 --> OD1
-  OD0 --> OD2
-  OD0 --> OD3
-  OD1 --> K01
-  OD2 --> K01
-  OD3 -. "= K04" .-> K04
-  OD0 -. "revival" .-> K02
+  H10 -. "canonical-sensitive" .-> PS5
+  PS1 -. "resolves" .-> K02
 
   classDef uncertain stroke-dasharray: 5 5;
   class AC00 uncertain;
@@ -495,11 +494,11 @@ flowchart TD
   class K05 uncertain;
   class K06 uncertain;
   class K08 uncertain;
-  class PS1 uncertain;
-  class PS2 uncertain;
-  class PS3 uncertain;
-  class PS4 uncertain;
-  class PS5 uncertain;
   class OD1 uncertain;
   class OD2 uncertain;
   class OD3 uncertain;
+  class PS1 uncertain;
+  class PS2 uncertain;
+  class PS4 uncertain;
+  class PS5 uncertain;
+  class PS6 uncertain;
