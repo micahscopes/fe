@@ -25,7 +25,7 @@ use super::{
 use crate::{
     HirDb,
     hir_def::{
-        AssocConstDef, AssocTyDef, BinOp, CompBinOp, Expr, ExprId, Field, FieldIndex,
+        ArithBinOp, AssocConstDef, AssocTyDef, BinOp, CompBinOp, Expr, ExprId, Field, FieldIndex,
         FuncModifiers, GenericArg, IdentId, IntegerId, LitKind, LogicalBinOp, MatchArm, Partial,
         PathId, PathKind, RecordPatField, TraitRefId, TupleTypeId, TypeBound, TypeId, TypeKind,
         Visibility, WhereClauseId, WherePredicate,
@@ -263,6 +263,11 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let lhs = self.replay_expr(body, *lhs);
                 let rhs = self.replay_expr(body, *rhs);
                 body.push_expr(Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::Or)))
+            }
+            GenExpr::Add(lhs, rhs) => {
+                let lhs = self.replay_expr(body, *lhs);
+                let rhs = self.replay_expr(body, *rhs);
+                body.push_expr(Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Add)))
             }
             GenExpr::SelfRef => body.path_expr(PathId::from_ident(db, IdentId::make_self(db))),
             GenExpr::ArgRef(name) => body.ident_expr(*name),

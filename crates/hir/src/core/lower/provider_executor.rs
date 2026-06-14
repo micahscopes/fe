@@ -116,6 +116,9 @@ pub(super) enum GenExpr<'db> {
     And(GenExprId, GenExprId),
     /// `lhs || rhs`
     Or(GenExprId, GenExprId),
+    /// `lhs + rhs` (integer addition; used by layout-fact providers folding
+    /// per-field size consts, e.g. ABI `HEAD_WORDS`).
+    Add(GenExprId, GenExprId),
     /// The generated method's `self` value.
     SelfRef,
     /// A reference to a generated method parameter by name.
@@ -1663,6 +1666,16 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
                 let rhs = self.gen_expr_arg(rhs.expr)?;
                 Ok(self.push_expr(GenExpr::And(lhs, rhs)))
+            }
+            ("add", [lhs, rhs]) => {
+                let lhs = self.gen_expr_arg(lhs.expr)?;
+                let rhs = self.gen_expr_arg(rhs.expr)?;
+                Ok(self.push_expr(GenExpr::Add(lhs, rhs)))
+            }
+            ("or", [lhs, rhs]) => {
+                let lhs = self.gen_expr_arg(lhs.expr)?;
+                let rhs = self.gen_expr_arg(rhs.expr)?;
+                Ok(self.push_expr(GenExpr::Or(lhs, rhs)))
             }
             ("self_ref", []) => Ok(self.push_expr(GenExpr::SelfRef)),
             ("arg_ref", [arg]) => {
