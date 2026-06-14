@@ -1,0 +1,118 @@
+// Std-lib derive provider: lexicographic `Ord` (lt/le/gt/ge) authored on the
+// existing provider/builder bridge, mirroring StableEq/StableClone. Struct-only
+// (the same scope as the StableClone fixture), exercised through the generated
+// comparison methods.
+//
+// This is "safe std-lib polish" per the bridge + reification inventory
+// (docs/dev/FCO_BRIDGE_AND_REIFICATION_TARGETS.md, finding #5): it rides the
+// existing typed-provider bridge and depends on NEITHER the Constraint-kind
+// graduation (K02-K04) NOR scoped ProvisionEnv. It grows the thin std-lib
+// provider coverage (previously only StableEq / StableDefault / StableEip712 /
+// StableClone).
+
+use core::ops::Eq
+use core::ops::Ord
+
+impl StableOrd: Derive for Ord {
+    const fn derive<T>(ev: own Evidence<Ord<T>>) -> Evidence<Ord<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Ord<T>>,
+        )
+    {
+        if reflect.is_struct() {
+            // Lexicographic order as a left fold over fields. For field i,
+            // `eq_prefix` is `self.f0 == other.f0 && .. && self.f{i-1} == other.f{i-1}`:
+            //   lt = OR_i (eq_prefix_i && self.fi < other.fi)
+            //   gt = OR_i (eq_prefix_i && self.fi > other.fi)
+            //   le = lt || full_eq          ge = gt || full_eq
+            // The leading `false ||` / `true &&` seeds are folded away by MIR
+            // (the same trick StableEq uses for its `true &&` seed). Splices are
+            // AST-level, so the `(eq_prefix && cmp)` grouping is hygienic — no
+            // operator-precedence hazard. Comparisons use the `<`/`>` operators
+            // (the quote fragment supports `&&`, `||`, `==`, `<`, `>`); the
+            // operators are type-directed, so `self.x < other.x` resolves against
+            // the field type's `Ord` impl (a bare `.lt()` method call would
+            // mis-resolve against the goal trait's `Ord<Self>`).
+            let mut lt_body = quote { false }
+            let mut gt_body = quote { false }
+            let mut eq_prefix = quote { true }
+            for field in reflect.fields() {
+                builder.require<Ord>(field.ty())
+                builder.require<Eq>(field.ty())
+                lt_body = quote(other) {
+                    ${lt_body} || (${eq_prefix} && self.${field} < other.${field})
+                }
+                gt_body = quote(other) {
+                    ${gt_body} || (${eq_prefix} && self.${field} > other.${field})
+                }
+                eq_prefix = quote(other) {
+                    ${eq_prefix} && self.${field} == other.${field}
+                }
+            }
+            let le_body = quote { ${lt_body} || ${eq_prefix} }
+            let ge_body = quote { ${gt_body} || ${eq_prefix} }
+
+            let mut lt_sig = builder.method("lt")
+            lt_sig = builder.with_self(lt_sig)
+            lt_sig = builder.with_arg(lt_sig, "other", builder.target_ty())
+            lt_sig = builder.returns(lt_sig, builder.ty<bool>())
+            builder.emit_method(lt_sig, lt_body)
+
+            let mut le_sig = builder.method("le")
+            le_sig = builder.with_self(le_sig)
+            le_sig = builder.with_arg(le_sig, "other", builder.target_ty())
+            le_sig = builder.returns(le_sig, builder.ty<bool>())
+            builder.emit_method(le_sig, le_body)
+
+            let mut gt_sig = builder.method("gt")
+            gt_sig = builder.with_self(gt_sig)
+            gt_sig = builder.with_arg(gt_sig, "other", builder.target_ty())
+            gt_sig = builder.returns(gt_sig, builder.ty<bool>())
+            builder.emit_method(gt_sig, gt_body)
+
+            let mut ge_sig = builder.method("ge")
+            ge_sig = builder.with_self(ge_sig)
+            ge_sig = builder.with_arg(ge_sig, "other", builder.target_ty())
+            ge_sig = builder.returns(ge_sig, builder.ty<bool>())
+            builder.emit_method(ge_sig, ge_body)
+        }
+        builder.finish()
+        ev
+    }
+}
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+derive Ord for Point using StableOrd
+
+// Fresh operands per comparison so the test body doesn't depend on `Point`
+// being `Copy` (Ord methods take `self`/`other` by value).
+#[test]
+fn ord_primary_field_decides() {
+    assert!(Point { x: 1, y: 9 }.lt(Point { x: 2, y: 0 }))
+    assert!(Point { x: 1, y: 9 }.le(Point { x: 2, y: 0 }))
+    assert!(Point { x: 2, y: 0 }.gt(Point { x: 1, y: 9 }))
+    assert!(Point { x: 2, y: 0 }.ge(Point { x: 1, y: 9 }))
+    assert!(!Point { x: 1, y: 9 }.gt(Point { x: 2, y: 0 }))
+}
+
+#[test]
+fn ord_secondary_field_breaks_tie() {
+    // primary field equal (5 == 5); the secondary field decides.
+    assert!(Point { x: 5, y: 3 }.lt(Point { x: 5, y: 7 }))
+    assert!(!Point { x: 5, y: 7 }.lt(Point { x: 5, y: 3 }))
+    assert!(Point { x: 5, y: 3 }.le(Point { x: 5, y: 7 }))
+    assert!(Point { x: 5, y: 7 }.gt(Point { x: 5, y: 3 }))
+}
+
+#[test]
+fn ord_equal_is_le_ge_not_lt_gt() {
+    assert!(Point { x: 4, y: 4 }.le(Point { x: 4, y: 4 }))
+    assert!(Point { x: 4, y: 4 }.ge(Point { x: 4, y: 4 }))
+    assert!(!Point { x: 4, y: 4 }.lt(Point { x: 4, y: 4 }))
+    assert!(!Point { x: 4, y: 4 }.gt(Point { x: 4, y: 4 }))
+}

@@ -114,6 +114,8 @@ pub(super) enum GenExpr<'db> {
     Bool(bool),
     /// `lhs && rhs`
     And(GenExprId, GenExprId),
+    /// `lhs || rhs`
+    Or(GenExprId, GenExprId),
     /// The generated method's `self` value.
     SelfRef,
     /// A reference to a generated method parameter by name.
@@ -122,6 +124,10 @@ pub(super) enum GenExpr<'db> {
     FieldGet(GenExprId, FieldKey),
     /// `lhs == rhs`
     EqCmp(GenExprId, GenExprId),
+    /// `lhs < rhs`
+    LtCmp(GenExprId, GenExprId),
+    /// `lhs > rhs`
+    GtCmp(GenExprId, GenExprId),
     /// `<ty as GoalishTrait>::method(args..)` — a qualified call of the
     /// request's goal trait method on `ty` (`Self::method(args..)` when `ty`
     /// is the `Self` type).
@@ -1147,15 +1153,34 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
                 Ok(self.push_gen(GenExpr::And(lhs, rhs)))
             }
+            Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::Or)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
+                Ok(self.push_gen(GenExpr::Or(lhs, rhs)))
+            }
             Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)) => {
                 let (lhs, rhs) = (*lhs, *rhs);
                 let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
                 let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
                 Ok(self.push_gen(GenExpr::EqCmp(lhs, rhs)))
             }
+            Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Lt)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
+                Ok(self.push_gen(GenExpr::LtCmp(lhs, rhs)))
+            }
+            Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Gt)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
+                Ok(self.push_gen(GenExpr::GtCmp(lhs, rhs)))
+            }
             Expr::Bin(..) => Err(self.invalid_quote(
                 expr,
-                "this operator is not supported in quote bodies (quotes support `&&` and `==`)",
+                "this operator is not supported in quote bodies (quotes support `&&`, `||`, \
+                 `==`, `<`, `>`, and method calls)",
             )),
             Expr::Path(_) => {
                 let Some(name) = self.simple_expr_path_ident(expr) else {

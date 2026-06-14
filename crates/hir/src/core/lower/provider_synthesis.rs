@@ -259,6 +259,11 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let rhs = self.replay_expr(body, *rhs);
                 body.push_expr(Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::And)))
             }
+            GenExpr::Or(lhs, rhs) => {
+                let lhs = self.replay_expr(body, *lhs);
+                let rhs = self.replay_expr(body, *rhs);
+                body.push_expr(Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::Or)))
+            }
             GenExpr::SelfRef => body.path_expr(PathId::from_ident(db, IdentId::make_self(db))),
             GenExpr::ArgRef(name) => body.ident_expr(*name),
             GenExpr::FieldGet(base, field) => {
@@ -270,6 +275,16 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let lhs = self.replay_expr(body, *lhs);
                 let rhs = self.replay_expr(body, *rhs);
                 body.push_expr(Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)))
+            }
+            GenExpr::LtCmp(lhs, rhs) => {
+                let lhs = self.replay_expr(body, *lhs);
+                let rhs = self.replay_expr(body, *rhs);
+                body.push_expr(Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Lt)))
+            }
+            GenExpr::GtCmp(lhs, rhs) => {
+                let lhs = self.replay_expr(body, *lhs);
+                let rhs = self.replay_expr(body, *rhs);
+                body.push_expr(Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Gt)))
             }
             GenExpr::TraitCall { ty, method, args } => {
                 let callee_path = self.goal_item_path(db, *ty, *method);
