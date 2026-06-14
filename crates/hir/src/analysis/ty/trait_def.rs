@@ -287,6 +287,13 @@ pub(crate) fn impls_for_ty_with_constraints<'db>(
                 }
 
                 for &constraint in impl_constraints.list(db) {
+                    // The implementor was instantiated with fresh vars and its
+                    // self type unified with `ty`, so fold the predicate through
+                    // the table to get the *concrete* goal (e.g. `Point: Copy`,
+                    // not `?T: Copy`) before checking satisfiability — otherwise a
+                    // conditional blanket's guard (`impl<T: Copy> Clone for T`)
+                    // is never judged UnSat and the impl is kept spuriously.
+                    let constraint = constraint.fold_with(db, &mut table);
                     match is_goal_satisfiable(db, solve_cx, constraint) {
                         GoalSatisfiability::UnSat(_) => {
                             table.rollback_to(snapshot);

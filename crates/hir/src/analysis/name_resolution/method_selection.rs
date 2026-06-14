@@ -10,7 +10,7 @@ use crate::analysis::{
         binder::Binder,
         canonical::{Canonical, Canonicalized, Solution},
         method_table::probe_method,
-        trait_def::{TraitInstId, impls_for_ty},
+        trait_def::{TraitInstId, impls_for_ty, impls_for_ty_with_constraints},
         trait_resolution::{
             CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx,
             is_goal_query_satisfiable,
@@ -168,16 +168,49 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
         let receiver_is_ty_param = receiver_is_ty_param_like(self.db, self.receiver.original());
 
         if !receiver_is_ty_param {
-            let search_ingots = [
+            let search_ingots: Vec<_> = [
                 Some(scope_ingot),
                 self.receiver
                     .original()
                     .ingot(self.db)
                     .filter(|&ingot| ingot != scope_ingot),
-            ];
-            for ingot in search_ingots.into_iter().flatten() {
-                for &imp in impls_for_ty(self.db, ingot, self.receiver.canonical()) {
-                    self.insert_trait_method_cand(imp.skip_binder().trait_(self.db));
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            // PS2 (conditional-provision candidate gating): prefer the
+            // constraint-gated impl set so a conditional blanket impl whose
+            // `where` clause is unsatisfiable for this concrete receiver
+            // (e.g. `impl<T: Copy> Clone for T` applied to a non-`Copy`
+            // `Point`) is dropped, rather than surfacing as a spurious
+            // method-resolution ambiguity against a real impl.
+            let mut supplied_by_gated = false;
+            for &ingot in &search_ingots {
+                for imp in impls_for_ty_with_constraints(
+                    self.db,
+                    ingot,
+                    self.receiver.canonical(),
+                    self.assumptions,
+                ) {
+                    supplied_by_gated |=
+                        self.insert_trait_method_cand(imp.skip_binder().trait_(self.db));
+                }
+            }
+
+            // PS3 (gate-not-erase): gating is for disambiguation among rivals,
+            // not for hiding the only impl. If no constraint-satisfied impl
+            // actually *supplies this method* (e.g. the sole impl that defines
+            // `f` was dropped because its `where` clause is unsatisfiable, while
+            // an unrelated impl that lacks `f` survived gating), fall back to the
+            // full structural set. That keeps the bound-failing impl as a
+            // candidate so `check_inst` reports the precise `trait bound not
+            // satisfied` (6-0003) rather than a bare `no method named` (2-0010).
+            if !supplied_by_gated {
+                for &ingot in &search_ingots {
+                    for imp in impls_for_ty(self.db, ingot, self.receiver.canonical()) {
+                        self.insert_trait_method_cand(imp.skip_binder().trait_(self.db));
+                    }
                 }
             }
         }
@@ -212,13 +245,19 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
         self.trait_.map(|t| t == trait_def).unwrap_or(true)
     }
 
-    fn insert_trait_method_cand(&mut self, inst: TraitInstId<'db>) {
+    /// Inserts `inst` as a trait-method candidate. Returns `true` if the trait
+    /// actually defines the method being resolved (i.e. a usable candidate was
+    /// contributed), `false` otherwise.
+    fn insert_trait_method_cand(&mut self, inst: TraitInstId<'db>) -> bool {
         let trait_def = inst.def(self.db);
         if !self.allow_trait(trait_def) {
-            return;
+            return false;
         }
         if let Some(&trait_method) = trait_def.method_defs(self.db).get(&self.method_name) {
             self.candidates.traits.insert((inst, trait_method));
+            true
+        } else {
+            false
         }
     }
 }

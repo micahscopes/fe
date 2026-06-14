@@ -1,0 +1,83 @@
+// PS2 regression + std-lib derive: a `Clone` derive provider authored on the
+// existing provider/builder bridge, exercised through method calls.
+//
+// History: this was a quarantined repro — the provider generated `impl Clone for
+// Point` fine, but `p.clone()` was ambiguous because method resolution listed the
+// `impl<T: Copy> Clone for T` blanket as a candidate WITHOUT discharging
+// `Point: Copy`. The fix (PS2): method-candidate assembly now uses the
+// constraint-gated impl set, so a conditional blanket impl whose `where` clause
+// is unsatisfiable for the concrete receiver is dropped. It now compiles + runs.
+
+use core::clone::Clone
+
+impl StableClone: Derive for Clone {
+    const fn derive<T>(ev: own Evidence<Clone<T>>) -> Evidence<Clone<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Clone<T>>,
+        )
+    {
+        if reflect.is_struct() {
+            // Self { f0: self.f0.clone(), f1: self.f1.clone(), .. }
+            let mut init = builder.struct_init()
+            for field in reflect.fields() {
+                builder.require<Clone>(field.ty())
+                init = builder.with_field(
+                    init,
+                    field,
+                    builder.call(builder.field_get(builder.self_ref(), field), "clone"),
+                )
+            }
+            let mut sig = builder.method("clone")
+            sig = builder.with_self(sig)
+            sig = builder.returns(sig, builder.self_ty())
+            builder.emit_method(sig, init)
+        }
+        builder.finish()
+        ev
+    }
+}
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+derive Clone for Point using StableClone
+
+struct Nested {
+    p: Point,
+    flag: bool,
+}
+
+derive Clone for Nested using StableClone
+
+#[test]
+fn clone_struct_copies_fields() {
+    let p = Point { x: 7, y: 9 }
+    let q = p.clone()
+    assert!(q.x == 7)
+    assert!(q.y == 9)
+}
+
+#[test]
+fn clone_nested_struct_recurses() {
+    let n = Nested { p: Point { x: 1, y: 2 }, flag: true }
+    let m = n.clone()
+    assert!(m.p.x == 1)
+    assert!(m.p.y == 2)
+    assert!(m.flag)
+}
+
+// The generated impl satisfies a generic `Clone` bound like a hand-written one.
+fn dup<T: Clone>(_ value: T) -> T {
+    value.clone()
+}
+
+#[test]
+fn generated_impl_satisfies_generic_bound() {
+    let p = Point { x: 5, y: 6 }
+    let q = dup(p)
+    assert!(q.x == 5)
+    assert!(q.y == 6)
+}
