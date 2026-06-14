@@ -3172,6 +3172,13 @@ impl<'db> TyChecker<'db> {
             }
         };
 
+        // Gate-2 tail: a concrete trait-method selection commits to an impl just
+        // like a trait-bound call; remember it so its selected-impl const
+        // predicates run through the shared gate-not-select adapter once
+        // `check_args` has fixed the substitution. `NeedsConfirmation` already
+        // raises its own obligation (which routes through the same gate), so it
+        // is intentionally not gated here a second time.
+        let mut method_selection_to_gate: Option<TraitInstId<'db>> = None;
         let (func_ty, trait_inst) = match candidate {
             MethodCandidate::InherentMethod(func_def) => (
                 self.instantiate_inherent_method_to_term(func_def, selected_receiver_ty),
@@ -3181,6 +3188,7 @@ impl<'db> TyChecker<'db> {
             MethodCandidate::TraitMethod(cand) => {
                 let inst = canonical_r_ty.extract_solution(&mut self.table, cand.inst);
                 let inst = self.specialize_same_trait_method_inst(method_name, inst);
+                method_selection_to_gate = Some(inst);
                 let func_ty =
                     self.instantiate_trait_method_to_term(cand.method, selected_receiver_ty, inst);
                 (func_ty, Some(inst))
@@ -3251,6 +3259,13 @@ impl<'db> TyChecker<'db> {
             Some((*receiver, receiver_prop)),
             false,
         );
+
+        // Gate-2 tail: `check_args` has unified the receiver with the impl self
+        // type, so the selection is concrete; route it through the shared
+        // gate-not-select adapter.
+        if let Some(inst) = method_selection_to_gate {
+            self.gate_concrete_method_selection(inst, call_span.clone().into());
+        }
 
         // Check required effects for the method call
         self.check_callable_effects(expr, &mut callable);

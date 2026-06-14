@@ -1575,6 +1575,37 @@ impl<'db> TyChecker<'db> {
             .collect()
     }
 
+    /// Gate-2 tail adapter: a concrete method call commits to an impl exactly as
+    /// a trait-bound call does, but method resolution does not raise the
+    /// selection as a trait obligation on its own. Re-raise the resolved
+    /// selection `inst` as an obligation so its selected-impl `where`-clause
+    /// const predicates run through the *same* discharge → gate-not-select path
+    /// ([`Self::gate_selected_impl_const_predicates`]) — never a bespoke
+    /// method-call checker. Only a concrete goal is gated: a symbolic receiver's
+    /// predicate is the enclosing item's own assumption, discharged by identity
+    /// at its eventual concrete call site (the gate also skips non-concrete
+    /// goals, so this guard is belt-and-suspenders).
+    fn gate_concrete_method_selection(
+        &mut self,
+        inst: TraitInstId<'db>,
+        span: DynLazySpan<'db>,
+    ) {
+        let db = self.db;
+        let inst = inst.fold_with(db, &mut self.table);
+        if inst
+            .args(db)
+            .iter()
+            .any(|ty| ty.has_var(db) || ty.has_param(db) || ty.has_invalid(db))
+        {
+            return;
+        }
+        self.env.register_trait_obligation(env::TraitObligation {
+            goal: inst,
+            origin: env::TraitObligationOrigin::GenericConfirmation,
+            span,
+        });
+    }
+
     /// Gate-not-select: once the trait solver commits to an impl for `goal`,
     /// that impl's own `where`-clause const predicates must hold for the
     /// committing substitution. The substitution is re-derived by unifying the
@@ -1882,6 +1913,18 @@ impl<'db> TyChecker<'db> {
                                     Some((receiver, receiver_prop)),
                                     true,
                                 );
+
+                                // Gate-2 tail: now that `check_args` has unified
+                                // the receiver with the impl's self type, route
+                                // the concrete selection through the shared
+                                // gate-not-select adapter (`needs_confirmation`
+                                // already routed above).
+                                if !candidate.needs_confirmation {
+                                    self.gate_concrete_method_selection(
+                                        inst,
+                                        call_span.clone().into(),
+                                    );
+                                }
 
                                 self.check_callable_effects(pending.expr, &mut callable);
 

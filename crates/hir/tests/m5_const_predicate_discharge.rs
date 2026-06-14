@@ -741,11 +741,11 @@ impl<const N: u256> M for Wrap<N> where N < 50 {}
     );
 }
 
-// Concrete method-call impl selection does not route through the deferred
-// obligation queue, so the selected impl's residual const predicate is not yet
-// gated there. Quarantined until method resolution enqueues the residual.
+// Gate-2 tail: a concrete method call commits to an impl just like a
+// trait-bound call, so the selected impl's residual const predicate is gated
+// through the same obligation → gate-not-select path. `Wrap<10>.big()` selects
+// `impl Big for Wrap<N> where N >= 50`; the gate refutes `10 >= 50`.
 #[test]
-#[ignore = "TODO: gate a selected impl's const predicate on concrete method calls (method resolution must enqueue the residual)"]
 fn impl_const_predicate_gates_method_call() {
     let src = r#"
 trait Big {
@@ -762,6 +762,52 @@ fn bad(w: Wrap<10>) -> u256 {
 }
 "#;
     assert_has_code("impl_gate_method", src, "8-0085");
+}
+
+// The satisfying receiver compiles: the selected impl's const predicate holds.
+#[test]
+fn impl_const_predicate_method_call_satisfied_compiles() {
+    assert_compiles(
+        "impl_gate_method_ok",
+        r#"
+trait Big {
+    fn big(self) -> u256
+}
+struct Wrap<const N: u256> {}
+impl<const N: u256> Big for Wrap<N> where N >= 50 {
+    fn big(self) -> u256 {
+        0
+    }
+}
+fn good(w: Wrap<50>) -> u256 {
+    w.big()
+}
+"#,
+    );
+}
+
+// A symbolic receiver in a generic context must NOT be CTFE-gated at the method
+// call: `T`'s predicate is the enclosing item's own assumption (here forwarded
+// by `where N >= 50`), discharged by identity, not refuted.
+#[test]
+fn impl_const_predicate_method_call_symbolic_not_refuted() {
+    assert_compiles(
+        "impl_gate_method_symbolic",
+        r#"
+trait Big {
+    fn big(self) -> u256
+}
+struct Wrap<const N: u256> {}
+impl<const N: u256> Big for Wrap<N> where N >= 50 {
+    fn big(self) -> u256 {
+        0
+    }
+}
+fn forward<const N: u256>(w: Wrap<N>) -> u256 where N >= 50 {
+    w.big()
+}
+"#,
+    );
 }
 
 #[test]
