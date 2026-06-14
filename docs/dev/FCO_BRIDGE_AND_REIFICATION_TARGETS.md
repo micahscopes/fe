@@ -39,7 +39,7 @@ owner_decision_needed) is in `fco_bridge_reification_targets.json`.
 |---|---|---|---|---|---|---|
 | TGT-DERIVE-MARKER | Derive compiler-known marker | COMPLETE_AND_TESTED | BRIDGE | GRADUATION_TARGET | BR0/K04 | provider.rs:33,93-110; item.rs:810 |
 | TGT-EVIDENCE-IMPLBUILDER-MARKERS | Evidence/ImplBuilder opaque Value markers | COMPLETE_AND_TESTED | BRIDGE | BRIDGE_INTENTIONAL | BR1 | provider_executor.rs:301,385-391 |
-| TGT-PROVIDER-AUTHORITY-STRINGKEY | provider capability string-keyed + body-exempt | COMPLETE_BUT_UNDERTESTED | PROVISIONIZATION_TARGET | BRIDGE_AT_RISK | BR2/K07/P* | provider.rs:30-31,170-190; ty/mod.rs:386-389,718-721; borrowck/check.rs:185 |
+| TGT-PROVIDER-AUTHORITY-STRINGKEY | capability recognition: resolved-identity (K04a-C2/C3) + quarantined string-key shim | PARTIAL | PROVISIONIZATION_TARGET | BRIDGE_AT_RISK | BR2/K07/P* | core::derive::{Reflect,ImplBuilder}; provider.rs path_names_derive_capability; std migrated to identity; shim now fixture-only (removal target). body-exempt unchanged |
 | TGT-GENERATED-ITEM-VALIDATION | generated-item validation + provenance gap | PARTIAL | PROVIDERIZATION_TARGET | BRIDGE_AT_RISK | BR3/H50/P50 | ty_check.rs:242-289; provider.rs:176-190 |
 | TGT-REFLECTION-BINDING | reflection handle-based (method-name strings) | COMPLETE_AND_TESTED | BRIDGE | BRIDGE_INTENTIONAL | BR4 | provider_executor.rs:568-588,1483-1494,2127 |
 | TGT-QUOTE-FRAGMENT-LIMITS | quote hygiene / fragment limits | COMPLETE_AND_TESTED | DIAGNOSTIC_GUARD | DIAGNOSTIC_GUARD | BR5 | diagnostics.rs:694,863; derive.rs:129,736 |
