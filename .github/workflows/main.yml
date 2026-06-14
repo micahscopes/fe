@@ -58,8 +58,10 @@ jobs:
           fi
           # Gate: the discharge-evidence schema keeps its premises one-way
           # door. A discharge that cannot record the checks it depended on
-          # cannot be retrofitted after `fe explain`/hover/cert formats ship;
-          # the slot is reserved inert at M5 (every route is premise-free).
+          # cannot be retrofitted after `fe explain`/hover/cert formats ship.
+          # The Assumption route now records the matched in-scope assumption as
+          # a premise; the Ctfe route is premise-free by design (closed
+          # evaluation). The slot/type must stay present and extensible.
           if [ -f crates/hir/src/analysis/ty/ty_check/mod.rs ] && \
              ! grep -q 'premises' crates/hir/src/analysis/ty/ty_check/mod.rs; then
             echo "gate failed: evidence premises slot removed"; fail=1

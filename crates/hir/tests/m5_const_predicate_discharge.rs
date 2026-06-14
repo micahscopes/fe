@@ -9,8 +9,8 @@
 //! predicate as its own assumption (no false discharge, no false error).
 
 use common::diagnostics::{CompleteDiagnostic, cmp_complete_diagnostics};
-use fe_hir::analysis::ty::ty_check::{DischargeRoute, check_func_body};
-use fe_hir::hir_def::{Expr, Func, Partial, TopLevelMod};
+use fe_hir::analysis::ty::ty_check::{CheckPremise, DischargeRoute, check_func_body};
+use fe_hir::hir_def::{Expr, Func, Partial, TopLevelMod, WhereClauseOwner};
 use fe_hir::test_db::{HirAnalysisTestDb, initialize_analysis_pass};
 
 /// A `Platform` trait carrying a backend fact (`WORD_BITS`), a satisfying
@@ -153,7 +153,28 @@ fn symbolic_forward_discharges_by_matching_assumption() {
         DischargeRoute::Assumption,
         "a symbolic forwarded predicate discharges by assumption, not CTFE"
     );
-    assert!(records[0].premises.is_empty());
+    // A3: the assumption route records the matched in-scope assumption as its
+    // premise — the logical dependency of the discharge. Matching is by exact
+    // identity, so the required and assumption terms are the same term, and the
+    // premise's origin points at `mid`'s own `where`-clause predicate body (the
+    // anchor a receipt resolves to "discharged by assumption at <span>").
+    assert_eq!(records[0].premises.len(), 1, "one matched assumption");
+    let CheckPremise::Assumption {
+        required_term,
+        assumption_term,
+        assumption,
+    } = records[0].premises[0];
+    assert_eq!(
+        required_term, assumption_term,
+        "M5 matches assumptions by exact term identity"
+    );
+    let mid_where_pred = WhereClauseOwner::from(mid)
+        .where_clause(&db)
+        .const_predicates(&db)[0];
+    assert_eq!(
+        assumption, mid_where_pred,
+        "the premise origin is the caller's own `where`-clause predicate body"
+    );
 }
 
 #[test]

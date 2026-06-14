@@ -1130,6 +1130,104 @@ fn term_intern_key(term: TermId<'_>) -> u32 {
     term.as_id().as_u32()
 }
 
+/// Renders a term as compact, source-like text for receipts, hover, and
+/// diagnostics (e.g. `(B::WORD_BITS == 256)`).
+///
+/// Not a parser-faithful printer: every compound node is fully parenthesized so
+/// the structure is unambiguous without re-deriving precedence, and operand
+/// order reflects the *normalized* term (interning order), not the source. It
+/// is a display of identity, which is exactly what an evidence consumer wants.
+pub fn pretty_print_term<'db>(db: &'db dyn HirAnalysisDb, term: TermId<'db>) -> String {
+    match term.data(db) {
+        TermNode::Int(value) => value.data(db).to_string(),
+        TermNode::Bool(value) => value.to_string(),
+        TermNode::ConstParam(ty) => ty.pretty_print(db).to_string(),
+        TermNode::ConstRef(const_) => const_
+            .name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string())
+            .unwrap_or_else(|| "{const}".to_string()),
+        TermNode::AssocConst { inst, name } => {
+            format!("{}::{}", inst.self_ty(db).pretty_print(db), name.data(db))
+        }
+        TermNode::Arith { op, lhs, rhs } => format!(
+            "({} {} {})",
+            pretty_print_term(db, *lhs),
+            arith_op_symbol(*op),
+            pretty_print_term(db, *rhs),
+        ),
+        TermNode::Cmp { op, lhs, rhs } => format!(
+            "({} {} {})",
+            pretty_print_term(db, *lhs),
+            cmp_op_symbol(*op),
+            pretty_print_term(db, *rhs),
+        ),
+        TermNode::And(lhs, rhs) => format!(
+            "({} && {})",
+            pretty_print_term(db, *lhs),
+            pretty_print_term(db, *rhs),
+        ),
+        TermNode::Or(lhs, rhs) => format!(
+            "({} || {})",
+            pretty_print_term(db, *lhs),
+            pretty_print_term(db, *rhs),
+        ),
+        TermNode::Not(inner) => format!("!{}", pretty_print_term(db, *inner)),
+        TermNode::App {
+            callee,
+            generic_args,
+            args,
+        } => {
+            let generics = if generic_args.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "::<{}>",
+                    generic_args
+                        .iter()
+                        .map(|ty| ty.pretty_print(db).to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            };
+            let call_args = args
+                .iter()
+                .map(|arg| pretty_print_term(db, *arg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let callee = callee
+                .name(db)
+                .to_opt()
+                .map(|name| name.data(db).to_string())
+                .unwrap_or_else(|| "{fn}".to_string());
+            format!("{callee}{generics}({call_args})")
+        }
+    }
+}
+
+/// The source spelling of a term arithmetic operator.
+fn arith_op_symbol(op: TermArithOp) -> &'static str {
+    match op {
+        TermArithOp::Add => "+",
+        TermArithOp::Sub => "-",
+        TermArithOp::Mul => "*",
+        TermArithOp::Div => "/",
+        TermArithOp::Rem => "%",
+    }
+}
+
+/// The source spelling of a term comparison operator.
+fn cmp_op_symbol(op: TermCmpOp) -> &'static str {
+    match op {
+        TermCmpOp::Eq => "==",
+        TermCmpOp::Ne => "!=",
+        TermCmpOp::Lt => "<",
+        TermCmpOp::Le => "<=",
+        TermCmpOp::Gt => ">",
+        TermCmpOp::Ge => ">=",
+    }
+}
+
 /// FNV-1a fingerprint of the term-language shape: [`TERM_LANG_SHAPE`],
 /// [`TERM_ARITH_OP_SHAPE`], [`TERM_CMP_OP_SHAPE`], and
 /// [`NORMALIZATION_RULES`].

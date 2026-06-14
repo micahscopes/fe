@@ -5,7 +5,8 @@ use common::file::File;
 use hir::{
     HirDb,
     analysis::ty::{
-        ty_check::{DischargeRoute, EffectParamSite, LocalBinding, ParamSite},
+        term::pretty_print_term,
+        ty_check::{CheckPremise, DischargeRoute, EffectParamSite, LocalBinding, ParamSite},
         ty_def::TyId,
     },
     core::semantic::{
@@ -268,9 +269,10 @@ fn discharged_obligations_footer<'db>(
 
 /// Renders the `where`-clause const predicates that type checking discharged
 /// for the call under the cursor: the route each took (CTFE evaluation or an
-/// in-scope assumption) and the type substitution it was discharged under. The
-/// `premises` slot is shown only when non-empty (always empty at M5). This is
-/// the user-facing consumer of the const-predicate evidence record.
+/// in-scope assumption) and the type substitution it was discharged under.
+/// Premises are shown when present — the matched in-scope assumption for the
+/// assumption route; the CTFE route is premise-free. This is the user-facing
+/// consumer of the const-predicate evidence record.
 fn discharged_const_predicates_footer<'db>(
     db: &'db DriverDataBase,
     reference: &ReferenceView<'db>,
@@ -293,7 +295,17 @@ fn discharged_const_predicates_footer<'db>(
             let premises = if discharged.premises.is_empty() {
                 String::new()
             } else {
-                format!(", premises: {}", discharged.premises.len())
+                let rendered = discharged
+                    .premises
+                    .iter()
+                    .map(|premise| match premise {
+                        CheckPremise::Assumption {
+                            assumption_term, ..
+                        } => format!("`{}`", pretty_print_term(db, *assumption_term)),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(", from assumption {rendered}")
             };
             format!("- const predicate discharged by {route} (with `{args}`){premises}")
         })

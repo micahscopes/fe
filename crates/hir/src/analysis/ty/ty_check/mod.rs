@@ -1440,9 +1440,13 @@ impl<'db> TyChecker<'db> {
         };
         match eval_body_owner_const(db, owner, args.clone()) {
             Ok(value) => match static_assert_bool_value(db, value) {
-                Some(true) => {
-                    self.record_discharged_const_predicate(obligation, args, DischargeRoute::Ctfe)
-                }
+                // A closed CTFE discharge consults nothing else: premise-free.
+                Some(true) => self.record_discharged_const_predicate(
+                    obligation,
+                    args,
+                    DischargeRoute::Ctfe,
+                    Vec::new(),
+                ),
                 Some(false) => self.push_diag(BodyDiag::WhereConstPredicateFailed {
                     primary: obligation.span.clone(),
                 }),
@@ -1471,6 +1475,7 @@ impl<'db> TyChecker<'db> {
         obligation: env::ConstPredicateObligation<'db>,
         generic_args: Vec<TyId<'db>>,
         route: DischargeRoute,
+        premises: Vec<CheckPremise<'db>>,
     ) {
         self.env
             .record_discharged_const_predicate(DischargedConstPredicate {
@@ -1478,7 +1483,7 @@ impl<'db> TyChecker<'db> {
                 predicate: obligation.predicate,
                 generic_args,
                 route,
-                premises: Vec::new(),
+                premises,
             });
     }
 
@@ -1518,8 +1523,25 @@ impl<'db> TyChecker<'db> {
         };
         let goal_term = normalize_term(db, substitute_term(db, goal_term, &args));
 
-        if self.const_predicate_assumption_terms().contains(&goal_term) {
-            self.record_discharged_const_predicate(obligation, args, DischargeRoute::Assumption);
+        if let Some((assumption_term, assumption)) = self
+            .const_predicate_assumptions()
+            .into_iter()
+            .find(|(term, _)| *term == goal_term)
+        {
+            // Record the matched in-scope assumption as this discharge's
+            // premise: the logical dependency a receipt/explain consumer needs
+            // to say "required P, discharged by assumption P at <span>".
+            let premise = CheckPremise::Assumption {
+                required_term: goal_term,
+                assumption_term,
+                assumption,
+            };
+            self.record_discharged_const_predicate(
+                obligation,
+                args,
+                DischargeRoute::Assumption,
+                vec![premise],
+            );
         } else {
             // No in-scope assumption proves it and the subject is symbolic, so
             // CTFE cannot decide it either: this is a hard failure.
@@ -1530,9 +1552,12 @@ impl<'db> TyChecker<'db> {
         ConstPredicateOutcome::Discharged
     }
 
-    /// The caller's own `where`-clause const predicates, lowered to normalized
-    /// terms — the assumptions a symbolic obligation may discharge against.
-    fn const_predicate_assumption_terms(&self) -> Vec<TermId<'db>> {
+    /// The caller's own `where`-clause const predicates, each lowered to a
+    /// normalized term paired with the predicate body it came from — the
+    /// assumptions a symbolic obligation may discharge against, and the origin
+    /// recorded as the discharge premise. Predicates outside the term fragment
+    /// are skipped (their formation is diagnosed elsewhere).
+    fn const_predicate_assumptions(&self) -> Vec<(TermId<'db>, Body<'db>)> {
         let db = self.db;
         let BodyOwner::Func(func) = self.env.owner() else {
             return Vec::new();
@@ -1545,7 +1570,7 @@ impl<'db> TyChecker<'db> {
             .filter_map(|&predicate| {
                 lower_hir_to_term(db, predicate, predicate.expr(db), assumptions)
                     .ok()
-                    .map(|term| normalize_term(db, term))
+                    .map(|term| (normalize_term(db, term), predicate))
             })
             .collect()
     }
@@ -3122,39 +3147,56 @@ pub enum DischargeRoute {
     Assumption,
 }
 
-/// A discharge's dependency on another check's presence or result.
+/// A discharge's dependency on another checked fact.
 ///
-/// No producer at M5 — every M5 route is premise-free (`Ctfe` evaluates a
-/// closed term and consults nothing else). The slot is reserved so the
-/// evidence schema is premise-extensible before it calcifies: future
-/// resource/proof discharges (frame conditions, ownership assumptions,
-/// optimizer-preserved facts) will depend on prior facts, and evidence that
-/// cannot record those edges cannot be retrofitted. Record-side only — never
-/// part of an interned evidence key.
+/// `premises` records *logical* dependencies, not every evaluation input. The
+/// [`DischargeRoute::Ctfe`] route is premise-free — it evaluates a closed term
+/// and consults nothing else, so its `premises` stay empty (the evaluated value
+/// is receipt/debug payload, not a premise). The [`DischargeRoute::Assumption`]
+/// route depends on the in-scope `where`-clause assumption it matched, recorded
+/// as [`CheckPremise::Assumption`].
+///
+/// The enum is deliberately extensible: future routes (SMT-discharged evidence,
+/// runtime-check sites, axioms/laws, resource proofs) add their own variants
+/// without changing the meaning of the existing ones. That premise-extensibility
+/// is a one-way door — a discharge that cannot record what it depended on cannot
+/// be retrofitted once `fe explain`/hover/certificate formats ship. Record-side
+/// only — never part of an interned evidence key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CheckPremise<'db> {
-    /// The goal whose discharge this one assumed. (Reserved; unpopulated at
-    /// M5.)
-    pub goal: TraitInstId<'db>,
+pub enum CheckPremise<'db> {
+    /// The discharge relied on an in-scope `where`-clause assumption, matched by
+    /// normalized term identity (the [`DischargeRoute::Assumption`] route).
+    Assumption {
+        /// The normalized obligation term that had to be proved.
+        required_term: TermId<'db>,
+        /// The normalized in-scope assumption term it matched. Identical to
+        /// `required_term` at M5 (matching is by exact identity); kept distinct
+        /// so a future non-identity route can record the assumption it used.
+        assumption_term: TermId<'db>,
+        /// The caller `where`-clause const-predicate body the assumption came
+        /// from. Span and owner derive from this stable id (repo-native origin —
+        /// no separate span/owner fields to drift out of sync).
+        assumption: Body<'db>,
+    },
 }
 
 impl<'db> TyVisitable<'db> for CheckPremise<'db> {
-    fn visit_with<V>(&self, visitor: &mut V)
+    fn visit_with<V>(&self, _visitor: &mut V)
     where
         V: crate::analysis::ty::visitor::TyVisitor<'db> + ?Sized,
     {
-        self.goal.visit_with(visitor);
+        // Premise payloads are recorded facts (interned terms in the caller's
+        // own parameter frame, plus an HIR body id), not live obligations:
+        // there is nothing for a type folder/visitor to traverse.
     }
 }
 
 impl<'db> TyFoldable<'db> for CheckPremise<'db> {
-    fn super_fold_with<F>(self, db: &'db dyn HirAnalysisDb, folder: &mut F) -> Self
+    fn super_fold_with<F>(self, _db: &'db dyn HirAnalysisDb, _folder: &mut F) -> Self
     where
         F: crate::analysis::ty::fold::TyFolder<'db>,
     {
-        Self {
-            goal: self.goal.fold_with(db, folder),
-        }
+        self
     }
 }
 
@@ -3176,8 +3218,9 @@ pub struct DischargedConstPredicate<'db> {
     pub generic_args: Vec<TyId<'db>>,
     /// How the predicate was discharged.
     pub route: DischargeRoute,
-    /// Discharges this one depends on. Empty for every M5 route; reserved so
-    /// the evidence schema stays premise-extensible.
+    /// Logical dependencies of this discharge: the matched assumption for the
+    /// `Assumption` route, empty for the (closed) `Ctfe` route. See
+    /// [`CheckPremise`].
     pub premises: Vec<CheckPremise<'db>>,
 }
 
