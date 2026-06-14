@@ -3453,6 +3453,15 @@
         "Refined debt-negative PS1a: consolidate the duplicated ingot-search-then-lookup pattern (search_ingots=[scope_ingot, ty_ingot] + impls_for_ty find_map). IDENTICAL 'find implementor of msg_variant_trait visible from scope' at contract.rs:712, contract.rs:860, semantic/mod.rs:2797; plus stmt.rs:248 (Seq, different downstream). Extract one free helper (e.g. find_implementor_of_trait_in_scope) — behavior-preserving, ~3 real callers, NOT a new API layer. Keep EffectEnv separate BY DESIGN.",
         "First slice identified + designed; NOT yet implemented (paused 2026-06-14 per Micah to relay to architect first)."
       ]
+    },
+    {
+      "date": "2026-06-14",
+      "topic": "K04a typed-capabilities — grounding (sizes the slice; avoid wrong turn)",
+      "items": [
+        "PrimTy is the WRONG vehicle: PrimTy = 4 runtime variants (Bool/Int/Uint/String) matched in ~220 codegen/mir/abi sites; capabilities are compile-time-ONLY, so PrimTy-izing Reflect/ImplBuilder/Evidence/Quote (the effort2 route) breaks dozens of exhaustive matches AND is a semantic misfit (runtime lowering of non-runtime types).",
+        "Recognition is at LOWERING, not type-check: provider.rs reads the `uses` param's path head-ident (REFLECT_KEY/IMPL_BUILDER_KEY) during HIR construction, before name resolution. So 'typed recognition' is a recognition-STAGE change (resolve the capability path to a definition, or move recognition past name-res) — not a string→type compare swap.",
+        "Recommended fco-native K04a: capabilities as resolved-type identities (e.g. opaque builtin/std types recognized by ADT identity), NOT PrimTy; rewire provider.rs recognition off the string keys. Keep body exemption; minimal provenance (P50). This is the big architect-domain load-bearing node — grounded + ready, awaiting the representation/stage confirmation before implementation."
+      ]
     }
   ]
 }
