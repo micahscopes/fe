@@ -198,6 +198,14 @@ flowchart TD
     BR10["BR10 premise model (CTFE empty / Assumption populated)<br/><small>FINAL</small>"]
     BR11["BR11 merge_runtime_class pragmatic patch<br/><small>BRIDGE_INTENTIONAL</small>"]
     BR12["BR12 NEEDS_DESIGN labels as permanent deferral<br/><small>UNKNOWN_NEEDS_AUDIT</small>"]
+    BR13["BR13 global coherence checking as bridge<br/><small>BRIDGE_AT_RISK</small>"]
+  end
+
+  subgraph Provision_scoping["Provision scoping (scoped provisions / demote global coherence)"]
+    PS0["PS0 scoped provisions north star<br/><small>north_star</small>"]
+    PS1["PS1 demote global coherence to companion provisions<br/><small>capability</small>"]
+    PS2["PS2 module/ingot-tier provisions (missing middle)<br/><small>grammar</small>"]
+    PS3["PS3 scope-chain resolution + within-level ambiguity<br/><small>capability</small>"]
   end
 
   T00 --> T10
@@ -426,6 +434,19 @@ flowchart TD
   BR12 -. "graduates" .-> K07
   BR12 -. "graduates" .-> G00
 
+  %% Provision-scoping spine + BR13
+  F04 --> PS0
+  PV00 --> PS0
+  PV10 --> PS1
+  PS0 --> PS1
+  PS0 --> PS2
+  PS0 --> PS3
+  PS2 --> PS1
+  BR13 --> PS1
+  A10 -. "route" .-> PS0
+  PS3 -. "replaces" .-> PS1
+  BR13 -. "needs" .-> PV00
+
   classDef uncertain stroke-dasharray: 5 5;
   class AC00 uncertain;
   class AC30 uncertain;
@@ -457,3 +478,6 @@ flowchart TD
   class K05 uncertain;
   class K06 uncertain;
   class K08 uncertain;
+  class PS1 uncertain;
+  class PS2 uncertain;
+  class PS3 uncertain;

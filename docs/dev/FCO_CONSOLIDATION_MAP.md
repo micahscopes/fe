@@ -834,3 +834,45 @@ ident-string); method-conformance (`6-0016`) and `8-0084` are **live** — this 
 was stale; `8-0086` is genuinely unimplemented (doc-reserved). Fixture gaps to
 close: BR3 (generated-impl-fails-through-normal-trait-diagnostics) and BR7 (named
 rejection of planned kind forms — the K01 acceptance).
+
+## Second north star: provision scoping / demote global coherence (PS0–PS3)
+
+**Added 2026-06-14.** A *second* originating intent — discussed verbally, written
+up in `/workspace/fe-provision-scoping-design-2026-06-10.md` (Q0 charter) — was
+at risk of staying folklore the same way the `Constraint`-kind spine was. The
+decision was **not** "replace traits with effects"; it was **collapse traits +
+effects into one scope-indexed *provision* mechanism**: demand → provision-lookup
+→ evidence (G1), with global `impl Eq for Point` *demoted* to a companion
+provision (outermost scope, lowest priority) and the **orphan rule + global
+coherence *checker* deleted** ("coherence becomes a default produced by
+placement").
+
+Status: **designed + tracked, not built** — same posture as the K-spine. Today
+global coherence checking (`5-0001`) is still active across `trait_lower.rs` /
+`trait_def.rs`, and the note's ~6 separate resolution pathways still exist; the
+collapse is the `PV00–PV60` provision-unification cluster plus the new
+`PS0–PS3` framing. `PS2` (module/ingot-tier `provide impl` grammar) is the
+note's "missing middle — to design". Bridge node **BR13** marks global-coherence
+checking as the comfortable Rust-heritage bridge this demotes.
+
+### Provenance: this branch ports `metaprogramming-effort2` — and a grammar regression
+
+`first-class-obligations` is a port/rewrite of
+`/workspace/fe-worktrees/metaprogramming-effort2/` (the prior end-to-end draft:
+const-predicate prover, `CapabilityEnv`, scoped derive overlays, scoped-conflict
+diagnostics). A parser diff (`syntax_kind.rs`: effort2 918 / fco 930 lines)
+surfaced a concrete **regression**: effort2's parser had
+
+- `KindBoundConstraint` (bare-ident kind bound, e.g. `Constraint`),
+- `KindBoundPath` (path kind bound, e.g. `A<B>` in kind position),
+- `WhereConstraintPredicate`
+
+(`metaprogramming-effort2/crates/parser/src/ast/param.rs:305,514–545`,
+`parser/param.rs:361–372`). The fco port reduced `KindBound` to `Mono | Abs`,
+**dropping** these — and instead added the quasi-quote grammar
+(`Dollar`/`QuoteExpr`/`QuoteHole*`). So BR7's "planned kind forms not parseable"
+is more precisely a **dropped-in-port regression**: reviving `* -> Constraint` /
+`A<B> -> *` is a **re-port** of effort2 grammar (`KindBoundConstraintScope` /
+`KindBoundPathScope`), not greenfield — materially cheaper than assumed, and a
+direct first step on the K-spine (K01/K02). Depth of effort2's *type-system*
+support behind that grammar is a further check (the parser scopes look thin).

@@ -1170,7 +1170,8 @@
       ],
       "notes": [
         "architect id: K1",
-        "near-term; may proceed if cheap and it does not displace the M5 gate tail"
+        "near-term; may proceed if cheap and it does not displace the M5 gate tail",
+        "effort2 parser had KindBoundConstraint/KindBoundPath/WhereConstraintPredicate (dropped in port); 'reject by name' may instead be 'revive + gate' the re-ported grammar"
       ]
     },
     {
@@ -1403,10 +1404,12 @@
         "A<B>->*, *->A<B>, *->Constraint each emit a named diagnostic; no silent Kind::Any acceptance; fixtures pin each rejection"
       ],
       "notes": [
-        "latent: no surface today; Kind::Any is a fossilization trap the moment surface is added"
+        "latent: no surface today; Kind::Any is a fossilization trap the moment surface is added",
+        "effort2 had the parser surface; reviving = re-port grammar (KindBoundConstraintScope/KindBoundPathScope), NOT greenfield",
+        "fco traded this surface for the quote grammar (Dollar/QuoteExpr/QuoteHole*)"
       ],
       "bridge_status": "BRIDGE_AT_RISK",
-      "current_mechanism": "ty_def.rs:1277-1304 (Kind, does_match Any-arms); hir_def/params.rs:307-313 (KindBound); ty_lower.rs:1629-1645 (Any only from absent sub-kinds)",
+      "current_mechanism": "fco: Kind=Star|Abs|Any, KindBound=Mono|Abs (params.rs:307-313). REGRESSION: effort2's parser HAD KindBoundConstraint (bare-ident kind), KindBoundPath (A<B> path kind), WhereConstraintPredicate (param.rs:305,514-545; parser/param.rs:361-372) - dropped in the port.",
       "final_target": "K01 (named planned-not-yet-supported diagnostics) + K02 (Constraint kind)",
       "risk_if_fossilized": "Kind::Any silently swallows planned forms once surface syntax is added; K01 acceptance permanently unmet",
       "nearest_guard_fixture": "NONE"
@@ -1503,6 +1506,70 @@
       "final_target": "triad attached to each deferred node",
       "risk_if_fossilized": "NEEDS_DESIGN becomes permanent because no probe is ever scoped",
       "nearest_guard_fixture": "N/A (process)"
+    },
+    {
+      "id": "PS0",
+      "title": "Scoped provisions north star",
+      "group": "Provision scoping (scoped provisions / demote global coherence)",
+      "kind": "north_star",
+      "description": "Traits and effects are one judgment ('type T has impl of interface I') = a provision; demand->provision-lookup->evidence as a SINGLE resolution pathway (Q0 charter, fe-provision-scoping-design-2026-06-10). Originating impetus, peer of the K-spine: tracked, not built.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "the design move is 'collapse the spectrum', NOT 'replace traits with effects'",
+        "today: ~6 separate resolution pathways still exist"
+      ]
+    },
+    {
+      "id": "PS1",
+      "title": "Demote global coherence to companion provisions",
+      "group": "Provision scoping (scoped provisions / demote global coherence)",
+      "kind": "capability",
+      "description": "Global `impl Eq for Point` becomes a companion provision (outermost scope, lowest priority); DELETE the orphan rule + global coherence *checker*; coherence becomes a default produced by placement (outermost scope <= 1 provision per goal).",
+      "uncertain": true,
+      "acceptance": [
+        "orphan rule + global coherence checker removed; companion provisions + narrower-scope shadowing added; existing code keeps its meaning"
+      ],
+      "notes": []
+    },
+    {
+      "id": "PS2",
+      "title": "Module/ingot-tier provisions (the missing middle)",
+      "group": "Provision scoping (scoped provisions / demote global coherence)",
+      "kind": "grammar",
+      "description": "`provide impl Eq for Point` (+pub) at module/ingot scope; imported provisions. The note calls this 'the missing middle - to design'. No grammar today.",
+      "uncertain": true,
+      "acceptance": [
+        "module-tier provision syntax parses; visible in module + pub importers"
+      ],
+      "notes": []
+    },
+    {
+      "id": "PS3",
+      "title": "Scope-chain resolution + within-level ambiguity",
+      "group": "Provision scoping (scoped provisions / demote global coherence)",
+      "kind": "capability",
+      "description": "Resolution order: with-block > fn uses > module provisions > imported > companion; ambiguity within one level is an error. effort2's scoped-conflict diagnostics are the prototype.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "BR13",
+      "title": "Global trait coherence checking as a comfortable bridge",
+      "group": "Bridge placeholder audit",
+      "kind": "bridge",
+      "description": "Orphan rule + conflicting-impl/overlap checking (5-0001) enforced by a checker. The provision-scoping design wants this DEMOTED to placement (companion provisions), not deleted-but-not-checker-enforced.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "provision-scoping headline bridge (parallel to BR0 for Constraint-kind)"
+      ],
+      "bridge_status": "BRIDGE_AT_RISK",
+      "current_mechanism": "5-0001 ConflictImpl/overlap across trait_lower.rs, trait_def.rs, name_resolution; orphan rule active",
+      "final_target": "PS1: companion provisions; coherence-by-placement (outermost scope <=1 provision per goal)",
+      "risk_if_fossilized": "Rust-style global coherence quietly becomes the permanent model; the ~6 resolution pathways never collapse into one scoped provision env",
+      "nearest_guard_fixture": "B2b overlap fixture pins CURRENT global coherence (guards the bridge, not the graduation); NONE for scoped provisions"
     }
   ],
   "edges": [
@@ -2831,6 +2898,72 @@
       "to": "G00",
       "kind": "soft",
       "reason": "deferred labels need the per-run repo-capability audit discipline"
+    },
+    {
+      "from": "F04",
+      "to": "PS0",
+      "kind": "hard",
+      "reason": "the one obligation queue is the substrate of the single resolution pathway"
+    },
+    {
+      "from": "A10",
+      "to": "PS0",
+      "kind": "soft",
+      "reason": "assumption discharge is one provision route through the pathway"
+    },
+    {
+      "from": "PV00",
+      "to": "PS0",
+      "kind": "hard",
+      "reason": "scope-indexed provision environment realizes the north star"
+    },
+    {
+      "from": "PV10",
+      "to": "PS1",
+      "kind": "hard",
+      "reason": "trait/env-assumptions-as-provisions is the mechanism that demotes global impls"
+    },
+    {
+      "from": "PS0",
+      "to": "PS1",
+      "kind": "hard",
+      "reason": "north star scopes the demotion of global coherence"
+    },
+    {
+      "from": "PS0",
+      "to": "PS2",
+      "kind": "hard",
+      "reason": "north star scopes the missing module/ingot tier"
+    },
+    {
+      "from": "PS0",
+      "to": "PS3",
+      "kind": "hard",
+      "reason": "north star scopes scope-chain resolution"
+    },
+    {
+      "from": "PS2",
+      "to": "PS1",
+      "kind": "hard",
+      "reason": "module-tier provisions are needed before the global coherence checker can be removed"
+    },
+    {
+      "from": "PS3",
+      "to": "PS1",
+      "kind": "soft",
+      "reason": "within-level ambiguity rules replace global coherence's conflict checking"
+    },
+    {
+      "from": "BR13",
+      "to": "PS1",
+      "kind": "hard",
+      "reason": "the global-coherence bridge graduates via demotion to companion provisions"
+    },
+    {
+      "from": "BR13",
+      "to": "PV00",
+      "kind": "soft",
+      "reason": "demotion needs the scope-indexed provision environment"
     }
   ],
   "topological_layers_hard_edges": [
