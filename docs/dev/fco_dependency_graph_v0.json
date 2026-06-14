@@ -1186,7 +1186,8 @@
         "architect id: K2",
         "do not implement before M5 semantic closure unless architect reorders the draft",
         "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield.",
-        "Revival plan: docs/dev/FCO_CONSTRAINT_KIND_REVIVAL.md (Layer1 cheap re-port: 1184fbbf0+e98cec695+7caf6343f+f6affe4f3+tree-sitter 1d009d576; ~34 Kind match sites; Layer2=re-integration on fco substrate)"
+        "Revival plan: docs/dev/FCO_CONSTRAINT_KIND_REVIVAL.md (Layer1 cheap re-port: 1184fbbf0+e98cec695+7caf6343f+f6affe4f3+tree-sitter 1d009d576; ~34 Kind match sites; Layer2=re-integration on fco substrate)",
+        "K02a LANDED (804dc959a): Kind::Constraint + KindBoundConstraint grammar + lowering re-ported; `* -> Constraint` parses AND lowers to Kind::Constraint (2 unit tests; fe-hir lib 116/0, m5 40/0). Remaining: K02b (Placeholder/kind inference e98cec695), KindBoundPath."
       ]
     },
     {
@@ -1414,7 +1415,8 @@
       "notes": [
         "latent: no surface today; Kind::Any is a fossilization trap the moment surface is added",
         "effort2 had the parser surface; reviving = re-port grammar (KindBoundConstraintScope/KindBoundPathScope), NOT greenfield",
-        "fco traded this surface for the quote grammar (Dollar/QuoteExpr/QuoteHole*)"
+        "fco traded this surface for the quote grammar (Dollar/QuoteExpr/QuoteHole*)",
+        "PARTIALLY RESOLVED by K02a: `* -> Constraint` now parses+lowers (no longer a regression). `A<B> -> *` (KindBoundPath, later effort2 commit) still regressed."
       ],
       "bridge_status": "BRIDGE_AT_RISK",
       "current_mechanism": "fco: Kind=Star|Abs|Any, KindBound=Mono|Abs (params.rs:307-313). REGRESSION: effort2's parser HAD KindBoundConstraint (bare-ident kind), KindBoundPath (A<B> path kind), WhereConstraintPredicate (param.rs:305,514-545; parser/param.rs:361-372) - dropped in the port.",
@@ -1618,7 +1620,9 @@
       "description": "ANSWERED (git archaeology): effort2 parsed A<B>->*, *->A<B>, *->Constraint and had the Constraint kind + kinded Derive/Evidence/ImplBuilder; fco (parallel branch off a shared base) never carried it. Port regression, not intentional deferral. Revival source: 1184fbbf0 (+1d009d576).",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [
+        "Revival underway: K02a landed 2026-06-14 (804dc959a)."
+      ]
     },
     {
       "id": "OD1",
@@ -1638,7 +1642,9 @@
       "description": "Until revived: `* -> A<B>` / `* -> Constraint` (evidence/proposition codomain) gets a named diagnostic. effort2 had KindBoundConstraint grammar.",
       "uncertain": true,
       "acceptance": [],
-      "notes": []
+      "notes": [
+        "`* -> Constraint` now SUPPORTED (K02a, lowers to Kind::Constraint) — not rejected; `* -> A<B>` (path codomain) still unsupported."
+      ]
     },
     {
       "id": "OD3",
@@ -1648,7 +1654,9 @@
       "description": "Graduation target = K04: Derive as a real kinded construct. effort2 had `Derive : (* -> Constraint) -> Constraint` as a PrimTy kind (revival, not greenfield).",
       "uncertain": true,
       "acceptance": [],
-      "notes": []
+      "notes": [
+        "Unblocked at the kind level: Kind::Constraint now exists (K02a); K04 = wire Derive as the kinded PrimTy."
+      ]
     }
   ],
   "edges": [

@@ -89,3 +89,20 @@ into "the kind exists." K02b and K03/K04 follow as separate, larger increments.
 
 Open confirm before starting K02a: whether to re-port `Placeholder` now (couples
 K02a to K02b) or add `Constraint` alone and require explicit kinds (smaller).
+
+## Status: K02a LANDED (2026-06-14, commit 804dc959a)
+
+The `Constraint` kind core is re-ported and regression-clean. `* -> Constraint`
+parses and lowers to `Kind::Constraint` (`Kind = Star | Constraint | Abs | Any`).
+Tests: parser `generic_param_with_constraint_kind_bound`, lowering
+`lowers_constraint_kind_bound`; fe-hir lib 116/0, m5 40/0. The `Kind::Star` match
+sites needed no triage (they use wildcards) — only the four exhaustive sites
+(applicable_kind, lower_kind, lower_hir_kind_local, KindBound::pretty_print) got
+a `Constraint` arm.
+
+Remaining (separate increments): **K02b** kind inference (`e98cec695`, +
+`Placeholder`); **KindBoundPath** (`A<B> -> *`, a later effort2 commit) — BR7's
+path-half; **K03/K04** the kinded `PrimTy` builtins + provider re-integration;
+**tree-sitter** grammar (`1d009d576`) — needs the tree-sitter CLI (not hand-edit
+`parser.c`). Note: `tree_sitter_parse_strict` is pre-existing-red on this branch
+(26 base fixtures, 97.7%), unrelated to K02a (confirmed via stash).
