@@ -18,6 +18,8 @@
 // hole in arm position.
 
 use core::default::Default
+use core::derive::ImplBuilder
+use core::derive::Reflect
 use core::ops::Eq
 
 impl StableEq: Derive for Eq {
