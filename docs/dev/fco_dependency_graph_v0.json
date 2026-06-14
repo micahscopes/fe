@@ -3424,5 +3424,35 @@
     "KERNEL_PRIMITIVE": "stays a compiler primitive, but gains a Fe-facing spec/evidence/proof contract",
     "CONSUMER_TARGET": "reads structured evidence; must not define the evidence schema",
     "NATIVE": "already in the intended final form"
-  }
+  },
+  "architect_relay_queue": [
+    {
+      "date": "2026-06-14",
+      "topic": "Forgotten-finished prereqs — DO NOT re-implement (repo-verified file:line)",
+      "items": [
+        "Hover reads const-predicate evidence: DONE — hover.rs:276 discharged_const_predicates_footer, :283 _for_call, :405 render; test mock_lsp_hover_shows_discharged_const_predicates. (Architect's latest reification list re-named this a TODO; it is finished.)",
+        "Method conformance / 'trait-only method path': DONE — compare_const_predicates method_cmp.rs:1050, 6-0016 diagnostics.rs:1074.",
+        "ADT/signature/WF const-pred discharge / 'trait-only WF path': DONE — Gate 1/3.",
+        "Assumption-route discharge: DONE (Gate 4-7). Gate-2 impl-pred gating + concrete-method-call tail: DONE (expr.rs:3267 gate_concrete_method_selection). Diagnostic-code reconcile: DONE.",
+        "Constraint kind K02a: DONE. BR3 generated-item validation: DONE (8-0013 guard). Normalized-term identity: DONE (term.rs). PS2/PS3 conditional-blanket gating: DONE.",
+        "NET: 2 of the 5 reification targets in the architect's latest list (hover-evidence, method/WF) are ALREADY DONE. Live frontier = typed capabilities (K04a/K07), ABI providerization (H10), scoped-provision unification (PS1), generated-impl provenance (P50; grep-confirmed ABSENT)."
+      ]
+    },
+    {
+      "date": "2026-06-14",
+      "topic": "constraint.rs correction (K03 substrate)",
+      "items": [
+        "fco DOES have trait_resolution/constraint.rs (salsa collect_constraints / super_trait_cycle -> PredicateListId) but NO ConstraintId type. The K03/K04 map's 'fco has no constraint.rs' was wrong (fixed). Confirms architect answer #4 empirically: project K03 over PredicateListId; do NOT re-add an effort2-style ConstraintId (would be the scaffolding the debt-negative rule forbids)."
+      ]
+    },
+    {
+      "date": "2026-06-14",
+      "topic": "PS1a read-path map — facade finding + refined scope",
+      "items": [
+        "Three read paths: global trait env (impls_for_ty*, salsa-immutable), assumptions (PredicateListId, salsa-immutable), EffectEnv (MUTABLE frame stack, NOT salsa). Trait-env + assumptions already converge at TraitSolveCx/is_goal_satisfiable; EffectEnv is structurally incompatible. Folding all three behind one lookup = FACADE (matches the facade-risk question in the typed-cap packet).",
+        "Refined debt-negative PS1a: consolidate the duplicated ingot-search-then-lookup pattern (search_ingots=[scope_ingot, ty_ingot] + impls_for_ty find_map). IDENTICAL 'find implementor of msg_variant_trait visible from scope' at contract.rs:712, contract.rs:860, semantic/mod.rs:2797; plus stmt.rs:248 (Seq, different downstream). Extract one free helper (e.g. find_implementor_of_trait_in_scope) — behavior-preserving, ~3 real callers, NOT a new API layer. Keep EffectEnv separate BY DESIGN.",
+        "First slice identified + designed; NOT yet implemented (paused 2026-06-14 per Micah to relay to architect first)."
+      ]
+    }
+  ]
 }

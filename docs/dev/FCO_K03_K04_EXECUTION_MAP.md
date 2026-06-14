@@ -51,11 +51,17 @@ prerequisite for K04.**
 ### Clash 2 — `TyData::ConstraintTerm` vs fco's constraint model (K03)
 
 effort2 adds `TyData::ConstraintTerm(ConstraintId)` (traits-as-types of
-`Kind::Constraint`) backed by `analysis/ty/constraint.rs` (`ConstraintId` /
-`ConstraintKind`). **fco has no `constraint.rs`** — it uses `PredicateListId` +
-the obligation queue. So `ConstraintTerm` must be re-expressed over fco's model
-(or a thin `ConstraintId` introduced), and `7caf6343f`'s "lower `Eq<T>` by
-expected kind = Constraint" re-integrated against fco lowering.
+`Kind::Constraint`) backed by effort2's `analysis/ty/constraint.rs` (`ConstraintId` /
+`ConstraintKind`). **Correction (2026-06-14): fco DOES have a
+`trait_resolution/constraint.rs`** — but it is a *different* thing: salsa-tracked
+`collect_constraints` / `super_trait_cycle` returning `PredicateListId`, with **no
+`ConstraintId` type**. So fco models constraints as `PredicateListId` + the
+obligation queue, and K03 should **project traits-as-`*->Constraint` over that
+existing machinery** (architect decision, 2026-06-14). Do NOT re-introduce an
+effort2-style `ConstraintId` unless `PredicateListId`/`TermId` provably cannot give
+stable identity / origin links / kinded-application shape — adding one otherwise is
+exactly the scaffolding the debt-negative rule forbids. `7caf6343f`'s "lower
+`Eq<T>` by expected kind = Constraint" still needs re-integrating against fco lowering.
 
 ## Rollback hazards (blast radius)
 
