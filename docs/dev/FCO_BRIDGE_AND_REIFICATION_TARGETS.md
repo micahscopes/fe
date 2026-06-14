@@ -103,7 +103,9 @@ This confirms BR8's "code-as-SSOT, doc lags": `6-0016` and `8-0084` are **live**
   `Value::Reflect`), only the method **vocabulary** is string-matched, under a
   budget. The architect's "ident-string reflection" framing was wrong; corrected.
 - **TGT-QUOTE-FRAGMENT-LIMITS** (BR5) — restricted fragment, named diagnostics
-  (`8-0084`, `13-00xx`), 5 snapshot guards.
+  (`8-0084`, `13-00xx`), 5 snapshot guards. *Expr fragment extended 2026-06-14
+  (`757d66b69`): added `||`/`<`/`>` to the prior `&&`/`==` to enable ordered
+  std-lib providers (StableOrd).*
 - **TGT-HARDCODED-ABI-EVENT-ERROR-MSG** (BR6) — intentional until typed providers
   exist; EIP-712 already proves the Fe-provider path.
 - **TGT-MERGE-RUNTIME-CLASS** (BR11) — pragmatic, contained, do-not-rewrite.
