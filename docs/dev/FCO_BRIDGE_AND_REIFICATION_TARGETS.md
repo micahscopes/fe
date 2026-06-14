@@ -278,8 +278,13 @@ COMPLETE_BUT_UNDERTESTED ×2, NOT_EXPRESSIBLE_YET ×1, BLOCKED_BY_DESIGN ×1.
 - **Commit the working-tree PS2/PS3 method-candidate gating fix** (it is finished,
   with `derived_clone.fe` as its passing fixture).
 - **Add the BR3 guard fixture** (generated-impl-fails-through-normal-trait-diagnostics).
-- **Add the BR7 guard fixture** (named rejection of `A<B> -> *`) — *iff* K01 is
-  done as grammar-recognition; otherwise pin current `2-0002`/no-ICE behavior.
+- ~~**Add the BR7 guard fixture** (named rejection of `A<B> -> *`)~~ — **LANDED**
+  as a *tripwire* (`crates/uitest/fixtures/ty/def/kind_path_form_trap.fe`): K01 is
+  not done, so it pins the current **loud** rejection (`1-0001` parse + `2-0007`
+  "expected trait, found type") rather than a named diagnostic. Its value is that
+  the trap (silent `Kind::Any` fold) is **not** sprung today; if a grammar change
+  ever makes a path-in-kind-position parse and silently become `Kind::Any`, the
+  errors vanish and the snapshot fails.
 - **W12** (record evidence at WF positions) — small follow-up.
 - **fe explain seed (R2)** — consumer extension on the existing schema.
 - **Reconcile the taxonomy doc** to the live codes (no code change).
@@ -346,7 +351,7 @@ regenerated/disposable and was left to the existing generator.
 | TGT-METHOD-RESOLUTION-CANDIDATE-GATING | keep `derived_clone.fe` (graduated PASS) | yes (working tree) |
 | TGT-CONDITIONAL-BLANKET-PROVISIONS | keep `repro_stable_clone_blanket_ambiguity.fe` as doc-repro | yes |
 | TGT-GENERATED-ITEM-VALIDATION | **ADD** generated-impl-fails-through-normal-trait-diagnostics | **NONE** |
-| TGT-KIND-ANY-PLANNED-FORM-TRAP | **ADD** named rejection of `A<B> -> *` | **NONE** |
+| TGT-KIND-ANY-PLANNED-FORM-TRAP | tripwire pinning loud rejection of path-in-kind-position | yes (`kind_path_form_trap`; tripwire, not named-rejection — K01 not done) |
 | TGT-QUOTE-FRAGMENT-LIMITS | keep 5 `quote_*` snapshots | yes |
 | TGT-ASSUMPTION-ROUTE-EXACT-MATCH | keep `assumption_route_mismatch_is_rejected` | yes |
 | TGT-PROVIDER-AUTHORITY-STRINGKEY | **ADD** authority/escape guard (interim) | **NONE** |
