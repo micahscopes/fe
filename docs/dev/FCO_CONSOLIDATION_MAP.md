@@ -876,3 +876,31 @@ is more precisely a **dropped-in-port regression**: reviving `* -> Constraint` /
 `KindBoundPathScope`), not greenfield — materially cheaper than assumed, and a
 direct first step on the K-spine (K01/K02). Depth of effort2's *type-system*
 support behind that grammar is a further check (the parser scopes look thin).
+
+### Deeper: the `Constraint` kind itself was built in effort2 and DELETED in the port
+
+The regression is not just grammar — it is the whole kind-system layer. effort2's
+`Kind` enum was `Star | Constraint | Abs | Placeholder(String) | Any`
+(`metaprogramming-effort2/crates/hir/src/analysis/ty/ty_def.rs:1363`), with a real
+**`Constraint` kind** ("the proposition kind inhabited by constraints"). And
+`Derive`/`Evidence`/`ImplBuilder`/`Reflect`/`Field`/… were real **`PrimTy`
+builtins with real kinds** (`ty_def.rs:2035-2055`):
+
+- `Derive : (* -> Constraint) -> Constraint`
+- `Evidence : Constraint -> *`, `ImplBuilder : Constraint -> *`
+- `Reflect/TypeInfo/FieldList/Variant/VariantList/GeneratedExpr : * -> *`, `Field : * -> * -> *`
+- traits/constraints as `ConstraintTerm` with `Kind::Constraint` (`ty_def.rs:2000`)
+
+i.e. **`Derive : (* -> Constraint) -> Constraint` was implemented**, exactly the
+remembered design. The fco rewrite reduced `Kind` to `Star | Abs | Any`, deleted
+`Constraint`/`Placeholder`, dropped these builtins from `PrimTy`, and substituted
+the string-recognized provider marker (BR0/BR1) + the `Mono|Abs` kind-bound
+grammar (BR7).
+
+**Consequence for the K-spine:** K02 (`Constraint` kind), K03 (traits as
+`* -> Constraint`), K04 (`Derive` graduation) are **revivals / re-ports of
+effort2's working code**, not greenfield kind-system research. This materially
+lowers their cost and risk versus the earlier framing. Open question to confirm
+before scheduling: *why* the port dropped it (deliberate simplification vs.
+rewrite scope) — that decides whether revival is a straight cherry-pick or needs
+re-integration against the new obligation substrate.

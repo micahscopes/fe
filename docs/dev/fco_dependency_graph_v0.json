@@ -1184,7 +1184,8 @@
       "acceptance": [],
       "notes": [
         "architect id: K2",
-        "do not implement before M5 semantic closure unless architect reorders the draft"
+        "do not implement before M5 semantic closure unless architect reorders the draft",
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
       ]
     },
     {
@@ -1196,7 +1197,8 @@
       "uncertain": true,
       "acceptance": [],
       "notes": [
-        "architect id: K3"
+        "architect id: K3",
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
       ]
     },
     {
@@ -1208,7 +1210,8 @@
       "uncertain": true,
       "acceptance": [],
       "notes": [
-        "architect id: K4"
+        "architect id: K4",
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
       ]
     },
     {
@@ -1220,7 +1223,8 @@
       "uncertain": true,
       "acceptance": [],
       "notes": [
-        "architect id: K5"
+        "architect id: K5",
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
       ]
     },
     {
@@ -1232,7 +1236,8 @@
       "uncertain": true,
       "acceptance": [],
       "notes": [
-        "architect id: K6"
+        "architect id: K6",
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
       ]
     },
     {
@@ -1273,7 +1278,8 @@
         "Derive/Evidence re-expressed as ordinary kinded constructs once Constraint kind exists"
       ],
       "notes": [
-        "headline graduation target = K04"
+        "headline graduation target = K04",
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
       ],
       "bridge_status": "GRADUATION_TARGET",
       "current_mechanism": "provider.rs:30-35,93-97,122-123,170-172; opaque binding provider_executor.rs:326-327,385; not a PrimTy/ingot decl",
@@ -1292,7 +1298,8 @@
         "Evidence becomes a real evidence-bearing codomain (*->A<B>)"
       ],
       "notes": [
-        "graduates with BR0/K04"
+        "graduates with BR0/K04",
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
       ],
       "bridge_status": "BRIDGE_INTENTIONAL",
       "current_mechanism": "provider_executor.rs:299-330 (Value enum Builder/Reflect/Evidence carry no data), seeded by name :383-392",
