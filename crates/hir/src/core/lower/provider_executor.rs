@@ -1694,6 +1694,16 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let rhs = self.gen_expr_arg(rhs.expr)?;
                 Ok(self.push_expr(GenExpr::EqCmp(lhs, rhs)))
             }
+            ("lt", [lhs, rhs]) => {
+                let lhs = self.gen_expr_arg(lhs.expr)?;
+                let rhs = self.gen_expr_arg(rhs.expr)?;
+                Ok(self.push_expr(GenExpr::LtCmp(lhs, rhs)))
+            }
+            ("gt", [lhs, rhs]) => {
+                let lhs = self.gen_expr_arg(lhs.expr)?;
+                let rhs = self.gen_expr_arg(rhs.expr)?;
+                Ok(self.push_expr(GenExpr::GtCmp(lhs, rhs)))
+            }
             ("trait_call", [ty_arg, method_arg, extra @ ..]) => {
                 let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
                     return Err(self.unsupported_expr(ty_arg.expr));
