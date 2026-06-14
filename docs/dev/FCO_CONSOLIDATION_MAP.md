@@ -62,10 +62,10 @@ error lowering) is outside the pathway.
 
 | # | Candidate | Current locus | Smell | Target FCO shape | Difficulty | Risk | Label |
 |---|-----------|---------------|-------|------------------|-----------|------|-------|
-| 1 | Const predicates beyond call sites (ADT construction + signature/WF) | `callable.rs:797` (Func-only), `expr.rs:3634` `check_record_init` (no enqueue), `trait_resolution/mod.rs:278` `check_ty_wf` / `:338` `check_trait_inst_wf` (trait-only) | A `where MIN<=MAX` on a struct/enum parses and is accepted at decl, then is **never enforced** at construction or in signature positions | Enqueue ADT `const_predicates` at construction; check them in WF/signature positions; reuse `DeferredTask`/`DischargedConstPredicate` | M | Med | **CORE_M5_NEXT** |
-| 2 | Assumption-route discharge (generic caller restates a bound) | `mod.rs:1423-1425` stub returns `Discharged` silently; `term.rs:425` `lower_hir_to_term` + `:807` `normalize_term` unused by discharge | Symbolic args silently discharge with **no evidence and no exact-match diagnostic**; a mismatched forwarded bound is accepted | New `DischargeRoute::Assumption`; lower predicate to a normalized term; exact-match against caller's harvested const-predicate assumption set | M | Med | **CORE_M5_NEXT** |
+| 1 | Const predicates beyond call sites (ADT construction + signature/WF) | `callable.rs:797` (Func-only), `expr.rs:3634` `check_record_init` (no enqueue), `trait_resolution/mod.rs:278` `check_ty_wf` / `:338` `check_trait_inst_wf` (trait-only) | A `where MIN<=MAX` on a struct/enum parses and is accepted at decl, then is **never enforced** at construction or in signature positions | Enqueue ADT `const_predicates` at construction; check them in WF/signature positions; reuse `DeferredTask`/`DischargedConstPredicate` | M | Med | **LANDED** (Gate 1/3; ADT/sig const-preds enforced via WF `ty_const_predicate_violation` mod.rs:4864 ← check_ty_wf) — keep regression guard |
+| 2 | Assumption-route discharge (generic caller restates a bound) | `mod.rs:1423-1425` stub returns `Discharged` silently; `term.rs:425` `lower_hir_to_term` + `:807` `normalize_term` unused by discharge | Symbolic args silently discharge with **no evidence and no exact-match diagnostic**; a mismatched forwarded bound is accepted | New `DischargeRoute::Assumption`; lower predicate to a normalized term; exact-match against caller's harvested const-predicate assumption set | M | Med | **LANDED** (Gate 4-7; `DischargeRoute::Assumption` mod.rs:1542, normalized-term exact match) — keep regression guard |
 | 3 | Impl-method const-predicate conformance | `method_cmp.rs:62` `compare_impl_method`, `compare_const_predicates` (`:1050-1086`) | ~~An impl method may weaken/strengthen the trait method's const predicates with **no error**~~ | Compare const-predicate sets by normalized-term identity (reuses #2 machinery) | S–M | Low | **LANDED** (M0, `468bb69b7`; emits `6-0016`) |
-| 4 | Const-predicate WF in signature positions | `trait_resolution/mod.rs:278/338`; invoked via `ty_def.rs:630` `emit_wf_diag` | `check_ty_wf` runs trait constraints but **ignores** const predicates on the type's where clause | Fold const-predicate checking into WF (the signature half of #1) | M | Med | **CORE_M5_NEXT** (with #1) |
+| 4 | Const-predicate WF in signature positions | `trait_resolution/mod.rs:278/338`; invoked via `ty_def.rs:630` `emit_wf_diag` | `check_ty_wf` runs trait constraints but **ignores** const predicates on the type's where clause | Fold const-predicate checking into WF (the signature half of #1) | M | Med | **LANDED** (with #1) — keep regression guard |
 | 5 | Hardcoded ABI/event/error lowering vs derive providers | `core/lower/event.rs`, `error.rs` (`lower_error_abi_size_impl`/`encode_impl` ~365-439), `msg.rs` (HEAD_SIZE/IS_DYNAMIC HIR), `crates/fe/src/abi.rs:~1452` | Parallel Rust provision path: bypasses `DeferredTask`, produces **no evidence**, not extensible from Fe; HEAD_SIZE/IS_DYNAMIC are exactly what const predicates could verify | Migrate to Fe derive providers; verify layout consts via const-predicate obligations | L | High | **M6_OR_POST** |
 | 6 | Typed provider `uses` capabilities | `core/lower/provider.rs` (`REFLECT_KEY`/`IMPL_BUILDER_KEY`/`DERIVE_*` string keys, `:30-35`), `provider_executor.rs` (string-keyed dispatch `:1485-1486`, budgets) | Capabilities are **string-keyed**, not typed; provider execution yields an impl but **no `DischargedObligation`** | Type `uses` signatures as compile-time-only capability obligations with evidence | L | High | **NEEDS_DESIGN** |
 | 7 | LSP hover renders const-predicate evidence | `language-server/.../hover.rs:243` `discharged_obligations_footer` reads `discharged_obligations_for_call` (`:250`) but never `discharged_const_predicates` | Hover shows trait discharges but **not** const-predicate discharges, though `discharged_const_predicates_for_call` (`mod.rs:3427`) already exists | One-function extension to render route/premises | S | Low | **READY_NOW** |
@@ -74,7 +74,7 @@ error lowering) is outside the pathway.
 
 ### Per-item notes
 
-#### 1. Const predicates beyond call sites — **CORE_M5_NEXT**
+#### 1. Const predicates beyond call sites — **LANDED** (Gate 1/3; keep regression guard)
 - **Current mechanism.** Const predicates are enqueued **only** in
   `Callable::enqueue_constraints` (`callable.rs:759`), inside a
   `if let CallableDef::Func(func)` guard at `:797`. ADT construction
@@ -111,7 +111,7 @@ error lowering) is outside the pathway.
 - **Difficulty** M. **Risk** Med — touches WF (a hot, salsa-tracked path) and
   record-init checking; must avoid double-reporting against the decl-site check.
 
-#### 2. Assumption-route discharge — **CORE_M5_NEXT**
+#### 2. Assumption-route discharge — **LANDED** (Gate 4-7; keep regression guard)
 - **Current mechanism.** When a generic caller forwards its own type parameter
   (`fn mid<B: Platform>() where B::WORD_BITS == 256 { word_op::<B>() }`), the
   args still mention a param, so `process_const_predicate_obligation` hits the
@@ -157,7 +157,7 @@ error lowering) is outside the pathway.
   emits **`6-0016`** `MethodConstPredicateMismatch` (`diagnostics.rs:1074`,
   TraitSatisfaction pass) on mismatch. Tracked as task M0 / graph node MC00.
 
-#### 4. Const-predicate WF in signatures — **CORE_M5_NEXT (folded into #1)**
+#### 4. Const-predicate WF in signatures — **LANDED** (folded into #1; keep regression guard)
 - This is the signature half of #1: `check_ty_wf` (`trait_resolution/mod.rs:278`,
   invoked at `ty_def.rs:630`) must run const predicates. Listed separately
   because it is the part of #1 with the highest blast radius (salsa-tracked WF),
@@ -252,7 +252,7 @@ that future, *without* pretending compile-time facts discharge runtime ones.
 
 ## First recommended rewrite
 
-### Choice: **Candidate 1 — extend const-predicate discharge to ADT construction + signature/WF positions** (CORE_M5_NEXT)
+### Choice: **Candidate 1 — extend const-predicate discharge to ADT construction + signature/WF positions** (CORE_M5_NEXT — now LANDED, Gate 1/3)
 
 #### Why this one (vs. B/2 and the others)
 
