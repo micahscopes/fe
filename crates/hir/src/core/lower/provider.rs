@@ -34,6 +34,40 @@ const DERIVE_MARKER: &str = "Derive";
 /// The single function a provider must define.
 const DERIVE_FN: &str = "derive";
 
+/// A compile-time capability a provider's `derive` fn consumes, declared in its
+/// `uses (..)` clause (`reflect: Reflect<T>`, `builder: mut ImplBuilder<Goal>`).
+/// The variant carries the binding name introduced for the capability.
+///
+/// Capabilities are recognized TODAY by the capability key's head identifier
+/// (`REFLECT_KEY` / `IMPL_BUILDER_KEY`) — a string match. K04a will recognize
+/// them by resolved-type identity instead; at that point this enum is the natural
+/// home for the resolved capability type (and any grade/scope), so the recognition
+/// change is localized to how this `Capability` is produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+pub(super) enum Capability<'db> {
+    /// `reflect: Reflect<T>` — reflection over the derive target.
+    Reflect(IdentId<'db>),
+    /// `builder: mut ImplBuilder<Goal>` — the generated-impl builder.
+    ImplBuilder(IdentId<'db>),
+}
+
+impl<'db> Capability<'db> {
+    /// The binding name introduced for this capability in `uses (..)`.
+    pub(super) fn binding(self) -> IdentId<'db> {
+        match self {
+            Capability::Reflect(name) | Capability::ImplBuilder(name) => name,
+        }
+    }
+
+    pub(super) fn is_reflect(self) -> bool {
+        matches!(self, Capability::Reflect(_))
+    }
+
+    pub(super) fn is_builder(self) -> bool {
+        matches!(self, Capability::ImplBuilder(_))
+    }
+}
+
 /// A derive provider that passed the HIR-level shape validation and can be
 /// selected and executed by the expansion stage.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
@@ -52,10 +86,9 @@ pub(super) struct ValidatedProvider<'db> {
     /// trait through this path so resolution does not depend on imports at
     /// the derive site.
     pub(super) trait_path: PathId<'db>,
-    /// Names bound for `Reflect<..>` capabilities in the `uses` clause.
-    pub(super) reflect_names: Vec<IdentId<'db>>,
-    /// Names bound for `mut ImplBuilder<..>` capabilities.
-    pub(super) builder_names: Vec<IdentId<'db>>,
+    /// The compile-time capabilities the provider consumes, in `uses (..)`
+    /// declaration order (`Reflect<..>`, `mut ImplBuilder<..>`).
+    pub(super) capabilities: Vec<Capability<'db>>,
     /// Names of the function's ordinary parameters (e.g. `ev`); bound as
     /// opaque evidence values during execution.
     pub(super) param_names: Vec<IdentId<'db>>,
@@ -144,8 +177,7 @@ pub(super) fn validate_provider<'db>(
     };
 
     let mut body = None;
-    let mut reflect_names = Vec::new();
-    let mut builder_names = Vec::new();
+    let mut capabilities = Vec::new();
     let mut param_names = Vec::new();
     if let Some(func) = func {
         if !func.is_const(db) {
@@ -168,21 +200,23 @@ pub(super) fn validate_provider<'db>(
                 continue;
             };
             match key_head.data(db).as_str() {
-                REFLECT_KEY => reflect_names.push(param_name),
-                IMPL_BUILDER_KEY if param.is_mut => builder_names.push(param_name),
+                REFLECT_KEY => capabilities.push(Capability::Reflect(param_name)),
+                IMPL_BUILDER_KEY if param.is_mut => {
+                    capabilities.push(Capability::ImplBuilder(param_name))
+                }
                 _ => {}
             }
         }
         // The minimal capability check: a provider must declare the
         // capabilities it consumes. The full key/grade capability system is
         // a later milestone.
-        if reflect_names.is_empty() {
+        if !capabilities.iter().any(|capability| capability.is_reflect()) {
             errors.push(error(
                 "derive provider functions must declare a `Reflect<..>` capability in `uses (..)`"
                     .into(),
             ));
         }
-        if builder_names.is_empty() {
+        if !capabilities.iter().any(|capability| capability.is_builder()) {
             errors.push(error(
                 "derive provider functions must declare a `mut ImplBuilder<..>` capability in `uses (..)`"
                     .into(),
@@ -215,8 +249,7 @@ pub(super) fn validate_provider<'db>(
         name,
         head_name,
         trait_path,
-        reflect_names,
-        builder_names,
+        capabilities,
         param_names,
     })
 }

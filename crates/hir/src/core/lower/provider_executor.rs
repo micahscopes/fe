@@ -393,11 +393,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         for &name in &provider.param_names {
             initial_scope.push((name, Value::Evidence));
         }
-        for &name in &provider.reflect_names {
-            initial_scope.push((name, Value::Reflect));
-        }
-        for &name in &provider.builder_names {
-            initial_scope.push((name, Value::Builder));
+        for &capability in &provider.capabilities {
+            let value = match capability {
+                super::provider::Capability::Reflect(_) => Value::Reflect,
+                super::provider::Capability::ImplBuilder(_) => Value::Builder,
+            };
+            initial_scope.push((capability.binding(), value));
         }
 
         let fallback_range = super::provider::provider_name_range(db, provider.provider);
