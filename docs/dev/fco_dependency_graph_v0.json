@@ -3451,7 +3451,7 @@
       "items": [
         "Three read paths: global trait env (impls_for_ty*, salsa-immutable), assumptions (PredicateListId, salsa-immutable), EffectEnv (MUTABLE frame stack, NOT salsa). Trait-env + assumptions already converge at TraitSolveCx/is_goal_satisfiable; EffectEnv is structurally incompatible. Folding all three behind one lookup = FACADE (matches the facade-risk question in the typed-cap packet).",
         "Refined debt-negative PS1a: consolidate the duplicated ingot-search-then-lookup pattern (search_ingots=[scope_ingot, ty_ingot] + impls_for_ty find_map). IDENTICAL 'find implementor of msg_variant_trait visible from scope' at contract.rs:712, contract.rs:860, semantic/mod.rs:2797; plus stmt.rs:248 (Seq, different downstream). Extract one free helper (e.g. find_implementor_of_trait_in_scope) — behavior-preserving, ~3 real callers, NOT a new API layer. Keep EffectEnv separate BY DESIGN.",
-        "First slice identified + designed; NOT yet implemented (paused 2026-06-14 per Micah to relay to architect first)."
+        "First slice IMPLEMENTED + LANDED 2026-06-14 (commit 9d5f7ce34): find_implementor_of_trait_in_scope extracted in trait_def.rs; 3 callers migrated (contract.rs msg-variant + return-type, semantic/mod.rs variant-selector). Behavior-preserving (fe-hir + fe + uitest all green, 0 failed). EffectEnv kept separate by design."
       ]
     },
     {
