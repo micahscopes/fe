@@ -3522,7 +3522,8 @@
       "moving StableClone/StableOrd into core_derives"
     ],
     "after_k04a": "P50 (if not complete) -> H10 tiny ABI/static-layout providerization slice -> K03 over existing constraint.rs/PredicateListId",
-    "c2_cycle_finding_2026-06-14": "INVESTIGATION (Explore): validate_provider runs inside expanded_items_impl (expansion stage), which may read ONLY base_scope_graph_impl — resolving a type path needs the merged scope_graph_impl, which would cycle back into expansion. So recognition-by-resolved-identity CANNOT happen in provider.rs during expansion. 'Recognize after resolution' => move capability recognition OUT of expansion into type-lowering / a post-name-res pass (ty_lower lower_hir_ty or later), storing key_path verbatim at expansion and resolving later. Also: Reflect/ImplBuilder/Evidence/Quote are NOT types today (no TyId); Evidence/Quote are Value markers in provider_executor; closest existing opaque-builtin-by-identity model is TyBase::Contract (non-PrimTy base with scope identity). EffectParam (hir_def/effects.rs:11) carries key_path:Partial<PathId> + name + is_mut but NOT the goal generic arg (e.g. Ord<T> in ImplBuilder<Ord<T>>) — capturing the goal is a representation upgrade C1/C2 needs."
+    "c2_cycle_finding_2026-06-14": "INVESTIGATION (Explore): validate_provider runs inside expanded_items_impl (expansion stage), which may read ONLY base_scope_graph_impl — resolving a type path needs the merged scope_graph_impl, which would cycle back into expansion. So recognition-by-resolved-identity CANNOT happen in provider.rs during expansion. 'Recognize after resolution' => move capability recognition OUT of expansion into type-lowering / a post-name-res pass (ty_lower lower_hir_ty or later), storing key_path verbatim at expansion and resolving later. Also: Reflect/ImplBuilder/Evidence/Quote are NOT types today (no TyId); Evidence/Quote are Value markers in provider_executor; closest existing opaque-builtin-by-identity model is TyBase::Contract (non-PrimTy base with scope identity). EffectParam (hir_def/effects.rs:11) carries key_path:Partial<PathId> + name + is_mut but NOT the goal generic arg (e.g. Ord<T> in ImplBuilder<Ord<T>>) — capturing the goal is a representation upgrade C1/C2 needs.",
+    "c1_landed_2026-06-14": "C1 DONE (34d657a1a): typed Capability enum (Reflect/ImplBuilder) replaces reflect_names/builder_names in ValidatedProvider; recognition+validation+executor binding route through it. No behavior change (fe-hir + fe_test 152 green). C2 (recognize by resolved-type identity, not string key) is now localized to how Capability is produced. C2-C5 DEFERRED to fresh context: per the c2_cycle_finding, recognition must move OUT of the expansion stage (base-graph-only) into post-name-res / type-lowering — a careful pipeline change on the load-bearing node, best done with fresh context. BR2 guard (provider_authority_outside_provider) + the typed Capability model are the C2 regression anchors."
   },
   "lane_a_progress": {
     "date": "2026-06-14",
@@ -3534,7 +3535,10 @@
       "BR7 guard kind_path_form_trap (path-in-kind-position loudly rejected, no silent Kind::Any) — 052ce0064",
       "BR2 guard provider_authority_outside_provider (capability authority gated to :Derive) — 918bd1edb",
       "K02b/K03 classification constraint_kind_constructor — 1bc039278",
-      "H10a ABI layout provider (StableAbiShape) + backend-agnostic builder.add/or fold primitives — 9b6558baf"
+      "H10a ABI layout provider (StableAbiShape) + backend-agnostic builder.add/or fold primitives — 9b6558baf",
+      "HKT assoc-type classification (actor Backend shape) — 55f19e630",
+      "payload-enum Ord unified (builder.lt/gt) + Measure tests — 3210c35bf",
+      "K04a-C1 typed Capability model (no behavior change) — 34d657a1a"
     ],
     "key_decisions_from_fable_logs": [
       "Construction stays in builder commands; quotes are for comparison/expression bodies. Do NOT grow quote surface for variant/struct construction (quote struct-init list-holes deferred indefinitely). builder vocabulary = bytecode, quotes = the language.",
