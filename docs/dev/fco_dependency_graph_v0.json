@@ -431,7 +431,8 @@
       "description": "At least one debug or test-visible consumer exposes discharged const predicate evidence.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "CONSUMER_TARGET"
     },
     {
       "id": "R10",
@@ -441,7 +442,8 @@
       "description": "Human-facing surface renders goal, route, origin, substitution, and premises.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "CONSUMER_TARGET"
     },
     {
       "id": "R20",
@@ -451,7 +453,8 @@
       "description": "Explain mode traces from use site through assumptions/providers/premises to discharge route.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "CONSUMER_TARGET"
     },
     {
       "id": "E00",
@@ -701,7 +704,8 @@
       "description": "Model generated-code preconditions as facts such as IS_DYNAMIC, HEAD_WORDS, field count, and layout class.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "H10",
@@ -711,7 +715,8 @@
       "description": "First high-level generator rewritten or shadowed in Fe using provider capabilities and const-predicate evidence.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "H20",
@@ -721,7 +726,8 @@
       "description": "Move Rust-hardcoded event/error/msg lowering toward Fe providers after ABI/static shape is proven.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "H30",
@@ -731,7 +737,8 @@
       "description": "Use evidence-backed layout/field facts to generate and explain hash/EIP-712 code.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "H40",
@@ -741,7 +748,8 @@
       "description": "Generic derive providers consume/produce FCO obligations/evidence rather than parallel derive logic.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "H50",
@@ -751,7 +759,8 @@
       "description": "Provider-generated code type-checks and discharges obligations through the same pipeline as handwritten Fe.",
       "uncertain": false,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "B00",
@@ -821,7 +830,8 @@
       "description": "Document latent order-dependent runtime-class merge behavior and its current reachability status.",
       "uncertain": true,
       "acceptance": [],
-      "notes": []
+      "notes": [],
+      "migration_class": "KERNEL_PRIMITIVE"
     },
     {
       "id": "RT10",
@@ -1290,7 +1300,8 @@
       "current_mechanism": "provider.rs:30-35,93-97,122-123,170-172; opaque binding provider_executor.rs:326-327,385; not a PrimTy/ingot decl",
       "final_target": "K02->K03->K04: Constraint kind, traits as *->Constraint, Derive as kinded construct",
       "risk_if_fossilized": "derive stays a bespoke lowering path; Derive/Evidence semantics pinned by executor behavior not a kind law",
-      "nearest_guard_fixture": "fe_test/quote_provider.fe; hir/tests/ty_check.rs:242 (behavioral only)"
+      "nearest_guard_fixture": "fe_test/quote_provider.fe; hir/tests/ty_check.rs:242 (behavioral only)",
+      "migration_class": "BRIDGE"
     },
     {
       "id": "BR1",
@@ -1310,7 +1321,8 @@
       "current_mechanism": "provider_executor.rs:299-330 (Value enum Builder/Reflect/Evidence carry no data), seeded by name :383-392",
       "final_target": "K06 (evidence-bearing codomains), P20 (capabilities as FCO provisions/evidence)",
       "risk_if_fossilized": "Evidence semantics defined by interpreter, not by the evidence schema/kind system",
-      "nearest_guard_fixture": "fe_test/derived_eq_default.fe; derived_eip712.fe"
+      "nearest_guard_fixture": "fe_test/derived_eq_default.fe; derived_eip712.fe",
+      "migration_class": "BRIDGE"
     },
     {
       "id": "BR2",
@@ -1329,7 +1341,8 @@
       "current_mechanism": "provider.rs:30-31,176-190; exemption analysis/ty/mod.rs:386-389,721 and semantic/borrowck/check.rs:185",
       "final_target": "P10/P20/P30 then K07",
       "risk_if_fossilized": "authority = whatever the executor accepts; permanent type/borrowck hole for provider bodies; no evidence trail for grants",
-      "nearest_guard_fixture": "fe_test/zero_sized_capability_provider.fe (behavioral; no authority/escape guard)"
+      "nearest_guard_fixture": "fe_test/zero_sized_capability_provider.fe (behavioral; no authority/escape guard)",
+      "migration_class": "PROVISIONIZATION_TARGET"
     },
     {
       "id": "BR3",
@@ -1348,7 +1361,8 @@
       "current_mechanism": "lower/derive.rs:1-11; provider_synthesis.rs:40-63,135-172; expansion.rs:19; re-entry confirmed hir/tests/ty_check.rs:242-289; body exemption per BR2",
       "final_target": "H50 (generated code through normal HIR obligations), P50 (provenance evidence)",
       "risk_if_fossilized": "bad provider bodies caught only by ad-hoc executor checks; no evidence record for generation",
-      "nearest_guard_fixture": "NONE (no generated-impl-fails-through-normal-trait-diagnostics fixture)"
+      "nearest_guard_fixture": "NONE (no generated-impl-fails-through-normal-trait-diagnostics fixture)",
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "BR4",
@@ -1367,7 +1381,8 @@
       "current_mechanism": "provider_executor.rs:11-14,307,1481-1524,2127-2129 (value-dispatch); FieldKey handle :307,1494-1512",
       "final_target": "P40/K07 (typed capability boundary)",
       "risk_if_fossilized": "low: small budget-guarded method vocabulary; not a soundness bridge",
-      "nearest_guard_fixture": "fe_test/quote_provider.fe; derived_eq_default_enum.fe"
+      "nearest_guard_fixture": "fe_test/quote_provider.fe; derived_eq_default_enum.fe",
+      "migration_class": "BRIDGE"
     },
     {
       "id": "BR5",
@@ -1384,7 +1399,8 @@
       "current_mechanism": "provider_executor.rs:778-786,1088,1142,1156,889-934,1117; code ty/diagnostics.rs:863 (8-0084)",
       "final_target": "none for soundness; fragment richness is std/feature scope",
       "risk_if_fossilized": "low",
-      "nearest_guard_fixture": "cli_output/single_files/quote_open_name_mismatch.snap (+4 quote_* snaps); uitest quote_outside_provider.snap"
+      "nearest_guard_fixture": "cli_output/single_files/quote_open_name_mismatch.snap (+4 quote_* snaps); uitest quote_outside_provider.snap",
+      "migration_class": "BRIDGE"
     },
     {
       "id": "BR6",
@@ -1403,7 +1419,8 @@
       "current_mechanism": "lower/error.rs:365,393; msg.rs:132,443,524; event.rs:44,400; contrast ingots/std/src/eip712.fe:248",
       "final_target": "H10 (ABI/static-layout provider rewrite) -> H20 (event/error/msg) -> H50",
       "risk_if_fossilized": "two parallel provision paths persist; layout facts stay unverified",
-      "nearest_guard_fixture": "where_const_predicate_abi_static_layout.fe (guards target, not current Rust path)"
+      "nearest_guard_fixture": "where_const_predicate_abi_static_layout.fe (guards target, not current Rust path)",
+      "migration_class": "PROVIDERIZATION_TARGET"
     },
     {
       "id": "BR7",
@@ -1425,7 +1442,8 @@
       "current_mechanism": "fco: Kind=Star|Abs|Any, KindBound=Mono|Abs (params.rs:307-313). REGRESSION: effort2's parser HAD KindBoundConstraint (bare-ident kind), KindBoundPath (A<B> path kind), WhereConstraintPredicate (param.rs:305,514-545; parser/param.rs:361-372) - dropped in the port.",
       "final_target": "K01 (named planned-not-yet-supported diagnostics) + K02 (Constraint kind)",
       "risk_if_fossilized": "Kind::Any silently swallows planned forms once surface syntax is added; K01 acceptance permanently unmet",
-      "nearest_guard_fixture": "NONE"
+      "nearest_guard_fixture": "NONE",
+      "migration_class": "BRIDGE"
     },
     {
       "id": "BR8",
@@ -1461,7 +1479,8 @@
       "current_mechanism": "schema ty_check/mod.rs:3182-3268; rendering language-server/hover.rs:276-310 (accessor-only)",
       "final_target": "R10/R20 build on the same accessor",
       "risk_if_fossilized": "low: separation correct",
-      "nearest_guard_fixture": "hir/tests/ty_check.rs:242 + LSP hover tests"
+      "nearest_guard_fixture": "hir/tests/ty_check.rs:242 + LSP hover tests",
+      "migration_class": "CONSUMER_TARGET"
     },
     {
       "id": "BR10",
@@ -1480,7 +1499,8 @@
       "current_mechanism": "ty_check/mod.rs:3193-3224 (CheckPremise + doc), :1534-1544 (population), :1516-1523 (silent-discharge soft spot)",
       "final_target": "S20/S30 (premise closure / certificates)",
       "risk_if_fossilized": "low: schema+intent documented",
-      "nearest_guard_fixture": "m5_const_predicate_discharge.rs (route=Assumption; assumption_route_mismatch_is_rejected)"
+      "nearest_guard_fixture": "m5_const_predicate_discharge.rs (route=Assumption; assumption_route_mismatch_is_rejected)",
+      "migration_class": "NATIVE"
     },
     {
       "id": "BR11",
@@ -1499,7 +1519,8 @@
       "current_mechanism": "mir/src/runtime/lower/infer.rs:1132-1211 (preferred_address_space :1176,1204)",
       "final_target": "RT30 (VSDG) -> RT40 (separation logic) -> RT70 (supersession)",
       "risk_if_fossilized": "order-dependent merge becomes de-facto resource model via behavior-describing tests",
-      "nearest_guard_fixture": "infer.rs:1501,1541 unit tests (behavior, not bridge bound); RT10 repro open"
+      "nearest_guard_fixture": "infer.rs:1501,1541 unit tests (behavior, not bridge bound); RT10 repro open",
+      "migration_class": "KERNEL_PRIMITIVE"
     },
     {
       "id": "BR12",
@@ -1535,73 +1556,8 @@
       "current_mechanism": "5-0001 ConflictImpl/overlap across trait_lower.rs, trait_def.rs, name_resolution; orphan rule active",
       "final_target": "PS1: companion provisions; coherence-by-placement (outermost scope <=1 provision per goal)",
       "risk_if_fossilized": "Rust-style global coherence quietly becomes the permanent model; the ~6 resolution pathways never collapse into one scoped provision env",
-      "nearest_guard_fixture": "B2b overlap fixture pins CURRENT global coherence (guards the bridge, not the graduation); NONE for scoped provisions"
-    },
-    {
-      "id": "PS0",
-      "title": "Global trait env as bridge",
-      "group": "Scoped provision / global-trait bridge",
-      "kind": "bridge",
-      "description": "Today's global/companion impl table is the OUTERMOST provision tier, not the final architecture. Demote global `impl Eq for Point` to a companion provision (outermost, lowest priority); delete the orphan rule + global coherence checker -> coherence becomes a default produced by placement. (Provision-scoping 'second north star'.)",
-      "uncertain": false,
-      "acceptance": [],
-      "notes": [
-        "folds the earlier 'demote global coherence' framing; BR13 is its bridge marker"
-      ]
-    },
-    {
-      "id": "PS1",
-      "title": "Conditional blanket provisions",
-      "group": "Scoped provision / global-trait bridge",
-      "kind": "capability",
-      "description": "Blanket impls with where-clauses (`impl<T: Copy> Clone for T`) are provisions CONDITIONAL on evidence (`T: Copy`), not unconditional global candidates. eliminate/deprioritize/ambiguous is a provision-scoping policy, NOT a per-trait special-case.",
-      "uncertain": true,
-      "acceptance": [
-        "a conditional blanket impl is not a viable method candidate unless its where-condition is dischargeable for the receiver"
-      ],
-      "notes": []
-    },
-    {
-      "id": "PS2",
-      "title": "Method-resolution candidate gating",
-      "group": "Scoped provision / global-trait bridge",
-      "kind": "capability",
-      "description": "Method calls must account for a candidate provision's conditions (blanket guard / where-clause) BEFORE reporting ambiguity or selecting. StableClone repro: `p.clone()` ambiguous because the Copy-blanket is listed without discharging `Point: Copy`.",
-      "uncertain": true,
-      "acceptance": [
-        "a conditional blanket candidate whose guard is unsatisfiable for the receiver is dropped, not reported as ambiguous"
-      ],
-      "notes": []
-    },
-    {
-      "id": "PS3",
-      "title": "Scoped provision priority policy",
-      "group": "Scoped provision / global-trait bridge",
-      "kind": "capability",
-      "description": "Resolution scope-chain: with-block > fn `uses` > module provisions > imported > companion; ambiguity WITHIN one level is an error. Includes the module/ingot 'missing middle' (`provide impl` grammar - to design).",
-      "uncertain": true,
-      "acceptance": [],
-      "notes": []
-    },
-    {
-      "id": "PS4",
-      "title": "Canonical-only traits",
-      "group": "Scoped provision / global-trait bridge",
-      "kind": "policy",
-      "description": "Consensus/layout-sensitive interfaces (Ord, Hash, ABI-family) may be restricted to canonical companion provisions (no free shadowing) until witness capture exists - the canonicity hazard.",
-      "uncertain": true,
-      "acceptance": [],
-      "notes": []
-    },
-    {
-      "id": "PS5",
-      "title": "Witness capture in type identity",
-      "group": "Scoped provision / global-trait bridge",
-      "kind": "capability",
-      "description": "Long-term: capture the chosen provision/witness in type identity where it affects persistent state/consensus layout.",
-      "uncertain": true,
-      "acceptance": [],
-      "notes": []
+      "nearest_guard_fixture": "B2b overlap fixture pins CURRENT global coherence (guards the bridge, not the graduation); NONE for scoped provisions",
+      "migration_class": "PROVISIONIZATION_TARGET"
     },
     {
       "id": "STCLONE",
@@ -1661,6 +1617,95 @@
       "notes": [
         "Unblocked at the kind level: Kind::Constraint now exists (K02a); K04 = wire Derive as the kinded PrimTy."
       ]
+    },
+    {
+      "id": "PS0",
+      "title": "Global trait env as bridge (companion provisions)",
+      "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
+      "kind": "bridge",
+      "description": "Today's global impl table is the COMPATIBILITY BRIDGE: demote global `impl Eq for Point` to the outermost 'companion provision' frame (lowest priority), not delete. Coherence becomes placement, not a checker. BR13 marks it.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "architect: scoped PROVISIONS, not scoped effects — traits/effects/caps/generated/assumptions all become provisions"
+      ],
+      "migration_class": "PROVISIONIZATION_TARGET"
+    },
+    {
+      "id": "PS1",
+      "title": "Frame-based ProvisionEnv (scope chain)",
+      "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
+      "kind": "architecture",
+      "description": "One scope-indexed environment: demand=obligation, resolution=scope-chain provision lookup OR discharge, result=evidence. Frames innermost-first: WithBlock > fn `uses`/`where` > Module > Import > Companion; ambiguity WITHIN one frame is an error. GROW IT FROM the existing frame-like keyed EffectEnv — NOT effort2's flat envs.",
+      "uncertain": true,
+      "acceptance": [
+        "scope-chain lookup with the frame order; within-frame ambiguity is an error; global impls resolve as the companion frame"
+      ],
+      "notes": [],
+      "migration_class": "PROVISIONIZATION_TARGET"
+    },
+    {
+      "id": "PS2",
+      "title": "Conditional blanket provisions",
+      "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
+      "kind": "capability",
+      "description": "Blanket impls with `where` clauses (`impl<T: Copy> Clone for T`) are provisions CONDITIONAL on evidence (`Copy<T>`), not unconditional global candidates.",
+      "uncertain": true,
+      "acceptance": [
+        "a conditional blanket is viable only when its where-condition is dischargeable for the subject"
+      ],
+      "notes": [],
+      "migration_class": "PROVISIONIZATION_TARGET"
+    },
+    {
+      "id": "PS3",
+      "title": "Method resolution gates candidates by provision conditions",
+      "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
+      "kind": "capability",
+      "description": "Method-candidate assembly must discharge a candidate provision's conditions for the (concrete) receiver before reporting ambiguity / selecting. The StableClone `p.clone()` ambiguity lives here.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "PARTIALLY LANDED: method selection now uses impls_for_ty_with_constraints (drops unsatisfiable-guard blanket candidates for concrete receivers) — see STCLONE"
+      ],
+      "migration_class": "PROVISIONIZATION_TARGET"
+    },
+    {
+      "id": "PS4",
+      "title": "Effects / capabilities / generated impls as provisions",
+      "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
+      "kind": "capability",
+      "description": "Converge the keyed EffectEnv, provider capabilities, generated-impl overlays, and const-predicate assumptions into the one ProvisionEnv (lookup-class vs discharge-class share the outer path).",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [
+        "the keyed EffectEnv is already frame-shaped — the migration skeleton"
+      ],
+      "migration_class": "PROVISIONIZATION_TARGET"
+    },
+    {
+      "id": "PS5",
+      "title": "Canonical-only markers",
+      "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
+      "kind": "policy",
+      "description": "Safety valve: consensus/layout-sensitive traits (Ord, Hash, ABI/storage/serialization) resolve ONLY through the companion/canonical frame — no local shadowing — until witness capture exists.",
+      "uncertain": true,
+      "acceptance": [
+        "canonical-only traits cannot be overridden by nearer scoped provisions"
+      ],
+      "notes": [],
+      "migration_class": "PROVISIONIZATION_TARGET"
+    },
+    {
+      "id": "PS6",
+      "title": "Witness capture in type identity",
+      "group": "Scoped provision / global-trait bridge (ProvisionEnv)",
+      "kind": "capability",
+      "description": "Longer-term precision: capture the chosen provision/witness in type identity where meaning depends on it (witness-dependent data structures / proofs / layout).",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": [],
+      "migration_class": "PROVISIONIZATION_TARGET"
     }
   ],
   "edges": [
@@ -2997,66 +3042,6 @@
       "reason": "demotion needs the scope-indexed provision environment"
     },
     {
-      "from": "F04",
-      "to": "PS0",
-      "kind": "hard",
-      "reason": "one obligation/provision pathway is the substrate for demoting the global trait env"
-    },
-    {
-      "from": "PV00",
-      "to": "PS0",
-      "kind": "hard",
-      "reason": "scope-indexed provision env realizes the demotion"
-    },
-    {
-      "from": "PS0",
-      "to": "PS1",
-      "kind": "hard",
-      "reason": "blanket provisions live in the global/companion tier being demoted"
-    },
-    {
-      "from": "PS1",
-      "to": "PS2",
-      "kind": "hard",
-      "reason": "method resolution must gate conditional blanket candidates"
-    },
-    {
-      "from": "PS0",
-      "to": "PS3",
-      "kind": "hard",
-      "reason": "scope-chain priority defines the tiers global is demoted into"
-    },
-    {
-      "from": "PS3",
-      "to": "PS4",
-      "kind": "hard",
-      "reason": "canonical-only restriction is a priority/shadowing policy"
-    },
-    {
-      "from": "PS4",
-      "to": "PS5",
-      "kind": "hard",
-      "reason": "witness capture is the long-term answer where canonical-only is insufficient"
-    },
-    {
-      "from": "STCLONE",
-      "to": "PS1",
-      "kind": "hard",
-      "reason": "concrete repro of a conditional blanket provision"
-    },
-    {
-      "from": "STCLONE",
-      "to": "PS2",
-      "kind": "hard",
-      "reason": "concrete repro of method-resolution candidate gating"
-    },
-    {
-      "from": "BR13",
-      "to": "PS0",
-      "kind": "hard",
-      "reason": "global-coherence bridge graduates into the companion-provision tier"
-    },
-    {
       "from": "OD0",
       "to": "OD1",
       "kind": "hard",
@@ -3097,6 +3082,84 @@
       "to": "K02",
       "kind": "soft",
       "reason": "parity audit feeds the Constraint-kind revival (K02 = re-port 1184fbbf0)"
+    },
+    {
+      "from": "PV20",
+      "to": "PS1",
+      "kind": "hard",
+      "reason": "grow ProvisionEnv from the existing frame-like keyed EffectEnv (effects-as-obligations), not flat envs"
+    },
+    {
+      "from": "F04",
+      "to": "PS1",
+      "kind": "hard",
+      "reason": "the obligation/evidence queue is the discharge half of the one pathway"
+    },
+    {
+      "from": "PS0",
+      "to": "PS1",
+      "kind": "hard",
+      "reason": "global impls become the companion frame of the scope chain"
+    },
+    {
+      "from": "PS1",
+      "to": "PS2",
+      "kind": "hard",
+      "reason": "conditional blanket provisions are provisions in the env"
+    },
+    {
+      "from": "PS2",
+      "to": "PS3",
+      "kind": "hard",
+      "reason": "method resolution must gate conditional blanket candidates"
+    },
+    {
+      "from": "PS1",
+      "to": "PS4",
+      "kind": "hard",
+      "reason": "effects/caps/generated/assumptions converge into the env"
+    },
+    {
+      "from": "PS1",
+      "to": "PS5",
+      "kind": "hard",
+      "reason": "canonical-only is a frame/shadowing policy"
+    },
+    {
+      "from": "PS5",
+      "to": "PS6",
+      "kind": "hard",
+      "reason": "witness capture is the precise mechanism where canonical-only is too coarse"
+    },
+    {
+      "from": "STCLONE",
+      "to": "PS2",
+      "kind": "hard",
+      "reason": "concrete repro of a conditional blanket provision"
+    },
+    {
+      "from": "STCLONE",
+      "to": "PS3",
+      "kind": "hard",
+      "reason": "concrete repro of method-resolution candidate gating"
+    },
+    {
+      "from": "BR13",
+      "to": "PS0",
+      "kind": "hard",
+      "reason": "the global-coherence bridge graduates into the companion frame"
+    },
+    {
+      "from": "H10",
+      "to": "PS5",
+      "kind": "soft",
+      "reason": "ABI/static-layout is a canonical-only-sensitive provision"
+    },
+    {
+      "from": "PS1",
+      "to": "K02",
+      "kind": "soft",
+      "reason": "the scope-chain env is where Constraint-kind/Derive graduation eventually resolves"
     }
   ],
   "topological_layers_hard_edges": [
@@ -3350,5 +3413,14 @@
     "S40",
     "S60",
     "RT70"
-  ]
+  ],
+  "migration_class_values": {
+    "BRIDGE": "temporary compiler mechanism shaped like the intended final language feature (graduates away)",
+    "REIFICATION_TARGET": "existing compiler-resident behavior that should become Fe-specifiable (Fe code/obligation/evidence/spec)",
+    "PROVIDERIZATION_TARGET": "reification target: hardcoded Rust codegen/lowering that should become a Fe provider",
+    "PROVISIONIZATION_TARGET": "reification target: resolution logic that should become scoped ProvisionEnv/evidence",
+    "KERNEL_PRIMITIVE": "stays a compiler primitive, but gains a Fe-facing spec/evidence/proof contract",
+    "CONSUMER_TARGET": "reads structured evidence; must not define the evidence schema",
+    "NATIVE": "already in the intended final form"
+  }
 }

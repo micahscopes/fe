@@ -968,3 +968,34 @@ reframed: revive (re-port `1184fbbf0`), not merely reject** — it needs grammar
 recognition, not just diagnostic routing. **8-0086** stays on hold (`2-0002`
 chained-projection is acceptable named/no-ICE behavior until the taxonomy decides
 suppress-vs-wrap).
+
+## Migration-class taxonomy (architect, 2026-06-14)
+
+`migration_class` is a graph-node field **orthogonal to implementation status and
+`bridge_status`**. It distinguishes intentional *bridges* from *reification
+targets* — compiler-resident behavior that was reasonable in Rust before Fe could
+express it, and is now becoming Fe-specifiable. ("Reification" = making an
+implicit compiler thing an explicit first-class Fe object.)
+
+| class | meaning | nodes |
+|---|---|---|
+| **BRIDGE** | temporary mechanism shaped like the final feature; graduates away | BR0 Derive marker, BR1 Evidence/ImplBuilder special-casing, BR4 reflection handles, BR5 quote fragment, BR7 Kind::Any guard |
+| **PROVIDERIZATION_TARGET** | hardcoded Rust codegen/lowering → Fe provider | BR6 ABI/event/error lowering, BR3 generated-item validation, H00/H10/H20/H30/H40/H50 |
+| **PROVISIONIZATION_TARGET** | resolution logic → scoped ProvisionEnv/evidence | BR2 provider-capability authority, BR13 global trait env, PS0–PS6 |
+| **KERNEL_PRIMITIVE** | stays a compiler primitive, gains a Fe-facing spec/evidence contract | BR11/RT00 merge_runtime_class (do NOT rewrite until the Sonatina-v2 resource model exists) |
+| **CONSUMER_TARGET** | reads structured evidence; must not define the schema | BR9 receipt rendering, R00/R10/R20 |
+| **NATIVE** | already in the intended final form | BR10 premise model |
+| **REIFICATION_TARGET** | (umbrella) existing compiler behavior that should become Fe-specifiable | superclass of providerization/provisionization |
+
+**The key distinction (don't conflate):**
+- A **bridge** is *"we built a temporary stand-in because the final abstraction
+  doesn't exist yet"* (e.g. `Derive` marker until `Constraint` kinds — graduates via K02–K04).
+- A **reification target** is *"we built this in the compiler because Fe couldn't
+  express it yet; now Fe is becoming able to"* (e.g. hardcoded ABI/event/error
+  lowering → Fe providers). Not a temporary shim — a candidate for lifting into
+  typed compile-time Fe with evidence.
+
+The unifying thesis (one project, not three threads): replace macro/global-magic
+with **typed, scoped, evidence-carrying metaprogramming** — providerize hardcoded
+generation, provisionize resolution, graduate the Derive bridge to `Constraint`
+kinds, and keep only true kernel primitives in the compiler (with Fe-facing specs).
