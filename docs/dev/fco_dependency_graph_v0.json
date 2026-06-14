@@ -1200,7 +1200,8 @@
       "acceptance": [],
       "notes": [
         "architect id: K3",
-        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield.",
+        "OPEN (separate from K02a's Constraint-kind). traits as *->Constraint = TyData::ConstraintTerm; fco has NO constraint.rs/ConstraintId (uses PredicateListId+obligation queue) so this is re-integration; LARGEST blast radius (breaks every exhaustive match TyData). Do LAST. Plan: docs/dev/FCO_K03_K04_EXECUTION_MAP.md."
       ]
     },
     {
@@ -1213,7 +1214,8 @@
       "acceptance": [],
       "notes": [
         "architect id: K4",
-        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield."
+        "REGRESSION FROM effort2: effort2 HAD this fully: Kind::Constraint + Placeholder (ty_def.rs:1363); PrimTy Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*, Reflect/Field/etc. kinded (ty_def.rs:2035-2055); ConstraintTerm:Kind::Constraint (:2000). The fco port DELETED the Constraint kind and demoted these to recognized strings = REGRESSION; K02-K04/BR0/BR1 are a RE-PORT, not greenfield.",
+        "OPEN. Derive/Evidence/ImplBuilder graduation. K04a (PrimTy-ize builtins + retire REFLECT_KEY/IMPL_BUILDER_KEY string authority = K07/BR2; needs architect signoff) -> K04b (HasKind kinds + PrimTy::Derive). effort2 7caf6343f/f6affe4f3/71e000cd4; Layer-2 (analysis/elab) NOT portable. Plan: docs/dev/FCO_K03_K04_EXECUTION_MAP.md."
       ]
     },
     {
@@ -1254,7 +1256,8 @@
       ],
       "notes": [
         "architect id: K7",
-        "actual prerequisite pressure for graduating the bridge (std-lib provider polish is NOT)"
+        "actual prerequisite pressure for graduating the bridge (std-lib provider polish is NOT)",
+        "HARD PREREQ for K04a: retire string-keyed provider authority (REFLECT_KEY/IMPL_BUILDER_KEY, provider.rs:30-31,171-172) before PrimTy-izing the capability builtins, else two recognition paths clash. See FCO_K03_K04_EXECUTION_MAP.md."
       ]
     },
     {
@@ -1621,7 +1624,8 @@
       "uncertain": false,
       "acceptance": [],
       "notes": [
-        "Revival underway: K02a landed 2026-06-14 (804dc959a)."
+        "Revival underway: K02a landed 2026-06-14 (804dc959a).",
+        "PARITY MATRIX: effort2 parsed A<B>->* (KindBoundPath 3d789a5a1), *->Constraint (KindBoundConstraint 1184fbbf0), *->A<B> (Abs(*,Path)); `Derive:*->Constraint` is a PrimTy builtin kind (7caf6343f), not surface. fco AFTER K02a: *->Constraint YES; A<B>->* / *->A<B> NO (KindBoundPath not ported, tree-sitter-blocked); builtin kinds = K04b. So K01/OD1 for the path forms = re-port KindBoundPath (3d789a5a1) OR named-rejection; NOT before K03/K04 scoping (done)."
       ]
     },
     {
