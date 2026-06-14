@@ -3532,7 +3532,8 @@
       "enum Clone generic Maybe<T> via 'derive ... using' (first generic-using-derive ever) — 2b9343818",
       "enum Ord unit-only (OrderingLike, declaration order) + NEW primitive variant.precedes — 9a0826a3b",
       "BR7 guard kind_path_form_trap (path-in-kind-position loudly rejected, no silent Kind::Any) — 052ce0064",
-      "BR2 guard provider_authority_outside_provider (capability authority gated to :Derive) — 918bd1edb"
+      "BR2 guard provider_authority_outside_provider (capability authority gated to :Derive) — 918bd1edb",
+      "K02b/K03 classification constraint_kind_constructor — 1bc039278"
     ],
     "key_decisions_from_fable_logs": [
       "Construction stays in builder commands; quotes are for comparison/expression bodies. Do NOT grow quote surface for variant/struct construction (quote struct-init list-holes deferred indefinitely). builder vocabulary = bytecode, quotes = the language.",
@@ -3543,6 +3544,10 @@
       "payload-carrying enum Ord (same-variant lexicographic tie-break over payload, doubly-nested match) — guarded out today, NOT silently wrong",
       "negative: unsupported enum shape for Ord fails by name (needs a provider fail mechanism)",
       "K02b/K03 motivating fixture: fn require_constraint<P: * -> Constraint, T>() where P<T> — classify current behavior (parse/recognize/reject-by-name; no Kind::Any; no ICE)"
-    ]
+    ],
+    "findings_2026-06-14": {
+      "K02b_not_bottleneck": "Motivating fixture shows <P: * -> Constraint> kind bound is ACCEPTED (K02a). The gap is K03: `where P<T>` (constraint-kind application) -> generic 8-0030 NotValue (no Kind::Any, no ICE). So K02b (kind INFERENCE) is NOT what's needed; do not implement it now. K03 named-diagnostic / impl is the real frontier; where-pred lowering (constraint.rs:355) only consumes TypeBound::Trait, so P<T> falls to a value-resolution path.",
+      "H10_needs_integers": "PREDICTION (to verify): ABI layout facts like HEAD_WORDS:u256 require summing field head sizes, but the provider body has NO integer Value (Value enum = Bool/Str/Field/Variant/Ty/GenTy/Expr/Pat/Sig/Quote/Builder/Reflect/Evidence/Unit). Same wall as enum Ord (solved there via precedes for ORDERING, but counting/summing needs real integers). So H10 likely needs provider-body integer support OR composition via trait_const of field consts (like EIP-712 composes). Fable agent dispatched on the ABI design + whether arithmetic was planned. IS_DYNAMIC:bool may be expressible via || over <Field as AbiShape>::IS_DYNAMIC (trait_const exists); HEAD_WORDS is the arithmetic pressure point."
+    }
   }
 }
