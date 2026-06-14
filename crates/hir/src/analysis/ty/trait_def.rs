@@ -6,7 +6,7 @@ use crate::{
         trait_lower::collect_trait_impls,
         trait_resolution::{GoalSatisfiability, PredicateListId, Selection},
     },
-    hir_def::{Contract, Func, HirIngot, IdentId, ImplTrait, Trait},
+    hir_def::{Contract, Func, HirIngot, IdentId, ImplTrait, Trait, scope_graph::ScopeId},
 };
 use common::{
     indexmap::{IndexMap, IndexSet},
@@ -359,6 +359,39 @@ pub(crate) fn impls_for_ty<'db>(
             is_ok
         })
         .collect()
+}
+
+/// Finds the implementor of `trait_def` for `ty`, searching the trait env
+/// **visible from `scope`** — the scope's ingot first, then `ty`'s own ingot
+/// (for an external trait implemented in the type's ingot). Returns the first
+/// match.
+///
+/// PS1a (read-path unification): this is the first scope-indexed *provision
+/// lookup* primitive. It consolidates the duplicated
+/// `search_ingots = [scope_ingot, ty_ingot]` + `impls_for_ty(..).find(trait)`
+/// pattern that was open-coded at several call sites (msg-variant / contract
+/// resolution). It is a deliberate **read-path** unification of the global trait
+/// env behind one entry; it does NOT change resolution outcomes. The mutable,
+/// non-salsa `EffectEnv` frame stack is intentionally NOT folded in here — it is
+/// a separate resolution surface (unifying it would be a facade).
+pub(crate) fn find_implementor_of_trait_in_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+    ty: TyId<'db>,
+    trait_def: Trait<'db>,
+) -> Option<Binder<ImplementorId<'db>>> {
+    let canonical_ty = Canonical::new(db, ty);
+    let scope_ingot = scope.ingot(db);
+    let search_ingots = [
+        Some(scope_ingot),
+        ty.ingot(db).filter(|&ingot| ingot != scope_ingot),
+    ];
+    search_ingots.into_iter().flatten().find_map(|ingot| {
+        impls_for_ty(db, ingot, canonical_ty)
+            .iter()
+            .find(|impl_| impl_.skip_binder().trait_def(db) == trait_def)
+            .copied()
+    })
 }
 
 /// Looks up the HIR body for an associated const defined in the selected trait impl, if unique.

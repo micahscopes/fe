@@ -2773,9 +2773,8 @@ fn get_variant_selector_info<'db>(
 ) -> VariantSelectorInfo {
     use crate::analysis::semantic::{SemConstScalar, SemConstValue, eval_body_owner_const};
     use crate::analysis::ty::{
-        canonical::Canonical,
         corelib::resolve_core_trait,
-        trait_def::impls_for_ty,
+        trait_def::find_implementor_of_trait_in_scope,
         ty_def::{PrimTy, TyBase, TyData},
     };
     use num_traits::ToPrimitive;
@@ -2786,19 +2785,9 @@ fn get_variant_selector_info<'db>(
             signature: None,
         };
     };
-    let canonical_ty = Canonical::new(db, variant_ty);
-    let scope_ingot = scope.ingot(db);
-    let search_ingots = [
-        Some(scope_ingot),
-        variant_ty.ingot(db).filter(|&ingot| ingot != scope_ingot),
-    ];
-
-    let Some(implementor) = search_ingots.into_iter().flatten().find_map(|ingot| {
-        impls_for_ty(db, ingot, canonical_ty)
-            .iter()
-            .find(|impl_| impl_.skip_binder().trait_def(db).eq(&msg_variant_trait))
-            .copied()
-    }) else {
+    let Some(implementor) =
+        find_implementor_of_trait_in_scope(db, scope, variant_ty, msg_variant_trait)
+    else {
         return VariantSelectorInfo {
             value: None,
             signature: None,
