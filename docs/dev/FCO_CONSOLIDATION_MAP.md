@@ -904,3 +904,28 @@ lowers their cost and risk versus the earlier framing. Open question to confirm
 before scheduling: *why* the port dropped it (deliberate simplification vs.
 rewrite scope) — that decides whether revival is a straight cherry-pick or needs
 re-integration against the new obligation substrate.
+
+### Why it was dropped: forgotten in a parallel rewrite (not a deliberate cut)
+
+Git archaeology confirms the "it just got forgotten" reading:
+
+- `first-class-obligations` and `metaprogramming-effort2` are **parallel branches**
+  from a shared ~May-2026 base; the Constraint-kind code is **never in fco's
+  lineage** (`git merge-base --is-ancestor 1184fbbf0 HEAD` → not an ancestor).
+- The Constraint kind was built by **Micah** on the effort2 line on **2026-05-29**:
+  - `1184fbbf0` "Wire Constraint kind bounds through HIR" — **9 files, +136 lines**:
+    `ty_def.rs`, `ty_lower.rs`, `core/hir_def/params.rs`, `core/lower/params.rs`,
+    `core/print.rs`, `core/semantic/mod.rs`, `parser/ast/param.rs`,
+    `parser/parser/param.rs`, `parser/syntax_kind.rs`.
+  - `1d009d576` "Update tree-sitter Constraint kind grammar" — tree-sitter.
+  - (The kinded `PrimTy` builtins `Derive`/`Evidence`/`ImplBuilder` at
+    `ty_def.rs:2035-2055` may be in adjacent effort2 commits — confirm span.)
+- **No deliberate-cut artifact exists** on fco (no removal commit, no "defer
+  Constraint kind" note); the planning docs treat it as *net-new future* work —
+  the tell that the team lost the memory it had already been built.
+
+**Revival = cherry-pick / re-port `1184fbbf0` (+`1d009d576`) onto the fco
+obligation substrate**, re-integrate against the new obligations/quote machinery,
+regen tree-sitter. Compact and concrete — not a kind-system research project.
+This is the recommended first concrete step on the K-spine (K02), ahead of K01's
+"reject by name" (you would instead *revive*, not reject).
