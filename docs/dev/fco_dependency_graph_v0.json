@@ -1515,53 +1515,6 @@
       "nearest_guard_fixture": "N/A (process)"
     },
     {
-      "id": "PS0",
-      "title": "Scoped provisions north star",
-      "group": "Provision scoping (scoped provisions / demote global coherence)",
-      "kind": "north_star",
-      "description": "Traits and effects are one judgment ('type T has impl of interface I') = a provision; demand->provision-lookup->evidence as a SINGLE resolution pathway (Q0 charter, fe-provision-scoping-design-2026-06-10). Originating impetus, peer of the K-spine: tracked, not built.",
-      "uncertain": false,
-      "acceptance": [],
-      "notes": [
-        "the design move is 'collapse the spectrum', NOT 'replace traits with effects'",
-        "today: ~6 separate resolution pathways still exist"
-      ]
-    },
-    {
-      "id": "PS1",
-      "title": "Demote global coherence to companion provisions",
-      "group": "Provision scoping (scoped provisions / demote global coherence)",
-      "kind": "capability",
-      "description": "Global `impl Eq for Point` becomes a companion provision (outermost scope, lowest priority); DELETE the orphan rule + global coherence *checker*; coherence becomes a default produced by placement (outermost scope <= 1 provision per goal).",
-      "uncertain": true,
-      "acceptance": [
-        "orphan rule + global coherence checker removed; companion provisions + narrower-scope shadowing added; existing code keeps its meaning"
-      ],
-      "notes": []
-    },
-    {
-      "id": "PS2",
-      "title": "Module/ingot-tier provisions (the missing middle)",
-      "group": "Provision scoping (scoped provisions / demote global coherence)",
-      "kind": "grammar",
-      "description": "`provide impl Eq for Point` (+pub) at module/ingot scope; imported provisions. The note calls this 'the missing middle - to design'. No grammar today.",
-      "uncertain": true,
-      "acceptance": [
-        "module-tier provision syntax parses; visible in module + pub importers"
-      ],
-      "notes": []
-    },
-    {
-      "id": "PS3",
-      "title": "Scope-chain resolution + within-level ambiguity",
-      "group": "Provision scoping (scoped provisions / demote global coherence)",
-      "kind": "capability",
-      "description": "Resolution order: with-block > fn uses > module provisions > imported > companion; ambiguity within one level is an error. effort2's scoped-conflict diagnostics are the prototype.",
-      "uncertain": true,
-      "acceptance": [],
-      "notes": []
-    },
-    {
       "id": "BR13",
       "title": "Global trait coherence checking as a comfortable bridge",
       "group": "Bridge placeholder audit",
@@ -1577,6 +1530,124 @@
       "final_target": "PS1: companion provisions; coherence-by-placement (outermost scope <=1 provision per goal)",
       "risk_if_fossilized": "Rust-style global coherence quietly becomes the permanent model; the ~6 resolution pathways never collapse into one scoped provision env",
       "nearest_guard_fixture": "B2b overlap fixture pins CURRENT global coherence (guards the bridge, not the graduation); NONE for scoped provisions"
+    },
+    {
+      "id": "PS0",
+      "title": "Global trait env as bridge",
+      "group": "Scoped provision / global-trait bridge",
+      "kind": "bridge",
+      "description": "Today's global/companion impl table is the OUTERMOST provision tier, not the final architecture. Demote global `impl Eq for Point` to a companion provision (outermost, lowest priority); delete the orphan rule + global coherence checker -> coherence becomes a default produced by placement. (Provision-scoping 'second north star'.)",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "folds the earlier 'demote global coherence' framing; BR13 is its bridge marker"
+      ]
+    },
+    {
+      "id": "PS1",
+      "title": "Conditional blanket provisions",
+      "group": "Scoped provision / global-trait bridge",
+      "kind": "capability",
+      "description": "Blanket impls with where-clauses (`impl<T: Copy> Clone for T`) are provisions CONDITIONAL on evidence (`T: Copy`), not unconditional global candidates. eliminate/deprioritize/ambiguous is a provision-scoping policy, NOT a per-trait special-case.",
+      "uncertain": true,
+      "acceptance": [
+        "a conditional blanket impl is not a viable method candidate unless its where-condition is dischargeable for the receiver"
+      ],
+      "notes": []
+    },
+    {
+      "id": "PS2",
+      "title": "Method-resolution candidate gating",
+      "group": "Scoped provision / global-trait bridge",
+      "kind": "capability",
+      "description": "Method calls must account for a candidate provision's conditions (blanket guard / where-clause) BEFORE reporting ambiguity or selecting. StableClone repro: `p.clone()` ambiguous because the Copy-blanket is listed without discharging `Point: Copy`.",
+      "uncertain": true,
+      "acceptance": [
+        "a conditional blanket candidate whose guard is unsatisfiable for the receiver is dropped, not reported as ambiguous"
+      ],
+      "notes": []
+    },
+    {
+      "id": "PS3",
+      "title": "Scoped provision priority policy",
+      "group": "Scoped provision / global-trait bridge",
+      "kind": "capability",
+      "description": "Resolution scope-chain: with-block > fn `uses` > module provisions > imported > companion; ambiguity WITHIN one level is an error. Includes the module/ingot 'missing middle' (`provide impl` grammar - to design).",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PS4",
+      "title": "Canonical-only traits",
+      "group": "Scoped provision / global-trait bridge",
+      "kind": "policy",
+      "description": "Consensus/layout-sensitive interfaces (Ord, Hash, ABI-family) may be restricted to canonical companion provisions (no free shadowing) until witness capture exists - the canonicity hazard.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "PS5",
+      "title": "Witness capture in type identity",
+      "group": "Scoped provision / global-trait bridge",
+      "kind": "capability",
+      "description": "Long-term: capture the chosen provision/witness in type identity where it affects persistent state/consensus layout.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "STCLONE",
+      "title": "StableClone provider pressure-test",
+      "group": "Scoped provision / global-trait bridge",
+      "kind": "fixture",
+      "description": "PASS: the provider bridge generated a structural `impl Clone for Point`. FINDING: `p.clone()` ambiguous because `impl<T: Copy> Clone for T` is listed as a candidate without discharging `Point: Copy`. NOT std-lib-polish failure; a method-resolution / conditional-blanket-provision repro (docs/dev/repro_stable_clone_blanket_ambiguity.fe). Do not special-case Clone; do not weaken the blanket.",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": [
+        "architect: provider bridge PASS; method/provision resolution is the problem"
+      ]
+    },
+    {
+      "id": "OD0",
+      "title": "Original-draft parity: kinded-obligation parsing",
+      "group": "Original draft parity",
+      "kind": "audit",
+      "description": "ANSWERED (git archaeology): effort2 parsed A<B>->*, *->A<B>, *->Constraint and had the Constraint kind + kinded Derive/Evidence/ImplBuilder; fco (parallel branch off a shared base) never carried it. Port regression, not intentional deferral. Revival source: 1184fbbf0 (+1d009d576).",
+      "uncertain": false,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "OD1",
+      "title": "A<B> -> * named rejection (until revived)",
+      "group": "Original draft parity",
+      "kind": "diagnostic",
+      "description": "Until revived: `A<B> -> *` (path kind / obligation-bearing domain) gets a named 'planned, not yet supported' diagnostic - never accept-and-ignore / Kind::Any. effort2 had KindBoundPath grammar.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "OD2",
+      "title": "* -> A<B> / * -> Constraint named rejection (until revived)",
+      "group": "Original draft parity",
+      "kind": "diagnostic",
+      "description": "Until revived: `* -> A<B>` / `* -> Constraint` (evidence/proposition codomain) gets a named diagnostic. effort2 had KindBoundConstraint grammar.",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
+    },
+    {
+      "id": "OD3",
+      "title": "Derive : * -> Constraint graduation target",
+      "group": "Original draft parity",
+      "kind": "capability",
+      "description": "Graduation target = K04: Derive as a real kinded construct. effort2 had `Derive : (* -> Constraint) -> Constraint` as a PrimTy kind (revival, not greenfield).",
+      "uncertain": true,
+      "acceptance": [],
+      "notes": []
     }
   ],
   "edges": [
@@ -2907,70 +2978,112 @@
       "reason": "deferred labels need the per-run repo-capability audit discipline"
     },
     {
+      "from": "BR13",
+      "to": "PV00",
+      "kind": "soft",
+      "reason": "demotion needs the scope-indexed provision environment"
+    },
+    {
       "from": "F04",
       "to": "PS0",
       "kind": "hard",
-      "reason": "the one obligation queue is the substrate of the single resolution pathway"
-    },
-    {
-      "from": "A10",
-      "to": "PS0",
-      "kind": "soft",
-      "reason": "assumption discharge is one provision route through the pathway"
+      "reason": "one obligation/provision pathway is the substrate for demoting the global trait env"
     },
     {
       "from": "PV00",
       "to": "PS0",
       "kind": "hard",
-      "reason": "scope-indexed provision environment realizes the north star"
-    },
-    {
-      "from": "PV10",
-      "to": "PS1",
-      "kind": "hard",
-      "reason": "trait/env-assumptions-as-provisions is the mechanism that demotes global impls"
+      "reason": "scope-indexed provision env realizes the demotion"
     },
     {
       "from": "PS0",
       "to": "PS1",
       "kind": "hard",
-      "reason": "north star scopes the demotion of global coherence"
+      "reason": "blanket provisions live in the global/companion tier being demoted"
     },
     {
-      "from": "PS0",
+      "from": "PS1",
       "to": "PS2",
       "kind": "hard",
-      "reason": "north star scopes the missing module/ingot tier"
+      "reason": "method resolution must gate conditional blanket candidates"
     },
     {
       "from": "PS0",
       "to": "PS3",
       "kind": "hard",
-      "reason": "north star scopes scope-chain resolution"
-    },
-    {
-      "from": "PS2",
-      "to": "PS1",
-      "kind": "hard",
-      "reason": "module-tier provisions are needed before the global coherence checker can be removed"
+      "reason": "scope-chain priority defines the tiers global is demoted into"
     },
     {
       "from": "PS3",
-      "to": "PS1",
-      "kind": "soft",
-      "reason": "within-level ambiguity rules replace global coherence's conflict checking"
+      "to": "PS4",
+      "kind": "hard",
+      "reason": "canonical-only restriction is a priority/shadowing policy"
     },
     {
-      "from": "BR13",
+      "from": "PS4",
+      "to": "PS5",
+      "kind": "hard",
+      "reason": "witness capture is the long-term answer where canonical-only is insufficient"
+    },
+    {
+      "from": "STCLONE",
       "to": "PS1",
       "kind": "hard",
-      "reason": "the global-coherence bridge graduates via demotion to companion provisions"
+      "reason": "concrete repro of a conditional blanket provision"
+    },
+    {
+      "from": "STCLONE",
+      "to": "PS2",
+      "kind": "hard",
+      "reason": "concrete repro of method-resolution candidate gating"
     },
     {
       "from": "BR13",
-      "to": "PV00",
+      "to": "PS0",
+      "kind": "hard",
+      "reason": "global-coherence bridge graduates into the companion-provision tier"
+    },
+    {
+      "from": "OD0",
+      "to": "OD1",
+      "kind": "hard",
+      "reason": "parity audit gates the named-rejection diagnostics"
+    },
+    {
+      "from": "OD0",
+      "to": "OD2",
+      "kind": "hard",
+      "reason": "parity audit gates the named-rejection diagnostics"
+    },
+    {
+      "from": "OD0",
+      "to": "OD3",
+      "kind": "hard",
+      "reason": "parity audit identifies Derive:*->Constraint as the revival target"
+    },
+    {
+      "from": "OD1",
+      "to": "K01",
+      "kind": "hard",
+      "reason": "A<B>->* rejection is part of K01"
+    },
+    {
+      "from": "OD2",
+      "to": "K01",
+      "kind": "hard",
+      "reason": "*->Constraint rejection is part of K01"
+    },
+    {
+      "from": "OD3",
+      "to": "K04",
       "kind": "soft",
-      "reason": "demotion needs the scope-indexed provision environment"
+      "reason": "Derive graduation target = K04"
+    },
+    {
+      "from": "OD0",
+      "to": "K02",
+      "kind": "soft",
+      "reason": "parity audit feeds the Constraint-kind revival (K02 = re-port 1184fbbf0)"
     }
   ],
   "topological_layers_hard_edges": [

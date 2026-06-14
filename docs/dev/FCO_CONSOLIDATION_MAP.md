@@ -929,3 +929,42 @@ obligation substrate**, re-integrate against the new obligations/quote machinery
 regen tree-sitter. Compact and concrete — not a kind-system research project.
 This is the recommended first concrete step on the K-spine (K02), ahead of K01's
 "reject by name" (you would instead *revive*, not reject).
+
+## Architect steer (post-ZIP review): refine PS cluster + StableClone reclassification + OD parity
+
+The earlier "PS0–PS3 = demote global coherence" framing was **superseded** by the
+architect's finer, authoritative slice (graph group "Scoped provision /
+global-trait bridge"):
+
+- **PS0 global trait env as bridge** (today's global/companion impl table = the
+  outermost provision tier, not final; demote, don't delete; BR13 is its marker)
+- **PS1 conditional blanket provisions** — `impl<T: Copy> Clone for T` is a
+  provision *conditional on evidence*, not an unconditional global candidate
+- **PS2 method-resolution candidate gating** — gate a candidate's conditions
+  before reporting ambiguity / selecting
+- **PS3 scoped provision priority** — `with > uses > module > import > companion`;
+  within-level ambiguity is an error; includes the module-tier "missing middle"
+- **PS4 canonical-only traits** — Ord/Hash/ABI-family may be canonical-only
+  (no free shadowing) until witness capture (the canonicity hazard)
+- **PS5 witness capture in type identity** — long-term, for layout/consensus-
+  sensitive witnesses
+
+**StableClone reclassified** (node `STCLONE`): **PASS** — the provider bridge
+generated a structural `impl Clone for Point`; **FINDING** — `p.clone()` is
+ambiguous because the `Copy`-blanket is listed as a candidate without discharging
+`Point: Copy`. This is a **method-resolution / conditional-blanket-provision**
+issue (→ PS1/PS2), **not** a std-lib-polish failure and **not** a Clone
+special-case. Quarantined repro: `docs/dev/repro_stable_clone_blanket_ambiguity.fe`
+(kept out of the `fe_test` glob so it doesn't fail the suite). Distinct from M5
+gate-not-select (that gated *const predicates*; this is a *trait/provision*
+condition) — only reopen M5 if Gate-2 claims it gates **all** selected-impl
+residuals; otherwise it's a PS1/PS2 candidate-policy item.
+
+**Original-draft parity axis (`OD0–OD3`):** OD0 is **ANSWERED** by the git
+archaeology above — the kinded forms parsed in effort2 (`1184fbbf0`) and the fco
+port regressed them; OD1/OD2 (named rejection of `A<B> -> *` / `* -> A<B>` /
+`* -> Constraint`) feed K01; OD3 (`Derive : * -> Constraint`) = K04. So **K01 is
+reframed: revive (re-port `1184fbbf0`), not merely reject** — it needs grammar
+recognition, not just diagnostic routing. **8-0086** stays on hold (`2-0002`
+chained-projection is acceptable named/no-ICE behavior until the taxonomy decides
+suppress-vs-wrap).

@@ -201,11 +201,21 @@ flowchart TD
     BR13["BR13 global coherence checking as bridge<br/><small>BRIDGE_AT_RISK</small>"]
   end
 
-  subgraph Provision_scoping["Provision scoping (scoped provisions / demote global coherence)"]
-    PS0["PS0 scoped provisions north star<br/><small>north_star</small>"]
-    PS1["PS1 demote global coherence to companion provisions<br/><small>capability</small>"]
-    PS2["PS2 module/ingot-tier provisions (missing middle)<br/><small>grammar</small>"]
-    PS3["PS3 scope-chain resolution + within-level ambiguity<br/><small>capability</small>"]
+
+  subgraph Scoped_provision["Scoped provision / global-trait bridge"]
+    PS0["PS0 global trait env as bridge<br/><small>bridge</small>"]
+    PS1["PS1 conditional blanket provisions<br/><small>impl&lt;T:Copy&gt; Clone for T</small>"]
+    PS2["PS2 method-resolution candidate gating<br/><small>capability</small>"]
+    PS3["PS3 scoped provision priority<br/><small>with&gt;uses&gt;module&gt;import&gt;companion</small>"]
+    PS4["PS4 canonical-only traits<br/><small>Ord/Hash/ABI</small>"]
+    PS5["PS5 witness capture in type identity<br/><small>capability</small>"]
+    STCLONE["StableClone pressure-test<br/><small>provider PASS; method ambiguity</small>"]
+  end
+  subgraph Original_draft_parity["Original draft parity"]
+    OD0["OD0 kinded-obligation parsing parity<br/><small>ANSWERED: effort2 had it, port regression</small>"]
+    OD1["OD1 A&lt;B&gt; -&gt; * named rejection<br/><small>diagnostic</small>"]
+    OD2["OD2 * -&gt; A&lt;B&gt; / * -&gt; Constraint named rejection<br/><small>diagnostic</small>"]
+    OD3["OD3 Derive : * -&gt; Constraint graduation<br/><small>= K04</small>"]
   end
 
   T00 --> T10
@@ -434,18 +444,25 @@ flowchart TD
   BR12 -. "graduates" .-> K07
   BR12 -. "graduates" .-> G00
 
-  %% Provision-scoping spine + BR13
+
+  %% Scoped-provision + original-draft-parity
   F04 --> PS0
   PV00 --> PS0
-  PV10 --> PS1
   PS0 --> PS1
-  PS0 --> PS2
+  PS1 --> PS2
   PS0 --> PS3
-  PS2 --> PS1
-  BR13 --> PS1
-  A10 -. "route" .-> PS0
-  PS3 -. "replaces" .-> PS1
-  BR13 -. "needs" .-> PV00
+  PS3 --> PS4
+  PS4 --> PS5
+  STCLONE --> PS1
+  STCLONE --> PS2
+  BR13 --> PS0
+  OD0 --> OD1
+  OD0 --> OD2
+  OD0 --> OD3
+  OD1 --> K01
+  OD2 --> K01
+  OD3 -. "= K04" .-> K04
+  OD0 -. "revival" .-> K02
 
   classDef uncertain stroke-dasharray: 5 5;
   class AC00 uncertain;
@@ -481,3 +498,8 @@ flowchart TD
   class PS1 uncertain;
   class PS2 uncertain;
   class PS3 uncertain;
+  class PS4 uncertain;
+  class PS5 uncertain;
+  class OD1 uncertain;
+  class OD2 uncertain;
+  class OD3 uncertain;

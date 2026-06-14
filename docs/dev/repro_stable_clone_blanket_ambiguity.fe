@@ -1,0 +1,60 @@
+// QUARANTINED REPRO — not a passing fixture. Do NOT place under
+// crates/fe/tests/fixtures/fe_test/ (that glob asserts exit 0).
+//
+// Graph: STCLONE -> PS1 (conditional blanket provisions) / PS2 (method-
+// resolution candidate gating). See FCO_CONSOLIDATION_MAP.md "Scoped provision".
+//
+// PASS: the provider bridge generates a structural `impl Clone for Point`.
+// FINDING: `p.clone()` is AMBIGUOUS — method resolution lists the conditional
+// blanket `impl<T: Copy> Clone for T` (core/clone.fe) as a candidate WITHOUT
+// discharging `Point: Copy` (which is false). The provider bridge is fine; the
+// problem is candidate gating for conditional blanket provisions.
+//
+// Do NOT: special-case Clone, weaken/remove the blanket impl, or call this a
+// std-lib-polish failure. The fix is provision/method-resolution policy (PS1/PS2).
+//
+//   error[2-0003]: `clone` is ambiguous
+//     candidate: `Clone::clone`   (derived impl Clone for Point)
+//     candidate: `Clone::clone`   (blanket impl<T: Copy> Clone for T)
+//   error[8-0031]: type annotation is needed  (let q = p.clone())
+
+use core::clone::Clone
+
+impl StableClone: Derive for Clone {
+    const fn derive<T>(ev: own Evidence<Clone<T>>) -> Evidence<Clone<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Clone<T>>)
+    {
+        if reflect.is_struct() {
+            let mut init = builder.struct_init()
+            for field in reflect.fields() {
+                builder.require<Clone>(field.ty())
+                init = builder.with_field(
+                    init,
+                    field,
+                    builder.call(builder.field_get(builder.self_ref(), field), "clone"),
+                )
+            }
+            let mut sig = builder.method("clone")
+            sig = builder.with_self(sig)
+            sig = builder.returns(sig, builder.self_ty())
+            builder.emit_method(sig, init)
+        }
+        builder.finish()
+        ev
+    }
+}
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+derive Clone for Point using StableClone
+
+#[test]
+fn clone_struct_copies_fields() {
+    let p = Point { x: 7, y: 9 }
+    let q = p.clone()   // <-- ambiguous: derived impl vs Copy-blanket (Point: Copy unmet)
+    assert!(q.x == 7)
+    assert!(q.y == 9)
+}
