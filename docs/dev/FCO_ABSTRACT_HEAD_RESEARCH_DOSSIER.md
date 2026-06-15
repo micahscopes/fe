@@ -121,6 +121,21 @@ exact anti-pattern the wizard's Temperance note warns against.
 
 **Recommendation: SHELVE-WITH-RUNWAY.** All four tracks converge.
 
+> **Framing to not lose — TWO INDEPENDENT GATES.**
+> 1. **Feasibility is open + hard, not merely "needs design."** The abstract head is *not impossible*
+>    (no impossibility result; the concrete head already works), but the open part is a **theorem that may
+>    not exist**: genuine variable-headed solving sits next to a known cliff — higher-order matching is
+>    undecidable in general. Three honest outcomes: (i) a useful decidable + coherence-preserving
+>    sub-fragment is provable; (ii) only a *narrow* fragment works (less than the full `trait Derive<P>`);
+>    (iii) the useful form is undecidable → monomorphization stays the answer. The adversary *proved the
+>    cheap fragment collapses to concrete solving* (order-isomorphic to W-B); the harder one is genuinely
+>    unknown. So it needs a sound design **plus a feasibility proof not guaranteed to exist** — which could
+>    come back partial or negative.
+> 2. **Demand is the BINDING constraint, and it is currently EMPTY (C6).** Even a perfect, proven design
+>    would not justify building today — there is no consumer; every real need is met by the concrete head
+>    + monomorphization. This (not feasibility) is the actual reason it is shelved, and it is the cheaper
+>    kill-switch. Re-open only when a real consumer appears *and* the feasibility proof is in hand.
+
 - **Track 0 (demand) — EMPTY. C6 CONFIRMED.** Every named consumer (one-provider-for-a-trait-family,
   `derive Functor`, multi-trait conjunction `P<T>+Q<T>`, the ABI Encode/Decode/AbiSize serialization
   family, and the corpus's own strongest Form-6 `IsoAt` demand) is met by monomorphize-per-trait or
