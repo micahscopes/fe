@@ -3583,5 +3583,17 @@
       "alignment": "H10a AbiShape = EVM's projection of the actor Codec axis. add/or primitives = backend-agnostic infra. FCO reification work builds substrate the actor interface's EVM projection consumes. Keep layout providers backend-parameterized or backend-scoped; never hardcode EVM as universal.",
       "hkt_grammar_gap_on_fco": "CLASSIFIED (hkt_assoc_type_constructor fixture): HKT associated-type constructors (type Ptr<T>, kind * -> *) do NOT parse on first-class-obligations (1-0001). multi-backend branch HAS the grammar but incomplete B::Ptr<u32> resolution. => actor interface on FCO needs both grammar (port from multi-backend) + resolution. Distinct from the * -> Constraint (K02a/K03) frontier; this is ordinary * -> * assoc-type HKT."
     }
+  },
+  "wiring_party_decision_2026-06-15": {
+    "record": "docs/dev/FCO_WIRING_PARTY_DECISION_RECORD.md (fable-grounded, cited)",
+    "headline": "Kinded derive API graduation. D1: project constraints over PredicateListId/TraitInstId, NO ConstraintId (architect-ratified FCO_K03_K04_EXECUTION_MAP.md:55-64; corroborated by LANDED term.rs keying AssocConst by TraitInstId). D2: abstract where P<T> DEFERRED+escalate (undesigned everywhere; effort2's was dead scaffold, no substitution-on-instantiation). D3: Self=first-arg (Eq<T=Self> ops.fe:119). D4: kinds Derive:(*->Constraint)->Constraint, Evidence/ImplBuilder:Constraint->*; stage K04a(done)->K04b->K03-last. D5: the 5 effort2 blockers (CTFE-out-of-solver, no-residual-drop, no-dual-pipeline, evidence-persists, reject-don't-fake-kinds). D6: FV grounds the SUBSTRATE (term confluence/UNF proven; const-pred arithmetic) NOT the kind system (design-grounded only).",
+    "term_lang_substrate": "LANDED term.rs TERM_LANG_VERSION=1 (commit 0059cf583): normalized-term identity (Lit|ConstParam|UnivParam|App|Bin|Un), content-addressed, version-baked-into-interning-key. Constraints/goals/evidence ride this. Lean litmus PROVES confluence + unique-normal-forms + strong-normalization (fe-lean-litmus-2026-06-11.lean §9), sorry-free, given (a) selection-is-a-function (coherence) (b) fixed resolution context per normalize run. AssocConst keyed by TraitInstId (disambiguates trait args).",
+    "fv_corpus": "fe-lean-litmus-2026-06-11.lean (Lean4, term-language proofs), z3-vc-census/ + fe-vc-census-z3-2026-06-11.md (const-pred arithmetic 19/19, W6 nonlinear needs premise-gated NIA at u256 -> evidence premises slot), fe-assurance/ (merge_runtime_class NOT a semilattice but unreached; hash712 proven bounded). 100 subagent threads in fe-sessions-bundle-2026-06-13/*/subagents/.",
+    "open": [
+      "ConstraintListId-primary (M5 port map) vs TraitInstId-primary (K03/K04) reconciliation unstated",
+      "AssocConst subject key TraitInstId vs (TyId,item) deferred to next TERM_LANG_VERSION bump",
+      "abstract P<T> head representation+Self-convention undesigned",
+      "Evidence<C> arg opaque(K04a) vs kinded(K04b) recommended-not-ratified"
+    ]
   }
 }
