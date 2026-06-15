@@ -204,6 +204,56 @@ not in the diagnostic-free collection lowering.)
 Full packet + the five adversarial Lean attacks + Track-1/Track-2 dossiers:
 `/tmp/claude-1000/.../tasks/wf1lto04p.output` (run `wf_2e7b8127-d83`).
 
+## 4d. COHERENT USE-DRIVEN DESIGN (2026-06-15, design-wizard generative pass)
+
+Designing the abstract head *from its best uses* (not from demand) yields a coherent design organized by
+one decision — **the SOLVE LINE:** *everything the abstract head expresses must be eliminable to a concrete
+`TraitInstId`/`PredicateListId` goal BEFORE the solver runs; the solver never sees a live `P`.* This is the
+Fe-native answer to the feasibility cliff: instead of *proving* a decidable fragment of variable-headed
+solving (the theorem that may not exist), route every admissible use to the already-proven concrete
+fragment by **elimination**, and **reject** (named diagnostic) anything that can't be eliminated. Nothing
+reaches the solver with a variable head, so the Lean-proven assumptions (coherence-as-function, fixed-Γ,
+concreteness, first-order) are untouched. Precedent: this is exactly how Scala-3 transparent `type` aliases
+and Haskell `ConstraintKinds` *type synonyms* work (elaborator-expanded, never in resolution search); the
+danger only begins at `QuantifiedConstraints`, which adds a solver rule — the tier Fe refuses.
+
+**Three tiers, split by the solve line:**
+- **Tier A — constraint aliases (definitionally transparent). SHIP-EQUIVALENT, the surprise win.**
+  `constraint Serializable<T> = Encode<T> + Decode<T> + AbiSize<T>`. A new item kind; kind `* -> Constraint`
+  (K02a, landed); **expanded to its `PredicateListId` at lowering** via the *same* `lower_hir_constraint_
+  application` path W-B built — so NO solver work, NO new `TyData`, NO soundness obligation beyond
+  "expansion terminates" (non-recursive aliases, the standard restriction). This is the most-used face of
+  `ConstraintKinds`, delivered nearly free over already-shipped machinery. Captures the alias + backend-
+  family uses entirely.
+- **Tier B — head-as-parameter, MONOMORPHIZE-ONLY (the meta-deriver). BUILD WHEN `Generic<T>` EXISTS.**
+  `impl<P> Derive<P> for StructuralFold where P: *->Constraint`. `P` is **substituted before the body is
+  checked and before any goal is solved** (the shelf's V1 head-promotion `TyFolder`, ~30 LOC, re-enters
+  W-B's reifier → `TraitInstId`). The body is checked as if it were the monomorphic provider; the solver
+  only sees `Eq<FieldTy>`. **KEY INVERSION:** the adversary's "the cheap fragment collapses to concrete
+  solving / order-isomorphic to W-B" finding — which read as a disappointment for *general* solving — is
+  precisely the **soundness certificate** for this tier: monomorphize-then-solve is sound + decidable *by
+  reduction to the proven concrete case*. No `ConstraintTerm`. BUT its true prerequisite is a `Generic<T>`
+  universal structural representation (a shared traversal body to carry); the `P` parameter without it is
+  pure ceremony.
+- **Tier C — `TyData::ConstraintTerm` + quantified constraints (`forall T. P<T> =>`, `Evidence<C>` as a
+  value). NAMED-REJECT, DO NOT BUILD.** The only tier needing variable-headed/higher-order solving (the
+  undecidability + coherence cliffs) and the max-blast-radius `ConstraintTerm` D7 showed no simulation
+  needs. Zero demand. Lift per concrete shape (ordinary conditional impls) instead.
+
+**Where designing it well points (the decisive coda):** *the constraint-constructor solver was never the
+lever.* (1) Build **Tier A aliases** → the most-used face of the abstract head is delivered for free, over
+shipped machinery. (2) Build the **`Generic<T>` universal representation** → the meta-deriver becomes
+authorable *without* a live constraint-constructor parameter (parameterize the fold by a value/trait-method
+leaf op, not by a constraint head). So "designed well, the abstract head is not one feature": a kind
+(shipped) + a transparent abbreviation (**build — cheap, high-value**) + a monomorphization folder (build
+after `Generic<T>`) + a refusal (keep). The "abstract solver" everyone pictures on hearing "first-class
+obligations one level up" is the single piece the design says to leave on the shelf.
+
+**Actionable that fell out:** **Tier A constraint aliases** is a genuine, shippable, low-risk increment —
+*not* the abstract head (it's sugar over the concrete head), demand-plausible (kills `where`-conjunction
+boilerplate in `core/abi.fe`), and nearly free over K02a + W-B + `PredicateListId`. Candidate for real work,
+independent of the build trigger.
+
 ## 5. Key sources
 effort2 `crates/hir/src/analysis/ty/constraint.rs` (`:1,21-31,165-185,559-575,601-655`),
 `ty_check/mod.rs:1577-1617`, `ty_def.rs:1363-1379,2014,2022`; architect bundle
