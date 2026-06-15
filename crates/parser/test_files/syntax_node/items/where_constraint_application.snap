@@ -1,0 +1,419 @@
+---
+source: crates/parser/tests/syntax_node.rs
+assertion_line: 17
+expression: node
+input_file: test_files/syntax_node/items/where_constraint_application.fe
+---
+Root@0..1282
+  Comment@0..79 "// Boundless constrai ..."
+  Newline@79..80 "\n"
+  Comment@80..152 "// as `WherePredicate ..."
+  Newline@152..153 "\n"
+  Comment@153..228 "// type-bound predica ..."
+  Newline@228..229 "\n"
+  Comment@229..308 "// discriminator is:  ..."
+  Newline@308..309 "\n"
+  Comment@309..355 "// token that does no ..."
+  Newline@355..357 "\n\n"
+  Comment@357..399 "// Single concrete co ..."
+  Newline@399..400 "\n"
+  ItemList@400..1281
+    Item@400..427
+      Func@400..427
+        FnKw@400..402 "fn"
+        WhiteSpace@402..403 " "
+        FuncSignature@403..423
+          Ident@403..406 "one"
+          GenericParamList@406..409
+            Lt@406..407 "<"
+            TypeGenericParam@407..408
+              Ident@407..408 "T"
+            Gt@408..409 ">"
+          FuncParamList@409..411
+            LParen@409..410 "("
+            RParen@410..411 ")"
+          WhiteSpace@411..412 " "
+          WhereClause@412..423
+            WhereKw@412..417 "where"
+            WhiteSpace@417..418 " "
+            WherePredicate@418..423
+              PathType@418..423
+                Path@418..423
+                  PathSegment@418..423
+                    Ident@418..420 "Eq"
+                    GenericArgList@420..423
+                      Lt@420..421 "<"
+                      TypeGenericArg@421..422
+                        PathType@421..422
+                          Path@421..422
+                            PathSegment@421..422
+                              Ident@421..422 "T"
+                      Gt@422..423 ">"
+        WhiteSpace@423..424 " "
+        BlockExpr@424..427
+          LBrace@424..425 "{"
+          Newline@425..426 "\n"
+          RBrace@426..427 "}"
+    Newline@427..429 "\n\n"
+    Comment@429..493 "// Multiple, comma-se ..."
+    Newline@493..494 "\n"
+    Item@494..543
+      Func@494..543
+        FnKw@494..496 "fn"
+        WhiteSpace@496..497 " "
+        FuncSignature@497..539
+          Ident@497..501 "many"
+          GenericParamList@501..507
+            Lt@501..502 "<"
+            TypeGenericParam@502..503
+              Ident@502..503 "T"
+            Comma@503..504 ","
+            WhiteSpace@504..505 " "
+            TypeGenericParam@505..506
+              Ident@505..506 "U"
+            Gt@506..507 ">"
+          FuncParamList@507..509
+            LParen@507..508 "("
+            RParen@508..509 ")"
+          WhiteSpace@509..510 " "
+          WhereClause@510..539
+            WhereKw@510..515 "where"
+            WhiteSpace@515..516 " "
+            WherePredicate@516..524
+              PathType@516..517
+                Path@516..517
+                  PathSegment@516..517
+                    Ident@516..517 "T"
+              TypeBoundList@517..524
+                Colon@517..518 ":"
+                WhiteSpace@518..519 " "
+                TypeBound@519..524
+                  TraitRef@519..524
+                    Path@519..524
+                      PathSegment@519..524
+                        Ident@519..524 "Sized"
+            Comma@524..525 ","
+            WhiteSpace@525..526 " "
+            WherePredicate@526..531
+              PathType@526..531
+                Path@526..531
+                  PathSegment@526..531
+                    Ident@526..528 "Eq"
+                    GenericArgList@528..531
+                      Lt@528..529 "<"
+                      TypeGenericArg@529..530
+                        PathType@529..530
+                          Path@529..530
+                            PathSegment@529..530
+                              Ident@529..530 "T"
+                      Gt@530..531 ">"
+            Comma@531..532 ","
+            WhiteSpace@532..533 " "
+            WherePredicate@533..539
+              PathType@533..539
+                Path@533..539
+                  PathSegment@533..539
+                    Ident@533..536 "Ord"
+                    GenericArgList@536..539
+                      Lt@536..537 "<"
+                      TypeGenericArg@537..538
+                        PathType@537..538
+                          Path@537..538
+                            PathSegment@537..538
+                              Ident@537..538 "U"
+                      Gt@538..539 ">"
+        WhiteSpace@539..540 " "
+        BlockExpr@540..543
+          LBrace@540..541 "{"
+          Newline@541..542 "\n"
+          RBrace@542..543 "}"
+    Newline@543..545 "\n\n"
+    Comment@545..578 "// Multi-segment trai ..."
+    Newline@578..579 "\n"
+    Item@579..620
+      Func@579..620
+        FnKw@579..581 "fn"
+        WhiteSpace@581..582 " "
+        FuncSignature@582..616
+          Ident@582..588 "pathed"
+          GenericParamList@588..591
+            Lt@588..589 "<"
+            TypeGenericParam@589..590
+              Ident@589..590 "T"
+            Gt@590..591 ">"
+          FuncParamList@591..593
+            LParen@591..592 "("
+            RParen@592..593 ")"
+          WhiteSpace@593..594 " "
+          WhereClause@594..616
+            WhereKw@594..599 "where"
+            WhiteSpace@599..600 " "
+            WherePredicate@600..616
+              PathType@600..616
+                Path@600..616
+                  PathSegment@600..604
+                    Ident@600..604 "core"
+                  Colon2@604..606 "::"
+                  PathSegment@606..609
+                    Ident@606..609 "ops"
+                  Colon2@609..611 "::"
+                  PathSegment@611..616
+                    Ident@611..613 "Eq"
+                    GenericArgList@613..616
+                      Lt@613..614 "<"
+                      TypeGenericArg@614..615
+                        PathType@614..615
+                          Path@614..615
+                            PathSegment@614..615
+                              Ident@614..615 "T"
+                      Gt@615..616 ">"
+        WhiteSpace@616..617 " "
+        BlockExpr@617..620
+          LBrace@617..618 "{"
+          Newline@618..619 "\n"
+          RBrace@619..620 "}"
+    Newline@620..622 "\n\n"
+    Comment@622..695 "// Constraint applica ..."
+    Newline@695..696 "\n"
+    Item@696..741
+      Struct@696..741
+        StructKw@696..702 "struct"
+        WhiteSpace@702..703 " "
+        Ident@703..709 "Holder"
+        GenericParamList@709..712
+          Lt@709..710 "<"
+          TypeGenericParam@710..711
+            Ident@710..711 "T"
+          Gt@711..712 ">"
+        WhiteSpace@712..713 " "
+        WhereClause@713..724
+          WhereKw@713..718 "where"
+          WhiteSpace@718..719 " "
+          WherePredicate@719..724
+            PathType@719..724
+              Path@719..724
+                PathSegment@719..724
+                  Ident@719..721 "Eq"
+                  GenericArgList@721..724
+                    Lt@721..722 "<"
+                    TypeGenericArg@722..723
+                      PathType@722..723
+                        Path@722..723
+                          PathSegment@722..723
+                            Ident@722..723 "T"
+                    Gt@723..724 ">"
+        WhiteSpace@724..725 " "
+        RecordFieldDefList@725..741
+          LBrace@725..726 "{"
+          Newline@726..727 "\n"
+          WhiteSpace@727..731 "    "
+          RecordFieldDef@731..739
+            Ident@731..736 "inner"
+            Colon@736..737 ":"
+            WhiteSpace@737..738 " "
+            PathType@738..739
+              Path@738..739
+                PathSegment@738..739
+                  Ident@738..739 "T"
+          Newline@739..740 "\n"
+          RBrace@740..741 "}"
+    Newline@741..743 "\n\n"
+    Comment@743..819 "// Trait method decla ..."
+    Newline@819..820 "\n"
+    Item@820..867
+      Trait@820..867
+        TraitKw@820..825 "trait"
+        WhiteSpace@825..826 " "
+        Ident@826..833 "Bounded"
+        WhiteSpace@833..834 " "
+        TraitItemList@834..867
+          LBrace@834..835 "{"
+          Newline@835..836 "\n"
+          WhiteSpace@836..840 "    "
+          Func@840..865
+            FnKw@840..842 "fn"
+            WhiteSpace@842..843 " "
+            FuncSignature@843..865
+              Ident@843..848 "needs"
+              GenericParamList@848..851
+                Lt@848..849 "<"
+                TypeGenericParam@849..850
+                  Ident@849..850 "T"
+                Gt@850..851 ">"
+              FuncParamList@851..853
+                LParen@851..852 "("
+                RParen@852..853 ")"
+              WhiteSpace@853..854 " "
+              WhereClause@854..865
+                WhereKw@854..859 "where"
+                WhiteSpace@859..860 " "
+                WherePredicate@860..865
+                  PathType@860..865
+                    Path@860..865
+                      PathSegment@860..865
+                        Ident@860..862 "Eq"
+                        GenericArgList@862..865
+                          Lt@862..863 "<"
+                          TypeGenericArg@863..864
+                            PathType@863..864
+                              Path@863..864
+                                PathSegment@863..864
+                                  Ident@863..864 "T"
+                          Gt@864..865 ">"
+          Newline@865..866 "\n"
+          RBrace@866..867 "}"
+    Newline@867..869 "\n\n"
+    Comment@869..942 "// LOOK-ALIKES that m ..."
+    Newline@942..943 "\n"
+    Comment@943..959 "// applications:"
+    Newline@959..960 "\n"
+    Comment@960..1000 "//   - bare ident fla ..."
+    Newline@1000..1001 "\n"
+    Item@1001..1025
+      Func@1001..1025
+        FnKw@1001..1003 "fn"
+        WhiteSpace@1003..1004 " "
+        FuncSignature@1004..1021
+          Ident@1004..1008 "flag"
+          FuncParamList@1008..1010
+            LParen@1008..1009 "("
+            RParen@1009..1010 ")"
+          WhiteSpace@1010..1011 " "
+          WhereClause@1011..1021
+            WhereKw@1011..1016 "where"
+            WhiteSpace@1016..1017 " "
+            WhereConstPredicate@1017..1021
+              PathExpr@1017..1021
+                Path@1017..1021
+                  PathSegment@1017..1021
+                    Ident@1017..1021 "FLAG"
+        WhiteSpace@1021..1022 " "
+        BlockExpr@1022..1025
+          LBrace@1022..1023 "{"
+          Newline@1023..1024 "\n"
+          RBrace@1024..1025 "}"
+    Newline@1025..1026 "\n"
+    Comment@1026..1094 "//   - generic call ( ..."
+    Newline@1094..1095 "\n"
+    Item@1095..1152
+      Func@1095..1152
+        FnKw@1095..1097 "fn"
+        WhiteSpace@1097..1098 " "
+        FuncSignature@1098..1148
+          Ident@1098..1106 "gen_call"
+          GenericParamList@1106..1109
+            Lt@1106..1107 "<"
+            TypeGenericParam@1107..1108
+              Ident@1107..1108 "T"
+            Gt@1108..1109 ">"
+          FuncParamList@1109..1111
+            LParen@1109..1110 "("
+            RParen@1110..1111 ")"
+          WhiteSpace@1111..1112 " "
+          WhereClause@1112..1148
+            WhereKw@1112..1117 "where"
+            WhiteSpace@1117..1118 " "
+            WherePredicate@1118..1126
+              PathType@1118..1119
+                Path@1118..1119
+                  PathSegment@1118..1119
+                    Ident@1118..1119 "T"
+              TypeBoundList@1119..1126
+                Colon@1119..1120 ":"
+                WhiteSpace@1120..1121 " "
+                TypeBound@1121..1126
+                  TraitRef@1121..1126
+                    Path@1121..1126
+                      PathSegment@1121..1126
+                        Ident@1121..1126 "Sized"
+            Comma@1126..1127 ","
+            WhiteSpace@1127..1128 " "
+            WhereConstPredicate@1128..1148
+              CallExpr@1128..1148
+                PathExpr@1128..1146
+                  Path@1128..1146
+                    PathSegment@1128..1146
+                      Ident@1128..1143 "above_threshold"
+                      GenericArgList@1143..1146
+                        Lt@1143..1144 "<"
+                        TypeGenericArg@1144..1145
+                          PathType@1144..1145
+                            Path@1144..1145
+                              PathSegment@1144..1145
+                                Ident@1144..1145 "T"
+                        Gt@1145..1146 ">"
+                CallArgList@1146..1148
+                  LParen@1146..1147 "("
+                  RParen@1147..1148 ")"
+        WhiteSpace@1148..1149 " "
+        BlockExpr@1149..1152
+          LBrace@1149..1150 "{"
+          Newline@1150..1151 "\n"
+          RBrace@1151..1152 "}"
+    Newline@1152..1153 "\n"
+    Comment@1153..1227 "//   - associated-con ..."
+    Newline@1227..1228 "\n"
+    Item@1228..1281
+      Func@1228..1281
+        FnKw@1228..1230 "fn"
+        WhiteSpace@1230..1231 " "
+        FuncSignature@1231..1277
+          Ident@1231..1234 "cmp"
+          GenericParamList@1234..1237
+            Lt@1234..1235 "<"
+            TypeGenericParam@1235..1236
+              Ident@1235..1236 "T"
+            Gt@1236..1237 ">"
+          FuncParamList@1237..1239
+            LParen@1237..1238 "("
+            RParen@1238..1239 ")"
+          WhiteSpace@1239..1240 " "
+          WhereClause@1240..1277
+            WhereKw@1240..1245 "where"
+            WhiteSpace@1245..1246 " "
+            WherePredicate@1246..1254
+              PathType@1246..1247
+                Path@1246..1247
+                  PathSegment@1246..1247
+                    Ident@1246..1247 "T"
+              TypeBoundList@1247..1254
+                Colon@1247..1248 ":"
+                WhiteSpace@1248..1249 " "
+                TypeBound@1249..1254
+                  TraitRef@1249..1254
+                    Path@1249..1254
+                      PathSegment@1249..1254
+                        Ident@1249..1254 "Sized"
+            Comma@1254..1255 ","
+            WhiteSpace@1255..1256 " "
+            WhereConstPredicate@1256..1277
+              BinExpr@1256..1277
+                PathExpr@1256..1271
+                  Path@1256..1271
+                    PathSegment@1256..1265
+                      Ident@1256..1262 "Holder"
+                      GenericArgList@1262..1265
+                        Lt@1262..1263 "<"
+                        TypeGenericArg@1263..1264
+                          PathType@1263..1264
+                            Path@1263..1264
+                              PathSegment@1263..1264
+                                Ident@1263..1264 "T"
+                        Gt@1264..1265 ">"
+                    Colon2@1265..1267 "::"
+                    PathSegment@1267..1271
+                      Ident@1267..1271 "SIZE"
+                WhiteSpace@1271..1272 " "
+                GtEq@1272..1274
+                  Gt@1272..1273 ">"
+                  Eq@1273..1274 "="
+                WhiteSpace@1274..1275 " "
+                LitExpr@1275..1277
+                  Lit@1275..1277
+                    Int@1275..1277 "50"
+        WhiteSpace@1277..1278 " "
+        BlockExpr@1278..1281
+          LBrace@1278..1279 "{"
+          Newline@1279..1280 "\n"
+          RBrace@1280..1281 "}"
+  Newline@1281..1282 "\n"
