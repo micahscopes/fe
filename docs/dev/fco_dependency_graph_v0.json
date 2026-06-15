@@ -3706,5 +3706,36 @@
       "Generic<T> without a concrete shared-derive fixture"
     ],
     "note": "More architect guidance pending from a parallel literature search (2026-06-15). Deep implementation held until that lands; documentation locked now."
+  },
+  "lit_review_2026-06-15": {
+    "source": "Architect literature review 2026-06-15 (Haskell/GHC ConstraintKinds+QuantifiedConstraints, Rust/Chalk, Lean instance synthesis outParam/semiOutParam, Coq/Rocq typeclasses, higher-order-unification theory).",
+    "verdict": "CONFIRMS the Fable findings + the TD/AH split independently — no pivot. The solve-line ~ Haskell constraint-synonym elaboration (sugar elaborated before the solver); Tier A ~ ConstraintKinds (the common useful face, the 'surprise win'); Tier C ~ QuantifiedConstraints/proof-search/HOU cliff (a serious solver feature, not a small extension); two-gates ~ HOU-undecidable-in-general + decidable-only-under-restrictions; 'True Derive needs concrete plumbing, not the abstract head'; Generic<T> structural representation before solver power.",
+    "new_additions": {
+      "lean_mode_discipline": "IF the abstract head ever reopens, use a MODE discipline (Lean outParam/semiOutParam): the head P must be KNOWN (input) before solving P<T>; some params may be outputs. This SUPPORTS the current 'do not solve until the head is known' rule — added to the AH runway as a design constraint, not a reason to build.",
+      "TR_total_closed_world": "NEW future research node — TR: total / closed-world constraints for generated structural universes. Certify a constraint family covers ALL shapes in a closed ingot or Generic<T> representation (e.g. 'all generated variants have Encode', 'all fields satisfy Law', 'all sizes have a proof route'). A possible STRONGER closed-world alternative to general live P<T> solving; may help CTCubFe Forms 4-5. NOT to build now — a research node behind Generic<T>."
+    },
+    "test_standard": "Any future solver-adjacent work (aliases, monomorphize-only head promotion, Generic<T>, restricted fragments) must be ANTI-VACUOUS like the M5 tests: positive proves the intended elaboration happened; negative proves the forbidden solver shape did NOT slip through; diagnostics prove the boundary is named; evidence proves the route.",
+    "synthesis": {
+      "build_now": [
+        "concrete where Eq<T>",
+        "Evidence<Eq<T>>",
+        "ImplBuilder<Eq<T>>",
+        "provider selection by resolved concrete goal (W-C)",
+        "transparent constraint aliases (Tier A)",
+        "ABI/static-layout providerization using aliases"
+      ],
+      "build_later_if_motivated": [
+        "Generic<T> universal structural representation",
+        "monomorphize-only head parameters (Tier B)",
+        "TR total/closed-world constraint coverage experiments"
+      ],
+      "do_not_build_now": [
+        "live variable-headed P<T> solver",
+        "TyData::ConstraintTerm",
+        "quantified constraints",
+        "runtime Evidence<P<T>> dictionaries",
+        "general higher-order constraint search"
+      ]
+    }
   }
 }
