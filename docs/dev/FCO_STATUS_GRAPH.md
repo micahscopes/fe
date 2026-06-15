@@ -1,8 +1,26 @@
 # FCO status snapshot
 
-**Snapshot as of commit `f3c63e1f4` (2026-06-14). The repo is authoritative;
-the full DAG is `fco_dependency_graph_v0.json`. Update this after each gate
-commit.**
+> **⚠️ ARCHIVAL SNAPSHOT as of commit `f3c63e1f4` (2026-06-14).** This mermaid view
+> is no longer maintained per-commit. For current status use the live sources:
+> **`fco_dependency_graph_v0.json`** (the DAG, kept current) and
+> **`FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md`** (the abstract-head decision). The repo
+> is authoritative over any doc.
+>
+> **Landed since this snapshot (2026-06-15):**
+> - **W-B (K03-concrete):** `where Eq<T>` → `TraitInstId`, enforced like `where T: Eq`,
+>   end-to-end against real `core::ops::Eq` (no new `TyData`, no `ConstraintTerm`).
+> - **D7 wizard verdict:** ship the projection; `ConstraintTerm` off the critical path.
+> - **Abstract head (`P : * -> Constraint` solving):** SHELVED-WITH-RUNWAY (two gates —
+>   feasibility open + demand empty); named `6-0008` rejection shipped; coherent
+>   use-driven design (solve-line + Tier A/B/C) recorded in the dossier.
+> - **Tier A constraint aliases:** identified as the next shippable, low-risk win
+>   (transparent-expand over K02a + W-B + `PredicateListId`; NOT the abstract head).
+> - **G1:** provider `require` diagnostics now name the trait + the fix.
+> - **K04a:** capability recognition is by resolved identity (string-key = fixture
+>   compat shim, removal target).
+>
+> The mermaid below reflects the M5 substrate as of the snapshot and is still
+> broadly accurate for that layer.
 
 ```mermaid
 flowchart TD

@@ -3617,5 +3617,18 @@
       "tests": "parser syntax_node 58 (fork fixture + const-pred tripwire); uitest ty 84 / ty_check 187 (where_constraint_application proves No!:Equal<No>); fe cli_output all 11 derived_* green (exit 0); fe-hir green.",
       "next": "W-C (task #35): provider selection by goal trait identity + capabilities carry goal TraitInstId; generated-impl require<Trait> re-enters via this path."
     }
+  },
+  "abstract_head_2026-06-15": {
+    "status": "SHELVED-WITH-RUNWAY (not pending-implementation)",
+    "charter": "docs/dev/FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md (SSOT)",
+    "decision": "Variable-headed `P : * -> Constraint` SOLVING (the abstract head) is research-gated behind TWO gates: feasibility (open+hard, a theorem that may not exist — brushes higher-order-matching undecidability; the cheap fragment collapses to concrete solving) AND demand (BINDING, currently EMPTY — C6 robust under a generative re-imagination of 8 consumer shapes). Named-reject ships (6-0008). NOT a slice, NOT solo.",
+    "solve_line": "Design rule: everything must be eliminable to a concrete TraitInstId/PredicateListId goal BEFORE the solver runs; the solver never sees a live P. Route admissible uses to the proven concrete fragment by elimination; reject the rest.",
+    "tiers": {
+      "A_constraint_aliases": "`constraint Name<T> = C1<T> + C2<T>` — transparent-expand at lowering over K02a + W-B + PredicateListId. NO solver/repr/soundness cost. SHIP-CANDIDATE (real, low-risk; NOT the abstract head). Top next-feature candidate.",
+      "B_head_promotion_monomorphize_only": "impl<P> Derive<P> ... — substitute P:=Eq before solve (V1 ~30 LOC reuses W-B reifier); sound by reduction to the proven concrete fragment. TRUE PREREQ = a Generic<T> universal representation, not the solver. Build later if motivated.",
+      "C_constraint_term_quantified": "TyData::ConstraintTerm + `forall T. P<T> =>` + Evidence<C> as value. NEVER build (undecidability+coherence cliffs, max blast radius, zero demand). Named-reject."
+    },
+    "real_levers": "constraint aliases (Tier A) + a Generic<T> universal structural representation — NOT the constraint-constructor solver.",
+    "build_trigger": "build the verbs only when BOTH (a) a genuine variable-headed-solving feasibility proof exists AND (b) a real in-tree consumer appears (Sim-C meta-deriver, whose hidden precondition is that a Generic<T> representation exists)."
   }
 }

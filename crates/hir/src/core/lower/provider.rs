@@ -41,11 +41,12 @@ const DERIVE_MODULE: &str = "derive";
 /// `uses (..)` clause (`reflect: Reflect<T>`, `builder: mut ImplBuilder<Goal>`).
 /// The variant carries the binding name introduced for the capability.
 ///
-/// Capabilities are recognized TODAY by the capability key's head identifier
-/// (`REFLECT_KEY` / `IMPL_BUILDER_KEY`) — a string match. K04a will recognize
-/// them by resolved-type identity instead; at that point this enum is the natural
-/// home for the resolved capability type (and any grade/scope), so the recognition
-/// change is localized to how this `Capability` is produced.
+/// Capabilities are recognized (K04a, landed) by the capability type's resolved
+/// canonical-path identity — `core::derive::Reflect` / `core::derive::ImplBuilder`
+/// — after type resolution, NOT by string match. A string-key fallback
+/// (`REFLECT_KEY` / `IMPL_BUILDER_KEY`) remains only as a fixture-compat shim with
+/// a removal target (see `path_names_derive_capability`). This enum is the home
+/// for the recognized capability (and any future grade/scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
 pub(super) enum Capability<'db> {
     /// `reflect: Reflect<T>` — reflection over the derive target.
