@@ -3603,6 +3603,19 @@
       "c_abstract_head": "DEFER behind a NAMED diagnostic; escalate (confirms D2). Upgrade generic 8-0030 NotValue -> named 'constraint-constructor generic params not yet supported, monomorphize per trait' (honors D5.5).",
       "guardrails": "G1 error quality (missing-capability/unsatisfied-require name the capability + target/field path; Effect-Maze-for-providers). G2 provenance (decision-packet D3 minimal; generated impls carry Evidence record provider-id+discharged-requires via existing receipt path; reserve Evidence payload slot premises:Vec<CheckPremise> per D6 FV; subsumes P50/K04a-C4).",
       "futures": "proof-compiler extension point is Evidence's PAYLOAD not the constraint type-kind; projection enough for CTCubFe/SMT-Lean era; own linearity keeps proof transport unforgeable."
+    },
+    "w_b_landed_2026-06-15": {
+      "commit": "608f39c84 feat(fco): W-B concrete where Eq<T> constraint applications (projection)",
+      "what": "Boundless where-predicate `where Eq<T>` collected as trait obligation T:Eq and enforced at use sites exactly like `where T:Eq`. Projection over TraitInstId/PredicateListId, NO new TyData, NO ConstraintTerm (realizes D1/D7b).",
+      "convention": "D3 Self=first-arg: proposition shape Trait<Self,Args..>; `where Eq<T>` binds Self=T.",
+      "layers": {
+        "parser": "param.rs is_constraint_application_predicate: path with generic args on FINAL segment + no expr-continuation -> boundless WherePredicate (colon optional). Excludes look-alikes: bare flags, generic calls above_threshold<T>(), comparisons Foo<T>::C>=5. Pinned by where_constraint_application syntax_node fixture.",
+        "lowering": "trait_lower.rs lower_hir_constraint_application: resolve head->trait, build TraitInstId Self=first-arg via complete_explicit_args + kind/const checks (mirrors lower_trait_ref_impl). None for non-trait/abstract head.",
+        "collection": "constraint.rs Deferred->enum; boundless pred feeds the SAME fixed-point as Type:Trait bounds (D5.3 one routine). Diagnostic-free (solver not re-entered).",
+        "diagnostics": "diagnosable.rs constraint_application_diags (analysis pass, post-collection, no salsa cycle): non-trait/abstract head named-rejected. `where P<T>` now `expected trait here, but found type P` (2-0007) instead of silent drop (closes constraint_kind_constructor guard, D2/D7c). Precise 'monomorphize per trait' wording deferred to 8-0086 expressibility diagnostics (task #12)."
+      },
+      "tests": "parser syntax_node 58 (fork fixture + const-pred tripwire); uitest ty 84 / ty_check 187 (where_constraint_application proves No!:Equal<No>); fe cli_output all 11 derived_* green (exit 0); fe-hir green.",
+      "next": "W-C (task #35): provider selection by goal trait identity + capabilities carry goal TraitInstId; generated-impl require<Trait> re-enters via this path."
     }
   }
 }
