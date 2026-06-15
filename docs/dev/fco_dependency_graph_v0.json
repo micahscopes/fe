@@ -3592,8 +3592,17 @@
     "open": [
       "ConstraintListId-primary (M5 port map) vs TraitInstId-primary (K03/K04) reconciliation unstated",
       "AssocConst subject key TraitInstId vs (TyId,item) deferred to next TERM_LANG_VERSION bump",
-      "abstract P<T> head representation+Self-convention undesigned",
-      "Evidence<C> arg opaque(K04a) vs kinded(K04b) recommended-not-ratified"
-    ]
+      "abstract P<T> head: RESOLVED-AS-DEFERRED by D7(c) -> named-reject + escalate, not solo",
+      "Evidence<C> arg opaque vs kinded: RESOLVED by D7(b) -> ship projection (kinded = Evidence<TraitInstId-goal> over PredicateListId, no ConstraintTerm)"
+    ],
+    "D7_ergonomics_adjudication_2026-06-15": {
+      "source": "fe-design-wizard max-effort simulation, agent aa7c371c3cc46ab8c; full verdict /workspace/fe-design-wizard-kinded-derive-verdict-2026-06-15.md",
+      "method": "surface-first language-ergonomics: classify -> env-weighted precedent (Rust derive/proc-macro, Scala-3 derives/Mirror/${}, Haskell GHC.Generics, Move) -> sensibilities-in-tension -> ramification sims (refactor trap, generic ctx, cross-boundary/orphan, cost surprise, composition gauntlet, teaching, futures)",
+      "a_surface": "SHIP WITH GUARDRAILS. Concrete kinded provider surface right FOR FE: authority-to-generate-code rides the same uses(...) capability grammar as the rest of the language (no other derive system has this). Keep verbose signature (verbosity=auditability); pay authoring-learnability with error quality.",
+      "b_representation": "SHIP THE PROJECTION (confirms D1). where Eq<T>/Evidence<Eq<T>>/ImplBuilder<Eq<T>> over TraitInstId/PredicateListId, Self=first-arg, NO new TyData. Decisive: every ergonomic property the sims need (generic-ctx inference, cross-boundary, futures/export) comes from TraitInstId identity (Lean-proven) + PredicateListId predicate-synthesis. ConstraintTerm buys ONLY a general type-position Evidence<C> that NO simulation needed, at max compiler blast radius. -> ConstraintTerm OFF critical path; adopt only on a concrete type-position need.",
+      "c_abstract_head": "DEFER behind a NAMED diagnostic; escalate (confirms D2). Upgrade generic 8-0030 NotValue -> named 'constraint-constructor generic params not yet supported, monomorphize per trait' (honors D5.5).",
+      "guardrails": "G1 error quality (missing-capability/unsatisfied-require name the capability + target/field path; Effect-Maze-for-providers). G2 provenance (decision-packet D3 minimal; generated impls carry Evidence record provider-id+discharged-requires via existing receipt path; reserve Evidence payload slot premises:Vec<CheckPremise> per D6 FV; subsumes P50/K04a-C4).",
+      "futures": "proof-compiler extension point is Evidence's PAYLOAD not the constraint type-kind; projection enough for CTCubFe/SMT-Lean era; own linearity keeps proof transport unforgeable."
+    }
   }
 }

@@ -87,15 +87,50 @@ and bump `TERM_LANG_VERSION`; or you recreate effort2's `expected X, found X`."
   rest on the design corpus + the architect decision, NOT on any machine-checked artifact. State plainly when
   asked.
 
+## D7 — Ergonomics adjudication (fe-design-wizard, 2026-06-15): SHIP THE PROJECTION
+**Decision (ergonomics-driven, confirms D1).** A max-effort `fe-design-wizard` simulation treated the
+kinded derive surface as a language-ergonomics challenge (surface-first; representation follows) and ran the
+full method — classify, environment-weighted precedent (Rust `#[derive]`/proc-macros, Scala-3 `derives`/
+`Mirror`/`${}`, Haskell `GHC.Generics`, Move), sensibilities-in-tension, ramification simulations
+(refactoring trap, generic context, cross-boundary/orphan, cost surprise, composition gauntlet, teaching,
+futures). Verdict, in full at `/workspace/fe-design-wizard-kinded-derive-verdict-2026-06-15.md`
+(agent `aa7c371c3cc46ab8c`):
+- **(a) Surface — SHIP WITH GUARDRAILS.** The concrete kinded provider surface is right *for Fe specifically*
+  because authority-to-generate-code rides the same `uses(...)` capability grammar as the rest of the language
+  — a property no other derive system has. Keep the verbose signature (its verbosity IS the auditability);
+  pay the authoring-site learnability debt with error quality.
+- **(b) Representation — SHIP THE PROJECTION.** Project `where Eq<T>` and `Evidence<Eq<T>>`/`ImplBuilder<Eq<T>>`
+  over `TraitInstId`/`PredicateListId` (D1/D3), **no new `TyData` variant**. *Decisive argument:* every
+  ergonomic property the simulations require (generic-context inference, cross-boundary, futures/export) is
+  delivered by `TraitInstId` identity (Lean-proven sound) + `PredicateListId` predicate synthesis. A
+  `ConstraintTerm` of `Kind::Constraint` buys only a general type-position `Evidence<C>` that **no simulation
+  produced a need for**, at the largest blast radius in the compiler. Cost/benefit lopsided. → `ConstraintTerm`
+  stays off the critical path (confirms the D1 caveat); adopt only on a concrete type-position need.
+- **(c) Abstract `P<T>` head — DEFER behind a NAMED diagnostic; escalate.** Confirms D2. Upgrade the current
+  generic `8-0030 NotValue` to a NAMED rejection ("constraint-constructor generic params not yet supported —
+  monomorphize per trait"), so a library author learns the language's shape (honors D5.5).
+- **Two guardrails to land alongside the wiring (both cheap, no representation work):**
+  **G1** error quality — missing-capability/unsatisfied-`require` diagnostics name the specific capability and
+  target/field path (Effect-Maze-for-providers). **G2** provenance (decision-packet D3, minimal) — generated
+  impls carry a minimal `Evidence` record (provider id + discharged `require<…>` obligations) via the existing
+  receipt path; reserve the `Evidence` payload slot (`premises: Vec<CheckPremise>`, D6 FV) so it is additive.
+  G2 subsumes the P50 provenance follow-up (K04a-C4).
+- **Futures note:** the proof-compiler extension point is `Evidence`'s *payload*, NOT the constraint's
+  type-kind — so the projection is enough for the CTCubFe/SMT-Lean era. `own` linearity keeps future proof
+  transport unforgeable.
+
 ## Open / flagged (need a written call before they calcify)
 1. **`ConstraintListId`-primary (M5 port map `:90`) vs `TraitInstId`-primary (K03/K04 map `:55-64`)** —
    newer governs; reconciliation (const-predicates need heterogeneous `ConstraintListId`; trait-application-head
    rides `TraitInstId`) is **not stated anywhere** — a real gap.
 2. **AssocConst subject key**: landed `TraitInstId` vs spec `(TyId-subject, item)` — deferred to next
    `TERM_LANG_VERSION` bump; currently favors `TraitInstId` (informs the `where Eq<T>` choice).
-3. **Abstract `P<T>` head representation + Self-convention** (D2) — undesigned.
-4. **`Evidence<C>` arg at K04a (opaque) vs K04b (kinded)** — recommended (opaque first) but the decision
-   packet still lists it as DECISION REQUESTED (`FCO_DECISION_PACKET_typed_provider_capabilities.md:1-3,91-107`).
+3. **Abstract `P<T>` head representation + Self-convention** (D2) — undesigned. **RESOLVED-AS-DEFERRED by D7(c):**
+   defer behind a named diagnostic, escalate before building; not solo. No longer "needs a call" — the call is
+   "named-reject + escalate."
+4. **`Evidence<C>` arg at K04a (opaque) vs K04b (kinded)** — **RESOLVED by D7(b):** ship the projection; the
+   kinded form is `Evidence<TraitInstId-goal>` over `PredicateListId`, no `ConstraintTerm`. (Decision packet's
+   DECISION REQUESTED is now answered: opaque→kinded via projection.)
 
 ## Net direction (grounded)
 Proceed: **W-B** (`where Eq<T>` → `TraitInstId`, Self=first-arg, projection — D1/D3) + **W-C** (capabilities
