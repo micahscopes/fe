@@ -168,9 +168,31 @@ exact anti-pattern the wizard's Temperance note warns against.
 abstract-mode `P<T>` (live `P`, σ unbound) succeeding as a hypothesis, with confluence + UNF +
 selection-is-a-function re-established once conjunction (`P<T>+Q<T>`) and head-projecting args are
 admitted — NOT the concrete residue Track 1 proved; AND (b) a real in-tree consumer (the pinned **Sim-C
-meta-deriver**: ≥2 traits sharing ONE structural-recursion body, owned by an ingot a third party cannot
-edit, so per-trait concrete providers are not authorable). Today (a) holds only for the concrete residue
-and (b) is empty.
+meta-deriver**, with its hidden precondition now made explicit): **a `Generic`-style universal structural
+representation exists** (so derives share ONE traversal body — Fe has none today; `Reflect`+`quote` build
+each body imperatively, so there is nothing to share), **AND** ≥2 traits over that representation differ
+only in a leaf operation, **AND** the trait set is open/un-editable by the consumer (per-trait concrete
+providers not authorable). Today (a) holds only for the concrete residue and (b) is empty — and the first
+conjunct (a universal representation) is the actual upstream lever: it, not the constraint-constructor
+solver, is what would make Sim-C authorable, and it is a separate demand-driven investigation.
+
+## 4c. GENERATIVE RE-EXAMINATION (2026-06-15, design-wizard "is Sim-C too narrow?")
+
+A max-effort design-wizard imagined eight consumer shapes *beyond* Sim-C and tested each against the
+monomorphization-escape: (A) `derive_all<P>` shared-body meta-deriver, (B) capability/permission framework
+over `P`, (C) proof-carrying/verification API over property `P`, (D) ABI/serialization codec family,
+(E) quantified constraints `forall T. P<T> =>`, (F) constraint aliases/bundles, (G) `Evidence<P<T>>` as a
+runtime value, (H) access-control/role framework. **Verdict: "empty demand" is ROBUST; the box was not
+drawn too small.** Every *demanded* shape escapes to a first-order mechanism Fe already ships
+(capabilities→effects `uses`/`with`; spec-checking→const-predicates+concrete obligations, where
+concreteness IS the feature for the AI-spec-layer thesis; backend variation→`Platform` assoc-consts;
+bundles→alias sugar over the concrete head; roles→runtime storage). The one shape that is *irreducible*
+(E, quantified/entailment constraints) has zero Fe demand and is the hardest + most-dangerous form (the
+coherence cliff Fable ranked last) — so it *strengthens* the shelve. Recommendation: **ship-trigger-as-is**
+(refine the Sim-C wording per §4b, do not broaden the gate). The deep reason imagination can't rescue
+demand: Fe's effects/traits split + "maximally minimal" axiom route every would-be abstract-head use to a
+first-order mechanism; the abstract head is the *elegant unifier*, never the *only* expression of any real
+need.
 
 **SHIP NOW (the only code endorsed, independent of the trigger):** upgrade the abstract-head rejection
 from the bare `expected trait, found type P` to a workaround-naming diagnostic
