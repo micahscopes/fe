@@ -1,0 +1,131 @@
+# FCO Abstract-Head Research Dossier & Charter
+
+**2026-06-15.** Consolidated literature review + research-program charter for the
+**abstract head** of the kinded-derive system: constraint-constructor *parameters*
+(`P : * -> Constraint`), their application (`where P<T>`, `ImplBuilder<P,T>`,
+`Evidence<P<T>>`), substitution-on-instantiation (`P := Eq` → `TraitInstId`), and
+variable-headed solver goals (`P<T>`, `P<Option<T>>`, `P<T> + Q<T>`).
+
+This is the charter document for a bounded background research program (below).
+It exists so the abstract-head question is never re-excavated from scratch, and so
+that if a concrete consumer ever appears the staged path + soundness requirements
+are already on the shelf. Sources are cited inline; the load-bearing claims come
+from a 2a viability spike + three fable-corpus digs (designs / FV / cautions) +
+two historian passes run 2026-06-15.
+
+## 0. Provenance — where the idea came from, and the immediate reaction it drew
+
+- **Canonical origin (2026-05-22 architect/Codex session, `codex-session-019e4df9-readable.md`).**
+  "derive isn't even the goal here as much as metaprogramming in general. reflect
+  gives us access to some compile time context, builder lets us generate it." The
+  kind sketch was first written there: `Eq : * -> Constraint`,
+  `Derive : (* -> Constraint) -> Constraint`. The abstract head
+  (`trait Derive<P> where P: * -> Constraint { const fn derive<T>() uses(reflect, builder: mut ImplBuilder<P,T>) }`)
+  and the variable-headed goal forms (`P<T>`, `P<Option<T>>`, `P<T> + Q<T>`) were
+  sketched there and *explicitly flagged*: "the solver needs to handle
+  variable-headed goals, not only concrete trait names. **That is a major extension
+  to trait resolution.**" The original 4-tier roadmap put it in the **"Eventually"**
+  tier (MVP/Next/Later/Eventually), never the MVP.
+- **The hand-off to the Fable agent for its take (2026-06-10, `obligations-review_session_322265f5/transcript.jsonl`, model = Fable 5).**
+  Hand-off (07:30): *"the full fledged `A<B> -> *` and `* -> A<B>` syntax, what would
+  properly supporting it yield us in the deeper layers? are we truly moving toward
+  that?"* Fable's immediate reaction (07:32) led with the durable reframe:
+  *"`F: A<B> -> *` — a bounded domain: the kind arrow carries a demand … kind
+  application becomes evidence application. `G: * -> A<B>` — a bounded codomain: the
+  solver gets `forall T. G<T>: A<B>` as an axiom attached to the constructor itself,
+  no per-instantiation solving. … kinds that carry obligations and kinds that carry
+  evidence … it's first-class obligations, one level up."* It immediately flagged the
+  caution that aged perfectly: the kind checker is *"the weakest link,"* *"reject the
+  syntax until it has semantics,"* and rank codomain (universal-evidence) bounds
+  **last** because *"universally quantified evidence touches coherence."*
+
+## 1. State of the art — three irreducible layers (spike + designs dig)
+
+| Layer | Status | Evidence |
+|---|---|---|
+| **Represent** `P<T>` (variable head) | **buildable; rejected by D1** | effort2 built `ConstraintKind::ConstraintApplication(ConstraintApplicationId{head: ConstraintHeadId, args: Vec<TyId>})` with `ConstraintHeadKind::{ConcreteTrait, GenericParam(TyId), Builtin}` (`metaprogramming-effort2/.../ty/constraint.rs:21-31,165-185,559-575`). It parsed + collected (`pretty_print == "P<T>"`), but the whole file is `#![allow(dead_code)]`. The fco projection (`TraitInstId`) structurally cannot hold a variable head — `lower_hir_constraint_application` requires `PathRes::Trait`; a TyParam head → `None` (confirmed by 2a spike: `where P<T>` → `2-0007 expected trait, found type P`). |
+| **Substitute** `P:=Eq` → `TraitInstId` | **VOID — never designed** | effort2's fold maps `GenericParam(ty) → GenericParam(Eq)` — substitutes the type but **never promotes the head to `ConcreteTrait`, never reifies a `TraitInstId`** (`constraint.rs:601-655`). The only substitution that exists anywhere is value-term `ConstParam` (`fe-m5-normalized-term-spec-2026-06-10.md:294-299`), never head-level. |
+| **Solve** `P<T>` (variable-headed goal) | **VOID — never done; + anti-proven** | discharge is literal interned-ID `==` against assumptions, zero impl search (`ty_check/mod.rs:1577-1617`); `Derive` goals fall through to `UnsupportedConstraint`. Port map: "zero producers/dischargers … OUT" (`fe-m5-const-predicates-port-map-2026-06-11.md:88,94`). |
+
+The vision review's one-liner frames it exactly: *"the branch's **nouns** are the right
+nouns (the kind algebra composes, `HasKind` is fine); the **verbs** (syntactic
+matching, identity discharge, evidence-dropping, in-forest evaluation) are
+placeholders."* The kind *declaration* (`P: * -> Constraint`, K02a) is sound and
+landed; the *verbs* (substitute + solve) are the whole problem.
+
+## 2. FV finding — the abstract head is *anti*-proven, not merely unproven (FV dig)
+
+**No FV artifact ever modeled the abstract head** (Lean litmus, 57-file z3 census,
+fe-assurance, ~100 subagent threads — all concrete/ground). Worse, a variable head
+**violates the four assumptions the proofs IMPORT (do not prove)**:
+1. **Coherence-as-a-function** — Lean §9 takes "`ctfe` is a function (impl selection
+   deterministic)" as an imported parameter (`fe-lean-litmus-2026-06-11.lean:295-301`).
+   A `P` bound to different traits in different contexts makes the head non-functional
+   in the goal → premise fails.
+2. **Fixed resolution context Γ** — the proof warns verbatim: "concreteness judged
+   against a context that moves mid-normalization would be exactly the ambiguity that
+   breaks confluence" (`:302-306`). A variable head resolved during solving is exactly
+   that.
+3. **Full concreteness of subjects** — `isConcrete Γ` is `false` for a variable head;
+   the rewrite rules do not fire on it. `P<T>` falls *outside* the proven (reducible)
+   fragment — the proofs are silent, not supportive.
+4. **First-order / binder-free** — the term language is deliberately binder-free;
+   variable-headed goals are second-order matching ("higher-order unification — that
+   door stays closed through Stage 3 at minimum," `fe-ct-cubical-compiler-roadmap-2026-06-10.md:466`).
+
+## 3. Cautions, ranked (cautions dig)
+
+1. **DECISIVE (observed):** the mechanism doesn't exist — substitution-on-instantiation
+   never designed; effort2's discharge was a faked `==` with zero dischargers.
+2. **HIGH (theory, repeatedly stated):** undecidability of variable-headed solving
+   (higher-order unification) — forecloses the G6 decidability the solver rests on.
+3. **MODERATE (debt):** every variable-headed goal is a *residual* (re-arms the
+   "never drop residual constraints" blocker, D5.2); wiring `-> Constraint` codomains
+   now "would pre-commit the Constraint-kind story under time pressure" at max blast
+   radius.
+4. **LOW/STALE for fco:** Salsa-cycle ICE, `Kind::Placeholder`/`Any` accept-and-ignore,
+   dead scaffold — all *already mitigated* on fco (CI forbids in-forest CTFE; `where
+   P<T>` clean-rejects; the carrier was never ported). Treat as "don't re-introduce."
+
+**The escape hatch the corpus itself points to (C6):** the single strongest real demand
+(Form 6 `IsoAt` family parameter) was satisfied **without** a true `P: * -> Constraint`
+param — "a `family` parameter sort … matched by name only. No `Kind` extension, no
+higher-order unification" (`fe-prove-once-represent-freely-2026-06-11.md:285-287`). The
+abstract head is *over-powered relative to any real need*; first-order routing or
+monomorphization has met every actual demand so far.
+
+## 4. The research program (bounded; kill-switch first)
+
+Run as a **single-pass background inquiry**, not an open program — because there is no
+current consumer, and an open program researching machinery for an empty use-set is the
+exact anti-pattern the wizard's Temperance note warns against.
+
+- **Track 0 — demand gate (kill-switch).** Is there a real Fe program whose need the
+  concrete head + first-order routing / monomorphization *cannot* meet? If no, the
+  abstract head stays shelved (named-reject) regardless of feasibility.
+- **Track 1 — FV feasibility (Lean4).** Is there a **decidable, coherence-preserving
+  fragment** of variable-headed solving for Fe's restricted form (concrete-trait
+  instantiation only, first-order args, no `P<T> + Q<T>` initially)? Deliverable: a Lean
+  sketch extending the term language with a constraint-head sort that re-establishes
+  selection-is-a-function + confluence/UNF — *or* a precise impossibility result.
+  Adversarially verified (try to break the claimed fragment).
+- **Track 2 — design (wizard).** Substitution-on-instantiation (head promotion) +
+  monomorphize-vs-solve boundary; simulate `trait Derive<P>` ramifications in real Fe;
+  pin the minimal consumer that would justify it.
+- **Synthesis → architect decision packet** with an explicit **BUILD TRIGGER**: code
+  starts only when *(a)* Track 1 finds a sound + decidable fragment **and** *(b)* a
+  concrete consumer exists (Track 0). Until both, ship the concrete surface (W-C/G1) and
+  keep the named rejection.
+
+## 5. Key sources
+effort2 `crates/hir/src/analysis/ty/constraint.rs` (`:1,21-31,165-185,559-575,601-655`),
+`ty_check/mod.rs:1577-1617`, `ty_def.rs:1363-1379,2014,2022`; architect bundle
+`codex-session-019e4df9-readable.md` (`:756-847,1234-1293`); Fable hand-off
+`fe-sessions-bundle-2026-06-13/obligations-review_session_322265f5/transcript.jsonl`
+(L1509/L1512); `fe-lean-litmus-2026-06-11.lean` (`:294-313`), `fe-fv-question-ledger-2026-06-11.md`;
+`fe-m5-const-predicates-port-map-2026-06-11.md` (`:88,94,453-456`),
+`fe-m5-normalized-term-spec-2026-06-10.md:294-322`,
+`fe-prove-once-represent-freely-2026-06-11.md:285-287`,
+`fe-ct-cubical-compiler-roadmap-2026-06-10.md` (`:462-466,643-649`);
+`docs/dev/FCO_WIRING_PARTY_DECISION_RECORD.md` (D2/D5/D7),
+`/workspace/fe-design-wizard-kinded-derive-verdict-2026-06-15.md`.
