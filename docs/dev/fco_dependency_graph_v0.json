@@ -3630,5 +3630,81 @@
     },
     "real_levers": "constraint aliases (Tier A) + a Generic<T> universal structural representation — NOT the constraint-constructor solver.",
     "build_trigger": "build the verbs only when BOTH (a) a genuine variable-headed-solving feasibility proof exists AND (b) a real in-tree consumer appears (Sim-C meta-deriver, whose hidden precondition is that a Generic<T> representation exists)."
+  },
+  "derive_track_split_2026-06-15": {
+    "source": "Architect directive 2026-06-15 (ratifying the implementor's True-Derive vs abstract-head distinction).",
+    "governing_correction": "'True Derive in Fe' and 'the abstract head' are SEPARATE tracks. The abstract head = the solver seeing a LIVE variable-headed goal P<T>. A normal provider `impl Derive<Eq> for StableEq` pins P:=Eq at the impl boundary, so Evidence<P<T>> becomes Evidence<Eq<T>> BEFORE solving — that is substitution + kind-checking, NOT higher-order solving. Do NOT treat shelving the abstract head as shelving True Derive.",
+    "say_dont_say": {
+      "dont": [
+        "Derive is blocked by the abstract head",
+        "The Derive dream is shipped",
+        "The abstract head is the next step for Derive"
+      ],
+      "do": [
+        "Derive bridge graduation is blocked by kind-checking + substitution + provider-execution demagic, NOT live variable-headed solving",
+        "The concrete Derive path is substantially realized; remaining work is removing bridge machinery and making the concrete path ordinary",
+        "The abstract head is only for generic-over-all-traits meta-derivers; its real upstream prereq is Generic<T>, and it stays shelved"
+      ]
+    },
+    "TRUE_DERIVE_track": {
+      "status": "ACTIVE / BUILDABLE / bridge-graduation (does NOT require live variable-headed solving)",
+      "nodes": {
+        "TD0": "Constraint kind / traits as * -> Constraint  [LANDED: K02a]",
+        "TD1": "kind-check P<T> in Derive declarations (apply *->Constraint param to a type -> Constraint)",
+        "TD2": "substitution-on-instantiation: P:=Eq before method/body checking",
+        "TD3": "Evidence<P<T>> / ImplBuilder<P<T>> / where P<T> normalize to CONCRETE goals (Eq<T>)",
+        "TD4": "Derive as an ordinary trait over concrete constraint constructors",
+        "TD5": "provider bodies via ordinary CTFE + reflect/quote effects (de-magic the bespoke executor)",
+        "TD6": "remove Derive marker / string authority bridge (DERIVE_MARKER etc.)"
+      },
+      "edges": [
+        "TD0->TD1",
+        "TD1->TD2",
+        "TD2->TD3",
+        "TD3->TD4",
+        "TD4->TD6",
+        "TD5->TD6"
+      ],
+      "W_C": "provider selection by RESOLVED GOAL IDENTITY is part of TD (making Derive<Eq> ordinary, not string/marker magic). Architect decision: prefer (b) analysis-owned identity (or a thin analysis helper used by the lowering site); NOT (c) accept aliasing risk; symmetric canonicalization acceptable only as an explicitly short-lived adapter with a removal target."
+    },
+    "ABSTRACT_HEAD_track": {
+      "status": "SHELVED-WITH-RUNWAY / do not build",
+      "nodes": {
+        "AH0": "live P<T> reaches the solver",
+        "AH1": "generic provider over arbitrary P (impl<P:*->Constraint> Derive<P> for OneUniversalProvider)",
+        "AH2": "requires a feasibility proof (decidable+coherent variable-headed solving)",
+        "AH3": "requires a real Generic<T>-based consumer",
+        "AH4": "named rejection (6-0008) until BOTH triggers fire"
+      },
+      "edges": [
+        "AH3->AH1",
+        "AH1->AH0",
+        "AH2->AH0",
+        "AH0-.shelved.->AH4"
+      ]
+    },
+    "reranked_queue": [
+      "1. W-C provider selection by resolved goal identity (TD; prefer analysis-owned identity)",
+      "2. TD1/TD2 spike: kind-check P<T> in Derive decls + substitution-on-instantiation for concrete impls",
+      "3. Tier A constraint aliases (shippable, low-risk; expands to PredicateListId; no live P)",
+      "4. P50 provider provenance",
+      "5. H10 ABI/static-layout providerization",
+      "6. Generic<T> design spike ONLY if a concrete shared-derive fixture appears",
+      "7. Abstract head remains shelved"
+    ],
+    "fixture_first_spikes": {
+      "A": "concrete Derive substitution: `impl Derive<Eq> for StableEq` substitutes P:=Eq before checking provider capability types; solver sees only concrete Eq<T>; existing StableEq/Ord/Clone fixtures still work.",
+      "B": "abstract head still rejected: `fn bad<P:*->Constraint,T>() where P<T>` -> named 6-0008 (proves TD did not open AH).",
+      "C": "provider selection by resolved goal identity: `derive Eq`/`derive core::ops::Eq`/`derive MyEq` (aliased) all select the same provider; same-named trait elsewhere does not alias (W-C)."
+    },
+    "do_not_build": [
+      "live variable-headed solver",
+      "TyData::ConstraintTerm",
+      "quantified constraints",
+      "Evidence<P<T>> as arbitrary runtime/dictionary value",
+      "OneUniversalProvider over arbitrary P",
+      "Generic<T> without a concrete shared-derive fixture"
+    ],
+    "note": "More architect guidance pending from a parallel literature search (2026-06-15). Deep implementation held until that lands; documentation locked now."
   }
 }

@@ -254,6 +254,38 @@ obligations one level up" is the single piece the design says to leave on the sh
 boilerplate in `core/abi.fe`), and nearly free over K02a + W-B + `PredicateListId`. Candidate for real work,
 independent of the build trigger.
 
+## 4e. ARCHITECT RATIFICATION — TWO TRACKS (2026-06-15)
+
+The architect ratified the implementor's distinction: **"True Derive in Fe" and "the abstract head"
+are NOT the same track.** The abstract head = the solver seeing a LIVE variable-headed goal `P<T>`. A
+normal provider `impl Derive<Eq> for StableEq` pins `P := Eq` at the impl boundary, so `Evidence<P<T>>`
+becomes `Evidence<Eq<T>>` *before* solving — substitution + kind-checking, NOT higher-order solving.
+
+- **Track 1 — True Derive (ACTIVE / BUILDABLE):** make `Derive` an ordinary kinded, evidence-carrying Fe
+  construct for *concrete* traits. Needs: TD0 Constraint kind (landed) → TD1 kind-check `P<T>` in
+  declarations → TD2 substitution-on-instantiation (`P:=Eq` before checking) → TD3 `Evidence<P<T>>` /
+  `ImplBuilder<P<T>>` / `where P<T>` normalize to concrete goals → TD4 `Derive` an ordinary trait → TD5
+  provider bodies via ordinary CTFE + reflect/quote effects (de-magic the bespoke executor) → TD6 remove
+  the `DERIVE_MARKER` string authority. **None of this requires live variable-headed solving.** W-C
+  (provider selection by resolved goal identity) is part of TD; architect picks the **analysis-owned
+  identity** option (not accept-aliasing-risk; canonicalization only as a short-lived adapter).
+- **Track 2 — Abstract head (SHELVED-WITH-RUNWAY):** solver reasons about `P<T>` with `P` live. Only
+  needed for a generic-over-all-traits meta-deriver (`impl<P:*->Constraint> Derive<P> for OneUniversal`);
+  real upstream prereq is `Generic<T>`. Named-reject (6-0008) until both triggers fire.
+
+**Framing corrections (use going forward):** ✗ "Derive is blocked by the abstract head" → ✓ "Derive
+bridge graduation is blocked by kind-checking + substitution + provider-execution de-magic, not live
+variable-headed solving." ✗ "the Derive dream is shipped" → ✓ "the concrete Derive path is substantially
+realized; remaining work is removing bridge machinery." ✗ "the abstract head is the next step for Derive"
+→ ✓ "the abstract head is only for generic-over-all-traits meta-derivers; it stays shelved."
+
+**Re-ranked queue:** (1) W-C resolved-goal provider selection; (2) TD1/TD2 spike (kind-check `P<T>` +
+substitution for concrete impls); (3) Tier A constraint aliases; (4) P50 provenance; (5) H10 ABI
+providerization; (6) `Generic<T>` spike only if a concrete shared-derive fixture appears; (7) abstract
+head shelved. Full split + the TD*/AH* nodes/edges in `fco_dependency_graph_v0.json` key
+`derive_track_split_2026-06-15`. (More architect guidance pending from a parallel literature search;
+deep implementation held until it lands.)
+
 ## 5. Key sources
 effort2 `crates/hir/src/analysis/ty/constraint.rs` (`:1,21-31,165-185,559-575,601-655`),
 `ty_check/mod.rs:1577-1617`, `ty_def.rs:1363-1379,2014,2022`; architect bundle
