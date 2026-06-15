@@ -54,7 +54,7 @@ pub enum ProviderFailureKind {
     /// A builder command was issued after `builder.finish()`.
     CommandAfterFinish,
     /// A `require` command had a malformed trait argument or operand.
-    InvalidRequirement,
+    InvalidRequirement { detail: String },
     /// A method-emission command was malformed (bad signature value, body
     /// value, or duplicate method name).
     InvalidMethod { detail: String },
@@ -83,7 +83,7 @@ impl ProviderFailureKind {
             Self::CommandAfterFinish => {
                 "the provider issued a builder command after `finish`".into()
             }
-            Self::InvalidRequirement => "invalid `require` command".into(),
+            Self::InvalidRequirement { detail } => format!("invalid `require` command: {detail}"),
             Self::InvalidMethod { detail } => format!("invalid method emission: {detail}"),
             Self::InvalidAssoc { detail } => {
                 format!("invalid associated item emission: {detail}")
@@ -1579,13 +1579,22 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 self.check_not_finished(expr)?;
                 let Some(trait_path) = self.single_type_generic_arg_path(generic_args) else {
                     return Err(ExecError {
-                        kind: ProviderFailureKind::InvalidRequirement,
+                        kind: ProviderFailureKind::InvalidRequirement {
+                            detail: "the type argument must be a single trait path, e.g. \
+                                     `builder.require<Eq>(field.ty())`"
+                                .into(),
+                        },
                         range: self.expr_range(expr),
                     });
                 };
                 let Value::Ty(ty) = self.eval_expr(arg.expr)? else {
                     return Err(ExecError {
-                        kind: ProviderFailureKind::InvalidRequirement,
+                        kind: ProviderFailureKind::InvalidRequirement {
+                            detail: format!(
+                                "`require<{}>(..)` expects a type argument, e.g. `field.ty()`",
+                                trait_path.pretty_print(self.db)
+                            ),
+                        },
                         range: self.expr_range(arg.expr),
                     });
                 };

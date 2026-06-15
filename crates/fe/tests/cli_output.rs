@@ -134,6 +134,61 @@ fn f() {
 }
 
 #[test]
+fn test_cli_check_provider_require_non_type_names_the_trait_and_fix() {
+    // G1 (provider-authoring error quality): a `require` command given a
+    // non-type operand (`field` instead of `field.ty()`) must name the required
+    // trait and the expected operand, not just say "invalid `require` command".
+    let temp = tempdir().expect("tempdir");
+    let file = temp.path().join("provider_bad_require.fe");
+    fs::write(
+        &file,
+        r#"
+trait Tagged {
+    fn tag(self) -> bool
+}
+
+impl BadReq: Derive for Tagged {
+    const fn derive<T>(ev: own Evidence<Tagged<T>>) -> Evidence<Tagged<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Tagged<T>>,
+        )
+    {
+        for field in reflect.fields() {
+            builder.require<Tagged>(field)
+        }
+        let mut sig = builder.method("tag")
+        sig = builder.with_self(sig)
+        sig = builder.returns(sig, builder.ty<bool>())
+        builder.emit_method(sig, builder.bool(true))
+        builder.finish()
+        ev
+    }
+}
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+derive Tagged for Point using BadReq
+"#,
+    )
+    .expect("write fixture");
+
+    let (output, exit_code) = run_fe_check(file.to_str().expect("fixture path utf8"));
+    assert_eq!(exit_code, 1, "expected check failure:\n{output}");
+    assert!(
+        output.contains("expects a type argument"),
+        "expected the `require` diagnostic to name the expected operand:\n{output}"
+    );
+    assert!(
+        output.contains("Tagged"),
+        "expected the `require` diagnostic to name the required trait:\n{output}"
+    );
+}
+
+#[test]
 fn test_cli_check_unresolved_record_init_path_reports_error_instead_of_panicking() {
     let temp = tempdir().expect("tempdir");
     let file = temp.path().join("unresolved_record_init_path.fe");
