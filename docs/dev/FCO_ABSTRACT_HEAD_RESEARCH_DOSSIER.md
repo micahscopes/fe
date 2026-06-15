@@ -117,6 +117,56 @@ exact anti-pattern the wizard's Temperance note warns against.
   concrete consumer exists (Track 0). Until both, ship the concrete surface (W-C/G1) and
   keep the named rejection.
 
+## 4b. PROGRAM RESULT (2026-06-15, workflow `abstract-head-feasibility`, run `wf_2e7b8127-d83`)
+
+**Recommendation: SHELVE-WITH-RUNWAY.** All four tracks converge.
+
+- **Track 0 (demand) — EMPTY. C6 CONFIRMED.** Every named consumer (one-provider-for-a-trait-family,
+  `derive Functor`, multi-trait conjunction `P<T>+Q<T>`, the ABI Encode/Decode/AbiSize serialization
+  family, and the corpus's own strongest Form-6 `IsoAt` demand) is met by monomorphize-per-trait or
+  first-order name-matched routing. Decisive reason: every live provider body is *irreducibly
+  trait-specific* (StableEq folds `&&` over `eq`; StableOrd folds lexicographic OR over lt/le/gt/ge;
+  StableDefault over `default`) — there is **no shared `derive<P>` body to factor**, so a `P` parameter
+  is pure ceremony. The one thing the abstract head uniquely expresses (general `Evidence<C>` in arbitrary
+  type position) was produced by no real program.
+- **Track 1 (Lean FV) — mechanically GREEN, but a category narrower than its headline; the adversary
+  (also mechanically clean) showed it COLLAPSES to concrete solving.** The "restricted fragment"
+  compiles (`[propext]`-only, same axiom base as the litmus), but `attack6 varhead_adds_no_solvable_goals`
+  proves its solvable set is **order-isomorphic to the concrete-trait fragment W-B/the litmus already
+  cover** — the variable head appears only in inputs eliminated by a fixed σ *before* any solve
+  (= monomorphization, not solving) or dropped as `none`. The PRIMARY use — abstract-mode body checking
+  of `fn foo<P, T>() where P<T>` (the live `constraint_kind_constructor.fe` fixture) — promotes to `none`,
+  i.e. *outside* the proven fragment. The coherence theorem is a tautology (the adversary reproduced it
+  for a demonstrably incoherent selector); decidability proved ground-equality, not first-order matching
+  against parametric impl heads; confluence's orthogonality held only because the arg type forbids
+  head-projecting args (`<T as P>::Assoc`, ordinary in derive bodies, is redex-creating). So clause (a)
+  of the build trigger is satisfied only for the concrete residue — **genuine variable-headed solving
+  remains unproven and the clean theorem is still owed.**
+- **Track 2 (design) — no live tension.** Shipping, safety, auditability all point at the concrete head;
+  only elegance pulls the other way and collapses once you see there is nothing to abstract. Both verbs
+  are designed and shelved: **V1** head-promotion `TyFolder` (~30 LOC: on meeting impl-param `P`, look up
+  the expansion-site `TraitDef` binding and re-enter the *existing* W-B `lower_hir_constraint_application`
+  reifier — no new representation); **V2** widen the existing `has_param` carry gate to treat a head-param
+  as symbolic-carried-by-assumption (this carry path's confluence/UNF is the unproven theorem owed).
+
+**BUILD TRIGGER (both must fire):** (a) a Lean result covering *genuinely* variable-headed solving —
+abstract-mode `P<T>` (live `P`, σ unbound) succeeding as a hypothesis, with confluence + UNF +
+selection-is-a-function re-established once conjunction (`P<T>+Q<T>`) and head-projecting args are
+admitted — NOT the concrete residue Track 1 proved; AND (b) a real in-tree consumer (the pinned **Sim-C
+meta-deriver**: ≥2 traits sharing ONE structural-recursion body, owned by an ingot a third party cannot
+edit, so per-trait concrete providers are not authorable). Today (a) holds only for the concrete residue
+and (b) is empty.
+
+**SHIP NOW (the only code endorsed, independent of the trigger):** upgrade the abstract-head rejection
+from the bare `expected trait, found type P` to a workaround-naming diagnostic
+("constraint-constructor generic parameter `P` (`* -> Constraint`) is not yet a supported trait head;
+write one provider per concrete trait, or monomorphize the consumer"). Honors D5.5; zero solver/
+representation surface. (Emitted in the analysis pass `diagnosable.rs::constraint_application_diags`,
+not in the diagnostic-free collection lowering.)
+
+Full packet + the five adversarial Lean attacks + Track-1/Track-2 dossiers:
+`/tmp/claude-1000/.../tasks/wf1lto04p.output` (run `wf_2e7b8127-d83`).
+
 ## 5. Key sources
 effort2 `crates/hir/src/analysis/ty/constraint.rs` (`:1,21-31,165-185,559-575,601-655`),
 `ty_check/mod.rs:1577-1617`, `ty_def.rs:1363-1379,2014,2022`; architect bundle

@@ -4574,6 +4574,27 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
                 ],
                 error_code: GlobalErrorCode::new(DiagnosticPass::TyCheck, 85),
             },
+
+            Self::ConstraintCtorParamUnsupported { span, param } => {
+                let name = param.data(db);
+                CompleteDiagnostic {
+                    severity,
+                    message: "constraint-constructor parameter is not yet a supported trait head"
+                        .to_string(),
+                    sub_diagnostics: vec![SubDiagnostic {
+                        style: LabelStyle::Primary,
+                        message: format!(
+                            "`{name}` (`* -> Constraint`) cannot yet be applied as a trait here"
+                        ),
+                        span: span.resolve(db),
+                    }],
+                    notes: vec![
+                        "write one provider per concrete trait (e.g. `impl Derive for Eq`), or monomorphize the consumer"
+                            .to_string(),
+                    ],
+                    error_code,
+                }
+            }
         }
     }
 }

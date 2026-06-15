@@ -930,6 +930,17 @@ pub enum TraitConstraintDiag<'db> {
         span: DynLazySpan<'db>,
         predicate: Body<'db>,
     },
+
+    /// An abstract constraint-constructor parameter (`P : * -> Constraint`) used
+    /// as a trait head, e.g. `where P<T>`. Not yet supported: genuine
+    /// variable-headed solving is build-trigger-gated research (wiring-party
+    /// D2/D7c; `docs/dev/FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md`). Names the
+    /// monomorphize-per-trait workaround rather than silently dropping the
+    /// predicate.
+    ConstraintCtorParamUnsupported {
+        span: DynLazySpan<'db>,
+        param: IdentId<'db>,
+    },
 }
 
 impl TraitConstraintDiag<'_> {
@@ -946,6 +957,7 @@ impl TraitConstraintDiag<'_> {
             // call-site const-predicate failure; this local code is unused for
             // the rendered code but kept for the enum's own numbering.
             Self::ConstPredicateNotSat { .. } => 7,
+            Self::ConstraintCtorParamUnsupported { .. } => 8,
         }
     }
 }
