@@ -1,0 +1,28 @@
+// FCO Level 1 (W-D) NEGATIVE A — live abstract head, named at a typed boundary.
+//
+// `Evidence<P<T>>` with `P: * -> Constraint` is a LIVE variable-headed goal.
+// The narrow `CapabilityGoal` carrier has no variable-head variant by
+// construction, so a live head can never be carried to the solver; the goal
+// position is reported with the abstract-head diagnostic (`6-0008`), the same
+// boundary as a `where P<T>` predicate. Genuine variable-headed solving is
+// build-trigger-gated research (FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md).
+
+trait Real {
+    fn r(self) -> bool
+}
+
+impl LiveHead: Derive for Real {
+    const fn derive<P: * -> Constraint, T>(ev: own Evidence<P<T>>) -> Evidence<P<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<P<T>>,
+        )
+    {
+        let mut sig = builder.method("r")
+        sig = builder.with_self(sig)
+        sig = builder.returns(sig, builder.ty<bool>())
+        builder.emit_method(sig, builder.bool(true))
+        builder.finish()
+        ev
+    }
+}

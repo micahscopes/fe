@@ -941,6 +941,19 @@ pub enum TraitConstraintDiag<'db> {
         span: DynLazySpan<'db>,
         param: IdentId<'db>,
     },
+
+    /// A derive-provider capability/witness goal argument (`Evidence<..>` /
+    /// `ImplBuilder<..>`) is not a concrete, saturated constraint — e.g.
+    /// `Evidence<Eq>` names the bare `* -> Constraint` head instead of a
+    /// saturated `Eq<T>` (FCO Level 1). The goal must lower to one concrete
+    /// obligation; an unsaturated head cannot.
+    ProviderGoalNotConcrete {
+        span: DynLazySpan<'db>,
+        /// The capability naming the goal (`Evidence` / `ImplBuilder`).
+        capability: &'static str,
+        /// The goal head as written (`Eq`).
+        goal: IdentId<'db>,
+    },
 }
 
 impl TraitConstraintDiag<'_> {
@@ -958,6 +971,7 @@ impl TraitConstraintDiag<'_> {
             // the rendered code but kept for the enum's own numbering.
             Self::ConstPredicateNotSat { .. } => 7,
             Self::ConstraintCtorParamUnsupported { .. } => 8,
+            Self::ProviderGoalNotConcrete { .. } => 9,
         }
     }
 }

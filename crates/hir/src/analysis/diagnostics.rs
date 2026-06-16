@@ -4595,6 +4595,29 @@ impl DiagnosticVoucher for TraitConstraintDiag<'_> {
                     error_code,
                 }
             }
+
+            Self::ProviderGoalNotConcrete {
+                span,
+                capability,
+                goal,
+            } => {
+                let goal_name = goal.data(db);
+                CompleteDiagnostic {
+                    severity,
+                    message: "derive provider goal is not a concrete constraint".to_string(),
+                    sub_diagnostics: vec![SubDiagnostic {
+                        style: LabelStyle::Primary,
+                        message: format!(
+                            "`{capability}<{goal_name}>` names the bare `* -> Constraint` head `{goal_name}`, not a saturated constraint"
+                        ),
+                        span: span.resolve(db),
+                    }],
+                    notes: vec![format!(
+                        "write a saturated goal such as `{capability}<{goal_name}<T>>` so the goal lowers to one concrete obligation"
+                    )],
+                    error_code,
+                }
+            }
         }
     }
 }

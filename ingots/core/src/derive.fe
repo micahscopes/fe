@@ -1,9 +1,10 @@
 //! Compile-time derive-provider capability types.
 //!
 //! A derive provider's `derive` fn consumes capabilities through its `uses (..)`
-//! clause. These are their canonical types:
+//! clause, plus a witness parameter. These are their canonical types:
 //!   - `Reflect<T>`     — reflection over the derive target `T`.
 //!   - `ImplBuilder<G>` — the builder for the generated `impl G`.
+//!   - `Evidence<G>`    — the witness that the provider derives the goal `G`.
 //!
 //! They exist so the compiler can recognize provider capabilities by RESOLVED
 //! identity (the canonical path `core::derive::*`) rather than by a bare
@@ -23,5 +24,17 @@ pub struct Reflect<T> {
 
 /// Generated-impl builder capability for the goal `G` (e.g. `Eq<T>`).
 pub struct ImplBuilder<G> {
+    handle: u256
+}
+
+/// Witness that a derive provider produces evidence for the goal `G` (e.g.
+/// `Eq<T>`). It is the `derive` fn's ordinary witness parameter and result.
+///
+/// Like `Reflect`/`ImplBuilder`, `Evidence` is recognized by resolved identity,
+/// is NOT in the prelude, has only a private field, and has no constructor — so
+/// no runtime `Evidence<G>` value can be built. The witness is bound by the
+/// provider executor as a compile-time value; the goal `G` is kind-checked at
+/// the provider signature (FCO Level 1), never materialized at runtime.
+pub struct Evidence<G> {
     handle: u256
 }

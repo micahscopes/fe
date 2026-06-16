@@ -39,6 +39,7 @@
 ///   which covers the canonical `Mail`/`Person` example. Deep transitive
 ///   closure and name-sorting are future work.
 
+use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect
 use super::evm::Address

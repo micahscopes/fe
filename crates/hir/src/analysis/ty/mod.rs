@@ -47,6 +47,7 @@ pub mod pattern_analysis;
 pub mod pattern_ir;
 pub mod pattern_types;
 pub mod provider;
+pub mod provider_goal;
 pub(crate) mod scratch;
 pub mod term;
 pub mod trait_def;
@@ -714,14 +715,35 @@ impl ModuleAnalysisPass for FuncAnalysisPass {
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         // Function diagnostics are handled here; contract-specific diagnostics are separate.
-        // Derive provider bodies are checked by the provider executor.
-        top_mod
+        let mut diags: Vec<Box<dyn DiagnosticVoucher + 'db>> = top_mod
             .all_funcs(db)
             .iter()
             .filter(|func| !func.is_derive_provider_fn(db))
             .flat_map(|func| func.diags(db))
             .map(|diag| diag.to_voucher())
-            .collect()
+            .collect();
+
+        // Derive provider SIGNATURES are still exempt from the ordinary
+        // `*`-kinded signature walk (their non-goal parts are checked by the
+        // provider executor, like the body) — EXCEPT the capability/witness GOAL
+        // positions (`Evidence<..>` / `ImplBuilder<..>`). Those name a CONCRETE
+        // constraint and are now kind-checked: the goal argument is lowered via
+        // `provider_capability_goals` (position-scoped, no `ConstraintTerm`, no
+        // live head to the solver) and a non-concrete goal is reported here
+        // (FCO Level 1). De-exempting the goal position retires the
+        // "goal-argument-is-decoration" bridge: a nonsense trait in `Evidence<..>`
+        // no longer compiles silently.
+        diags.extend(
+            top_mod
+                .all_funcs(db)
+                .iter()
+                .filter(|func| func.is_derive_provider_fn(db))
+                .flat_map(|func| provider_goal::provider_capability_goals(db, *func))
+                .filter_map(|goal| provider_goal::goal_error_diag(db, &goal))
+                .map(|diag| diag.to_voucher()),
+        );
+
+        diags
     }
 }
 
