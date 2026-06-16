@@ -378,23 +378,20 @@ fn expand_derive_decl<'db>(
         .head_path()
         .map(|path| path.syntax().text_range())
         .unwrap_or_else(|| decl_ast.syntax().text_range());
-    let Some(trait_name) = head_path.as_ident(db) else {
-        accumulate_error(
-            ctxt,
-            &item_name,
-            DeriveErrorKind::UnknownTrait {
-                name: head_path.pretty_print(db),
-                available: provider::core_derivable_trait_names(db, ctxt.top_mod()),
-            },
-            head_range,
-        );
+    // The goal trait's last path segment, used for diagnostics, `Default`
+    // handling, and `#[derive]`/declaration conflict deduplication. The full
+    // `head_path` (bare, aliased, or qualified) drives provider *selection*
+    // by resolved identity (W-C); a qualified head no longer bails here.
+    let Some(trait_name) = head_path.ident(db).to_opt() else {
+        // Parser error inside the head path's last segment, already handled
+        // by `path_has_missing_segment` above.
         return;
     };
 
     // Selection: explicit `using ..` or an enclosing `with Provider { .. }`
     // scope select by provider name; bare declarations use the canonical
-    // core provider — and validate the trait name against the core set up
-    // front, like attribute derives do.
+    // core provider — and validate the trait against the core set up front,
+    // by resolved identity, like attribute derives do.
     let (selection, selection_range) = if let Some(provider_path) = decl
         .selected_provider_path(db)
         .and_then(|path| path.to_opt())
@@ -405,12 +402,12 @@ fn expand_derive_decl<'db>(
             .unwrap_or(head_range);
         (ProviderSelection::Named(provider_path), Some(range))
     } else {
-        if !provider::is_core_derivable(db, ctxt.top_mod(), trait_name) {
+        if !provider::is_core_derivable(db, ctxt.top_mod(), head_path) {
             accumulate_error(
                 ctxt,
                 &item_name,
                 DeriveErrorKind::UnknownTrait {
-                    name: trait_name.data(db).to_string(),
+                    name: head_path.pretty_print(db),
                     available: provider::core_derivable_trait_names(db, ctxt.top_mod()),
                 },
                 head_range,

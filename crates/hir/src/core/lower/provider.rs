@@ -21,7 +21,8 @@ use crate::{
     HirDb,
     hir_def::{
         Body, DeriveProvider, Func, HirIngot, IdentId, ItemKind, PathId, TopLevelMod, TypeId,
-        UsePathSegment, scope_graph::ScopeId,
+        UsePathSegment,
+        scope_graph::{ScopeGraph, ScopeId},
     },
 };
 
@@ -83,12 +84,17 @@ pub(super) struct ValidatedProvider<'db> {
     pub(super) body: Body<'db>,
     /// The provider's name (`StableEq` in `impl StableEq: Derive for Eq`).
     pub(super) name: IdentId<'db>,
-    /// The last segment of the head trait path (`Eq`).
+    /// The last segment of the head trait path (`Eq`). Used for
+    /// diagnostics and for the cross-module-safe bare-ident selection adapter
+    /// (`goal_matches_provider`); provider selection otherwise keys on
+    /// [`Self::trait_path`] identity, not on this string (W-C).
     pub(super) head_name: IdentId<'db>,
     /// The canonical path of the head trait, resolved against the provider
     /// module's `use` items (e.g. `core::ops::Eq`). Generated impls name the
     /// trait through this path so resolution does not depend on imports at
-    /// the derive site.
+    /// the derive site. W-C: it is also the provider's selection *identity* —
+    /// a derive request whose goal canonicalizes to this same path selects
+    /// this provider, regardless of how the goal was spelled at the site.
     pub(super) trait_path: PathId<'db>,
     /// The compile-time capabilities the provider consumes, in `uses (..)`
     /// declaration order (`Reflect<..>`, `mut ImplBuilder<..>`).
@@ -483,15 +489,137 @@ pub(super) fn core_derivable_trait_names<'db>(
     names
 }
 
-/// Whether `name` is derivable through a canonical core provider.
-pub(super) fn is_core_derivable<'db>(
+/// Whether the bare identifier `name` already names a trait, type, or `use`
+/// import in `from`'s **base** scope graph — i.e. a *competing* definition
+/// that would shadow the implicit core-derive convention. Used as the
+/// cross-module safety guard for the bare-ident selection adapter: a bare
+/// `derive Eq` only falls back to the canonical core `Eq` provider when no
+/// such local/imported `Eq` exists, so a user trait `Eq` (or `use other::Eq`)
+/// never silently selects the core provider.
+///
+/// Base-graph only (`base_scope_graph_impl`); the expansion stage must not
+/// read the merged graph.
+fn names_competing_definition<'db>(
     db: &'db dyn HirDb,
     from: TopLevelMod<'db>,
     name: IdentId<'db>,
 ) -> bool {
+    let base = base_scope_graph_impl(db, from);
+    base.items_dfs(db).any(|item| match item {
+        // A locally declared trait/type of the same name is a distinct
+        // identity from the canonical core trait.
+        ItemKind::Trait(_)
+        | ItemKind::Struct(_)
+        | ItemKind::Enum(_)
+        | ItemKind::TypeAlias(_)
+        | ItemKind::Contract(_) => item
+            .name(db)
+            .is_some_and(|item_name| item_name == name)
+            // Only definitions directly in the requesting module shadow the
+            // bare convention; items nested in inner modules do not.
+            && item.top_mod(db) == from
+            && is_top_level_item(base, item),
+        // A `use` binding the name resolves the bare ident to its imported
+        // target instead (handled by canonical-path identity); its presence
+        // disqualifies the bare convention here too.
+        ItemKind::Use(use_) => use_binds_name(db, use_, name),
+        _ => false,
+    })
+}
+
+/// Whether `item` is a direct child of the top-level module scope (not nested
+/// inside an inner `mod`).
+fn is_top_level_item<'db>(base: &ScopeGraph<'db>, item: ItemKind<'db>) -> bool {
+    base.child_items(ScopeId::Item(base.top_mod.into()))
+        .any(|child| child == item)
+}
+
+/// Whether the `use` item introduces the binding `name` (through its alias,
+/// or — absent an alias — its final path segment).
+fn use_binds_name<'db>(db: &'db dyn HirDb, use_: crate::hir_def::Use<'db>, name: IdentId<'db>) -> bool {
+    match use_.alias(db) {
+        Some(alias) => matches!(
+            alias.to_opt(),
+            Some(crate::hir_def::UseAlias::Ident(ident)) if ident == name
+        ),
+        None => use_
+            .path(db)
+            .to_opt()
+            .and_then(|path| path.data(db).last().cloned())
+            .and_then(|seg| seg.to_opt())
+            .and_then(UsePathSegment::ident)
+            .is_some_and(|ident| ident == name),
+    }
+}
+
+/// Whether the goal trait named by `goal_path` (as written at the derive
+/// site) resolves to the same trait identity as `provider`'s head trait
+/// (W-C). Selection keys on this identity, not on the head-name string, so an
+/// aliased/qualified goal still selects the canonical provider and a
+/// same-named trait from another module does not.
+///
+/// Identity is established (in priority order):
+///
+/// 1. **Canonical-path identity.** Both the goal path and the provider head
+///    are canonicalized against their respective modules' `use` items
+///    ([`canonical_trait_path`], base-graph only). Equal canonical paths are
+///    the same trait. This covers a qualified goal (`core::ops::Eq`), an
+///    aliased goal (`use core::ops::Eq as MyEq; derive MyEq`), and a bare
+///    goal imported with `use core::ops::Eq`.
+///
+/// 2. **Bare-ident adapter (short-lived).** A *bare* goal ident that resolves
+///    to nothing through the requesting module's `use` items and has no
+///    competing local trait/type of that name
+///    ([`names_competing_definition`]) selects a core provider whose head
+///    *last segment* equals the ident. This is the implicit "derive prelude"
+///    convention for canonical core traits that are not actually imported at
+///    the site (e.g. `Eq`/`Ord`, which the prelude does not re-export). It is
+///    cross-module-safe — a user trait `Eq` or `use other::Eq` disqualifies
+///    it — but it is still a last-segment match, kept ONLY until goal traits
+///    are resolved to a `Trait` item by a stratification-safe resolver (its
+///    removal target). Until then it must never be the *only* matcher, hence
+///    the guard.
+fn goal_matches_provider<'db>(
+    db: &'db dyn HirDb,
+    from: TopLevelMod<'db>,
+    goal_path: PathId<'db>,
+    provider: &ValidatedProvider<'db>,
+) -> bool {
+    let goal_canonical = canonical_trait_path(db, from, goal_path);
+    if goal_canonical == provider.trait_path {
+        return true;
+    }
+
+    // Bare-ident adapter: only for an unresolved bare ident with no competing
+    // local/imported definition.
+    let Some(goal_ident) = goal_path.as_ident(db) else {
+        return false;
+    };
+    if goal_canonical != goal_path {
+        // The ident canonicalized to something else (via a `use`); that
+        // resolved identity already failed to match above, so do not fall
+        // back to a string match that would ignore the import.
+        return false;
+    }
+    if names_competing_definition(db, from, goal_ident) {
+        return false;
+    }
+    provider.head_name == goal_ident
+}
+
+/// Whether the goal trait named by `goal_path` (bare, aliased, or qualified)
+/// is derivable through a canonical core provider, by resolved identity
+/// (W-C). Used for the up-front `13-0002 cannot derive` / "derivable traits
+/// are .." check on `#[derive(Trait)]` arguments and bare `derive Trait for
+/// T` declarations, so that check keys on identity exactly like selection.
+pub(super) fn is_core_derivable<'db>(
+    db: &'db dyn HirDb,
+    from: TopLevelMod<'db>,
+    goal_path: PathId<'db>,
+) -> bool {
     core_providers(db, from)
         .iter()
-        .any(|provider| provider.head_name == name)
+        .any(|provider| goal_matches_provider(db, from, goal_path, provider))
 }
 
 /// How a derive request selects its provider.
@@ -518,17 +646,24 @@ pub(super) enum SelectionOutcome<'db> {
     },
 }
 
-/// Selects the provider for a request deriving `trait_name`.
+/// Selects the provider for a request whose goal trait is named by
+/// `goal_path` (the head path exactly as written at the derive site: bare,
+/// aliased, or qualified).
+///
+/// W-C: the goal is matched against each candidate by *resolved identity*
+/// ([`goal_matches_provider`]), not by the head-name string. An aliased or
+/// qualified goal therefore still selects the canonical provider, and a
+/// same-named trait from another module does not.
 pub(super) fn select_provider<'db>(
     db: &'db dyn HirDb,
     from: TopLevelMod<'db>,
-    trait_name: IdentId<'db>,
+    goal_path: PathId<'db>,
     selection: ProviderSelection<'db>,
 ) -> SelectionOutcome<'db> {
     let candidates: Vec<&'db ValidatedProvider<'db>> = match selection {
         ProviderSelection::Canonical => core_providers(db, from)
             .into_iter()
-            .filter(|provider| provider.head_name == trait_name)
+            .filter(|provider| goal_matches_provider(db, from, goal_path, provider))
             .collect(),
         ProviderSelection::Named(path) => {
             let Some(selected) = path.as_ident(db) else {
@@ -543,7 +678,7 @@ pub(super) fn select_provider<'db>(
             let matching: Vec<_> = named
                 .iter()
                 .copied()
-                .filter(|provider| provider.head_name == trait_name)
+                .filter(|provider| goal_matches_provider(db, from, goal_path, provider))
                 .collect();
             if matching.is_empty() {
                 return SelectionOutcome::NotFound {

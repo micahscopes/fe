@@ -224,7 +224,8 @@ pub(super) fn parse_derive_traits<'db>(
 
             let name = key.text().to_string();
             let ident = IdentId::new(ctxt.db(), name.clone());
-            if !provider::is_core_derivable(ctxt.db(), ctxt.top_mod(), ident) {
+            let goal_path = PathId::from_ident(ctxt.db(), ident);
+            if !provider::is_core_derivable(ctxt.db(), ctxt.top_mod(), goal_path) {
                 accumulate_error(
                     ctxt,
                     item_name,
@@ -686,7 +687,7 @@ fn execute_requests<'db>(
         let provider: &ValidatedProvider<'db> = match provider::select_provider(
             db,
             ctxt.top_mod(),
-            request.trait_name,
+            request.trait_path,
             request.selection,
         ) {
             SelectionOutcome::Found(provider) => provider,
