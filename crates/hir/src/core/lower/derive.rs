@@ -264,7 +264,20 @@ pub(super) fn parse_derive_traits<'db>(
 /// declaration (optionally with a `using Provider` selection).
 #[derive(Debug, Clone)]
 pub(super) struct DeriveRequest<'db> {
+    /// The goal trait's last path segment (`Eq` in `core::ops::Eq` or
+    /// `MyEq`). Retained for diagnostics, `Default`-marker handling, and
+    /// `#[derive(..)]`/declaration conflict deduplication. Provider
+    /// *selection* keys on [`Self::trait_path`] (resolved identity), not on
+    /// this string, so an aliased or qualified goal still selects the right
+    /// provider and a same-named trait from another module does not.
     pub(super) trait_name: IdentId<'db>,
+    /// The goal trait path exactly as written at the derive site: a bare
+    /// ident (`Eq`), an alias (`MyEq`), or a qualified path
+    /// (`core::ops::Eq`). Provider selection canonicalizes this against the
+    /// requesting module's `use` items (base-graph only) to recover the
+    /// goal's resolved identity (W-C). For `#[derive(Trait)]` attributes the
+    /// argument is always a single ident, so this is `PathId::from_ident`.
+    pub(super) trait_path: PathId<'db>,
     /// The request site: the derive attribute argument or the declaration's
     /// trait path. Primary span for request-level diagnostics.
     pub(super) primary_range: parser::TextRange,

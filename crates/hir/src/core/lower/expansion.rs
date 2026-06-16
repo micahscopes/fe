@@ -159,6 +159,7 @@ pub(crate) fn expanded_items_impl<'db>(
                             TargetKind::Struct(struct_, ast.clone()),
                             DeriveRequest {
                                 trait_name,
+                                trait_path: PathId::from_ident(db, trait_name),
                                 primary_range: range,
                                 selection: ProviderSelection::Canonical,
                                 selection_range: None,
@@ -209,6 +210,7 @@ pub(crate) fn expanded_items_impl<'db>(
                         TargetKind::Enum(enum_, ast.clone()),
                         DeriveRequest {
                             trait_name,
+                            trait_path: PathId::from_ident(db, trait_name),
                             primary_range: range,
                             selection: ProviderSelection::Canonical,
                             selection_range: None,
@@ -524,6 +526,7 @@ fn expand_derive_decl<'db>(
         kind,
         DeriveRequest {
             trait_name,
+            trait_path: head_path,
             primary_range: head_range,
             selection,
             selection_range,
