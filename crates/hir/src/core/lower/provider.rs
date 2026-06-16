@@ -20,7 +20,7 @@ use super::base_scope_graph_impl;
 use crate::{
     HirDb,
     hir_def::{
-        Body, DeriveProvider, Func, HirIngot, IdentId, ItemKind, PathId, TopLevelMod, TypeId,
+        Body, DeriveProvider, Func, HirIngot, IdentId, ItemKind, PathId, TopLevelMod, Trait, TypeId,
         UsePathSegment,
         scope_graph::{ScopeGraph, ScopeId},
     },
@@ -410,6 +410,166 @@ pub(super) fn canonical_trait_path<'db>(
     path
 }
 
+/// A module reached while walking a trait path's leading segments. Submodules
+/// are either separate files (their own [`TopLevelMod`], reached through the
+/// module tree) or inline `mod` items (children of an enclosing top mod's
+/// scope, reached through that top mod's base scope graph). Either way the
+/// final-segment trait lookup reads only *base* scope graphs, so this is
+/// stratification-safe for the expansion stage.
+#[derive(Clone, Copy)]
+enum NavModule<'db> {
+    /// A top-level module (file root or file-based submodule).
+    Top(TopLevelMod<'db>),
+    /// An inline `mod` item, with the top mod whose base graph holds it.
+    Inline(crate::hir_def::Mod<'db>, TopLevelMod<'db>),
+}
+
+impl<'db> NavModule<'db> {
+    /// The top mod whose *base* scope graph holds this module's direct child
+    /// items (the module's own graph for a top mod; the enclosing top mod's
+    /// graph for an inline mod).
+    fn graph_owner(self) -> TopLevelMod<'db> {
+        match self {
+            NavModule::Top(top) => top,
+            NavModule::Inline(_, owner) => owner,
+        }
+    }
+
+    /// This module's scope (the key under which its child items hang in the
+    /// owner's base scope graph).
+    fn scope(self) -> ScopeId<'db> {
+        match self {
+            NavModule::Top(top) => ScopeId::Item(top.into()),
+            NavModule::Inline(mod_, _) => ScopeId::Item(mod_.into()),
+        }
+    }
+}
+
+/// Resolves a *canonical* trait path (an ingot-rooted multi-segment path, or a
+/// bare trait ident local to `from`) to the `Trait` *item* it names, reading
+/// only base scope graphs and the module tree — never the merged
+/// [`scope_graph_impl`](super::scope_graph_impl) of any module of the
+/// requesting ingot. This is the stratification-safe replacement for
+/// last-segment string matching in provider selection: selection identity is
+/// the resolved `Trait` def, not the path's spelling.
+///
+/// Inputs are the output of [`canonical_trait_path`], so the leading segment is
+/// either an ingot alias (`core`, an external-dependency ingot), an ingot-self
+/// keyword (`ingot`), or — for a bare path — a trait/submodule directly in
+/// `from`. Generic args on any segment are ignored (a goal's `Eq<T>` names the
+/// same trait as the head's `Eq`). Returns `None` when the path does not name a
+/// reachable `Trait` (e.g. a not-yet-imported bare ident, or a non-trait
+/// target); callers treat an unresolved path as "no identity match".
+pub(super) fn resolve_trait_def<'db>(
+    db: &'db dyn HirDb,
+    from: TopLevelMod<'db>,
+    path: PathId<'db>,
+) -> Option<Trait<'db>> {
+    // Collect the path's identifier segments (root .. last), generic args
+    // stripped. A `QualifiedType` segment has no ident and cannot name a trait
+    // path here, so bail.
+    let len = path.len(db);
+    let mut idents = Vec::with_capacity(len);
+    for idx in 0..len {
+        let seg = path.segment(db, idx)?;
+        idents.push(seg.ident(db).to_opt()?);
+    }
+    let (&last, leading) = idents.split_last()?;
+
+    // Establish the module the leading segments walk from, and the submodule
+    // steps that remain to walk (the final trait segment is excluded).
+    let (mut module, walk) = resolve_path_root(db, from, &idents, leading)?;
+
+    // Walk the leading segments as submodules.
+    for &segment in walk {
+        module = nav_child_module(db, module, segment)?;
+    }
+
+    // Final segment: a `Trait` directly in the resolved module's base graph.
+    let owner = module.graph_owner();
+    let base = base_scope_graph_impl(db, owner);
+    base.child_items(module.scope()).find_map(|item| match item {
+        ItemKind::Trait(trait_) if trait_.name(db).to_opt() == Some(last) => Some(trait_),
+        _ => None,
+    })
+}
+
+/// Resolves the *root* segment of a trait path to the module its leading
+/// segments walk from, returning that module and the submodule steps still to
+/// walk (everything between that starting module and the final trait segment).
+///
+/// * a bare single-ident path: start at `from`, no submodule steps — the trait
+///   is looked up directly in `from`.
+/// * `ingot`: start at the requesting ingot's root; walk all leading segments
+///   after `ingot`.
+/// * an external-ingot alias (`core`, ..): start at that dependency ingot's
+///   root module; walk the leading segments after the alias. Reading a
+///   dependency ingot's base graphs never cycles back into this ingot's
+///   expansion.
+/// * otherwise (root is a submodule of `from`): start at `from` and walk all
+///   leading segments (the root included).
+///
+/// All reads are the module tree (content-agnostic) and `resolved_external_ingots`
+/// (project structure) — base/stratification-safe.
+fn resolve_path_root<'db, 'a>(
+    db: &'db dyn HirDb,
+    from: TopLevelMod<'db>,
+    idents: &'a [IdentId<'db>],
+    leading: &'a [IdentId<'db>],
+) -> Option<(NavModule<'db>, &'a [IdentId<'db>])> {
+    let (&root, _) = idents.split_first()?;
+    // A bare single-ident path names a trait directly in `from`.
+    if leading.is_empty() {
+        return Some((NavModule::Top(from), leading));
+    }
+
+    // `leading` is `[root, mid...]` (the final trait segment is already split
+    // off by the caller). The submodule steps after the root are `leading[1..]`.
+    let after_root = &leading[1..];
+
+    if root.is_ingot(db) {
+        return Some((NavModule::Top(from.ingot(db).root_mod(db)), after_root));
+    }
+
+    for &(alias, ingot) in from.ingot(db).resolved_external_ingots(db) {
+        if alias == root {
+            return Some((NavModule::Top(ingot.root_mod(db)), after_root));
+        }
+    }
+
+    // The root names a submodule directly in `from`: walk from `from`,
+    // consuming the root as the first submodule step (all of `leading`).
+    Some((NavModule::Top(from), leading))
+}
+
+/// The submodule named `segment` directly under `module`: a file-based child
+/// top mod (module tree) or an inline `mod` item (base scope graph). Base/
+/// module-tree reads only.
+fn nav_child_module<'db>(
+    db: &'db dyn HirDb,
+    module: NavModule<'db>,
+    segment: IdentId<'db>,
+) -> Option<NavModule<'db>> {
+    // File-based submodules of a top mod live in the module tree.
+    if let NavModule::Top(top) = module {
+        for child in top.child_top_mods(db) {
+            if child.name(db) == segment {
+                return Some(NavModule::Top(child));
+            }
+        }
+    }
+
+    // Inline `mod` items hang off the module's scope in the owner's base graph.
+    let owner = module.graph_owner();
+    let base = base_scope_graph_impl(db, owner);
+    base.child_items(module.scope()).find_map(|item| match item {
+        ItemKind::Mod(mod_) if mod_.name(db).to_opt() == Some(segment) => {
+            Some(NavModule::Inline(mod_, owner))
+        }
+        _ => None,
+    })
+}
+
 /// All validated derive providers declared in `ingot`, discovered through
 /// the base scope graphs of its modules. Providers that fail shape
 /// validation are silently excluded here; their diagnostics are reported
@@ -557,45 +717,40 @@ fn use_binds_name<'db>(
 }
 
 /// Whether the goal trait named by `goal_path` (as written at the derive
-/// site) resolves to the same trait identity as `provider`'s head trait
-/// (W-C). Selection keys on this identity, not on the head-name string, so an
-/// aliased/qualified goal still selects the canonical provider and a
+/// site) is the same trait as `provider`'s head trait (W-C). Selection keys on
+/// resolved trait-*def* identity, not on the head-name string, so an
+/// aliased/qualified/imported goal still selects the canonical provider and a
 /// same-named trait from another module does not.
 ///
 /// Identity is established (in priority order):
 ///
-/// 1. **Canonical-path identity.** Both the goal path and the provider head
-///    are canonicalized against their respective modules' `use` items
-///    ([`canonical_trait_path`], base-graph only). Equal canonical paths are
-///    the same trait. This covers a qualified goal (`core::ops::Eq`), an
-///    aliased goal (`use core::ops::Eq as MyEq; derive MyEq`), and a bare
-///    goal imported with `use core::ops::Eq`.
+/// 1. **Resolved trait-def identity (the SSOT).** The goal path is resolved
+///    against `from`, and the provider's head trait path against the provider's
+///    own module, each through [`resolve_trait_def`] (base scope graphs + module
+///    tree only — stratification-safe). When *both* resolve, identity is exactly
+///    `goal_def == head_def`: equal defs match, distinct defs do not — even when
+///    the last segments spell the same name. This single rule covers a qualified
+///    goal (`core::ops::Eq`), an aliased goal (`use core::ops::Eq as MyEq; derive
+///    MyEq`), a bare goal imported with `use core::ops::Eq`, and a same-named
+///    local trait (which resolves to a *different* def and is rejected).
 ///
-/// 2. **Head-name fallback.** A last-segment (head-name) match, used in two
-///    bounded shapes — never as the sole, unguarded matcher:
+/// 2. **Bare-ident "derive prelude" convention (COMPAT SHIM, residual).** A
+///    *bare* goal ident with no `use` import and no competing local trait/type
+///    of that name does not resolve to any trait def from `from` (step 1 yields
+///    `None` for the goal) — it relies on an implicit "derive prelude" for
+///    canonical core traits the prelude does not re-export (e.g. `Eq`/`Ord`).
+///    Such a goal is matched against the provider's *resolved head def name*,
+///    guarded by [`names_competing_definition`] so a user trait `Eq` or
+///    `use other::Eq` disqualifies it. This is the one residual name comparison;
+///    see the COMPAT SHIM note at its site.
 ///
-///    * **Canonical selection** (bare `#[derive(Trait)]` / `derive Trait for
-///      T`): only for a *bare* goal ident that resolves to nothing through the
-///      requesting module's `use` items and has no competing local trait/type
-///      of that name ([`names_competing_definition`]). This is the implicit
-///      "derive prelude" convention for canonical core traits the prelude does
-///      not re-export (e.g. `Eq`/`Ord`). It is cross-module-safe — a user
-///      trait `Eq` or `use other::Eq` disqualifies it.
-///
-///    * **Named selection** (`derive Trait for T using Provider`, or a `with
-///      Provider { .. }` scope), gated by `named_provider`: the user has
-///      *explicitly* named the provider, so the goal-trait check matches the
-///      provider's head last segment. This restores the pre-W-C named-goal
-///      semantics (named selection matched `head_name == trait_name`) and is
-///      required when the provider declares its head trait in the provider's
-///      own module — then `trait_path` is bare while the goal is imported and
-///      thus qualified, so canonical-path identity (1) cannot fire. It is not
-///      a cross-module *core*-aliasing risk because the provider is not chosen
-///      from the canonical-core set but by the exact name the user wrote.
-///
-/// Both fallbacks are last-segment matches kept ONLY until goal traits are
-/// resolved to a `Trait` item by a stratification-safe resolver (the removal
-/// target).
+/// 3. **Named-provider fallback (COMPAT SHIM, residual).** Under explicit
+///    `derive .. using Provider` / `with Provider { .. }` (`named_provider`),
+///    when step 1 could not establish identity because the goal or the head did
+///    not resolve to a def, fall back to the goal's last segment matching the
+///    provider's head last segment. The user named the provider explicitly, so
+///    this is not a cross-module *core*-aliasing risk. See the COMPAT SHIM note
+///    at its site.
 fn goal_matches_provider<'db>(
     db: &'db dyn HirDb,
     from: TopLevelMod<'db>,
@@ -603,34 +758,59 @@ fn goal_matches_provider<'db>(
     provider: &ValidatedProvider<'db>,
     named_provider: bool,
 ) -> bool {
-    let goal_canonical = canonical_trait_path(db, from, goal_path);
-    if goal_canonical == provider.trait_path {
-        return true;
+    // (1) Resolved trait-def identity — the selection SSOT.
+    let goal_def = resolve_trait_def(db, from, canonical_trait_path(db, from, goal_path));
+    let head_def = resolve_trait_def(db, provider.provider.top_mod(db), provider.trait_path);
+    if let (Some(goal_def), Some(head_def)) = (goal_def, head_def) {
+        // Both ends resolved: identity is decided purely by def equality.
+        // Distinct defs with the same last-segment name fall through to `false`
+        // here — name spelling never overrides a resolved-def mismatch.
+        return goal_def == head_def;
     }
 
     if named_provider {
-        // The user named this provider explicitly; match its head trait by
-        // the goal's last segment (handles a provider whose head trait is
-        // declared in its own module, giving it a bare `trait_path` while the
-        // goal is imported and thus qualified — canonical-path identity above
-        // cannot fire). Identity (1) was already attempted.
+        // COMPAT SHIM — removal target: named-selection last-segment fallback.
+        // Blocker: reached only when step (1) could not resolve the goal or the
+        // head to a `Trait` def (e.g. a provider whose head trait is declared in
+        // its own module and not reachable as a canonical/importable path from
+        // here, or a goal that does not resolve). The user named this provider
+        // explicitly, so a last-segment match restores the pre-W-C named-goal
+        // semantics without cross-module *core*-aliasing risk. Retire once every
+        // provider head and named goal resolve to a def via `resolve_trait_def`.
         return last_path_ident(db, goal_path) == Some(provider.head_name);
     }
 
-    // Canonical selection: bare-ident adapter only.
+    // (2) Bare-ident "derive prelude" convention.
     let Some(goal_ident) = goal_path.as_ident(db) else {
         return false;
     };
-    if goal_canonical != goal_path {
-        // The ident canonicalized to something else (via a `use`); that
-        // resolved identity already failed to match above, so do not fall
-        // back to a string match that would ignore the import.
+    if goal_def.is_some() {
+        // The bare goal resolved to *some* trait def (a local trait, or one
+        // imported with `use`); step (1) already decided identity against it, so
+        // do not fall back to a name match that would ignore that resolution.
         return false;
     }
     if names_competing_definition(db, from, goal_ident) {
         return false;
     }
-    provider.head_name == goal_ident
+    // COMPAT SHIM — removal target: bare-ident derive-prelude convention.
+    // Blocker: a bare `derive Eq` with no `use core::ops::Eq` import resolves to
+    // no trait def from `from` (there is no base-graph import to follow), yet
+    // must still select the canonical core `Eq` provider — the implicit
+    // "derive prelude" for core traits the prelude does not re-export. Matching
+    // is against the provider's *resolved head def name* (not the raw
+    // `head_name` string) so it is anchored to the real core trait def; the
+    // `names_competing_definition` guard keeps it cross-module-safe. Retire once
+    // the canonical core derive traits are in the prelude (so a bare goal
+    // resolves to the def) or a derive-prelude is expressible as a base-graph
+    // import.
+    match head_def {
+        Some(head_def) => head_def.name(db).to_opt() == Some(goal_ident),
+        // Head did not resolve to a def: last-segment string match, the most
+        // residual case (e.g. a core provider whose head path is not yet
+        // resolvable here). Same removal target as above.
+        None => provider.head_name == goal_ident,
+    }
 }
 
 /// Whether the goal trait named by `goal_path` (bare, aliased, or qualified)
@@ -820,5 +1000,101 @@ impl<'db> TargetReflection<'db> {
             None => self.struct_fields().get(index),
             Some(v) => self.variant(v)?.fields.get(index),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{core_providers, goal_matches_provider, is_core_derivable, resolve_trait_def};
+    use crate::{
+        hir_def::PathId,
+        lower::map_file_to_mod,
+        test_db::TestDb,
+    };
+
+    /// The selection SSOT — [`resolve_trait_def`] — keys on the resolved
+    /// `Trait` *def*, so two traits that *spell* the same last segment in
+    /// different modules resolve to two DISTINCT defs (and the core trait of the
+    /// same name to a third). This is the property last-segment string matching
+    /// could not express; it is the foundation of identity-based selection.
+    #[test]
+    fn resolve_trait_def_distinguishes_same_named_traits() {
+        let mut db = TestDb::default();
+        let text = r#"
+            mod a {
+                pub trait Eq {
+                    fn eq(self, other: Self) -> bool
+                }
+            }
+            mod b {
+                pub trait Eq {
+                    fn eq(self, other: Self) -> bool
+                }
+            }
+        "#;
+        let file = db.standalone_file(text);
+        let top_mod = map_file_to_mod(&db, file);
+
+        let a_eq = resolve_trait_def(&db, top_mod, PathId::from_segments(&db, &["a", "Eq"]))
+            .expect("a::Eq resolves to a trait def");
+        let b_eq = resolve_trait_def(&db, top_mod, PathId::from_segments(&db, &["b", "Eq"]))
+            .expect("b::Eq resolves to a trait def");
+        let core_eq =
+            resolve_trait_def(&db, top_mod, PathId::from_segments(&db, &["core", "ops", "Eq"]))
+                .expect("core::ops::Eq resolves to the core trait def");
+
+        // Same last segment (`Eq`) everywhere, three distinct defs.
+        assert_ne!(a_eq, b_eq, "same-named local traits must be distinct defs");
+        assert_ne!(a_eq, core_eq);
+        assert_ne!(b_eq, core_eq);
+    }
+
+    /// End-to-end: provider selection keys on resolved def identity, NOT on the
+    /// head-name string. A goal that resolves to a *local* trait named `Eq` does
+    /// not match the canonical core `Eq` provider, while a goal that resolves to
+    /// `core::ops::Eq` does — even though both goals spell `Eq` as their last
+    /// segment. This is the anti-vacuous guard for the bridge removal: it proves
+    /// the resolved-identity path (not the string path) is what fires.
+    #[test]
+    fn goal_matches_provider_keys_on_def_not_name() {
+        let mut db = TestDb::default();
+        // A user trait *also* named `Eq`, a distinct def from `core::ops::Eq`.
+        let text = r#"
+            mod local {
+                pub trait Eq {
+                    fn eq(self, other: Self) -> bool
+                }
+            }
+        "#;
+        let file = db.standalone_file(text);
+        let top_mod = map_file_to_mod(&db, file);
+
+        // The canonical core `Eq` provider (`StableEq`, from core_derives).
+        let core_eq_provider = core_providers(&db, top_mod)
+            .into_iter()
+            .find(|p| p.head_name.data(&db) == "Eq")
+            .expect("a canonical core `Eq` provider is visible");
+
+        let core_goal = PathId::from_segments(&db, &["core", "ops", "Eq"]);
+        let local_goal = PathId::from_segments(&db, &["local", "Eq"]);
+
+        // Identity match: `core::ops::Eq` resolves to the same def as the
+        // provider head, so it selects the core provider.
+        assert!(
+            goal_matches_provider(&db, top_mod, core_goal, core_eq_provider, false),
+            "core::ops::Eq goal must match the core Eq provider by def"
+        );
+        assert!(is_core_derivable(&db, top_mod, core_goal));
+
+        // Identity MISMATCH: `local::Eq` resolves to a DIFFERENT def, so it must
+        // NOT match the core provider — despite the identical `Eq` spelling.
+        assert!(
+            !goal_matches_provider(&db, top_mod, local_goal, core_eq_provider, false),
+            "local::Eq goal must NOT match the core Eq provider — distinct defs"
+        );
+        assert!(
+            !is_core_derivable(&db, top_mod, local_goal),
+            "a goal resolving to a local same-named trait is not core-derivable"
+        );
     }
 }
