@@ -20,10 +20,11 @@ use super::base_scope_graph_impl;
 use crate::{
     HirDb,
     hir_def::{
-        Body, DeriveProvider, Func, HirIngot, IdentId, ItemKind, PathId, TopLevelMod, Trait, TypeId,
-        UsePathSegment,
+        Body, DeriveProvider, Func, HirIngot, IdentId, ImplTrait, ItemKind, PathId, TopLevelMod,
+        Trait, TraitRefId, TypeId, UsePathSegment,
         scope_graph::{ScopeGraph, ScopeId},
     },
+    span::{DesugaredOrigin, DynLazySpan, HirOrigin},
 };
 
 /// The marker after `:` in a provider declaration: `impl Name: Derive for T`.
@@ -1023,6 +1024,120 @@ impl<'db> TargetReflection<'db> {
     }
 }
 
+/// Observable provenance for a provider-generated `impl Trait for Type`:
+/// the link `derive site → provider → generated impl → goal`.
+///
+/// This is *reconstructed* — not stored — from data already on the generated
+/// impl (its [`HirOrigin::Desugared`] derive-site origin and its goal trait
+/// ref), so it adds no field to [`ImplTrait`] and no new salsa stored input.
+/// The query [`derived_impl_provenance`] re-runs provider selection (the same
+/// resolved-identity selection used during expansion) to recover the provider
+/// that produced the impl. It therefore turns provider generation from an
+/// opaque "better macro" into evidence-carrying metaprogramming: every link in
+/// the chain is recoverable and assertable.
+///
+/// All fields are salsa ids (tracked structs / interned ids), so the value is
+/// `salsa::Update` and the query can be `#[salsa::tracked]`; the derive-site
+/// span is computed on demand from the impl via [`Self::derive_site`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+pub struct DerivedImplProvenance<'db> {
+    /// The provider whose body produced the generated impl. Its
+    /// `TrackedItemId` (via `provider.into()`), `name`, and `top_mod` identify
+    /// it by stable identity — not by name string.
+    pub provider: DeriveProvider<'db>,
+    /// The generated `impl Trait for Type` item. Its `TrackedItemId` is the
+    /// generated-impl id; `generated_impl.into()` recovers it.
+    pub generated_impl: ImplTrait<'db>,
+    /// The goal trait reference of the generated impl (the canonical head path
+    /// the provider provides for, e.g. `core::ops::Ord`).
+    pub goal: TraitRefId<'db>,
+}
+
+impl<'db> DerivedImplProvenance<'db> {
+    /// The derive site span: the `#[derive(..)]` target or the standalone
+    /// `derive Trait for Type` declaration that requested this impl. The
+    /// generated impl's origin is the derive site (a `Desugared(Derive(..))`
+    /// origin), so its own span already resolves there.
+    pub fn derive_site(&self) -> DynLazySpan<'db> {
+        self.generated_impl.span().into()
+    }
+}
+
+/// Reconstructs the provenance of a provider-generated impl: the provider that
+/// produced it, the generated impl itself, and its goal trait. Returns `None`
+/// for a hand-written (non-generated) impl, or when the provider cannot be
+/// uniquely re-identified.
+///
+/// Reconstruction (no stored provenance, no `ImplTrait` schema change):
+///
+/// 1. Read `impl_trait.origin` — only a `Desugared(Derive(..))` origin (an
+///    impl expanded from `#[derive(..)]` or a `derive Trait for T`
+///    declaration) is provider-generated; everything else is `None`.
+/// 2. Recover the goal trait path from the impl's `trait_ref` (synthesis put
+///    the provider's canonical head path there).
+/// 3. Find, among the providers visible from the impl's module, the unique one
+///    whose head trait matches the goal by *resolved identity*
+///    ([`goal_matches_provider`]) — the same selection rule expansion used.
+///    This recovers the provider for both canonical (`derive Trait`) and named
+///    (`using Provider`) selections; ambiguity (more than one matching
+///    provider) yields `None` rather than guessing.
+///
+/// Anti-vacuous: a hand-written impl has no `Desugared(Derive(..))` origin and
+/// returns `None`, so the query never claims a non-generated impl is
+/// provider-generated.
+///
+/// KNOWN LIMITATION (reconstruction gap): when the goal is provided by MORE THAN
+/// ONE visible provider — e.g. `derive Clone for Point using MyClone` while the
+/// canonical core `StableClone` also provides `Clone` — reconstruction cannot
+/// recover WHICH provider ran from the impl alone, so it returns `None`. The
+/// unique-provider case (the common one) is exact. To make the `using`-override
+/// case exact, either read the `using Provider` name from the impl's
+/// `Desugared(Derive(Decl(..)))` AST, or record the selected provider id at
+/// synthesis — additive follow-ups, not done here (kept to pure reconstruction).
+#[salsa::tracked]
+pub fn derived_impl_provenance<'db>(
+    db: &'db dyn HirDb,
+    impl_trait: ImplTrait<'db>,
+) -> Option<DerivedImplProvenance<'db>> {
+    // (1) Only impls desugared from a derive site are provider-generated.
+    if !matches!(
+        impl_trait.origin(db),
+        HirOrigin::Desugared(DesugaredOrigin::Derive(_))
+    ) {
+        return None;
+    }
+
+    // (2) Recover the goal trait path the provider provided for.
+    let goal = impl_trait.hir_trait_ref(db).to_opt()?;
+    let goal_path = goal.path(db).to_opt()?;
+
+    let from = impl_trait.top_mod(db);
+
+    // (3) Re-identify the provider by the same resolved-identity match used at
+    // selection time. We search all visible providers (not just the canonical
+    // core ones) so that `using Provider` selections — whose provider lives
+    // outside `core_derives` — are recovered too. `named_provider = true`
+    // keeps the last-segment compat shim available for heads that do not
+    // resolve to a def, matching `select_provider`'s named path.
+    let mut matching = visible_providers(db, from)
+        .into_iter()
+        .filter(|provider| goal_matches_provider(db, from, goal_path, provider, true));
+
+    let provider = matching.next()?;
+    // Unique match only: if two providers both provide this goal we cannot
+    // tell which one generated the impl from the reconstructed data, so report
+    // honestly rather than guess.
+    if matching.next().is_some() {
+        return None;
+    }
+
+    Some(DerivedImplProvenance {
+        provider: provider.provider,
+        generated_impl: impl_trait,
+        goal,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1216,5 +1331,130 @@ mod tests {
             messages.contains("must declare a `mut ImplBuilder<..>` capability"),
             "expected the missing-ImplBuilder-capability error; got:\n{messages}"
         );
+    }
+
+    /// P50 provenance proof: a provider-generated impl is linked back to the
+    /// provider that produced it (`derive site → provider → generated impl →
+    /// goal`), reconstructed by [`super::derived_impl_provenance`] with no
+    /// stored provenance — and a HAND-WRITTEN impl has `None` provenance, so the
+    /// query never claims a non-generated impl is provider-generated.
+    ///
+    /// Anti-vacuous on both ends: the generated `impl Eq for Point` resolves to
+    /// the fixture-local `ConcreteEq` provider by identity; the hand-written
+    /// `impl Marker for Point` resolves to nothing.
+    #[test]
+    fn derived_impl_provenance_links_provider_and_none_for_handwritten() {
+        use super::derived_impl_provenance;
+        use crate::span::{DesugaredOrigin, HirOrigin};
+        use crate::test_db::HirAnalysisTestDb;
+        use camino::Utf8PathBuf;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("p50_provenance.fe"),
+            r#"
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+// A fixture-LOCAL goal trait, so the only provider that provides it is the
+// fixture-local one below — reconstruction is unambiguous. (A goal that a core
+// provider ALSO provides, e.g. `Eq`, is intentionally ambiguous under pure
+// reconstruction; see the doc on `derived_impl_provenance`.)
+trait Taggable {
+    fn tag(self) -> bool
+}
+
+// Fixture-local provider for the local goal `Taggable<T>` (concrete goal).
+impl TagProv: Derive for Taggable {
+    const fn derive<T>(ev: own Evidence<Taggable<T>>) -> Evidence<Taggable<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Taggable<T>>,
+        )
+    {
+        let mut sig = builder.method("tag")
+        sig = builder.with_self(sig)
+        sig = builder.returns(sig, builder.ty<bool>())
+        builder.emit_method(sig, builder.bool(true))
+        builder.finish()
+        ev
+    }
+}
+
+derive Taggable for Point using TagProv
+
+// A hand-written impl: the anti-vacuous control (provenance must be `None`).
+trait Marker {}
+impl Marker for Point {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        // Run the analysis pass to trigger derive expansion (the generated impl
+        // is synthesized and merged) and to prove provenance SURVIVES the impl
+        // re-entering ordinary checking.
+        let _ = db.run_on_top_mod(top_mod);
+
+        let impls = top_mod.all_impl_traits(&db);
+        let generated: Vec<_> = impls
+            .iter()
+            .copied()
+            .filter(|it| {
+                matches!(
+                    it.origin(&db),
+                    HirOrigin::Desugared(DesugaredOrigin::Derive(_))
+                )
+            })
+            .collect();
+        let handwritten: Vec<_> = impls
+            .iter()
+            .copied()
+            .filter(|it| {
+                !matches!(
+                    it.origin(&db),
+                    HirOrigin::Desugared(DesugaredOrigin::Derive(_))
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            generated.len(),
+            1,
+            "exactly one generated impl (the derived `Eq for Point`)"
+        );
+        let gen_impl = generated[0];
+
+        // The generated impl has provenance pointing at the fixture-local provider.
+        let prov = derived_impl_provenance(&db, gen_impl)
+            .expect("a provider-generated impl must have reconstructable provenance");
+        assert_eq!(
+            prov.generated_impl, gen_impl,
+            "provenance names the generated impl itself"
+        );
+        let expected_provider = *top_mod
+            .all_derive_providers(&db)
+            .first()
+            .expect("the fixture declares one provider (ConcreteEq)");
+        assert_eq!(
+            prov.provider, expected_provider,
+            "provenance resolves to the fixture-local `ConcreteEq` provider by identity"
+        );
+
+        // Anti-vacuous: a hand-written impl has NO provenance.
+        assert!(
+            !handwritten.is_empty(),
+            "the fixture has a hand-written `impl Marker for Point`"
+        );
+        for hw in handwritten {
+            assert!(
+                derived_impl_provenance(&db, hw).is_none(),
+                "a hand-written impl must have no provider provenance"
+            );
+        }
     }
 }

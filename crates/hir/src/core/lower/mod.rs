@@ -23,6 +23,7 @@ use crate::{
 pub use abi_field::{AbiFieldContext, AbiFieldDiagnostic};
 pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
 pub use derive::{DeriveError, DeriveErrorKind, DeriveSecondarySpan};
+pub use provider::{DerivedImplProvenance, derived_impl_provenance};
 pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
 pub use event::{EventError, EventErrorKind};
 pub(crate) use expansion::expanded_items_impl;
