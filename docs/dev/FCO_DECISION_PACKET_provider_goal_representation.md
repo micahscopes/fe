@@ -6,9 +6,23 @@
 (`Evidence<Eq<T>>`, `ImplBuilder<Eq<T>>`, `Reflect<T>`, `quote`, `require<…>`) so those
 signatures can be **type-checked like ordinary Fe**, instead of being exempted.
 **Companion docs:** `FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md` (the TD/AH split, the solve-line,
-Tier A/B/C); `FCO_DERIVE_LITERATURE_AND_RESEARCH.md` (precedent + research backlog).
+Tier A/B/C); `FCO_DERIVE_LITERATURE_AND_RESEARCH.md` (precedent + research backlog);
+`/workspace/fe-design-wizard-kinded-derive-verdict-2026-06-15.md` (the max-effort design-wizard
+simulation that already adjudicated this fork — see below).
 **Hard rule carried in:** *do not adopt full `TyData::ConstraintTerm` now.* This packet exists to
 decide whether a **narrower** carrier (Level 1) can retire the exemption without it.
+
+**Prior adjudication (load-bearing).** The projection-vs-`ConstraintTerm` fork is *not freshly open*
+— the `fe-design-wizard` max-effort simulation (2026-06-15) already ruled on it as a language-
+ergonomics question: **(b) "SHIP THE PROJECTION; `ConstraintTerm` RECONSIDER (defer)"** — project
+`Evidence<Eq<T>>` / `ImplBuilder<Eq<T>>` / `where Eq<T>` over `TraitInstId`/`PredicateListId`,
+**no new `TyData` variant**, because "`ConstraintTerm` buys only a general type-position `Evidence<C>`
+that **no simulation needed**, at the largest blast radius." This packet's **Level 1 *is* that
+projection**, and **Level 2 *is* the deferred `ConstraintTerm`** — so Option 2.5 is the *engineering
+form of the wizard's already-rendered verdict*, not a new proposal. The one refinement the wizard's
+framing forces on Level 1 is in Q3 below: the projection is **position-scoped lowering**, NOT making
+`Evidence` a general `Constraint -> *` type constructor (that looser framing is itself the drift path
+toward Level 2).
 
 ---
 
@@ -106,7 +120,7 @@ become a real, checkable form:
 |---|---|---|
 | `Reflect<T>` | declared struct, arg discarded | **nothing new** — `T` is `*`-kinded; just stop discarding the arg and kind-check it as `*` |
 | `ImplBuilder<Eq<T>>` | declared struct, arg discarded | a **constraint carrier** for `Eq<T>` + a kind for `ImplBuilder` (`Constraint -> *`) |
-| `Evidence<Eq<T>>` | undeclared; `Value::Evidence` only | `Evidence` becomes a **declared** capability type `Constraint -> *` + the same constraint carrier |
+| `Evidence<Eq<T>>` | undeclared; `Value::Evidence` only | `Evidence` recognized as a **capability/witness position** (by identity) whose single argument lowers to the constraint carrier — **not** a general `Constraint -> *` type constructor (see Q3) |
 | `quote { … }` | special-cased template (`Value::Quote`) | a typed result form; **independent of the carrier** — can stay command-language for now |
 | `require<Trait>` in synthesis | lowers to a constraint-application predicate (W-B path) | **already concrete** (W-B landed) — no carrier needed |
 
@@ -155,6 +169,16 @@ a head.
 but their **type argument is lowered through `lower_hir_constraint_application` into a
 `CapabilityGoal`** instead of being discarded — and *that lowering is the kind-check*: it succeeds
 only for a concrete constraint, fails (with a typed diagnostic) for anything else.
+
+**Wizard refinement (do not skip this).** The lowering is **position-scoped**: we recognize the
+capability/witness *position* (`Evidence<…>` / `ImplBuilder<…>` by resolved identity) and lower its
+*one* argument. We do **not** model `Evidence` as a general `Constraint -> *` type constructor that
+the ordinary kind-checker applies to an argument — because applying such a constructor would require
+`Eq<T>` to be an actual kind-`Constraint` `TyId`, which is precisely `ConstraintTerm` (Level 2). The
+design-wizard verdict (2026-06-15) makes this the deciding line: `Evidence<Eq<T>>` is a *capability
+position* that lowers to `TraitInstId` at the constraint layer, **not** a general type-position
+`Evidence<C>`. Keeping the lowering position-scoped is what keeps Level 1 from silently becoming
+Level 2.
 
 ### Q4 — Where is it legal? (containment)
 
@@ -259,10 +283,11 @@ generalize, so Level 1 is not throwaway.
 - **Verdict:** correct **bridge**; keep until Level 1 lands. Not the end state.
 
 ### Level 1 — narrow `CapabilityGoal` (proposed end state for concrete goals)
-- **Mechanism:** §2 Q3. `CapabilityGoal` sidecar enum on `Capability`; `Evidence` becomes a declared
-  `Constraint -> *` capability type; capability/witness goal args lowered via
-  `lower_hir_constraint_application`; that lowering *is* the kind-check; eliminated to
-  `TraitInstId`/`PredicateListId` before the solver.
+- **Mechanism:** §2 Q3. `CapabilityGoal` sidecar enum on `Capability`; `Evidence`/`ImplBuilder`
+  recognized as capability/witness **positions** (by identity) whose single argument is lowered via
+  `lower_hir_constraint_application` — **position-scoped projection, not a general `Constraint -> *`
+  constructor**; that lowering *is* the kind-check; eliminated to `TraitInstId`/`PredicateListId`
+  before the solver. (This is the design-wizard's "ship the projection" verdict, 2026-06-15.)
 - **Pro:** retires the type-level exemption for concrete goals; abstract head becomes a *typed*
   named rejection; one constraint-application lowering shared with W-B; no new `TyData`; no live `P`;
   no runtime `Evidence<C>`; reuses landed machinery.
