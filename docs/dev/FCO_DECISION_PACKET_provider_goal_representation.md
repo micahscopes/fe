@@ -49,6 +49,65 @@ exactly what Level 1 refuses.
 
 ---
 
+## 0.5 Spike outcome (2026-06-16): **VIABLE — with one load-bearing placement correction**
+
+A throwaway analysis-layer spike built and tested the Level-1 mechanism end-to-end (worktree-
+isolated; reverted; 5/5 probe tests green, independently re-run). Full record:
+`docs/dev/FCO_PROBE_provider_goal_representation.md`. **The verdict is VIABLE** — a narrow
+`CapabilityGoal` carries the concrete goal and de-exempts the signature with **no `ConstraintTerm`
+and no live head** — confirmed by three tested facts:
+
+1. **The projection works.** Feeding the *inner* HIR type `Eq<T>` (extracted from the witness
+   param's `Evidence<…>` by position) into the existing W-B `lower_hir_constraint_application` yields
+   exactly `TraitInstId{Eq,[T]}` (printed: `Some("T: Eq")`), kind-checked, no `ConstraintTerm`, no
+   live head ever constructed.
+2. **Every forbidden shape declines to `None`** from that *same* function — missing trait
+   (`Bogus<T>`), unsaturated head (`Eq`), and live `* -> Constraint` param head (`Q<T>`) all printed
+   `None`. The carrier needs no variable-head variant; `None` is its "not a concrete constraint"
+   verdict, rendered as a typed diagnostic.
+3. **The ordinary checker cannot be the one doing it.** Simply un-exempting and letting the normal
+   `*`-kinded walk see `Evidence<Eq<T>>` rejects `Eq<T>` as a type application
+   (`2-0011 incorrect number of generic arguments for Eq; expected 0, given 1`) at
+   `collect_hir_ty_diags` (`crates/hir/src/core/semantic/mod.rs:1207-1208`) — **that is the exact line
+   that would otherwise demand `ConstraintTerm`.** Level 1 dodges it by intercepting the
+   `Evidence`/`ImplBuilder` argument *position* and routing it to `lower_hir_constraint_application`,
+   bypassing the `*`-kinded walk for that one slot. This is the position-scoped discipline made
+   concrete.
+
+**The load-bearing correction (read before implementing):** the goal-lowering must live in the
+**analysis layer (post scope-graph merge)**, **NOT** in the expansion-stage `validate_provider` this
+packet's earlier draft implied. Reasons the spike found empirically:
+- `validate_provider` runs on `HirDb` in the expansion stage and must never read the merged scope
+  graph; `lower_hir_constraint_application → resolve_path → scope_graph_impl` would **salsa-cycle**.
+- `TraitInstId`/`PredicateListId` are analysis-layer types; `Capability` is an expansion-layer type —
+  storing the goal *on `Capability`* is a layering inversion. Instead the carrier is an analysis-layer
+  `CapabilityGoal` produced by a new query `provider_capability_goals(func)`, keyed off the `Func`,
+  consumed by the diagnosable layer. (The W-B `require<Trait>` precedent only works because it emits a
+  *syntactic* `where Eq<T>` that is lowered later, post-merge — not at expansion time.)
+
+Three further spike findings that shape the build (and the fixture in §4):
+- The exemption is concretely **two `is_derive_provider_fn`-keyed skips** — signature at
+  `crates/hir/src/analysis/ty/mod.rs:721`, body at `:389` — **plus** `Evidence` being undeclared. So
+  de-exemption's *first* failure is `2-0002 Evidence is not found`: **`Evidence` must be declared
+  (`*`-kinded, one param) before anything else** (Q6 updated accordingly).
+- `Func::diags()` never checks the `uses` clause — only the witness param and where-clauses. So the
+  witness `Evidence<…>` is where de-exemption bites first; kind-checking the `ImplBuilder<…>` *uses-key*
+  is **net-new work, not a reuse** of an existing walk.
+- **Neg D is structurally impossible already** — `Evidence` is declared nowhere and `Value::Evidence`
+  is a typeless opaque executor unit with no constructor, so it cannot escape as a runtime value. The
+  enforcement point is the executor value model itself; Neg D becomes a *documented* invariant, not a
+  new diagnostic.
+
+**Blast radius to land Level 1 for real:** ~190–290 LoC confined to the analysis + provider-lowering
+layers — declare `Evidence<G>` in `ingots/core/src/derive.fe` (~4); analysis-layer `CapabilityGoal` +
+`provider_capability_goals(func)` query (~120–180); route the witness param in `diagnosable.rs`
+bypassing `collect_hir_ty_diags` (~40–60); un-skip signatures at `mod.rs:721` (~2); diagnostics
+(~20–40); fixtures. **No `TyData` churn, no solver changes, no structural salsa/`Update` ripple.**
+This is the engineering confirmation that Level 1 is genuinely narrow — the `ConstraintTerm` blast
+radius (Level 2) is avoided, not merely deferred.
+
+---
+
 ## 1. The problem, precisely (why the exemption exists)
 
 A derive provider today looks like:
@@ -171,10 +230,11 @@ enum CapabilityGoal<'db> {
 
 This reuses the **exact machinery W-B/W-C already built** — `lower_hir_constraint_application`
 (concrete `Eq<T>` → `TraitInstId`, Self = first arg), `PredicateListId`, canonical-path identity.
-`CapabilityGoal` is just the *named home* for "the concrete goal a capability signature mentions,"
-stored on the `Capability` enum (which today carries only a binding name). It never introduces a
-new kind-`Constraint` `TyId`; the constraint never enters `TyData`; it never reaches the solver as
-a head.
+`CapabilityGoal` is the *named home* for "the concrete goal a capability signature mentions." **It is
+an analysis-layer type produced by a query `provider_capability_goals(func)` keyed off the `Func`**
+(NOT stored on the expansion-layer `Capability` enum — see §0.5: that would invert the layering and
+salsa-cycle). It never introduces a new kind-`Constraint` `TyId`; the constraint never enters
+`TyData`; it never reaches the solver as a head.
 
 `ImplBuilder` and `Evidence` are then recognized exactly as today (K04a canonical-path identity),
 but their **type argument is lowered through `lower_hir_constraint_application` into a
