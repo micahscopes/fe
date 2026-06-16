@@ -3780,7 +3780,7 @@
       "L1_build": "gates task #33 (TD1/TD2)",
       "forward_now": "task #37 Tier A aliases — needs no carrier decision; its expand-to-PredicateListId is exactly CapabilityGoal::AliasExpanded, so Tier A de-risks L1."
     },
-    "status": "HELD_PENDING_ARCHITECT (not blocked) — boundary locked (bd10ec966 = GUARD_BRIDGE/BUILD_STRUCTURE, COMPLETE_AND_TESTED). Level 1 build plan ready; awaits architect go/no-go. Do NOT build Level 1, ConstraintTerm, or expand the provider-signature exemption meanwhile.",
+    "status": "LANDED (b82fc43a6) — Level 1 built under bridge-burn-down authorization. Evidence<G> declared; analysis-layer CapabilityGoal de-exempts provider signature goal positions; no ConstraintTerm, no live head. Level 2 (full ConstraintTerm) remains gated.",
     "prior_adjudication": "The projection-vs-ConstraintTerm fork was ALREADY ruled on by the fe-design-wizard max-effort simulation (/workspace/fe-design-wizard-kinded-derive-verdict-2026-06-15.md, agent aa7c371c3cc46ab8c): verdict (b) SHIP THE PROJECTION over TraitInstId/PredicateListId, no new TyData; (G) ConstraintTerm RECONSIDER/defer, only on a real general type-position Evidence<C> need. Level 1 IS that projection; Level 2 IS the deferred ConstraintTerm. Option 2.5 = the engineering form of the wizard verdict, not a new proposal.",
     "wizard_refinement": "Projection must be POSITION-SCOPED: recognize Evidence/ImplBuilder capability positions by identity and lower their single argument to a CapabilityGoal — do NOT model Evidence as a general Constraint->* type constructor (that would require constraint-as-TyId = drift into Level 2). This is the L1/L2 deciding line.",
     "spike_outcome_2026-06-16": {
