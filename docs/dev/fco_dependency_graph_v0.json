@@ -3462,6 +3462,19 @@
         "Recognition is at LOWERING, not type-check: provider.rs reads the `uses` param's path head-ident (REFLECT_KEY/IMPL_BUILDER_KEY) during HIR construction, before name resolution. So 'typed recognition' is a recognition-STAGE change (resolve the capability path to a definition, or move recognition past name-res) — not a string→type compare swap.",
         "Recommended fco-native K04a: capabilities as resolved-type identities (e.g. opaque builtin/std types recognized by ADT identity), NOT PrimTy; rewire provider.rs recognition off the string keys. Keep body exemption; minimal provenance (P50). This is the big architect-domain load-bearing node — grounded + ready, awaiting the representation/stage confirmation before implementation."
       ]
+    },
+    {
+      "date": "2026-06-16",
+      "topic": "Provider-goal representation — decision packet ready + Level 1 spike-VERIFIED VIABLE",
+      "items": [
+        "The projection-vs-ConstraintTerm fork was already adjudicated by the fe-design-wizard sim (2026-06-15): ship the projection, defer ConstraintTerm. Packet Option 2.5 = its engineering form. Level 1 = projection; Level 2 = deferred ConstraintTerm.",
+        "NEW: executable ground-truth proof of the L0 exemption — replacing the canonical Eq provider goal Eq<T> with an UNDECLARED trait Bogus<T> still compiles + passes derived_eq_default 3/3. The goal arg is genuinely discarded today.",
+        "NEW: Level-1 spike VERIFIED VIABLE (5/5 probe tests, independently re-run). Narrow CapabilityGoal carries the concrete goal with NO ConstraintTerm and NO live head: inner Eq<T> -> lower_hir_constraint_application = Some(T: Eq); Bogus<T>/Eq/live Q<T> -> None.",
+        "LOAD-BEARING CORRECTION to the packet mechanism: goal-lowering must be ANALYSIS-layer (query provider_capability_goals(func), post merge), NOT expansion-stage validate_provider (salsa cycle + layer inversion). Evidence must be declared *-kinded first (first de-exempt failure is 2-0002).",
+        "Blast radius to land Level 1: ~190-290 LoC, analysis + provider-lowering only; no TyData/solver/Update churn. The ConstraintTerm (Level 2) blast radius is AVOIDED, not merely deferred.",
+        "Tier A constraint aliases (the sanctioned parallel forward work): the safe marker-trait + blanket-impl form is LANDED + green (6183f29c1) — ValueLike: Eq+Default, anti-vacuous, 6-0003 names the missing member. Zero compiler change.",
+        "DECISION REQUESTED: approve building Level 1 now (analysis-layer CapabilityGoal, behind the §4 fixture), or hold at Level 0. Level 2 remains gated."
+      ]
     }
   ],
   "standing_authorization": {
@@ -3755,8 +3768,16 @@
       "L1_build": "gates task #33 (TD1/TD2)",
       "forward_now": "task #37 Tier A aliases — needs no carrier decision; its expand-to-PredicateListId is exactly CapabilityGoal::AliasExpanded, so Tier A de-risks L1."
     },
-    "status": "OPEN — owner decision requested (approve Option 2.5 / redirect).",
+    "status": "SPIKE-VERIFIED VIABLE — owner decision requested: approve building Level 1 (analysis-layer CapabilityGoal) now, or hold.",
     "prior_adjudication": "The projection-vs-ConstraintTerm fork was ALREADY ruled on by the fe-design-wizard max-effort simulation (/workspace/fe-design-wizard-kinded-derive-verdict-2026-06-15.md, agent aa7c371c3cc46ab8c): verdict (b) SHIP THE PROJECTION over TraitInstId/PredicateListId, no new TyData; (G) ConstraintTerm RECONSIDER/defer, only on a real general type-position Evidence<C> need. Level 1 IS that projection; Level 2 IS the deferred ConstraintTerm. Option 2.5 = the engineering form of the wizard verdict, not a new proposal.",
-    "wizard_refinement": "Projection must be POSITION-SCOPED: recognize Evidence/ImplBuilder capability positions by identity and lower their single argument to a CapabilityGoal — do NOT model Evidence as a general Constraint->* type constructor (that would require constraint-as-TyId = drift into Level 2). This is the L1/L2 deciding line."
+    "wizard_refinement": "Projection must be POSITION-SCOPED: recognize Evidence/ImplBuilder capability positions by identity and lower their single argument to a CapabilityGoal — do NOT model Evidence as a general Constraint->* type constructor (that would require constraint-as-TyId = drift into Level 2). This is the L1/L2 deciding line.",
+    "spike_outcome_2026-06-16": {
+      "verdict": "VIABLE (independently re-verified, 5/5 probe tests green). Option 2.5 / Level 1 confirmed BUILDABLE without ConstraintTerm and without a live head.",
+      "evidence": "inner Eq<T> -> lower_hir_constraint_application = Some(TraitInstId{Eq,[T]} = \"T: Eq\"); Bogus<T>/Eq/live Q<T> all -> None (same function produces positive, rejects every negative). Naive de-exempt fails at collect_hir_ty_diags (crates/hir/src/core/semantic/mod.rs:1207-1208) with 2-0011 — the exact line that would demand ConstraintTerm; position-scoped intercept dodges it.",
+      "placement_correction": "Goal-lowering MUST live in the ANALYSIS layer via a query provider_capability_goals(func) (post scope-graph merge), NOT in expansion-stage validate_provider (lower_hir_constraint_application->resolve_path->scope_graph_impl salsa-cycles; TraitInstId/PredicateListId are analysis-layer while Capability is expansion-layer = inversion). CapabilityGoal is analysis-layer, keyed off Func, consumed by diagnosable — NOT stored on the Capability enum.",
+      "prereqs_found": "(1) Evidence must be declared *-kinded in core/derive.fe FIRST — de-exempt first failure is 2-0002 Evidence-not-found. (2) Exemption = two is_derive_provider_fn skips at analysis/ty/mod.rs:721 (sig) and :389 (body). (3) Func::diags() never checks the uses clause — witness Evidence<..> bites first; ImplBuilder<..> uses-key kind-check is NET-NEW work, not reuse. (4) Neg D (runtime Evidence value) is already structurally impossible (Value::Evidence typeless/unconstructable) — documented invariant, not a new diag.",
+      "blast_radius": "~190-290 LoC, analysis + provider-lowering layers only. NO TyData churn, NO solver change, NO structural salsa/Update ripple.",
+      "record": "docs/dev/FCO_PROBE_provider_goal_representation.md (spike), docs/dev/FCO_DECISION_PACKET_provider_goal_representation.md §0.5 (folded in)."
+    }
   }
 }
