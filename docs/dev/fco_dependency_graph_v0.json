@@ -3738,5 +3738,23 @@
         "general higher-order constraint search"
       ]
     }
+  },
+  "provider_goal_representation_2026-06-16": {
+    "source": "Decision packet docs/dev/FCO_DECISION_PACKET_provider_goal_representation.md (2026-06-16), answering the architect 2026-06-16 three-levels steer.",
+    "finding": "De-magicking provider signatures (kind-checked Evidence<Eq<T>> / ImplBuilder<Eq<T>>) requires a constraint carried as a kind-Constraint type argument. Today this is avoided ONLY because Evidence is undeclared (Value::Evidence executor-only) and Reflect/ImplBuilder discard their type argument (Capability carries only a binding name). This carrier is needed even for the CONCRETE, no-live-P case; it is DISTINCT from the abstract head (the solver seeing a live P<T>).",
+    "three_levels": {
+      "L0": "keep the signature exemption (today bridge): Evidence undeclared, goal arg discarded, provider sig+body not ordinary-checked. Zero risk, not the end state.",
+      "L1": "narrow compile-time-only CapabilityGoal carrier (enum: ConcreteTrait(TraitInstId) | PredicateList(PredicateListId) | AliasExpanded{alias,expanded}). Sidecar enum on Capability, NOT a TyData variant. No live P, no runtime Evidence<C>, eliminated to a concrete obligation BEFORE the solver. Reuses W-B lower_hir_constraint_application as the kind-check.",
+      "L2": "full TyData::ConstraintTerm — constraint as a first-class kind-Constraint TyId. Enables live abstract head + runtime Evidence<C>. GATED: build only on explicit owner decision once a real abstract-head consumer (AH3 trigger) exists. L1 is its concrete sub-case, not a competitor."
+    },
+    "recommendation": "Option 2.5 — keep L0 as the bridge, build L1 to retire the concrete-goal exemption, gate L2. L1 stays strictly inside the solve-line.",
+    "retires_at_L1": "the type-level signature exemption for the goal arg; the goal-arg-is-decoration gap (ImplBuilder<Eq<T>> vs <Whatever> vs <Eq> become distinguishable); the bespoke Eq<T>-in-Evidence accept (now shares W-B lowering). Does NOT retire: K04a identity recognition (stays), DERIVE_MARKER/DERIVE_FN/DERIVE_MODULE string shim (K04a-C3), or the executor body exemption (TD5).",
+    "refuses_at_L1": "Evidence<P<T>> live P -> 6-0008 (no variable-head variant); quantified constraints (Tier C named-reject); Evidence<Eq> arity/kind mismatch; unexpanded/cyclic aliases; runtime Evidence<C> values (no Value variant / constructor).",
+    "fixture": "provider_signature_concrete_goal_checked.fe (positive) + negatives A live-head, B unresolved-trait, C arity/kind, D runtime-evidence-value. Anti-vacuous M5 standard.",
+    "maps_to_tasks": {
+      "L1_build": "gates task #33 (TD1/TD2)",
+      "forward_now": "task #37 Tier A aliases — needs no carrier decision; its expand-to-PredicateListId is exactly CapabilityGoal::AliasExpanded, so Tier A de-risks L1."
+    },
+    "status": "OPEN — owner decision requested (approve Option 2.5 / redirect)."
   }
 }
