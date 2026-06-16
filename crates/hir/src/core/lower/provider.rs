@@ -1457,4 +1457,144 @@ impl Marker for Point {}
             );
         }
     }
+
+    /// BRIDGE BURN-DOWN #5 / H10a reify-path — provenance for a generated
+    /// `impl core::abi::AbiSize` resolves to the NAMED `StableAbiSize` provider.
+    ///
+    /// This is the reify-path analogue of
+    /// [`derived_impl_provenance_links_provider_and_none_for_handwritten`], but
+    /// over the REAL core trait `core::abi::AbiSize` (an EVM layout trait) rather
+    /// than a fixture-local goal. Reconstruction is unambiguous *precisely
+    /// because* AbiSize-derivation is NOT canonicalized into `core_derives`:
+    /// there is no canonical AbiSize provider competing with the fixture-local
+    /// `StableAbiSize`, so `derived_impl_provenance` finds exactly one matching
+    /// provider and returns `Some(StableAbiSize)`. (If a canonical AbiSize
+    /// provider were ever added — the multi-backend PAUSE condition — this would
+    /// become ambiguous and the query would honestly return `None`; this test
+    /// would then catch that policy change.)
+    #[test]
+    fn derived_impl_provenance_links_named_abi_size_provider() {
+        use super::derived_impl_provenance;
+        use crate::span::{DesugaredOrigin, HirOrigin};
+        use crate::test_db::HirAnalysisTestDb;
+        use camino::Utf8PathBuf;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("reify_abi_size_provenance.fe"),
+            r#"
+use core::abi::AbiSize
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+// A NAMED provider for the REAL core trait `core::abi::AbiSize`. There is no
+// canonical AbiSize provider in core_derives (AbiSize is EVM-specific and was
+// deliberately NOT canonicalized), so this is the only provider that provides
+// the goal -> reconstruction is unique.
+impl StableAbiSize: Derive for AbiSize {
+    const fn derive<T>(ev: own Evidence<AbiSize<T>>) -> Evidence<AbiSize<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<AbiSize<T>>,
+        )
+    {
+        if reflect.is_struct() {
+            let mut head = builder.bool(false)
+            let mut first = true
+            for field in reflect.fields() {
+                builder.require<AbiSize>(field.ty())
+                let field_head = builder.trait_const(field.ty(), "HEAD_SIZE")
+                if first {
+                    head = field_head
+                    first = false
+                } else {
+                    head = builder.add(head, field_head)
+                }
+            }
+            builder.emit_const("HEAD_SIZE", builder.ty<u256>(), head)
+            builder.emit_const("IS_DYNAMIC", builder.ty<bool>(), builder.bool(false))
+        }
+        builder.finish()
+        ev
+    }
+}
+
+derive AbiSize for Point using StableAbiSize
+
+// A hand-written impl: the anti-vacuous control (provenance must be `None`).
+trait Marker {}
+impl Marker for Point {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        // Run analysis to trigger derive expansion and prove provenance SURVIVES
+        // the generated impl re-entering ordinary checking.
+        let _ = db.run_on_top_mod(top_mod);
+
+        let impls = top_mod.all_impl_traits(&db);
+        let generated: Vec<_> = impls
+            .iter()
+            .copied()
+            .filter(|it| {
+                matches!(
+                    it.origin(&db),
+                    HirOrigin::Desugared(DesugaredOrigin::Derive(_))
+                )
+            })
+            .collect();
+        assert_eq!(
+            generated.len(),
+            1,
+            "exactly one generated impl (the derived `AbiSize for Point`)"
+        );
+        let gen_impl = generated[0];
+
+        // The generated impl's provenance points at the NAMED `StableAbiSize`
+        // provider — reconstructed (no stored provenance) and UNIQUE because no
+        // canonical AbiSize competitor exists.
+        let prov = derived_impl_provenance(&db, gen_impl).expect(
+            "a NAMED-only AbiSize derive must have unambiguous reconstructable provenance",
+        );
+        assert_eq!(
+            prov.generated_impl, gen_impl,
+            "provenance names the generated impl itself"
+        );
+        let expected_provider = *top_mod
+            .all_derive_providers(&db)
+            .first()
+            .expect("the fixture declares one provider (StableAbiSize)");
+        assert_eq!(
+            prov.provider, expected_provider,
+            "provenance resolves to the NAMED `StableAbiSize` provider by identity"
+        );
+
+        // Anti-vacuous: the hand-written `impl Marker for Point` has NO
+        // provenance, so the query never claims a non-generated impl is derived.
+        let handwritten: Vec<_> = impls
+            .iter()
+            .copied()
+            .filter(|it| {
+                !matches!(
+                    it.origin(&db),
+                    HirOrigin::Desugared(DesugaredOrigin::Derive(_))
+                )
+            })
+            .collect();
+        assert!(
+            !handwritten.is_empty(),
+            "the fixture has a hand-written `impl Marker for Point`"
+        );
+        for hw in handwritten {
+            assert!(
+                derived_impl_provenance(&db, hw).is_none(),
+                "a hand-written impl must have no provider provenance"
+            );
+        }
+    }
 }

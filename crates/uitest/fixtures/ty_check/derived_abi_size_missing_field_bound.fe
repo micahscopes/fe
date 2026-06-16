@@ -1,0 +1,78 @@
+// BRIDGE BURN-DOWN #5 / H10a reify-path — NEGATIVE (anti-vacuous) control.
+//
+// The companion positive fixture (crates/fe/tests/fixtures/fe_test/derived_abi_size.fe)
+// proves a NAMED provider `StableAbiSize` derives the REAL `core::abi::AbiSize`
+// by folding per-field facts AND emits `require<AbiSize>(field.ty())` so the
+// generated impl re-enters ordinary checking carrying a per-field obligation.
+//
+// This fixture is the proof that those obligations are ENFORCED, not silently
+// dropped. The provider derives `AbiSize` for the GENERIC target `Wrap<T>`, so
+// `require<AbiSize>(T)` lands as a real `where T: AbiSize` predicate on the
+// generated `impl<T> AbiSize for Wrap<T>` (provider_synthesis.rs:requirement_
+// where_clause). Reading `<Wrap<NoAbi> as AbiSize>::HEAD_SIZE` then requires
+// `NoAbi: AbiSize`, which has no satisfying impl -> a NORMAL trait-bound error
+// (6-0003), exactly as a hand-written `where T: AbiSize` impl would raise. If
+// the `require` were a no-op the bound would vanish and this snapshot empty.
+//
+// (A *concrete* missing-AbiSize field, e.g. `struct Bad { bad: NoAbi }`, is a
+// different story — see the residual note in the burn-down report: the concrete
+// require obligation is discharged at the generated const's USE site, and the
+// const-eval path currently panics there instead of emitting 6-0003. That is a
+// pre-existing const-ref robustness gap, reproducible with the proven
+// fixture-local `derived_abi_shape.fe` pattern too, and out of scope for #5.)
+
+use core::abi::AbiSize
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
+impl StableAbiSize: Derive for AbiSize {
+    const fn derive<T>(ev: own Evidence<AbiSize<T>>) -> Evidence<AbiSize<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<AbiSize<T>>,
+        )
+    {
+        if reflect.is_struct() {
+            let mut head = builder.bool(false)
+            let mut dynamic = builder.bool(false)
+            let mut first = true
+            for field in reflect.fields() {
+                builder.require<AbiSize>(field.ty())
+                let field_head = builder.trait_const(field.ty(), "HEAD_SIZE")
+                let field_dyn = builder.trait_const(field.ty(), "IS_DYNAMIC")
+                if first {
+                    head = field_head
+                    first = false
+                } else {
+                    head = builder.add(head, field_head)
+                }
+                dynamic = builder.or(dynamic, field_dyn)
+            }
+            builder.emit_const("HEAD_SIZE", builder.ty<u256>(), head)
+            builder.emit_const("IS_DYNAMIC", builder.ty<bool>(), dynamic)
+        }
+        builder.finish()
+        ev
+    }
+}
+
+struct Wrap<T> {
+    inner: T,
+}
+
+// Generated: `impl<T> AbiSize for Wrap<T> where T: AbiSize { .. }`.
+derive AbiSize for Wrap<T> using StableAbiSize
+
+// No `impl AbiSize for NoAbi` exists.
+struct NoAbi {}
+
+fn needs<T: AbiSize>() -> u256 {
+    T::HEAD_SIZE
+}
+
+// `Wrap<NoAbi>: AbiSize` requires `NoAbi: AbiSize` (the derived where-predicate)
+// -> a normal trait-bound error.
+fn use_it() -> u256 {
+    needs<Wrap<NoAbi>>()
+}
