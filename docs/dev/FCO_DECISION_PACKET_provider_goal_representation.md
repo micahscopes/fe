@@ -417,6 +417,31 @@ Each negative must prove the **forbidden solver shape did not slip through** (no
 solver; no silent `Kind::Any`); the positive must prove the **concrete obligation was produced** and
 the derive still works.
 
+### 4a. Boundary already locked (landed, decision-free — valid at Level 0 AND Level 1)
+
+The §4 end-to-end *error* fixtures above mostly require Level 1 to be built (at Level 0 the negatives
+silently compile — see §0.5). But the **carrier invariant underneath them** is testable now against
+the *existing* `lower_hir_constraint_application`, and it is locked:
+
+- **`provider_capability_goal_lowers_concrete_rejects_nonconcrete`** (unit test, landed in
+  `crates/hir/src/analysis/ty/trait_resolution/constraint.rs`). Builds a provider whose witness goal is
+  each of `Eq<T>` / `Bogus<T>` / `Eq` / `Q<T>` (a live `* -> Constraint` param head), extracts the inner
+  goal type by position, and feeds it to `lower_hir_constraint_application`. Asserts: `Eq<T>` →
+  `Some("T: Eq")` (= `CapabilityGoal::ConcreteTrait`, Self = T); the other three → `None`. This is the
+  §4 A/B/C boundary **at the representation level** — the same function produces the concrete carrier
+  and declines every non-concrete shape, so a live head can never be carried. It does not depend on the
+  Level-1 wiring and will not need to change when Level 1 lands; it becomes the unit-level companion to
+  the end-to-end fixtures.
+- **Negative D** is recorded as a standing invariant (no runtime `Evidence<C>` value is constructable;
+  `Value::Evidence` is a typeless opaque executor unit) — see §0.5; nothing to build.
+- **The Level-0 exemption itself** is captured executably in §1 (the `Bogus<T>`-compiles probe). When
+  Level 1 lands, that case flips from "compiles" to Negative B's error — an intentional, visible
+  snapshot change, not a silent one.
+
+So the boundary is fixed *regardless of when Level 1 is approved*: the carrier's accept/reject contract
+is a permanent test today; the end-to-end error fixtures (Positive + A–C as `.fe`/`.snap`) are written
+together with the Level-1 wiring.
+
 ---
 
 ## 5. What I recommend doing now
