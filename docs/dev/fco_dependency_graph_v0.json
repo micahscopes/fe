@@ -3705,7 +3705,8 @@
       "OneUniversalProvider over arbitrary P",
       "Generic<T> without a concrete shared-derive fixture"
     ],
-    "note": "More architect guidance pending from a parallel literature search (2026-06-15). Deep implementation held until that lands; documentation locked now."
+    "note": "More architect guidance pending from a parallel literature search (2026-06-15). Deep implementation held until that lands; documentation locked now.",
+    "W_C_LANDED": "2026-06-16: provider selection by resolved goal identity. goal_matches_provider canonical-path identity (primary) + guarded fallbacks (bare-ident adapter gated by names_competing_definition for cross-module safety; named-selection by head-name for same-module-declared head traits) — short-lived adapters, removal target = stratification-safe Trait-item resolution. Threaded goal PATH through DeriveRequest. Stratification preserved (base graph only). Fixtures: derived_goal_identity (bare/qualified/aliased select one provider, executes), derive_local_trait_no_alias (local Eq -> 13-0002, no false core match). Green: ty 84 / ty_check 188 / cli_output derived 12. Commits 581db768d..9013b94aa."
   },
   "lit_review_2026-06-15": {
     "source": "Architect literature review 2026-06-15 (Haskell/GHC ConstraintKinds+QuantifiedConstraints, Rust/Chalk, Lean instance synthesis outParam/semiOutParam, Coq/Rocq typeclasses, higher-order-unification theory).",
