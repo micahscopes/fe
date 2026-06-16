@@ -446,6 +446,10 @@ together with the Level-1 wiring.
 
 ## 5. What I recommend doing now
 
+> **Execution artifact:** if Level 1 is approved, the ordered, file-by-file build is in
+> `docs/dev/FCO_LEVEL1_BUILD_PLAN_provider_goal.md` (gate → declare `Evidence` → `CapabilityGoal`
+> query → diagnostics → de-exempt → fixtures), grounded in the spike findings.
+
 1. **Adopt Option 2.5** (this packet's recommendation): Level 0 stays as the bridge; Level 1 is the
    sanctioned build for retiring the concrete-goal exemption; Level 2 stays gated.
 2. **Do not block forward progress on this decision.** Per the architect, while the decision is

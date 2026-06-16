@@ -3778,6 +3778,7 @@
       "prereqs_found": "(1) Evidence must be declared *-kinded in core/derive.fe FIRST — de-exempt first failure is 2-0002 Evidence-not-found. (2) Exemption = two is_derive_provider_fn skips at analysis/ty/mod.rs:721 (sig) and :389 (body). (3) Func::diags() never checks the uses clause — witness Evidence<..> bites first; ImplBuilder<..> uses-key kind-check is NET-NEW work, not reuse. (4) Neg D (runtime Evidence value) is already structurally impossible (Value::Evidence typeless/unconstructable) — documented invariant, not a new diag.",
       "blast_radius": "~190-290 LoC, analysis + provider-lowering layers only. NO TyData churn, NO solver change, NO structural salsa/Update ripple.",
       "record": "docs/dev/FCO_PROBE_provider_goal_representation.md (spike), docs/dev/FCO_DECISION_PACKET_provider_goal_representation.md §0.5 (folded in)."
-    }
+    },
+    "build_plan": "docs/dev/FCO_LEVEL1_BUILD_PLAN_provider_goal.md — ordered execution plan (gated on approval): Step0 feature gate, Step1 declare Evidence<G>, Step2 CapabilityGoal + provider_capability_goals(func) analysis-layer query, Step3 GoalError diagnostics, Step4 de-exempt signature (SEMANTICS FLIP), Step5 end-to-end fixtures, Step6 retire decoration. Carrier invariant already locked (provider_capability_goal_lowers_concrete_rejects_nonconcrete, bd10ec966)."
   }
 }
