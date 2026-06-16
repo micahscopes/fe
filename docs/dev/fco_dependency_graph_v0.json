@@ -3475,6 +3475,18 @@
         "Tier A constraint aliases (the sanctioned parallel forward work): the safe marker-trait + blanket-impl form is LANDED + green (6183f29c1) — ValueLike: Eq+Default, anti-vacuous, 6-0003 names the missing member. Zero compiler change.",
         "DECISION REQUESTED: approve building Level 1 now (analysis-layer CapabilityGoal, behind the §4 fixture), or hold at Level 0. Level 2 remains gated."
       ]
+    },
+    {
+      "date": "2026-06-16",
+      "topic": "CHECKPOINT (architect-confirmed): boundary hardened, Level 1 HELD_PENDING_ARCHITECT, proceed on P50",
+      "items": [
+        "Architect confirmed: valid pause point; the boundary guard is the right thing; keep it.",
+        "Commit bd10ec966 classified GUARD_BRIDGE/BUILD_STRUCTURE, COMPLETE_AND_TESTED: locks the Level 0/Level 1 concrete-vs-nonconcrete gate (Eq<T> -> concrete carrier; Bogus<T>/Eq/live Q<T> decline; same lowering creates+rejects; no live head to solver) WITHOUT changing production semantics. Does NOT mean Level 1 implemented / ConstraintTerm approved / runtime Evidence<C> supported.",
+        "Level 1 = HELD_PENDING_ARCHITECT (a held call, NOT stuck). Do not implement Level 1 provider-signature de-exemption without the architect call.",
+        "Decision still needed: approve narrow concrete CapabilityGoal (TraitInstId/PredicateListId) only in compile-time provider capability positions, OR keep Level 0 exemption. Do NOT adopt full ConstraintTerm.",
+        "Sanctioned autonomous queue (architect): 0 relay; 1 P50 provenance proof fixture; 2 W-C provider selection by resolved identity [NOTE: ALREADY LANDED 8c6cf81d0/9013b94aa — flag as done]; 3 H10a ABI/static-layout providerization using Tier A aliases; 4 Level 1 only after architect call; 5 Generic<T> only if shared derive bodies become real; 6 keep full ConstraintTerm / Tier C rejected.",
+        "NOW DOING: P50 — provider-generated impls have visible provenance (derive site -> provider id -> generated impl id -> receipt/debug/diagnostic path). Anti-vacuous: broken generated impl still fails normal checking; provenance survives re-entry into normal checking. No Level 1, no ConstraintTerm, no provider-selection-semantics change unless the fixture forces it."
+      ]
     }
   ],
   "standing_authorization": {
@@ -3768,7 +3780,7 @@
       "L1_build": "gates task #33 (TD1/TD2)",
       "forward_now": "task #37 Tier A aliases — needs no carrier decision; its expand-to-PredicateListId is exactly CapabilityGoal::AliasExpanded, so Tier A de-risks L1."
     },
-    "status": "SPIKE-VERIFIED VIABLE — owner decision requested: approve building Level 1 (analysis-layer CapabilityGoal) now, or hold.",
+    "status": "HELD_PENDING_ARCHITECT (not blocked) — boundary locked (bd10ec966 = GUARD_BRIDGE/BUILD_STRUCTURE, COMPLETE_AND_TESTED). Level 1 build plan ready; awaits architect go/no-go. Do NOT build Level 1, ConstraintTerm, or expand the provider-signature exemption meanwhile.",
     "prior_adjudication": "The projection-vs-ConstraintTerm fork was ALREADY ruled on by the fe-design-wizard max-effort simulation (/workspace/fe-design-wizard-kinded-derive-verdict-2026-06-15.md, agent aa7c371c3cc46ab8c): verdict (b) SHIP THE PROJECTION over TraitInstId/PredicateListId, no new TyData; (G) ConstraintTerm RECONSIDER/defer, only on a real general type-position Evidence<C> need. Level 1 IS that projection; Level 2 IS the deferred ConstraintTerm. Option 2.5 = the engineering form of the wizard verdict, not a new proposal.",
     "wizard_refinement": "Projection must be POSITION-SCOPED: recognize Evidence/ImplBuilder capability positions by identity and lower their single argument to a CapabilityGoal — do NOT model Evidence as a general Constraint->* type constructor (that would require constraint-as-TyId = drift into Level 2). This is the L1/L2 deciding line.",
     "spike_outcome_2026-06-16": {
