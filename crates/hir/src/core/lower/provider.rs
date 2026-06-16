@@ -536,7 +536,11 @@ fn is_top_level_item<'db>(base: &ScopeGraph<'db>, item: ItemKind<'db>) -> bool {
 
 /// Whether the `use` item introduces the binding `name` (through its alias,
 /// or — absent an alias — its final path segment).
-fn use_binds_name<'db>(db: &'db dyn HirDb, use_: crate::hir_def::Use<'db>, name: IdentId<'db>) -> bool {
+fn use_binds_name<'db>(
+    db: &'db dyn HirDb,
+    use_: crate::hir_def::Use<'db>,
+    name: IdentId<'db>,
+) -> bool {
     match use_.alias(db) {
         Some(alias) => matches!(
             alias.to_opt(),
@@ -567,31 +571,53 @@ fn use_binds_name<'db>(db: &'db dyn HirDb, use_: crate::hir_def::Use<'db>, name:
 ///    aliased goal (`use core::ops::Eq as MyEq; derive MyEq`), and a bare
 ///    goal imported with `use core::ops::Eq`.
 ///
-/// 2. **Bare-ident adapter (short-lived).** A *bare* goal ident that resolves
-///    to nothing through the requesting module's `use` items and has no
-///    competing local trait/type of that name
-///    ([`names_competing_definition`]) selects a core provider whose head
-///    *last segment* equals the ident. This is the implicit "derive prelude"
-///    convention for canonical core traits that are not actually imported at
-///    the site (e.g. `Eq`/`Ord`, which the prelude does not re-export). It is
-///    cross-module-safe — a user trait `Eq` or `use other::Eq` disqualifies
-///    it — but it is still a last-segment match, kept ONLY until goal traits
-///    are resolved to a `Trait` item by a stratification-safe resolver (its
-///    removal target). Until then it must never be the *only* matcher, hence
-///    the guard.
+/// 2. **Head-name fallback.** A last-segment (head-name) match, used in two
+///    bounded shapes — never as the sole, unguarded matcher:
+///
+///    * **Canonical selection** (bare `#[derive(Trait)]` / `derive Trait for
+///      T`): only for a *bare* goal ident that resolves to nothing through the
+///      requesting module's `use` items and has no competing local trait/type
+///      of that name ([`names_competing_definition`]). This is the implicit
+///      "derive prelude" convention for canonical core traits the prelude does
+///      not re-export (e.g. `Eq`/`Ord`). It is cross-module-safe — a user
+///      trait `Eq` or `use other::Eq` disqualifies it.
+///
+///    * **Named selection** (`derive Trait for T using Provider`, or a `with
+///      Provider { .. }` scope), gated by `named_provider`: the user has
+///      *explicitly* named the provider, so the goal-trait check matches the
+///      provider's head last segment. This restores the pre-W-C named-goal
+///      semantics (named selection matched `head_name == trait_name`) and is
+///      required when the provider declares its head trait in the provider's
+///      own module — then `trait_path` is bare while the goal is imported and
+///      thus qualified, so canonical-path identity (1) cannot fire. It is not
+///      a cross-module *core*-aliasing risk because the provider is not chosen
+///      from the canonical-core set but by the exact name the user wrote.
+///
+/// Both fallbacks are last-segment matches kept ONLY until goal traits are
+/// resolved to a `Trait` item by a stratification-safe resolver (the removal
+/// target).
 fn goal_matches_provider<'db>(
     db: &'db dyn HirDb,
     from: TopLevelMod<'db>,
     goal_path: PathId<'db>,
     provider: &ValidatedProvider<'db>,
+    named_provider: bool,
 ) -> bool {
     let goal_canonical = canonical_trait_path(db, from, goal_path);
     if goal_canonical == provider.trait_path {
         return true;
     }
 
-    // Bare-ident adapter: only for an unresolved bare ident with no competing
-    // local/imported definition.
+    if named_provider {
+        // The user named this provider explicitly; match its head trait by
+        // the goal's last segment (handles a provider whose head trait is
+        // declared in its own module, giving it a bare `trait_path` while the
+        // goal is imported and thus qualified — canonical-path identity above
+        // cannot fire). Identity (1) was already attempted.
+        return last_path_ident(db, goal_path) == Some(provider.head_name);
+    }
+
+    // Canonical selection: bare-ident adapter only.
     let Some(goal_ident) = goal_path.as_ident(db) else {
         return false;
     };
@@ -619,7 +645,7 @@ pub(super) fn is_core_derivable<'db>(
 ) -> bool {
     core_providers(db, from)
         .iter()
-        .any(|provider| goal_matches_provider(db, from, goal_path, provider))
+        .any(|provider| goal_matches_provider(db, from, goal_path, provider, false))
 }
 
 /// How a derive request selects its provider.
@@ -663,7 +689,7 @@ pub(super) fn select_provider<'db>(
     let candidates: Vec<&'db ValidatedProvider<'db>> = match selection {
         ProviderSelection::Canonical => core_providers(db, from)
             .into_iter()
-            .filter(|provider| goal_matches_provider(db, from, goal_path, provider))
+            .filter(|provider| goal_matches_provider(db, from, goal_path, provider, false))
             .collect(),
         ProviderSelection::Named(path) => {
             let Some(selected) = path.as_ident(db) else {
@@ -678,7 +704,7 @@ pub(super) fn select_provider<'db>(
             let matching: Vec<_> = named
                 .iter()
                 .copied()
-                .filter(|provider| goal_matches_provider(db, from, goal_path, provider))
+                .filter(|provider| goal_matches_provider(db, from, goal_path, provider, true))
                 .collect();
             if matching.is_empty() {
                 return SelectionOutcome::NotFound {
