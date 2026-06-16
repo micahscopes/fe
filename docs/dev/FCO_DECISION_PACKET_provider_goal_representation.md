@@ -107,6 +107,17 @@ a live variable-headed goal `P<T>`. The carrier here is needed even when `P` nev
 purely to make the *signature* a checkable type. We can have the carrier and still forbid the
 solver from ever seeing a live head.
 
+**Executable ground-truth probe (2026-06-16) — the exemption, demonstrated not asserted.** A
+throwaway edit replaced the canonical `Eq` provider's capability/witness goal `Eq<T>` with a
+**wholly undeclared trait** `Bogus<T>` — `ev: own Evidence<Bogus<T>>`, `builder: mut
+ImplBuilder<Bogus<T>>` — leaving the impl head (`for Eq`) and the body's real `require<Eq>` intact.
+Result: **`cargo test -p fe --test cli_output derived_eq_default` still passes, 3/3.** A nonsense,
+unresolvable trait in capability position is *silently accepted*, and `#[derive(Eq)]` still
+generates a working `eq`/`ne`/`==`. This is the Level-0 exemption in the flesh: the goal argument is
+not resolved, not kind-checked, not even required to *name something that exists*. (Edit reverted;
+tree clean.) Every Level-1 negative in §4 is a case this probe proves the bridge does **not**
+currently catch — which is exactly why de-exempting is worth doing.
+
 ---
 
 ## 2. The architect's eight questions, answered
