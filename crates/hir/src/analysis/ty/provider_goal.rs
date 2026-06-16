@@ -50,11 +50,36 @@ use crate::{
     span::{DynLazySpan, path::LazyPathSpan},
 };
 
-/// The head-identifier the witness parameter type carries (`Evidence<..>`).
-const EVIDENCE_KEY: &str = "Evidence";
-/// The head-identifier a generated-impl-builder capability carries
-/// (`ImplBuilder<..>`).
-const IMPL_BUILDER_KEY: &str = "ImplBuilder";
+/// The `core::derive` module that holds the canonical capability/witness types,
+/// used for resolved-identity recognition of a goal position.
+const DERIVE_MODULE: &str = "derive";
+/// The canonical last-segment name of the witness type (`core::derive::Evidence`).
+const EVIDENCE_TY: &str = "Evidence";
+/// The canonical last-segment name of the builder type
+/// (`core::derive::ImplBuilder`).
+const IMPL_BUILDER_TY: &str = "ImplBuilder";
+
+/// A `core::derive` capability/witness type recognized at a goal position by
+/// RESOLVED IDENTITY (not by a bare head-identifier string). The position
+/// recognition resolves the outer type's head through the func's scope and checks
+/// it canonicalizes to one of these (`core::derive::Evidence` / `::ImplBuilder`);
+/// a user type merely *named* `Evidence`, without `use core::derive::Evidence`,
+/// is not recognized as a goal position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityTy {
+    Evidence,
+    ImplBuilder,
+}
+
+impl CapabilityTy {
+    /// The canonical last-segment name of this capability type, for diagnostics.
+    fn name(self) -> &'static str {
+        match self {
+            CapabilityTy::Evidence => EVIDENCE_TY,
+            CapabilityTy::ImplBuilder => IMPL_BUILDER_TY,
+        }
+    }
+}
 
 /// Where a provider names a goal — for naming the position in diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +94,8 @@ impl GoalPosition {
     /// The capability type that names the goal, for diagnostics.
     fn capability_name(self) -> &'static str {
         match self {
-            GoalPosition::Witness => EVIDENCE_KEY,
-            GoalPosition::ImplBuilder => IMPL_BUILDER_KEY,
+            GoalPosition::Witness => CapabilityTy::Evidence.name(),
+            GoalPosition::ImplBuilder => CapabilityTy::ImplBuilder.name(),
         }
     }
 }
@@ -130,12 +155,14 @@ pub(crate) fn provider_capability_goals<'db>(
     let scope = func.scope();
     let mut goals = Vec::new();
 
-    // Witness parameters: ordinary func params whose type head is `Evidence`.
+    // Witness parameters: ordinary func params whose type head resolves to
+    // `core::derive::Evidence` (by identity, not by the bare name `Evidence`).
     for param in func.params(db) {
         let Some(hir_ty) = param.hir_ty(db) else {
             continue;
         };
-        let Some(inner) = capability_position_inner(db, hir_ty, EVIDENCE_KEY) else {
+        let Some(inner) = capability_position_inner(db, hir_ty, scope, CapabilityTy::Evidence)
+        else {
             continue;
         };
         // outer path span: `Evidence<Eq<T>>` (mode-stripped param ty path).
@@ -151,11 +178,13 @@ pub(crate) fn provider_capability_goals<'db>(
     }
 
     // `uses (..)` capabilities: an `ImplBuilder<..>` key path carries the goal.
+    // The head is recognized by RESOLVED identity (`core::derive::ImplBuilder`),
+    // not by the bare name `ImplBuilder`.
     for (idx, effect) in func.effect_params(db).enumerate() {
         let Some(key_path) = effect.key_path(db) else {
             continue;
         };
-        if !path_head_is(db, key_path, IMPL_BUILDER_KEY) {
+        if !path_head_resolves_to_capability(db, key_path, scope, CapabilityTy::ImplBuilder) {
             continue;
         }
         let Some(inner) = inner_goal_of_path(db, key_path) else {
@@ -279,30 +308,79 @@ fn empty_path<'db>(db: &'db dyn HirAnalysisDb) -> PathId<'db> {
     PathId::from_ident(db, IdentId::new(db, ""))
 }
 
-/// Whether `path`'s last segment is `name` (head-identifier recognition for the
-/// capability/witness *position*, mirroring `validate_provider`'s key match).
-fn path_head_is<'db>(db: &'db dyn HirAnalysisDb, path: PathId<'db>, name: &str) -> bool {
-    path.ident(db)
-        .to_opt()
-        .is_some_and(|ident| ident.data(db) == name)
+/// Whether `path`'s head (its segments minus the final generic args) RESOLVES to
+/// the canonical `core::derive` capability/witness type `expected`. This is the
+/// analysis-layer resolved-identity recognition that retires the bare head-
+/// identifier string match: the head is resolved through `scope` (the full merged-
+/// graph resolver is available here), and accepted only when it names a struct
+/// whose scope identity is `core::derive::<expected>`. A user type merely *named*
+/// `Evidence` / `ImplBuilder`, without `use core::derive::..`, does not resolve to
+/// the canonical type and is not recognized as a goal position.
+fn path_head_resolves_to_capability<'db>(
+    db: &'db dyn HirAnalysisDb,
+    path: PathId<'db>,
+    scope: ScopeId<'db>,
+    expected: CapabilityTy,
+) -> bool {
+    let head = path.strip_generic_args(db);
+    let assumptions = PredicateListId::empty_list(db);
+    let Ok(PathRes::Ty(ty)) = resolve_path(db, head, scope, assumptions, false) else {
+        return false;
+    };
+    let Some(def_scope) = ty.as_scope(db) else {
+        return false;
+    };
+    scope_is_derive_capability(db, def_scope, expected)
 }
 
-/// If `hir_ty` is a `<name><goal>` capability/witness position (after stripping
-/// an own/mut mode wrapper), return its single inner goal HIR type.
+/// Whether `def_scope` is the definition scope of the canonical `core::derive`
+/// capability type `expected`: its own name is `expected`'s name, its parent
+/// module is the `derive` module, and that module lives in the `core` ingot. The
+/// `core` ingot + `derive` module qualifier is the resolved identity (stronger
+/// than the spelling): a like-named user type in any other module is rejected.
+fn scope_is_derive_capability<'db>(
+    db: &'db dyn HirAnalysisDb,
+    def_scope: ScopeId<'db>,
+    expected: CapabilityTy,
+) -> bool {
+    use common::ingot::IngotKind;
+
+    let name_matches = def_scope
+        .name(db)
+        .is_some_and(|name| name.data(db) == expected.name());
+    if !name_matches {
+        return false;
+    }
+    let Some(module) = def_scope.parent_module(db) else {
+        return false;
+    };
+    let module_is_derive = module
+        .name(db)
+        .is_some_and(|name| name.data(db) == DERIVE_MODULE);
+    let in_core = module.top_mod(db).ingot(db).kind(db) == IngotKind::Core;
+    module_is_derive && in_core
+}
+
+/// If `hir_ty` is an `Evidence<goal>` / `ImplBuilder<goal>` capability/witness
+/// position (after stripping an own/mut mode wrapper) whose head resolves to the
+/// canonical capability type `expected`, return its single inner goal HIR type.
 fn capability_position_inner<'db>(
     db: &'db dyn HirAnalysisDb,
     hir_ty: HirTypeId<'db>,
-    name: &str,
+    scope: ScopeId<'db>,
+    expected: CapabilityTy,
 ) -> Option<HirTypeId<'db>> {
-    let path = capability_position_path(db, hir_ty, name)?;
+    let path = capability_position_path(db, hir_ty, scope, expected)?;
     inner_goal_of_path(db, path)
 }
 
-/// The `<name><..>` capability path of `hir_ty`, mode-wrapper stripped.
+/// The capability path of `hir_ty` (mode-wrapper stripped) whose head resolves to
+/// the canonical capability type `expected`, or `None`.
 fn capability_position_path<'db>(
     db: &'db dyn HirAnalysisDb,
     hir_ty: HirTypeId<'db>,
-    name: &str,
+    scope: ScopeId<'db>,
+    expected: CapabilityTy,
 ) -> Option<PathId<'db>> {
     let hir_ty = match hir_ty.data(db) {
         TypeKind::Mode(_, inner) => inner.to_opt()?,
@@ -312,7 +390,7 @@ fn capability_position_path<'db>(
         return None;
     };
     let path = p.to_opt()?;
-    path_head_is(db, path, name).then_some(path)
+    path_head_resolves_to_capability(db, path, scope, expected).then_some(path)
 }
 
 /// The single inner type argument of a capability/witness path

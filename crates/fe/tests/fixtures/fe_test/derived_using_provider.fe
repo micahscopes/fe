@@ -8,6 +8,9 @@
 //    and generates a real impl — including a method body emitted through
 //    builder expression commands.
 
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
 use core::ops::Eq
 
 // A user trait with a required method; the provider below derives it.

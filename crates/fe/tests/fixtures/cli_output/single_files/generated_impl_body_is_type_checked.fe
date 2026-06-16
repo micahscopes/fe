@@ -12,6 +12,10 @@
 // provider/derive-lower rejection) — NOT a clean compile. The captured snapshot
 // records which path reports it.
 
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
 trait Dup {
     fn dup(self) -> Self
 }

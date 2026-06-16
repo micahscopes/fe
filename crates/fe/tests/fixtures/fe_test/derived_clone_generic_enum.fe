@@ -7,6 +7,9 @@
 // generic structs). Fixture-local; NOT canonicalized into core_derives.
 
 use core::clone::Clone
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
 
 impl StableClone: Derive for Clone {
     const fn derive<T>(ev: own Evidence<Clone<T>>) -> Evidence<Clone<T>>

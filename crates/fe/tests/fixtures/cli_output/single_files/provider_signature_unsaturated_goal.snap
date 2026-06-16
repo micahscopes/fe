@@ -8,17 +8,17 @@ input_file: tests/fixtures/cli_output/single_files/provider_signature_unsaturate
 errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/provider_signature_unsaturated_goal.fe
 
 error[6-0009]: derive provider goal is not a concrete constraint
-   ┌─ provider_signature_unsaturated_goal.fe:11:41
+   ┌─ provider_signature_unsaturated_goal.fe:14:41
    │
-11 │     const fn derive<T>(ev: own Evidence<Eq>) -> Evidence<Eq>
+14 │     const fn derive<T>(ev: own Evidence<Eq>) -> Evidence<Eq>
    │                                         ^^ `Evidence<Eq>` names the bare `* -> Constraint` head `Eq`, not a saturated constraint
    │
    = write a saturated goal such as `Evidence<Eq<T>>` so the goal lowers to one concrete obligation
 
 error[6-0009]: derive provider goal is not a concrete constraint
-   ┌─ provider_signature_unsaturated_goal.fe:14:38
+   ┌─ provider_signature_unsaturated_goal.fe:17:38
    │
-14 │             builder: mut ImplBuilder<Eq>,
+17 │             builder: mut ImplBuilder<Eq>,
    │                                      ^^ `ImplBuilder<Eq>` names the bare `* -> Constraint` head `Eq`, not a saturated constraint
    │
    = write a saturated goal such as `ImplBuilder<Eq<T>>` so the goal lowers to one concrete obligation

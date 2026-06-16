@@ -13,6 +13,10 @@
 // layout provider can use. Fixture-local pressure test; NOT canonicalized into
 // core_derives (the real core ABI traits live in core::abi).
 
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
 trait AbiShape {
     const HEAD_WORDS: u256
     const IS_DYNAMIC: bool

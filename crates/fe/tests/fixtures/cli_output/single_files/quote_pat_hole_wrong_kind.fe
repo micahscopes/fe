@@ -1,6 +1,10 @@
 // A pattern hole takes a reflected `Variant` handle: `${field}(lhs)` in
 // pattern position is a precise executor failure.
 
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
 trait Tagged {
     fn tag(self) -> bool
 }

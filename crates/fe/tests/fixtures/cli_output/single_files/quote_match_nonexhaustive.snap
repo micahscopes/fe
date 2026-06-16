@@ -1,5 +1,6 @@
 ---
 source: crates/fe/tests/cli_output.rs
+assertion_line: 1820
 expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_match_nonexhaustive.fe
 ---
@@ -7,12 +8,12 @@ input_file: tests/fixtures/cli_output/single_files/quote_match_nonexhaustive.fe
 errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_match_nonexhaustive.fe
 
 error[13-0010]: derive provider `FirstOnly` failed to derive `Tagged`
-   ┌─ quote_match_nonexhaustive.fe:40:8
+   ┌─ quote_match_nonexhaustive.fe:44:8
    │
-29 │         builder.emit_method(sig, quote { match self { ${arms} } })
+33 │         builder.emit_method(sig, quote { match self { ${arms} } })
    │                                          ---------------------- invalid quote: the template match does not cover variant `Off`; add a `${variant}(group)` arm for it or a `_` arm
    ·
-40 │ derive Tagged for Mode using FirstOnly
+44 │ derive Tagged for Mode using FirstOnly
    │        ^^^^^^ requested here: invalid quote: the template match does not cover variant `Off`; add a `${variant}(group)` arm for it or a `_` arm
    │
    = the provider `FirstOnly` ran at compile time and failed; the secondary label points at the failing provider code

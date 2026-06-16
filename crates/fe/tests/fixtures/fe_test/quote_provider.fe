@@ -10,6 +10,10 @@
 // 3. Quote templates elaborate into the same generated expressions the
 //    builder commands produce: method calls, field access, `&&`, `==`.
 
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
 // A unit-bearing wrapper with an inherent comparison method; the provider
 // below generates calls to it from inside a quote.
 struct Gauge {

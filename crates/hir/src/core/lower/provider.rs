@@ -26,10 +26,6 @@ use crate::{
     },
 };
 
-/// The names a provider's `uses` clause binds for the compile-time
-/// capabilities, keyed by the capability key's head identifier.
-const REFLECT_KEY: &str = "Reflect";
-const IMPL_BUILDER_KEY: &str = "ImplBuilder";
 /// The marker after `:` in a provider declaration: `impl Name: Derive for T`.
 const DERIVE_MARKER: &str = "Derive";
 /// The single function a provider must define.
@@ -37,23 +33,39 @@ const DERIVE_FN: &str = "derive";
 /// The `core::derive` module that holds the canonical capability types
 /// (`Reflect`, `ImplBuilder`), used for resolved-identity recognition.
 const DERIVE_MODULE: &str = "derive";
+/// The canonical last-segment names of the `core::derive` capability types.
+/// These are the *identity* the recognized canonical path must end in — they
+/// are matched only behind the `core::derive` module qualifier (see
+/// [`path_names_derive_capability`]), never as a bare head-identifier authority.
+const REFLECT_TY: &str = "Reflect";
+const IMPL_BUILDER_TY: &str = "ImplBuilder";
 
 /// A compile-time capability a provider's `derive` fn consumes, declared in its
 /// `uses (..)` clause (`reflect: Reflect<T>`, `builder: mut ImplBuilder<Goal>`).
 /// The variant carries the binding name introduced for the capability.
 ///
-/// Capabilities are recognized (K04a, landed) by the capability type's resolved
-/// canonical-path identity — `core::derive::Reflect` / `core::derive::ImplBuilder`
-/// — after type resolution, NOT by string match. A string-key fallback
-/// (`REFLECT_KEY` / `IMPL_BUILDER_KEY`) remains only as a fixture-compat shim with
-/// a removal target (see `path_names_derive_capability`). This enum is the home
-/// for the recognized capability (and any future grade/scope).
+/// Capabilities are recognized (K04a-C3, landed) by the capability type's
+/// resolved canonical-path identity — `core::derive::Reflect` /
+/// `core::derive::ImplBuilder` — established through the provider module's base-
+/// graph `use` items (see [`path_names_derive_capability`]). There is no string-
+/// key fallback: a user type merely *named* `Reflect`, without importing the
+/// canonical type, grants NO capability authority. This enum is the home for the
+/// recognized capability (and any future grade/scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
 pub(super) enum Capability<'db> {
     /// `reflect: Reflect<T>` — reflection over the derive target.
     Reflect(IdentId<'db>),
     /// `builder: mut ImplBuilder<Goal>` — the generated-impl builder.
     ImplBuilder(IdentId<'db>),
+}
+
+/// Which `core::derive` capability type a recognized canonical path names. The
+/// recognition is purely by resolved identity ([`path_names_derive_capability`]);
+/// this kind carries the result without re-keying on a raw head string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeriveCapabilityKind {
+    Reflect,
+    ImplBuilder,
 }
 
 impl<'db> Capability<'db> {
@@ -208,32 +220,28 @@ pub(super) fn validate_provider<'db>(
             let Some(key_head) = last_path_ident(db, key_path) else {
                 continue;
             };
-            // Prefer resolved-identity recognition: canonicalize the capability
-            // key path (base-graph `use` resolution only — provider validation runs
-            // in the expansion stage and must not touch the merged graph) and
-            // accept it when it names a `core::derive` capability type. A user type
-            // merely named `Reflect` then no longer collides with the capability.
-            // The bare head-identifier string match remains as a compatibility
-            // shim for providers that name the capability by the unqualified ident
-            // with no import (K04a-C3 retires it once the canonical form is the
-            // only one in tree).
+            // Recognize the capability by RESOLVED IDENTITY only (K04a-C3): the
+            // capability key path is canonicalized (base-graph `use` resolution
+            // only — provider validation runs in the expansion stage and must not
+            // touch the merged graph) and accepted only when it names a
+            // `core::derive` capability type by its canonical-path identity
+            // (`derive::Reflect` / `derive::ImplBuilder`). A user type merely named
+            // `Reflect`, with no `use core::derive::Reflect`, no longer collides
+            // with the capability — the bare head-identifier string fallback is
+            // gone, so the name alone grants no authority.
             let canonical = if key_path.parent(db).is_some() {
                 key_path
             } else {
                 canonical_trait_path(db, provider.top_mod(db), PathId::from_ident(db, key_head))
             };
-            if path_names_derive_capability(db, canonical, REFLECT_KEY) {
-                capabilities.push(Capability::Reflect(param_name));
-            } else if param.is_mut && path_names_derive_capability(db, canonical, IMPL_BUILDER_KEY) {
-                capabilities.push(Capability::ImplBuilder(param_name));
-            } else {
-                match key_head.data(db).as_str() {
-                    REFLECT_KEY => capabilities.push(Capability::Reflect(param_name)),
-                    IMPL_BUILDER_KEY if param.is_mut => {
-                        capabilities.push(Capability::ImplBuilder(param_name))
-                    }
-                    _ => {}
+            match path_names_derive_capability(db, canonical) {
+                Some(DeriveCapabilityKind::Reflect) => {
+                    capabilities.push(Capability::Reflect(param_name))
                 }
+                Some(DeriveCapabilityKind::ImplBuilder) if param.is_mut => {
+                    capabilities.push(Capability::ImplBuilder(param_name))
+                }
+                _ => {}
             }
         }
         // The minimal capability check: a provider must declare the
@@ -311,24 +319,36 @@ fn last_path_ident<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> Option<IdentId
     path.ident(db).to_opt()
 }
 
-/// Whether `path` names a `core::derive` capability type by resolved (canonical-
-/// path) identity: its last segment is `name` and its parent segment is the
-/// `derive` module. This is the base-graph-safe form of identity recognition —
-/// it requires the `derive` module qualifier (so a bare user `struct Reflect`
-/// does not match) without needing the merged scope graph (unavailable during
-/// the expansion stage). The caller canonicalizes a bare ident through the
-/// provider module's `use` items before calling this.
+/// Which `core::derive` capability type `path` names by resolved (canonical-path)
+/// identity, or `None`. A path matches only when its parent segment is the
+/// `derive` module AND its last segment is a capability type name
+/// (`Reflect` / `ImplBuilder`). This is the base-graph-safe form of identity
+/// recognition — it requires the `derive` module qualifier (so a bare user
+/// `struct Reflect`, not imported from `core::derive`, does not match) without
+/// needing the merged scope graph (unavailable during the expansion stage). The
+/// caller canonicalizes a bare ident through the provider module's `use` items
+/// before calling this, so an imported/aliased capability is recognized while a
+/// like-named local type is not. There is no bare-name fallback: the name alone
+/// grants no authority.
 fn path_names_derive_capability<'db>(
     db: &'db dyn HirDb,
     path: PathId<'db>,
-    name: &str,
-) -> bool {
-    let last_matches = path.ident(db).to_opt().is_some_and(|ident| ident.data(db) == name);
+) -> Option<DeriveCapabilityKind> {
     let parent_is_derive = path
         .parent(db)
         .and_then(|parent| parent.ident(db).to_opt())
         .is_some_and(|ident| ident.data(db) == DERIVE_MODULE);
-    last_matches && parent_is_derive
+    if !parent_is_derive {
+        return None;
+    }
+    let last = path.ident(db).to_opt()?;
+    if last.data(db) == REFLECT_TY {
+        Some(DeriveCapabilityKind::Reflect)
+    } else if last.data(db) == IMPL_BUILDER_TY {
+        Some(DeriveCapabilityKind::ImplBuilder)
+    } else {
+        None
+    }
 }
 
 /// Resolves `path` (the head trait of a provider, or the trait argument of a
@@ -1005,7 +1025,10 @@ impl<'db> TargetReflection<'db> {
 
 #[cfg(test)]
 mod tests {
-    use super::{core_providers, goal_matches_provider, is_core_derivable, resolve_trait_def};
+    use super::{
+        core_providers, goal_matches_provider, is_core_derivable, resolve_trait_def,
+        validate_provider,
+    };
     use crate::{
         hir_def::PathId,
         lower::map_file_to_mod,
@@ -1095,6 +1118,103 @@ mod tests {
         assert!(
             !is_core_derivable(&db, top_mod, local_goal),
             "a goal resolving to a local same-named trait is not core-derivable"
+        );
+    }
+
+    /// The single provider named `name` in `text`, validated.
+    fn validate_only_provider(
+        text: &str,
+    ) -> Result<(), Vec<String>> {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(text);
+        let top_mod = map_file_to_mod(&db, file);
+        let providers = top_mod.all_derive_providers(&db);
+        let provider = *providers.first().expect("one provider is present");
+        validate_provider(&db, provider)
+            .map(|_| ())
+            .map_err(|errors| errors.into_iter().map(|e| e.message).collect())
+    }
+
+    /// Positive control for the anti-vacuous guard below: a provider whose `uses`
+    /// clause names the CANONICAL capability types (`use core::derive::Reflect` /
+    /// `ImplBuilder`) is recognized by identity and validates.
+    #[test]
+    fn provider_capability_recognized_when_canonical_imported() {
+        let result = validate_only_provider(
+            r#"
+            use core::ops::Eq
+            use core::derive::Evidence
+            use core::derive::Reflect
+            use core::derive::ImplBuilder
+
+            impl ImportedEq: Derive for Eq {
+                const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+                    uses (
+                        reflect: Reflect<T>,
+                        builder: mut ImplBuilder<Eq<T>>,
+                    )
+                {
+                    ev
+                }
+            }
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "a provider importing the canonical capability types must validate; got {result:?}"
+        );
+    }
+
+    /// Anti-vacuous guard for the K04a-C3 string-fallback removal: provider
+    /// capability authority keys on the resolved canonical identity
+    /// (`core::derive::Reflect` / `::ImplBuilder`), NOT on the bare name.
+    ///
+    /// This provider's `uses` clause names LOCAL `struct Reflect` / `ImplBuilder`
+    /// declared in the SAME file, with NO `use core::derive::..` anywhere — so the
+    /// names cannot canonicalize to `core::derive::*`. The capability is therefore
+    /// NOT recognized, and the provider fails shape validation with the missing-
+    /// capability errors. If the deleted bare head-identifier string fallback
+    /// ever returns, these local-named types would be granted authority and this
+    /// test fails. (Mirrors the spirit of `derive_local_trait_no_alias` from
+    /// burn-down #1.)
+    #[test]
+    fn provider_capability_keys_on_identity_not_name() {
+        let errors = validate_only_provider(
+            r#"
+            use core::ops::Eq
+            use core::derive::Evidence
+
+            // A user type merely NAMED `Reflect` / `ImplBuilder`, with no
+            // `use core::derive::..`. The name alone must grant no authority.
+            struct Reflect<T> { x: T }
+            struct ImplBuilder<G> { x: G }
+
+            impl LocalNamedEq: Derive for Eq {
+                const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+                    uses (
+                        reflect: Reflect<T>,
+                        builder: mut ImplBuilder<Eq<T>>,
+                    )
+                {
+                    ev
+                }
+            }
+            "#,
+        )
+        .expect_err(
+            "a provider whose `uses` clause names a like-named LOCAL type (not \
+             `core::derive::Reflect`/`ImplBuilder`) must NOT be granted the \
+             capability by name",
+        );
+        let messages = errors.join("\n");
+        assert!(
+            messages.contains("must declare a `Reflect<..>` capability"),
+            "expected the missing-Reflect-capability error (identity, not name, \
+             fires); got:\n{messages}"
+        );
+        assert!(
+            messages.contains("must declare a `mut ImplBuilder<..>` capability"),
+            "expected the missing-ImplBuilder-capability error; got:\n{messages}"
         );
     }
 }

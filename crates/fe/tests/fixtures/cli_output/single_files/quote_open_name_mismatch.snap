@@ -1,5 +1,6 @@
 ---
 source: crates/fe/tests/cli_output.rs
+assertion_line: 1820
 expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_open_name_mismatch.fe
 ---
@@ -7,12 +8,12 @@ input_file: tests/fixtures/cli_output/single_files/quote_open_name_mismatch.fe
 errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_open_name_mismatch.fe
 
 error[13-0010]: derive provider `QuoteSame` failed to derive `Same`
-   ┌─ quote_open_name_mismatch.fe:33:8
+   ┌─ quote_open_name_mismatch.fe:37:8
    │
-17 │             body = quote(rhs) { ${body} && self.${field} == rhs.${field} }
+21 │             body = quote(rhs) { ${body} && self.${field} == rhs.${field} }
    │                    ------------------------------------------------------- invalid quote: the quote declares open name `rhs`, but the emitted method `same` binds `self`, `other`; open names bind against the destination method's parameter names
    ·
-33 │ derive Same for Point using QuoteSame
+37 │ derive Same for Point using QuoteSame
    │        ^^^^ requested here: invalid quote: the quote declares open name `rhs`, but the emitted method `same` binds `self`, `other`; open names bind against the destination method's parameter names
    │
    = the provider `QuoteSame` ran at compile time and failed; the secondary label points at the failing provider code

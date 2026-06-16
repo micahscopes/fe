@@ -10,6 +10,9 @@
 // provider coverage (previously only StableEq / StableDefault / StableEip712 /
 // StableClone).
 
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
 use core::ops::Eq
 use core::ops::Ord
 

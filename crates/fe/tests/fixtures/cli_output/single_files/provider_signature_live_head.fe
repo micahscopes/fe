@@ -7,6 +7,10 @@
 // boundary as a `where P<T>` predicate. Genuine variable-headed solving is
 // build-trigger-gated research (FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md).
 
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
 trait Real {
     fn r(self) -> bool
 }
