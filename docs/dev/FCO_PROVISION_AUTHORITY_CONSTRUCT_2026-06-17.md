@@ -4,6 +4,20 @@
 grounded). Design-only, read-only, NON-BLOCKING. Designs the *construct* (vs the A/B/C/D policy menu
 in `FCO_AUTHORITY_GATED_OVERRIDE_2026-06-17.md`). Load-bearing code claims spot-verified ✓.
 
+## DEVX CONSTRAINT (Micah, 2026-06-17 — governs all surface design)
+The *mechanism* below (consumer-side demand that a layout choice is consistent + from a trusted
+scope) is ratified-good. The **surface is NOT**: `@uniform` / `#[witness_uniform]` / "provenance" /
+"witness" / "canonical" / "@rooted" are **PL/type-theory jargon and must NOT leak into the devx**.
+Audience = smart-contract devs, not PL theorists. Redesign the surface to: (1) **invisible-by-default**
+— the everyday dev writes NOTHING; std sets up storage-shaped traits so they're consistent
+automatically; (2) **plain-language errors** carry the whole devx (e.g. "`Balance` is stored two
+different ways in this contract — in `get` and in `pay()`; a contract must store a type one way
+everywhere"); (3) **domain-natural opt-in** for the rare customization, reading like a *setting*
+(e.g. a contract-level "this contract's storage encoding is X"), never a `where`-clause qualifier;
+(4) any std-author marker uses domain words ("per-contract" / "storage-layout" / "consistent"), not
+"witness/uniform". The `@uniform`-style machinery stays strictly UNDER THE HOOD. This is a surface/
+naming redesign over the (kept) mechanism — tracked for a devx pass, not yet spelled.
+
 ## The decisive reframe
 A programmer must be able to say four distinct things: **S**eal (provider: "no closer shadow"),
 **O**verride-authority ("I may introduce a competitor here"), **P**rovenance-demand (consumer: "the
