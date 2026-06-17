@@ -60,12 +60,19 @@ broad EIP-712 before ABI/static-layout.
 
 ## Execution order
 1 → 2 → 3 → 4 → 5a → #6 → #42 (const-ref ICE) → **5b DONE** (`43ebe7efb`, error generator
-deleted, std provider, byte-identical, full-gate verified). Now: **#5c** (retire the
-Rust `lower_msg_variant_abi_size_impl` generator — same Route-A pattern; msg structs are
-ENUM VARIANTS, variant reflection already proven by the StableClone enum fixture #30; after
-deletion, the shared `create_{head_size,is_dynamic,payload_size}_*` helpers in msg.rs used
-only by error+msg AbiSize become dead → delete them too; `build_head_size_body_expr` /
-`create_direct_encode_assoc_const` stay, Encode still uses them) → **TD5 ladder**
+deleted, std provider, byte-identical, full-gate verified). Now: **#5c** (retire the Rust `lower_msg_variant_abi_size_impl` generator). SCOPING
+(2026-06-17) corrected the plan: msg variants desugar to FULLY SYNTHETIC structs
+(`variant_struct_ty` = a NORMAL `Path(name)` struct — so the struct-only `StableAbiSize`
+body works, NO variant reflection needed) but with NO source `ast::Struct` (source is
+`ast::MsgVariant`). So Route-A scheduling needs a derive-machinery GENERALIZATION: a
+`TargetKind::SyntheticStruct(Struct, TextRange)` + a `lower_struct_derives` variant taking
+(HIR struct + diagnostic span) instead of `&ast::Struct` (the ast is only used for item-name,
+also in HIR, and a generics-diagnostic span; reflection is already HIR-sourced). Then schedule
+in `expanded_items_impl` for `Desugared(Msg{variant_idx:Some})` origins (EXPANSION stage, not
+base-lowering — stratification). After deletion, reap msg.rs helpers used only by error+msg
+AbiSize (`create_{head_size,is_dynamic,payload_size}_*`); keep `build_head_size_body_expr` +
+`create_direct_encode_assoc_const` (Encode uses them). Verify on the FULL gates (cli_output +
+fe_test_runner + ty_check + fe-hir + `fe check ingots/std`), not name-filters. → **TD5 ladder**
 (TD5.0/.1/.2 first sprint) → **#7** only after TD5.
 Keep #5 split: **#5a reify-proof DONE / #5b generator deletion OPEN.** Not "fully
 bridge-free": selection/authority/goal-check/provenance de-magicked; provider body
