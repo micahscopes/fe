@@ -6,11 +6,14 @@ yet." Feeds a Micah-gut decision. Read-only; load-bearing citations spot-verifie
 
 **GOVERNING CONSTRAINT (Micah 2026-06-17) — MECHANISM, NOT POLICY.** Option-D is a sound
 *direction*, but **do NOT bake A/B/C/D, the canonical set, the coherence root, or sealed/open into
-the core.** The core carries the *data* (scope/provenance/witness identity) + a clean *policy seam*;
-the override/authority policy is a **pluggable layer, deferred, and PER-BACKEND** (Fe is EVM-now /
-multibackend-soon — "contract = coherence root" and "StorageKey is the witness" are EVM *policy*,
-not mechanism; parameterized like AbiSize/Platform per backend). Capabilities are the ideal eventual
-mechanism — **don't block on it now.** ⇒ Everything below is a *menu/direction*, NOT a core
+the core.** The core carries the *data* (scope/provenance/witness identity) + a clean *seam*;
+the override/authority control is a **first-class LANGUAGE-LEVEL construct (TBD), deferred — NOT a
+per-platform config knob.** Micah was explicit: not a "per-platform policy config"; a *nice language
+control* expressed in Fe source, uniform. Backend differences (Fe is EVM-now / multibackend-soon —
+"contract = coherence root" / "StorageKey is the witness" are EVM *usage*) emerge *through* that
+language construct, expressed in-language, NOT via a side config. Capabilities are the obvious shape
+— **don't block on the exact mechanism now.** (Language-construct design dispatched to a
+design-wizard, task #52.) ⇒ Everything below is a *menu/direction*, NOT a core
 commitment; the StorageKey/authority gut-questions are **DEFERRED**, not decide-now; the only
 now-requirement is that the substrate stays policy-agnostic + backend-agnostic + scope-carrying.
 
