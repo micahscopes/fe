@@ -60,20 +60,23 @@ broad EIP-712 before ABI/static-layout.
 
 ## Execution order
 1 → 2 → 3 → 4 → 5a → #6 → #42 (const-ref ICE) → **5b DONE** (`43ebe7efb`, error generator
-deleted, std provider, byte-identical, full-gate verified). Now: **#5c** (retire the Rust `lower_msg_variant_abi_size_impl` generator). SCOPING
-(2026-06-17) corrected the plan: msg variants desugar to FULLY SYNTHETIC structs
-(`variant_struct_ty` = a NORMAL `Path(name)` struct — so the struct-only `StableAbiSize`
-body works, NO variant reflection needed) but with NO source `ast::Struct` (source is
-`ast::MsgVariant`). So Route-A scheduling needs a derive-machinery GENERALIZATION: a
-`TargetKind::SyntheticStruct(Struct, TextRange)` + a `lower_struct_derives` variant taking
-(HIR struct + diagnostic span) instead of `&ast::Struct` (the ast is only used for item-name,
-also in HIR, and a generics-diagnostic span; reflection is already HIR-sourced). Then schedule
-in `expanded_items_impl` for `Desugared(Msg{variant_idx:Some})` origins (EXPANSION stage, not
-base-lowering — stratification). After deletion, reap msg.rs helpers used only by error+msg
-AbiSize (`create_{head_size,is_dynamic,payload_size}_*`); keep `build_head_size_body_expr` +
-`create_direct_encode_assoc_const` (Encode uses them). Verify on the FULL gates (cli_output +
-fe_test_runner + ty_check + fe-hir + `fe check ingots/std`), not name-filters. → **TD5 ladder**
-(TD5.0/.1/.2 first sprint) → **#7** only after TD5.
+deleted, std provider, byte-identical, full-gate verified). → **#5c DONE** (`fbfbba0ef`, 2026-06-17): Rust `lower_msg_variant_abi_size_impl` deleted; std
+`StableAbiSize` produces msg-variant AbiSize via a synthetic derive. New machinery (vs #5b): msg
+variants are FULLY SYNTHETIC structs (no source `ast::Struct`), so added
+`TargetKind::SyntheticStruct(Struct, TextRange)` + `lower_synthetic_struct_derives` (derive.rs,
+shares `lower_struct_derives_inner`) + `DeriveDesugared::MsgVariant` provenance (span/mod.rs +
+transition.rs); variant structs are NORMAL `Path` structs so the struct-only provider works.
+Reaped the whole helper cascade (`create_payload_size_func`, `create_{head_size,is_dynamic}_assoc_const`,
+`create_bool_assoc_const`, `build_{is_dynamic,head_size}_expr`, `abi_size_assoc_expr`,
+`abi_size_trait_ref`, `push_int_expr` + dead imports); kept `build_head_size_body_expr` /
+`create_direct_encode_assoc_const` / `push_bool_expr` (Encode/Decode). **Net -101 lines.** Verified
+BYTE-IDENTICAL on the real gates: cli_output 353/0 (simple/multi/abi contract msg codegen, zero
+drift), build_foundry 1/0 (erc20), ty_check 192/0, fe-hir 123/0.
+
+Now: **TD5 ladder** (TD5.0 inventory/freeze + TD5.1 ProviderEffect trace + TD5.2 require-as-obligation,
+then STOP — see TD5_PROVIDER_BODY_EFFECTS.md; the W6 const-ref ICE prereq is RESOLVED as #42). BOTH
+Rust AbiSize generators (error #5b + msg #5c) are now gone; the remaining ABI generators are
+Encode/Decode (still Rust — a later providerization). → **#7** (Derive marker) only after TD5.
 Keep #5 split: **#5a reify-proof DONE / #5b generator deletion OPEN.** Not "fully
 bridge-free": selection/authority/goal-check/provenance de-magicked; provider body
 (TD5) + `Derive` marker (#7) remain intentional bridges.
