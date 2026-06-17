@@ -4,6 +4,16 @@
 architect gone). NON-BLOCKING — public-provision-layer policy, gated behind "no public syntax
 yet." Feeds a Micah-gut decision. Read-only; load-bearing citations spot-verified (✓).
 
+**GOVERNING CONSTRAINT (Micah 2026-06-17) — MECHANISM, NOT POLICY.** Option-D is a sound
+*direction*, but **do NOT bake A/B/C/D, the canonical set, the coherence root, or sealed/open into
+the core.** The core carries the *data* (scope/provenance/witness identity) + a clean *policy seam*;
+the override/authority policy is a **pluggable layer, deferred, and PER-BACKEND** (Fe is EVM-now /
+multibackend-soon — "contract = coherence root" and "StorageKey is the witness" are EVM *policy*,
+not mechanism; parameterized like AbiSize/Platform per backend). Capabilities are the ideal eventual
+mechanism — **don't block on it now.** ⇒ Everything below is a *menu/direction*, NOT a core
+commitment; the StorageKey/authority gut-questions are **DEFERRED**, not decide-now; the only
+now-requirement is that the substrate stays policy-agnostic + backend-agnostic + scope-carrying.
+
 **Reframe:** the ratified synthesis treats consensus soundness as binary (canonical = no override
 / scoped = free shadow). Micah's steer rejects the binary: *"we might WANT those changeable, but
 gate WHERE and WHO can override; sometimes ensure a provider comes FROM ABOVE and isn't tampered;
