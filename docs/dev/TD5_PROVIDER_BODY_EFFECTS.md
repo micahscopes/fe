@@ -36,24 +36,47 @@ retires one effect family at a time until provider bodies are ordinary effectful
 **Freeze rule:** no new provider-body operation may be added without (a) a TD5 category and (b) — for
 quote forms — an entry in the quote-fragment spec. This keeps the surface from growing while it shrinks.
 
-## The ladder (each rung = a burn-down row with a fixture + a deletion/narrowing claim)
-- **TD5.0** inventory + freeze (the table above, with exact `file:line` + future-effect + first-fixture
-  + deletion-target per op). Doc + freeze rule.
-- **TD5.1** internal `ProviderEffect` IR + a dumpable, **asserted** trace. No behavior change.
-  Enum ≈ `ReflectFields | Require{goal,subject} | Quote{…} | BuilderMethod{…} | EmitConst{…} | … | Finish`.
-  Test: a provider's trace contains the expected `Require` + `EmitMethod/EmitConst`.
-- **TD5.2** re-home `builder.require<Trait>` as **ordinary obligation emission** (first real demagic):
-  emit a typed obligation carrying goal + subject + provider id + derive site + field origin into the
-  FCO obligation/evidence queue (the design-wizard G2 "reserve `premises`" slot). Missing-member failure
-  then routes through normal obligation diagnostics; provenance gains the require chain.
-- **TD5.3** reflection → typed read-only CTFE capability (body-level, handles not strings).
-- **TD5.4** quote → typed generated-HIR with hygiene + typed holes (NOT template strings).
-- **TD5.5** `ImplBuilder<G>` → typed generated-HIR builder effect **scoped to the goal G**.
-- **TD5.6** one tiny provider body runs through the ordinary CTFE/effect path (others stay on executor).
-- **TD5.7** port one real provider; order: marker → Default → Clone → Eq → Ord → AbiSize (each adds one
-  effect family: Default=struct-init, Clone=reflect+call, Eq=reflect+require+quote-conjunction,
-  Ord=match/branch, AbiSize=assoc-const folds).
-- **TD6 / #7** retire the `Derive` marker only once the executor is boring.
+## NO SHIM-FOR-SHIM (the ratchet rule) — architect 2026-06-17
+**We do not replace an opaque shim with another shim.** A `ProviderEffect` layer is acceptable ONLY as
+a temporary transition that *immediately deletes/narrows* executor-owned behavior. Hard rule:
+
+> Do NOT land a `ProviderEffect` layer unless the same commit — or the immediately following commit —
+> migrates at least one executor operation OUT of bespoke handling. A trace-only `ProviderEffect`
+> commit is allowed ONLY if it is (1) explicitly diagnostic/temporary, (2) has a deletion target,
+> (3) is followed by a concrete opcode migration (preferably `builder.require`), and (4) the board
+> says **"observability only," NOT "bridge removed."**
+
+**TD5 progress is NOT "we wrapped the executor in a nicer enum." TD5 progress is "one fewer thing
+requires the executor."** Every rung below is named by what it DELETES. Bad: `ProviderEffect` exists but
+the executor still owns everything → that's laundering the bridge; reject it.
+
+## The ladder — DELETION milestones (each rung removes/narrows executor ownership)
+- **TD5a — inventory + freeze.** Output: the §command-surface table with exact `file:line` + future
+  effect + first fixture + deletion target per op; freeze rule (no new opcode without a category).
+  Deletion claim: no NEW hidden opcodes can be added.
+- **TD5b — `require` no longer executor-owned (the first REAL migration).** `builder.require<Trait>(ty)`
+  emits an ordinary provider-origin FCO obligation (goal=`Trait<ty>`, subject, provider id, derive site,
+  reflected-field origin, evidence/provenance linked) instead of being a bespoke executor opcode that
+  *silently drops concrete requirements* (surprise #1). **Deletion: the executor no longer owns
+  generated trait requirements.** The `ProviderEffect` trace (observability) is allowed here ONLY paired
+  with this migration — not as a standalone "TD5 progress" commit. (Depends on the W6 const-ref ICE fix.)
+  Acceptance: StableEq still works; a missing field bound fails through NORMAL obligation diagnostics;
+  provenance can say "StableEq required Eq<FieldTy> because field `x` was reflected from Point"; with the
+  old executor-side `require` handling disabled, the new path still carries the obligation.
+- **TD5c — reflection no longer string/executor-owned.** Field/variant handles get a typed CTFE
+  representation. Deletion: `reflect.*` reads stop being executor-intercepted strings.
+- **TD5d — quote no longer template-executor-owned.** `quote` elaborates to typed generated HIR with
+  hygiene + typed holes. Deletion: quote stops being a template interpreted by the executor.
+- **TD5e — builder emit no longer executor-owned.** Generated-item construction (`emit_*`/`method`/…) is
+  a typed build effect scoped to the goal G. Deletion: generated-HIR construction leaves the executor.
+- **TD5f — one provider body runs OUTSIDE the bespoke executor.** Deletion: the executor path is unused
+  for one provider (the marker/Default pilot).
+- **TD5g — all canonical providers off the executor.** Deletion: the executor is removed/quarantined.
+- **#7 — retire the `Derive` marker** only once the executor is boring (has no job).
+
+Porting order for TD5f/g: marker → Default → Clone → Eq → Ord → AbiSize (each adds one effect family:
+Default=struct-init, Clone=reflect+call, Eq=reflect+require+quote-conjunction, Ord=match/branch,
+AbiSize=assoc-const folds).
 
 ## Top wrenches + their guards
 - **W6 — the const-ref ICE is a TD5.2 PREREQUISITE, not a surprise.** TD5.2 (concrete `require` as a
@@ -83,19 +106,27 @@ quote forms — an entry in the quote-fragment spec. This keeps the surface from
    so unlike comparison/init primitives these **cannot** be absorbed by TD5.4 quotes — they must remain
    typed builder-effect ops in TD5.5.
 
-## Highest-leverage first step
-**TD5.1:** insert one `record(ProviderEffect)` journaling seam into `eval_builder_method` /
-`eval_method_call` / quote elaboration, with an asserted, dumpable trace. Zero behavior change; gives
-every later rung a stable strangler-fig contract to narrow against; is the prerequisite for the TD5.2
-deletion.
+## Highest-leverage first DELETION
+**TD5b — migrate `builder.require` out of executor ownership.** It is already obligation-shaped, so it's
+the cleanest opcode to re-home into the real FCO obligation/evidence machinery — and doing so DELETES
+the executor's silent-drop of concrete requirements (surprise #1). The `ProviderEffect` trace is the
+*scaffolding* that makes this safe (a strangler-fig contract), but it lands **paired with** the require
+migration, not as a standalone "progress" commit. The measure of done is "require no longer needs the
+executor," not "a trace exists."
 
-## Smallest first PR (the TD5.0/.1/.2 sprint, then STOP)
-1. **TD5.0** — this packet's table completed with exact `file:line` per op + freeze rule (add to repo).
-2. **TD5.1** — `ProviderEffect` enum + `record()` seam + one trace-assertion test (`StableEq` trace =
-   ReflectFields, Require(Eq<FieldTy>), Quote, EmitMethod, Finish). No behavior change.
-3. **TD5.2** — (after the W6 const-ref ICE fix) `require` emits a typed obligation; fixtures: missing
-   concrete member now `6-0003` (not ICE, not silent), provenance shows "provider required Eq<FieldTy>
-   because field x". STOP after this rung; reassess.
+## Smallest first PR (TD5a + TD5b, then STOP)
+1. **TD5a** — complete this packet's command table (exact `file:line` per op) + add the freeze rule to
+   the repo. Deletion claim: no new hidden opcodes.
+2. **W6 prerequisite** — fix the const-ref ICE (`body.rs:730`, task #42) so a missing concrete `require`
+   diagnoses `6-0003` instead of panicking. (TD5b walks straight into it — surprise #1.)
+3. **TD5b** — `builder.require<Trait>(ty)` emits an ordinary provider-origin FCO obligation; the
+   executor's bespoke `require` handling is **removed** (not wrapped). Paired observability: a
+   `ProviderEffect`/trace seam, labeled "observability only." Fixtures: missing concrete member →
+   `6-0003`; provenance says "provider required Eq<FieldTy> because field x"; **with executor-side
+   `require` disabled, the obligation still flows.** STOP after this rung; reassess.
+
+A `ProviderEffect` enum that merely re-wraps identical behavior, a trace-only commit with no migration,
+or new docs that don't delete/narrow executor ownership **do NOT count as TD5 progress.**
 
 ## Sequencing
 Architect-confirmed: **#6 → #5b → (W6 ICE fix) → TD5.0/.1/.2 → … → #7.** TD5 is not started until #6/#5b
