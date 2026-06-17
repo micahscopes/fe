@@ -49,7 +49,7 @@ First sprint when TD5 starts: TD5.0 doc + freeze, TD5.1 trace, TD5.2 require-as-
 No commit may ADD bridge surface unless it also deletes a bridge path, narrows one, reifies compiler magic into Fe, or adds an adversarial guard against bridge expansion. Docs only if they support one of those.
 
 ## Pre-existing issues surfaced (not introduced; tracked, not hidden)
-- **Concrete missing-`AbiSize` field panics** in the const-ref path (`crates/hir/src/analysis/semantic/lower/body.rs:730`, "const ref should resolve to a semantic instance") instead of emitting `6-0003`. Surfaced by #5; PRE-EXISTING (reproduces with the pre-#5 `derived_abi_shape` pattern; #5 is test-only so cannot have introduced it). A const-eval robustness bug: a derived const initializer referencing a missing impl's assoc const should diagnose, not ICE. Candidate follow-up; out of burn-down scope (touches const-eval, not derive machinery).
+- **RESOLVED (`751a6755f`, task #42): Concrete missing-`AbiSize` field panics** in the const-ref path (`crates/hir/src/analysis/semantic/lower/body.rs:730`, "const ref should resolve to a semantic instance") instead of emitting `6-0003`. Surfaced by #5; PRE-EXISTING (reproduces with the pre-#5 `derived_abi_shape` pattern; #5 is test-only so cannot have introduced it). A const-eval robustness bug: a derived const initializer referencing a missing impl's assoc const should diagnose, not ICE. Candidate follow-up; out of burn-down scope (touches const-eval, not derive machinery).
 
 ## Do NOT
 Full `TyData::ConstraintTerm`; live `P<T>` solving; bridge-taxonomy docs without a
