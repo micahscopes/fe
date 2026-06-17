@@ -3,6 +3,15 @@
 **Date:** 2026-06-17 · **Status:** precedent research (design-wizard, web-verified). Design-only,
 NON-BLOCKING. Refines `FCO_AUTHORITY_GATED_OVERRIDE` / `FCO_PROVISION_AUTHORITY_CONSTRUCT`.
 
+## DECISION (Micah, 2026-06-17) — the keyword pair
+- **`fixed`** = the surface keyword for the top/non-overridable tier (the sealed, one-true-witness,
+  consistent-per-deployment state). Decided now. (Internal name stays `global ≡ canonical`; not surfaced.)
+- **`fix`** (verb) = a FUTURE, permissioned override: "override a `fixed` provision **in the context of a
+  held capability**." This is the capability-gated *authorized override* (the wizard's Construct-2 /
+  ocap-attenuation case) given a clean, jargon-free surface — the `fixed`(adjective, sealed) / `fix`(verb,
+  authorized-override) symmetry. **DEFERRED — do not build now; "for now `fixed` is great."** Captures
+  Micah's "overridable but gated by who/capability" with capabilities as the gate.
+
 ## Precedent for nuanced scope control (the family Fe is joining)
 - **Coq/Rocq — closest direct precedent.** Instance locality `local` / `global` / `#[export]` +
   per-instance `priority`. CRITICAL: `global` (active on any transitive `Require`, even un-`Import`ed)
