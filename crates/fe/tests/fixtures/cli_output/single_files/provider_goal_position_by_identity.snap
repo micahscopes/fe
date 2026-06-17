@@ -1,6 +1,6 @@
 ---
 source: crates/fe/tests/cli_output.rs
-assertion_line: 1820
+assertion_line: 1824
 expression: output
 input_file: tests/fixtures/cli_output/single_files/provider_goal_position_by_identity.fe
 ---
@@ -12,6 +12,12 @@ error[2-0002]: `Bogus` is not found
    │
 29 │     const fn derive<T>(ev: own W<Bogus<T>>) -> W<Bogus<T>>
    │                                  ^^^^^ `Bogus` is not found
+
+error[2-0002]: `Bogus` is not found
+   ┌─ provider_goal_position_by_identity.fe:29:50
+   │
+29 │     const fn derive<T>(ev: own W<Bogus<T>>) -> W<Bogus<T>>
+   │                                                  ^^^^^ `Bogus` is not found
 
 error[2-0002]: `Bogus` is not found
    ┌─ provider_goal_position_by_identity.fe:32:28
