@@ -21,41 +21,9 @@
 // pre-existing const-ref robustness gap, reproducible with the proven
 // fixture-local `derived_abi_shape.fe` pattern too, and out of scope for #5.)
 
+// FCO #5b: `StableAbiSize` is the std-resident provider
+// (`ingots/std/src/abi.fe`); this fixture selects it by name.
 use core::abi::AbiSize
-use core::derive::Evidence
-use core::derive::ImplBuilder
-use core::derive::Reflect
-
-impl StableAbiSize: Derive for AbiSize {
-    const fn derive<T>(ev: own Evidence<AbiSize<T>>) -> Evidence<AbiSize<T>>
-        uses (
-            reflect: Reflect<T>,
-            builder: mut ImplBuilder<AbiSize<T>>,
-        )
-    {
-        if reflect.is_struct() {
-            let mut head = builder.bool(false)
-            let mut dynamic = builder.bool(false)
-            let mut first = true
-            for field in reflect.fields() {
-                builder.require<AbiSize>(field.ty())
-                let field_head = builder.trait_const(field.ty(), "HEAD_SIZE")
-                let field_dyn = builder.trait_const(field.ty(), "IS_DYNAMIC")
-                if first {
-                    head = field_head
-                    first = false
-                } else {
-                    head = builder.add(head, field_head)
-                }
-                dynamic = builder.or(dynamic, field_dyn)
-            }
-            builder.emit_const("HEAD_SIZE", builder.ty<u256>(), head)
-            builder.emit_const("IS_DYNAMIC", builder.ty<bool>(), dynamic)
-        }
-        builder.finish()
-        ev
-    }
-}
 
 struct Wrap<T> {
     inner: T,

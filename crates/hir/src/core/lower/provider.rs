@@ -1494,49 +1494,21 @@ impl Marker for Point {}
         use camino::Utf8PathBuf;
 
         let mut db = HirAnalysisTestDb::default();
+        // FCO #5b: `StableAbiSize` is the std-resident provider
+        // (`ingots/std/src/abi.fe`), promoted out of fixtures. It lives in `std`
+        // (not `core`) so its goal canonicalizes to the absolute path
+        // `core::abi::AbiSize` and the generated impls resolve everywhere; it is
+        // NOT in `core_derives`, so it is never a canonical AbiSize competitor.
+        // This file selects it by NAME — the unique provider of that name — so
+        // reconstruction is unambiguous.
         let file = db.new_stand_alone(
             Utf8PathBuf::from("reify_abi_size_provenance.fe"),
             r#"
 use core::abi::AbiSize
-use core::derive::Evidence
-use core::derive::ImplBuilder
-use core::derive::Reflect
 
 struct Point {
     x: u256,
     y: u256,
-}
-
-// A NAMED provider for the REAL core trait `core::abi::AbiSize`. There is no
-// canonical AbiSize provider in core_derives (AbiSize is EVM-specific and was
-// deliberately NOT canonicalized), so this is the only provider that provides
-// the goal -> reconstruction is unique.
-impl StableAbiSize: Derive for AbiSize {
-    const fn derive<T>(ev: own Evidence<AbiSize<T>>) -> Evidence<AbiSize<T>>
-        uses (
-            reflect: Reflect<T>,
-            builder: mut ImplBuilder<AbiSize<T>>,
-        )
-    {
-        if reflect.is_struct() {
-            let mut head = builder.bool(false)
-            let mut first = true
-            for field in reflect.fields() {
-                builder.require<AbiSize>(field.ty())
-                let field_head = builder.trait_const(field.ty(), "HEAD_SIZE")
-                if first {
-                    head = field_head
-                    first = false
-                } else {
-                    head = builder.add(head, field_head)
-                }
-            }
-            builder.emit_const("HEAD_SIZE", builder.ty<u256>(), head)
-            builder.emit_const("IS_DYNAMIC", builder.ty<bool>(), builder.bool(false))
-        }
-        builder.finish()
-        ev
-    }
 }
 
 derive AbiSize for Point using StableAbiSize
@@ -1579,10 +1551,13 @@ impl Marker for Point {}
             prov.generated_impl, gen_impl,
             "provenance names the generated impl itself"
         );
-        let expected_provider = *top_mod
-            .all_derive_providers(&db)
-            .first()
-            .expect("the fixture declares one provider (StableAbiSize)");
+        // The expected provider is the std-resident `StableAbiSize`, found
+        // among the providers visible from this module (its own ingot + std + core).
+        let expected_provider = super::visible_providers(&db, top_mod)
+            .into_iter()
+            .find(|p| p.name.data(&db) == "StableAbiSize")
+            .map(|p| p.provider)
+            .expect("the std-resident `StableAbiSize` provider is visible");
         assert_eq!(
             prov.provider, expected_provider,
             "provenance resolves to the NAMED `StableAbiSize` provider by identity"

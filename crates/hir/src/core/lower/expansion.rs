@@ -168,10 +168,32 @@ pub(crate) fn expanded_items_impl<'db>(
                         );
                     }
                 }
-                // `#[event]` / `#[error]` structs cannot be derive targets;
-                // report `#[derive(..)]` on them instead of expanding.
+                // `#[event]` / `#[error]` structs cannot be USER derive
+                // targets; a `#[derive(..)]` on them is still reported.
                 HirOrigin::Desugared(DesugaredOrigin::Event(_) | DesugaredOrigin::Error(_)) => {
                     report_derive_on_desugared_struct(&mut ctxt, struct_, &root);
+                    // FCO #5b (Route A): the compiler itself schedules a
+                    // synthetic, NAMED `AbiSize` derive for `#[error]`
+                    // desugared structs, replacing the deleted Rust
+                    // `lower_error_abi_size_impl` generator. This is
+                    // compiler-internal — not a user `#[derive]` — so it runs
+                    // regardless of the report above (a malformed user
+                    // `#[derive]` on the error is independent of the synthetic
+                    // AbiSize impl the error always needs).
+                    if let HirOrigin::Desugared(DesugaredOrigin::Error(
+                        crate::span::ErrorDesugared { error_struct },
+                    )) = struct_.origin(db)
+                    {
+                        schedule_error_abi_size(
+                            db,
+                            ctxt.top_mod(),
+                            struct_,
+                            error_struct.clone(),
+                            &mut |item, kind, request| {
+                                schedule(&mut targets, &mut groups, item, kind, request)
+                            },
+                        );
+                    }
                     continue;
                 }
                 _ => continue,
@@ -304,6 +326,102 @@ pub(crate) fn expanded_items_impl<'db>(
     }
 
     ExpandedItems { items, graph }
+}
+
+/// FCO #5b: schedules the compiler-internal, NAMED `AbiSize` derive request
+/// for an `#[error]` desugared struct (Route A), replacing the deleted Rust
+/// `lower_error_abi_size_impl` generator.
+///
+/// The request targets the `AbiSize` trait (canonical path `core::abi::AbiSize`,
+/// spelled through the error module's own core-ingot alias so it resolves to the
+/// real core trait def from any ingot), selected by NAME (`StableAbiSize`, the
+/// std-resident provider). It carries a `DeriveDesugared::Struct` origin built
+/// from the error struct's own AST, so the generated impl's origin is a
+/// `Desugared(Derive(..))` — provenance (`derived_impl_provenance`) then
+/// attributes it to `StableAbiSize`, and `lower_struct_derives` sources the
+/// reflection from the error struct's HIR fields, exactly like a user
+/// `derive AbiSize for E using StableAbiSize`.
+fn schedule_error_abi_size<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+    struct_: Struct<'db>,
+    error_struct: parser::ast::AstPtr<ast::Struct>,
+    schedule: &mut dyn FnMut(ItemKind<'db>, TargetKind<'db>, DeriveRequest<'db>),
+) {
+    use common::ingot::IngotKind;
+    use crate::hir_def::TypeKind;
+
+    // Well-formedness gate — byte-identical to the deleted Rust generator's
+    // guards in `lower_error_struct`: the `AbiSize` impl was generated ONLY for
+    // a named, non-generic error struct whose fields are all `Path` types
+    // (`parse_error_fields` rejects non-`Path` fields, setting `is_valid =
+    // false`, and the generator early-returns on `!is_valid`/generics/missing
+    // name). Replicating it here keeps the negative fixtures' diagnostics
+    // unchanged: a tuple/array field (`error_tuple_field`) still produces ONLY
+    // its 16-0004 diagnostic, with no synthetic `AbiSize` impl scheduled.
+    if struct_.name(db).to_opt().is_none() {
+        return;
+    }
+    if !struct_.generic_params(db).data(db).is_empty() {
+        return;
+    }
+    let fields = struct_.fields(db);
+    for field in fields.data(db) {
+        let Some(ty) = field.type_ref.to_opt() else {
+            return;
+        };
+        if !matches!(ty.data(db), TypeKind::Path(_)) {
+            return;
+        }
+        if field.name.to_opt().is_none() {
+            return;
+        }
+    }
+
+    // Recover the error struct's AST: `lower_struct_derives` uses it only for the
+    // item name and the generic-params diagnostic range (error structs have no
+    // generics). The reflection itself comes from the struct's HIR fields.
+    let root = top_mod_ast(db, top_mod).syntax().clone();
+    let Some(ast) = error_struct
+        .syntax_node_ptr()
+        .try_to_node(&root)
+        .and_then(ast::Struct::cast)
+    else {
+        return;
+    };
+
+    // The core-ingot alias as seen from the error module: `ingot` when the error
+    // itself lives in `core` (e.g. `core::error::*`), `core` otherwise. Mirrors
+    // `LibRoots::for_ctxt`, so the synthetic goal path resolves to the real
+    // `core::abi::AbiSize` trait def from this module (selection-by-identity).
+    let core_alias = if top_mod.ingot(db).kind(db) == IngotKind::Core {
+        IdentId::make_ingot(db)
+    } else {
+        IdentId::make_core(db)
+    };
+    let abi_size_ident = IdentId::new(db, "AbiSize".to_string());
+    let trait_path = PathId::from_ident(db, core_alias)
+        .push_ident(db, IdentId::new(db, "abi".to_string()))
+        .push_ident(db, abi_size_ident);
+
+    // NAMED selection of the std-resident `StableAbiSize` provider (a bare
+    // ident — `select_provider`'s named path resolves it by provider name).
+    let provider_path = PathId::from_ident(db, IdentId::new(db, "StableAbiSize".to_string()));
+
+    let primary_range = ast.syntax().text_range();
+
+    schedule(
+        ItemKind::Struct(struct_),
+        TargetKind::Struct(struct_, ast),
+        DeriveRequest {
+            trait_name: abi_size_ident,
+            trait_path,
+            primary_range,
+            selection: ProviderSelection::Named(provider_path),
+            selection_range: None,
+            desugared: DeriveDesugared::Struct(error_struct),
+        },
+    );
 }
 
 /// Reports the `#[derive(..)]` attributes of an `#[event]` / `#[error]`

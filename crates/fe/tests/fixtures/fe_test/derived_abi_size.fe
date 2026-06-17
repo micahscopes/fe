@@ -21,50 +21,12 @@
 // it uses ARE backend-agnostic infra (any layout provider can use them).
 
 use core::abi::AbiSize
-use core::derive::Evidence
-use core::derive::ImplBuilder
-use core::derive::Reflect
 
-// A NAMED provider for the REAL core trait `core::abi::AbiSize`. Selected only
-// via `derive AbiSize for T using StableAbiSize`; there is no canonical
-// auto-selected competitor (see the multi-backend note above).
-impl StableAbiSize: Derive for AbiSize {
-    const fn derive<T>(ev: own Evidence<AbiSize<T>>) -> Evidence<AbiSize<T>>
-        uses (
-            reflect: Reflect<T>,
-            builder: mut ImplBuilder<AbiSize<T>>,
-        )
-    {
-        if reflect.is_struct() {
-            // HEAD_SIZE = <F0 as AbiSize>::HEAD_SIZE + <F1>::HEAD_SIZE + ..
-            //   seeded with the first field's const so no integer literal is
-            //   needed; each later field folds in with `builder.add`.
-            // IS_DYNAMIC = false || <F0>::IS_DYNAMIC || .. (the leading `false`
-            //   seed is folded away by MIR, like StableEq's `true &&`).
-            let mut head = builder.bool(false)
-            let mut dynamic = builder.bool(false)
-            let mut first = true
-            for field in reflect.fields() {
-                // Re-enter normal checking: the generated impl carries an
-                // `AbiSize` obligation on every field type.
-                builder.require<AbiSize>(field.ty())
-                let field_head = builder.trait_const(field.ty(), "HEAD_SIZE")
-                let field_dyn = builder.trait_const(field.ty(), "IS_DYNAMIC")
-                if first {
-                    head = field_head
-                    first = false
-                } else {
-                    head = builder.add(head, field_head)
-                }
-                dynamic = builder.or(dynamic, field_dyn)
-            }
-            builder.emit_const("HEAD_SIZE", builder.ty<u256>(), head)
-            builder.emit_const("IS_DYNAMIC", builder.ty<bool>(), dynamic)
-        }
-        builder.finish()
-        ev
-    }
-}
+// FCO #5b: `StableAbiSize` lives in the `std` ingot
+// (`ingots/std/src/abi.fe`), promoted out of this fixture. It is selected here
+// by NAME via `derive AbiSize for T using StableAbiSize` (the unique provider
+// of that name, NOT canonical) — exercising the std-resident provider
+// end-to-end, the same one the compiler schedules for `#[error]` structs.
 
 struct Point {
     x: u256,

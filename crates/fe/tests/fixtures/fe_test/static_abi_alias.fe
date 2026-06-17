@@ -60,38 +60,11 @@ trait StaticAbi: AbiSize + AbiShape {}
 // write `impl StaticAbi for MyType`; satisfying both members is sufficient.
 impl<T> StaticAbi for T where T: AbiSize + AbiShape {}
 
-// --- NAMED providers for each member (reused from #5 / derived_abi_shape) ----
-impl StableAbiSize: Derive for AbiSize {
-    const fn derive<T>(ev: own Evidence<AbiSize<T>>) -> Evidence<AbiSize<T>>
-        uses (
-            reflect: Reflect<T>,
-            builder: mut ImplBuilder<AbiSize<T>>,
-        )
-    {
-        if reflect.is_struct() {
-            let mut head = builder.bool(false)
-            let mut dynamic = builder.bool(false)
-            let mut first = true
-            for field in reflect.fields() {
-                builder.require<AbiSize>(field.ty())
-                let field_head = builder.trait_const(field.ty(), "HEAD_SIZE")
-                let field_dyn = builder.trait_const(field.ty(), "IS_DYNAMIC")
-                if first {
-                    head = field_head
-                    first = false
-                } else {
-                    head = builder.add(head, field_head)
-                }
-                dynamic = builder.or(dynamic, field_dyn)
-            }
-            builder.emit_const("HEAD_SIZE", builder.ty<u256>(), head)
-            builder.emit_const("IS_DYNAMIC", builder.ty<bool>(), dynamic)
-        }
-        builder.finish()
-        ev
-    }
-}
-
+// --- NAMED providers for each member ----------------------------------------
+// `StableAbiSize` (member 1, `core::abi::AbiSize`) is now the std-resident
+// provider (`ingots/std/src/abi.fe`), promoted out of fixtures in FCO #5b;
+// it is selected by name below. `StableAbiShape` (member 2) stays fixture-local
+// (its trait `AbiShape` is fixture-local).
 impl StableAbiShape: Derive for AbiShape {
     const fn derive<T>(ev: own Evidence<AbiShape<T>>) -> Evidence<AbiShape<T>>
         uses (

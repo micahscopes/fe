@@ -5,10 +5,7 @@ use super::{
     AbiFieldContext, AbiFieldDiagnostic, FileLowerCtxt,
     attr::{has_named_attr, lower_attrs_without_named, named_attr_specs},
     hir_builder::HirBuilder,
-    msg::{
-        build_head_size_body_expr, create_direct_encode_assoc_const, create_head_size_assoc_const,
-        create_is_dynamic_assoc_const, create_payload_size_func,
-    },
+    msg::{build_head_size_body_expr, create_direct_encode_assoc_const},
 };
 use crate::{
     hir_def::{
@@ -167,8 +164,15 @@ pub(super) fn lower_error_struct<'db>(
         },
     );
 
-    // Generate impl AbiSize
-    lower_error_abi_size_impl(&mut builder, self_ty, &field_specs);
+    // FCO burn-down #5b: the `AbiSize` impl is NO LONGER generated here. It is
+    // produced in the post-lowering EXPANSION stage by the std-resident
+    // `StableAbiSize` derive provider, scheduled as a synthetic NAMED derive
+    // request against this `#[error]` struct (see `expansion.rs`
+    // `schedule_error_abi_size`). The deleted Rust generator was
+    // `lower_error_abi_size_impl`. `Encode` (below) stays in base lowering and
+    // reads per-field `Field::HEAD_SIZE` (not `Self::HEAD_SIZE`); the error's
+    // own `AbiSize` impl is resolved post-merge at ty_check, where the
+    // expansion-generated impl is visible.
 
     // Generate impl Encode<Sol>
     lower_error_encode_impl(&mut builder, self_ty, &field_specs);
@@ -360,34 +364,6 @@ fn create_selector_const<'db>(
         ty: Partial::Present(selector_ty),
         value: Partial::Present(body),
     }
-}
-
-fn lower_error_abi_size_impl<'db>(
-    builder: &mut HirBuilder<'_, 'db, ErrorDesugared>,
-    self_ty: TypeId<'db>,
-    field_specs: &[(IdentId<'db>, TypeId<'db>)],
-) {
-    let db = builder.db();
-    let roots = builder.roots();
-    let trait_path = PathId::from_ident(db, roots.core)
-        .push_str(db, "abi")
-        .push_str(db, "AbiSize");
-    let trait_ref = Partial::Present(TraitRefId::new(db, Partial::Present(trait_path)));
-    let ty = Partial::Present(self_ty);
-    let impl_trait_idx = builder.ctxt().next_impl_trait_idx();
-    builder.with_item_scope(
-        TrackedItemVariant::ImplTrait(impl_trait_idx),
-        |builder, id| {
-            let consts = vec![
-                create_head_size_assoc_const(builder, field_specs),
-                create_is_dynamic_assoc_const(builder, field_specs),
-            ];
-            let impl_trait =
-                builder.new_impl_trait(id, trait_ref, ty, vec![], consts, builder.origin());
-            create_payload_size_func(builder, field_specs);
-            impl_trait
-        },
-    );
 }
 
 fn lower_error_encode_impl<'db>(
