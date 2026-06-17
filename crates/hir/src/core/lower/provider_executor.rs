@@ -383,15 +383,14 @@ struct QuoteTemplate<'db> {
 type BinderGroup<'db> = (IdentId<'db>, usize);
 
 /// A builder command recorded during provider execution.
+///
+/// TD5.2: `require` is no longer a `BuilderCommand`. It migrated off bespoke
+/// command replay into the typed [`ProviderEffect::Require`] trace, which
+/// synthesis replays as an ordinary where-predicate. The executor no longer owns
+/// generated trait requirements; `BuilderCommand` now carries only generated-item
+/// construction (emit) commands.
 #[derive(Debug, Clone)]
 pub(super) enum BuilderCommand<'db> {
-    /// `builder.require<Trait>(ty)`: the generated impl requires
-    /// `ty: Trait`. `trait_path` is the canonical path of the required
-    /// trait (resolved against the provider module's imports).
-    Require {
-        ty: TypeId<'db>,
-        trait_path: crate::hir_def::PathId<'db>,
-    },
     /// `builder.emit_method(sig, body)`.
     EmitMethod { sig: SigId, body: GenExprId },
     /// `builder.emit_assoc_ty(name, ty)`: `type name = ty` in the generated
@@ -406,6 +405,42 @@ pub(super) enum BuilderCommand<'db> {
     },
 }
 
+/// A typed *provider effect*: the observable, side-effecting things a provider
+/// body does that re-enter ordinary compilation, recorded as an internal,
+/// dumpable IR seam (TD5.1).
+///
+/// This is the strangler-fig contract for the executor burn-down: each effect
+/// family is meant to migrate OUT of the bespoke `BuilderCommand` replay and
+/// into ordinary Fe compilation. It is deliberately **observability only** — it
+/// is NOT a parallel command language. It lands paired with the migration of
+/// the effect it records (the ratchet rule); a trace with no migration is not
+/// progress.
+///
+/// TD5.2 migrates the first family: [`ProviderEffect::Require`] — a
+/// provider-origin trait obligation. The require effect is no longer owned by the
+/// executor as a bespoke `BuilderCommand` (that variant is deleted); it is read
+/// from this trace by [`super::provider_synthesis::requirement_where_clause`],
+/// which replays a generic-param requirement as an ordinary `ty: Trait`
+/// where-predicate on the generated impl. A concrete requirement is a concrete
+/// obligation discharged at the generated body's use site. Both flow through
+/// normal obligation checking.
+#[derive(Debug, Clone)]
+pub(super) enum ProviderEffect<'db> {
+    /// `builder.require<Trait>(ty)`: the generated impl asserts `ty: Trait`.
+    ///
+    /// Carries the provenance of the requirement when it is cheaply
+    /// recoverable: `field_origin` is the reflected field whose `field.ty()`
+    /// produced `ty` (when the require argument was literally `field.ty()`),
+    /// for "provider required `Trait<ty>` because field `f` was reflected"
+    /// attribution. `None` when the require argument was some other type
+    /// expression (e.g. `builder.ty<u256>()`).
+    Require {
+        ty: TypeId<'db>,
+        trait_path: PathId<'db>,
+        field_origin: Option<FieldKey>,
+    },
+}
+
 /// The successful result of running a provider body: the recorded commands
 /// plus the arenas the generated expression/pattern/signature ids index
 /// into.
@@ -416,6 +451,42 @@ pub(super) struct ProviderOutput<'db> {
     pub(super) tys: Vec<GenTy<'db>>,
     pub(super) sigs: Vec<GenMethodSig<'db>>,
     pub(super) commands: Vec<BuilderCommand<'db>>,
+    /// The typed effect trace (TD5.1). Recorded in body-execution order,
+    /// paralleling [`Self::commands`] for the effect families that have
+    /// migrated off bespoke replay. Internal/dumpable; consumed by
+    /// [`super::provider_synthesis`].
+    pub(super) effects: Vec<ProviderEffect<'db>>,
+}
+
+impl<'db> ProviderOutput<'db> {
+    /// Renders the effect trace as a stable, dumpable string (TD5.1
+    /// observability). One line per recorded effect.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn dump_effects(&self, db: &'db dyn HirDb) -> String {
+        let mut out = String::new();
+        for effect in &self.effects {
+            match effect {
+                ProviderEffect::Require {
+                    ty,
+                    trait_path,
+                    field_origin,
+                } => {
+                    use std::fmt::Write;
+                    let _ = write!(
+                        out,
+                        "require {}: {}",
+                        ty.pretty_print(db),
+                        trait_path.pretty_print(db),
+                    );
+                    if let Some(field) = field_origin {
+                        let _ = write!(out, " (field {:?}.{})", field.variant, field.index);
+                    }
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
 }
 
 /// A compile-time value in the provider command language.
@@ -484,6 +555,9 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     sigs: Vec<GenMethodSig<'db>>,
     quotes: Vec<QuoteTemplate<'db>>,
     commands: Vec<BuilderCommand<'db>>,
+    /// The typed effect trace (TD5.1): the provider effects that re-enter
+    /// ordinary compilation, recorded in execution order.
+    effects: Vec<ProviderEffect<'db>>,
     emitted_methods: Vec<IdentId<'db>>,
     emitted_assocs: Vec<IdentId<'db>>,
     finished: bool,
@@ -529,6 +603,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             sigs: Vec::new(),
             quotes: Vec::new(),
             commands: Vec::new(),
+            effects: Vec::new(),
             emitted_methods: Vec::new(),
             emitted_assocs: Vec::new(),
             finished: false,
@@ -551,6 +626,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             tys: executor.tys,
             sigs: executor.sigs,
             commands: executor.commands,
+            effects: executor.effects,
         })
     }
 
@@ -621,7 +697,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
 
     fn tick(&mut self, range: TextRange) -> Result<(), ExecError> {
         self.steps += 1;
-        if self.steps > STEP_BUDGET || self.commands.len() + self.exprs.len() > COMMAND_BUDGET {
+        // `effects` is counted alongside `commands`: TD5.2 moved `require` out of
+        // `commands` into the effect trace, so the command-count cap must include
+        // it to keep the DoS guard total.
+        if self.steps > STEP_BUDGET
+            || self.commands.len() + self.effects.len() + self.exprs.len() > COMMAND_BUDGET
+        {
             return Err(ExecError {
                 kind: ProviderFailureKind::BudgetExceeded,
                 range,
@@ -1681,6 +1762,26 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
     }
 
+    /// The reflected field a `require<Trait>(ty)` argument came from, when the
+    /// argument is literally `<field-expr>.ty()` and the receiver evaluates to a
+    /// reflected field handle. Best-effort provenance for the effect trace
+    /// (TD5.1); returns `None` for any other type expression. Re-evaluating the
+    /// receiver is side-effect free — `field.ty()` is a pure reflection read.
+    fn require_field_origin(&mut self, arg: ExprId) -> Option<FieldKey> {
+        let Partial::Present(Expr::MethodCall(receiver, method, _, method_args)) =
+            arg.data(self.db, self.body)
+        else {
+            return None;
+        };
+        if method.to_opt()?.data(self.db).as_str() != "ty" || !method_args.is_empty() {
+            return None;
+        }
+        match self.eval_expr(*receiver).ok()? {
+            Value::Field(field) => Some(field),
+            _ => None,
+        }
+    }
+
     /// The main dispatch site for `builder.*` operations.
     ///
     /// FREEZE (TD5.0): every `(method, args)` arm below is a recognized
@@ -1722,8 +1823,20 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     });
                 };
                 let trait_path = canonical_trait_path(self.db, self.provider_top_mod, trait_path);
-                self.commands
-                    .push(BuilderCommand::Require { ty, trait_path });
+                // TD5.2 migration: `require` re-enters ordinary compilation as a
+                // typed provider effect, NOT a bespoke executor command (the
+                // `BuilderCommand::Require` variant is deleted). Synthesis
+                // ([`super::provider_synthesis::requirement_where_clause`]) replays
+                // a generic-param requirement as an ordinary `ty: Trait`
+                // where-predicate on the generated impl; a concrete requirement is
+                // a concrete obligation discharged at the generated body's use site.
+                // Either way the executor no longer OWNS the requirement.
+                let field_origin = self.require_field_origin(arg.expr);
+                self.effects.push(ProviderEffect::Require {
+                    ty,
+                    trait_path,
+                    field_origin,
+                });
                 Ok(Value::Unit)
             }
             ("emit_method", [sig_arg, body_arg]) => {
@@ -2547,6 +2660,80 @@ mod freeze_guard {
             total, 54,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
+        );
+    }
+
+    /// TD5.2 deletion guard: `require` is no longer a `BuilderCommand`. This
+    /// exhaustive match fails to compile if a `Require` (or any non-emit)
+    /// `BuilderCommand` variant is reintroduced — pinning that the executor no
+    /// longer OWNS generated trait requirements as bespoke replay commands.
+    #[test]
+    fn require_is_not_a_builder_command() {
+        fn _assert_only_emit_commands(cmd: &super::BuilderCommand<'_>) {
+            match cmd {
+                super::BuilderCommand::EmitMethod { .. }
+                | super::BuilderCommand::EmitAssocTy { .. }
+                | super::BuilderCommand::EmitConst { .. } => {}
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod effect_trace {
+    //! TD5.1 observability: the typed [`super::ProviderEffect`] trace is the
+    //! internal, dumpable seam recording the provider effects that re-enter
+    //! ordinary compilation. It lands PAIRED with the TD5.2 require migration
+    //! (the ratchet rule), not as a standalone shim.
+
+    use super::{FieldKey, ProviderEffect, ProviderOutput};
+    use crate::{HirDb, hir_def::PathId, test_db::TestDb};
+
+    #[test]
+    fn require_effect_dumps_with_field_provenance() {
+        let db = TestDb::default();
+        let db: &dyn HirDb = &db;
+
+        let ty = crate::hir_def::TypeId::new(
+            db,
+            crate::hir_def::TypeKind::Path(crate::hir_def::Partial::Present(PathId::from_ident(
+                db,
+                crate::hir_def::IdentId::new(db, "u256".to_string()),
+            ))),
+        );
+        let trait_path = PathId::from_ident(db, crate::hir_def::IdentId::new(db, "Eq".to_string()));
+
+        let output = ProviderOutput {
+            exprs: vec![],
+            pats: vec![],
+            tys: vec![],
+            sigs: vec![],
+            commands: vec![],
+            effects: vec![
+                ProviderEffect::Require {
+                    ty,
+                    trait_path,
+                    field_origin: Some(FieldKey {
+                        variant: None,
+                        index: 0,
+                    }),
+                },
+                ProviderEffect::Require {
+                    ty,
+                    trait_path,
+                    field_origin: None,
+                },
+            ],
+        };
+
+        let dump = output.dump_effects(db);
+        // The effect IR records BOTH the require and (cheaply) its reflected
+        // field origin — the observability paired with the migration.
+        assert_eq!(
+            dump,
+            "require u256: Eq (field None.0)\nrequire u256: Eq\n",
+            "TD5.1 effect trace must render each require (with field provenance \
+             when available)"
         );
     }
 }

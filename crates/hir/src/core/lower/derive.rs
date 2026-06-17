@@ -315,8 +315,11 @@ pub(super) struct DeriveGenerics<'db> {
     pub(super) impl_params: GenericParamListId<'db>,
     /// The item's own where-clause predicates, copied onto each impl.
     pub(super) inherited_preds: Vec<WherePredicate<'db>>,
-    /// Each type param as a path type (`A`, `B`, ..); provider requirements
-    /// on these become `P: Trait` predicates on the impl.
+    /// Each type param as a path type (`A`, `B`, ..). A provider `require`
+    /// whose type mentions one of these (a generic-param requirement) becomes a
+    /// real where-predicate on the impl; a fully-concrete requirement does not
+    /// (it is a concrete obligation discharged at the generated body's use
+    /// site). See [`super::provider_synthesis::requirement_where_clause`].
     pub(super) param_tys: Vec<TypeId<'db>>,
     /// `<A, B>` argument list applied to the item's name in the impl self
     /// type; `GenericArgListId::none` for non-generic items.

@@ -19,7 +19,7 @@ use super::{
     provider::{FieldName, ReflectedVariantKind, TargetReflection},
     provider_executor::{
         BuilderCommand, FieldKey, GenExpr, GenExprId, GenPat, GenPatId, GenTy, GenTyId,
-        ProviderOutput,
+        ProviderEffect, ProviderOutput,
     },
 };
 use crate::{
@@ -85,7 +85,7 @@ pub(super) fn synthesize_provider_impl<'db>(
                             value: Partial::Present(value_body),
                         });
                     }
-                    BuilderCommand::Require { .. } | BuilderCommand::EmitMethod { .. } => {}
+                    BuilderCommand::EmitMethod { .. } => {}
                 }
             }
             (types, consts)
@@ -123,49 +123,79 @@ pub(super) fn synthesize_provider_impl<'db>(
     );
 }
 
-/// The where clause of a provider-generated impl: the target's own
-/// predicates, plus one `P: Trait` predicate for every generic parameter
-/// `P` of the target that is *mentioned* by the type of some `require`
-/// command, in parameter order. A requirement on a composite type like
-/// `Pair<T, bool>` therefore becomes `T: Trait` — predicates on the
-/// composite type itself would shadow the (possibly generated) blanket impl
-/// and make trait resolution ambiguous. Requirements on fully concrete
-/// types need no predicate — the generated method bodies discharge them at
-/// their use sites like hand-written code.
+/// The where clause of a provider-generated impl: the target's own predicates,
+/// plus one `ty: Trait` predicate for every **generic-param** `require<Trait>(ty)`
+/// effect the provider issued.
+///
+/// TD5.2 (the require migration). Two things changed from the old executor-owned
+/// path, and one thing did NOT (and must not — see the W4/ambiguity note below):
+///
+/// 1. SOURCE: the requirement no longer comes from the executor's bespoke
+///    `BuilderCommand::Require` (deleted) walked by this function. It now comes
+///    from the typed [`ProviderEffect::Require`] trace — the obligation re-enters
+///    ordinary compilation as a provider effect, not an executor command. The
+///    executor no longer OWNS generated trait requirements.
+/// 2. SHAPE: the requirement is emitted on the **whole** require type (no
+///    per-param decomposition of composites); a requirement on `Pair<T, bool>`
+///    becomes `where Pair<T, bool>: Trait`, not the old `where T: Trait`.
+///
+/// W4 (the solve-line) — what stays. The predicate is the bounded form (subject
+/// `ty`, bound `Trait`). It is collected by the SAME constraint machinery as a
+/// hand-written `where ty: Trait` (`collect_decl_constraints` → `Deferred::Bound`
+/// → `lower_trait_ref`), which lowers `ty` to a concrete `TyId` and builds a
+/// concrete `TraitInstId`. `ty` is whatever `field.ty()` produced — a
+/// `TypeKind::Path`/tuple/etc., never a `* -> Constraint` head — so **no live
+/// `P` ever reaches the solver**. A generic-param `ty` (e.g. `T`) becomes
+/// `where T: Trait`, concrete at each instantiation.
+///
+/// CONCRETE requirements are NOT emitted as predicates (the
+/// `requirement_mentions_param` gate). This is not the old "silent drop": the
+/// concrete obligation IS enforced — it is discharged at the generated body's
+/// USE site (`<NoAbi as AbiSize>::HEAD_SIZE`, `self.field.eq(..)`, …), where a
+/// missing impl fails through the normal `6-0003` trait-bound diagnostic (the W6
+/// const-ref fix, #42, ensures this for assoc-const reads instead of an ICE).
+/// Emitting a where-predicate on a concrete `ty` whose impl is in scope is
+/// actively WRONG: it adds a duplicate method-resolution candidate (the bare
+/// where-assumption alongside the real impl), which the solver reports as
+/// `8-0026` "multiple trait candidates" for `self.field.<method>()` in the
+/// generated body (observed on array/tuple field types). Removing that gate
+/// entirely would require a method-resolution policy change (dedup
+/// assumption-candidates against impl-candidates), which is an owner decision,
+/// not part of TD5.2 — see the TD5.2 report.
 fn requirement_where_clause<'db>(
     db: &'db dyn HirDb,
     generics: &super::derive::DeriveGenerics<'db>,
     output: &ProviderOutput<'db>,
 ) -> WhereClauseId<'db> {
-    let mut requirements: Vec<(TypeId<'db>, PathId<'db>)> = Vec::new();
-    for command in &output.commands {
-        if let BuilderCommand::Require { ty, trait_path } = command
-            && !requirements.contains(&(*ty, *trait_path))
-        {
-            requirements.push((*ty, *trait_path));
-        }
-    }
+    let param_names: Vec<IdentId<'db>> = generics
+        .param_tys
+        .iter()
+        .filter_map(|param_ty| ty_as_bare_ident(db, *param_ty))
+        .collect();
 
     let mut preds = generics.inherited_preds.clone();
-    for param_ty in &generics.param_tys {
-        let Some(param_name) = ty_as_bare_ident(db, *param_ty) else {
+    let mut seen: Vec<(TypeId<'db>, PathId<'db>)> = Vec::new();
+    for effect in &output.effects {
+        let ProviderEffect::Require {
+            ty, trait_path, ..
+        } = effect;
+        // Concrete requirements are discharged at the generated body's use site,
+        // not as a predicate (see the doc comment): only generic-param
+        // requirements become where-predicates.
+        if !ty_mentions_param(db, *ty, &param_names) {
             continue;
-        };
-        let mut bound_paths: Vec<PathId<'db>> = Vec::new();
-        for (ty, trait_path) in &requirements {
-            if ty_mentions_param(db, *ty, &[param_name]) && !bound_paths.contains(trait_path) {
-                bound_paths.push(*trait_path);
-            }
         }
-        for trait_path in bound_paths {
-            preds.push(WherePredicate {
-                ty: Partial::Present(*param_ty),
-                bounds: vec![TypeBound::Trait(TraitRefId::new(
-                    db,
-                    Partial::Present(trait_path),
-                ))],
-            });
+        if seen.contains(&(*ty, *trait_path)) {
+            continue;
         }
+        seen.push((*ty, *trait_path));
+        preds.push(WherePredicate {
+            ty: Partial::Present(*ty),
+            bounds: vec![TypeBound::Trait(TraitRefId::new(
+                db,
+                Partial::Present(*trait_path),
+            ))],
+        });
     }
 
     WhereClauseId::new(db, preds, vec![])
@@ -179,9 +209,12 @@ fn ty_as_bare_ident<'db>(db: &'db dyn HirDb, ty: TypeId<'db>) -> Option<IdentId<
     }
 }
 
-/// Whether `ty` syntactically mentions any of the target's generic
-/// parameter names.
+/// Whether `ty` syntactically mentions any of the target's generic parameter
+/// names — i.e. whether the requirement is generic (vs fully concrete).
 fn ty_mentions_param<'db>(db: &'db dyn HirDb, ty: TypeId<'db>, params: &[IdentId<'db>]) -> bool {
+    if params.is_empty() {
+        return false;
+    }
     match ty.data(db) {
         TypeKind::Path(path) => path
             .to_opt()
