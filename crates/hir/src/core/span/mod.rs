@@ -315,6 +315,11 @@ pub enum DeriveDesugared {
     /// impl. Diagnostics on decl-generated items point at the declaration,
     /// not at the target type.
     Decl(AstPtr<ast::DeriveDecl>),
+    /// A compiler-synthesized derive on a `#[msg]` VARIANT struct (FCO #5c):
+    /// the variant has no source `struct` AST, so provenance points at the
+    /// `msg` block and the variant index. Diagnostics on the generated impl
+    /// resolve to the variant's span.
+    MsgVariant(AstPtr<ast::Msg>, usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

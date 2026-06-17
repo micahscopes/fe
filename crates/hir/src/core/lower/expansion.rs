@@ -66,6 +66,11 @@ pub fn generated_hir_items<'db>(
 enum TargetKind<'db> {
     Struct(Struct<'db>, ast::Struct),
     Enum(Enum<'db>, ast::Enum),
+    /// A SYNTHETIC struct with no source `ast::Struct` — a `#[msg]` variant
+    /// struct (FCO #5c). The compiler schedules a NAMED `AbiSize` derive for it;
+    /// `lower_synthetic_struct_derives` reflects its HIR fields and uses the
+    /// carried span as the (never-firing) generics-diagnostic anchor.
+    SyntheticStruct(Struct<'db>, parser::TextRange),
 }
 
 struct PendingTarget<'db> {
@@ -196,6 +201,33 @@ pub(crate) fn expanded_items_impl<'db>(
                     }
                     continue;
                 }
+                // FCO #5c (Route A): a `#[msg]` block desugars to a mod of
+                // per-variant structs. The compiler schedules a synthetic NAMED
+                // `AbiSize` derive for each VARIANT struct, replacing the deleted
+                // Rust `lower_msg_variant_abi_size_impl` generator. Variant
+                // structs are fully synthetic (source is `ast::MsgVariant`, no
+                // `ast::Struct`), so this uses a `SyntheticStruct` target. The
+                // msg MOD itself (variant_idx == None) is not a struct target.
+                HirOrigin::Desugared(DesugaredOrigin::Msg(_)) => {
+                    if let HirOrigin::Desugared(DesugaredOrigin::Msg(crate::span::MsgDesugared {
+                        msg,
+                        variant_idx: Some(variant_idx),
+                        ..
+                    })) = struct_.origin(db)
+                    {
+                        schedule_msg_variant_abi_size(
+                            db,
+                            ctxt.top_mod(),
+                            struct_,
+                            msg.clone(),
+                            *variant_idx,
+                            &mut |item, kind, request| {
+                                schedule(&mut targets, &mut groups, item, kind, request)
+                            },
+                        );
+                    }
+                    continue;
+                }
                 _ => continue,
             },
             ItemKind::Enum(enum_) => {
@@ -315,6 +347,14 @@ pub(crate) fn expanded_items_impl<'db>(
                 TargetKind::Enum(enum_, ast) => {
                     derive::lower_enum_derives(&mut ctxt, ast, *enum_, &pending.requests);
                 }
+                TargetKind::SyntheticStruct(struct_, anchor) => {
+                    derive::lower_synthetic_struct_derives(
+                        &mut ctxt,
+                        *anchor,
+                        *struct_,
+                        &pending.requests,
+                    );
+                }
             }
         }
         ctxt.leave_shim_scope();
@@ -420,6 +460,83 @@ fn schedule_error_abi_size<'db>(
             selection: ProviderSelection::Named(provider_path),
             selection_range: None,
             desugared: DeriveDesugared::Struct(error_struct),
+        },
+    );
+}
+
+/// FCO #5c: schedules the compiler-internal, NAMED `AbiSize` derive request for
+/// a `#[msg]` VARIANT struct (Route A), replacing the deleted Rust
+/// `lower_msg_variant_abi_size_impl` generator.
+///
+/// Unlike `#[error]` structs (which have a real source `ast::Struct`), msg
+/// variant structs are FULLY SYNTHETIC — the source is an `ast::MsgVariant`, so
+/// there is no `ast::Struct` to feed the normal `TargetKind::Struct` path. This
+/// schedules a `TargetKind::SyntheticStruct` instead: `lower_synthetic_struct_
+/// derives` reflects the variant struct's HIR fields and uses `anchor` (the
+/// variant's span) only as the never-firing generics-diagnostic fallback. The
+/// goal trait is the real `core::abi::AbiSize` (spelled through the module's
+/// core-ingot alias), selected by NAME (`StableAbiSize`, the std-resident
+/// provider). Provenance is `DeriveDesugared::MsgVariant(msg, idx)`.
+///
+/// No `#[error]`-style Path-field gate: the deleted msg generator emitted
+/// `AbiSize` for every variant regardless of field shape, so a non-`AbiSize`
+/// field now diagnoses through the generated impl exactly as it did before.
+fn schedule_msg_variant_abi_size<'db>(
+    db: &'db dyn HirDb,
+    top_mod: TopLevelMod<'db>,
+    struct_: Struct<'db>,
+    msg: parser::ast::AstPtr<ast::Msg>,
+    variant_idx: usize,
+    schedule: &mut dyn FnMut(ItemKind<'db>, TargetKind<'db>, DeriveRequest<'db>),
+) {
+    use common::ingot::IngotKind;
+
+    // Guard against a parser-error variant with no name (avoid a nameless impl).
+    if struct_.name(db).to_opt().is_none() {
+        return;
+    }
+
+    // Recover the variant's span as the diagnostic anchor for the synthetic
+    // struct (it has no `ast::Struct`).
+    let root = top_mod_ast(db, top_mod).syntax().clone();
+    let Some(msg_ast) = msg
+        .syntax_node_ptr()
+        .try_to_node(&root)
+        .and_then(ast::Msg::cast)
+    else {
+        return;
+    };
+    let anchor = msg_ast
+        .variants()
+        .and_then(|vs| vs.into_iter().nth(variant_idx))
+        .map(|v| v.syntax().text_range())
+        .unwrap_or_else(|| msg_ast.syntax().text_range());
+
+    // Same core-ingot alias as the error scheduler: `ingot` when the msg lives
+    // in `core`, `core` otherwise — so the synthetic goal resolves to the real
+    // `core::abi::AbiSize` def from this module.
+    let core_alias = if top_mod.ingot(db).kind(db) == IngotKind::Core {
+        IdentId::make_ingot(db)
+    } else {
+        IdentId::make_core(db)
+    };
+    let abi_size_ident = IdentId::new(db, "AbiSize".to_string());
+    let trait_path = PathId::from_ident(db, core_alias)
+        .push_ident(db, IdentId::new(db, "abi".to_string()))
+        .push_ident(db, abi_size_ident);
+
+    let provider_path = PathId::from_ident(db, IdentId::new(db, "StableAbiSize".to_string()));
+
+    schedule(
+        ItemKind::Struct(struct_),
+        TargetKind::SyntheticStruct(struct_, anchor),
+        DeriveRequest {
+            trait_name: abi_size_ident,
+            trait_path,
+            primary_range: anchor,
+            selection: ProviderSelection::Named(provider_path),
+            selection_range: None,
+            desugared: DeriveDesugared::MsgVariant(msg, variant_idx),
         },
     );
 }

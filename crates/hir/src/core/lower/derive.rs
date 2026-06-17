@@ -414,7 +414,38 @@ pub(super) fn lower_struct_derives<'db>(
     requests: &[DeriveRequest<'db>],
 ) {
     let item_name = ast.name().map(|n| n.text().to_string());
+    lower_struct_derives_inner(ctxt, item_name, struct_, requests, || {
+        ast.generic_params()
+            .map(|g| g.syntax().text_range())
+            .unwrap_or_else(|| ast.syntax().text_range())
+    });
+}
 
+/// Like [`lower_struct_derives`] but for a SYNTHETIC struct that has no source
+/// `ast::Struct` — e.g. a `#[msg]` variant struct (FCO #5c). The item name comes
+/// from the HIR struct, and `anchor` is the diagnostic span used only as the
+/// generics-diagnostic fallback (synthetic structs have no generics, so it never
+/// actually fires). Reflection is sourced from the struct's HIR fields, exactly
+/// as in [`lower_struct_derives`] — the `ast::Struct` was only ever used for the
+/// item name and that fallback span.
+pub(super) fn lower_synthetic_struct_derives<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    anchor: parser::TextRange,
+    struct_: Struct<'db>,
+    requests: &[DeriveRequest<'db>],
+) {
+    let db = ctxt.db();
+    let item_name = struct_.name(db).to_opt().map(|n| n.data(db).to_string());
+    lower_struct_derives_inner(ctxt, item_name, struct_, requests, || anchor);
+}
+
+fn lower_struct_derives_inner<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    item_name: Option<String>,
+    struct_: Struct<'db>,
+    requests: &[DeriveRequest<'db>],
+    generics_range: impl FnOnce() -> parser::TextRange,
+) {
     let db = ctxt.db();
 
     let Some(generics) = derive_generics(
@@ -423,11 +454,7 @@ pub(super) fn lower_struct_derives<'db>(
         "struct",
         struct_.generic_params(db),
         struct_.where_clause(db),
-        || {
-            ast.generic_params()
-                .map(|g| g.syntax().text_range())
-                .unwrap_or_else(|| ast.syntax().text_range())
-        },
+        generics_range,
     ) else {
         return;
     };

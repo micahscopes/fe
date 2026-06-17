@@ -556,6 +556,14 @@ impl DesugaredOrigin {
             Self::Derive(super::DeriveDesugared::Decl(derive_decl)) => {
                 derive_decl.to_node(&root).syntax().text_range()
             }
+            Self::Derive(super::DeriveDesugared::MsgVariant(msg, variant_idx)) => {
+                let msg_node = msg.to_node(&root);
+                msg_node
+                    .variants()
+                    .and_then(|vs| vs.into_iter().nth(variant_idx))
+                    .map(|v| v.syntax().text_range())
+                    .unwrap_or_else(|| msg_node.syntax().text_range())
+            }
         };
 
         Span::new(file, range, SpanKind::Original)
