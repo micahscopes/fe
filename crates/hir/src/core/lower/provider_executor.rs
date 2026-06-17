@@ -40,6 +40,119 @@ const STEP_BUDGET: usize = 100_000;
 /// one provider run.
 const COMMAND_BUDGET: usize = 10_000;
 
+// === FROZEN command surface (TD5.0) ====================================
+//
+// FREEZE (TD5.0): the provider-body executor recognizes a fixed set of
+// operations. Adding a provider-body op requires a TD5 category decision
+// (see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md). The canonical lists below
+// are the single source of truth for the *names* the dispatch recognizes;
+// the `recognized_*_ops_are_frozen` tests pin them so the surface cannot
+// grow silently while later TD5 rungs shrink it. Update these lists ONLY as
+// part of a TD5 rung (and update the inventory doc in the same change).
+//
+// These are pure inventory: the dispatch `match`es in `eval_builder_method`,
+// `eval_method_call`, and `eval_iterable` remain the runtime authority; the
+// catch-all arms `debug_assert!` that any name routed to them is NOT in the
+// canonical list, so the list and the dispatch cannot drift apart.
+
+/// Every `builder.*` operation recognized by [`ProviderExecutor::eval_builder_method`].
+/// One entry per `(method, args)` arm spelling. Includes obligation
+/// (`require`), finish (`finish`), and the generated-HIR builder cluster.
+const RECOGNIZED_BUILDER_OPS: &[&str] = &[
+    // B-obl
+    "require",
+    // FIN
+    "finish",
+    // B-build: emit
+    "emit_method",
+    "emit_const",
+    "emit_assoc_ty",
+    // B-build: generated expressions
+    "bool",
+    "and",
+    "or",
+    "add",
+    "eq",
+    "lt",
+    "gt",
+    "self_ref",
+    "arg_ref",
+    "field_get",
+    "call",
+    "trait_call",
+    "trait_const",
+    "static_call",
+    "keccak",
+    "struct_init",
+    "variant_init",
+    "with_field",
+    "match_expr",
+    "with_arm",
+    "variant_binder",
+    "tuple_expr",
+    "with_elem",
+    "str",
+    // B-build: generated patterns
+    "wildcard_pat",
+    "variant_pat",
+    // B-build: generated types
+    "ty",
+    "target_ty",
+    "self_ty",
+    "str_ty",
+    "tuple_ty",
+    "with_elem_ty",
+    "trait_assoc_ty",
+    // B-build: generated method signatures
+    "method",
+    "with_self",
+    "with_arg",
+    "returns",
+    // B-build / R: compile-time string fold + identity reads spelled as
+    // `builder.*` methods (catalogued as R in the inventory doc, but their
+    // literals live in `eval_builder_method` so they are pinned here).
+    "concat",
+    "same_ty",
+    "same_field",
+];
+
+/// Every reflection-read operation recognized as a method call on a
+/// `reflect`/`field`/`variant` handle in [`ProviderExecutor::eval_method_call`].
+/// (The `for`-loop iterable reads `fields`/`variants` live in
+/// [`RECOGNIZED_ITERABLE_OPS`].)
+const RECOGNIZED_REFLECT_OPS: &[&str] = &[
+    // reflect.*
+    "is_struct",
+    "is_enum",
+    "target_name",
+    // field.*
+    "ty",
+    "name",
+    // variant.*
+    "is_default",
+    "precedes",
+];
+
+/// Every `for`-loop iterable read intercepted by
+/// [`ProviderExecutor::eval_iterable`] (matched as `(receiver, method)` pairs;
+/// the distinct method names are listed here). `fields` is recognized on both
+/// `reflect` and `variant` receivers.
+const RECOGNIZED_ITERABLE_OPS: &[&str] = &["fields", "variants"];
+
+/// FREEZE (TD5.0): a compile-time pin on the size of the recognized command
+/// surface. Changing any list above without updating these counts (and
+/// `docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md`) fails to compile. The
+/// `recognized_*_ops_*` tests additionally pin exact membership against the
+/// dispatch arms. (This `const` block also keeps the lists referenced in
+/// non-test builds, so they are not dead code.)
+const _: () = {
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 45);
+    assert!(RECOGNIZED_REFLECT_OPS.len() == 7);
+    assert!(RECOGNIZED_ITERABLE_OPS.len() == 2);
+};
+
+// === end FROZEN command surface ========================================
+
 /// Why a provider execution failed. Rendered into a derive diagnostic at the
 /// request site (with the failing provider expression as the primary span
 /// when it lies in the same file, see `expansion`).
@@ -1507,6 +1620,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         };
         let receiver_value = self.eval_expr(receiver)?;
         let method_name = method.data(self.db).clone();
+        // FREEZE (TD5.0): the reflection-read method names below are pinned by
+        // [`RECOGNIZED_REFLECT_OPS`]; `builder.*` ops are pinned in
+        // `eval_builder_method`. See docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md.
         match receiver_value {
             Value::Builder => self.eval_builder_method(expr, &method_name, generic_args, &args),
             Value::Reflect => match (method_name.as_str(), args.as_slice()) {
@@ -1565,6 +1681,13 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
     }
 
+    /// The main dispatch site for `builder.*` operations.
+    ///
+    /// FREEZE (TD5.0): every `(method, args)` arm below is a recognized
+    /// provider-body op, mirrored by [`RECOGNIZED_BUILDER_OPS`]. Adding an op
+    /// requires a TD5 category decision (see
+    /// `docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md`); update the canonical list
+    /// and the inventory doc in the same change, or the freeze test fails.
     fn eval_builder_method(
         &mut self,
         expr: ExprId,
@@ -1993,6 +2116,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 };
                 Ok(Value::Ty(path))
             }
+            // FREEZE (TD5.0): an unrecognized `builder.*` op (or a recognized
+            // one with the wrong arity) falls here. The set of recognized
+            // names is pinned to RECOGNIZED_BUILDER_OPS by the
+            // `recognized_builder_ops_match_dispatch` test, which scans this
+            // function's arms — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md.
             _ => Err(self.unsupported_expr(expr)),
         }
     }
@@ -2193,6 +2321,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             return Err(self.unsupported_expr(iterable));
         }
         let receiver_value = self.eval_expr(receiver)?;
+        // FREEZE (TD5.0): the `for`-loop iterable reads below are pinned by
+        // [`RECOGNIZED_ITERABLE_OPS`]. See
+        // docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md.
         match (receiver_value, method.data(self.db).as_str()) {
             (Value::Reflect, "fields") => Ok(Iterable::StructFields),
             (Value::Reflect, "variants") => Ok(Iterable::Variants),
@@ -2234,5 +2365,188 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Reflect => "reflect capability",
         Value::Evidence => "evidence value",
         Value::Unit => "unit value",
+    }
+}
+
+#[cfg(test)]
+mod freeze_guard {
+    //! FREEZE (TD5.0): adding a provider-body op requires a TD5 category
+    //! decision (see TD5_PROVIDER_COMMAND_SURFACE.md). Update this list only as
+    //! part of a TD5 rung.
+    //!
+    //! These tests pin the executor's recognized command surface. They scan
+    //! this very source file (`include_str!`) and cross-check the dispatch
+    //! arms against the canonical `RECOGNIZED_*` lists, so the surface cannot
+    //! grow (or shrink) silently while later TD5 rungs migrate ops off the
+    //! executor. A new `("name", ..)` arm with no entry in the canonical list
+    //! — or a list entry with no arm — fails the corresponding test.
+
+    use super::{RECOGNIZED_BUILDER_OPS, RECOGNIZED_ITERABLE_OPS, RECOGNIZED_REFLECT_OPS};
+
+    /// This module's source, embedded at compile time so the scan is
+    /// path-independent and always matches the dispatch it pins.
+    const SOURCE: &str = include_str!("provider_executor.rs");
+
+    /// Returns the source slice from the first occurrence of `start` to the
+    /// first occurrence of `end` after it. Panics if either marker is missing,
+    /// so a refactor that renames the dispatch fns trips the test loudly.
+    fn slice_between<'s>(start: &str, end: &str) -> &'s str {
+        let from = SOURCE
+            .find(start)
+            .unwrap_or_else(|| panic!("freeze scan: marker `{start}` not found"));
+        let rest = &SOURCE[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("freeze scan: marker `{end}` not found after `{start}`"));
+        &rest[..to]
+    }
+
+    /// Extracts every leading `("name",` arm key from a match body slice: a
+    /// line whose first non-whitespace characters are `("`, taking the
+    /// identifier up to the closing `"`. This is exactly the spelling of every
+    /// recognized-op arm in the dispatch functions.
+    fn arm_keys(slice: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        for line in slice.lines() {
+            let trimmed = line.trim_start();
+            if let Some(after) = trimmed.strip_prefix("(\"")
+                && let Some(end) = after.find('"')
+            {
+                keys.push(after[..end].to_string());
+            }
+        }
+        keys
+    }
+
+    fn sorted_unique(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn recognized_builder_ops_match_dispatch() {
+        // The body of `eval_builder_method`, from its signature to the
+        // catch-all freeze marker, so neither the `RECOGNIZED_*` consts nor
+        // unrelated string literals are scanned.
+        let body = slice_between(
+            "fn eval_builder_method(",
+            "// FREEZE (TD5.0): an unrecognized `builder.*` op",
+        );
+        let dispatch = sorted_unique(arm_keys(body));
+        let canonical = sorted_unique(
+            RECOGNIZED_BUILDER_OPS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        assert_eq!(
+            dispatch, canonical,
+            "FREEZE (TD5.0): eval_builder_method dispatch arms drifted from \
+             RECOGNIZED_BUILDER_OPS. Adding/removing a `builder.*` op requires a TD5 \
+             category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
+        );
+        // No accidental duplicate spellings in the canonical list.
+        assert_eq!(
+            RECOGNIZED_BUILDER_OPS.len(),
+            canonical.len(),
+            "RECOGNIZED_BUILDER_OPS has duplicate entries"
+        );
+        // Pin the count too, so a same-size swap is still flagged for review.
+        assert_eq!(
+            RECOGNIZED_BUILDER_OPS.len(),
+            45,
+            "FREEZE (TD5.0): the builder command surface changed size; update the count \
+             and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung."
+        );
+    }
+
+    #[test]
+    fn recognized_reflect_ops_match_dispatch() {
+        // The reflect/field/variant method arms live between the
+        // `eval_method_call` freeze comment and the start of
+        // `eval_builder_method`.
+        let body = slice_between(
+            "// FREEZE (TD5.0): the reflection-read method names below",
+            "fn eval_builder_method(",
+        );
+        let mut dispatch = arm_keys(body);
+        // `eval_method_call`'s arms repeat no names except across receiver
+        // blocks (none here), so a plain sort/dedup yields the recognized set.
+        dispatch = sorted_unique(dispatch);
+        let canonical = sorted_unique(
+            RECOGNIZED_REFLECT_OPS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        assert_eq!(
+            dispatch, canonical,
+            "FREEZE (TD5.0): eval_method_call reflection-read arms drifted from \
+             RECOGNIZED_REFLECT_OPS — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
+        );
+        assert_eq!(
+            RECOGNIZED_REFLECT_OPS.len(),
+            7,
+            "FREEZE (TD5.0): the reflection-read surface changed size; update the count \
+             and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung."
+        );
+    }
+
+    #[test]
+    fn recognized_iterable_ops_are_frozen() {
+        // The `for`-loop iterables are matched as `(receiver, "name")` pairs,
+        // not leading `("name",` arms, so pin them by exact membership against
+        // the names the dispatch contains.
+        let body = slice_between(
+            "// FREEZE (TD5.0): the `for`-loop iterable reads below",
+            "_ => Err(self.unsupported_expr(iterable)),",
+        );
+        for op in RECOGNIZED_ITERABLE_OPS {
+            assert!(
+                body.contains(&format!("\"{op}\"")),
+                "FREEZE (TD5.0): RECOGNIZED_ITERABLE_OPS lists `{op}` but eval_iterable has \
+                 no matching arm — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
+            );
+        }
+        // Exactly the two distinct iterable method names (`fields`,
+        // `variants`); `fields` is matched on two receivers.
+        assert_eq!(
+            RECOGNIZED_ITERABLE_OPS.len(),
+            2,
+            "FREEZE (TD5.0): the for-loop iterable surface changed size; update the count \
+             and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung."
+        );
+        // Guard against an unrecognized string-literal `(Value::*, \"x\")`
+        // iterable arm sneaking in: every quoted name in this slice must be a
+        // recognized iterable op.
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("(Value::")
+                && let Some(open) = trimmed.find('"')
+                && let Some(close) = trimmed[open + 1..].find('"')
+            {
+                let name = &trimmed[open + 1..open + 1 + close];
+                assert!(
+                    RECOGNIZED_ITERABLE_OPS.contains(&name),
+                    "FREEZE (TD5.0): eval_iterable recognizes `{name}` but it is not in \
+                     RECOGNIZED_ITERABLE_OPS — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn total_recognized_method_surface_is_pinned() {
+        // The full named method/iterable surface the freeze pins: 45 builder
+        // ops + 7 reflection reads + 2 iterable names = 54 distinct literals
+        // (the inventory's "55" counts `fields` twice for its two receivers).
+        let total =
+            RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len() + RECOGNIZED_ITERABLE_OPS.len();
+        assert_eq!(
+            total, 54,
+            "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
+             a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
+        );
     }
 }
