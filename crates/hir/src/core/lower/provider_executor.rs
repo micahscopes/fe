@@ -116,15 +116,18 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     "same_field",
 ];
 
-/// Every reflection-read operation recognized as a method call on a
-/// `reflect`/`field`/`variant` handle in [`ProviderExecutor::eval_method_call`].
-/// (The `for`-loop iterable reads `fields`/`variants` live in
-/// [`RECOGNIZED_ITERABLE_OPS`].)
+/// Every reflection-read operation still recognized as a *bespoke* method-call
+/// arm on a `reflect`/`field`/`variant` handle in
+/// [`ProviderExecutor::eval_method_call`]. (The `for`-loop iterable reads
+/// `fields`/`variants` live in [`RECOGNIZED_ITERABLE_OPS`].)
+///
+/// TD5c: the three `reflect.*` *scalar* reads (`is_struct`/`is_enum`/
+/// `target_name`) are NO LONGER here. They migrated off the bespoke executor
+/// onto the typed read-only [`ReflectHandle`], which owns its own property
+/// vocabulary; the executor consults the handle by name instead of pinning
+/// those names as dispatch arms. The `field.*`/`variant.*` reads are not yet
+/// migrated, so they remain pinned here.
 const RECOGNIZED_REFLECT_OPS: &[&str] = &[
-    // reflect.*
-    "is_struct",
-    "is_enum",
-    "target_name",
     // field.*
     "ty",
     "name",
@@ -147,7 +150,8 @@ const RECOGNIZED_ITERABLE_OPS: &[&str] = &["fields", "variants"];
 /// non-test builds, so they are not dead code.)
 const _: () = {
     assert!(RECOGNIZED_BUILDER_OPS.len() == 45);
-    assert!(RECOGNIZED_REFLECT_OPS.len() == 7);
+    // TD5c: was 7; the three `reflect.*` scalar reads moved onto `ReflectHandle`.
+    assert!(RECOGNIZED_REFLECT_OPS.len() == 4);
     assert!(RECOGNIZED_ITERABLE_OPS.len() == 2);
 };
 
@@ -514,12 +518,76 @@ enum Value<'db> {
     Quote(QuoteId),
     /// The `builder: mut ImplBuilder<..>` capability.
     Builder,
-    /// The `reflect: Reflect<..>` capability.
-    Reflect,
+    /// The `reflect: Reflect<..>` capability, as a typed read-only handle
+    /// (TD5c). Scalar reads (`is_struct`/`is_enum`/`target_name`) resolve
+    /// against the handle's own property table, not bespoke executor arms.
+    Reflect(ReflectHandle<'db>),
     /// An opaque evidence value (the provider's ordinary parameters).
     Evidence,
     /// The result of a command call; carries no data.
     Unit,
+}
+
+/// A typed read-only compile-time handle over the derive target's reflection
+/// (TD5c). It is the value `Value::Reflect` carries.
+///
+/// The point of the handle is to take the `reflect.*` *scalar* reads OFF the
+/// bespoke executor: instead of `eval_method_call` string-matching
+/// `("is_struct", [])` / `("is_enum", [])` / `("target_name", [])` against a
+/// `Value::Reflect` receiver and reaching into ambient executor state, the
+/// handle owns its own read-only property vocabulary ([`Self::scalar_read`]).
+/// The executor no longer knows those names — it asks the handle to resolve a
+/// named, argument-free read and turns the result into a `Value`. This is a
+/// read-only CTFE view: it carries copies of the facts (no `&` into the
+/// reflection arena) and emits no commands/obligations.
+#[derive(Debug, Clone, Copy)]
+struct ReflectHandle<'db> {
+    is_struct: bool,
+    is_enum: bool,
+    target_name: IdentId<'db>,
+}
+
+/// The typed result of a read-only scalar reflection read (TD5c). Maps onto a
+/// `Value` without the read site knowing which property produced it.
+#[derive(Debug, Clone, Copy)]
+enum ScalarRead<'db> {
+    Bool(bool),
+    Name(IdentId<'db>),
+}
+
+impl<'db> ReflectHandle<'db> {
+    fn new(reflection: &TargetReflection<'db>, target_name: IdentId<'db>) -> Self {
+        ReflectHandle {
+            is_struct: reflection.is_struct(),
+            is_enum: reflection.is_enum(),
+            target_name,
+        }
+    }
+
+    /// This handle's read-only scalar property vocabulary: the named,
+    /// argument-free reads it answers, as a *data table* of `(name, value)`.
+    /// The vocabulary lives HERE, on the handle — not as arms in the
+    /// executor's dispatch `match`. The executor consults the table by name
+    /// ([`Self::scalar_read`]); it does not know `is_struct`/`is_enum`/
+    /// `target_name` (TD5c).
+    fn scalar_reads(&self) -> [(&'static str, ScalarRead<'db>); 3] {
+        [
+            ("is_struct", ScalarRead::Bool(self.is_struct)),
+            ("is_enum", ScalarRead::Bool(self.is_enum)),
+            ("target_name", ScalarRead::Name(self.target_name)),
+        ]
+    }
+
+    /// Resolves an argument-free scalar read by name against this handle's
+    /// property table. `None` for any name the handle does not expose — the
+    /// executor maps that to "unsupported", exactly as an unknown method would
+    /// have.
+    fn scalar_read(&self, name: &str) -> Option<ScalarRead<'db>> {
+        self.scalar_reads()
+            .into_iter()
+            .find(|(prop, _)| *prop == name)
+            .map(|(_, value)| value)
+    }
 }
 
 enum Flow {
@@ -540,9 +608,9 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     /// The impl self type with generic args applied (`Pair<A, B>`), exposed
     /// as `builder.target_ty()`.
     target_ty: TypeId<'db>,
-    /// The target item's bare name (`Mail`), exposed as
-    /// `reflect.target_name()`.
-    target_name: IdentId<'db>,
+    // TD5c: the target's bare name (exposed as `reflect.target_name()`) is no
+    // longer ambient executor state — it lives on the typed `ReflectHandle`
+    // carried by `Value::Reflect`, which owns that read.
     /// The provider's module, for canonicalizing `require<Trait>` paths.
     provider_top_mod: crate::hir_def::TopLevelMod<'db>,
     /// Lexically scoped value bindings; the innermost binding of a name
@@ -582,7 +650,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
         for &capability in &provider.capabilities {
             let value = match capability {
-                super::provider::Capability::Reflect(_) => Value::Reflect,
+                super::provider::Capability::Reflect(_) => {
+                    Value::Reflect(ReflectHandle::new(reflection, target_name))
+                }
                 super::provider::Capability::ImplBuilder(_) => Value::Builder,
             };
             initial_scope.push((capability.binding(), value));
@@ -594,7 +664,6 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             body: provider.body,
             reflection,
             target_ty,
-            target_name,
             provider_top_mod: provider.provider.top_mod(db),
             scopes: vec![initial_scope],
             exprs: Vec::new(),
@@ -1704,19 +1773,32 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         // FREEZE (TD5.0): the reflection-read method names below are pinned by
         // [`RECOGNIZED_REFLECT_OPS`]; `builder.*` ops are pinned in
         // `eval_builder_method`. See docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md.
+        //
+        // TD5c: the `reflect.*` *scalar* reads (`is_struct`/`is_enum`/
+        // `target_name`) are NO LONGER bespoke arms here. They are served by
+        // the typed read-only [`ReflectHandle`] the `Value::Reflect` carries —
+        // the executor consults the handle's property table by name and does
+        // not know those names. (`fields()`/`variants()` remain `for`-iterable
+        // interceptions in `eval_iterable`; field/variant reads are not yet
+        // migrated.) RECOGNIZED_REFLECT_OPS no longer lists the three scalar
+        // reads — they are off the recognized string-keyed surface.
         match receiver_value {
             Value::Builder => self.eval_builder_method(expr, &method_name, generic_args, &args),
-            Value::Reflect => match (method_name.as_str(), args.as_slice()) {
-                ("is_struct", []) => Ok(Value::Bool(self.reflection.is_struct())),
-                ("is_enum", []) => Ok(Value::Bool(self.reflection.is_enum())),
-                ("target_name", []) => Ok(Value::Str(StringId::new(
-                    self.db,
-                    self.target_name.data(self.db).clone(),
-                ))),
-                // `fields()` / `variants()` are only meaningful as `for`
-                // iterables, which are intercepted before evaluation.
-                _ => Err(self.unsupported_expr(expr)),
-            },
+            Value::Reflect(handle) => {
+                if !args.is_empty() {
+                    return Err(self.unsupported_expr(expr));
+                }
+                match handle.scalar_read(method_name.as_str()) {
+                    Some(ScalarRead::Bool(value)) => Ok(Value::Bool(value)),
+                    Some(ScalarRead::Name(name)) => {
+                        Ok(Value::Str(StringId::new(self.db, name.data(self.db).clone())))
+                    }
+                    // `fields()` / `variants()` are only meaningful as `for`
+                    // iterables, which are intercepted before evaluation; any
+                    // other name is unsupported.
+                    None => Err(self.unsupported_expr(expr)),
+                }
+            }
             Value::Field(field) => match (method_name.as_str(), args.as_slice()) {
                 ("ty", []) => {
                     let Some(reflected) = self.reflection.field(field.variant, field.index) else {
@@ -2438,8 +2520,8 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         // [`RECOGNIZED_ITERABLE_OPS`]. See
         // docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md.
         match (receiver_value, method.data(self.db).as_str()) {
-            (Value::Reflect, "fields") => Ok(Iterable::StructFields),
-            (Value::Reflect, "variants") => Ok(Iterable::Variants),
+            (Value::Reflect(_), "fields") => Ok(Iterable::StructFields),
+            (Value::Reflect(_), "variants") => Ok(Iterable::Variants),
             (Value::Variant(variant), "fields") => Ok(Iterable::VariantFields(variant)),
             _ => Err(self.unsupported_expr(iterable)),
         }
@@ -2475,7 +2557,7 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Sig(_) => "method signature",
         Value::Quote(_) => "quote value",
         Value::Builder => "builder capability",
-        Value::Reflect => "reflect capability",
+        Value::Reflect(_) => "reflect capability",
         Value::Evidence => "evidence value",
         Value::Unit => "unit value",
     }
@@ -2600,9 +2682,11 @@ mod freeze_guard {
         );
         assert_eq!(
             RECOGNIZED_REFLECT_OPS.len(),
-            7,
+            4,
             "FREEZE (TD5.0): the reflection-read surface changed size; update the count \
-             and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung."
+             and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
+             (TD5c moved the three `reflect.*` scalar reads off the bespoke executor \
+             onto the typed `ReflectHandle`.)"
         );
     }
 
@@ -2652,12 +2736,13 @@ mod freeze_guard {
     #[test]
     fn total_recognized_method_surface_is_pinned() {
         // The full named method/iterable surface the freeze pins: 45 builder
-        // ops + 7 reflection reads + 2 iterable names = 54 distinct literals
-        // (the inventory's "55" counts `fields` twice for its two receivers).
+        // ops + 4 reflection reads + 2 iterable names = 51 distinct literals.
+        // TD5c moved the three `reflect.*` scalar reads (`is_struct`/`is_enum`/
+        // `target_name`) off the bespoke executor onto `ReflectHandle` (was 54).
         let total =
             RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len() + RECOGNIZED_ITERABLE_OPS.len();
         assert_eq!(
-            total, 54,
+            total, 51,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );

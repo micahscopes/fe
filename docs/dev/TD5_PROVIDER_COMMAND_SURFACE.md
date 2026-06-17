@@ -47,11 +47,23 @@ Dispatch sites are in three functions:
 These become a typed **read-only CTFE capability** (TD5c): field/variant handles get a typed
 CTFE representation and `reflect.*` reads stop being executor-intercepted strings.
 
+**TD5c status — first slice DONE (the three `reflect.*` scalar reads).** `reflect.is_struct()`,
+`reflect.is_enum()`, and `reflect.target_name()` no longer have bespoke arms in
+`eval_method_call`. `Value::Reflect` now carries a typed read-only `ReflectHandle` that owns its
+own scalar-read property table (`is_struct`/`is_enum`/`target_name`); the executor consults the
+handle *by name* and no longer knows those names. They are **removed from
+`RECOGNIZED_REFLECT_OPS`** (7 → 4) — they are off the recognized string-keyed executor surface
+(total named method/iterable surface 54 → 51). The executor's ambient `target_name` field was
+deleted (the read lives on the handle). No live `P`/`ConstraintTerm`/schema change/public syntax:
+reflection stays read-only CTFE. **Still executor-owned (later TD5c slices):** the
+`field.*`/`variant.*` reads (`ty`/`name`/`is_default`/`precedes`), the three `for`-iterables
+(`fields`/`variants`/`variant.fields`), and the mis-shelved `same_ty`/`same_field`.
+
 | op | dispatch site | category | future effect | rung |
 |---|---|---|---|---|
-| `reflect.is_struct()` | `provider_executor.rs:1513` | R | typed read-only CTFE handle (bool) | TD5c |
-| `reflect.is_enum()` | `provider_executor.rs:1514` | R | typed read-only CTFE handle (bool) | TD5c |
-| `reflect.target_name()` | `provider_executor.rs:1515` | R | typed read-only CTFE handle (string) | TD5c |
+| `reflect.is_struct()` | `ReflectHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `ReflectHandle` scalar read (bool) | TD5c ✔ |
+| `reflect.is_enum()` | `ReflectHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `ReflectHandle` scalar read (bool) | TD5c ✔ |
+| `reflect.target_name()` | `ReflectHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `ReflectHandle` scalar read (string) | TD5c ✔ |
 | `field.ty()` | `provider_executor.rs:1524` | R | typed read-only CTFE handle (type) | TD5c |
 | `field.name()` | `provider_executor.rs:1530` | R | typed read-only CTFE handle (string) | TD5c |
 | `variant.is_default()` | `provider_executor.rs:1543` | R | typed read-only CTFE handle (bool) | TD5c |
@@ -256,9 +268,13 @@ reads + 3 for-iterables + 6 quote forms + 9 control-flow constructs.** The 45 + 
 "named method/iterable ops" is what the freeze test pins.
 
 ### Mechanical pin (what the freeze test enforces)
-The freeze test pins the 55 **named** ops as string literals:
+The freeze test pins the named ops as string literals (counts are the **current** values; the
+TD5.0 baseline was 45 / 7 / 3 = 55):
 - `RECOGNIZED_BUILDER_OPS` — the 45 arms of `eval_builder_method`.
-- `RECOGNIZED_REFLECT_OPS` — the 7 reflect/field/variant method reads in `eval_method_call`.
+- `RECOGNIZED_REFLECT_OPS` — the **4** reflect/field/variant method reads in `eval_method_call`
+  (TD5.0 baseline 7; **TD5c removed the three `reflect.*` scalar reads** `is_struct`/`is_enum`/
+  `target_name`, which migrated onto the typed `ReflectHandle` and are no longer string-keyed
+  executor arms).
 - `RECOGNIZED_ITERABLE_OPS` — the 3 `for`-loop iterable method names in `eval_iterable`.
 
 Quote forms and control-flow constructs are AST-shape dispatch (not string literals), so they
@@ -271,7 +287,10 @@ requires editing those matches, which is itself a TD5 category decision.
 ## Migration map (ladder ⇄ this table)
 
 - **TD5b** removes `require` (B-obl) from executor ownership → real FCO obligation.
-- **TD5c** removes all 12 **R** ops → typed read-only CTFE handles/iterators.
+- **TD5c** removes all 12 **R** ops → typed read-only CTFE handles/iterators. *Slice 1 DONE:* the
+  three `reflect.*` scalar reads (`is_struct`/`is_enum`/`target_name`) now live on the typed
+  `ReflectHandle` (off `eval_method_call`, off `RECOGNIZED_REFLECT_OPS`). Remaining: `field.*`/
+  `variant.*` reads, the three `for`-iterables, and `same_ty`/`same_field`.
 - **TD5d** removes the 6 **Q** forms (and the quote-template vocabulary) → typed generated HIR.
 - **TD5e** removes the 39 **B-build** ops + `finish` (FIN) → typed builder effect; the 4
   goal-qualified ops (surprise #3) stay as typed builder-effect ops here.
