@@ -12,6 +12,33 @@ stays-concrete. PAUSE only for full `ConstraintTerm`, live `P<T>` to the solver,
 public syntax beyond approved surface, evidence-schema compat, bridge deletion
 without a passing replacement, or scoped-provision/canonical-policy change.
 
+## Architect directive 2026-06-17 — RECONCILED against live repo state
+The architect issued a consolidated steer (provision scoping ratified + burn-down queue).
+It was built on a STALE snapshot; reconciled here ("active steer until revised with new repo
+facts" — the architect's own instruction):
+- **Provision scoping RATIFIED** → `PROVISION_SCOPING_SYNTHESIS_2026-06-17.md` (committed
+  `ddcdb391c`), classified DOC_DECISION_PACKET / ARCHITECT_RATIFIED / PUBLIC_SEMANTICS_NOT_
+  IMPLEMENTED. 5 binding decisions (companion default; global≡canonical; canonical-only
+  markers now / witness-capture later; orphan demoted to canonical-rule; one `ProvisionEnv`).
+- **Directive queue is already DONE** (the stale part): #6 alias/bundle = DONE (`e3e1838e9`,
+  *exactly* the directive's `StaticAbi: AbiSize+AbiShape` shape); #5b error AbiSize generator
+  = DELETED (`43ebe7efb`); #5c msg AbiSize generator = DELETED (`fbfbba0ef`) — BOTH AbiSize
+  generators gone, byte-identical (note: directive said "pick exactly ONE"; we did both AbiSize
+  ones, NOT event/EIP712/Encode/Decode — surfaced honestly); const-ref ICE = RESOLVED (#42,
+  `751a6755f`); TD5.0 inventory+freeze = DONE (`7460dfb30`); TD5.1+TD5.2a = DONE (`cfce8d366`).
+- **TD5.2 reassessment RESOLVED by the directive:** TD5.2a (`BuilderCommand::Require` deleted)
+  = counts as real progress ✔; **TD5.2b** (route `require` all the way through the FCO/ProvisionEnv
+  path, not `requirement_where_clause`) = OPEN, and BLOCKED by **PS-MR** (task #49) — do NOT
+  solve PS-MR inside TD5.
+- **Live frontier:** TD5 vertical cut (TD5.3+ — smallest provider op whose old executor branch
+  can be deleted; NOT StableOrd/AbiSize) **OR** internal `ProvisionEnv` v0 (read-path
+  unification, debt-negative, authorized without further sign-off) — "whichever has the clearest
+  deletion target" (architect). PS-MR (#49) tracked separately. #7 still gated by TD5.
+- **Proceed/pause policy (reaffirmed):** GO on internal ProvisionEnv read-path unification +
+  TD5 vertical cuts; PAUSE on public provision syntax / canonical syntax / module-ingot syntax /
+  orphan relaxation / witness capture / live-P / ConstraintTerm / Generic<T> / #7 / broad
+  ABI-event-EIP712 rewrite / shim-only TD5.
+
 ## Board
 
 | # | Bridge | Target | Class | Status |
