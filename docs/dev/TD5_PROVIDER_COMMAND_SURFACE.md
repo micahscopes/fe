@@ -47,38 +47,50 @@ Dispatch sites are in three functions:
 These become a typed **read-only CTFE capability** (TD5c): field/variant handles get a typed
 CTFE representation and `reflect.*` reads stop being executor-intercepted strings.
 
-**TD5c status — first slice DONE (the three `reflect.*` scalar reads).** `reflect.is_struct()`,
-`reflect.is_enum()`, and `reflect.target_name()` no longer have bespoke arms in
-`eval_method_call`. `Value::Reflect` now carries a typed read-only `ReflectHandle` that owns its
-own scalar-read property table (`is_struct`/`is_enum`/`target_name`); the executor consults the
-handle *by name* and no longer knows those names. They are **removed from
-`RECOGNIZED_REFLECT_OPS`** (7 → 4) — they are off the recognized string-keyed executor surface
-(total named method/iterable surface 54 → 51). The executor's ambient `target_name` field was
-deleted (the read lives on the handle). No live `P`/`ConstraintTerm`/schema change/public syntax:
-reflection stays read-only CTFE. **Still executor-owned (later TD5c slices):** the
-`field.*`/`variant.*` reads (`ty`/`name`/`is_default`/`precedes`), the three `for`-iterables
-(`fields`/`variants`/`variant.fields`), and the mis-shelved `same_ty`/`same_field`.
+**TD5c status — all NON-ITERATING reflection reads DONE.** Every non-iterating `R` read has
+migrated off the bespoke executor onto a typed read-only handle that owns its own read vocabulary
+as a data table; the executor consults the handle *by name* and no longer knows those names.
+
+- *Slice 1 (DONE):* `reflect.is_struct()`/`is_enum()`/`target_name()` → `ReflectHandle`
+  (`Value::Reflect` carries it). `RECOGNIZED_REFLECT_OPS` 7 → 4. The executor's ambient
+  `target_name` field was deleted.
+- *Slice 2 (DONE, this rung):* `field.ty()`/`field.name()` → `FieldHandle` (`Value::Field` now
+  carries it, preserving the `FieldKey` identity via `FieldHandle::key`);
+  `variant.is_default()`/`variant.precedes(other)` → `VariantHandle` (`Value::Variant` carries it,
+  preserving the decl-order index via `VariantHandle::index`; `precedes` is a *binary* read in the
+  handle's `binary_read` vocabulary). `RECOGNIZED_REFLECT_OPS` 4 → **0** — the
+  `eval_method_call` reflection arms are GONE; the Field/Variant arms now just consult the handle.
+  The mis-shelved `builder.same_ty`/`same_field` → the free-standing typed read-only
+  `ReflectionCompare` table, resolved in the `eval_builder_method` catch-all; their `("name",`
+  arms are deleted, so `RECOGNIZED_BUILDER_OPS` 45 → **43**. Total named method/iterable surface
+  51 → **45**.
+
+No live `P`/`ConstraintTerm`/schema change/public syntax: reflection stays read-only CTFE; the
+handles copy facts at construction and emit no commands/obligations. **Still executor-owned
+(deferred, separate slice):** the three `for`-iterables (`reflect.fields()`/`reflect.variants()`/
+`variant.fields()`) — intercepted in `eval_iterable` (surprise #2).
 
 | op | dispatch site | category | future effect | rung |
 |---|---|---|---|---|
 | `reflect.is_struct()` | `ReflectHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `ReflectHandle` scalar read (bool) | TD5c ✔ |
 | `reflect.is_enum()` | `ReflectHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `ReflectHandle` scalar read (bool) | TD5c ✔ |
 | `reflect.target_name()` | `ReflectHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `ReflectHandle` scalar read (string) | TD5c ✔ |
-| `field.ty()` | `provider_executor.rs:1524` | R | typed read-only CTFE handle (type) | TD5c |
-| `field.name()` | `provider_executor.rs:1530` | R | typed read-only CTFE handle (string) | TD5c |
-| `variant.is_default()` | `provider_executor.rs:1543` | R | typed read-only CTFE handle (bool) | TD5c |
-| `variant.precedes(other)` | `provider_executor.rs:1549` | R | typed read-only CTFE handle (bool; decl-order index compare) | TD5c |
-| `reflect.fields()` (for-iterable) | `provider_executor.rs:2197` | R | typed read-only CTFE iterator over struct fields | TD5c |
-| `reflect.variants()` (for-iterable) | `provider_executor.rs:2198` | R | typed read-only CTFE iterator over variants | TD5c |
-| `variant.fields()` (for-iterable) | `provider_executor.rs:2199` | R | typed read-only CTFE iterator over variant fields | TD5c |
-| `builder.same_ty(a, b)` | `provider_executor.rs:1826` | R | typed read-only CTFE type-identity compare (bool) | TD5c |
-| `builder.same_field(a, b)` | `provider_executor.rs:1835` | R | typed read-only CTFE field-identity compare (bool) | TD5c |
+| `field.ty()` | `FieldHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `FieldHandle` scalar read (type) | TD5c ✔ |
+| `field.name()` | `FieldHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `FieldHandle` scalar read (string) | TD5c ✔ |
+| `variant.is_default()` | `VariantHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `VariantHandle` scalar read (bool) | TD5c ✔ |
+| `variant.precedes(other)` | `VariantHandle::binary_read` (MIGRATED off executor) | R | typed read-only `VariantHandle` binary read (bool; decl-order index compare) | TD5c ✔ |
+| `reflect.fields()` (for-iterable) | `provider_executor.rs` `eval_iterable` | R | typed read-only CTFE iterator over struct fields | TD5c (deferred) |
+| `reflect.variants()` (for-iterable) | `provider_executor.rs` `eval_iterable` | R | typed read-only CTFE iterator over variants | TD5c (deferred) |
+| `variant.fields()` (for-iterable) | `provider_executor.rs` `eval_iterable` | R | typed read-only CTFE iterator over variant fields | TD5c (deferred) |
+| `builder.same_ty(a, b)` | `ReflectionCompare::binary_read` (MIGRATED off executor) | R | typed read-only CTFE type-identity compare (bool) | TD5c ✔ |
+| `builder.same_field(a, b)` | `ReflectionCompare::binary_read` (MIGRATED off executor) | R | typed read-only CTFE field-identity compare (bool) | TD5c ✔ |
 
 **Note on placement:** `same_ty`/`same_field` are spelled as `builder.*` methods but are pure
-reflection-style *reads* (they compute a `Value::Bool` from reflected handles and emit no
-command/expr). They are catalogued as **R** because that is what they *become* — read-only CTFE
-comparisons — not as B-build. The freeze test still pins them in `RECOGNIZED_BUILDER_OPS`
-(their literal lives in `eval_builder_method`); the doc category is the migration target.
+reflection-style *reads* (they compute a `Value::Bool` from already-evaluated operands and emit no
+command/expr). They were catalogued as **R** because that is what they *became* — read-only CTFE
+comparisons. TD5c moved their vocabulary off `eval_builder_method`'s bespoke arms onto the typed
+read-only `ReflectionCompare` table (consulted in the catch-all), so they are **removed from
+`RECOGNIZED_BUILDER_OPS`** (their `("name",` arms are deleted).
 
 ---
 
@@ -263,19 +275,26 @@ Authoritative count: **68** total / **59** excluding CTFE.
 **Net:** counting only the executor's "command surface" the way the packet did (R + B-obl +
 B-build + Q + FIN, no CTFE) gives **59** vs the estimated ~56 — close, with B-build the main
 undercount. Counting the full recognized surface including control-flow interception gives
-**68**. **The authoritative numbers are 45 `builder.*` literals + 7 reflect/field/variant method
-reads + 3 for-iterables + 6 quote forms + 9 control-flow constructs.** The 45 + 7 + 3 = 55
-"named method/iterable ops" is what the freeze test pins.
+**68**. **The TD5.0 baseline numbers were 45 `builder.*` literals + 7 reflect/field/variant
+method reads + 3 for-iterables + 6 quote forms + 9 control-flow constructs**; the 45 + 7 + 3 = 55
+"named method/iterable ops" was what the freeze test pinned at baseline. *(TD5c has since shrunk
+the pinned surface — see the mechanical pin below.)*
 
 ### Mechanical pin (what the freeze test enforces)
 The freeze test pins the named ops as string literals (counts are the **current** values; the
-TD5.0 baseline was 45 / 7 / 3 = 55):
-- `RECOGNIZED_BUILDER_OPS` — the 45 arms of `eval_builder_method`.
-- `RECOGNIZED_REFLECT_OPS` — the **4** reflect/field/variant method reads in `eval_method_call`
-  (TD5.0 baseline 7; **TD5c removed the three `reflect.*` scalar reads** `is_struct`/`is_enum`/
-  `target_name`, which migrated onto the typed `ReflectHandle` and are no longer string-keyed
-  executor arms).
-- `RECOGNIZED_ITERABLE_OPS` — the 3 `for`-loop iterable method names in `eval_iterable`.
+TD5.0 baseline was 45 / 7 / 3 = 55, now 43 / 0 / 2 = 45):
+- `RECOGNIZED_BUILDER_OPS` — the **43** arms of `eval_builder_method` (TD5.0 baseline 45; **TD5c
+  removed `same_ty`/`same_field`** — mis-shelved `builder.*`-spelled identity reads — which moved
+  onto the typed read-only `ReflectionCompare` table and are resolved in the catch-all, not as
+  `("name",` arms).
+- `RECOGNIZED_REFLECT_OPS` — now **EMPTY** (TD5.0 baseline 7). **TD5c removed every non-iterating
+  reflection read** from `eval_method_call`: `reflect.*` (`is_struct`/`is_enum`/`target_name`) →
+  `ReflectHandle`, then `field.*` (`ty`/`name`) → `FieldHandle` and `variant.*`
+  (`is_default`/`precedes`) → `VariantHandle`. The Field/Variant `eval_method_call` arms now just
+  consult the handle's read table by name.
+- `RECOGNIZED_ITERABLE_OPS` — the **2** distinct `for`-loop iterable method names (`fields`/
+  `variants`) in `eval_iterable` (`fields` is matched on two receivers). These remain
+  executor-owned — the deferred for-iterable slice of TD5c.
 
 Quote forms and control-flow constructs are AST-shape dispatch (not string literals), so they
 cannot be pinned as a string set; they are frozen by *rule* (this doc) and guarded structurally
@@ -287,10 +306,13 @@ requires editing those matches, which is itself a TD5 category decision.
 ## Migration map (ladder ⇄ this table)
 
 - **TD5b** removes `require` (B-obl) from executor ownership → real FCO obligation.
-- **TD5c** removes all 12 **R** ops → typed read-only CTFE handles/iterators. *Slice 1 DONE:* the
-  three `reflect.*` scalar reads (`is_struct`/`is_enum`/`target_name`) now live on the typed
-  `ReflectHandle` (off `eval_method_call`, off `RECOGNIZED_REFLECT_OPS`). Remaining: `field.*`/
-  `variant.*` reads, the three `for`-iterables, and `same_ty`/`same_field`.
+- **TD5c** removes all 12 **R** ops → typed read-only CTFE handles/iterators. *All 9 non-iterating
+  reads DONE:* `reflect.*` (`is_struct`/`is_enum`/`target_name`) → `ReflectHandle`; `field.*`
+  (`ty`/`name`) → `FieldHandle`; `variant.*` (`is_default`/`precedes`) → `VariantHandle`;
+  `same_ty`/`same_field` → the free-standing `ReflectionCompare` table. All off `eval_method_call`/
+  `eval_builder_method` (`RECOGNIZED_REFLECT_OPS` → 0, `RECOGNIZED_BUILDER_OPS` 45 → 43).
+  **Remaining (deferred):** the three `for`-iterables (`fields`/`variants`/`variant.fields`),
+  intercepted in `eval_iterable` (surprise #2) — a separate, harder slice.
 - **TD5d** removes the 6 **Q** forms (and the quote-template vocabulary) → typed generated HIR.
 - **TD5e** removes the 39 **B-build** ops + `finish` (FIN) → typed builder effect; the 4
   goal-qualified ops (surprise #3) stay as typed builder-effect ops here.
