@@ -3606,6 +3606,20 @@ impl<'db> TyChecker<'db> {
                         inst.assoc_type_bindings(self.db).clone(),
                     );
 
+                    // Reading `<Ty as Trait>::CONST` requires `Ty: Trait`.
+                    // When the receiver type is concrete, this obligation has
+                    // no satisfying impl unless one exists; registering it here
+                    // makes that surface as a normal `6-0003` trait-bound
+                    // diagnostic instead of an unresolved const-ref that
+                    // panics during semantic lowering. (For generic receivers
+                    // the obligation is discharged by an in-scope `where`
+                    // bound, exactly like the sibling assoc-fn arm above.)
+                    self.env.register_trait_obligation(TraitObligation {
+                        goal: inst,
+                        origin: TraitObligationOrigin::GenericConfirmation,
+                        span: path_expr_span.clone().into(),
+                    });
+
                     self.env.register_const_ref(
                         expr,
                         ConstRef::TraitConst(AssocConstUse::new(

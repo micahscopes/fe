@@ -85,6 +85,19 @@ fn extract_type_mismatch<'db>(
     }
 }
 
+/// Trait-satisfiability diagnostics raised while checking an associated-const
+/// initializer (e.g. an unsatisfied `Ty: Trait` bound behind a
+/// `<Ty as Trait>::CONST` read). These have no other reporting site for impl
+/// assoc-const bodies, so they are surfaced from `diags_assoc_consts`.
+fn extract_satisfiability<'db>(diag: &FuncBodyDiag<'db>) -> Option<TyDiagCollection<'db>> {
+    match diag {
+        FuncBodyDiag::Ty(collection @ TyDiagCollection::Satisfiability(_)) => {
+            Some(collection.clone())
+        }
+        _ => None,
+    }
+}
+
 fn cyclic_trait_ref_diag<'db>(span: DynLazySpan<'db>, context: &str) -> TyDiagCollection<'db> {
     TraitConstraintDiag::InfiniteBoundRecursion(
         span,
@@ -724,6 +737,25 @@ impl<'db> ImplTrait<'db> {
             if let Some((span, expected, given)) = body_diags.iter().find_map(extract_type_mismatch)
             {
                 diags.push(const_ty_mismatch_diag(span, expected, given));
+            }
+
+            // An associated-const initializer that reads `<Ty as Trait>::CONST`
+            // carries a `Ty: Trait` trait obligation. For a DERIVE-PROVIDER-
+            // generated impl this is the SOLE site that checks the generated
+            // const body, so an unsatisfied bound (e.g. a derived
+            // `impl AbiSize for Bad` whose `HEAD_SIZE` folds
+            // `<NoAbi as AbiSize>::HEAD_SIZE` for a concrete field type lacking
+            // `AbiSize`) must be surfaced here — otherwise the unsatisfiable
+            // const-ref reaches semantic lowering and panics instead of
+            // producing `6-0003`. Gate on the `Desugared(Derive)` origin:
+            // error/msg-generated ABI impls already report the same
+            // `Ty: AbiSize`/`Encode` bounds via their encode/decode lowering, so
+            // surfacing here too would DUPLICATE them.
+            if matches!(
+                self.origin(db),
+                crate::span::HirOrigin::Desugared(crate::span::DesugaredOrigin::Derive(_))
+            ) {
+                diags.extend(body_diags.iter().filter_map(extract_satisfiability));
             }
         }
 
