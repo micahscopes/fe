@@ -1,6 +1,6 @@
 ---
 source: crates/fe/tests/cli_output.rs
-assertion_line: 1820
+assertion_line: 1824
 expression: output
 input_file: tests/fixtures/cli_output/single_files/provider_signature_live_head.fe
 ---
@@ -12,6 +12,14 @@ error[6-0008]: constraint-constructor parameter is not yet a supported trait hea
    │
 19 │     const fn derive<P: * -> Constraint, T>(ev: own Evidence<P<T>>) -> Evidence<P<T>>
    │                                                             ^^^^ `P` (`* -> Constraint`) cannot yet be applied as a trait here
+   │
+   = write one provider per concrete trait (e.g. `impl Derive for Eq`), or monomorphize the consumer
+
+error[6-0008]: constraint-constructor parameter is not yet a supported trait head
+   ┌─ provider_signature_live_head.fe:19:80
+   │
+19 │     const fn derive<P: * -> Constraint, T>(ev: own Evidence<P<T>>) -> Evidence<P<T>>
+   │                                                                                ^^^^ `P` (`* -> Constraint`) cannot yet be applied as a trait here
    │
    = write one provider per concrete trait (e.g. `impl Derive for Eq`), or monomorphize the consumer
 

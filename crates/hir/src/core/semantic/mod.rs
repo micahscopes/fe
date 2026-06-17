@@ -681,6 +681,14 @@ impl<'db> Func<'db> {
         self.ret_type_ref(db).is_some()
     }
 
+    /// The explicit HIR return-type reference, if the function annotates one.
+    /// HIR-level (the `ret_type_ref` field is `pub(in crate::core)`); for the
+    /// analysis-lowered type use [`Self::return_ty`]. Exposed so the provider-goal
+    /// de-exemption can check the `-> Evidence<..>` return position by identity.
+    pub fn ret_ty_hir(self, db: &'db dyn HirDb) -> Option<crate::hir_def::TypeId<'db>> {
+        self.ret_type_ref(db)
+    }
+
     /// Explicit return type if annotated in source; `None` when the
     /// function has no explicit return type.
     fn explicit_return_ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {

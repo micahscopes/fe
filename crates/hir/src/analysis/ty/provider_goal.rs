@@ -201,6 +201,28 @@ pub(crate) fn provider_capability_goals<'db>(
         });
     }
 
+    // Witness RETURN position: `derive(..) -> Evidence<Eq<T>>`. The result is
+    // also a witness whose goal must be a concrete constraint — without this the
+    // goal-argument exemption would survive in the return slot (a nonsense trait
+    // in `-> Evidence<..>` would compile silently). Recognized by resolved
+    // identity, exactly like the witness parameter.
+    if let Some(ret_hir) = func.ret_ty_hir(db)
+        && let Some(inner) = capability_position_inner(db, ret_hir, scope, CapabilityTy::Evidence)
+    {
+        // The return type carries no own/mut mode wrapper (modes are param-only),
+        // so take the path span directly — `mode_stripped_ty_span`'s
+        // `into_mode_type()` mis-resolves a non-mode return span to the file root.
+        let outer = func.span().ret_ty().into_path_type().path();
+        let goal_path_span = inner_goal_path_span(db, ret_hir, outer);
+        let result = lower_goal(db, inner, scope);
+        goals.push(ProviderGoal {
+            position: GoalPosition::Witness,
+            scope,
+            goal_path_span,
+            result,
+        });
+    }
+
     goals
 }
 

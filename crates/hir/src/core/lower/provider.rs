@@ -1389,7 +1389,21 @@ impl TagProv: Derive for Taggable {
 
 derive Taggable for Point using TagProv
 
-// A hand-written impl: the anti-vacuous control (provenance must be `None`).
+// GATE-ISOLATING control: a HAND-WRITTEN impl of the PROVIDER-BACKED trait
+// `Taggable` (TagProv provides it) for a different type. Its provenance must be
+// `None` ONLY because its origin is not a derive site — if the origin gate were
+// removed, reconstruction WOULD find TagProv for it (the goal resolves to a
+// real provider), so this control fails when the gate is deleted. (The `Marker`
+// control below does NOT isolate the gate: `Marker` has no provider, so it would
+// return `None` via the empty provider-filter regardless of the gate.)
+struct Other {}
+impl Taggable for Other {
+    fn tag(self) -> bool {
+        false
+    }
+}
+
+// A hand-written impl of a non-provider-backed trait: a second control.
 trait Marker {}
 impl Marker for Point {}
 "#,
