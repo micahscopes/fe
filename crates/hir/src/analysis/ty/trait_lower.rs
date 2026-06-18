@@ -207,6 +207,25 @@ pub(crate) enum TraitArgError<'db> {
     Ignored,
 }
 
+/// In a `* -> Constraint`-expected generic-arg position, a bare concrete trait
+/// (`Eq`) is a first-class trait-constructor value, not a `2-0006` type error.
+/// A bare trait lowers to `Invalid(NotAType(PathRes::Trait(_)))`; if the
+/// expected param kind matches the candidate `TraitCtor`'s kind, lift it to that
+/// ctor. In a `*` position (or any kind mismatch) the original invalid is kept,
+/// preserving the existing "expected type, found trait" diagnostic.
+fn lift_trait_arg_to_ctor<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    expected_kind: Option<&Kind>,
+) -> Option<TyId<'db>> {
+    let TyData::Invalid(InvalidCause::NotAType(PathRes::Trait(inst))) = ty.data(db) else {
+        return None;
+    };
+    let expected_kind = expected_kind?;
+    let ctor = TyId::trait_ctor(db, inst.def(db));
+    expected_kind.does_match(ctor.kind(db)).then_some(ctor)
+}
+
 pub(crate) fn lower_trait_ref_impl<'db>(
     db: &'db (dyn HirAnalysisDb + 'static),
     path: PathId<'db>,
@@ -241,6 +260,17 @@ fn lower_trait_ref_impl_inner<'db>(
                 let ty = lower_opt_hir_ty(db, ty_arg.ty, scope, assumptions);
                 let ty =
                     hole_frame.map_or(ty, |frame| rebase_structural_holes_under_app(db, ty, frame));
+                // A bare concrete trait (`Eq`) lowers to a `NotAType` invalid, but in
+                // a `* -> Constraint`-expected param position it is a trait
+                // constructor value (the unsaturated sibling of `ConstraintTerm`).
+                // Kind-directed: the corresponding trait param is
+                // `trait_params[Self + provided_explicit.len()]`; if its kind
+                // matches the candidate ctor's, produce the `TraitCtor`. In a `*`
+                // position the kinds disagree and we keep the `NotAType` (→ 2-0006).
+                let expected_kind = trait_params
+                    .get(provided_explicit.len() + 1)
+                    .map(|p| p.kind(db));
+                let ty = lift_trait_arg_to_ctor(db, ty, expected_kind).unwrap_or(ty);
                 provided_explicit.push(ty);
             }
             GenericArg::Const(const_arg) => match const_arg.value {
@@ -629,6 +659,54 @@ trait Eq<T = Self> {}
         assert_eq!(folded, tc);
         assert!(matches!(folded.data(&db), TyData::TraitCtor(_)));
         let _ = tc.pretty_print(&db);
+    }
+
+    /// Applying a trait constructor (`Eq`, kind `* -> Constraint`) to its subject
+    /// reduces it to the saturated constraint `ConstraintTerm(Eq<T>)`. This is
+    /// the R3 reduction in `TyId::app` (the single fold-routed application site).
+    /// `Eq<T = Self>` has a defaulted explicit param, so a single subject
+    /// saturates it via default-completion (`Self := bool`, `T := Self := bool`).
+    #[test]
+    fn trait_ctor_application_reduces_to_constraint_term() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("trait_ctor_application_reduces_to_constraint_term.fe"),
+            r#"
+trait Eq<T = Self> {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let trait_ = top_mod
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::Trait(trait_)
+                    if trait_
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(&db) == "Eq") =>
+                {
+                    Some(trait_)
+                }
+                _ => None,
+            })
+            .expect("missing `Eq` trait");
+
+        let ctor = TyId::trait_ctor(&db, trait_);
+        let subject = TyId::bool(&db);
+
+        // `Eq` applied to `bool` saturates (single required subject) → reduces.
+        let applied = TyId::app(&db, ctor, subject);
+        assert_eq!(*applied.kind(&db), Kind::Constraint);
+        let TyData::ConstraintTerm(inst) = applied.data(&db) else {
+            panic!("expected the trait-ctor application to reduce to a ConstraintTerm");
+        };
+
+        // The reduced instance is `Eq<Self = bool, T = bool>`: subject bound to
+        // `Self`, the defaulted `T` completed to `Self`.
+        assert_eq!(inst.def(&db), trait_);
+        assert_eq!(inst.args(&db).as_slice(), &[subject, subject]);
     }
 }
 

@@ -744,7 +744,68 @@ impl<'db> TyId<'db> {
             );
         }
 
+        // A trait constructor (`Eq`, kind `* -> Constraint`) is the unsaturated
+        // sibling of `ConstraintTerm`: applying it to its subject (and any
+        // required explicit params) reduces it to the saturated constraint
+        // `ConstraintTerm(Eq<T>)`. This is the single fold-routed application
+        // site (`fold_ty_app` defaults to `TyId::app`), so this reduction covers
+        // substitution, normalization, and direct lowering uniformly. Until the
+        // ctor is saturated it stays a plain `TyApp` (partial application).
+        if let Some(reduced) = Self::reduce_trait_ctor_app(db, lhs, rhs) {
+            return reduced;
+        }
+
         Self::new(db, TyData::TyApp(lhs, rhs))
+    }
+
+    /// If `lhs` is a (possibly partially-applied) trait constructor and applying
+    /// `rhs` saturates it, build the resulting `ConstraintTerm`. Returns `None`
+    /// when `lhs` is not a trait ctor or the application is still partial (more
+    /// subjects/params required), in which case the caller keeps the plain
+    /// `TyApp` accumulation.
+    fn reduce_trait_ctor_app(
+        db: &'db dyn HirAnalysisDb,
+        lhs: Self,
+        rhs: Self,
+    ) -> Option<TyId<'db>> {
+        let (base, existing_args) = lhs.decompose_ty_app(db);
+        let TyData::TraitCtor(trait_) = base.data(db) else {
+            return None;
+        };
+        let trait_ = *trait_;
+
+        // The first applied arg is the subject (`Self`); the rest are explicit
+        // params. Reuse the default-completion that `lower_hir_constraint_application`
+        // uses so a defaulted param like `Eq<T = Self>` saturates with a single
+        // explicit subject. The reduction is a pure substitution with no use-site
+        // path, so default completion runs in metadata mode against empty
+        // assumptions.
+        let mut applied: Vec<TyId<'db>> = Vec::with_capacity(existing_args.len() + 1);
+        applied.extend_from_slice(existing_args);
+        applied.push(rhs);
+
+        let subject = applied[0];
+        let provided_explicit = &applied[1..];
+        let non_self_completed = trait_.param_set(db).complete_explicit_args(
+            db,
+            Some(subject),
+            provided_explicit,
+            PredicateListId::empty_list(db),
+            super::ty_lower::ConstDefaultCompletion::metadata(None),
+        );
+
+        // Only saturated applications reduce; a still-partial ctor (a trait with
+        // further required explicit params) keeps accumulating as a `TyApp`.
+        if non_self_completed.len() != trait_.params(db).len() - 1 {
+            return None;
+        }
+
+        let mut final_args: Vec<TyId<'db>> = Vec::with_capacity(trait_.params(db).len());
+        final_args.push(subject);
+        final_args.extend(non_self_completed);
+
+        let inst = TraitInstId::new(db, trait_, final_args, common::indexmap::IndexMap::new());
+        Some(Self::constraint_term(db, inst))
     }
 
     pub(crate) fn check_const_ty_without_eval(

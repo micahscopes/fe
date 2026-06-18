@@ -1,17 +1,7 @@
 ---
 source: crates/fe/tests/cli_output.rs
-assertion_line: 1824
 expression: output
 input_file: tests/fixtures/cli_output/single_files/derive_kind_form2_param.fe
 ---
-=== STDERR ===
-errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/derive_kind_form2_param.fe
 
-error[2-0006]: expected type item here
-   ┌─ derive_kind_form2_param.fe:28:14
-   │
-28 │ impl Derive_<Eq> for StableEqK {
-   │              ^^ expected type here, but found trait `Eq`
-
-
-=== EXIT CODE: 1 ===
+=== EXIT CODE: 0 ===
