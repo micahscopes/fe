@@ -24,6 +24,7 @@ use super::{
         rebase_structural_holes_under_app, rewrite_structural_holes,
     },
     trait_def::TraitInstId,
+    trait_lower::lower_hir_constraint_application,
     trait_resolution::{
         PredicateListId,
         constraint::{collect_constraints, collect_func_decl_constraints},
@@ -74,11 +75,27 @@ fn lower_hir_ty_impl<'db>(
             }
         }
 
-        HirTyKind::Path(path) => prepend_local_parent_to_structural_holes(
-            db,
-            lower_path_impl(db, scope, *path, assumptions),
-            ty_frame,
-        ),
+        HirTyKind::Path(path) => {
+            // A saturated concrete trait application in type position (e.g.
+            // `Eq<T>`) lowers to a `Constraint`-kinded `ConstraintTerm` rather
+            // than falling to the `2-0006` "found trait, expected type"
+            // (`NotAType`) fallback in `lower_path_impl`. `None` covers a
+            // bare/unsaturated head, an abstract `* -> Constraint` parameter
+            // head, a non-trait head, or an arg-count/kind/const failure — all
+            // of which keep the existing path-lowering behavior. Whether a
+            // `ConstraintTerm` actually *fits* its use site is decided
+            // downstream by the kind check (`*` position => kind error,
+            // `Constraint` position => fits); production here is unconditional.
+            if let Some(inst) = lower_hir_constraint_application(db, ty, scope, assumptions) {
+                TyId::constraint_term(db, inst)
+            } else {
+                prepend_local_parent_to_structural_holes(
+                    db,
+                    lower_path_impl(db, scope, *path, assumptions),
+                    ty_frame,
+                )
+            }
+        }
 
         HirTyKind::Tuple(tuple_id) => {
             let elems = tuple_id.data(db);

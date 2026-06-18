@@ -408,6 +408,12 @@ impl<'db> TyId<'db> {
         matches!(self.base_ty(db).data(db), TyData::ConstTy(_))
     }
 
+    /// Whether this type is a `Constraint`-kinded constraint term produced from a
+    /// saturated concrete trait application (e.g. `Eq<T>` in type position).
+    pub fn is_constraint_term(self, db: &dyn HirAnalysisDb) -> bool {
+        matches!(self.data(db), TyData::ConstraintTerm(_))
+    }
+
     /// Returns the contract if this type is a contract type.
     pub fn as_contract(self, db: &'db dyn HirAnalysisDb) -> Option<crate::hir_def::Contract<'db>> {
         match self.base_ty(db).data(db) {
