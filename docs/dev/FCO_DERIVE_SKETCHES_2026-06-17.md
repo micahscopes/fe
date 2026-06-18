@@ -131,16 +131,16 @@ pub trait ErrorVariant<A: Abi>: Encode<A> + AbiSize {
 
 ## B. HEADED — the HKT / kinded target (PROPOSED, not implemented)
 
-> **UPDATE 2026-06-17 — `Derive`'s kind decided + spike-validated. See
-> `FCO_DERIVE_KIND_DECISION_2026-06-17.md` (SSOT).** The kinded target is the **associated-type
-> form**: `Derive` stays a **first-order ordinary trait** (`Derive : * -> Constraint`), with the
-> derived trait on `type Goal : * -> Constraint`; the provider implements it
-> (`impl Derive for StableEq { type Goal = Eq }`). NOT the `(* -> Constraint) -> Constraint` form
-> shown below. A feasibility spike confirmed the generic `Derive` skeleton already kind-checks on
-> today's machinery (projection head `Self::Goal<T>` computes kind `Constraint`, unlike a param head
-> `P<T>` which hits the shelved `6-0008` frontier); remaining gaps are K04b (Constraint-kind the
-> capabilities) + K03-value (trait-as-`*->Constraint`-value, today's `2-0006`). The before→after
-> below still illustrates the shim→kinded transition; read the `Derive` line per this update.
+> **UPDATE 2026-06-17/18 — `Derive`'s kind decided (TWO-STAGE) + spike-validated. See
+> `FCO_DERIVE_KIND_DECISION_2026-06-17.md` (SSOT).** Stage 1 INTERMEDIATE = the **associated-type
+> form**: `Derive` a **first-order ordinary trait** (`Derive : * -> Constraint`), derived trait on
+> `type Goal : * -> Constraint`, provider implements it (`impl Derive for StableEq { type Goal = Eq }`).
+> Stage 2 END = the **elegant param-head form shown below** (`Derive : (* -> Constraint) -> Constraint`,
+> `impl Derive<Eq> for StableEq`) — pushed through after the intermediate. A spike confirmed Stage 1's
+> generic skeleton already kind-checks (projection head `Self::Goal<T>` computes `Constraint`, unlike a
+> param head `P<T>` which hits the shelved `6-0008` frontier). Stage 2 is the "True Derive" track
+> (`P:=Eq` pinned concrete → substitution, not variable-headed solving). So the `(*->C)->C` below IS
+> the end target — just reached via the assoc-type intermediate.
 
 Per `fe-design-wizard-kinded-derive-verdict-2026-06-15.md` (D7): project over `TraitInstId`/`PredicateListId`, **no `TyData::ConstraintTerm`**, abstract `P<T>` head SHELVED. The kinds become real; the `Derive` marker retires (board #7); provider bodies become ordinary effectful CTFE (TD5 complete).
 
