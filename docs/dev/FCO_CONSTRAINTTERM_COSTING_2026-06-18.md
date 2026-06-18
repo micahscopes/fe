@@ -1,9 +1,10 @@
 # Concrete-only `ConstraintTerm` — Measured Cost/Benefit + Decision Packet
 
 **Date:** 2026-06-18 · **Status:** costing complete (2 read-only agents, load-bearing claims
-spot-verified by the integrator). **DECISION PENDING (Micah)** — this reverses the 2026-06-15 D7/
-wiring-party "no `ConstraintTerm` / projection" verdict and is a standing PAUSE condition. Read-only;
-nothing built.
+spot-verified by the integrator). **DECISION: GO (Micah, 2026-06-18)** — pause lifted; this reverses the
+2026-06-15 D7/wiring-party "no `ConstraintTerm` / projection" verdict. Supersedes the assoc-type/param
+workaround plan (carrier dissolves; both derive forms become ordinary applications). Build in flight:
+R1 (inert variant, agent `a52877336cf08569c`).
 
 ## What's being costed
 
