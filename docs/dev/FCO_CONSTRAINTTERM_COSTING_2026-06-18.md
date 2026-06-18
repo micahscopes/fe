@@ -1,10 +1,24 @@
 # Concrete-only `ConstraintTerm` — Measured Cost/Benefit + Decision Packet
 
-**Date:** 2026-06-18 · **Status:** costing complete (2 read-only agents, load-bearing claims
-spot-verified by the integrator). **DECISION: GO (Micah, 2026-06-18)** — pause lifted; this reverses the
-2026-06-15 D7/wiring-party "no `ConstraintTerm` / projection" verdict. Supersedes the assoc-type/param
-workaround plan (carrier dissolves; both derive forms become ordinary applications). Build in flight:
-R1 (inert variant, agent `a52877336cf08569c`).
+**Date:** 2026-06-18 · **Status:** **R1–R3 LANDED + independently verified** (`e06235c50` inert variant,
+`c04cb76c7` production, `71bd772c0` provider-goal flow + carrier slim). DECISION: GO (Micah). Reverses the
+2026-06-15 D7/wiring-party "no `ConstraintTerm`" verdict.
+
+> ## POST-IMPLEMENTATION REVISION (2026-06-18) — read this before trusting the BENEFIT section below
+> The BENEFIT estimate below was **partly wrong, and we corrected it by building.** The carrier did
+> **NOT** dissolve: `provider_goal.rs` went 509→503 (**net −6 LOC**, not the predicted ~−250–300). Its
+> diagnostics are **load-bearing** — and `ConstraintTerm` *increased* the need for them: because `P<T>`
+> is now `Constraint`-kinded, an abstract-head provider goal `Evidence<P<T>>` **kind-checks silently**
+> without the carrier's `6-0008`. So the carrier survives, slimmed to a pure **diagnostic pass** (the
+> redundant `CapabilityGoal` *representation* was deleted; the good goal now rides R2's `ConstraintTerm`).
+> **Net across R1–R3 ≈ +130 LOC, not −170/−210.** The win is **qualitative** — first-class constraint
+> *terms*, honest `Evidence`/`ImplBuilder` generics, uniform representation (the project's premise) — NOT
+> an LOC deletion. The *cost* axis (blast radius) was accurate; the *benefit* axis was optimistic.
+> Lesson ([[reverify-inherited-blockers]]) applies to our own measurement: re-measure as you learn.
+> Proceeding was reaffirmed (Micah: "we have plenty more burndown enabled by this") — the value is the
+> honest representation + what it unblocks, not the LOC. Fully eliminating the carrier-as-validator
+> (re-homing the abstract/unsaturated/`uses`-param rejections into ordinary checking) is a real future
+> option, not free.
 
 ## What's being costed
 
