@@ -8,11 +8,12 @@ packet (`TD5_PROVIDER_BODY_EFFECTS.md`) deferred to TD5.0.
 **Freeze rule (TD5.0 deletion claim):** *no new provider-body operation may be added to the
 executor without (a) a TD5 category decision and (b) — for quote forms — an entry in the
 quote-fragment spec.* The freeze is enforced by the unit tests
-`recognized_*_ops_are_frozen` in `provider_executor.rs`'s `#[cfg(test)]` module, which pin the
+in `provider_executor.rs`'s `#[cfg(test)]` `freeze_guard` module, which pin the
 exact set of recognized op-name string literals against the canonical
-`RECOGNIZED_BUILDER_OPS` / `RECOGNIZED_REFLECT_OPS` / `RECOGNIZED_ITERABLE_OPS` consts. Adding
-an op without updating both the dispatch and the canonical list fails the test. **Update the
-lists only as part of a TD5 rung** (and update this doc in the same change).
+`RECOGNIZED_BUILDER_OPS` / `RECOGNIZED_REFLECT_OPS` consts (and structurally pin that the
+reflection iterables stay off the executor). Adding an op without updating both the dispatch
+and the canonical list fails the test. **Update the lists only as part of a TD5 rung** (and
+update this doc in the same change).
 
 ## Counts (AUTHORITATIVE — see "Count reconciliation" below)
 
@@ -30,15 +31,19 @@ The packet estimated **~56**. The authoritative count is **68** (or **59** if yo
 9 CTFE control-flow interception points, which the packet did not enumerate as "ops"). The
 difference is explained in "Count reconciliation".
 
-Dispatch sites are in three functions:
-- `eval_method_call` (`provider_executor.rs:1497`) — receiver-typed method dispatch
-  (`Value::Builder` delegates to `eval_builder_method`; `Value::Reflect`/`Value::Field`/
-  `Value::Variant` handled inline).
-- `eval_builder_method` (`provider_executor.rs:1568`) — the big `(method, args)` match for
-  all `builder.*` ops. **This is the main dispatch site; the freeze comment lives here.**
-- `eval_iterable` (`provider_executor.rs:2182`) — the `for`-loop interception that
-  pattern-matches `reflect.fields()` / `reflect.variants()` / `variant.fields()` *instead of
-  evaluating the call* (surprise #2).
+Dispatch sites are now in two functions:
+- `eval_method_call` — receiver-typed method dispatch (`Value::Builder` delegates to
+  `eval_builder_method`; `Value::Reflect`/`Value::Field`/`Value::Variant` handled inline). The
+  reflection iterables (`reflect.fields()`/`reflect.variants()`/`variant.fields()`) are
+  ORDINARY method calls here now — they return a `Value::Seq` of typed read-only handles built
+  eagerly from the reflection (`reflection_sequence`/`variant_field_sequence`), which the
+  `for`-loop iterates like any other sequence value.
+- `eval_builder_method` — the big `(method, args)` match for all `builder.*` ops. **This is the
+  main dispatch site; the freeze comment lives here.**
+
+*(The `eval_iterable` `for`-loop interception that used to pattern-match the iterable
+*expression* — surprise #2 — is GONE as of TD5c. There is no longer a special iterable-read
+dispatch site.)*
 
 ---
 
@@ -47,14 +52,15 @@ Dispatch sites are in three functions:
 These become a typed **read-only CTFE capability** (TD5c): field/variant handles get a typed
 CTFE representation and `reflect.*` reads stop being executor-intercepted strings.
 
-**TD5c status — all NON-ITERATING reflection reads DONE.** Every non-iterating `R` read has
-migrated off the bespoke executor onto a typed read-only handle that owns its own read vocabulary
-as a data table; the executor consults the handle *by name* and no longer knows those names.
+**TD5c status — ALL reflection reads DONE (reads AND iterables).** Every `R` read has migrated
+off the bespoke executor. The non-iterating reads live on typed read-only handles that own their
+own read vocabulary as a data table; the iterables are ordinary method calls returning a
+`Value::Seq` of those same handles. The executor no longer knows any reflection read by name.
 
 - *Slice 1 (DONE):* `reflect.is_struct()`/`is_enum()`/`target_name()` → `ReflectHandle`
   (`Value::Reflect` carries it). `RECOGNIZED_REFLECT_OPS` 7 → 4. The executor's ambient
   `target_name` field was deleted.
-- *Slice 2 (DONE, this rung):* `field.ty()`/`field.name()` → `FieldHandle` (`Value::Field` now
+- *Slice 2 (DONE):* `field.ty()`/`field.name()` → `FieldHandle` (`Value::Field` now
   carries it, preserving the `FieldKey` identity via `FieldHandle::key`);
   `variant.is_default()`/`variant.precedes(other)` → `VariantHandle` (`Value::Variant` carries it,
   preserving the decl-order index via `VariantHandle::index`; `precedes` is a *binary* read in the
@@ -64,11 +70,19 @@ as a data table; the executor consults the handle *by name* and no longer knows 
   `ReflectionCompare` table, resolved in the `eval_builder_method` catch-all; their `("name",`
   arms are deleted, so `RECOGNIZED_BUILDER_OPS` 45 → **43**. Total named method/iterable surface
   51 → **45**.
+- *Slice 3 (DONE, this rung — the iterables):* `reflect.fields()`/`reflect.variants()`/
+  `variant.fields()` are now ORDINARY method calls in `eval_method_call`, returning a
+  `Value::Seq` of the SAME typed read-only handles the scalar path builds (`FieldHandle` /
+  `VariantHandle`), constructed eagerly from the reflection at the call site
+  (`reflection_sequence` / `variant_field_sequence`). The `for`-loop iterates that sequence
+  value like any other; the `eval_iterable` interception, the `Iterable` enum, and the
+  `RECOGNIZED_ITERABLE_OPS` const are DELETED. `Value::Seq` is the one new (non-`Copy`) value
+  variant. Order (declaration order) and identity (`FieldKey` / variant decl-order index) are
+  preserved exactly — derive codegen is byte-identical. Named method/iterable surface 45 → **43**
+  (now just the 43 `builder.*` ops). **The reflection-read surface is entirely off the executor.**
 
 No live `P`/`ConstraintTerm`/schema change/public syntax: reflection stays read-only CTFE; the
-handles copy facts at construction and emit no commands/obligations. **Still executor-owned
-(deferred, separate slice):** the three `for`-iterables (`reflect.fields()`/`reflect.variants()`/
-`variant.fields()`) — intercepted in `eval_iterable` (surprise #2).
+handles copy facts at construction and emit no commands/obligations.
 
 | op | dispatch site | category | future effect | rung |
 |---|---|---|---|---|
@@ -79,9 +93,9 @@ handles copy facts at construction and emit no commands/obligations. **Still exe
 | `field.name()` | `FieldHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `FieldHandle` scalar read (string) | TD5c ✔ |
 | `variant.is_default()` | `VariantHandle::scalar_reads` (MIGRATED off executor) | R | typed read-only `VariantHandle` scalar read (bool) | TD5c ✔ |
 | `variant.precedes(other)` | `VariantHandle::binary_read` (MIGRATED off executor) | R | typed read-only `VariantHandle` binary read (bool; decl-order index compare) | TD5c ✔ |
-| `reflect.fields()` (for-iterable) | `provider_executor.rs` `eval_iterable` | R | typed read-only CTFE iterator over struct fields | TD5c (deferred) |
-| `reflect.variants()` (for-iterable) | `provider_executor.rs` `eval_iterable` | R | typed read-only CTFE iterator over variants | TD5c (deferred) |
-| `variant.fields()` (for-iterable) | `provider_executor.rs` `eval_iterable` | R | typed read-only CTFE iterator over variant fields | TD5c (deferred) |
+| `reflect.fields()` (iterable) | `reflection_sequence` (ordinary method call; MIGRATED off executor) | R | `Value::Seq` of `FieldHandle` over struct fields | TD5c ✔ |
+| `reflect.variants()` (iterable) | `reflection_sequence` (ordinary method call; MIGRATED off executor) | R | `Value::Seq` of `VariantHandle` over variants | TD5c ✔ |
+| `variant.fields()` (iterable) | `variant_field_sequence` (ordinary method call; MIGRATED off executor) | R | `Value::Seq` of `FieldHandle` over variant fields | TD5c ✔ |
 | `builder.same_ty(a, b)` | `ReflectionCompare::binary_read` (MIGRATED off executor) | R | typed read-only CTFE type-identity compare (bool) | TD5c ✔ |
 | `builder.same_field(a, b)` | `ReflectionCompare::binary_read` (MIGRATED off executor) | R | typed read-only CTFE field-identity compare (bool) | TD5c ✔ |
 
@@ -225,17 +239,18 @@ Q-category change governed by the freeze rule.
 
 ## CTFE — control flow (9)
 
-Already ordinary Fe semantically (surprise #2). The only genuinely magic narrowness is the
-`for`-loop's `eval_iterable` interception of `reflect.fields()` etc. (catalogued under R above)
-and the `Value::Builder`/`Value::Reflect` method-dispatch tables. Beyond removing the
-interception, there is little to do here; these are listed for completeness so the freeze
-covers the executor's full recognized surface.
+Already ordinary Fe semantically (surprise #2). The `for`-loop's old `eval_iterable`
+interception of `reflect.fields()` etc. (catalogued under R above) is **GONE** as of TD5c — the
+iterables are ordinary method calls returning a `Value::Seq`, and the `for`-loop iterates that
+sequence value like any other. What remains is the `Value::Builder`/`Value::Reflect`
+method-dispatch tables. Beyond that, there is little to do here; these are listed for
+completeness so the freeze covers the executor's full recognized surface.
 
 | op | dispatch site | category | future effect | rung |
 |---|---|---|---|---|
 | `let pat = init` | `provider_executor.rs:556` | CTFE | ordinary Fe `let` | (interception removal, TD5f) |
 | `name = value` (assign / `mut`) | `provider_executor.rs:669` | CTFE | ordinary Fe assignment | TD5f |
-| `for pat in iterable { .. }` | `provider_executor.rs:567` | CTFE | ordinary Fe `for` (over typed CTFE iterators) | TD5c/TD5f |
+| `for pat in iterable { .. }` | `provider_executor.rs` `Stmt::For` | CTFE | ordinary Fe `for` over an ordinary sequence `Value::Seq` (iterable interception removed, TD5c ✔) | TD5f |
 | `if cond { .. }` | `provider_executor.rs:660` | CTFE | ordinary Fe `if` | TD5f |
 | `else { .. }` | `provider_executor.rs:663` | CTFE | ordinary Fe `else` | TD5f |
 | `&&` (cond) | `provider_executor.rs:698` | CTFE | ordinary Fe `&&` | TD5f |
@@ -282,7 +297,8 @@ the pinned surface — see the mechanical pin below.)*
 
 ### Mechanical pin (what the freeze test enforces)
 The freeze test pins the named ops as string literals (counts are the **current** values; the
-TD5.0 baseline was 45 / 7 / 3 = 55, now 43 / 0 / 2 = 45):
+TD5.0 baseline was 45 / 7 / 3 = 55, now 43 / 0 = 43 — the executor's only named surface is
+`builder.*`):
 - `RECOGNIZED_BUILDER_OPS` — the **43** arms of `eval_builder_method` (TD5.0 baseline 45; **TD5c
   removed `same_ty`/`same_field`** — mis-shelved `builder.*`-spelled identity reads — which moved
   onto the typed read-only `ReflectionCompare` table and are resolved in the catch-all, not as
@@ -292,9 +308,12 @@ TD5.0 baseline was 45 / 7 / 3 = 55, now 43 / 0 / 2 = 45):
   `ReflectHandle`, then `field.*` (`ty`/`name`) → `FieldHandle` and `variant.*`
   (`is_default`/`precedes`) → `VariantHandle`. The Field/Variant `eval_method_call` arms now just
   consult the handle's read table by name.
-- `RECOGNIZED_ITERABLE_OPS` — the **2** distinct `for`-loop iterable method names (`fields`/
-  `variants`) in `eval_iterable` (`fields` is matched on two receivers). These remain
-  executor-owned — the deferred for-iterable slice of TD5c.
+- The iterable-ops const (TD5.0 baseline 3 / shrunk to 2) is **DELETED**. The reflection
+  iterables (`reflect.fields()`/`reflect.variants()`/`variant.fields()`) are no longer a special
+  dispatch surface — they are ordinary method calls returning a `Value::Seq` of handles, so there
+  is no list to pin. Instead the `freeze_guard::iterable_reads_are_off_the_executor` test pins
+  *structurally* that neither the iterable-expression interception fn nor the iterable-ops const
+  ever reappears in the source.
 
 Quote forms and control-flow constructs are AST-shape dispatch (not string literals), so they
 cannot be pinned as a string set; they are frozen by *rule* (this doc) and guarded structurally
@@ -306,13 +325,16 @@ requires editing those matches, which is itself a TD5 category decision.
 ## Migration map (ladder ⇄ this table)
 
 - **TD5b** removes `require` (B-obl) from executor ownership → real FCO obligation.
-- **TD5c** removes all 12 **R** ops → typed read-only CTFE handles/iterators. *All 9 non-iterating
-  reads DONE:* `reflect.*` (`is_struct`/`is_enum`/`target_name`) → `ReflectHandle`; `field.*`
-  (`ty`/`name`) → `FieldHandle`; `variant.*` (`is_default`/`precedes`) → `VariantHandle`;
-  `same_ty`/`same_field` → the free-standing `ReflectionCompare` table. All off `eval_method_call`/
-  `eval_builder_method` (`RECOGNIZED_REFLECT_OPS` → 0, `RECOGNIZED_BUILDER_OPS` 45 → 43).
-  **Remaining (deferred):** the three `for`-iterables (`fields`/`variants`/`variant.fields`),
-  intercepted in `eval_iterable` (surprise #2) — a separate, harder slice.
+- **TD5c** removes all 12 **R** ops → typed read-only CTFE handles/iterators. **DONE (complete).**
+  *Non-iterating reads:* `reflect.*` (`is_struct`/`is_enum`/`target_name`) → `ReflectHandle`;
+  `field.*` (`ty`/`name`) → `FieldHandle`; `variant.*` (`is_default`/`precedes`) → `VariantHandle`;
+  `same_ty`/`same_field` → the free-standing `ReflectionCompare` table. *Iterables (final slice):*
+  `reflect.fields()`/`reflect.variants()`/`variant.fields()` → ordinary method calls returning a
+  `Value::Seq` of those same handles (`reflection_sequence`/`variant_field_sequence`); the
+  `eval_iterable` interception, the `Iterable` enum, and the iterable-ops const are deleted. All
+  off `eval_method_call`/`eval_builder_method` (`RECOGNIZED_REFLECT_OPS` → 0, the iterable-ops
+  const gone, `RECOGNIZED_BUILDER_OPS` 45 → 43). **The reflection-read surface is entirely off the
+  executor; only `builder.*` ops remain.**
 - **TD5d** removes the 6 **Q** forms (and the quote-template vocabulary) → typed generated HIR.
 - **TD5e** removes the 39 **B-build** ops + `finish` (FIN) → typed builder effect; the 4
   goal-qualified ops (surprise #3) stay as typed builder-effect ops here.

@@ -50,10 +50,10 @@ const COMMAND_BUDGET: usize = 10_000;
 // grow silently while later TD5 rungs shrink it. Update these lists ONLY as
 // part of a TD5 rung (and update the inventory doc in the same change).
 //
-// These are pure inventory: the dispatch `match`es in `eval_builder_method`,
-// `eval_method_call`, and `eval_iterable` remain the runtime authority; the
-// catch-all arms `debug_assert!` that any name routed to them is NOT in the
-// canonical list, so the list and the dispatch cannot drift apart.
+// These are pure inventory: the dispatch `match`es in `eval_builder_method`
+// and `eval_method_call` remain the runtime authority; the catch-all arms
+// `debug_assert!` that any name routed to them is NOT in the canonical list,
+// so the list and the dispatch cannot drift apart.
 
 /// Every `builder.*` operation recognized by [`ProviderExecutor::eval_builder_method`].
 /// One entry per `(method, args)` arm spelling. Includes obligation
@@ -120,25 +120,26 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
 
 /// Every reflection-read operation still recognized as a *bespoke* method-call
 /// arm on a `reflect`/`field`/`variant` handle in
-/// [`ProviderExecutor::eval_method_call`]. (The `for`-loop iterable reads
-/// `fields`/`variants` live in [`RECOGNIZED_ITERABLE_OPS`].)
+/// [`ProviderExecutor::eval_method_call`].
 ///
-/// TD5c: this list is now EMPTY. Every non-iterating reflection read
-/// (`reflect.is_struct`/`is_enum`/`target_name`, `field.ty`/`name`,
-/// `variant.is_default`/`precedes`) has migrated off the bespoke executor onto
-/// the typed read-only handle the receiver `Value` carries
-/// ([`ReflectHandle`]/[`FieldHandle`]/[`VariantHandle`]), which owns its own
-/// read vocabulary; the executor consults the handle by name and no longer
-/// pins any of those names as dispatch arms. Only the `for`-iterables
-/// (`fields`/`variants`/`variant.fields`) remain executor-owned (a separate,
-/// deferred TD5c slice in `eval_iterable`).
+/// TD5c: this list is now EMPTY. Every reflection read — scalar AND iterating —
+/// has migrated off the bespoke executor:
+/// * the non-iterating reads (`reflect.is_struct`/`is_enum`/`target_name`,
+///   `field.ty`/`name`, `variant.is_default`/`precedes`) migrated onto the
+///   typed read-only handle the receiver `Value` carries
+///   ([`ReflectHandle`]/[`FieldHandle`]/[`VariantHandle`]), which owns its own
+///   read vocabulary; the executor consults the handle by name and no longer
+///   pins any of those names as dispatch arms.
+/// * the iterables (`reflect.fields`/`reflect.variants`/`variant.fields`) are
+///   now ORDINARY method calls returning a `Value::Seq` of those same handles
+///   (built eagerly in [`ProviderExecutor::reflection_sequence`] /
+///   [`ProviderExecutor::variant_field_sequence`]); the `for`-loop iterates the
+///   resulting sequence value like any other, so there is no longer an
+///   `eval_iterable` interception of the iterable *expression*.
+///
+/// The only executor-owned named surface that remains is the `builder.*` op
+/// cluster ([`RECOGNIZED_BUILDER_OPS`]).
 const RECOGNIZED_REFLECT_OPS: &[&str] = &[];
-
-/// Every `for`-loop iterable read intercepted by
-/// [`ProviderExecutor::eval_iterable`] (matched as `(receiver, method)` pairs;
-/// the distinct method names are listed here). `fields` is recognized on both
-/// `reflect` and `variant` receivers.
-const RECOGNIZED_ITERABLE_OPS: &[&str] = &["fields", "variants"];
 
 /// FREEZE (TD5.0): a compile-time pin on the size of the recognized command
 /// surface. Changing any list above without updating these counts (and
@@ -150,10 +151,12 @@ const _: () = {
     // TD5c: was 45; `same_ty`/`same_field` (mis-shelved `builder.*`-spelled
     // identity reads) moved onto the typed read-only `ReflectionCompare` table.
     assert!(RECOGNIZED_BUILDER_OPS.len() == 43);
-    // TD5c: was 7, then 4; ALL non-iterating reflection reads now live on the
-    // typed read-only handles (`ReflectHandle`/`FieldHandle`/`VariantHandle`).
+    // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
+    // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
+    // the `fields`/`variants` iterables (now ordinary method calls returning a
+    // `Value::Seq` of those handles) — are off the bespoke executor. The
+    // executor's only named surface is now `builder.*`.
     assert!(RECOGNIZED_REFLECT_OPS.is_empty());
-    assert!(RECOGNIZED_ITERABLE_OPS.len() == 2);
 };
 
 // === end FROZEN command surface ========================================
@@ -495,7 +498,13 @@ impl<'db> ProviderOutput<'db> {
 }
 
 /// A compile-time value in the provider command language.
-#[derive(Debug, Clone, Copy)]
+///
+/// Not `Copy`: TD5c's [`Value::Seq`] carries an owned `Vec` of element values
+/// (the reflection iterables' handles). Every other variant is small and
+/// `Copy`; the few sites that previously relied on copying a looked-up/captured
+/// value now `clone()` (cheap for the non-`Seq` variants, an owned vector copy
+/// for a bound sequence).
+#[derive(Debug, Clone)]
 enum Value<'db> {
     Bool(bool),
     /// A compile-time string (string literals, reflected names, and
@@ -533,6 +542,14 @@ enum Value<'db> {
     Evidence,
     /// The result of a command call; carries no data.
     Unit,
+    /// An ordinary compile-time sequence of values (TD5c). The reflection
+    /// iterables (`reflect.fields()`/`reflect.variants()`/`variant.fields()`)
+    /// are plain method calls returning one of these — a `Vec` of typed
+    /// read-only handles (`Value::Field`/`Value::Variant`) built eagerly from
+    /// the reflection at the call site. The `for`-loop iterates this like any
+    /// other sequence value; the executor no longer special-cases the iterable
+    /// *expression*.
+    Seq(Vec<Value<'db>>),
 }
 
 /// A typed read-only compile-time handle over the derive target's reflection
@@ -841,12 +858,6 @@ enum Flow {
     Return,
 }
 
-enum Iterable {
-    StructFields,
-    Variants,
-    VariantFields(usize),
-}
-
 pub(super) struct ProviderExecutor<'a, 'db> {
     db: &'db dyn HirDb,
     body: Body<'db>,
@@ -1040,7 +1051,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             .iter()
             .rev()
             .flat_map(|scope| scope.iter().rev())
-            .find_map(|(bound, value)| (*bound == name).then_some(*value))
+            .find_map(|(bound, value)| (*bound == name).then(|| value.clone()))
     }
 
     fn assign(&mut self, name: IdentId<'db>, value: Value<'db>) -> bool {
@@ -1077,59 +1088,13 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let Some(binding) = self.simple_pat_binding(*pat) else {
                     return Err(self.unsupported_stmt(stmt));
                 };
-                let iterable_kind = self.eval_iterable(*iterable)?;
-                // TD5c: iteration yields typed read-only handles (`FieldHandle`/
-                // `VariantHandle`), each copying its scalar facts at construction
-                // from the reflection arena. The handle ctors look the reflected
-                // item back up by key/index; the items being iterated come from
-                // that same arena, so the lookup always succeeds (a malformed
-                // handle would be a defect, skipped via `filter_map`).
-                let items: Vec<Value<'db>> = match iterable_kind {
-                    Iterable::StructFields => self
-                        .reflection
-                        .struct_fields()
-                        .iter()
-                        .filter_map(|field| {
-                            FieldHandle::new(
-                                self.db,
-                                self.reflection,
-                                FieldKey {
-                                    variant: field.variant,
-                                    index: field.index,
-                                },
-                            )
-                            .map(Value::Field)
-                        })
-                        .collect(),
-                    Iterable::Variants => self
-                        .reflection
-                        .variants()
-                        .iter()
-                        .filter_map(|variant| {
-                            VariantHandle::new(self.reflection, variant.index).map(Value::Variant)
-                        })
-                        .collect(),
-                    Iterable::VariantFields(variant) => self
-                        .reflection
-                        .variant(variant)
-                        .map(|variant| {
-                            variant
-                                .fields
-                                .iter()
-                                .filter_map(|field| {
-                                    FieldHandle::new(
-                                        self.db,
-                                        self.reflection,
-                                        FieldKey {
-                                            variant: field.variant,
-                                            index: field.index,
-                                        },
-                                    )
-                                    .map(Value::Field)
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                // TD5c: the iterable is an ORDINARY expression now. It evaluates
+                // to a `Value::Seq` of typed read-only handles (built eagerly at
+                // the `reflect.fields()`/`reflect.variants()`/`variant.fields()`
+                // method-call site); the executor no longer special-cases the
+                // iterable expression. Any non-sequence iterable is unsupported.
+                let Value::Seq(items) = self.eval_expr(*iterable)? else {
+                    return Err(self.unsupported_expr(*iterable));
                 };
                 for item in items {
                     self.scopes.push(vec![(binding, item)]);
@@ -2013,7 +1978,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         match template
             .holes
             .iter()
-            .find_map(|(hole, value)| (*hole == expr).then_some(*value))
+            .find_map(|(hole, value)| (*hole == expr).then(|| value.clone()))
         {
             Some(value) => Ok(value),
             None => Err(self.invalid_quote(
@@ -2049,19 +2014,28 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         // the result into a `Value` — it does not know those names. So
         // [`RECOGNIZED_REFLECT_OPS`] is now EMPTY: the reflection-read surface
         // is off the recognized string-keyed executor surface entirely.
-        // (`fields()`/`variants()`/`variant.fields()` remain `for`-iterable
-        // interceptions in `eval_iterable` — a separate, deferred slice.)
+        //
+        // The reflection iterables (`reflect.fields()`/`reflect.variants()`/
+        // `variant.fields()`) are likewise ORDINARY method calls now: they
+        // return a `Value::Seq` of typed read-only handles, built eagerly from
+        // the reflection here (`reflection_sequence`). The `for`-loop iterates
+        // that sequence like any other value; the executor no longer
+        // special-cases the iterable *expression* (the `eval_iterable`
+        // interception is gone).
         match receiver_value {
             Value::Builder => self.eval_builder_method(expr, &method_name, generic_args, &args),
             Value::Reflect(handle) => {
                 if !args.is_empty() {
                     return Err(self.unsupported_expr(expr));
                 }
-                match handle.scalar_read(method_name.as_str()) {
-                    Some(read) => Ok(read.into_value(self.db)),
-                    // `fields()` / `variants()` are only meaningful as `for`
-                    // iterables, which are intercepted before evaluation; any
-                    // other name is unsupported.
+                // Argument-free scalar read (`is_struct`/`is_enum`/
+                // `target_name`) → handle table; otherwise the `fields`/
+                // `variants` iterables → a `Value::Seq` of handles.
+                if let Some(read) = handle.scalar_read(method_name.as_str()) {
+                    return Ok(read.into_value(self.db));
+                }
+                match self.reflection_sequence(method_name.as_str()) {
+                    Some(seq) => Ok(Value::Seq(seq)),
                     None => Err(self.unsupported_expr(expr)),
                 }
             }
@@ -2075,11 +2049,15 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 }
             }
             Value::Variant(variant) => {
-                // Argument-free scalar read (`is_default`) → handle table.
+                // Argument-free reads on a variant: the scalar `is_default`
+                // (handle table) or the `fields` iterable (a `Value::Seq` of
+                // field handles for this variant's payload).
                 if args.is_empty() {
-                    return match variant.scalar_read(method_name.as_str()) {
-                        Some(read) => Ok(read.into_value(self.db)),
-                        // `fields()` is only meaningful as a `for` iterable.
+                    if let Some(read) = variant.scalar_read(method_name.as_str()) {
+                        return Ok(read.into_value(self.db));
+                    }
+                    return match self.variant_field_sequence(variant.index(), method_name.as_str()) {
+                        Some(seq) => Ok(Value::Seq(seq)),
                         None => Err(self.unsupported_expr(expr)),
                     };
                 }
@@ -2097,6 +2075,81 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             _ => Err(self.unsupported_expr(expr)),
         }
+    }
+
+    /// Builds the ordinary sequence value produced by a `reflect.*` iterable
+    /// method (`fields`/`variants`); `None` for any other name (the executor
+    /// maps that to "unsupported", exactly as an unrecognized read would). The
+    /// elements are the SAME typed read-only handles the scalar path builds —
+    /// `FieldHandle`/`VariantHandle` constructed from the reflection arena —
+    /// so identity (`FieldKey` / variant decl-order index) and order
+    /// (declaration order) are preserved exactly. A handle ctor only fails for
+    /// a key/index the arena does not hold; since the items come from that same
+    /// arena the lookup always succeeds, so a malformed handle (a defect) is
+    /// skipped via `filter_map` rather than aborting the sequence.
+    fn reflection_sequence(&self, method: &str) -> Option<Vec<Value<'db>>> {
+        match method {
+            "fields" => Some(
+                self.reflection
+                    .struct_fields()
+                    .iter()
+                    .filter_map(|field| {
+                        FieldHandle::new(
+                            self.db,
+                            self.reflection,
+                            FieldKey {
+                                variant: field.variant,
+                                index: field.index,
+                            },
+                        )
+                        .map(Value::Field)
+                    })
+                    .collect(),
+            ),
+            "variants" => Some(
+                self.reflection
+                    .variants()
+                    .iter()
+                    .filter_map(|variant| {
+                        VariantHandle::new(self.reflection, variant.index).map(Value::Variant)
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Builds the ordinary sequence value produced by `variant.fields()` — the
+    /// payload fields of the variant at `variant_index`, as `FieldHandle`
+    /// values in declaration order. `None` for any other method name. Same
+    /// identity/order preservation and `filter_map` rationale as
+    /// [`Self::reflection_sequence`].
+    fn variant_field_sequence(&self, variant_index: usize, method: &str) -> Option<Vec<Value<'db>>> {
+        if method != "fields" {
+            return None;
+        }
+        let fields = self
+            .reflection
+            .variant(variant_index)
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .filter_map(|field| {
+                        FieldHandle::new(
+                            self.db,
+                            self.reflection,
+                            FieldKey {
+                                variant: field.variant,
+                                index: field.index,
+                            },
+                        )
+                        .map(Value::Field)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(fields)
     }
 
     /// The reflected field a `require<Trait>(ty)` argument came from, when the
@@ -2767,33 +2820,6 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         type_arg.ty.to_opt()
     }
 
-    /// Detects the supported `for` iterables: `reflect.fields()`,
-    /// `reflect.variants()`, and `variant.fields()`.
-    fn eval_iterable(&mut self, iterable: ExprId) -> Result<Iterable, ExecError> {
-        let Partial::Present(Expr::MethodCall(receiver, method, _, args)) =
-            iterable.data(self.db, self.body)
-        else {
-            return Err(self.unsupported_expr(iterable));
-        };
-        let (receiver, args_empty) = (*receiver, args.is_empty());
-        let Some(method) = method.to_opt() else {
-            return Err(self.unsupported_expr(iterable));
-        };
-        if !args_empty {
-            return Err(self.unsupported_expr(iterable));
-        }
-        let receiver_value = self.eval_expr(receiver)?;
-        // FREEZE (TD5.0): the `for`-loop iterable reads below are pinned by
-        // [`RECOGNIZED_ITERABLE_OPS`]. See
-        // docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md.
-        match (receiver_value, method.data(self.db).as_str()) {
-            (Value::Reflect(_), "fields") => Ok(Iterable::StructFields),
-            (Value::Reflect(_), "variants") => Ok(Iterable::Variants),
-            (Value::Variant(variant), "fields") => Ok(Iterable::VariantFields(variant.index())),
-            _ => Err(self.unsupported_expr(iterable)),
-        }
-    }
-
     fn simple_pat_binding(&self, pat: PatId) -> Option<IdentId<'db>> {
         let Partial::Present(Pat::Path(Partial::Present(path), _)) = pat.data(self.db, self.body)
         else {
@@ -2827,6 +2853,7 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Reflect(_) => "reflect capability",
         Value::Evidence => "evidence value",
         Value::Unit => "unit value",
+        Value::Seq(_) => "compile-time sequence",
     }
 }
 
@@ -2843,7 +2870,7 @@ mod freeze_guard {
     //! executor. A new `("name", ..)` arm with no entry in the canonical list
     //! — or a list entry with no arm — fails the corresponding test.
 
-    use super::{RECOGNIZED_BUILDER_OPS, RECOGNIZED_ITERABLE_OPS, RECOGNIZED_REFLECT_OPS};
+    use super::{RECOGNIZED_BUILDER_OPS, RECOGNIZED_REFLECT_OPS};
 
     /// This module's source, embedded at compile time so the scan is
     /// path-independent and always matches the dispatch it pins.
@@ -2960,61 +2987,44 @@ mod freeze_guard {
     }
 
     #[test]
-    fn recognized_iterable_ops_are_frozen() {
-        // The `for`-loop iterables are matched as `(receiver, "name")` pairs,
-        // not leading `("name",` arms, so pin them by exact membership against
-        // the names the dispatch contains.
-        let body = slice_between(
-            "// FREEZE (TD5.0): the `for`-loop iterable reads below",
-            "_ => Err(self.unsupported_expr(iterable)),",
+    fn iterable_reads_are_off_the_executor() {
+        // TD5c: the reflection iterables are ordinary method calls now — there
+        // is no longer an iterable-expression interception or an iterable-ops
+        // const. Pin both deletions structurally so neither can creep back
+        // without tripping this test.
+        //
+        // The needles are assembled at runtime so they do not appear verbatim
+        // in this file's own embedded `SOURCE` (which would defeat the scan, as
+        // it did for the deleted markers).
+        let interception_fn = format!("fn eval_{}", "iterable");
+        assert!(
+            !SOURCE.contains(&interception_fn),
+            "FREEZE (TD5.0): the iterable-expression interception `{interception_fn}` is back; \
+             the reflection iterables must stay ordinary method calls returning a `Value::Seq` \
+             — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );
-        for op in RECOGNIZED_ITERABLE_OPS {
-            assert!(
-                body.contains(&format!("\"{op}\"")),
-                "FREEZE (TD5.0): RECOGNIZED_ITERABLE_OPS lists `{op}` but eval_iterable has \
-                 no matching arm — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
-            );
-        }
-        // Exactly the two distinct iterable method names (`fields`,
-        // `variants`); `fields` is matched on two receivers.
-        assert_eq!(
-            RECOGNIZED_ITERABLE_OPS.len(),
-            2,
-            "FREEZE (TD5.0): the for-loop iterable surface changed size; update the count \
-             and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung."
+        let iterable_ops_const = format!("RECOGNIZED_{}_OPS", "ITERABLE");
+        assert!(
+            !SOURCE.contains(&iterable_ops_const),
+            "FREEZE (TD5.0): the const `{iterable_ops_const}` is back; the iterable surface is \
+             gone — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );
-        // Guard against an unrecognized string-literal `(Value::*, \"x\")`
-        // iterable arm sneaking in: every quoted name in this slice must be a
-        // recognized iterable op.
-        for line in body.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("(Value::")
-                && let Some(open) = trimmed.find('"')
-                && let Some(close) = trimmed[open + 1..].find('"')
-            {
-                let name = &trimmed[open + 1..open + 1 + close];
-                assert!(
-                    RECOGNIZED_ITERABLE_OPS.contains(&name),
-                    "FREEZE (TD5.0): eval_iterable recognizes `{name}` but it is not in \
-                     RECOGNIZED_ITERABLE_OPS — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
-                );
-            }
-        }
     }
 
     #[test]
     fn total_recognized_method_surface_is_pinned() {
-        // The full named method/iterable surface the freeze pins: 43 builder
-        // ops + 0 reflection reads + 2 iterable names = 45 distinct literals.
-        // TD5c first moved the three `reflect.*` scalar reads onto `ReflectHandle`
-        // (54 → 51), then this slice moved the `field.*`/`variant.*` reads onto
-        // `FieldHandle`/`VariantHandle` (RECOGNIZED_REFLECT_OPS → 0) and
-        // `same_ty`/`same_field` onto `ReflectionCompare` (builder 45 → 43),
-        // taking the surface 51 → 45.
-        let total =
-            RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len() + RECOGNIZED_ITERABLE_OPS.len();
+        // The full named method surface the freeze pins: 43 builder ops + 0
+        // reflection reads = 43 distinct literals. TD5c first moved the three
+        // `reflect.*` scalar reads onto `ReflectHandle` (54 → 51), then moved
+        // the `field.*`/`variant.*` reads onto `FieldHandle`/`VariantHandle`
+        // (RECOGNIZED_REFLECT_OPS → 0) and `same_ty`/`same_field` onto
+        // `ReflectionCompare` (builder 45 → 43) (51 → 45), then this slice made
+        // the `fields`/`variants` iterables ordinary method calls returning a
+        // `Value::Seq` of handles (the iterable-ops const deleted; 45 → 43).
+        // `builder.*` is now the executor's only named surface.
+        let total = RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len();
         assert_eq!(
-            total, 45,
+            total, 43,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );
