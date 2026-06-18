@@ -216,6 +216,8 @@ where
                 Err(UnificationError::TypeMismatch)
             }
 
+            (TyData::ConstraintTerm(a), TyData::ConstraintTerm(b)) => self.unify(*a, *b),
+
             _ => Err(UnificationError::TypeMismatch),
         }
     }

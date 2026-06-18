@@ -148,6 +148,11 @@ impl<'db> TyFoldable<'db> for TyId<'db> {
                 TyId::qualified_ty(db, folded_trait)
             }
 
+            ConstraintTerm(inst) => {
+                let folded_inst = inst.fold_with(db, folder);
+                TyId::constraint_term(db, folded_inst)
+            }
+
             TyVar(_) | TyParam(_) | TyBase(_) | Never | Invalid(_) => self,
         }
     }

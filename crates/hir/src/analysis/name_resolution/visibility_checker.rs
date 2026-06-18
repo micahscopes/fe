@@ -115,6 +115,9 @@ pub(crate) fn is_ty_visible_from(db: &dyn HirAnalysisDb, ty: TyId, from_scope: S
         TyData::QualifiedTy(trait_inst) => {
             is_scope_visible_from(db, trait_inst.def(db).scope(), from_scope)
         }
+        TyData::ConstraintTerm(inst) => {
+            is_scope_visible_from(db, inst.def(db).scope(), from_scope)
+        }
         TyData::TyApp(_, _) => unreachable!(),
     }
 }

@@ -413,6 +413,7 @@ fn ty_mentions_effect_provider_param<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'
         TyData::QualifiedTy(trait_inst) => {
             trait_inst_mentions_effect_provider_param(db, *trait_inst)
         }
+        TyData::ConstraintTerm(inst) => trait_inst_mentions_effect_provider_param(db, *inst),
         TyData::TyVar(_)
         | TyData::TyBase(_)
         | TyData::ConstTy(_)
@@ -494,6 +495,7 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
             assoc.name.data(db)
         ),
         TyData::QualifiedTy(trait_inst) => format!("qualified${}", trait_identity(db, *trait_inst)),
+        TyData::ConstraintTerm(inst) => format!("constraint${}", trait_identity(db, *inst)),
         TyData::ConstTy(const_ty) => {
             format!(
                 "const_ty${}",

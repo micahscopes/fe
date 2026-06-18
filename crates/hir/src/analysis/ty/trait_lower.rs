@@ -443,9 +443,11 @@ mod layout_hole_tests {
     use super::lower_trait_ref_impl;
     use crate::analysis::ty::{
         const_ty::{ConstTyData, HoleId},
+        fold::{TyFoldable, TyFolder},
         trait_resolution::PredicateListId,
-        ty_def::TyData,
+        ty_def::{Kind, TyData, TyId},
     };
+    use crate::analysis::HirAnalysisDb;
     use crate::hir_def::{ItemKind, PathId};
     use crate::test_db::HirAnalysisTestDb;
 
@@ -509,6 +511,68 @@ trait Cap<const LEFT: u256 = _, const RIGHT: u256 = _> {}
             right.data(&db),
             ConstTyData::Hole(_, HoleId::Structural(_),)
         ));
+    }
+
+    /// `TyData::ConstraintTerm` is produced nowhere yet, so this constructs one
+    /// directly to prove the plumbing: it carries `Kind::Constraint` and
+    /// round-trips through fold and pretty-print without panicking.
+    #[test]
+    fn constraint_term_is_constraint_kinded_and_round_trips() {
+        struct IdFolder;
+        impl<'db> TyFolder<'db> for IdFolder {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                ty.super_fold_with(db, self)
+            }
+        }
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("constraint_term_is_constraint_kinded_and_round_trips.fe"),
+            r#"
+trait Eq {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let trait_ = top_mod
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::Trait(trait_)
+                    if trait_
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(&db) == "Eq") =>
+                {
+                    Some(trait_)
+                }
+                _ => None,
+            })
+            .expect("missing `Eq` trait");
+        let name = trait_.name(&db).to_opt().expect("trait must have a name");
+        let path = PathId::from_ident(&db, name);
+        let inst = match lower_trait_ref_impl(
+            &db,
+            path,
+            trait_.scope(),
+            PredicateListId::empty_list(&db),
+            trait_,
+        ) {
+            Ok(inst) => inst,
+            Err(_) => panic!("failed to lower trait ref"),
+        };
+
+        let ct = TyId::constraint_term(&db, inst);
+
+        // The first Constraint-kinded `TyData`.
+        assert_eq!(*ct.kind(&db), Kind::Constraint);
+        assert!(matches!(ct.data(&db), TyData::ConstraintTerm(_)));
+
+        // Round-trips through fold (identity folder) and pretty-print w/o panic.
+        let folded = ct.fold_with(&db, &mut IdFolder);
+        assert_eq!(folded, ct);
+        assert!(matches!(folded.data(&db), TyData::ConstraintTerm(_)));
+        let _ = ct.pretty_print(&db);
     }
 }
 
