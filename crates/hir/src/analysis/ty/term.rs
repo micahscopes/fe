@@ -667,6 +667,7 @@ fn term_of_resolved_const_ty<'db>(
         | TyData::AssocTy(_)
         | TyData::QualifiedTy(_)
         | TyData::ConstraintTerm(_)
+        | TyData::TraitCtor(_)
         | TyData::TyApp(..)
         | TyData::TyBase(_)
         | TyData::Never
@@ -747,6 +748,7 @@ fn callee_from_func_ty<'db>(
         | TyData::AssocTy(_)
         | TyData::QualifiedTy(_)
         | TyData::ConstraintTerm(_)
+        | TyData::TraitCtor(_)
         | TyData::TyApp(..)
         | TyData::ConstTy(_)
         | TyData::Never

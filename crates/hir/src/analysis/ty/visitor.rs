@@ -87,6 +87,8 @@ where
             visitor.visit_ty(inst.self_ty(visitor.db()));
             inst.visit_with(visitor);
         }
+        // `TraitCtor` holds a `Trait` def, not an inner `TyId` — leaf, nothing to visit.
+        TyData::TraitCtor(_) => {}
         TyData::TyApp(abs, arg) => visitor.visit_app(*abs, *arg),
         TyData::TyBase(ty_con) => visitor.visit_ty_base(ty_con),
         TyData::ConstTy(const_ty) => visitor.visit_const_ty(const_ty),

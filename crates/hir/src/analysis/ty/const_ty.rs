@@ -613,6 +613,7 @@ fn ty_is_fully_ground<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> bool {
         | TyData::AssocTy(_)
         | TyData::QualifiedTy(_)
         | TyData::ConstraintTerm(_)
+        | TyData::TraitCtor(_)
         | TyData::Invalid(_) => false,
         TyData::TyApp(abs, arg) => ty_is_fully_ground(db, *abs) && ty_is_fully_ground(db, *arg),
         TyData::ConstTy(const_ty) => const_ty_is_fully_ground(db, *const_ty),
@@ -1071,6 +1072,8 @@ pub fn canonicalize_ty_for_mode<'db>(
                 db,
                 canonicalize_trait_inst_for_mode(db, *inst, env, mode),
             ),
+            // Leaf: a bare `Trait` def with no inner `TyId` to canonicalize.
+            TyData::TraitCtor(trait_) => TyId::trait_ctor(db, *trait_),
             TyData::TyVar(_)
             | TyData::TyParam(_)
             | TyData::TyBase(_)

@@ -414,6 +414,8 @@ fn ty_mentions_effect_provider_param<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'
             trait_inst_mentions_effect_provider_param(db, *trait_inst)
         }
         TyData::ConstraintTerm(inst) => trait_inst_mentions_effect_provider_param(db, *inst),
+        // A bare `Trait` def carries no type arguments, hence no effect provider.
+        TyData::TraitCtor(_) => false,
         TyData::TyVar(_)
         | TyData::TyBase(_)
         | TyData::ConstTy(_)
@@ -496,6 +498,7 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
         ),
         TyData::QualifiedTy(trait_inst) => format!("qualified${}", trait_identity(db, *trait_inst)),
         TyData::ConstraintTerm(inst) => format!("constraint${}", trait_identity(db, *inst)),
+        TyData::TraitCtor(trait_) => format!("traitctor${}", item_identity(db, (*trait_).into())),
         TyData::ConstTy(const_ty) => {
             format!(
                 "const_ty${}",

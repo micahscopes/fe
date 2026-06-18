@@ -153,7 +153,8 @@ impl<'db> TyFoldable<'db> for TyId<'db> {
                 TyId::constraint_term(db, folded_inst)
             }
 
-            TyVar(_) | TyParam(_) | TyBase(_) | Never | Invalid(_) => self,
+            // `TraitCtor` holds a `Trait` def, not an inner `TyId` — leaf.
+            TraitCtor(_) | TyVar(_) | TyParam(_) | TyBase(_) | Never | Invalid(_) => self,
         }
     }
 

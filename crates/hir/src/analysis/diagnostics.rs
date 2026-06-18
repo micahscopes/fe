@@ -49,6 +49,11 @@ fn pretty_print_ty_for_mismatch<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId
             format!("<{} as {}>", self_ty, trait_inst.pretty_print(db, false))
         }
         TyData::ConstraintTerm(inst) => inst.pretty_print(db, false),
+        TyData::TraitCtor(trait_) => trait_
+            .name(db)
+            .to_opt()
+            .map(|n| n.data(db).to_string())
+            .unwrap_or_else(|| "<unknown>".to_string()),
         TyData::TyApp(_, _) => pretty_print_ty_app_for_mismatch(db, ty),
         TyData::TyBase(base) => {
             use crate::analysis::ty::ty_def::TyBase;

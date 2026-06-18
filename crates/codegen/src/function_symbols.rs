@@ -365,6 +365,7 @@ fn readable_type_component<'db>(db: &'db DriverDataBase, ty: TyId<'db>) -> Optio
         }
         TyData::AssocTy(_)
         | TyData::ConstraintTerm(_)
+        | TyData::TraitCtor(_)
         | TyData::ConstTy(_)
         | TyData::Never
         | TyData::TyVar(_)

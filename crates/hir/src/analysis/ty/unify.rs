@@ -218,6 +218,14 @@ where
 
             (TyData::ConstraintTerm(a), TyData::ConstraintTerm(b)) => self.unify(*a, *b),
 
+            (TyData::TraitCtor(a), TyData::TraitCtor(b)) => {
+                if a == b {
+                    Ok(())
+                } else {
+                    Err(UnificationError::TypeMismatch)
+                }
+            }
+
             _ => Err(UnificationError::TypeMismatch),
         }
     }

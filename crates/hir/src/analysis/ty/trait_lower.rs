@@ -574,6 +574,62 @@ trait Eq {}
         assert!(matches!(folded.data(&db), TyData::ConstraintTerm(_)));
         let _ = ct.pretty_print(&db);
     }
+
+    /// `TyData::TraitCtor` (the unsaturated sibling of `ConstraintTerm`) is
+    /// produced nowhere yet, so this constructs one directly to prove the
+    /// plumbing: its kind is built from the trait's required-explicit-param
+    /// arity, not a constant. `Eq<T = Self>` has a single defaulted explicit
+    /// param, so its only required subject is `Self` → kind `* -> Constraint`.
+    /// It also folds and pretty-prints without panicking.
+    #[test]
+    fn trait_ctor_is_arrow_kinded_and_round_trips() {
+        struct IdFolder;
+        impl<'db> TyFolder<'db> for IdFolder {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                ty.super_fold_with(db, self)
+            }
+        }
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("trait_ctor_is_arrow_kinded_and_round_trips.fe"),
+            r#"
+trait Eq<T = Self> {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        let trait_ = top_mod
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::Trait(trait_)
+                    if trait_
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(&db) == "Eq") =>
+                {
+                    Some(trait_)
+                }
+                _ => None,
+            })
+            .expect("missing `Eq` trait");
+
+        let tc = TyId::trait_ctor(&db, trait_);
+
+        // Defaulted `T` => only `Self` is a required subject => `* -> Constraint`.
+        assert_eq!(
+            *tc.kind(&db),
+            Kind::Abs(Box::new((Kind::Star, Kind::Constraint)))
+        );
+        assert!(matches!(tc.data(&db), TyData::TraitCtor(_)));
+
+        // Round-trips through fold (identity folder) and pretty-print w/o panic.
+        let folded = tc.fold_with(&db, &mut IdFolder);
+        assert_eq!(folded, tc);
+        assert!(matches!(folded.data(&db), TyData::TraitCtor(_)));
+        let _ = tc.pretty_print(&db);
+    }
 }
 
 #[salsa::tracked(return_ref)]

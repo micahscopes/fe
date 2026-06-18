@@ -44,7 +44,7 @@ use crate::analysis::{
         ty_error::emit_invalid_ty_error,
     },
 };
-use crate::hir_def::CallableDef;
+use crate::hir_def::{CallableDef, Trait};
 
 pub const MAX_INLINE_STRING_BYTES: usize = 31;
 
@@ -228,6 +228,11 @@ impl<'db> TyId<'db> {
                 )
             }
             TyData::ConstraintTerm(inst) => inst.pretty_print(db, false),
+            TyData::TraitCtor(trait_) => trait_
+                .name(db)
+                .to_opt()
+                .map(|n| n.data(db).to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
             TyData::TyApp(_, _) => pretty_print_ty_app(db, self, mode),
             TyData::TyBase(base) => base.pretty_print(db),
             TyData::ConstTy(const_ty) => const_ty.pretty_print_with_mode(db, mode),
@@ -374,6 +379,10 @@ impl<'db> TyId<'db> {
 
     pub(crate) fn constraint_term(db: &'db dyn HirAnalysisDb, inst: TraitInstId<'db>) -> Self {
         Self::new(db, TyData::ConstraintTerm(inst))
+    }
+
+    pub(crate) fn trait_ctor(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>) -> Self {
+        Self::new(db, TyData::TraitCtor(trait_))
     }
 
     pub(crate) fn adt(db: &'db dyn HirAnalysisDb, adt: AdtDef<'db>) -> Self {
@@ -581,6 +590,7 @@ impl<'db> TyId<'db> {
             TyData::AssocTy(assoc_ty) => assoc_ty.scope(db),
             TyData::QualifiedTy(trait_inst) => Some(trait_inst.def(db).scope()),
             TyData::ConstraintTerm(inst) => Some(inst.def(db).scope()),
+            TyData::TraitCtor(trait_) => Some(trait_.scope()),
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.scope(db)),
             TyData::TyBase(TyBase::Contract(c)) => Some(c.scope()),
             TyData::TyBase(TyBase::Func(func)) => Some(func.scope()),
@@ -607,6 +617,7 @@ impl<'db> TyId<'db> {
             TyData::AssocTy(assoc_ty) => assoc_ty.scope(db)?.name_span(db),
             TyData::QualifiedTy(trait_inst) => trait_inst.def(db).scope().name_span(db),
             TyData::ConstraintTerm(inst) => inst.def(db).scope().name_span(db),
+            TyData::TraitCtor(trait_) => trait_.scope().name_span(db),
 
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.name_span(db)),
             TyData::TyBase(TyBase::Contract(c)) => c.scope().name_span(db),
@@ -1085,6 +1096,12 @@ pub enum TyData<'db> {
     /// expected, e.g. the `Eq<T>` in `Evidence<Eq<T>>`. Concrete-only: the head is
     /// always a resolved trait. Inert leaf — never a solver goal, never reduced.
     ConstraintTerm(TraitInstId<'db>),
+
+    /// A concrete trait constructor as a first-class value (unsaturated), e.g. `Eq`
+    /// (kind `* -> Constraint`). The unsaturated sibling of `ConstraintTerm` — it
+    /// REDUCES to a `ConstraintTerm` when applied to its subject (that reduction is a
+    /// later rung; R1 is inert). Typing-only; never a solver goal.
+    TraitCtor(Trait<'db>),
 
     // Type application,
     // e.g., `Option<i32>` is represented as `TApp(TyConst(Option), TyConst(i32))`.
@@ -1861,6 +1878,15 @@ impl HasKind for TyData<'_> {
                 .unwrap_or(Kind::Star),
             TyData::QualifiedTy(_) => Kind::Star,
             TyData::ConstraintTerm(_) => Kind::Constraint,
+            TyData::TraitCtor(trait_) => {
+                // The trait-constructor kind: one `*` arrow per subject that must be
+                // supplied to saturate the trait into a `Constraint`. That is the
+                // implicit `Self` subject plus every required (non-defaulted)
+                // explicit parameter. `core::ops::Eq<T = Self>` has a defaulted `T`,
+                // so its arity is 1 → `* -> Constraint`.
+                let arity = 1 + trait_.param_set(db).required_explicit_param_count(db);
+                (0..arity).fold(Kind::Constraint, |acc, _| Kind::abs(Kind::Star, acc))
+            }
             TyData::TyBase(base) => base.kind(db),
             TyData::TyApp(abs, _) => match abs.kind(db) {
                 // `TyId::app` method handles the kind mismatch, so we don't need to verify it again

@@ -1028,6 +1028,19 @@ impl<'db> GenericParamTypeSet<'db> {
             .saturating_sub(self.offset_to_explicit(db))
     }
 
+    /// Number of explicit parameters that have no default and therefore must be
+    /// supplied explicitly. Defaults are trailing, so this is the length of the
+    /// required prefix. Read-only query used to size kinds (e.g. the
+    /// trait-constructor kind `* -> ... -> Constraint`); does not participate in
+    /// argument lowering.
+    pub(crate) fn required_explicit_param_count(self, db: &'db dyn HirAnalysisDb) -> usize {
+        self.params_precursor(db)
+            .iter()
+            .skip(self.offset_to_explicit(db))
+            .filter(|prec| prec.default_hir_ty.is_none() && prec.default_hir_const.is_none())
+            .count()
+    }
+
     pub(crate) fn explicit_const_param_default_hole_ty(
         self,
         db: &'db dyn HirAnalysisDb,
