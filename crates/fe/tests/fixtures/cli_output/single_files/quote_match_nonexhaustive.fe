@@ -27,10 +27,7 @@ impl FirstOnly: Derive for Tagged {
             }
             first = false
         }
-        let mut sig = builder.method("tag")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, quote { match self { ${arms} } })
+        builder.emit_method("tag", quote { match self { ${arms} } })
         builder.finish()
         ev
     }

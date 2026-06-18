@@ -1378,10 +1378,7 @@ impl TagProv: Derive for Taggable {
             builder: mut ImplBuilder<Taggable<T>>,
         )
     {
-        let mut sig = builder.method("tag")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, builder.bool(true))
+        builder.emit_method("tag", builder.bool(true))
         builder.finish()
         ev
     }

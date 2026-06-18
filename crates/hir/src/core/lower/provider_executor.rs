@@ -20,16 +20,18 @@ use parser::TextRange;
 use parser::ast::prelude::*;
 
 use super::{
-    provider::{TargetReflection, ValidatedProvider, canonical_trait_path},
+    base_scope_graph_impl,
+    provider::{TargetReflection, ValidatedProvider, canonical_trait_path, resolve_trait_def},
     top_mod_ast,
 };
 use crate::{
     HirDb,
     analysis::ty::ty_def::MAX_INLINE_STRING_BYTES,
     hir_def::{
-        BinOp, Body, CompBinOp, Cond, CondId, Expr, ExprId, GenericArg, GenericArgListId, IdentId,
-        LitKind, LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId, QuoteBody, Stmt, StmtId,
-        StringId, TypeId, TypeKind,
+        BinOp, Body, CompBinOp, Cond, CondId, Expr, ExprId, Func, GenericArg, GenericArgListId,
+        IdentId, ItemKind, LitKind, LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId, QuoteBody,
+        Stmt, StmtId, StringId, Trait, TypeId, TypeKind,
+        scope_graph::ScopeId,
     },
     span::HirOrigin,
 };
@@ -103,11 +105,11 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     "tuple_ty",
     "with_elem_ty",
     "trait_assoc_ty",
-    // B-build: generated method signatures
-    "method",
-    "with_self",
-    "with_arg",
-    "returns",
+    // B-build: generated method signatures.
+    // DEVX-A: the `method`/`with_self`/`with_arg`/`returns` signature dance was
+    // dropped — the emitted method's signature is inferred from the goal trait's
+    // declaration at `emit_method(name, body)` (see `infer_method_sig`), so
+    // these four ops have no authoring use and are off the recognized surface.
     // B-build: compile-time string fold spelled as a `builder.*` method.
     "concat",
     // TD5c: `same_ty`/`same_field` are NO LONGER here. They are spelled
@@ -149,8 +151,12 @@ const RECOGNIZED_REFLECT_OPS: &[&str] = &[];
 /// non-test builds, so they are not dead code.)
 const _: () = {
     // TD5c: was 45; `same_ty`/`same_field` (mis-shelved `builder.*`-spelled
-    // identity reads) moved onto the typed read-only `ReflectionCompare` table.
-    assert!(RECOGNIZED_BUILDER_OPS.len() == 43);
+    // identity reads) moved onto the typed read-only `ReflectionCompare` table
+    // (45 → 43). DEVX-A: the four signature-dance ops (`method`/`with_self`/
+    // `with_arg`/`returns`) were dropped — the emitted method's signature is now
+    // inferred from the goal trait's declaration at `emit_method(name, body)`
+    // (43 → 39).
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 39);
     // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
     // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
     // the `fields`/`variants` iterables (now ordinary method calls returning a
@@ -336,8 +342,10 @@ pub(super) enum GenPat<'db> {
     },
 }
 
-/// A generated method signature, built with `builder.method("name")` +
-/// `with_self` / `with_arg` / `returns`.
+/// A generated method signature. DEVX-A: inferred from the goal trait's
+/// declaration of the emitted method at `emit_method(name, body)` (see
+/// [`ProviderExecutor::infer_method_sig`]); previously built op-by-op with the
+/// dropped `method`/`with_self`/`with_arg`/`returns` dance.
 #[derive(Debug, Clone)]
 pub(super) struct GenMethodSig<'db> {
     pub(super) name: IdentId<'db>,
@@ -399,7 +407,8 @@ type BinderGroup<'db> = (IdentId<'db>, usize);
 /// construction (emit) commands.
 #[derive(Debug, Clone)]
 pub(super) enum BuilderCommand<'db> {
-    /// `builder.emit_method(sig, body)`.
+    /// `builder.emit_method(name, body)`: `sig` is the signature inferred from
+    /// the goal trait's declaration of `name` (DEVX-A).
     EmitMethod { sig: SigId, body: GenExprId },
     /// `builder.emit_assoc_ty(name, ty)`: `type name = ty` in the generated
     /// impl.
@@ -528,8 +537,6 @@ enum Value<'db> {
     Expr(GenExprId),
     /// A generated pattern.
     Pat(GenPatId),
-    /// A generated method signature.
-    Sig(SigId),
     /// A quote template (`quote { .. }`).
     Quote(QuoteId),
     /// The `builder: mut ImplBuilder<..>` capability.
@@ -858,6 +865,16 @@ enum Flow {
     Return,
 }
 
+/// Where a goal-trait-declared type sits in the inferred signature (DEVX-A).
+/// Self/target types are spelled differently per position to match the dance
+/// byte-for-byte: `target_ty()` for arguments, `self_ty()` (`Self`) for the
+/// return type.
+#[derive(Debug, Clone, Copy)]
+enum SigPosition {
+    Arg,
+    Return,
+}
+
 pub(super) struct ProviderExecutor<'a, 'db> {
     db: &'db dyn HirDb,
     body: Body<'db>,
@@ -870,6 +887,10 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     // carried by `Value::Reflect`, which owns that read.
     /// The provider's module, for canonicalizing `require<Trait>` paths.
     provider_top_mod: crate::hir_def::TopLevelMod<'db>,
+    /// The canonical path of the provider's goal trait (`core::ops::Eq`). The
+    /// 2-arg `emit_method(name, body)` form infers a method's signature from
+    /// this trait's declaration of `name` (DEVX-A).
+    goal_trait_path: PathId<'db>,
     /// Lexically scoped value bindings; the innermost binding of a name
     /// shadows outer ones (including the capability params).
     scopes: Vec<Vec<(IdentId<'db>, Value<'db>)>>,
@@ -922,6 +943,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             reflection,
             target_ty,
             provider_top_mod: provider.provider.top_mod(db),
+            goal_trait_path: provider.trait_path,
             scopes: vec![initial_scope],
             exprs: Vec::new(),
             pats: Vec::new(),
@@ -2229,11 +2251,20 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 });
                 Ok(Value::Unit)
             }
-            ("emit_method", [sig_arg, body_arg]) => {
+            ("emit_method", [name_arg, body_arg]) => {
                 self.check_not_finished(expr)?;
-                let Value::Sig(sig) = self.eval_expr(sig_arg.expr)? else {
-                    return Err(self.invalid_method(sig_arg.expr, "expected a method signature"));
-                };
+                // DEVX-A: the signature is INFERRED from the goal trait's
+                // declaration of `name` — for a derive provider the emitted
+                // method always *is* the goal trait's method, so re-spelling
+                // its signature (the old `method`/`with_self`/`with_arg`/
+                // `returns` dance) was pure ceremony. We synthesize the same
+                // `GenMethodSig` the dance produced: self-ness, arg names, and
+                // arg/return types come from the declaration, with the trait's
+                // `Self`/self-type-param substituted by `target_ty()` (argument
+                // position) / `self_ty()` (return position) exactly as the dance
+                // did. The generated impl is byte-identical.
+                let name = self.string_value_ident(name_arg.expr)?;
+                let sig = self.infer_method_sig(name_arg.expr, name)?;
                 let body = match self.eval_expr(body_arg.expr)? {
                     Value::Expr(body) => body,
                     // Quotes land here: the template elaborates into the
@@ -2247,10 +2278,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         ));
                     }
                 };
-                let name = self.sigs[sig.0].name;
                 if self.emitted_methods.contains(&name) {
                     return Err(self.invalid_method(
-                        sig_arg.expr,
+                        name_arg.expr,
                         &format!("duplicate generated method `{}`", name.data(self.db)),
                     ));
                 }
@@ -2564,44 +2594,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     prefix,
                 }))
             }
-            ("method", [name_arg]) => {
-                let name = self.string_value_ident(name_arg.expr)?;
-                self.sigs.push(GenMethodSig {
-                    name,
-                    takes_self: false,
-                    args: Vec::new(),
-                    ret: None,
-                });
-                Ok(Value::Sig(SigId(self.sigs.len() - 1)))
-            }
-            ("with_self", [sig_arg]) => {
-                let sig = self.sig_arg(sig_arg.expr)?;
-                let mut new_sig = self.sigs[sig.0].clone();
-                new_sig.takes_self = true;
-                self.sigs.push(new_sig);
-                Ok(Value::Sig(SigId(self.sigs.len() - 1)))
-            }
-            ("with_arg", [sig_arg, name_arg, ty_arg]) => {
-                let sig = self.sig_arg(sig_arg.expr)?;
-                let name = self.string_value_ident(name_arg.expr)?;
-                let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
-                    return Err(self.unsupported_expr(ty_arg.expr));
-                };
-                let mut new_sig = self.sigs[sig.0].clone();
-                new_sig.args.push((name, ty));
-                self.sigs.push(new_sig);
-                Ok(Value::Sig(SigId(self.sigs.len() - 1)))
-            }
-            ("returns", [sig_arg, ty_arg]) => {
-                let sig = self.sig_arg(sig_arg.expr)?;
-                let Value::Ty(ty) = self.eval_expr(ty_arg.expr)? else {
-                    return Err(self.unsupported_expr(ty_arg.expr));
-                };
-                let mut new_sig = self.sigs[sig.0].clone();
-                new_sig.ret = Some(ty);
-                self.sigs.push(new_sig);
-                Ok(Value::Sig(SigId(self.sigs.len() - 1)))
-            }
+            // DEVX-A: the `method`/`with_self`/`with_arg`/`returns` signature
+            // dance was dropped. A derive provider's emitted method signature
+            // always re-spelled the goal trait's own method declaration, so it
+            // is now INFERRED at `emit_method(name, body)` (see
+            // `infer_method_sig`) instead of authored op-by-op.
             ("target_ty", []) => Ok(Value::Ty(self.target_ty)),
             ("self_ty", []) => Ok(Value::Ty(TypeId::fallback_self_ty(self.db))),
             ("ty", []) => {
@@ -2733,6 +2730,150 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         }
     }
 
+    /// DEVX-A: infer the signature of the emitted method `name` from the goal
+    /// trait's declaration, returning a fresh [`SigId`].
+    ///
+    /// For a derive provider the emitted method always *is* the goal trait's
+    /// method, so its signature is exactly the trait's declaration of `name`.
+    /// The old author-facing dance (`builder.method("name")` then
+    /// `with_self`/`with_arg`/`returns`) merely re-spelled that declaration; we
+    /// reconstruct the identical [`GenMethodSig`] here so the generated impl is
+    /// byte-identical:
+    ///
+    /// * self-ness ← the declaration's first parameter being a `self` receiver;
+    /// * argument names ← the declaration's remaining parameter names, in order;
+    /// * argument/return *types* ← the declared types, with the trait's `Self`
+    ///   type and its own generic parameters (a saturated derive goal binds
+    ///   every trait type-param to the target) substituted by the SAME witness
+    ///   the dance used — `target_ty()` in argument position, `self_ty()`
+    ///   (`Self`) in return position. Any other declared type is used as
+    ///   written.
+    ///
+    /// `at` is the `name` argument expression of `emit_method`, used for error
+    /// spans.
+    fn infer_method_sig(&mut self, at: ExprId, name: IdentId<'db>) -> Result<SigId, ExecError> {
+        let goal = self.goal_trait_path;
+        let Some(trait_def) = resolve_trait_def(self.db, self.provider_top_mod, goal) else {
+            return Err(self.invalid_method(
+                at,
+                &format!(
+                    "cannot infer the signature of `{}`: the goal trait `{}` does not \
+                     resolve to a trait declaration",
+                    name.data(self.db),
+                    goal.pretty_print(self.db),
+                ),
+            ));
+        };
+
+        let Some(method) = self.trait_method(trait_def, name) else {
+            return Err(self.invalid_method(
+                at,
+                &format!(
+                    "the goal trait `{}` declares no method `{}` to infer a signature from",
+                    goal.pretty_print(self.db),
+                    name.data(self.db),
+                ),
+            ));
+        };
+
+        // The trait's own generic parameter names: a saturated derive goal
+        // (`Eq<Target>`) binds each of these to the target type, so a reference
+        // to one in the method signature is the target type — exactly what the
+        // dance spelled `target_ty()` for (e.g. `Eq<T = Self>`'s `_ other: T`).
+        let trait_params: Vec<IdentId<'db>> = trait_def
+            .generic_params(self.db)
+            .data(self.db)
+            .iter()
+            .filter_map(|param| param.name().to_opt())
+            .collect();
+
+        let mut takes_self = false;
+        let mut args = Vec::new();
+        if let Some(params) = method.params_list(self.db).to_opt() {
+            for (idx, param) in params.data(self.db).iter().enumerate() {
+                if idx == 0 && param.is_self_param(self.db) {
+                    takes_self = true;
+                    continue;
+                }
+                let Some(arg_name) = param.name() else {
+                    return Err(self.invalid_method(
+                        at,
+                        &format!(
+                            "cannot infer the signature of `{}`: parameter {} of the goal \
+                             trait's declaration has no name",
+                            name.data(self.db),
+                            idx,
+                        ),
+                    ));
+                };
+                let Some(decl_ty) = param.ty.to_opt() else {
+                    return Err(self.invalid_method(
+                        at,
+                        &format!(
+                            "cannot infer the signature of `{}`: parameter `{}` of the goal \
+                             trait's declaration has no type",
+                            name.data(self.db),
+                            arg_name.data(self.db),
+                        ),
+                    ));
+                };
+                let ty = self.substitute_target(decl_ty, &trait_params, SigPosition::Arg);
+                args.push((arg_name, ty));
+            }
+        }
+
+        let ret = method
+            .ret_type_ref(self.db)
+            .map(|decl_ty| self.substitute_target(decl_ty, &trait_params, SigPosition::Return));
+
+        self.sigs.push(GenMethodSig {
+            name,
+            takes_self,
+            args,
+            ret,
+        });
+        Ok(SigId(self.sigs.len() - 1))
+    }
+
+    /// Finds the goal trait's method `name`, reading the trait's BASE scope
+    /// graph (never the requesting ingot's merged graph — the executor runs in
+    /// the expansion stage), mirroring [`resolve_trait_def`]'s stratification.
+    fn trait_method(&self, trait_def: Trait<'db>, name: IdentId<'db>) -> Option<Func<'db>> {
+        let scope = ScopeId::from_item(trait_def.into());
+        let base = base_scope_graph_impl(self.db, trait_def.top_mod(self.db));
+        base.child_items(scope).find_map(|item| match item {
+            ItemKind::Func(func) if func.name(self.db).to_opt() == Some(name) => Some(func),
+            _ => None,
+        })
+    }
+
+    /// Maps a goal-trait-declared signature type to the witness the dance used:
+    /// the trait's `Self` type, or any of the trait's own generic parameters
+    /// (bound to the target in a saturated derive goal), becomes `target_ty()`
+    /// in argument position and `self_ty()` (`Self`) in return position; any
+    /// other type is used as written.
+    fn substitute_target(
+        &self,
+        decl_ty: TypeId<'db>,
+        trait_params: &[IdentId<'db>],
+        position: SigPosition,
+    ) -> TypeId<'db> {
+        let is_target = decl_ty.is_self_ty(self.db)
+            || matches!(
+                decl_ty.data(self.db),
+                TypeKind::Path(Partial::Present(path))
+                    if path.as_ident(self.db).is_some_and(|id| trait_params.contains(&id))
+            );
+        if is_target {
+            match position {
+                SigPosition::Arg => self.target_ty,
+                SigPosition::Return => TypeId::fallback_self_ty(self.db),
+            }
+        } else {
+            decl_ty
+        }
+    }
+
     /// A generated-type argument. Concrete `Ty` witnesses (from `ty<T>()` /
     /// `field.ty()` / `target_ty()`) are accepted and wrapped, so type
     /// commands take either currency.
@@ -2746,13 +2887,6 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 Ok(id)
             }
             _ => Err(self.unsupported_expr(expr)),
-        }
-    }
-
-    fn sig_arg(&mut self, expr: ExprId) -> Result<SigId, ExecError> {
-        match self.eval_expr(expr)? {
-            Value::Sig(id) => Ok(id),
-            _ => Err(self.invalid_method(expr, "expected a method signature")),
         }
     }
 
@@ -2847,7 +2981,6 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Ty(_) | Value::GenTy(_) => "type value",
         Value::Expr(_) => "generated expression",
         Value::Pat(_) => "generated pattern",
-        Value::Sig(_) => "method signature",
         Value::Quote(_) => "quote value",
         Value::Builder => "builder capability",
         Value::Reflect(_) => "reflect capability",
@@ -2944,11 +3077,14 @@ mod freeze_guard {
         // Pin the count too, so a same-size swap is still flagged for review.
         assert_eq!(
             RECOGNIZED_BUILDER_OPS.len(),
-            43,
+            39,
             "FREEZE (TD5.0): the builder command surface changed size; update the count \
              and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
              (TD5c moved `same_ty`/`same_field` — mis-shelved `builder.*`-spelled identity \
-             reads — off the bespoke executor onto the typed `ReflectionCompare` table.)"
+             reads — off the bespoke executor onto the typed `ReflectionCompare` table, 45 → 43. \
+             DEVX-A dropped the four signature-dance ops `method`/`with_self`/`with_arg`/`returns` \
+             — the emitted method's signature is inferred from the goal trait's declaration at \
+             `emit_method(name, body)`, 43 → 39.)"
         );
     }
 
@@ -3013,18 +3149,21 @@ mod freeze_guard {
 
     #[test]
     fn total_recognized_method_surface_is_pinned() {
-        // The full named method surface the freeze pins: 43 builder ops + 0
-        // reflection reads = 43 distinct literals. TD5c first moved the three
+        // The full named method surface the freeze pins: 39 builder ops + 0
+        // reflection reads = 39 distinct literals. TD5c first moved the three
         // `reflect.*` scalar reads onto `ReflectHandle` (54 → 51), then moved
         // the `field.*`/`variant.*` reads onto `FieldHandle`/`VariantHandle`
         // (RECOGNIZED_REFLECT_OPS → 0) and `same_ty`/`same_field` onto
         // `ReflectionCompare` (builder 45 → 43) (51 → 45), then this slice made
         // the `fields`/`variants` iterables ordinary method calls returning a
         // `Value::Seq` of handles (the iterable-ops const deleted; 45 → 43).
-        // `builder.*` is now the executor's only named surface.
+        // DEVX-A then dropped the four signature-dance ops (`method`/`with_self`/
+        // `with_arg`/`returns`) — the emitted method's signature is inferred from
+        // the goal trait's declaration at `emit_method(name, body)` (43 → 39).
+        // `builder.*` is the executor's only named surface.
         let total = RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len();
         assert_eq!(
-            total, 43,
+            total, 39,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );

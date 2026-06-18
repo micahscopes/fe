@@ -28,10 +28,7 @@ impl StableClone: Derive for Clone {
                     builder.call(builder.field_get(builder.self_ref(), field), "clone"),
                 )
             }
-            let mut sig = builder.method("clone")
-            sig = builder.with_self(sig)
-            sig = builder.returns(sig, builder.self_ty())
-            builder.emit_method(sig, init)
+            builder.emit_method("clone", init)
         }
         if reflect.is_enum() {
             let mut body = builder.match_expr(builder.self_ref())
@@ -48,10 +45,7 @@ impl StableClone: Derive for Clone {
                 }
                 body = builder.with_arm(body, pat, init)
             }
-            let mut sig = builder.method("clone")
-            sig = builder.with_self(sig)
-            sig = builder.returns(sig, builder.self_ty())
-            builder.emit_method(sig, body)
+            builder.emit_method("clone", body)
         }
         builder.finish()
         ev

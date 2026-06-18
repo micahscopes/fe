@@ -20,10 +20,7 @@ impl FieldTag: Derive for Tagged {
         for field in reflect.fields() {
             body = quote { ${field} }
         }
-        let mut sig = builder.method("tag")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, body)
+        builder.emit_method("tag", body)
         builder.finish()
         ev
     }

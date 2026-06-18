@@ -43,11 +43,7 @@ impl BoundCheck: Derive for Within {
         for field in reflect.fields() {
             body = quote(limit) { ${body} && self.${field}.lte(limit.${field}) }
         }
-        let mut sig = builder.method("within")
-        sig = builder.with_self(sig)
-        sig = builder.with_arg(sig, "limit", builder.target_ty())
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, body)
+        builder.emit_method("within", body)
         builder.finish()
         ev
     }
@@ -67,10 +63,7 @@ impl AlwaysAudited: Derive for Audited {
         )
     {
         let flag = true
-        let mut sig = builder.method("audited")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, quote { ${flag} })
+        builder.emit_method("audited", quote { ${flag} })
         builder.finish()
         ev
     }

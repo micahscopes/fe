@@ -26,10 +26,7 @@ impl ReturnGoal: Derive for Real {
             builder: mut ImplBuilder<Real<T>>,
         )
     {
-        let mut sig = builder.method("r")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, builder.bool(true))
+        builder.emit_method("r", builder.bool(true))
         builder.finish()
         ev
     }

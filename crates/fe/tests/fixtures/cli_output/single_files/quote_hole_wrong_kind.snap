@@ -1,6 +1,5 @@
 ---
 source: crates/fe/tests/cli_output.rs
-assertion_line: 1820
 expression: output
 input_file: tests/fixtures/cli_output/single_files/quote_hole_wrong_kind.fe
 ---
@@ -8,12 +7,12 @@ input_file: tests/fixtures/cli_output/single_files/quote_hole_wrong_kind.fe
 errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/quote_hole_wrong_kind.fe
 
 error[13-0010]: derive provider `FieldTag` failed to derive `Tagged`
-   ┌─ quote_hole_wrong_kind.fe:36:8
+   ┌─ quote_hole_wrong_kind.fe:33:8
    │
 21 │             body = quote { ${field} }
    │                            -------- invalid quote: a `Field` handle only fills member-access holes (`self.${field}`); expression holes accept quote values and compile-time bool/string values
    ·
-36 │ derive Tagged for Point using FieldTag
+33 │ derive Tagged for Point using FieldTag
    │        ^^^^^^ requested here: invalid quote: a `Field` handle only fills member-access holes (`self.${field}`); expression holes accept quote values and compile-time bool/string values
    │
    = the provider `FieldTag` ran at compile time and failed; the secondary label points at the failing provider code

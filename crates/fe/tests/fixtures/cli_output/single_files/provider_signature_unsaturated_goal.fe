@@ -17,11 +17,7 @@ impl Unsaturated: Derive for Eq {
             builder: mut ImplBuilder<Eq>,
         )
     {
-        let mut sig = builder.method("eq")
-        sig = builder.with_self(sig)
-        sig = builder.with_arg(sig, "other", builder.target_ty())
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, builder.bool(true))
+        builder.emit_method("eq", builder.bool(true))
         builder.finish()
         ev
     }

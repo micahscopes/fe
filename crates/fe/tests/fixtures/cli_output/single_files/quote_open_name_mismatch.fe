@@ -20,11 +20,7 @@ impl QuoteSame: Derive for Same {
         for field in reflect.fields() {
             body = quote(rhs) { ${body} && self.${field} == rhs.${field} }
         }
-        let mut sig = builder.method("same")
-        sig = builder.with_self(sig)
-        sig = builder.with_arg(sig, "other", builder.target_ty())
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, body)
+        builder.emit_method("same", body)
         builder.finish()
         ev
     }

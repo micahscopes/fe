@@ -154,10 +154,7 @@ impl StableAbiSize: Derive for AbiSize {
             }
             builder.emit_const("HEAD_SIZE", builder.ty<u256>(), head)
             builder.emit_const("IS_DYNAMIC", builder.ty<bool>(), dynamic)
-            let mut sig = builder.method("payload_size")
-            sig = builder.with_self(sig)
-            sig = builder.returns(sig, builder.ty<u256>())
-            builder.emit_method(sig, payload)
+            builder.emit_method("payload_size", payload)
         }
         builder.finish()
         ev

@@ -18,10 +18,7 @@ impl ExprAsArms: Derive for Tagged {
         )
     {
         let not_arms = quote { true }
-        let mut sig = builder.method("tag")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, quote { match self { ${not_arms} } })
+        builder.emit_method("tag", quote { match self { ${not_arms} } })
         builder.finish()
         ev
     }

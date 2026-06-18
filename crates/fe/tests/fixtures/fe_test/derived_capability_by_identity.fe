@@ -33,11 +33,7 @@ impl AliasedEq: Derive for Eq {
                 builder.require<Eq>(field.ty())
                 body = quote(other) { ${body} && self.${field} == other.${field} }
             }
-            let mut sig = builder.method("eq")
-            sig = builder.with_self(sig)
-            sig = builder.with_arg(sig, "other", builder.target_ty())
-            sig = builder.returns(sig, builder.ty<bool>())
-            builder.emit_method(sig, body)
+            builder.emit_method("eq", body)
         }
         builder.finish()
         ev

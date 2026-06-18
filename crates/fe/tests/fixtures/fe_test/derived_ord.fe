@@ -56,29 +56,13 @@ impl StableOrd: Derive for Ord {
             let le_body = quote { ${lt_body} || ${eq_prefix} }
             let ge_body = quote { ${gt_body} || ${eq_prefix} }
 
-            let mut lt_sig = builder.method("lt")
-            lt_sig = builder.with_self(lt_sig)
-            lt_sig = builder.with_arg(lt_sig, "other", builder.target_ty())
-            lt_sig = builder.returns(lt_sig, builder.ty<bool>())
-            builder.emit_method(lt_sig, lt_body)
+            builder.emit_method("lt", lt_body)
 
-            let mut le_sig = builder.method("le")
-            le_sig = builder.with_self(le_sig)
-            le_sig = builder.with_arg(le_sig, "other", builder.target_ty())
-            le_sig = builder.returns(le_sig, builder.ty<bool>())
-            builder.emit_method(le_sig, le_body)
+            builder.emit_method("le", le_body)
 
-            let mut gt_sig = builder.method("gt")
-            gt_sig = builder.with_self(gt_sig)
-            gt_sig = builder.with_arg(gt_sig, "other", builder.target_ty())
-            gt_sig = builder.returns(gt_sig, builder.ty<bool>())
-            builder.emit_method(gt_sig, gt_body)
+            builder.emit_method("gt", gt_body)
 
-            let mut ge_sig = builder.method("ge")
-            ge_sig = builder.with_self(ge_sig)
-            ge_sig = builder.with_arg(ge_sig, "other", builder.target_ty())
-            ge_sig = builder.returns(ge_sig, builder.ty<bool>())
-            builder.emit_method(ge_sig, ge_body)
+            builder.emit_method("ge", ge_body)
         }
         if reflect.is_enum() {
             // Enums order by (variant declaration position, then payload
@@ -157,29 +141,13 @@ impl StableOrd: Derive for Ord {
                 gt_body = builder.with_arm(gt_body, builder.variant_pat(sv, "lhs"), gt_inner)
                 ge_body = builder.with_arm(ge_body, builder.variant_pat(sv, "lhs"), ge_inner)
             }
-            let mut lt_sig = builder.method("lt")
-            lt_sig = builder.with_self(lt_sig)
-            lt_sig = builder.with_arg(lt_sig, "other", builder.target_ty())
-            lt_sig = builder.returns(lt_sig, builder.ty<bool>())
-            builder.emit_method(lt_sig, lt_body)
+            builder.emit_method("lt", lt_body)
 
-            let mut le_sig = builder.method("le")
-            le_sig = builder.with_self(le_sig)
-            le_sig = builder.with_arg(le_sig, "other", builder.target_ty())
-            le_sig = builder.returns(le_sig, builder.ty<bool>())
-            builder.emit_method(le_sig, le_body)
+            builder.emit_method("le", le_body)
 
-            let mut gt_sig = builder.method("gt")
-            gt_sig = builder.with_self(gt_sig)
-            gt_sig = builder.with_arg(gt_sig, "other", builder.target_ty())
-            gt_sig = builder.returns(gt_sig, builder.ty<bool>())
-            builder.emit_method(gt_sig, gt_body)
+            builder.emit_method("gt", gt_body)
 
-            let mut ge_sig = builder.method("ge")
-            ge_sig = builder.with_self(ge_sig)
-            ge_sig = builder.with_arg(ge_sig, "other", builder.target_ty())
-            ge_sig = builder.returns(ge_sig, builder.ty<bool>())
-            builder.emit_method(ge_sig, ge_body)
+            builder.emit_method("ge", ge_body)
         }
         builder.finish()
         ev

@@ -161,10 +161,7 @@ impl BadReq: Derive for Tagged {
         for field in reflect.fields() {
             builder.require<Tagged>(field)
         }
-        let mut sig = builder.method("tag")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.ty<bool>())
-        builder.emit_method(sig, builder.bool(true))
+        builder.emit_method("tag", builder.bool(true))
         builder.finish()
         ev
     }

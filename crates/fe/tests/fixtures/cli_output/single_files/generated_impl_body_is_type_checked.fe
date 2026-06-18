@@ -27,12 +27,10 @@ impl BadDup: Derive for Dup {
             builder: mut ImplBuilder<Dup<T>>,
         )
     {
-        // Deliberately wrong: `dup` returns `Self`, but the emitted body is a
-        // `bool`. A correct provider would build `Self { .. }`.
-        let mut sig = builder.method("dup")
-        sig = builder.with_self(sig)
-        sig = builder.returns(sig, builder.self_ty())
-        builder.emit_method(sig, quote { true })
+        // Deliberately wrong: `dup` returns `Self` (the inferred signature from
+        // the `Dup` goal trait), but the emitted body is a `bool`. A correct
+        // provider would build `Self { .. }`.
+        builder.emit_method("dup", quote { true })
         builder.finish()
         ev
     }

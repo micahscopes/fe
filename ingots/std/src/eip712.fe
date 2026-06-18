@@ -286,14 +286,7 @@ impl StableEip712: Derive for Eip712 {
             }
             text = builder.concat(text, ")")
             acc = builder.call(acc, "piece", builder.str(text))
-            let mut members_sig = builder.method("append_members")
-            members_sig = builder.with_arg(
-                members_sig,
-                "acc",
-                builder.ty<std::eip712::Hash712>(),
-            )
-            members_sig = builder.returns(members_sig, builder.ty<std::eip712::Hash712>())
-            builder.emit_method(members_sig, acc)
+            builder.emit_method("append_members", acc)
 
             // fn hash712(self) -> u256 {
             //     Hash712::new()
@@ -340,10 +333,7 @@ impl StableEip712: Derive for Eip712 {
                     ),
                 )
             }
-            let mut sig = builder.method("hash712")
-            sig = builder.with_self(sig)
-            sig = builder.returns(sig, builder.ty<u256>())
-            builder.emit_method(sig, builder.call(hash, "finish"))
+            builder.emit_method("hash712", builder.call(hash, "finish"))
         }
         builder.finish()
         ev

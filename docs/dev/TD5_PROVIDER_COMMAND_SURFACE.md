@@ -21,15 +21,18 @@ update this doc in the same change).
 |---|---|---|
 | **R** — reflection reads | 12 | read-only queries on `reflect` / `field` / `variant` handles (method dispatch + `for`-loop iterables) |
 | **B-obl** — obligation | 1 | `builder.require<Trait>(ty)` |
-| **B-build** — generated-HIR builder ops | 39 | the `builder.*` expression/type/sig/pattern/emit cluster (excludes `require` and `finish`) |
+| **B-build** — generated-HIR builder ops | 35 | the `builder.*` expression/type/pattern/emit cluster (excludes `require` and `finish`) |
 | **Q** — quote | 6 | `quote{}` + the five hole/splice forms |
 | **CTFE** — control flow | 9 | `let`/`mut`(assign)/`for`/`if`/`else`/`&&`/`||`/`!`/`return` interception points |
 | **FIN** — finish | 1 | `builder.finish()` |
-| **total** | **68** | |
+| **total** | **64** | |
 
-The packet estimated **~56**. The authoritative count is **68** (or **59** if you exclude the
+The packet estimated **~56**. The authoritative count is **64** (or **55** if you exclude the
 9 CTFE control-flow interception points, which the packet did not enumerate as "ops"). The
-difference is explained in "Count reconciliation".
+difference is explained in "Count reconciliation". **DEVX-A** (the `emit_method` signature
+inference, Proposal A of `FCO_METAPROG_DEVX_REVIEW_2026-06-18.md`) dropped the four
+signature-dance B-build ops (`method`/`with_self`/`with_arg`/`returns`), shrinking B-build 39 → 35
+and `RECOGNIZED_BUILDER_OPS` 43 → 39.
 
 Dispatch sites are now in two functions:
 - `eval_method_call` — receiver-typed method dispatch (`Value::Builder` delegates to
@@ -131,7 +134,7 @@ panicking.
 
 ---
 
-## B-build — generated-HIR builder ops (39)
+## B-build — generated-HIR builder ops (35)
 
 The largest cluster; the shrink target. Becomes a typed generated-HIR **builder effect** scoped
 to the goal `G` (TD5e), EXCEPT the four goal-qualified ops that cannot be quoted hygienically
@@ -187,18 +190,28 @@ to the goal `G` (TD5e), EXCEPT the four goal-qualified ops that cannot be quoted
 
 ### Generated method signatures
 
-| op | dispatch site | category | future effect | rung |
-|---|---|---|---|---|
-| `builder.method(name)` | `provider_executor.rs:1950` | B-build | typed builder sig (seed) | TD5e |
-| `builder.with_self(sig)` | `provider_executor.rs:1960` | B-build | typed builder sig (`self`) | TD5e |
-| `builder.with_arg(sig, n, ty)` | `provider_executor.rs:1967` | B-build | typed builder sig (param) | TD5e |
-| `builder.returns(sig, ty)` | `provider_executor.rs:1978` | B-build | typed builder sig (return) | TD5e |
+**DEVX-A (DROPPED).** The four signature-dance ops below were removed
+(`FCO_METAPROG_DEVX_REVIEW_2026-06-18.md`, Proposal A). For a derive provider the emitted
+method's signature *is* the goal trait's declaration of that method, so re-spelling it op-by-op
+was pure ceremony. The signature is now **inferred** from the goal trait's method declaration at
+`emit_method(name, body)` (`ProviderExecutor::infer_method_sig`): self-ness and argument names from
+the declaration; argument/return types from the declaration with the trait's `Self`/own type-params
+substituted by `target_ty()` (argument position) / `self_ty()` (return position) — the SAME witness
+the dance produced, so the generated impl is byte-identical. These ops are removed from
+`RECOGNIZED_BUILDER_OPS` (43 → 39):
+
+| op (REMOVED) | was | now |
+|---|---|---|
+| `builder.method(name)` | typed builder sig (seed) | inferred from the goal-trait declaration |
+| `builder.with_self(sig)` | typed builder sig (`self`) | inferred (declaration's `self` receiver) |
+| `builder.with_arg(sig, n, ty)` | typed builder sig (param) | inferred (declaration's params) |
+| `builder.returns(sig, ty)` | typed builder sig (return) | inferred (declaration's return type) |
 
 ### Emit (generated-item construction) + compile-time string fold
 
 | op | dispatch site | category | future effect | rung |
 |---|---|---|---|---|
-| `builder.emit_method(sig, body)` | `provider_executor.rs:1606` | B-build | typed builder emit (method) | TD5e |
+| `builder.emit_method(name, body)` | `provider_executor.rs` (`eval_builder_method`) | B-build | typed builder emit (method); signature inferred from the goal trait (DEVX-A) | TD5e |
 | `builder.emit_const(name, ty, value)` | `provider_executor.rs:1643` | B-build | typed builder emit (const) | TD5e |
 | `builder.emit_assoc_ty(name, ty)` | `provider_executor.rs:1635` | B-build | typed builder emit (assoc type) | TD5e |
 | `builder.concat(a, b)` | `provider_executor.rs:1773` | B-build | CTFE string fold (pure compile-time op) | TD5e |
@@ -276,33 +289,35 @@ Becomes effect-handler finalize (TD5e/TD5f).
 ## Count reconciliation (the difference IS a finding)
 
 Packet estimate: **~56** (R ~12, B-obl 1, B-build ~33, Q ~7, CTFE "control flow", FIN 1).
-Authoritative count: **68** total / **59** excluding CTFE.
+Authoritative count: **64** total / **55** excluding CTFE (after DEVX-A; was 68 / 59).
 
 | category | packet | actual | delta | why |
 |---|---|---|---|---|
 | R | ~12 | 12 | 0 | matches; but actual 12 = 7 method reads + 3 for-iterables + `same_ty`/`same_field` recategorized from B-build |
 | B-obl | 1 | 1 | 0 | matches |
-| B-build | ~33 | 39 | +6 | the packet's "~33" undercounted the tuple ops (`tuple_expr`/`with_elem`/`tuple_ty`/`with_elem_ty`), `keccak`, `concat`, `str`/`str_ty`, the match-builder ops (`match_expr`/`with_arm`/`variant_binder`), and the pattern ops (`wildcard_pat`/`variant_pat`). Note `same_ty`/`same_field` are spelled `builder.*` but moved to R, which offsets some of the growth. |
+| B-build | ~33 | 35 | +2 | the packet's "~33" undercounted the tuple ops (`tuple_expr`/`with_elem`/`tuple_ty`/`with_elem_ty`), `keccak`, `concat`, `str`/`str_ty`, the match-builder ops (`match_expr`/`with_arm`/`variant_binder`), and the pattern ops (`wildcard_pat`/`variant_pat`); `same_ty`/`same_field` are spelled `builder.*` but moved to R. **DEVX-A then dropped the four signature-dance ops (`method`/`with_self`/`with_arg`/`returns`)**, B-build 39 → 35. |
 | Q | ~7 | 6 | −1 | the packet listed 5 surface forms plus loose phrasing; the exact distinct quote forms are 6 (quote, expr hole, field hole, pattern hole, arm splice, empty quote). |
 | CTFE | (unenumerated) | 9 | +9 | the packet treated control flow as a bucket, not as counted ops; the executor recognizes 9 distinct control-flow constructs (plus 3 explicit *rejections*). |
 | FIN | 1 | 1 | 0 | matches |
 
 **Net:** counting only the executor's "command surface" the way the packet did (R + B-obl +
-B-build + Q + FIN, no CTFE) gives **59** vs the estimated ~56 — close, with B-build the main
-undercount. Counting the full recognized surface including control-flow interception gives
-**68**. **The TD5.0 baseline numbers were 45 `builder.*` literals + 7 reflect/field/variant
-method reads + 3 for-iterables + 6 quote forms + 9 control-flow constructs**; the 45 + 7 + 3 = 55
-"named method/iterable ops" was what the freeze test pinned at baseline. *(TD5c has since shrunk
-the pinned surface — see the mechanical pin below.)*
+B-build + Q + FIN, no CTFE) gives **55** (was 59 before DEVX-A). Counting the full recognized
+surface including control-flow interception gives **64** (was 68). **The TD5.0 baseline numbers
+were 45 `builder.*` literals + 7 reflect/field/variant method reads + 3 for-iterables + 6 quote
+forms + 9 control-flow constructs**; the 45 + 7 + 3 = 55 "named method/iterable ops" was what the
+freeze test pinned at baseline. *(TD5c and DEVX-A have since shrunk the pinned surface to 39 — see
+the mechanical pin below.)*
 
 ### Mechanical pin (what the freeze test enforces)
 The freeze test pins the named ops as string literals (counts are the **current** values; the
-TD5.0 baseline was 45 / 7 / 3 = 55, now 43 / 0 = 43 — the executor's only named surface is
+TD5.0 baseline was 45 / 7 / 3 = 55, now **39** / 0 = 39 — the executor's only named surface is
 `builder.*`):
-- `RECOGNIZED_BUILDER_OPS` — the **43** arms of `eval_builder_method` (TD5.0 baseline 45; **TD5c
+- `RECOGNIZED_BUILDER_OPS` — the **39** arms of `eval_builder_method` (TD5.0 baseline 45; **TD5c
   removed `same_ty`/`same_field`** — mis-shelved `builder.*`-spelled identity reads — which moved
   onto the typed read-only `ReflectionCompare` table and are resolved in the catch-all, not as
-  `("name",` arms).
+  `("name",` arms (45 → 43); **DEVX-A dropped the four signature-dance ops** `method`/`with_self`/
+  `with_arg`/`returns` — the emitted method's signature is inferred from the goal trait's
+  declaration at `emit_method(name, body)` (43 → 39)).
 - `RECOGNIZED_REFLECT_OPS` — now **EMPTY** (TD5.0 baseline 7). **TD5c removed every non-iterating
   reflection read** from `eval_method_call`: `reflect.*` (`is_struct`/`is_enum`/`target_name`) →
   `ReflectHandle`, then `field.*` (`ty`/`name`) → `FieldHandle` and `variant.*`
@@ -335,8 +350,13 @@ requires editing those matches, which is itself a TD5 category decision.
   off `eval_method_call`/`eval_builder_method` (`RECOGNIZED_REFLECT_OPS` → 0, the iterable-ops
   const gone, `RECOGNIZED_BUILDER_OPS` 45 → 43). **The reflection-read surface is entirely off the
   executor; only `builder.*` ops remain.**
+- **DEVX-A** drops the four signature-dance **B-build** ops (`method`/`with_self`/`with_arg`/
+  `returns`) → the emitted method's signature is inferred from the goal trait's declaration at
+  `emit_method(name, body)` (`ProviderExecutor::infer_method_sig`). A surface *shrink*, not a
+  migration off the executor; generated impls are byte-identical (`RECOGNIZED_BUILDER_OPS` 43 → 39).
+  See `FCO_METAPROG_DEVX_REVIEW_2026-06-18.md` (Proposal A).
 - **TD5d** removes the 6 **Q** forms (and the quote-template vocabulary) → typed generated HIR.
-- **TD5e** removes the 39 **B-build** ops + `finish` (FIN) → typed builder effect; the 4
+- **TD5e** removes the 35 **B-build** ops + `finish` (FIN) → typed builder effect; the 4
   goal-qualified ops (surprise #3) stay as typed builder-effect ops here.
 - **TD5f/g** removes the 9 **CTFE** interception points → provider body runs as ordinary
   effectful compile-time Fe, off the executor.

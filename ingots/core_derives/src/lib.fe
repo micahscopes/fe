@@ -40,11 +40,7 @@ impl StableEq: Derive for Eq {
                 builder.require<Eq>(field.ty())
                 body = quote(other) { ${body} && self.${field} == other.${field} }
             }
-            let mut sig = builder.method("eq")
-            sig = builder.with_self(sig)
-            sig = builder.with_arg(sig, "other", builder.target_ty())
-            sig = builder.returns(sig, builder.ty<bool>())
-            builder.emit_method(sig, body)
+            builder.emit_method("eq", body)
         }
         if reflect.is_enum() {
             // Variant counting with plain bools: `multi` is true when the
@@ -102,11 +98,7 @@ impl StableEq: Derive for Eq {
                 }
                 body = quote { match self { ${arms} } }
             }
-            let mut sig = builder.method("eq")
-            sig = builder.with_self(sig)
-            sig = builder.with_arg(sig, "other", builder.target_ty())
-            sig = builder.returns(sig, builder.ty<bool>())
-            builder.emit_method(sig, body)
+            builder.emit_method("eq", body)
         }
         builder.finish()
         ev
@@ -127,9 +119,7 @@ impl StableDefault: Derive for Default {
                 builder.require<Default>(field.ty())
                 init = builder.with_field(init, field, builder.trait_call(field.ty(), "default"))
             }
-            let mut sig = builder.method("default")
-            sig = builder.returns(sig, builder.self_ty())
-            builder.emit_method(sig, init)
+            builder.emit_method("default", init)
         }
         if reflect.is_enum() {
             // Enum::DefaultVariant / Enum::DefaultVariant(..defaults..) /
@@ -146,9 +136,7 @@ impl StableDefault: Derive for Default {
                             builder.trait_call(field.ty(), "default"),
                         )
                     }
-                    let mut sig = builder.method("default")
-                    sig = builder.returns(sig, builder.self_ty())
-                    builder.emit_method(sig, init)
+                    builder.emit_method("default", init)
                 }
             }
         }
