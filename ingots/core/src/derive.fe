@@ -23,7 +23,12 @@ pub struct Reflect<T> {
 }
 
 /// Generated-impl builder capability for the goal `G` (e.g. `Eq<T>`).
-pub struct ImplBuilder<G> {
+///
+/// `G` is a CONSTRAINT (the trait being derived), not an ordinary `*`-kinded
+/// type, so its param is `Constraint`-kinded — i.e. `ImplBuilder : Constraint -> *`
+/// (FCO K04b). The goal is recognized + lowered by the provider-goal carrier
+/// (`provider_goal.rs`), not by the ordinary `*`-kinded type walk.
+pub struct ImplBuilder<G: Constraint> {
     handle: u256
 }
 
@@ -35,6 +40,11 @@ pub struct ImplBuilder<G> {
 /// no runtime `Evidence<G>` value can be built. The witness is bound by the
 /// provider executor as a compile-time value; the goal `G` is kind-checked at
 /// the provider signature (FCO Level 1), never materialized at runtime.
-pub struct Evidence<G> {
+///
+/// `G` is a CONSTRAINT (the trait being derived), not an ordinary `*`-kinded
+/// type, so its param is `Constraint`-kinded — i.e. `Evidence : Constraint -> *`
+/// (FCO K04b). The goal is recognized + lowered by the provider-goal carrier
+/// (`provider_goal.rs`), not by the ordinary `*`-kinded type walk.
+pub struct Evidence<G: Constraint> {
     handle: u256
 }

@@ -241,7 +241,23 @@ fn lower_goal<'db>(
     // concrete saturated constraint becomes a `TraitInstId`; everything else
     // declines to `None` and is classified below.
     if let Some(inst) = lower_hir_constraint_application(db, goal_hir, scope, assumptions) {
-        return Ok(CapabilityGoal::ConcreteTrait(inst));
+        // FCO K04b: the carried goal is INHERENTLY kind `Constraint`. A
+        // `TraitInstId` from `lower_hir_constraint_application` is a saturated
+        // trait instance (a `Constraint`-kinded obligation), never a `*`-kinded
+        // `TyData` node — the inner `Eq<T>` is lowered HERE via the carrier, not
+        // through the ordinary `*`-kinded `ty_lower` walk. This is what makes the
+        // re-kinded `Evidence`/`ImplBuilder` param (`: Constraint -> *`,
+        // `core::derive::{Evidence,ImplBuilder}`) load-bearing through this
+        // carrier rather than via `ty_lower`: the constraint reaches the solver
+        // only as this `ConcreteTrait` obligation, and `CapabilityGoal` has no
+        // variable-head variant, so no live `* -> Constraint` head escapes.
+        let goal = CapabilityGoal::ConcreteTrait(inst);
+        debug_assert!(
+            matches!(goal, CapabilityGoal::ConcreteTrait(_)),
+            "provider goal must be carried as a Constraint-kinded trait instance, \
+             not a *-kinded type",
+        );
+        return Ok(goal);
     }
 
     // Declined. Classify by resolving the goal head, exactly like the
