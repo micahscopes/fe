@@ -1,8 +1,14 @@
 # Trait-Constructor-as-Value — design + rung plan (Form 2 enablement)
 
-**Date:** 2026-06-18 · **Status:** scoped + crux claims spot-verified (read-only). Implementation R1 in
-flight. The unsaturated sibling of `ConstraintTerm`; flips the chosen **Form 2** derive-kind
-(`derive_kind_form2_param.fe`) from `2-0006` to clean. = decision-doc Stage 2 (TD-arg + TD2/TD3).
+**Date:** 2026-06-18 · **Status: R1–R3 LANDED + independently verified — Form 2 is GREEN.** R1 inert
+variant `863db9b83`; R2+R3 produce+reduce `df2c37570` (only `derive_kind_form2_param.snap` changed,
+`2-0006`→clean; cold gate fe-hir 132/0, cli_output 360/0). The unsaturated sibling of `ConstraintTerm`;
+flipped the chosen **Form 2** derive-kind to clean = decision-doc Stage 2 (TD-arg + TD2/TD3).
+**Implementation note:** the `2-0006` source was `path_resolver.rs` (trait-path generic-arg pre-validation),
+NOT `ty_error.rs:261` as scoped — the impl agent instrumented to find the real emitter and guarded it there.
+The R3 reduction is in `app_in_mode` (the single fold-routed site), reusing `complete_explicit_args` so
+`Eq<T=Self>` saturates. This is **job-1 of #7** (makes `impl Derive<Eq> for StableEq` a real impl);
+job-2 (executor→CTFE, TD5) + marker deletion remain.
 
 ## What & why
 
