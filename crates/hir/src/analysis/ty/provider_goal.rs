@@ -1,29 +1,38 @@
-//! Derive-provider capability/witness GOAL representation and kind-check
-//! (FCO Level 1, "W-D").
+//! Derive-provider capability/witness GOAL diagnostics (FCO Level 1, "W-D").
 //!
 //! A derive provider's `derive` fn names a *goal* in type-argument position:
-//! `Evidence<Eq<T>>` (the witness parameter) and `ImplBuilder<Eq<T>>` (a
+//! `Evidence<Eq<T>>` (the witness parameter/return) and `ImplBuilder<Eq<T>>` (a
 //! `uses (..)` capability). The `Eq<T>` there is a CONSTRAINT, not an ordinary
-//! `*`-kinded type, so the ordinary signature checker cannot lower it (it would
-//! reject `Eq<T>` as a type application, `2-0011`). Level 0 dodged that by
-//! exempting the whole provider signature — which made the goal argument pure
-//! decoration: a nonsense trait in `Evidence<..>` compiled silently.
+//! `*`-kinded type.
 //!
-//! This module retires that exemption FOR CONCRETE GOALS via a narrow,
-//! analysis-layer carrier. It recognizes the `Evidence`/`ImplBuilder` argument
-//! POSITION, extracts the single inner HIR type argument, and lowers THAT via
-//! the existing [`lower_hir_constraint_application`] (the W-B lowering). A
-//! concrete saturated constraint (`Eq<T>`) lowers to a
-//! [`CapabilityGoal::ConcreteTrait`] ([`TraitInstId`]); every non-concrete shape
-//! (missing trait, unsaturated `* -> Constraint` head, live `* -> Constraint`
-//! param head) is declined to a typed [`GoalError`].
+//! As of FCO R2/R3 the GOOD case needs no special handling: `Evidence` /
+//! `ImplBuilder` are `Constraint`-kinded constructors (`Constraint -> *`, K04b),
+//! a saturated concrete goal `Eq<T>` lowers to a `Constraint`-kinded
+//! [`TyData::ConstraintTerm`] (R2), and the provider signature is no longer
+//! exempt from the ordinary type walk (R3) — so a valid goal type-checks like any
+//! other application and the concrete goal is carried by the `ConstraintTerm` in
+//! the lowered signature. This module no longer REPRESENTS the goal (the old
+//! `CapabilityGoal::ConcreteTrait(TraitInstId)` carrier value was never read);
+//! it only retains the goal-DIAGNOSTIC pass for ILL-FORMED goals, which the
+//! ordinary walk does not report well:
 //!
-//! This is POSITION-SCOPED: `Evidence`/`ImplBuilder` are NOT modeled as general
-//! `Constraint -> *` type constructors (that would require a constraint to be a
-//! kind-`Constraint` `TyId`, i.e. `TyData::ConstraintTerm`, which is forbidden
-//! here). The inner constraint never travels through the `*`-kinded type walk,
-//! never becomes a `TyData` node, and never reaches the solver as a live head:
-//! [`CapabilityGoal`] has no variable-head variant by construction.
+//!   - a live `* -> Constraint` parameter head (`Evidence<P<T>>`) is kind-correct
+//!     and lowers SILENTLY — only this pass catches it (`6-0008`);
+//!   - a bare/unsaturated head (`Evidence<Eq>`) degrades to a generic `2-0006`
+//!     instead of the provider-specific guidance (`6-0009`);
+//!   - a goal in the `uses (..)` clause is not walked by the ordinary signature
+//!     diag at all.
+//!
+//! The pass classifies each recognized goal position by re-lowering the inner
+//! HIR goal exactly as the where-clause path does
+//! (`WherePredicateView::constraint_application_diags`), so a provider goal is
+//! held to the same boundary as `where Eq<T>`. A concrete saturated goal lowers
+//! cleanly and yields no diagnostic; every other shape is classified to a typed
+//! [`GoalError`] and reported.
+//!
+//! Goal positions are recognized by RESOLVED IDENTITY (`core::derive::Evidence` /
+//! `::ImplBuilder`), not by the bare names: a user type merely *named* `Evidence`,
+//! without `use core::derive::Evidence`, is not a goal position.
 //!
 //! Placement: this is an analysis-layer helper (post scope-graph merge), NOT the
 //! expansion-stage `validate_provider` — [`lower_hir_constraint_application`]
@@ -36,7 +45,6 @@ use crate::{
         name_resolution::{ExpectedPathKind, PathRes, resolve_path},
         ty::{
             diagnostics::{TraitConstraintDiag, TyDiagCollection},
-            trait_def::TraitInstId,
             trait_lower::lower_hir_constraint_application,
             trait_resolution::PredicateListId,
             ty_def::Kind,
@@ -83,8 +91,8 @@ impl CapabilityTy {
 
 /// Where a provider names a goal — for naming the position in diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GoalPosition {
-    /// The `Evidence<..>` witness parameter.
+enum GoalPosition {
+    /// The `Evidence<..>` witness parameter / return.
     Witness,
     /// An `ImplBuilder<..>` capability in the `uses (..)` clause.
     ImplBuilder,
@@ -100,22 +108,10 @@ impl GoalPosition {
     }
 }
 
-/// The concrete constraint a provider capability/witness names (`Eq<T>` in
-/// `Evidence<Eq<T>>` / `ImplBuilder<Eq<T>>`).
-///
-/// Compile-time only; never a runtime value; eliminated to a concrete trait
-/// obligation before the solver runs. By construction it has NO variable-head
-/// variant, so a live head can never be carried.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CapabilityGoal<'db> {
-    /// A single applied trait: `Eq<T>` → `TraitInstId{Eq, [T]}` (Self = T).
-    ConcreteTrait(TraitInstId<'db>),
-}
-
 /// Why a provider goal argument is not a concrete constraint. Each maps to a
 /// typed diagnostic (see [`goal_error_diag`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GoalError<'db> {
+enum GoalError<'db> {
     /// The goal head does not resolve, or resolves outside the trait domain
     /// (e.g. `Evidence<MissingTrait<T>>`) → a name-resolution diagnostic.
     Unresolved { head: PathId<'db> },
@@ -128,32 +124,42 @@ pub(crate) enum GoalError<'db> {
     Unsaturated { head: PathId<'db> },
 }
 
-/// One recognized provider goal position, with the result of lowering its goal.
-pub(crate) struct ProviderGoal<'db> {
-    pub(crate) position: GoalPosition,
+/// One recognized provider goal position whose goal is ILL-FORMED, paired with
+/// the data needed to report it.
+struct GoalDiag<'db> {
+    position: GoalPosition,
     /// The func scope the goal lowers in (for re-resolving on the diag path).
     scope: ScopeId<'db>,
     /// The inner goal's path span (`Eq<T>`), for diagnostics.
     goal_path_span: LazyPathSpan<'db>,
-    pub(crate) result: Result<CapabilityGoal<'db>, GoalError<'db>>,
+    err: GoalError<'db>,
 }
 
-/// The provider capability/witness goals for `func`, recognized by position and
-/// lowered/kind-checked. Empty when `func` is not a derive-provider `derive` fn.
+/// Diagnostics for the capability/witness goals of `func`, recognized by position
+/// and classified. Empty when `func` is not a derive-provider `derive` fn or when
+/// every recognized goal is a well-formed concrete constraint.
 ///
-/// This is the SSOT for de-exempting the provider signature: the caller routes
-/// the recognized goal positions through here (emitting [`goal_error_diag`])
-/// INSTEAD of the ordinary `*`-kinded type walk for those slots.
-pub(crate) fn provider_capability_goals<'db>(
+/// This is the SSOT for the provider-goal boundary diagnostics. The ordinary
+/// type walk (de-exempted in R3) type-checks the goal positions and carries a
+/// good goal as a `ConstraintTerm`; this pass adds the precise FCO diagnostics
+/// for the ill-formed shapes the ordinary walk reports poorly or not at all.
+pub(crate) fn provider_goal_diags<'db>(
     db: &'db dyn HirAnalysisDb,
     func: Func<'db>,
-) -> Vec<ProviderGoal<'db>> {
+) -> Vec<TyDiagCollection<'db>> {
     if !func.is_derive_provider_fn(db) {
         return Vec::new();
     }
 
     let scope = func.scope();
-    let mut goals = Vec::new();
+    let mut diags = Vec::new();
+    let mut push = |slot: Option<GoalDiag<'db>>| {
+        if let Some(slot) = slot
+            && let Some(diag) = goal_error_diag(db, &slot)
+        {
+            diags.push(diag);
+        }
+    };
 
     // Witness parameters: ordinary func params whose type head resolves to
     // `core::derive::Evidence` (by identity, not by the bare name `Evidence`).
@@ -168,18 +174,13 @@ pub(crate) fn provider_capability_goals<'db>(
         // outer path span: `Evidence<Eq<T>>` (mode-stripped param ty path).
         let outer = mode_stripped_ty_span(param.lazy_ty_span(db));
         let goal_path_span = inner_goal_path_span(db, hir_ty, outer);
-        let result = lower_goal(db, inner, scope);
-        goals.push(ProviderGoal {
-            position: GoalPosition::Witness,
-            scope,
-            goal_path_span,
-            result,
-        });
+        push(classify_goal(db, GoalPosition::Witness, inner, scope, goal_path_span));
     }
 
     // `uses (..)` capabilities: an `ImplBuilder<..>` key path carries the goal.
     // The head is recognized by RESOLVED identity (`core::derive::ImplBuilder`),
-    // not by the bare name `ImplBuilder`.
+    // not by the bare name `ImplBuilder`. The ordinary signature walk does not
+    // visit effect-param types, so this is the only pass that checks this slot.
     for (idx, effect) in func.effect_params(db).enumerate() {
         let Some(key_path) = effect.key_path(db) else {
             continue;
@@ -192,20 +193,18 @@ pub(crate) fn provider_capability_goals<'db>(
         };
         let outer = func.span().effects().param_idx(idx).path();
         let goal_path_span = inner_goal_path_span_from_outer(db, key_path, outer);
-        let result = lower_goal(db, inner, scope);
-        goals.push(ProviderGoal {
-            position: GoalPosition::ImplBuilder,
+        push(classify_goal(
+            db,
+            GoalPosition::ImplBuilder,
+            inner,
             scope,
             goal_path_span,
-            result,
-        });
+        ));
     }
 
     // Witness RETURN position: `derive(..) -> Evidence<Eq<T>>`. The result is
-    // also a witness whose goal must be a concrete constraint — without this the
-    // goal-argument exemption would survive in the return slot (a nonsense trait
-    // in `-> Evidence<..>` would compile silently). Recognized by resolved
-    // identity, exactly like the witness parameter.
+    // also a witness whose goal must be a concrete constraint. Recognized by
+    // resolved identity, exactly like the witness parameter.
     if let Some(ret_hir) = func.ret_ty_hir(db)
         && let Some(inner) = capability_position_inner(db, ret_hir, scope, CapabilityTy::Evidence)
     {
@@ -214,97 +213,92 @@ pub(crate) fn provider_capability_goals<'db>(
         // `into_mode_type()` mis-resolves a non-mode return span to the file root.
         let outer = func.span().ret_ty().into_path_type().path();
         let goal_path_span = inner_goal_path_span(db, ret_hir, outer);
-        let result = lower_goal(db, inner, scope);
-        goals.push(ProviderGoal {
-            position: GoalPosition::Witness,
-            scope,
-            goal_path_span,
-            result,
-        });
+        push(classify_goal(db, GoalPosition::Witness, inner, scope, goal_path_span));
     }
 
-    goals
+    diags
 }
 
-/// Lower the inner goal HIR type to a [`CapabilityGoal`], or classify why it is
-/// not a concrete constraint. Mirrors the where-clause `constraint_application`
+/// Classify the inner goal HIR type: a concrete saturated constraint (`Eq<T>`)
+/// is WELL-FORMED (returns `None` — no diagnostic; the ordinary walk lowers it
+/// to a `ConstraintTerm`), everything else is classified to why it is not a
+/// concrete constraint. Mirrors the where-clause `constraint_application`
 /// classification (`WherePredicateView::constraint_application_diags`), so a
 /// provider goal is held to the same boundary as `where Eq<T>`.
-fn lower_goal<'db>(
+fn classify_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    position: GoalPosition,
+    goal_hir: HirTypeId<'db>,
+    scope: ScopeId<'db>,
+    goal_path_span: LazyPathSpan<'db>,
+) -> Option<GoalDiag<'db>> {
+    let err = goal_error(db, goal_hir, scope)?;
+    Some(GoalDiag {
+        position,
+        scope,
+        goal_path_span,
+        err,
+    })
+}
+
+/// `None` when the inner goal is a concrete saturated constraint (well-formed);
+/// otherwise the classified [`GoalError`].
+fn goal_error<'db>(
     db: &'db dyn HirAnalysisDb,
     goal_hir: HirTypeId<'db>,
     scope: ScopeId<'db>,
-) -> Result<CapabilityGoal<'db>, GoalError<'db>> {
+) -> Option<GoalError<'db>> {
     let assumptions = PredicateListId::empty_list(db);
 
-    // The concrete projection: feed the inner type into the W-B lowering. A
-    // concrete saturated constraint becomes a `TraitInstId`; everything else
-    // declines to `None` and is classified below.
-    if let Some(inst) = lower_hir_constraint_application(db, goal_hir, scope, assumptions) {
-        // FCO K04b: the carried goal is INHERENTLY kind `Constraint`. A
-        // `TraitInstId` from `lower_hir_constraint_application` is a saturated
-        // trait instance (a `Constraint`-kinded obligation), never a `*`-kinded
-        // `TyData` node — the inner `Eq<T>` is lowered HERE via the carrier, not
-        // through the ordinary `*`-kinded `ty_lower` walk. This is what makes the
-        // re-kinded `Evidence`/`ImplBuilder` param (`: Constraint -> *`,
-        // `core::derive::{Evidence,ImplBuilder}`) load-bearing through this
-        // carrier rather than via `ty_lower`: the constraint reaches the solver
-        // only as this `ConcreteTrait` obligation, and `CapabilityGoal` has no
-        // variable-head variant, so no live `* -> Constraint` head escapes.
-        let goal = CapabilityGoal::ConcreteTrait(inst);
-        debug_assert!(
-            matches!(goal, CapabilityGoal::ConcreteTrait(_)),
-            "provider goal must be carried as a Constraint-kinded trait instance, \
-             not a *-kinded type",
-        );
-        return Ok(goal);
+    // The concrete projection: a saturated concrete constraint lowers via the
+    // W-B lowering (the same lowering R2 uses to produce the `ConstraintTerm` in
+    // the ordinary walk). If it lowers, the goal is well-formed — no diagnostic.
+    if lower_hir_constraint_application(db, goal_hir, scope, assumptions).is_some() {
+        return None;
     }
 
     // Declined. Classify by resolving the goal head, exactly like the
     // where-clause path, so the diagnostic distinguishes the failure modes.
     let TypeKind::Path(path) = goal_hir.data(db) else {
         // Not even a path (e.g. a tuple/array goal). No trait head to name.
-        return Err(GoalError::Unresolved {
+        return Some(GoalError::Unresolved {
             head: empty_path(db),
         });
     };
     let Some(path) = path.to_opt() else {
-        return Err(GoalError::Unresolved {
+        return Some(GoalError::Unresolved {
             head: empty_path(db),
         });
     };
     let head = path.strip_generic_args(db);
 
-    match resolve_path(db, head, scope, assumptions, false) {
+    Some(match resolve_path(db, head, scope, assumptions, false) {
         // Resolved to a trait, but the application was not a concrete saturated
         // constraint (no subject / arity / kind) — `lower_hir_constraint_application`
         // already declined it.
-        Ok(PathRes::Trait(_)) => Err(GoalError::Unsaturated { head }),
+        Ok(PathRes::Trait(_)) => GoalError::Unsaturated { head },
         // A live `* -> Constraint` parameter head (`Evidence<P<T>>`): the
         // abstract-head boundary, named at a typed position.
         Ok(PathRes::Ty(ty)) if is_constraint_ctor(&ty.kind(db)) => match path.ident(db).to_opt() {
-            Some(param) => Err(GoalError::LiveHead { param }),
-            None => Err(GoalError::Unresolved { head }),
+            Some(param) => GoalError::LiveHead { param },
+            None => GoalError::Unresolved { head },
         },
         // Any other non-trait head, or a resolution failure.
-        _ => Err(GoalError::Unresolved { head }),
-    }
+        _ => GoalError::Unresolved { head },
+    })
 }
 
-/// The typed diagnostic for a goal error. The missing/unsaturated cases name the
+/// The typed diagnostic for a goal error. The unsaturated case names the
 /// capability and the goal spelling; the live-head case reuses `6-0008`.
-pub(crate) fn goal_error_diag<'db>(
+fn goal_error_diag<'db>(
     db: &'db dyn HirAnalysisDb,
-    goal: &ProviderGoal<'db>,
+    goal: &GoalDiag<'db>,
 ) -> Option<TyDiagCollection<'db>> {
     use crate::analysis::name_resolution::diagnostics::PathResDiag;
 
-    let Err(err) = goal.result else {
-        return None;
-    };
     let span: DynLazySpan = goal.goal_path_span.clone().into();
 
-    match err {
+    match goal.err {
         GoalError::LiveHead { param } => {
             // Reuse the abstract-head boundary diagnostic (`6-0008`).
             Some(TraitConstraintDiag::ConstraintCtorParamUnsupported { span, param }.into())

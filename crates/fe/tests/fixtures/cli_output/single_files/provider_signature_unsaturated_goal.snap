@@ -7,6 +7,18 @@ input_file: tests/fixtures/cli_output/single_files/provider_signature_unsaturate
 === STDERR ===
 errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/provider_signature_unsaturated_goal.fe
 
+error[2-0006]: expected type item here
+   ┌─ provider_signature_unsaturated_goal.fe:14:41
+   │
+14 │     const fn derive<T>(ev: own Evidence<Eq>) -> Evidence<Eq>
+   │                                         ^^ expected type here, but found trait `Eq`
+
+error[2-0006]: expected type item here
+   ┌─ provider_signature_unsaturated_goal.fe:14:58
+   │
+14 │     const fn derive<T>(ev: own Evidence<Eq>) -> Evidence<Eq>
+   │                                                          ^^ expected type here, but found trait `Eq`
+
 error[6-0009]: derive provider goal is not a concrete constraint
    ┌─ provider_signature_unsaturated_goal.fe:14:41
    │

@@ -715,31 +715,36 @@ impl ModuleAnalysisPass for FuncAnalysisPass {
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         // Function diagnostics are handled here; contract-specific diagnostics are separate.
+        // Derive provider signatures are NO LONGER exempt from the ordinary
+        // `*`-kinded signature walk (FCO R3). A valid capability/witness goal
+        // (`Evidence<Eq<T>>`) lowers cleanly to a `Constraint`-kinded
+        // `ConstraintTerm` through ordinary type lowering (R2), so the witness
+        // parameter/return and the `uses`-`ImplBuilder` slots type-check without
+        // a special case — `core_derives` and `std` providers check clean. The
+        // exemption is therefore removed wholesale; nothing in a valid provider
+        // signature over-reports under the ordinary walk.
         let mut diags: Vec<Box<dyn DiagnosticVoucher + 'db>> = top_mod
             .all_funcs(db)
             .iter()
-            .filter(|func| !func.is_derive_provider_fn(db))
             .flat_map(|func| func.diags(db))
             .map(|diag| diag.to_voucher())
             .collect();
 
-        // Derive provider SIGNATURES are still exempt from the ordinary
-        // `*`-kinded signature walk (their non-goal parts are checked by the
-        // provider executor, like the body) — EXCEPT the capability/witness GOAL
-        // positions (`Evidence<..>` / `ImplBuilder<..>`). Those name a CONCRETE
-        // constraint and are now kind-checked: the goal argument is lowered via
-        // `provider_capability_goals` (position-scoped, no `ConstraintTerm`, no
-        // live head to the solver) and a non-concrete goal is reported here
-        // (FCO Level 1). De-exempting the goal position retires the
-        // "goal-argument-is-decoration" bridge: a nonsense trait in `Evidence<..>`
-        // no longer compiles silently.
+        // The ordinary walk type-checks the goal POSITIONS but does not produce
+        // the boundary diagnostics for ILL-FORMED provider goals: a live abstract
+        // head (`Evidence<P<T>>`, `P: * -> Constraint`) is kind-correct and
+        // lowers SILENTLY; a bare/unsaturated head (`Evidence<Eq>`) degrades to a
+        // generic `2-0006`; and a goal in the `uses (..)` clause is not walked at
+        // all. The provider-goal pass classifies each recognized goal position and
+        // emits the precise FCO boundary diagnostic (`6-0008` live head, `6-0009`
+        // unsaturated, name-resolution for an unresolved head) with its hint —
+        // covering all three goal slots (witness param, `uses`-builder, return).
         diags.extend(
             top_mod
                 .all_funcs(db)
                 .iter()
                 .filter(|func| func.is_derive_provider_fn(db))
-                .flat_map(|func| provider_goal::provider_capability_goals(db, *func))
-                .filter_map(|goal| provider_goal::goal_error_diag(db, &goal))
+                .flat_map(|func| provider_goal::provider_goal_diags(db, *func))
                 .map(|diag| diag.to_voucher()),
         );
 

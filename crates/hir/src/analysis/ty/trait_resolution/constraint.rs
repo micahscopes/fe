@@ -828,22 +828,22 @@ fn require_decode<T>() where T: Decode<Sol> {}
     }
 
     // ----------------------------------------------------------------------
-    // Provider-goal representation carrier invariant (FCO Level 1, "W-D").
+    // Provider-goal concrete-constraint boundary invariant (FCO Level 1, "W-D").
     //
-    // De-magicking a derive provider's capability/witness signature (making
-    // `Evidence<Eq<T>>` / `ImplBuilder<Eq<T>>` real kind-checked types) needs the
-    // goal `Eq<T>` carried as a CONCRETE constraint. The narrow `CapabilityGoal`
-    // design carries it by reusing THIS module's `lower_hir_constraint_application`
-    // (the W-B lowering) on the *inner* type argument — a position-scoped intercept,
-    // NOT a general `Constraint -> *` constructor and NOT `TyData::ConstraintTerm`.
+    // A derive provider's capability/witness signature (`Evidence<Eq<T>>` /
+    // `ImplBuilder<Eq<T>>`) is a real kind-checked type: the GOOD goal `Eq<T>`
+    // lowers to a `Constraint`-kinded `TyData::ConstraintTerm` (R2) through the
+    // ordinary type walk (R3), via THIS module's `lower_hir_constraint_application`
+    // (the W-B lowering). The provider-goal DIAGNOSTIC pass (`provider_goal.rs`)
+    // reuses the SAME function as its good/bad discriminator on the *inner* type
+    // argument.
     //
-    // This test LOCKS that carrier invariant against the *existing* lowering, so the
-    // boundary is fixed regardless of when Level 1 is built (see
+    // This test LOCKS that boundary against the *existing* lowering (see
     // docs/dev/FCO_DECISION_PACKET_provider_goal_representation.md §0.5 / §4 and
     // FCO_PROBE_provider_goal_representation.md): the SAME function that yields the
-    // concrete goal for `Eq<T>` rejects every non-concrete shape (missing trait,
+    // concrete goal for `Eq<T>` declines every non-concrete shape (missing trait,
     // unsaturated `* -> Constraint` head, and a LIVE `* -> Constraint` param head)
-    // by declining to `None` — so no live head can ever be carried to the solver.
+    // to `None` — so no live head can ever be carried to the solver.
     #[test]
     fn provider_capability_goal_lowers_concrete_rejects_nonconcrete() {
         use crate::hir_def::scope_graph::ScopeId;
