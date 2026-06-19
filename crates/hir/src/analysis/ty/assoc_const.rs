@@ -3,7 +3,7 @@ use salsa::Update;
 use super::{
     fold::{TyFoldable, TyFolder},
     trait_def::TraitInstId,
-    trait_resolution::{PredicateListId, TraitSolveCx},
+    trait_resolution::PredicateListId,
     visitor::{TyVisitable, TyVisitor},
 };
 use crate::{
@@ -60,10 +60,6 @@ impl<'db> AssocConstUse<'db> {
 
     pub fn name(self) -> IdentId<'db> {
         self.name
-    }
-
-    pub fn solve_cx(self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        TraitSolveCx::new(db, self.origin_scope).with_assumptions(self.assumptions)
     }
 }
 

@@ -163,6 +163,55 @@ unsafe impl<'db> Update for TraitSolveCx<'db> {
     }
 }
 
+/// SSOT read-wrapper for the `(scope, assumptions)` pair that every body-checker
+/// provision query needs. Building the solver context goes through exactly one
+/// place ([`ProvisionEnv::solve_cx`]) so the `(scope, assumptions) -> TraitSolveCx`
+/// triple is never hand-assembled at call sites.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProvisionEnv<'db> {
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+}
+
+impl<'db> ProvisionEnv<'db> {
+    /// Build a provision environment for an explicit `(scope, assumptions)` pair.
+    ///
+    /// The body checker's *current* provision env comes from
+    /// [`TyCheckEnv::provision_env`]; legs that verify a candidate in a
+    /// *specific* effect scope (e.g. the effect-provider verify leg, which scans
+    /// a lexical scope to enumerate a provider and then verifies `ProviderTy:
+    /// Trait` against that scope's assumptions) supply their own `(scope,
+    /// assumptions)` here so solver-context construction still flows through the
+    /// single [`ProvisionEnv::solve_cx`] site rather than being hand-assembled.
+    ///
+    /// [`TyCheckEnv::provision_env`]: crate::analysis::ty::ty_check::env::TyCheckEnv::provision_env
+    pub(crate) fn for_scope(
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> ProvisionEnv<'db> {
+        ProvisionEnv { scope, assumptions }
+    }
+
+    /// Build the trait-solver context for this provision environment. This is the
+    /// single construction site for a body-checker `TraitSolveCx`.
+    pub(crate) fn solve_cx(&self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
+        TraitSolveCx::new(db, self.scope).with_assumptions(self.assumptions)
+    }
+
+    // `assumptions`/`scope` round out the SSOT read surface so rung 3.1+ can read
+    // either dimension through `ProvisionEnv` instead of `TyCheckEnv` directly.
+    // In rung 3.0 only `solve_cx` has non-test callers yet.
+    #[allow(dead_code)]
+    pub(crate) fn assumptions(&self) -> PredicateListId<'db> {
+        self.assumptions
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn scope(&self) -> ScopeId<'db> {
+        self.scope
+    }
+}
+
 impl<'db> TraitSolveCx<'db> {
     pub fn new(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Self {
         Self {

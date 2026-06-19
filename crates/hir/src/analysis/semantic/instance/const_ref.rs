@@ -13,7 +13,7 @@ use crate::{
             trait_def::{
                 assoc_const_body_and_impl_args_for_trait_inst, resolve_trait_method_instance,
             },
-            trait_resolution::{PredicateListId, TraitSolveCx},
+            trait_resolution::{PredicateListId, ProvisionEnv, TraitSolveCx},
             ty_check::{
                 BodyOwner, Callable, ConstRef, EffectParamSite, EffectProviderSpecialization,
             },
@@ -300,7 +300,7 @@ fn semantic_const_key_for_assoc_const<'db>(
 ) -> Option<SemanticInstanceKey<'db>> {
     let (body, impl_args) = assoc_const_body_and_impl_args_for_trait_inst(
         db,
-        assoc.solve_cx(db),
+        ProvisionEnv::for_scope(assoc.origin_scope(), assoc.assumptions()).solve_cx(db),
         assoc.inst(),
         assoc.name(),
     )?;

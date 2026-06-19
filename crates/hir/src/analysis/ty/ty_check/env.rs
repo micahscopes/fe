@@ -37,7 +37,7 @@ use crate::analysis::{
         provider::ProviderAddressSpace,
         trait_def::TraitInstId,
         trait_resolution::{
-            PredicateListId, TraitSolveCx,
+            PredicateListId,
             constraint::{
                 collect_constraints, collect_func_decl_constraints,
                 collect_func_effect_provider_constraints,
@@ -53,52 +53,12 @@ use crate::core::semantic::{
     EffectEnvView, EffectRequirement, ProviderBinding, ResolvedEffectBindingInfo,
 };
 
-/// SSOT read-wrapper for the `(scope, assumptions)` pair that every body-checker
-/// provision query needs. Building the solver context goes through exactly one
-/// place ([`ProvisionEnv::solve_cx`]) so the `(scope, assumptions) -> TraitSolveCx`
-/// triple is never hand-assembled at call sites.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ProvisionEnv<'db> {
-    scope: ScopeId<'db>,
-    assumptions: PredicateListId<'db>,
-}
-
-impl<'db> ProvisionEnv<'db> {
-    /// Build a provision environment for an explicit `(scope, assumptions)` pair.
-    ///
-    /// The body checker's *current* provision env comes from
-    /// [`TyCheckEnv::provision_env`]; legs that verify a candidate in a
-    /// *specific* effect scope (e.g. the effect-provider verify leg, which scans
-    /// a lexical scope to enumerate a provider and then verifies `ProviderTy:
-    /// Trait` against that scope's assumptions) supply their own `(scope,
-    /// assumptions)` here so solver-context construction still flows through the
-    /// single [`ProvisionEnv::solve_cx`] site rather than being hand-assembled.
-    pub(crate) fn for_scope(
-        scope: ScopeId<'db>,
-        assumptions: PredicateListId<'db>,
-    ) -> ProvisionEnv<'db> {
-        ProvisionEnv { scope, assumptions }
-    }
-
-    /// Build the trait-solver context for this provision environment. This is the
-    /// single construction site for a body-checker `TraitSolveCx`.
-    pub(crate) fn solve_cx(&self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
-        TraitSolveCx::new(db, self.scope).with_assumptions(self.assumptions)
-    }
-
-    // `assumptions`/`scope` round out the SSOT read surface so rung 3.1+ can read
-    // either dimension through `ProvisionEnv` instead of `TyCheckEnv` directly.
-    // In rung 3.0 only `solve_cx` has non-test callers yet.
-    #[allow(dead_code)]
-    pub(crate) fn assumptions(&self) -> PredicateListId<'db> {
-        self.assumptions
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn scope(&self) -> ScopeId<'db> {
-        self.scope
-    }
-}
+// `ProvisionEnv` — the SSOT read-wrapper for the body-checker `(scope,
+// assumptions)` pair — now lives beside `TraitSolveCx` (its sole construction
+// target) in `trait_resolution`. Re-exported here so the body checker keeps
+// referring to it through `ty_check::env` (`provision_env()`, `for_scope`,
+// `solve_cx`) exactly as before.
+pub(crate) use crate::analysis::ty::trait_resolution::ProvisionEnv;
 
 pub(crate) struct TyCheckEnv<'db> {
     db: &'db dyn HirAnalysisDb,
@@ -661,10 +621,7 @@ impl<'db> TyCheckEnv<'db> {
     /// The SSOT provision environment for the current scope: the
     /// `(scope, assumptions)` pair body-checker provision queries are built from.
     pub(crate) fn provision_env(&self) -> ProvisionEnv<'db> {
-        ProvisionEnv {
-            scope: self.scope(),
-            assumptions: self.assumptions(),
-        }
+        ProvisionEnv::for_scope(self.scope(), self.assumptions())
     }
 
     pub(crate) fn base_assumptions(&self) -> PredicateListId<'db> {
@@ -1720,10 +1677,11 @@ impl<'db> TyCheckEnv<'db> {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ProvisionEnv, TraitSolveCx};
+    use super::ProvisionEnv;
     use crate::{
-        analysis::ty::trait_resolution::constraint::collect_func_def_constraints,
-        hir_def::Func, test_db::HirAnalysisTestDb,
+        analysis::ty::trait_resolution::{TraitSolveCx, constraint::collect_func_def_constraints},
+        hir_def::Func,
+        test_db::HirAnalysisTestDb,
     };
 
     /// SSOT guard for rung 3.0: building a solver context through
@@ -1749,7 +1707,7 @@ mod tests {
             let hand_built = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
 
             // SSOT path: through the ProvisionEnv wrapper.
-            let provision_env = ProvisionEnv { scope, assumptions };
+            let provision_env = ProvisionEnv::for_scope(scope, assumptions);
             let via_wrapper = provision_env.solve_cx(db);
 
             assert_eq!(

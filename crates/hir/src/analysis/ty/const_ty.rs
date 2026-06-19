@@ -16,7 +16,7 @@ use super::{
     normalize::normalize_ty,
     trait_def::TraitInstId,
     trait_resolution::{
-        TraitSolveCx,
+        ProvisionEnv, TraitSolveCx,
         constraint::{collect_constraints, collect_func_decl_constraints},
     },
     ty_check::{check_anon_const_body, check_const_body},
@@ -2169,7 +2169,12 @@ pub(crate) fn const_ty_from_assoc_const_use<'db>(
     db: &'db dyn HirAnalysisDb,
     assoc: AssocConstUse<'db>,
 ) -> Option<ConstTyId<'db>> {
-    const_ty_from_trait_const(db, assoc.solve_cx(db), assoc.inst(), assoc.name())
+    const_ty_from_trait_const(
+        db,
+        ProvisionEnv::for_scope(assoc.origin_scope(), assoc.assumptions()).solve_cx(db),
+        assoc.inst(),
+        assoc.name(),
+    )
 }
 
 pub(crate) fn const_ty_or_abstract_from_assoc_const_use<'db>(
