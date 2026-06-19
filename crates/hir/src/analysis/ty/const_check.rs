@@ -70,7 +70,7 @@ impl<'db> ConstFnChecker<'db, '_> {
         };
         if let Some(inst) = callable.trait_inst()
             && let Some(name) = func.name(self.db).to_opt()
-            && let Some((impl_func, _)) = resolve_trait_method_instance(
+            && let Some(resolved) = resolve_trait_method_instance(
                 self.db,
                 TraitSolveCx::new(self.db, self.body.scope())
                     .with_assumptions(self.typed_body.assumptions()),
@@ -78,7 +78,7 @@ impl<'db> ConstFnChecker<'db, '_> {
                 name,
             )
         {
-            return Some(impl_func);
+            return Some(resolved.func);
         }
         Some(func)
     }

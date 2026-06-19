@@ -2277,7 +2277,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         original_inst
     };
     let assumptions = runtime_callee_assumptions(db, caller_key, caller_typed_body);
-    let Some((impl_func, mut impl_args)) = resolve_trait_method_instance(
+    let Some(resolved) = resolve_trait_method_instance(
         db,
         TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
             .with_assumptions(assumptions),
@@ -2293,6 +2293,13 @@ pub(crate) fn resolve_runtime_call_key<'db>(
                 .unwrap_or_else(|| "<none>".to_string()),
         )));
     };
+    // `resolved.implementor` is the impl this MIR re-resolution selected. Rung
+    // 3.2 does NOT consult it here: the instantiation-time choice is already
+    // carried on the instance's `ImplEnv` (via `const_ref.rs`) and reachable
+    // from this site; rung 3.3 will compare the two. Nothing below depends on
+    // the implementor, so the new return type only changes how func/args bind.
+    let impl_func = resolved.func;
+    let mut impl_args = resolved.impl_args;
     let trait_arg_len = concrete_inst.args(db).len();
     let tail = callee_key
         .subst(db)

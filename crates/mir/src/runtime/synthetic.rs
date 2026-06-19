@@ -1517,13 +1517,18 @@ fn resolve_trait_runtime_instance<'db>(
     extra_generic_args: Vec<TyId<'db>>,
 ) -> Result<RuntimeInstance<'db>, ()> {
     let assumptions = PredicateListId::empty_list(db);
-    let (func, mut impl_args) = resolve_trait_method_instance(
+    let resolved = resolve_trait_method_instance(
         db,
         TraitSolveCx::new(db, scope).with_assumptions(assumptions),
         inst,
         IdentId::new(db, method.to_string()),
     )
     .ok_or(())?;
+    // `resolved.implementor` (the impl this MIR re-resolution selected) is not
+    // consulted in rung 3.2; rung 3.3 will compare it against the
+    // instantiation-time choice carried on the instance's `ImplEnv`.
+    let func = resolved.func;
+    let mut impl_args = resolved.impl_args;
     impl_args.extend(extra_generic_args);
     let key = SemanticInstanceKey::new(
         db,

@@ -75,26 +75,33 @@ fn semantic_callee_key_with_assumptions<'db>(
     provider_resolution_mode: ProviderResolutionMode,
 ) -> Option<SemanticInstanceKey<'db>> {
     let impl_env = caller_key.impl_env(db);
+    // The impl typeck's solver committed to at this instantiation-time
+    // resolution. `None` unless this callable is a resolved trait method;
+    // carried into the instance's `ImplEnv` below as rung-3.2 provenance
+    // (excluded from the key's identity — see the IDENTITY INVARIANT on
+    // `ImplEnv`). Rung 3.3 will assert MIR re-resolution selects the same one.
+    let mut selected_implementor = None;
     let (owner, mut subst_args) = match callable.callable_def() {
         CallableDef::Func(func) => {
             let mut subst_args = callable.generic_args().to_vec();
             let owner = if let Some(inst) = callable.trait_inst()
                 && let Some(name) = func.name(db).to_opt()
-                && let Some((impl_func, impl_args)) = resolve_trait_method_instance(
+                && let Some(resolved) = resolve_trait_method_instance(
                     db,
                     TraitSolveCx::new(db, impl_env.normalization_scope(db))
                         .with_assumptions(assumptions),
                     inst,
                     name,
                 ) {
+                selected_implementor = Some(resolved.implementor);
                 let trait_arg_len = inst.args(db).len();
-                let mut resolved_args = impl_args;
+                let mut resolved_args = resolved.impl_args;
                 let tail = subst_args
                     .get(trait_arg_len..)
                     .unwrap_or(subst_args.as_slice());
                 resolved_args.extend_from_slice(tail);
                 subst_args = resolved_args;
-                BodyOwner::Func(impl_func)
+                BodyOwner::Func(resolved.func)
             } else {
                 BodyOwner::Func(func)
             };
@@ -115,12 +122,17 @@ fn semantic_callee_key_with_assumptions<'db>(
     if let Some(witness) = callable.trait_inst() {
         witnesses.insert(witness);
     }
+    // Carry the instantiation-time-selected implementor into the semantic
+    // instance (rung 3.2). It is excluded from `ImplEnv`'s identity, so the
+    // `SemanticInstanceKey` below is byte-identical to before; rung 3.3 will
+    // assert MIR re-resolution at this instance picks the same implementor.
     let impl_env = ImplEnv::new(
         db,
         impl_env.normalization_scope(db),
         assumptions,
         witnesses.into_iter().collect::<Vec<_>>(),
-    );
+    )
+    .with_selected_implementor(selected_implementor);
 
     Some(SemanticInstanceKey::new(
         db,

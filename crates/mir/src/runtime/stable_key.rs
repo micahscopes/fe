@@ -320,7 +320,7 @@ fn local_binding_identity<'db>(db: &'db dyn HirAnalysisDb, binding: LocalBinding
     }
 }
 
-fn impl_env_identity<'db>(db: &'db dyn HirAnalysisDb, env: ImplEnv<'db>) -> String {
+fn impl_env_identity<'db>(db: &'db dyn HirAnalysisDb, env: &ImplEnv<'db>) -> String {
     let assumptions = env
         .assumptions(db)
         .list(db)
@@ -340,7 +340,7 @@ fn impl_env_identity<'db>(db: &'db dyn HirAnalysisDb, env: ImplEnv<'db>) -> Stri
     )
 }
 
-fn impl_env_symbol_identity<'db>(db: &'db dyn HirAnalysisDb, env: ImplEnv<'db>) -> String {
+fn impl_env_symbol_identity<'db>(db: &'db dyn HirAnalysisDb, env: &ImplEnv<'db>) -> String {
     let assumptions = trait_symbol_identities(db, env.assumptions(db).list(db).iter().copied());
     let witnesses = trait_symbol_identities(db, env.witnesses(db).iter().copied());
     format!(

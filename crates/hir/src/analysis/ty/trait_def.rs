@@ -162,8 +162,12 @@ fn std_evm_contract_trait_def<'db>(
     }
 }
 
+/// `pub` (rather than `pub(crate)`) because it is the `origin` field of
+/// [`ImplementorId`], which is now public provenance carried out of typeck's
+/// impl selection (rung 3.2). Salsa's generated accessor for that field would
+/// otherwise leak this crate-private type through a public interface (E0446).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
-pub(crate) enum ImplementorOrigin<'db> {
+pub enum ImplementorOrigin<'db> {
     Hir(ImplTrait<'db>),
     VirtualContract(Contract<'db>),
     Assumption,
@@ -191,15 +195,31 @@ fn ingot_trait_env_cycle_recover<'db>(
     salsa::CycleRecoveryAction::Iterate
 }
 
+/// The result of resolving a trait method to its concrete HIR function: the
+/// function, the impl's instantiated generic arguments, and the selected
+/// implementor.
+///
+/// `implementor` is provenance carried for rung 3.2 — it records which impl
+/// typeck's solver committed to so a later rung (3.3) can assert that MIR
+/// re-resolution picks the same one. It is **not consulted** in rung 3.2:
+/// callers that only need the function/args ignore it. The instantiation-time
+/// caller (`const_ref.rs`) stores it into the semantic instance's `ImplEnv`.
+#[derive(Debug, Clone)]
+pub struct ResolvedTraitMethod<'db> {
+    pub func: Func<'db>,
+    pub impl_args: Vec<TyId<'db>>,
+    pub implementor: ImplementorId<'db>,
+}
+
 /// Resolves the concrete HIR function that implements `method` for the given
-/// trait instance, returning both the function and the impl's instantiated
-/// generic arguments.
+/// trait instance, returning the function, the impl's instantiated generic
+/// arguments, and the selected implementor (see [`ResolvedTraitMethod`]).
 pub fn resolve_trait_method_instance<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
     inst: TraitInstId<'db>,
     method: IdentId<'db>,
-) -> Option<(Func<'db>, Vec<TyId<'db>>)> {
+) -> Option<ResolvedTraitMethod<'db>> {
     let assumptions = solve_cx.assumptions();
     let norm_scope = solve_cx.normalization_scope_for_trait_inst(db, inst);
     let inst = normalize_trait_inst_preserving_validity(db, inst, norm_scope, assumptions);
@@ -209,6 +229,9 @@ pub fn resolve_trait_method_instance<'db>(
         Selection::Ambiguous(_ambiguous) => return None,
         Selection::NotFound => return None,
     };
+    // The selected implementor is provenance: carried out for rung 3.2, never
+    // consulted here (the resolution result below is unchanged from before).
+    let selected_implementor = implementor;
     let explicit_method = implementor.methods(db).get(&method).copied();
     let trait_method = implementor
         .trait_def(db)
@@ -226,12 +249,20 @@ pub fn resolve_trait_method_instance<'db>(
             .iter()
             .map(|&ty| ty.fold_with(db, &mut table))
             .collect();
-        return Some((func, impl_args));
+        return Some(ResolvedTraitMethod {
+            func,
+            impl_args,
+            implementor: selected_implementor,
+        });
     }
 
     let func = trait_method?;
     let trait_args = inst.args(db).to_vec();
-    Some((func, trait_args))
+    Some(ResolvedTraitMethod {
+        func,
+        impl_args: trait_args,
+        implementor: selected_implementor,
+    })
 }
 
 /// Returns all implementors for the given `ty` that satisfy the given assumptions.
@@ -500,9 +531,17 @@ impl<'db> TraitEnv<'db> {
 
 /// Represents a slim, internal view of a trait impl, derived from an
 /// `ImplTrait` item and its lowered trait instance.
+///
+/// `pub` (rather than `pub(crate)`) because it is the provenance carried out of
+/// typeck's impl selection (rung 3.2): `resolve_trait_method_instance` reports
+/// the selected `ImplementorId` so the instantiation-time caller can record
+/// which impl typeck committed to in the semantic instance's `ImplEnv`. The
+/// carry is read-only in rung 3.2 (never compared, hashed into a key, or
+/// serialized into a codegen symbol); rung 3.3 will assert MIR re-resolves the
+/// same one.
 #[salsa::interned]
 #[derive(Debug)]
-pub(crate) struct ImplementorId<'db> {
+pub struct ImplementorId<'db> {
     /// The trait instance that this impl realizes.
     pub(crate) trait_: TraitInstId<'db>,
 
