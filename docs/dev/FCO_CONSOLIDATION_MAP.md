@@ -885,6 +885,15 @@ support behind that grammar is a further check (the parser scopes look thin).
 
 ### Deeper: the `Constraint` kind itself was built in effort2 and DELETED in the port
 
+> **CORRECTED 2026-06-19 — THIS REGRESSION HAS BEEN REVERTED; the claims below describe the port
+> state AS OF THIS DOC'S WRITING and are NO LONGER CURRENT.** `Kind::Constraint` is LIVE
+> (`ty_def.rs:1379`); `TyData::ConstraintTerm` yields it (`ty_def.rs:1941`, ~40 sites); the capability
+> constructors are kinded (K04b). ConstraintTerm R1–R3 (`e06235c50`/`c04cb76c7`/`71bd772c0`) and
+> TraitCtor R1–R3 / Form 2 (`863db9b83`/`df2c37570`/`820a15a0d`) landed; the string `DERIVE_MARKER` is
+> deleted and `Derive` is a real trait (TD4, `17a2c2ed4`). So K02/K03/K04 are **DONE, not pending** —
+> revivals, exactly as this section predicted. Read the rest as historical lineage only.
+> SSOT spine: `FCO_THE_SLIDE_2026-06-19.md`.
+
 The regression is not just grammar — it is the whole kind-system layer. effort2's
 `Kind` enum was `Star | Constraint | Abs | Placeholder(String) | Any`
 (`metaprogramming-effort2/crates/hir/src/analysis/ty/ty_def.rs:1363`), with a real
