@@ -410,49 +410,33 @@ struct QuoteTemplate<'db> {
 /// the elaboration point: the group name and the matched variant's index.
 type BinderGroup<'db> = (IdentId<'db>, usize);
 
-/// A builder command recorded during provider execution.
-///
-/// TD5.2: `require` is no longer a `BuilderCommand`. It migrated off bespoke
-/// command replay into the typed [`ProviderEffect::Require`] trace, which
-/// synthesis replays as an ordinary where-predicate. The executor no longer owns
-/// generated trait requirements; `BuilderCommand` now carries only generated-item
-/// construction (emit) commands.
-#[derive(Debug, Clone)]
-pub(super) enum BuilderCommand<'db> {
-    /// `builder.emit_method(name, body)`: `sig` is the signature inferred from
-    /// the goal trait's declaration of `name` (DEVX-A).
-    EmitMethod { sig: SigId, body: GenExprId },
-    /// `builder.emit_assoc_ty(name, ty)`: `type name = ty` in the generated
-    /// impl.
-    EmitAssocTy { name: IdentId<'db>, ty: GenTyId },
-    /// `builder.emit_const(name, ty, value)`: `const name: ty = value` in
-    /// the generated impl.
-    EmitConst {
-        name: IdentId<'db>,
-        ty: GenTyId,
-        value: GenExprId,
-    },
-}
-
 /// A typed *provider effect*: the observable, side-effecting things a provider
 /// body does that re-enter ordinary compilation, recorded as an internal,
 /// dumpable IR seam (TD5.1).
 ///
 /// This is the strangler-fig contract for the executor burn-down: each effect
-/// family is meant to migrate OUT of the bespoke `BuilderCommand` replay and
-/// into ordinary Fe compilation. It is deliberately **observability only** — it
-/// is NOT a parallel command language. It lands paired with the migration of
-/// the effect it records (the ratchet rule); a trace with no migration is not
-/// progress.
+/// family migrated OUT of the bespoke `BuilderCommand` replay and into this
+/// typed trace, which synthesis replays. It is deliberately **observability
+/// only** — it is NOT a parallel command language. It lands paired with the
+/// migration of the effect it records (the ratchet rule); a trace with no
+/// migration is not progress.
 ///
-/// TD5.2 migrates the first family: [`ProviderEffect::Require`] — a
-/// provider-origin trait obligation. The require effect is no longer owned by the
-/// executor as a bespoke `BuilderCommand` (that variant is deleted); it is read
-/// from this trace by [`super::provider_synthesis::requirement_where_clause`],
-/// which replays a generic-param requirement as an ordinary `ty: Trait`
-/// where-predicate on the generated impl. A concrete requirement is a concrete
-/// obligation discharged at the generated body's use site. Both flow through
-/// normal obligation checking.
+/// TD5.2 migrated the first family: [`ProviderEffect::Require`] — a
+/// provider-origin trait obligation read by
+/// [`super::provider_synthesis::requirement_where_clause`], which replays a
+/// generic-param requirement as an ordinary `ty: Trait` where-predicate on the
+/// generated impl. A concrete requirement is a concrete obligation discharged at
+/// the generated body's use site. Both flow through normal obligation checking.
+///
+/// TD5.x then migrated the three EMIT families
+/// ([`ProviderEffect::EmitMethod`]/[`ProviderEffect::EmitConst`]/
+/// [`ProviderEffect::EmitAssocTy`]) off the last bespoke replay vehicle and
+/// DELETED `BuilderCommand`. The emit effects carry the same generated-item
+/// payloads the old commands did; synthesis
+/// ([`super::provider_synthesis::synthesize_provider_impl`]) walks this trace in
+/// push order to build the generated impl's members. This trace is now the SOLE
+/// replay authority for everything a provider body does — requirements (filter
+/// `Require`) and emitted members (filter `Emit*`).
 #[derive(Debug, Clone)]
 pub(super) enum ProviderEffect<'db> {
     /// `builder.require<Trait>(ty)`: the generated impl asserts `ty: Trait`.
@@ -468,9 +452,23 @@ pub(super) enum ProviderEffect<'db> {
         trait_path: PathId<'db>,
         field_origin: Option<FieldKey>,
     },
+    /// `builder.emit_method(name, body)`: a method member of the generated
+    /// impl. `sig` is the signature inferred from the goal trait's declaration
+    /// of `name` (DEVX-A); `body` is the generated body expression.
+    EmitMethod { sig: SigId, body: GenExprId },
+    /// `builder.emit_assoc_ty(name, ty)`: `type name = ty` in the generated
+    /// impl.
+    EmitAssocTy { name: IdentId<'db>, ty: GenTyId },
+    /// `builder.emit_const(name, ty, value)`: `const name: ty = value` in the
+    /// generated impl.
+    EmitConst {
+        name: IdentId<'db>,
+        ty: GenTyId,
+        value: GenExprId,
+    },
 }
 
-/// The successful result of running a provider body: the recorded commands
+/// The successful result of running a provider body: the typed effect trace
 /// plus the arenas the generated expression/pattern/signature ids index
 /// into.
 #[derive(Debug)]
@@ -479,11 +477,10 @@ pub(super) struct ProviderOutput<'db> {
     pub(super) pats: Vec<GenPat<'db>>,
     pub(super) tys: Vec<GenTy<'db>>,
     pub(super) sigs: Vec<GenMethodSig<'db>>,
-    pub(super) commands: Vec<BuilderCommand<'db>>,
-    /// The typed effect trace (TD5.1). Recorded in body-execution order,
-    /// paralleling [`Self::commands`] for the effect families that have
-    /// migrated off bespoke replay. Internal/dumpable; consumed by
-    /// [`super::provider_synthesis`].
+    /// The typed effect trace (TD5.1). Recorded in body-execution order; the
+    /// SOLE replay authority for everything a provider body does. Internal/
+    /// dumpable; consumed by [`super::provider_synthesis`], which filters
+    /// `Require` for where-predicates and `Emit*` for generated members.
     pub(super) effects: Vec<ProviderEffect<'db>>,
 }
 
@@ -492,6 +489,7 @@ impl<'db> ProviderOutput<'db> {
     /// observability). One line per recorded effect.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn dump_effects(&self, db: &'db dyn HirDb) -> String {
+        use std::fmt::Write;
         let mut out = String::new();
         for effect in &self.effects {
             match effect {
@@ -500,7 +498,6 @@ impl<'db> ProviderOutput<'db> {
                     trait_path,
                     field_origin,
                 } => {
-                    use std::fmt::Write;
                     let _ = write!(
                         out,
                         "require {}: {}",
@@ -511,6 +508,15 @@ impl<'db> ProviderOutput<'db> {
                         let _ = write!(out, " (field {:?}.{})", field.variant, field.index);
                     }
                     out.push('\n');
+                }
+                ProviderEffect::EmitMethod { sig, .. } => {
+                    let _ = writeln!(out, "emit_method {}", self.sigs[sig.0].name.data(db));
+                }
+                ProviderEffect::EmitAssocTy { name, .. } => {
+                    let _ = writeln!(out, "emit_assoc_ty {}", name.data(db));
+                }
+                ProviderEffect::EmitConst { name, .. } => {
+                    let _ = writeln!(out, "emit_const {}", name.data(db));
                 }
             }
         }
@@ -912,9 +918,9 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     tys: Vec<GenTy<'db>>,
     sigs: Vec<GenMethodSig<'db>>,
     quotes: Vec<QuoteTemplate<'db>>,
-    commands: Vec<BuilderCommand<'db>>,
-    /// The typed effect trace (TD5.1): the provider effects that re-enter
-    /// ordinary compilation, recorded in execution order.
+    /// The typed effect trace (TD5.1): everything a provider body does that
+    /// re-enters ordinary compilation (requirements + emitted members),
+    /// recorded in execution order. The sole replay authority for synthesis.
     effects: Vec<ProviderEffect<'db>>,
     emitted_methods: Vec<IdentId<'db>>,
     emitted_assocs: Vec<IdentId<'db>>,
@@ -962,7 +968,6 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             tys: Vec::new(),
             sigs: Vec::new(),
             quotes: Vec::new(),
-            commands: Vec::new(),
             effects: Vec::new(),
             emitted_methods: Vec::new(),
             emitted_assocs: Vec::new(),
@@ -985,7 +990,6 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             pats: executor.pats,
             tys: executor.tys,
             sigs: executor.sigs,
-            commands: executor.commands,
             effects: executor.effects,
         })
     }
@@ -1057,11 +1061,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
 
     fn tick(&mut self, range: TextRange) -> Result<(), ExecError> {
         self.steps += 1;
-        // `effects` is counted alongside `commands`: TD5.2 moved `require` out of
-        // `commands` into the effect trace, so the command-count cap must include
-        // it to keep the DoS guard total.
+        // `effects` is the sole replay trace: TD5.2 moved `require` and TD5.x
+        // moved the emit families out of bespoke `commands` (deleted) into the
+        // effect trace, so the command-count cap is measured over `effects`.
         if self.steps > STEP_BUDGET
-            || self.commands.len() + self.effects.len() + self.exprs.len() > COMMAND_BUDGET
+            || self.effects.len() + self.exprs.len() > COMMAND_BUDGET
         {
             return Err(ExecError {
                 kind: ProviderFailureKind::BudgetExceeded,
@@ -2353,7 +2357,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     ));
                 }
                 self.emitted_methods.push(name);
-                self.commands.push(BuilderCommand::EmitMethod { sig, body });
+                self.effects.push(ProviderEffect::EmitMethod { sig, body });
                 Ok(Value::Unit)
             }
             ("emit_assoc_ty", [name_arg, ty_arg]) => {
@@ -2361,7 +2365,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let name = self.string_value_ident(name_arg.expr)?;
                 let ty = self.gen_ty_arg(ty_arg.expr)?;
                 self.check_fresh_assoc(name_arg.expr, name)?;
-                self.commands.push(BuilderCommand::EmitAssocTy { name, ty });
+                self.effects.push(ProviderEffect::EmitAssocTy { name, ty });
                 Ok(Value::Unit)
             }
             ("emit_const", [name_arg, ty_arg, value_arg]) => {
@@ -2374,8 +2378,8 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     );
                 };
                 self.check_fresh_assoc(name_arg.expr, name)?;
-                self.commands
-                    .push(BuilderCommand::EmitConst { name, ty, value });
+                self.effects
+                    .push(ProviderEffect::EmitConst { name, ty, value });
                 Ok(Value::Unit)
             }
             ("finish", []) => {
@@ -3287,19 +3291,25 @@ mod freeze_guard {
         );
     }
 
-    /// TD5.2 deletion guard: `require` is no longer a `BuilderCommand`. This
-    /// exhaustive match fails to compile if a `Require` (or any non-emit)
-    /// `BuilderCommand` variant is reintroduced — pinning that the executor no
-    /// longer OWNS generated trait requirements as bespoke replay commands.
+    /// TD5.x deletion guard: `BuilderCommand` is GONE. Every provider effect —
+    /// requirements AND emitted members — now rides the typed
+    /// [`super::ProviderEffect`] trace, which is the sole replay authority. This
+    /// exhaustive match fails to compile if the bespoke command replay is
+    /// reintroduced under a new name, or if an effect family is dropped.
     #[test]
-    fn require_is_not_a_builder_command() {
-        fn _assert_only_emit_commands(cmd: &super::BuilderCommand<'_>) {
-            match cmd {
-                super::BuilderCommand::EmitMethod { .. }
-                | super::BuilderCommand::EmitAssocTy { .. }
-                | super::BuilderCommand::EmitConst { .. } => {}
+    fn all_effects_ride_the_typed_trace() {
+        fn _assert_effect_families(effect: &super::ProviderEffect<'_>) {
+            match effect {
+                super::ProviderEffect::Require { .. }
+                | super::ProviderEffect::EmitMethod { .. }
+                | super::ProviderEffect::EmitAssocTy { .. }
+                | super::ProviderEffect::EmitConst { .. } => {}
             }
         }
+        // `BuilderCommand` no longer exists; there is no parallel command
+        // language for synthesis to read. The source-level freeze scan below
+        // (in the `command_surface_freeze` module) keeps the named op surface
+        // pinned independently of this type-level guard.
     }
 }
 
@@ -3332,7 +3342,6 @@ mod effect_trace {
             pats: vec![],
             tys: vec![],
             sigs: vec![],
-            commands: vec![],
             effects: vec![
                 ProviderEffect::Require {
                     ty,

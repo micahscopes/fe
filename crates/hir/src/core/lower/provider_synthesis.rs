@@ -1,11 +1,13 @@
-//! Replay of derive-provider builder commands into real HIR.
+//! Replay of the derive-provider effect trace into real HIR.
 //!
 //! The executor ([`super::provider_executor`]) records what a provider
-//! *wants* (requirements, method signatures, method body expressions) as
-//! transient command data. This module replays those commands through the
+//! *wants* (requirements, emitted methods/consts/assoc-types) as a typed
+//! [`ProviderEffect`] trace. This module replays those effects through the
 //! same [`HirBuilder`]/[`BodyBuilder`] synthesis vocabulary used by the
 //! `#[event]`/`#[error]` desugarings, producing an ordinary
-//! `impl Trait for Target` item in the expansion stage's scope graph.
+//! `impl Trait for Target` item in the expansion stage's scope graph. The
+//! trace is the sole replay authority: `Require` effects become where-clause
+//! predicates, the `Emit*` effects become impl members (in push order).
 //!
 //! No derive shape knowledge lives here: which fields are compared, how
 //! variant matches nest, what the method bodies look like — all of that is
@@ -18,8 +20,8 @@ use super::{
     hir_builder::{BodyBuilder, HirBuilder},
     provider::{FieldName, ReflectedVariantKind, TargetReflection},
     provider_executor::{
-        BuilderCommand, FieldKey, GenExpr, GenExprId, GenPat, GenPatId, GenTy, GenTyId,
-        ProviderEffect, ProviderOutput,
+        FieldKey, GenExpr, GenExprId, GenPat, GenPatId, GenTy, GenTyId, ProviderEffect,
+        ProviderOutput,
     },
 };
 use crate::{
@@ -63,9 +65,14 @@ pub(super) fn synthesize_provider_impl<'db>(
         |builder| {
             let mut types = Vec::new();
             let mut consts = Vec::new();
-            for command in &output.commands {
-                match command {
-                    BuilderCommand::EmitAssocTy { name, ty } => {
+            // Replay the emit effects in push order (TD5.x): the executor
+            // recorded these in body-execution order, so iterating `effects`
+            // and filtering the emit variants reproduces the exact member order
+            // the old `output.commands` walk produced. `Require` effects belong
+            // to the where-clause pass and are skipped here.
+            for effect in &output.effects {
+                match effect {
+                    ProviderEffect::EmitAssocTy { name, ty } => {
                         let ty = replay.materialize_ty(builder, *ty);
                         types.push(AssocTyDef {
                             attributes: builder.empty_attrs(),
@@ -73,7 +80,7 @@ pub(super) fn synthesize_provider_impl<'db>(
                             type_ref: Partial::Present(ty),
                         });
                     }
-                    BuilderCommand::EmitConst { name, ty, value } => {
+                    ProviderEffect::EmitConst { name, ty, value } => {
                         let ty = replay.materialize_ty(builder, *ty);
                         let value_expr = *value;
                         let value_body = builder
@@ -85,14 +92,17 @@ pub(super) fn synthesize_provider_impl<'db>(
                             value: Partial::Present(value_body),
                         });
                     }
-                    BuilderCommand::EmitMethod { .. } => {}
+                    ProviderEffect::EmitMethod { .. } | ProviderEffect::Require { .. } => {}
                 }
             }
             (types, consts)
         },
         |builder| {
-            for command in &output.commands {
-                let BuilderCommand::EmitMethod { sig, body } = command else {
+            // Same push-order replay as the assoc/const pass: filter the
+            // `EmitMethod` effects out of the trace, preserving the order the
+            // executor recorded them in.
+            for effect in &output.effects {
+                let ProviderEffect::EmitMethod { sig, body } = effect else {
                     continue;
                 };
                 let sig = &output.sigs[sig.0];
@@ -176,9 +186,16 @@ fn requirement_where_clause<'db>(
     let mut preds = generics.inherited_preds.clone();
     let mut seen: Vec<(TypeId<'db>, PathId<'db>)> = Vec::new();
     for effect in &output.effects {
+        // The trace interleaves requirements and emitted members; this pass
+        // owns only `Require` (the emit variants are replayed in
+        // `synthesize_provider_impl`'s member closures). Filtering here keeps
+        // the two readers of the single trace from double-processing.
         let ProviderEffect::Require {
             ty, trait_path, ..
-        } = effect;
+        } = effect
+        else {
+            continue;
+        };
         // Concrete requirements are discharged at the generated body's use site,
         // not as a predicate (see the doc comment): only generic-param
         // requirements become where-predicates.
