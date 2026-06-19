@@ -97,7 +97,7 @@ use crate::analysis::ty::{
         ProviderSemantics, RootProviderRegistration, provider_semantics, registered_root_providers,
     },
     trait_resolution::{
-        GoalSatisfiability, PredicateListId, ProvisionEnv, TraitSolveCx, WellFormedness,
+        GoalSatisfiability, PredicateListId, ProvisionEnv, WellFormedness,
         check_ty_wf, is_goal_satisfiable,
     },
     ty_check::EffectParamSite,
@@ -1935,7 +1935,11 @@ impl<'db> ContractFieldEffectHandleCx<'db> {
         field_ty: TyId<'db>,
     ) -> (bool, TyId<'db>, TyId<'db>) {
         let inst = TraitInstId::new(db, self.effect_handle, vec![field_ty], IndexMap::new());
-        match is_goal_satisfiable(db, TraitSolveCx::new(db, self.scope), inst) {
+        match is_goal_satisfiable(
+            db,
+            ProvisionEnv::for_scope(self.scope, PredicateListId::empty_list(db)).solve_cx(db),
+            inst,
+        ) {
             GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
                 (false, self.fallback_space, field_ty)
             }
