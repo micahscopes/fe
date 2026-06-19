@@ -19,28 +19,40 @@ debt-negative, let it accrete.**
   generated-impl overlay, const-predicate prover) — vs one `ProvisionEnv` walk;
 - the **global coherence checker** (`ty/diagnostics.rs` `ConflictTraitImpl`) — vs placement.
 
-## The slide (top → bottom; byte-identical until the one short push)
-1. **Consolidate 6 → one walk.** Fold each bespoke resolver into the `ProvisionEnv` walk (cut-1 = step 1:
-   one solve-cx construction + verify-leg + scope retained + provenance + determinism). Keep folding,
-   byte-identical (the walk picks the same provision because nothing shadows across tiers *yet*). *Deletes seams.*
-2. **De-magic the deriver.** Delete `DERIVE_MARKER`; graduate `Derive` to a real solver-trait (so
-   `D: Derive<Eq>` resolves); fold the executor into ordinary CTFE (continue the TD5 series); capabilities
-   bound through the provision env, not hardcoded. *Deletes magic* — and dissolves the "stratum-crossing"
-   the gap analysis feared (no boundary once the executor is ordinary evaluation). Byte-identical generated impls.
-3. **Demote coherence.** Once the canonical tier exists, `ConflictTraitImpl` becomes placement — delete the
-   checker (keep uniqueness only for the canonical tier). *Deletes a checker.* Byte-identical for existing code.
-4. **The one genuine push — `fixed`/`Fix` gating (BUILT IN, not deferred).** `Fix<T>` = a single `Evidence`
-   clone (A1 narrow; `Fix<*>`-as-kind is the sanctioned future master — ∀ over Constraint, instantiate-only,
-   never solved); `fixed`/canonical = the non-overridable tier; `fix` verb = capability-gated override;
-   scoped shadowing = the one-walk "stop forcing outermost-only." **Money-soundness ⇒ provable, not green
-   tests** — the FV obligations from `FCO_FIX_CAPABILITY_PACKET` (unforgeability, non-ambient propagation,
-   attenuation lattice, gate soundness, MIR re-resolution determinism for a scoped override). Smallest, last,
-   gated on 1–3.
-5. **Runout (emerges, nothing built):** `with (Derive<Eq> = StableEq) { cmp(p, q) }` — the resolver runs the
-   provided deriver to satisfy `where Eq<T>`. Derivers-as-provisions falls out.
+## The slide (top → bottom)
+**CORRECTION (measured 2026-06-19):** the byte-identical runway is steps 1–2. Making `ProvisionEnv` the actual
+first-match *walk* (impl table as a tier, innermost-wins over the proof-forest's collect-all) is **NOT
+byte-identical — it IS scoped shadowing**. So the walk + canonical tier + `Fix` + checker-demotion are ONE
+new-behavior push (step 3), FV-gated — not a free consolidation.
 
-Steps 1–3 are surface-area-NEGATIVE; 4 is one short push (small new surface that *also* deletes the checker
-in 3); 5 is free. A slide with a shove at the very end — not a mountain.
+1. **Construction SSOT (byte-identical) — IN PROGRESS.** Fold every hand-rolled `TraitSolveCx` construction onto
+   the one `ProvisionEnv` (cut-1 + seam-1 done; ~25 clean sites remain in `diagnosable.rs`, `core/semantic`,
+   `analysis/ty/*`). Unifies *how* the solver context is built so the eventual walk is a one-place flip. Does
+   NOT yet make it a walk. *Deletes scattered constructions.*
+2. **De-magic the deriver (byte-identical).** Delete `DERIVE_MARKER`; graduate `Derive` to a real solver-trait
+   (so `D: Derive<Eq>` resolves); fold the executor into ordinary CTFE (TD5 series); capabilities bound through
+   the provision env, not hardcoded. *Deletes magic + eats CapabilityEnv (#4) and the generated-impl overlay
+   (#5)* — and dissolves the "stratum-crossing" (no boundary once the executor is ordinary evaluation).
+   Byte-identical generated impls.
+3. **THE PUSH — one first-match walk + `fixed`/`Fix` gating (NEW behavior; PROVEN).** Make `ProvisionEnv` the
+   actual scope-chain walk: impl table = companion/outermost tier, effect frames = inner tiers, innermost-wins
+   first-match — **this IS scoped shadowing** (the measured non-byte-identical step), and it collapses systems
+   #1 (solver) and #2 (effect env) into the one walk. Add the `fixed`/canonical non-overridable tier; the
+   `Fix<T>` capability (A1 narrow `Evidence`-clone; `Fix<*>`-as-kind master — ∀ over Constraint, instantiate-
+   only, never solved) gating overrides via the `fix` verb; and **demote `ConflictTraitImpl` into the canonical
+   tier — delete the global checker** (coherence = placement). **Money-soundness ⇒ provable** — FV obligations
+   per `FCO_FIX_CAPABILITY_PACKET` (unforgeability, non-ambient propagation, attenuation lattice, gate
+   soundness, MIR re-resolution determinism). The one human gut-call (decision C: the canonical/`fixed` set) is
+   surfaced to Micah before landing.
+4. **Runout (emerges, nothing built):** a deriver provided as a scoped provision is run by the walk to satisfy
+   `where Eq<T>`. Derivers-as-provisions falls out. **MECHANISM locked; the SURFACE syntax for "provide a
+   deriver in scope" is OPEN, chosen at the runout** (not the illustrative `with (Derive<Eq> = …)` — a unified
+   shim-free resolver can desugar several surfaces to the same provision). System #6 (const-predicate) rides
+   along as the CTFE backend.
+
+Steps 1–2 are surface-area-NEGATIVE (byte-identical); step 3 is the one push (new behavior + the only new
+surface, which also DELETES the checker + collapses #1/#2); step 4 is free. A slide with a shove near the
+bottom — not a mountain.
 
 ## The boundary that keeps every step sound (the cliff law)
 Pin the **head concrete before the solver**; never let a `* -> Constraint` *variable* reach it. `Eq<T>`,
