@@ -1,5 +1,7 @@
 # K03/K04 execution map — `Derive` bridge graduation (re-integration, not port)
 
+> **CORRECTED 2026-06-19 — largely LANDED.** `Kind::Constraint` live; `ConstraintTerm`+`TraitCtor` landed (Form 2 chosen); `Derive` is a real trait, `DERIVE_MARKER` deleted (TD4). The "OD3 (`Derive : * -> Constraint`)" shorthand here is stale — see `FCO_DERIVE_KIND_FORMS_2026-06-18.md`. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Architect-ready scope, 2026-06-14.** K02a landed the `Constraint` *kind*
 (commit `804dc959a`). K03/K04 is the *graduation*: make `Derive`/`Evidence`/
 `ImplBuilder`/`Reflect` real kinded constructs and `Eq<T>` a real `* -> Constraint`

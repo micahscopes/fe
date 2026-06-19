@@ -90,10 +90,16 @@ x-0…x-4 ladder in step 2. Scope shrinks: x-3 narrows overlay #5 (not deletes);
    delivers the six→one headline on its own; Half B is the safety rail, sequenced second. **Measure the walk-flip
    blast radius (spike) before building**, exactly as TD5.
 4. **Runout (emerges, nothing built):** a deriver provided as a scoped provision is run by the walk to satisfy
-   `where Eq<T>`. Derivers-as-provisions falls out. **MECHANISM locked; the SURFACE syntax for "provide a
-   deriver in scope" is OPEN, chosen at the runout** (not the illustrative `with (Derive<Eq> = …)` — a unified
-   shim-free resolver can desugar several surfaces to the same provision). System #6 (const-predicate) rides
-   along as the CTFE backend.
+   `where Eq<T>`. Derivers-as-provisions falls out. The **load-bearing invariant is the mechanism, not the
+   surface** — surface-neutral, it is exactly four steps: (1) a deriver is a *value* that produces
+   `Evidence<Eq<T>>`, typed `D: Derive<Eq>`; (2) it is placed as a *provision* in a scope tier; (3) a demand
+   `where Eq<T>` ≡ `uses (_: Evidence<Eq<T>>)` walks the scope chain; (4) the walk *runs* the deriver to
+   discharge the obligation, yielding the evidence. **Demanding a deriver is itself first-class and cliff-safe:**
+   `D: Derive<Eq>` has concrete head `Derive<·,Eq>` with `D` the roaming subject = ✅ — `StableEq` satisfies it,
+   `StableClone` does not — so "require/provide a deriver" sits on the safe side of the cliff law, no abstract
+   head needed. **The SURFACE syntax stays OPEN/deferred-tunable** (governing principle): the illustrative
+   `with (Derive<Eq> = …)` is one of several spellings a shim-free resolver desugars to the same provision; pick
+   the plainest at the runout, don't gate on it. System #6 (const-predicate) rides along as the CTFE backend.
 
 Steps 1–2 are surface-area-NEGATIVE (byte-identical); step 3 is the one push (new behavior + the only new
 surface, which also DELETES the checker + collapses #1/#2); step 4 is free. A slide with a shove near the

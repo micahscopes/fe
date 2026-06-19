@@ -1,5 +1,7 @@
 # FCO Decision Packet — Provider-Goal Representation (de-magicking provider signatures)
 
+> **OUTCOME 2026-06-19 — the narrow `CapabilityGoal` representation decided here was superseded: `TyData::ConstraintTerm` (R1–R3) landed and the `CapabilityGoal` representation was DELETED (`71bd772c0`); the PrimTy route was rejected (K04a = recognize by resolved identity). Historical decision lineage only.** SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Status:** OPEN — owner decision requested.
 **Author:** implementing agent. **Date:** 2026-06-16.
 **Scope:** how to represent the *goal* a derive provider's capability signature mentions

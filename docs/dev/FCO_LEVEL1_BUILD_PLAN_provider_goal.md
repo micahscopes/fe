@@ -1,5 +1,7 @@
 # FCO Level 1 — Build Plan (provider-goal `CapabilityGoal`, "W-D")
 
+> **OUTCOME 2026-06-19 — obsolete: this `CapabilityGoal` ("W-D") build plan was superseded by `TyData::ConstraintTerm` (R1–R3 landed); the `CapabilityGoal` representation was deleted. Historical only.** SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Status:** READY TO EXECUTE — **gated on architect approval** (de-exempting provider signatures
 changes accepted-program semantics: shapes that silently compile today start erroring). Do not start
 the semantics-flipping steps without sign-off.

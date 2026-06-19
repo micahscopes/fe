@@ -1,5 +1,7 @@
 # Rung 3 — unified provision resolver (`ProvisionEnv`): implementation plan
 
+> **SUPERSEDED 2026-06-19 → `FCO_THE_SLIDE_2026-06-19.md` (step 3) + `FCO_RUNG3_SCOPE_REFINEMENT`.** The 3.4 "make the solver select" framing is refuted; rungs 3.0–3.5 landed. Kept only for the located file:line map of the six resolvers.
+
 **Date:** 2026-06-19 · **Status:** architect plan (opus), grounded in code + the two readiness spikes
 (`FCO_RUNG3_READINESS_SPIKES_2026-06-19.md`). Policy = **sensible defaults / behavior-preserving
 unification** (Micah, 2026-06-19; adjust later). Build as clean SSOT-respecting increments, byte-identical

@@ -1,5 +1,7 @@
 # Derivers as first-class scoped provisions — gap analysis + phased plan
 
+> **SUPERSEDED 2026-06-19 → `FCO_THE_SLIDE_2026-06-19.md`.** The "MOUNTAIN / Layer-0/1/2 / multi-quarter / decompose-by-FV-feature" framing here is the DRIFT the slide corrects (uphill vs the slide's downhill). The CODE FACTS (six-resolver file:line, the stratum-crossing, the variable-`V` cliff) remain accurate; the SHAPE/sequencing is wrong.
+
 **Date:** 2026-06-19 · **Status:** read-only architect gap analysis (opus), grounded in code + prior docs.
 HEAD `e84f30b4a`. Target: collapse `derive V for T using P` into `uses (a V-deriver for T)` /
 `with (a V-deriver for T = P)` resolved by the ordinary provision system.

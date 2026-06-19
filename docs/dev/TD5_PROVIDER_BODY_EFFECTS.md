@@ -1,5 +1,7 @@
 # TD5 — Provider body: bespoke executor → ordinary effectful CTFE (DESIGN PACKET)
 
+> **CORRECTED 2026-06-19 → `FCO_THE_SLIDE_2026-06-19.md` CORRECTION 2.** The endgame is NOT "executor → ordinary effectful CTFE" / engine fusion: the executor is a *quasiquoter / backend*, not a value evaluator (measured). The expansion↔type-check stratum collapses by STAGING (the x-0…x-4 ladder), not fusion. The command-surface inventory, the TD5.0/.2 ladder, and the NO-SHIM-FOR-SHIM ratchet rule here remain BINDING.
+
 **Status:** PLAN ONLY — do NOT implement TD5 yet. TD5 is the real gate for retiring the `Derive`
 marker (#7); it stays OFF the critical path until after #6 / #5b. This packet makes the first sprint
 (TD5.0/.1/.2) executable on demand.

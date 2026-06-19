@@ -1,5 +1,7 @@
 # FCO Probe — Provider-Goal Representation (Level 1 viability spike)
 
+> **SUPERSEDED — the narrow `CapabilityGoal` carrier this spike probed was built then DELETED, replaced by `TyData::ConstraintTerm` (R1–R3 landed, `71bd772c0`). Historical only.** SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Status:** SPIKE COMPLETE (throwaway). **Date:** 2026-06-16.
 **Question:** Can a narrow, compile-time-only `CapabilityGoal` carrier let a derive
 provider's capability/witness goal argument (`Eq<T>` in `Evidence<Eq<T>>` /

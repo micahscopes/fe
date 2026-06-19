@@ -1,6 +1,6 @@
 # `Fix` / `Fix<T>` override-capability — design packet (rung-3 stage-2)
 
-**Date:** 2026-06-19 · **Status:** proposal to decide against. NOT byte-identical; policy-gated on Micah.
+**Date:** 2026-06-19 · **Status:** LIVE Half-B appendix to `FCO_THE_SLIDE_2026-06-19.md` (the SSOT). Per the governing principle, decisions A–D are DEFERRED-TUNABLE defaults (not gates); the SOUNDNESS OBLIGATIONS (unforgeable `Fix`, gate actually blocks, non-ambient propagation, attenuation lattice, MIR re-resolution determinism) are MANDATORY. NOT byte-identical (step-3 new behavior).
 HEAD `e84f30b4a`. Source: read-only design agent (opus), grounded in code.
 
 ## Frame: two shadowings (don't conflate)
