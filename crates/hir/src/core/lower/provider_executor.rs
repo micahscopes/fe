@@ -468,20 +468,39 @@ pub(super) enum ProviderEffect<'db> {
     },
 }
 
-/// The successful result of running a provider body: the typed effect trace
-/// plus the arenas the generated expression/pattern/signature ids index
-/// into.
+/// The provider impl's *skeleton*: the typed effect trace plus the arenas the
+/// generated *signature* and *type* ids index into. Everything a downstream
+/// query needs to shape the `impl` (where-clause + member declarations) WITHOUT
+/// materializing the method bodies (TD5.x-2 cleave). The skeleton arenas are
+/// disjoint from [`ProviderBodies`]: no `GenExpr` references a `GenTyId`, and
+/// `GenMethodSig` holds resolved `TypeId`s, never `GenTy` arena indices.
 #[derive(Debug)]
-pub(super) struct ProviderOutput<'db> {
-    pub(super) exprs: Vec<GenExpr<'db>>,
-    pub(super) pats: Vec<GenPat<'db>>,
-    pub(super) tys: Vec<GenTy<'db>>,
-    pub(super) sigs: Vec<GenMethodSig<'db>>,
+pub(super) struct ProviderSkeleton<'db> {
     /// The typed effect trace (TD5.1). Recorded in body-execution order; the
     /// SOLE replay authority for everything a provider body does. Internal/
     /// dumpable; consumed by [`super::provider_synthesis`], which filters
     /// `Require` for where-predicates and `Emit*` for generated members.
     pub(super) effects: Vec<ProviderEffect<'db>>,
+    pub(super) sigs: Vec<GenMethodSig<'db>>,
+    pub(super) tys: Vec<GenTy<'db>>,
+}
+
+/// The provider impl's *bodies*: the arenas the generated expression/pattern
+/// ids index into. Split off from [`ProviderSkeleton`] (TD5.x-2) so a later
+/// step can move body production into a separate downstream query.
+#[derive(Debug)]
+pub(super) struct ProviderBodies<'db> {
+    pub(super) exprs: Vec<GenExpr<'db>>,
+    pub(super) pats: Vec<GenPat<'db>>,
+}
+
+/// The successful result of running a provider body: the [`ProviderSkeleton`]
+/// (effect trace + signature/type arenas) plus the [`ProviderBodies`]
+/// (expression/pattern arenas the generated ids index into).
+#[derive(Debug)]
+pub(super) struct ProviderOutput<'db> {
+    pub(super) skeleton: ProviderSkeleton<'db>,
+    pub(super) bodies: ProviderBodies<'db>,
 }
 
 impl<'db> ProviderOutput<'db> {
@@ -491,7 +510,7 @@ impl<'db> ProviderOutput<'db> {
     pub(super) fn dump_effects(&self, db: &'db dyn HirDb) -> String {
         use std::fmt::Write;
         let mut out = String::new();
-        for effect in &self.effects {
+        for effect in &self.skeleton.effects {
             match effect {
                 ProviderEffect::Require {
                     ty,
@@ -510,7 +529,7 @@ impl<'db> ProviderOutput<'db> {
                     out.push('\n');
                 }
                 ProviderEffect::EmitMethod { sig, .. } => {
-                    let _ = writeln!(out, "emit_method {}", self.sigs[sig.0].name.data(db));
+                    let _ = writeln!(out, "emit_method {}", self.skeleton.sigs[sig.0].name.data(db));
                 }
                 ProviderEffect::EmitAssocTy { name, .. } => {
                     let _ = writeln!(out, "emit_assoc_ty {}", name.data(db));
@@ -986,11 +1005,15 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             });
         }
         Ok(ProviderOutput {
-            exprs: executor.exprs,
-            pats: executor.pats,
-            tys: executor.tys,
-            sigs: executor.sigs,
-            effects: executor.effects,
+            skeleton: ProviderSkeleton {
+                effects: executor.effects,
+                sigs: executor.sigs,
+                tys: executor.tys,
+            },
+            bodies: ProviderBodies {
+                exprs: executor.exprs,
+                pats: executor.pats,
+            },
         })
     }
 
@@ -3320,7 +3343,7 @@ mod effect_trace {
     //! ordinary compilation. It lands PAIRED with the TD5.2 require migration
     //! (the ratchet rule), not as a standalone shim.
 
-    use super::{FieldKey, ProviderEffect, ProviderOutput};
+    use super::{FieldKey, ProviderBodies, ProviderEffect, ProviderOutput, ProviderSkeleton};
     use crate::{HirDb, hir_def::PathId, test_db::TestDb};
 
     #[test]
@@ -3338,25 +3361,29 @@ mod effect_trace {
         let trait_path = PathId::from_ident(db, crate::hir_def::IdentId::new(db, "Eq".to_string()));
 
         let output = ProviderOutput {
-            exprs: vec![],
-            pats: vec![],
-            tys: vec![],
-            sigs: vec![],
-            effects: vec![
-                ProviderEffect::Require {
-                    ty,
-                    trait_path,
-                    field_origin: Some(FieldKey {
-                        variant: None,
-                        index: 0,
-                    }),
-                },
-                ProviderEffect::Require {
-                    ty,
-                    trait_path,
-                    field_origin: None,
-                },
-            ],
+            skeleton: ProviderSkeleton {
+                effects: vec![
+                    ProviderEffect::Require {
+                        ty,
+                        trait_path,
+                        field_origin: Some(FieldKey {
+                            variant: None,
+                            index: 0,
+                        }),
+                    },
+                    ProviderEffect::Require {
+                        ty,
+                        trait_path,
+                        field_origin: None,
+                    },
+                ],
+                sigs: vec![],
+                tys: vec![],
+            },
+            bodies: ProviderBodies {
+                exprs: vec![],
+                pats: vec![],
+            },
         };
 
         let dump = output.dump_effects(db);

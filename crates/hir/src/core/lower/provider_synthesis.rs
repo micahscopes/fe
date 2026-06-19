@@ -70,7 +70,7 @@ pub(super) fn synthesize_provider_impl<'db>(
             // and filtering the emit variants reproduces the exact member order
             // the old `output.commands` walk produced. `Require` effects belong
             // to the where-clause pass and are skipped here.
-            for effect in &output.effects {
+            for effect in &output.skeleton.effects {
                 match effect {
                     ProviderEffect::EmitAssocTy { name, ty } => {
                         let ty = replay.materialize_ty(builder, *ty);
@@ -101,11 +101,11 @@ pub(super) fn synthesize_provider_impl<'db>(
             // Same push-order replay as the assoc/const pass: filter the
             // `EmitMethod` effects out of the trace, preserving the order the
             // executor recorded them in.
-            for effect in &output.effects {
+            for effect in &output.skeleton.effects {
                 let ProviderEffect::EmitMethod { sig, body } = effect else {
                     continue;
                 };
-                let sig = &output.sigs[sig.0];
+                let sig = &output.skeleton.sigs[sig.0];
 
                 let mut params = Vec::new();
                 if sig.takes_self {
@@ -185,7 +185,7 @@ fn requirement_where_clause<'db>(
 
     let mut preds = generics.inherited_preds.clone();
     let mut seen: Vec<(TypeId<'db>, PathId<'db>)> = Vec::new();
-    for effect in &output.effects {
+    for effect in &output.skeleton.effects {
         // The trace interleaves requirements and emitted members; this pass
         // owns only `Require` (the emit variants are replayed in
         // `synthesize_provider_impl`'s member closures). Filtering here keeps
@@ -302,7 +302,7 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
         expr: GenExprId,
     ) -> ExprId {
         let db = body.db();
-        match &self.output.exprs[expr.0] {
+        match &self.output.bodies.exprs[expr.0] {
             GenExpr::Bool(value) => body.bool_lit_expr(*value),
             GenExpr::And(lhs, rhs) => {
                 let lhs = self.replay_expr(body, *lhs);
@@ -496,7 +496,7 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
         pat: GenPatId,
     ) -> crate::hir_def::PatId {
         let db = body.db();
-        match &self.output.pats[pat.0] {
+        match &self.output.bodies.pats[pat.0] {
             GenPat::Wildcard => body.wildcard_pat(),
             GenPat::Variant { variant, prefix } => {
                 let variant_path = self.variant_path(db, *variant);
@@ -586,7 +586,7 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
         ty: GenTyId,
     ) -> TypeId<'db> {
         let db = builder.db();
-        match &self.output.tys[ty.0] {
+        match &self.output.skeleton.tys[ty.0] {
             GenTy::StringN(len) => builder.string_n_ty(*len),
             GenTy::Tuple(elems) => {
                 let elems: Vec<Partial<TypeId<'db>>> = elems
