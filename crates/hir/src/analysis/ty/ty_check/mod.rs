@@ -1261,7 +1261,6 @@ impl<'db> TyChecker<'db> {
         final_pass: bool,
     ) -> TraitObligationOutcome<'db> {
         let db = self.db;
-        let scope = self.env.scope();
         let assumptions = self.env.assumptions();
 
         if self.has_dead_inference_keys(&obligation.goal) {
@@ -1275,7 +1274,7 @@ impl<'db> TyChecker<'db> {
             return TraitObligationOutcome::Discharged(None);
         }
 
-        let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+        let solve_cx = self.env.provision_env().solve_cx(db);
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         match is_goal_query_satisfiable(db, solve_cx, &query) {
             GoalSatisfiability::Satisfied(solution) => {

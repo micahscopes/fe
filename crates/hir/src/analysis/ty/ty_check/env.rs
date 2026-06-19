@@ -37,7 +37,7 @@ use crate::analysis::{
         provider::ProviderAddressSpace,
         trait_def::TraitInstId,
         trait_resolution::{
-            PredicateListId,
+            PredicateListId, TraitSolveCx,
             constraint::{
                 collect_constraints, collect_func_decl_constraints,
                 collect_func_effect_provider_constraints,
@@ -52,6 +52,37 @@ use crate::analysis::{
 use crate::core::semantic::{
     EffectEnvView, EffectRequirement, ProviderBinding, ResolvedEffectBindingInfo,
 };
+
+/// SSOT read-wrapper for the `(scope, assumptions)` pair that every body-checker
+/// provision query needs. Building the solver context goes through exactly one
+/// place ([`ProvisionEnv::solve_cx`]) so the `(scope, assumptions) -> TraitSolveCx`
+/// triple is never hand-assembled at call sites.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProvisionEnv<'db> {
+    scope: ScopeId<'db>,
+    assumptions: PredicateListId<'db>,
+}
+
+impl<'db> ProvisionEnv<'db> {
+    /// Build the trait-solver context for this provision environment. This is the
+    /// single construction site for a body-checker `TraitSolveCx`.
+    pub(crate) fn solve_cx(&self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
+        TraitSolveCx::new(db, self.scope).with_assumptions(self.assumptions)
+    }
+
+    // `assumptions`/`scope` round out the SSOT read surface so rung 3.1+ can read
+    // either dimension through `ProvisionEnv` instead of `TyCheckEnv` directly.
+    // In rung 3.0 only `solve_cx` has non-test callers yet.
+    #[allow(dead_code)]
+    pub(crate) fn assumptions(&self) -> PredicateListId<'db> {
+        self.assumptions
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn scope(&self) -> ScopeId<'db> {
+        self.scope
+    }
+}
 
 pub(crate) struct TyCheckEnv<'db> {
     db: &'db dyn HirAnalysisDb,
@@ -609,6 +640,15 @@ impl<'db> TyCheckEnv<'db> {
         // Return the assumptions we computed in new, which includes
         // both generic bounds (if any) AND the effect parameter bounds.
         self.assumptions
+    }
+
+    /// The SSOT provision environment for the current scope: the
+    /// `(scope, assumptions)` pair body-checker provision queries are built from.
+    pub(crate) fn provision_env(&self) -> ProvisionEnv<'db> {
+        ProvisionEnv {
+            scope: self.scope(),
+            assumptions: self.assumptions(),
+        }
     }
 
     pub(crate) fn base_assumptions(&self) -> PredicateListId<'db> {
@@ -1661,3 +1701,71 @@ pub(super) struct ConstPredicateObligation<'db> {
 }
 
 impl<'db> TyCheckEnv<'db> {}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProvisionEnv, TraitSolveCx};
+    use crate::{
+        analysis::ty::trait_resolution::constraint::collect_func_def_constraints,
+        hir_def::Func, test_db::HirAnalysisTestDb,
+    };
+
+    /// SSOT guard for rung 3.0: building a solver context through
+    /// [`ProvisionEnv::solve_cx`] must be byte-identical to the inline
+    /// `TraitSolveCx::new(db, scope).with_assumptions(assumptions)` it replaced.
+    ///
+    /// A source-scan guard ("no inline `TraitSolveCx::new` in the body checker")
+    /// is *not* used here: two legitimate `TraitSolveCx::new` sites remain in
+    /// `ty_check/mod.rs` that are NOT the body-checker provision env (the
+    /// contract-root effect check keys off `contract.scope()`, and the
+    /// finalizer keys off `self.body.body.scope()` with no `env` access). A
+    /// blanket scan could not distinguish those from the migrated hot site
+    /// without a fragile allow-list, so the plan's accepted fallback — a focused
+    /// equality unit test — is used instead.
+    #[test]
+    fn provision_env_solve_cx_matches_hand_built() {
+        fn check<'db>(db: &'db HirAnalysisTestDb, func: Func<'db>) {
+            let scope = func.scope();
+            let assumptions =
+                collect_func_def_constraints(db, func.into(), true).instantiate_identity();
+
+            // Hand-built, exactly as the migrated call site used to construct it.
+            let hand_built = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+
+            // SSOT path: through the ProvisionEnv wrapper.
+            let provision_env = ProvisionEnv { scope, assumptions };
+            let via_wrapper = provision_env.solve_cx(db);
+
+            assert_eq!(
+                hand_built, via_wrapper,
+                "ProvisionEnv::solve_cx diverged from the hand-built TraitSolveCx",
+            );
+            assert_eq!(provision_env.scope(), scope);
+            assert_eq!(provision_env.assumptions(), assumptions);
+        }
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provision_env_solve_cx_matches_hand_built.fe".into(),
+            r#"
+trait A {}
+
+fn with_a<T: A>() -> bool {
+    true
+}
+
+fn without_a<T>() -> bool {
+    true
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
+        // Exercise both a func with non-empty assumptions (`T: A`) and one with
+        // empty assumptions, so the assumptions plumbing is covered in both cases.
+        for func in top_mod.all_funcs(&db).iter().copied() {
+            check(&db, func);
+        }
+    }
+}
