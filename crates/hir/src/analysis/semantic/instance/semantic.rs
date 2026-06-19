@@ -23,7 +23,7 @@ use crate::{
                 RootProviderSiteKind, provider_semantics, provider_semantics_for_specialized_call,
             },
             trait_resolution::{
-                GoalSatisfiability, PredicateListId, TraitSolveCx, is_goal_satisfiable,
+                GoalSatisfiability, PredicateListId, ProvisionEnv, is_goal_satisfiable,
             },
             ty_check::{
                 BodyOwner, EffectParamSite, EffectProviderProvenance, EffectProviderSpecialization,
@@ -1649,7 +1649,7 @@ fn root_provider_satisfies_effect_requirement<'db>(
             matches!(
                 is_goal_satisfiable(
                     db,
-                    TraitSolveCx::new(db, func.scope()).with_assumptions(assumptions),
+                    ProvisionEnv::for_scope(func.scope(), assumptions).solve_cx(db),
                     goal,
                 ),
                 GoalSatisfiability::Satisfied(_) | GoalSatisfiability::NeedsConfirmation(_)

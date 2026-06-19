@@ -22,7 +22,7 @@ use super::{
     term::{TermId, lower_hir_to_term, normalize_term, rebase_term_with},
     trait_def::TraitInstId,
     trait_resolution::{
-        GoalSatisfiability, PredicateListId, TraitSolveCx,
+        GoalSatisfiability, PredicateListId, ProvisionEnv,
         constraint::{collect_func_decl_constraints, collect_func_def_constraints},
         is_goal_satisfiable,
     },
@@ -1003,7 +1003,7 @@ fn compare_constraints<'db>(
     for &goal in impl_m_constraints.list(db) {
         match is_goal_satisfiable(
             db,
-            TraitSolveCx::new(db, trait_m.scope()).with_assumptions(trait_m_constraints),
+            ProvisionEnv::for_scope(trait_m.scope(), trait_m_constraints).solve_cx(db),
             goal,
         ) {
             GoalSatisfiability::Satisfied(_) | GoalSatisfiability::ContainsInvalid => {}

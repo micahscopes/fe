@@ -1,7 +1,7 @@
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::ty::diagnostics::{BodyDiag, FuncBodyDiag};
 use crate::analysis::ty::trait_def::resolve_trait_method_instance;
-use crate::analysis::ty::trait_resolution::TraitSolveCx;
+use crate::analysis::ty::trait_resolution::ProvisionEnv;
 use crate::analysis::ty::ty_check::{Callable, TypedBody};
 use crate::hir_def::{
     Body, CallableDef, Cond, CondId, Expr, ExprId, Func, Partial, Pat, Stmt, StmtId,
@@ -72,8 +72,8 @@ impl<'db> ConstFnChecker<'db, '_> {
             && let Some(name) = func.name(self.db).to_opt()
             && let Some(resolved) = resolve_trait_method_instance(
                 self.db,
-                TraitSolveCx::new(self.db, self.body.scope())
-                    .with_assumptions(self.typed_body.assumptions()),
+                ProvisionEnv::for_scope(self.body.scope(), self.typed_body.assumptions())
+                    .solve_cx(self.db),
                 inst,
                 name,
             )

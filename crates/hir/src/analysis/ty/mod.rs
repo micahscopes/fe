@@ -1,7 +1,7 @@
 use crate::analysis::ty::diagnostics::BodyDiag;
 use crate::analysis::ty::effects::{ResolvedEffectKey, resolve_effect_key};
 use crate::analysis::ty::trait_resolution::{
-    GoalSatisfiability, PredicateListId, TraitSolveCx, is_goal_satisfiable,
+    GoalSatisfiability, PredicateListId, ProvisionEnv, TraitSolveCx, is_goal_satisfiable,
 };
 use crate::analysis::ty::ty_check::EffectParamOwner;
 use crate::core::adt_lower::lower_adt;
@@ -138,7 +138,7 @@ fn ty_is_copy_query<'db>(
     {
         return true;
     }
-    let solve_cx = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+    let solve_cx = ProvisionEnv::for_scope(scope, assumptions).solve_cx(db);
     if !copy_goal_has_possible_impl(db, solve_cx, inst) {
         return false;
     }
@@ -476,8 +476,8 @@ impl ModuleAnalysisPass for ContractAnalysisPass {
                         if matches!(
                             is_goal_satisfiable(
                                 db,
-                                TraitSolveCx::new(db, contract.scope())
-                                    .with_assumptions(assumptions),
+                                ProvisionEnv::for_scope(contract.scope(), assumptions)
+                                    .solve_cx(db),
                                 trait_req
                             ),
                             GoalSatisfiability::UnSat(_) | GoalSatisfiability::ContainsInvalid
@@ -601,7 +601,7 @@ pub fn effect_handle_metadata<'db>(
     let inst = trait_def::TraitInstId::new(db, effect_handle, vec![ty], IndexMap::new());
     match is_goal_satisfiable(
         db,
-        TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+        ProvisionEnv::for_scope(scope, assumptions).solve_cx(db),
         inst,
     ) {
         GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => None,

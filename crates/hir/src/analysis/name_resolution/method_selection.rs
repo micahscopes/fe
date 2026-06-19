@@ -12,7 +12,7 @@ use crate::analysis::{
         method_table::probe_method,
         trait_def::{TraitInstId, impls_for_ty, impls_for_ty_with_constraints},
         trait_resolution::{
-            CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx,
+            CanonicalGoalQuery, GoalSatisfiability, PredicateListId, ProvisionEnv,
             is_goal_query_satisfiable,
         },
         ty_def::{TyData, TyId},
@@ -428,7 +428,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
             return false;
         }
 
-        let solve_cx = TraitSolveCx::new(self.db, self.scope).with_assumptions(self.assumptions);
+        let solve_cx = ProvisionEnv::for_scope(self.scope, self.assumptions).solve_cx(self.db);
         let query = CanonicalGoalQuery::new(self.db, candidate_inst, self.assumptions);
         let confirmed = Canonical::new(self.db, confirmed_inst);
         let mut table = UnificationTable::new(self.db);
@@ -477,7 +477,7 @@ impl<'db, 'a> MethodSelector<'db, 'a> {
 
         match is_goal_query_satisfiable(
             self.db,
-            TraitSolveCx::new(self.db, self.scope).with_assumptions(self.assumptions),
+            ProvisionEnv::for_scope(self.scope, self.assumptions).solve_cx(self.db),
             &query,
         ) {
             GoalSatisfiability::Satisfied(solution) => {

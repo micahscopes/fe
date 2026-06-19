@@ -13,7 +13,7 @@ use crate::{
             trait_def::{
                 assoc_const_body_and_impl_args_for_trait_inst, resolve_trait_method_instance,
             },
-            trait_resolution::{PredicateListId, ProvisionEnv, TraitSolveCx},
+            trait_resolution::{PredicateListId, ProvisionEnv},
             ty_check::{
                 BodyOwner, Callable, ConstRef, EffectParamSite, EffectProviderSpecialization,
             },
@@ -88,8 +88,8 @@ fn semantic_callee_key_with_assumptions<'db>(
                 && let Some(name) = func.name(db).to_opt()
                 && let Some(resolved) = resolve_trait_method_instance(
                     db,
-                    TraitSolveCx::new(db, impl_env.normalization_scope(db))
-                        .with_assumptions(assumptions),
+                    ProvisionEnv::for_scope(impl_env.normalization_scope(db), assumptions)
+                        .solve_cx(db),
                     inst,
                     name,
                 ) {

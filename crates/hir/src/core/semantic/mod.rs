@@ -97,8 +97,8 @@ use crate::analysis::ty::{
         ProviderSemantics, RootProviderRegistration, provider_semantics, registered_root_providers,
     },
     trait_resolution::{
-        GoalSatisfiability, PredicateListId, TraitSolveCx, WellFormedness, check_ty_wf,
-        is_goal_satisfiable,
+        GoalSatisfiability, PredicateListId, ProvisionEnv, TraitSolveCx, WellFormedness,
+        check_ty_wf, is_goal_satisfiable,
     },
     ty_check::EffectParamSite,
     ty_contains_const_hole,
@@ -1262,7 +1262,7 @@ impl<'db> FuncParamView<'db> {
         // Well-formedness (trait bounds and const predicates) for parameter type
         if let Some(diag) = check_ty_wf(
             db,
-            TraitSolveCx::new(db, func.scope()).with_assumptions(assumptions),
+            ProvisionEnv::for_scope(func.scope(), assumptions).solve_cx(db),
             ty,
         )
         .into_diag(ty_span.clone())
@@ -3453,7 +3453,7 @@ impl<'db> TypeAlias<'db> {
         let ty = lower_hir_ty(db, hir_ty, self.scope(), assumptions);
         check_ty_wf(
             db,
-            TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions),
+            ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db),
             ty,
         )
         .into_diag(self.span().ty().into())
@@ -3864,7 +3864,7 @@ impl<'db> Impl<'db> {
         let assumptions = constraints_for(db, self.into());
         match check_ty_wf(
             db,
-            TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions),
+            ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db),
             ty,
         ) {
             WellFormedness::WellFormed => InherentImplAdmissibility::Admissible { ty },
@@ -4393,7 +4393,7 @@ impl<'db> ImplAssocTypeView<'db> {
         let ty = lower_hir_ty(db, hir, self.owner.scope(), assumptions);
         check_ty_wf(
             db,
-            TraitSolveCx::new(db, self.owner.scope()).with_assumptions(assumptions),
+            ProvisionEnv::for_scope(self.owner.scope(), assumptions).solve_cx(db),
             ty,
         )
         .into_diag(ty_span.into())
@@ -4945,7 +4945,7 @@ impl<'db> FieldView<'db> {
         let assumptions = constraints_for(db, owner_item);
         if let Some(diag) = check_ty_wf(
             db,
-            TraitSolveCx::new(db, owner_item.scope()).with_assumptions(assumptions),
+            ProvisionEnv::for_scope(owner_item.scope(), assumptions).solve_cx(db),
             ty,
         )
         .into_diag(span.clone())

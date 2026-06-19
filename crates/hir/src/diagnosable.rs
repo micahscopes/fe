@@ -153,7 +153,7 @@ impl<'db> SuperTraitRefView<'db> {
 
         check_trait_inst_wf(
             db,
-            ty::trait_resolution::TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+            ty::trait_resolution::ProvisionEnv::for_scope(scope, assumptions).solve_cx(db),
             inst,
         )
         .into_diag(span.into())
@@ -349,8 +349,8 @@ impl<'db> WherePredicateBoundView<'db> {
                 if !is_trait_self_subject
                     && let Some(diag) = check_trait_inst_wf(
                         db,
-                        ty::trait_resolution::TraitSolveCx::new(db, scope)
-                            .with_assumptions(assumptions),
+                        ty::trait_resolution::ProvisionEnv::for_scope(scope, assumptions)
+                            .solve_cx(db),
                         inst,
                     )
                     .into_diag(span.into())
@@ -476,8 +476,8 @@ impl<'db> Trait<'db> {
             for trait_inst in assoc.bounds_on_subject(db, default_ty) {
                 match ty::trait_resolution::is_goal_satisfiable(
                     db,
-                    ty::trait_resolution::TraitSolveCx::new(db, self.scope())
-                        .with_assumptions(assumptions),
+                    ty::trait_resolution::ProvisionEnv::for_scope(self.scope(), assumptions)
+                        .solve_cx(db),
                     trait_inst,
                 ) {
                     ty::trait_resolution::GoalSatisfiability::Satisfied(_) => {}
@@ -528,8 +528,8 @@ impl<'db> Trait<'db> {
             if let Ok(inst) = view.trait_inst(db)
                 && let Some(diag) = check_trait_inst_wf(
                     db,
-                    ty::trait_resolution::TraitSolveCx::new(db, self.scope())
-                        .with_assumptions(view.assumptions(db)),
+                    ty::trait_resolution::ProvisionEnv::for_scope(self.scope(), view.assumptions(db))
+                        .solve_cx(db),
                     inst,
                 )
                 .into_diag(view.span().into())
@@ -820,10 +820,10 @@ impl<'db> ImplTrait<'db> {
                     trait_args,
                 };
                 let bound_inst = bound_inst.fold_with(db, &mut folder);
-                use ty::trait_resolution::{GoalSatisfiability, TraitSolveCx, is_goal_satisfiable};
+                use ty::trait_resolution::{GoalSatisfiability, ProvisionEnv, is_goal_satisfiable};
                 if let GoalSatisfiability::UnSat(_) = is_goal_satisfiable(
                     db,
-                    TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions),
+                    ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db),
                     bound_inst,
                 ) {
                     let assoc_ty_span = self
@@ -864,7 +864,7 @@ impl<'db> ImplTrait<'db> {
 
         let assumptions = collect_constraints(db, self.into()).instantiate_identity();
         let solve_cx =
-            trait_resolution::TraitSolveCx::new(db, self.scope()).with_assumptions(assumptions);
+            trait_resolution::ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db);
 
         let is_satisfied = |goal, span: DynLazySpan<'db>, out: &mut Vec<_>| {
             match trait_resolution::is_goal_satisfiable(db, solve_cx, goal) {
@@ -944,7 +944,7 @@ impl<'db> VariantView<'db> {
     pub fn diags_tuple_elems_wf(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
         use crate::hir_def::types::TypeKind as HirTyKind;
         use name_resolution::{PathRes, resolve_path};
-        use ty::trait_resolution::{TraitSolveCx, check_ty_wf};
+        use ty::trait_resolution::{ProvisionEnv, check_ty_wf};
         use ty::ty_lower::lower_hir_ty;
 
         let mut out = Vec::new();
@@ -1015,7 +1015,7 @@ impl<'db> VariantView<'db> {
             // Well-formedness (trait bounds and const predicates) for element type.
             if let Some(diag) = check_ty_wf(
                 db,
-                TraitSolveCx::new(db, scope).with_assumptions(assumptions),
+                ProvisionEnv::for_scope(scope, assumptions).solve_cx(db),
                 ty,
             )
             .into_diag(span.clone().into())
@@ -1351,8 +1351,8 @@ impl<'db> GenericParamOwner<'db> {
 
                         if let Some(diag) = check_trait_inst_wf(
                             db,
-                            ty::trait_resolution::TraitSolveCx::new(db, scope)
-                                .with_assumptions(assumptions),
+                            ty::trait_resolution::ProvisionEnv::for_scope(scope, assumptions)
+                                .solve_cx(db),
                             inst,
                         )
                         .into_diag(span.into())

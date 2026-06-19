@@ -1703,7 +1703,7 @@ pub(crate) fn evaluate_const_ty<'db>(
                     }
                     PathRes::TraitConst(_recv_ty, inst, name) => {
                         let solve_cx =
-                            TraitSolveCx::new(db, body.scope()).with_assumptions(assumptions);
+                            ProvisionEnv::for_scope(body.scope(), assumptions).solve_cx(db);
                         const_ty_from_trait_const(db, solve_cx, inst, name)
                             .ok_or(ConstIntError::NotIntExpr)?
                     }
@@ -1790,7 +1790,7 @@ pub(crate) fn evaluate_const_ty<'db>(
                     };
 
                     let solve_cx =
-                        TraitSolveCx::new(db, body.scope()).with_assumptions(assumptions);
+                        ProvisionEnv::for_scope(body.scope(), assumptions).solve_cx(db);
                     if let Some(const_ty) = const_ty_from_trait_const(db, solve_cx, inst, name) {
                         let evaluated = const_ty.evaluate(db, expected_ty);
                         if evaluated.ty(db).has_invalid(db) {

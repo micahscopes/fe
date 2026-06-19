@@ -22,7 +22,7 @@ use super::{
     fold::TyFoldable as _,
     trait_lower::collect_implementor_methods,
     trait_resolution::{
-        TraitSolveCx, constraint::collect_constraints, is_goal_satisfiable,
+        ProvisionEnv, TraitSolveCx, constraint::collect_constraints, is_goal_satisfiable,
         normalize_trait_inst_preserving_validity,
     },
     ty_def::TyId,
@@ -306,7 +306,7 @@ pub(crate) fn impls_for_ty_with_constraints<'db>(
     let ty = ty.extract_identity(&mut table);
 
     let env = ingot_trait_env(db, ingot);
-    let solve_cx = TraitSolveCx::new(db, ingot.root_mod(db).scope()).with_assumptions(assumptions);
+    let solve_cx = ProvisionEnv::for_scope(ingot.root_mod(db).scope(), assumptions).solve_cx(db);
     if ty.has_invalid(db) || ty.base_ty(db).is_never(db) {
         return vec![];
     }
