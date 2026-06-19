@@ -26,8 +26,9 @@ pub struct Reflect<T> {
 ///
 /// `G` is a CONSTRAINT (the trait being derived), not an ordinary `*`-kinded
 /// type, so its param is `Constraint`-kinded — i.e. `ImplBuilder : Constraint -> *`
-/// (FCO K04b). The goal is recognized + lowered by the provider-goal carrier
-/// (`provider_goal.rs`), not by the ordinary `*`-kinded type walk.
+/// (FCO K04b). A valid saturated goal (`Eq<T>`) lowers through the ordinary type
+/// walk to a `Constraint`-kinded `ConstraintTerm`; `provider_goal.rs` only
+/// diagnoses ILL-FORMED goals (e.g. a live `* -> Constraint` head).
 pub struct ImplBuilder<G: Constraint> {
     handle: u256
 }
@@ -43,8 +44,9 @@ pub struct ImplBuilder<G: Constraint> {
 ///
 /// `G` is a CONSTRAINT (the trait being derived), not an ordinary `*`-kinded
 /// type, so its param is `Constraint`-kinded — i.e. `Evidence : Constraint -> *`
-/// (FCO K04b). The goal is recognized + lowered by the provider-goal carrier
-/// (`provider_goal.rs`), not by the ordinary `*`-kinded type walk.
+/// (FCO K04b). A valid saturated goal (`Eq<T>`) lowers through the ordinary type
+/// walk to a `Constraint`-kinded `ConstraintTerm`; `provider_goal.rs` only
+/// diagnoses ILL-FORMED goals (e.g. a live `* -> Constraint` head).
 pub struct Evidence<G: Constraint> {
     handle: u256
 }
