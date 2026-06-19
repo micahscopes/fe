@@ -29,8 +29,8 @@ use crate::{
     analysis::ty::ty_def::MAX_INLINE_STRING_BYTES,
     hir_def::{
         BinOp, Body, CompBinOp, Cond, CondId, Expr, ExprId, Func, GenericArg, GenericArgListId,
-        IdentId, ItemKind, LitKind, LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId, QuoteBody,
-        Stmt, StmtId, StringId, Trait, TypeId, TypeKind,
+        IdentId, ItemKind, LitKind, LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId, PathKind,
+        QuoteBody, Stmt, StmtId, StringId, Trait, TraitRefId, TypeId, TypeKind,
         scope_graph::ScopeId,
     },
     span::HirOrigin,
@@ -1702,12 +1702,17 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                  `==`, `<`, `>`, and method calls)",
             )),
             Expr::Path(_) => {
-                let Some(name) = self.simple_expr_path_ident(expr) else {
-                    return Err(
-                        self.invalid_quote(expr, "paths in quote bodies must be a single name")
-                    );
-                };
-                self.elab_template_name(expr, name, template, sig, binders)
+                if let Some(name) = self.simple_expr_path_ident(expr) {
+                    return self.elab_template_name(expr, name, template, sig, binders);
+                }
+                if let Some((ty, trait_, name)) = self.extract_qualified_path(expr) {
+                    return self.elab_qualified_const(expr, ty, trait_, name);
+                }
+                Err(self.invalid_quote(
+                    expr,
+                    "paths in quote bodies must be a single name or a qualified associated-const \
+                     access `<Ty as Trait>::item`",
+                ))
             }
             Expr::QuoteHole(_) => {
                 let value = self.quote_hole_value(expr, template)?;
@@ -1989,6 +1994,55 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             )
         };
         Err(self.invalid_quote(expr, &detail))
+    }
+
+    /// Elaborates a quote-body `<Ty as Trait>::CONST` qualified associated-const
+    /// access (DEVX-B R1) to [`GenExpr::TraitConst`]. Synthesis replays it via
+    /// `goal_item_path`, which spells the qualifier as `<ty as GoalTrait>` — so
+    /// the trait written in the quote must resolve to the provider's goal trait.
+    /// A different trait cannot be represented by `GenExpr::TraitConst` and is
+    /// rejected with a precise diagnostic rather than silently mis-qualified.
+    fn elab_qualified_const(
+        &mut self,
+        expr: ExprId,
+        ty: TypeId<'db>,
+        trait_: TraitRefId<'db>,
+        name: IdentId<'db>,
+    ) -> Result<GenExprId, ExecError> {
+        let Some(written_path) = trait_.path(self.db).to_opt() else {
+            return Err(self.invalid_quote(
+                expr,
+                "the trait in a `<Ty as Trait>::item` quote access is missing",
+            ));
+        };
+        let written_path = canonical_trait_path(self.db, self.provider_top_mod, written_path);
+        let written_def = resolve_trait_def(self.db, self.provider_top_mod, written_path);
+        let goal_def = resolve_trait_def(self.db, self.provider_top_mod, self.goal_trait_path);
+        let matches = match (written_def, goal_def) {
+            (Some(written), Some(goal)) => written == goal,
+            // An end did not resolve to a `Trait` def (e.g. a goal trait local
+            // to the provider's own module): fall back to comparing the written
+            // and goal traits' last-segment names, mirroring the named-selection
+            // compat path in `goal_matches_provider`.
+            _ => {
+                let written_last = written_path.ident(self.db).to_opt();
+                let goal_last = self.goal_trait_path.ident(self.db).to_opt();
+                written_last.is_some() && written_last == goal_last
+            }
+        };
+        if !matches {
+            let detail = format!(
+                "`<Ty as {}>::{}` reads an associated const of `{}`, but a derive provider can \
+                 only qualify by its goal trait `{}`; rewrite the access to use the goal trait \
+                 (or `Self`)",
+                trait_.pretty_print(self.db),
+                name.data(self.db),
+                trait_.pretty_print(self.db),
+                self.goal_trait_path.pretty_print(self.db),
+            );
+            return Err(self.invalid_quote(expr, &detail));
+        }
+        Ok(self.push_gen(GenExpr::TraitConst { ty, name }))
     }
 
     /// The value captured for a hole expression when its quote was built.
@@ -2969,6 +3023,56 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         };
         path.as_ident(self.db)
     }
+
+    /// Recognizes a quote-body qualified-path expression `<Ty as Trait>::item`:
+    /// a final bare-`Ident` segment whose parent is a single `QualifiedType`
+    /// segment. Returns the qualifying `(type_, trait_, item-name)` triple, or
+    /// `None` for any other path shape (a bare ident, a generic-arg-bearing
+    /// item segment, or a longer/multi-segment qualified path that this grammar
+    /// does not yet accept).
+    fn extract_qualified_path(
+        &self,
+        expr: ExprId,
+    ) -> Option<(TypeId<'db>, TraitRefId<'db>, IdentId<'db>)> {
+        let Partial::Present(Expr::Path(Partial::Present(path))) = expr.data(self.db, self.body)
+        else {
+            return None;
+        };
+        qualified_path_parts(self.db, *path)
+    }
+}
+
+/// The pure path-shape recognizer behind
+/// [`ProviderExecutor::extract_qualified_path`]: a `<Ty as Trait>::item`
+/// associated-item access is a final bare-`Ident` segment (no generic args)
+/// whose single parent is a `QualifiedType` segment. Any other shape — a bare
+/// ident, an item segment carrying generic args, or a longer path — returns
+/// `None`.
+fn qualified_path_parts<'db>(
+    db: &'db dyn HirDb,
+    path: PathId<'db>,
+) -> Option<(TypeId<'db>, TraitRefId<'db>, IdentId<'db>)> {
+    // Final segment: a bare associated-item name with no generic args.
+    let PathKind::Ident {
+        ident,
+        generic_args,
+    } = path.kind(db)
+    else {
+        return None;
+    };
+    if !generic_args.is_empty(db) {
+        return None;
+    }
+    let name = ident.to_opt()?;
+    // Its sole parent: the `<Ty as Trait>` qualifier segment.
+    let parent = path.parent(db)?;
+    if parent.parent(db).is_some() {
+        return None;
+    }
+    let PathKind::QualifiedType { type_, trait_ } = parent.kind(db) else {
+        return None;
+    };
+    Some((type_, trait_, name))
 }
 
 /// A human-readable kind name for hole-value diagnostics.
@@ -3241,5 +3345,80 @@ mod effect_trace {
             "TD5.1 effect trace must render each require (with field provenance \
              when available)"
         );
+    }
+}
+
+#[cfg(test)]
+mod qualified_path {
+    //! DEVX-B R1: the quote-body `<Ty as Trait>::item` shape recognizer.
+
+    use super::qualified_path_parts;
+    use crate::{
+        HirDb,
+        hir_def::{
+            GenericArg, GenericArgListId, IdentId, Partial, PathId, PathKind, TraitRefId, TypeId,
+            TypeKind,
+        },
+        test_db::TestDb,
+    };
+
+    fn path_ty<'db>(db: &'db dyn HirDb, name: &str) -> TypeId<'db> {
+        TypeId::new(
+            db,
+            TypeKind::Path(Partial::Present(PathId::from_str(db, name))),
+        )
+    }
+
+    #[test]
+    fn recognizes_qualified_const_access() {
+        let db = TestDb::default();
+        let db: &dyn HirDb = &db;
+
+        let ty = path_ty(db, "Point");
+        let trait_ = TraitRefId::new(db, Partial::Present(PathId::from_str(db, "HasK")));
+        // `<Point as HasK>::K`
+        let path = PathId::new(
+            db,
+            PathKind::QualifiedType { type_: ty, trait_ },
+            None,
+        )
+        .push_str(db, "K");
+
+        let (got_ty, got_trait, got_name) =
+            qualified_path_parts(db, path).expect("a `<Ty as Trait>::item` path is recognized");
+        assert_eq!(got_ty, ty);
+        assert_eq!(got_trait, trait_);
+        assert_eq!(got_name, IdentId::new(db, "K".to_string()));
+    }
+
+    #[test]
+    fn bare_ident_is_not_qualified() {
+        let db = TestDb::default();
+        let db: &dyn HirDb = &db;
+        let path = PathId::from_str(db, "K");
+        assert!(qualified_path_parts(db, path).is_none());
+    }
+
+    #[test]
+    fn item_segment_with_generic_args_is_rejected() {
+        let db = TestDb::default();
+        let db: &dyn HirDb = &db;
+        let ty = path_ty(db, "Point");
+        let trait_ = TraitRefId::new(db, Partial::Present(PathId::from_str(db, "HasK")));
+        let args = GenericArgListId::given(
+            db,
+            vec![GenericArg::Type(crate::hir_def::TypeGenericArg {
+                ty: Partial::Present(path_ty(db, "u256")),
+            })],
+        );
+        // `<Point as HasK>::K<u256>` — a generic-arg-bearing final segment is
+        // not the bare associated-item form this grammar accepts.
+        let path = PathId::new(
+            db,
+            PathKind::QualifiedType { type_: ty, trait_ },
+            None,
+        )
+        .push_str_args(db, "K", args);
+        assert!(qualified_path_parts(db, path).is_none());
     }
 }
