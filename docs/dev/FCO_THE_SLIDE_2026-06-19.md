@@ -12,6 +12,20 @@ Downhill, not uphill. Drop "plan-the-mountain / decompose-by-FV-feature"; resume
 (cut-1, the TD5 executor de-magic, the ABI providerization): **pick the next seam, delete it byte-identical +
 debt-negative, let it accrete.**
 
+## Governing principle: get the GUTS right, don't get hung up on sugar (2026-06-19, Micah, binding)
+The win is the **guts** — ONE streamlined resolver, **zero** ad-hoc competing systems, **zero** shims-into-sugars /
+intrinsics / bolt-ons. Surface syntax and policy *canon* are **deferred-tunable, NOT blockers**: pick a sensible
+default now and proceed; never ask Micah or block on them. Two binding consequences:
+- **Decision C (the canonical/`fixed` SET) is NOT a gate.** Default = narrow (nothing `fixed` by default; opt-in
+  marker). Land the mechanism against that default; the set is tunable later. *Default the POLICY, never the PROOF*
+  — the soundness obligations (unforgeable `Fix`, the gate actually blocks, FV per the Fix packet) stay mandatory.
+- **Surface syntax is NOT a gate.** The `fix` verb / `fixed` marker / "provide a deriver in scope" spellings are
+  illustrative; pick the plainest and move. A correct shim-free resolver desugars many surfaces onto the one
+  provision — getting the guts right *buys* the tuning flexibility. This is metaprogramming; that is the point.
+
+Corollary: syntax polish has been a distraction from the guts. Rank work by *core streamlining / deletions*, not
+surface nicety. If a choice is tunable-later, choose and proceed — do not surface it.
+
 ## The brakes to remove (each a deletion)
 - the `Derive` **string marker** (`provider.rs:31` `DERIVE_MARKER`) — vs a real trait;
 - the **expansion↔type-check stratum** that keeps the deriver runner off the one walk (`provider_executor.rs`
@@ -68,8 +82,13 @@ x-0…x-4 ladder in step 2. Scope shrinks: x-3 narrows overlay #5 (not deletes);
    only, never solved) gating overrides via the `fix` verb; and **demote `ConflictTraitImpl` into the canonical
    tier — delete the global checker** (coherence = placement). **Money-soundness ⇒ provable** — FV obligations
    per `FCO_FIX_CAPABILITY_PACKET` (unforgeability, non-ambient propagation, attenuation lattice, gate
-   soundness, MIR re-resolution determinism). The one human gut-call (decision C: the canonical/`fixed` set) is
-   surfaced to Micah before landing.
+   soundness, MIR re-resolution determinism). Per the governing principle, decision C (the canonical/`fixed`
+   *set*) is **defaulted, not gated** — land the mechanism against the narrow default and tune the set later; the
+   *proof obligations above stay mandatory*. Plan the push as ~8 substeps in two halves: **Half A** = the walk
+   (collapse #1+#2 + coherence-as-placement + write override `ImplementorId` into `ImplEnv`); **Half B** = the
+   gate (`fixed` tier, `Fix<T>`, mint-at-root + non-ambient propagation, `fix` verb + attenuation, FV). Half A
+   delivers the six→one headline on its own; Half B is the safety rail, sequenced second. **Measure the walk-flip
+   blast radius (spike) before building**, exactly as TD5.
 4. **Runout (emerges, nothing built):** a deriver provided as a scoped provision is run by the walk to satisfy
    `where Eq<T>`. Derivers-as-provisions falls out. **MECHANISM locked; the SURFACE syntax for "provide a
    deriver in scope" is OPEN, chosen at the runout** (not the illustrative `with (Derive<Eq> = …)` — a unified
@@ -89,6 +108,7 @@ only, e.g. `Fix<*>`), never at the **solver** level (∃/search).
 ## Operating rhythm (autonomous, via agents)
 - One seam per increment, own worktree agent, parent **cold-verifies** (FF + own gate + inspect the change),
   **byte-identical** for 1–3, **+FV** for the money parts of 4. STOP-on-wall; phone-a-friend (helper agent /
-  fable logs), not Micah, unless a genuine money-policy gut-call (decision C: the canonical/`fixed` set).
+  fable logs), **never block on Micah** for tunable-later policy or syntax — pick a sensible default and proceed
+  (governing principle). Surface only a true correctness/soundness wall, never a sugar or canon-set choice.
 - Re-verify "can't / too big" verdicts by *measuring what can be deleted next* ([[reverify-inherited-blockers]];
   surface-area is the metric, [[burndown-value-is-surface-area]]; clean SSOT increments, [[tracing-must-be-a-joy-to-maintain]]).
