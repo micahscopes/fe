@@ -17,7 +17,7 @@ use super::evm::{mem, ops}
 // path that resolves from every error/msg-bearing module (see the provider
 // note below).
 use core::abi::AbiSize
-use core::derive::{Evidence, ImplBuilder, Reflect}
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 
 /// Allocate a 32-byte Solidity ABI `bytes` value from a single word.
 ///

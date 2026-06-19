@@ -11,6 +11,7 @@
 // the return position — proving `provider_capability_goals` checks the return
 // slot, not only params/effects.
 
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

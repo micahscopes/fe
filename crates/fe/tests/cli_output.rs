@@ -143,6 +143,7 @@ fn test_cli_check_provider_require_non_type_names_the_trait_and_fix() {
     fs::write(
         &file,
         r#"
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

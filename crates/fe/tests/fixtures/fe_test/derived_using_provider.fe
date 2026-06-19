@@ -8,6 +8,7 @@
 //    and generates a real impl — including a method body emitted through
 //    builder expression commands.
 
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

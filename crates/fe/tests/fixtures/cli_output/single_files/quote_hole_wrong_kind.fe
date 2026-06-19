@@ -1,6 +1,7 @@
 // A `Field` handle only fills member-access holes (`self.${field}`);
 // splicing it in expression position is a precise executor failure.
 
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

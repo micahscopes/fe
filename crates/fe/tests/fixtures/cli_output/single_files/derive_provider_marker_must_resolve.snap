@@ -1,0 +1,19 @@
+---
+source: crates/fe/tests/cli_output.rs
+assertion_line: 1822
+expression: output
+input_file: tests/fixtures/cli_output/single_files/derive_provider_marker_must_resolve.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/derive_provider_marker_must_resolve.fe
+
+error[13-0014]: invalid derive provider declaration
+   ┌─ derive_provider_marker_must_resolve.fe:16:6
+   │
+16 │ impl WrongMarker: NotDerive for Eq {
+   │      ^^^^^^^^^^^ the path after `:` must resolve to `core::derive::Derive`
+   │
+   = expected `impl Name: Derive for Trait { const fn derive<T>(..) uses (reflect: Reflect<T>, builder: mut ImplBuilder<..>) { .. } }`
+
+
+=== EXIT CODE: 1 ===

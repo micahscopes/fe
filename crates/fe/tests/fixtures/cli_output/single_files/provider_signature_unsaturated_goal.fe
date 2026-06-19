@@ -5,6 +5,7 @@
 // unsaturated head cannot. The Level-1 goal lowering declines it and reports an
 // arity/kind diagnostic naming the capability and the goal spelling.
 
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

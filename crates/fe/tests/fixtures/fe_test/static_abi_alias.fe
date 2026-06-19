@@ -28,6 +28,7 @@
 // transparent bundle over concrete EVM ABI obligations, nothing more.
 
 use core::abi::AbiSize
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

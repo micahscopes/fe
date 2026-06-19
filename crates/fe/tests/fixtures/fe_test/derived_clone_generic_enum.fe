@@ -7,6 +7,7 @@
 // generic structs). Fixture-local; NOT canonicalized into core_derives.
 
 use core::clone::Clone
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

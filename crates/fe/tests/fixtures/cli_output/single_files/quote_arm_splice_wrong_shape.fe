@@ -2,6 +2,7 @@
 // quote of match arms; splicing an expression template there is a precise
 // executor failure.
 
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

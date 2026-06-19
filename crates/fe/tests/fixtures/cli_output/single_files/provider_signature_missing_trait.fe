@@ -7,6 +7,7 @@
 // `where MissingTrait<T>` predicate. This is the de-exempt flip from
 // "compiles" to "errors" (decision packet §1 `Bogus<T>` probe).
 
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

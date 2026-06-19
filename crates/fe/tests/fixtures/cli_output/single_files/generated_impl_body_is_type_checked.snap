@@ -1,5 +1,6 @@
 ---
 source: crates/fe/tests/cli_output.rs
+assertion_line: 1822
 expression: output
 input_file: tests/fixtures/cli_output/single_files/generated_impl_body_is_type_checked.fe
 ---
@@ -7,9 +8,9 @@ input_file: tests/fixtures/cli_output/single_files/generated_impl_body_is_type_c
 errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/generated_impl_body_is_type_checked.fe
 
 error[8-0013]: returned type mismatch
-   ┌─ generated_impl_body_is_type_checked.fe:43:1
+   ┌─ generated_impl_body_is_type_checked.fe:44:1
    │
-43 │ derive Dup for Point using BadDup
+44 │ derive Dup for Point using BadDup
    │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    │ │
    │ expected `Point`, but `bool` is returned

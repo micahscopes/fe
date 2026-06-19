@@ -16,6 +16,7 @@
 // derived_clone.)
 
 use core::ops::Eq
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::Reflect as Mirror
 use core::derive::ImplBuilder as Builder

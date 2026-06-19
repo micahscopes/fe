@@ -17,6 +17,7 @@
 // so the presence of these two errors is the anti-vacuous proof that identity
 // (not the name) is what fires.
 
+use core::derive::Derive
 use core::derive::Evidence as W
 use core::derive::ImplBuilder as B
 use core::derive::Reflect

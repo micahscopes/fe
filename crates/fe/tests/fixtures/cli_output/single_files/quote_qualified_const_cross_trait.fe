@@ -7,6 +7,7 @@
 // qualified-const quote form works end-to-end — the form `#[error]`'s
 // `<FieldTy as AbiSize>::HEAD_SIZE` needs (#65).
 
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

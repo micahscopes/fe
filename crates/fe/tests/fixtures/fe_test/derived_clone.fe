@@ -9,6 +9,7 @@
 // is unsatisfiable for the concrete receiver is dropped. It now compiles + runs.
 
 use core::clone::Clone
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

@@ -18,6 +18,7 @@
 // hole in arm position.
 
 use core::default::Default
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

@@ -50,3 +50,18 @@ pub struct ImplBuilder<G: Constraint> {
 pub struct Evidence<G: Constraint> {
     handle: u256
 }
+
+/// The derive-provider trait. A provider `impl Name: Derive for P` (with goal
+/// `P` a `* -> Constraint` trait constructor) declares the canonical `derive`
+/// fn the expansion stage runs to produce evidence for the goal `P<T>`.
+///
+/// This is the real trait the compiler now recognizes providers by (the marker
+/// after `:`): provider recognition canonicalizes the `: Derive` path and
+/// accepts it only when it resolves to `core::derive::Derive` by identity —
+/// there is no built-in string marker. The `uses (reflect, builder)` clause
+/// records the capabilities the body consumes; the provider validator is the
+/// enforcement of those capabilities (TD4, design choice B).
+pub trait Derive<P: * -> Constraint> {
+    const fn derive<T>(ev: own Evidence<P<T>>) -> Evidence<P<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<P<T>>)
+}

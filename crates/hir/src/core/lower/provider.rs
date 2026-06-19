@@ -27,12 +27,11 @@ use crate::{
     span::{DesugaredOrigin, DynLazySpan, HirOrigin},
 };
 
-/// The marker after `:` in a provider declaration: `impl Name: Derive for T`.
-const DERIVE_MARKER: &str = "Derive";
 /// The single function a provider must define.
 const DERIVE_FN: &str = "derive";
 /// The `core::derive` module that holds the canonical capability types
-/// (`Reflect`, `ImplBuilder`), used for resolved-identity recognition.
+/// (`Reflect`, `ImplBuilder`) and the `Derive` provider trait, used for
+/// resolved-identity recognition.
 const DERIVE_MODULE: &str = "derive";
 /// The canonical last-segment names of the `core::derive` capability types.
 /// These are the *identity* the recognized canonical path must end in — they
@@ -40,6 +39,12 @@ const DERIVE_MODULE: &str = "derive";
 /// [`path_names_derive_capability`]), never as a bare head-identifier authority.
 const REFLECT_TY: &str = "Reflect";
 const IMPL_BUILDER_TY: &str = "ImplBuilder";
+/// The canonical last-segment name of the `core::derive` provider trait. Like
+/// the capability types, it is matched only behind the `core::derive` module
+/// qualifier (see [`path_names_derive_trait`]) — the marker after `:` in
+/// `impl Name: Derive for T` is now recognized by its resolved
+/// `core::derive::Derive` identity, never by a bare string.
+const DERIVE_TRAIT_TY: &str = "Derive";
 
 /// A compile-time capability a provider's `derive` fn consumes, declared in its
 /// `uses (..)` clause (`reflect: Reflect<T>`, `builder: mut ImplBuilder<Goal>`).
@@ -146,14 +151,27 @@ pub(super) fn validate_provider<'db>(
         ));
     }
 
+    // The `: Derive` marker is recognized by RESOLVED IDENTITY (TD4): the path
+    // after `:` is canonicalized through the provider module's base-graph `use`
+    // items (the expansion stage must not read the merged graph) and accepted
+    // only when it names `core::derive::Derive` by its canonical-path identity.
+    // There is no built-in string marker: a path merely spelled `Derive`, with
+    // no `use core::derive::Derive`, no longer grants provider authority.
     let derive_marker_ok = provider
         .derive_path(db)
         .to_opt()
-        .and_then(|path| path.as_ident(db))
-        .is_some_and(|ident| ident.data(db) == DERIVE_MARKER);
+        .map(|path| {
+            let canonical = if path.parent(db).is_some() {
+                path
+            } else {
+                canonical_trait_path(db, provider.top_mod(db), path)
+            };
+            path_names_derive_trait(db, canonical)
+        })
+        .unwrap_or(false);
     if !derive_marker_ok {
         errors.push(error(
-            "derive provider declarations must use the built-in `Derive` marker after `:`".into(),
+            "the path after `:` must resolve to `core::derive::Derive`".into(),
         ));
     }
 
@@ -350,6 +368,26 @@ fn path_names_derive_capability<'db>(
     } else {
         None
     }
+}
+
+/// Whether `path` names the `core::derive::Derive` provider trait by resolved
+/// (canonical-path) identity. Mirrors [`path_names_derive_capability`]: a path
+/// matches only when its parent segment is the `derive` module AND its last
+/// segment is `Derive`. The caller canonicalizes a bare ident through the
+/// provider module's base-graph `use` items before calling this, so an
+/// imported/aliased `Derive` is recognized while a like-named local type is
+/// not. There is no bare-name fallback: the name alone grants no authority.
+fn path_names_derive_trait<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> bool {
+    let parent_is_derive = path
+        .parent(db)
+        .and_then(|parent| parent.ident(db).to_opt())
+        .is_some_and(|ident| ident.data(db) == DERIVE_MODULE);
+    if !parent_is_derive {
+        return false;
+    }
+    path.ident(db)
+        .to_opt()
+        .is_some_and(|last| last.data(db) == DERIVE_TRAIT_TY)
 }
 
 /// Resolves `path` (the head trait of a provider, or the trait argument of a
@@ -1258,6 +1296,7 @@ mod tests {
         let result = validate_only_provider(
             r#"
             use core::ops::Eq
+            use core::derive::Derive
             use core::derive::Evidence
             use core::derive::Reflect
             use core::derive::ImplBuilder
@@ -1285,22 +1324,25 @@ mod tests {
     /// (`core::derive::Reflect` / `::ImplBuilder`), NOT on the bare name.
     ///
     /// This provider's `uses` clause names LOCAL `struct Reflect` / `ImplBuilder`
-    /// declared in the SAME file, with NO `use core::derive::..` anywhere — so the
-    /// names cannot canonicalize to `core::derive::*`. The capability is therefore
-    /// NOT recognized, and the provider fails shape validation with the missing-
-    /// capability errors. If the deleted bare head-identifier string fallback
-    /// ever returns, these local-named types would be granted authority and this
-    /// test fails. (Mirrors the spirit of `derive_local_trait_no_alias` from
-    /// burn-down #1.)
+    /// declared in the SAME file, with NO `use core::derive::Reflect`/`ImplBuilder`
+    /// import — so the names cannot canonicalize to `core::derive::*`. The
+    /// capability is therefore NOT recognized, and the provider fails shape
+    /// validation with the missing-capability errors. If the deleted bare
+    /// head-identifier string fallback ever returns, these local-named types would
+    /// be granted authority and this test fails. (Mirrors the spirit of
+    /// `derive_local_trait_no_alias` from burn-down #1.) The `: Derive` marker is
+    /// imported so the test isolates the capability check, not the marker.
     #[test]
     fn provider_capability_keys_on_identity_not_name() {
         let errors = validate_only_provider(
             r#"
             use core::ops::Eq
+            use core::derive::Derive
             use core::derive::Evidence
 
             // A user type merely NAMED `Reflect` / `ImplBuilder`, with no
-            // `use core::derive::..`. The name alone must grant no authority.
+            // `use core::derive::Reflect`/`ImplBuilder`. The name alone must grant
+            // no authority.
             struct Reflect<T> { x: T }
             struct ImplBuilder<G> { x: G }
 
@@ -1353,6 +1395,7 @@ mod tests {
         let file = db.new_stand_alone(
             Utf8PathBuf::from("p50_provenance.fe"),
             r#"
+use core::derive::Derive
 use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect

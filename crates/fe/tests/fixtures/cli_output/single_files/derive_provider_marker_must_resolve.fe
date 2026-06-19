@@ -1,0 +1,25 @@
+// TD4 (THE SLIDE step 2) — the de-magicked `: Derive` marker, demonstrated.
+//
+// Provider recognition no longer keys on a built-in `Derive` STRING marker: the
+// path after `:` is recognized by RESOLVED identity and accepted only when it
+// canonicalizes to `core::derive::Derive`. Here the marker is `NotDerive` — a
+// path that does NOT resolve to `core::derive::Derive` — so the declaration is
+// rejected as an invalid derive provider (`13-0014`). (Under the deleted string
+// marker this could never have been written; the point is that ONLY the real
+// `core::derive::Derive` identity grants provider authority.)
+
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+use core::ops::Eq
+
+impl WrongMarker: NotDerive for Eq {
+    const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Eq<T>>,
+        )
+    {
+        ev
+    }
+}
