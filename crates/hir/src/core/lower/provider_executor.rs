@@ -170,7 +170,7 @@ const _: () = {
 /// Why a provider execution failed. Rendered into a derive diagnostic at the
 /// request site (with the failing provider expression as the primary span
 /// when it lies in the same file, see `expansion`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub enum ProviderFailureKind {
     /// The body uses a construct outside the provider command language.
     UnsupportedBody,
@@ -228,7 +228,7 @@ impl ProviderFailureKind {
 
 /// An execution failure, with the source range of the offending construct
 /// *inside the provider's file*.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) struct ExecError {
     pub(super) kind: ProviderFailureKind,
     pub(super) range: TextRange,
@@ -236,7 +236,7 @@ pub(super) struct ExecError {
 
 /// A generated expression node, built by builder expression commands and
 /// replayed into real HIR expressions by the synthesis module.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) enum GenExpr<'db> {
     Bool(bool),
     /// `lhs && rhs`
@@ -330,7 +330,7 @@ pub(super) enum GenExpr<'db> {
 /// real [`TypeId`] by the synthesis module (some forms, like exact-width
 /// string types, need a lowering context to build their const-argument
 /// bodies, so materialization cannot happen during execution).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) enum GenTy<'db> {
     /// `String<LEN>` — an exact-width inline string type.
     StringN(usize),
@@ -343,7 +343,7 @@ pub(super) enum GenTy<'db> {
     Concrete(TypeId<'db>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) enum GenPat<'db> {
     Wildcard,
     /// A pattern matching `variant`, binding every payload field to
@@ -358,7 +358,7 @@ pub(super) enum GenPat<'db> {
 /// declaration of the emitted method at `emit_method(name, body)` (see
 /// [`ProviderExecutor::infer_method_sig`]); previously built op-by-op with the
 /// dropped `method`/`with_self`/`with_arg`/`returns` dance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) struct GenMethodSig<'db> {
     pub(super) name: IdentId<'db>,
     pub(super) takes_self: bool,
@@ -437,7 +437,7 @@ type BinderGroup<'db> = (IdentId<'db>, usize);
 /// push order to build the generated impl's members. This trace is now the SOLE
 /// replay authority for everything a provider body does — requirements (filter
 /// `Require`) and emitted members (filter `Emit*`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) enum ProviderEffect<'db> {
     /// `builder.require<Trait>(ty)`: the generated impl asserts `ty: Trait`.
     ///
@@ -474,7 +474,7 @@ pub(super) enum ProviderEffect<'db> {
 /// materializing the method bodies (TD5.x-2 cleave). The skeleton arenas are
 /// disjoint from [`ProviderBodies`]: no `GenExpr` references a `GenTyId`, and
 /// `GenMethodSig` holds resolved `TypeId`s, never `GenTy` arena indices.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, salsa::Update)]
 pub(super) struct ProviderSkeleton<'db> {
     /// The typed effect trace (TD5.1). Recorded in body-execution order; the
     /// SOLE replay authority for everything a provider body does. Internal/
@@ -488,7 +488,7 @@ pub(super) struct ProviderSkeleton<'db> {
 /// The provider impl's *bodies*: the arenas the generated expression/pattern
 /// ids index into. Split off from [`ProviderSkeleton`] (TD5.x-2) so a later
 /// step can move body production into a separate downstream query.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, salsa::Update)]
 pub(super) struct ProviderBodies<'db> {
     pub(super) exprs: Vec<GenExpr<'db>>,
     pub(super) pats: Vec<GenPat<'db>>,
@@ -497,7 +497,7 @@ pub(super) struct ProviderBodies<'db> {
 /// The successful result of running a provider body: the [`ProviderSkeleton`]
 /// (effect trace + signature/type arenas) plus the [`ProviderBodies`]
 /// (expression/pattern arenas the generated ids index into).
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, salsa::Update)]
 pub(super) struct ProviderOutput<'db> {
     pub(super) skeleton: ProviderSkeleton<'db>,
     pub(super) bodies: ProviderBodies<'db>,
