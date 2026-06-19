@@ -18,7 +18,7 @@ use super::{
     },
     env::{
         EffectOrigin, EffectParamSite, ExprProp, LocalBinding, ParamSite, PendingPrimitiveOp,
-        ProvidedEffect, TraitObligation, TraitObligationOrigin, TyCheckEnv,
+        ProvidedEffect, ProvisionEnv, TraitObligation, TraitObligationOrigin, TyCheckEnv,
     },
     path::ResolvedPathInBody,
     ty_may_be_code_region_token,
@@ -56,7 +56,7 @@ use crate::analysis::ty::{
     fold::{AssocTySubst, TyFoldable as _, TyFolder},
     provider::{ProviderTransport, provider_semantics_for_specialized_call},
     trait_def::TraitInstId,
-    trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx},
+    trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution},
     ty_check::callable::{Callable, EffectProviderProvenance, EffectProviderSpecialization},
     ty_def::{CapabilityKind, PrimTy, TyBase, TyData, prim_int_bits},
     unify::UnificationTable,
@@ -2334,7 +2334,14 @@ impl<'db> TyChecker<'db> {
         assumptions: PredicateListId<'db>,
         trait_goal: TraitInstId<'db>,
     ) -> GoalSatisfiability<'db> {
-        let solve_cx = TraitSolveCx::new(self.db, scope).with_assumptions(assumptions);
+        // SSOT construction: route the verify-leg solver-cx through `ProvisionEnv`
+        // (rung 3.0's seam) instead of hand-assembling `TraitSolveCx::new(..)`.
+        // This leg verifies a scope-enumerated provider candidate, so it supplies
+        // its own `(scope, assumptions)` — preserved exactly — rather than the
+        // body's current `provision_env()`. The resulting `TraitSolveCx`, the
+        // canonical query, and the `is_goal_query_satisfiable` result are
+        // byte-identical to the previous inline construction.
+        let solve_cx = ProvisionEnv::for_scope(scope, assumptions).solve_cx(self.db);
         let query = crate::analysis::ty::trait_resolution::CanonicalGoalQuery::new(
             self.db,
             trait_goal,

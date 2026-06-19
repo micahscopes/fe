@@ -64,6 +64,22 @@ pub(crate) struct ProvisionEnv<'db> {
 }
 
 impl<'db> ProvisionEnv<'db> {
+    /// Build a provision environment for an explicit `(scope, assumptions)` pair.
+    ///
+    /// The body checker's *current* provision env comes from
+    /// [`TyCheckEnv::provision_env`]; legs that verify a candidate in a
+    /// *specific* effect scope (e.g. the effect-provider verify leg, which scans
+    /// a lexical scope to enumerate a provider and then verifies `ProviderTy:
+    /// Trait` against that scope's assumptions) supply their own `(scope,
+    /// assumptions)` here so solver-context construction still flows through the
+    /// single [`ProvisionEnv::solve_cx`] site rather than being hand-assembled.
+    pub(crate) fn for_scope(
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> ProvisionEnv<'db> {
+        ProvisionEnv { scope, assumptions }
+    }
+
     /// Build the trait-solver context for this provision environment. This is the
     /// single construction site for a body-checker `TraitSolveCx`.
     pub(crate) fn solve_cx(&self, db: &'db dyn HirAnalysisDb) -> TraitSolveCx<'db> {
@@ -1764,6 +1780,69 @@ fn without_a<T>() -> bool {
 
         // Exercise both a func with non-empty assumptions (`T: A`) and one with
         // empty assumptions, so the assumptions plumbing is covered in both cases.
+        for func in top_mod.all_funcs(&db).iter().copied() {
+            check(&db, func);
+        }
+    }
+
+    /// SSOT guard for rung 3.4a: the effect-verify leg
+    /// (`trait_effect_goal_satisfiability_in_scope`) now routes its solver-cx
+    /// construction through [`ProvisionEnv::for_scope`] + [`ProvisionEnv::solve_cx`]
+    /// instead of hand-assembling `TraitSolveCx::new(db, scope).with_assumptions(..)`.
+    /// Unlike the body's `provision_env()`, this leg verifies a scope-enumerated
+    /// candidate against an *arbitrary* `(scope, assumptions)` pair supplied by the
+    /// caller, so the guard covers the explicit-pair constructor: the routed path
+    /// must produce a `TraitSolveCx` byte-identical to the inline construction it
+    /// replaced, for that site's exact inputs.
+    ///
+    /// A source-scan guard is unsuitable for the same reason as rung 3.0 (other
+    /// legitimate `TraitSolveCx::new` sites exist), so the focused equality test
+    /// is used.
+    #[test]
+    fn provision_env_for_scope_matches_hand_built_verify_leg() {
+        fn check<'db>(db: &'db HirAnalysisTestDb, func: Func<'db>) {
+            // The verify leg receives an explicit `(scope, assumptions)` pair (the
+            // effect scope a candidate provider is being verified in), not
+            // necessarily the body's current provision env. Mirror that here.
+            let scope = func.scope();
+            let assumptions =
+                collect_func_def_constraints(db, func.into(), true).instantiate_identity();
+
+            // Hand-built, exactly as `trait_effect_goal_satisfiability_in_scope`
+            // constructed it inline before rung 3.4a.
+            let hand_built = TraitSolveCx::new(db, scope).with_assumptions(assumptions);
+
+            // Routed SSOT path: the explicit-pair `ProvisionEnv` constructor.
+            let provision_env = ProvisionEnv::for_scope(scope, assumptions);
+            let via_wrapper = provision_env.solve_cx(db);
+
+            assert_eq!(
+                hand_built, via_wrapper,
+                "ProvisionEnv::for_scope(..).solve_cx diverged from the verify leg's \
+                 hand-built TraitSolveCx",
+            );
+            assert_eq!(provision_env.scope(), scope);
+            assert_eq!(provision_env.assumptions(), assumptions);
+        }
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "provision_env_for_scope_matches_hand_built_verify_leg.fe".into(),
+            r#"
+trait A {}
+
+fn with_a<T: A>() -> bool {
+    true
+}
+
+fn without_a<T>() -> bool {
+    true
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+
         for func in top_mod.all_funcs(&db).iter().copied() {
             check(&db, func);
         }
