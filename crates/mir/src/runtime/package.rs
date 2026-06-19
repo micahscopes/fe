@@ -58,12 +58,20 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash, salsa::Update)]
 pub enum LowerError {
     Unsupported(String),
+    /// Monomorphization re-resolved a trait method to a *different* impl than
+    /// type-checking committed to at instantiation time (rung 3.3). Under
+    /// coherence this can never happen for valid Fe; if it fires it is a real
+    /// determinism violation in the resolver, and must hard-fail rather than
+    /// silently lower against the wrong impl. The message carries both
+    /// implementors for diagnosis.
+    NondeterministicReResolution(String),
 }
 
 impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LowerError::Unsupported(message) => write!(f, "{message}"),
+            LowerError::NondeterministicReResolution(message) => write!(f, "{message}"),
         }
     }
 }
@@ -1658,9 +1666,14 @@ fn resolve_trait_runtime_instance<'db>(
             method.data(db)
         ))
     })?;
-    // `resolved.implementor` (the impl this MIR re-resolution selected) is not
-    // consulted in rung 3.2; rung 3.3 will compare it against the
-    // instantiation-time choice carried on the instance's `ImplEnv`.
+    // DETERMINISM ASSERTION (rung 3.3): NOT applicable at this site, for the same
+    // reason as the twin helper in `synthetic.rs`. This synthesizes a *fresh*
+    // `TraitInstId` inside the MIR runtime-package planner (e.g. `core::abi::Decode`
+    // built by `resolve_decode_instance`), with empty assumptions and no upstream
+    // typeck instance carrying a committed `selected_implementor`. There is no
+    // pinned choice to compare against here (carried value is structurally
+    // `None`); the invariant is enforced at the `classify.rs` site that
+    // re-resolves an instance typeck already committed to.
     let func = resolved.func;
     let mut impl_args = resolved.impl_args;
     impl_args.extend(extra_generic_args);
@@ -2466,6 +2479,12 @@ fn wrap_runtime_lowering_error<'db>(
             "MIR lowering failed: unsupported while lowering `{}`: {message}",
             runtime_instance_symbol_base(db, instance)
         )),
+        LowerError::NondeterministicReResolution(message) => {
+            LowerError::NondeterministicReResolution(format!(
+                "MIR lowering failed: nondeterministic re-resolution while lowering `{}`: {message}",
+                runtime_instance_symbol_base(db, instance)
+            ))
+        }
     }
 }
 

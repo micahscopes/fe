@@ -211,6 +211,36 @@ pub struct ResolvedTraitMethod<'db> {
     pub implementor: ImplementorId<'db>,
 }
 
+/// Rung 3.3 MIR re-resolution determinism check (pure).
+///
+/// Compares the implementor type-checking committed to at instantiation time
+/// (`typeck_selected`, carried on the semantic instance's `ImplEnv`) against the
+/// implementor monomorphization just re-resolved (`mono_resolved`):
+///
+/// - `typeck_selected == None` — type-checking did not commit a concrete impl
+///   for this callable (genuinely generic / not a trait method). Nothing to
+///   enforce → `Ok(())`.
+/// - both present and **equal** — the expected path under coherence → `Ok(())`.
+/// - both present and **differ** — a determinism violation: monomorphization
+///   picked a *different* impl than type-checking. Returns the offending pair so
+///   the caller can raise a hard, precise diagnostic (never silently proceed).
+///
+/// This is its own pure function so the (otherwise un-triggerable under
+/// coherence) violation branch is unit-testable directly — a source-level
+/// mismatch is not constructible in valid Fe (coherence guarantees a single
+/// valid impl per concrete trait inst, and re-resolution with identical inputs
+/// is deterministic), so the assertion is a defensive invariant that earns its
+/// keep when rung 3.4 broadens "provision" and could re-resolve differently.
+pub fn check_reresolution_determinism<'db>(
+    typeck_selected: Option<ImplementorId<'db>>,
+    mono_resolved: ImplementorId<'db>,
+) -> Result<(), (ImplementorId<'db>, ImplementorId<'db>)> {
+    match typeck_selected {
+        Some(typeck) if typeck != mono_resolved => Err((typeck, mono_resolved)),
+        _ => Ok(()),
+    }
+}
+
 /// Resolves the concrete HIR function that implements `method` for the given
 /// trait instance, returning the function, the impl's instantiated generic
 /// arguments, and the selected implementor (see [`ResolvedTraitMethod`]).
@@ -889,9 +919,68 @@ impl<'db> TraitInstId<'db> {
 mod tests {
     use camino::Utf8PathBuf;
 
-    use super::impls_for_trait_def;
+    use super::{check_reresolution_determinism, impls_for_trait_def};
     use crate::hir_def::ItemKind;
     use crate::test_db::HirAnalysisTestDb;
+
+    /// Rung 3.3: the MIR re-resolution determinism assertion fires on a genuine
+    /// impl mismatch and is a no-op otherwise. A source-level mismatch is NOT
+    /// constructible in valid Fe (coherence guarantees a single valid impl per
+    /// concrete trait inst, and re-resolution with identical inputs is
+    /// deterministic), so we cannot drive this via a `.fe` fixture — we instead
+    /// build two genuinely distinct `ImplementorId`s (two types implementing the
+    /// same trait) and exercise the pure check directly. This keeps the
+    /// otherwise-untriggerable violation branch under test for rung 3.4.
+    #[test]
+    fn reresolution_determinism_check_detects_impl_mismatch() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("reresolution_determinism_check_detects_impl_mismatch.fe"),
+            r#"
+trait Foo {}
+
+struct A {}
+struct B {}
+
+impl Foo for A {}
+impl Foo for B {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let trait_ = top_mod
+            .children_non_nested(&db)
+            .find_map(|item| match item {
+                ItemKind::Trait(trait_)
+                    if trait_
+                        .name(&db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(&db) == "Foo") =>
+                {
+                    Some(trait_)
+                }
+                _ => None,
+            })
+            .expect("missing `Foo` trait");
+
+        let impls = impls_for_trait_def(&db, top_mod.ingot(&db), trait_);
+        assert_eq!(impls.len(), 2, "expected the two distinct `Foo` impls");
+        // Two genuinely distinct implementors (`Foo for A` and `Foo for B`).
+        let impl_a = impls[0].instantiate_identity();
+        let impl_b = impls[1].instantiate_identity();
+        assert_ne!(impl_a, impl_b, "impls of `Foo` for A vs B must differ");
+
+        // Carried `None` (typeck committed nothing concrete) → no assertion.
+        assert!(check_reresolution_determinism(None, impl_a).is_ok());
+        // Carried and re-resolved agree (the coherent path) → no assertion.
+        assert!(check_reresolution_determinism(Some(impl_a), impl_a).is_ok());
+        // Carried and re-resolved DIFFER → the hard-fail branch, returning the
+        // offending pair (mapped to `LowerError::NondeterministicReResolution`
+        // at the MIR site, never a silent divergence / panic).
+        assert_eq!(
+            check_reresolution_determinism(Some(impl_a), impl_b),
+            Err((impl_a, impl_b)),
+        );
+    }
 
     #[test]
     fn trait_env_collects_overlapping_constrained_impls_without_cycle() {

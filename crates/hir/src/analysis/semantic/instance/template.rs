@@ -184,9 +184,8 @@ impl<'db> ImplEnv<'db> {
     }
 
     /// The impl typeck committed to at instantiation time, if this `ImplEnv`
-    /// belongs to a resolved trait-method instance. Carry-context for rung 3.3;
-    /// not consulted in rung 3.2.
-    #[allow(dead_code)]
+    /// belongs to a resolved trait-method instance. Consumed by the rung-3.3 MIR
+    /// re-resolution determinism assertion (`classify.rs::resolve_runtime_call_key`).
     pub fn selected_implementor(&self, _db: &'db dyn HirAnalysisDb) -> Option<ImplementorId<'db>> {
         self.selected_implementor
     }

@@ -16,7 +16,7 @@ use hir::analysis::{
         corelib::runtime_builtin_func_kind,
         normalize::normalize_ty,
         provider::registered_root_providers,
-        trait_def::{TraitInstId, resolve_trait_method_instance},
+        trait_def::{TraitInstId, check_reresolution_determinism, resolve_trait_method_instance},
         trait_resolution::{PredicateListId, TraitSolveCx},
         ty_check::{BodyOwner, EffectParamSite, EffectPassMode, LocalBinding, ParamSite},
         ty_def::{CapabilityKind, TyData, TyId, strip_derived_adt_layout_args},
@@ -2293,11 +2293,29 @@ pub(crate) fn resolve_runtime_call_key<'db>(
                 .unwrap_or_else(|| "<none>".to_string()),
         )));
     };
-    // `resolved.implementor` is the impl this MIR re-resolution selected. Rung
-    // 3.2 does NOT consult it here: the instantiation-time choice is already
-    // carried on the instance's `ImplEnv` (via `const_ref.rs`) and reachable
-    // from this site; rung 3.3 will compare the two. Nothing below depends on
-    // the implementor, so the new return type only changes how func/args bind.
+    // DETERMINISM ASSERTION (rung 3.3): `resolved.implementor` is the impl this
+    // MIR re-resolution selected. The impl typeck committed to at
+    // instantiation time is carried on the *callee* instance's `ImplEnv` (set in
+    // `const_ref.rs::semantic_callee_key_with_assumptions` via
+    // `with_selected_implementor`, which is exactly the instance referenced by
+    // `callee_key` here — built by `provisional_semantic_callee_key`). Under
+    // coherence these always agree, so this never fires on valid Fe; if it
+    // fires, MIR has re-resolved to a *different* impl than type-checking — a
+    // real determinism violation that must hard-fail, never silently lower
+    // against the wrong impl. This locks the invariant before rung 3.4 broadens
+    // "provision" (a broadened resolver that diverges at mono is caught here).
+    // Carried `None` (typeck did not commit a concrete impl) → no assertion (the
+    // pure check returns `Ok`). See `check_reresolution_determinism`.
+    if let Err((typeck_implementor, mono_implementor)) =
+        check_reresolution_determinism(impl_env.selected_implementor(db), resolved.implementor)
+    {
+        return Err(crate::runtime::LowerError::NondeterministicReResolution(format!(
+            "internal: monomorphization re-resolved trait method `{}` to a different impl than type-checking selected: \
+             typeck={typeck_implementor:?} mono={mono_implementor:?} concrete_inst={} caller={caller_key:?} callee={callee_key:?}",
+            method_name.data(db),
+            concrete_inst.pretty_print(db, false),
+        )));
+    }
     let impl_func = resolved.func;
     let mut impl_args = resolved.impl_args;
     let trait_arg_len = concrete_inst.args(db).len();
