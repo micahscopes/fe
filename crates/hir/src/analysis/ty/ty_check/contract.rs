@@ -144,7 +144,8 @@ fn check_recv_variant_param_types_decodable<'db>(
     let Some(decode_trait) = resolve_core_trait(db, contract.scope(), &["abi", "Decode"]) else {
         return;
     };
-    let solve_cx = TraitSolveCx::new(db, contract.scope()).with_assumptions(assumptions);
+    let solve_cx =
+        super::env::ProvisionEnv::for_scope(contract.scope(), assumptions).solve_cx(db);
 
     for field_ty in variant.ty.field_types(db) {
         check_ty_decodable(

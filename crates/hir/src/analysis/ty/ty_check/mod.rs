@@ -66,7 +66,7 @@ use super::{
     term::{TermId, lower_hir_to_term, normalize_term, substitute_term},
     trait_def::{ImplementorOrigin, TraitInstId},
     trait_resolution::{
-        CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitGoalSolution, TraitSolveCx,
+        CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitGoalSolution,
         is_goal_query_satisfiable, is_goal_satisfiable,
     },
     ty_contains_const_hole,
@@ -743,7 +743,11 @@ impl<'db> TyChecker<'db> {
                         if matches!(
                             is_goal_satisfiable(
                                 self.db,
-                                TraitSolveCx::new(self.db, contract.scope()),
+                                env::ProvisionEnv::for_scope(
+                                    contract.scope(),
+                                    PredicateListId::empty_list(self.db),
+                                )
+                                .solve_cx(self.db),
                                 trait_req
                             ),
                             GoalSatisfiability::UnSat(_) | GoalSatisfiability::ContainsInvalid
@@ -4843,7 +4847,11 @@ impl<'db> TyCheckerFinalizer<'db> {
             return;
         }
 
-        let solve_cx = TraitSolveCx::new(self.db, self.body.body.unwrap().scope());
+        let solve_cx = env::ProvisionEnv::for_scope(
+            self.body.body.unwrap().scope(),
+            PredicateListId::empty_list(self.db),
+        )
+        .solve_cx(self.db);
         if let Some(diag) = ty.emit_wf_diag(self.db, solve_cx, self.assumptions, span) {
             self.diags.push(diag.into());
         }
