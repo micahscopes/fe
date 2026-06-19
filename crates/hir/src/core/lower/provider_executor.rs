@@ -273,6 +273,18 @@ pub(super) enum GenExpr<'db> {
         ty: TypeId<'db>,
         name: IdentId<'db>,
     },
+    /// `<ty as Trait>::NAME` — a qualified reference to an associated const of
+    /// an *arbitrary* (non-goal) trait on `ty`, e.g. `<FieldTy as AbiSize>::HEAD_SIZE`
+    /// emitted by an `Encode` provider. `trait_path` is the canonical
+    /// (import-resolved) trait path, so synthesis spells a qualifier that
+    /// resolves in the generated impl's scope regardless of the user module's
+    /// imports. (The goal-trait case uses the shorter `TraitConst`, which can
+    /// also spell `Self::NAME`.)
+    QualifiedConst {
+        ty: TypeId<'db>,
+        trait_path: PathId<'db>,
+        name: IdentId<'db>,
+    },
     /// `receiver.method(args..)` — a method call on a generated expression.
     MethodCall {
         receiver: GenExprId,
@@ -1997,11 +2009,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
     }
 
     /// Elaborates a quote-body `<Ty as Trait>::CONST` qualified associated-const
-    /// access (DEVX-B R1) to [`GenExpr::TraitConst`]. Synthesis replays it via
-    /// `goal_item_path`, which spells the qualifier as `<ty as GoalTrait>` — so
-    /// the trait written in the quote must resolve to the provider's goal trait.
-    /// A different trait cannot be represented by `GenExpr::TraitConst` and is
-    /// rejected with a precise diagnostic rather than silently mis-qualified.
+    /// access (DEVX-B). The goal trait uses [`GenExpr::TraitConst`] (synthesis
+    /// can spell the qualifier as `<ty as GoalTrait>` or `Self::CONST`); any
+    /// other trait uses [`GenExpr::QualifiedConst`], which carries the canonical
+    /// (import-resolved) trait path so synthesis emits a qualifier that resolves
+    /// in the generated impl's scope.
     fn elab_qualified_const(
         &mut self,
         expr: ExprId,
@@ -2030,19 +2042,21 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 written_last.is_some() && written_last == goal_last
             }
         };
-        if !matches {
-            let detail = format!(
-                "`<Ty as {}>::{}` reads an associated const of `{}`, but a derive provider can \
-                 only qualify by its goal trait `{}`; rewrite the access to use the goal trait \
-                 (or `Self`)",
-                trait_.pretty_print(self.db),
-                name.data(self.db),
-                trait_.pretty_print(self.db),
-                self.goal_trait_path.pretty_print(self.db),
-            );
-            return Err(self.invalid_quote(expr, &detail));
+        if matches {
+            // The goal trait: the shorter `TraitConst` (synthesis can spell
+            // `Self::NAME` for the `Self` type).
+            Ok(self.push_gen(GenExpr::TraitConst { ty, name }))
+        } else {
+            // An arbitrary (non-goal) trait, e.g. `<FieldTy as AbiSize>::HEAD_SIZE`
+            // from an `Encode` provider. Carry the canonical trait path so
+            // synthesis emits `<ty as CanonicalTrait>::NAME`, which resolves in
+            // the generated impl's scope regardless of the user module's imports.
+            Ok(self.push_gen(GenExpr::QualifiedConst {
+                ty,
+                trait_path: written_path,
+                name,
+            }))
         }
-        Ok(self.push_gen(GenExpr::TraitConst { ty, name }))
     }
 
     /// The value captured for a hole expression when its quote was built.

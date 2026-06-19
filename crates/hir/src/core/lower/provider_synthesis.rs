@@ -337,6 +337,26 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let path = self.goal_item_path(db, *ty, *name);
                 body.path_expr(path)
             }
+            GenExpr::QualifiedConst {
+                ty,
+                trait_path,
+                name,
+            } => {
+                // `<ty as CanonicalTrait>::name` — an arbitrary (non-goal) trait
+                // const. The canonical trait path resolves in the generated
+                // impl's scope; unlike `TraitConst` there is no `Self` shorthand.
+                let trait_ref = TraitRefId::new(db, Partial::Present(*trait_path));
+                let path = PathId::new(
+                    db,
+                    PathKind::QualifiedType {
+                        type_: *ty,
+                        trait_: trait_ref,
+                    },
+                    None,
+                )
+                .push_ident(db, *name);
+                body.path_expr(path)
+            }
             GenExpr::MethodCall {
                 receiver,
                 method,

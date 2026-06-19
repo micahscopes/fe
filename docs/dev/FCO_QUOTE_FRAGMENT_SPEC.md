@@ -24,16 +24,21 @@ provider pressure — not one-off hacks (the fossilization risk).
 | `lhs > rhs` | `GenExpr::GtCmp` → `BinOp::Comp(Gt)` | **StableOrd** |
 | `receiver.method(args)` (non-generic) | `GenExpr::MethodCall` | builder calls |
 | `match scrut { arms }` + `${variant}(group)` pat holes | `GenExpr::Match` / `VariantBinder` | StableEq enum branch |
-| `<Ty as Trait>::CONST` (qualified assoc-const access) | `GenExpr::TraitConst` | **DEVX-B R1** (read a goal-trait assoc const, e.g. `<Self as HasK>::K`) |
+| `<Ty as Trait>::CONST` (qualified assoc-const access) | `GenExpr::TraitConst` (goal trait) / `GenExpr::QualifiedConst` (any other trait) | **DEVX-B** (e.g. `<FieldTy as AbiSize>::HEAD_SIZE` from an `Encode` provider) |
 | struct/variant init, tuple, keccak, trait_call, static_call | corresponding `GenExpr` | builder commands |
 
-**`<Ty as Trait>::CONST` (DEVX-B R1).** A qualified path whose final segment is a
-bare associated-const name and whose qualifier is a single `<Ty as Trait>` segment
-elaborates to `GenExpr::TraitConst { ty, name }`. Synthesis replays it via
-`goal_item_path`, which spells the qualifier as `<ty as GoalTrait>` (or `Self::CONST`
-when `ty` is `Self`) — so `Trait` must resolve to the provider's **goal trait**; a
-different trait cannot be represented and is rejected with a precise diagnostic. The
-method form `<Ty as Trait>::method(args)` is NOT yet supported (it is a call whose
+**`<Ty as Trait>::CONST` (DEVX-B).** A qualified path whose final segment is a bare
+associated-const name and whose qualifier is a single `<Ty as Trait>` segment reads
+an associated const of *any* trait. Two cases:
+- **`Trait` is the provider's goal trait** → `GenExpr::TraitConst { ty, name }`;
+  synthesis replays via `goal_item_path`, spelling `<ty as GoalTrait>` (or the
+  `Self::CONST` shorthand when `ty` is `Self`).
+- **`Trait` is any other trait** (R1b) → `GenExpr::QualifiedConst { ty, trait_path, name }`,
+  where `trait_path` is the **canonical** (import-resolved, via `canonical_trait_path`)
+  trait path; synthesis spells `<ty as CanonicalTrait>::name`, which resolves in the
+  generated impl's scope regardless of the user module's imports (no `Self` shorthand).
+
+The method form `<Ty as Trait>::method(args)` is NOT yet supported (it is a call whose
 callee is a qualified path, not a bare `Expr::Path`; see DEVX-B R2).
 
 **Comparisons are the operators (`<`/`>`), NOT `.lt()`/`.gt()` method calls.**
@@ -46,8 +51,8 @@ require `u256: Ord<Point>`). See commit that added StableOrd.
 - integer literals (`invalid quote: integer literals not supported`)
 - generic method calls (`...generic method calls are not supported`)
 - qualified method calls `<Ty as Trait>::method(args)` (R2, not yet landed) and any
-  multi-segment / non-goal-trait qualified path: a bare-`Expr::Path` must be a single
-  name or a `<Ty as Trait>::CONST` assoc-const access whose `Trait` is the goal trait
+  longer/multi-segment qualified path: a bare-`Expr::Path` must be a single name or a
+  `<Ty as Trait>::CONST` assoc-const access (`Trait` may be any trait, goal or not)
 - `<=`, `>=`, `!=`, arithmetic, bitwise, unary `!`/`-`, and other operators
   (`...operator is not supported in quote bodies (quotes support &&, ||, ==, <, >, and method calls)`)
 - quotes outside a provider body → `8-0084` (`QuoteOutsideProvider`)
