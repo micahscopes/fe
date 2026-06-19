@@ -106,10 +106,61 @@ pub(crate) enum Selection<T> {
     NotFound,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Update)]
+// SALSA-KEY INVARIANT (rung 3.1): `TraitSolveCx` is passed BY VALUE into the
+// `#[salsa::tracked]` fns `check_ty_wf`/`check_trait_inst_wf` (below), where its
+// `Hash`/`Eq` form part of the salsa cache key and its `Update` governs
+// revalidation. `scope` is pure carry-context — nothing in any tracked
+// computation reads it (rung 3.4 will), and it is always functionally
+// determined by `origin_ingot == scope.ingot(db)`. Two contexts that differ
+// ONLY in `scope` therefore produce identical results from every tracked fn, so
+// `scope` MUST be excluded from `PartialEq`/`Eq`/`Hash`/`Update`; otherwise
+// impl-resolution memoization would shatter across distinct scopes sharing an
+// ingot. Hence the manual impls below instead of `#[derive(...)]`.
+#[derive(Debug, Clone, Copy)]
 pub struct TraitSolveCx<'db> {
     origin_ingot: Ingot<'db>,
     assumptions: PredicateListId<'db>,
+    /// Lexical scope the query was raised in. Pure carry-context in rung 3.1 —
+    /// retained for scope-chain provision lookup (innermost-wins) in rung 3.4;
+    /// deliberately excluded from the salsa cache key (see invariant above).
+    scope: ScopeId<'db>,
+}
+
+impl<'db> PartialEq for TraitSolveCx<'db> {
+    fn eq(&self, other: &Self) -> bool {
+        // `scope` excluded — see SALSA-KEY INVARIANT above.
+        self.origin_ingot == other.origin_ingot && self.assumptions == other.assumptions
+    }
+}
+
+impl<'db> Eq for TraitSolveCx<'db> {}
+
+impl<'db> std::hash::Hash for TraitSolveCx<'db> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // `scope` excluded — must stay consistent with `PartialEq` above.
+        self.origin_ingot.hash(state);
+        self.assumptions.hash(state);
+    }
+}
+
+unsafe impl<'db> Update for TraitSolveCx<'db> {
+    unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
+        let old_value = unsafe { &mut *old_pointer };
+        // `scope` excluded from the change decision (consistent with `Eq`): a
+        // context differing only in `scope` is NOT a salsa change. We still
+        // refresh the stored `scope` to the latest value so the carry-context
+        // never goes stale, but report "unchanged" so downstream memoized
+        // results are not invalidated.
+        if old_value.origin_ingot == new_value.origin_ingot
+            && old_value.assumptions == new_value.assumptions
+        {
+            old_value.scope = new_value.scope;
+            false
+        } else {
+            *old_value = new_value;
+            true
+        }
+    }
 }
 
 impl<'db> TraitSolveCx<'db> {
@@ -117,6 +168,7 @@ impl<'db> TraitSolveCx<'db> {
         Self {
             origin_ingot: scope.ingot(db),
             assumptions: PredicateListId::empty_list(db),
+            scope,
         }
     }
 
@@ -133,6 +185,14 @@ impl<'db> TraitSolveCx<'db> {
 
     pub(crate) fn origin_ingot(self) -> Ingot<'db> {
         self.origin_ingot
+    }
+
+    /// The lexical scope this solver context was raised in. Consumed in rung 3.4
+    /// for scope-chain provision lookup (innermost-wins); nothing reads it for
+    /// resolution in rung 3.1, and it is excluded from the salsa cache key.
+    #[allow(dead_code)]
+    pub(crate) fn scope(self) -> ScopeId<'db> {
+        self.scope
     }
 
     pub(crate) fn select_impl(
