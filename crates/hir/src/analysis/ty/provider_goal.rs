@@ -66,6 +66,10 @@ const EVIDENCE_TY: &str = "Evidence";
 /// The canonical last-segment name of the builder type
 /// (`core::derive::ImplBuilder`).
 const IMPL_BUILDER_TY: &str = "ImplBuilder";
+/// The canonical last-segment name of the unforgeable override-capability type
+/// (`core::derive::Fix`, FCO increment B1a). Recognition of this name is gated by
+/// the full `core::derive::Fix` resolved identity, never by the bare spelling.
+const FIX_TY: &str = "Fix";
 
 /// A `core::derive` capability/witness type recognized at a goal position by
 /// RESOLVED IDENTITY (not by a bare head-identifier string). The position
@@ -393,6 +397,49 @@ fn scope_is_derive_capability<'db>(
     module_is_derive && in_core
 }
 
+/// Whether `def_scope` is the definition scope of the canonical unforgeable
+/// override-capability type `core::derive::Fix` (FCO increment B1a). Mirrors
+/// [`scope_is_derive_capability`] EXACTLY — name `Fix`, parent module `derive`,
+/// `core` ingot — so it inherits the same resolved-identity guarantee.
+///
+/// UNFORGEABILITY (type-confusion blocked). Recognition is the full resolved
+/// `core::derive::Fix` identity, NOT the bare spelling: all three of
+///   1. the type's own name is `Fix`,
+///   2. its parent module is `derive`, and
+///   3. that module lives in the `core` ingot (`IngotKind::Core`)
+/// must hold. A user type merely *named* `Fix` — in any other module or ingot,
+/// imported or not — fails check (2) and/or (3), so it resolves to a DIFFERENT
+/// `def_scope` and is granted ZERO override authority. The companion proof that
+/// no `Fix<T>` value can be CONSTRUCTED (private field, no ctor, not in prelude)
+/// lives on the `Fix` type in `ingots/core/src/derive.fe`.
+///
+/// INERT (FCO B1a): this is the recognition primitive only. Nothing in the
+/// production path consumes it yet — the override gate that turns "scope holds a
+/// `core::derive::Fix`" into authority is increment B1b, and minting-at-root /
+/// the `fixed` tier are A2 / B2. The unit test
+/// `scope_is_fix_capability_keys_on_core_identity_not_name` exercises both the
+/// positive (`core::derive::Fix`) and negative (a local `struct Fix<T>`) cases.
+// removal target: wired by B1b gate (the consumer that reads this recognition).
+#[allow(dead_code)]
+fn scope_is_fix_capability<'db>(db: &'db dyn HirAnalysisDb, def_scope: ScopeId<'db>) -> bool {
+    use common::ingot::IngotKind;
+
+    let name_matches = def_scope
+        .name(db)
+        .is_some_and(|name| name.data(db) == FIX_TY);
+    if !name_matches {
+        return false;
+    }
+    let Some(module) = def_scope.parent_module(db) else {
+        return false;
+    };
+    let module_is_derive = module
+        .name(db)
+        .is_some_and(|name| name.data(db) == DERIVE_MODULE);
+    let in_core = module.top_mod(db).ingot(db).kind(db) == IngotKind::Core;
+    module_is_derive && in_core
+}
+
 /// If `hir_ty` is an `Evidence<goal>` / `ImplBuilder<goal>` capability/witness
 /// position (after stripping an own/mut mode wrapper) whose head resolves to the
 /// canonical capability type `expected`, return its single inner goal HIR type.
@@ -500,4 +547,83 @@ fn is_constraint_ctor(kind: &Kind) -> bool {
         Kind::Abs(inner)
             if inner.0.does_match(&Kind::Star) && inner.1.does_match(&Kind::Constraint)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+
+    use super::scope_is_fix_capability;
+    use crate::{
+        analysis::name_resolution::{PathRes, resolve_path},
+        analysis::ty::trait_resolution::PredicateListId,
+        hir_def::PathId,
+        test_db::HirAnalysisTestDb,
+    };
+
+    /// Resolve `path` (as segment strings) from `text`'s file scope to its
+    /// definition scope, asserting it resolves to a TYPE (anti-vacuous: a `None`
+    /// would make either polarity of the recognition test pass for free).
+    fn resolve_to_def_scope(
+        db: &mut HirAnalysisTestDb,
+        file_name: &str,
+        text: &str,
+        path: &[&str],
+    ) -> bool {
+        let file = db.new_stand_alone(Utf8PathBuf::from(file_name), text);
+        let (top_mod, _) = db.top_mod(file);
+        let scope = top_mod.scope();
+        let assumptions = PredicateListId::empty_list(db);
+        let path_id = PathId::from_segments(db, path);
+        let ty = match resolve_path(db, path_id, scope, assumptions, false) {
+            Ok(PathRes::Ty(ty)) | Ok(PathRes::TyAlias(_, ty)) => ty,
+            res => panic!("expected {path:?} to resolve to a type, got {res:?}"),
+        };
+        let def_scope = ty
+            .as_scope(db)
+            .unwrap_or_else(|| panic!("{path:?} resolved type has no def scope"));
+        scope_is_fix_capability(db, def_scope)
+    }
+
+    /// The crown-jewel unforgeability property (type-confusion arm): override
+    /// authority keys on the FULL resolved `core::derive::Fix` identity
+    /// (name + `derive` module + `core` ingot), NEVER on the bare spelling.
+    ///
+    /// Positive: the canonical `core::derive::Fix` resolves to the `core`-ingot
+    /// capability scope and IS recognized.
+    ///
+    /// Negative (anti-vacuous): a LOCAL `struct Fix<T>` declared in the fixture,
+    /// with NO `use core::derive::Fix`, resolves to a DIFFERENT def scope (wrong
+    /// parent module / wrong ingot) and is NOT recognized — the identical `Fix`
+    /// spelling grants ZERO authority. The `resolve_to_def_scope` helper asserts
+    /// each path resolves to a real type, so neither arm can pass vacuously.
+    #[test]
+    fn scope_is_fix_capability_keys_on_core_identity_not_name() {
+        let mut db = HirAnalysisTestDb::default();
+
+        // Positive: the canonical capability type, by its absolute `core` path.
+        let recognized = resolve_to_def_scope(
+            &mut db,
+            "fix_capability_positive.fe",
+            "struct Anchor {}\n",
+            &["core", "derive", "Fix"],
+        );
+        assert!(
+            recognized,
+            "core::derive::Fix must be recognized as the Fix override capability"
+        );
+
+        // Negative: a like-named LOCAL type, no import — same spelling, no authority.
+        let mut db = HirAnalysisTestDb::default();
+        let recognized_local = resolve_to_def_scope(
+            &mut db,
+            "fix_capability_negative.fe",
+            "struct Fix<T> { x: T }\n",
+            &["Fix"],
+        );
+        assert!(
+            !recognized_local,
+            "a local `struct Fix<T>` (not core::derive::Fix) must be granted no authority"
+        );
+    }
 }

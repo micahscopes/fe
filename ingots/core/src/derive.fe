@@ -51,6 +51,34 @@ pub struct Evidence<G: Constraint> {
     handle: u256
 }
 
+/// Unforgeable override capability for a constraint `T` (FCO increment B1a).
+///
+/// `Fix<T>` is the compile-time TOKEN that authorizes overriding the canonical
+/// resolution of the constraint `T` (the "fixed" tier). This increment adds the
+/// type ONLY — it is INERT: nothing mints it, nothing consumes its authority yet
+/// (minting-at-root, the override gate, shadowing, and the `fixed` tier are later
+/// increments B1b / A2 / B2). It exists now so the compiler can recognize the
+/// capability by RESOLVED IDENTITY (`core::derive::Fix`) ahead of that wiring.
+///
+/// UNFORGEABILITY (construction blocked). Like `Evidence` / `ImplBuilder`, `Fix`
+/// has ONLY a private field (`handle: u256`) and NO public constructor, and it is
+/// deliberately NOT in the prelude. Therefore no ordinary expression — in any
+/// ingot — can mint a `Fix<T>` value: there is no `Fix { .. }` literal it can
+/// write (the field is private) and no associated/free constructor to call. A
+/// `Fix<T>` can only ever be bound as a compile-time value by the compiler
+/// itself (the mint-at-root step is B1b). This is the same proof shape that makes
+/// `Evidence` unforgeable; capture/propagation of the bound capability is B1b's
+/// concern and out of scope here.
+///
+/// `T` is a CONSTRAINT (the obligation being overridden), not an ordinary
+/// `*`-kinded type, so its param is `Constraint`-kinded — i.e.
+/// `Fix : Constraint -> *` (mirrors `Evidence` / `ImplBuilder`, FCO K04b). A
+/// saturated concrete constraint (`Eq<T>`) lowers through the ordinary type walk
+/// to a `Constraint`-kinded `ConstraintTerm`.
+pub struct Fix<T: Constraint> {
+    handle: u256
+}
+
 /// The derive-provider trait. A provider `impl Name: Derive for P` (with goal
 /// `P` a `* -> Constraint` trait constructor) declares the canonical `derive`
 /// fn the expansion stage runs to produce evidence for the goal `P<T>`.
