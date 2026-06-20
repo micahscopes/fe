@@ -89,7 +89,19 @@ x-0…x-4 ladder in step 2. Scope shrinks: x-3 narrows overlay #5 (not deletes);
 3. **THE PUSH — one first-match walk + `fixed`/`Fix` gating (NEW behavior; PROVEN).** Make `ProvisionEnv` the
    actual scope-chain walk: impl table = companion/outermost tier, effect frames = inner tiers, innermost-wins
    first-match — **this IS scoped shadowing** (the measured non-byte-identical step), and it collapses systems
-   #1 (solver) and #2 (effect env) into the one walk. Add the `fixed`/canonical non-overridable tier; the
+   #1 (solver) and #2 (effect env) into the one walk.
+   **MEASURED (2026-06-20, Half-A blast radius):** near-ZERO fixture churn — the 4 `5-0001` coherence fixtures are
+   all *same-tier* (two top-level impls) → stay conflicts under "outermost tier ≤1 provision," stay green; body
+   `AmbiguousTraitInst` fixtures = 0. No existing fixture encodes inner-vs-outer shadowing → the new behavior is
+   purely ADDITIVE (new fixtures only). Rails READY: typeck + MIR re-resolution both funnel through `select_impl`,
+   so a scoped override written into `ImplEnv.selected_implementor` is determinism-covered for free. The REAL work
+   is two non-fixture risks: (1) **salsa-key inversion** — `scope` is deliberately EXCLUDED from the solver key
+   today (cut-1 carry, `trait_resolution/mod.rs:109-164`); a real scoped walk makes results scope-dependent → the
+   key must change, incrementality blast radius build-only-measurable; (2) **PS5 canonical markers must land WITH
+   coherence demotion** (the money gate). #1 = collect-all proof forest (`proof_forest.rs:178`), #2
+   (`effect_env.rs:162`) already first-match; the merge makes the impl table the outermost tier of one lexical
+   walk. Sequence: gated mechanism-flip (companion tier reproduces today) → PS5 markers + companion-tier coherence
+   (delete global `ConflictTraitImpl`) → shadowing fixtures. Add the `fixed`/canonical non-overridable tier; the
    `Fix<T>` capability (A1 narrow `Evidence`-clone; `Fix<*>`-as-kind master — ∀ over Constraint, instantiate-
    only, never solved) gating overrides via the `fix` verb; and **demote `ConflictTraitImpl` into the canonical
    tier — delete the global checker** (coherence = placement). **Money-soundness ⇒ provable** — FV obligations
