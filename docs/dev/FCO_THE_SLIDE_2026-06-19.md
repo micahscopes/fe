@@ -60,6 +60,21 @@ merging flips `Ambiguous`→`Unique` = the new behavior. **The push's true shape
 selections downstream + coherence-as-placement/PS5 — a real design, money-soundness-bearing, NOT a wiring flip. The
 byte-identical runway ENDS at x-3a/b; the push is the supervised new-behavior phase.
 
+**HIR-QUERY VERDICT + CACHE-SAFE DESIGN (2026-06-20, Micah's "query-based compiler" steer):** the scope-graph
+ancestry, the impl tier (`ingot_trait_env`), and the assumptions tier ARE pure salsa queries — so they need NOT
+enter a scoped key. The `with`/effect tier is the ONE that resists: its provision payload `ProvidedEffect.ty` is a
+mid-inference result (`check_with`→`check_expr_unknown`→`fold_ty`, `expr.rs:1167-1181`) and the `With` expr is not
+scope-graph-sited (`lower/expr.rs`), so it can't be a `(scope)` query — but that's fine, `with` is a use-site
+phenomenon by nature, and downstream legitimately resolves one tier down (impl table) on the recorded
+`selected_implementor`. **Decisive payoff: do NOT add `scope` to the tracked solver key (`is_query_satisfiable:357`)
+— that would shatter the whole solver cache. Resolve the scoped `with`-tier override at the VERIFY-LEG
+(`expr.rs:2331`, scope already a param, OUTSIDE the tracked solve). Cache blast radius confined to the new override
+layer; the impl-table query stays ingot-keyed.** Increment ladder: A1 companion-tier entry-unification
+(behavior-preserving) → A2 scoped shadowing (new, additive) → A3 coherence demotion → B1 `Fix` capability
+(the PS5/MONEY increment) → B2 the `fixed`/`fix` gate. A2/A3 must NOT enable shadowing of a canonical goal before
+B1's gate exists. v1 canonical set (picked, narrow, tunable marker): storage-layout (`StorageKey::write_key`),
+ABI-layout, consensus `Ord`/`Hash`.
+
 1. **Construction SSOT (byte-identical) — IN PROGRESS.** Fold every hand-rolled `TraitSolveCx` construction onto
    the one `ProvisionEnv` (cut-1 + seam-1 done; ~25 clean sites remain in `diagnosable.rs`, `core/semantic`,
    `analysis/ty/*`). Unifies *how* the solver context is built so the eventual walk is a one-place flip. Does
