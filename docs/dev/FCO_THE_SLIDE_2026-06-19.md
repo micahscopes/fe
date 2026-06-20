@@ -49,6 +49,17 @@ the executor is a **backend** ("single pathway, multiple backends" — the impl-
 to merge. The stratum collapses by *staging* (skeleton upstream / bodies downstream), not engine fusion — see the
 x-0…x-4 ladder in step 2. Scope shrinks: x-3 narrows overlay #5 (not deletes); CapabilityEnv #4 is NOT eaten here.
 
+**CORRECTION 3 (measured 2026-06-20, P1 build attempt — STOPPED clean, no changes):** there is NO byte-identical
+pre-step to the walk flip. Verified: **(Wall 1)** trait resolution is invoked from ~28 sites incl. MIR re-resolution
+(`mir/.../classify.rs:2280`, `synthetic.rs:1520`, `package.rs:1657`) and context-poor hir sites that have NO
+`TyCheckEnv`/effect-frames — only `(scope, assumptions)` (`ProvisionEnv`, `trait_resolution/mod.rs:171-174`); the
+lexical scope-chain (effect frames) lives only in `TyCheckEnv.effect_env` (`env.rs:739`). ⇒ the scoped walk can ONLY
+run at use-sites; downstream MUST be **record-driven** (the cut-1 `ImplEnv.selected_implementor` rail), never re-walk
+with scope. **(Wall 2)** #1 is collect-all (load-bearing for the `5-0001` coherence diagnostics), #2 is first-match —
+merging flips `Ambiguous`→`Unique` = the new behavior. **The push's true shape:** use-site scoped walk + recorded
+selections downstream + coherence-as-placement/PS5 — a real design, money-soundness-bearing, NOT a wiring flip. The
+byte-identical runway ENDS at x-3a/b; the push is the supervised new-behavior phase.
+
 1. **Construction SSOT (byte-identical) — IN PROGRESS.** Fold every hand-rolled `TraitSolveCx` construction onto
    the one `ProvisionEnv` (cut-1 + seam-1 done; ~25 clean sites remain in `diagnosable.rs`, `core/semantic`,
    `analysis/ty/*`). Unifies *how* the solver context is built so the eventual walk is a one-place flip. Does
