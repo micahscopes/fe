@@ -1269,11 +1269,20 @@ impl<'db> TyChecker<'db> {
     /// `Evidence<Eq<T>>`) is recognized by RESOLVED identity. The first provision
     /// whose witnessed constraint unifies with `goal` discharges it.
     ///
-    /// Returns `Some(solution)` when discharged — the inner solution is `None`
-    /// because the provision IS the evidence (no impl-table `TraitGoalSolution`
-    /// is selected), so MIR re-resolution sees a discharge record with no
-    /// committed impl and the [`DischargeRoute::ScopedProvision`] route. Returns
-    /// `None` when no provision matches, leaving the impl-table solve to run.
+    /// Returns `Some(solution)` when discharged — and the inner solution is now
+    /// always `Some(TraitGoalSolution { .. })` carrying the REAL global `Hir`
+    /// [`ImplementorId`] the matching provision named (cascade C2). This closes
+    /// the former `Some(None)` floor: every scoped discharge records a concrete
+    /// impl, so the cascade's recorded selection (consumed by MIR under C1) is
+    /// real end-to-end and never re-resolved into a future ambiguity. The route
+    /// stays [`DischargeRoute::ScopedProvision`]. Returns `None` when no provision
+    /// matches, leaving the impl-table solve to run.
+    ///
+    /// A provision that unifies but carries no impl (`selected_implementor` is
+    /// `None`) is NOT treated as a match — discharge requires the real impl. No
+    /// real provision is ever `Evidence`-typed today (the snapshot is always
+    /// empty until cascade C3), so this never fires on real code; the synthetic
+    /// 1a unit test is the only producer of a carrying provision.
     ///
     /// Unification commits its bindings only on a match (`UnificationTable::unify`
     /// rolls back on failure), so a non-matching provision never perturbs
@@ -1291,10 +1300,19 @@ impl<'db> TyChecker<'db> {
             else {
                 continue;
             };
+            // The cascade soundness floor: a scoped discharge MUST carry the real
+            // impl the provision names. A provision missing it cannot discharge.
+            let Some(implementor) = provided.selected_implementor else {
+                continue;
+            };
             if self.table.unify(witnessed, goal).is_ok() {
-                // The provision discharges the goal. No impl-table solution is
-                // committed: the in-scope `Evidence` value is the evidence.
-                return Some(None);
+                // The provision discharges the goal, recording the REAL global
+                // `Hir` implementor it names as the committed solution (the
+                // post-unify `goal` is its trait instance) — never `Some(None)`.
+                return Some(Some(TraitGoalSolution {
+                    inst: goal,
+                    implementor,
+                }));
             }
         }
         None
@@ -4992,7 +5010,7 @@ mod scoped_provision_tests {
         analysis::{
             name_resolution::{PathRes, resolve_path},
             ty::{
-                trait_def::TraitInstId,
+                trait_def::{ImplementorId, TraitInstId, impls_for_trait_def},
                 trait_resolution::PredicateListId,
                 ty_check::env::{EffectOrigin, EffectParamSite, ProvidedEffect},
                 ty_def::TyId,
@@ -5003,10 +5021,13 @@ mod scoped_provision_tests {
         test_db::HirAnalysisTestDb,
     };
 
-    /// A fixture with an `Eq`/`Ord` bound function and a `Point` struct that has
-    /// NO `impl Eq` / `impl Ord` in scope — so the only way an `Eq<Point>` /
-    /// `Ord<Point>` goal can be discharged is FROM a scoped provision, never from
-    /// the impl table.
+    /// A fixture with an `Eq` bound function, a `Point` struct, and a real
+    /// `impl Eq for Point` (the global `Hir` impl whose [`ImplementorId`] a scoped
+    /// provision names under cascade C2), but NO `impl Ord for Point` — so an
+    /// `Ord<Point>` goal can only ever come from a provision, exercising the
+    /// negative arm against the impl table.
+    ///
+    /// [`ImplementorId`]: crate::analysis::ty::trait_def::ImplementorId
     const FIXTURE: &str = r#"
 use core::ops::Eq
 use core::ops::Ord
@@ -5014,6 +5035,12 @@ use core::ops::Ord
 struct Point {
     x: u256,
     y: u256,
+}
+
+impl Eq for Point {
+    fn eq(self, _ other: Point) -> bool {
+        self.x == other.x
+    }
 }
 
 fn requires_eq<T: Eq>(_ t: T) {}
@@ -5051,10 +5078,38 @@ fn requires_eq<T: Eq>(_ t: T) {}
             .unwrap_or_else(|| panic!("missing `{name}` function"))
     }
 
-    /// The headline mechanism (FCO increment 1a): a deferred trait obligation
-    /// whose snapshot carries an in-scope `Evidence<Eq<Point>>` provision is
-    /// discharged FROM that provision — even though NO `impl Eq for Point` exists
-    /// — and records the `ScopedProvision` route. The negative arm proves the
+    /// The REAL global `Hir` [`ImplementorId`] of the sole `impl <trait_inst.def>`
+    /// for `subject` in `top_mod`'s ingot — e.g. `impl Eq for Point` — looked up
+    /// through the same impl table the trait solver uses. This is what a scoped
+    /// provision names under cascade C2; the unit test carries it so the discharge
+    /// records a concrete `TraitGoalSolution` rather than the old `Some(None)`.
+    fn sole_implementor<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: crate::hir_def::TopLevelMod<'db>,
+        trait_inst: TraitInstId<'db>,
+        subject: TyId<'db>,
+    ) -> ImplementorId<'db> {
+        let impls = impls_for_trait_def(db, top_mod.ingot(db), trait_inst.def(db));
+        let mut matching = impls
+            .iter()
+            .map(|binder| binder.instantiate_identity())
+            .filter(|implementor| implementor.self_ty(db) == subject);
+        let implementor = matching
+            .next()
+            .unwrap_or_else(|| panic!("expected a real impl of the trait for the subject type"));
+        assert!(
+            matching.next().is_none(),
+            "expected exactly one impl for the subject type",
+        );
+        implementor
+    }
+
+    /// The headline mechanism (FCO increment 1a + cascade C2): a deferred trait
+    /// obligation whose snapshot carries an in-scope `Evidence<Eq<Point>>`
+    /// provision — naming the REAL `impl Eq for Point` — is discharged FROM that
+    /// provision (consulted before the impl table), recording the `ScopedProvision`
+    /// route AND a concrete `TraitGoalSolution` whose implementor is that real
+    /// impl (never the old `Some(None)` floor). The negative arm proves the
     /// discharge is goal-specific: the same `Evidence<Eq<Point>>` does NOT
     /// discharge an unrelated `Ord<Point>` goal.
     #[test]
@@ -5103,6 +5158,11 @@ fn requires_eq<T: Eq>(_ t: T) {}
             "the recognizer must peel Evidence<Eq<Point>> to Eq<Point>",
         );
 
+        // The REAL global `Hir` implementor the provision names: `impl Eq for
+        // Point`. Cascade C2 carries this onto the provision so the discharge
+        // records it as the committed solution (not `Some(None)`).
+        let eq_point_impl = sole_implementor(&db, top_mod, eq_inst, point_ty);
+
         let requires_eq = find_func(&db, top_mod, "requires_eq");
         let provision = ProvidedEffect {
             origin: EffectOrigin::Param {
@@ -5113,6 +5173,7 @@ fn requires_eq<T: Eq>(_ t: T) {}
             ty: evidence_eq_point,
             is_mut: false,
             binding: None,
+            selected_implementor: Some(eq_point_impl),
         };
 
         let make_obligation = |goal| env::TraitObligation {
@@ -5124,27 +5185,39 @@ fn requires_eq<T: Eq>(_ t: T) {}
 
         // POSITIVE: the obligation goal `Eq<Point>` is witnessed by the snapshot
         // provision, so it discharges FROM the provision via `ScopedProvision` —
-        // never consulting the (empty) impl table.
+        // recording the REAL `impl Eq for Point` implementor the provision names
+        // as the committed solution (cascade C2: never `Some(None)`).
         {
             let mut tc = TyChecker::new(&db, super::BodyOwner::Func(requires_eq))
                 .expect("requires_eq is checkable");
             let outcome = tc.discharge_from_scoped_provision(eq_point, &make_obligation(eq_point));
+            let solution = outcome
+                .expect("Evidence<Eq<Point>> must discharge an Eq<Point> goal")
+                .expect("the scoped discharge must record a concrete solution, not Some(None)");
             assert_eq!(
-                outcome,
-                Some(None),
-                "Evidence<Eq<Point>> must discharge an Eq<Point> goal (no impl-table solution)",
+                solution.implementor, eq_point_impl,
+                "the recorded implementor must be the REAL `impl Eq for Point`",
+            );
+            assert_eq!(
+                solution.inst, eq_point,
+                "the recorded solution's trait inst must be the discharged Eq<Point> goal",
             );
 
-            // Full processing path: the outcome carries the ScopedProvision route.
+            // Full processing path: the outcome carries the ScopedProvision route
+            // AND the concrete solution naming the real implementor.
             let mut tc = TyChecker::new(&db, super::BodyOwner::Func(requires_eq))
                 .expect("requires_eq is checkable");
             let outcome = tc.process_trait_obligation(make_obligation(eq_point), false);
-            assert!(
-                matches!(
-                    outcome,
-                    TraitObligationOutcome::Discharged(None, DischargeRoute::ScopedProvision)
-                ),
-                "processing must discharge Eq<Point> via the ScopedProvision route",
+            let TraitObligationOutcome::Discharged(Some(solution), DischargeRoute::ScopedProvision) =
+                outcome
+            else {
+                panic!(
+                    "processing must discharge Eq<Point> via the ScopedProvision route with a concrete solution",
+                );
+            };
+            assert_eq!(
+                solution.implementor, eq_point_impl,
+                "the processed discharge must record the REAL `impl Eq for Point`",
             );
         }
 

@@ -1178,6 +1178,10 @@ impl<'db> TyChecker<'db> {
                 ty: self.table.fold_ty(self.db, value_prop.ty),
                 is_mut,
                 binding: value_prop.binding,
+                // The `with`-binding surface that mints a REAL `Evidence`
+                // provision carrying its impl is cascade C3; today every
+                // `with` provision records no impl (latent).
+                selected_implementor: None,
             };
 
             match binding.key_path {

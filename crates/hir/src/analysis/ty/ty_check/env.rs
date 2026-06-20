@@ -35,7 +35,7 @@ use crate::analysis::{
         },
         fold::{TyFoldable, TyFolder},
         provider::ProviderAddressSpace,
-        trait_def::TraitInstId,
+        trait_def::{ImplementorId, TraitInstId},
         trait_resolution::{
             PredicateListId,
             constraint::{
@@ -1124,6 +1124,7 @@ impl<'db> TyChecker<'db> {
                     .unwrap_or_else(|| self.env.lookup_binding_ty(&local_binding)),
                 is_mut: local_binding.is_mut(),
                 binding: Some(local_binding),
+                selected_implementor: None,
             };
 
             if let Some(req) = EffectRequirementDecl::from_effect_requirement(self.db, binding)
@@ -1182,6 +1183,7 @@ impl<'db> TyChecker<'db> {
                 .unwrap_or_else(|| self.env.lookup_binding_ty(&local_binding)),
             is_mut: binding.is_mut,
             binding: Some(local_binding),
+            selected_implementor: None,
         })
     }
 
@@ -1370,6 +1372,20 @@ pub(crate) struct ProvidedEffect<'db> {
     pub ty: TyId<'db>,
     pub is_mut: bool,
     pub binding: Option<LocalBinding<'db>>,
+    /// For an `Evidence`-typed scoped provision (FCO "slide"), the REAL global
+    /// `Hir` [`ImplementorId`] of the impl the provision names — the impl that
+    /// discharges the witnessed goal. Carried so [`discharge_from_scoped_provision`]
+    /// records a concrete [`TraitGoalSolution`] (never the old `Some(None)` floor),
+    /// making the cascade's recorded selection real end-to-end (cascade C2).
+    ///
+    /// `None` for every ordinary effect provider AND for every real provision
+    /// today: nothing mints an `Evidence` value into a `with` yet (the surface is
+    /// cascade C3), so the only producer of a `Some` here is the synthetic 1a
+    /// unit test. Excluded from no key — the snapshot never enters a salsa key.
+    ///
+    /// [`discharge_from_scoped_provision`]: super::TyChecker::discharge_from_scoped_provision
+    /// [`TraitGoalSolution`]: crate::analysis::ty::trait_resolution::TraitGoalSolution
+    pub selected_implementor: Option<ImplementorId<'db>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
