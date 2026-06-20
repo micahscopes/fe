@@ -45,9 +45,10 @@ use crate::{
         name_resolution::{ExpectedPathKind, PathRes, resolve_path},
         ty::{
             diagnostics::{TraitConstraintDiag, TyDiagCollection},
+            trait_def::TraitInstId,
             trait_lower::lower_hir_constraint_application,
             trait_resolution::PredicateListId,
-            ty_def::Kind,
+            ty_def::{Kind, TyData, TyId},
         },
     },
     hir_def::{
@@ -395,6 +396,40 @@ fn scope_is_derive_capability<'db>(
         .is_some_and(|name| name.data(db) == DERIVE_MODULE);
     let in_core = module.top_mod(db).ingot(db).kind(db) == IngotKind::Core;
     module_is_derive && in_core
+}
+
+/// If `ty` is a saturated `core::derive::Evidence<G>` witness value — recognized
+/// by the RESOLVED identity of its head ADT (the same `core` ingot + `derive`
+/// module + `Evidence` name check as [`scope_is_derive_capability`], NOT the bare
+/// spelling) and whose single type argument `G` is a concrete `ConstraintTerm` —
+/// return the inner constraint goal `G`'s [`TraitInstId`].
+///
+/// This is the TYPE-LEVEL (`TyId`) sibling of [`capability_position_inner`],
+/// which recognizes the same position on a HIR type. It is the recognition
+/// primitive the obligation processor uses to peel a snapshotted in-scope
+/// `Evidence`-typed scoped provision down to the constraint it witnesses (FCO
+/// "slide" step 3 / THE PUSH, increment 1a). Returns `None` for any other type,
+/// for a like-named user `Evidence`, or when the witnessed argument is not a
+/// concrete constraint term (e.g. still an inference var or unsaturated).
+pub(crate) fn evidence_witnessed_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<TraitInstId<'db>> {
+    let (head, args) = ty.decompose_ty_app(db);
+    // `Evidence<G>` is applied to exactly one argument: the witnessed goal.
+    let [goal_arg] = args else {
+        return None;
+    };
+    let def_scope = head.as_scope(db)?;
+    if !scope_is_derive_capability(db, def_scope, CapabilityTy::Evidence) {
+        return None;
+    }
+    // The witnessed argument must be a concrete, saturated constraint term
+    // (`Eq<T>` in type position), never an inference var or unsaturated ctor.
+    match goal_arg.data(db) {
+        TyData::ConstraintTerm(inst) => Some(*inst),
+        _ => None,
+    }
 }
 
 /// Whether `def_scope` is the definition scope of the canonical unforgeable

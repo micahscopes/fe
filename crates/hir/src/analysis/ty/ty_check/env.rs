@@ -740,6 +740,30 @@ impl<'db> TyCheckEnv<'db> {
         &self.effect_env
     }
 
+    /// Captures the innermost-first snapshot of the in-scope `Evidence`-typed
+    /// scoped provisions for a trait obligation raised at the current point in
+    /// the body walk (FCO "slide" step 3 / THE PUSH, increment 1a).
+    ///
+    /// Of every live provision (across all `with` / `uses` frames), only those
+    /// whose type is a saturated `core::derive::Evidence<G>` — recognized by
+    /// RESOLVED identity, never the bare spelling — are kept; the rest (ordinary
+    /// effect providers) are irrelevant to obligation discharge and dropped here.
+    /// The result is stored on the [`TraitObligation`] so the processor can
+    /// consult it after the effect frames have been popped.
+    ///
+    /// TODAY THIS ALWAYS RETURNS EMPTY: nothing can place an `Evidence` value
+    /// into a `with` yet (it is unforgeable — increment 1b), so no live provision
+    /// is `Evidence`-typed and the snapshot is always `[]`.
+    pub(super) fn snapshot_evidence_provisions(&self) -> Vec<ProvidedEffect<'db>> {
+        self.effect_env
+            .snapshot_provisions()
+            .into_iter()
+            .filter(|provided| {
+                super::super::provider_goal::evidence_witnessed_goal(self.db, provided.ty).is_some()
+            })
+            .collect()
+    }
+
     pub(super) fn push_call_effect_arg(
         &mut self,
         call_expr: ExprId,
@@ -1641,6 +1665,20 @@ pub(super) struct TraitObligation<'db> {
     pub goal: TraitInstId<'db>,
     pub origin: TraitObligationOrigin<'db>,
     pub span: DynLazySpan<'db>,
+    /// An innermost-first snapshot of the `Evidence`-typed scoped provisions in
+    /// scope at the site where this obligation was raised (FCO "slide" step 3 /
+    /// THE PUSH, increment 1a). Trait obligations are resolved LAZILY — after the
+    /// whole body walk, by which point every `with` / `uses` effect frame has
+    /// been popped — so the in-scope provisions must be carried onto the
+    /// obligation here, at enqueue time, to be consulted at processing time.
+    ///
+    /// Captured from the live effect env (via
+    /// [`snapshot_evidence_provisions`](TyCheckEnv::snapshot_evidence_provisions))
+    /// at each enqueue site. TODAY THIS IS ALWAYS EMPTY: there is no surface to
+    /// put an `Evidence` value into a `with` yet (`Evidence` is unforgeable —
+    /// that is increment 1b), so the discharge-from-provision path never fires on
+    /// real code and existing behavior is byte-identical.
+    pub scoped_provisions: Vec<ProvidedEffect<'db>>,
 }
 
 /// Where a const-predicate obligation processed during type checking was

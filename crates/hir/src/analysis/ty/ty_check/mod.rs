@@ -525,8 +525,11 @@ enum TraitObligationOutcome<'db> {
     /// The obligation was retired. Carries the solution the solver committed
     /// to, or `None` when the obligation was retired without committing to
     /// evidence (rolled-back inference, invalid goals, or ambiguity and
-    /// unsatisfiability that were reported as diagnostics instead).
-    Discharged(Option<TraitGoalSolution<'db>>),
+    /// unsatisfiability that were reported as diagnostics instead), plus the
+    /// [`DischargeRoute`] that retired it (the ordinary trait-solver path is
+    /// [`DischargeRoute::ImplTable`]; discharge from an in-scope scoped provision
+    /// is [`DischargeRoute::ScopedProvision`]).
+    Discharged(Option<TraitGoalSolution<'db>>, DischargeRoute),
     Progressed,
     Requeue(env::TraitObligation<'db>),
 }
@@ -1259,6 +1262,44 @@ impl<'db> TyChecker<'db> {
         }
     }
 
+    /// Tries to discharge `goal` FROM one of the in-scope scoped provisions
+    /// captured onto `obligation` at enqueue time (FCO "slide" step 3 / THE
+    /// PUSH, increment 1a). The provisions are consulted innermost-first; each is
+    /// an `Evidence`-typed value whose witnessed constraint (the `Eq<T>` inside
+    /// `Evidence<Eq<T>>`) is recognized by RESOLVED identity. The first provision
+    /// whose witnessed constraint unifies with `goal` discharges it.
+    ///
+    /// Returns `Some(solution)` when discharged — the inner solution is `None`
+    /// because the provision IS the evidence (no impl-table `TraitGoalSolution`
+    /// is selected), so MIR re-resolution sees a discharge record with no
+    /// committed impl and the [`DischargeRoute::ScopedProvision`] route. Returns
+    /// `None` when no provision matches, leaving the impl-table solve to run.
+    ///
+    /// Unification commits its bindings only on a match (`UnificationTable::unify`
+    /// rolls back on failure), so a non-matching provision never perturbs
+    /// inference. This consultation is deliberately OUTSIDE the tracked
+    /// `is_goal_query_satisfiable` solve — the scope-carried snapshot never enters
+    /// a salsa key, so the solve cache stays scope-free.
+    fn discharge_from_scoped_provision(
+        &mut self,
+        goal: TraitInstId<'db>,
+        obligation: &env::TraitObligation<'db>,
+    ) -> Option<Option<TraitGoalSolution<'db>>> {
+        let db = self.db;
+        for provided in &obligation.scoped_provisions {
+            let Some(witnessed) = super::provider_goal::evidence_witnessed_goal(db, provided.ty)
+            else {
+                continue;
+            };
+            if self.table.unify(witnessed, goal).is_ok() {
+                // The provision discharges the goal. No impl-table solution is
+                // committed: the in-scope `Evidence` value is the evidence.
+                return Some(None);
+            }
+        }
+        None
+    }
+
     fn process_trait_obligation(
         &mut self,
         mut obligation: env::TraitObligation<'db>,
@@ -1268,14 +1309,28 @@ impl<'db> TyChecker<'db> {
         let assumptions = self.env.assumptions();
 
         if self.has_dead_inference_keys(&obligation.goal) {
-            return TraitObligationOutcome::Discharged(None);
+            return TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable);
         }
 
         obligation.goal = self.normalize_trait_goal(obligation.goal);
         let goal = obligation.goal;
         let flags = collect_flags(db, goal);
         if flags.contains(TyFlags::HAS_INVALID) || self.has_dead_inference_keys(&goal) {
-            return TraitObligationOutcome::Discharged(None);
+            return TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable);
+        }
+
+        // FCO "slide" step 3 / THE PUSH (increment 1a): before consulting the
+        // global impl table, try to discharge the goal FROM an in-scope scoped
+        // provision captured onto this obligation at enqueue time. Each
+        // `Evidence`-typed provision witnesses a concrete constraint; if that
+        // witnessed constraint unifies with this (normalized) goal, the provision
+        // IS the evidence and the impl-table solve is skipped entirely. The
+        // consultation happens HERE, before/outside the tracked
+        // `is_goal_query_satisfiable` solve, so the solve cache stays scope-free.
+        // (TODAY the snapshot is always empty — `Evidence` is unforgeable until
+        // increment 1b — so this loop never fires on real code.)
+        if let Some(solution) = self.discharge_from_scoped_provision(goal, &obligation) {
+            return TraitObligationOutcome::Discharged(solution, DischargeRoute::ScopedProvision);
         }
 
         let solve_cx = self.env.provision_env().solve_cx(db);
@@ -1284,13 +1339,13 @@ impl<'db> TyChecker<'db> {
             GoalSatisfiability::Satisfied(solution) => {
                 let solved = query.extract_solution(&mut self.table, solution);
                 if self.has_dead_inference_keys(&solved) {
-                    return TraitObligationOutcome::Discharged(None);
+                    return TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable);
                 }
                 self.table.unify(goal, solved.inst).unwrap();
                 if self.normalize_trait_goal(goal) != goal {
                     TraitObligationOutcome::Progressed
                 } else {
-                    TraitObligationOutcome::Discharged(Some(solved))
+                    TraitObligationOutcome::Discharged(Some(solved), DischargeRoute::ImplTable)
                 }
             }
             GoalSatisfiability::NeedsConfirmation(ambiguous) => {
@@ -1307,7 +1362,7 @@ impl<'db> TyChecker<'db> {
                     if unified && self.normalize_trait_goal(goal) != goal {
                         TraitObligationOutcome::Progressed
                     } else {
-                        TraitObligationOutcome::Discharged(unified.then_some(solution))
+                        TraitObligationOutcome::Discharged(unified.then_some(solution), DischargeRoute::ImplTable)
                     }
                 } else {
                     if final_pass && self.trait_goal_is_concrete_for_diagnostics(goal) {
@@ -1327,11 +1382,11 @@ impl<'db> TyChecker<'db> {
                                 .collect(),
                             required_by,
                         });
-                        return TraitObligationOutcome::Discharged(None);
+                        return TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable);
                     }
 
                     if final_pass {
-                        TraitObligationOutcome::Discharged(None)
+                        TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable)
                     } else {
                         TraitObligationOutcome::Requeue(obligation)
                     }
@@ -1356,14 +1411,14 @@ impl<'db> TyChecker<'db> {
                             required_by,
                         },
                     ));
-                    TraitObligationOutcome::Discharged(None)
+                    TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable)
                 } else if final_pass {
-                    TraitObligationOutcome::Discharged(None)
+                    TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable)
                 } else {
                     TraitObligationOutcome::Requeue(obligation)
                 }
             }
-            GoalSatisfiability::ContainsInvalid => TraitObligationOutcome::Discharged(None),
+            GoalSatisfiability::ContainsInvalid => TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable),
         }
     }
 
@@ -1376,6 +1431,7 @@ impl<'db> TyChecker<'db> {
         origin: env::TraitObligationOrigin<'db>,
         goal: TraitInstId<'db>,
         solution: Option<TraitGoalSolution<'db>>,
+        route: DischargeRoute,
     ) {
         if self.has_dead_inference_keys(&goal) {
             return;
@@ -1384,6 +1440,7 @@ impl<'db> TyChecker<'db> {
             origin,
             goal,
             solution,
+            route,
         });
     }
 
@@ -1602,10 +1659,12 @@ impl<'db> TyChecker<'db> {
         {
             return;
         }
+        let scoped_provisions = self.env.snapshot_evidence_provisions();
         self.env.register_trait_obligation(env::TraitObligation {
             goal: inst,
             origin: env::TraitObligationOrigin::GenericConfirmation,
             span,
+            scoped_provisions,
         });
     }
 
@@ -1799,8 +1858,8 @@ impl<'db> TyChecker<'db> {
                         let goal = obligation.goal;
                         let span = obligation.span.clone();
                         match self.process_trait_obligation(obligation, false) {
-                            TraitObligationOutcome::Discharged(solution) => {
-                                self.record_discharged_obligation(origin, goal, solution);
+                            TraitObligationOutcome::Discharged(solution, route) => {
+                                self.record_discharged_obligation(origin, goal, solution, route);
                                 if let Some(solution) = solution {
                                     self.gate_selected_impl_const_predicates(goal, solution, span);
                                 }
@@ -1893,10 +1952,13 @@ impl<'db> TyChecker<'db> {
                                 };
 
                                 if candidate.needs_confirmation {
+                                    let scoped_provisions =
+                                        self.env.snapshot_evidence_provisions();
                                     self.env.register_trait_obligation(env::TraitObligation {
                                         goal: inst,
                                         origin: env::TraitObligationOrigin::GenericConfirmation,
                                         span: call_span.clone().into(),
+                                        scoped_provisions,
                                     });
                                 }
 
@@ -1991,10 +2053,10 @@ impl<'db> TyChecker<'db> {
                     let origin = obligation.origin;
                     let goal = obligation.goal;
                     let span = obligation.span.clone();
-                    if let TraitObligationOutcome::Discharged(solution) =
+                    if let TraitObligationOutcome::Discharged(solution, route) =
                         self.process_trait_obligation(obligation, true)
                     {
-                        self.record_discharged_obligation(origin, goal, solution);
+                        self.record_discharged_obligation(origin, goal, solution, route);
                         if let Some(solution) = solution {
                             self.gate_selected_impl_const_predicates(goal, solution, span);
                         }
@@ -3147,6 +3209,11 @@ pub struct DischargedObligation<'db> {
     /// obligation was retired without committing to evidence (e.g. ambiguity
     /// or unsatisfiability already reported as a diagnostic).
     pub solution: Option<TraitGoalSolution<'db>>,
+    /// The discharge mechanism that committed this goal. The ordinary
+    /// trait-solver path records [`DischargeRoute::ImplTable`]; a goal discharged
+    /// from an in-scope `Evidence`-typed scoped provision records
+    /// [`DischargeRoute::ScopedProvision`] (FCO increment 1a).
+    pub route: DischargeRoute,
 }
 
 impl<'db> TyVisitable<'db> for DischargedObligation<'db> {
@@ -3170,6 +3237,7 @@ impl<'db> TyFoldable<'db> for DischargedObligation<'db> {
             origin: self.origin,
             goal: self.goal.fold_with(db, folder),
             solution: self.solution.map(|solution| solution.fold_with(db, folder)),
+            route: self.route,
         }
     }
 }
@@ -3191,6 +3259,17 @@ pub enum DischargeRoute {
     /// against an in-scope `where`-clause assumption of the caller (no CTFE,
     /// no implication, no direction flipping, no boolean splitting).
     Assumption,
+    /// A trait goal was discharged by the trait solver selecting an impl from
+    /// the global impl table (the ordinary trait-impl-selection route). The
+    /// committed impl, when one was recorded, rides in the obligation's
+    /// `solution`.
+    ImplTable,
+    /// A trait goal was discharged FROM an in-scope scoped provision: an
+    /// `Evidence`-typed `with`/`uses` provision, captured onto the obligation at
+    /// enqueue time, whose witnessed constraint unified with the obligation goal
+    /// (FCO "slide" step 3 / THE PUSH, increment 1a). The impl table is NOT
+    /// consulted on this route — the provision IS the evidence.
+    ScopedProvision,
 }
 
 /// A discharge's dependency on another checked fact.
@@ -4902,4 +4981,185 @@ pub(crate) fn ty_const_predicate_violation<'db>(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod scoped_provision_tests {
+    use camino::Utf8PathBuf;
+
+    use super::{DischargeRoute, TraitObligationOutcome, TyChecker, env};
+    use crate::{
+        analysis::{
+            name_resolution::{PathRes, resolve_path},
+            ty::{
+                trait_def::TraitInstId,
+                trait_resolution::PredicateListId,
+                ty_check::env::{EffectOrigin, EffectParamSite, ProvidedEffect},
+                ty_def::TyId,
+            },
+        },
+        hir_def::{Func, PathId},
+        span::DynLazySpan,
+        test_db::HirAnalysisTestDb,
+    };
+
+    /// A fixture with an `Eq`/`Ord` bound function and a `Point` struct that has
+    /// NO `impl Eq` / `impl Ord` in scope — so the only way an `Eq<Point>` /
+    /// `Ord<Point>` goal can be discharged is FROM a scoped provision, never from
+    /// the impl table.
+    const FIXTURE: &str = r#"
+use core::ops::Eq
+use core::ops::Ord
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+fn requires_eq<T: Eq>(_ t: T) {}
+"#;
+
+    /// Resolve a path (as segment strings) from `top_mod`'s file scope to whatever
+    /// it names, panicking if it does not resolve.
+    fn resolve<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod_scope: crate::hir_def::scope_graph::ScopeId<'db>,
+        segments: &[&str],
+    ) -> PathRes<'db> {
+        let path = PathId::from_segments(db, segments);
+        resolve_path(db, path, top_mod_scope, PredicateListId::empty_list(db), false)
+            .unwrap_or_else(|e| panic!("expected {segments:?} to resolve, got {e:?}"))
+    }
+
+    /// Build the concrete trait instance `<subject>: <trait><subject>` (e.g.
+    /// `Point: Eq<Point>`), exactly the saturated `[Self, T]` arg shape a real
+    /// `T: Eq` constraint instantiates to when `T := Point`.
+    fn concrete_inst<'db>(
+        db: &'db HirAnalysisTestDb,
+        trait_inst: TraitInstId<'db>,
+        subject: TyId<'db>,
+    ) -> TraitInstId<'db> {
+        TraitInstId::new_simple(db, trait_inst.def(db), vec![subject, subject])
+    }
+
+    fn find_func<'db>(db: &'db HirAnalysisTestDb, top_mod: crate::hir_def::TopLevelMod<'db>, name: &str) -> Func<'db> {
+        top_mod
+            .all_funcs(db)
+            .iter()
+            .copied()
+            .find(|f| f.name(db).to_opt().is_some_and(|n| n.data(db) == name))
+            .unwrap_or_else(|| panic!("missing `{name}` function"))
+    }
+
+    /// The headline mechanism (FCO increment 1a): a deferred trait obligation
+    /// whose snapshot carries an in-scope `Evidence<Eq<Point>>` provision is
+    /// discharged FROM that provision — even though NO `impl Eq for Point` exists
+    /// — and records the `ScopedProvision` route. The negative arm proves the
+    /// discharge is goal-specific: the same `Evidence<Eq<Point>>` does NOT
+    /// discharge an unrelated `Ord<Point>` goal.
+    #[test]
+    fn evidence_provision_discharges_matching_goal_only() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("scoped_provision_discharge.fe"),
+            FIXTURE,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let scope = top_mod.scope();
+
+        // Resolve the canonical `core::derive::Evidence` ADT ctor and the
+        // `core::ops::Eq` / `core::ops::Ord` traits by RESOLVED identity.
+        let PathRes::Ty(evidence_ctor) = resolve(&db, scope, &["core", "derive", "Evidence"])
+        else {
+            panic!("core::derive::Evidence must resolve to a type");
+        };
+        let PathRes::Trait(eq_inst) = resolve(&db, scope, &["core", "ops", "Eq"]) else {
+            panic!("core::ops::Eq must resolve to a trait");
+        };
+        let PathRes::Trait(ord_inst) = resolve(&db, scope, &["core", "ops", "Ord"]) else {
+            panic!("core::ops::Ord must resolve to a trait");
+        };
+        let PathRes::Ty(point_ty) = resolve(&db, scope, &["Point"]) else {
+            panic!("Point must resolve to a type");
+        };
+
+        let eq_point = concrete_inst(&db, eq_inst, point_ty);
+        let ord_point = concrete_inst(&db, ord_inst, point_ty);
+
+        // The in-scope provision value's type: a saturated `Evidence<Eq<Point>>`
+        // (the `Eq<Point>` goal as a `ConstraintTerm`, applied to the `Evidence`
+        // ctor) — exactly the witness shape increment 1b will mint at a `with`.
+        let eq_constraint_term = TyId::constraint_term(&db, eq_point);
+        let evidence_eq_point = TyId::app(&db, evidence_ctor, eq_constraint_term);
+
+        // Anti-vacuous: the recognizer must peel this synthetic witness back to
+        // the `Eq<Point>` it witnesses, by resolved `core::derive::Evidence`
+        // identity. (If this returned `None`, the whole discharge path is dead
+        // and both polarities below would pass for free.)
+        assert_eq!(
+            super::super::provider_goal::evidence_witnessed_goal(&db, evidence_eq_point),
+            Some(eq_point),
+            "the recognizer must peel Evidence<Eq<Point>> to Eq<Point>",
+        );
+
+        let requires_eq = find_func(&db, top_mod, "requires_eq");
+        let provision = ProvidedEffect {
+            origin: EffectOrigin::Param {
+                site: EffectParamSite::Func(requires_eq),
+                index: 0,
+                name: None,
+            },
+            ty: evidence_eq_point,
+            is_mut: false,
+            binding: None,
+        };
+
+        let make_obligation = |goal| env::TraitObligation {
+            goal,
+            origin: env::TraitObligationOrigin::GenericConfirmation,
+            span: DynLazySpan::invalid(),
+            scoped_provisions: vec![provision],
+        };
+
+        // POSITIVE: the obligation goal `Eq<Point>` is witnessed by the snapshot
+        // provision, so it discharges FROM the provision via `ScopedProvision` —
+        // never consulting the (empty) impl table.
+        {
+            let mut tc = TyChecker::new(&db, super::BodyOwner::Func(requires_eq))
+                .expect("requires_eq is checkable");
+            let outcome = tc.discharge_from_scoped_provision(eq_point, &make_obligation(eq_point));
+            assert_eq!(
+                outcome,
+                Some(None),
+                "Evidence<Eq<Point>> must discharge an Eq<Point> goal (no impl-table solution)",
+            );
+
+            // Full processing path: the outcome carries the ScopedProvision route.
+            let mut tc = TyChecker::new(&db, super::BodyOwner::Func(requires_eq))
+                .expect("requires_eq is checkable");
+            let outcome = tc.process_trait_obligation(make_obligation(eq_point), false);
+            assert!(
+                matches!(
+                    outcome,
+                    TraitObligationOutcome::Discharged(None, DischargeRoute::ScopedProvision)
+                ),
+                "processing must discharge Eq<Point> via the ScopedProvision route",
+            );
+        }
+
+        // NEGATIVE: the same `Evidence<Eq<Point>>` provision must NOT discharge an
+        // unrelated `Ord<Point>` goal — the discharge is keyed on the witnessed
+        // constraint's identity, not "any provision discharges anything".
+        {
+            let mut tc = TyChecker::new(&db, super::BodyOwner::Func(requires_eq))
+                .expect("requires_eq is checkable");
+            let outcome =
+                tc.discharge_from_scoped_provision(ord_point, &make_obligation(ord_point));
+            assert_eq!(
+                outcome, None,
+                "Evidence<Eq<Point>> must NOT discharge an Ord<Point> goal",
+            );
+        }
+    }
 }

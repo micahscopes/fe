@@ -778,6 +778,7 @@ impl<'db> Callable<'db> {
                 continue;
             }
 
+            let scoped_provisions = tc.env.snapshot_evidence_provisions();
             tc.env
                 .register_trait_obligation(super::env::TraitObligation {
                     goal: constraint,
@@ -787,6 +788,7 @@ impl<'db> Callable<'db> {
                         constraint_idx,
                     },
                     span: span.clone(),
+                    scoped_provisions,
                 });
         }
 

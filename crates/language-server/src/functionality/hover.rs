@@ -285,6 +285,10 @@ fn discharged_const_predicates_footer<'db>(
             let route = match discharged.route {
                 DischargeRoute::Ctfe => "CTFE",
                 DischargeRoute::Assumption => "an assumption",
+                // Trait-obligation routes; const predicates never take these, but
+                // the match is wildcard-free so a new route is a compile error.
+                DischargeRoute::ImplTable => "the impl table",
+                DischargeRoute::ScopedProvision => "a scoped provision",
             };
             let args = discharged
                 .generic_args

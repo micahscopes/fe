@@ -3204,10 +3204,12 @@ impl<'db> TyChecker<'db> {
             MethodCandidate::NeedsConfirmation(cand) => {
                 let inst = canonical_r_ty.extract_solution(&mut self.table, cand.inst);
                 let inst = self.specialize_same_trait_method_inst(method_name, inst);
+                let scoped_provisions = self.env.snapshot_evidence_provisions();
                 self.env.register_trait_obligation(TraitObligation {
                     goal: inst,
                     origin: TraitObligationOrigin::GenericConfirmation,
                     span: call_span.clone().into(),
+                    scoped_provisions,
                 });
                 let func_ty =
                     self.instantiate_trait_method_to_term(cand.method, selected_receiver_ty, inst);
@@ -3483,10 +3485,13 @@ impl<'db> TyChecker<'db> {
                                 inst
                             };
                             if matches!(candidate, MethodCandidate::NeedsConfirmation(_)) {
+                                let scoped_provisions =
+                                    self.env.snapshot_evidence_provisions();
                                 self.env.register_trait_obligation(TraitObligation {
                                     goal: inst,
                                     origin: TraitObligationOrigin::GenericConfirmation,
                                     span: path_expr_span.clone().into(),
+                                    scoped_provisions,
                                 });
                             }
                             let method_ty = if cand.method.is_method(self.db) {
@@ -3578,10 +3583,12 @@ impl<'db> TyChecker<'db> {
                         trait_inst
                     };
 
+                    let scoped_provisions = self.env.snapshot_evidence_provisions();
                     self.env.register_trait_obligation(TraitObligation {
                         goal: inst,
                         origin: TraitObligationOrigin::GenericConfirmation,
                         span: path_expr_span.clone().into(),
+                        scoped_provisions,
                     });
 
                     let func_ty = self.instantiate_trait_assoc_fn_to_term(
@@ -3621,10 +3628,12 @@ impl<'db> TyChecker<'db> {
                     // panics during semantic lowering. (For generic receivers
                     // the obligation is discharged by an in-scope `where`
                     // bound, exactly like the sibling assoc-fn arm above.)
+                    let scoped_provisions = self.env.snapshot_evidence_provisions();
                     self.env.register_trait_obligation(TraitObligation {
                         goal: inst,
                         origin: TraitObligationOrigin::GenericConfirmation,
                         span: path_expr_span.clone().into(),
+                        scoped_provisions,
                     });
 
                     self.env.register_const_ref(
@@ -4331,10 +4340,12 @@ impl<'db> TyChecker<'db> {
             ) => {
                 let inst = c_lhs_ty.extract_solution(&mut self.table, cand.inst);
                 if matches!(res, MethodCandidate::NeedsConfirmation(_)) {
+                    let scoped_provisions = self.env.snapshot_evidence_provisions();
                     self.env.register_trait_obligation(TraitObligation {
                         goal: inst,
                         origin: TraitObligationOrigin::GenericConfirmation,
                         span: expr.span(self.body()).into(),
+                        scoped_provisions,
                     });
                 }
 
@@ -4405,10 +4416,12 @@ impl<'db> TyChecker<'db> {
                         let candidate = viable.pop().unwrap();
                         let inst = c_lhs_ty.extract_solution(&mut self.table, candidate.cand.inst);
                         if candidate.needs_confirmation {
+                            let scoped_provisions = self.env.snapshot_evidence_provisions();
                             self.env.register_trait_obligation(TraitObligation {
                                 goal: inst,
                                 origin: TraitObligationOrigin::GenericConfirmation,
                                 span: expr.span(self.body()).into(),
+                                scoped_provisions,
                             });
                         }
                         let func_ty = self.instantiate_trait_method_to_term(
