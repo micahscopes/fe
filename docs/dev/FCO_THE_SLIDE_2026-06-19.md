@@ -88,6 +88,20 @@ work = the executor↔CTFE crossing:** running a deriver to produce GENUINE (imp
 This same crossing gates sound-1b (real scoped evidence) AND x-3c/d (move generated bodies downstream). It is the
 central remaining hard problem of the slide; the byte-identical runway + the 1a mechanism are the runway up to it.
 
+**CASCADE (coherent cascading shadowing — the sound, near-term path; 2026-06-20):** Micah's target = inner scopes
+shadow outer for a goal, innermost-wins, canonical/`fixed` non-shadowable (money floor). Built SOUNDLY as
+**multiple REAL global impls coexist + scope picks which one, RECORDED so codegen uses it** — NOT scope-local impls
+(verified unneeded: `ImplementorOrigin`=Hir|VirtualContract|Assumption `trait_def.rs:170`; MIR floor
+`classify.rs:2287`; the impl table is already a `Vec` + the solver already multi-solutions). DISTINCT from the
+executor↔CTFE keystone: the cascade SELECTS among existing impls (near-term, sound); the keystone RUNS a deriver to
+GENERATE a new impl (later). Ladder: **C1 LANDED+verified (`64166f6a6`)** — MIR consumes the recorded
+`selected_implementor` as the source (re-resolve only as fallback) + plumbs it forward; byte-identical incl. codegen
+(build_foundry/cli_output/fe-mir). **C2** — the innermost-first discharge records a REAL `ImplementorId` (close the
+live `Some(None)` forge floor, `mod.rs:1297`). **C3** — demote the single global coherence checker
+(`does_impl_trait_conflict`, sole caller `core/semantic/mod.rs:3989`) to allow >1 impl for NON-canonical goals;
+canonical/`fixed` stay exactly-one (the `Fix` floor, B1a's inert recognition wired live here). Order C1→C2→C3 so
+there is never a >1-impl + re-resolve + `Some(None)` ambiguity/money window.
+
 1. **Construction SSOT (byte-identical) — IN PROGRESS.** Fold every hand-rolled `TraitSolveCx` construction onto
    the one `ProvisionEnv` (cut-1 + seam-1 done; ~25 clean sites remain in `diagnosable.rs`, `core/semantic`,
    `analysis/ty/*`). Unifies *how* the solver context is built so the eventual walk is a one-place flip. Does
