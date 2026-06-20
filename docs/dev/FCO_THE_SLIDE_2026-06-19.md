@@ -75,6 +75,19 @@ layer; the impl-table query stays ingot-keyed.** Increment ladder: A1 companion-
 B1's gate exists. v1 canonical set (picked, narrow, tunable marker): storage-layout (`StorageKey::write_key`),
 ABI-layout, consensus `Ord`/`Hash`.
 
+**PUSH PROGRESS (2026-06-20):** **1a LANDED + cold-verified (`22cc20d53`) — the #1+#2 unification MECHANISM is in.**
+A deferred trait obligation can be discharged by an in-scope `Evidence<goal>` provision: snapshot rides the
+obligation to drain-time (`TraitObligation.scoped_provisions`), peeled by resolved `core::derive::Evidence`
+identity, unified, discharged via a new `DischargeRoute::ScopedProvision` (MIR re-resolution sees it). Additive
+(inert until a surface mints `Evidence` into scope), unit-tested, cache stayed scope-free. **1b (the runout that
+ACTIVATES 1a) — NOT landed.** A worktree spike (`172dbd652`) demonstrated the e2e path (a `where Eq<T>` discharging
+from a scoped provision with NO `impl Eq` — the headline visible) but only via a typeck-only FORGE
+(`pub extern fn __derive_evidence<G> -> Evidence<G>`, ungated despite a doc claiming otherwise) that bypasses
+`Evidence` unforgeability. Rejected — we do not bake an unforgeability hole. **THE KEYSTONE for the remaining sound
+work = the executor↔CTFE crossing:** running a deriver to produce GENUINE (impl-backed) evidence at resolution.
+This same crossing gates sound-1b (real scoped evidence) AND x-3c/d (move generated bodies downstream). It is the
+central remaining hard problem of the slide; the byte-identical runway + the 1a mechanism are the runway up to it.
+
 1. **Construction SSOT (byte-identical) — IN PROGRESS.** Fold every hand-rolled `TraitSolveCx` construction onto
    the one `ProvisionEnv` (cut-1 + seam-1 done; ~25 clean sites remain in `diagnosable.rs`, `core/semantic`,
    `analysis/ty/*`). Unifies *how* the solver context is built so the eventual walk is a one-place flip. Does
