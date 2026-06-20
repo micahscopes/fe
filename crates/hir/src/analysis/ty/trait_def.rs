@@ -259,7 +259,55 @@ pub fn resolve_trait_method_instance<'db>(
         Selection::Ambiguous(_ambiguous) => return None,
         Selection::NotFound => return None,
     };
-    // The selected implementor is provenance: carried out for rung 3.2, never
+    resolve_trait_method_against_implementor(db, inst, method, implementor)
+}
+
+/// Reconstructs a [`ResolvedTraitMethod`] for `method` against a **given**
+/// (recorded) implementor, WITHOUT re-running impl selection (`select_impl`).
+///
+/// This is the recorded-source entry point of the FCO "slide" cascade (C1).
+/// When a callee instance carries the implementor typeck's solver committed to
+/// at instantiation time (`ImplEnv::selected_implementor`), MIR consumes that
+/// recorded implementor as the resolution SOURCE instead of re-resolving
+/// through the global impl table.
+///
+/// Normalization of `inst` is performed here, identically to
+/// [`resolve_trait_method_instance`] (`normalization_scope_for_trait_inst` +
+/// `normalize_trait_inst_preserving_validity`), so the subsequent
+/// `trait_inst`-unification is byte-identical to the re-resolve path. The ONLY
+/// difference between the two paths is the source of `implementor`: here it is
+/// the recorded one; in `resolve_trait_method_instance` it is `select_impl`'s
+/// result. Under coherence (today's ≤1-impl invariant, enforced for the
+/// recorded path in MIR by `check_reresolution_determinism`) the recorded
+/// implementor is exactly the one `select_impl` would return, so this produces
+/// the identical `func`/`impl_args`.
+pub fn resolve_trait_method_instance_with_implementor<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    inst: TraitInstId<'db>,
+    method: IdentId<'db>,
+    implementor: ImplementorId<'db>,
+) -> Option<ResolvedTraitMethod<'db>> {
+    let assumptions = solve_cx.assumptions();
+    let norm_scope = solve_cx.normalization_scope_for_trait_inst(db, inst);
+    let inst = normalize_trait_inst_preserving_validity(db, inst, norm_scope, assumptions);
+    resolve_trait_method_against_implementor(db, inst, method, implementor)
+}
+
+/// Shared reconstruction tail of [`resolve_trait_method_instance`] and
+/// [`resolve_trait_method_instance_with_implementor`]: given a concrete
+/// `implementor` and the **already-normalized** trait instance `inst`, build
+/// the [`ResolvedTraitMethod`] (method lookup + fresh-var instantiation +
+/// `trait_inst` unification + param folding / trait-arg fallback). Factored out
+/// so both the `select_impl` path and the recorded-implementor path run the
+/// exact same code, guaranteeing byte-identical `func`/`impl_args`.
+fn resolve_trait_method_against_implementor<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+    method: IdentId<'db>,
+    implementor: ImplementorId<'db>,
+) -> Option<ResolvedTraitMethod<'db>> {
+    // The given implementor is provenance: carried out for rung 3.2, never
     // consulted here (the resolution result below is unchanged from before).
     let selected_implementor = implementor;
     let explicit_method = implementor.methods(db).get(&method).copied();

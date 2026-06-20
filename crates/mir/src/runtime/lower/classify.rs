@@ -16,7 +16,10 @@ use hir::analysis::{
         corelib::runtime_builtin_func_kind,
         normalize::normalize_ty,
         provider::registered_root_providers,
-        trait_def::{TraitInstId, check_reresolution_determinism, resolve_trait_method_instance},
+        trait_def::{
+            TraitInstId, check_reresolution_determinism, resolve_trait_method_instance,
+            resolve_trait_method_instance_with_implementor,
+        },
         trait_resolution::{PredicateListId, TraitSolveCx},
         ty_check::{BodyOwner, EffectParamSite, EffectPassMode, LocalBinding, ParamSite},
         ty_def::{CapabilityKind, TyData, TyId, strip_derived_adt_layout_args},
@@ -2277,45 +2280,82 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         original_inst
     };
     let assumptions = runtime_callee_assumptions(db, caller_key, caller_typed_body);
-    let Some(resolved) = resolve_trait_method_instance(
-        db,
-        TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
-            .with_assumptions(assumptions),
-        concrete_inst,
-        method_name,
-    ) else {
-        return Err(crate::runtime::LowerError::Unsupported(format!(
-            "runtime trait-call resolution failed to resolve a concrete impl body: caller={caller_key:?} decl={callee_key:?} method={} concrete_inst={} original_inst={}",
-            method_name.data(db),
-            concrete_inst.pretty_print(db, false),
-            original_inst
-                .map(|inst| inst.pretty_print(db, false))
-                .unwrap_or_else(|| "<none>".to_string()),
-        )));
-    };
-    // DETERMINISM ASSERTION (rung 3.3): `resolved.implementor` is the impl this
-    // MIR re-resolution selected. The impl typeck committed to at
-    // instantiation time is carried on the *callee* instance's `ImplEnv` (set in
+    // FCO "slide" cascade C1: consume the RECORDED implementor as the resolution
+    // SOURCE where typeck committed one, re-resolve only where it did not.
+    //
+    // `impl_env.selected_implementor(db)` is the impl typeck's solver committed
+    // to at instantiation time (set in
     // `const_ref.rs::semantic_callee_key_with_assumptions` via
-    // `with_selected_implementor`, which is exactly the instance referenced by
-    // `callee_key` here — built by `provisional_semantic_callee_key`). Under
-    // coherence these always agree, so this never fires on valid Fe; if it
-    // fires, MIR has re-resolved to a *different* impl than type-checking — a
-    // real determinism violation that must hard-fail, never silently lower
-    // against the wrong impl. This locks the invariant before rung 3.4 broadens
-    // "provision" (a broadened resolver that diverges at mono is caught here).
-    // Carried `None` (typeck did not commit a concrete impl) → no assertion (the
-    // pure check returns `Ok`). See `check_reresolution_determinism`.
-    if let Err((typeck_implementor, mono_implementor)) =
-        check_reresolution_determinism(impl_env.selected_implementor(db), resolved.implementor)
-    {
-        return Err(crate::runtime::LowerError::NondeterministicReResolution(format!(
-            "internal: monomorphization re-resolved trait method `{}` to a different impl than type-checking selected: \
-             typeck={typeck_implementor:?} mono={mono_implementor:?} concrete_inst={} caller={caller_key:?} callee={callee_key:?}",
-            method_name.data(db),
-            concrete_inst.pretty_print(db, false),
-        )));
-    }
+    // `with_selected_implementor`, on exactly the instance referenced by
+    // `callee_key` here — built by `provisional_semantic_callee_key`).
+    //
+    // - `Some(implementor)` → build `resolved` directly FROM that recorded
+    //   implementor (`resolve_trait_method_instance_with_implementor`), skipping
+    //   `select_impl` entirely. Today there is always ≤1 coexisting impl, so the
+    //   recorded implementor is exactly the one `select_impl` would return and
+    //   this yields the byte-identical `func`/`impl_args`. With the future
+    //   cascade's ≥2 coexisting impls, `select_impl` would go `Ambiguous` →
+    //   `LowerError` → panic; consuming the record avoids re-deciding what
+    //   typeck already decided. No determinism assertion: the record IS the
+    //   source, so there is nothing to compare against.
+    // - `None` (typeck did not commit a concrete impl) → re-resolve EXACTLY as
+    //   before through the global impl table, and keep the rung-3.3 determinism
+    //   assertion (which is `Ok` for `None` anyway, but guards against any
+    //   re-resolution divergence). See `check_reresolution_determinism`.
+    let resolved = if let Some(recorded_implementor) = impl_env.selected_implementor(db) {
+        let Some(resolved) = resolve_trait_method_instance_with_implementor(
+            db,
+            TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
+                .with_assumptions(assumptions),
+            concrete_inst,
+            method_name,
+            recorded_implementor,
+        ) else {
+            return Err(crate::runtime::LowerError::Unsupported(format!(
+                "runtime trait-call resolution failed to reconstruct a concrete impl body from the recorded implementor: caller={caller_key:?} decl={callee_key:?} method={} concrete_inst={} recorded_implementor={recorded_implementor:?}",
+                method_name.data(db),
+                concrete_inst.pretty_print(db, false),
+            )));
+        };
+        resolved
+    } else {
+        let Some(resolved) = resolve_trait_method_instance(
+            db,
+            TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
+                .with_assumptions(assumptions),
+            concrete_inst,
+            method_name,
+        ) else {
+            return Err(crate::runtime::LowerError::Unsupported(format!(
+                "runtime trait-call resolution failed to resolve a concrete impl body: caller={caller_key:?} decl={callee_key:?} method={} concrete_inst={} original_inst={}",
+                method_name.data(db),
+                concrete_inst.pretty_print(db, false),
+                original_inst
+                    .map(|inst| inst.pretty_print(db, false))
+                    .unwrap_or_else(|| "<none>".to_string()),
+            )));
+        };
+        // DETERMINISM ASSERTION (rung 3.3): `resolved.implementor` is the impl
+        // this MIR re-resolution selected. The impl typeck committed to is
+        // carried on the *callee* instance's `ImplEnv`. Under coherence these
+        // always agree, so this never fires on valid Fe; if it fires, MIR has
+        // re-resolved to a *different* impl than type-checking — a real
+        // determinism violation that must hard-fail, never silently lower
+        // against the wrong impl. Carried `None` (this branch) → the pure check
+        // returns `Ok`. See `check_reresolution_determinism`.
+        if let Err((typeck_implementor, mono_implementor)) =
+            check_reresolution_determinism(impl_env.selected_implementor(db), resolved.implementor)
+        {
+            return Err(crate::runtime::LowerError::NondeterministicReResolution(format!(
+                "internal: monomorphization re-resolved trait method `{}` to a different impl than type-checking selected: \
+                 typeck={typeck_implementor:?} mono={mono_implementor:?} concrete_inst={} caller={caller_key:?} callee={callee_key:?}",
+                method_name.data(db),
+                concrete_inst.pretty_print(db, false),
+            )));
+        }
+        resolved
+    };
+    let resolved_implementor = resolved.implementor;
     let impl_func = resolved.func;
     let mut impl_args = resolved.impl_args;
     let trait_arg_len = concrete_inst.args(db).len();
@@ -2334,12 +2374,21 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         BodyOwner::Func(impl_func),
         GenericSubst::new(db, impl_args),
         hir::analysis::semantic::EffectProviderSubst::empty(db),
+        // Gap C: carry the implementor we just resolved into the resolved-body
+        // instance's `ImplEnv` so nested trait calls inside that body inherit a
+        // real record and themselves take the recorded-source path above
+        // (previously this was discarded → nested calls carried `None` and
+        // re-resolved). `selected_implementor` is excluded from `ImplEnv`'s
+        // identity (see the IDENTITY INVARIANT in `template.rs`), so the
+        // interned `SemanticInstanceKey` is byte-identical with or without it —
+        // no codegen-symbol or MIR-output change.
         ImplEnv::new(
             db,
             caller_key.impl_env(db).normalization_scope(db),
             assumptions,
             witnesses.into_iter().collect::<Vec<_>>(),
-        ),
+        )
+        .with_selected_implementor(Some(resolved_implementor)),
     ))
 }
 
