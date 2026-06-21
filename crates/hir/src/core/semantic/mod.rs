@@ -81,7 +81,8 @@ use crate::analysis::ty::layout_holes::{
     substitute_layout_holes_by_identity_in, substitute_layout_placeholders_by_identity,
 };
 use crate::analysis::ty::trait_def::{
-    ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict, ingot_trait_env,
+    ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict, goal_is_canonical,
+    ingot_trait_env,
 };
 use crate::analysis::ty::trait_lower::{TraitRefLowerError, lower_trait_ref};
 use crate::analysis::ty::trait_resolution::constraint::{
@@ -3979,6 +3980,10 @@ impl<'db> ImplTrait<'db> {
 
         // Conflict check
         let trait_ = implementor.skip_binder().trait_(db);
+        // C3c-1 money-floor seam: canonical goals stay exactly-one; the
+        // non-canonical branch is flipped to allow >1 by C3c-3 (the demotion).
+        // Behavior byte-identical until then.
+        let canonical = goal_is_canonical(db, trait_.def(db));
         let env = ingot_trait_env(db, self.top_mod(db).ingot(db));
         if let Some(impls) = env.impls.get(&trait_.def(db)) {
             for &cand_view in impls {
@@ -3987,10 +3992,24 @@ impl<'db> ImplTrait<'db> {
                     continue;
                 }
                 if does_impl_trait_conflict(db, cand_view, implementor) {
-                    return Err(ImplTraitLowerError::Conflict {
-                        primary: cand_impl_trait,
-                        conflict: self,
-                    });
+                    // The canonical/non-canonical branch is live here, but both
+                    // arms preserve today's behavior: a coherence conflict is
+                    // disallowed for BOTH canonical and non-canonical goals.
+                    let conflict_allowed = if canonical {
+                        // Canonical goal (storage-/ABI-layout critical): a second
+                        // in-scope impl is always a genuine coherence conflict.
+                        false
+                    } else {
+                        // Non-canonical goal: still disallowed today (byte-identical).
+                        // C3c-3 flips THIS arm to `true` (provider-overridable >1).
+                        false
+                    };
+                    if !conflict_allowed {
+                        return Err(ImplTraitLowerError::Conflict {
+                            primary: cand_impl_trait,
+                            conflict: self,
+                        });
+                    }
                 }
             }
         }

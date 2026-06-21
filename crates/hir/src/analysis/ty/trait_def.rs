@@ -848,17 +848,18 @@ pub(crate) fn does_impl_trait_conflict<'db>(
 /// relying on a specific ordering), not a property of the trait def — deferred as
 /// a tunable refinement rather than blanket-canonicalized here.
 ///
-/// INERT (FCO slide C3a): this is the recognition primitive only. Nothing in the
-/// production path consumes it yet — the coherence demotion that turns "the goal
-/// is NON-canonical" into "a second impl is permitted (provider-overridable)" is
-/// increment C3c, which gates the conflict prune (`does_impl_trait_conflict` /
-/// `lowered_implementor`) on this predicate. The unit test
+/// LIVE (FCO slide C3c-1): the coherence conflict gate in `lowered_implementor`
+/// (`core/semantic/mod.rs`) now computes this predicate and branches the conflict
+/// path on it. As of C3c-1 BOTH branches preserve today's behavior — a conflict
+/// still returns `Conflict`/emits `5-0001` for canonical AND non-canonical goals
+/// (byte-identical) — so the seam is planted and the predicate is genuinely
+/// consumed. The coherence demotion that turns "the goal is NON-canonical" into
+/// "a second impl is permitted (provider-overridable)" is increment C3c-3, which
+/// flips only the non-canonical branch. The unit test
 /// `goal_is_canonical_keys_on_resolved_identity_not_name` exercises the v1 set
 /// (StorageKey / AbiSize = true) and the non-canonical cases (Ord / Eq /
 /// user-defined = false), each via a real trait resolution so neither arm passes
 /// vacuously.
-// wired live by cascade C3c (coherence demotion)
-#[allow(dead_code)]
 pub(crate) fn goal_is_canonical<'db>(db: &'db dyn HirAnalysisDb, trait_def: Trait<'db>) -> bool {
     let Some(name) = trait_def.name(db).to_opt() else {
         return false;
