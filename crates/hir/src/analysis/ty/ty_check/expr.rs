@@ -55,7 +55,7 @@ use crate::analysis::ty::{
     },
     fold::{AssocTySubst, TyFoldable as _, TyFolder},
     provider::{ProviderTransport, provider_semantics_for_specialized_call},
-    trait_def::TraitInstId,
+    trait_def::{ImplementorId, TraitInstId, impls_for_trait_def},
     trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution},
     ty_check::callable::{Callable, EffectProviderProvenance, EffectProviderSpecialization},
     ty_def::{CapabilityKind, PrimTy, TyBase, TyData, prim_int_bits},
@@ -1164,6 +1164,25 @@ impl<'db> TyChecker<'db> {
         self.env.effect_env_mut().push_frame();
 
         for binding in bindings {
+            // PROVISIONAL near-term activation surface for cascade scoped-selection
+            // — NOT the final provision-scoping form; will be replaced once the
+            // keystone lets a deriver mint Evidence soundly. See FCO_THE_SLIDE.
+            //
+            // A shorthand `with (<T as Trait>) { .. }` whose value names a
+            // concrete trait goal stamps a real `Evidence`-typed scoped provision
+            // carrying the goal's sole `Hir` implementor, activating the cascade
+            // (snapshot → `discharge_from_scoped_provision`). It is SOUND: the
+            // named goal resolves to a REAL existing impl's `ImplementorId`; no
+            // `Evidence` value is forged. It is byte-identical-in-effect today:
+            // coherence forbids >1 impl per (type, goal), so the named impl is the
+            // only impl the solver could pick.
+            if binding.key_path.is_none()
+                && let Some(provided) = self.provisional_scoped_selection(binding.value)
+            {
+                self.env.effect_env_mut().insert_unkeyed(provided);
+                continue;
+            }
+
             let value_prop = self.check_expr_unknown(binding.value);
 
             let is_mut = value_prop
@@ -1236,6 +1255,117 @@ impl<'db> TyChecker<'db> {
         };
         self.env.effect_env_mut().pop_frame();
         result
+    }
+
+    /// PROVISIONAL near-term activation surface for cascade scoped-selection —
+    /// NOT the final provision-scoping form; will be replaced once the keystone
+    /// lets a deriver mint `Evidence` soundly. See `FCO_THE_SLIDE`.
+    ///
+    /// If `value` is a `with`-binding value that names a concrete trait goal via
+    /// the qualified-path form `<T as Trait>` (so its `Self` is concrete), and
+    /// that goal has a REAL `Hir` implementor in scope, build the scoped
+    /// provision the cascade consumes:
+    ///
+    /// - `ty`: a saturated `core::derive::Evidence<G>` (the goal `G` as a
+    ///   `ConstraintTerm`), recognized by [`snapshot_evidence_provisions`] and
+    ///   peeled by [`evidence_witnessed_goal`].
+    /// - `selected_implementor`: `Some(`the goal's sole `ImplementorId`)` — the
+    ///   REAL existing impl the surface names, so [`discharge_from_scoped_provision`]
+    ///   records a concrete [`TraitGoalSolution`] (never the old `Some(None)`).
+    ///
+    /// SOUNDNESS: the goal resolves to a REAL existing impl; no `Evidence` value
+    /// is forged. BYTE-IDENTITY: coherence forbids >1 impl per (type, goal)
+    /// today, so the named impl is the only one the solver could pick — selecting
+    /// it via the provision yields the same impl, leaving the surface inert in
+    /// effect until C3c-3 demotes coherence.
+    ///
+    /// Returns `None` for any other value (an ordinary effect provider), for a
+    /// non-qualified path, for a goal whose `Self` is not concrete, or when no
+    /// real implementor exists — in every case the caller falls through to the
+    /// ordinary `with`-provider path.
+    ///
+    /// [`snapshot_evidence_provisions`]: super::env::TyCheckEnv::snapshot_evidence_provisions
+    /// [`evidence_witnessed_goal`]: crate::analysis::ty::provider_goal::evidence_witnessed_goal
+    /// [`discharge_from_scoped_provision`]: super::TyChecker::discharge_from_scoped_provision
+    pub(super) fn provisional_scoped_selection(
+        &mut self,
+        value: ExprId,
+    ) -> Option<ProvidedEffect<'db>> {
+        // The value must be a bare path expression — the qualified-path form
+        // `<T as Trait>` lowers to a single qualified-type path segment.
+        let Partial::Present(Expr::Path(Partial::Present(path))) =
+            self.env.expr_data(value).clone()
+        else {
+            return None;
+        };
+
+        // Resolve the named goal. `<T as Trait>` resolves to a `QualifiedTy`
+        // wrapping the concrete trait instance (its `Self` bound to `T`).
+        let path_span = value.span(self.body()).into_path_expr().path();
+        let PathRes::Ty(qualified_ty) = self.resolve_path(path, false, path_span).ok()? else {
+            return None;
+        };
+        let TyData::QualifiedTy(goal) = qualified_ty.data(self.db) else {
+            return None;
+        };
+        let goal = *goal;
+
+        // The goal's `Self` must be concrete: a real impl is selected by self
+        // type, and a non-concrete goal cannot name a single impl. (The
+        // qualified-path form always gives a concrete `Self`; this is the
+        // soundness backstop.)
+        let subject = goal.self_ty(self.db);
+        if subject.has_var(self.db) || subject.has_invalid(self.db) {
+            return None;
+        }
+
+        // The REAL global `Hir` implementor the surface names: the sole impl of
+        // the goal's trait for `subject`. Coherence forbids a second, so this is
+        // the impl the solver would itself pick (byte-identity). If none exists,
+        // mint nothing and fall through.
+        let implementor = self.sole_scoped_selection_implementor(goal, subject)?;
+
+        // Mint the witness type the cascade recognizes: `Evidence<G>` with `G`
+        // the goal as a `ConstraintTerm`, by RESOLVED `core::derive::Evidence`
+        // identity (never the bare spelling). Verify with the recognizer so a
+        // shadowing user `Evidence` can never activate the cascade.
+        let evidence_ctor = resolve_lib_type_path(self.db, self.env.scope(), "core::derive::Evidence")?;
+        let constraint_term = TyId::constraint_term(self.db, goal);
+        let evidence_ty = TyId::app(self.db, evidence_ctor, constraint_term);
+        if super::super::provider_goal::evidence_witnessed_goal(self.db, evidence_ty)
+            != Some(goal)
+        {
+            return None;
+        }
+
+        Some(ProvidedEffect {
+            origin: EffectOrigin::With { value_expr: value },
+            ty: evidence_ty,
+            is_mut: false,
+            binding: None,
+            selected_implementor: Some(implementor),
+        })
+    }
+
+    /// The sole real `Hir` [`ImplementorId`] of `goal`'s trait for `subject`,
+    /// looked up through the impl table the trait solver itself uses (the goal's
+    /// trait-def ingot and the current scope's ingot). Returns `None` when no
+    /// such impl exists. Coherence forbids more than one, so the result — when
+    /// present — is exactly what the solver would select.
+    fn sole_scoped_selection_implementor(
+        &self,
+        goal: TraitInstId<'db>,
+        subject: TyId<'db>,
+    ) -> Option<ImplementorId<'db>> {
+        let db = self.db;
+        let trait_def = goal.def(db);
+        let scope_ingot = self.env.scope().ingot(db);
+        let trait_ingot = trait_def.top_mod(db).ingot(db);
+        [scope_ingot, trait_ingot]
+            .into_iter()
+            .flat_map(|ingot| impls_for_trait_def(db, ingot, trait_def).iter().copied())
+            .map(|binder| binder.instantiate_identity())
+            .find(|implementor| implementor.self_ty(db) == subject)
     }
 
     fn check_call(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {

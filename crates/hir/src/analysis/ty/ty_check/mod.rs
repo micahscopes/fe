@@ -5032,7 +5032,7 @@ mod scoped_provision_tests {
                 ty_def::TyId,
             },
         },
-        hir_def::{Func, PathId},
+        hir_def::{Expr, ExprId, Func, Partial, PathId},
         span::DynLazySpan,
         test_db::HirAnalysisTestDb,
     };
@@ -5250,5 +5250,124 @@ fn requires_eq<T: Eq>(_ t: T) {}
                 "Evidence<Eq<Point>> must NOT discharge an Ord<Point> goal",
             );
         }
+    }
+
+    /// A fixture exercising the PROVISIONAL near-term activation surface for
+    /// cascade scoped-selection (FCO slide C3b): a `with (<Point as Eq>) { .. }`
+    /// shorthand whose value names the concrete goal `<Point as Eq>` and a body
+    /// that uses no effects. `select` returns `()`; `not_a_goal` holds an
+    /// ordinary value `with` to exercise the negative arm.
+    const SELECTION_FIXTURE: &str = r#"
+use core::ops::Eq
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+impl Eq for Point {
+    fn eq(self, _ other: Point) -> bool {
+        self.x == other.x
+    }
+}
+
+fn select() {
+    with (<Point as Eq>) {
+        ()
+    }
+}
+
+fn not_a_goal() {
+    let p: u256 = 0
+    with (p) {
+        ()
+    }
+}
+"#;
+
+    /// The value `ExprId` of the sole `with`-binding in `func`'s body.
+    fn sole_with_binding_value<'db>(db: &'db HirAnalysisTestDb, func: Func<'db>) -> ExprId {
+        let body = func.body(db).expect("func has a body");
+        for (_id, expr) in body.exprs(db).iter() {
+            if let Partial::Present(Expr::With(bindings, _)) = expr {
+                let [binding] = bindings.as_slice() else {
+                    panic!("expected exactly one with-binding");
+                };
+                return binding.value;
+            }
+        }
+        panic!("expected a `with` expression in `{:?}`'s body", func.name(db));
+    }
+
+    /// FCO slide C3b: the PROVISIONAL activation surface. A
+    /// `with (<Point as Eq>) { .. }` shorthand stamps a REAL `Evidence`-typed
+    /// scoped provision — `ty == Evidence<Eq<Point>>`, `selected_implementor ==
+    /// Some(`the sole `impl Eq for Point`)` — so the cascade's snapshot/discharge
+    /// fire on it. The named goal resolves to a REAL impl's `ImplementorId` (no
+    /// forged `Evidence`), and the whole body type-checks with no diagnostics
+    /// (the surface is inert in effect: byte-identical until coherence demotes).
+    /// The negative arm proves an ordinary value `with (p)` mints no selection.
+    #[test]
+    fn provisional_with_selection_stamps_real_implementor() {
+        use crate::analysis::ty::{provider_goal::evidence_witnessed_goal, ty_def::TyData};
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("provisional_with_selection.fe"),
+            SELECTION_FIXTURE,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        // Byte-identity / inertness: the surface introduces no diagnostics — the
+        // body checks exactly as it would without the selection.
+        db.assert_no_diags(top_mod);
+        let scope = top_mod.scope();
+
+        let PathRes::Trait(eq_inst) = resolve(&db, scope, &["core", "ops", "Eq"]) else {
+            panic!("core::ops::Eq must resolve to a trait");
+        };
+        let PathRes::Ty(point_ty) = resolve(&db, scope, &["Point"]) else {
+            panic!("Point must resolve to a type");
+        };
+        let eq_point = concrete_inst(&db, eq_inst, point_ty);
+        let eq_point_impl = sole_implementor(&db, top_mod, eq_inst, point_ty);
+
+        // POSITIVE: `with (<Point as Eq>)` stamps the real selection.
+        let select = find_func(&db, top_mod, "select");
+        let value = sole_with_binding_value(&db, select);
+        let mut tc =
+            TyChecker::new(&db, super::BodyOwner::Func(select)).expect("select is checkable");
+        let provided = tc
+            .provisional_scoped_selection(value)
+            .expect("`with (<Point as Eq>)` must mint a scoped selection provision");
+
+        // The minted witness type is a saturated `Evidence<Eq<Point>>` the
+        // cascade recognizer peels back to `Eq<Point>`.
+        assert!(
+            matches!(provided.ty.data(&db), TyData::TyApp(..)),
+            "the provision type must be the applied `Evidence<Eq<Point>>`",
+        );
+        assert_eq!(
+            evidence_witnessed_goal(&db, provided.ty),
+            Some(eq_point),
+            "the minted provision type must be Evidence<Eq<Point>>",
+        );
+        // The stamp carries the REAL `impl Eq for Point` implementor — the only
+        // impl coherence permits, hence the one the solver would itself pick.
+        assert_eq!(
+            provided.selected_implementor,
+            Some(eq_point_impl),
+            "the provision must name the real `impl Eq for Point` implementor",
+        );
+
+        // NEGATIVE: an ordinary value `with (p)` is NOT a goal selection.
+        let not_a_goal = find_func(&db, top_mod, "not_a_goal");
+        let value = sole_with_binding_value(&db, not_a_goal);
+        let mut tc = TyChecker::new(&db, super::BodyOwner::Func(not_a_goal))
+            .expect("not_a_goal is checkable");
+        assert_eq!(
+            tc.provisional_scoped_selection(value),
+            None,
+            "an ordinary value `with (p)` must not mint a scoped selection",
+        );
     }
 }
