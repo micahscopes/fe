@@ -4665,6 +4665,22 @@ impl<'db> TypedBody<'db> {
             .collect()
     }
 
+    /// Build an otherwise-empty [`TypedBody`] carrying the given discharge
+    /// records. Test-only constructor for the cascade C3d const_ref read
+    /// (`scoped_provision_implementor`): it lets a unit test hand-build the exact
+    /// `ScopedProvision`-routed discharge a real caller would record, without
+    /// running a full body walk.
+    #[cfg(test)]
+    pub(crate) fn with_discharged_obligations_for_test(
+        db: &'db dyn HirAnalysisDb,
+        discharged_obligations: Vec<DischargedObligation<'db>>,
+    ) -> Self {
+        Self {
+            discharged_obligations,
+            ..Self::empty(db)
+        }
+    }
+
     fn empty(db: &'db dyn HirAnalysisDb) -> Self {
         Self {
             body: None,

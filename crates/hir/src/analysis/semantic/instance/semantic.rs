@@ -275,8 +275,14 @@ fn provisional_call_sites<'db>(
             continue;
         };
         sites[expr.index()] = Some(CallSiteLowering {
-            callee: provisional_semantic_callee_key(db, instance.key(db), callable, assumptions)
-                .map(|key| SemanticCalleeRef { key }),
+            callee: provisional_semantic_callee_key(
+                db,
+                instance.key(db),
+                callable,
+                assumptions,
+                Some(expr),
+            )
+            .map(|key| SemanticCalleeRef { key }),
             receiver: receiver_lowering_plan(
                 db,
                 expr_data,
@@ -313,11 +319,15 @@ fn provisional_for_loop_call_sites<'db>(
         };
         sites[stmt.index()] = Some(ForLoopCallSites {
             len: CallSiteLowering {
+                // For-loop Seq calls are keyed by `StmtId`, not the `ExprId` that
+                // carries a `CallConstraint` discharge, so there is no scoped
+                // provision to consult here — pass `None` (cascade C3d).
                 callee: provisional_semantic_callee_key(
                     db,
                     instance.key(db),
                     &seq.len_callable,
                     assumptions,
+                    None,
                 )
                 .map(|key| SemanticCalleeRef { key }),
                 receiver: None,
@@ -329,6 +339,7 @@ fn provisional_for_loop_call_sites<'db>(
                     instance.key(db),
                     &seq.get_callable,
                     assumptions,
+                    None,
                 )
                 .map(|key| SemanticCalleeRef { key }),
                 receiver: None,
@@ -396,6 +407,7 @@ fn final_call_site_data<'db>(
             callable,
             site,
             by_site.get(&CallSiteId::Expr(expr)).map(Vec::as_slice),
+            Some(expr),
         );
     }
 
@@ -417,6 +429,9 @@ fn final_call_site_data<'db>(
             by_site
                 .get(&CallSiteId::ForLoopLen(stmt))
                 .map(Vec::as_slice),
+            // For-loop Seq calls are `StmtId`-keyed and carry no `CallConstraint`
+            // discharge, so there is no scoped provision to consult (cascade C3d).
+            None,
         );
         finalize_call_site(
             db,
@@ -426,6 +441,7 @@ fn final_call_site_data<'db>(
             by_site
                 .get(&CallSiteId::ForLoopGet(stmt))
                 .map(Vec::as_slice),
+            None,
         );
     }
 
@@ -508,6 +524,7 @@ fn finalize_call_site<'db>(
     callable: &crate::analysis::ty::ty_check::Callable<'db>,
     site: &mut CallSiteLowering<'db>,
     refinements: Option<&[CallSiteProviderRefinement]>,
+    call_expr: Option<ExprId>,
 ) {
     let mut effect_providers = callable.effect_providers().to_vec();
     if let Some(refinements) = refinements {
@@ -536,6 +553,7 @@ fn finalize_call_site<'db>(
         instance.key(db),
         callable,
         &effect_providers,
+        call_expr,
     )
     .map(|key| SemanticCalleeRef { key });
 }

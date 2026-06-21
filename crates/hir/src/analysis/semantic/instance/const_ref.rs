@@ -11,18 +11,20 @@ use crate::{
             assoc_const::AssocConstUse,
             effects::place_effect_provider_param_index_map,
             trait_def::{
-                assoc_const_body_and_impl_args_for_trait_inst, resolve_trait_method_instance,
+                ImplementorId, TraitInstId, assoc_const_body_and_impl_args_for_trait_inst,
+                resolve_trait_method_instance,
             },
             trait_resolution::{PredicateListId, ProvisionEnv},
             ty_check::{
-                BodyOwner, Callable, ConstRef, EffectParamSite, EffectProviderSpecialization,
+                BodyOwner, Callable, ConstRef, DischargeRoute, EffectParamSite,
+                EffectProviderSpecialization, TypedBody,
             },
             ty_def::TyId,
             ty_lower::instantiate_callable_effect_layout_args,
         },
     },
     core::semantic::{EffectEnvView, ProviderBinding},
-    hir_def::{CallableDef, Const},
+    hir_def::{CallableDef, Const, ExprId},
 };
 use common::indexmap::IndexSet;
 use rustc_hash::FxHashMap;
@@ -38,6 +40,7 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
     caller_key: SemanticInstanceKey<'db>,
     callable: &Callable<'db>,
     effect_providers: &[EffectProviderSpecialization<'db>],
+    call_expr: Option<ExprId>,
 ) -> Option<SemanticInstanceKey<'db>> {
     let assumptions = SemanticInstance::new(db, caller_key).assumptions(db);
     semantic_callee_key_with_assumptions(
@@ -47,6 +50,7 @@ pub(crate) fn semantic_callee_key_with_effect_providers<'db>(
         effect_providers,
         assumptions,
         ProviderResolutionMode::Final,
+        call_expr,
     )
 }
 
@@ -55,6 +59,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
     caller_key: SemanticInstanceKey<'db>,
     callable: &Callable<'db>,
     assumptions: PredicateListId<'db>,
+    call_expr: Option<ExprId>,
 ) -> Option<SemanticInstanceKey<'db>> {
     semantic_callee_key_with_assumptions(
         db,
@@ -63,6 +68,7 @@ pub(crate) fn provisional_semantic_callee_key<'db>(
         callable.effect_providers(),
         assumptions,
         ProviderResolutionMode::Provisional,
+        call_expr,
     )
 }
 
@@ -73,6 +79,7 @@ fn semantic_callee_key_with_assumptions<'db>(
     effect_providers: &[EffectProviderSpecialization<'db>],
     assumptions: PredicateListId<'db>,
     provider_resolution_mode: ProviderResolutionMode,
+    call_expr: Option<ExprId>,
 ) -> Option<SemanticInstanceKey<'db>> {
     let impl_env = caller_key.impl_env(db);
     // The impl typeck's solver committed to at this instantiation-time
@@ -93,7 +100,21 @@ fn semantic_callee_key_with_assumptions<'db>(
                     inst,
                     name,
                 ) {
-                selected_implementor = Some(resolved.implementor);
+                // The typeck twin of the MIR `selected_implementor` source
+                // (cascade C3d). Where the caller discharged THIS call's trait
+                // obligation FROM an in-scope scoped provision, the committed
+                // implementor is the one the provision named — NOT the impl-table
+                // re-solve above. Prefer it; fall back to the re-solve when no such
+                // discharge exists. Today no `ScopedProvision` discharge exists on
+                // real code (the snapshot is always empty — `Evidence` is
+                // unforgeable until increment 1b), so this lookup returns `None`
+                // everywhere and `selected_implementor` is byte-identical to the
+                // re-solve result below.
+                selected_implementor = call_expr
+                    .and_then(|call_expr| {
+                        scoped_provision_implementor(caller_key.typed_body(db), call_expr, inst)
+                    })
+                    .or(Some(resolved.implementor));
                 let trait_arg_len = inst.args(db).len();
                 let mut resolved_args = resolved.impl_args;
                 let tail = subst_args
@@ -141,6 +162,31 @@ fn semantic_callee_key_with_assumptions<'db>(
         EffectProviderSubst::new(db, effect_providers),
         impl_env,
     ))
+}
+
+/// The implementor a scoped provision named for THIS call's trait obligation,
+/// if the caller discharged that obligation via [`DischargeRoute::ScopedProvision`]
+/// (cascade C3d — the typeck twin of the MIR `selected_implementor` source).
+///
+/// Reads the caller's `discharged_obligations` for `call_expr` and returns the
+/// implementor of the `ScopedProvision`-routed discharge whose goal is the
+/// callable's originating trait instance `inst`. Returns `None` when no such
+/// discharge exists — the caller then falls back to the impl-table re-solve. On
+/// real code today no `ScopedProvision` discharge is ever recorded (the snapshot
+/// is empty; `Evidence` is unforgeable until increment 1b), so this always
+/// returns `None` and behavior is byte-identical to the re-solve.
+fn scoped_provision_implementor<'db>(
+    typed_body: &TypedBody<'db>,
+    call_expr: ExprId,
+    inst: TraitInstId<'db>,
+) -> Option<ImplementorId<'db>> {
+    typed_body
+        .discharged_obligations_for_call(call_expr)
+        .find(|discharged| {
+            discharged.route == DischargeRoute::ScopedProvision && discharged.goal == inst
+        })
+        .and_then(|discharged| discharged.solution)
+        .map(|solution| solution.implementor)
 }
 
 fn resolve_callable_effect_providers<'db>(
@@ -316,4 +362,213 @@ fn semantic_const_key_for_assoc_const<'db>(
             vec![assoc.inst()],
         ),
     ))
+}
+
+#[cfg(test)]
+mod scoped_provision_const_ref_tests {
+    use camino::Utf8PathBuf;
+    use cranelift_entity::EntityRef;
+
+    use super::{DischargeRoute, ImplementorId, TraitInstId, scoped_provision_implementor};
+    use crate::{
+        analysis::{
+            name_resolution::{PathRes, resolve_path},
+            ty::{
+                trait_def::impls_for_trait_def,
+                trait_resolution::{PredicateListId, TraitGoalSolution},
+                ty_check::{DischargedObligation, TraitObligationOrigin, TypedBody},
+                ty_def::TyId,
+            },
+        },
+        hir_def::{CallableDef, ExprId, Func, PathId, TopLevelMod, scope_graph::ScopeId},
+        test_db::HirAnalysisTestDb,
+    };
+
+    /// A `Point` struct with a real `impl Eq for Point` (the global `Hir` impl a
+    /// scoped provision names under cascade C2), an `Eq`-bound `requires_eq` to
+    /// own the synthetic caller body, and NO `impl Ord for Point` — so an
+    /// `Ord<Point>` discharge can only be hand-built, exercising the goal-specific
+    /// arm of the const_ref read.
+    const FIXTURE: &str = r#"
+use core::ops::Eq
+use core::ops::Ord
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+impl Eq for Point {
+    fn eq(self, _ other: Point) -> bool {
+        self.x == other.x
+    }
+}
+
+fn requires_eq<T: Eq>(_ t: T) {}
+"#;
+
+    fn resolve<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod_scope: ScopeId<'db>,
+        segments: &[&str],
+    ) -> PathRes<'db> {
+        let path = PathId::from_segments(db, segments);
+        resolve_path(db, path, top_mod_scope, PredicateListId::empty_list(db), false)
+            .unwrap_or_else(|e| panic!("expected {segments:?} to resolve, got {e:?}"))
+    }
+
+    /// `<subject>: <trait><subject>` (e.g. `Point: Eq<Point>`) — the saturated
+    /// `[Self, T]` arg shape a `T: Eq` constraint instantiates to when `T :=
+    /// Point`, identical to the goal a real `CallConstraint` obligation carries.
+    fn concrete_inst<'db>(
+        db: &'db HirAnalysisTestDb,
+        trait_inst: TraitInstId<'db>,
+        subject: TyId<'db>,
+    ) -> TraitInstId<'db> {
+        TraitInstId::new_simple(db, trait_inst.def(db), vec![subject, subject])
+    }
+
+    fn find_func<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> Func<'db> {
+        top_mod
+            .all_funcs(db)
+            .iter()
+            .copied()
+            .find(|f| f.name(db).to_opt().is_some_and(|n| n.data(db) == name))
+            .unwrap_or_else(|| panic!("missing `{name}` function"))
+    }
+
+    /// The REAL global `Hir` [`ImplementorId`] of the sole `impl <trait_inst.def>`
+    /// for `subject` — what a scoped provision names under cascade C2.
+    fn sole_implementor<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        trait_inst: TraitInstId<'db>,
+        subject: TyId<'db>,
+    ) -> ImplementorId<'db> {
+        impls_for_trait_def(db, top_mod.ingot(db), trait_inst.def(db))
+            .iter()
+            .map(|binder| binder.instantiate_identity())
+            .find(|implementor| implementor.self_ty(db) == subject)
+            .unwrap_or_else(|| panic!("expected a real impl of the trait for the subject type"))
+    }
+
+    /// A `ScopedProvision`-routed call-constraint discharge for `call_expr`,
+    /// witnessing `goal` and naming `implementor` — exactly the record a caller
+    /// would write when it discharges THIS call's trait obligation from an
+    /// in-scope `Evidence` provision (cascade C2). When `route` is `ImplTable`
+    /// instead, it is the ordinary trait-solver discharge.
+    fn call_discharge<'db>(
+        call_expr: ExprId,
+        callable_def: CallableDef<'db>,
+        goal: TraitInstId<'db>,
+        implementor: ImplementorId<'db>,
+        route: DischargeRoute,
+    ) -> DischargedObligation<'db> {
+        DischargedObligation {
+            origin: TraitObligationOrigin::CallConstraint {
+                call_expr,
+                callable_def,
+                constraint_idx: 0,
+            },
+            goal,
+            solution: Some(TraitGoalSolution { inst: goal, implementor }),
+            route,
+        }
+    }
+
+    /// Cascade C3d: `scoped_provision_implementor` — the read that feeds
+    /// `selected_implementor` in const_ref's typeck twin — returns the REAL
+    /// implementor of a `ScopedProvision`-routed discharge keyed to THIS call
+    /// whose goal matches the callable's trait inst, never the re-solve. The
+    /// negative arms prove it is keyed on call expr, route, AND goal.
+    #[test]
+    fn scoped_provision_discharge_is_preferred_for_const_ref() {
+        let mut db = HirAnalysisTestDb::default();
+        let file =
+            db.new_stand_alone(Utf8PathBuf::from("scoped_provision_const_ref.fe"), FIXTURE);
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let scope = top_mod.scope();
+
+        let PathRes::Trait(eq_inst) = resolve(&db, scope, &["core", "ops", "Eq"]) else {
+            panic!("core::ops::Eq must resolve to a trait");
+        };
+        let PathRes::Trait(ord_inst) = resolve(&db, scope, &["core", "ops", "Ord"]) else {
+            panic!("core::ops::Ord must resolve to a trait");
+        };
+        let PathRes::Ty(point_ty) = resolve(&db, scope, &["Point"]) else {
+            panic!("Point must resolve to a type");
+        };
+
+        let eq_point = concrete_inst(&db, eq_inst, point_ty);
+        let ord_point = concrete_inst(&db, ord_inst, point_ty);
+        let eq_point_impl = sole_implementor(&db, top_mod, eq_inst, point_ty);
+
+        let requires_eq = find_func(&db, top_mod, "requires_eq");
+        let callable_def = CallableDef::Func(requires_eq);
+
+        // The call expr the discharge is keyed to (synthetic id — the const_ref
+        // read only filters on it, never dereferences it against a real body).
+        let call_expr = ExprId::new(0);
+        let other_expr = ExprId::new(1);
+
+        // POSITIVE: a `ScopedProvision` discharge for `call_expr` whose goal is the
+        // callable trait inst `Eq<Point>` is preferred — the read returns the REAL
+        // `impl Eq for Point` the provision named.
+        let typed_body = TypedBody::with_discharged_obligations_for_test(
+            &db,
+            vec![call_discharge(
+                call_expr,
+                callable_def,
+                eq_point,
+                eq_point_impl,
+                DischargeRoute::ScopedProvision,
+            )],
+        );
+        assert_eq!(
+            scoped_provision_implementor(&typed_body, call_expr, eq_point),
+            Some(eq_point_impl),
+            "the const_ref read must record the implementor the scoped provision named",
+        );
+
+        // NEGATIVE (goal): the same `ScopedProvision` discharge does NOT answer for
+        // an unrelated `Ord<Point>` goal — the read is goal-specific.
+        assert_eq!(
+            scoped_provision_implementor(&typed_body, call_expr, ord_point),
+            None,
+            "a scoped discharge must not answer for a different goal",
+        );
+
+        // NEGATIVE (call expr): the discharge is keyed to `call_expr`, so a query
+        // for a different call expr finds nothing — the caller falls back to the
+        // re-solve.
+        assert_eq!(
+            scoped_provision_implementor(&typed_body, other_expr, eq_point),
+            None,
+            "a scoped discharge must not answer for a different call expr",
+        );
+
+        // NEGATIVE (route): an ordinary `ImplTable` discharge for the same call and
+        // goal is NOT a scoped provision — the read ignores it so const_ref falls
+        // back to the impl-table re-solve (preserving today's behavior).
+        let impl_table_body = TypedBody::with_discharged_obligations_for_test(
+            &db,
+            vec![call_discharge(
+                call_expr,
+                callable_def,
+                eq_point,
+                eq_point_impl,
+                DischargeRoute::ImplTable,
+            )],
+        );
+        assert_eq!(
+            scoped_provision_implementor(&impl_table_body, call_expr, eq_point),
+            None,
+            "an ImplTable discharge must not be treated as a scoped provision",
+        );
+    }
 }
