@@ -29,6 +29,8 @@ Below the landed kind layer (`Constraint`/`ConstraintTerm`/`TraitCtor`/Form-2 ch
 - **L0.1 TD1/TD2** substitution-on-instantiation (`P:=V` pinned at `impl Derive<V> for P`). MED, test.
 - **L0.2 TD4** `Derive` an ordinary trait — delete `DERIVE_MARKER` recognition (`provider.rs:31,149-158`).
   HIGH (load-bearing string-path deletion; Micah signoff).
+> **⚠️ SUPERSEDED (2026-06-21) — see `FCO_THE_SLIDE_2026-06-19.md` "KEYSTONE INSIGHT".** The framing below ("ordinary CTFE" / "executor → CTFE de-magic" / "provider bodies become ordinary effectful CTFE") describes engine **fusion** and is superseded. The settled decision is **stage, don't fuse** (twice-measured): the executor is a **quasiquoter backend** (GenExpr→HIR, not a value-evaluator) run as a **downstream salsa query** producing a real `impl`; it is NOT folded into the CTFE value-evaluator (CTFE-inside-the-solver = Salsa-cycle ICE, a measured dead-end). Near-term the **cascade SELECTS** among existing impls; the keystone later **RUNS** a deriver to **GENERATE** one — distinct steps.
+
 - **L0.3 TD5** executor → ordinary CTFE; capabilities bound through the provision env, not hardcoded `Value`s
   (`provider_executor.rs:941`). **First crack in the expansion↔type-check stratum boundary.** HIGH, largest blast radius.
 

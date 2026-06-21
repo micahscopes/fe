@@ -142,6 +142,8 @@ pub trait ErrorVariant<A: Abi>: Encode<A> + AbiSize {
 > (`P:=Eq` pinned concrete → substitution, not variable-headed solving). So the `(*->C)->C` below IS
 > the end target — just reached via the assoc-type intermediate.
 
+> **⚠️ SUPERSEDED (2026-06-21) — see `FCO_THE_SLIDE_2026-06-19.md` "KEYSTONE INSIGHT".** The framing below ("ordinary CTFE" / "executor → CTFE de-magic" / "provider bodies become ordinary effectful CTFE") describes engine **fusion** and is superseded. The settled decision is **stage, don't fuse** (twice-measured): the executor is a **quasiquoter backend** (GenExpr→HIR, not a value-evaluator) run as a **downstream salsa query** producing a real `impl`; it is NOT folded into the CTFE value-evaluator (CTFE-inside-the-solver = Salsa-cycle ICE, a measured dead-end). Near-term the **cascade SELECTS** among existing impls; the keystone later **RUNS** a deriver to **GENERATE** one — distinct steps.
+
 Per `fe-design-wizard-kinded-derive-verdict-2026-06-15.md` (D7): project over `TraitInstId`/`PredicateListId`, **no `TyData::ConstraintTerm`**, abstract `P<T>` head SHELVED. The kinds become real; the `Derive` marker retires (board #7); provider bodies become ordinary effectful CTFE (TD5 complete).
 
 ### B.1 The kind signatures that become real
@@ -194,6 +196,8 @@ impl Derive<Eq> for StableEq {                                  // real `Derive 
     }
 }
 ```
+
+> **⚠️ SUPERSEDED (2026-06-21) — see `FCO_THE_SLIDE_2026-06-19.md` "KEYSTONE INSIGHT".** The framing below ("ordinary CTFE" / "executor → CTFE de-magic" / "provider bodies become ordinary effectful CTFE") describes engine **fusion** and is superseded. The settled decision is **stage, don't fuse** (twice-measured): the executor is a **quasiquoter backend** (GenExpr→HIR, not a value-evaluator) run as a **downstream salsa query** producing a real `impl`; it is NOT folded into the CTFE value-evaluator (CTFE-inside-the-solver = Salsa-cycle ICE, a measured dead-end). Near-term the **cascade SELECTS** among existing impls; the keystone later **RUNS** a deriver to **GENERATE** one — distinct steps.
 
 What each NOW-shim becomes:
 

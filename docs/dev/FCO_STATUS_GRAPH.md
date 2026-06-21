@@ -1,5 +1,7 @@
 # FCO status snapshot
 
+> **⚠️ ARCHIVAL SNAPSHOT — superseded. Live SSOT: `FCO_THE_SLIDE_2026-06-19.md` + `fco_dependency_graph_v0.json` + `FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md`.**
+
 > **⚠️ ARCHIVAL SNAPSHOT as of commit `f3c63e1f4` (2026-06-14).** This mermaid view
 > is no longer maintained per-commit. For current status use the live sources:
 > **`fco_dependency_graph_v0.json`** (the DAG, kept current) and

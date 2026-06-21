@@ -3,7 +3,11 @@
 **Date:** 2026-06-17 · **Status:** DECISION (Micah) + empirical spike (run on this branch's
 `target/debug/fe`). Supersedes the `(* -> Constraint) -> Constraint` framing in
 `FCO_DERIVE_SKETCHES_2026-06-17.md` §B as the **HEADED target**. Design-only; non-blocking on the
-live burn-down (TD5). The kinded graduation (K04b/K03) still sequences AFTER the executor de-magic.
+live burn-down (TD5).
+
+> **⚠️ SUPERSEDED (2026-06-21) — see `FCO_THE_SLIDE_2026-06-19.md` "KEYSTONE INSIGHT".** The framing below ("ordinary CTFE" / "executor → CTFE de-magic" / "provider bodies become ordinary effectful CTFE") describes engine **fusion** and is superseded. The settled decision is **stage, don't fuse** (twice-measured): the executor is a **quasiquoter backend** (GenExpr→HIR, not a value-evaluator) run as a **downstream salsa query** producing a real `impl`; it is NOT folded into the CTFE value-evaluator (CTFE-inside-the-solver = Salsa-cycle ICE, a measured dead-end). Near-term the **cascade SELECTS** among existing impls; the keystone later **RUNS** a deriver to **GENERATE** one — distinct steps.
+
+The kinded graduation (K04b/K03) still sequences AFTER the executor de-magic.
 
 ## Decision — TWO-STAGE target (Micah, 2026-06-17/18): assoc-type INTERMEDIATE → param-head END
 
@@ -117,6 +121,8 @@ The abstract `P<T>` head (live `P` reaching the solver, `trait Derive<P>` used g
 SHELVED — **neither stage needs it** (Stage 2 pins `P:=Eq` concrete before solving).
 
 ## Sequencing (OPEN — being mapped)
+
+> **⚠️ SUPERSEDED (2026-06-21) — see `FCO_THE_SLIDE_2026-06-19.md` "KEYSTONE INSIGHT".** The framing below ("ordinary CTFE" / "executor → CTFE de-magic" / "provider bodies become ordinary effectful CTFE") describes engine **fusion** and is superseded. The settled decision is **stage, don't fuse** (twice-measured): the executor is a **quasiquoter backend** (GenExpr→HIR, not a value-evaluator) run as a **downstream salsa query** producing a real `impl`; it is NOT folded into the CTFE value-evaluator (CTFE-inside-the-solver = Salsa-cycle ICE, a measured dead-end). Near-term the **cascade SELECTS** among existing impls; the keystone later **RUNS** a deriver to **GENERATE** one — distinct steps.
 
 Convention has been TD5 (executor de-magic) → K04b → K03-value → retire `Derive` marker (#7). Whether
 the Stage-1 kind/signature work can land in parallel with / ahead of TD5 (the signature kinds and the

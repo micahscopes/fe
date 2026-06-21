@@ -261,6 +261,8 @@ are NOT the same track.** The abstract head = the solver seeing a LIVE variable-
 normal provider `impl Derive<Eq> for StableEq` pins `P := Eq` at the impl boundary, so `Evidence<P<T>>`
 becomes `Evidence<Eq<T>>` *before* solving — substitution + kind-checking, NOT higher-order solving.
 
+> **⚠️ SUPERSEDED (2026-06-21) — see `FCO_THE_SLIDE_2026-06-19.md` "KEYSTONE INSIGHT".** The framing below ("ordinary CTFE" / "executor → CTFE de-magic" / "provider bodies become ordinary effectful CTFE") describes engine **fusion** and is superseded. The settled decision is **stage, don't fuse** (twice-measured): the executor is a **quasiquoter backend** (GenExpr→HIR, not a value-evaluator) run as a **downstream salsa query** producing a real `impl`; it is NOT folded into the CTFE value-evaluator (CTFE-inside-the-solver = Salsa-cycle ICE, a measured dead-end). Near-term the **cascade SELECTS** among existing impls; the keystone later **RUNS** a deriver to **GENERATE** one — distinct steps.
+
 - **Track 1 — True Derive (ACTIVE / BUILDABLE):** make `Derive` an ordinary kinded, evidence-carrying Fe
   construct for *concrete* traits. Needs: TD0 Constraint kind (landed) → TD1 kind-check `P<T>` in
   declarations → TD2 substitution-on-instantiation (`P:=Eq` before checking) → TD3 `Evidence<P<T>>` /
