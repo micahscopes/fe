@@ -486,6 +486,7 @@ fn typed_body_for_bodyless_func<'db>(
         for_loop_seq: SecondaryMap::new(),
         discharged_obligations: Vec::new(),
         discharged_const_predicates: Vec::new(),
+        scoped_selection_exprs: FxHashSet::default(),
         expr_place: SecondaryMap::new(),
         expr_places: PrimaryMap::new(),
     }
@@ -1382,6 +1383,36 @@ impl<'db> TyChecker<'db> {
                     } else {
                         TraitObligationOutcome::Discharged(unified.then_some(solution), DischargeRoute::ImplTable)
                     }
+                } else if let Some(crate::analysis::ty::trait_resolution::Selection::Unique(
+                    default,
+                )) = self
+                    .env
+                    .provision_env()
+                    .solve_cx(db)
+                    .default_tier_selection(db, goal)
+                {
+                    // FCO "slide" cascade C3c-2 — the DEFAULT-TIER rule at the
+                    // trait-goal discharge leg. With >1 REAL coexisting impl for a
+                    // concrete non-canonical goal and no in-scope provision having
+                    // selected one, pick the sole default-marked (CoreDerives-
+                    // origin) impl deterministically and RECORD it as the committed
+                    // solution, so the cascade's recorded selection (const_ref's
+                    // typeck twin → MIR's C1 rail) consumes the default and never
+                    // re-decides into a `select_impl`→`Ambiguous`→panic. The
+                    // consultation is OUTSIDE the tracked `is_goal_query_satisfiable`
+                    // solve (it runs on the solve's result), so the salsa cache
+                    // stays scope-free. None/many marked falls through to the clean
+                    // `AmbiguousTraitInst` diagnostic below — NEVER a panic. For
+                    // code without a cascade default+override pair the demotion
+                    // still forbids a 2nd impl, so this is `None` (byte-identical).
+                    let solution = TraitGoalSolution {
+                        inst: goal,
+                        implementor: default,
+                    };
+                    TraitObligationOutcome::Discharged(
+                        Some(solution),
+                        DischargeRoute::ImplTable,
+                    )
                 } else {
                     if final_pass && self.trait_goal_is_concrete_for_diagnostics(goal) {
                         let required_by = match obligation.origin {
@@ -3061,6 +3092,10 @@ pub struct TypedBody<'db> {
     /// Discharge evidence for const-predicate obligations retired while
     /// checking this body, in retirement order.
     discharged_const_predicates: Vec<DischargedConstPredicate<'db>>,
+    /// FCO "slide" cascade C3b: value `ExprId`s of `with`-bindings consumed as
+    /// scoped impl selections (`with (<T as Trait>)`). MIR body lowering skips
+    /// these (they name a goal, not a value).
+    scoped_selection_exprs: FxHashSet<ExprId>,
     expr_place: SecondaryMap<ExprId, PackedOption<ExprPlaceId>>,
     expr_places: PrimaryMap<ExprPlaceId, Place<'db>>,
 }
@@ -3765,6 +3800,15 @@ impl<'db> TypedBody<'db> {
                 } => origin_expr == call_expr,
                 TraitObligationOrigin::GenericConfirmation => false,
             })
+    }
+
+    /// FCO "slide" cascade C3b: whether `value_expr` is a `with`-binding consumed
+    /// as a scoped impl SELECTION (`with (<T as Trait>)`) — it names a (Trait,
+    /// Type) goal, not a runtime value, so MIR body lowering must SKIP lowering it
+    /// (it has no value-path classification; the impl it selected is recorded on
+    /// the discharge instead).
+    pub fn is_scoped_selection_expr(&self, value_expr: ExprId) -> bool {
+        self.scoped_selection_exprs.contains(&value_expr)
     }
 
     /// All const-predicate discharge records for this body, in the order the
@@ -4704,6 +4748,7 @@ impl<'db> TypedBody<'db> {
             for_loop_seq: SecondaryMap::new(),
             discharged_obligations: Vec::new(),
             discharged_const_predicates: Vec::new(),
+            scoped_selection_exprs: FxHashSet::default(),
             expr_place: SecondaryMap::new(),
             expr_places: PrimaryMap::new(),
         }

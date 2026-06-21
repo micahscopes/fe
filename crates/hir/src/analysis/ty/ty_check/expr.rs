@@ -1179,6 +1179,9 @@ impl<'db> TyChecker<'db> {
             if binding.key_path.is_none()
                 && let Some(provided) = self.provisional_scoped_selection(binding.value)
             {
+                // The binding value names a (Trait, Type) GOAL, not a runtime
+                // value — record it so MIR body lowering skips it (cascade C3b).
+                self.env.record_scoped_selection_expr(binding.value);
                 self.env.effect_env_mut().insert_unkeyed(provided);
                 continue;
             }
@@ -1347,25 +1350,70 @@ impl<'db> TyChecker<'db> {
         })
     }
 
-    /// The sole real `Hir` [`ImplementorId`] of `goal`'s trait for `subject`,
-    /// looked up through the impl table the trait solver itself uses (the goal's
-    /// trait-def ingot and the current scope's ingot). Returns `None` when no
-    /// such impl exists. Coherence forbids more than one, so the result — when
-    /// present — is exactly what the solver would select.
+    /// The real `Hir` [`ImplementorId`] that `with (<T as Trait>)` SELECTS for
+    /// `goal`'s trait at `subject`, looked up through the impl table the trait
+    /// solver itself uses (the goal's trait-def ingot and the current scope's
+    /// ingot).
+    ///
+    /// FCO "slide" cascade C3b selection rule — "derive the default, override it
+    /// in a scope". The scoped surface always names the OVERRIDE (the custom,
+    /// non-default impl) — never the derived default — so:
+    ///
+    /// - exactly 1 impl → that impl (byte-identical with today: coherence forbids
+    ///   a second, so the sole impl IS what the solver would pick);
+    /// - 1 default-marked (CoreDerives-origin) + 1 non-default → the NON-default
+    ///   override (the cascade keystone case: an unscoped call uses the derived
+    ///   default, `with (<T as Trait>)` selects the hand-written override);
+    /// - >1 non-default (N-way) → `None` (keystone-deferred: selecting among
+    ///   several overrides needs more than naming the goal — do NOT invent
+    ///   impl-naming; fall through to the ordinary `with`-provider path);
+    /// - all default-marked → `None` (nothing to override).
+    ///
+    /// SOUNDNESS: always returns a REAL existing `ImplementorId` (never forges
+    /// Evidence). Default-marking is recognized by the SSOT
+    /// [`TraitSolveCx::implementor_is_default_marked`] (CoreDerives-origin by
+    /// resolved provenance ingot, never by name).
+    ///
+    /// [`TraitSolveCx::implementor_is_default_marked`]: crate::analysis::ty::trait_resolution::TraitSolveCx::implementor_is_default_marked
     fn sole_scoped_selection_implementor(
         &self,
         goal: TraitInstId<'db>,
         subject: TyId<'db>,
     ) -> Option<ImplementorId<'db>> {
+        use crate::analysis::ty::trait_resolution::TraitSolveCx;
         let db = self.db;
         let trait_def = goal.def(db);
         let scope_ingot = self.env.scope().ingot(db);
         let trait_ingot = trait_def.top_mod(db).ingot(db);
-        [scope_ingot, trait_ingot]
-            .into_iter()
-            .flat_map(|ingot| impls_for_trait_def(db, ingot, trait_def).iter().copied())
-            .map(|binder| binder.instantiate_identity())
-            .find(|implementor| implementor.self_ty(db) == subject)
+        // The real `Hir` impls of this trait for `subject` (dedup across the two
+        // search ingots, which can overlap when scope and trait share an ingot).
+        let mut candidates: Vec<ImplementorId<'db>> = Vec::new();
+        for ingot in [scope_ingot, trait_ingot] {
+            for binder in impls_for_trait_def(db, ingot, trait_def).iter() {
+                let implementor = binder.instantiate_identity();
+                if implementor.self_ty(db) == subject && !candidates.contains(&implementor) {
+                    candidates.push(implementor);
+                }
+            }
+        }
+
+        match candidates.as_slice() {
+            // Exactly one impl: byte-identical with the pre-cascade behavior.
+            [only] => Some(*only),
+            // ≥2 coexisting impls: select the sole NON-default override.
+            _ => {
+                let mut overrides = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&impl_| !TraitSolveCx::implementor_is_default_marked(db, impl_));
+                let first = overrides.next()?;
+                // >1 non-default (N-way) → ambiguous-to-name; keystone-deferred.
+                if overrides.next().is_some() {
+                    return None;
+                }
+                Some(first)
+            }
+        }
     }
 
     fn check_call(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {

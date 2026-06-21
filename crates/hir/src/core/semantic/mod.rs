@@ -3980,9 +3980,15 @@ impl<'db> ImplTrait<'db> {
 
         // Conflict check
         let trait_ = implementor.skip_binder().trait_(db);
-        // C3c-1 money-floor seam: canonical goals stay exactly-one; the
-        // non-canonical branch is flipped to allow >1 by C3c-3 (the demotion).
-        // Behavior byte-identical until then.
+        // C3c money-floor + demotion: canonical goals stay exactly-one; for a
+        // non-canonical goal the C3c-3 DEMOTION is LIVE but DELIBERATELY NARROW —
+        // it permits a second impl ONLY for the cascade's "derive the default,
+        // override it" shape, i.e. when exactly ONE of the two conflicting impls
+        // is the CoreDerives-origin DEFAULT (`implementor_is_default_marked`). Two
+        // arbitrary OVERLAPPING user impls (neither a derived default) stay a real
+        // coherence conflict (`5-0001`) — overlap is a genuine hazard, not a
+        // cascade default+override pair. Canonical goals (the money floor) ALWAYS
+        // reject a second impl.
         let canonical = goal_is_canonical(db, trait_.def(db));
         let env = ingot_trait_env(db, self.top_mod(db).ingot(db));
         if let Some(impls) = env.impls.get(&trait_.def(db)) {
@@ -3992,17 +3998,27 @@ impl<'db> ImplTrait<'db> {
                     continue;
                 }
                 if does_impl_trait_conflict(db, cand_view, implementor) {
-                    // The canonical/non-canonical branch is live here, but both
-                    // arms preserve today's behavior: a coherence conflict is
-                    // disallowed for BOTH canonical and non-canonical goals.
                     let conflict_allowed = if canonical {
                         // Canonical goal (storage-/ABI-layout critical): a second
                         // in-scope impl is always a genuine coherence conflict.
+                        // The money floor — never flips (soundness invariant).
                         false
                     } else {
-                        // Non-canonical goal: still disallowed today (byte-identical).
-                        // C3c-3 flips THIS arm to `true` (provider-overridable >1).
-                        false
+                        // Non-canonical goal: permit coexistence ONLY when exactly
+                        // one of the pair is the derived default — the cascade
+                        // default+override shape. The unscoped default-tier (C3c-2)
+                        // then picks the CoreDerives-origin default; `with
+                        // (<T as Trait>)` (C3b) selects the override. Two
+                        // non-default user impls remain a `5-0001` conflict.
+                        let this_default = crate::analysis::ty::trait_resolution::TraitSolveCx::implementor_is_default_marked(
+                            db,
+                            *implementor.skip_binder(),
+                        );
+                        let cand_default = crate::analysis::ty::trait_resolution::TraitSolveCx::implementor_is_default_marked(
+                            db,
+                            *cand_view.skip_binder(),
+                        );
+                        this_default != cand_default
                     };
                     if !conflict_allowed {
                         return Err(ImplTraitLowerError::Conflict {

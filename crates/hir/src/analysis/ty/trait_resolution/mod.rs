@@ -257,6 +257,25 @@ impl<'db> TraitSolveCx<'db> {
                 Selection::Unique(solution.value.implementor)
             }
             GoalSatisfiability::NeedsConfirmation(ambiguous) => {
+                // FCO "slide" cascade C3c-2 — the DEFAULT-TIER rule, consulted
+                // OUTSIDE the tracked `is_goal_satisfiable` solve (this match arm
+                // runs on the solve's *result*, so the salsa-key invariant at
+                // `mod.rs:109-164` — `scope` excluded from the tracked key — is
+                // untouched). When >1 REAL coexisting impl applies to a concrete
+                // non-canonical goal and exactly one is default-marked
+                // (CoreDerives-origin), collapse the ambiguity to that default so
+                // an unscoped call resolves deterministically (never a MIR
+                // `select_impl`→`Ambiguous`→panic). None/many marked, or any
+                // candidate carrying inference vars, leaves the ambiguity intact
+                // (a clean diagnostic upstream). With C3c-3 LIVE the demotion only
+                // admits coexistence in the cascade's default+override shape (the
+                // gate at `core/semantic/mod.rs` requires exactly one default), so
+                // this engages exactly there; for code without a coexisting pair
+                // `default_tier_selection` finds ≤1 applying candidate ⇒ `None` ⇒
+                // this falls through to `Ambiguous` (byte-identical).
+                if let Some(Selection::Unique(default)) = self.default_tier_selection(db, inst) {
+                    return Selection::Unique(default);
+                }
                 Selection::Ambiguous(ambiguous.iter().map(|s| s.value.implementor).collect())
             }
             GoalSatisfiability::ContainsInvalid | GoalSatisfiability::UnSat(_) => {
@@ -265,23 +284,24 @@ impl<'db> TraitSolveCx<'db> {
         }
     }
 
-    /// FCO "slide" cascade C3c-2 — the DEFAULT-TIER rule (LATENT until C3c-3).
+    /// FCO "slide" cascade C3c-2 — the DEFAULT-TIER rule (LIVE with C3c-3).
     ///
     /// When >1 real coexisting `Hir` impl applies to one concrete goal and no
     /// in-scope provision selected one (the unscoped/default tier), this picks the
     /// DEFAULT-marked impl: the one whose provenance is a canonical core-derive
-    /// provider (see [`Self::implementor_is_default_marked`]). It is the verify-leg
-    /// disambiguator the design pins at `expr.rs:2335` — scope-free, run OUTSIDE
-    /// the tracked `is_query_satisfiable` solve so the cache-safety invariant
-    /// (`trait_resolution/mod.rs:109-164`) is untouched.
+    /// provider (see [`Self::implementor_is_default_marked`]). It is the
+    /// disambiguator consumed by [`Self::select_impl`]'s `Ambiguous` arm —
+    /// scope-free, run OUTSIDE the tracked `is_query_satisfiable` solve so the
+    /// cache-safety invariant (`trait_resolution/mod.rs:109-164`) is untouched.
     ///
     /// Returns:
     /// - `None` — the rule DOES NOT ENGAGE: ≤1 coexisting impl applies to the
-    ///   goal. This is the ONLY reachable outcome on today's code: coherence
-    ///   (`does_impl_trait_conflict`, sole caller `core/semantic/mod.rs:3989`)
-    ///   forbids >1 coexisting impl for a (type, goal), so the applying-candidate
-    ///   set is always ≤1 and the engage branch below is DEAD. The caller falls
-    ///   back to today's path unchanged → byte-identical.
+    ///   goal, OR the goal still carries inference vars (the inference-ambiguity
+    ///   path). For code WITHOUT a cascade default+override pair the applying set
+    ///   is ≤1, so this is `None` and the caller falls back to today's path
+    ///   unchanged → byte-identical. Coexistence is admitted only in the cascade's
+    ///   default+override shape (the gate in `core/semantic/mod.rs` requires
+    ///   exactly one default-marked impl), so the engage branch fires there.
     /// - `Some(Selection::Unique(impl))` — >1 applied AND exactly one is
     ///   default-marked: select it deterministically (recorded so MIR consumes it
     ///   via the C1 rail, never reaching `select_impl`→`LowerError`→panic at
@@ -301,15 +321,28 @@ impl<'db> TraitSolveCx<'db> {
     /// inference vars, not by coexisting coherent impls. The two cases are
     /// structurally distinct here.
     ///
-    /// Has no non-test callers in C3c-2: the seam is planted + unit-tested
-    /// synthetically (`default_tier_rule_tests`); the verify-leg consumes it once
-    /// C3c-3 demotes coherence so >1 can coexist.
-    #[allow(dead_code)]
+    /// Consumed (C3c-2 LIVE) by [`Self::select_impl`]'s `Ambiguous` arm — the
+    /// single impl-selection SSOT — so an unscoped call over >1 coexisting impl
+    /// resolves deterministically to the default; and unit-tested synthetically
+    /// (`default_tier_rule_tests`). LATENT until C3c-3 demotes coherence: today
+    /// `applying.len() <= 1` ⇒ `None` ⇒ byte-identical.
     pub(crate) fn default_tier_selection(
         self,
         db: &'db dyn HirAnalysisDb,
         inst: TraitInstId<'db>,
     ) -> Option<Selection<ImplementorId<'db>>> {
+        // CONCRETE-GOAL GATE: the default-tier rule is for the UNSCOPED-call case
+        // (a concrete goal with >1 coexisting coherent impl). A goal still carrying
+        // inference variables belongs to the inference-ambiguity path
+        // (`NeedsConfirmation` → `AmbiguousTraitInst`), NOT here: its vars live in
+        // the CALLER's unification table, so instantiating candidates against it in
+        // our fresh table (`implementor_applies_to_goal`) would mix foreign keys
+        // (out-of-bounds in `TyVarResolver`). Leave such goals to the caller's
+        // normal path. Checked on the raw goal, before normalization touches it.
+        if crate::analysis::ty::visitor::collect_flags(db, inst).contains(TyFlags::HAS_VAR) {
+            return None;
+        }
+
         let scope = self.normalization_scope_for_trait_inst(db, inst);
         let inst = normalize_trait_inst_preserving_validity(db, inst, scope, self.assumptions);
 
@@ -329,9 +362,10 @@ impl<'db> TraitSolveCx<'db> {
             .map(|cand| cand.instantiate_identity())
             .collect();
 
-        // LATENCY GATE: today coherence forbids >1 coexisting impl, so this is
-        // always ≤1 and the rule does not engage (byte-identical). Only the
-        // post-C3c-3 cascade state (>1 coexisting impl) reaches the body below.
+        // ENGAGE GATE: only >1 coexisting impl reaches the default-tier decision.
+        // Without a cascade default+override pair the demotion (C3c-3) still
+        // forbids a second impl, so `applying` is ≤1 and the rule no-ops here
+        // (byte-identical for non-cascade code).
         if applying.len() <= 1 {
             return None;
         }
@@ -375,21 +409,36 @@ impl<'db> TraitSolveCx<'db> {
     }
 
     /// DEFAULT-marked recognition (precise): an implementor is default-marked iff
-    /// its provenance is a canonical core-derive provider — i.e. its
-    /// [`ImplementorOrigin`] is `Hir(impl_trait)` AND that impl's defining ingot
-    /// kind is [`IngotKind::CoreDerives`]. This is the same canonical-ness
-    /// recognizer `core_providers` keys on (`core/lower/provider.rs:692`), and
-    /// keys on the impl's RESOLVED provenance ingot — never on a bare name. A
-    /// user impl in a `Local`/`Std`/`Core` ingot, a `VirtualContract`, or an
-    /// `Assumption` are NEVER default-marked.
-    fn implementor_is_default_marked(
+    /// it is the output of a CANONICAL core-derive provider — i.e. its
+    /// [`ImplementorOrigin`] is `Hir(impl_trait)`, that impl was generated from a
+    /// derive site (`Desugared(Derive(..))`), and the provider that produced it
+    /// lives in a [`IngotKind::CoreDerives`] ingot. This is the "derive the
+    /// default" half of the cascade: a `#[derive(Eq)]`/`derive Eq for T` impl
+    /// (whose generator is the canonical `core_derives` `StableEq`) is the
+    /// DEFAULT; a hand-written `impl Eq for T` is the OVERRIDE.
+    ///
+    /// Recognition keys on the RESOLVED PROVENANCE PROVIDER's ingot
+    /// ([`derived_impl_provenance`] — the same provider re-identification the
+    /// derive selection used), never on the generated impl's own ingot (which is
+    /// the *user's* file, not `core_derives`) and never on a bare name. So:
+    /// - a hand-written impl (no `Desugared(Derive)` origin) → NOT marked;
+    /// - a derive backed by a NON-core (`using MyProvider`) provider → NOT marked
+    ///   (it is a custom default, not the canonical core one);
+    /// - a `VirtualContract` or an `Assumption` → NEVER marked.
+    ///
+    /// [`derived_impl_provenance`]: crate::core::lower::derived_impl_provenance
+    pub(crate) fn implementor_is_default_marked(
         db: &'db dyn HirAnalysisDb,
         implementor: ImplementorId<'db>,
     ) -> bool {
         match implementor.origin(db) {
             ImplementorOrigin::Hir(impl_trait) => {
-                impl_trait.top_mod(db).ingot(db).kind(db)
-                    == common::ingot::IngotKind::CoreDerives
+                crate::core::lower::derived_impl_provenance(db, impl_trait).is_some_and(
+                    |provenance| {
+                        provenance.provider.top_mod(db).ingot(db).kind(db)
+                            == common::ingot::IngotKind::CoreDerives
+                    },
+                )
             }
             ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => false,
         }

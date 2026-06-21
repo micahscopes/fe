@@ -110,6 +110,14 @@ pub(crate) struct TyCheckEnv<'db> {
     /// Discharge evidence for const-predicate obligations retired while
     /// checking this body, in retirement order.
     discharged_const_predicates: Vec<super::DischargedConstPredicate<'db>>,
+
+    /// FCO "slide" cascade C3b — the value `ExprId`s of `with`-bindings consumed
+    /// as scoped impl SELECTIONS (`with (<T as Trait>) { .. }`). Such a binding
+    /// names a (Trait, Type) GOAL, not a runtime value, so it contributes no
+    /// value to the body and its qualified-type-path value expr has no value-path
+    /// classification. MIR body lowering reads this to SKIP lowering those value
+    /// exprs (they only selected an impl, already recorded on the discharge).
+    scoped_selection_exprs: FxHashSet<ExprId>,
 }
 
 impl<'db> TyCheckEnv<'db> {
@@ -248,6 +256,7 @@ impl<'db> TyCheckEnv<'db> {
             for_loop_seq: SecondaryMap::new(),
             discharged_obligations: Vec::new(),
             discharged_const_predicates: Vec::new(),
+            scoped_selection_exprs: FxHashSet::default(),
         };
 
         env.enter_scope(body.expr(db));
@@ -914,6 +923,12 @@ impl<'db> TyCheckEnv<'db> {
         self.discharged_const_predicates.push(discharged);
     }
 
+    /// FCO "slide" cascade C3b: mark a `with`-binding value expr as a scoped impl
+    /// SELECTION (not a runtime value), so MIR body lowering skips lowering it.
+    pub(super) fn record_scoped_selection_expr(&mut self, value_expr: ExprId) {
+        self.scoped_selection_exprs.insert(value_expr);
+    }
+
     pub(super) fn deferred_len(&self) -> usize {
         self.deferred.len()
     }
@@ -1055,6 +1070,7 @@ impl<'db> TyCheckEnv<'db> {
             for_loop_seq: self.for_loop_seq,
             discharged_obligations: self.discharged_obligations,
             discharged_const_predicates: self.discharged_const_predicates,
+            scoped_selection_exprs: self.scoped_selection_exprs,
             expr_place,
             expr_places,
         }
