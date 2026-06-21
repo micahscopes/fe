@@ -821,6 +821,64 @@ pub(crate) fn does_impl_trait_conflict<'db>(
     true
 }
 
+/// Whether a goal's resolved trait-def identity is in the v1 CANONICAL set: the
+/// narrow tier of traits whose impl is consensus-/layout-critical, so a second
+/// in-scope impl is a genuine coherence conflict (a wrong impl silently
+/// relocates storage slots or changes the ABI wire format = fund loss), NOT a
+/// benign customization. Recognition keys on the FULL resolved identity (the
+/// trait's own name + its defining ingot kind), NEVER on the bare spelling —
+/// EXACTLY like [`is_std_evm_contract_trait_def`] and the `core::derive`
+/// capability recognizers (`scope_is_derive_capability` /
+/// `scope_is_fix_capability`, `provider_goal.rs`): a user trait merely *named*
+/// `AbiSize` / `StorageKey`, defined in a `Local` ingot, resolves to a DIFFERENT
+/// `Trait` def and is NOT canonical.
+///
+/// The v1 set (tunable allowlist; v1 = storage-layout + ABI-layout):
+///   - storage-layout: `std::evm::storage_map::StorageKey` (the storage-slot
+///     witness — a wrong `write_key` relocates every mapping slot);
+///   - ABI-layout family: `core::abi::AbiSize` (the layout/size metadata:
+///     `HEAD_SIZE` / `IS_DYNAMIC` / `payload_size`), plus the codecs built on it,
+///     `core::abi::Encode` / `core::abi::Decode` (a wrong impl produces wrong
+///     on-the-wire bytes = consensus break). `AbiSize` lives in the `Core` ingot
+///     and `StorageKey` in the `Std` ingot, so the kind discriminates per trait.
+///
+/// Deliberately NON-canonical in v1: `Ord` / `Hash` (`core::ops`). These are
+/// commonly and legitimately customized via providers (e.g. `StableOrd`), and
+/// the "consensus Ord/Hash" worry is a use-context sub-case (a specific contract
+/// relying on a specific ordering), not a property of the trait def — deferred as
+/// a tunable refinement rather than blanket-canonicalized here.
+///
+/// INERT (FCO slide C3a): this is the recognition primitive only. Nothing in the
+/// production path consumes it yet — the coherence demotion that turns "the goal
+/// is NON-canonical" into "a second impl is permitted (provider-overridable)" is
+/// increment C3c, which gates the conflict prune (`does_impl_trait_conflict` /
+/// `lowered_implementor`) on this predicate. The unit test
+/// `goal_is_canonical_keys_on_resolved_identity_not_name` exercises the v1 set
+/// (StorageKey / AbiSize = true) and the non-canonical cases (Ord / Eq /
+/// user-defined = false), each via a real trait resolution so neither arm passes
+/// vacuously.
+// wired live by cascade C3c (coherence demotion)
+#[allow(dead_code)]
+pub(crate) fn goal_is_canonical<'db>(db: &'db dyn HirAnalysisDb, trait_def: Trait<'db>) -> bool {
+    let Some(name) = trait_def.name(db).to_opt() else {
+        return false;
+    };
+    let name = name.data(db).as_str();
+    let ingot_kind = trait_def.top_mod(db).ingot(db).kind(db);
+
+    // tunable allowlist; v1 = storage-layout + ABI-layout (keyed on the trait's
+    // resolved (name, defining-ingot-kind) identity, never the bare spelling).
+    matches!(
+        (name, ingot_kind),
+        // storage-layout: the storage-slot witness (std::evm::storage_map).
+        ("StorageKey", IngotKind::Std)
+            // ABI-layout family: layout metadata + its wire-format codecs (core::abi).
+            | ("AbiSize", IngotKind::Core)
+            | ("Encode", IngotKind::Core)
+            | ("Decode", IngotKind::Core)
+    )
+}
+
 /// Represents an instantiated trait, which can be thought of as a trait
 /// reference from a HIR perspective.
 #[salsa::interned]
@@ -967,8 +1025,10 @@ impl<'db> TraitInstId<'db> {
 mod tests {
     use camino::Utf8PathBuf;
 
-    use super::{check_reresolution_determinism, impls_for_trait_def};
-    use crate::hir_def::ItemKind;
+    use super::{check_reresolution_determinism, goal_is_canonical, impls_for_trait_def};
+    use crate::analysis::name_resolution::{PathRes, resolve_path};
+    use crate::analysis::ty::trait_resolution::PredicateListId;
+    use crate::hir_def::{ItemKind, PathId};
     use crate::test_db::HirAnalysisTestDb;
 
     /// Rung 3.3: the MIR re-resolution determinism assertion fires on a genuine
@@ -1061,5 +1121,107 @@ impl<T> Foo for T where T: Marker {}
 
         let impls = impls_for_trait_def(&db, top_mod.ingot(&db), trait_);
         assert_eq!(impls.len(), 2);
+    }
+
+    /// Resolve `path` (as segment strings) from `file`'s top-module scope to its
+    /// trait def, asserting it resolves to a TRAIT (anti-vacuous: a non-`Trait`
+    /// resolution — or a failure — would make either polarity of the canonical
+    /// check pass for free), then return `goal_is_canonical` for that def.
+    fn resolve_goal_is_canonical(
+        db: &mut HirAnalysisTestDb,
+        file_name: &str,
+        text: &str,
+        path: &[&str],
+    ) -> bool {
+        let file = db.new_stand_alone(Utf8PathBuf::from(file_name), text);
+        let (top_mod, _) = db.top_mod(file);
+        let scope = top_mod.scope();
+        let assumptions = PredicateListId::empty_list(db);
+        let path_id = PathId::from_segments(db, path);
+        let trait_def = match resolve_path(db, path_id, scope, assumptions, false) {
+            Ok(PathRes::Trait(inst)) => inst.def(db),
+            res => panic!("expected {path:?} to resolve to a trait, got {res:?}"),
+        };
+        goal_is_canonical(db, trait_def)
+    }
+
+    /// FCO slide C3a: the canonical-recognition predicate keys on the FULL
+    /// resolved trait-def identity (name + defining ingot kind), NEVER on the bare
+    /// spelling, and recognizes exactly the v1 set (storage-layout + ABI-layout).
+    ///
+    /// Positive (anti-vacuous): the real `std::evm::StorageKey` and
+    /// `core::abi::AbiSize` traits resolve to their canonical defs and ARE
+    /// canonical.
+    ///
+    /// Negative (anti-vacuous): `core::ops::Ord` and `core::ops::Eq` are real
+    /// traits in the SAME `Core` ingot but are NOT in the allowlist (confirming
+    /// Ord is deliberately non-canonical in v1), and a LOCAL `trait AbiSize {}`
+    /// declared in the fixture — same spelling, `Local` ingot — is NOT canonical.
+    /// `resolve_goal_is_canonical` asserts each path resolves to a real trait, so
+    /// neither arm can pass vacuously.
+    #[test]
+    fn goal_is_canonical_keys_on_resolved_identity_not_name() {
+        // Positive: storage-layout — std::evm::StorageKey.
+        let mut db = HirAnalysisTestDb::default();
+        assert!(
+            resolve_goal_is_canonical(
+                &mut db,
+                "goal_is_canonical_storage_key.fe",
+                "struct Anchor {}\n",
+                &["std", "evm", "StorageKey"],
+            ),
+            "std::evm::StorageKey (storage-layout) must be canonical in v1"
+        );
+
+        // Positive: ABI-layout — core::abi::AbiSize.
+        let mut db = HirAnalysisTestDb::default();
+        assert!(
+            resolve_goal_is_canonical(
+                &mut db,
+                "goal_is_canonical_abi_size.fe",
+                "struct Anchor {}\n",
+                &["core", "abi", "AbiSize"],
+            ),
+            "core::abi::AbiSize (ABI-layout) must be canonical in v1"
+        );
+
+        // Negative: core::ops::Ord is a real trait but deliberately NON-canonical
+        // in v1 (commonly customized via providers).
+        let mut db = HirAnalysisTestDb::default();
+        assert!(
+            !resolve_goal_is_canonical(
+                &mut db,
+                "goal_is_canonical_ord.fe",
+                "struct Anchor {}\n",
+                &["core", "ops", "Ord"],
+            ),
+            "core::ops::Ord must be NON-canonical in v1"
+        );
+
+        // Negative: core::ops::Eq is also a real, non-canonical trait.
+        let mut db = HirAnalysisTestDb::default();
+        assert!(
+            !resolve_goal_is_canonical(
+                &mut db,
+                "goal_is_canonical_eq.fe",
+                "struct Anchor {}\n",
+                &["core", "ops", "Eq"],
+            ),
+            "core::ops::Eq must be NON-canonical in v1"
+        );
+
+        // Negative (anti-vacuous on identity): a LOCAL `trait AbiSize {}` — same
+        // spelling, `Local` ingot — resolves to a DIFFERENT def and is NOT
+        // canonical. The identity is keyed on (name, defining-ingot), not name.
+        let mut db = HirAnalysisTestDb::default();
+        assert!(
+            !resolve_goal_is_canonical(
+                &mut db,
+                "goal_is_canonical_local_abi_size.fe",
+                "trait AbiSize {}\n",
+                &["AbiSize"],
+            ),
+            "a local `trait AbiSize` (not core::abi::AbiSize) must be NON-canonical"
+        );
     }
 }
