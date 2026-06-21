@@ -1,5 +1,7 @@
 # FCO Consolidation Map
 
+> **SUPERSEDED (M5/M6 obligation-pathway framing) → entry point: `FCO_MAP.md`; SSOT: `FCO_THE_SLIDE_2026-06-19.md`.** This map's "demand → obligation/provision → evidence → consumer" framing and its candidate table (#1–#9, the const-predicate/CTFE-backend slice) are the EARLIER consolidation pass; the converged spine is now ONE establish-an-impl operation + ONE provision-walk resolver (the slide), not "more features become const-predicate producers/consumers." The LANDED rows (#1–#4, #7 obligation gates) remain accurate as a record of what shipped; the forward-looking candidates (#5/#6/#8/#9) are subsumed by the slide's deletion ladder. Historical record — read for the file:line locus of the M5 substrate, not for current sequencing.
+
 This document is a repo-grounded map of features in the Fe compiler that
 already share — or could be migrated onto — one common obligation/evidence
 pathway, plus **one** recommended first implementation task. It is a planning

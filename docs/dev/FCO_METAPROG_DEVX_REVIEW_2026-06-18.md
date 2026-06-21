@@ -1,5 +1,7 @@
 # Metaprogramming authoring DEVX — review + alternative-interface proposals
 
+> **HISTORICAL (authoring-DEVX review; deferred-tunable surface) → `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** Per the governing principle (`fco-guts-over-sugar`), authoring surface/DEVX is a deferred-tunable default, not a gate; this review's A+B+C-narrow recommendation is a parked surface proposal, not the live spine. Historical design review.
+
 **Date:** 2026-06-18 · **Status:** design-wizard review (read-only; fable-log + surface-lore grounded;
 load-bearing claims spot-verified). Recommends A+B+C-narrow for the authoring-DEVX slice.
 

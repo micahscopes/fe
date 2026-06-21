@@ -1,5 +1,7 @@
 # Derive / Constraint-Kind — Literature & Research Record (2026-06-15)
 
+> **HISTORICAL/REFERENCE (citable literature record) → live decision: `FCO_ABSTRACT_HEAD_RESEARCH_DOSSIER.md`; entry: `FCO_MAP.md`; SSOT: `FCO_THE_SLIDE_2026-06-19.md`.** The external-precedent + theory convergence record; the live abstract-head decision lives in the dossier. Kept as the dated citable record.
+
 Consolidated from the architect's web-precedent pass, CTCubFe-connection pass, and research-directions
 pass (2026-06-15), cross-checked against the Fable findings. **Verdict: full convergence, no pivot** — the
 external precedent + theory independently confirm the Fable/architect design (the TD/AH split, the

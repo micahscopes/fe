@@ -1,5 +1,7 @@
 # Provision Authority — the Language Construct (design-wizard, fable-grounded)
 
+> **HISTORICAL (authority-construct exploration; folded) → `FCO_FIX_UNIVERSAL_IMPL_DESIGN_2026-06-21.md` §4 + `FCO_MAP.md`.** The authority *construct* explored here is now the ratified `Fix`/establishment model's deferred `Authority`/`grant`/`RootProvider` policy layer (Tier 3, grant-as-data, no reified `Mint` tower per the cliff law). Historical construct exploration. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Date:** 2026-06-17 · **Status:** language-design exploration (self-review methodology; fable-corpus
 grounded). Design-only, read-only, NON-BLOCKING. Designs the *construct* (vs the A/B/C/D policy menu
 in `FCO_AUTHORITY_GATED_OVERRIDE_2026-06-17.md`). Load-bearing code claims spot-verified ✓.

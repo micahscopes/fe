@@ -1,5 +1,7 @@
 # Trait-Constructor-as-Value — design + rung plan (Form 2 enablement)
 
+> **HISTORICAL (LANDED) → `FCO_DERIVE_KIND_FORMS_2026-06-18.md` (Form 2) / `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** `TraitCtor` R1–R3 shipped (`863db9b83`, `df2c37570`), enabling the chosen Form 2 derive-kind. Kept as the dated landed-decision record.
+
 **Date:** 2026-06-18 · **Status: R1–R3 LANDED + independently verified — Form 2 is GREEN.** R1 inert
 variant `863db9b83`; R2+R3 produce+reduce `df2c37570` (only `derive_kind_form2_param.snap` changed,
 `2-0006`→clean; cold gate fe-hir 132/0, cli_output 360/0). The unsaturated sibling of `ConstraintTerm`;

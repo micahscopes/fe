@@ -1,5 +1,7 @@
 # Provision Scoping & the Trait/Effect Unification — Synthesis + Design Push
 
+> **LIVE (ratified design anchor; §4 anchors the slide).** Still authoritative for the ratified provision-scoping decisions (one resolver, ladder of tiers, impls = companion/outermost tier, innermost-wins, canonical = non-overridable). `FCO_THE_SLIDE_2026-06-19.md` is the SSOT built ON this; `FCO_MAP.md` is the one-page entry point.
+
 **Date:** 2026-06-17 · **Audience:** architect · **Status:**
 `DOC_DECISION_PACKET / ARCHITECT_RATIFIED_DESIGN_DIRECTION / PUBLIC_SEMANTICS_NOT_IMPLEMENTED`
 (ratified 2026-06-17, architect directive). Synthesis of prior fable logs + design-wizard

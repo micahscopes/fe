@@ -1,5 +1,7 @@
 # Rung 3 (unified provision resolver) — readiness spikes
 
+> **SUPERSEDED (rung 3 built) → `FCO_THE_SLIDE_2026-06-19.md` (SSOT) / `FCO_RUNG3_SCOPE_REFINEMENT_2026-06-19.md` / `FCO_MAP.md`.** Both de-risking spikes resolved into the slide's "stage, don't fuse" + scope-refinement steers; rung 3 landed. Historical de-risking record. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Date:** 2026-06-19 · **Status:** two de-risking spikes complete (opus, read-only). Both **YELLOW**
 (achievable with bounded, well-localized changes; neither RED / no fundamental blocker). They
 **converge on one architectural steer.** This gates building rung 3 alongside Micah's coherence gut-calls.

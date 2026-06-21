@@ -1,5 +1,7 @@
 # PS-MR — Sizing & Decision Record
 
+> **HISTORICAL (sizing/decision record) → `FCO_THE_SLIDE_2026-06-19.md` (SSOT) / `FCO_MAP.md`.** This PS-MR (#49) sizing spike fed the TD5.2b/`require`-routing work, now subsumed by the slide's de-magic ladder (step 2). Historical sizing record.
+
 **Date:** 2026-06-17 · **Status:** read-only sizing spike (no code change), citations
 spot-verified in-tree. Decision: **pursue framing-2 (solver-verified-obligation sidestep) to
 complete TD5.2b**; framing-1 (general method-resolution dedup) is the deferred general fix, to be

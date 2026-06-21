@@ -1,5 +1,7 @@
 # Scope-Control Precedent + the `global` Keyword Verdict
 
+> **HISTORICAL (precedent research + keyword verdict; surface deferred-tunable) → `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** Per the governing principle (`fco-guts-over-sugar`), the `global`/keyword surface is a deferred-tunable default, not a gate. Kept as the dated precedent research + keyword-pair decision record.
+
 **Date:** 2026-06-17 · **Status:** precedent research (design-wizard, web-verified). Design-only,
 NON-BLOCKING. Refines `FCO_AUTHORITY_GATED_OVERRIDE` / `FCO_PROVISION_AUTHORITY_CONSTRUCT`.
 

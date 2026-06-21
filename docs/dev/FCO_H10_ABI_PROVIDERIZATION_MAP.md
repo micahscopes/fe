@@ -1,5 +1,7 @@
 # H10 execution map — ABI/static-layout providerization (the #1 reification win)
 
+> **SUPERSEDED (scoping map; reify-path proven) → `FCO_BRIDGE_BURN_DOWN.md` row 5 / `FCO_MAP.md`.** The ABI/static-layout providerization this map scoped has its reify-path proven (`StableAbiSize` derives real `core::abi::AbiSize`, `c0eaec79b`) and both AbiSize generators deleted (`43ebe7efb`, `fbfbba0ef`); remaining ABI/event providerization rides the slide's deletion ladder. Historical scoping map. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Scoping, 2026-06-14. Reification target, not a bridge.** Per the bridge +
 reification inventory (`FCO_BRIDGE_AND_REIFICATION_TARGETS.md`, top reification
 win #1), the hardcoded Rust ABI/event/error/msg lowering is a

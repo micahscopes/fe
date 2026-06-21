@@ -1,5 +1,7 @@
 # FCO Abstract-Head Research Dossier & Charter
 
+> **LIVE (charter for the DEFERRED abstract-head / N-way work).** Still authoritative for the `P : * -> Constraint` abstract-head program, which the slide defers (the cliff law keeps the near-term spine concrete-headed). Read this for the abstract-head soundness requirements + staged path; read `FCO_THE_SLIDE_2026-06-19.md` (SSOT) + `FCO_MAP.md` for the converged near-term spine.
+
 **2026-06-15.** Consolidated literature review + research-program charter for the
 **abstract head** of the kinded-derive system: constraint-constructor *parameters*
 (`P : * -> Constraint`), their application (`where P<T>`, `ImplBuilder<P,T>`,

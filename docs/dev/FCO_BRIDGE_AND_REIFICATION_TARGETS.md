@@ -1,5 +1,7 @@
 # FCO Bridge + Reification Target Inventory
 
+> **SUPERSEDED (2026-06-14 inventory) → live board: `FCO_BRIDGE_BURN_DOWN.md`; entry: `FCO_MAP.md`.** This BR0–BR13 / providerization inventory was the input to the burn-down phase; the LIVE tracking of bridge removal is now the burn-down board (which records what landed). Kept as the dated origin inventory + classification taxonomy. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Repo-grounded audit, 2026-06-14, branch `first-class-obligations`.** Audit + docs
 pass only — no compiler behavior changed. Every status/classification cites a
 verified `file:line` read in this repo. This is the companion overlay to:

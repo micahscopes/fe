@@ -1,5 +1,7 @@
 # Rung 3 — scope refinement (the 3.4 design spike's pivotal finding)
 
+> **SUPERSEDED (folded into the SSOT) → `FCO_THE_SLIDE_2026-06-19.md` / `FCO_MAP.md`.** The pivotal finding here — SELECTION cannot be unified onto the solver, only VERIFICATION can (resolve the scoped override at the verify-leg, keep `scope` out of the tracked solver key) — is now a load-bearing part of the slide's HIR-query verdict + cascade. Read the SSOT for the live model; this is the dated spike that produced the finding.
+
 **Date:** 2026-06-19 · **Status:** read-only design spike (opus) on rung 3.4, applied. Reshapes what the
 byte-identical rung-3 cut delivers. Supersedes the 3.4 framing in `FCO_RUNG3_PLAN_2026-06-19.md`.
 

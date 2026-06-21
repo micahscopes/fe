@@ -1,5 +1,7 @@
 # Tier A constraint aliases via marker-trait + blanket-impl
 
+> **HISTORICAL/REFERENCE (works-today technique) → `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** Documents the safe "Tier A" constraint-alias face that already works in Fe with zero compiler change. Kept as a dated reference; not part of the live build spine.
+
 **Status:** Verified working in Fe today, zero compiler change. (2026-06-16)
 
 A "constraint alias" bundles several trait obligations under one name. This

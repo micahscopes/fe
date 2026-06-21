@@ -1,5 +1,7 @@
 # Wiring-Party Decision Record — kinded derive API, grounded in the fable corpus
 
+> **HISTORICAL (kinded-derive decision record; partly revised) → `FCO_DERIVE_KIND_FORMS_2026-06-18.md` / `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** The `Derive : (* -> Constraint) -> Constraint` framing recorded here was later refined to **Form 2** (`* -> (* -> Constraint) -> Constraint`); the fable-grounded rationale remains the citable origin record. Read `FCO_DERIVE_KIND_FORMS` for the chosen form.
+
 **2026-06-15.** Decisions for graduating the derive/metaprogramming bridge to its kinded form
 (`Derive : (* -> Constraint) -> Constraint`, `Evidence`/`ImplBuilder : Constraint -> *`,
 traits-as-`* -> Constraint`, `where P<T>`). Every load-bearing call below is anchored in the

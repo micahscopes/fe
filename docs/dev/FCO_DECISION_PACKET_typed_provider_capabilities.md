@@ -1,5 +1,7 @@
 # Architect-decision packet — Typed provider capabilities (P00/P10 = K07/BR2)
 
+> **SUPERSEDED (decided + landed) → `FCO_DERIVE_KIND_FORMS_2026-06-18.md` / `FCO_BRIDGE_BURN_DOWN.md` rows 2–3 / `FCO_MAP.md`.** The typed-capability decision this packet requested was made and shipped: `Evidence`/`ImplBuilder`/`Reflect`/`Derive` are recognized by resolved `core::derive` identity (string-key authority deleted — burn-down rows 2/3, `b82fc43a6` etc.); `Derive` graduated to a real trait. Historical decision packet. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Status: DECISION REQUESTED. Prepared 2026-06-14 by the implementor; no code
 written for this — design only.** This is the single highest-leverage decision in
 the FCO arc: it is the hard prerequisite for the entire `Derive`-bridge graduation

@@ -1,5 +1,7 @@
 # Constraint-kind revival plan (K02 — re-port from effort2)
 
+> **HISTORICAL (DONE) → `FCO_DERIVE_KIND_FORMS_2026-06-18.md` (chosen Form 2) / `FCO_MAP.md`.** K02 SHIPPED: `Kind::Constraint` is live (`804dc959a`); `ConstraintTerm`+`TraitCtor` landed (R1–R3); `Derive` is a real trait, `DERIVE_MARKER` deleted (TD4). This re-port plan is the dated origin record. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Scope of K02 (graph node) as of 2026-06-14.** The `Constraint` kind was built
 on `metaprogramming-effort2` and never carried into `first-class-obligations`
 (parallel branches; port regression — see `FCO_CONSOLIDATION_MAP.md`). This is

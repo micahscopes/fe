@@ -1,5 +1,7 @@
 # Authority-Gated Provision Override — Design Exploration + Decision Menu
 
+> **HISTORICAL (policy menu; folded) → `FCO_FIX_UNIVERSAL_IMPL_DESIGN_2026-06-21.md` §4 + `FCO_MAP.md`.** The override-authority A/B/C/D policy explored here is now the deferred `Authority`/`grant`/per-platform-mint POLICY layer of the ratified `Fix`/establishment model (Tier 3); the proof obligations are mandatory, the policy is a deferred-tunable default. Historical decision-menu record. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Date:** 2026-06-17 · **Status:** design exploration (self-review-via-design-wizard; human
 architect gone). NON-BLOCKING — public-provision-layer policy, gated behind "no public syntax
 yet." Feeds a Micah-gut decision. Read-only; load-bearing citations spot-verified (✓).

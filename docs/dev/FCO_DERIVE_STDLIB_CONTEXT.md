@@ -1,5 +1,7 @@
 # FCO derive + quasi-quote: machinery vs. std-lib (context for std-lib polish)
 
+> **HISTORICAL (dated hand-off brief) → `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** A point-in-time (`abf8a6247`) snapshot of the derive/quasi-quote machinery-vs-stdlib split; the repo is authoritative. Kept as a dated context brief, not a spec.
+
 **Snapshot as of commit `abf8a6247`. Repo is authoritative; treat this as a
 hand-off brief, not a spec.**
 

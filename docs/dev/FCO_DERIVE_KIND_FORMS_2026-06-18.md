@@ -1,5 +1,7 @@
 # HKT Derive — the three kind forms, demonstrated + their tradeoffs
 
+> **HISTORICAL DECISION RECORD (Form 2 chosen + landed) → `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** This is the authoritative record of WHY the `Derive` kind is Form 2 (`* -> (* -> Constraint) -> Constraint`); the decision shipped (R1–R3, `FCO_TRAIT_CTOR_VALUE_2026-06-18.md`). Read it for the form rationale; read the SSOT for how Form 2 sits in the converged spine.
+
 **Date:** 2026-06-18 · **Status:** design demonstration, empirically grounded against the live
 compiler (HEAD post-TD5-iter). **DECISION (Micah, 2026-06-18): FORM 2** — `Derive` kind
 `* -> (* -> Constraint) -> Constraint` (provider as `Self`, goal as a param). Fixtures pin all

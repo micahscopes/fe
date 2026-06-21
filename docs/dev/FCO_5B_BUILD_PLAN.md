@@ -1,5 +1,7 @@
 # FCO Burn-down #5b — Build Plan: delete a Rust AbiSize generator, Fe provider produces it
 
+> **HISTORICAL (DONE) → `FCO_BRIDGE_BURN_DOWN.md` (board) / `FCO_MAP.md`.** This #5b plan SHIPPED: both AbiSize generators deleted byte-identical (`43ebe7efb`, `fbfbba0ef`); see the burn-down board's reconciliation note (2026-06-17). Kept as the dated feasibility/build record. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 Feasibility spike, 2026-06-17. Investigation + build plan ONLY (no production code
 landed). Companion to the #5a reify-proof (DONE, `c0eaec79b`) and the H10 ABI
 providerization map (`docs/dev/FCO_H10_ABI_PROVIDERIZATION_MAP.md`, phase H20).

@@ -1,5 +1,7 @@
 # Moving Rust desugaring into Fe metaprogramming — prioritized menu
 
+> **HISTORICAL/REFERENCE (deletion-target menu) → `FCO_BRIDGE_BURN_DOWN.md` / `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** This surface-area-ranked menu of Rust-desugar → Fe-provider targets feeds the slide's deletion ladder + the burn-down board; the live tracking of which targets shipped is the board. Kept as the dated prioritized menu.
+
 **Date:** 2026-06-18 · **Status:** creative design study (read-only), load-bearing feasibility claims
 spot-verified. Ranked by **surface area removed** (compiler special-paths deleted), not LOC.
 

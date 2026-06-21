@@ -1,5 +1,7 @@
 # Provision Scoping — Design-Wizard Architect Review + ProvisionEnv v0 Design
 
+> **SUPERSEDED (ProvisionEnv landed) → `PROVISION_SCOPING_SYNTHESIS_2026-06-17.md` (ratified) + `FCO_THE_SLIDE_2026-06-19.md` (SSOT) / `FCO_MAP.md`.** The `ProvisionEnv` v0 reviewed here landed via rung 3 (as a read-wrapper over `TraitSolveCx`); the scoping decisions were ratified in the synthesis doc. Historical review. SSOT: `FCO_THE_SLIDE_2026-06-19.md`.
+
 **Date:** 2026-06-17 · **Status:** architect-review (the human GPT-Pro architect is gone;
 this is the self-review-via-design-wizard mechanism per memory `fco-autonomy-protocol`).
 Read-only, no code change. Load-bearing citations spot-verified in-tree (noted ✓).

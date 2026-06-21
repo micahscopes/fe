@@ -1,5 +1,7 @@
 # "Higher-kinded effects" — named, mapped, and ranked (design sketch)
 
+> **HISTORICAL (design sketch; grounding for the cliff law + `Fix`/`Evidence` shape) → `FCO_THE_SLIDE_2026-06-19.md` (cliff law) / `FCO_FIX_UNIVERSAL_IMPL_DESIGN_2026-06-21.md` §1.1 / `FCO_MAP.md`.** The constraint-indexed-capability shape (`Fix : Constraint -> *`, concrete-saturated only) and the soundness cliff are now folded into the SSOT/decision-ledger; the speculative HKT-effect ranking beyond that core is research-only. Kept as the dated design sketch.
+
 **Date:** 2026-06-18 · **Status:** design wizard sketch (fable-grounded; load-bearing claims spot-verified)
 + surface-area-as-bug-substrate overlay. Speculative beyond the grounded core; soundness cliff marked
 throughout. No build implication — this is *shape + soundness map*, not a plan.

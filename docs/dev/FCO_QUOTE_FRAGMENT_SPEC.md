@@ -1,5 +1,7 @@
 # Quote fragment spec (provider `quote { .. }` expression language)
 
+> **HISTORICAL/REFERENCE (guard doc for the live `quote { }` fragment) → `FCO_MAP.md` / SSOT `FCO_THE_SLIDE_2026-06-19.md`.** Documents the restricted `quote { }` subset elaborated by the executor (the "quasiquoter backend" the slide names). The compiler is authoritative; kept as a dated guard/reference for that fragment language.
+
 **Guard doc, 2026-06-14.** The provider quote fragment is deliberately a *restricted*
 subset of Fe, elaborated in `crates/hir/src/core/lower/provider_executor.rs`
 (`elab_template_expr`) into `GenExpr` and replayed to HIR in
