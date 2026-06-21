@@ -88,6 +88,23 @@ work = the executor↔CTFE crossing:** running a deriver to produce GENUINE (imp
 This same crossing gates sound-1b (real scoped evidence) AND x-3c/d (move generated bodies downstream). It is the
 central remaining hard problem of the slide; the byte-identical runway + the 1a mechanism are the runway up to it.
 
+**KEYSTONE INSIGHT (Fable-log review 2026-06-21):** "stage, don't fuse" is the ORIGINAL genesis decision (OBL-TX
+2026-06-10: "the real CTFE machine can't host provider bodies — no mutation through effect params, no command
+side-effects, no reflection iteration"), re-confirmed by the 2026-06-19 measurement — twice-measured, trustworthy.
+So the keystone = **run the executor (quasiquoter backend) as a DOWNSTREAM salsa query; its output (a REAL impl,
+surfaced as a `TraitInstId`/`ImplementorId`) is the evidence the ordinary solver consumes** — evidence is an IMPL,
+not a value or a `term.rs` term. **The ONE open frontier = the `Body`/`TrackedItemId` identity-stability wall**
+(acyclicity is PROVEN; byte/id-identity of downstream-constructed `Body`s is RUNTIME-ONLY — no proof, no clean test
+yet; this is the genuine soundness obligation). Costed runway already on the shelf: `CTFE_DERIVE_PHASE_BOUNDARY.md`
+Option B (post-lowering derive-expansion salsa query taking `HirAnalysisDb` — exactly x-3d's shape; lowering can't
+invoke analysis, this is the escape); the quasiquote authority frame (`fe-quasiquote-design-2026-06-10.md`:
+`ImplBuilder` gates splice = the unforgeability that rejects the forge); Rung-3 Spike-2 ("lower provision demands to
+canonical trait-solver goals, REUSE the tabled proof forest — don't grow a second resolver"). DEAD-END to avoid:
+NEVER run CTFE/the deriver inside `is_query_satisfiable` (Salsa-cycle ICE; D5.1) — run it OUTSIDE, feed the impl IN.
+Vocabulary: "quasiquoter backend," never "CTFE provider" (the latter phrasing caused the fuse-misread; some
+reference docs — dossier §4e, derive sketches, kind-decision rung — still carry the superseded "de-magic the
+executor into CTFE" framing; `FCO_THE_SLIDE` is SSOT).
+
 **CASCADE (coherent cascading shadowing — the sound, near-term path; 2026-06-20):** Micah's target = inner scopes
 shadow outer for a goal, innermost-wins, canonical/`fixed` non-shadowable (money floor). Built SOUNDLY as
 **multiple REAL global impls coexist + scope picks which one, RECORDED so codegen uses it** — NOT scope-local impls
