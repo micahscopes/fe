@@ -57,9 +57,11 @@ pub struct SemanticInstanceKey<'db> {
     pub effect_providers: EffectProviderSubst<'db>,
     // `ImplEnv` is now a (non-`Copy`) plain struct carrying rung-3.2 provenance;
     // `#[return_ref]` so `impl_env(db)` borrows rather than clones, and so its
-    // `&Vec` witnesses accessor can borrow through it. The interning identity of
-    // this key derives from `ImplEnv`'s manual `Hash`/`Eq`, which exclude the
-    // carried `selected_implementor` — see the IDENTITY INVARIANT on `ImplEnv`.
+    // `&Vec` accessors can borrow through it. The interning identity of this key
+    // derives from `ImplEnv`'s manual `Hash`/`Eq`, which fold the carried
+    // `selected_implementors` per-goal map into identity ONLY when it is NON-EMPTY
+    // (the empty-only floor: an empty carrier is byte-identical to the pre-cascade
+    // behavior) — see the IDENTITY INVARIANT on `ImplEnv`.
     #[return_ref]
     pub impl_env: ImplEnv<'db>,
 }

@@ -337,7 +337,7 @@ fn impl_env_identity<'db>(db: &'db dyn HirAnalysisDb, env: &ImplEnv<'db>) -> Str
     format!(
         "scope${}$assumptions${assumptions}$witnesses${witnesses}{}",
         module_path_components_for_scope(db, env.normalization_scope(db)).join("$"),
-        selected_implementor_discriminator(db, env.selected_implementor(db)),
+        selected_implementor_discriminator(db, env.selected_implementors(db)),
     )
 }
 
@@ -347,41 +347,79 @@ fn impl_env_symbol_identity<'db>(db: &'db dyn HirAnalysisDb, env: &ImplEnv<'db>)
     format!(
         "scope${}$assumptions${assumptions}$witnesses${witnesses}{}",
         module_path_components_for_scope(db, env.normalization_scope(db)).join("$"),
-        selected_implementor_discriminator(db, env.selected_implementor(db)),
+        selected_implementor_discriminator(db, env.selected_implementors(db)),
     )
 }
 
-/// The SOME-ONLY codegen-symbol discriminator for `ImplEnv::selected_implementor`
-/// (cascade C3d). MANDATORY: it keeps the codegen-symbol identity in lockstep
-/// with the interning identity (`template.rs` folds `selected_implementor` into
-/// `ImplEnv`'s `Eq`/`Hash` only when `Some`). Without it two now-distinct
-/// `Some(default)`/`Some(override)` instances would mint the SAME symbol — a
-/// miscompile (one impl's body served under the other's symbol).
+/// The EMPTY-ONLY codegen-symbol discriminator for the `ImplEnv`
+/// `selected_implementors` per-goal carrier (cascade C3d/M3). MANDATORY: it keeps
+/// the codegen-symbol identity in LOCKSTEP with the interning identity
+/// (`template.rs` folds the carrier into `ImplEnv`'s `Eq`/`Hash` only when
+/// NON-EMPTY). Without it two now-distinct `default`/`override`-carrying instances
+/// would mint the SAME symbol — a miscompile (one impl's body served under the
+/// other's symbol).
 ///
-/// - `None` → the empty string, so a non-scope-selected env's identity is
-///   BYTE-IDENTICAL to the pre-cascade behavior (today every non-cascade
-///   instance carries `None`, so all existing symbols are unchanged).
-/// - `Some(impl)` → a discriminator keyed on the impl's own HIR `impl` item (a
-///   derived default and a hand-written override of the same `(Trait, Type)` are
-///   DISTINCT items → distinct strings → distinct symbols). For a virtual /
-///   assumption implementor (no HIR item — never carried as a selection today)
-///   the trait-inst + self-type identity is the fallback discriminator.
+/// - EMPTY carrier → the empty string, so a non-scope-selected env's identity is
+///   BYTE-IDENTICAL to the pre-cascade behavior (today every non-cascade instance
+///   carries an empty carrier, so all existing symbols are unchanged).
+/// - SINGLE-entry carrier → keyed on the impl's own HIR `impl` item ALONE — a
+///   discriminator BYTE-IDENTICAL to the pre-M3 `Some(impl)` output, so every
+///   resolved-impl-body instance that already carries one override keeps its
+///   exact existing symbol. (A derived default and a hand-written override of the
+///   same `(Trait, Type)` are DISTINCT items → distinct strings → distinct
+///   symbols; for a virtual / assumption implementor with no HIR item the
+///   trait-inst + self-type identity is the fallback.)
+/// - MULTI-entry carrier (the M3 generic-helper case, which never existed pre-M3)
+///   → a discriminator over EVERY `(goal, impl)` entry in the carrier's canonical
+///   order, so a helper instantiated under two different scoped selections mints
+///   distinct symbols.
 fn selected_implementor_discriminator<'db>(
     db: &'db dyn HirAnalysisDb,
-    selected: Option<ImplementorId<'db>>,
+    selected: &[(TraitInstId<'db>, ImplementorId<'db>)],
 ) -> String {
-    let Some(implementor) = selected else {
-        return String::new();
-    };
-    let impl_identity = match implementor.hir_item(db) {
+    match selected {
+        [] => String::new(),
+        // SINGLE entry: byte-identical to the pre-M3 `Some(impl)` discriminator —
+        // hash the impl identity ALONE (the goal rides in `witnesses` already), so
+        // existing resolved-body symbols are unchanged.
+        [(_, implementor)] => format!(
+            "$selected_implementor${}",
+            stable_identity_hash(&implementor_discriminator_identity(db, *implementor)),
+        ),
+        // MULTI entry: hash the full canonically-ordered `(goal, impl)` set.
+        entries => {
+            let joined = entries
+                .iter()
+                .map(|(goal, implementor)| {
+                    format!(
+                        "{}@{}",
+                        trait_identity(db, *goal),
+                        implementor_discriminator_identity(db, *implementor),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("$");
+            format!("$selected_implementors${}", stable_identity_hash(&joined))
+        }
+    }
+}
+
+/// The stable identity string of an `ImplementorId` used in the
+/// `selected_implementor`/`selected_implementors` discriminators: the impl's own
+/// HIR `impl` item when it has one, else a virtual trait-inst + self-type
+/// fallback (an assumption implementor with no HIR item — never carried today).
+fn implementor_discriminator_identity<'db>(
+    db: &'db dyn HirAnalysisDb,
+    implementor: ImplementorId<'db>,
+) -> String {
+    match implementor.hir_item(db) {
         Some(item) => item_identity(db, item),
         None => format!(
             "virtual${}$self${}",
             trait_identity(db, implementor.trait_inst(db)),
             type_identity(db, implementor.self_ty(db)),
         ),
-    };
-    format!("$selected_implementor${}", stable_identity_hash(&impl_identity))
+    }
 }
 
 fn trait_symbol_identities<'db>(

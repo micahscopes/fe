@@ -82,14 +82,25 @@ fn semantic_callee_key_with_assumptions<'db>(
     call_expr: Option<ExprId>,
 ) -> Option<SemanticInstanceKey<'db>> {
     let impl_env = caller_key.impl_env(db);
-    // The impl typeck's solver committed to at this instantiation-time
-    // resolution. `None` unless this callable is a resolved trait method whose
-    // call was SCOPE-SELECTED (`with (<T as Trait>)`); carried into the
-    // instance's `ImplEnv` below. Under the Some-only `ImplEnv` identity (see the
-    // IDENTITY INVARIANT on `ImplEnv`), a `None` carry is byte-identical to the
-    // pre-cascade behavior, while a `Some(impl)` makes the scope selection
-    // observable (a distinct key/symbol consumed by the MIR C1 rail).
-    let mut selected_implementor = None;
+    // The per-goal impl overrides the typeck solver committed to at this
+    // instantiation-time resolution, carried onto the instance's `ImplEnv` below.
+    // EMPTY unless the call was SCOPE-SELECTED (`with (<T as Trait>)`). Two
+    // sources populate it:
+    //
+    //   * the TRAIT-METHOD callee (`trait_inst().is_some()`) discharged its own
+    //     trait obligation FROM an in-scope scoped provision — one `(inst, impl)`
+    //     entry (cascade C3d, the direct-receiver / M2 case);
+    //   * the GENERIC-HELPER callee (`trait_inst().is_none()`, the `else` branch
+    //     below) carried its CALLER's scoped-provision discharges for THIS call
+    //     site — one `(goal, impl)` entry per goal a `with (<T as Trait>)` scope
+    //     selected, so the helper body's inner trait calls each look their
+    //     override up BY GOAL (M3).
+    //
+    // Under the empty-only `ImplEnv` identity (see the IDENTITY INVARIANT on
+    // `ImplEnv`), an EMPTY carry is byte-identical to the pre-cascade behavior,
+    // while a NON-EMPTY carry makes the scope selection observable (a distinct
+    // key/symbol consumed by the MIR C1 rail).
+    let mut selected_implementors: Vec<(TraitInstId<'db>, ImplementorId<'db>)> = Vec::new();
     let (owner, mut subst_args) = match callable.callable_def() {
         CallableDef::Func(func) => {
             let mut subst_args = callable.generic_args().to_vec();
@@ -102,24 +113,39 @@ fn semantic_callee_key_with_assumptions<'db>(
                 )
                 .solve_cx(db);
                 // The typeck twin of the MIR `selected_implementor` source
-                // (cascade C3d). `Some(override)` ONLY where the caller discharged
-                // THIS call's trait obligation FROM an in-scope scoped provision
-                // (`with (<T as Trait>)`): the committed implementor is the one
-                // the provision named. The call's instance then becomes identity-
-                // distinct (Some-only `ImplEnv` identity — see `template.rs`) AND
-                // its body is resolved FROM the override (not the default-tier
-                // re-solve), so the override runs inside the scope.
+                // (cascade C3d/M3). `Some(override)` from one of two sources:
+                //
+                //   * the caller discharged THIS call's trait obligation FROM an
+                //     in-scope scoped provision (`with (<T as Trait>)`), readable
+                //     in the caller's own typed body keyed to `call_expr` (the
+                //     direct-receiver / M2 case); OR
+                //   * the CALLER INSTANCE already carries an override for this
+                //     goal `inst` on its `ImplEnv` per-goal carrier (M3): this is
+                //     how a scoped selection reaches an inner trait call that is
+                //     resolved to a concrete impl func at instance-build time
+                //     (e.g. `x.method()` inside a generic helper whose `T` is now
+                //     concrete). The helper instance got that carrier from its own
+                //     call site's scoped discharges (the `else` branch below), so
+                //     the override propagates through the helper boundary into this
+                //     inner resolution.
+                //
+                // When present, the call's instance becomes identity-distinct
+                // (empty-only `ImplEnv` identity — see `template.rs`) AND its body
+                // is resolved FROM the override (not the default-tier re-solve), so
+                // the override runs inside the scope.
                 //
                 // `None` otherwise (every non-scope-selected call): the instance
-                // is BYTE-IDENTICAL to the pre-cascade behavior (Some-only
-                // identity makes a `None` env hash/compare/serialize exactly as
+                // is BYTE-IDENTICAL to the pre-cascade behavior (empty-only
+                // identity makes an empty env hash/compare/serialize exactly as
                 // before) and the body comes from the ordinary impl-table re-solve
                 // — today the deterministic default tier for a 1-impl or
-                // derive-default goal. This `None` default keeps EVERY existing
+                // derive-default goal. This default keeps EVERY existing
                 // instance/symbol unchanged.
-                let scoped = call_expr.and_then(|call_expr| {
-                    scoped_provision_implementor(caller_key.typed_body(db), call_expr, inst)
-                });
+                let scoped = call_expr
+                    .and_then(|call_expr| {
+                        scoped_provision_implementor(caller_key.typed_body(db), call_expr, inst)
+                    })
+                    .or_else(|| impl_env.selected_implementor_for_goal(db, inst));
                 // Resolve the body: from the scope-named override when present,
                 // else through the ordinary impl-table re-solve. Both reconstruct
                 // an identical `ResolvedTraitMethod` shape; only the implementor
@@ -131,7 +157,9 @@ fn semantic_callee_key_with_assumptions<'db>(
                     None => resolve_trait_method_instance(db, solve_cx, inst, name),
                 };
                 if let Some(resolved) = resolved {
-                    selected_implementor = scoped;
+                    if let Some(override_impl) = scoped {
+                        selected_implementors.push((inst, override_impl));
+                    }
                     let trait_arg_len = inst.args(db).len();
                     let mut resolved_args = resolved.impl_args;
                     let tail = subst_args
@@ -144,6 +172,26 @@ fn semantic_callee_key_with_assumptions<'db>(
                     BodyOwner::Func(func)
                 }
             } else {
+                // GENERIC HELPER (M3): the callee is a plain `fn` with a trait
+                // bound (`trait_inst() == None`), so its body's inner `x.method()`
+                // calls will RE-RESOLVE through the trait solver unless we carry
+                // the scope selection onto this helper instance. Read THIS call
+                // site's scoped-provision discharges — the helper's `T: Trait`
+                // bound, discharged FROM the in-scope `with (<T as Trait>)`
+                // provision and recorded keyed to `call_expr` — and carry each
+                // `(goal, override)` onto the helper's `ImplEnv`. The MIR C1 rail
+                // then looks each override up BY GOAL when lowering the inner call
+                // (`classify.rs`), so the scope-selected impl propagates through
+                // the helper boundary. Each entry is still validated by the C1
+                // rail's `recorded_implementor_is_valid_candidate` backstop.
+                //
+                // EMPTY when the helper is called outside any selecting scope
+                // (every non-cascade call) — byte-identical to the pre-M3 instance
+                // (empty-only `ImplEnv` identity — see `template.rs`).
+                if let Some(call_expr) = call_expr {
+                    selected_implementors
+                        .extend(scoped_provision_implementors(caller_key.typed_body(db), call_expr));
+                }
                 BodyOwner::Func(func)
             };
             (owner, subst_args)
@@ -163,19 +211,21 @@ fn semantic_callee_key_with_assumptions<'db>(
     if let Some(witness) = callable.trait_inst() {
         witnesses.insert(witness);
     }
-    // Carry the instantiation-time-selected implementor into the semantic
-    // instance. Under the Some-only `ImplEnv` identity, a `None` carry leaves the
+    // Carry the instantiation-time-selected implementors into the semantic
+    // instance. Under the empty-only `ImplEnv` identity, an EMPTY carry leaves the
     // `SemanticInstanceKey` byte-identical to before (every non-scope-selected
-    // call), while a `Some(impl)` (a `with (<T as Trait>)` scoped call) mints a
-    // distinct key/symbol so MIR's C1 rail lowers it against the selected impl;
-    // rung 3.3 asserts MIR re-resolution agrees on the `None` (re-resolve) path.
+    // call), while a NON-EMPTY carry (a `with (<T as Trait>)` scoped call) mints a
+    // distinct key/symbol so MIR's C1 rail lowers it against the selected impl(s);
+    // rung 3.3 asserts MIR re-resolution agrees on the empty (re-resolve) path.
+    // `with_selected_implementors` canonically orders the carrier so equal
+    // selection sets mint equal keys.
     let impl_env = ImplEnv::new(
         db,
         impl_env.normalization_scope(db),
         assumptions,
         witnesses.into_iter().collect::<Vec<_>>(),
     )
-    .with_selected_implementor(selected_implementor);
+    .with_selected_implementors(selected_implementors);
 
     Some(SemanticInstanceKey::new(
         db,
@@ -212,6 +262,36 @@ fn scoped_provision_implementor<'db>(
         })
         .and_then(|discharged| discharged.solution)
         .map(|solution| solution.implementor)
+}
+
+/// Every `(goal, override)` a scoped provision named for THIS call's trait
+/// obligations, when the caller discharged them via
+/// [`DischargeRoute::ScopedProvision`] (M3 — the generic-helper twin of the MIR
+/// per-goal carrier).
+///
+/// Reads the caller's `discharged_obligations` for `call_expr` and yields the
+/// `(goal, implementor)` of EACH `ScopedProvision`-routed discharge that
+/// committed a concrete implementor. For a `with (<T as Trait>) { helper(x) }`
+/// call, the helper's `T: Trait` bound is enqueued as a call-keyed
+/// `CallConstraint` obligation (one per bound) and discharged from the in-scope
+/// provision, so its `ScopedProvision` discharge is readable here per call
+/// (`discharged_obligations_for_call`); the named override is carried onto the
+/// helper instance's `ImplEnv` so the helper body's inner trait call resolves it
+/// BY GOAL through the MIR C1 rail. Yields NOTHING when the helper is called
+/// outside any selecting scope — the instance carries an empty carrier
+/// (byte-identical to the pre-M3 behavior; MIR re-resolves).
+fn scoped_provision_implementors<'a, 'db>(
+    typed_body: &'a TypedBody<'db>,
+    call_expr: ExprId,
+) -> impl Iterator<Item = (TraitInstId<'db>, ImplementorId<'db>)> + 'a {
+    typed_body
+        .discharged_obligations_for_call(call_expr)
+        .filter(|discharged| discharged.route == DischargeRoute::ScopedProvision)
+        .filter_map(|discharged| {
+            discharged
+                .solution
+                .map(|solution| (discharged.goal, solution.implementor))
+        })
 }
 
 fn resolve_callable_effect_providers<'db>(
