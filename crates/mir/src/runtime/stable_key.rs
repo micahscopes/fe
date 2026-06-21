@@ -4,7 +4,7 @@ use hir::{
         HirAnalysisDb,
         semantic::{EffectProviderSubst, GenericSubst, ImplEnv, SemanticInstance},
         ty::{
-            trait_def::TraitInstId,
+            trait_def::{ImplementorId, TraitInstId},
             ty_check::{
                 BodyOwner, EffectParamSite, EffectProviderProvenance, EffectProviderSpecialization,
                 LocalBinding,
@@ -335,8 +335,9 @@ fn impl_env_identity<'db>(db: &'db dyn HirAnalysisDb, env: &ImplEnv<'db>) -> Str
         .collect::<Vec<_>>()
         .join("$");
     format!(
-        "scope${}$assumptions${assumptions}$witnesses${witnesses}",
-        module_path_components_for_scope(db, env.normalization_scope(db)).join("$")
+        "scope${}$assumptions${assumptions}$witnesses${witnesses}{}",
+        module_path_components_for_scope(db, env.normalization_scope(db)).join("$"),
+        selected_implementor_discriminator(db, env.selected_implementor(db)),
     )
 }
 
@@ -344,9 +345,43 @@ fn impl_env_symbol_identity<'db>(db: &'db dyn HirAnalysisDb, env: &ImplEnv<'db>)
     let assumptions = trait_symbol_identities(db, env.assumptions(db).list(db).iter().copied());
     let witnesses = trait_symbol_identities(db, env.witnesses(db).iter().copied());
     format!(
-        "scope${}$assumptions${assumptions}$witnesses${witnesses}",
-        module_path_components_for_scope(db, env.normalization_scope(db)).join("$")
+        "scope${}$assumptions${assumptions}$witnesses${witnesses}{}",
+        module_path_components_for_scope(db, env.normalization_scope(db)).join("$"),
+        selected_implementor_discriminator(db, env.selected_implementor(db)),
     )
+}
+
+/// The SOME-ONLY codegen-symbol discriminator for `ImplEnv::selected_implementor`
+/// (cascade C3d). MANDATORY: it keeps the codegen-symbol identity in lockstep
+/// with the interning identity (`template.rs` folds `selected_implementor` into
+/// `ImplEnv`'s `Eq`/`Hash` only when `Some`). Without it two now-distinct
+/// `Some(default)`/`Some(override)` instances would mint the SAME symbol — a
+/// miscompile (one impl's body served under the other's symbol).
+///
+/// - `None` → the empty string, so a non-scope-selected env's identity is
+///   BYTE-IDENTICAL to the pre-cascade behavior (today every non-cascade
+///   instance carries `None`, so all existing symbols are unchanged).
+/// - `Some(impl)` → a discriminator keyed on the impl's own HIR `impl` item (a
+///   derived default and a hand-written override of the same `(Trait, Type)` are
+///   DISTINCT items → distinct strings → distinct symbols). For a virtual /
+///   assumption implementor (no HIR item — never carried as a selection today)
+///   the trait-inst + self-type identity is the fallback discriminator.
+fn selected_implementor_discriminator<'db>(
+    db: &'db dyn HirAnalysisDb,
+    selected: Option<ImplementorId<'db>>,
+) -> String {
+    let Some(implementor) = selected else {
+        return String::new();
+    };
+    let impl_identity = match implementor.hir_item(db) {
+        Some(item) => item_identity(db, item),
+        None => format!(
+            "virtual${}$self${}",
+            trait_identity(db, implementor.trait_inst(db)),
+            type_identity(db, implementor.self_ty(db)),
+        ),
+    };
+    format!("$selected_implementor${}", stable_identity_hash(&impl_identity))
 }
 
 fn trait_symbol_identities<'db>(

@@ -676,12 +676,32 @@ impl<'db> ImplementorId<'db> {
     }
 
     /// Semantic self type of this impl.
-    pub(crate) fn self_ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
+    ///
+    /// `pub` so codegen-symbol minting (`mir::runtime::stable_key`) can build a
+    /// stable per-implementor discriminator for a SCOPE-SELECTED
+    /// `ImplEnv::selected_implementor` (cascade C3d Some-only identity).
+    pub fn self_ty(self, db: &'db dyn HirAnalysisDb) -> TyId<'db> {
         self.trait_(db).self_ty(db)
     }
 
+    /// The HIR `impl` item this implementor was lowered from, as an `ItemKind`,
+    /// or `None` for a virtual / assumption-based implementor (which never carry
+    /// a `selected_implementor`). It is the stable discriminator the cascade C3d
+    /// Some-only codegen-symbol identity needs: a derived default and a
+    /// hand-written override of the same `(Trait, Type)` are DISTINCT HIR `impl`
+    /// items, so this distinguishes them (`mir::runtime::stable_key`).
+    pub fn hir_item(self, db: &'db dyn HirAnalysisDb) -> Option<crate::hir_def::ItemKind<'db>> {
+        match self.origin(db) {
+            ImplementorOrigin::Hir(impl_trait) => Some(impl_trait.into()),
+            ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => None,
+        }
+    }
+
     /// Trait instance realized by this impl, including its associated type definitions.
-    pub(crate) fn trait_inst(self, db: &'db dyn HirAnalysisDb) -> TraitInstId<'db> {
+    ///
+    /// `pub` for the same reason as [`Self::self_ty`] (cascade C3d codegen-symbol
+    /// discriminator).
+    pub fn trait_inst(self, db: &'db dyn HirAnalysisDb) -> TraitInstId<'db> {
         let trait_inst = self.trait_(db);
         if self.types(db).is_empty() {
             return trait_inst;

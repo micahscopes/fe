@@ -1690,6 +1690,18 @@ pub enum TraitObligationOrigin<'db> {
     /// The obligation re-confirms an ambiguous trait method selection once
     /// inference has progressed; it is not keyed to a specific constraint.
     GenericConfirmation,
+    /// The obligation confirms a CONCRETE trait-method selection at a direct
+    /// receiver call (`gate_concrete_method_selection`), keyed to the call
+    /// expression. Distinct from `CallConstraint` (which carries a constraint
+    /// index and a call-constraint diagnostic): a method-selection discharge has
+    /// no diagnostic, but IS call-keyed so its scoped-provision discharge is
+    /// readable per call (`discharged_obligations_for_call`) — the cascade C3d
+    /// link that lets a direct receiver call consume a recorded scope selection
+    /// at MIR (`const_ref.rs::scoped_provision_implementor`).
+    MethodSelection {
+        /// The method-call expression whose concrete selection this confirms.
+        call_expr: ExprId,
+    },
 }
 
 #[derive(Debug, Clone)]

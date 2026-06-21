@@ -3387,9 +3387,12 @@ impl<'db> TyChecker<'db> {
                 let inst = canonical_r_ty.extract_solution(&mut self.table, cand.inst);
                 let inst = self.specialize_same_trait_method_inst(method_name, inst);
                 let scoped_provisions = self.env.snapshot_evidence_provisions();
+                // Cascade C3d: a method selection that needs confirmation is still
+                // call-keyed, so a scoped-provision discharge (a `with (<T as
+                // Trait>)` selection) is readable per call and carried to MIR.
                 self.env.register_trait_obligation(TraitObligation {
                     goal: inst,
-                    origin: TraitObligationOrigin::GenericConfirmation,
+                    origin: TraitObligationOrigin::MethodSelection { call_expr: expr },
                     span: call_span.clone().into(),
                     scoped_provisions,
                 });
@@ -3455,7 +3458,7 @@ impl<'db> TyChecker<'db> {
         // type, so the selection is concrete; route it through the shared
         // gate-not-select adapter.
         if let Some(inst) = method_selection_to_gate {
-            self.gate_concrete_method_selection(inst, call_span.clone().into());
+            self.gate_concrete_method_selection(inst, expr, call_span.clone().into());
         }
 
         // Check required effects for the method call

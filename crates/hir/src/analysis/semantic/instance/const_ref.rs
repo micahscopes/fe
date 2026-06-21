@@ -12,7 +12,7 @@ use crate::{
             effects::place_effect_provider_param_index_map,
             trait_def::{
                 ImplementorId, TraitInstId, assoc_const_body_and_impl_args_for_trait_inst,
-                resolve_trait_method_instance,
+                resolve_trait_method_instance, resolve_trait_method_instance_with_implementor,
             },
             trait_resolution::{PredicateListId, ProvisionEnv},
             ty_check::{
@@ -83,46 +83,66 @@ fn semantic_callee_key_with_assumptions<'db>(
 ) -> Option<SemanticInstanceKey<'db>> {
     let impl_env = caller_key.impl_env(db);
     // The impl typeck's solver committed to at this instantiation-time
-    // resolution. `None` unless this callable is a resolved trait method;
-    // carried into the instance's `ImplEnv` below as rung-3.2 provenance
-    // (excluded from the key's identity — see the IDENTITY INVARIANT on
-    // `ImplEnv`). Rung 3.3 will assert MIR re-resolution selects the same one.
+    // resolution. `None` unless this callable is a resolved trait method whose
+    // call was SCOPE-SELECTED (`with (<T as Trait>)`); carried into the
+    // instance's `ImplEnv` below. Under the Some-only `ImplEnv` identity (see the
+    // IDENTITY INVARIANT on `ImplEnv`), a `None` carry is byte-identical to the
+    // pre-cascade behavior, while a `Some(impl)` makes the scope selection
+    // observable (a distinct key/symbol consumed by the MIR C1 rail).
     let mut selected_implementor = None;
     let (owner, mut subst_args) = match callable.callable_def() {
         CallableDef::Func(func) => {
             let mut subst_args = callable.generic_args().to_vec();
             let owner = if let Some(inst) = callable.trait_inst()
                 && let Some(name) = func.name(db).to_opt()
-                && let Some(resolved) = resolve_trait_method_instance(
-                    db,
-                    ProvisionEnv::for_scope(impl_env.normalization_scope(db), assumptions)
-                        .solve_cx(db),
-                    inst,
-                    name,
-                ) {
+            {
+                let solve_cx = ProvisionEnv::for_scope(
+                    impl_env.normalization_scope(db),
+                    assumptions,
+                )
+                .solve_cx(db);
                 // The typeck twin of the MIR `selected_implementor` source
-                // (cascade C3d). Where the caller discharged THIS call's trait
-                // obligation FROM an in-scope scoped provision, the committed
-                // implementor is the one the provision named — NOT the impl-table
-                // re-solve above. Prefer it; fall back to the re-solve when no such
-                // discharge exists. Today no `ScopedProvision` discharge exists on
-                // real code (the snapshot is always empty — `Evidence` is
-                // unforgeable until increment 1b), so this lookup returns `None`
-                // everywhere and `selected_implementor` is byte-identical to the
-                // re-solve result below.
-                selected_implementor = call_expr
-                    .and_then(|call_expr| {
-                        scoped_provision_implementor(caller_key.typed_body(db), call_expr, inst)
-                    })
-                    .or(Some(resolved.implementor));
-                let trait_arg_len = inst.args(db).len();
-                let mut resolved_args = resolved.impl_args;
-                let tail = subst_args
-                    .get(trait_arg_len..)
-                    .unwrap_or(subst_args.as_slice());
-                resolved_args.extend_from_slice(tail);
-                subst_args = resolved_args;
-                BodyOwner::Func(resolved.func)
+                // (cascade C3d). `Some(override)` ONLY where the caller discharged
+                // THIS call's trait obligation FROM an in-scope scoped provision
+                // (`with (<T as Trait>)`): the committed implementor is the one
+                // the provision named. The call's instance then becomes identity-
+                // distinct (Some-only `ImplEnv` identity — see `template.rs`) AND
+                // its body is resolved FROM the override (not the default-tier
+                // re-solve), so the override runs inside the scope.
+                //
+                // `None` otherwise (every non-scope-selected call): the instance
+                // is BYTE-IDENTICAL to the pre-cascade behavior (Some-only
+                // identity makes a `None` env hash/compare/serialize exactly as
+                // before) and the body comes from the ordinary impl-table re-solve
+                // — today the deterministic default tier for a 1-impl or
+                // derive-default goal. This `None` default keeps EVERY existing
+                // instance/symbol unchanged.
+                let scoped = call_expr.and_then(|call_expr| {
+                    scoped_provision_implementor(caller_key.typed_body(db), call_expr, inst)
+                });
+                // Resolve the body: from the scope-named override when present,
+                // else through the ordinary impl-table re-solve. Both reconstruct
+                // an identical `ResolvedTraitMethod` shape; only the implementor
+                // SOURCE differs (the cascade C3d twin of `classify.rs`).
+                let resolved = match scoped {
+                    Some(override_impl) => resolve_trait_method_instance_with_implementor(
+                        db, solve_cx, inst, name, override_impl,
+                    ),
+                    None => resolve_trait_method_instance(db, solve_cx, inst, name),
+                };
+                if let Some(resolved) = resolved {
+                    selected_implementor = scoped;
+                    let trait_arg_len = inst.args(db).len();
+                    let mut resolved_args = resolved.impl_args;
+                    let tail = subst_args
+                        .get(trait_arg_len..)
+                        .unwrap_or(subst_args.as_slice());
+                    resolved_args.extend_from_slice(tail);
+                    subst_args = resolved_args;
+                    BodyOwner::Func(resolved.func)
+                } else {
+                    BodyOwner::Func(func)
+                }
             } else {
                 BodyOwner::Func(func)
             };
@@ -144,9 +164,11 @@ fn semantic_callee_key_with_assumptions<'db>(
         witnesses.insert(witness);
     }
     // Carry the instantiation-time-selected implementor into the semantic
-    // instance (rung 3.2). It is excluded from `ImplEnv`'s identity, so the
-    // `SemanticInstanceKey` below is byte-identical to before; rung 3.3 will
-    // assert MIR re-resolution at this instance picks the same implementor.
+    // instance. Under the Some-only `ImplEnv` identity, a `None` carry leaves the
+    // `SemanticInstanceKey` byte-identical to before (every non-scope-selected
+    // call), while a `Some(impl)` (a `with (<T as Trait>)` scoped call) mints a
+    // distinct key/symbol so MIR's C1 rail lowers it against the selected impl;
+    // rung 3.3 asserts MIR re-resolution agrees on the `None` (re-resolve) path.
     let impl_env = ImplEnv::new(
         db,
         impl_env.normalization_scope(db),
@@ -171,10 +193,13 @@ fn semantic_callee_key_with_assumptions<'db>(
 /// Reads the caller's `discharged_obligations` for `call_expr` and returns the
 /// implementor of the `ScopedProvision`-routed discharge whose goal is the
 /// callable's originating trait instance `inst`. Returns `None` when no such
-/// discharge exists — the caller then falls back to the impl-table re-solve. On
-/// real code today no `ScopedProvision` discharge is ever recorded (the snapshot
-/// is empty; `Evidence` is unforgeable until increment 1b), so this always
-/// returns `None` and behavior is byte-identical to the re-solve.
+/// discharge exists — the call was not scope-selected, so the instance carries
+/// `None` (byte-identical to the pre-cascade behavior; MIR re-resolves). Returns
+/// `Some(override)` for a DIRECT receiver call inside a `with (<T as Trait>)`
+/// block: the gate registers a call-keyed `MethodSelection` obligation (cascade
+/// C3d), so its `ScopedProvision` discharge is readable here per call
+/// (`discharged_obligations_for_call`) and the named override is carried into the
+/// instance, making the scope selection observable at runtime.
 fn scoped_provision_implementor<'db>(
     typed_body: &TypedBody<'db>,
     call_expr: ExprId,

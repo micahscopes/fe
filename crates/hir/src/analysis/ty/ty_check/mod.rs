@@ -1421,7 +1421,8 @@ impl<'db> TyChecker<'db> {
                                 constraint_idx,
                                 ..
                             } => self.call_constraint_diag_info(callable_def, constraint_idx),
-                            env::TraitObligationOrigin::GenericConfirmation => None,
+                            env::TraitObligationOrigin::GenericConfirmation
+                            | env::TraitObligationOrigin::MethodSelection { .. } => None,
                         };
                         self.push_diag(BodyDiag::AmbiguousTraitInst {
                             primary: obligation.span.clone(),
@@ -1449,7 +1450,8 @@ impl<'db> TyChecker<'db> {
                             constraint_idx,
                             ..
                         } => self.call_constraint_diag_info(callable_def, constraint_idx),
-                        env::TraitObligationOrigin::GenericConfirmation => None,
+                        env::TraitObligationOrigin::GenericConfirmation
+                        | env::TraitObligationOrigin::MethodSelection { .. } => None,
                     };
                     let unsat = subgoal.map(|goal| query.extract_subgoal(&mut self.table, goal));
                     self.push_diag(TyDiagCollection::from(
@@ -1697,6 +1699,7 @@ impl<'db> TyChecker<'db> {
     fn gate_concrete_method_selection(
         &mut self,
         inst: TraitInstId<'db>,
+        call_expr: ExprId,
         span: DynLazySpan<'db>,
     ) {
         let db = self.db;
@@ -1709,9 +1712,14 @@ impl<'db> TyChecker<'db> {
             return;
         }
         let scoped_provisions = self.env.snapshot_evidence_provisions();
+        // Cascade C3d: a call-keyed origin so this concrete selection's scoped
+        // discharge is readable per call (`discharged_obligations_for_call`),
+        // letting `const_ref.rs::scoped_provision_implementor` carry a recorded
+        // scope selection through to MIR for a DIRECT receiver call. Distinct
+        // from `CallConstraint` so no call-constraint diagnostic is attached.
         self.env.register_trait_obligation(env::TraitObligation {
             goal: inst,
-            origin: env::TraitObligationOrigin::GenericConfirmation,
+            origin: env::TraitObligationOrigin::MethodSelection { call_expr },
             span,
             scoped_provisions,
         });
@@ -2003,9 +2011,14 @@ impl<'db> TyChecker<'db> {
                                 if candidate.needs_confirmation {
                                     let scoped_provisions =
                                         self.env.snapshot_evidence_provisions();
+                                    // Cascade C3d: call-keyed so a `with (<T as
+                                    // Trait>)` scoped selection on this deferred
+                                    // method call is readable per call → MIR.
                                     self.env.register_trait_obligation(env::TraitObligation {
                                         goal: inst,
-                                        origin: env::TraitObligationOrigin::GenericConfirmation,
+                                        origin: env::TraitObligationOrigin::MethodSelection {
+                                            call_expr: pending.expr,
+                                        },
                                         span: call_span.clone().into(),
                                         scoped_provisions,
                                     });
@@ -2036,6 +2049,7 @@ impl<'db> TyChecker<'db> {
                                 if !candidate.needs_confirmation {
                                     self.gate_concrete_method_selection(
                                         inst,
+                                        pending.expr,
                                         call_span.clone().into(),
                                     );
                                 }
@@ -3797,6 +3811,12 @@ impl<'db> TypedBody<'db> {
                 TraitObligationOrigin::CallConstraint {
                     call_expr: origin_expr,
                     ..
+                } => origin_expr == call_expr,
+                // Cascade C3d: a direct receiver call's concrete selection is
+                // call-keyed, so its scoped-provision discharge is readable here
+                // (consumed by `const_ref.rs::scoped_provision_implementor`).
+                TraitObligationOrigin::MethodSelection {
+                    call_expr: origin_expr,
                 } => origin_expr == call_expr,
                 TraitObligationOrigin::GenericConfirmation => false,
             })
