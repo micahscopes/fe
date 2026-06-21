@@ -137,6 +137,10 @@ C3c-1 + the unforgeable `Fix` gate (the ONLY authority to override a canonical g
 selection at the verify-leg + the discharge seam, outside the tracked solve). Build-only: parser spellability (C3b),
 MIR-panic-vs-clean-diag (C3c-2).
 
+> **POINTER:** the now-settled `Fix`/establishment model that unifies this cascade + Half-B floor under one
+> vocabulary is distilled below in **"Fix / establishment — ratified model (2026-06-21)"** (end of doc; full
+> adversarial pass in `FCO_FIX_UNIVERSAL_IMPL_DESIGN_2026-06-21.md`, commit `775ff0aa2`).
+
 1. **Construction SSOT (byte-identical) — IN PROGRESS.** Fold every hand-rolled `TraitSolveCx` construction onto
    the one `ProvisionEnv` (cut-1 + seam-1 done; ~25 clean sites remain in `diagnosable.rs`, `core/semantic`,
    `analysis/ty/*`). Unifies *how* the solver context is built so the eventual walk is a one-place flip. Does
@@ -230,3 +234,53 @@ only, e.g. `Fix<*>`), never at the **solver** level (∃/search).
   (governing principle). Surface only a true correctness/soundness wall, never a sugar or canon-set choice.
 - Re-verify "can't / too big" verdicts by *measuring what can be deleted next* ([[reverify-inherited-blockers]];
   surface-area is the metric, [[burndown-value-is-surface-area]]; clean SSOT increments, [[tracing-must-be-a-joy-to-maintain]]).
+
+---
+
+## Fix / establishment — ratified model (2026-06-21)
+
+*The peeled-back, settled version of the design. The full adversarial pass + two consolidation reviews are in
+`FCO_FIX_UNIVERSAL_IMPL_DESIGN_2026-06-21.md` (commit `775ff0aa2`) — read it for the SETTLED/OPEN/REFUTED tags,
+the lens-by-lens refutations, and the D1–D9 ledger. This section CITES that doc; it does not duplicate it.*
+
+**1. `Fix<G>` — what it is.** An unforgeable, linear (`own`), single-use value = "permission to ESTABLISH one
+impl of a consensus-critical goal `G`." The inert type exists today (`ingots/core/src/derive.fe:78`). Three
+beats: **BORN** at root (compiler-only origin ⇒ unforgeable), **SPENT** to establish the impl (`own`/move ⇒ used
+once ⇒ at most one), **GONE** after. It gates impl **CREATION**, never the **USE** of the implemented functions.
+Cosmetic goals (`Eq`/`Ord`/`Clone`…) need no `Fix`; canonical goals (ABI / storage layout) require it.
+
+**2. Enforcement — the two distinct mechanisms (do not conflate).** "No second impl gets created" is enforced by
+the **GATE** (`lowered_implementor` → `does_impl_trait_conflict`, live today as `5-0001`), which COUNTS impls.
+`Fix` is the unforgeable + scarce + linear **AUTHORITY** the gate honors for a sanctioned canonical impl /
+override. Linearity alone is insufficient — it does not stop a no-`Fix` second impl; the gate does the counting,
+`Fix` governs the exception. "Never USED" needs no separate check: an impl the gate rejected never enters the
+impl table, so use-soundness is transitive on creation-soundness.
+
+**3. One representation, convergence-at-the-gate.** Hand-written and generated impls both become ONE `ImplTrait`
+HIR node via the same constructor and meet at `lowered_implementor` (`ImplementorOrigin::Hir`). The executor's
+intermediate (`GenExpr` / `ProviderOutput`) is TRANSIENT — never persisted. The only difference is the
+`HirOrigin` provenance tag (`raw` source-span vs `desugared`). **`impl`-as-sugar was REFUTED** — it would
+relabel, not collapse; demand net-new builder surface; and downgrade hand-written impls to the unstable
+desugared identity. `impl` stays its own front-end; the unity is the shared GATE, not a shared builder.
+
+**4. Consolidation verdict.** ONE recognizer family (`Fix` / `Evidence` / `ImplBuilder` / `Reflect` / `Derive`
+recognized by one predicate — Tier 1.1), TWO value lanes. `Fix` MUST stay an ordinary `own` value (NOT a
+borrowck-capability / provider-binding), because `local_has_runtime_move_semantics` (`borrowck/ir.rs:215`) drops
+the move-floor for capability-typed / Provider locals (`as_capability` recognizes only `Borrow*`/`View`).
+`Authority` / `grant` / per-platform-mint = a deferred POLICY layer (grant-as-data, bottoming at compiler-seeded
+`RootProvider`; NO reified `Mint` tower — cliff law).
+
+**5. Keystone = the linchpin** for soundness AND tooling: content-keyed stable identity for generated impls
+(today they get a positional expansion `TrackedItemId` + `HirOrigin::desugared`, unstable vs hand-written
+source-AST anchoring). It unblocks derive-via-`uses`/`with`, the remaining cascade fixtures, the derive-grammar
+retirement, AND LSP / tracing / debug parity. **Independent of `Fix`.**
+
+**6. Open decisions (D1–D9 ledger).** See `FCO_FIX_UNIVERSAL_IMPL_DESIGN_2026-06-21.md §8`. The two that matter
+first: **D1** (mint default — recommend **scarce-for-canonical / ambient-for-rest**) and the **D8**
+cross-ingot / orphan-root caveat.
+
+**7. Build sequencing.**
+- **Tier 1** — recognizer collapse (→ `Some`-branch determinism + `Fix`-floor byte-identical → this write-up).
+- **Tier 2** — keystone (parallel long-pole).
+- **Tier 3** — the Half-B money rail (fix-consumption + `Authority`/`grant` + per-platform mint + non-ambient
+  propagation → delete the coherence checker **LAST**).
