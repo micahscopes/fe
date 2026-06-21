@@ -847,11 +847,10 @@ pub(crate) fn does_impl_trait_conflict<'db>(
 /// relocates storage slots or changes the ABI wire format = fund loss), NOT a
 /// benign customization. Recognition keys on the FULL resolved identity (the
 /// trait's own name + its defining ingot kind), NEVER on the bare spelling —
-/// EXACTLY like [`is_std_evm_contract_trait_def`] and the `core::derive`
-/// capability recognizers (`scope_is_derive_capability` /
-/// `scope_is_fix_capability`, `provider_goal.rs`): a user trait merely *named*
-/// `AbiSize` / `StorageKey`, defined in a `Local` ingot, resolves to a DIFFERENT
-/// `Trait` def and is NOT canonical.
+/// EXACTLY like [`is_std_evm_contract_trait_def`] and the `core::derive` item
+/// recognizer (`scope_is_core_derive_item`, `provider_goal.rs`): a user trait
+/// merely *named* `AbiSize` / `StorageKey`, defined in a `Local` ingot, resolves
+/// to a DIFFERENT `Trait` def and is NOT canonical.
 ///
 /// The v1 set (tunable allowlist; v1 = storage-layout + ABI-layout):
 ///   - storage-layout: `std::evm::storage_map::StorageKey` (the storage-slot

@@ -51,6 +51,7 @@ use crate::{
             ty_def::{Kind, TyData, TyId},
         },
     },
+    core::lower::CoreDeriveItem,
     hir_def::{
         Func, GenericArg, IdentId, PathId,
         scope_graph::ScopeId,
@@ -60,17 +61,11 @@ use crate::{
 };
 
 /// The `core::derive` module that holds the canonical capability/witness types,
-/// used for resolved-identity recognition of a goal position.
+/// used for resolved-identity recognition of a goal position. The canonical
+/// last-segment names of the items themselves are owned by [`CoreDeriveItem`]
+/// (`core::lower::provider`), the single recognized SET shared with the
+/// base-graph path-keyed recognizer.
 const DERIVE_MODULE: &str = "derive";
-/// The canonical last-segment name of the witness type (`core::derive::Evidence`).
-const EVIDENCE_TY: &str = "Evidence";
-/// The canonical last-segment name of the builder type
-/// (`core::derive::ImplBuilder`).
-const IMPL_BUILDER_TY: &str = "ImplBuilder";
-/// The canonical last-segment name of the unforgeable override-capability type
-/// (`core::derive::Fix`, FCO increment B1a). Recognition of this name is gated by
-/// the full `core::derive::Fix` resolved identity, never by the bare spelling.
-const FIX_TY: &str = "Fix";
 
 /// A `core::derive` capability/witness type recognized at a goal position by
 /// RESOLVED IDENTITY (not by a bare head-identifier string). The position
@@ -85,12 +80,17 @@ enum CapabilityTy {
 }
 
 impl CapabilityTy {
+    /// The canonical [`CoreDeriveItem`] this goal-position capability recognizes.
+    fn item(self) -> CoreDeriveItem {
+        match self {
+            CapabilityTy::Evidence => CoreDeriveItem::Evidence,
+            CapabilityTy::ImplBuilder => CoreDeriveItem::ImplBuilder,
+        }
+    }
+
     /// The canonical last-segment name of this capability type, for diagnostics.
     fn name(self) -> &'static str {
-        match self {
-            CapabilityTy::Evidence => EVIDENCE_TY,
-            CapabilityTy::ImplBuilder => IMPL_BUILDER_TY,
-        }
+        self.item().name()
     }
 }
 
@@ -367,18 +367,32 @@ fn path_head_resolves_to_capability<'db>(
     let Some(def_scope) = ty.as_scope(db) else {
         return false;
     };
-    scope_is_derive_capability(db, def_scope, expected)
+    scope_is_core_derive_item(db, def_scope, expected.item())
 }
 
 /// Whether `def_scope` is the definition scope of the canonical `core::derive`
-/// capability type `expected`: its own name is `expected`'s name, its parent
-/// module is the `derive` module, and that module lives in the `core` ingot. The
-/// `core` ingot + `derive` module qualifier is the resolved identity (stronger
-/// than the spelling): a like-named user type in any other module is rejected.
-fn scope_is_derive_capability<'db>(
+/// item `expected`: its own name is `expected`'s name, its parent module is the
+/// `derive` module, and that module lives in the `core` ingot. The `core` ingot
+/// + `derive` module qualifier is the resolved identity (stronger than the
+/// spelling): a like-named user type in any other module is rejected.
+///
+/// This is the merged-graph scope-keyed recognizer; its base-graph path-keyed
+/// sibling is `core::lower::provider::path_core_derive_item`. Both recognize the
+/// one [`CoreDeriveItem`] SET by the same (name + `core::derive` qualifier)
+/// resolved identity.
+///
+/// The [`CoreDeriveItem::Fix`] arm is RECOGNIZED here (part of the SET) but not
+/// yet CONSUMED by the production path — the override gate that turns "scope
+/// holds a `core::derive::Fix`" into authority is FCO increment B1b. The
+/// companion proof that no `Fix<T>` value can be CONSTRUCTED (private field, no
+/// ctor, not in prelude) lives on the `Fix` type in `ingots/core/src/derive.fe`.
+/// The unit test `scope_is_core_derive_item_keys_on_core_identity_not_name`
+/// exercises the `Fix` positive (`core::derive::Fix`) and negative (a local
+/// `struct Fix<T>`) cases.
+fn scope_is_core_derive_item<'db>(
     db: &'db dyn HirAnalysisDb,
     def_scope: ScopeId<'db>,
-    expected: CapabilityTy,
+    expected: CoreDeriveItem,
 ) -> bool {
     use common::ingot::IngotKind;
 
@@ -400,7 +414,7 @@ fn scope_is_derive_capability<'db>(
 
 /// If `ty` is a saturated `core::derive::Evidence<G>` witness value — recognized
 /// by the RESOLVED identity of its head ADT (the same `core` ingot + `derive`
-/// module + `Evidence` name check as [`scope_is_derive_capability`], NOT the bare
+/// module + `Evidence` name check as [`scope_is_core_derive_item`], NOT the bare
 /// spelling) and whose single type argument `G` is a concrete `ConstraintTerm` —
 /// return the inner constraint goal `G`'s [`TraitInstId`].
 ///
@@ -421,7 +435,7 @@ pub(crate) fn evidence_witnessed_goal<'db>(
         return None;
     };
     let def_scope = head.as_scope(db)?;
-    if !scope_is_derive_capability(db, def_scope, CapabilityTy::Evidence) {
+    if !scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Evidence) {
         return None;
     }
     // The witnessed argument must be a concrete, saturated constraint term
@@ -430,49 +444,6 @@ pub(crate) fn evidence_witnessed_goal<'db>(
         TyData::ConstraintTerm(inst) => Some(*inst),
         _ => None,
     }
-}
-
-/// Whether `def_scope` is the definition scope of the canonical unforgeable
-/// override-capability type `core::derive::Fix` (FCO increment B1a). Mirrors
-/// [`scope_is_derive_capability`] EXACTLY — name `Fix`, parent module `derive`,
-/// `core` ingot — so it inherits the same resolved-identity guarantee.
-///
-/// UNFORGEABILITY (type-confusion blocked). Recognition is the full resolved
-/// `core::derive::Fix` identity, NOT the bare spelling: all three of
-///   1. the type's own name is `Fix`,
-///   2. its parent module is `derive`, and
-///   3. that module lives in the `core` ingot (`IngotKind::Core`)
-/// must hold. A user type merely *named* `Fix` — in any other module or ingot,
-/// imported or not — fails check (2) and/or (3), so it resolves to a DIFFERENT
-/// `def_scope` and is granted ZERO override authority. The companion proof that
-/// no `Fix<T>` value can be CONSTRUCTED (private field, no ctor, not in prelude)
-/// lives on the `Fix` type in `ingots/core/src/derive.fe`.
-///
-/// INERT (FCO B1a): this is the recognition primitive only. Nothing in the
-/// production path consumes it yet — the override gate that turns "scope holds a
-/// `core::derive::Fix`" into authority is increment B1b, and minting-at-root /
-/// the `fixed` tier are A2 / B2. The unit test
-/// `scope_is_fix_capability_keys_on_core_identity_not_name` exercises both the
-/// positive (`core::derive::Fix`) and negative (a local `struct Fix<T>`) cases.
-// removal target: wired by B1b gate (the consumer that reads this recognition).
-#[allow(dead_code)]
-fn scope_is_fix_capability<'db>(db: &'db dyn HirAnalysisDb, def_scope: ScopeId<'db>) -> bool {
-    use common::ingot::IngotKind;
-
-    let name_matches = def_scope
-        .name(db)
-        .is_some_and(|name| name.data(db) == FIX_TY);
-    if !name_matches {
-        return false;
-    }
-    let Some(module) = def_scope.parent_module(db) else {
-        return false;
-    };
-    let module_is_derive = module
-        .name(db)
-        .is_some_and(|name| name.data(db) == DERIVE_MODULE);
-    let in_core = module.top_mod(db).ingot(db).kind(db) == IngotKind::Core;
-    module_is_derive && in_core
 }
 
 /// If `hir_ty` is an `Evidence<goal>` / `ImplBuilder<goal>` capability/witness
@@ -588,7 +559,7 @@ fn is_constraint_ctor(kind: &Kind) -> bool {
 mod tests {
     use camino::Utf8PathBuf;
 
-    use super::scope_is_fix_capability;
+    use super::{CoreDeriveItem, scope_is_core_derive_item};
     use crate::{
         analysis::name_resolution::{PathRes, resolve_path},
         analysis::ty::trait_resolution::PredicateListId,
@@ -617,7 +588,7 @@ mod tests {
         let def_scope = ty
             .as_scope(db)
             .unwrap_or_else(|| panic!("{path:?} resolved type has no def scope"));
-        scope_is_fix_capability(db, def_scope)
+        scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Fix)
     }
 
     /// The crown-jewel unforgeability property (type-confusion arm): override
@@ -633,7 +604,7 @@ mod tests {
     /// spelling grants ZERO authority. The `resolve_to_def_scope` helper asserts
     /// each path resolves to a real type, so neither arm can pass vacuously.
     #[test]
-    fn scope_is_fix_capability_keys_on_core_identity_not_name() {
+    fn scope_is_core_derive_item_keys_on_core_identity_not_name() {
         let mut db = HirAnalysisTestDb::default();
 
         // Positive: the canonical capability type, by its absolute `core` path.

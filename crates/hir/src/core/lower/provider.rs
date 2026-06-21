@@ -30,21 +30,71 @@ use crate::{
 /// The single function a provider must define.
 const DERIVE_FN: &str = "derive";
 /// The `core::derive` module that holds the canonical capability types
-/// (`Reflect`, `ImplBuilder`) and the `Derive` provider trait, used for
+/// (`Reflect`, `ImplBuilder`), the `Evidence` witness, the unforgeable `Fix`
+/// override capability, and the `Derive` provider trait, used for
 /// resolved-identity recognition.
 const DERIVE_MODULE: &str = "derive";
-/// The canonical last-segment names of the `core::derive` capability types.
-/// These are the *identity* the recognized canonical path must end in — they
-/// are matched only behind the `core::derive` module qualifier (see
-/// [`path_names_derive_capability`]), never as a bare head-identifier authority.
+/// The canonical last-segment names of the `core::derive` items. These are the
+/// *identity* the recognized canonical path / def scope must end in — they are
+/// matched only behind the `core::derive` module qualifier (path side, see
+/// [`path_core_derive_item`]) or `core`-ingot `derive` module (scope side, see
+/// `provider_goal::scope_is_core_derive_item`), never as a bare head-identifier
+/// authority.
 const REFLECT_TY: &str = "Reflect";
 const IMPL_BUILDER_TY: &str = "ImplBuilder";
+const EVIDENCE_TY: &str = "Evidence";
+const FIX_TY: &str = "Fix";
 /// The canonical last-segment name of the `core::derive` provider trait. Like
 /// the capability types, it is matched only behind the `core::derive` module
-/// qualifier (see [`path_names_derive_trait`]) — the marker after `:` in
-/// `impl Name: Derive for T` is now recognized by its resolved
-/// `core::derive::Derive` identity, never by a bare string.
+/// qualifier — the marker after `:` in `impl Name: Derive for T` is recognized
+/// by its resolved `core::derive::Derive` identity, never by a bare string.
 const DERIVE_TRAIT_TY: &str = "Derive";
+
+/// A canonical `core::derive` item recognized by RESOLVED IDENTITY (its name +
+/// the `core`-ingot `derive` module qualifier), NOT by a bare head-identifier
+/// string. This is the single recognized SET shared by both resolved-identity
+/// recognizers: the base-graph path-keyed one here ([`path_core_derive_item`])
+/// and the merged-graph scope-keyed one in `provider_goal`
+/// (`scope_is_core_derive_item`). A user type merely *named* `Reflect` /
+/// `Evidence` / `Fix`, without `use core::derive::..`, does not resolve to the
+/// canonical item and is granted ZERO authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreDeriveItem {
+    /// `core::derive::Derive` — the provider trait (the marker after `:`).
+    Derive,
+    /// `core::derive::Evidence` — the witness type.
+    Evidence,
+    /// `core::derive::ImplBuilder` — the generated-impl builder capability.
+    ImplBuilder,
+    /// `core::derive::Reflect` — reflection-over-the-target capability.
+    Reflect,
+    /// `core::derive::Fix` — the unforgeable override capability (FCO B1a).
+    /// Recognition is live (this item is part of the recognized SET); the gate
+    /// that turns recognition into override authority is increment B1b.
+    Fix,
+}
+
+impl CoreDeriveItem {
+    /// The canonical last-segment name of this item.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            CoreDeriveItem::Derive => DERIVE_TRAIT_TY,
+            CoreDeriveItem::Evidence => EVIDENCE_TY,
+            CoreDeriveItem::ImplBuilder => IMPL_BUILDER_TY,
+            CoreDeriveItem::Reflect => REFLECT_TY,
+            CoreDeriveItem::Fix => FIX_TY,
+        }
+    }
+
+    /// Every canonical item, in declaration order — the recognized SET.
+    const ALL: [CoreDeriveItem; 5] = [
+        CoreDeriveItem::Derive,
+        CoreDeriveItem::Evidence,
+        CoreDeriveItem::ImplBuilder,
+        CoreDeriveItem::Reflect,
+        CoreDeriveItem::Fix,
+    ];
+}
 
 /// A compile-time capability a provider's `derive` fn consumes, declared in its
 /// `uses (..)` clause (`reflect: Reflect<T>`, `builder: mut ImplBuilder<Goal>`).
@@ -53,8 +103,8 @@ const DERIVE_TRAIT_TY: &str = "Derive";
 /// Capabilities are recognized (K04a-C3, landed) by the capability type's
 /// resolved canonical-path identity — `core::derive::Reflect` /
 /// `core::derive::ImplBuilder` — established through the provider module's base-
-/// graph `use` items (see [`path_names_derive_capability`]). There is no string-
-/// key fallback: a user type merely *named* `Reflect`, without importing the
+/// graph `use` items (see [`path_core_derive_item`]). There is no string-key
+/// fallback: a user type merely *named* `Reflect`, without importing the
 /// canonical type, grants NO capability authority. This enum is the home for the
 /// recognized capability (and any future grade/scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
@@ -63,15 +113,6 @@ pub(super) enum Capability<'db> {
     Reflect(IdentId<'db>),
     /// `builder: mut ImplBuilder<Goal>` — the generated-impl builder.
     ImplBuilder(IdentId<'db>),
-}
-
-/// Which `core::derive` capability type a recognized canonical path names. The
-/// recognition is purely by resolved identity ([`path_names_derive_capability`]);
-/// this kind carries the result without re-keying on a raw head string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeriveCapabilityKind {
-    Reflect,
-    ImplBuilder,
 }
 
 impl<'db> Capability<'db> {
@@ -166,7 +207,7 @@ pub(super) fn validate_provider<'db>(
             } else {
                 canonical_trait_path(db, provider.top_mod(db), path)
             };
-            path_names_derive_trait(db, canonical)
+            path_core_derive_item(db, canonical) == Some(CoreDeriveItem::Derive)
         })
         .unwrap_or(false);
     if !derive_marker_ok {
@@ -253,11 +294,11 @@ pub(super) fn validate_provider<'db>(
             } else {
                 canonical_trait_path(db, provider.top_mod(db), PathId::from_ident(db, key_head))
             };
-            match path_names_derive_capability(db, canonical) {
-                Some(DeriveCapabilityKind::Reflect) => {
+            match path_core_derive_item(db, canonical) {
+                Some(CoreDeriveItem::Reflect) => {
                     capabilities.push(Capability::Reflect(param_name))
                 }
-                Some(DeriveCapabilityKind::ImplBuilder) if param.is_mut => {
+                Some(CoreDeriveItem::ImplBuilder) if param.is_mut => {
                     capabilities.push(Capability::ImplBuilder(param_name))
                 }
                 _ => {}
@@ -338,21 +379,23 @@ fn last_path_ident<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> Option<IdentId
     path.ident(db).to_opt()
 }
 
-/// Which `core::derive` capability type `path` names by resolved (canonical-path)
-/// identity, or `None`. A path matches only when its parent segment is the
-/// `derive` module AND its last segment is a capability type name
-/// (`Reflect` / `ImplBuilder`). This is the base-graph-safe form of identity
-/// recognition — it requires the `derive` module qualifier (so a bare user
-/// `struct Reflect`, not imported from `core::derive`, does not match) without
-/// needing the merged scope graph (unavailable during the expansion stage). The
-/// caller canonicalizes a bare ident through the provider module's `use` items
-/// before calling this, so an imported/aliased capability is recognized while a
-/// like-named local type is not. There is no bare-name fallback: the name alone
-/// grants no authority.
-fn path_names_derive_capability<'db>(
-    db: &'db dyn HirDb,
-    path: PathId<'db>,
-) -> Option<DeriveCapabilityKind> {
+/// Which [`CoreDeriveItem`] `path` names by resolved (canonical-path) identity,
+/// or `None`. A path matches only when its parent segment is the `derive` module
+/// AND its last segment is a canonical item name (`Derive` / `Evidence` /
+/// `ImplBuilder` / `Reflect` / `Fix`). This is the base-graph-safe form of
+/// identity recognition — it requires the `derive` module qualifier (so a bare
+/// user `struct Reflect`, not imported from `core::derive`, does not match)
+/// without needing the merged scope graph (unavailable during the expansion
+/// stage). The caller canonicalizes a bare ident through the provider module's
+/// `use` items before calling this, so an imported/aliased item is recognized
+/// while a like-named local type is not. There is no bare-name fallback: the
+/// name alone grants no authority.
+///
+/// This is the base-graph path-keyed sibling of the merged-graph scope-keyed
+/// `provider_goal::scope_is_core_derive_item`; both recognize the one
+/// [`CoreDeriveItem`] SET by the same (name + `core::derive` qualifier)
+/// resolved identity.
+fn path_core_derive_item<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> Option<CoreDeriveItem> {
     let parent_is_derive = path
         .parent(db)
         .and_then(|parent| parent.ident(db).to_opt())
@@ -361,33 +404,9 @@ fn path_names_derive_capability<'db>(
         return None;
     }
     let last = path.ident(db).to_opt()?;
-    if last.data(db) == REFLECT_TY {
-        Some(DeriveCapabilityKind::Reflect)
-    } else if last.data(db) == IMPL_BUILDER_TY {
-        Some(DeriveCapabilityKind::ImplBuilder)
-    } else {
-        None
-    }
-}
-
-/// Whether `path` names the `core::derive::Derive` provider trait by resolved
-/// (canonical-path) identity. Mirrors [`path_names_derive_capability`]: a path
-/// matches only when its parent segment is the `derive` module AND its last
-/// segment is `Derive`. The caller canonicalizes a bare ident through the
-/// provider module's base-graph `use` items before calling this, so an
-/// imported/aliased `Derive` is recognized while a like-named local type is
-/// not. There is no bare-name fallback: the name alone grants no authority.
-fn path_names_derive_trait<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> bool {
-    let parent_is_derive = path
-        .parent(db)
-        .and_then(|parent| parent.ident(db).to_opt())
-        .is_some_and(|ident| ident.data(db) == DERIVE_MODULE);
-    if !parent_is_derive {
-        return false;
-    }
-    path.ident(db)
-        .to_opt()
-        .is_some_and(|last| last.data(db) == DERIVE_TRAIT_TY)
+    CoreDeriveItem::ALL
+        .into_iter()
+        .find(|item| last.data(db) == item.name())
 }
 
 /// Resolves `path` (the head trait of a provider, or the trait argument of a
