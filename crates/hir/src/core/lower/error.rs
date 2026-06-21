@@ -143,9 +143,11 @@ pub(super) fn lower_error_struct<'db>(
     let field_type_paths = parsed_fields.field_type_paths.clone();
     let field_specs = parsed_fields.field_specs.clone();
 
-    let impl_trait_idx = builder.ctxt().next_impl_trait_idx();
     builder.with_item_scope(
-        TrackedItemVariant::ImplTrait(impl_trait_idx),
+        TrackedItemVariant::GeneratedImplTrait {
+            goal: Partial::Present(trait_ref),
+            self_ty: Partial::Present(self_ty),
+        },
         move |builder, id| {
             let selector_const = create_selector_const(
                 builder.ctxt(),
@@ -373,11 +375,13 @@ fn lower_error_encode_impl<'db>(
 ) {
     let field_specs = field_specs.to_vec();
 
-    let impl_trait_idx = builder.ctxt().next_impl_trait_idx();
     let trait_ref = Partial::Present(builder.core_abi_trait_ref_sol("Encode"));
     let ty = Partial::Present(self_ty);
     builder.with_item_scope(
-        TrackedItemVariant::ImplTrait(impl_trait_idx),
+        TrackedItemVariant::GeneratedImplTrait {
+            goal: trait_ref,
+            self_ty: ty,
+        },
         |builder, id| {
             let direct_encode_const = create_direct_encode_assoc_const(builder, &field_specs);
             let impl_trait = builder.new_impl_trait(

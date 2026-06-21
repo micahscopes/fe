@@ -471,11 +471,16 @@ where
         let trait_ref = Partial::Present(trait_ref);
         let ty = Partial::Present(ty);
 
-        let idx = self.ctxt.next_impl_trait_idx();
-        self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
-            let (types, consts) = build_assocs(this);
-            this.new_impl_trait(id, trait_ref, ty, types, consts, this.origin())
-        })
+        self.with_item_scope(
+            TrackedItemVariant::GeneratedImplTrait {
+                goal: trait_ref,
+                self_ty: ty,
+            },
+            |this, id| {
+                let (types, consts) = build_assocs(this);
+                this.new_impl_trait(id, trait_ref, ty, types, consts, this.origin())
+            },
+        )
     }
 
     /// Builds a generic `impl<..> Trait for Ty<..> where ..` item with
@@ -497,22 +502,27 @@ where
         let trait_ref = Partial::Present(trait_ref);
         let ty = Partial::Present(ty);
 
-        let idx = self.ctxt.next_impl_trait_idx();
-        self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
-            let (types, consts) = build_assocs(this);
-            let impl_trait = this.new_impl_trait_generic(
-                id,
-                trait_ref,
-                ty,
-                generic_params,
-                where_clause,
-                types,
-                consts,
-                this.origin(),
-            );
-            build_children(this);
-            impl_trait
-        })
+        self.with_item_scope(
+            TrackedItemVariant::GeneratedImplTrait {
+                goal: trait_ref,
+                self_ty: ty,
+            },
+            |this, id| {
+                let (types, consts) = build_assocs(this);
+                let impl_trait = this.new_impl_trait_generic(
+                    id,
+                    trait_ref,
+                    ty,
+                    generic_params,
+                    where_clause,
+                    types,
+                    consts,
+                    this.origin(),
+                );
+                build_children(this);
+                impl_trait
+            },
+        )
     }
 
     /// Builds an anonymous single-expression body (e.g. the value of an
@@ -570,12 +580,18 @@ where
         let trait_ref = Partial::Present(trait_ref);
         let ty = Partial::Present(ty);
 
-        let idx = self.ctxt.next_impl_trait_idx();
-        self.with_item_scope(TrackedItemVariant::ImplTrait(idx), |this, id| {
-            let impl_trait = this.new_impl_trait(id, trait_ref, ty, types, consts, this.origin());
-            build_children(this);
-            impl_trait
-        })
+        self.with_item_scope(
+            TrackedItemVariant::GeneratedImplTrait {
+                goal: trait_ref,
+                self_ty: ty,
+            },
+            |this, id| {
+                let impl_trait =
+                    this.new_impl_trait(id, trait_ref, ty, types, consts, this.origin());
+                build_children(this);
+                impl_trait
+            },
+        )
     }
 
     pub(super) fn func_with_body_inline_always(

@@ -142,11 +142,13 @@ fn lower_msg_variant_encode_impl<'db>(
 ) -> ImplTrait<'db> {
     let field_specs = lower_msg_variant_field_specs(builder.ctxt(), variant);
 
-    let impl_trait_idx = builder.ctxt().next_impl_trait_idx();
     let trait_ref = Partial::Present(builder.core_abi_trait_ref_sol("Encode"));
     let ty = Partial::Present(variant_struct_ty(builder.db(), struct_));
     builder.with_item_scope(
-        TrackedItemVariant::ImplTrait(impl_trait_idx),
+        TrackedItemVariant::GeneratedImplTrait {
+            goal: trait_ref,
+            self_ty: ty,
+        },
         |builder, id| {
             let direct_encode_const = create_direct_encode_assoc_const(builder, &field_specs);
             let impl_trait = builder.new_impl_trait(

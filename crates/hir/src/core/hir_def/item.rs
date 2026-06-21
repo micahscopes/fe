@@ -1350,6 +1350,16 @@ impl<'db> ImplTrait<'db> {
         })
     }
 
+    /// A `db`-resolved, salsa-index-independent rendering of this impl's
+    /// interning identity (its [`TrackedItemId`]'s [`TrackedItemVariant`]).
+    /// Exposes the FCO keystone's content key for cross-database comparison:
+    /// a *generated* impl renders its `(goal, self_ty)` content, whereas a
+    /// hand-written one renders its positional ordinal. See
+    /// [`TrackedItemVariant::content_repr`].
+    pub fn interning_identity_repr(self, db: &'db dyn HirDb) -> String {
+        self.id(db).variant(db).content_repr(db)
+    }
+
     // raw type_ref access kept; shim exposes public ___tmp method.
 
     // Semantic `ty` lives in `crate::semantic`.
@@ -1865,6 +1875,23 @@ pub enum TrackedItemVariant<'db> {
     Impl(u32),
     Trait(Partial<IdentId<'db>>),
     ImplTrait(u32),
+    /// FCO KEYSTONE: the content-keyed identity of a *generated* `impl Trait
+    /// for Ty` item (the `#[error]`/`#[event]`/`#[msg]` desugarings and the
+    /// derive-provider replay). Unlike the positional [`Self::ImplTrait`]
+    /// ordinal — which is reset to 0 in every lowering pass and renumbers all
+    /// downstream ids when derive targets are reordered — this arm keys on the
+    /// HIR-level content that actually distinguishes the impl: its goal trait
+    /// reference and self type. Under coherence (at most one impl of a given
+    /// trait for a given type) `(goal, self_ty)` is collision-free, so the
+    /// interned `TrackedItemId` — and therefore the downstream `ImplementorId`
+    /// / `SemanticInstanceKey` — is stable across reorderings of sibling
+    /// derive targets. Hand-written `impl Trait` items stay on
+    /// [`Self::ImplTrait`] (they are already reorder-stable via
+    /// `HirOrigin::raw`).
+    GeneratedImplTrait {
+        goal: Partial<TraitRefId<'db>>,
+        self_ty: Partial<TypeId<'db>>,
+    },
     DeriveProvider(Partial<IdentId<'db>>),
     DeriveProviderScope(u32),
     DeriveDecl(u32),
@@ -1893,8 +1920,69 @@ pub enum TrackedItemVariant<'db> {
     StaticAssertComparisonRhs,
     Joined(Box<Self>, Box<Self>),
 }
-impl TrackedItemVariant<'_> {
+impl<'db> TrackedItemVariant<'db> {
     pub(crate) fn join(self, rhs: Self) -> Self {
         Self::Joined(self.into(), rhs.into())
+    }
+
+    /// A `db`-resolved, salsa-index-independent rendering of this variant,
+    /// suitable for comparing interning identity *across databases* (idents are
+    /// resolved to their text, paths/types to their source form). Used by the
+    /// FCO keystone tripwire to observe that a *generated* impl's interning
+    /// identity is stable under derive-target reordering: the
+    /// [`Self::ImplTrait`] arm renders its positional ordinal (the instability),
+    /// while [`Self::GeneratedImplTrait`] renders only its `(goal, self_ty)`
+    /// content (the fix).
+    pub fn content_repr(&self, db: &'db dyn crate::HirDb) -> String {
+        fn ident(p: &Partial<IdentId>, db: &dyn crate::HirDb) -> String {
+            p.to_opt()
+                .map_or_else(|| "<missing>".into(), |i| i.data(db).to_string())
+        }
+        match self {
+            Self::TopLevelMod(name) => format!("TopMod({})", name.data(db)),
+            Self::Mod(name) => format!("Mod({})", ident(name, db)),
+            Self::Func(name) => format!("Func({})", ident(name, db)),
+            Self::Struct(name) => format!("Struct({})", ident(name, db)),
+            Self::Contract(name) => format!("Contract({})", ident(name, db)),
+            Self::Enum(name) => format!("Enum({})", ident(name, db)),
+            Self::TypeAlias(name) => format!("TypeAlias({})", ident(name, db)),
+            Self::Impl(idx) => format!("Impl(ord:{idx})"),
+            Self::Trait(name) => format!("Trait({})", ident(name, db)),
+            Self::ImplTrait(idx) => format!("ImplTrait(ord:{idx})"),
+            Self::GeneratedImplTrait { goal, self_ty } => {
+                let goal = goal.to_opt().and_then(|t| t.path(db).to_opt()).map_or_else(
+                    || "<missing>".into(),
+                    |p| p.pretty_print(db),
+                );
+                let self_ty = self_ty
+                    .to_opt()
+                    .map_or_else(|| "<missing>".into(), |t| t.pretty_print(db));
+                format!("GeneratedImplTrait(goal:{goal},self:{self_ty})")
+            }
+            Self::DeriveProvider(name) => format!("DeriveProvider({})", ident(name, db)),
+            Self::DeriveProviderScope(idx) => format!("DeriveProviderScope(ord:{idx})"),
+            Self::DeriveDecl(idx) => format!("DeriveDecl(ord:{idx})"),
+            Self::Const(name) => format!("Const({})", ident(name, db)),
+            Self::StaticAssert(idx) => format!("StaticAssert(ord:{idx})"),
+            Self::ContractInit => "ContractInit".into(),
+            Self::ContractRecvArm { recv_idx, arm_idx } => {
+                format!("ContractRecvArm({recv_idx},{arm_idx})")
+            }
+            Self::Use(path) => format!(
+                "Use({})",
+                path.to_opt()
+                    .map_or_else(|| "<missing>".into(), |p| p.pretty_path(db))
+            ),
+            Self::Expansion => "Expansion".into(),
+            Self::FuncBody => "FuncBody".into(),
+            Self::NamelessBody => "NamelessBody".into(),
+            Self::WhereConstPredicate(idx) => format!("WhereConstPredicate({idx})"),
+            Self::StaticAssertCondition => "StaticAssertCondition".into(),
+            Self::StaticAssertComparisonLhs => "StaticAssertComparisonLhs".into(),
+            Self::StaticAssertComparisonRhs => "StaticAssertComparisonRhs".into(),
+            Self::Joined(lhs, rhs) => {
+                format!("{}::{}", lhs.content_repr(db), rhs.content_repr(db))
+            }
+        }
     }
 }
