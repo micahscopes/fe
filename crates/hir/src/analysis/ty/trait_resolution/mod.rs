@@ -1,7 +1,8 @@
 use super::{
+    binder::Binder,
     canonical::{Canonical, Canonicalized, Solution},
     fold::{AssocTySubst, TyFoldable},
-    trait_def::{ImplementorId, ImplementorOrigin, TraitInstId},
+    trait_def::{ImplementorId, ImplementorOrigin, TraitInstId, impls_for_trait_in_ingots},
     ty_def::{TyData, TyFlags, TyId},
 };
 use crate::analysis::{
@@ -264,6 +265,136 @@ impl<'db> TraitSolveCx<'db> {
         }
     }
 
+    /// FCO "slide" cascade C3c-2 — the DEFAULT-TIER rule (LATENT until C3c-3).
+    ///
+    /// When >1 real coexisting `Hir` impl applies to one concrete goal and no
+    /// in-scope provision selected one (the unscoped/default tier), this picks the
+    /// DEFAULT-marked impl: the one whose provenance is a canonical core-derive
+    /// provider (see [`Self::implementor_is_default_marked`]). It is the verify-leg
+    /// disambiguator the design pins at `expr.rs:2335` — scope-free, run OUTSIDE
+    /// the tracked `is_query_satisfiable` solve so the cache-safety invariant
+    /// (`trait_resolution/mod.rs:109-164`) is untouched.
+    ///
+    /// Returns:
+    /// - `None` — the rule DOES NOT ENGAGE: ≤1 coexisting impl applies to the
+    ///   goal. This is the ONLY reachable outcome on today's code: coherence
+    ///   (`does_impl_trait_conflict`, sole caller `core/semantic/mod.rs:3989`)
+    ///   forbids >1 coexisting impl for a (type, goal), so the applying-candidate
+    ///   set is always ≤1 and the engage branch below is DEAD. The caller falls
+    ///   back to today's path unchanged → byte-identical.
+    /// - `Some(Selection::Unique(impl))` — >1 applied AND exactly one is
+    ///   default-marked: select it deterministically (recorded so MIR consumes it
+    ///   via the C1 rail, never reaching `select_impl`→`LowerError`→panic at
+    ///   `classify.rs:2297`).
+    /// - `Some(Selection::Ambiguous(applying))` — >1 applied but none or >1 is
+    ///   default-marked: a CLEAN ambiguity signal (the caller emits the
+    ///   "disambiguate with `with`" diagnostic) — NEVER a panic.
+    /// - `Some(Selection::NotFound)` never occurs (the engage gate already
+    ///   requires applying candidates).
+    ///
+    /// SCOPING (the feasibility gate): this looks ONLY at the impl-table candidate
+    /// set (`impls_for_trait_in_ingots`) — how many *real coexisting impls* apply
+    /// to a concrete goal — and NEVER at a `GoalSatisfiability`. So it cannot
+    /// perturb the inference-variable ambiguity path
+    /// (`process_trait_obligation`'s `NeedsConfirmation` →
+    /// `BodyDiag::AmbiguousTraitInst`, `ty_check/mod.rs:1385`), which is fed by
+    /// inference vars, not by coexisting coherent impls. The two cases are
+    /// structurally distinct here.
+    ///
+    /// Has no non-test callers in C3c-2: the seam is planted + unit-tested
+    /// synthetically (`default_tier_rule_tests`); the verify-leg consumes it once
+    /// C3c-3 demotes coherence so >1 can coexist.
+    #[allow(dead_code)]
+    pub(crate) fn default_tier_selection(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        inst: TraitInstId<'db>,
+    ) -> Option<Selection<ImplementorId<'db>>> {
+        let scope = self.normalization_scope_for_trait_inst(db, inst);
+        let inst = normalize_trait_inst_preserving_validity(db, inst, scope, self.assumptions);
+
+        // The impl-table candidate set for this goal's trait, across the same
+        // deterministic ingots the proof forest searches.
+        let (primary, secondary) = self.search_ingots_for_trait_inst(db, inst);
+        let cands = impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, inst));
+
+        // Restrict to candidates that ACTUALLY apply to the goal (instantiate with
+        // fresh vars, normalize, unify) — mirroring the proof forest's candidate
+        // match (`proof_forest.rs:382-396`). This is the set of coexisting
+        // coherent impls for the goal.
+        let applying: Vec<ImplementorId<'db>> = cands
+            .iter()
+            .copied()
+            .filter(|&cand| Self::implementor_applies_to_goal(db, cand, inst, scope, self.assumptions))
+            .map(|cand| cand.instantiate_identity())
+            .collect();
+
+        // LATENCY GATE: today coherence forbids >1 coexisting impl, so this is
+        // always ≤1 and the rule does not engage (byte-identical). Only the
+        // post-C3c-3 cascade state (>1 coexisting impl) reaches the body below.
+        if applying.len() <= 1 {
+            return None;
+        }
+
+        let marked: Vec<(ImplementorId<'db>, bool)> = applying
+            .into_iter()
+            .map(|implementor| {
+                (
+                    implementor,
+                    Self::implementor_is_default_marked(db, implementor),
+                )
+            })
+            .collect();
+
+        Some(default_tier_decision(marked))
+    }
+
+    /// Whether a candidate implementor applies to `goal`: instantiate it with
+    /// fresh vars, normalize its trait instance, and unify it against the
+    /// (already-normalized) goal — exactly the proof forest's candidate match
+    /// (`proof_forest.rs:382-396`), minus the constraint sub-solve (an
+    /// over-approximation that is sound for the latency gate: it can only
+    /// over-count applying candidates, never under-count, so it cannot make the
+    /// `<= 1` gate fire spuriously when >1 genuinely coexist).
+    fn implementor_applies_to_goal(
+        db: &'db dyn HirAnalysisDb,
+        cand: Binder<ImplementorId<'db>>,
+        goal: TraitInstId<'db>,
+        scope: ScopeId<'db>,
+        assumptions: PredicateListId<'db>,
+    ) -> bool {
+        let mut table = UnificationTable::new(db);
+        let gen_cand = table.instantiate_with_fresh_vars(cand);
+        let normalized_cand = normalize_trait_inst_preserving_validity(
+            db,
+            gen_cand.trait_inst(db),
+            scope,
+            assumptions,
+        );
+        table.unify(normalized_cand, goal).is_ok()
+    }
+
+    /// DEFAULT-marked recognition (precise): an implementor is default-marked iff
+    /// its provenance is a canonical core-derive provider — i.e. its
+    /// [`ImplementorOrigin`] is `Hir(impl_trait)` AND that impl's defining ingot
+    /// kind is [`IngotKind::CoreDerives`]. This is the same canonical-ness
+    /// recognizer `core_providers` keys on (`core/lower/provider.rs:692`), and
+    /// keys on the impl's RESOLVED provenance ingot — never on a bare name. A
+    /// user impl in a `Local`/`Std`/`Core` ingot, a `VirtualContract`, or an
+    /// `Assumption` are NEVER default-marked.
+    fn implementor_is_default_marked(
+        db: &'db dyn HirAnalysisDb,
+        implementor: ImplementorId<'db>,
+    ) -> bool {
+        match implementor.origin(db) {
+            ImplementorOrigin::Hir(impl_trait) => {
+                impl_trait.top_mod(db).ingot(db).kind(db)
+                    == common::ingot::IngotKind::CoreDerives
+            }
+            ImplementorOrigin::VirtualContract(_) | ImplementorOrigin::Assumption => false,
+        }
+    }
+
     pub(crate) fn search_ingots_for_trait_inst(
         self,
         db: &'db dyn HirAnalysisDb,
@@ -321,6 +452,31 @@ impl<'db> TraitSolveCx<'db> {
 
     pub(crate) fn origin_scope(self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
         self.origin_ingot.root_mod(db).scope()
+    }
+}
+
+/// FCO "slide" cascade C3c-2 — the pure DEFAULT-TIER decision over a set of ≥2
+/// coexisting candidate implementors that all apply to one goal, each paired with
+/// whether it is default-marked (a canonical core-derive provider, per
+/// [`TraitSolveCx::implementor_is_default_marked`]). Factored out so the decision
+/// is unit-testable synthetically without needing the impl table to physically
+/// hold >1 impl (which today's coherence forbids).
+///
+/// - exactly one default-marked → [`Selection::Unique`] (the default impl wins);
+/// - none or >1 default-marked → [`Selection::Ambiguous`] over ALL candidates (a
+///   CLEAN ambiguity the caller turns into a "disambiguate with `with`"
+///   diagnostic — NEVER a panic).
+fn default_tier_decision<'db>(
+    marked: Vec<(ImplementorId<'db>, bool)>,
+) -> Selection<ImplementorId<'db>> {
+    let default_marked: Vec<ImplementorId<'db>> = marked
+        .iter()
+        .filter_map(|&(implementor, is_marked)| is_marked.then_some(implementor))
+        .collect();
+
+    match default_marked.as_slice() {
+        [unique] => Selection::Unique(*unique),
+        _ => Selection::Ambiguous(marked.into_iter().map(|(implementor, _)| implementor).collect()),
     }
 }
 
@@ -845,5 +1001,165 @@ fn without_a<T>() -> bool {
             is_goal_query_satisfiable(&db, without_cx, &without_query),
             GoalSatisfiability::UnSat(_)
         ));
+    }
+}
+
+/// FCO "slide" cascade C3c-2 — the DEFAULT-TIER rule, exercised synthetically.
+///
+/// The rule fires ONLY in the future cascade state (>1 coexisting coherent impl
+/// for one goal), which today's coherence forbids, so it cannot be reached on
+/// real code. These tests therefore drive the two pieces directly:
+///  - [`super::default_tier_decision`]: the selection over ≥2 coexisting
+///    candidates (exactly-one-marked → `Unique`; none/two-marked → `Ambiguous`);
+///  - [`TraitSolveCx::implementor_is_default_marked`]: the canonical-provenance
+///    recognizer, proven anti-vacuously to REJECT a real `Local`-ingot `Hir` impl
+///    and an `Assumption` implementor (the only origins constructible without a
+///    `CoreDerives` ingot in the test DB).
+#[cfg(test)]
+mod default_tier_rule_tests {
+    use camino::Utf8PathBuf;
+
+    use super::{Selection, TraitSolveCx, default_tier_decision};
+    use crate::{
+        analysis::{
+            name_resolution::{PathRes, resolve_path},
+            ty::{
+                trait_def::{ImplementorId, TraitInstId, impls_for_trait_def},
+                trait_resolution::PredicateListId,
+                ty_def::TyId,
+            },
+        },
+        hir_def::PathId,
+        test_db::HirAnalysisTestDb,
+    };
+
+    /// A `Point` struct with a single real `impl Eq for Point` — a `Local`-ingot
+    /// `Hir` implementor (NOT a canonical core-derive provider).
+    const FIXTURE: &str = r#"
+use core::ops::Eq
+
+struct Point {
+    x: u256,
+    y: u256,
+}
+
+impl Eq for Point {
+    fn eq(self, _ other: Point) -> bool {
+        self.x == other.x
+    }
+}
+"#;
+
+    fn resolve<'db>(
+        db: &'db HirAnalysisTestDb,
+        scope: crate::hir_def::scope_graph::ScopeId<'db>,
+        segments: &[&str],
+    ) -> PathRes<'db> {
+        let path = PathId::from_segments(db, segments);
+        resolve_path(db, path, scope, PredicateListId::empty_list(db), false)
+            .unwrap_or_else(|e| panic!("expected {segments:?} to resolve, got {e:?}"))
+    }
+
+    /// The sole real `impl Eq for Point` implementor, via the impl table.
+    fn sole_eq_point_impl<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: crate::hir_def::TopLevelMod<'db>,
+        eq_inst: TraitInstId<'db>,
+        point_ty: TyId<'db>,
+    ) -> ImplementorId<'db> {
+        impls_for_trait_def(db, top_mod.ingot(db), eq_inst.def(db))
+            .iter()
+            .map(|binder| binder.instantiate_identity())
+            .find(|implementor| implementor.self_ty(db) == point_ty)
+            .expect("expected a real impl Eq for Point")
+    }
+
+    /// The recognizer keys on RESOLVED canonical provenance, never on a name: a
+    /// real `Local`-ingot `Hir` impl is NOT default-marked, and an `Assumption`
+    /// implementor is NOT default-marked. (Anti-vacuous: if the recognizer always
+    /// returned `true`, the `none-marked → Ambiguous` decision case below could
+    /// pass for the wrong reason.)
+    #[test]
+    fn default_marked_recognizer_rejects_non_canonical_origins() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("default_tier_recognizer.fe"), FIXTURE);
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let scope = top_mod.scope();
+
+        let PathRes::Trait(eq_inst) = resolve(&db, scope, &["core", "ops", "Eq"]) else {
+            panic!("core::ops::Eq must resolve to a trait");
+        };
+        let PathRes::Ty(point_ty) = resolve(&db, scope, &["Point"]) else {
+            panic!("Point must resolve to a type");
+        };
+
+        let eq_point_impl = sole_eq_point_impl(&db, top_mod, eq_inst, point_ty);
+        assert!(
+            !TraitSolveCx::implementor_is_default_marked(&db, eq_point_impl),
+            "a Local-ingot Hir impl must NOT be default-marked",
+        );
+
+        let eq_point = TraitInstId::new_simple(&db, eq_inst.def(&db), vec![point_ty, point_ty]);
+        let assumption_impl = ImplementorId::assumption(&db, eq_point);
+        assert!(
+            !TraitSolveCx::implementor_is_default_marked(&db, assumption_impl),
+            "an Assumption implementor must NOT be default-marked",
+        );
+    }
+
+    /// The decision over ≥2 coexisting candidates: exactly-one default-marked →
+    /// that one is selected `Unique`; none or two default-marked → a CLEAN
+    /// `Ambiguous` over all candidates (never a panic). The default-marked bit is
+    /// fed explicitly here because the test DB has no `CoreDerives` ingot to mint a
+    /// genuinely canonical second impl; the recognizer itself is checked
+    /// independently above.
+    #[test]
+    fn default_tier_decision_selects_unique_marked_else_ambiguous() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("default_tier_decision.fe"), FIXTURE);
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+        let scope = top_mod.scope();
+
+        let PathRes::Trait(eq_inst) = resolve(&db, scope, &["core", "ops", "Eq"]) else {
+            panic!("core::ops::Eq must resolve to a trait");
+        };
+        let PathRes::Ty(point_ty) = resolve(&db, scope, &["Point"]) else {
+            panic!("Point must resolve to a type");
+        };
+
+        // Two distinct candidate implementors for the same `Eq<Point>` goal: the
+        // real impl, and a synthetic `Assumption` standing in for a second
+        // coexisting impl (the future cascade state). Distinct so `Ambiguous` can
+        // be observed to carry both.
+        let real = sole_eq_point_impl(&db, top_mod, eq_inst, point_ty);
+        let eq_point = TraitInstId::new_simple(&db, eq_inst.def(&db), vec![point_ty, point_ty]);
+        let other = ImplementorId::assumption(&db, eq_point);
+        assert_ne!(real, other, "candidates must be distinct");
+
+        // Exactly one default-marked → select it.
+        match default_tier_decision(vec![(real, true), (other, false)]) {
+            Selection::Unique(selected) => assert_eq!(
+                selected, real,
+                "the single default-marked candidate must be selected",
+            ),
+            other => panic!("expected Unique, got {other:?}"),
+        }
+
+        // None default-marked → clean ambiguity over BOTH candidates.
+        match default_tier_decision(vec![(real, false), (other, false)]) {
+            Selection::Ambiguous(cands) => {
+                assert_eq!(cands.len(), 2, "ambiguity must list every candidate");
+                assert!(cands.contains(&real) && cands.contains(&other));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+
+        // Two default-marked → also clean ambiguity (no unique default).
+        match default_tier_decision(vec![(real, true), (other, true)]) {
+            Selection::Ambiguous(cands) => assert_eq!(cands.len(), 2),
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
     }
 }
