@@ -119,6 +119,24 @@ live `Some(None)` forge floor, `mod.rs:1297`). **C3** — demote the single glob
 canonical/`fixed` stay exactly-one (the `Fix` floor, B1a's inert recognition wired live here). Order C1→C2→C3 so
 there is never a >1-impl + re-resolve + `Some(None)` ambiguity/money window.
 
+**SUMMIT DESIGN (2026-06-21): the selection seam ALREADY EXISTS — the summit = surface + floor + default-rule +
+demotion, NOT a new resolver.** `discharge_from_scoped_provision` (`mod.rs:1292`) is already the scope-free,
+innermost-first, first-match walk (runs BEFORE the tracked solve; walks `scoped_provisions` innermost-first;
+records a real impl) — the Spike-2 steer realized (reuse the forest for the unscoped default; no second resolver).
+Literal "candidate-ordering in the proof forest" FAILS: the forest deliberately seeks a 2nd solution to detect
+ambiguity (`proof_forest.rs:26,155-187`), so reordering can't collapse `NeedsConfirmation`→`Satisfied` without
+scope-keying the tracked solve (forbidden, `trait_resolution/mod.rs:109-164`). **Default-tier rule (a′+b):**
+unscoped + >1 impl → pick the default-marked (canonical/CoreDerives) impl at the verify-leg (`expr.rs:2335`,
+scope-free); none/multiple marked → clean diag, NEVER the MIR `select_impl`→panic path. **Sub-rung ladder
+(default-rule + floor land BEFORE the demotion — the ordering law):** **C3c-1** money floor (wire `goal_is_canonical`
+LIVE, byte-identical — canonical stays exactly-one + `5-0001` fires; remove `allow(dead_code)`; the SMALLEST first
+rung) → **C3c-2** default-tier rule (verify-leg picks default-marked; clean diag) → **C3b** surface (flip
+`None`→`Some(impl)` at the `With` stamp site `expr.rs:1184`; downstream already wired; spelling deferred-tunable +
+parser-risk) → **C3c-3** the demotion/prune (allow >1 non-canonical; canonical unchanged). Money risk CLOSED by
+C3c-1 + the unforgeable `Fix` gate (the ONLY authority to override a canonical goal). Salsa-key risk ZERO (all
+selection at the verify-leg + the discharge seam, outside the tracked solve). Build-only: parser spellability (C3b),
+MIR-panic-vs-clean-diag (C3c-2).
+
 1. **Construction SSOT (byte-identical) — IN PROGRESS.** Fold every hand-rolled `TraitSolveCx` construction onto
    the one `ProvisionEnv` (cut-1 + seam-1 done; ~25 clean sites remain in `diagnosable.rs`, `core/semantic`,
    `analysis/ty/*`). Unifies *how* the solver context is built so the eventual walk is a one-place flip. Does
