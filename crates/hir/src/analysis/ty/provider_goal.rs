@@ -412,6 +412,38 @@ fn scope_is_core_derive_item<'db>(
     module_is_derive && in_core
 }
 
+/// Whether the unforgeable override capability `core::derive::Fix` is RESOLVABLE
+/// from `scope` by its canonical resolved identity (the SAME unified recognizer —
+/// path resolution + [`scope_is_core_derive_item`] — exercised by
+/// `scope_is_core_derive_item_keys_on_core_identity_not_name`, NOT a bare-name
+/// match): the `Fix` path must resolve to a type whose def scope is `core`-ingot
+/// `derive::Fix`. A like-named local `struct Fix<T>` (no `use core::derive::Fix`)
+/// resolves elsewhere and is NOT recognized.
+///
+/// This is the floor-side RECOGNITION primitive for the FCO "slide" cascade Fix
+/// override (T1.1 made the `CoreDeriveItem::Fix` arm of the recognizer SET live).
+/// It answers only "is the override mechanism present in this resolution context",
+/// keyed on the goal-INDEPENDENT canonical `Fix` identity — exactly like
+/// `goal_is_canonical` keys on the trait def, NOT on a per-call provision. It does
+/// NOT, and must NOT, consult any in-scope `Fix<goal>` PROVISION/selection: that
+/// is the per-call override decision, which lives at the LIVE verify-leg
+/// (`MethodSelection` / `scoped_selection_exprs`), never at this coherence floor
+/// (whose salsa key must stay scope-free — see `trait_resolution/mod.rs:103-167`).
+pub(crate) fn fix_capability_in_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> bool {
+    let fix_path = PathId::from_segments(db, &["core", "derive", "Fix"]);
+    let assumptions = PredicateListId::empty_list(db);
+    let Ok(PathRes::Ty(ty)) = resolve_path(db, fix_path, scope, assumptions, false) else {
+        return false;
+    };
+    let Some(def_scope) = ty.as_scope(db) else {
+        return false;
+    };
+    scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Fix)
+}
+
 /// If `ty` is a saturated `core::derive::Evidence<G>` witness value — recognized
 /// by the RESOLVED identity of its head ADT (the same `core` ingot + `derive`
 /// module + `Evidence` name check as [`scope_is_core_derive_item`], NOT the bare

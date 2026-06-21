@@ -65,6 +65,15 @@ pub enum LowerError {
     /// silently lower against the wrong impl. The message carries both
     /// implementors for diagnosis.
     NondeterministicReResolution(String),
+    /// The recorded `ImplEnv::selected_implementor` consumed by the MIR C1 rail's
+    /// `Some` branch (cascade C1) is NOT a valid impl for the call's goal — it is
+    /// not a member of the goal's impl-table candidate set, or does not apply to
+    /// it. Under coherence every recorded implementor is a solver solution = a
+    /// real applying candidate, so this can never happen for valid Fe; if it fires
+    /// the record was forged/mismatched and must hard-fail rather than silently
+    /// lower against a bad impl. The message carries the recorded implementor and
+    /// the goal for diagnosis. See `recorded_implementor_is_valid_candidate`.
+    ForgedRecordedImplementor(String),
 }
 
 impl std::fmt::Display for LowerError {
@@ -72,6 +81,7 @@ impl std::fmt::Display for LowerError {
         match self {
             LowerError::Unsupported(message) => write!(f, "{message}"),
             LowerError::NondeterministicReResolution(message) => write!(f, "{message}"),
+            LowerError::ForgedRecordedImplementor(message) => write!(f, "{message}"),
         }
     }
 }
@@ -2482,6 +2492,12 @@ fn wrap_runtime_lowering_error<'db>(
         LowerError::NondeterministicReResolution(message) => {
             LowerError::NondeterministicReResolution(format!(
                 "MIR lowering failed: nondeterministic re-resolution while lowering `{}`: {message}",
+                runtime_instance_symbol_base(db, instance)
+            ))
+        }
+        LowerError::ForgedRecordedImplementor(message) => {
+            LowerError::ForgedRecordedImplementor(format!(
+                "MIR lowering failed: forged recorded implementor while lowering `{}`: {message}",
                 runtime_instance_symbol_base(db, instance)
             ))
         }

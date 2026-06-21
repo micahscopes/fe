@@ -2296,13 +2296,38 @@ pub(crate) fn resolve_runtime_call_key<'db>(
     //   this yields the byte-identical `func`/`impl_args`. With the future
     //   cascade's ≥2 coexisting impls, `select_impl` would go `Ambiguous` →
     //   `LowerError` → panic; consuming the record avoids re-deciding what
-    //   typeck already decided. No determinism assertion: the record IS the
-    //   source, so there is nothing to compare against.
+    //   typeck already decided. We cannot replay `select_impl` here (a scoped
+    //   override legitimately DIFFERS from its default result — that is the whole
+    //   point of the cascade), but we CAN — and do — VALIDITY-check the record
+    //   before trusting it (`recorded_implementor_is_valid_candidate`): the
+    //   recorded `ImplementorId` must be a member of THIS goal's impl-table
+    //   candidate set AND actually apply to it. That rejects a forged/mismatched
+    //   record (the one place codegen otherwise consumes a recorded implementor
+    //   with zero cross-check) WITHOUT rejecting a legitimate scoped override, and
+    //   is byte-identical today: every recorded implementor is a solver solution =
+    //   a candidate that applied to the goal, so this never fires on valid Fe.
     // - `None` (typeck did not commit a concrete impl) → re-resolve EXACTLY as
     //   before through the global impl table, and keep the rung-3.3 determinism
     //   assertion (which is `Ok` for `None` anyway, but guards against any
     //   re-resolution divergence). See `check_reresolution_determinism`.
     let resolved = if let Some(recorded_implementor) = impl_env.selected_implementor(db) {
+        // SOUNDNESS BACKSTOP (cascade C1 `Some` branch): the recorded implementor
+        // is about to be CONSUMED as the resolution source. Cross-check that it is
+        // a real, valid impl for this call's goal before trusting it — see the
+        // invariant on `recorded_implementor_is_valid_candidate`. Never fires under
+        // coherence; a hard failure (never silently lower against a bad record),
+        // mirroring the `None` branch's determinism assertion below.
+        if !TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))
+            .with_assumptions(assumptions)
+            .recorded_implementor_is_valid_candidate(db, concrete_inst, recorded_implementor)
+        {
+            return Err(crate::runtime::LowerError::ForgedRecordedImplementor(format!(
+                "internal: the recorded selected implementor is not a valid impl for this trait call's goal: \
+                 recorded={recorded_implementor:?} method={} concrete_inst={} caller={caller_key:?} callee={callee_key:?}",
+                method_name.data(db),
+                concrete_inst.pretty_print(db, false),
+            )));
+        }
         let Some(resolved) = resolve_trait_method_instance_with_implementor(
             db,
             TraitSolveCx::new(db, caller_key.impl_env(db).normalization_scope(db))

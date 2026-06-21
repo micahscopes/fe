@@ -383,6 +383,58 @@ impl<'db> TraitSolveCx<'db> {
         Some(default_tier_decision(marked))
     }
 
+    /// FCO "slide" cascade C1 SOUNDNESS BACKSTOP — whether `implementor` is a
+    /// REAL, valid impl for `goal`: a member of the same impl-table candidate set
+    /// the solver searches (`impls_for_trait_in_ingots`) that ACTUALLY APPLIES to
+    /// the (normalized) goal (`implementor_applies_to_goal`).
+    ///
+    /// This is the validity predicate the MIR C1 rail (`classify.rs`) checks
+    /// before it CONSUMES a recorded `ImplEnv::selected_implementor` as the
+    /// resolution source on its `Some` branch — the one path that otherwise trusts
+    /// a recorded implementor with no cross-check. It is NOT "recorded == default
+    /// re-resolution": a scoped override (`with (<T as Trait>)`) legitimately picks
+    /// a non-default candidate, and any such override is STILL a member of this set
+    /// (it is one of the goal's coexisting coherent impls), so this accepts every
+    /// legitimate override while rejecting a forged/mismatched record (an impl that
+    /// is not in the goal's candidate set, or does not unify with the goal/self-ty).
+    ///
+    /// Membership keys on interned `ImplementorId` identity: both the candidate set
+    /// (`cand.instantiate_identity()`) and a recorded implementor (a solver
+    /// solution, registered as `cand.instantiate_identity()` in
+    /// `proof_forest.rs::step`) are the raw, un-substituted candidate id, so a
+    /// genuinely-selected impl always compares equal here. BYTE-IDENTICAL today:
+    /// every recorded implementor is a solver solution = a candidate that applied
+    /// to the goal, so this is always `true` on valid Fe and never makes the MIR
+    /// check fire. The reuse of `implementor_applies_to_goal` (the over-approximate
+    /// apply test) keeps the predicate from ever under-counting — it can only
+    /// admit, never spuriously reject, a real applying candidate.
+    ///
+    /// `pub` (rather than `pub(crate)`) so the MIR C1 rail (`fe-mir`) can run the
+    /// backstop through the same `TraitSolveCx` it already builds for resolution,
+    /// mirroring the cross-crate `check_reresolution_determinism` entry point.
+    pub fn recorded_implementor_is_valid_candidate(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        goal: TraitInstId<'db>,
+        implementor: ImplementorId<'db>,
+    ) -> bool {
+        let scope = self.normalization_scope_for_trait_inst(db, goal);
+        let goal = normalize_trait_inst_preserving_validity(db, goal, scope, self.assumptions);
+
+        // The impl-table candidate set for this goal's trait, across the same
+        // deterministic ingots the proof forest searches.
+        let (primary, secondary) = self.search_ingots_for_trait_inst(db, goal);
+        let cands = impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, goal));
+
+        // The recorded implementor is valid iff it is one of those candidates AND
+        // it actually applies to the goal (instantiate + normalize + unify) — the
+        // exact membership the solver would have established when it selected it.
+        cands.iter().copied().any(|cand| {
+            cand.instantiate_identity() == implementor
+                && Self::implementor_applies_to_goal(db, cand, goal, scope, self.assumptions)
+        })
+    }
+
     /// Whether a candidate implementor applies to `goal`: instantiate it with
     /// fresh vars, normalize its trait instance, and unify it against the
     /// (already-normalized) goal — exactly the proof forest's candidate match
