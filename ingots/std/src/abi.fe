@@ -117,7 +117,9 @@ uses (mem: mut RawMem)
 // override (the per-field dynamic-tail fold the deleted error generator emitted)
 // and a `<() as AbiSize>::HEAD_SIZE` (== 0) seed so empty error structs fold to
 // `HEAD_SIZE = 0`, matching the deleted Rust generator byte-for-byte.
-impl StableAbiSize: Derive for AbiSize {
+struct StableAbiSize {}
+
+impl Derive<AbiSize> for StableAbiSize {
     const fn derive<T>(ev: own Evidence<AbiSize<T>>) -> Evidence<AbiSize<T>>
         uses (
             reflect: Reflect<T>,

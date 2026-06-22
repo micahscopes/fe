@@ -11,7 +11,7 @@ use core::derive::ImplBuilder
 use core::derive::Reflect
 use core::ops::Eq
 
-impl Unsaturated: Derive for Eq {
+impl Derive<Eq> for Unsaturated {
     const fn derive<T>(ev: own Evidence<Eq>) -> Evidence<Eq>
         uses (
             reflect: Reflect<T>,
@@ -23,3 +23,5 @@ impl Unsaturated: Derive for Eq {
         ev
     }
 }
+
+struct Unsaturated {}

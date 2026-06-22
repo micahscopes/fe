@@ -16,7 +16,7 @@ trait Real {
     fn r(self) -> bool
 }
 
-impl LiveHead: Derive for Real {
+impl Derive<Real> for LiveHead {
     const fn derive<P: * -> Constraint, T>(ev: own Evidence<P<T>>) -> Evidence<P<T>>
         uses (
             reflect: Reflect<T>,
@@ -28,3 +28,5 @@ impl LiveHead: Derive for Real {
         ev
     }
 }
+
+struct LiveHead {}

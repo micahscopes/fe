@@ -11,7 +11,7 @@ trait Tagged {
     fn tag(self) -> bool
 }
 
-impl FirstOnly: Derive for Tagged {
+impl Derive<Tagged> for FirstOnly {
     const fn derive<T>(ev: own Evidence<Tagged<T>>) -> Evidence<Tagged<T>>
         uses (
             reflect: Reflect<T>,
@@ -40,3 +40,5 @@ enum Mode {
 }
 
 derive Tagged for Mode using FirstOnly
+
+struct FirstOnly {}

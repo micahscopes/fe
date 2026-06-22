@@ -21,7 +21,7 @@ trait Tagged {
 
 // A user-defined derive provider: generates `impl Tagged for T` with
 // `fn tag(self) -> bool { return true }`.
-impl AlwaysTagged: Derive for Tagged {
+impl Derive<Tagged> for AlwaysTagged {
     const fn derive<T>(ev: own Evidence<Tagged<T>>) -> Evidence<Tagged<T>>
         uses (
             reflect: Reflect<T>,
@@ -87,3 +87,5 @@ fn generated_impl_satisfies_generic_bound() {
     let p = Point { x: 5, y: 6 }
     assert!(tag_of(p))
 }
+
+struct AlwaysTagged {}

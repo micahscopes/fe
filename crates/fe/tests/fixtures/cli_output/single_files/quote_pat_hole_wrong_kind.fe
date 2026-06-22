@@ -10,7 +10,7 @@ trait Tagged {
     fn tag(self) -> bool
 }
 
-impl PatTag: Derive for Tagged {
+impl Derive<Tagged> for PatTag {
     const fn derive<T>(ev: own Evidence<Tagged<T>>) -> Evidence<Tagged<T>>
         uses (
             reflect: Reflect<T>,
@@ -34,3 +34,5 @@ enum Coin {
 }
 
 derive Tagged for Coin using PatTag
+
+struct PatTag {}

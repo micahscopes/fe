@@ -17,7 +17,7 @@ use core::derive::Reflect
 use core::ops::Eq
 use core::ops::Ord
 
-impl StableOrd: Derive for Ord {
+impl Derive<Ord> for StableOrd {
     const fn derive<T>(ev: own Evidence<Ord<T>>) -> Evidence<Ord<T>>
         uses (
             reflect: Reflect<T>,
@@ -281,3 +281,5 @@ fn enum_ord_payload_same_variant_lexicographic() {
     assert!(!Measure::Pair(4, 4).lt(Measure::Pair(4, 4)))
     assert!(!Measure::Pair(4, 4).gt(Measure::Pair(4, 4)))
 }
+
+struct StableOrd {}

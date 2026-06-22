@@ -26,7 +26,7 @@ trait Real {
     fn r(self) -> bool
 }
 
-impl AliasedGoal: Derive for Real {
+impl Derive<Real> for AliasedGoal {
     const fn derive<T>(ev: own W<Bogus<T>>) -> W<Bogus<T>>
         uses (
             reflect: Reflect<T>,
@@ -38,3 +38,5 @@ impl AliasedGoal: Derive for Real {
         ev
     }
 }
+
+struct AliasedGoal {}

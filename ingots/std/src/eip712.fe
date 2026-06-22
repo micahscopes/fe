@@ -249,7 +249,9 @@ impl<const N: usize> Eip712 for String<N> {
 /// descriptor once, in field order, so a referenced struct type's
 /// descriptor appears once even when several fields share it (the
 /// `Mail`/`Person` case).
-impl StableEip712: Derive for Eip712 {
+struct StableEip712 {}
+
+impl Derive<Eip712> for StableEip712 {
     const fn derive<T>(ev: own Evidence<Eip712<T>>) -> Evidence<Eip712<T>>
         uses (
             reflect: Reflect<T>,

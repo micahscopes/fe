@@ -32,7 +32,7 @@ trait Within {
     fn within(self, _ limit: Self) -> bool
 }
 
-impl BoundCheck: Derive for Within {
+impl Derive<Within> for BoundCheck {
     const fn derive<T>(ev: own Evidence<Within<T>>) -> Evidence<Within<T>>
         uses (
             reflect: Reflect<T>,
@@ -56,7 +56,7 @@ trait Audited {
     fn audited(self) -> bool
 }
 
-impl AlwaysAudited: Derive for Audited {
+impl Derive<Audited> for AlwaysAudited {
     const fn derive<T>(ev: own Evidence<Audited<T>>) -> Evidence<Audited<T>>
         uses (
             reflect: Reflect<T>,
@@ -128,3 +128,6 @@ fn generated_impl_satisfies_generic_bound() {
     assert!(fits(small, big))
     assert!(!fits(big, small))
 }
+
+struct BoundCheck {}
+struct AlwaysAudited {}

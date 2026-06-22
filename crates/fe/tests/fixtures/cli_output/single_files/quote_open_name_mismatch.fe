@@ -10,7 +10,7 @@ trait Same {
     fn same(self, _ other: Self) -> bool
 }
 
-impl QuoteSame: Derive for Same {
+impl Derive<Same> for QuoteSame {
     const fn derive<T>(ev: own Evidence<Same<T>>) -> Evidence<Same<T>>
         uses (
             reflect: Reflect<T>,
@@ -32,3 +32,5 @@ struct Point {
 }
 
 derive Same for Point using QuoteSame
+
+struct QuoteSame {}

@@ -28,7 +28,7 @@ struct Point {
 // A user-defined `Eq` provider whose goals are concrete (`Eq<T>`). Each goal
 // position is kind-checked concrete by the Level-1 rule; the body still runs in
 // the provider executor and emits a working `eq`.
-impl ConcreteEq: Derive for Eq {
+impl Derive<Eq> for ConcreteEq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (
             reflect: Reflect<T>,
@@ -57,3 +57,5 @@ fn concrete_goal_provider_executes() {
     assert!(!a.eq(c))
     assert!(a == b)
 }
+
+struct ConcreteEq {}

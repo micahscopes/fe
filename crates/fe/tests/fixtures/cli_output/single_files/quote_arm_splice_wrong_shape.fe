@@ -11,7 +11,7 @@ trait Tagged {
     fn tag(self) -> bool
 }
 
-impl ExprAsArms: Derive for Tagged {
+impl Derive<Tagged> for ExprAsArms {
     const fn derive<T>(ev: own Evidence<Tagged<T>>) -> Evidence<Tagged<T>>
         uses (
             reflect: Reflect<T>,
@@ -31,3 +31,5 @@ enum Mode {
 }
 
 derive Tagged for Mode using ExprAsArms
+
+struct ExprAsArms {}

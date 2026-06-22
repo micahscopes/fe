@@ -746,7 +746,20 @@ impl<'db> ImplementorId<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Vec<TyDiagCollection<'db>> {
-        if !matches!(self.origin(db), ImplementorOrigin::Hir(_)) {
+        let ImplementorOrigin::Hir(impl_trait) = self.origin(db) else {
+            return Vec::new();
+        };
+        // A derive provider declared in the ordinary `impl Derive<Goal> for
+        // Provider` form is NOT an ordinary trait impl: its `derive` fn is the
+        // compile-time command-language entry point (checked by the provider
+        // executor, exempt from ordinary signature/body analysis via
+        // `is_derive_provider_fn`), so its signature intentionally diverges from
+        // `core::derive::Derive::derive` (extra type params for live abstract
+        // heads, the `uses (..)` capability clause, etc.). The legacy
+        // colon-overload form was a bespoke `DeriveProvider` node and never ran
+        // method conformance; the ordinary form must skip it too, or migrating a
+        // provider's declaration form would spuriously flip the diagnostics.
+        if crate::core::lower::impl_trait_provider_goal_path(db, impl_trait).is_some() {
             return Vec::new();
         }
         let mut diags = vec![];

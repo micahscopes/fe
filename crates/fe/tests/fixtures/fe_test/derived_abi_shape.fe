@@ -34,7 +34,7 @@ impl AbiShape for bool {
     const IS_DYNAMIC: bool = false
 }
 
-impl StableAbiShape: Derive for AbiShape {
+impl Derive<AbiShape> for StableAbiShape {
     const fn derive<T>(ev: own Evidence<AbiShape<T>>) -> Evidence<AbiShape<T>>
         uses (
             reflect: Reflect<T>,
@@ -129,3 +129,5 @@ fn abi_head_words_nested_composition() {
     assert!(Outer::HEAD_WORDS == 3)
     assert!(!Outer::IS_DYNAMIC)
 }
+
+struct StableAbiShape {}

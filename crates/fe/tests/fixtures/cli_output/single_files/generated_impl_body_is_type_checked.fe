@@ -21,7 +21,7 @@ trait Dup {
     fn dup(self) -> Self
 }
 
-impl BadDup: Derive for Dup {
+impl Derive<Dup> for BadDup {
     const fn derive<T>(ev: own Evidence<Dup<T>>) -> Evidence<Dup<T>>
         uses (
             reflect: Reflect<T>,
@@ -42,3 +42,5 @@ struct Point {
 }
 
 derive Dup for Point using BadDup
+
+struct BadDup {}

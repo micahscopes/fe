@@ -24,7 +24,7 @@ trait GetK {
     fn get_k(self) -> u256
 }
 
-impl StableGetK: Derive for GetK {
+impl Derive<GetK> for StableGetK {
     const fn derive<T>(ev: own Evidence<GetK<T>>) -> Evidence<GetK<T>>
         uses (
             reflect: Reflect<T>,
@@ -43,3 +43,5 @@ struct Point {
 }
 
 derive GetK for Point using StableGetK
+
+struct StableGetK {}

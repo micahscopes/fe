@@ -12,7 +12,7 @@ use core::derive::Evidence
 use core::derive::ImplBuilder
 use core::derive::Reflect
 
-impl StableClone: Derive for Clone {
+impl Derive<Clone> for StableClone {
     const fn derive<T>(ev: own Evidence<Clone<T>>) -> Evidence<Clone<T>>
         uses (
             reflect: Reflect<T>,
@@ -79,3 +79,5 @@ fn clone_generic_enum_unit() {
         Maybe::Nothing => assert!(true),
     }
 }
+
+struct StableClone {}

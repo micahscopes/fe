@@ -24,7 +24,9 @@ use core::derive::ImplBuilder
 use core::derive::Reflect
 use core::ops::Eq
 
-impl StableEq: Derive for Eq {
+struct StableEq {}
+
+impl Derive<Eq> for StableEq {
     const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
         uses (
             reflect: Reflect<T>,
@@ -106,7 +108,9 @@ impl StableEq: Derive for Eq {
     }
 }
 
-impl StableDefault: Derive for Default {
+struct StableDefault {}
+
+impl Derive<Default> for StableDefault {
     const fn derive<T>(ev: own Evidence<Default<T>>) -> Evidence<Default<T>>
         uses (
             reflect: Reflect<T>,

@@ -20,7 +20,7 @@ trait Real {
     fn r(self) -> bool
 }
 
-impl ReturnGoal: Derive for Real {
+impl Derive<Real> for ReturnGoal {
     const fn derive<T>(ev: own Evidence<Real<T>>) -> Evidence<ReturnBogus<T>>
         uses (
             reflect: Reflect<T>,
@@ -32,3 +32,5 @@ impl ReturnGoal: Derive for Real {
         ev
     }
 }
+
+struct ReturnGoal {}

@@ -16,7 +16,7 @@ trait Real {
     fn r(self) -> bool
 }
 
-impl MissingGoal: Derive for Real {
+impl Derive<Real> for MissingGoal {
     const fn derive<T>(ev: own Evidence<MissingTrait<T>>) -> Evidence<MissingTrait<T>>
         uses (
             reflect: Reflect<T>,
@@ -28,3 +28,5 @@ impl MissingGoal: Derive for Real {
         ev
     }
 }
+
+struct MissingGoal {}
