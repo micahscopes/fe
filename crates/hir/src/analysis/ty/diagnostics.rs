@@ -572,6 +572,12 @@ pub enum BodyDiag<'db> {
         primary: DynLazySpan<'db>,
         cands: ThinVec<TraitInstId<'db>>,
         required_by: Option<CallConstraintDiagInfo<'db>>,
+        /// FCO T-Nway (#84 inc3) — when the coexisting impls behind this
+        /// ambiguity carry `as Name` aliases (the N-way cascade case), the alias
+        /// names usable to disambiguate, e.g. `with (Casual)` / `with (Formal)`.
+        /// Empty for every non-cascade ambiguity (the inference-variable path),
+        /// so that rendering is byte-identical there.
+        alias_suggestions: Vec<IdentId<'db>>,
     },
 
     InvisibleAmbiguousTrait {
@@ -699,6 +705,32 @@ pub enum BodyDiag<'db> {
     ConstFnEffectfulCall {
         primary: DynLazySpan<'db>,
         callee: CallableDef<'db>,
+    },
+
+    /// FCO T-Nway (#84 inc3) — `with (Name)` where `Name` is a bare ident that
+    /// resolves to neither a `<T as Trait>` goal, an in-scope named impl alias,
+    /// nor an ordinary value/type binding, while ≥1 `as Name` impl IS visible.
+    /// The most likely intent was to select a named impl by alias, so we report
+    /// a precise "no impl named `Name`" instead of the generic
+    /// `UndefinedVariable` "not found" (which this variant SUPPRESSES).
+    UnknownWithImplAlias {
+        primary: DynLazySpan<'db>,
+        name: IdentId<'db>,
+        /// Every `as Name` impl alias visible in scope, sorted, for the
+        /// "available named impls" help line + did-you-mean.
+        available: Vec<IdentId<'db>>,
+    },
+
+    /// FCO T-Nway (#84 inc3) — `with (Name)` where `Name` matches MORE THAN ONE
+    /// visible `as Name` impl (e.g. two impls of different `(Trait, Type)` both
+    /// aliased `Name`). The alias does not pick a single impl, so selection is
+    /// ambiguous; we name the conflicting goals rather than silently falling
+    /// through to a confusing value error.
+    AmbiguousWithImplAlias {
+        primary: DynLazySpan<'db>,
+        name: IdentId<'db>,
+        /// The `(Trait, Type)` goals of the impls that share the alias `name`.
+        goals: ThinVec<TraitInstId<'db>>,
     },
 }
 
@@ -863,6 +895,8 @@ impl<'db> BodyDiag<'db> {
             Self::QuoteOutsideProvider(_) => 84,
             Self::ConstFnNonConstCall { .. } => 62,
             Self::ConstFnEffectfulCall { .. } => 63,
+            Self::UnknownWithImplAlias { .. } => 86,
+            Self::AmbiguousWithImplAlias { .. } => 87,
         }
     }
 }

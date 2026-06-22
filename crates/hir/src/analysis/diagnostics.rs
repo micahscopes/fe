@@ -3787,6 +3787,7 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 primary,
                 cands,
                 required_by,
+                alias_suggestions,
             } => {
                 let mut sub_diagnostics = vec![SubDiagnostic {
                     style: LabelStyle::Primary,
@@ -3812,11 +3813,25 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                     });
                 }
 
+                // FCO T-Nway (#84 inc3) — when the coexisting impls are aliased,
+                // tell the user exactly how to disambiguate: select one with the
+                // `with (Name)` form. Empty for non-cascade ambiguity, so the
+                // note is absent there (byte-identical).
+                let mut notes = vec![];
+                if !alias_suggestions.is_empty() {
+                    let choices = alias_suggestions
+                        .iter()
+                        .map(|n| format!("`with ({})`", n.data(db)))
+                        .collect::<Vec<_>>()
+                        .join(" or ");
+                    notes.push(format!("disambiguate by selecting an impl: {choices}"));
+                }
+
                 CompleteDiagnostic {
                     severity: Severity::Error,
                     message: "ambiguous trait implementation".to_string(),
                     sub_diagnostics,
-                    notes: vec![],
+                    notes,
                     error_code,
                 }
             }
@@ -4320,8 +4335,115 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                     error_code,
                 )
             }
+
+            BodyDiag::UnknownWithImplAlias {
+                primary,
+                name,
+                available,
+            } => {
+                let name_str = name.data(db);
+                // The available aliases, rendered as `` `Casual` `` etc. — sorted
+                // by the emit site so the help line is deterministic.
+                let available_list = available
+                    .iter()
+                    .map(|n| format!("`{}`", n.data(db)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let mut notes = vec![if available.is_empty() {
+                    "no named impls (`impl Trait for Type as Name`) are in scope".to_string()
+                } else {
+                    format!("available named impls: {available_list}")
+                }];
+
+                // Did-you-mean: the closest available alias within a small edit
+                // distance (deterministic — `available` is pre-sorted).
+                if let Some(suggestion) = closest_name(name_str, available, db) {
+                    notes.push(format!("did you mean `{suggestion}`?"));
+                }
+
+                CompleteDiagnostic::new(
+                    severity,
+                    format!("no impl named `{name_str}` in scope"),
+                    vec![SubDiagnostic::new(
+                        LabelStyle::Primary,
+                        format!("`with ({name_str})` names no impl alias here"),
+                        primary.resolve(db),
+                    )],
+                    notes,
+                    error_code,
+                )
+            }
+
+            BodyDiag::AmbiguousWithImplAlias {
+                primary,
+                name,
+                goals,
+            } => {
+                let name_str = name.data(db);
+                let goals_list = goals
+                    .iter()
+                    .map(|g| format!("`{}`", g.pretty_print(db, true)))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+
+                CompleteDiagnostic::new(
+                    severity,
+                    format!("`{name_str}` is an ambiguous impl alias"),
+                    vec![SubDiagnostic::new(
+                        LabelStyle::Primary,
+                        format!("`{name_str}` names more than one impl: {goals_list}"),
+                        primary.resolve(db),
+                    )],
+                    vec![
+                        "give the two impls distinct `as Name` aliases so each can be selected unambiguously"
+                            .to_string(),
+                    ],
+                    error_code,
+                )
+            }
         }
     }
+}
+
+/// FCO T-Nway (#84 inc3) — the closest candidate name to `target` for a
+/// did-you-mean hint, by Levenshtein distance. Returns the first candidate (in
+/// the already-sorted `candidates` order, so the result is deterministic) within
+/// a distance threshold scaled to the target length. `None` if nothing is close.
+fn closest_name<'db>(
+    target: &str,
+    candidates: &[crate::hir_def::IdentId<'db>],
+    db: &dyn SpannedHirAnalysisDb,
+) -> Option<String> {
+    // Tolerate up to ~1 edit per 3 chars (min 1), capped at 3 — typical typo
+    // tolerance that avoids matching wildly different names.
+    let threshold = (target.len() / 3).clamp(1, 3);
+    candidates
+        .iter()
+        .map(|c| c.data(db).to_string())
+        .filter(|cand| cand != target)
+        .map(|cand| (levenshtein(target, &cand), cand))
+        .filter(|(dist, _)| *dist <= threshold)
+        .min_by_key(|(dist, _)| *dist)
+        .map(|(_, cand)| cand)
+}
+
+/// Plain iterative Levenshtein edit distance (byte-wise — alias idents are ASCII
+/// identifiers). Small inputs, so the simple two-row DP is fine.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 impl DiagnosticVoucher for TraitLowerDiag<'_> {

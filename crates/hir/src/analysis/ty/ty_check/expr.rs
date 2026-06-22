@@ -1186,6 +1186,19 @@ impl<'db> TyChecker<'db> {
                 continue;
             }
 
+            // FCO T-Nway (#84 inc3) — selection FAILED for this keyless head. If
+            // it looks like an impl-alias selection that went wrong (unknown or
+            // ambiguous `with (Name)`), emit a PRECISE diagnostic and SKIP the
+            // ordinary value path so the generic `UndefinedVariable` is NOT also
+            // reported (no double-report). `None` means "a legitimate
+            // `with (value)`" — fall through unchanged.
+            if binding.key_path.is_none()
+                && let Some(diag) = self.classify_with_alias_failure(binding.value)
+            {
+                self.push_diag(diag);
+                continue;
+            }
+
             let value_prop = self.check_expr_unknown(binding.value);
 
             let is_mut = value_prop
@@ -1415,6 +1428,152 @@ impl<'db> TyChecker<'db> {
 
         let implementor = matched?;
         Some((implementor.trait_(db), implementor))
+    }
+
+    /// FCO T-Nway (#84 inc3) — FIRST-CLASS DIAGNOSTICS for a `with (Name)` head
+    /// that DID NOT select an impl ([`Self::provisional_scoped_selection`]
+    /// returned `None`). Classify the failure precisely and, when it is an alias
+    /// problem, return the diagnostic to emit. Returning `Some(diag)` means the
+    /// caller MUST emit it and SKIP the ordinary `check_expr_unknown` value path
+    /// (so the generic `UndefinedVariable` "not found" is suppressed — no
+    /// double-report). Returning `None` means "this is NOT an alias problem" — a
+    /// legitimate `with (someRuntimeValue)` or `with (<T as Trait>)` — so the
+    /// caller falls through to the ordinary value path unchanged.
+    ///
+    /// PRECISION (do NOT hijack a real value binding):
+    /// - Only a bare SINGLE-SEGMENT ident path is ever an alias candidate.
+    /// - AMBIGUOUS: the ident matches >1 visible `as Name` impl → always an alias
+    ///   error (a real value can't both type-check AND collide with two impl
+    ///   aliases; the alias-shaped intent is unambiguous). Emitted regardless of
+    ///   whether the ident also resolves as a value, because a successful value
+    ///   resolution would have been taken by `provisional_scoped_selection`'s
+    ///   caller path already — here selection failed, so the alias collision is
+    ///   the actionable cause.
+    /// - UNKNOWN: the ident matches 0 visible aliases. We ONLY claim it as an
+    ///   alias typo when (a) ≥1 `as Name` impl exists somewhere in scope (so
+    ///   "named impls" is a real concept here) AND (b) the ident genuinely fails
+    ///   ORDINARY value/type resolution ([`resolve_ident_expr`] yields
+    ///   `NewBinding`, i.e. unresolved). If it resolves to a real value/type, it
+    ///   is a legitimate `with (value)` — return `None`, let it type-check.
+    fn classify_with_alias_failure(&self, value: ExprId) -> Option<BodyDiag<'db>> {
+        use crate::analysis::ty::trait_resolution::{SelDiscriminator, selection_discriminator};
+        let db = self.db;
+
+        // Only a bare path expression can be an alias head.
+        let Partial::Present(Expr::Path(Partial::Present(path))) = self.env.expr_data(value).clone()
+        else {
+            return None;
+        };
+        // The alias must be a bare single-segment ident — multi-segment paths
+        // live in module namespaces and are never impl aliases.
+        if path.parent(db).is_some() {
+            return None;
+        }
+        let Partial::Present(name) = path.ident(db) else {
+            return None;
+        };
+
+        // Enumerate every visible `as Name` impl alias once: collect the goals
+        // that share `name`, and the full set of available alias names (sorted,
+        // deduped) for the help line / did-you-mean.
+        let env = ingot_trait_env(db, self.env.scope().ingot(db));
+        let mut matching_goals: Vec<TraitInstId<'db>> = Vec::new();
+        let mut available: Vec<IdentId<'db>> = Vec::new();
+        for impls in env.impls.values() {
+            for binder in impls {
+                let implementor = binder.instantiate_identity();
+                if let SelDiscriminator::Alias(alias) = selection_discriminator(db, implementor) {
+                    if !available.contains(&alias) {
+                        available.push(alias);
+                    }
+                    if alias == name {
+                        let goal = implementor.trait_(db);
+                        if !matching_goals.contains(&goal) {
+                            matching_goals.push(goal);
+                        }
+                    }
+                }
+            }
+        }
+
+        // No `as Name` impls anywhere → the named-impl concept does not apply
+        // here; this is an ordinary value/goal binding. Leave it to the value
+        // path (which reports the right error if the value is itself undefined).
+        if available.is_empty() {
+            return None;
+        }
+
+        let path_expr_span = value.span(self.body()).into_path_expr();
+
+        // AMBIGUOUS: the alias names more than one impl. The user clearly meant to
+        // select by alias (the name collides with multiple `as Name` impls), so
+        // name the conflicting goals instead of falling through to a value error.
+        if matching_goals.len() > 1 {
+            // Deterministic order for the message.
+            matching_goals.sort_by_key(|g| g.pretty_print(db, true));
+            return Some(BodyDiag::AmbiguousWithImplAlias {
+                primary: path_expr_span.into(),
+                name,
+                goals: matching_goals.into_iter().collect(),
+            });
+        }
+
+        // Exactly one match would have been selected by
+        // `provisional_scoped_selection`; we are only called after it returned
+        // `None`, so a single match here cannot happen. Guard anyway: defer.
+        if matching_goals.len() == 1 {
+            return None;
+        }
+
+        // UNKNOWN (0 matches) AND named impls exist. Only claim it as a typo if
+        // the ident genuinely fails ORDINARY resolution — protecting a real
+        // `with (value)` whose name happens to differ from every alias.
+        let ident_span: DynLazySpan<'db> = path_expr_span.clone().into();
+        if !matches!(
+            resolve_ident_expr(db, &self.env, path, ident_span),
+            ResolvedPathInBody::NewBinding(_)
+        ) {
+            // Resolves to a real value/type/binding → legitimate value binding.
+            return None;
+        }
+
+        available.sort_by_key(|n| n.data(db).clone());
+        Some(BodyDiag::UnknownWithImplAlias {
+            primary: path_expr_span.into(),
+            name,
+            available,
+        })
+    }
+
+    /// FCO T-Nway (#84 inc3) — the `as Name` aliases (sorted, deduped) of the
+    /// impls that coexist for `goal`'s `(Trait, Type)`. Used to ENRICH an
+    /// unscoped-ambiguity diagnostic with `with (Name)` disambiguation
+    /// suggestions. Returns `Vec::new()` when no coexisting impl is aliased (the
+    /// non-cascade ambiguity case), so the enrichment is inert there.
+    pub(super) fn alias_suggestions_for_goal(&self, goal: TraitInstId<'db>) -> Vec<IdentId<'db>> {
+        use crate::analysis::ty::trait_resolution::{SelDiscriminator, selection_discriminator};
+        let db = self.db;
+        let subject = goal.self_ty(db);
+        let trait_def = goal.def(db);
+        let scope_ingot = self.env.scope().ingot(db);
+        let trait_ingot = trait_def.top_mod(db).ingot(db);
+
+        let mut aliases: Vec<IdentId<'db>> = Vec::new();
+        for ingot in [scope_ingot, trait_ingot] {
+            for binder in impls_for_trait_def(db, ingot, trait_def).iter() {
+                let implementor = binder.instantiate_identity();
+                if implementor.self_ty(db) != subject {
+                    continue;
+                }
+                if let SelDiscriminator::Alias(alias) = selection_discriminator(db, implementor)
+                    && !aliases.contains(&alias)
+                {
+                    aliases.push(alias);
+                }
+            }
+        }
+        aliases.sort_by_key(|n| n.data(db).clone());
+        aliases
     }
 
     /// The real `Hir` [`ImplementorId`] that `with (<T as Trait>)` SELECTS for
@@ -4714,6 +4873,9 @@ impl<'db> TyChecker<'db> {
                             primary: expr.span(self.body()).into(),
                             cands,
                             required_by: None,
+                            // Ops-trait inference ambiguity, not the N-way cascade
+                            // path — no impl-alias disambiguation applies.
+                            alias_suggestions: Vec::new(),
                         });
                         return ExprProp::invalid(self.db);
                     }

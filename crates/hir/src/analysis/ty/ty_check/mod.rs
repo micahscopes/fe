@@ -1424,6 +1424,11 @@ impl<'db> TyChecker<'db> {
                             env::TraitObligationOrigin::GenericConfirmation
                             | env::TraitObligationOrigin::MethodSelection { .. } => None,
                         };
+                        // FCO T-Nway (#84 inc3) — if the coexisting impls behind
+                        // this ambiguity are `as Name`-aliased (the N-way cascade
+                        // case), enrich the diagnostic with `with (Name)`
+                        // disambiguation suggestions. Empty otherwise.
+                        let alias_suggestions = self.alias_suggestions_for_goal(goal);
                         self.push_diag(BodyDiag::AmbiguousTraitInst {
                             primary: obligation.span.clone(),
                             cands: candidates
@@ -1431,6 +1436,7 @@ impl<'db> TyChecker<'db> {
                                 .map(|solution| solution.inst)
                                 .collect(),
                             required_by,
+                            alias_suggestions,
                         });
                         return TraitObligationOutcome::Discharged(None, DischargeRoute::ImplTable);
                     }
