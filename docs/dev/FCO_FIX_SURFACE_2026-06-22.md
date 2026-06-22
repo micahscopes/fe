@@ -26,13 +26,13 @@ other can be written. Default-ALLOW: granted for free for almost everything; a s
    `assert`):
    ```
    pub const fn anchor<G: Constraint>() -> Anchor<G>
-       uses (grant: AnchorRight<G>)
+       uses (grant: AdmitAnchor<G>)
    ```
-   The gate is NOT in the body; it is the `uses (grant: AnchorRight<G>)` obligation (the same effect-clause
+   The gate is NOT in the body; it is the `uses (grant: AdmitAnchor<G>)` obligation (the same effect-clause
    providers use to demand `Reflect<T>` / `mut ImplBuilder<G>`). Whether it discharges is the whole policy:
-   - **Ordinary goal:** `AnchorRight<G>` resolves against a default-allow blanket provider, ambiently. Free.
+   - **Ordinary goal:** `AdmitAnchor<G>` resolves against a default-allow blanket provider, ambiently. Free.
    - **One-of-a-kind goal:** the blanket is EXCLUDED for the hold-back set, so there is no ambient grant; the
-     obligation is satisfiable only where an `AnchorRight<G>` was threaded in non-ambiently (from root,
+     obligation is satisfiable only where an `AdmitAnchor<G>` was threaded in non-ambiently (from root,
      delegated to the deployed-contract root). Calling `anchor()` without it is an ordinary
      unsatisfied-obligation error. The policy ("which goals are one-of-a-kind") is an ordinary blanket
      provider `GrantsAnchor<G>` with an exclusion set: `goal_is_canonical` re-expressed as a PROVISION, not a
@@ -57,8 +57,8 @@ other can be written. Default-ALLOW: granted for free for almost everything; a s
   `anchor()` where you hold the authority, then add `with a`."
 
 ## The one piece of non-ordinary machinery (named, minimized)
-`Anchor<G>` and `AnchorRight<G>` are unforgeable compile-time capabilities recognized by RESOLVED IDENTITY
-(`core::derive::Anchor`, `core::derive::AnchorRight`): private field, no constructor, not-in-prelude-by-bare-
+`Anchor<G>` and `AdmitAnchor<G>` are unforgeable compile-time capabilities recognized by RESOLVED IDENTITY
+(`core::derive::Anchor`, `core::derive::AdmitAnchor`): private field, no constructor, not-in-prelude-by-bare-
 name, exactly like the four types already in `derive.fe`. `anchor()` is the single authorized SOURCE of an
 `Anchor`, the way a `derive` fn is the authorized source of `Evidence`. That is the only magic: the existing
 capability pattern with two more recognized names. Value-gates-compile-time-impl is the existing phase story:
@@ -68,24 +68,24 @@ the `own Anchor<G>` consumed there.
 ## Risks / open (for when T3 builds this)
 1. **HIGHEST: the ambient-capture exclusion must share ONE predicate with `goal_is_canonical`.** The blanket
    `GrantsAnchor<G>` must be excluded for held-back goals via the SAME source of truth as the money floor; if
-   the blanket accidentally covers a canonical goal, the floor is void. `AnchorRight` must thread
+   the blanket accidentally covers a canonical goal, the floor is void. `AdmitAnchor` must thread
    non-ambiently for one-of-a-kind goals (a `uses`-demand on a barrier-excluded frame); `snapshot_provisions`
    currently DROPS barriers, so this is new walk logic, not a wire-up. This is D4 wearing a provider hat.
-2. **Where a one-of-a-kind `AnchorRight<G>` originates is the real substance (D8 / keystone-adjacent).**
+2. **Where a one-of-a-kind `AdmitAnchor<G>` originates is the real substance (D8 / keystone-adjacent).**
    Surface is honest only once a grant flows from `RootProvider` and is delegated to the deployed-contract
    root. Prereq unchanged: `ProvisionEnv` must retain the originating `ScopeId` (GAP 1).
 3. **Keep `Anchor` an affine VALUE at the consume site (D2),** out of `as_capability` / provider-binding
    lowering, or the affine floor turns off for it. Add a double-consume fixture after wiring.
-4. **Recognizer set grows by two** (`Anchor`, `AnchorRight`) in `CoreDeriveItem` / `scope_is_core_derive_item`.
+4. **Recognizer set grows by two** (`Anchor`, `AdmitAnchor`) in `CoreDeriveItem` / `scope_is_core_derive_item`.
    Recommendation: RENAME the inert `Fix<T>` in `derive.fe` to `Anchor` (it is dead-code-allowed, so free)
-   and add `AnchorRight` as the sibling.
+   and add `AdmitAnchor` as the sibling.
 5. **Generic-context restriction (D6):** `with a` allowed only at monomorphic/root impl sites in v1.
-6. **Naming:** the user-facing word "anchor" is chosen; `AnchorRight` / `GrantsAnchor` (the authority layer)
+6. **Naming:** the user-facing word "anchor" is chosen; `AdmitAnchor` / `GrantsAnchor` (the authority layer)
    are working names and can still move. None block the guts.
 
 ## Pitch (Sean/Yoshi)
 Ordinary language, not magic: a prelude `const fn` (`anchor`), an ordinary capability obligation
-(`uses (grant: AnchorRight<G>)`), one extra trailing impl clause (`with a`) in the slot `as Name` already
+(`uses (grant: AdmitAnchor<G>)`), one extra trailing impl clause (`with a`) in the slot `as Name` already
 occupies. No new keyword, no new declaration form. Gates EXISTENCE not USE (a phase distinction). Money-floor
 safety by construction (affine move, no counter). Dogfoods the provider system (the hold-back policy is a
 swappable provider, not a compiler table). The common case is unchanged.

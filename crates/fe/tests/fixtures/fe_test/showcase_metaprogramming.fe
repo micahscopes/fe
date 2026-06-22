@@ -3,8 +3,8 @@
 // ════════════════════════════════════════════════════════════════════════════
 //
 //  Everything here compiles and runs; it's a passing test. No macro layer:
-//  deriving is a compile-time function that writes a real impl, and picking
-//  between impls is lexical scope. Same trait system, nothing bolted on.
+//  deriving is a compile-time function that writes a real impl, and choosing
+//  between impls is lexical scope. Nothing bolted on.
 //
 //    1. Derive for free          `#[derive(Eq, Default)]`
 //    2. Write your own derive     a const fn + quasiquote
@@ -22,10 +22,9 @@ use core::derive::Reflect
 // ─── 1. Derive for free ──────────────────────────────────────────────────────
 //
 //  Ask for `Eq` and `Default`; the compiler writes them, field by field for
-//  structs, variant by variant for enums (`#[default]` included).
-//
-//  There is no "derive" feature in the type system. `#[derive]` runs a provider
-//  (section 2) at compile time; its output is a plain impl, checked like any other.
+//  structs, variant by variant for enums (`#[default]` included). There is no
+//  "derive" feature in the type system: `#[derive]` runs a provider (section 2)
+//  at compile time, and its output is a plain impl checked like any other.
 
 #[derive(Eq, Default)]
 struct Potion {
@@ -54,12 +53,11 @@ fn derive_is_free() {
 
 // ─── 2. Write your own derive ────────────────────────────────────────────────
 //
-//  A provider is a `const fn` that runs at compile time. It reflects over the
-//  target's fields and quasiquotes the body: `quote { .. }` is a real Fe-syntax
-//  template, `${hole}` splices in field handles, other quotes, or const values.
-//  Its `uses (..)` clause is the effect signature: it takes a `Reflect<T>` and a
-//  `mut ImplBuilder` and emits the impl. It is an ordinary impl of `Derive`, run
-//  by the compiler; what it emits goes back through the normal checks.
+//  A provider is a `const fn` run at compile time. It reflects over the target's
+//  fields and quasiquotes the body: `quote { .. }` is a real Fe template,
+//  `${hole}` splices in field handles, other quotes, or const values. Its
+//  `uses (..)` clause takes a `Reflect<T>` and a `mut ImplBuilder` and emits the
+//  impl. It's an ordinary impl of `Derive`; what it emits re-enters normal checks.
 //
 //  `Packs`: does every field fit under the limit? Built field by field.
 
@@ -86,8 +84,7 @@ impl Derive<Packs> for FieldwisePacks {
     {
         let mut body = quote { true }
         for field in reflect.fields() {
-            // `quote(limit)` opens a name bound to the method's `limit` param;
-            // `${field}` is the field handle for member access.
+            // `quote(limit)` binds the method's `limit` param; `${field}` is the field handle.
             body = quote(limit) { ${body} && self.${field}.under(limit.${field}) }
         }
         builder.emit_method("packs", body)
@@ -96,8 +93,8 @@ impl Derive<Packs> for FieldwisePacks {
     }
 }
 
-// The whole body is a lifted const value: `${open}` drops the interpreter's bool
-// into a generated literal. The method is decided entirely at compile time.
+// A lifted const: `${open}` drops the interpreter's bool into a generated literal,
+// so the method is decided entirely at compile time.
 trait AlwaysReady {
     fn ready(self) -> bool
 }
@@ -120,9 +117,8 @@ struct Loadout {
     potion: Weight,
 }
 
-// Same machinery as `#[derive(..)]`, written out. `#[derive(Eq)]` reaches the
-// built-in provider; `using FieldwisePacks` names your own. Same result: a real
-// `impl Packs for Loadout`.
+// Same machinery as `#[derive(..)]`, written out: `#[derive(Eq)]` reaches the
+// built-in provider, `using FieldwisePacks` names your own. Same result.
 derive Packs for Loadout using FieldwisePacks
 derive AlwaysReady for Loadout using ReadyByFiat
 
@@ -150,12 +146,10 @@ fn my_own_derive_runs_at_compile_time() {
 // ─── 3. One trait, many impls: name them, scope picks ────────────────────────
 //
 //  Usually it is one impl per (trait, type). Name alternatives with `as` and they
-//  coexist; a `with (Name)` scope picks which is in force. No globals, no passing
-//  strategy objects around.
-//
-//  Coherence still holds: the compiler tells the impls apart by a discriminator
-//  (a derived default, an `as` name, or anonymous). `with (Name)` records which
-//  one a scope chose; it is decided at compile time, not runtime dispatch.
+//  coexist; a `with (Name)` scope picks which is in force. No globals, no strategy
+//  objects. Coherence still holds: the compiler tells them apart by a discriminator
+//  (a derived default, an `as` name, or anonymous), and `with (Name)` just records
+//  which one a scope chose, at compile time, not runtime dispatch.
 
 trait Greeting {
     fn greet(self) -> u256
@@ -260,36 +254,34 @@ fn one_bound_many_obligations() {
 
 // ─── Coming soon: anchoring an impl there can only be one of ─────────────────
 //
-//  The impls above coexist happily. A few goals can't have two. Storage layout is
-//  the case: two versions mean two parts of the program disagree about the bytes.
-//  ("anchor" here is to fix in place, like a fixed point, not to repair.)
+//  These coexist happily, but a few goals can't have two: storage layout, say,
+//  where two versions mean the program disagrees about the bytes.
+//  ("anchor" = fix in place, not repair.)
 //
-//  For those, one impl is ANCHORED and no other can be written. An anchor is an
-//  ordinary value, `Anchor<G>`, where `G` is the goal written as a trait on its
-//  type: `Anchor<StorageLayout<Ledger>>`. It is use-once; moving it into an impl
-//  is the whole guarantee.
+//  One impl gets ANCHORED and no other can be written. An anchor is an ordinary
+//  value, `Anchor<G>`, where `G` is the goal as a trait on its type:
+//  `Anchor<StorageLayout<Ledger>>`. It is use-once; moving it into an impl is the
+//  whole guarantee.
 //
-//  The common case stays free. For an ordinary goal the anchor is granted and
-//  consumed for you, so you write nothing extra, exactly as today:
+//  The common case stays free: for an ordinary goal it's granted and consumed
+//  for you, so you write nothing extra:
 //
 //      impl Show for Widget { .. }
 //
 //  A one-of-a-kind goal names the anchor it holds, inline, with `with` (sibling to
-//  the `as` clause above):
+//  `as`); move it in, and a second impl has no anchor left to consume:
 //
 //      impl StorageLayout for Ledger with a { .. }
 //
-//  Move `a` in and a second `impl StorageLayout for Ledger` has no anchor left to
-//  consume, so a second one can't exist. Forget it and the compiler stops you:
+//  Forget it and the compiler stops you:
 //
 //      impl StorageLayout for Ledger { .. }
 //      //  error: StorageLayout for Ledger may have only one impl, and this one
-//      //  is not anchored. mint an anchor with `anchor()` where you hold the
-//      //  authority, then add `with a`.
+//      //  is not anchored. mint an anchor with `anchor()`, then add `with a`.
 //
-//  `anchor()` is an ordinary prelude fn. For an ordinary goal it just works; for a
-//  one-of-a-kind goal it succeeds only where the authority was handed to you, at
-//  the program root or delegated to a contract's root:
+//  `anchor()` is an ordinary prelude fn: free for ordinary goals; for a
+//  one-of-a-kind goal it works only where the authority was handed to you (the
+//  program root, or delegated to a contract's root).
 //
 //      let a = anchor()        // only where you hold the authority
 //
