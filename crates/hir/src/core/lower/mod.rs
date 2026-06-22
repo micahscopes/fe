@@ -25,6 +25,7 @@ pub use attr::{AttrMisuseError, AttrMisuseErrorKind};
 pub use derive::{DeriveError, DeriveErrorKind, DeriveSecondarySpan};
 pub use provider::{DerivedImplProvenance, derived_impl_provenance};
 pub(crate) use provider::CoreDeriveItem;
+pub(crate) use provider::impl_trait_provider_goal_path;
 pub use error::{ErrorDiagnostic, ErrorDiagnosticKind};
 pub use event::{EventError, EventErrorKind};
 pub(crate) use expansion::expanded_items_impl;

@@ -20,8 +20,8 @@ use super::base_scope_graph_impl;
 use crate::{
     HirDb,
     hir_def::{
-        Body, DeriveProvider, Func, HirIngot, IdentId, ImplTrait, ItemKind, PathId, TopLevelMod,
-        Trait, TraitRefId, TypeId, UsePathSegment,
+        Body, DeriveProvider, Func, GenericArg, HirIngot, IdentId, ImplTrait, ItemKind, PathId,
+        TopLevelMod, Trait, TraitRefId, TypeId, TypeKind, UsePathSegment,
         scope_graph::{ScopeGraph, ScopeId},
     },
     span::{DesugaredOrigin, DynLazySpan, HirOrigin},
@@ -132,11 +132,62 @@ impl<'db> Capability<'db> {
     }
 }
 
+/// How a validated provider was DECLARED. Both forms are ordinary HIR items
+/// and validate to the same [`ValidatedProvider`]; they differ only in the head
+/// syntax and which HIR node carries the declaration:
+///
+/// * [`ProviderDecl::Legacy`] — the bespoke colon-overload form
+///   `impl Name: Derive for Trait { .. }`, lowered to a [`DeriveProvider`] node
+///   (provider name before `:`, marker after `:`, goal after `for`).
+/// * [`ProviderDecl::Impl`] — the ORDINARY form `impl Derive<Goal> for Name { .. }`,
+///   an ordinary [`ImplTrait`] whose trait ref is `core::derive::Derive<Goal>`
+///   (goal = the first generic arg, provider name = the `Self`/implementor type).
+///
+/// This enum is the join point of the derive-grammar retirement: discovery,
+/// validation, provenance, and ingot-kind classification key on it instead of
+/// on the legacy node alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
+pub(super) enum ProviderDecl<'db> {
+    /// The legacy colon-overload `impl Name: Derive for Trait` form.
+    Legacy(DeriveProvider<'db>),
+    /// The ordinary `impl Derive<Goal> for Name` form.
+    Impl(ImplTrait<'db>),
+}
+
+impl<'db> ProviderDecl<'db> {
+    /// The top-level module the declaration lives in.
+    pub(super) fn top_mod(self, db: &'db dyn HirDb) -> TopLevelMod<'db> {
+        match self {
+            ProviderDecl::Legacy(provider) => provider.top_mod(db),
+            ProviderDecl::Impl(impl_trait) => impl_trait.top_mod(db),
+        }
+    }
+
+    /// The declaration's own scope (the key under which its `derive` fn hangs in
+    /// the base scope graph).
+    pub(super) fn scope(self) -> ScopeId<'db> {
+        match self {
+            ProviderDecl::Legacy(provider) => provider.scope(),
+            ProviderDecl::Impl(impl_trait) => impl_trait.scope(),
+        }
+    }
+
+    /// The primary range for provider shape diagnostics: the legacy provider's
+    /// name token, or — for the ordinary form — the implementor (`Self`) type,
+    /// falling back to the whole declaration.
+    pub(super) fn name_range(self, db: &'db dyn HirDb) -> parser::TextRange {
+        match self {
+            ProviderDecl::Legacy(provider) => provider_name_range(db, provider),
+            ProviderDecl::Impl(impl_trait) => impl_provider_name_range(db, impl_trait),
+        }
+    }
+}
+
 /// A derive provider that passed the HIR-level shape validation and can be
 /// selected and executed by the expansion stage.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) struct ValidatedProvider<'db> {
-    pub(super) provider: DeriveProvider<'db>,
+    pub(super) provider: ProviderDecl<'db>,
     /// The provider's `derive` function.
     pub(super) func: Func<'db>,
     /// The function's body (validated present).
@@ -224,12 +275,70 @@ pub(super) fn validate_provider<'db>(
         ));
     }
 
-    // The provider's `derive` function, found through the *base* scope graph
-    // of the provider's module (`DeriveProvider::methods` reads the merged
-    // graph, which the expansion stage must not touch).
-    let base = base_scope_graph_impl(db, provider.top_mod(db));
+    // Shared func-level validation (the `derive` fn lookup, `const fn` /
+    // body / `uses (..)` capability checks), keyed off the declaration's own
+    // scope and module — identical for the legacy and ordinary-impl forms.
+    let decl = ProviderDecl::Legacy(provider);
+    let func_level = validate_provider_fn(db, decl, &error);
+    errors.extend(func_level.errors);
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let (Some(name), Some(head_name), Some(func), Some(body)) =
+        (name, head_name, func_level.func, func_level.body)
+    else {
+        return Err(errors);
+    };
+
+    let trait_path = canonical_trait_path(db, provider.top_mod(db), head.unwrap());
+
+    Ok(ValidatedProvider {
+        provider: decl,
+        func,
+        body,
+        name,
+        head_name,
+        trait_path,
+        capabilities: func_level.capabilities,
+        param_names: func_level.param_names,
+    })
+}
+
+/// The func-level fields a validated provider carries, plus any shape errors
+/// found while extracting them. Shared by both declaration forms.
+struct ProviderFnValidation<'db> {
+    func: Option<Func<'db>>,
+    body: Option<Body<'db>>,
+    capabilities: Vec<Capability<'db>>,
+    param_names: Vec<IdentId<'db>>,
+    errors: Vec<ProviderShapeError>,
+}
+
+/// Validates the `derive` function of a provider `decl`, independent of HOW the
+/// provider head was written: it finds the one `derive` fn among the
+/// declaration's base-graph children, checks it is a `const fn` with a body, and
+/// recognizes the `uses (..)` capabilities by resolved `core::derive` identity.
+/// `error` builds a [`ProviderShapeError`] with the declaration's fallback
+/// range. The declaration's scope/module are taken from [`ProviderDecl`], so the
+/// legacy and ordinary-impl forms share this verbatim.
+///
+/// All reads are *base* scope graphs (the expansion stage must not touch the
+/// merged graph).
+fn validate_provider_fn<'db>(
+    db: &'db dyn HirDb,
+    decl: ProviderDecl<'db>,
+    error: &impl Fn(String) -> ProviderShapeError,
+) -> ProviderFnValidation<'db> {
+    let mut errors = Vec::new();
+    let top_mod = decl.top_mod(db);
+
+    // The provider's `derive` function, found through the *base* scope graph of
+    // the declaring module (the merged-graph `methods` reader must not run in
+    // the expansion stage).
+    let base = base_scope_graph_impl(db, top_mod);
     let mut derive_fns = base
-        .child_items(ScopeId::Item(provider.into()))
+        .child_items(decl.scope())
         .filter_map(|item| match item {
             ItemKind::Func(func)
                 if func
@@ -292,7 +401,7 @@ pub(super) fn validate_provider<'db>(
             let canonical = if key_path.parent(db).is_some() {
                 key_path
             } else {
-                canonical_trait_path(db, provider.top_mod(db), PathId::from_ident(db, key_head))
+                canonical_trait_path(db, top_mod, PathId::from_ident(db, key_head))
             };
             match path_core_derive_item(db, canonical) {
                 Some(CoreDeriveItem::Reflect) => {
@@ -329,25 +438,92 @@ pub(super) fn validate_provider<'db>(
         }
     }
 
+    ProviderFnValidation {
+        func,
+        body,
+        capabilities,
+        param_names,
+        errors,
+    }
+}
+
+/// Validates the shape of a provider declared in the ORDINARY form
+/// `impl Derive<Goal> for Provider`, returning the validated form or shape
+/// errors. The recognition that this impl IS a `core::derive::Derive<..>`
+/// provider (and the extraction of the goal path) is
+/// [`impl_trait_provider_goal_path`]; this function assumes that has already
+/// matched and fills in the rest of the [`ValidatedProvider`]:
+///
+/// * `name` — the implementor (`Self`) type's last-segment ident
+///   (`StableEq` in `impl Derive<Eq> for StableEq`).
+/// * goal — recovered again from the recognizer; `head_name` is its last
+///   segment and `trait_path` its canonicalization.
+/// * the `: Derive` marker is implied (the trait ref already IS
+///   `core::derive::Derive`).
+/// * `func` / `body` / `capabilities` / `param_names` — via the shared
+///   [`validate_provider_fn`].
+pub(super) fn validate_impl_provider<'db>(
+    db: &'db dyn HirDb,
+    impl_trait: ImplTrait<'db>,
+) -> Result<ValidatedProvider<'db>, Vec<ProviderShapeError>> {
+    let mut errors = Vec::new();
+    let fallback_range = impl_provider_name_range(db, impl_trait);
+    let error = |message: String| ProviderShapeError {
+        message,
+        range: fallback_range,
+    };
+
+    // The provider name is the implementor (`Self`) type's last-segment ident.
+    let name = impl_trait
+        .type_ref(db)
+        .to_opt()
+        .and_then(|ty| type_head_path(db, ty))
+        .and_then(|path| last_path_ident(db, path));
+    if name.is_none() {
+        errors.push(error(
+            "derive provider declarations must have a provider name".into(),
+        ));
+    }
+
+    // The goal trait path, recovered from the `Derive<Goal>` argument by the
+    // same recognizer that classified this impl as a provider.
+    let goal_path = impl_trait_provider_goal_path(db, impl_trait);
+    let head_name = goal_path.and_then(|path| last_path_ident(db, path));
+    if head_name.is_none() {
+        errors.push(error(
+            "derive provider declarations must name a goal trait as the `Derive<..>` argument"
+                .into(),
+        ));
+    }
+
+    let decl = ProviderDecl::Impl(impl_trait);
+    let func_level = validate_provider_fn(db, decl, &error);
+    errors.extend(func_level.errors);
+
     if !errors.is_empty() {
         return Err(errors);
     }
-    let (Some(name), Some(head_name), Some(func), Some(body)) = (name, head_name, func, body)
-    else {
+    let (Some(name), Some(head_name), Some(goal_path), Some(func), Some(body)) = (
+        name,
+        head_name,
+        goal_path,
+        func_level.func,
+        func_level.body,
+    ) else {
         return Err(errors);
     };
 
-    let trait_path = canonical_trait_path(db, provider.top_mod(db), head.unwrap());
+    let trait_path = canonical_trait_path(db, impl_trait.top_mod(db), goal_path);
 
     Ok(ValidatedProvider {
-        provider,
+        provider: decl,
         func,
         body,
         name,
         head_name,
         trait_path,
-        capabilities,
-        param_names,
+        capabilities: func_level.capabilities,
+        param_names: func_level.param_names,
     })
 }
 
@@ -371,6 +547,30 @@ pub(super) fn provider_name_range<'db>(
     };
     ast.name()
         .map(|name| name.text_range())
+        .unwrap_or_else(|| ast.syntax().text_range())
+}
+
+/// The primary range for shape errors on an ordinary-form provider
+/// (`impl Derive<Goal> for Provider`): the implementor (`Self`) type, or the
+/// whole `impl` when the type is missing.
+pub(super) fn impl_provider_name_range<'db>(
+    db: &'db dyn HirDb,
+    impl_trait: ImplTrait<'db>,
+) -> parser::TextRange {
+    use parser::ast::prelude::*;
+    let root = super::top_mod_ast(db, impl_trait.top_mod(db));
+    let crate::span::HirOrigin::Raw(ptr) = impl_trait.origin(db) else {
+        return parser::TextRange::new(0.into(), 0.into());
+    };
+    let Some(ast) = ptr
+        .syntax_node_ptr()
+        .try_to_node(root.syntax())
+        .and_then(parser::ast::ImplTrait::cast)
+    else {
+        return parser::TextRange::new(0.into(), 0.into());
+    };
+    ast.ty()
+        .map(|ty| ty.syntax().text_range())
         .unwrap_or_else(|| ast.syntax().text_range())
 }
 
@@ -407,6 +607,68 @@ fn path_core_derive_item<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> Option<C
     CoreDeriveItem::ALL
         .into_iter()
         .find(|item| last.data(db) == item.name())
+}
+
+/// The head [`PathId`] of `ty`, peeling any leading mode wrapper (`own`/`mut`/
+/// `ref`). A goal type argument is an ordinary `TypeKind::Path` (`Eq`,
+/// `core::ops::Eq`); other shapes (tuple, pointer, ..) cannot name a goal trait
+/// and yield `None`.
+fn type_head_path<'db>(db: &'db dyn HirDb, ty: TypeId<'db>) -> Option<PathId<'db>> {
+    match ty.data(db) {
+        TypeKind::Path(path) => path.to_opt(),
+        TypeKind::Mode(_, inner) => inner.to_opt().and_then(|inner| type_head_path(db, inner)),
+        _ => None,
+    }
+}
+
+/// Recognizes the ORDINARY derive-provider form `impl Derive<Goal> for Provider`
+/// and returns the GOAL trait path (the first generic arg of the `Derive<..>`
+/// trait ref), or `None` when `impl_trait` is not a provider in this form.
+///
+/// Base-graph-safe (the expansion stage must not read the merged scope graph):
+/// the trait-ref head path is canonicalized the SAME way the legacy `: Derive`
+/// marker is ([`canonical_trait_path`] + [`path_core_derive_item`]) and accepted
+/// ONLY when it resolves to `core::derive::Derive` by identity. A like-named
+/// local `trait Derive`, not imported from `core::derive`, does not match.
+///
+/// The goal is the first `GenericArg::Type` of the trait ref, reduced to its
+/// underlying head path (`Derive<Eq>` → `Eq`, `Derive<core::ops::Eq>` →
+/// `core::ops::Eq`). Returns `None` if the trait ref has no type argument.
+///
+/// This is the ordinary-impl sibling of the legacy `DeriveProvider`-node
+/// recognition in [`validate_provider`]: same identity rule for the marker, the
+/// goal moves from the `for` clause to the `Derive<..>` argument.
+pub(crate) fn impl_trait_provider_goal_path<'db>(
+    db: &'db dyn HirDb,
+    impl_trait: ImplTrait<'db>,
+) -> Option<PathId<'db>> {
+    let trait_ref = impl_trait.hir_trait_ref(db).to_opt()?;
+    let trait_path = trait_ref.path(db).to_opt()?;
+
+    // The trait-ref head must resolve to `core::derive::Derive` by identity —
+    // same canonicalization the legacy marker uses (base-graph `use` resolution).
+    // Strip generic args first so the head is keyed on its name, then
+    // canonicalize a bare ident through the impl module's `use` items.
+    let head = trait_path.strip_generic_args(db);
+    let canonical = if head.parent(db).is_some() {
+        head
+    } else {
+        canonical_trait_path(db, impl_trait.top_mod(db), head)
+    };
+    if path_core_derive_item(db, canonical) != Some(CoreDeriveItem::Derive) {
+        return None;
+    }
+
+    // The goal is the first type argument of `Derive<..>`.
+    trait_path
+        .generic_args(db)
+        .data(db)
+        .iter()
+        .find_map(|arg| match arg {
+            GenericArg::Type(type_arg) => type_arg.ty.to_opt(),
+            _ => None,
+        })
+        .and_then(|ty| type_head_path(db, ty))
 }
 
 /// Resolves `path` (the head trait of a provider, or the trait argument of a
@@ -661,10 +923,25 @@ pub(super) fn validated_providers_in_ingot<'db>(
     for &top_mod in ingot.all_modules(db) {
         let base = base_scope_graph_impl(db, top_mod);
         for item in base.items_dfs(db) {
-            if let ItemKind::DeriveProvider(provider) = item
-                && let Ok(validated) = validate_provider(db, provider)
-            {
-                providers.push(validated);
+            match item {
+                // Legacy colon-overload form (`impl Name: Derive for Trait`).
+                ItemKind::DeriveProvider(provider) => {
+                    if let Ok(validated) = validate_provider(db, provider) {
+                        providers.push(validated);
+                    }
+                }
+                // Ordinary form (`impl Derive<Goal> for Provider`): an ordinary
+                // `impl Trait` whose trait ref resolves to `core::derive::Derive`
+                // by identity. A non-provider `impl SomeTrait for T` (the goal
+                // recognizer returns `None`) is left untouched.
+                ItemKind::ImplTrait(impl_trait) => {
+                    if impl_trait_provider_goal_path(db, impl_trait).is_some()
+                        && let Ok(validated) = validate_impl_provider(db, impl_trait)
+                    {
+                        providers.push(validated);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1188,8 +1465,18 @@ pub fn derived_impl_provenance<'db>(
         return None;
     }
 
+    // Provenance currently carries the legacy `DeriveProvider` node; an
+    // ordinary-impl provider has no such node, so its provenance reconstruction
+    // is a follow-up (generalizing the public `DerivedImplProvenance.provider`
+    // field to `ProviderDecl`). This increment is additive: legacy-form
+    // provenance is unchanged, and impl-form provenance reports `None` rather
+    // than fabricating a node.
+    let ProviderDecl::Legacy(provider_node) = provider.provider else {
+        return None;
+    };
+
     Some(DerivedImplProvenance {
-        provider: provider.provider,
+        provider: provider_node,
         generated_impl: impl_trait,
         goal,
     })
@@ -1391,6 +1678,111 @@ mod tests {
         assert!(
             messages.contains("must declare a `mut ImplBuilder<..>` capability"),
             "expected the missing-ImplBuilder-capability error; got:\n{messages}"
+        );
+    }
+
+    /// FCO #87 inc1: the ORDINARY form `impl Derive<Goal> for Provider` is
+    /// discovered and validated as a derive provider, with the goal extracted
+    /// from the `Derive<..>` argument and the provider name from the `Self`
+    /// (implementor) type — producing the SAME [`ValidatedProvider`] shape as the
+    /// legacy `impl Provider: Derive for Goal` form. The recognition keys on the
+    /// `core::derive::Derive` IDENTITY of the trait ref (an `impl Derive_<Eq>`
+    /// with a like-named local trait would not match).
+    #[test]
+    fn ordinary_impl_form_is_recognized_as_provider() {
+        use super::{impl_trait_provider_goal_path, validate_impl_provider, ProviderDecl};
+
+        let mut db = TestDb::default();
+        let text = r#"
+            use core::ops::Eq
+            use core::derive::Derive
+            use core::derive::Evidence
+            use core::derive::Reflect
+            use core::derive::ImplBuilder
+
+            struct StableEq {}
+
+            impl Derive<Eq> for StableEq {
+                const fn derive<T>(ev: own Evidence<Eq<T>>) -> Evidence<Eq<T>>
+                    uses (
+                        reflect: Reflect<T>,
+                        builder: mut ImplBuilder<Eq<T>>,
+                    )
+                {
+                    ev
+                }
+            }
+        "#;
+        let file = db.standalone_file(text);
+        let top_mod = map_file_to_mod(&db, file);
+
+        // Find the `impl Derive<Eq> for StableEq` item and confirm the recognizer
+        // extracts the goal `Eq` from the `Derive<..>` argument.
+        let impl_trait = top_mod
+            .all_impl_traits(&db)
+            .iter()
+            .copied()
+            .find(|it| impl_trait_provider_goal_path(&db, *it).is_some())
+            .expect("the ordinary-form provider impl is recognized as a Derive provider");
+        let goal_path = impl_trait_provider_goal_path(&db, impl_trait)
+            .expect("goal path is recovered from the Derive<..> argument");
+        assert_eq!(
+            goal_path.ident(&db).to_opt().map(|i| i.data(&db).to_string()),
+            Some("Eq".to_string()),
+            "the goal extracted from `Derive<Eq>` is `Eq`"
+        );
+
+        // Validation yields a ValidatedProvider whose name is the implementor
+        // (`StableEq`), goal head is `Eq`, and capabilities are recognized.
+        let validated = validate_impl_provider(&db, impl_trait)
+            .expect("the ordinary-form provider validates");
+        assert_eq!(validated.name.data(&db), "StableEq");
+        assert_eq!(validated.head_name.data(&db), "Eq");
+        assert!(matches!(validated.provider, ProviderDecl::Impl(_)));
+        assert!(
+            validated.capabilities.iter().any(|c| c.is_reflect()),
+            "the Reflect capability is recognized in the ordinary form"
+        );
+        assert!(
+            validated.capabilities.iter().any(|c| c.is_builder()),
+            "the ImplBuilder capability is recognized in the ordinary form"
+        );
+
+        // It also shows up through ingot discovery (`visible_providers`), proving
+        // `validated_providers_in_ingot` walks the ordinary-impl branch.
+        let discovered = super::visible_providers(&db, top_mod)
+            .into_iter()
+            .any(|p| p.name.data(&db) == "StableEq" && matches!(p.provider, ProviderDecl::Impl(_)));
+        assert!(
+            discovered,
+            "the ordinary-form provider is discovered by `validated_providers_in_ingot`"
+        );
+
+        // Anti-vacuous: an `impl Derive_<Eq> for X` over a LIKE-NAMED local trait
+        // (`Derive_`, not `core::derive::Derive`) is NOT recognized.
+        let mut db2 = TestDb::default();
+        let not_provider = r#"
+            use core::ops::Eq
+
+            trait Derive_<P: * -> Constraint> {
+                const fn derive<T>(ev: Eq<T>) -> Eq<T>
+            }
+
+            struct StableEqK {}
+
+            impl Derive_<Eq> for StableEqK {
+                const fn derive<T>(ev: Eq<T>) -> Eq<T> { ev }
+            }
+        "#;
+        let file2 = db2.standalone_file(not_provider);
+        let top_mod2 = map_file_to_mod(&db2, file2);
+        assert!(
+            top_mod2
+                .all_impl_traits(&db2)
+                .iter()
+                .all(|it| impl_trait_provider_goal_path(&db2, *it).is_none()),
+            "an `impl Derive_<..>` over a like-named local trait must NOT be \
+             recognized as a `core::derive::Derive` provider"
         );
     }
 
@@ -1612,10 +2004,17 @@ impl Marker for Point {}
         );
         // The expected provider is the std-resident `StableAbiSize`, found
         // among the providers visible from this module (its own ingot + std + core).
+        // It is a legacy-form provider, so its `ProviderDecl` carries the
+        // `DeriveProvider` node that `DerivedImplProvenance.provider` records.
         let expected_provider = super::visible_providers(&db, top_mod)
             .into_iter()
             .find(|p| p.name.data(&db) == "StableAbiSize")
-            .map(|p| p.provider)
+            .map(|p| match p.provider {
+                super::ProviderDecl::Legacy(node) => node,
+                super::ProviderDecl::Impl(_) => {
+                    panic!("the std-resident `StableAbiSize` provider is declared in legacy form")
+                }
+            })
             .expect("the std-resident `StableAbiSize` provider is visible");
         assert_eq!(
             prov.provider, expected_provider,

@@ -802,16 +802,28 @@ impl<'db> Func<'db> {
         self.modifiers(db).is_extern
     }
 
-    /// Whether this function is the `derive` function of a derive provider
-    /// (`impl Name: Derive for Trait { const fn derive .. }`). Provider
-    /// bodies are written in the compile-time command language and are
-    /// checked by the provider executor in the expansion stage, so the
-    /// ordinary signature/body analyses skip them.
+    /// Whether this function is the `derive` function of a derive provider.
+    /// Provider bodies are written in the compile-time command language and are
+    /// checked by the provider executor in the expansion stage, so the ordinary
+    /// signature/body analyses skip them.
+    ///
+    /// Two declaration forms are recognized (the derive-grammar retirement
+    /// keeps both during migration):
+    ///
+    /// * the legacy colon-overload `impl Name: Derive for Trait { const fn
+    ///   derive .. }`, whose parent item is a [`ItemKind::DeriveProvider`] node;
+    /// * the ordinary `impl Derive<Goal> for Provider { const fn derive .. }`,
+    ///   whose parent is an [`ItemKind::ImplTrait`] whose trait ref resolves —
+    ///   base-graph-safely, by the same `core::derive::Derive` identity rule the
+    ///   provider engine uses — to the `Derive` provider trait.
     pub fn is_derive_provider_fn(self, db: &dyn HirDb) -> bool {
-        matches!(
-            self.scope().parent_item(db),
-            Some(ItemKind::DeriveProvider(_))
-        )
+        match self.scope().parent_item(db) {
+            Some(ItemKind::DeriveProvider(_)) => true,
+            Some(ItemKind::ImplTrait(impl_trait)) => {
+                crate::lower::impl_trait_provider_goal_path(db, impl_trait).is_some()
+            }
+            _ => false,
+        }
     }
 
     pub fn is_method(self, db: &dyn HirDb) -> bool {
