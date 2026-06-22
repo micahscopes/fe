@@ -1,0 +1,284 @@
+// ════════════════════════════════════════════════════════════════════════════
+//  Fe metaprogramming — a tour of what works today
+// ════════════════════════════════════════════════════════════════════════════
+//
+//  Everything below compiles and RUNS (it's a passing test). Fe's metaprogramming
+//  is not a macro preprocessor bolted on the side — it's the ordinary trait system
+//  turned up a notch: deriving is just running a compile-time function that writes
+//  a real `impl`, and choosing between impls is just lexical scope.
+//
+//  The tour:
+//    1. Derive for free            — `#[derive(Eq, Default)]`
+//    2. Write your own derive      — a compile-time function + quasiquote
+//    3. One trait, many impls      — name them, let scope pick   (the fun one)
+//    4. Scopes nest                — innermost selection wins
+//    5. Bundle obligations         — constraint aliases
+
+use core::ops::Eq
+use core::default::Default
+use core::derive::Derive
+use core::derive::Evidence
+use core::derive::ImplBuilder
+use core::derive::Reflect
+
+// ─── 1. Derive for free ──────────────────────────────────────────────────────
+//
+//  Ask for `Eq` and `Default` and the compiler writes them — field-by-field for
+//  structs, variant-by-variant for enums (including the `#[default]` variant).
+
+#[derive(Eq, Default)]
+struct Potion {
+    fizz: u256,
+    glow: u256,
+}
+
+#[derive(Eq, Default)]
+enum Mood {
+    #[default]
+    Calm,
+    Cheerful,
+    Grumpy,
+}
+
+#[test]
+fn derive_is_free() {
+    // `==` and `.default()` exist because the impls were generated for us.
+    let a = Potion { fizz: 3, glow: 7 }
+    let b = Potion { fizz: 3, glow: 7 }
+    let empty = Potion { fizz: 0, glow: 0 }
+    assert!(a == b)
+    assert!(Potion::default() == empty)
+    assert!(Mood::default() == Mood::Calm)        // the #[default] variant
+    assert!(Mood::Cheerful != Mood::Grumpy)
+}
+
+// ─── 2. Write your own derive ────────────────────────────────────────────────
+//
+//  A derive provider is a `const fn` that runs at compile time. It REFLECTS over
+//  the target's fields and QUASIQUOTES the method body — the `quote { .. }` is a
+//  real Fe-syntax template, and `${hole}` splices in field handles, other quotes,
+//  or compile-time values. The `uses (..)` clause is an effect signature: this
+//  function consumes a `Reflect<T>` view and a `mut ImplBuilder` to emit the impl.
+//
+//  `Packs` answers "does every item fit under the limits?" — generated field-wise.
+
+struct Weight {
+    grams: u256,
+}
+impl Weight {
+    fn under(self, _ cap: Weight) -> bool {
+        return self.grams <= cap.grams
+    }
+}
+
+trait Packs {
+    fn packs(self, _ limit: Self) -> bool
+}
+
+// The provider: fold one `&&`-clause per field — `true && self.f.under(limit.f) && ..`
+impl Derive<Packs> for FieldwisePacks {
+    const fn derive<T>(ev: own Evidence<Packs<T>>) -> Evidence<Packs<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Packs<T>>,
+        )
+    {
+        let mut body = quote { true }
+        for field in reflect.fields() {
+            // `quote(limit) { .. }` opens the name `limit`, bound to the emitted
+            // method's parameter; `${field}` is the field handle for member access.
+            body = quote(limit) { ${body} && self.${field}.under(limit.${field}) }
+        }
+        builder.emit_method("packs", body)
+        builder.finish()
+        ev
+    }
+}
+
+// A second provider: the whole body is a LIFTED compile-time value. `${open}`
+// lifts the interpreter's `bool` into a generated literal — the method is decided
+// entirely at compile time.
+trait AlwaysReady {
+    fn ready(self) -> bool
+}
+impl Derive<AlwaysReady> for ReadyByFiat {
+    const fn derive<T>(ev: own Evidence<AlwaysReady<T>>) -> Evidence<AlwaysReady<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<AlwaysReady<T>>,
+        )
+    {
+        let open = true
+        builder.emit_method("ready", quote { ${open} })
+        builder.finish()
+        ev
+    }
+}
+
+struct Loadout {
+    sword: Weight,
+    potion: Weight,
+}
+
+// `derive Trait for Type using Provider` is the EXPLICIT form of the very same
+// machinery as the `#[derive(..)]` attribute up top. `#[derive(Eq)]` is the
+// shorthand that reaches the built-in provider; `using FieldwisePacks` is how you
+// name your OWN. Same engine, same result — both produce a real `impl … for …`.
+//   #[derive(Eq)]                              ← shorthand, built-in provider
+//   derive Packs for Loadout using FieldwisePacks  ← explicit, names the provider
+derive Packs for Loadout using FieldwisePacks
+derive AlwaysReady for Loadout using ReadyByFiat
+
+// The generated impls are REAL impls — usable through generic bounds, like any other.
+fn can_carry<T: Packs>(_ kit: T, _ limit: T) -> bool {
+    kit.packs(limit)
+}
+
+fn w(_ grams: u256) -> Weight {
+    Weight { grams }
+}
+
+#[test]
+fn my_own_derive_runs_at_compile_time() {
+    let light = Loadout { sword: w(50), potion: w(5) }
+    let cap = Loadout { sword: w(100), potion: w(10) }
+    assert!(light.packs(cap))                 // both fields under the cap
+    assert!(can_carry(light, cap))            // ...and through a generic bound
+
+    let heavy = Loadout { sword: w(200), potion: w(5) }
+    assert!(!heavy.packs(cap))                // first field over the cap
+    assert!(light.ready())                    // the lifted-bool body
+}
+
+// ─── 3. One trait, many impls — name them, let scope pick ─────────────────────
+//
+//  Coherence usually says "one impl per (trait, type)". Fe lets alternatives
+//  COEXIST when you give them names with `as`, and a lexical `with (Name)` scope
+//  picks which one is in force — no globals, no passing strategy objects around.
+
+trait Greeting {
+    fn greet(self) -> u256
+}
+
+struct Patron {
+    id: u256,
+}
+
+// The unaliased impl is the default — what an unscoped call uses.
+impl Greeting for Patron {
+    fn greet(self) -> u256 { 1 }            // FORMAL: "Good evening."
+}
+// Two named alternatives coexist with it.
+impl Greeting for Patron as Casual {
+    fn greet(self) -> u256 { 2 }            // "hey!"
+}
+impl Greeting for Patron as Pirate {
+    fn greet(self) -> u256 { 3 }            // "ahoy!"
+}
+
+// The selection follows the CALL SITE's scope, even through a generic helper.
+fn welcome<T: Greeting>(_ who: T) -> u256 {
+    who.greet()
+}
+
+#[test]
+fn scope_picks_the_dialect() {
+    let p = Patron { id: 1 }
+
+    assert!(p.greet() == 1)                  // default (formal)
+
+    let c: u256 = with (Casual) { p.greet() }
+    assert!(c == 2)                          // casual, inside the scope
+
+    let y: u256 = with (Pirate) { welcome(p) }
+    assert!(y == 3)                          // chosen at the call site, through `welcome`
+
+    assert!(p.greet() == 1)                  // back to the default once scopes close
+}
+
+// ─── 4. Scopes nest — innermost wins ─────────────────────────────────────────
+//
+//  Selections stack like any lexical binding: the nearest enclosing `with` wins,
+//  and popping a scope restores the one outside it.
+
+trait Volume {
+    fn level(self) -> u256
+}
+
+struct Speaker {
+    id: u256,
+}
+
+impl Volume for Speaker {
+    fn level(self) -> u256 { 3 }            // default
+}
+impl Volume for Speaker as Loud {
+    fn level(self) -> u256 { 5 }
+}
+impl Volume for Speaker as Louder {
+    fn level(self) -> u256 { 7 }
+}
+
+#[test]
+fn nesting_shadows_innermost_first() {
+    let s = Speaker { id: 1 }
+    assert!(s.level() == 3)                  // depth 0: default
+
+    let outer: u256 = with (Loud) {
+        assert!(s.level() == 5)              // depth 1: Loud
+        let inner: u256 = with (Louder) {
+            s.level()                        // depth 2: Louder shadows Loud
+        }
+        assert!(inner == 7)
+        assert!(s.level() == 5)              // Louder popped -> Loud restored
+        s.level()
+    }
+    assert!(outer == 5)
+    assert!(s.level() == 3)                  // all popped -> default restored
+}
+
+// ─── 5. Bundle obligations — constraint aliases ──────────────────────────────
+//
+//  A marker trait whose supertraits ARE the bundle, plus a blanket impl, gives a
+//  one-word alias for several obligations. `where T: Tradeable` expands to
+//  `T: Eq + Default` before the solver runs — no new machinery, just elaboration.
+
+trait Tradeable: Eq + Default {}
+impl<T> Tradeable for T where T: Eq + Default {}
+
+// `Potion` already derives both members, so `Potion: Tradeable` holds for free.
+fn is_fresh<T>(_ x: T) -> bool where T: Tradeable {
+    x == T::default()                        // uses BOTH members via the one bound
+}
+
+#[test]
+fn one_bound_many_obligations() {
+    assert!(is_fresh(Potion { fizz: 0, glow: 0 }))   // an unmixed potion is "fresh"
+    assert!(!is_fresh(Potion { fizz: 1, glow: 0 }))
+}
+
+// ─── Coming soon: when an impl must be one-of-a-kind ─────────────────────────
+//
+//  The impls above coexist happily. A few types can't have two — like how a type
+//  is laid out in storage: two versions = two parts of the program disagreeing
+//  about the bytes.
+//
+//  The plan keeps the common case ceremony-free. A provider hands out permission
+//  to add an impl FOR FREE for almost everything — only a small hold-back list
+//  (the must-be-one-of-a-kind types) needs to ask. So:
+//
+//      // ordinary — permission is free, you write nothing extra:
+//      impl Show for Widget { .. }
+//
+//      // a held-back type — ask with an ordinary `with` block (the same `with`
+//      // from §3); the permission is use-once, so a second can't be made:
+//      with (allow) {
+//          impl StorageLayout for Ledger { .. }
+//      }
+//
+//  No new syntax — just the `with` you already have, plus a provider that decides
+//  who has to ask.
+
+// Provider Self-types (named providers are ordinary structs).
+struct FieldwisePacks {}
+struct ReadyByFiat {}
