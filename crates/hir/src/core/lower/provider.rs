@@ -1383,7 +1383,9 @@ pub struct DerivedImplProvenance<'db> {
     /// underlying salsa tracked node — a legacy `DeriveProvider` or an
     /// ordinary `ImplTrait`) — not by name string — so BOTH the legacy
     /// colon-form and the ordinary `impl Derive<G> for P` form are first-class.
-    pub provider: ProviderDecl<'db>,
+    /// Crate-internal: the raw declaration is an fe-hir detail (the only reader is
+    /// `implementor_is_default_marked`); external consumers use the pub accessors.
+    pub(crate) provider: ProviderDecl<'db>,
     /// The generated `impl Trait for Type` item. Its `TrackedItemId` is the
     /// generated-impl id; `generated_impl.into()` recovers it.
     pub generated_impl: ImplTrait<'db>,
