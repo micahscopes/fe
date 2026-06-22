@@ -6,6 +6,20 @@
 HEAD `e84f30b4a`. Target: collapse `derive V for T using P` into `uses (a V-deriver for T)` /
 `with (a V-deriver for T = P)` resolved by the ordinary provision system.
 
+> **STATUS UPDATE 2026-06-22 — DECLARATION half DONE (#87, "minimal sugar first").** The provider
+> **declaration** grammar is fully de-magicked: the bespoke colon-overload `impl Name: Derive for Trait`
+> and the entire `DeriveProvider` HIR node are DELETED (86 refs, net −591 LOC). Providers are now ordinary
+> `impl Derive<Goal> for Provider` (goal = first `Derive<..>` type-arg; provider = the `Self` struct),
+> recognized by the trait resolving to `core::derive::Derive` by identity — one recognizer
+> (`impl_trait_provider_goal_path`) shared by every exemption site (effects/body/borrowck/conformance).
+> Done in 3 cold-verified increments: inc1 additive recognition · inc2 provenance widened + all 4 ingot
+> providers (StableEq/StableDefault/StableAbiSize/StableEip712) & ~21 fixtures migrated · inc3 deletion.
+> Byte-identical throughout (keystone preserves generated-impl identity) except one deleted colon-marker
+> fixture. The `L0.2 TD4` row below is thus SUBSUMED and surpassed.
+> **REMAINING = the INVOCATION half (Phase 2):** `derive V for T using P` / `with Provider { .. }`
+> (the `DeriveProviderScope`/`DeriveDecl` grammar, ~164 refs) → unified `uses`/`with`. Needs a surface-design
+> call (incl. whether `#[derive(..)]` stays sugar or routes through the unified surface) before building.
+
 ## Verdict: a MOUNTAIN (multi-quarter), gated on 3 bodies of work + 1 decisive scoping call
 
 Achievable as a large program **at concrete-`V` scope** (every demand names a specific trait `V`); a
