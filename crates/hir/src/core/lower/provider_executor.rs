@@ -973,7 +973,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             initial_scope.push((capability.binding(), value));
         }
 
-        let fallback_range = provider.provider.name_range(db);
+        let fallback_range = super::provider::impl_provider_name_range(db, provider.provider);
         let mut executor = ProviderExecutor {
             db,
             body: provider.body,

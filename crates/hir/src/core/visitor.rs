@@ -8,7 +8,7 @@ use crate::{
     },
     hir_def::{
         Body, CallArg, Cond, CondId, Const, ConstGenericArgValue, Contract, ContractRecv,
-        ContractRecvArm, ContractRecvArmListId, DeriveDecl, DeriveProvider, DeriveProviderScope,
+        ContractRecvArm, ContractRecvArmListId, DeriveDecl, DeriveProviderScope,
         EffectParam, EffectParamListId, Enum, EnumVariant, Expr, ExprId, Field, FieldDef,
         FieldDefListId, FieldIndex, FieldParent, Func, FuncParam, FuncParamListId, FuncParamName,
         GenericArg, GenericArgListId, GenericParam, GenericParamListId, IdentId, Impl, ImplTrait,
@@ -26,7 +26,7 @@ pub mod prelude {
         Visitor, VisitorCtxt, walk_arm, walk_attribute, walk_attribute_list, walk_body,
         walk_call_arg, walk_call_arg_list, walk_const, walk_contract, walk_contract_recv,
         walk_contract_recv_arm, walk_contract_recv_arm_list, walk_derive_decl,
-        walk_derive_provider, walk_derive_provider_scope, walk_effect_param,
+        walk_derive_provider_scope, walk_effect_param,
         walk_effect_param_list, walk_enum, walk_expr, walk_field, walk_field_def,
         walk_field_def_list, walk_field_list, walk_func, walk_func_param, walk_func_param_list,
         walk_generic_arg, walk_generic_arg_list, walk_generic_param, walk_generic_param_list,
@@ -143,14 +143,6 @@ pub trait Visitor<'db> {
         impl_trait: ImplTrait<'db>,
     ) {
         walk_impl_trait(self, ctxt, impl_trait)
-    }
-
-    fn visit_derive_provider(
-        &mut self,
-        ctxt: &mut VisitorCtxt<'db, LazyDeriveProviderSpan<'db>>,
-        provider: DeriveProvider<'db>,
-    ) {
-        walk_derive_provider(self, ctxt, provider)
     }
 
     fn visit_derive_provider_scope(
@@ -483,10 +475,6 @@ pub fn walk_item<'db, V>(
         ItemKind::ImplTrait(impl_trait) => {
             let mut new_ctxt = VisitorCtxt::with_impl_trait(ctxt.db, impl_trait);
             visitor.visit_impl_trait(&mut new_ctxt, impl_trait)
-        }
-        ItemKind::DeriveProvider(provider) => {
-            let mut new_ctxt = VisitorCtxt::with_derive_provider(ctxt.db, provider);
-            visitor.visit_derive_provider(&mut new_ctxt, provider)
         }
         ItemKind::DeriveProviderScope(scope) => {
             let mut new_ctxt = VisitorCtxt::with_derive_provider_scope(ctxt.db, scope);
@@ -1104,53 +1092,6 @@ pub fn walk_impl_trait<'db, V>(
     );
 
     for item in impl_trait.children_non_nested(ctxt.db) {
-        visitor.visit_item(&mut VisitorCtxt::with_item(ctxt.db, item), item);
-    }
-}
-
-pub fn walk_derive_provider<'db, V>(
-    visitor: &mut V,
-    ctxt: &mut VisitorCtxt<'db, LazyDeriveProviderSpan<'db>>,
-    provider: DeriveProvider<'db>,
-) where
-    V: Visitor<'db> + ?Sized,
-{
-    if let Some(name) = provider.name(ctxt.db).to_opt() {
-        ctxt.with_new_ctxt(
-            |span| span.name(),
-            |ctxt| {
-                visitor.visit_ident(ctxt, name);
-            },
-        );
-    }
-
-    if let Some(path) = provider.derive_path(ctxt.db).to_opt() {
-        ctxt.with_new_ctxt(
-            |span| span.derive_path(),
-            |ctxt| {
-                visitor.visit_path(ctxt, path);
-            },
-        );
-    }
-
-    if let Some(path) = provider.head_path(ctxt.db).to_opt() {
-        ctxt.with_new_ctxt(
-            |span| span.head_path(),
-            |ctxt| {
-                visitor.visit_path(ctxt, path);
-            },
-        );
-    }
-
-    ctxt.with_new_ctxt(
-        |span| span.attributes(),
-        |ctxt| {
-            let id = provider.attributes(ctxt.db);
-            visitor.visit_attribute_list(ctxt, id);
-        },
-    );
-
-    for item in provider.children_non_nested(ctxt.db) {
         visitor.visit_item(&mut VisitorCtxt::with_item(ctxt.db, item), item);
     }
 }
@@ -2575,7 +2516,6 @@ where
             ChainRoot::Impl(impl_) => impl_.top_mod(self.db),
             ChainRoot::Trait(trait_) => trait_.top_mod(self.db),
             ChainRoot::ImplTrait(impl_trait) => impl_trait.top_mod(self.db),
-            ChainRoot::DeriveProvider(provider) => provider.top_mod(self.db),
             ChainRoot::DeriveProviderScope(scope) => scope.top_mod(self.db),
             ChainRoot::DeriveDecl(decl) => decl.top_mod(self.db),
             ChainRoot::Const(const_) => const_.top_mod(self.db),
@@ -2754,7 +2694,6 @@ define_item_ctxt_ctor! {
     (LazyImplSpan<'db>, with_impl(impl_: Impl<'db>)),
     (LazyTraitSpan<'db>, with_trait(trait_: Trait<'db>)),
     (LazyImplTraitSpan<'db>, with_impl_trait(impl_trait: ImplTrait<'db>)),
-    (LazyDeriveProviderSpan<'db>, with_derive_provider(provider: DeriveProvider<'db>)),
     (LazyDeriveProviderScopeSpan<'db>, with_derive_provider_scope(scope: DeriveProviderScope<'db>)),
     (LazyDeriveDeclSpan<'db>, with_derive_decl(decl: DeriveDecl<'db>)),
     (LazyConstSpan<'db>, with_const(const_: Const<'db>)),

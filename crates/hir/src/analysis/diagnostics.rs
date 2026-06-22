@@ -737,7 +737,7 @@ impl DiagnosticVoucher for crate::DeriveError {
                 "invalid derive provider declaration".to_string(),
                 message.clone(),
                 vec![
-                    "expected `impl Name: Derive for Trait { const fn derive<T>(..) uses (reflect: Reflect<T>, builder: mut ImplBuilder<..>) { .. } }`"
+                    "expected `impl Derive<Trait> for Provider { const fn derive<T>(..) uses (reflect: Reflect<T>, builder: mut ImplBuilder<..>) { .. } }`"
                         .to_string(),
                 ],
             ),

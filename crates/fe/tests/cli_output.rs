@@ -152,7 +152,9 @@ trait Tagged {
     fn tag(self) -> bool
 }
 
-impl BadReq: Derive for Tagged {
+struct BadReq {}
+
+impl Derive<Tagged> for BadReq {
     const fn derive<T>(ev: own Evidence<Tagged<T>>) -> Evidence<Tagged<T>>
         uses (
             reflect: Reflect<T>,

@@ -35,7 +35,7 @@
 //! without `use core::derive::Evidence`, is not a goal position.
 //!
 //! Placement: this is an analysis-layer helper (post scope-graph merge), NOT the
-//! expansion-stage `validate_provider` — [`lower_hir_constraint_application`]
+//! expansion-stage `validate_impl_provider` — [`lower_hir_constraint_application`]
 //! reaches the merged scope graph, which the expansion stage must not read
 //! (it would salsa-cycle). See `docs/dev/FCO_PROBE_provider_goal_representation.md`.
 

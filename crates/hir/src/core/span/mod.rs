@@ -5,7 +5,7 @@ use salsa::Update;
 use crate::{
     HirDb, SpannedHirDb,
     core::hir_def::{
-        Body, Const, Contract, DeriveDecl, DeriveProvider, DeriveProviderScope, Enum, Func, Impl,
+        Body, Const, Contract, DeriveDecl, DeriveProviderScope, Enum, Func, Impl,
         ImplTrait, Mod, StaticAssert, Struct, TopLevelMod, Trait, TypeAlias, Use,
     },
     core::lower::top_mod_ast,
@@ -39,7 +39,7 @@ pub mod lazy_spans {
         },
         item::{
             LazyBodySpan, LazyConstSpan, LazyContractRecvSpan, LazyContractSpan,
-            LazyDeriveDeclSpan, LazyDeriveProviderScopeSpan, LazyDeriveProviderSpan, LazyEnumSpan,
+            LazyDeriveDeclSpan, LazyDeriveProviderScopeSpan, LazyEnumSpan,
             LazyFieldDefListSpan, LazyFieldDefSpan, LazyFuncSignatureSpan, LazyFuncSpan,
             LazyImplSpan, LazyImplTraitSpan, LazyItemSpan, LazyModSpan, LazyRecvArmListSpan,
             LazyRecvArmSpan, LazyStaticAssertSpan, LazyStructSpan, LazyTopModSpan, LazyTraitSpan,
@@ -153,13 +153,6 @@ pub fn impl_trait_ast<'db>(
     db: &'db dyn SpannedHirDb,
     item: ImplTrait<'db>,
 ) -> &'db HirOrigin<ast::ImplTrait> {
-    item.origin(db)
-}
-
-pub fn derive_provider_ast<'db>(
-    db: &'db dyn SpannedHirDb,
-    item: DeriveProvider<'db>,
-) -> &'db HirOrigin<ast::DeriveProvider> {
     item.origin(db)
 }
 

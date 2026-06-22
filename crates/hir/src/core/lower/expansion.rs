@@ -273,16 +273,20 @@ pub(crate) fn expanded_items_impl<'db>(
                     );
                 }
             }
-            ItemKind::DeriveProvider(provider_item) => {
+            ItemKind::ImplTrait(impl_trait)
+                if provider::impl_trait_provider_goal_path(db, impl_trait).is_some() =>
+            {
                 // Shape-validate providers declared in this module so a
                 // malformed provider is diagnosed even when nothing selects
                 // it. (Providers of other modules are validated when their
-                // own module expands.)
-                if let Err(errors) = provider::validate_provider(db, provider_item) {
-                    let item_name = provider_item
-                        .name(db)
+                // own module expands.) A provider is the ordinary
+                // `impl Derive<Goal> for Provider` form, recognized by the
+                // trait ref's resolved `core::derive::Derive` identity.
+                if let Err(errors) = provider::validate_impl_provider(db, impl_trait) {
+                    let item_name = impl_trait
+                        .type_ref(db)
                         .to_opt()
-                        .map(|name| name.data(db).to_string());
+                        .map(|ty| ty.pretty_print(db));
                     for error in errors {
                         accumulate_error(
                             &mut ctxt,

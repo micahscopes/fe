@@ -45,7 +45,6 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Impl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Trait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::ImplTrait))
-            .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveProvider))
             .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveProviderScope))
             .or_else(|| support::child(self.syntax()).map(ItemKind::DeriveDecl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Const))
@@ -474,30 +473,6 @@ impl ImplTrait {
 }
 
 ast_node! {
-    /// `impl StableEq: Derive for Eq { .. }`
-    pub struct DeriveProvider,
-    SK::DeriveProvider,
-}
-impl super::AttrListOwner for DeriveProvider {}
-impl DeriveProvider {
-    pub fn name(&self) -> Option<SyntaxToken> {
-        support::token(self.syntax(), SK::Ident)
-    }
-
-    pub fn derive_path(&self) -> Option<super::Path> {
-        support::children(self.syntax()).next()
-    }
-
-    pub fn head_path(&self) -> Option<super::Path> {
-        support::children(self.syntax()).nth(1)
-    }
-
-    pub fn item_list(&self) -> Option<TraitItemList> {
-        support::child(self.syntax())
-    }
-}
-
-ast_node! {
     /// `with StableEq { derive Eq for Foo }`
     pub struct DeriveProviderScope,
     SK::DeriveProviderScope,
@@ -808,7 +783,6 @@ pub enum ItemKind {
     Impl(Impl),
     Trait(Trait),
     ImplTrait(ImplTrait),
-    DeriveProvider(DeriveProvider),
     DeriveProviderScope(DeriveProviderScope),
     DeriveDecl(DeriveDecl),
     Const(Const),
@@ -1071,21 +1045,6 @@ mod tests {
         assert_eq!(decl.head_path().unwrap().to_string(), "Eq");
         assert_eq!(decl.target_path().unwrap().to_string(), "Foo");
         assert_eq!(decl.provider_path().unwrap().to_string(), "StableEq");
-    }
-
-    #[test]
-    #[wasm_bindgen_test]
-    fn named_derive_provider() {
-        let source = r#"
-                impl StableEq: Derive for Eq {
-                    const fn derive<T>() -> Evidence<Eq<T>>
-                }
-            "#;
-        let provider: DeriveProvider = parse_item(source);
-        assert_eq!(provider.name().unwrap().text(), "StableEq");
-        assert_eq!(provider.derive_path().unwrap().to_string(), "Derive");
-        assert_eq!(provider.head_path().unwrap().to_string(), "Eq");
-        assert_eq!(provider.item_list().unwrap().iter().count(), 1);
     }
 
     #[test]

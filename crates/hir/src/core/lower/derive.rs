@@ -2,7 +2,7 @@
 //!
 //! `#[derive(..)]` attributes and `derive Trait for Type` declarations
 //! produce [`DeriveRequest`]s. Each request selects a derive *provider* — a
-//! Fe `impl Name: Derive for Trait { const fn derive .. }` item — whose body
+//! Fe `impl Derive<Trait> for Provider { const fn derive .. }` item — whose body
 //! executes at compile time ([`super::provider_executor`]) and whose builder
 //! commands are replayed into a real HIR `impl Trait for Target` item
 //! ([`super::provider_synthesis`]) via [`HirBuilder`], exactly like

@@ -98,7 +98,6 @@ impl<'db> HasReferences<'db> for ItemKind<'db> {
             // Modules don't contain references themselves
             ItemKind::TopMod(_)
             | ItemKind::Mod(_)
-            | ItemKind::DeriveProvider(_)
             | ItemKind::DeriveProviderScope(_)
             | ItemKind::DeriveDecl(_) => EMPTY_REFS,
             ItemKind::Contract(contract) => contract_references(db, *contract),

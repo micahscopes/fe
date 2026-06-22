@@ -856,6 +856,7 @@ fn require_decode<T>() where T: Decode<Sol> {}
         fn provider_src(goal: &str) -> String {
             format!(
                 r#"
+use core::derive::Derive
 use core::derive::ImplBuilder
 use core::derive::Reflect
 
@@ -865,7 +866,9 @@ struct Evidence<G> {{
     handle: u256
 }}
 
-impl Prov: Derive for Eq {{
+struct Prov {{}}
+
+impl Derive<Eq> for Prov {{
     const fn derive<Q: * -> Constraint, T>(ev: own Evidence<{goal}>) -> Evidence<{goal}>
         uses (reflect: Reflect<T>, builder: mut ImplBuilder<{goal}>)
     {{

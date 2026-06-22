@@ -18,7 +18,6 @@ pub(crate) fn is_container_item(item: ItemKind) -> bool {
             | ItemKind::Contract(_)
             | ItemKind::Impl(_)
             | ItemKind::ImplTrait(_)
-            | ItemKind::DeriveProvider(_)
     )
 }
 

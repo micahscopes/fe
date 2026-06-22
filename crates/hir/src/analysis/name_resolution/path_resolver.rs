@@ -1552,8 +1552,7 @@ pub fn resolve_name_res<'db>(
                     }
                 }
 
-                ItemKind::DeriveProvider(_)
-                | ItemKind::DeriveProviderScope(_)
+                ItemKind::DeriveProviderScope(_)
                 | ItemKind::DeriveDecl(_)
                 | ItemKind::StaticAssert(_)
                 | ItemKind::Use(_)

@@ -312,7 +312,6 @@ impl<'db> DocExtractor<'db> {
             ItemKind::Const(_) => Some(DocItemKind::Const),
             ItemKind::Impl(_) => Some(DocItemKind::Impl),
             ItemKind::ImplTrait(_) => Some(DocItemKind::ImplTrait),
-            ItemKind::DeriveProvider(_) => Some(DocItemKind::ImplTrait),
             ItemKind::StaticAssert(_)
             | ItemKind::Use(_)
             | ItemKind::DeriveProviderScope(_)

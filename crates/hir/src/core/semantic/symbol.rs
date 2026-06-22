@@ -93,7 +93,6 @@ impl<'db> From<ItemKind<'db>> for SymbolKind {
             ItemKind::Trait(_) => SymbolKind::Trait,
             ItemKind::Impl(_) => SymbolKind::Impl,
             ItemKind::ImplTrait(_) => SymbolKind::ImplTrait,
-            ItemKind::DeriveProvider(_) => SymbolKind::Derive,
             ItemKind::DeriveProviderScope(_) => SymbolKind::Derive,
             ItemKind::DeriveDecl(_) => SymbolKind::Derive,
             ItemKind::Const(_) => SymbolKind::Const,
@@ -470,11 +469,6 @@ fn item_children<'db>(db: &'db dyn HirDb, item: ItemKind<'db>) -> Vec<SymbolView
                 children.push(SymbolView::from_item(ItemKind::Func(method)));
             }
         }
-        ItemKind::DeriveProvider(provider) => {
-            for method in provider.methods(db) {
-                children.push(SymbolView::from_item(ItemKind::Func(method)));
-            }
-        }
         ItemKind::DeriveProviderScope(scope) => {
             for child_item in scope.children_non_nested(db) {
                 children.push(SymbolView::from_item(child_item));
@@ -555,7 +549,6 @@ pub fn item_kind_to_url_suffix(item: ItemKind) -> Option<&'static str> {
         ItemKind::Const(_) => Some("const"),
         ItemKind::Impl(_) => Some("impl"),
         ItemKind::ImplTrait(_) => Some("impl"),
-        ItemKind::DeriveProvider(_) => Some("derive"),
         ItemKind::StaticAssert(_)
         | ItemKind::Use(_)
         | ItemKind::DeriveProviderScope(_)

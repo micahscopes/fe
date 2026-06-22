@@ -144,7 +144,6 @@ fn for_each_fixture_instance(
             | ItemKind::Trait(_)
             | ItemKind::Impl(_)
             | ItemKind::ImplTrait(_)
-            | ItemKind::DeriveProvider(_)
             | ItemKind::DeriveProviderScope(_)
             | ItemKind::DeriveDecl(_)
             | ItemKind::TypeAlias(_)
