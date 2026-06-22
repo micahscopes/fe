@@ -258,44 +258,43 @@ fn one_bound_many_obligations() {
     assert!(!is_fresh(Potion { fizz: 1, glow: 0 }))
 }
 
-// ─── Coming soon: a "fix" for impls there can only be one of ─────────────────
+// ─── Coming soon: anchoring an impl there can only be one of ─────────────────
 //
-//  The impls above coexist happily. A few types can't have two. Storage layout is
-//  the classic case: two versions mean two parts of the program disagree about
-//  the bytes.
+//  The impls above coexist happily. A few goals can't have two. Storage layout is
+//  the case: two versions mean two parts of the program disagree about the bytes.
+//  ("anchor" here is to fix in place, like a fixed point, not to repair.)
 //
-//  A fix is an ordinary value: permission to establish the one true impl of a
-//  goal. Its type is `FixImpl<G>`, where `G` is the goal written as a trait on
-//  its type, `StorageLayout<Ledger>`, the same shape as the `Evidence<..>` a
-//  derive emits. A fix is use-once: moving it into an impl is the whole guarantee.
+//  For those, one impl is ANCHORED and no other can be written. An anchor is an
+//  ordinary value, `Anchor<G>`, where `G` is the goal written as a trait on its
+//  type: `Anchor<StorageLayout<Ledger>>`. It is use-once; moving it into an impl
+//  is the whole guarantee.
 //
-//  The common case stays free. For unlocked goals the fix is granted and consumed
-//  for you, so you write nothing extra, exactly as today:
+//  The common case stays free. For an ordinary goal the anchor is granted and
+//  consumed for you, so you write nothing extra, exactly as today:
 //
 //      impl Show for Widget { .. }
 //
-//  A locked goal names the fix it holds, inline, with `with` (sibling to `as`):
+//  A one-of-a-kind goal names the anchor it holds, inline, with `with` (sibling to
+//  the `as` clause above):
 //
-//      impl StorageLayout for Ledger with ledger_fix { .. }
+//      impl StorageLayout for Ledger with a { .. }
 //
-//  Move it in and a second `impl StorageLayout for Ledger` has no fix left to
-//  consume, so a second one can't be written.
+//  Move `a` in and a second `impl StorageLayout for Ledger` has no anchor left to
+//  consume, so a second one can't exist. Forget it and the compiler stops you:
 //
-//  Where does `ledger_fix` come from? `fix` is an ordinary prelude fn, but for a
-//  locked goal it demands the authority to mint, the way a derive demands
-//  `Reflect`, through `uses`:
+//      impl StorageLayout for Ledger { .. }
+//      //  error: StorageLayout for Ledger may have only one impl, and this one
+//      //  is not anchored. mint an anchor with `anchor()` where you hold the
+//      //  authority, then add `with a`.
 //
-//      pub const fn fix<G: Constraint>() -> FixImpl<G>
-//          uses (grant: MintRight<G>)
+//  `anchor()` is an ordinary prelude fn. For an ordinary goal it just works; for a
+//  one-of-a-kind goal it succeeds only where the authority was handed to you, at
+//  the program root or delegated to a contract's root:
 //
-//  Unlocked goals get that grant ambiently, so the call just works. A locked goal
-//  has no ambient grant: you can only call `fix` where the authority was handed
-//  to you, at the program root or delegated to a contract's root.
+//      let a = anchor()        // only where you hold the authority
 //
-//      let ledger_fix = fix()              // only where you hold the grant
-//
-//  Which goals are locked is itself a provider you can read and swap, not a
-//  compiler table. (Not runnable yet. "fix" might not be the final word.)
+//  Which goals are one-of-a-kind is itself a provider you can read and swap, not a
+//  compiler table. (Not runnable yet.)
 
 // Provider Self-types (named providers are ordinary structs).
 struct FieldwisePacks {}
