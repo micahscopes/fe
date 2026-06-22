@@ -147,7 +147,7 @@ impl<'db> Capability<'db> {
 /// validation, provenance, and ingot-kind classification key on it instead of
 /// on the legacy node alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
-pub(super) enum ProviderDecl<'db> {
+pub(crate) enum ProviderDecl<'db> {
     /// The legacy colon-overload `impl Name: Derive for Trait` form.
     Legacy(DeriveProvider<'db>),
     /// The ordinary `impl Derive<Goal> for Name` form.
@@ -155,8 +155,11 @@ pub(super) enum ProviderDecl<'db> {
 }
 
 impl<'db> ProviderDecl<'db> {
-    /// The top-level module the declaration lives in.
-    pub(super) fn top_mod(self, db: &'db dyn HirDb) -> TopLevelMod<'db> {
+    /// The top-level module the declaration lives in. `pub(crate)` because it
+    /// is the identity hook read off [`DerivedImplProvenance::provider`] (a
+    /// public field) by the cascade's default-tier decision in
+    /// `trait_resolution` (`implementor_is_default_marked`).
+    pub(crate) fn top_mod(self, db: &'db dyn HirDb) -> TopLevelMod<'db> {
         match self {
             ProviderDecl::Legacy(provider) => provider.top_mod(db),
             ProviderDecl::Impl(impl_trait) => impl_trait.top_mod(db),
@@ -1375,10 +1378,12 @@ impl<'db> TargetReflection<'db> {
 /// span is computed on demand from the impl via [`Self::derive_site`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, salsa::Update)]
 pub struct DerivedImplProvenance<'db> {
-    /// The provider whose body produced the generated impl. Its
-    /// `TrackedItemId` (via `provider.into()`), `name`, and `top_mod` identify
-    /// it by stable identity — not by name string.
-    pub provider: DeriveProvider<'db>,
+    /// The provider whose body produced the generated impl. A [`ProviderDecl`]
+    /// identifies the declaration by stable identity (its `top_mod` plus the
+    /// underlying salsa tracked node — a legacy `DeriveProvider` or an
+    /// ordinary `ImplTrait`) — not by name string — so BOTH the legacy
+    /// colon-form and the ordinary `impl Derive<G> for P` form are first-class.
+    pub provider: ProviderDecl<'db>,
     /// The generated `impl Trait for Type` item. Its `TrackedItemId` is the
     /// generated-impl id; `generated_impl.into()` recovers it.
     pub generated_impl: ImplTrait<'db>,
@@ -1465,18 +1470,12 @@ pub fn derived_impl_provenance<'db>(
         return None;
     }
 
-    // Provenance currently carries the legacy `DeriveProvider` node; an
-    // ordinary-impl provider has no such node, so its provenance reconstruction
-    // is a follow-up (generalizing the public `DerivedImplProvenance.provider`
-    // field to `ProviderDecl`). This increment is additive: legacy-form
-    // provenance is unchanged, and impl-form provenance reports `None` rather
-    // than fabricating a node.
-    let ProviderDecl::Legacy(provider_node) = provider.provider else {
-        return None;
-    };
-
+    // Provenance carries the discovered [`ProviderDecl`] directly, so BOTH the
+    // legacy colon-form and the ordinary `impl Derive<G> for P` form yield
+    // first-class provenance (the `ProviderDecl` identifies the declaration by
+    // `top_mod` plus its underlying salsa node).
     Some(DerivedImplProvenance {
-        provider: provider_node,
+        provider: provider.provider,
         generated_impl: impl_trait,
         goal,
     })
@@ -1901,13 +1900,17 @@ impl Marker for Point {}
             prov.generated_impl, gen_impl,
             "provenance names the generated impl itself"
         );
-        let expected_provider = *top_mod
-            .all_derive_providers(&db)
-            .first()
-            .expect("the fixture declares one provider (ConcreteEq)");
+        // `prov.provider` is a `ProviderDecl`; compare it directly to the
+        // discovered provider's `ProviderDecl` (the fixture-local `TagProv`,
+        // the unique provider visible from this module), by stable identity.
+        let expected_provider = super::visible_providers(&db, top_mod)
+            .into_iter()
+            .find(|p| p.name.data(&db) == "TagProv")
+            .map(|p| p.provider)
+            .expect("the fixture declares one provider (TagProv)");
         assert_eq!(
             prov.provider, expected_provider,
-            "provenance resolves to the fixture-local `ConcreteEq` provider by identity"
+            "provenance resolves to the fixture-local `TagProv` provider by identity"
         );
 
         // Anti-vacuous: a hand-written impl has NO provenance.
@@ -2004,17 +2007,15 @@ impl Marker for Point {}
         );
         // The expected provider is the std-resident `StableAbiSize`, found
         // among the providers visible from this module (its own ingot + std + core).
-        // It is a legacy-form provider, so its `ProviderDecl` carries the
-        // `DeriveProvider` node that `DerivedImplProvenance.provider` records.
+        // `prov.provider` is now a `ProviderDecl`, so we compare the discovered
+        // provider's `ProviderDecl` directly — this assertion is form-agnostic:
+        // it holds whether `StableAbiSize` is declared in the legacy colon-form
+        // (inc2a) or the ordinary `impl Derive<AbiSize> for StableAbiSize` form
+        // (inc2b), proving provenance is first-class for impl-form providers.
         let expected_provider = super::visible_providers(&db, top_mod)
             .into_iter()
             .find(|p| p.name.data(&db) == "StableAbiSize")
-            .map(|p| match p.provider {
-                super::ProviderDecl::Legacy(node) => node,
-                super::ProviderDecl::Impl(_) => {
-                    panic!("the std-resident `StableAbiSize` provider is declared in legacy form")
-                }
-            })
+            .map(|p| p.provider)
             .expect("the std-resident `StableAbiSize` provider is visible");
         assert_eq!(
             prov.provider, expected_provider,
