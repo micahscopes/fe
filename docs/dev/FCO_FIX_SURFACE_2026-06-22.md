@@ -91,3 +91,42 @@ safety by construction (affine move, no counter). Dogfoods the provider system (
 swappable provider, not a compiler table). The common case is unchanged.
 
 Runnable plain sketch: `crates/fe/tests/fixtures/fe_test/showcase_metaprogramming.fe` ("Coming soon" section).
+
+## Build plan (spike-corrected 2026-06-22, read-only feasibility pass)
+The Risks section above was written from the design's guesses. A read-only spike measured them against the
+code and downgraded all three (per `reverify-inherited-blockers`):
+- **GAP-1 (ProvisionEnv scope): already done.** `ProvisionEnv` (`trait_resolution/mod.rs:172`) carries `scope`
+  end-to-end (~40 `for_scope` sites pass a real scope); it is just not yet READ by resolution (the solve keys
+  on `origin_ingot`; `scope` is deliberately out of the salsa key). Real remaining work = a rung-3.4 scope read
+  OUTSIDE the tracked solve, only for the held-back mint referent (inc5). MEDIUM -> LOW.
+- **Shared SSOT for the exclusion: trivial.** `goal_is_canonical` (`trait_def.rs:893`) has ONE production
+  caller (the establish-gate `mod.rs:3992`) and no second list. `GrantsAnchor` exclusion = `!goal_is_canonical`.
+  An inert recognition seam is already planted next to the floor (`mod.rs:4011`, `_fix_capability_present`).
+  HIGHEST -> LOW.
+- **Non-ambient threading: reuse, not invent.** The barrier-dropping `snapshot_provisions`
+  (`effect_env.rs:269`) feeds only the always-empty evidence-snapshot seam. The LIVE capability walk
+  `resolve_effect_query` -> `lookup_precise` (`effect_env.rs:162-226`) already respects barriers
+  (`BlockedByBarrier`). `AdmitAnchor<G>` rides that. Work = a seeding policy + root mint, not new walk logic.
+- **Affine floor confirmed:** `as_capability` (`ty_def.rs:289`) matches only Borrow/View ctors, so `Anchor<G>`
+  (a plain struct) stays move-tracked at the `with a` consume site (`lowered_implementor`, `mod.rs:3948`).
+  Keep `Anchor` (ordinary affine value) distinct from `AdmitAnchor` (the threaded capability).
+
+### Increment ordering (delete the coherence checker LAST)
+1. **inc1 (byte-identical):** rename the inert `Fix<T>` -> `Anchor<T>` in `derive.fe`; add inert sibling
+   `AdmitAnchor<G>`; rename the recognizer surface (`CoreDeriveItem::Fix`->`Anchor`, `FIX_TY`->`ANCHOR_TY`,
+   `fix_capability_in_scope`->`anchor_capability_in_scope`) and ADD `CoreDeriveItem::AdmitAnchor`; rename the
+   inert seam consumer `mod.rs:4011`. Everything stays inert -> all fixtures byte-identical.
+2. **inc2:** parser + HIR `with a` trailing impl clause (recognize-only, additive; mirrors the `as Name` inc1).
+3. **inc3:** prelude `anchor()` + default-allow `GrantsAnchor` blanket for `!goal_is_canonical`; rides the live
+   barrier-respecting effect-query walk. (Verify a `const fn` with a `uses` clause type-checks.)
+4. **inc4:** flip the floor at `mod.rs:4022` (`if canonical` -> consult anchor-consumption) + a new
+   "canonical, unanchored" diagnostic + the double-consume use-after-move fixture.
+5. **inc5:** root mint of `AdmitAnchor<G>` (`RootProvider`, `mod.rs:445/1668`) + contract-root delegation; the
+   rung-3.4 scope read lands here. The one genuinely open POLICY question (who-may-mint, where) is confirmed
+   with Micah before this inc.
+6. **inc6 (LAST):** delete the global coherence checker, once inc4's anchor floor demonstrably holds canonical
+   scarcity AND `does_impl_trait_conflict` still rejects non-default overlap. Keep locality/orphan checks.
+
+Open to verify at build time: `const fn` + `uses` acceptance (inc3); `EffectFamily` keying for `AdmitAnchor<G>`
+(inc3); salsa-key safety of reading anchor-consumption at the tracked establish-gate (inc4; the `with a` value
+is a property of the HIR node, not scope, so expected safe).
