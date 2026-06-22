@@ -4025,21 +4025,32 @@ impl<'db> ImplTrait<'db> {
                         // The money floor — never flips (soundness invariant).
                         false
                     } else {
-                        // Non-canonical goal: permit coexistence ONLY when exactly
-                        // one of the pair is the derived default — the cascade
-                        // default+override shape. The unscoped default-tier (C3c-2)
-                        // then picks the CoreDerives-origin default; `with
-                        // (<T as Trait>)` (C3b) selects the override. Two
-                        // non-default user impls remain a `5-0001` conflict.
-                        let this_default = crate::analysis::ty::trait_resolution::TraitSolveCx::implementor_is_default_marked(
+                        // Non-canonical goal: permit coexistence ONLY when the two
+                        // impls have DISTINCT selection discriminators (FCO T-Nway).
+                        // The unified discriminator GENERALIZES the old binary
+                        // `is_default_marked != is_default_marked` into the N-way
+                        // shape: ≤1 `Default`, ≤1 `Anonymous`, distinct `Alias`es
+                        // may coexist; a same-discriminator pair (two anonymous, two
+                        // defaults, or two same-named aliases) is a real `5-0001`
+                        // conflict. The unscoped default-tier (C3c-2) then picks the
+                        // `Default` (else the sole `Anonymous`); `with (Name)` selects
+                        // an `Alias`; `with (<T as Trait>)` (C3b) selects the sole
+                        // `Anonymous` override.
+                        //
+                        // BYTE-IDENTICAL when no aliases exist: the only
+                        // discriminators are `Default` / `Anonymous`, so
+                        // `discriminator != discriminator` is exactly the old
+                        // `this_default != cand_default` ({Default,Anonymous} ok;
+                        // {Anon,Anon}/{Default,Default} conflict).
+                        let this_disc = crate::analysis::ty::trait_resolution::selection_discriminator(
                             db,
                             *implementor.skip_binder(),
                         );
-                        let cand_default = crate::analysis::ty::trait_resolution::TraitSolveCx::implementor_is_default_marked(
+                        let cand_disc = crate::analysis::ty::trait_resolution::selection_discriminator(
                             db,
                             *cand_view.skip_binder(),
                         );
-                        this_default != cand_default
+                        this_disc != cand_disc
                     };
                     if !conflict_allowed {
                         return Err(ImplTraitLowerError::Conflict {

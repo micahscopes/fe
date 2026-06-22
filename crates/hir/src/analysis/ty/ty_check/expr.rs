@@ -55,7 +55,7 @@ use crate::analysis::ty::{
     },
     fold::{AssocTySubst, TyFoldable as _, TyFolder},
     provider::{ProviderTransport, provider_semantics_for_specialized_call},
-    trait_def::{ImplementorId, TraitInstId, impls_for_trait_def},
+    trait_def::{ImplementorId, TraitInstId, impls_for_trait_def, ingot_trait_env},
     trait_resolution::{GoalSatisfiability, PredicateListId, TraitGoalSolution},
     ty_check::callable::{Callable, EffectProviderProvenance, EffectProviderSpecialization},
     ty_def::{CapabilityKind, PrimTy, TyBase, TyData, prim_int_bits},
@@ -1295,38 +1295,54 @@ impl<'db> TyChecker<'db> {
         value: ExprId,
     ) -> Option<ProvidedEffect<'db>> {
         // The value must be a bare path expression — the qualified-path form
-        // `<T as Trait>` lowers to a single qualified-type path segment.
+        // `<T as Trait>` lowers to a single qualified-type path segment; the
+        // `with (Name)` alias form is a single bare-ident path.
         let Partial::Present(Expr::Path(Partial::Present(path))) =
             self.env.expr_data(value).clone()
         else {
             return None;
         };
 
-        // Resolve the named goal. `<T as Trait>` resolves to a `QualifiedTy`
-        // wrapping the concrete trait instance (its `Self` bound to `T`).
+        // Resolve the selected `(goal, implementor)` from the `with` head, trying
+        // the two coexisting selection forms in order:
+        //   1. `with (<T as Trait>)` — names a `(Trait, Type)` GOAL (a `QualifiedTy`
+        //      wrapping the concrete trait instance). Selects the sole `Anonymous`
+        //      override.
+        //   2. `with (Name)` — a bare ident that does NOT resolve to a `<T as Trait>`
+        //      goal. Looked up as an impl ALIAS (FCO T-Nway): scan visible trait
+        //      impls for the one whose `hir_alias` last-segment == `Name`.
         let path_span = value.span(self.body()).into_path_expr().path();
-        let PathRes::Ty(qualified_ty) = self.resolve_path(path, false, path_span).ok()? else {
-            return None;
-        };
-        let TyData::QualifiedTy(goal) = qualified_ty.data(self.db) else {
-            return None;
-        };
-        let goal = *goal;
+        let (goal, implementor) = match self.resolve_path(path, false, path_span).ok() {
+            Some(PathRes::Ty(qualified_ty))
+                if matches!(qualified_ty.data(self.db), TyData::QualifiedTy(_)) =>
+            {
+                // GOAL form: `<T as Trait>`.
+                let TyData::QualifiedTy(goal) = qualified_ty.data(self.db) else {
+                    return None;
+                };
+                let goal = *goal;
 
-        // The goal's `Self` must be concrete: a real impl is selected by self
-        // type, and a non-concrete goal cannot name a single impl. (The
-        // qualified-path form always gives a concrete `Self`; this is the
-        // soundness backstop.)
-        let subject = goal.self_ty(self.db);
-        if subject.has_var(self.db) || subject.has_invalid(self.db) {
-            return None;
-        }
+                // The goal's `Self` must be concrete: a real impl is selected by
+                // self type, and a non-concrete goal cannot name a single impl. (The
+                // qualified-path form always gives a concrete `Self`; this is the
+                // soundness backstop.)
+                let subject = goal.self_ty(self.db);
+                if subject.has_var(self.db) || subject.has_invalid(self.db) {
+                    return None;
+                }
 
-        // The REAL global `Hir` implementor the surface names: the sole impl of
-        // the goal's trait for `subject`. Coherence forbids a second, so this is
-        // the impl the solver would itself pick (byte-identity). If none exists,
-        // mint nothing and fall through.
-        let implementor = self.sole_scoped_selection_implementor(goal, subject)?;
+                // The REAL global `Hir` implementor the surface names: the sole
+                // `Anonymous` override of the goal's trait for `subject`. If none
+                // (or ambiguous because aliases coexist), mint nothing and fall
+                // through to the alias form / ordinary `with`-provider path.
+                let implementor = self.sole_scoped_selection_implementor(goal, subject)?;
+                (goal, implementor)
+            }
+            // ALIAS form: `with (Name)`. Either the path did not resolve, or it
+            // resolved to something other than a `<T as Trait>` goal — try the alias
+            // lookup. The recorded goal is the matched impl's own trait instance.
+            _ => self.alias_scoped_selection(path)?,
+        };
 
         // Mint the witness type the cascade recognizes: `Evidence<G>` with `G`
         // the goal as a `ConstraintTerm`, by RESOLVED `core::derive::Evidence`
@@ -1348,6 +1364,57 @@ impl<'db> TyChecker<'db> {
             binding: None,
             selected_implementor: Some(implementor),
         })
+    }
+
+    /// FCO T-Nway — the `with (Name)` ALIAS selection path. `path` is the `with`
+    /// head that did NOT resolve as a `<T as Trait>` goal; interpret it as an impl
+    /// ALIAS and look up the UNIQUE visible trait impl whose `as Name` alias
+    /// last-segment matches the path's last segment.
+    ///
+    /// This is a thin lookup (NOT a scope-graph binding, so the alias never
+    /// pollutes the namespace): scan every trait impl visible in the current
+    /// scope's ingot trait env (and the std/core ingots reachable from it) for one
+    /// carrying [`ImplTrait::hir_alias`] == `Name`. On a UNIQUE match, return the
+    /// matched impl's own trait instance as the recorded goal, plus its
+    /// [`ImplementorId`] — exactly the `(goal, implementor)` the goal form produces.
+    /// Ambiguous (>1) or no match → `None` (fall through to the ordinary
+    /// `with`-provider path; a precise diagnostic is increment-4 work).
+    fn alias_scoped_selection(
+        &self,
+        path: PathId<'db>,
+    ) -> Option<(TraitInstId<'db>, ImplementorId<'db>)> {
+        use crate::analysis::ty::trait_resolution::{SelDiscriminator, selection_discriminator};
+        let db = self.db;
+
+        // The alias must be a bare single-segment ident (`with (Name)`), never a
+        // multi-segment path — the alias lives in no module namespace.
+        if path.parent(db).is_some() {
+            return None;
+        }
+        let Partial::Present(name) = path.ident(db) else {
+            return None;
+        };
+
+        // Scan the trait impls visible in the current scope's ingot env (which
+        // already folds in resolved external ingots, e.g. std/core) for the unique
+        // impl whose `Alias` discriminator names `name`.
+        let env = ingot_trait_env(db, self.env.scope().ingot(db));
+        let mut matched: Option<ImplementorId<'db>> = None;
+        for impls in env.impls.values() {
+            for binder in impls {
+                let implementor = binder.instantiate_identity();
+                if selection_discriminator(db, implementor) == SelDiscriminator::Alias(name) {
+                    if matched.is_some_and(|m| m != implementor) {
+                        // Two impls share the alias `name` — ambiguous, bail.
+                        return None;
+                    }
+                    matched = Some(implementor);
+                }
+            }
+        }
+
+        let implementor = matched?;
+        Some((implementor.trait_(db), implementor))
     }
 
     /// The real `Hir` [`ImplementorId`] that `with (<T as Trait>)` SELECTS for
@@ -1380,7 +1447,7 @@ impl<'db> TyChecker<'db> {
         goal: TraitInstId<'db>,
         subject: TyId<'db>,
     ) -> Option<ImplementorId<'db>> {
-        use crate::analysis::ty::trait_resolution::TraitSolveCx;
+        use crate::analysis::ty::trait_resolution::{SelDiscriminator, selection_discriminator};
         let db = self.db;
         let trait_def = goal.def(db);
         let scope_ingot = self.env.scope().ingot(db);
@@ -1400,15 +1467,21 @@ impl<'db> TyChecker<'db> {
         match candidates.as_slice() {
             // Exactly one impl: byte-identical with the pre-cascade behavior.
             [only] => Some(*only),
-            // ≥2 coexisting impls: select the sole NON-default override.
+            // ≥2 coexisting impls: `with (<T as Trait>)` selects the sole
+            // `Anonymous`-discriminator override (the 2-slot {Default, Anonymous}
+            // case). With aliases coexisting there is no single `Anonymous` to mean
+            // — the goal form is ambiguous, so return `None` (fall through; the user
+            // should use the `with (Name)` alias form instead). Byte-identical when
+            // no aliases exist: every non-default impl is `Anonymous`, so this is
+            // exactly the old "sole non-default override".
             _ => {
-                let mut overrides = candidates
-                    .iter()
-                    .copied()
-                    .filter(|&impl_| !TraitSolveCx::implementor_is_default_marked(db, impl_));
-                let first = overrides.next()?;
-                // >1 non-default (N-way) → ambiguous-to-name; keystone-deferred.
-                if overrides.next().is_some() {
+                let mut anonymous = candidates.iter().copied().filter(|&impl_| {
+                    matches!(selection_discriminator(db, impl_), SelDiscriminator::Anonymous)
+                });
+                let first = anonymous.next()?;
+                // >1 `Anonymous` would be a coherence conflict (caught earlier), but
+                // be defensive: ambiguous → `None`.
+                if anonymous.next().is_some() {
                     return None;
                 }
                 Some(first)

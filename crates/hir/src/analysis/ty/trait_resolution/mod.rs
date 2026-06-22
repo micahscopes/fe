@@ -370,17 +370,12 @@ impl<'db> TraitSolveCx<'db> {
             return None;
         }
 
-        let marked: Vec<(ImplementorId<'db>, bool)> = applying
+        let discriminated: Vec<(ImplementorId<'db>, SelDiscriminator<'db>)> = applying
             .into_iter()
-            .map(|implementor| {
-                (
-                    implementor,
-                    Self::implementor_is_default_marked(db, implementor),
-                )
-            })
+            .map(|implementor| (implementor, selection_discriminator(db, implementor)))
             .collect();
 
-        Some(default_tier_decision(marked))
+        Some(default_tier_decision(discriminated))
     }
 
     /// FCO "slide" cascade C1 SOUNDNESS BACKSTOP — whether `implementor` is a
@@ -556,29 +551,101 @@ impl<'db> TraitSolveCx<'db> {
     }
 }
 
-/// FCO "slide" cascade C3c-2 — the pure DEFAULT-TIER decision over a set of ≥2
-/// coexisting candidate implementors that all apply to one goal, each paired with
-/// whether it is default-marked (a canonical core-derive provider, per
-/// [`TraitSolveCx::implementor_is_default_marked`]). Factored out so the decision
-/// is unit-testable synthetically without needing the impl table to physically
-/// hold >1 impl (which today's coherence forbids).
+/// FCO T-Nway — the UNIFIED SELECTION DISCRIMINATOR for a non-canonical
+/// `(Trait, Type)` impl. The cascade's three coordinated selection sites
+/// (coherence, the unscoped default tier, scoped `with` selection) all branch on
+/// this single per-impl discriminator, GENERALIZING the old binary
+/// `implementor_is_default_marked` ({default, override}) into the N-way shape:
 ///
-/// - exactly one default-marked → [`Selection::Unique`] (the default impl wins);
-/// - none or >1 default-marked → [`Selection::Ambiguous`] over ALL candidates (a
-///   CLEAN ambiguity the caller turns into a "disambiguate with `with`"
-///   diagnostic — NEVER a panic).
-fn default_tier_decision<'db>(
-    marked: Vec<(ImplementorId<'db>, bool)>,
-) -> Selection<ImplementorId<'db>> {
-    let default_marked: Vec<ImplementorId<'db>> = marked
-        .iter()
-        .filter_map(|&(implementor, is_marked)| is_marked.then_some(implementor))
-        .collect();
+/// - [`SelDiscriminator::Default`] — the impl is the CoreDerives-origin derived
+///   default ([`TraitSolveCx::implementor_is_default_marked`]). At most one per
+///   goal.
+/// - [`SelDiscriminator::Alias`]`(name)` — the impl carries an `as Name` user
+///   alias (inc1, [`ImplTrait::hir_alias`]). Distinct per name; `with (Name)`
+///   selects it.
+/// - [`SelDiscriminator::Anonymous`] — a hand-written, unaliased,
+///   non-default-marked impl. At most one (the hand-written default/override).
+///
+/// EQUALITY (the coherence / selection key): `Default == Default`,
+/// `Anonymous == Anonymous`, `Alias(a) == Alias(a)`; everything else `!=`.
+/// Restricted to the no-alias case the only discriminators are `Default` /
+/// `Anonymous`, so this is byte-identical to the old `is_default_marked` binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelDiscriminator<'db> {
+    Default,
+    Alias(crate::hir_def::IdentId<'db>),
+    Anonymous,
+}
 
-    match default_marked.as_slice() {
-        [unique] => Selection::Unique(*unique),
-        _ => Selection::Ambiguous(marked.into_iter().map(|(implementor, _)| implementor).collect()),
+/// Compute the [`SelDiscriminator`] for `implementor` (see the type docs).
+///
+/// `Default` takes precedence (the CoreDerives-origin default is never *also*
+/// selectable by an `as Name` alias — a derived impl carries no user alias).
+/// Otherwise, an `as Name` alias makes it `Alias(name)`; failing that it is
+/// `Anonymous`. A `VirtualContract` / `Assumption` implementor (no HIR item, no
+/// alias, not default-marked) is `Anonymous`.
+pub(crate) fn selection_discriminator<'db>(
+    db: &'db dyn HirAnalysisDb,
+    implementor: ImplementorId<'db>,
+) -> SelDiscriminator<'db> {
+    if TraitSolveCx::implementor_is_default_marked(db, implementor) {
+        return SelDiscriminator::Default;
     }
+    if let ImplementorOrigin::Hir(impl_trait) = implementor.origin(db)
+        && let Some(crate::hir_def::Partial::Present(name)) = impl_trait.hir_alias(db)
+    {
+        return SelDiscriminator::Alias(name);
+    }
+    SelDiscriminator::Anonymous
+}
+
+/// FCO "slide" cascade C3c-2 / T-Nway — the pure DEFAULT-TIER decision over a set
+/// of ≥2 coexisting candidate implementors that all apply to one goal, each paired
+/// with its [`SelDiscriminator`]. Factored out so the decision is unit-testable
+/// synthetically without needing the impl table to physically hold >1 impl.
+///
+/// The UNSCOPED default (no selecting `with` in view) is:
+/// - the sole [`SelDiscriminator::Default`] impl if present (the derived default);
+/// - ELSE the sole [`SelDiscriminator::Anonymous`] impl (the hand-written default);
+/// - else [`Selection::Ambiguous`] over ALL candidates (a CLEAN ambiguity the
+///   caller turns into a "disambiguate with `with`" diagnostic — NEVER a panic).
+///
+/// `Alias`'d impls are NEVER the unscoped default — only `with (Name)` selects
+/// them — so they are excluded from the default candidates here (but still appear
+/// in the `Ambiguous` list, which enumerates everything that applies).
+///
+/// BYTE-IDENTICAL today: the only non-aliased shape coherence currently permits is
+/// {`Default`, `Anonymous`}, where exactly one `Default` exists → `Unique(Default)`
+/// — identical to the old "exactly one default-marked → `Unique`". The
+/// `Anonymous`-fallback is reachable only once aliases let ≥2 non-marked impls
+/// coexist (the new N-way case).
+fn default_tier_decision<'db>(
+    discriminated: Vec<(ImplementorId<'db>, SelDiscriminator<'db>)>,
+) -> Selection<ImplementorId<'db>> {
+    let with_disc = |want: fn(&SelDiscriminator<'db>) -> bool| -> Vec<ImplementorId<'db>> {
+        discriminated
+            .iter()
+            .filter_map(|&(implementor, disc)| want(&disc).then_some(implementor))
+            .collect()
+    };
+
+    let defaults = with_disc(|d| matches!(d, SelDiscriminator::Default));
+    if let [unique] = defaults.as_slice() {
+        return Selection::Unique(*unique);
+    }
+    // No clear `Default`: fall back to the sole hand-written `Anonymous` default.
+    if defaults.is_empty() {
+        let anonymous = with_disc(|d| matches!(d, SelDiscriminator::Anonymous));
+        if let [unique] = anonymous.as_slice() {
+            return Selection::Unique(*unique);
+        }
+    }
+    Selection::Ambiguous(
+        discriminated
+            .into_iter()
+            .map(|(implementor, _)| implementor)
+            .collect(),
+    )
 }
 
 pub(crate) fn normalize_trait_inst_preserving_validity<'db>(
@@ -1120,7 +1187,7 @@ fn without_a<T>() -> bool {
 mod default_tier_rule_tests {
     use camino::Utf8PathBuf;
 
-    use super::{Selection, TraitSolveCx, default_tier_decision};
+    use super::{SelDiscriminator, Selection, TraitSolveCx, default_tier_decision};
     use crate::{
         analysis::{
             name_resolution::{PathRes, resolve_path},
@@ -1239,17 +1306,40 @@ impl Eq for Point {
         let other = ImplementorId::assumption(&db, eq_point);
         assert_ne!(real, other, "candidates must be distinct");
 
-        // Exactly one default-marked → select it.
-        match default_tier_decision(vec![(real, true), (other, false)]) {
+        use crate::hir_def::IdentId;
+        let casual = SelDiscriminator::Alias(IdentId::new(&db, "Casual".to_string()));
+        let formal = SelDiscriminator::Alias(IdentId::new(&db, "Formal".to_string()));
+
+        // Exactly one `Default` → select it (the byte-identical 2-slot case:
+        // {Default, Anonymous}).
+        match default_tier_decision(vec![
+            (real, SelDiscriminator::Default),
+            (other, SelDiscriminator::Anonymous),
+        ]) {
             Selection::Unique(selected) => assert_eq!(
                 selected, real,
-                "the single default-marked candidate must be selected",
+                "the single `Default` candidate must be selected",
             ),
             other => panic!("expected Unique, got {other:?}"),
         }
 
-        // None default-marked → clean ambiguity over BOTH candidates.
-        match default_tier_decision(vec![(real, false), (other, false)]) {
+        // No `Default`, sole `Anonymous` → the hand-written `Anonymous` is the
+        // unscoped default (the new N-way fallback: an `Anonymous` coexisting with
+        // an `Alias`, no derived default).
+        match default_tier_decision(vec![
+            (real, SelDiscriminator::Anonymous),
+            (other, casual),
+        ]) {
+            Selection::Unique(selected) => assert_eq!(
+                selected, real,
+                "the sole `Anonymous` is the unscoped default when no `Default` exists",
+            ),
+            other => panic!("expected Unique, got {other:?}"),
+        }
+
+        // Aliases are NEVER the unscoped default: two distinct aliases, no
+        // `Default`/`Anonymous` → clean ambiguity over BOTH (use `with (Name)`).
+        match default_tier_decision(vec![(real, casual), (other, formal)]) {
             Selection::Ambiguous(cands) => {
                 assert_eq!(cands.len(), 2, "ambiguity must list every candidate");
                 assert!(cands.contains(&real) && cands.contains(&other));
@@ -1257,8 +1347,24 @@ impl Eq for Point {
             other => panic!("expected Ambiguous, got {other:?}"),
         }
 
-        // Two default-marked → also clean ambiguity (no unique default).
-        match default_tier_decision(vec![(real, true), (other, true)]) {
+        // None `Default`, two `Anonymous` → clean ambiguity over BOTH candidates
+        // (no unique hand-written default).
+        match default_tier_decision(vec![
+            (real, SelDiscriminator::Anonymous),
+            (other, SelDiscriminator::Anonymous),
+        ]) {
+            Selection::Ambiguous(cands) => {
+                assert_eq!(cands.len(), 2, "ambiguity must list every candidate");
+                assert!(cands.contains(&real) && cands.contains(&other));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+
+        // Two `Default` → also clean ambiguity (no unique default).
+        match default_tier_decision(vec![
+            (real, SelDiscriminator::Default),
+            (other, SelDiscriminator::Default),
+        ]) {
             Selection::Ambiguous(cands) => assert_eq!(cands.len(), 2),
             other => panic!("expected Ambiguous, got {other:?}"),
         }
