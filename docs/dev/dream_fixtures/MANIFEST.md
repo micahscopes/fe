@@ -34,11 +34,14 @@ Every fixture that uses it carries a `PROVISIONAL-SURFACE` note in its header.
 Two spellings appear, both reusing the existing `with (..) { .. }` block
 expression (`WithExpr`) so they parse with today's grammar:
 
-- `with (Trait<Type>) { .. }` — names the `(Trait, Type)` GOAL. Used where one
-  alternate is being selected against the default (#4, #6).
-- `with (NamedImpl) { .. }` — names a SPECIFIC impl by impl-name (Fe already
-  names impls, cf. `impl StableClone: Derive for Clone`). Used where ≥2
-  non-default impls must be told apart at one goal (#5, #7).
+- `with (<T as Trait>) { .. }` — names the `(Trait, Type)` GOAL. Used where one
+  alternate is being selected against the default (#4, #6). Selects the sole
+  `Anonymous`-discriminator override.
+- `with (Name) { .. }` — names a SPECIFIC impl by its `as Name` ALIAS (FCO #84
+  T-Nway: `impl Trait for Type as Name`). Now REAL (inc2/inc3): a bare-ident
+  `with` head is looked up as an impl alias. Used where ≥2 non-default impls must
+  be told apart at one goal (`cascade_nested_shadowing`,
+  `cascade_greeting_dialects`).
 
 If the keystone unifies these (e.g. always select by goal+value, or always by
 impl identity), re-spell the `with (..)` heads and KEEP the assertions — the
@@ -52,9 +55,9 @@ assertions encode the semantics, the heads are placeholders.
 | `cascade_noncanonical_two_impls.fe` | Two impls of a user (non-canonical) trait for one type coexist with no conflict. | Compiles with NO `5-0001`; both impls accepted; `two_impls_coexist_and_compile` passes. | C3c-3 | fe_test | **RED** — today the 2nd `impl Volume for Speaker` is a `5-0001` conflict. Goes green at the demotion flip. |
 | `cascade_unscoped_default.fe` | Two coexisting impls, no scope → default-tier impl used, no ambiguity. | Unscoped `level()` returns default (3); no ambiguity panic; both tests pass. | C3c-2-wire + C3c-3 | fe_test | **RED** — `5-0001` today; after coexistence, also needs the unscoped resolution to deterministically pick the default tier. |
 | `cascade_scoped_alt_impl.fe` | Inner `with (Volume<Speaker>)` selects the non-default impl; outside uses default. | Same `level()` call = 11 inside the block, 3 outside; helper calls inside also use alt. | C3b + C3c-3 | fe_test | **RED** — `5-0001` today; needs the scoped-selection surface (C3b) + demotion. |
-| `cascade_nested_shadowing.fe` | Three nested scopes select different impls; innermost wins. | `level()` reads 3→5→7→9→7→5→3 across nested `with` blocks. | C3b + C3c-3 | fe_test | **RED** — `5-0001` today (4 impls of one goal); needs named-impl selection + nesting stack. |
+| `cascade_nested_shadowing.fe` | Three nested scopes select different impls; innermost wins. | `level()` reads 3→5→7→9→7→5→3 across nested `with` blocks. | T-Nway (#84 inc2) | fe_test | **GREEN** — real surface: an unaliased default `impl Volume for Speaker` (`Anonymous`) + `impl Volume for Speaker as LevelA/LevelB/LevelC`; nested `with (LevelA/B/C)`. Innermost-wins comes free from the effect-env frame stack. |
 | `cascade_mir_determinism.fe` | A scoped selection drives a runtime loop of trait calls; sum matches the selected impl deterministically. | Unscoped loop sum = n·3; scoped loop sum = n·11; no per-call drift; runs through codegen. | C1 rail + C3b + C3c-3 | fe_test | **RED** — `5-0001` today; the executable determinism guard once the spine lands. |
-| `cascade_greeting_dialects.fe` | Showcase: `Greeting` Formal vs Casual for `User`; scope picks the dialect. | `greet()` = 1 (Formal) by default / in `with (Formal)`, = 2 (Casual) in `with (Casual)`; distinguishable per scope. | C3b + C3c-3 | fe_test | **RED** — `5-0001` today; the narrative end-to-end showcase. |
+| `cascade_greeting_dialects.fe` | Showcase: `Greeting` for `User`; scope picks the dialect. | `greet()` = 1 (unaliased default) unscoped, = 2 in `with (Casual)`; distinguishable per scope, incl. through a `welcome<T: Greeting>` helper. | T-Nway (#84 inc2) | fe_test | **GREEN** — real surface: unaliased `impl Greeting for User` (`Anonymous`, == 1) + `impl Greeting for User as Casual` (== 2); `with (Casual)` selects the alias. |
 
 ## Notes for the install + drive pass
 
