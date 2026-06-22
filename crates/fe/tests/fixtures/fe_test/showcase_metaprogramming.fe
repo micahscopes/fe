@@ -1,18 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  Fe metaprogramming — a tour of what works today
+//  Fe metaprogramming - a tour of what works today
 // ════════════════════════════════════════════════════════════════════════════
 //
 //  Everything below compiles and RUNS (it's a passing test). Fe's metaprogramming
-//  is not a macro preprocessor bolted on the side — it's the ordinary trait system
+//  is not a macro preprocessor bolted on the side - it's the ordinary trait system
 //  turned up a notch: deriving is just running a compile-time function that writes
 //  a real `impl`, and choosing between impls is just lexical scope.
 //
 //  The tour:
-//    1. Derive for free            — `#[derive(Eq, Default)]`
-//    2. Write your own derive      — a compile-time function + quasiquote
-//    3. One trait, many impls      — name them, let scope pick   (the fun one)
-//    4. Scopes nest                — innermost selection wins
-//    5. Bundle obligations         — constraint aliases
+//    1. Derive for free            - `#[derive(Eq, Default)]`
+//    2. Write your own derive      - a compile-time function + quasiquote
+//    3. One trait, many impls      - name them, let scope pick   (the fun one)
+//    4. Scopes nest                - innermost selection wins
+//    5. Bundle obligations         - constraint aliases
 
 use core::ops::Eq
 use core::default::Default
@@ -23,7 +23,7 @@ use core::derive::Reflect
 
 // ─── 1. Derive for free ──────────────────────────────────────────────────────
 //
-//  Ask for `Eq` and `Default` and the compiler writes them — field-by-field for
+//  Ask for `Eq` and `Default` and the compiler writes them - field-by-field for
 //  structs, variant-by-variant for enums (including the `#[default]` variant).
 
 #[derive(Eq, Default)]
@@ -55,12 +55,12 @@ fn derive_is_free() {
 // ─── 2. Write your own derive ────────────────────────────────────────────────
 //
 //  A derive provider is a `const fn` that runs at compile time. It REFLECTS over
-//  the target's fields and QUASIQUOTES the method body — the `quote { .. }` is a
+//  the target's fields and QUASIQUOTES the method body - the `quote { .. }` is a
 //  real Fe-syntax template, and `${hole}` splices in field handles, other quotes,
 //  or compile-time values. The `uses (..)` clause is an effect signature: this
 //  function consumes a `Reflect<T>` view and a `mut ImplBuilder` to emit the impl.
 //
-//  `Packs` answers "does every item fit under the limits?" — generated field-wise.
+//  `Packs` answers "does every item fit under the limits?" - generated field-wise.
 
 struct Weight {
     grams: u256,
@@ -75,7 +75,7 @@ trait Packs {
     fn packs(self, _ limit: Self) -> bool
 }
 
-// The provider: fold one `&&`-clause per field — `true && self.f.under(limit.f) && ..`
+// The provider: fold one `&&`-clause per field - `true && self.f.under(limit.f) && ..`
 impl Derive<Packs> for FieldwisePacks {
     const fn derive<T>(ev: own Evidence<Packs<T>>) -> Evidence<Packs<T>>
         uses (
@@ -96,7 +96,7 @@ impl Derive<Packs> for FieldwisePacks {
 }
 
 // A second provider: the whole body is a LIFTED compile-time value. `${open}`
-// lifts the interpreter's `bool` into a generated literal — the method is decided
+// lifts the interpreter's `bool` into a generated literal - the method is decided
 // entirely at compile time.
 trait AlwaysReady {
     fn ready(self) -> bool
@@ -123,13 +123,13 @@ struct Loadout {
 // `derive Trait for Type using Provider` is the EXPLICIT form of the very same
 // machinery as the `#[derive(..)]` attribute up top. `#[derive(Eq)]` is the
 // shorthand that reaches the built-in provider; `using FieldwisePacks` is how you
-// name your OWN. Same engine, same result — both produce a real `impl … for …`.
+// name your OWN. Same engine, same result - both produce a real `impl … for …`.
 //   #[derive(Eq)]                              ← shorthand, built-in provider
 //   derive Packs for Loadout using FieldwisePacks  ← explicit, names the provider
 derive Packs for Loadout using FieldwisePacks
 derive AlwaysReady for Loadout using ReadyByFiat
 
-// The generated impls are REAL impls — usable through generic bounds, like any other.
+// The generated impls are REAL impls - usable through generic bounds, like any other.
 fn can_carry<T: Packs>(_ kit: T, _ limit: T) -> bool {
     kit.packs(limit)
 }
@@ -150,11 +150,11 @@ fn my_own_derive_runs_at_compile_time() {
     assert!(light.ready())                    // the lifted-bool body
 }
 
-// ─── 3. One trait, many impls — name them, let scope pick ─────────────────────
+// ─── 3. One trait, many impls - name them, let scope pick ─────────────────────
 //
 //  Coherence usually says "one impl per (trait, type)". Fe lets alternatives
 //  COEXIST when you give them names with `as`, and a lexical `with (Name)` scope
-//  picks which one is in force — no globals, no passing strategy objects around.
+//  picks which one is in force - no globals, no passing strategy objects around.
 
 trait Greeting {
     fn greet(self) -> u256
@@ -164,7 +164,7 @@ struct Patron {
     id: u256,
 }
 
-// The unaliased impl is the default — what an unscoped call uses.
+// The unaliased impl is the default - what an unscoped call uses.
 impl Greeting for Patron {
     fn greet(self) -> u256 { 1 }            // FORMAL: "Good evening."
 }
@@ -196,7 +196,7 @@ fn scope_picks_the_dialect() {
     assert!(p.greet() == 1)                  // back to the default once scopes close
 }
 
-// ─── 4. Scopes nest — innermost wins ─────────────────────────────────────────
+// ─── 4. Scopes nest - innermost wins ─────────────────────────────────────────
 //
 //  Selections stack like any lexical binding: the nearest enclosing `with` wins,
 //  and popping a scope restores the one outside it.
@@ -237,11 +237,11 @@ fn nesting_shadows_innermost_first() {
     assert!(s.level() == 3)                  // all popped -> default restored
 }
 
-// ─── 5. Bundle obligations — constraint aliases ──────────────────────────────
+// ─── 5. Bundle obligations - constraint aliases ──────────────────────────────
 //
 //  A marker trait whose supertraits ARE the bundle, plus a blanket impl, gives a
 //  one-word alias for several obligations. `where T: Tradeable` expands to
-//  `T: Eq + Default` before the solver runs — no new machinery, just elaboration.
+//  `T: Eq + Default` before the solver runs - no new machinery, just elaboration.
 
 trait Tradeable: Eq + Default {}
 impl<T> Tradeable for T where T: Eq + Default {}
@@ -257,27 +257,30 @@ fn one_bound_many_obligations() {
     assert!(!is_fresh(Potion { fizz: 1, glow: 0 }))
 }
 
-// ─── Coming soon: when an impl must be one-of-a-kind ─────────────────────────
+// ─── Coming soon: a "fix" for impls there can only be one of ─────────────────
 //
-//  The impls above coexist happily. A few types can't have two — like how a type
-//  is laid out in storage: two versions = two parts of the program disagreeing
-//  about the bytes.
+//  The impls above coexist happily. A few types can't have two. Storage layout is
+//  the classic case: two versions mean two parts of the program disagree about
+//  the bytes.
 //
-//  The plan keeps the common case ceremony-free. A provider hands out permission
-//  to add an impl FOR FREE for almost everything — only a small hold-back list
-//  (the must-be-one-of-a-kind types) needs to ask. So:
+//  The plan keeps the common case free. A provider hands out a "fix" (permission
+//  to add the one true impl) for almost everything; only a small hold-back list
+//  has to ask. An impl that needs one just names it inline, with `with`:
 //
-//      // ordinary — permission is free, you write nothing extra:
+//      // ordinary: a fix is granted for free, nothing extra to write.
 //      impl Show for Widget { .. }
 //
-//      // a held-back type — ask with an ordinary `with` block (the same `with`
-//      // from §3); the permission is use-once, so a second can't be made:
-//      with (allow) {
-//          impl StorageLayout for Ledger { .. }
-//      }
+//      // a held-back type: name the fix it was granted, inline. a fix is
+//      // use-once, so a second impl of this type can never be made.
+//      impl StorageLayout for Ledger with ledger_fix { .. }
 //
-//  No new syntax — just the `with` you already have, plus a provider that decides
-//  who has to ask.
+//  Where `ledger_fix` comes from is the whole policy question, and in practice it
+//  is scope- and application-dependent (who may hand one out, and where). The
+//  rough shape: somewhere you hold the authority, you mint one for the goal.
+//
+//      let ledger_fix = fix StorageLayout for Ledger   // only where you're allowed
+//
+//  ("fix" might not be the final word; we're leaning into it for now.)
 
 // Provider Self-types (named providers are ordinary structs).
 struct FieldwisePacks {}
