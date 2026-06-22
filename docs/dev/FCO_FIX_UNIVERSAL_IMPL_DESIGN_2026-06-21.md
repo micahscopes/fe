@@ -11,6 +11,19 @@ it is said plainly.
 This doc does NOT re-derive the cascade, the keystone, the FV obligations, or the skeptic-leak list — those live
 in the SSOT and the FIX packet. It cites them. Its job is the *unification* and the *honest delta*.
 
+> **RATIFIED 2026-06-22 (Micah) — the D1 sequencing for T3 (#83).** The "mint-policy default" is NOT an open
+> binary; the dial is SETTLED (§1.1) and the canonical-set default already lives as `goal_is_canonical`
+> (`trait_def.rs:883`), so the recommended scarce-for-canonical position is the live behavior — nothing gates it.
+> What sequences T3 (deleting the coherence checker last) is decided as:
+> 1. **Ship Dial 1** (existence-gating / mint policy) now; **pre-position Dial 2** (use-site uniformity, §1.4) as
+>    a guarded gate, do NOT build it now — the two-`Ord`-into-one-`BTreeMap` corruption is provably unreachable
+>    in the current tree (no `Ord`/`Hash`/`Eq`-keyed shared container; the only keyed container `StorageMap` is
+>    canonical and cannot be cascade-overridden). Land the gate BEFORE exposing the cascade for any
+>    canonical-adjacent keyed-container goal.
+> 2. **canonical-set table** stays `goal_is_canonical` — narrow, defaultable, not a blocker (`fco-guts-over-sugar`).
+> 3. **contract-root delegation edge** (per-platform mint for storage/ABI) is gated on the per-deployed-contract
+>    root referent (§3 PREREQUISITE) — a structural dependency, not a policy choice.
+
 ---
 
 ## 0. The thesis, and the one-line verdict
