@@ -784,6 +784,10 @@ impl<'db> ImplTrait<'db> {
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
         let trait_ref = TraitRefId::lower_ast_partial(ctxt, ast.trait_ref());
         let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
+        // Optional `as Name` alias (FCO T-Nway). Stored only — not bound.
+        let alias = ast
+            .alias()
+            .map(|a| IdentId::lower_token_partial(ctxt, a.name()));
         let origin = HirOrigin::raw(&ast);
 
         let mut types = vec![];
@@ -833,6 +837,7 @@ impl<'db> ImplTrait<'db> {
             where_clause,
             types,
             consts,
+            alias,
             ctxt.top_mod(),
             origin,
         );

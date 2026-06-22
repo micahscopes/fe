@@ -448,6 +448,8 @@ where
             where_clause,
             types,
             consts,
+            // Synthesized/generated impls carry no user-facing `as Name` alias.
+            None,
             self.top_mod(),
             origin,
         )

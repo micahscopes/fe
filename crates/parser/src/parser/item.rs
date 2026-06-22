@@ -842,6 +842,16 @@ impl super::Parse for ImplScope {
 
         parse_type(parser, None)?;
 
+        // Optional trailing `as Name` alias on a trait impl (FCO T-Nway).
+        // Only the `for`-bearing trait-impl form may be aliased; an inherent
+        // `impl Type {}` has no trait to select among. Consumed here — between
+        // the for-type and the where-clause/body — so the remaining recovery
+        // stack (`where`/`{`) is left intact. When absent, parsing is
+        // byte-identical to before.
+        if is_impl_trait && parser.current_kind() == Some(SyntaxKind::AsKw) {
+            parser.parse(ImplTraitAliasScope::default())?;
+        }
+
         parser.expect_and_pop_recovery_stack()?;
         parse_where_clause_opt(parser, WhereBracePolicy::Lookahead)?;
 
@@ -854,6 +864,21 @@ impl super::Parse for ImplScope {
             } else {
                 parser.parse(ImplItemListScope::default())?;
             }
+        }
+        Ok(())
+    }
+}
+
+define_scope! { ImplTraitAliasScope, ImplTraitAlias }
+impl super::Parse for ImplTraitAliasScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.set_newline_as_trivia(false);
+        parser.bump_expected(SyntaxKind::AsKw);
+        parser.set_scope_recovery_stack(&[SyntaxKind::Ident]);
+        if parser.find_and_pop(SyntaxKind::Ident, ExpectedKind::Name(SyntaxKind::ImplTrait))? {
+            parser.bump();
         }
         Ok(())
     }

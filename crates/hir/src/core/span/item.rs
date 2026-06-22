@@ -398,12 +398,18 @@ define_lazy_span_node!(
         (where_clause, where_clause, LazyWhereClauseSpan),
         (trait_ref, trait_ref, LazyTraitRefSpan),
         (ty, ty, LazyTySpan),
+        (alias, alias, LazyImplTraitAliasSpan),
         (item_list, item_list, LazyTraitItemListSpan),
     }
 );
 impl<'db> LazyImplTraitSpan<'db> {
     pub fn new(i: ImplTrait<'db>) -> Self {
         Self(crate::span::transition::SpanTransitionChain::new(i))
+    }
+
+    /// Span of the optional `as Name` alias name token (FCO T-Nway).
+    pub fn alias_name(self) -> LazySpanAtom<'db> {
+        self.alias().name()
     }
 
     pub fn associated_type(self, idx: usize) -> LazyTraitTypeSpan<'db> {
@@ -414,6 +420,14 @@ impl<'db> LazyImplTraitSpan<'db> {
         self.item_list().assoc_const(idx)
     }
 }
+
+define_lazy_span_node!(
+    LazyImplTraitAliasSpan,
+    ast::ImplTraitAlias,
+    @token {
+        (name, name),
+    }
+);
 
 define_lazy_span_node!(
     LazyDeriveProviderScopeSpan,

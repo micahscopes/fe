@@ -1286,6 +1286,10 @@ pub struct ImplTrait<'db> {
     pub(crate) types: Vec<AssocTyDef<'db>>,
     #[return_ref]
     pub(in crate::core) consts: Vec<AssocConstDef<'db>>,
+    /// The optional user-facing `as Name` alias on this trait impl (FCO
+    /// T-Nway). `None` for elided/synthesized impls. Stored only — not yet
+    /// bound into any scope nor used for selection (later increments).
+    pub(in crate::core) alias: Option<Partial<IdentId<'db>>>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -1300,6 +1304,14 @@ impl<'db> ImplTrait<'db> {
     /// Returns the trait reference for this impl.
     pub fn hir_trait_ref(self, db: &'db dyn HirDb) -> Partial<TraitRefId<'db>> {
         self.trait_ref(db)
+    }
+
+    /// Returns the optional user-facing `as Name` alias on this trait impl
+    /// (FCO T-Nway). `None` when the impl was written without an `as` clause
+    /// or is synthesized. Stored only — name binding/selection are later
+    /// increments.
+    pub fn hir_alias(self, db: &'db dyn HirDb) -> Option<Partial<IdentId<'db>>> {
+        self.alias(db)
     }
 
     /// Returns the raw associated const definitions from the HIR.

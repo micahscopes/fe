@@ -418,6 +418,8 @@ pub enum SyntaxKind {
     TraitItemList,
     /// `impl Trait for Foo { .. }`
     ImplTrait,
+    /// `as Name` — optional alias on a trait impl (`impl Trait for Foo as Name`)
+    ImplTraitAlias,
     /// `with StableEq { derive Eq for Foo }`
     DeriveProviderScope,
     /// `derive Trait for Foo`
@@ -783,6 +785,7 @@ impl SyntaxKind {
             SyntaxKind::TraitTypeItem => "`trait` type item",
             SyntaxKind::TraitConstItem => "`trait` const item",
             SyntaxKind::ImplTrait => "`impl` trait block",
+            SyntaxKind::ImplTraitAlias => "`impl` trait alias",
             SyntaxKind::DeriveProviderScope => "derive provider selection scope",
             SyntaxKind::DeriveDecl => "derive declaration",
             SyntaxKind::Const => "const definition",

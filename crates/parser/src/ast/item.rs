@@ -470,6 +470,25 @@ impl ImplTrait {
     pub fn item_list(&self) -> Option<TraitItemList> {
         support::child(self.syntax())
     }
+
+    /// Returns the optional `as Name` alias clause.
+    /// `as Baz` in `impl<T> Foo for Bar<T> as Baz { .. }`
+    pub fn alias(&self) -> Option<ImplTraitAlias> {
+        support::child(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `as Name` — optional alias on a trait impl.
+    pub struct ImplTraitAlias,
+    SK::ImplTraitAlias,
+}
+impl ImplTraitAlias {
+    /// Returns the alias name token.
+    /// `Name` in `as Name`.
+    pub fn name(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Ident)
+    }
 }
 
 ast_node! {
@@ -1156,6 +1175,33 @@ mod tests {
             TraitItemKind::Func(_)
         ));
         assert_eq!(items.next(), None);
+        // No `as Name` alias on this impl.
+        assert!(i.alias().is_none());
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn impl_trait_as_name() {
+        // The optional trailing `as Name` alias parses and is exposed.
+        let with_alias = r#"
+            impl Trait::Foo for (i32) as Bar {
+                fn foo(self) -> u32 { return 1 };
+            }"#;
+        let i: ImplTrait = parse_item(with_alias);
+        assert!(i.trait_ref().is_some());
+        assert!(matches!(i.ty().unwrap().kind(), TypeKind::Tuple(_)));
+        let alias = i.alias().expect("expected `as Name` alias");
+        assert_eq!(alias.name().unwrap().text(), "Bar");
+        // Body is still parsed normally after the alias.
+        assert!(i.item_list().is_some());
+
+        // The unnamed form has no alias.
+        let without_alias = r#"
+            impl Trait::Foo for (i32) {
+                fn foo(self) -> u32 { return 1 };
+            }"#;
+        let j: ImplTrait = parse_item(without_alias);
+        assert!(j.alias().is_none());
     }
 
     #[test]
