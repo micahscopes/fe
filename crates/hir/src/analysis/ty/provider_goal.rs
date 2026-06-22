@@ -381,14 +381,15 @@ fn path_head_resolves_to_capability<'db>(
 /// one [`CoreDeriveItem`] SET by the same (name + `core::derive` qualifier)
 /// resolved identity.
 ///
-/// The [`CoreDeriveItem::Fix`] arm is RECOGNIZED here (part of the SET) but not
-/// yet CONSUMED by the production path — the override gate that turns "scope
-/// holds a `core::derive::Fix`" into authority is FCO increment B1b. The
-/// companion proof that no `Fix<T>` value can be CONSTRUCTED (private field, no
-/// ctor, not in prelude) lives on the `Fix` type in `ingots/core/src/derive.fe`.
-/// The unit test `scope_is_core_derive_item_keys_on_core_identity_not_name`
-/// exercises the `Fix` positive (`core::derive::Fix`) and negative (a local
-/// `struct Fix<T>`) cases.
+/// The [`CoreDeriveItem::Anchor`] arm is RECOGNIZED here (part of the SET) but
+/// not yet CONSUMED by the production path: the establish gate that turns "scope
+/// holds a `core::derive::Anchor`" into authority is a later FCO increment. The
+/// companion proof that no `Anchor<T>` value can be CONSTRUCTED (private field, no
+/// ctor, not in prelude) lives on the `Anchor` type in
+/// `ingots/core/src/derive.fe`. The unit test
+/// `scope_is_core_derive_item_keys_on_core_identity_not_name` exercises the
+/// `Anchor` positive (`core::derive::Anchor`) and negative (a local
+/// `struct Anchor<T>`) cases.
 fn scope_is_core_derive_item<'db>(
     db: &'db dyn HirAnalysisDb,
     def_scope: ScopeId<'db>,
@@ -412,36 +413,36 @@ fn scope_is_core_derive_item<'db>(
     module_is_derive && in_core
 }
 
-/// Whether the unforgeable override capability `core::derive::Fix` is RESOLVABLE
-/// from `scope` by its canonical resolved identity (the SAME unified recognizer —
-/// path resolution + [`scope_is_core_derive_item`] — exercised by
+/// Whether the unforgeable one-of-a-kind capability `core::derive::Anchor` is
+/// RESOLVABLE from `scope` by its canonical resolved identity (the SAME unified
+/// recognizer, path resolution + [`scope_is_core_derive_item`], exercised by
 /// `scope_is_core_derive_item_keys_on_core_identity_not_name`, NOT a bare-name
-/// match): the `Fix` path must resolve to a type whose def scope is `core`-ingot
-/// `derive::Fix`. A like-named local `struct Fix<T>` (no `use core::derive::Fix`)
-/// resolves elsewhere and is NOT recognized.
+/// match): the `Anchor` path must resolve to a type whose def scope is
+/// `core`-ingot `derive::Anchor`. A like-named local `struct Anchor<T>` (no
+/// `use core::derive::Anchor`) resolves elsewhere and is NOT recognized.
 ///
-/// This is the floor-side RECOGNITION primitive for the FCO "slide" cascade Fix
-/// override (T1.1 made the `CoreDeriveItem::Fix` arm of the recognizer SET live).
-/// It answers only "is the override mechanism present in this resolution context",
-/// keyed on the goal-INDEPENDENT canonical `Fix` identity — exactly like
+/// This is the floor-side RECOGNITION primitive for the FCO one-of-a-kind anchor
+/// (T1.1 made the `CoreDeriveItem::Anchor` arm of the recognizer SET live). It
+/// answers only "is the anchor mechanism present in this resolution context",
+/// keyed on the goal-INDEPENDENT canonical `Anchor` identity, exactly like
 /// `goal_is_canonical` keys on the trait def, NOT on a per-call provision. It does
-/// NOT, and must NOT, consult any in-scope `Fix<goal>` PROVISION/selection: that
-/// is the per-call override decision, which lives at the LIVE verify-leg
+/// NOT, and must NOT, consult any in-scope `Anchor<goal>` PROVISION/selection:
+/// that is the per-call decision, which lives at the LIVE verify-leg
 /// (`MethodSelection` / `scoped_selection_exprs`), never at this coherence floor
-/// (whose salsa key must stay scope-free — see `trait_resolution/mod.rs:103-167`).
-pub(crate) fn fix_capability_in_scope<'db>(
+/// (whose salsa key must stay scope-free, see `trait_resolution/mod.rs:103-167`).
+pub(crate) fn anchor_capability_in_scope<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
 ) -> bool {
-    let fix_path = PathId::from_segments(db, &["core", "derive", "Fix"]);
+    let anchor_path = PathId::from_segments(db, &["core", "derive", "Anchor"]);
     let assumptions = PredicateListId::empty_list(db);
-    let Ok(PathRes::Ty(ty)) = resolve_path(db, fix_path, scope, assumptions, false) else {
+    let Ok(PathRes::Ty(ty)) = resolve_path(db, anchor_path, scope, assumptions, false) else {
         return false;
     };
     let Some(def_scope) = ty.as_scope(db) else {
         return false;
     };
-    scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Fix)
+    scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Anchor)
 }
 
 /// If `ty` is a saturated `core::derive::Evidence<G>` witness value — recognized
@@ -620,19 +621,19 @@ mod tests {
         let def_scope = ty
             .as_scope(db)
             .unwrap_or_else(|| panic!("{path:?} resolved type has no def scope"));
-        scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Fix)
+        scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Anchor)
     }
 
-    /// The crown-jewel unforgeability property (type-confusion arm): override
-    /// authority keys on the FULL resolved `core::derive::Fix` identity
+    /// The crown-jewel unforgeability property (type-confusion arm): anchor
+    /// authority keys on the FULL resolved `core::derive::Anchor` identity
     /// (name + `derive` module + `core` ingot), NEVER on the bare spelling.
     ///
-    /// Positive: the canonical `core::derive::Fix` resolves to the `core`-ingot
+    /// Positive: the canonical `core::derive::Anchor` resolves to the `core`-ingot
     /// capability scope and IS recognized.
     ///
-    /// Negative (anti-vacuous): a LOCAL `struct Fix<T>` declared in the fixture,
-    /// with NO `use core::derive::Fix`, resolves to a DIFFERENT def scope (wrong
-    /// parent module / wrong ingot) and is NOT recognized — the identical `Fix`
+    /// Negative (anti-vacuous): a LOCAL `struct Anchor<T>` declared in the fixture,
+    /// with NO `use core::derive::Anchor`, resolves to a DIFFERENT def scope (wrong
+    /// parent module / wrong ingot) and is NOT recognized: the identical `Anchor`
     /// spelling grants ZERO authority. The `resolve_to_def_scope` helper asserts
     /// each path resolves to a real type, so neither arm can pass vacuously.
     #[test]
@@ -642,26 +643,26 @@ mod tests {
         // Positive: the canonical capability type, by its absolute `core` path.
         let recognized = resolve_to_def_scope(
             &mut db,
-            "fix_capability_positive.fe",
-            "struct Anchor {}\n",
-            &["core", "derive", "Fix"],
+            "anchor_capability_positive.fe",
+            "struct Decoy {}\n",
+            &["core", "derive", "Anchor"],
         );
         assert!(
             recognized,
-            "core::derive::Fix must be recognized as the Fix override capability"
+            "core::derive::Anchor must be recognized as the Anchor capability"
         );
 
         // Negative: a like-named LOCAL type, no import — same spelling, no authority.
         let mut db = HirAnalysisTestDb::default();
         let recognized_local = resolve_to_def_scope(
             &mut db,
-            "fix_capability_negative.fe",
-            "struct Fix<T> { x: T }\n",
-            &["Fix"],
+            "anchor_capability_negative.fe",
+            "struct Anchor<T> { x: T }\n",
+            &["Anchor"],
         );
         assert!(
             !recognized_local,
-            "a local `struct Fix<T>` (not core::derive::Fix) must be granted no authority"
+            "a local `struct Anchor<T>` (not core::derive::Anchor) must be granted no authority"
         );
     }
 }

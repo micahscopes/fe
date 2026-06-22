@@ -30,8 +30,8 @@ use crate::{
 /// The single function a provider must define.
 const DERIVE_FN: &str = "derive";
 /// The `core::derive` module that holds the canonical capability types
-/// (`Reflect`, `ImplBuilder`), the `Evidence` witness, the unforgeable `Fix`
-/// override capability, and the `Derive` provider trait, used for
+/// (`Reflect`, `ImplBuilder`), the `Evidence` witness, the unforgeable `Anchor`
+/// one-of-a-kind capability, and the `Derive` provider trait, used for
 /// resolved-identity recognition.
 const DERIVE_MODULE: &str = "derive";
 /// The canonical last-segment names of the `core::derive` items. These are the
@@ -43,7 +43,8 @@ const DERIVE_MODULE: &str = "derive";
 const REFLECT_TY: &str = "Reflect";
 const IMPL_BUILDER_TY: &str = "ImplBuilder";
 const EVIDENCE_TY: &str = "Evidence";
-const FIX_TY: &str = "Fix";
+const ANCHOR_TY: &str = "Anchor";
+const ADMIT_ANCHOR_TY: &str = "AdmitAnchor";
 /// The canonical last-segment name of the `core::derive` provider trait. Like
 /// the capability types, it is matched only behind the `core::derive` module
 /// qualifier — the trait ref `Derive<Goal>` of an `impl Derive<Goal> for P` is
@@ -57,7 +58,7 @@ const DERIVE_TRAIT_TY: &str = "Derive";
 /// recognizers: the base-graph path-keyed one here ([`path_core_derive_item`])
 /// and the merged-graph scope-keyed one in `provider_goal`
 /// (`scope_is_core_derive_item`). A user type merely *named* `Reflect` /
-/// `Evidence` / `Fix`, without `use core::derive::..`, does not resolve to the
+/// `Evidence` / `Anchor`, without `use core::derive::..`, does not resolve to the
 /// canonical item and is granted ZERO authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CoreDeriveItem {
@@ -69,10 +70,15 @@ pub(crate) enum CoreDeriveItem {
     ImplBuilder,
     /// `core::derive::Reflect` — reflection-over-the-target capability.
     Reflect,
-    /// `core::derive::Fix` — the unforgeable override capability (FCO B1a).
+    /// `core::derive::Anchor`: the unforgeable one-of-a-kind capability,
+    /// permission to establish the one allowed impl of a one-of-a-kind goal.
     /// Recognition is live (this item is part of the recognized SET); the gate
-    /// that turns recognition into override authority is increment B1b.
-    Fix,
+    /// that turns recognition into establish authority is a later increment.
+    Anchor,
+    /// `core::derive::AdmitAnchor`: authority to mint an `Anchor<G>` for a
+    /// held-back goal. Recognized by identity; inert (nothing mints or consumes
+    /// it yet).
+    AdmitAnchor,
 }
 
 impl CoreDeriveItem {
@@ -83,17 +89,19 @@ impl CoreDeriveItem {
             CoreDeriveItem::Evidence => EVIDENCE_TY,
             CoreDeriveItem::ImplBuilder => IMPL_BUILDER_TY,
             CoreDeriveItem::Reflect => REFLECT_TY,
-            CoreDeriveItem::Fix => FIX_TY,
+            CoreDeriveItem::Anchor => ANCHOR_TY,
+            CoreDeriveItem::AdmitAnchor => ADMIT_ANCHOR_TY,
         }
     }
 
     /// Every canonical item, in declaration order — the recognized SET.
-    const ALL: [CoreDeriveItem; 5] = [
+    const ALL: [CoreDeriveItem; 6] = [
         CoreDeriveItem::Derive,
         CoreDeriveItem::Evidence,
         CoreDeriveItem::ImplBuilder,
         CoreDeriveItem::Reflect,
-        CoreDeriveItem::Fix,
+        CoreDeriveItem::Anchor,
+        CoreDeriveItem::AdmitAnchor,
     ];
 }
 
@@ -427,7 +435,8 @@ fn last_path_ident<'db>(db: &'db dyn HirDb, path: PathId<'db>) -> Option<IdentId
 /// Which [`CoreDeriveItem`] `path` names by resolved (canonical-path) identity,
 /// or `None`. A path matches only when its parent segment is the `derive` module
 /// AND its last segment is a canonical item name (`Derive` / `Evidence` /
-/// `ImplBuilder` / `Reflect` / `Fix`). This is the base-graph-safe form of
+/// `ImplBuilder` / `Reflect` / `Anchor` / `AdmitAnchor`). This is the
+/// base-graph-safe form of
 /// identity recognition — it requires the `derive` module qualifier (so a bare
 /// user `struct Reflect`, not imported from `core::derive`, does not match)
 /// without needing the merged scope graph (unavailable during the expansion
