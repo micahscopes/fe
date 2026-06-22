@@ -4342,34 +4342,39 @@ impl DiagnosticVoucher for BodyDiag<'_> {
                 available,
             } => {
                 let name_str = name.data(db);
-                // The available aliases, rendered as `` `Casual` `` etc. — sorted
-                // by the emit site so the help line is deterministic.
-                let available_list = available
-                    .iter()
-                    .map(|n| format!("`{}`", n.data(db)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
 
-                let mut notes = vec![if available.is_empty() {
-                    "no named impls (`impl Trait for Type as Name`) are in scope".to_string()
-                } else {
-                    format!("available named impls: {available_list}")
-                }];
+                // Primary: the `with (Name)` head that names no alias.
+                let mut sub_diagnostics = vec![SubDiagnostic::new(
+                    LabelStyle::Primary,
+                    format!("`with ({name_str})` names no impl alias here"),
+                    primary.resolve(db),
+                )];
+
+                // SECONDARY: point at every selectable named impl, at its
+                // `as Name` token, so the user SEES what they could have written.
+                // `available` is pre-sorted by alias name at the emit site.
+                for (alias, impl_trait) in available {
+                    sub_diagnostics.push(SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!("`{}` defined here", alias.data(db)),
+                        impl_trait.span().alias_name().resolve(db),
+                    ));
+                }
 
                 // Did-you-mean: the closest available alias within a small edit
-                // distance (deterministic — `available` is pre-sorted).
-                if let Some(suggestion) = closest_name(name_str, available, db) {
+                // distance (deterministic — `available` is pre-sorted). Kept as a
+                // closing note because it still adds value beyond the labels.
+                let mut notes = Vec::new();
+                let alias_names: Vec<crate::hir_def::IdentId> =
+                    available.iter().map(|(a, _)| *a).collect();
+                if let Some(suggestion) = closest_name(name_str, &alias_names, db) {
                     notes.push(format!("did you mean `{suggestion}`?"));
                 }
 
                 CompleteDiagnostic::new(
                     severity,
                     format!("no impl named `{name_str}` in scope"),
-                    vec![SubDiagnostic::new(
-                        LabelStyle::Primary,
-                        format!("`with ({name_str})` names no impl alias here"),
-                        primary.resolve(db),
-                    )],
+                    sub_diagnostics,
                     notes,
                     error_code,
                 )
@@ -4378,23 +4383,36 @@ impl DiagnosticVoucher for BodyDiag<'_> {
             BodyDiag::AmbiguousWithImplAlias {
                 primary,
                 name,
-                goals,
+                colliding,
             } => {
                 let name_str = name.data(db);
-                let goals_list = goals
+                let goals_list = colliding
                     .iter()
-                    .map(|g| format!("`{}`", g.pretty_print(db, true)))
+                    .map(|(g, _)| format!("`{}`", g.pretty_print(db, true)))
                     .collect::<Vec<_>>()
                     .join(" and ");
+
+                // Primary: the `with (Name)` head whose alias is overloaded.
+                let mut sub_diagnostics = vec![SubDiagnostic::new(
+                    LabelStyle::Primary,
+                    format!("`{name_str}` names more than one impl: {goals_list}"),
+                    primary.resolve(db),
+                )];
+
+                // SECONDARY: point at each colliding impl's `as Name` token so both
+                // declarations are visible. `colliding` is sorted by printed goal.
+                for (goal, impl_trait) in colliding {
+                    sub_diagnostics.push(SubDiagnostic::new(
+                        LabelStyle::Secondary,
+                        format!("also names this impl: `{}`", goal.pretty_print(db, true)),
+                        impl_trait.span().alias_name().resolve(db),
+                    ));
+                }
 
                 CompleteDiagnostic::new(
                     severity,
                     format!("`{name_str}` is an ambiguous impl alias"),
-                    vec![SubDiagnostic::new(
-                        LabelStyle::Primary,
-                        format!("`{name_str}` names more than one impl: {goals_list}"),
-                        primary.resolve(db),
-                    )],
+                    sub_diagnostics,
                     vec![
                         "give the two impls distinct `as Name` aliases so each can be selected unambiguously"
                             .to_string(),

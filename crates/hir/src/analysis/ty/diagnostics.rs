@@ -716,9 +716,11 @@ pub enum BodyDiag<'db> {
     UnknownWithImplAlias {
         primary: DynLazySpan<'db>,
         name: IdentId<'db>,
-        /// Every `as Name` impl alias visible in scope, sorted, for the
-        /// "available named impls" help line + did-you-mean.
-        available: Vec<IdentId<'db>>,
+        /// Every `as Name` impl alias visible in scope, sorted by alias name, for
+        /// the did-you-mean note and a SECONDARY label at each alias's `as Name`
+        /// token (so the user SEES every selectable impl). Each entry pairs the
+        /// alias ident with the impl item that declares it.
+        available: Vec<(IdentId<'db>, ImplTrait<'db>)>,
     },
 
     /// FCO T-Nway (#84 inc3) — `with (Name)` where `Name` matches MORE THAN ONE
@@ -729,8 +731,11 @@ pub enum BodyDiag<'db> {
     AmbiguousWithImplAlias {
         primary: DynLazySpan<'db>,
         name: IdentId<'db>,
-        /// The `(Trait, Type)` goals of the impls that share the alias `name`.
-        goals: ThinVec<TraitInstId<'db>>,
+        /// The impls that share the alias `name`, each paired with its
+        /// `(Trait, Type)` goal. Sorted by printed goal so the message and the
+        /// SECONDARY labels (one at each colliding impl's `as Name` token) are
+        /// deterministic.
+        colliding: Vec<(TraitInstId<'db>, ImplTrait<'db>)>,
     },
 }
 

@@ -80,7 +80,7 @@ use crate::analysis::{
         ty_lower::instantiate_callable_effect_layout_args,
     },
 };
-use crate::hir_def::{FieldParent, ItemKind, scope_graph::ScopeId};
+use crate::hir_def::{FieldParent, ImplTrait, ItemKind, scope_graph::ScopeId};
 use crate::semantic::ProviderBinding;
 use common::indexmap::IndexMap;
 
@@ -1477,19 +1477,23 @@ impl<'db> TyChecker<'db> {
         // that share `name`, and the full set of available alias names (sorted,
         // deduped) for the help line / did-you-mean.
         let env = ingot_trait_env(db, self.env.scope().ingot(db));
-        let mut matching_goals: Vec<TraitInstId<'db>> = Vec::new();
-        let mut available: Vec<IdentId<'db>> = Vec::new();
+        // The impls that share `name`, paired with their goal (for the ambiguous
+        // case). The full set of available aliases, paired with the declaring
+        // impl item (for the unknown case's secondary labels + did-you-mean).
+        let mut matching: Vec<(TraitInstId<'db>, ImplTrait<'db>)> = Vec::new();
+        let mut available: Vec<(IdentId<'db>, ImplTrait<'db>)> = Vec::new();
         for impls in env.impls.values() {
             for binder in impls {
                 let implementor = binder.instantiate_identity();
                 if let SelDiscriminator::Alias(alias) = selection_discriminator(db, implementor) {
-                    if !available.contains(&alias) {
-                        available.push(alias);
+                    let impl_trait = implementor.hir_impl_trait(db);
+                    if !available.iter().any(|(a, _)| *a == alias) {
+                        available.push((alias, impl_trait));
                     }
                     if alias == name {
                         let goal = implementor.trait_(db);
-                        if !matching_goals.contains(&goal) {
-                            matching_goals.push(goal);
+                        if !matching.iter().any(|(g, _)| *g == goal) {
+                            matching.push((goal, impl_trait));
                         }
                     }
                 }
@@ -1508,20 +1512,20 @@ impl<'db> TyChecker<'db> {
         // AMBIGUOUS: the alias names more than one impl. The user clearly meant to
         // select by alias (the name collides with multiple `as Name` impls), so
         // name the conflicting goals instead of falling through to a value error.
-        if matching_goals.len() > 1 {
-            // Deterministic order for the message.
-            matching_goals.sort_by_key(|g| g.pretty_print(db, true));
+        if matching.len() > 1 {
+            // Deterministic order for the message + secondary labels.
+            matching.sort_by_key(|(g, _)| g.pretty_print(db, true));
             return Some(BodyDiag::AmbiguousWithImplAlias {
                 primary: path_expr_span.into(),
                 name,
-                goals: matching_goals.into_iter().collect(),
+                colliding: matching,
             });
         }
 
         // Exactly one match would have been selected by
         // `provisional_scoped_selection`; we are only called after it returned
         // `None`, so a single match here cannot happen. Guard anyway: defer.
-        if matching_goals.len() == 1 {
+        if matching.len() == 1 {
             return None;
         }
 
@@ -1537,7 +1541,7 @@ impl<'db> TyChecker<'db> {
             return None;
         }
 
-        available.sort_by_key(|n| n.data(db).clone());
+        available.sort_by_key(|(n, _)| n.data(db).clone());
         Some(BodyDiag::UnknownWithImplAlias {
             primary: path_expr_span.into(),
             name,
