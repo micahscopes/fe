@@ -24,6 +24,27 @@ in the SSOT and the FIX packet. It cites them. Its job is the *unification* and 
 > 3. **contract-root delegation edge** (per-platform mint for storage/ABI) is gated on the per-deployed-contract
 >    root referent (§3 PREREQUISITE) — a structural dependency, not a policy choice.
 
+> **RATIFIED 2026-06-22 (Micah) — the SURFACE: default-free, hold-back list, ordinary `with`.** The user-facing
+> shape is decided, and it REPLACES the earlier surface sketches (`uses (fix: own Fix<G>)` capability-param;
+> any `establish … with` / `fixed` / `fix` keyword). The GUTS of §1 are unchanged (use-once authority, the money
+> floor, the §1.1 dial) — this is only the surface over them.
+> - **Common case = zero ceremony.** Establishing an impl needs nothing extra. You write `impl Trait for Type {..}`
+>   as always.
+> - **A small HOLD-BACK list needs permission.** For the must-be-one-of-a-kind goals (today's `goal_is_canonical`
+>   set — storage/ABI layout), you supply permission with an ORDINARY `with (allow) { impl .. }` block — the SAME
+>   `with` the cascade already uses for scoped selection. No new syntax. The permission is use-once (the linear
+>   authority of §1), so a second establishment can't be made.
+> - **The permission-giver is itself a PROVIDER** (default-ALLOW, with the hold-back list as its only exception).
+>   So the policy "which goals are locked down" lives in Fe as an ordinary provision you can read/swap — NOT a
+>   hardcoded compiler table. This dogfoods the provider system and is the ergonomic face of §4's
+>   capability-articulated mint tower: the hold-back list is `goal_is_canonical` expressed as a provision.
+> - **THE open question (the real substance):** for a held-back goal, where does the `allow` in `with (allow)`
+>   ORIGINATE? Someone must hold the authority to grant it, once. Answer (per §3 / D1.3): minted at the program
+>   root and delegated down (to each deployed-contract root for backend goals) — so `with (allow)` names a
+>   permission that flowed from root. That grant/delegation chain IS T3's substance; the `with`-surface above is
+>   just how it's spelled. A runnable plain-language sketch lives in
+>   `crates/fe/tests/fixtures/fe_test/showcase_metaprogramming.fe` ("Coming soon" section).
+
 ---
 
 ## 0. The thesis, and the one-line verdict
