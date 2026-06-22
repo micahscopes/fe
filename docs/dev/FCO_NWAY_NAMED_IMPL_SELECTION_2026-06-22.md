@@ -26,11 +26,36 @@ N-way selection. Naming is opt-in sugar over an identity that already exists.
   hand-written). The cascade already records a per-goal `selected_implementor: ImplementorId`
   (`ImplEnv`, consumed at MIR C1 `classify.rs:2305`). N-way changes only *how the user picks which
   ImplementorId* — by name — not the recording/consumption rail.
-- `as Name` binds `Name` in the enclosing module scope as a reference to that impl item (a nameable
-  "named impl"). `with (Name) { .. }` resolves `Name` → its `ImplementorId` → records the selection
-  (extends `provisional_scoped_selection`, alongside the existing `with (<T as Trait>)` goal form).
-- Elision: no `as` → no user-facing name → not `with`-selectable by name (still gets default/override
-  treatment, still has an ImplementorId, still gets an auto display-name in diagnostics).
+- `with (Name) { .. }` selection resolves `Name` by SCANNING visible impls for one whose `hir_alias`
+  matches (NOT a general scope-graph binding — a thin lookup, so the alias never pollutes the namespace
+  and "turns off easily later"). Alongside the existing `with (<T as Trait>)` goal form.
+- Elision: no `as` → not `with`-selectable by name (still has an ImplementorId; still gets an auto
+  display-name in diagnostics).
+
+## The unified SELECTION DISCRIMINATOR (the load-bearing generalization)
+Coherence, the unscoped default tier, and scoped selection today branch on the binary
+`implementor_is_default_marked` (CoreDerives provider origin) — the 2-slot {default, override} shape.
+N-way GENERALIZES that one binary into a per-impl **selection discriminator** for a non-canonical
+`(Trait, Type)`:
+- **`Default`** — `implementor_is_default_marked` (CoreDerives origin). At most one.
+- **`Alias(name)`** — has an `as Name`. Distinct per name.
+- **`Anonymous`** — hand-written, unaliased, not default-marked. At most one (the hand-written default).
+
+Three coordinated sites consume it (each a clean generalization; byte-identical when no aliases exist):
+1. **Coherence** (`lowered_implementor`, `mod.rs:4022-4043`): coexisting non-canonical impls must have
+   PAIRWISE-DISTINCT discriminators (≤1 `Default`, ≤1 `Anonymous`, distinct aliases). Restricted to the
+   no-alias case this is exactly today's `this_default != cand_default` ({Default,Anonymous} ok;
+   {Anon,Anon}/{Default,Default} conflict) — so **byte-identical**. Canonical goals: still never coexist
+   (money floor untouched).
+2. **Unscoped default tier** (`default_tier_decision`, `mod.rs:570`): the default = the `Default` impl
+   if present, ELSE the sole `Anonymous`. `Unique` if a clear default exists, else `Ambiguous`
+   (→ "disambiguate with `with`"). Today default_tier is only reached for {Default,Anonymous} (1 marked
+   → `Unique`), so unchanged; the `Anonymous`-fallback is NEW behavior reachable only once aliases let
+   ≥2 non-marked impls coexist (i.e. only in the new N-way case).
+3. **Scoped selection** (`provisional_scoped_selection` / `sole_scoped_selection_implementor`):
+   `with (Name)` selects the `Alias(Name)` impl (the N-way guts); `with (<T as Trait>)` still selects
+   the sole `Anonymous` override (2-slot, unchanged) and is `Ambiguous` if aliases coexist (use the
+   alias form instead).
 
 ## Increments (each cold-gated, byte-identical where noted)
 1. **Parse + HIR `as Name` (foundational, byte-identical when absent).** Optional `as Name` after the
