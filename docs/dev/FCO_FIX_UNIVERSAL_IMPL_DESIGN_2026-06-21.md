@@ -44,6 +44,16 @@ in the SSOT and the FIX packet. It cites them. Its job is the *unification* and 
 >   who-may-mint and where is scope- and application-dependent. That grant/delegation chain IS T3's substance; the
 >   `with`-surface is just how it's spelled. Runnable plain sketch:
 >   `crates/fe/tests/fixtures/fe_test/showcase_metaprogramming.fe` ("Coming soon" section).
+>
+> **CONCRETE NAMES (design-wizard pass 2026-06-22, full write-up in `FCO_FIX_SURFACE_2026-06-22.md`):** the
+> permission type is `FixImpl<G>` (`G` = the saturated goal, e.g. `StorageLayout<Ledger>`, kind `Constraint`,
+> same shape as `Evidence<..>`); minted by a prelude `const fn fix<G: Constraint>() -> FixImpl<G>
+> uses (grant: MintRight<G>)`; consumed by a trailing `impl T for Y with f` clause (use-once via affine `own`
+> move). The hold-back POLICY is an ordinary blanket `GrantsMint<G>` provider that excludes the locked set,
+> i.e. `goal_is_canonical` re-expressed as a provision. Two new recognized capability names (`FixImpl`,
+> `MintRight`); recommend renaming the inert `Fix<T>` in `derive.fe` to `FixImpl`. HIGHEST BUILD RISK: that
+> exclusion must share ONE source of truth with the money floor, and `MintRight` must thread NON-ambiently for
+> locked goals (`snapshot_provisions` drops barriers today, so it is new walk logic, not a wire-up).
 
 ---
 

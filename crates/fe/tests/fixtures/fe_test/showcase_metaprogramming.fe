@@ -1,18 +1,16 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  Fe metaprogramming - a tour of what works today
+//  Fe metaprogramming, end to end
 // ════════════════════════════════════════════════════════════════════════════
 //
-//  Everything below compiles and RUNS (it's a passing test). Fe's metaprogramming
-//  is not a macro preprocessor bolted on the side - it's the ordinary trait system
-//  turned up a notch: deriving is just running a compile-time function that writes
-//  a real `impl`, and choosing between impls is just lexical scope.
+//  Everything here compiles and runs; it's a passing test. No macro layer:
+//  deriving is a compile-time function that writes a real impl, and picking
+//  between impls is lexical scope. Same trait system, nothing bolted on.
 //
-//  The tour:
-//    1. Derive for free            - `#[derive(Eq, Default)]`
-//    2. Write your own derive      - a compile-time function + quasiquote
-//    3. One trait, many impls      - name them, let scope pick   (the fun one)
-//    4. Scopes nest                - innermost selection wins
-//    5. Bundle obligations         - constraint aliases
+//    1. Derive for free          `#[derive(Eq, Default)]`
+//    2. Write your own derive     a const fn + quasiquote
+//    3. One trait, many impls     name them, scope picks
+//    4. Scopes nest               innermost wins
+//    5. Bundle obligations        constraint aliases
 
 use core::ops::Eq
 use core::default::Default
@@ -23,8 +21,11 @@ use core::derive::Reflect
 
 // ─── 1. Derive for free ──────────────────────────────────────────────────────
 //
-//  Ask for `Eq` and `Default` and the compiler writes them - field-by-field for
-//  structs, variant-by-variant for enums (including the `#[default]` variant).
+//  Ask for `Eq` and `Default`; the compiler writes them, field by field for
+//  structs, variant by variant for enums (`#[default]` included).
+//
+//  There is no "derive" feature in the type system. `#[derive]` runs a provider
+//  (section 2) at compile time; its output is a plain impl, checked like any other.
 
 #[derive(Eq, Default)]
 struct Potion {
@@ -42,7 +43,6 @@ enum Mood {
 
 #[test]
 fn derive_is_free() {
-    // `==` and `.default()` exist because the impls were generated for us.
     let a = Potion { fizz: 3, glow: 7 }
     let b = Potion { fizz: 3, glow: 7 }
     let empty = Potion { fizz: 0, glow: 0 }
@@ -54,13 +54,14 @@ fn derive_is_free() {
 
 // ─── 2. Write your own derive ────────────────────────────────────────────────
 //
-//  A derive provider is a `const fn` that runs at compile time. It REFLECTS over
-//  the target's fields and QUASIQUOTES the method body - the `quote { .. }` is a
-//  real Fe-syntax template, and `${hole}` splices in field handles, other quotes,
-//  or compile-time values. The `uses (..)` clause is an effect signature: this
-//  function consumes a `Reflect<T>` view and a `mut ImplBuilder` to emit the impl.
+//  A provider is a `const fn` that runs at compile time. It reflects over the
+//  target's fields and quasiquotes the body: `quote { .. }` is a real Fe-syntax
+//  template, `${hole}` splices in field handles, other quotes, or const values.
+//  Its `uses (..)` clause is the effect signature: it takes a `Reflect<T>` and a
+//  `mut ImplBuilder` and emits the impl. It is an ordinary impl of `Derive`, run
+//  by the compiler; what it emits goes back through the normal checks.
 //
-//  `Packs` answers "does every item fit under the limits?" - generated field-wise.
+//  `Packs`: does every field fit under the limit? Built field by field.
 
 struct Weight {
     grams: u256,
@@ -75,7 +76,7 @@ trait Packs {
     fn packs(self, _ limit: Self) -> bool
 }
 
-// The provider: fold one `&&`-clause per field - `true && self.f.under(limit.f) && ..`
+// fold one `&&` clause per field: `true && self.f.under(limit.f) && ..`
 impl Derive<Packs> for FieldwisePacks {
     const fn derive<T>(ev: own Evidence<Packs<T>>) -> Evidence<Packs<T>>
         uses (
@@ -85,8 +86,8 @@ impl Derive<Packs> for FieldwisePacks {
     {
         let mut body = quote { true }
         for field in reflect.fields() {
-            // `quote(limit) { .. }` opens the name `limit`, bound to the emitted
-            // method's parameter; `${field}` is the field handle for member access.
+            // `quote(limit)` opens a name bound to the method's `limit` param;
+            // `${field}` is the field handle for member access.
             body = quote(limit) { ${body} && self.${field}.under(limit.${field}) }
         }
         builder.emit_method("packs", body)
@@ -95,9 +96,8 @@ impl Derive<Packs> for FieldwisePacks {
     }
 }
 
-// A second provider: the whole body is a LIFTED compile-time value. `${open}`
-// lifts the interpreter's `bool` into a generated literal - the method is decided
-// entirely at compile time.
+// The whole body is a lifted const value: `${open}` drops the interpreter's bool
+// into a generated literal. The method is decided entirely at compile time.
 trait AlwaysReady {
     fn ready(self) -> bool
 }
@@ -120,16 +120,13 @@ struct Loadout {
     potion: Weight,
 }
 
-// `derive Trait for Type using Provider` is the EXPLICIT form of the very same
-// machinery as the `#[derive(..)]` attribute up top. `#[derive(Eq)]` is the
-// shorthand that reaches the built-in provider; `using FieldwisePacks` is how you
-// name your OWN. Same engine, same result - both produce a real `impl … for …`.
-//   #[derive(Eq)]                              ← shorthand, built-in provider
-//   derive Packs for Loadout using FieldwisePacks  ← explicit, names the provider
+// Same machinery as `#[derive(..)]`, written out. `#[derive(Eq)]` reaches the
+// built-in provider; `using FieldwisePacks` names your own. Same result: a real
+// `impl Packs for Loadout`.
 derive Packs for Loadout using FieldwisePacks
 derive AlwaysReady for Loadout using ReadyByFiat
 
-// The generated impls are REAL impls - usable through generic bounds, like any other.
+// Generated impls are real impls, usable through generic bounds like any other.
 fn can_carry<T: Packs>(_ kit: T, _ limit: T) -> bool {
     kit.packs(limit)
 }
@@ -143,18 +140,22 @@ fn my_own_derive_runs_at_compile_time() {
     let light = Loadout { sword: w(50), potion: w(5) }
     let cap = Loadout { sword: w(100), potion: w(10) }
     assert!(light.packs(cap))                 // both fields under the cap
-    assert!(can_carry(light, cap))            // ...and through a generic bound
+    assert!(can_carry(light, cap))            // and through a generic bound
 
     let heavy = Loadout { sword: w(200), potion: w(5) }
     assert!(!heavy.packs(cap))                // first field over the cap
     assert!(light.ready())                    // the lifted-bool body
 }
 
-// ─── 3. One trait, many impls - name them, let scope pick ─────────────────────
+// ─── 3. One trait, many impls: name them, scope picks ────────────────────────
 //
-//  Coherence usually says "one impl per (trait, type)". Fe lets alternatives
-//  COEXIST when you give them names with `as`, and a lexical `with (Name)` scope
-//  picks which one is in force - no globals, no passing strategy objects around.
+//  Usually it is one impl per (trait, type). Name alternatives with `as` and they
+//  coexist; a `with (Name)` scope picks which is in force. No globals, no passing
+//  strategy objects around.
+//
+//  Coherence still holds: the compiler tells the impls apart by a discriminator
+//  (a derived default, an `as` name, or anonymous). `with (Name)` records which
+//  one a scope chose; it is decided at compile time, not runtime dispatch.
 
 trait Greeting {
     fn greet(self) -> u256
@@ -164,11 +165,11 @@ struct Patron {
     id: u256,
 }
 
-// The unaliased impl is the default - what an unscoped call uses.
+// unaliased is the default: an unscoped call uses it.
 impl Greeting for Patron {
-    fn greet(self) -> u256 { 1 }            // FORMAL: "Good evening."
+    fn greet(self) -> u256 { 1 }            // formal: "good evening"
 }
-// Two named alternatives coexist with it.
+// two named alternatives:
 impl Greeting for Patron as Casual {
     fn greet(self) -> u256 { 2 }            // "hey!"
 }
@@ -176,7 +177,7 @@ impl Greeting for Patron as Pirate {
     fn greet(self) -> u256 { 3 }            // "ahoy!"
 }
 
-// The selection follows the CALL SITE's scope, even through a generic helper.
+// selection follows the call site's scope, even through a generic helper.
 fn welcome<T: Greeting>(_ who: T) -> u256 {
     who.greet()
 }
@@ -196,10 +197,10 @@ fn scope_picks_the_dialect() {
     assert!(p.greet() == 1)                  // back to the default once scopes close
 }
 
-// ─── 4. Scopes nest - innermost wins ─────────────────────────────────────────
+// ─── 4. Scopes nest: innermost wins ──────────────────────────────────────────
 //
-//  Selections stack like any lexical binding: the nearest enclosing `with` wins,
-//  and popping a scope restores the one outside it.
+//  Selections stack like any binding: the nearest `with` wins, popping restores
+//  the one outside. Each `with` is a frame; a call reads the nearest.
 
 trait Volume {
     fn level(self) -> u256
@@ -230,25 +231,25 @@ fn nesting_shadows_innermost_first() {
             s.level()                        // depth 2: Louder shadows Loud
         }
         assert!(inner == 7)
-        assert!(s.level() == 5)              // Louder popped -> Loud restored
+        assert!(s.level() == 5)              // Louder popped, Loud restored
         s.level()
     }
     assert!(outer == 5)
-    assert!(s.level() == 3)                  // all popped -> default restored
+    assert!(s.level() == 3)                  // all popped, default restored
 }
 
-// ─── 5. Bundle obligations - constraint aliases ──────────────────────────────
+// ─── 5. Bundle obligations: constraint aliases ───────────────────────────────
 //
-//  A marker trait whose supertraits ARE the bundle, plus a blanket impl, gives a
-//  one-word alias for several obligations. `where T: Tradeable` expands to
-//  `T: Eq + Default` before the solver runs - no new machinery, just elaboration.
+//  A marker trait whose supertraits are the bundle, plus a blanket impl, gives a
+//  one-word alias. `where T: Tradeable` expands to `T: Eq + Default` before the
+//  solver runs: ordinary supertrait elaboration, no alias goal ever reaches it.
 
 trait Tradeable: Eq + Default {}
 impl<T> Tradeable for T where T: Eq + Default {}
 
-// `Potion` already derives both members, so `Potion: Tradeable` holds for free.
+// `Potion` derives both members, so `Potion: Tradeable` holds for free.
 fn is_fresh<T>(_ x: T) -> bool where T: Tradeable {
-    x == T::default()                        // uses BOTH members via the one bound
+    x == T::default()                        // both members, via the one bound
 }
 
 #[test]
@@ -263,24 +264,38 @@ fn one_bound_many_obligations() {
 //  the classic case: two versions mean two parts of the program disagree about
 //  the bytes.
 //
-//  The plan keeps the common case free. A provider hands out a "fix" (permission
-//  to add the one true impl) for almost everything; only a small hold-back list
-//  has to ask. An impl that needs one just names it inline, with `with`:
+//  A fix is an ordinary value: permission to establish the one true impl of a
+//  goal. Its type is `FixImpl<G>`, where `G` is the goal written as a trait on
+//  its type, `StorageLayout<Ledger>`, the same shape as the `Evidence<..>` a
+//  derive emits. A fix is use-once: moving it into an impl is the whole guarantee.
 //
-//      // ordinary: a fix is granted for free, nothing extra to write.
+//  The common case stays free. For unlocked goals the fix is granted and consumed
+//  for you, so you write nothing extra, exactly as today:
+//
 //      impl Show for Widget { .. }
 //
-//      // a held-back type: name the fix it was granted, inline. a fix is
-//      // use-once, so a second impl of this type can never be made.
+//  A locked goal names the fix it holds, inline, with `with` (sibling to `as`):
+//
 //      impl StorageLayout for Ledger with ledger_fix { .. }
 //
-//  Where `ledger_fix` comes from is the whole policy question, and in practice it
-//  is scope- and application-dependent (who may hand one out, and where). The
-//  rough shape: somewhere you hold the authority, you mint one for the goal.
+//  Move it in and a second `impl StorageLayout for Ledger` has no fix left to
+//  consume, so a second one can't be written.
 //
-//      let ledger_fix = fix StorageLayout for Ledger   // only where you're allowed
+//  Where does `ledger_fix` come from? `fix` is an ordinary prelude fn, but for a
+//  locked goal it demands the authority to mint, the way a derive demands
+//  `Reflect`, through `uses`:
 //
-//  ("fix" might not be the final word; we're leaning into it for now.)
+//      pub const fn fix<G: Constraint>() -> FixImpl<G>
+//          uses (grant: MintRight<G>)
+//
+//  Unlocked goals get that grant ambiently, so the call just works. A locked goal
+//  has no ambient grant: you can only call `fix` where the authority was handed
+//  to you, at the program root or delegated to a contract's root.
+//
+//      let ledger_fix = fix()              // only where you hold the grant
+//
+//  Which goals are locked is itself a provider you can read and swap, not a
+//  compiler table. (Not runnable yet. "fix" might not be the final word.)
 
 // Provider Self-types (named providers are ordinary structs).
 struct FieldwisePacks {}
