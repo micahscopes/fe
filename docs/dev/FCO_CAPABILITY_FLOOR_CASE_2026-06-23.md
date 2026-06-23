@@ -203,7 +203,90 @@ Corrections:
   5718 claim is corroborated across multiple results and matches the well-known issue, but it is
   search-summary-grounded. The Fe substrate claims are file:line-verified in the worktree.
 
-## 11. Provenance
+## 11. Affine's actual role: the three-layer dovetail (Micah, 2026-06-23)
+
+Affine is not the floor, but it is not idle either. It has a real complementary job in the CTFE half, and the
+full design is three cooperating layers, all dynamic only with respect to comptime (nothing runtime).
+
+1. **Static count (scarcity, whole-program).** The barrier count over the materialized impl set
+   (`ingot_trait_env.impls`) at the establish gate. Bounds the total to <= 1 per canonical goal. Runs where
+   there is no body (top-level items).
+2. **Affine in CTFE (registration anti-leak, per provider body).** Provider fns ARE bodies, so the move/borrow
+   checker runs on them. It keeps each CTFE registration well-formed: a `builder.finish() -> Evidence<G>` value
+   used once, not duplicated, not escaped, the builder not emitted-to after finish. This is the linear-token /
+   nonce-use-once idea applied IN CTFE, the one place it actually runs, not at the top-level floor.
+3. **Intrinsic-exposed static results (comptime-dynamic logic).** A read-only intrinsic (built on the #93
+   root-effect-object mechanism + the reflection/CTFE-handle work) surfaces the COMPLETE static facts ("is goal
+   G established?", "the final impl set") into CTFE, so providers can build richer comptime-dynamic logic on top.
+
+The cooperation: layer 2 makes each generated registration trustworthy at its source; layer 1 bounds the
+whole-program total; they shake hands at the convergence point (the materialized impl set, where generated and
+explicit impls already unify). Neither alone is complete: count without layer 2 lets a provider misbehave
+internally; layer 2 without count does not bound the program-wide total. Layer 3 is the payoff built on both.
+
+**Substrate (measured 2026-06-23).** `Evidence<G>` / `ImplBuilder<G>` are ordinary structs; `as_capability`
+returns `None` (`ty_def.rs:289-298`), so a local `Evidence` value gets normal move semantics
+(`local_has_runtime_move_semantics`, `ir.rs:215`; use-after-move is real, cf. `mir_move_error.fe`). The anti-leak
+role is therefore PARTLY present already. The gap: a provider-supplied `mut ImplBuilder<G>` param can lower to a
+`Provider` borrow root (`ir.rs:230`), which is exempt from move semantics, so "builder used after `finish()`" and
+"evidence escapes the provider body" are not necessarily caught today. Closing that is a separable small
+workstream (layer 2 below), not a precondition for the floor (layer 1).
+
+**The one rule that keeps layer 3 safe.** The intrinsic must expose a COMPLETE, barrier-computed static result
+(or a monotone/confluent query), NEVER an in-progress "what is registered so far" accumulator. If CTFE could
+read the live, mid-pass registration state and register conditionally on it, that registration becomes
+order-observable and we are back in the Zig-5718 trap the floor is designed to avoid. Read the finished set, not
+the live one.
+
+## 12. Consolidated build plan + validation
+
+Governing rule (Micah, 2026-06-23): **every increment ships with validation that PINS the property it claims, and
+lands only behind a full cold gate** (the M5 semantic standard: a fixture that fails before and passes after, snap
+diff = 0 beyond intended). Agent work is cold-verified by cherry-pick + an independent gate, never trusted from a
+self-report.
+
+- **inc4 (count + convergence; mostly safe, no mint dependency).** The scarcity <= 1 count is ALREADY the floor
+  (landed in T1.2: a canonical goal rejects a second overlapping impl via `does_impl_trait_conflict`,
+  `mod.rs:4022-4027`). inc4's new, tree-safe work:
+  - (a) **Convergence fixture (the meeting point).** A CTFE-generated impl and an explicit impl of the same
+    canonical goal/type both reach the gate and conflict. VALIDATION: the fixture errors as a conflict, with a
+    snap; this LOCKS the generated+explicit uniformity (which expansion already provides:
+    `lower/expansion.rs` folds generated impls into `all_items` -> `ingot_trait_env`).
+  - (b) **Authorization recognition (live but not yet mandatory).** Turn the `_anchor_capability_present`
+    recognition seam (`mod.rs:4012`) into a real per-impl-node check: resolve `self.hir_anchor` against an
+    `Anchor<G>` matching the goal. Recorded, not enforced. VALIDATION: a fixture shows an anchored canonical
+    impl (on a currently-grantable goal) is recognized as authorized; `cascade_canonical_floor` stays green.
+  - **Sequencing note (why mandate waits):** making anchoring MANDATORY for canonical goals (plus the
+    "canonical, unanchored" diagnostic) must wait for inc5, because the mint for a held-back canonical goal does
+    not exist yet. Forcing it now would break std's existing canonical impls (AbiSize/Encode/...), which carry
+    no `with a` and cannot obtain one until root delegation lands.
+
+- **Affine anti-leak (layer 2; separable, can interleave with inc4/inc5).** Make `Evidence<G>` / `ImplBuilder<G>`
+  affine end-to-end in provider bodies, closing the provider-param gap measured in section 11. VALIDATION:
+  (i) double-use of an `Evidence` value -> use-after-move; (ii) builder emitted-to after `finish()` -> error;
+  (iii) `Evidence` escaping the provider body -> error.
+
+- **inc5 (generic root mint + mandate).** Build the mint CAPABILITY-GENERIC (so `AdmitAnchor<G>` and intrinsic
+  capabilities share it), seeded at `RootProvider`, delegated to the contract root. Flip canonical anchoring to
+  MANDATORY + add the "canonical, unanchored" diagnostic. VALIDATION: (i) a held-back canonical impl with a
+  minted+delegated anchor compiles; (ii) an unanchored canonical impl errors with the new diagnostic; (iii) std
+  builds green (existing canonical impls now anchored via the mint). INTEGRATION CONSTRAINT (validate
+  explicitly): the gate filters impls by in-scope capability BEFORE the overlap loop, pinned by a backend-variant
+  fixture (two impls of the same goal/type gated on different target capabilities do NOT falsely conflict).
+
+- **inc6 (delete the coherence special-case, LAST).** Only once inc4/inc5 demonstrably hold the floor and
+  `does_impl_trait_conflict` still rejects non-default overlap. VALIDATION: full suite green after deletion; the
+  floor fixtures still error; no snap churn beyond intended.
+
+- **Intrinsic exposure (layer 3; later, on #93 + reflection handles).** The read-only static-results intrinsic.
+  VALIDATION: (i) a provider reads the complete established-set fact and branches on it; (ii) a NEGATIVE test
+  enforcing the barrier-vs-accumulator rule, the result a provider observes is order-independent (it cannot see
+  in-progress registration).
+
+Cold-gate scope per increment: `fe-hir` + `ty_check` + `cli_output` + `fe_test` (and `corelib` / `build_foundry`
+where touched), run inline, snap diff = 0 beyond intended, before any commit.
+
+## 13. Provenance
 
 - Spike #90 (`tasks/a47e1760...`): value-flow linear/affine is always body/arrow-scoped; no language makes a
   top-level binding linear; scarcity must be a static count over the whole-program impl set.
