@@ -252,24 +252,24 @@ fn one_bound_many_obligations() {
     assert!(!is_fresh(Potion { fizz: 1, glow: 0 }))
 }
 
-// ─── Coming soon: anchoring an impl there can only be one of ─────────────────
+// ─── Coming soon: a single-impl permit there can only be one of ──────────────
 //
 //  These coexist happily, but a few goals can't have two: storage layout, say,
 //  where two versions mean the program disagrees about the bytes.
-//  ("anchor" = fix in place, not repair.)
+//  ("permit" = the one license to establish that impl.)
 //
-//  One impl gets ANCHORED and no other can be written. An anchor is an ordinary
-//  value, `Anchor<G>`, where `G` is the goal as a trait on its type:
-//  `Anchor<StorageLayout<Ledger>>`. It is use-once; moving it into an impl is the
-//  whole guarantee.
+//  One impl gets PERMITTED and no other can be written. A permit is an ordinary
+//  value, `ImplPermit<G>`, where `G` is the goal as a trait on its type:
+//  `ImplPermit<StorageLayout<Ledger>>`. It is use-once; moving it into an impl is
+//  the whole guarantee.
 //
 //  The common case stays free: for an ordinary goal it's granted and consumed
 //  for you, so you write nothing extra:
 //
 //      impl Show for Widget { .. }
 //
-//  A one-of-a-kind goal names the anchor it holds, inline, with `with` (sibling to
-//  `as`); move it in, and a second impl has no anchor left to consume:
+//  A one-of-a-kind goal names the permit it holds, inline, with `with` (sibling to
+//  `as`); move it in, and a second impl has no permit left to consume:
 //
 //      impl StorageLayout for Ledger with a { .. }
 //
@@ -277,13 +277,13 @@ fn one_bound_many_obligations() {
 //
 //      impl StorageLayout for Ledger { .. }
 //      //  error: StorageLayout for Ledger may have only one impl, and this one
-//      //  is not anchored. mint an anchor with `anchor()`, then add `with a`.
+//      //  has no permit. mint a permit with `impl_permit()`, then add `with a`.
 //
-//  `anchor()` is an ordinary prelude fn: free for ordinary goals; for a
+//  `impl_permit()` is an ordinary prelude fn: free for ordinary goals; for a
 //  one-of-a-kind goal it works only where the authority was handed to you (the
 //  program root, or delegated to a contract's root).
 //
-//      let a = anchor()        // only where you hold the authority
+//      let a = impl_permit()   // only where you hold the authority
 //
 //  Which goals are one-of-a-kind is itself a provider you can read and swap, not a
 //  compiler table. (Not runnable yet.)

@@ -128,7 +128,7 @@ ambiguity (`proof_forest.rs:26,155-187`), so reordering can't collapse `NeedsCon
 scope-keying the tracked solve (forbidden, `trait_resolution/mod.rs:109-164`). **Default-tier rule (a′+b):**
 unscoped + >1 impl → pick the default-marked (canonical/CoreDerives) impl at the verify-leg (`expr.rs:2335`,
 scope-free); none/multiple marked → clean diag, NEVER the MIR `select_impl`→panic path. **Sub-rung ladder
-(default-rule + floor land BEFORE the demotion — the ordering law):** **C3c-1** money floor (wire `goal_is_canonical`
+(default-rule + floor land BEFORE the demotion — the ordering law):** **C3c-1** money floor (wire `is_single_impl`
 LIVE, byte-identical — canonical stays exactly-one + `5-0001` fires; remove `allow(dead_code)`; the SMALLEST first
 rung) → **C3c-2** default-tier rule (verify-leg picks default-marked; clean diag) → **C3b** surface (flip
 `None`→`Some(impl)` at the `With` stamp site `expr.rs:1184`; downstream already wired; spelling deferred-tunable +

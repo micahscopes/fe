@@ -477,9 +477,9 @@ impl ImplTrait {
         support::child(self.syntax())
     }
 
-    /// Returns the optional `with <path>` anchor clause.
+    /// Returns the optional `with <path>` permit clause.
     /// `with a` in `impl<T> Foo for Bar<T> with a { .. }`
-    pub fn with_anchor(&self) -> Option<ImplTraitWith> {
+    pub fn with_permit(&self) -> Option<ImplTraitWith> {
         support::child(self.syntax())
     }
 }
@@ -498,12 +498,12 @@ impl ImplTraitAlias {
 }
 
 ast_node! {
-    /// `with <path>` — optional anchor clause on a trait impl.
+    /// `with <path>` — optional permit clause on a trait impl.
     pub struct ImplTraitWith,
     SK::ImplTraitWith,
 }
 impl ImplTraitWith {
-    /// Returns the anchor path node.
+    /// Returns the permit path node.
     /// `a` in `with a`. Stored unresolved (FCO T3).
     pub fn path(&self) -> Option<super::Path> {
         support::child(self.syntax())
@@ -1225,31 +1225,31 @@ mod tests {
 
     #[test]
     #[wasm_bindgen_test]
-    fn impl_trait_with_anchor() {
-        // The optional trailing `with <path>` anchor clause parses and the
+    fn impl_trait_with_permit() {
+        // The optional trailing `with <path>` permit clause parses and the
         // path is exposed unresolved (FCO T3).
-        let with_anchor = r#"
+        let with_permit = r#"
             impl Trait::Foo for (i32) with a {
                 fn foo(self) -> u32 { return 1 };
             }"#;
-        let i: ImplTrait = parse_item(with_anchor);
+        let i: ImplTrait = parse_item(with_permit);
         assert!(i.trait_ref().is_some());
         assert!(matches!(i.ty().unwrap().kind(), TypeKind::Tuple(_)));
-        // No alias on this impl, only the anchor.
+        // No alias on this impl, only the permit.
         assert!(i.alias().is_none());
-        let anchor = i.with_anchor().expect("expected `with <path>` anchor");
-        let path = anchor.path().expect("expected anchor path");
+        let permit = i.with_permit().expect("expected `with <path>` permit");
+        let path = permit.path().expect("expected permit path");
         assert_eq!(path.text().to_string(), "a");
-        // Body is still parsed normally after the anchor.
+        // Body is still parsed normally after the permit.
         assert!(i.item_list().is_some());
 
-        // The plain form has no anchor.
-        let without_anchor = r#"
+        // The plain form has no permit.
+        let without_permit = r#"
             impl Trait::Foo for (i32) {
                 fn foo(self) -> u32 { return 1 };
             }"#;
-        let j: ImplTrait = parse_item(without_anchor);
-        assert!(j.with_anchor().is_none());
+        let j: ImplTrait = parse_item(without_permit);
+        assert!(j.with_permit().is_none());
     }
 
     #[test]

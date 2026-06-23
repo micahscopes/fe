@@ -12,12 +12,12 @@
 //   uses is asserted in cascade_unscoped_default.fe / cascade_scoped_override.fe;
 //   here we just prove COEXISTENCE.
 // DRIVEN-BY: C3c-3 (the demotion flip — the non-canonical branch of the
-//   `goal_is_canonical` conflict gate now permits a second impl).
+//   `is_single_impl` conflict gate now permits a second impl).
 // SURFACE: no impl is ever NAMED. `#[derive(Eq)]` mints the default; a plain
 //   `impl Eq for Speaker` is the override. The internal default/override
 //   discriminator is CoreDerives-origin (`implementor_is_default_marked`).
 //
-// `Eq` is non-canonical (`goal_is_canonical` is false for `core::ops::Eq`): it is
+// `Eq` is non-canonical (`is_single_impl` is false for `core::ops::Eq`): it is
 // NOT in the { AbiSize, Encode, Decode, StorageKey } money-floor set, so a second
 // impl is permitted.
 

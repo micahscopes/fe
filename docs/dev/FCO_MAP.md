@@ -52,7 +52,7 @@ at the **kind** level (∀, instantiate-only), never at the **solver** level (�
 1. **T1.1 — recognizer collapse.** One predicate recognizes the `Fix`/`Evidence`/`ImplBuilder`/
    `Reflect`/`Derive` family by resolved `core::derive` identity. Byte-identical. Includes the
    `Some`-branch determinism cleanup.
-2. **T1.2 — the `Fix` floor (byte-identical).** Wire `goal_is_canonical` LIVE so canonical goals stay
+2. **T1.2 — the `Fix` floor (byte-identical).** Wire `is_single_impl` LIVE so canonical goals stay
    exactly-one and `5-0001` fires; remove the `allow(dead_code)`. The smallest, money-risk-closing rung.
 3. **T2 — the keystone (parallel long-pole).** Content-keyed stable identity for generated impls. The
    one open soundness frontier (downstream-constructed `Body`/`TrackedItemId` identity stability —

@@ -886,11 +886,11 @@ pub(crate) fn does_impl_trait_conflict<'db>(
 /// consumed. The coherence demotion that turns "the goal is NON-canonical" into
 /// "a second impl is permitted (provider-overridable)" is increment C3c-3, which
 /// flips only the non-canonical branch. The unit test
-/// `goal_is_canonical_keys_on_resolved_identity_not_name` exercises the v1 set
+/// `is_single_impl_keys_on_resolved_identity_not_name` exercises the v1 set
 /// (StorageKey / AbiSize = true) and the non-canonical cases (Ord / Eq /
 /// user-defined = false), each via a real trait resolution so neither arm passes
 /// vacuously.
-pub(crate) fn goal_is_canonical<'db>(db: &'db dyn HirAnalysisDb, trait_def: Trait<'db>) -> bool {
+pub(crate) fn is_single_impl<'db>(db: &'db dyn HirAnalysisDb, trait_def: Trait<'db>) -> bool {
     let Some(name) = trait_def.name(db).to_opt() else {
         return false;
     };
@@ -1056,7 +1056,7 @@ impl<'db> TraitInstId<'db> {
 mod tests {
     use camino::Utf8PathBuf;
 
-    use super::{check_reresolution_determinism, goal_is_canonical, impls_for_trait_def};
+    use super::{check_reresolution_determinism, impls_for_trait_def, is_single_impl};
     use crate::analysis::name_resolution::{PathRes, resolve_path};
     use crate::analysis::ty::trait_resolution::PredicateListId;
     use crate::hir_def::{ItemKind, PathId};
@@ -1157,8 +1157,8 @@ impl<T> Foo for T where T: Marker {}
     /// Resolve `path` (as segment strings) from `file`'s top-module scope to its
     /// trait def, asserting it resolves to a TRAIT (anti-vacuous: a non-`Trait`
     /// resolution — or a failure — would make either polarity of the canonical
-    /// check pass for free), then return `goal_is_canonical` for that def.
-    fn resolve_goal_is_canonical(
+    /// check pass for free), then return `is_single_impl` for that def.
+    fn resolve_is_single_impl(
         db: &mut HirAnalysisTestDb,
         file_name: &str,
         text: &str,
@@ -1173,7 +1173,7 @@ impl<T> Foo for T where T: Marker {}
             Ok(PathRes::Trait(inst)) => inst.def(db),
             res => panic!("expected {path:?} to resolve to a trait, got {res:?}"),
         };
-        goal_is_canonical(db, trait_def)
+        is_single_impl(db, trait_def)
     }
 
     /// FCO slide C3a: the canonical-recognition predicate keys on the FULL
@@ -1188,17 +1188,17 @@ impl<T> Foo for T where T: Marker {}
     /// traits in the SAME `Core` ingot but are NOT in the allowlist (confirming
     /// Ord is deliberately non-canonical in v1), and a LOCAL `trait AbiSize {}`
     /// declared in the fixture — same spelling, `Local` ingot — is NOT canonical.
-    /// `resolve_goal_is_canonical` asserts each path resolves to a real trait, so
+    /// `resolve_is_single_impl` asserts each path resolves to a real trait, so
     /// neither arm can pass vacuously.
     #[test]
-    fn goal_is_canonical_keys_on_resolved_identity_not_name() {
+    fn is_single_impl_keys_on_resolved_identity_not_name() {
         // Positive: storage-layout — std::evm::StorageKey.
         let mut db = HirAnalysisTestDb::default();
         assert!(
-            resolve_goal_is_canonical(
+            resolve_is_single_impl(
                 &mut db,
-                "goal_is_canonical_storage_key.fe",
-                "struct Anchor {}\n",
+                "is_single_impl_storage_key.fe",
+                "struct ImplPermit {}\n",
                 &["std", "evm", "StorageKey"],
             ),
             "std::evm::StorageKey (storage-layout) must be canonical in v1"
@@ -1207,10 +1207,10 @@ impl<T> Foo for T where T: Marker {}
         // Positive: ABI-layout — core::abi::AbiSize.
         let mut db = HirAnalysisTestDb::default();
         assert!(
-            resolve_goal_is_canonical(
+            resolve_is_single_impl(
                 &mut db,
-                "goal_is_canonical_abi_size.fe",
-                "struct Anchor {}\n",
+                "is_single_impl_abi_size.fe",
+                "struct ImplPermit {}\n",
                 &["core", "abi", "AbiSize"],
             ),
             "core::abi::AbiSize (ABI-layout) must be canonical in v1"
@@ -1220,10 +1220,10 @@ impl<T> Foo for T where T: Marker {}
         // in v1 (commonly customized via providers).
         let mut db = HirAnalysisTestDb::default();
         assert!(
-            !resolve_goal_is_canonical(
+            !resolve_is_single_impl(
                 &mut db,
-                "goal_is_canonical_ord.fe",
-                "struct Anchor {}\n",
+                "is_single_impl_ord.fe",
+                "struct ImplPermit {}\n",
                 &["core", "ops", "Ord"],
             ),
             "core::ops::Ord must be NON-canonical in v1"
@@ -1232,10 +1232,10 @@ impl<T> Foo for T where T: Marker {}
         // Negative: core::ops::Eq is also a real, non-canonical trait.
         let mut db = HirAnalysisTestDb::default();
         assert!(
-            !resolve_goal_is_canonical(
+            !resolve_is_single_impl(
                 &mut db,
-                "goal_is_canonical_eq.fe",
-                "struct Anchor {}\n",
+                "is_single_impl_eq.fe",
+                "struct ImplPermit {}\n",
                 &["core", "ops", "Eq"],
             ),
             "core::ops::Eq must be NON-canonical in v1"
@@ -1246,9 +1246,9 @@ impl<T> Foo for T where T: Marker {}
         // canonical. The identity is keyed on (name, defining-ingot), not name.
         let mut db = HirAnalysisTestDb::default();
         assert!(
-            !resolve_goal_is_canonical(
+            !resolve_is_single_impl(
                 &mut db,
-                "goal_is_canonical_local_abi_size.fe",
+                "is_single_impl_local_abi_size.fe",
                 "trait AbiSize {}\n",
                 &["AbiSize"],
             ),

@@ -852,10 +852,10 @@ impl super::Parse for ImplScope {
             parser.parse(ImplTraitAliasScope::default())?;
         }
 
-        // Optional trailing `with <path>` anchor clause on a trait impl (FCO
+        // Optional trailing `with <path>` permit clause on a trait impl (FCO
         // T3). `with` is a contextual identifier (not a reserved keyword), so
         // it is recognized via `is_ident` exactly like the `with` derive-
-        // provider scope. The path references an anchor value; it is parsed and
+        // provider scope. The path references a permit value; it is parsed and
         // stored unresolved (no name resolution / no selection at this
         // increment). Consumed in the SAME slot as `as Name`, after any alias
         // and before the where-clause/body, so the remaining recovery stack
@@ -907,7 +907,7 @@ impl super::Parse for ImplTraitWithScope {
         parser.set_newline_as_trivia(false);
         // `with` is a contextual identifier; consume it as the clause head.
         parser.bump();
-        // The anchor path is parsed but NOT resolved at this increment.
+        // The permit path is parsed but NOT resolved at this increment.
         parser.parse_or_recover(PathScope::default())?;
         Ok(())
     }

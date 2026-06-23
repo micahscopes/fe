@@ -8,13 +8,13 @@
 // PASS CRITERIA: a `5-0001` "conflicting trait implementations" diagnostic fires
 //   on the two `impl AbiSize for Token` blocks — canonical goals stay
 //   exactly-one (the money floor).
-// DRIVEN-BY: the money floor (`goal_is_canonical` gates the conflict path; the
+// DRIVEN-BY: the money floor (`is_single_impl` gates the conflict path; the
 //   canonical arm of the conflict gate is `conflict_allowed = false` and NEVER
 //   flips). This fixture LOCKS that invariant after the C3c-3 demotion landed.
 //
 // Why AbiSize is canonical: a wrong ABI-layout impl is a consensus break (a 2nd
 // impl could silently relocate the on-the-wire encoding). The canonical set keyed
-// by resolved (name, ingot) identity in `goal_is_canonical` is
+// by resolved (name, ingot) identity in `is_single_impl` is
 // { core::abi::AbiSize, Encode, Decode ; std::evm::storage_map::StorageKey }.
 // Unlike a NON-canonical trait (e.g. `core::ops::Eq`), where a derived default and
 // a hand-written override now COEXIST, a second canonical impl is forbidden.

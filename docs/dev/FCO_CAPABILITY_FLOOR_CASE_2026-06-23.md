@@ -4,7 +4,7 @@
 The audience is Sean and Yoshi: this is the sellable case, not an internal scratchpad. No emdashes.
 
 It supersedes the floor-ENFORCEMENT claims in `FCO_FIX_SURFACE_2026-06-22.md` (the "use-once falls out of
-affine `own` move" framing). The SURFACE in that doc (`anchor()`, `Anchor<G>`, `with a`, `AdmitAnchor<G>`,
+affine `own` move" framing). The SURFACE in that doc (`impl_permit()`, `ImplPermit<G>`, `with a`, `PermitAuthority<G>`,
 default-allow) stands unchanged and correct; only the claim that the move-checker enforces the floor is wrong,
 and is replaced here. Grounded in three read-only research spikes (#90 value-flow linearity, #91 compile-time
 execution at root, #92 done-properly comptime + effects-as-capabilities) and one design spike (#93 multitarget
@@ -22,7 +22,7 @@ affine machinery, and affine machinery wants a function body to run in), so here
 
 The design factors cleanly into two checks. Keeping them separate is the whole argument.
 
-- **Authority = an effect-carried capability.** `AdmitAnchor<G>` rides the existing effect system
+- **Authority = an effect-carried capability.** `PermitAuthority<G>` rides the existing effect system
   (`uses` / `resolve_effect_query`). It is minted once at the program root and delegated down (to the
   per-deployed-contract root for storage/ABI goals). The check is the ordinary effects-as-capabilities check:
   is the capability in scope at this site. It is LOCAL and per-site, and it is a presence test (>= 1 in scope),
@@ -35,7 +35,7 @@ The design factors cleanly into two checks. Keeping them separate is the whole a
   goal with no impl is fine), never linear (= 1, which would wrongly force every canonical goal to be
   implemented).
 
-An anchored impl is subject to both. A non-scarce capability-gated impl (a backend intrinsic, see section 6) is
+A permitted impl is subject to both. A non-scarce capability-gated impl (a backend intrinsic, see section 6) is
 subject to authority only. The two checks share no mutable state and never interleave, so they compose without
 interference.
 
@@ -97,8 +97,8 @@ sound system converges on.
 
 There is no literal token moved and discarded. The same guarantee is produced by two facts that cooperate:
 
-1. The authority is mintable once: for a held-back canonical goal, `AdmitAnchor<G>` is non-ambient (the
-   default-allow blanket excludes canonical goals, via the single predicate `goal_is_canonical`), so the only
+1. The authority is mintable once: for a single-impl canonical goal, `PermitAuthority<G>` is non-ambient (the
+   default-allow blanket excludes canonical goals, via the single predicate `is_single_impl`), so the only
    source is the root's single mint, delegated down.
 2. At most one establishment is admitted: the barrier count rejects a second establishment of the same canonical
    goal.
@@ -107,13 +107,13 @@ Fact 2 is load-bearing precisely BECAUSE the effect grant in fact 1 is non-linea
 discharge two impls' obligations). Naming that is what makes the design honest rather than hand-wavy: the effect
 system gives authority; the count gives scarcity; neither alone is the floor.
 
-## 6. The unification: anchors are instance #1 of capability-gated establishment
+## 6. The unification: permits are instance #1 of capability-gated establishment
 
 The reason this is worth the trouble is that the canonical floor stops being a bespoke branch in the coherence
 checker and becomes an instance of one general mechanism: **establishment of an impl is gated on holding
 effect-carried capabilities, with scarcity an optional extra layer for the subset that needs it.**
 
-- **Anchors:** authority (`AdmitAnchor<G>`) + scarcity (<= 1). The money floor.
+- **Permits:** authority (`PermitAuthority<G>`) + scarcity (<= 1). The money floor.
 - **Backend intrinsics (the second instance, see #93):** authority only. An intrinsic declares
   `uses (t: EvmIntrinsics)`; the toolchain seeds the selected target's capability at the root; an impl/call is
   admitted only where that capability is in scope. Per-target exclusivity falls out for free (only one target's
@@ -133,9 +133,9 @@ constraints it proves, so the floor work does not paint us into a corner:
 - **The root-mint is the spine, and it already exists.** Target selection is already "which type fills
   `<Target as core::contracts::Target>::RootEffect`," seeded as the sole `RootProviderRegistration`
   (`provider.rs:117-131`, consumed at `semantic/mod.rs:434-452`). The ambient tail already has a
-  runtime-valueless authority resolution class (`AmbientGrant`). So intrinsic capabilities and `AdmitAnchor<G>`
+  runtime-valueless authority resolution class (`AmbientGrant`). So intrinsic capabilities and `PermitAuthority<G>`
   are two occupants of the same tail and two consumers of the same root seed. Build the mint generic, not
-  anchor-specific: inc5 should be "capability-generic root mint," with anchors contributing only the
+  permit-specific: inc5 should be "capability-generic root mint," with permits contributing only the
   canonical-ness flag.
 
 - **Authority is multiple; scarcity is <= 1; never conflate them.** The use-grant must stay non-linear (two call
@@ -156,8 +156,8 @@ Capability-gating that can admit a SECOND impl of a goal whose downstream semant
 classic global-uniqueness unsoundness: two `Ord` instances merging two `Set`s into a corrupted structure
 (ezyang's coherence/confluence/global-uniqueness note; the same hazard motivates Rust coherence). The scarcity
 layer is the backstop that prevents this, and the goals that need it are exactly the canonical ones (storage /
-ABI, whose layout other code trusts to be singular). So drawing the <= 1 line at `goal_is_canonical` is not
-arbitrary: it is precisely the set whose correctness depends on uniqueness. Anchors-as-the-scarce-special-case
+ABI, whose layout other code trusts to be singular). So drawing the <= 1 line at `is_single_impl` is not
+arbitrary: it is precisely the set whose correctness depends on uniqueness. Permits-as-the-scarce-special-case
 is the right place to draw the line, not a kludge.
 
 ## 9. What this changes for the build (#83 inc4 onward)
@@ -166,9 +166,9 @@ The increment ordering in `FCO_FIX_SURFACE_2026-06-22.md` is right; the ENFORCEM
 Corrections:
 
 - **inc4 is a count, not a use-after-move.** Flip the canonical branch at the establish gate so it consults
-  (a) authorization (does this impl hold a matching `Anchor<G>` / capability, a per-HIR-node + path-resolution
+  (a) authorization (does this impl hold a matching `ImplPermit<G>` / capability, a per-HIR-node + path-resolution
   check, scope-free) and (b) the <= 1 count over `ingot_trait_env.impls` for the canonical goal (reusing the
-  existing overlap loop verdict). Add the "canonical, unanchored" diagnostic. Drop the "double-consume
+  existing overlap loop verdict). Add the "canonical, unpermitted" diagnostic. Drop the "double-consume
   use-after-move fixture"; replace it with a "second canonical establishment" count fixture, plus the
   generated-impl + explicit-impl convergence fixture (section below).
 - **The convergence fixture is mandatory.** CTFE-generated impls and hand-written impls already converge into
@@ -182,9 +182,9 @@ Corrections:
 - **inc5 builds the mint generic** (section 7).
 - **inc6 deletes the coherence special-case last**, once inc4 demonstrably holds the floor and the overlap check
   still rejects non-default overlap.
-- **Drop the affine-VALUE requirements** (the surface doc's "keep `Anchor` out of `as_capability` or the affine
-  floor turns off" / D2). The floor is not the move-checker, so `Anchor`'s `as_capability` status is irrelevant
-  to it. (Leaving `Anchor` a plain struct is still fine; it just is not load-bearing for the floor.)
+- **Drop the affine-VALUE requirements** (the surface doc's "keep `ImplPermit` out of `as_capability` or the affine
+  floor turns off" / D2). The floor is not the move-checker, so `ImplPermit`'s `as_capability` status is irrelevant
+  to it. (Leaving `ImplPermit` a plain struct is still fine; it just is not load-bearing for the floor.)
 
 ## 10. Honest caveats
 
@@ -195,7 +195,7 @@ Corrections:
   step.
 - **Intrinsic-provision uniqueness, pre-Sketch-C, is a Rust-side invariant.** Today the opcode binding is a
   hardcoded Rust path-match (`corelib.rs`), implicitly unique (one arm per path). Until/unless intrinsic
-  provision is modeled as a counted provider trait (#93 Sketch C, behind `goal_is_canonical`), "one provider per
+  provision is modeled as a counted provider trait (#93 Sketch C, behind `is_single_impl`), "one provider per
   (intrinsic, target)" is not a Fe-checked property for non-canonical intrinsics. Flagged, not solved; not
   needed for the first slice.
 - **Evidence provenance.** The PL precedent in #90/#91/#92 was gathered under WebFetch returning HTTP 403, so it
@@ -259,12 +259,12 @@ self-report.
     canonical goal/type both reach the gate and conflict. VALIDATION: the fixture errors as a conflict, with a
     snap; this LOCKS the generated+explicit uniformity (which expansion already provides:
     `lower/expansion.rs` folds generated impls into `all_items` -> `ingot_trait_env`).
-  - (b) **Authorization recognition (live but not yet mandatory).** Turn the `_anchor_capability_present`
-    recognition seam (`mod.rs:4012`) into a real per-impl-node check: resolve `self.hir_anchor` against an
-    `Anchor<G>` matching the goal. Recorded, not enforced. VALIDATION: a fixture shows an anchored canonical
+  - (b) **Authorization recognition (live but not yet mandatory).** Turn the `_impl_permit_capability_present`
+    recognition seam (`mod.rs:4012`) into a real per-impl-node check: resolve `self.hir_impl_permit` against an
+    `ImplPermit<G>` matching the goal. Recorded, not enforced. VALIDATION: a fixture shows a permitted canonical
     impl (on a currently-grantable goal) is recognized as authorized; `cascade_canonical_floor` stays green.
-  - **Sequencing note (why mandate waits):** making anchoring MANDATORY for canonical goals (plus the
-    "canonical, unanchored" diagnostic) must wait for inc5, because the mint for a held-back canonical goal does
+  - **Sequencing note (why mandate waits):** making permitting MANDATORY for canonical goals (plus the
+    "canonical, unpermitted" diagnostic) must wait for inc5, because the mint for a single-impl canonical goal does
     not exist yet. Forcing it now would break std's existing canonical impls (AbiSize/Encode/...), which carry
     no `with a` and cannot obtain one until root delegation lands.
 
@@ -276,11 +276,11 @@ self-report.
   borrowck-on-provider-bodies treatment; it is unnecessary for the current command-program model and only becomes
   relevant if providers grow into full Fe bodies (the #89 ergonomics convergence).
 
-- **inc5 (generic root mint + mandate).** Build the mint CAPABILITY-GENERIC (so `AdmitAnchor<G>` and intrinsic
-  capabilities share it), seeded at `RootProvider`, delegated to the contract root. Flip canonical anchoring to
-  MANDATORY + add the "canonical, unanchored" diagnostic. VALIDATION: (i) a held-back canonical impl with a
-  minted+delegated anchor compiles; (ii) an unanchored canonical impl errors with the new diagnostic; (iii) std
-  builds green (existing canonical impls now anchored via the mint). INTEGRATION CONSTRAINT (validate
+- **inc5 (generic root mint + mandate).** Build the mint CAPABILITY-GENERIC (so `PermitAuthority<G>` and intrinsic
+  capabilities share it), seeded at `RootProvider`, delegated to the contract root. Flip canonical permitting to
+  MANDATORY + add the "canonical, unpermitted" diagnostic. VALIDATION: (i) a single-impl canonical impl with a
+  minted+delegated permit compiles; (ii) an unpermitted canonical impl errors with the new diagnostic; (iii) std
+  builds green (existing canonical impls now permitted via the mint). INTEGRATION CONSTRAINT (validate
   explicitly): the gate filters impls by in-scope capability BEFORE the overlap loop, pinned by a backend-variant
   fixture (two impls of the same goal/type gated on different target capabilities do NOT falsely conflict).
 
@@ -308,4 +308,4 @@ where touched), run inline, snap diff = 0 beyond intended, before any commit.
   generic inc5 shape and the filter-before-overlap integration constraint.
 - Design spike #93 (`tasks/a56095...`): multitarget intrinsics as root effect objects; the `Target::RootEffect`
   spine is already real; intrinsic capability = second occupant of the same ambient tail; scarcity (Sketch C)
-  only behind `goal_is_canonical`.
+  only behind `is_single_impl`.

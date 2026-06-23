@@ -183,8 +183,8 @@ enum EffectResolution<'db> {
     BlockedByBarrier,
     /// The obligation is discharged ambiently with NO backing provider value, so
     /// no call-site provider argument is threaded. Today this is ONLY the
-    /// default-allow grant for an `AdmitAnchor<G>` capability of an ordinary
-    /// (non-one-of-a-kind) goal `G` (the prelude `anchor()` mint): a compile-time
+    /// default-allow grant for a `PermitAuthority<G>` capability of an ordinary
+    /// (non-one-of-a-kind) goal `G` (the prelude `impl_permit()` mint): a compile-time
     /// capability that authorizes the mint but has no runtime value. It is treated
     /// like a satisfied effect that contributes no `ResolvedEffectArg`.
     AmbientGrant,
@@ -1717,8 +1717,8 @@ impl<'db> TyChecker<'db> {
         // return type unifies with `expected` only after this call returns
         // (`check_expr_with_result_context`), which is AFTER effects are resolved,
         // so an effect key mentioning a return-only generic param (e.g.
-        // `anchor() -> Anchor<G> uses (grant: AdmitAnchor<G>)`, where `G` is fixed
-        // only by `let a: Anchor<Eq<Foo>>`) would still be an unbound inference
+        // `impl_permit() -> ImplPermit<G> uses (grant: PermitAuthority<G>)`, where `G` is fixed
+        // only by `let a: ImplPermit<Eq<Foo>>`) would still be an unbound inference
         // var at the effect query and the per-goal grant could not be decided.
         // The unify is snapshot-guarded and rolled back on failure, so the later
         // unify (which emits any type-mismatch diagnostic) is untouched: for a
@@ -2052,7 +2052,7 @@ impl<'db> TyChecker<'db> {
                     });
                 }
                 EffectResolution::BlockedByBarrier => {}
-                // Ambiently granted (default-allow `AdmitAnchor<G>` for an
+                // Ambiently granted (default-allow `PermitAuthority<G>` for an
                 // ordinary goal): satisfied with no backing provider value, so no
                 // `ResolvedEffectArg` is threaded and no diagnostic is emitted.
                 EffectResolution::AmbientGrant => {}
@@ -2186,15 +2186,15 @@ impl<'db> TyChecker<'db> {
         let _ = (func, call_span);
         // Ambient fallback (the `RootProvider`-equivalent point after every live
         // `with` / `uses` frame missed): the DEFAULT-ALLOW grant for the prelude
-        // `anchor()` mint. An `AdmitAnchor<G>` capability obligation for an
+        // `impl_permit()` mint. A `PermitAuthority<G>` capability obligation for an
         // ordinary (non-one-of-a-kind) goal `G` is granted ambiently here, keyed
         // ONLY on the query's resolved carrier identity + the single
-        // `goal_is_canonical` predicate (no scope read), so a one-of-a-kind goal
+        // `is_single_impl` predicate (no scope read), so a one-of-a-kind goal
         // stays `Missing` and reports `8-0036`. `G` is extracted from the
-        // `AdmitAnchor<G>` type-query carrier (folded to its inferred instance).
+        // `PermitAuthority<G>` type-query carrier (folded to its inferred instance).
         if let Some(carrier) = self.query_type_key(&query.key) {
             let carrier = self.table.fold_ty(self.db, carrier);
-            if crate::analysis::ty::provider_goal::admit_anchor_grant_default_allowed(
+            if crate::analysis::ty::provider_goal::permit_authority_default_allowed(
                 self.db, carrier,
             ) {
                 return EffectResolution::AmbientGrant;

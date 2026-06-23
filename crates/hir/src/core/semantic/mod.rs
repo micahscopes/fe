@@ -81,8 +81,8 @@ use crate::analysis::ty::layout_holes::{
     substitute_layout_holes_by_identity_in, substitute_layout_placeholders_by_identity,
 };
 use crate::analysis::ty::trait_def::{
-    ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict, goal_is_canonical,
-    ingot_trait_env,
+    ImplementorId, ImplementorOrigin, TraitInstId, does_impl_trait_conflict, ingot_trait_env,
+    is_single_impl,
 };
 use crate::analysis::ty::trait_lower::{TraitRefLowerError, lower_trait_ref};
 use crate::analysis::ty::trait_resolution::constraint::{
@@ -3989,28 +3989,28 @@ impl<'db> ImplTrait<'db> {
         // coherence conflict (`5-0001`) — overlap is a genuine hazard, not a
         // cascade default+override pair. Canonical goals (the money floor) ALWAYS
         // reject a second impl.
-        let canonical = goal_is_canonical(db, trait_.def(db));
+        let canonical = is_single_impl(db, trait_.def(db));
 
-        // C3c Anchor-floor (T1.2, LATENT seam): recognize, via the unified
-        // resolved-identity recognizer (`anchor_capability_in_scope`, T1.1's live
-        // `CoreDeriveItem::Anchor` arm), whether the unforgeable one-of-a-kind
-        // capability `core::derive::Anchor` is present for this goal's coherence
+        // C3c ImplPermit-floor (T1.2, LATENT seam): recognize, via the unified
+        // resolved-identity recognizer (`impl_permit_capability_in_scope`, T1.1's live
+        // `CoreDeriveItem::ImplPermit` arm), whether the unforgeable one-of-a-kind
+        // capability `core::derive::ImplPermit` is present for this goal's coherence
         // floor. RECOGNITION ONLY: this is computed and DELIBERATELY NOT BRANCHED ON
         // (the `let _` makes that explicit), mirroring the C3c-1 byte-identical
         // landing: the seam is planted and the recognizer genuinely consumed,
         // behavior unchanged.
         //
-        // The actual Anchor-GATING (turning "an `Anchor<goal>` is in scope" into a
+        // The actual ImplPermit-GATING (turning "an `ImplPermit<goal>` is in scope" into a
         // permitted established impl) is a later increment, and it does NOT belong
         // here: this floor's job is existence-scarcity (coherence), and its salsa key
         // must stay scope-free (`trait_resolution/mod.rs:103-167`), so the per-call
         // decision must NOT become a scope-keyed tracked query at this query. Later
-        // increments must wire any anchor against the LIVE `MethodSelection` /
+        // increments must wire any permit against the LIVE `MethodSelection` /
         // `scoped_selection_exprs` verify-leg seam (`ty_check/env.rs`), NOT the
         // always-empty `discharge_from_scoped_provision` /
         // `snapshot_evidence_provisions` path (deletion survey knot #4).
-        let _anchor_capability_present =
-            crate::analysis::ty::provider_goal::anchor_capability_in_scope(db, self.scope());
+        let _impl_permit_capability_present =
+            crate::analysis::ty::provider_goal::impl_permit_capability_in_scope(db, self.scope());
 
         let env = ingot_trait_env(db, self.top_mod(db).ingot(db));
         if let Some(impls) = env.impls.get(&trait_.def(db)) {

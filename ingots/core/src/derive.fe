@@ -53,60 +53,60 @@ pub struct Evidence<G: Constraint> {
 
 /// Permission to establish the one allowed impl of a one-of-a-kind goal `T`.
 ///
-/// `Anchor<T>` is the compile-time TOKEN that authorizes establishing the single
+/// `ImplPermit<T>` is the compile-time TOKEN that authorizes establishing the single
 /// canonical impl of a one-of-a-kind constraint `T`. This increment adds the type
 /// ONLY: it is INERT, nothing mints it and nothing consumes its authority yet
-/// (minting-at-root, the establish gate, and the held-back flow are later
+/// (minting-at-root, the establish gate, and the single-impl flow are later
 /// increments). It exists now so the compiler can recognize the capability by
-/// RESOLVED IDENTITY (`core::derive::Anchor`) ahead of that wiring.
+/// RESOLVED IDENTITY (`core::derive::ImplPermit`) ahead of that wiring.
 ///
 /// UNFORGEABILITY (construction blocked). Like `Evidence` / `ImplBuilder`,
-/// `Anchor` has ONLY a private field (`handle: u256`) and NO public constructor,
+/// `ImplPermit` has ONLY a private field (`handle: u256`) and NO public constructor,
 /// and it is deliberately NOT in the prelude. Therefore no ordinary expression,
-/// in any ingot, can mint an `Anchor<T>` value: there is no `Anchor { .. }`
+/// in any ingot, can mint an `ImplPermit<T>` value: there is no `ImplPermit { .. }`
 /// literal it can write (the field is private) and no associated/free constructor
-/// to call. An `Anchor<T>` can only ever be bound as a compile-time value by the
+/// to call. An `ImplPermit<T>` can only ever be bound as a compile-time value by the
 /// compiler itself. This is the same proof shape that makes `Evidence`
 /// unforgeable; capture/propagation of the bound capability is a later increment's
 /// concern and out of scope here.
 ///
 /// `T` is a CONSTRAINT (the one-of-a-kind goal), not an ordinary `*`-kinded type,
-/// so its param is `Constraint`-kinded, i.e. `Anchor : Constraint -> *` (mirrors
+/// so its param is `Constraint`-kinded, i.e. `ImplPermit : Constraint -> *` (mirrors
 /// `Evidence` / `ImplBuilder`, FCO K04b). A saturated concrete constraint
 /// (`Eq<T>`) lowers through the ordinary type walk to a `Constraint`-kinded
 /// `ConstraintTerm`.
-pub struct Anchor<T: Constraint> {
+pub struct ImplPermit<T: Constraint> {
     handle: u256
 }
 
-/// Authority to mint an `Anchor<G>` for a held-back goal `G`. Recognized by
-/// RESOLVED IDENTITY (`core::derive::AdmitAnchor`). It has no constructor and is
+/// Authority to mint an `ImplPermit<G>` for a single-impl goal `G`. Recognized by
+/// RESOLVED IDENTITY (`core::derive::PermitAuthority`). It has no constructor and is
 /// not in the prelude, so ordinary code can never forge it; it is satisfied as a
 /// `uses (..)` capability obligation, never materialized as a runtime value.
 ///
-/// For an ORDINARY (non-one-of-a-kind) goal `G`, `AdmitAnchor<G>` discharges
-/// ambiently (default-allow): minting an `Anchor<G>` via `anchor()` is free. For
-/// a one-of-a-kind (canonical) goal there is NO ambient grant, so `anchor()`
-/// reports the ordinary missing-effect error unless an `AdmitAnchor<G>` was
+/// For an ORDINARY (non-one-of-a-kind) goal `G`, `PermitAuthority<G>` discharges
+/// ambiently (default-allow): minting an `ImplPermit<G>` via `impl_permit()` is free. For
+/// a one-of-a-kind (canonical) goal there is NO ambient grant, so `impl_permit()`
+/// reports the ordinary missing-effect error unless a `PermitAuthority<G>` was
 /// threaded in non-ambiently (a later increment). The default-allow rule shares
-/// the SINGLE `goal_is_canonical` predicate with the establish-gate floor.
-pub struct AdmitAnchor<G: Constraint> {
+/// the SINGLE `is_single_impl` predicate with the establish-gate floor.
+pub struct PermitAuthority<G: Constraint> {
     handle: u256
 }
 
 extern {
-    /// Mint the `Anchor<G>` that authorizes establishing the one allowed impl of
+    /// Mint the `ImplPermit<G>` that authorizes establishing the one allowed impl of
     /// the goal `G`. It is bodyless (an `extern const fn`, like `size_of` /
-    /// `panic`): an `Anchor<G>` is unforgeable, so no Fe body could construct one;
+    /// `panic`): an `ImplPermit<G>` is unforgeable, so no Fe body could construct one;
     /// the compiler binds the value at the compile-time call site. `G` is INFERRED
     /// from the binding/consume context (Fe has no turbofish), e.g.
-    /// `let a: Anchor<Eq<Foo>> = anchor()`.
+    /// `let a: ImplPermit<Eq<Foo>> = impl_permit()`.
     ///
-    /// The gate is the `uses (grant: AdmitAnchor<G>)` obligation, NOT the body:
+    /// The gate is the `uses (grant: PermitAuthority<G>)` obligation, NOT the body:
     /// for an ordinary goal `G` it discharges ambiently (free); for a one-of-a-
-    /// kind (canonical) goal it stays unsatisfied and calling `anchor()` reports
+    /// kind (canonical) goal it stays unsatisfied and calling `impl_permit()` reports
     /// the ordinary missing-effect error.
-    pub const fn anchor<G: Constraint>() -> Anchor<G> uses (grant: AdmitAnchor<G>)
+    pub const fn impl_permit<G: Constraint>() -> ImplPermit<G> uses (grant: PermitAuthority<G>)
 }
 
 /// The derive-provider trait. A provider `impl Derive<P> for Name` (with goal

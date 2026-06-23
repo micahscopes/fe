@@ -420,8 +420,8 @@ pub enum SyntaxKind {
     ImplTrait,
     /// `as Name` — optional alias on a trait impl (`impl Trait for Foo as Name`)
     ImplTraitAlias,
-    /// `with <path>` — optional anchor clause on a trait impl
-    /// (`impl Trait for Foo with a`). The path references an anchor value and
+    /// `with <path>` — optional permit clause on a trait impl
+    /// (`impl Trait for Foo with a`). The path references a permit value and
     /// is stored unresolved (FCO T3).
     ImplTraitWith,
     /// `with StableEq { derive Eq for Foo }`
@@ -790,7 +790,7 @@ impl SyntaxKind {
             SyntaxKind::TraitConstItem => "`trait` const item",
             SyntaxKind::ImplTrait => "`impl` trait block",
             SyntaxKind::ImplTraitAlias => "`impl` trait alias",
-            SyntaxKind::ImplTraitWith => "`impl` trait anchor clause",
+            SyntaxKind::ImplTraitWith => "`impl` trait permit clause",
             SyntaxKind::DeriveProviderScope => "derive provider selection scope",
             SyntaxKind::DeriveDecl => "derive declaration",
             SyntaxKind::Const => "const definition",

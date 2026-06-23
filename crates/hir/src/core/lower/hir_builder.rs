@@ -450,7 +450,7 @@ where
             consts,
             // Synthesized/generated impls carry no user-facing `as Name` alias.
             None,
-            // Synthesized/generated impls carry no user-facing `with <path>` anchor.
+            // Synthesized/generated impls carry no user-facing `with <path>` permit.
             None,
             self.top_mod(),
             origin,

@@ -78,5 +78,5 @@ Three coordinated sites consume it (each a clean generalization; byte-identical 
 
 ## Non-goals / boundaries
 - Does NOT touch the abstract-head cliff (`P : * -> Constraint`) — N-way *selection* is fully concrete.
-- Canonical/money-floor goals stay exactly-one (selection never applies; `goal_is_canonical` floor holds).
+- Canonical/money-floor goals stay exactly-one (selection never applies; `is_single_impl` floor holds).
 - Does NOT re-introduce the deleted colon-overload grammar (#87) — `as Name` is the new spelling.

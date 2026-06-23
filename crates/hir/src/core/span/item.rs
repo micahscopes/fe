@@ -399,7 +399,7 @@ define_lazy_span_node!(
         (trait_ref, trait_ref, LazyTraitRefSpan),
         (ty, ty, LazyTySpan),
         (alias, alias, LazyImplTraitAliasSpan),
-        (anchor, with_anchor, LazyImplTraitWithSpan),
+        (impl_permit, with_permit, LazyImplTraitWithSpan),
         (item_list, item_list, LazyTraitItemListSpan),
     }
 );
@@ -413,10 +413,10 @@ impl<'db> LazyImplTraitSpan<'db> {
         self.alias().name()
     }
 
-    /// Span of the optional `with <path>` anchor path (FCO T3). For inc4
+    /// Span of the optional `with <path>` permit path (FCO T3). For inc4
     /// diagnostics; the path itself is stored unresolved.
-    pub fn anchor_path(self) -> LazyPathSpan<'db> {
-        self.anchor().path()
+    pub fn impl_permit_path(self) -> LazyPathSpan<'db> {
+        self.impl_permit().path()
     }
 
     pub fn associated_type(self, idx: usize) -> LazyTraitTypeSpan<'db> {

@@ -381,15 +381,15 @@ fn path_head_resolves_to_capability<'db>(
 /// one [`CoreDeriveItem`] SET by the same (name + `core::derive` qualifier)
 /// resolved identity.
 ///
-/// The [`CoreDeriveItem::Anchor`] arm is RECOGNIZED here (part of the SET) but
+/// The [`CoreDeriveItem::ImplPermit`] arm is RECOGNIZED here (part of the SET) but
 /// not yet CONSUMED by the production path: the establish gate that turns "scope
-/// holds a `core::derive::Anchor`" into authority is a later FCO increment. The
-/// companion proof that no `Anchor<T>` value can be CONSTRUCTED (private field, no
-/// ctor, not in prelude) lives on the `Anchor` type in
+/// holds a `core::derive::ImplPermit`" into authority is a later FCO increment. The
+/// companion proof that no `ImplPermit<T>` value can be CONSTRUCTED (private field, no
+/// ctor, not in prelude) lives on the `ImplPermit` type in
 /// `ingots/core/src/derive.fe`. The unit test
 /// `scope_is_core_derive_item_keys_on_core_identity_not_name` exercises the
-/// `Anchor` positive (`core::derive::Anchor`) and negative (a local
-/// `struct Anchor<T>`) cases.
+/// `ImplPermit` positive (`core::derive::ImplPermit`) and negative (a local
+/// `struct ImplPermit<T>`) cases.
 fn scope_is_core_derive_item<'db>(
     db: &'db dyn HirAnalysisDb,
     def_scope: ScopeId<'db>,
@@ -413,36 +413,36 @@ fn scope_is_core_derive_item<'db>(
     module_is_derive && in_core
 }
 
-/// Whether the unforgeable one-of-a-kind capability `core::derive::Anchor` is
+/// Whether the unforgeable one-of-a-kind capability `core::derive::ImplPermit` is
 /// RESOLVABLE from `scope` by its canonical resolved identity (the SAME unified
 /// recognizer, path resolution + [`scope_is_core_derive_item`], exercised by
 /// `scope_is_core_derive_item_keys_on_core_identity_not_name`, NOT a bare-name
-/// match): the `Anchor` path must resolve to a type whose def scope is
-/// `core`-ingot `derive::Anchor`. A like-named local `struct Anchor<T>` (no
-/// `use core::derive::Anchor`) resolves elsewhere and is NOT recognized.
+/// match): the `ImplPermit` path must resolve to a type whose def scope is
+/// `core`-ingot `derive::ImplPermit`. A like-named local `struct ImplPermit<T>` (no
+/// `use core::derive::ImplPermit`) resolves elsewhere and is NOT recognized.
 ///
-/// This is the floor-side RECOGNITION primitive for the FCO one-of-a-kind anchor
-/// (T1.1 made the `CoreDeriveItem::Anchor` arm of the recognizer SET live). It
-/// answers only "is the anchor mechanism present in this resolution context",
-/// keyed on the goal-INDEPENDENT canonical `Anchor` identity, exactly like
-/// `goal_is_canonical` keys on the trait def, NOT on a per-call provision. It does
-/// NOT, and must NOT, consult any in-scope `Anchor<goal>` PROVISION/selection:
+/// This is the floor-side RECOGNITION primitive for the FCO one-of-a-kind permit
+/// (T1.1 made the `CoreDeriveItem::ImplPermit` arm of the recognizer SET live). It
+/// answers only "is the permit mechanism present in this resolution context",
+/// keyed on the goal-INDEPENDENT canonical `ImplPermit` identity, exactly like
+/// `is_single_impl` keys on the trait def, NOT on a per-call provision. It does
+/// NOT, and must NOT, consult any in-scope `ImplPermit<goal>` PROVISION/selection:
 /// that is the per-call decision, which lives at the LIVE verify-leg
 /// (`MethodSelection` / `scoped_selection_exprs`), never at this coherence floor
 /// (whose salsa key must stay scope-free, see `trait_resolution/mod.rs:103-167`).
-pub(crate) fn anchor_capability_in_scope<'db>(
+pub(crate) fn impl_permit_capability_in_scope<'db>(
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
 ) -> bool {
-    let anchor_path = PathId::from_segments(db, &["core", "derive", "Anchor"]);
+    let impl_permit_path = PathId::from_segments(db, &["core", "derive", "ImplPermit"]);
     let assumptions = PredicateListId::empty_list(db);
-    let Ok(PathRes::Ty(ty)) = resolve_path(db, anchor_path, scope, assumptions, false) else {
+    let Ok(PathRes::Ty(ty)) = resolve_path(db, impl_permit_path, scope, assumptions, false) else {
         return false;
     };
     let Some(def_scope) = ty.as_scope(db) else {
         return false;
     };
-    scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Anchor)
+    scope_is_core_derive_item(db, def_scope, CoreDeriveItem::ImplPermit)
 }
 
 /// If `ty` is a saturated `core::derive::Evidence<G>` witness value — recognized
@@ -479,30 +479,30 @@ pub(crate) fn evidence_witnessed_goal<'db>(
     }
 }
 
-/// If `ty` is a saturated `core::derive::AdmitAnchor<G>` capability — recognized
+/// If `ty` is a saturated `core::derive::PermitAuthority<G>` capability — recognized
 /// by the RESOLVED identity of its head ADT (the same `core` ingot + `derive`
 /// module + name check as [`scope_is_core_derive_item`], NOT the bare spelling)
 /// and whose single type argument `G` is a concrete `ConstraintTerm` — return the
 /// inner goal `G`'s [`TraitInstId`].
 ///
-/// This is the `AdmitAnchor` sibling of [`evidence_witnessed_goal`]: it is the
+/// This is the `PermitAuthority` sibling of [`evidence_witnessed_goal`]: it is the
 /// type-level (`TyId`) recognition primitive the effect-query walk uses to peel
-/// an `AdmitAnchor<G>` capability obligation (the `uses (grant: AdmitAnchor<G>)`
-/// clause of the prelude `anchor()` mint) down to the goal `G` it admits, so the
-/// default-allow policy can consult the SINGLE [`goal_is_canonical`] predicate.
-/// Returns `None` for any other type, a like-named user `AdmitAnchor`, or when the
+/// a `PermitAuthority<G>` capability obligation (the `uses (grant: PermitAuthority<G>)`
+/// clause of the prelude `impl_permit()` mint) down to the goal `G` it admits, so the
+/// default-allow policy can consult the SINGLE [`is_single_impl`] predicate.
+/// Returns `None` for any other type, a like-named user `PermitAuthority`, or when the
 /// argument is not a concrete saturated constraint term.
-pub(crate) fn admit_anchor_admitted_goal<'db>(
+pub(crate) fn permit_authority_goal<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
 ) -> Option<TraitInstId<'db>> {
     let (head, args) = ty.decompose_ty_app(db);
-    // `AdmitAnchor<G>` is applied to exactly one argument: the admitted goal.
+    // `PermitAuthority<G>` is applied to exactly one argument: the admitted goal.
     let [goal_arg] = args else {
         return None;
     };
     let def_scope = head.as_scope(db)?;
-    if !scope_is_core_derive_item(db, def_scope, CoreDeriveItem::AdmitAnchor) {
+    if !scope_is_core_derive_item(db, def_scope, CoreDeriveItem::PermitAuthority) {
         return None;
     }
     // The admitted argument must be a concrete, saturated constraint term
@@ -513,29 +513,29 @@ pub(crate) fn admit_anchor_admitted_goal<'db>(
     }
 }
 
-/// The DEFAULT-ALLOW grant policy for the prelude `anchor()` mint, keyed on the
-/// `AdmitAnchor<G>` capability `carrier` type from a `uses (grant: AdmitAnchor<G>)`
+/// The DEFAULT-ALLOW grant policy for the prelude `impl_permit()` mint, keyed on the
+/// `PermitAuthority<G>` capability `carrier` type from a `uses (grant: PermitAuthority<G>)`
 /// obligation.
 ///
-/// Returns `true` iff `carrier` is a saturated `core::derive::AdmitAnchor<G>`
-/// (recognized by [`admit_anchor_admitted_goal`]) whose admitted goal `G` is NOT
-/// one-of-a-kind, i.e. `!goal_is_canonical(G.def)`. This is the SINGLE money-floor
-/// predicate ([`goal_is_canonical`], `trait_def.rs`): an ordinary goal's
-/// `AdmitAnchor<G>` is granted ambiently (minting an `Anchor<G>` is free), a
-/// one-of-a-kind goal's is NOT (so `anchor()` reports the ordinary missing-effect
+/// Returns `true` iff `carrier` is a saturated `core::derive::PermitAuthority<G>`
+/// (recognized by [`permit_authority_goal`]) whose admitted goal `G` is NOT
+/// one-of-a-kind, i.e. `!is_single_impl(G.def)`. This is the SINGLE money-floor
+/// predicate ([`is_single_impl`], `trait_def.rs`): an ordinary goal's
+/// `PermitAuthority<G>` is granted ambiently (minting an `ImplPermit<G>` is free), a
+/// one-of-a-kind goal's is NOT (so `impl_permit()` reports the ordinary missing-effect
 /// `8-0036`, unless the grant was threaded non-ambiently in a later increment).
 ///
 /// It deliberately answers ONLY this goal-INDEPENDENT-of-scope question (carrier
-/// identity + the canonical-set predicate), so the ambient-fallback caller stays a
+/// identity + the single-impl predicate), so the ambient-fallback caller stays a
 /// localized rule and reads no scope.
-pub(crate) fn admit_anchor_grant_default_allowed<'db>(
+pub(crate) fn permit_authority_default_allowed<'db>(
     db: &'db dyn HirAnalysisDb,
     carrier: TyId<'db>,
 ) -> bool {
-    let Some(goal) = admit_anchor_admitted_goal(db, carrier) else {
+    let Some(goal) = permit_authority_goal(db, carrier) else {
         return false;
     };
-    !crate::analysis::ty::trait_def::goal_is_canonical(db, goal.def(db))
+    !crate::analysis::ty::trait_def::is_single_impl(db, goal.def(db))
 }
 
 /// If `hir_ty` is an `Evidence<goal>` / `ImplBuilder<goal>` capability/witness
@@ -680,19 +680,19 @@ mod tests {
         let def_scope = ty
             .as_scope(db)
             .unwrap_or_else(|| panic!("{path:?} resolved type has no def scope"));
-        scope_is_core_derive_item(db, def_scope, CoreDeriveItem::Anchor)
+        scope_is_core_derive_item(db, def_scope, CoreDeriveItem::ImplPermit)
     }
 
-    /// The crown-jewel unforgeability property (type-confusion arm): anchor
-    /// authority keys on the FULL resolved `core::derive::Anchor` identity
+    /// The crown-jewel unforgeability property (type-confusion arm): permit
+    /// authority keys on the FULL resolved `core::derive::ImplPermit` identity
     /// (name + `derive` module + `core` ingot), NEVER on the bare spelling.
     ///
-    /// Positive: the canonical `core::derive::Anchor` resolves to the `core`-ingot
+    /// Positive: the canonical `core::derive::ImplPermit` resolves to the `core`-ingot
     /// capability scope and IS recognized.
     ///
-    /// Negative (anti-vacuous): a LOCAL `struct Anchor<T>` declared in the fixture,
-    /// with NO `use core::derive::Anchor`, resolves to a DIFFERENT def scope (wrong
-    /// parent module / wrong ingot) and is NOT recognized: the identical `Anchor`
+    /// Negative (anti-vacuous): a LOCAL `struct ImplPermit<T>` declared in the fixture,
+    /// with NO `use core::derive::ImplPermit`, resolves to a DIFFERENT def scope (wrong
+    /// parent module / wrong ingot) and is NOT recognized: the identical `ImplPermit`
     /// spelling grants ZERO authority. The `resolve_to_def_scope` helper asserts
     /// each path resolves to a real type, so neither arm can pass vacuously.
     #[test]
@@ -702,26 +702,26 @@ mod tests {
         // Positive: the canonical capability type, by its absolute `core` path.
         let recognized = resolve_to_def_scope(
             &mut db,
-            "anchor_capability_positive.fe",
+            "impl_permit_capability_positive.fe",
             "struct Decoy {}\n",
-            &["core", "derive", "Anchor"],
+            &["core", "derive", "ImplPermit"],
         );
         assert!(
             recognized,
-            "core::derive::Anchor must be recognized as the Anchor capability"
+            "core::derive::ImplPermit must be recognized as the ImplPermit capability"
         );
 
         // Negative: a like-named LOCAL type, no import — same spelling, no authority.
         let mut db = HirAnalysisTestDb::default();
         let recognized_local = resolve_to_def_scope(
             &mut db,
-            "anchor_capability_negative.fe",
-            "struct Anchor<T> { x: T }\n",
-            &["Anchor"],
+            "impl_permit_capability_negative.fe",
+            "struct ImplPermit<T> { x: T }\n",
+            &["ImplPermit"],
         );
         assert!(
             !recognized_local,
-            "a local `struct Anchor<T>` (not core::derive::Anchor) must be granted no authority"
+            "a local `struct ImplPermit<T>` (not core::derive::ImplPermit) must be granted no authority"
         );
     }
 }

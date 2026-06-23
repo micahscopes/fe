@@ -17,14 +17,14 @@ in the SSOT and the FIX packet. It cites them. Its job is the *unification* and 
 > establish gate over `ingot_trait_env.impls`, reusing the coherence overlap check, computed at a barrier so it
 > is order-free and salsa-safe (the done-properly shape: Rust coherence, Coq canonical structures, Jai's
 > `TYPECHECKED_ALL_WE_CAN` barrier; the synthetic-root-body alternative is the Zig-5718 trap and is rejected).
-> Authority rides the effect system (`AdmitAnchor<G>`), non-linear, minted once at root. The two layers
+> Authority rides the effect system (`PermitAuthority<G>`), non-linear, minted once at root. The two layers
 > (effect-carried authority + barrier-counted scarcity) make the canonical floor an INSTANCE of one mechanism,
 > "capability-gated establishment," with backend-intrinsic gating as the second instance (authority only, no
 > scarcity). Authoritative rationale + the constraints to aim for: `FCO_CAPABILITY_FLOOR_CASE_2026-06-23.md`
 > (spikes #90-#93).
 
 > **RATIFIED 2026-06-22 (Micah). The D1 sequencing for T3 (#83).** The "mint-policy default" is NOT an open
-> binary; the dial is SETTLED (§1.1) and the canonical-set default already lives as `goal_is_canonical`
+> binary; the dial is SETTLED (§1.1) and the canonical-set default already lives as `is_single_impl`
 > (`trait_def.rs:883`), so the recommended scarce-for-canonical position is the live behavior — nothing gates it.
 > What sequences T3 (deleting the coherence checker last) is decided as:
 > 1. **Ship Dial 1** (existence-gating / mint policy) now; **pre-position Dial 2** (use-site uniformity, §1.4) as
@@ -32,40 +32,40 @@ in the SSOT and the FIX packet. It cites them. Its job is the *unification* and 
 >    in the current tree (no `Ord`/`Hash`/`Eq`-keyed shared container; the only keyed container `StorageMap` is
 >    canonical and cannot be cascade-overridden). Land the gate BEFORE exposing the cascade for any
 >    canonical-adjacent keyed-container goal.
-> 2. **canonical-set table** stays `goal_is_canonical` — narrow, defaultable, not a blocker (`fco-guts-over-sugar`).
+> 2. **canonical-set table** stays `is_single_impl` — narrow, defaultable, not a blocker (`fco-guts-over-sugar`).
 > 3. **contract-root delegation edge** (per-platform mint for storage/ABI) is gated on the per-deployed-contract
 >    root referent (§3 PREREQUISITE) — a structural dependency, not a policy choice.
 
-> **RATIFIED 2026-06-22 (Micah). The SURFACE: default-free, a "fix" only for a hold-back list, named inline with
+> **RATIFIED 2026-06-22 (Micah). The SURFACE: default-free, a "fix" only for a single-impl list, named inline with
 > `with`.** The user-facing shape is decided, and it REPLACES the earlier surface sketches (the
 > `uses (fix: own Fix<G>)` capability-param and any `establish` / `fixed` / `fix`-keyword form). The GUTS of §1 are
 > unchanged (use-once authority, the money floor, the §1.1 dial); this is only the surface over them.
 > - **Common case is zero ceremony.** An impl needs nothing extra: `impl Trait for Type { .. }` as always. A "fix"
 >   (permission to add the one true impl) is granted for free.
-> - **A small HOLD-BACK list has to ask.** For the must-be-one-of-a-kind goals (today's `goal_is_canonical` set,
+> - **A small SINGLE-IMPL list has to ask.** For the must-be-one-of-a-kind goals (today's `is_single_impl` set,
 >   e.g. storage/ABI layout) an impl names the fix it was granted, INLINE: `impl Trait for Type with the_fix { .. }`.
 >   A fix is use-once, so a second impl of that goal can never be made. No new keyword; `with` is a trailing impl
 >   clause (sibling to inc1's `as Name`).
-> - **The permission-giver is itself a PROVIDER** (default-ALLOW, hold-back list as its only exception). The policy
+> - **The permission-giver is itself a PROVIDER** (default-ALLOW, single-impl list as its only exception). The policy
 >   "which goals are locked down" lives in Fe as an ordinary provision you can read/swap, NOT a hardcoded compiler
 >   table. This dogfoods the provider system and is the ergonomic face of §4's capability-articulated mint tower:
->   the hold-back list is `goal_is_canonical` expressed as a provision.
-> - **THE open question (the real substance):** where does a held-back goal's fix ORIGINATE? Someone must hold the
+>   the single-impl list is `is_single_impl` expressed as a provision.
+> - **THE open question (the real substance):** where does a single-impl goal's fix ORIGINATE? Someone must hold the
 >   authority to mint it, once. Answer (per §3 / D1.3): minted at the program root and delegated down (to each
 >   deployed-contract root for backend goals), so `the_fix` names a permission that flowed from root. In practice
 >   who-may-mint and where is scope- and application-dependent. That grant/delegation chain IS T3's substance; the
 >   `with`-surface is just how it's spelled. Runnable plain sketch:
 >   `crates/fe/tests/fixtures/fe_test/showcase_metaprogramming.fe` ("Coming soon" section).
 >
-> **CONCRETE NAMES (design-wizard pass 2026-06-22; word "anchor" chosen by Micah; full write-up in
-> `FCO_FIX_SURFACE_2026-06-22.md`):** the permission type is `Anchor<G>` (`G` = the saturated goal, e.g.
+> **CONCRETE NAMES (design-wizard pass 2026-06-22; word "permit" (`ImplPermit`) chosen by Micah; full write-up in
+> `FCO_FIX_SURFACE_2026-06-22.md`):** the permission type is `ImplPermit<G>` (`G` = the saturated goal, e.g.
 > `StorageLayout<Ledger>`, kind `Constraint`, same shape as `Evidence<..>`); minted by a prelude
-> `const fn anchor<G: Constraint>() -> Anchor<G> uses (grant: AdmitAnchor<G>)`; consumed by a trailing
-> `impl T for Y with a` clause (use-once via affine `own` move). The hold-back POLICY is an ordinary blanket
-> `GrantsAnchor<G>` provider that excludes the one-of-a-kind set, i.e. `goal_is_canonical` re-expressed as a
-> provision. Two new recognized capability names (`Anchor`, `AdmitAnchor`); recommend renaming the inert
-> `Fix<T>` in `derive.fe` to `Anchor`. HIGHEST BUILD RISK: that exclusion must share ONE source of truth with
-> the money floor, and `AdmitAnchor` must thread NON-ambiently for one-of-a-kind goals (`snapshot_provisions`
+> `const fn impl_permit<G: Constraint>() -> ImplPermit<G> uses (grant: PermitAuthority<G>)`; consumed by a trailing
+> `impl T for Y with a` clause (use-once via affine `own` move). The single-impl POLICY is an ordinary blanket
+> `PermitAuthority<G>` provider that excludes the one-of-a-kind set, i.e. `is_single_impl` re-expressed as a
+> provision. Two new recognized capability names (`ImplPermit`, `PermitAuthority`); recommend renaming the inert
+> `Fix<T>` in `derive.fe` to `ImplPermit`. HIGHEST BUILD RISK: that exclusion must share ONE source of truth with
+> the money floor, and `PermitAuthority` must thread NON-ambiently for one-of-a-kind goals (`snapshot_provisions`
 > drops barriers today, so it is new walk logic, not a wire-up).
 
 ---
@@ -127,7 +127,7 @@ real `TraitInstId`/`ImplementorId` ("evidence is an IMPL, not a value").
 **"Budget" = per-goal MINT POLICY (SETTLED as a dial; the integer framing is REFUTED — see §1.3).** How
 generously the root admits a second establishment of `G`. Three shapes: budget-1-ambient (ordinary coherence),
 budget-N-ambient (cascade — *but see §1.3, it is a 2-slot {default, override} shape, not arbitrary N*),
-budget-1-root-scarce (canonical/money-floor). The dial LIVES TODAY as `goal_is_canonical` (`trait_def.rs:883`)
+budget-1-root-scarce (canonical/money-floor). The dial LIVES TODAY as `is_single_impl` (`trait_def.rs:883`)
 branching `lowered_implementor` (`mod.rs:4001-4022`).
 
 ### 1.2 The crucial invariant, re-stated honestly (SETTLED for USE; layered for EXISTENCE)
@@ -310,14 +310,14 @@ MECHANISM-NOT-POLICY steer (`FCO_AUTHORITY_GATED_OVERRIDE_2026-06-17.md`): the c
 (GAP 1): `ProvisionEnv` must retain the originating `ScopeId`/scope-chain (today the solver collapses to ingot at
 entry); without it, cross-ingot mint authority has no referent finer than the ingot.
 
-**`goal_is_canonical` dissolves into the default-policy table (SETTLED direction).** Keep the function and its
+**`is_single_impl` dissolves into the default-policy table (SETTLED direction).** Keep the function and its
 resolved-identity recognition, but read its return as a **default mint-policy** ("root-scarce for this `G`;
 ambient-grant default for the rest") rather than a hardcoded canonical *marker*. Canonical-ness becomes a data
 row in the delegation graph, not a special branch — satisfying "no special canonical marker." Do not delete it
 until a delegation graph can be authored in-language (post-keystone). **Caveat (from `coherence_migration`):** the
 live demotion is keyed on `implementor_is_default_marked`, NOT on a trait allowlist; so "restrict cascade to
 control traits" is a NEW sibling predicate `cascade_eligible(trait)` consulted in the non-canonical branch,
-distinct from `goal_is_canonical` (which forbids any second impl). Two predicates, two branches.
+distinct from `is_single_impl` (which forbids any second impl). Two predicates, two branches.
 
 ---
 
@@ -349,7 +349,7 @@ trait/type, `5-0000`/`5-0004`), orthogonal to HOW MANY. Leave it as a separate p
 as a precondition on `Fix`-eligibility ("you may only consume a `Fix<G>` for a (trait,type) you locally own or
 anchor"), but that is documentation, NOT a code move.
 
-**Doc reconciliation (REFUTED stale comment).** `goal_is_canonical`'s doc comment (`trait_def.rs:871-882`) still
+**Doc reconciliation (REFUTED stale comment).** `is_single_impl`'s doc comment (`trait_def.rs:871-882`) still
 describes C3c-3 demotion as a FUTURE increment and both branches as byte-identical; the LIVE code
 (`mod.rs:4006-4022`) and `cascade_noncanonical_coexist.fe` show demotion is shipped. Cite the fixture + code, not
 the comment, as status SSOT; update the comment when wiring (`reverify-inherited-blockers`).
@@ -361,7 +361,7 @@ the comment, as status SSOT; update the comment when wiring (`reverify-inherited
 **The cascade is the model's SELECT/identity substrate — REUSE wholesale, do not rework (SETTLED).** Landed C1
 → C3d (HEAD `da27d0983`); three green fixtures (`cascade_scoped_override.fe`, `cascade_noncanonical_coexist.fe`,
 `cascade_unscoped_default.fe`) under the real `test_fe_test` runner. The cascade = budget-N-ambient (the 2-slot
-default+override shape); `goal_is_canonical` = budget-1-root-scarce, already live; `Fix<T>` = the inert authority
+default+override shape); `is_single_impl` = budget-1-root-scarce, already live; `Fix<T>` = the inert authority
 token whose only missing wiring is mint-at-root + the override gate. The override-records-distinct-`ImplementorId`
 invariant (FIX packet 4.2) is ALREADY satisfied by Some-only identity. Nothing in the cascade contradicts the
 model.
@@ -385,7 +385,7 @@ check lands at; keep `ingot_trait_env` / `impls_for_trait_def` Fix-free and ingo
 **Build sequencing (the ordering law is binding — SSOT lines 131-138).**
 1. (Prereq) Confirm the `Some(None)` forge floor is closed on ALL recording paths (the `with`-provision path may
    still record `None`); extend the determinism assertion to the `Some` branch or prove record provenance (§2).
-2. Wire the LIVE canonical floor to the `Fix` gate: turn `goal_is_canonical`'s "always reject 2nd canonical impl"
+2. Wire the LIVE canonical floor to the `Fix` gate: turn `is_single_impl`'s "always reject 2nd canonical impl"
    into "reject UNLESS scope holds `Fix<T>`," consuming the inert `scope_is_fix_capability` (delete its
    `allow(dead_code)`); byte-identical-first (compute `Fix`-presence, branch nothing, prove consumption — mirror
    C3c-1).
@@ -409,7 +409,7 @@ second (SSOT lines 199-202).
 
 - **Rust/Haskell global coherence** exists so a structure with a global invariant trusts one `Hash`/`Ord` per
   type. BORROW: keep budget-1 for any trait a std container's invariant depends on. REFUSE: budget>1 *ambient*
-  for such traits. Fe's `goal_is_canonical` is the right shape; its v1 set omits `Ord`/`Hash` deliberately
+  for such traits. Fe's `is_single_impl` is the right shape; its v1 set omits `Ord`/`Hash` deliberately
   (collection-key risk is the Dial-2 latent gate, §1.4).
 - **Scala implicits = the cascade** (budget-N lexically-scoped, incoherent by design; the
   TreeMap-with-two-Orderings bug). BORROW: companion-priority default, ambiguity-is-error. REFUSE: shipping
@@ -438,10 +438,10 @@ Decisions are deferred-tunable defaults (`fco-guts-over-sugar`: default the poli
 
 ### D1 — The mint-policy DEFAULT (the dial's resting position) — FIRST
 - **Options:** (a) cosmetic-everywhere (budget-N for all, Scala's mistake); (b) **scarce-for-canonical /
-  ambient-for-the-rest** (the live `goal_is_canonical` shape, read as default policy); (c) scarce-for-everything
+  ambient-for-the-rest** (the live `is_single_impl` shape, read as default policy); (c) scarce-for-everything
   (no cascade).
 - **Recommendation:** (b). It is the LIVE behavior (`mod.rs:4001-4022`), keeps ~360 fixtures green, and is the
-  EVM-correct floor (layout traits scarce, customization traits open). Read `goal_is_canonical` as the default
+  EVM-correct floor (layout traits scarce, customization traits open). Read `is_single_impl` as the default
   mint-policy table; keep `Ord`/`Hash` non-canonical BUT gate the first `Ord`/`Hash`-keyed shared container on
   Dial 2 (§1.4).
 - **Blast radius:** LOW now (it is current behavior); the only forward risk is the latent Dial-2 gate — bounded,
@@ -463,7 +463,7 @@ Decisions are deferred-tunable defaults (`fco-guts-over-sugar`: default the poli
 - **Options:** (a) establish-site (executor-invoke + `lowered_implementor` gate) — ONE ledger, executor stays a
   backend, deriver bodies keep their move-check exemption; (b) inside the body + re-route derivers through
   borrowck; (c) both (status quo two-mechanism).
-- **Recommendation:** (a). Single convergence point for hand-written and derived; reuses `goal_is_canonical` as
+- **Recommendation:** (a). Single convergence point for hand-written and derived; reuses `is_single_impl` as
   the ledger; keeps the executor a backend (SSOT "stage, don't fuse").
 - **Blast radius:** LOW-MEDIUM. (a) adds a check at one site; (b) would re-enable borrowck for derivers
   (larger).
@@ -480,7 +480,7 @@ Decisions are deferred-tunable defaults (`fco-guts-over-sugar`: default the poli
 - **Options unit:** per-(trait,type) pair (naive, REFUTED for generics); per-`ImplementorId`; per-(trait-def,
   self-type-head). **Options shape:** integer-N (REFUTED — gate is 2-slot); keep 2-slot {default, override}.
 - **Recommendation:** consume per-`ImplementorId`; decide scarcity per-(trait-def, self-type-head) via
-  `does_impl_trait_conflict`, mirroring `goal_is_canonical`'s per-def discipline (so assoc-bindings/generics don't
+  `does_impl_trait_conflict`, mirroring `is_single_impl`'s per-def discipline (so assoc-bindings/generics don't
   fragment or dodge). Keep the 2-slot shape; defer integer-N (demand-empty, selection-blocked).
 - **Blast radius:** LOW (descriptive; the code already counts this way).
 
@@ -528,6 +528,6 @@ Decisions are deferred-tunable defaults (`fco-guts-over-sugar`: default the poli
   per-direct-call selection). A pre-positioned gate, not a shipping blocker.
 
 What does NOT break: affine `own` as the floor's substrate; `RootProvider` as the sole ambient origin; the
-cascade as the SELECT substrate; `goal_is_canonical` as the live dial; the keystone as the orthogonal open
+cascade as the SELECT substrate; `is_single_impl` as the live dial; the keystone as the orthogonal open
 linchpin; the cliff law; the two-dial intellectual frame. The unification is real as *vocabulary + sequencing +
 the two-layer/two-dial honesty*; it is not a single mechanical event.
