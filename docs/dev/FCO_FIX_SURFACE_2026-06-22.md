@@ -127,6 +127,21 @@ code and downgraded all three (per `reverify-inherited-blockers`):
 6. **inc6 (LAST):** delete the global coherence checker, once inc4's anchor floor demonstrably holds canonical
    scarcity AND `does_impl_trait_conflict` still rejects non-default overlap. Keep locality/orphan checks.
 
-Open to verify at build time: `const fn` + `uses` acceptance (inc3); `EffectFamily` keying for `AdmitAnchor<G>`
-(inc3); salsa-key safety of reading anchor-consumption at the tracked establish-gate (inc4; the `with a` value
-is a property of the HIR node, not scope, so expected safe).
+Open to verify at build time: `EffectFamily` keying for `AdmitAnchor<G>` (inc3); salsa-key safety of reading
+anchor-consumption at the tracked establish-gate (inc4; the `with a` value is a property of the HIR node, not
+scope, so expected safe).
+
+### inc3 PROBE RESULTS (measured 2026-06-22, the spike's open items resolved)
+- `const fn` + `uses` IS rejected (`error[8-0055]` from `const_check.rs:27`). FIX: declare `anchor` as an
+  `extern const fn` (bodyless), the precedent `panic`/`size_of` use; `check_const_fn_body` is gated on
+  `!is_extern` (`ty_check/mod.rs:385`), so extern skips it. Extern is also the right shape because `Anchor`
+  is unforgeable (no Fe body could construct it); the compiler binds the value, like `Evidence`.
+- Fe has NO turbofish and NO explicit generic call args. `anchor<G>()` / `anchor::<G>()` do NOT parse
+  (`mk<Eq<Foo>>()` lexes as comparison operators and ICEd at lowering; `::<>` is a parse error). So `anchor()`
+  MUST use INFERENCE: G is inferred from the binding/consume context (`let a: Anchor<Eq<Foo>> = anchor()`,
+  or the `with a` site). Do NOT write the turbofish (this was a scrapped agent's false "blocker").
+- The full shape WORKS, verified end-to-end:
+  `extern const fn mk<G: Constraint>() -> Anchor<G> uses (grant: AdmitAnchor<G>)` plus
+  `let a: Anchor<Eq<Foo>> = mk()` type-checks the call, and the grant obligation IS enforced at the inferred
+  call site: `error[8-0036]: missing effect AdmitAnchor<G> required by mk`. So the gate is real; inc3's only
+  remaining work is the default-allow SEEDING (ambient `AdmitAnchor<G>` for `!goal_is_canonical`).
