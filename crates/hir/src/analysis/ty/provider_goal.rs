@@ -479,6 +479,65 @@ pub(crate) fn evidence_witnessed_goal<'db>(
     }
 }
 
+/// If `ty` is a saturated `core::derive::AdmitAnchor<G>` capability — recognized
+/// by the RESOLVED identity of its head ADT (the same `core` ingot + `derive`
+/// module + name check as [`scope_is_core_derive_item`], NOT the bare spelling)
+/// and whose single type argument `G` is a concrete `ConstraintTerm` — return the
+/// inner goal `G`'s [`TraitInstId`].
+///
+/// This is the `AdmitAnchor` sibling of [`evidence_witnessed_goal`]: it is the
+/// type-level (`TyId`) recognition primitive the effect-query walk uses to peel
+/// an `AdmitAnchor<G>` capability obligation (the `uses (grant: AdmitAnchor<G>)`
+/// clause of the prelude `anchor()` mint) down to the goal `G` it admits, so the
+/// default-allow policy can consult the SINGLE [`goal_is_canonical`] predicate.
+/// Returns `None` for any other type, a like-named user `AdmitAnchor`, or when the
+/// argument is not a concrete saturated constraint term.
+pub(crate) fn admit_anchor_admitted_goal<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<TraitInstId<'db>> {
+    let (head, args) = ty.decompose_ty_app(db);
+    // `AdmitAnchor<G>` is applied to exactly one argument: the admitted goal.
+    let [goal_arg] = args else {
+        return None;
+    };
+    let def_scope = head.as_scope(db)?;
+    if !scope_is_core_derive_item(db, def_scope, CoreDeriveItem::AdmitAnchor) {
+        return None;
+    }
+    // The admitted argument must be a concrete, saturated constraint term
+    // (`Eq<T>` in type position), never an inference var or unsaturated ctor.
+    match goal_arg.data(db) {
+        TyData::ConstraintTerm(inst) => Some(*inst),
+        _ => None,
+    }
+}
+
+/// The DEFAULT-ALLOW grant policy for the prelude `anchor()` mint, keyed on the
+/// `AdmitAnchor<G>` capability `carrier` type from a `uses (grant: AdmitAnchor<G>)`
+/// obligation.
+///
+/// Returns `true` iff `carrier` is a saturated `core::derive::AdmitAnchor<G>`
+/// (recognized by [`admit_anchor_admitted_goal`]) whose admitted goal `G` is NOT
+/// one-of-a-kind, i.e. `!goal_is_canonical(G.def)`. This is the SINGLE money-floor
+/// predicate ([`goal_is_canonical`], `trait_def.rs`): an ordinary goal's
+/// `AdmitAnchor<G>` is granted ambiently (minting an `Anchor<G>` is free), a
+/// one-of-a-kind goal's is NOT (so `anchor()` reports the ordinary missing-effect
+/// `8-0036`, unless the grant was threaded non-ambiently in a later increment).
+///
+/// It deliberately answers ONLY this goal-INDEPENDENT-of-scope question (carrier
+/// identity + the canonical-set predicate), so the ambient-fallback caller stays a
+/// localized rule and reads no scope.
+pub(crate) fn admit_anchor_grant_default_allowed<'db>(
+    db: &'db dyn HirAnalysisDb,
+    carrier: TyId<'db>,
+) -> bool {
+    let Some(goal) = admit_anchor_admitted_goal(db, carrier) else {
+        return false;
+    };
+    !crate::analysis::ty::trait_def::goal_is_canonical(db, goal.def(db))
+}
+
 /// If `hir_ty` is an `Evidence<goal>` / `ImplBuilder<goal>` capability/witness
 /// position (after stripping an own/mut mode wrapper) whose head resolves to the
 /// canonical capability type `expected`, return its single inner goal HIR type.

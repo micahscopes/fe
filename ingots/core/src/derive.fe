@@ -79,11 +79,34 @@ pub struct Anchor<T: Constraint> {
     handle: u256
 }
 
-/// Authority to mint an `Anchor<G>` for a held-back goal `G`. Inert for now
-/// (private field, no constructor, not in prelude, nothing mints or consumes it),
-/// recognized by RESOLVED IDENTITY (`core::derive::AdmitAnchor`) ahead of wiring.
+/// Authority to mint an `Anchor<G>` for a held-back goal `G`. Recognized by
+/// RESOLVED IDENTITY (`core::derive::AdmitAnchor`). It has no constructor and is
+/// not in the prelude, so ordinary code can never forge it; it is satisfied as a
+/// `uses (..)` capability obligation, never materialized as a runtime value.
+///
+/// For an ORDINARY (non-one-of-a-kind) goal `G`, `AdmitAnchor<G>` discharges
+/// ambiently (default-allow): minting an `Anchor<G>` via `anchor()` is free. For
+/// a one-of-a-kind (canonical) goal there is NO ambient grant, so `anchor()`
+/// reports the ordinary missing-effect error unless an `AdmitAnchor<G>` was
+/// threaded in non-ambiently (a later increment). The default-allow rule shares
+/// the SINGLE `goal_is_canonical` predicate with the establish-gate floor.
 pub struct AdmitAnchor<G: Constraint> {
     handle: u256
+}
+
+extern {
+    /// Mint the `Anchor<G>` that authorizes establishing the one allowed impl of
+    /// the goal `G`. It is bodyless (an `extern const fn`, like `size_of` /
+    /// `panic`): an `Anchor<G>` is unforgeable, so no Fe body could construct one;
+    /// the compiler binds the value at the compile-time call site. `G` is INFERRED
+    /// from the binding/consume context (Fe has no turbofish), e.g.
+    /// `let a: Anchor<Eq<Foo>> = anchor()`.
+    ///
+    /// The gate is the `uses (grant: AdmitAnchor<G>)` obligation, NOT the body:
+    /// for an ordinary goal `G` it discharges ambiently (free); for a one-of-a-
+    /// kind (canonical) goal it stays unsatisfied and calling `anchor()` reports
+    /// the ordinary missing-effect error.
+    pub const fn anchor<G: Constraint>() -> Anchor<G> uses (grant: AdmitAnchor<G>)
 }
 
 /// The derive-provider trait. A provider `impl Derive<P> for Name` (with goal

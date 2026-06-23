@@ -181,6 +181,13 @@ pub(super) struct EffectCommitPlan<'db> {
 enum EffectResolution<'db> {
     Chosen(Box<EffectEvidence<'db>>),
     BlockedByBarrier,
+    /// The obligation is discharged ambiently with NO backing provider value, so
+    /// no call-site provider argument is threaded. Today this is ONLY the
+    /// default-allow grant for an `AdmitAnchor<G>` capability of an ordinary
+    /// (non-one-of-a-kind) goal `G` (the prelude `anchor()` mint): a compile-time
+    /// capability that authorizes the mint but has no runtime value. It is treated
+    /// like a satisfied effect that contributes no `ResolvedEffectArg`.
+    AmbientGrant,
     Missing,
     Ambiguous,
 }
@@ -298,7 +305,7 @@ impl<'db> TyChecker<'db> {
             Expr::Un(..) => self.check_unary(expr, expr_data),
             Expr::Cast(inner, ty) => self.check_cast(expr, *inner, *ty),
             Expr::Bin(lhs, rhs, op) => self.check_binary(expr, *lhs, *rhs, *op),
-            Expr::Call(..) => self.check_call(expr, expr_data),
+            Expr::Call(..) => self.check_call(expr, expr_data, expected),
             Expr::Assert(args) => self.check_assert(expr, args),
             Expr::MethodCall(..) => self.check_method_call(expr, expr_data),
             Expr::Path(..) => self.check_path(expr, expr_data),
@@ -1652,7 +1659,12 @@ impl<'db> TyChecker<'db> {
         }
     }
 
-    fn check_call(&mut self, expr: ExprId, expr_data: &Expr<'db>) -> ExprProp<'db> {
+    fn check_call(
+        &mut self,
+        expr: ExprId,
+        expr_data: &Expr<'db>,
+        expected: TyId<'db>,
+    ) -> ExprProp<'db> {
         let Expr::Call(callee, args) = expr_data else {
             unreachable!()
         };
@@ -1699,6 +1711,31 @@ impl<'db> TyChecker<'db> {
         }
 
         callable.check_args(self, args, call_span.clone().args(), None, false);
+
+        // Bind the callee's generic args from the expected (return-position) type
+        // BEFORE effect resolution, when the callee has effects. Ordinarily the
+        // return type unifies with `expected` only after this call returns
+        // (`check_expr_with_result_context`), which is AFTER effects are resolved,
+        // so an effect key mentioning a return-only generic param (e.g.
+        // `anchor() -> Anchor<G> uses (grant: AdmitAnchor<G>)`, where `G` is fixed
+        // only by `let a: Anchor<Eq<Foo>>`) would still be an unbound inference
+        // var at the effect query and the per-goal grant could not be decided.
+        // The unify is snapshot-guarded and rolled back on failure, so the later
+        // unify (which emits any type-mismatch diagnostic) is untouched: for a
+        // well-typed call this only resolves the same inference vars earlier, and
+        // for an ill-typed one it is a no-op.
+        if let CallableDef::Func(func) = callable.callable_def
+            && func.has_effects(self.db)
+            && !expected.is_ty_var(self.db)
+            && !expected.has_invalid(self.db)
+            && expected != TyId::unit(self.db)
+        {
+            let ret_ty = callable.ret_ty(self.db);
+            let snapshot = self.table.snapshot();
+            if self.table.unify(ret_ty, expected).is_err() {
+                self.table.rollback_to(snapshot);
+            }
+        }
 
         self.check_callable_effects(expr, &mut callable);
 
@@ -2015,6 +2052,10 @@ impl<'db> TyChecker<'db> {
                     });
                 }
                 EffectResolution::BlockedByBarrier => {}
+                // Ambiently granted (default-allow `AdmitAnchor<G>` for an
+                // ordinary goal): satisfied with no backing provider value, so no
+                // `ResolvedEffectArg` is threaded and no diagnostic is emitted.
+                EffectResolution::AmbientGrant => {}
                 EffectResolution::Missing => {
                     self.push_diag(BodyDiag::MissingEffect {
                         primary: call_span.clone(),
@@ -2143,6 +2184,22 @@ impl<'db> TyChecker<'db> {
             }
         }
         let _ = (func, call_span);
+        // Ambient fallback (the `RootProvider`-equivalent point after every live
+        // `with` / `uses` frame missed): the DEFAULT-ALLOW grant for the prelude
+        // `anchor()` mint. An `AdmitAnchor<G>` capability obligation for an
+        // ordinary (non-one-of-a-kind) goal `G` is granted ambiently here, keyed
+        // ONLY on the query's resolved carrier identity + the single
+        // `goal_is_canonical` predicate (no scope read), so a one-of-a-kind goal
+        // stays `Missing` and reports `8-0036`. `G` is extracted from the
+        // `AdmitAnchor<G>` type-query carrier (folded to its inferred instance).
+        if let Some(carrier) = self.query_type_key(&query.key) {
+            let carrier = self.table.fold_ty(self.db, carrier);
+            if crate::analysis::ty::provider_goal::admit_anchor_grant_default_allowed(
+                self.db, carrier,
+            ) {
+                return EffectResolution::AmbientGrant;
+            }
+        }
         EffectResolution::Missing
     }
 

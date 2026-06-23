@@ -1,0 +1,18 @@
+---
+source: crates/fe/tests/cli_output.rs
+expression: output
+input_file: tests/fixtures/cli_output/single_files/anchor_grant_default_allow.fe
+---
+=== STDERR ===
+errors in file://<project>/crates/fe/tests/fixtures/cli_output/single_files/anchor_grant_default_allow.fe
+
+error[8-0036]: missing effect `AdmitAnchor<G>` required by `anchor`
+   ┌─ anchor_grant_default_allow.fe:28:37
+   │
+28 │     let bad: Anchor<AbiSize<Foo>> = anchor()
+   │                                     ^^^^^^^^ `anchor` requires effect `AdmitAnchor<G>` to be in scope
+   │
+   = provide it with `with (AdmitAnchor<G> = value)` or require it via `uses AdmitAnchor<G>`
+
+
+=== EXIT CODE: 1 ===

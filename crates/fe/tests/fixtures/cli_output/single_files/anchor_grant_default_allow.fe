@@ -1,0 +1,29 @@
+// FCO T3 inc3 — the prelude `anchor()` mint + the DEFAULT-ALLOW grant policy.
+//
+// `anchor()` is `extern const fn anchor<G: Constraint>() -> Anchor<G>
+// uses (grant: AdmitAnchor<G>)` (derive.fe): bodyless (an `Anchor<G>` is
+// unforgeable), `G` inferred from the binding (Fe has no turbofish). The gate is
+// the `uses (grant: AdmitAnchor<G>)` obligation, NOT the body.
+//
+// DEFAULT-ALLOW: for an ORDINARY (non-one-of-a-kind) goal the `AdmitAnchor<G>`
+// obligation discharges AMBIENTLY (free), so the mint type-checks. For a ONE-OF-
+// A-KIND (canonical) goal there is NO ambient grant, so the mint reports the
+// ordinary missing-effect error (`8-0036`). The single source of truth for "which
+// goals are one-of-a-kind" is `goal_is_canonical` (the SAME predicate the
+// establish-gate floor consults), so this negative case proves the money-floor
+// policy is wired to that one predicate, NOT a second list.
+
+use core::derive::Anchor
+use core::ops::Eq
+use core::abi::AbiSize
+
+struct Foo {}
+
+fn test() {
+    // ORDINARY goal: `Eq` is non-canonical -> grant ambient -> mint type-checks.
+    let ok: Anchor<Eq<Foo>> = anchor()
+
+    // ONE-OF-A-KIND goal: `AbiSize` is canonical (a wrong impl changes the ABI
+    // wire bytes) -> no ambient grant -> `8-0036` missing `AdmitAnchor`.
+    let bad: Anchor<AbiSize<Foo>> = anchor()
+}
