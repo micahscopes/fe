@@ -11,6 +11,18 @@ it is said plainly.
 This doc does NOT re-derive the cascade, the keystone, the FV obligations, or the skeptic-leak list — those live
 in the SSOT and the FIX packet. It cites them. Its job is the *unification* and the *honest delta*.
 
+> **RATIFIED 2026-06-23 (Micah). Floor ENFORCEMENT = barrier count, not affine move.** §1.2 already admitted the
+> move-checker is not the canonical-floor enforcer; this confirms it as the decided position and names the
+> enforcer. The floor is a **whole-program COUNT** (affine over an unordered set, <= 1, zero legal) at the
+> establish gate over `ingot_trait_env.impls`, reusing the coherence overlap check, computed at a barrier so it
+> is order-free and salsa-safe (the done-properly shape: Rust coherence, Coq canonical structures, Jai's
+> `TYPECHECKED_ALL_WE_CAN` barrier; the synthetic-root-body alternative is the Zig-5718 trap and is rejected).
+> Authority rides the effect system (`AdmitAnchor<G>`), non-linear, minted once at root. The two layers
+> (effect-carried authority + barrier-counted scarcity) make the canonical floor an INSTANCE of one mechanism,
+> "capability-gated establishment," with backend-intrinsic gating as the second instance (authority only, no
+> scarcity). Authoritative rationale + the constraints to aim for: `FCO_CAPABILITY_FLOOR_CASE_2026-06-23.md`
+> (spikes #90-#93).
+
 > **RATIFIED 2026-06-22 (Micah). The D1 sequencing for T3 (#83).** The "mint-policy default" is NOT an open
 > binary; the dial is SETTLED (§1.1) and the canonical-set default already lives as `goal_is_canonical`
 > (`trait_def.rs:883`), so the recommended scarce-for-canonical position is the live behavior — nothing gates it.

@@ -7,6 +7,19 @@ authority, the money floor, the dial, gates EXISTENCE not USE, the cliff law). N
 (Filename keeps the "FIX" program lineage. The chosen USER-FACING word is **anchor**, as in "anchor in
 place / fixed point," NOT "repair." It supersedes the earlier `FixImpl` draft naming.)
 
+> **CORRECTION 2026-06-23 (Micah-directed, spikes #90/#91/#92). The SURFACE below is correct; the floor
+> ENFORCEMENT claim is not.** This doc says "use-once falls out of affine `own` move: a second `impl .. with a`
+> is a use-after-move" (§ Decisions.3, the Pitch, the spike-corrected "Affine floor confirmed", and the inc4
+> "double-consume use-after-move fixture"). That is REFUTED: an `impl` is a top-level item and the move-checker
+> is a no-op on impls (`borrowck/check.rs`, `ItemKind::ImplTrait`), so a second top-level establishment is not a
+> use-after-move. The floor is enforced as a **barrier COUNT** (affine over an unordered set = <= 1) at the
+> establish gate over `ingot_trait_env.impls`, reusing the coherence overlap check, NOT by the affine
+> move-checker. Authority still rides the effect system (`AdmitAnchor<G>`), unchanged. The authoritative floor
+> design is now `FCO_CAPABILITY_FLOOR_CASE_2026-06-23.md` (effect-carried capability + barrier count, no root
+> body, no CTFE; anchors as instance #1 of capability-gated establishment). Read inc4 (§ Increment ordering) as
+> "consult authorization + count," and ignore the affine-VALUE / `as_capability` / D2 requirements: they are not
+> load-bearing for the floor.
+
 A goal is "one-of-a-kind" when there must be exactly one impl, ever (storage layout, ABI encoding: two
 versions mean two parts of the program disagree about the bytes). One impl gets ANCHORED in place and no
 other can be written. Default-ALLOW: granted for free for almost everything; a small hold-back set (today
