@@ -284,6 +284,28 @@ self-report.
   explicitly): the gate filters impls by in-scope capability BEFORE the overlap loop, pinned by a backend-variant
   fixture (two impls of the same goal/type gated on different target capabilities do NOT falsely conflict).
 
+> **STAKES (measured 2026-06-23): authority-gating ESTABLISHMENT is one job with two populations, and BOTH need
+> the root mint.** The original framing (option 2 = "gate the provider body, no referent needed" vs option 3 =
+> "hand-written `with p` referent") was REFUTED by measurement, and the correction matters:
+> - **Option 2 as "add a `uses (grant: PermitAuthority<G>)` to the provider" is VACUOUS.** A provider body is a
+>   restricted COMMAND PROGRAM, not a real body, and `ProviderExecutor::run` (derive.rs:756) synthesizes
+>   reflect+builder and runs the program directly, it does NOT discharge the provider's `uses` at the derive site.
+>   Probed: adding the grant to `StableAbiSize` left `corelib` (19) and `derived_abi_size` green even though
+>   `AbiSize` is `#[fixed]` (non-ambient grant), i.e. the grant was never checked. So the provider `uses` clause
+>   is not a derive-site gate.
+> - **A REAL provider gate needs a check at the SCHEDULER** (the derive-lowering / `select_provider` path),
+>   asking whether the derive-site holds `PermitAuthority<G>`. For a `#[fixed]` goal that grant is non-ambient, so
+>   the derive site must obtain it from the ROOT MINT, the exact same dependency as option 3's mandatory flip.
+> - **So the fork collapses:** the provider path and the hand-written path are two populations of ONE job
+>   (authority-gating establishment), and BOTH are gated on the root mint + the delegation policy (who-may-mint,
+>   where). The provider-body angle does NOT avoid it.
+> - **THE STAKE, stated plainly:** until the root mint + authority-of-establishment lands, EVERY canonical impl
+>   (generated or hand-written) is **scarcity-counted but NOT authority-gated**, the count enforces <=1 regardless
+>   of who wrote it, but nothing yet checks who was AUTHORIZED to establish the one. Scarcity holds; the
+>   AUTHORIZATION/DELEGATION half (e.g. a per-deployed-contract `StorageKey` gated to its contract root) is the
+>   deferred piece, and it is the same deferred piece for both populations. The money floor's SCARCITY guarantee
+>   does not depend on it, which is why deferring is safe.
+
 - **inc6 (delete the coherence special-case, LAST).** Only once inc4/inc5 demonstrably hold the floor and
   `does_impl_trait_conflict` still rejects non-default overlap. VALIDATION: full suite green after deletion; the
   floor fixtures still error; no snap churn beyond intended.
