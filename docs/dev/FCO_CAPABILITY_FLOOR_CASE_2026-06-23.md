@@ -211,10 +211,13 @@ full design is three cooperating layers, all dynamic only with respect to compti
 1. **Static count (scarcity, whole-program).** The barrier count over the materialized impl set
    (`ingot_trait_env.impls`) at the establish gate. Bounds the total to <= 1 per canonical goal. Runs where
    there is no body (top-level items).
-2. **Affine in CTFE (registration anti-leak, per provider body).** Provider fns ARE bodies, so the move/borrow
-   checker runs on them. It keeps each CTFE registration well-formed: a `builder.finish() -> Evidence<G>` value
-   used once, not duplicated, not escaped, the builder not emitted-to after finish. This is the linear-token /
-   nonce-use-once idea applied IN CTFE, the one place it actually runs, not at the top-level floor.
+2. **Use-once anti-leak in CTFE (registration hygiene, per provider body).** Keeps each CTFE registration
+   well-formed: `finish()` must be called, exactly once, and no builder command may follow it. CORRECTION
+   (measured 2026-06-23): this is NOT the borrow checker, borrowck deliberately SKIPS provider bodies
+   (`borrowck/check.rs:185-186`, "checked by the provider executor instead"). It is realized as EXECUTOR
+   INVARIANTS and is ALREADY PRESENT. This is the same shape as layer 1: the use-once / linear-token intuition
+   maps to a mechanism that runs where borrowck does not (the executor), exactly as the floor's affine-<=1 maps
+   to a count, not the move-checker.
 3. **Intrinsic-exposed static results (comptime-dynamic logic).** A read-only intrinsic (built on the #93
    root-effect-object mechanism + the reflection/CTFE-handle work) surfaces the COMPLETE static facts ("is goal
    G established?", "the final impl set") into CTFE, so providers can build richer comptime-dynamic logic on top.
@@ -224,13 +227,17 @@ whole-program total; they shake hands at the convergence point (the materialized
 explicit impls already unify). Neither alone is complete: count without layer 2 lets a provider misbehave
 internally; layer 2 without count does not bound the program-wide total. Layer 3 is the payoff built on both.
 
-**Substrate (measured 2026-06-23).** `Evidence<G>` / `ImplBuilder<G>` are ordinary structs; `as_capability`
-returns `None` (`ty_def.rs:289-298`), so a local `Evidence` value gets normal move semantics
-(`local_has_runtime_move_semantics`, `ir.rs:215`; use-after-move is real, cf. `mir_move_error.fe`). The anti-leak
-role is therefore PARTLY present already. The gap: a provider-supplied `mut ImplBuilder<G>` param can lower to a
-`Provider` borrow root (`ir.rs:230`), which is exempt from move semantics, so "builder used after `finish()`" and
-"evidence escapes the provider body" are not necessarily caught today. Closing that is a separable small
-workstream (layer 2 below), not a precondition for the floor (layer 1).
+**Substrate (measured 2026-06-23, CORRECTED).** An earlier draft guessed the anti-leak rode borrowck on
+`Evidence`/`ImplBuilder` as plain move-tracked structs. That is wrong: borrowck SKIPS derive-provider bodies
+entirely (`borrowck/check.rs:185-186`: `if func.is_derive_provider_fn(db) { continue }`, "compile-time command
+programs, checked by the provider executor instead"). So affine/move does not run on provider bodies at all. The
+anti-leak instead lives in the EXECUTOR and is ALREADY PRESENT: `ProviderFailureKind` (`provider_executor.rs:177-211`)
+defines `MissingFinish` ("returned without calling finish"), `DuplicateFinish` ("called finish more than once"),
+and `CommandAfterFinish` ("issued a builder command after finish"), raised by the executor at `:1003/:2411/:2738`.
+That IS the use-once / no-leak discipline. The command-program model is also structurally single-impl (one builder
+-> one materialized impl) and `Evidence` is unforgeable + must be returned (type system), so evidence-forge and
+evidence-escape are prevented by construction. Net: layer 2 is largely DONE; the only gap is that these executor
+invariants are raised but not yet pinned by end-to-end fixtures.
 
 **The one rule that keeps layer 3 safe.** The intrinsic must expose a COMPLETE, barrier-computed static result
 (or a monotone/confluent query), NEVER an in-progress "what is registered so far" accumulator. If CTFE could
@@ -261,10 +268,13 @@ self-report.
     not exist yet. Forcing it now would break std's existing canonical impls (AbiSize/Encode/...), which carry
     no `with a` and cannot obtain one until root delegation lands.
 
-- **Affine anti-leak (layer 2; separable, can interleave with inc4/inc5).** Make `Evidence<G>` / `ImplBuilder<G>`
-  affine end-to-end in provider bodies, closing the provider-param gap measured in section 11. VALIDATION:
-  (i) double-use of an `Evidence` value -> use-after-move; (ii) builder emitted-to after `finish()` -> error;
-  (iii) `Evidence` escaping the provider body -> error.
+- **Use-once anti-leak (layer 2; ALREADY PRESENT in the executor, measure-first).** No new machinery: the
+  executor already raises `MissingFinish` / `DuplicateFinish` / `CommandAfterFinish` (`provider_executor.rs:177-211`),
+  and the command-program model + unforgeable-returned `Evidence` prevent forge/escape. Decent first pass = LOCK
+  these with end-to-end fixtures (they are raised but not fixture-pinned): a provider that (i) omits `finish`,
+  (ii) calls `finish` twice, (iii) emits after `finish`, each reports the corresponding diagnostic. Defer any
+  borrowck-on-provider-bodies treatment; it is unnecessary for the current command-program model and only becomes
+  relevant if providers grow into full Fe bodies (the #89 ergonomics convergence).
 
 - **inc5 (generic root mint + mandate).** Build the mint CAPABILITY-GENERIC (so `AdmitAnchor<G>` and intrinsic
   capabilities share it), seeded at `RootProvider`, delegated to the contract root. Flip canonical anchoring to
