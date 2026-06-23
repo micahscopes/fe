@@ -459,6 +459,13 @@ struct Private {}
 /// Default EVM effect provider (zero-sized).
 pub struct Evm { seal: Private }
 
+/// The EVM target's intrinsic-capability carrier (`<EvmTarget as Target>::Intrinsics`).
+/// A zero-sized, sealed (unforgeable: private field, no public ctor) token; the
+/// toolchain seeds it at the program root for an EVM build, and EVM intrinsic
+/// `extern` ops gate on holding it (`uses (t: EvmIntrinsics)`). Authority only,
+/// non-scarce.
+pub struct EvmIntrinsics { seal: Private }
+
 impl Evm {
     /// Return the current Solidity selector from raw calldata.
     pub fn selector(self) -> u32 {
