@@ -305,6 +305,19 @@ self-report.
 >   AUTHORIZATION/DELEGATION half (e.g. a per-deployed-contract `StorageKey` gated to its contract root) is the
 >   deferred piece, and it is the same deferred piece for both populations. The money floor's SCARCITY guarantee
 >   does not depend on it, which is why deferring is safe.
+>
+> **PRE-FLIGHT (measured 2026-06-23): the cheap ingot-based authority plant is VACUOUS or BREAKING now, so it is
+> NOT built; scarcity-only is the confirmed position.** The #100 slice-1 plant at `lowered_implementor` would
+> auto-allow provider-default impls (clause 1) and allow "impl's ingot == trait's declaring ingot" (clause 2).
+> But std hand-writes DOZENS of `impl AbiSize for <std type>` (Uint24..Uint248, Int24.., Bytes, ints.fe) where
+> `AbiSize` is declared in CORE, i.e. cross-ingot but entirely legitimate (orphan-legal: the std type is local).
+> Clause 2 strict rejects all of them (breaks std); clause 2 widened to "any orphan-legal ingot" is a TAUTOLOGY
+> (the orphan rule already governs who may impl, and the count already enforces <=1). So in the current tree the
+> plant adds no real property: provider path = auto-allowed, hand-written path = already covered by orphan+count.
+> The only NON-vacuous value is per-deployed-contract delegation (forbid a contract ingot establishing a `#[fixed]`
+> impl for its own type unless the contract root authorized it), which needs the per-contract referent
+> (`ContractInit` etc., named/ready in #100 section 4) and is genuinely deferred. CONCLUSION: hold at scarcity-only;
+> authority-of-establishment lands with the per-contract deployment story, not before. The floor is sound without it.
 
 - **inc6 (delete the coherence special-case, LAST).** Only once inc4/inc5 demonstrably hold the floor and
   `does_impl_trait_conflict` still rejects non-default overlap. VALIDATION: full suite green after deletion; the
