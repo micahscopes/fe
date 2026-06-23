@@ -476,6 +476,12 @@ impl ImplTrait {
     pub fn alias(&self) -> Option<ImplTraitAlias> {
         support::child(self.syntax())
     }
+
+    /// Returns the optional `with <path>` anchor clause.
+    /// `with a` in `impl<T> Foo for Bar<T> with a { .. }`
+    pub fn with_anchor(&self) -> Option<ImplTraitWith> {
+        support::child(self.syntax())
+    }
 }
 
 ast_node! {
@@ -488,6 +494,19 @@ impl ImplTraitAlias {
     /// `Name` in `as Name`.
     pub fn name(&self) -> Option<SyntaxToken> {
         support::token(self.syntax(), SK::Ident)
+    }
+}
+
+ast_node! {
+    /// `with <path>` — optional anchor clause on a trait impl.
+    pub struct ImplTraitWith,
+    SK::ImplTraitWith,
+}
+impl ImplTraitWith {
+    /// Returns the anchor path node.
+    /// `a` in `with a`. Stored unresolved (FCO T3).
+    pub fn path(&self) -> Option<super::Path> {
+        support::child(self.syntax())
     }
 }
 
@@ -1202,6 +1221,35 @@ mod tests {
             }"#;
         let j: ImplTrait = parse_item(without_alias);
         assert!(j.alias().is_none());
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn impl_trait_with_anchor() {
+        // The optional trailing `with <path>` anchor clause parses and the
+        // path is exposed unresolved (FCO T3).
+        let with_anchor = r#"
+            impl Trait::Foo for (i32) with a {
+                fn foo(self) -> u32 { return 1 };
+            }"#;
+        let i: ImplTrait = parse_item(with_anchor);
+        assert!(i.trait_ref().is_some());
+        assert!(matches!(i.ty().unwrap().kind(), TypeKind::Tuple(_)));
+        // No alias on this impl, only the anchor.
+        assert!(i.alias().is_none());
+        let anchor = i.with_anchor().expect("expected `with <path>` anchor");
+        let path = anchor.path().expect("expected anchor path");
+        assert_eq!(path.text().to_string(), "a");
+        // Body is still parsed normally after the anchor.
+        assert!(i.item_list().is_some());
+
+        // The plain form has no anchor.
+        let without_anchor = r#"
+            impl Trait::Foo for (i32) {
+                fn foo(self) -> u32 { return 1 };
+            }"#;
+        let j: ImplTrait = parse_item(without_anchor);
+        assert!(j.with_anchor().is_none());
     }
 
     #[test]

@@ -788,6 +788,11 @@ impl<'db> ImplTrait<'db> {
         let alias = ast
             .alias()
             .map(|a| IdentId::lower_token_partial(ctxt, a.name()));
+        // Optional `with <path>` anchor (FCO T3). The path is lowered but NOT
+        // resolved: it is stored as written for later increments.
+        let anchor = ast
+            .with_anchor()
+            .map(|w| PathId::lower_ast_partial(ctxt, w.path()));
         let origin = HirOrigin::raw(&ast);
 
         let mut types = vec![];
@@ -838,6 +843,7 @@ impl<'db> ImplTrait<'db> {
             types,
             consts,
             alias,
+            anchor,
             ctxt.top_mod(),
             origin,
         );

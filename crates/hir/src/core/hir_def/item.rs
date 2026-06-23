@@ -1290,6 +1290,11 @@ pub struct ImplTrait<'db> {
     /// T-Nway). `None` for elided/synthesized impls. Stored only — not yet
     /// bound into any scope nor used for selection (later increments).
     pub(in crate::core) alias: Option<Partial<IdentId<'db>>>,
+    /// The optional user-facing `with <path>` anchor on this trait impl (FCO
+    /// T3). `None` for elided/synthesized impls. The path references an anchor
+    /// value and is stored UNRESOLVED — not yet bound into any scope, gated,
+    /// nor used for selection (later increments).
+    pub(in crate::core) anchor: Option<Partial<PathId<'db>>>,
     pub top_mod: TopLevelMod<'db>,
 
     #[return_ref]
@@ -1312,6 +1317,14 @@ impl<'db> ImplTrait<'db> {
     /// increments.
     pub fn hir_alias(self, db: &'db dyn HirDb) -> Option<Partial<IdentId<'db>>> {
         self.alias(db)
+    }
+
+    /// Returns the optional user-facing `with <path>` anchor on this trait
+    /// impl (FCO T3). `None` when the impl was written without a `with` clause
+    /// or is synthesized. The path is stored UNRESOLVED — name resolution,
+    /// gating, and selection are later increments.
+    pub fn hir_anchor(self, db: &'db dyn HirDb) -> Option<Partial<PathId<'db>>> {
+        self.anchor(db)
     }
 
     /// Returns the raw associated const definitions from the HIR.

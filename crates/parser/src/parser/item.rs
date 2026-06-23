@@ -852,6 +852,20 @@ impl super::Parse for ImplScope {
             parser.parse(ImplTraitAliasScope::default())?;
         }
 
+        // Optional trailing `with <path>` anchor clause on a trait impl (FCO
+        // T3). `with` is a contextual identifier (not a reserved keyword), so
+        // it is recognized via `is_ident` exactly like the `with` derive-
+        // provider scope. The path references an anchor value; it is parsed and
+        // stored unresolved (no name resolution / no selection at this
+        // increment). Consumed in the SAME slot as `as Name`, after any alias
+        // and before the where-clause/body, so the remaining recovery stack
+        // (`where`/`{`) is left intact. Both clauses may appear in the order
+        // `as Name with a` (the `as` arm above runs first); supplying `with a`
+        // alone is the common form. When absent, parsing is byte-identical.
+        if is_impl_trait && parser.is_ident("with") {
+            parser.parse(ImplTraitWithScope::default())?;
+        }
+
         parser.expect_and_pop_recovery_stack()?;
         parse_where_clause_opt(parser, WhereBracePolicy::Lookahead)?;
 
@@ -880,6 +894,21 @@ impl super::Parse for ImplTraitAliasScope {
         if parser.find_and_pop(SyntaxKind::Ident, ExpectedKind::Name(SyntaxKind::ImplTrait))? {
             parser.bump();
         }
+        Ok(())
+    }
+}
+
+define_scope! { ImplTraitWithScope, ImplTraitWith }
+impl super::Parse for ImplTraitWithScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        debug_assert!(parser.is_ident("with"));
+        parser.set_newline_as_trivia(false);
+        // `with` is a contextual identifier; consume it as the clause head.
+        parser.bump();
+        // The anchor path is parsed but NOT resolved at this increment.
+        parser.parse_or_recover(PathScope::default())?;
         Ok(())
     }
 }
