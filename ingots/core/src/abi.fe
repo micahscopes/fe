@@ -170,6 +170,9 @@ pub trait AbiEncoder<A: Abi> {
 }
 
 /// ABI payload layout metadata and exact runtime payload size.
+// `#[fixed]`: one-of-a-kind (single-impl) goal, the money floor. A second
+// ABI-layout impl is a consensus break, so at most one may exist program-wide.
+#[fixed]
 pub trait AbiSize {
     const HEAD_SIZE: u256
     const IS_DYNAMIC: bool
@@ -204,6 +207,8 @@ pub trait AbiSpan<A: Abi>: AbiSize {
     }
 }
 
+// `#[fixed]`: single-impl wire-format codec, paired with the one ABI layout.
+#[fixed]
 pub trait Decode<A: Abi>: AbiSize {
     fn decode_payload<D: AbiDecoder<A>>(_: mut D) -> Self
 
@@ -240,6 +245,8 @@ pub trait Decode<A: Abi>: AbiSize {
     }
 }
 
+// `#[fixed]`: single-impl wire-format codec, paired with the one ABI layout.
+#[fixed]
 pub trait Encode<A: Abi>: AbiSize {
     const DIRECT_ENCODE: bool
 

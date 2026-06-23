@@ -891,23 +891,23 @@ pub(crate) fn does_impl_trait_conflict<'db>(
 /// user-defined = false), each via a real trait resolution so neither arm passes
 /// vacuously.
 pub(crate) fn is_single_impl<'db>(db: &'db dyn HirAnalysisDb, trait_def: Trait<'db>) -> bool {
-    let Some(name) = trait_def.name(db).to_opt() else {
-        return false;
-    };
-    let name = name.data(db).as_str();
-    let ingot_kind = trait_def.top_mod(db).ingot(db).kind(db);
-
-    // tunable allowlist; v1 = storage-layout + ABI-layout (keyed on the trait's
-    // resolved (name, defining-ingot-kind) identity, never the bare spelling).
-    matches!(
-        (name, ingot_kind),
-        // storage-layout: the storage-slot witness (std::evm::storage_map).
-        ("StorageKey", IngotKind::Std)
-            // ABI-layout family: layout metadata + its wire-format codecs (core::abi).
-            | ("AbiSize", IngotKind::Core)
-            | ("Encode", IngotKind::Core)
-            | ("Decode", IngotKind::Core)
-    )
+    // A goal trait is "single-impl" (one-of-a-kind: at most one impl program-wide,
+    // the money floor) iff its DECLARATION carries the `#[fixed]` attribute. The
+    // policy thus lives in Fe, on the trait decl (the storage-/ABI-layout traits in
+    // core/std), not a hardcoded compiler allowlist; adding or removing a goal is a
+    // one-line Fe change (`fco-guts-over-sugar`: the SET is a deferred-tunable
+    // default).
+    //
+    // Two properties this spelling buys for free:
+    // - SCOPE-FREE / salsa-safe: it reads an attribute of the trait HIR node, never
+    //   the lexical scope, so the scarcity key at `lowered_implementor` stays
+    //   scope-free (`trait_resolution/mod.rs` key invariant).
+    // - ORPHAN-SAFE by construction: you can only attribute a trait you are
+    //   DECLARING (one you own), so single-impl-marking a FOREIGN trait to seize
+    //   sole authority over its impls is unrepresentable.
+    crate::hir_def::ItemKind::Trait(trait_def)
+        .attrs(db)
+        .is_some_and(|attrs| attrs.has_attr(db, "fixed"))
 }
 
 /// Represents an instantiated trait, which can be thought of as a trait
@@ -1176,22 +1176,23 @@ impl<T> Foo for T where T: Marker {}
         is_single_impl(db, trait_def)
     }
 
-    /// FCO slide C3a: the canonical-recognition predicate keys on the FULL
-    /// resolved trait-def identity (name + defining ingot kind), NEVER on the bare
-    /// spelling, and recognizes exactly the v1 set (storage-layout + ABI-layout).
+    /// FCO: the single-impl (money-floor) predicate is driven by the `#[fixed]`
+    /// attribute on the trait DECLARATION, never by the bare spelling. It
+    /// recognizes exactly the traits that carry `#[fixed]` (the v1 storage-/ABI-
+    /// layout set in core/std).
     ///
     /// Positive (anti-vacuous): the real `std::evm::StorageKey` and
-    /// `core::abi::AbiSize` traits resolve to their canonical defs and ARE
-    /// canonical.
+    /// `core::abi::AbiSize` traits carry `#[fixed]`, so they ARE single-impl.
     ///
     /// Negative (anti-vacuous): `core::ops::Ord` and `core::ops::Eq` are real
-    /// traits in the SAME `Core` ingot but are NOT in the allowlist (confirming
-    /// Ord is deliberately non-canonical in v1), and a LOCAL `trait AbiSize {}`
-    /// declared in the fixture — same spelling, `Local` ingot — is NOT canonical.
+    /// traits with NO `#[fixed]` (confirming they are deliberately non-single-impl
+    /// in v1), and a LOCAL `trait AbiSize {}` declared in the fixture, same
+    /// spelling but no `#[fixed]`, is NOT single-impl. The local case is the
+    /// load-bearing one: it proves the predicate reads the attribute, not the name.
     /// `resolve_is_single_impl` asserts each path resolves to a real trait, so
     /// neither arm can pass vacuously.
     #[test]
-    fn is_single_impl_keys_on_resolved_identity_not_name() {
+    fn is_single_impl_reads_fixed_attribute() {
         // Positive: storage-layout — std::evm::StorageKey.
         let mut db = HirAnalysisTestDb::default();
         assert!(
