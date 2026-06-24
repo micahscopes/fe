@@ -1,5 +1,6 @@
 use core::keccak
 use core::option::Option
+use core::contracts::StorageIntrinsic
 
 use super::ops::{sload, sstore}
 
@@ -77,7 +78,7 @@ impl<const BITS: u256, const SALT: u256> StoragePackedArray<BITS, SALT>
     /// Read the lane at index `i`. Returns the lane value zero-extended to `u256`.
     #[arithmetic(unchecked)]
     #[inline(always)]
-    pub fn get(self, _ i: u256) -> u256 {
+    pub fn get(self, _ i: u256) -> u256 uses (_t: StorageIntrinsic) {
         let lanes_per_slot: u256 = 256 / BITS
         let lane_mask: u256 = (1 << BITS) - 1
         let slot: u256 = keccak(SALT) + (i / lanes_per_slot)
@@ -89,7 +90,7 @@ impl<const BITS: u256, const SALT: u256> StoragePackedArray<BITS, SALT>
     /// `value` are silently dropped.
     #[arithmetic(unchecked)]
     #[inline(always)]
-    pub fn set(self, i: u256, value: u256) {
+    pub fn set(self, i: u256, value: u256) uses (_t: StorageIntrinsic) {
         let lanes_per_slot: u256 = 256 / BITS
         let lane_mask: u256 = (1 << BITS) - 1
         let slot: u256 = keccak(SALT) + (i / lanes_per_slot)
@@ -106,7 +107,9 @@ impl<const BITS: u256, const SALT: u256> StoragePackedArray<BITS, SALT>
     /// from the in-register word, amortizing storage access across
     /// consecutive indices.
     #[arithmetic(unchecked)]
-    pub fn search(self, needle: u256, start: u256, end: u256) -> Option<u256> {
+    pub fn search(self, needle: u256, start: u256, end: u256) -> Option<u256>
+        uses (_t: StorageIntrinsic)
+    {
         let lanes_per_slot: u256 = 256 / BITS
         let lane_mask: u256 = (1 << BITS) - 1
         let base: u256 = keccak(SALT)

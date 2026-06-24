@@ -3,6 +3,7 @@ use super::mem
 use ingot::evm::ops::{keccak256, mstore, sload, sstore}
 use ingot::evm::word::WordRepr
 use core::{EffectRef, EffectRefMut}
+use core::contracts::StorageIntrinsic
 
 /// Keys that can be written into the mapping preimage for keccak hashing.
 // `#[fixed]`: one-of-a-kind (single-impl) goal, the storage-layout money floor.
@@ -144,7 +145,7 @@ fn storagemap_storage_slot_with_salt<K>(key: K, salt: u256) -> u256
 
 #[inline(always)]
 fn storagemap_get_word_with_salt<K>(key: K, salt: u256) -> u256
-    where K: StorageKey
+    uses (_t: StorageIntrinsic) where K: StorageKey
 {
     let storage_slot = storagemap_storage_slot_with_salt(key, salt)
     sload(storage_slot)
@@ -152,7 +153,7 @@ fn storagemap_get_word_with_salt<K>(key: K, salt: u256) -> u256
 
 #[inline(always)]
 fn storagemap_set_word_with_salt<K>(key: K, salt: u256, word: u256)
-    where K: StorageKey
+    uses (_t: StorageIntrinsic) where K: StorageKey
 {
     let storage_slot = storagemap_storage_slot_with_salt(key, salt)
     sstore(slot: storage_slot, value: word)
@@ -164,12 +165,12 @@ impl<K: StorageKey, V: WordRepr, const SALT: u256> StorageMap<K, V, SALT> {
     }
 
     #[inline(always)]
-    pub fn get(self, _ key: K) -> V {
+    pub fn get(self, _ key: K) -> V uses (_t: StorageIntrinsic) {
         V::from_word(storagemap_get_word_with_salt(key, salt: SALT))
     }
 
     #[inline(always)]
-    pub fn set(self, key: K, value: own V) {
+    pub fn set(self, key: K, value: own V) uses (_t: StorageIntrinsic) {
         storagemap_set_word_with_salt(key, salt: SALT, word: value.to_word())
     }
 }

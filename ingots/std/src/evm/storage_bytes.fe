@@ -1,4 +1,5 @@
 use core::abi::{ByteInput, BytesView}
+use core::contracts::StorageIntrinsic
 
 use super::mem
 use super::ops
@@ -117,12 +118,12 @@ impl<K: StorageKey + Copy, const LEN_SALT: u256, const WORD_SALT: u256>
         Self {}
     }
 
-    pub fn len(self, key: K) -> u256 {
+    pub fn len(self, key: K) -> u256 uses (_t: StorageIntrinsic) {
         let lengths: StorageMap<K, u256, LEN_SALT> = StorageMap::new()
         lengths.get(key)
     }
 
-    pub fn clear(self, key: K) {
+    pub fn clear(self, key: K) uses (_t: StorageIntrinsic) {
         let lengths: StorageMap<K, u256, LEN_SALT> = StorageMap::new()
         let words: StorageMap<(K, u256), u256, WORD_SALT> = StorageMap::new()
 
@@ -139,7 +140,9 @@ impl<K: StorageKey + Copy, const LEN_SALT: u256, const WORD_SALT: u256>
     /// Store bytes copied directly from calldata.
     ///
     /// `data_ptr` is a raw calldata byte offset.
-    pub fn store_from_calldata(self, key: K, data_ptr: u256, len: u256) {
+    pub fn store_from_calldata(self, key: K, data_ptr: u256, len: u256)
+        uses (_t: StorageIntrinsic)
+    {
         self.clear(key)
 
         let lengths: StorageMap<K, u256, LEN_SALT> = StorageMap::new()
@@ -163,7 +166,7 @@ impl<K: StorageKey + Copy, const LEN_SALT: u256, const WORD_SALT: u256>
 
     /// Store bytes from an arbitrary ABI byte view.
     pub fn store_view<I>(self, key: K, view: BytesView<I>)
-        where I: ByteInput
+        uses (_t: StorageIntrinsic) where I: ByteInput
     {
         self.clear(key)
 
@@ -187,7 +190,7 @@ impl<K: StorageKey + Copy, const LEN_SALT: u256, const WORD_SALT: u256>
     }
 
     /// Return ABI-encoded `bytes` from storage.
-    pub fn encode_return(self, key: K) -> ! {
+    pub fn encode_return(self, key: K) -> ! uses (_t: StorageIntrinsic) {
         let lengths: StorageMap<K, u256, LEN_SALT> = StorageMap::new()
         let words: StorageMap<(K, u256), u256, WORD_SALT> = StorageMap::new()
 

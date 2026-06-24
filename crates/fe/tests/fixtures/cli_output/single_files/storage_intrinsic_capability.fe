@@ -1,0 +1,46 @@
+// FCO effects-as-capabilities #2 (#93) — the EVM storage intrinsics gate.
+//
+// `std::evm::ops::sload`/`sstore` are `extern` ops gated on the TRAIT-keyed
+// obligation `uses (_t: StorageIntrinsic)` (`core::contracts::StorageIntrinsic`).
+// A TYPE-keyed `uses (t: EvmIntrinsics)` can NOT match a root-seeded provider
+// (a root provider has no target type to unify against, so it reports `8-0036`);
+// the trait-keyed gate DOES, because resolution makes the in-scope provider's
+// type the `Self` of the obligation and checks `Self: StorageIntrinsic`.
+//
+// On the default EVM build the toolchain seeds the target's root effect
+// (`std::evm::effects::Evm`) at the program root, and `impl StorageIntrinsic for
+// Evm` carries the capability. A storage-using recv arm taps that seeded
+// provider by declaring `uses (_t: StorageIntrinsic)` (exactly like a recv arm
+// declaring `uses (ctx: Ctx)`), and the capability threads down through the
+// `StorageMap` accessors to the gated ops — byte-identical to the pre-gate code.
+//
+// POSITIVE proof: this file compiles clean (no `8-0036`). The cross-target
+// NEGATIVE (a non-EVM target whose root effect lacks `StorageIntrinsic` rejecting
+// the op) is not testable until a second backend exists.
+
+use std::abi::sol
+use std::evm::StorageMap
+use core::contracts::StorageIntrinsic
+
+pub msg Msg {
+    #[selector = sol("store(uint256,uint256)")]
+    Store { key: u256, value: u256 },
+    #[selector = sol("load(uint256)")]
+    Load { key: u256 } -> u256,
+}
+
+pub contract Store {
+    mut data: StorageMap<u256, u256, 0>,
+
+    recv Msg {
+        // Each storage-using arm taps the root-seeded capability via
+        // `uses (_t: StorageIntrinsic)`; `data.set`/`data.get` forward it to the
+        // gated `sstore`/`sload`, so the arm resolves on the EVM build.
+        Store { key, value } uses (mut data, _t: StorageIntrinsic) {
+            data.set(key, value)
+        }
+        Load { key } -> u256 uses (data, _t: StorageIntrinsic) {
+            data.get(key)
+        }
+    }
+}

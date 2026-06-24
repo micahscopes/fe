@@ -14,6 +14,7 @@ use core::abi::{
     encode_single_root_alloc,
 }
 use core::contracts::ContractHost
+use core::contracts::StorageIntrinsic
 use core::error::ErrorVariant
 use core::message::MsgVariant
 
@@ -210,8 +211,8 @@ pub trait RawMem {
 
 /// Low-level raw storage operations.
 pub trait RawStorage {
-    fn sload(self, _: u256) -> u256
-    fn sstore(mut self, slot: u256, value: u256)
+    fn sload(self, _: u256) -> u256 uses (_t: StorageIntrinsic)
+    fn sstore(mut self, slot: u256, value: u256) uses (_t: StorageIntrinsic)
     fn stor_ptr<T>(self, _ slot: u256) -> StorPtr<T> {
         StorPtr::from_raw(slot)
     }
@@ -460,10 +461,16 @@ struct Private {}
 pub struct Evm { seal: Private }
 
 /// The EVM target's intrinsic-capability carrier (`<EvmTarget as Target>::Intrinsics`).
-/// A zero-sized, sealed (unforgeable: private field, no public ctor) token; the
-/// toolchain seeds it at the program root for an EVM build, and EVM intrinsic
-/// `extern` ops gate on holding it (`uses (t: EvmIntrinsics)`). Authority only,
-/// non-scarce.
+/// A zero-sized, sealed (unforgeable: private field, no public ctor) token that
+/// NAMES the per-target intrinsic capability (design #93).
+///
+/// The ACTUAL gate the storage ops carry is the TRAIT-keyed capability
+/// `core::contracts::StorageIntrinsic` (a type-keyed `uses (t: EvmIntrinsics)`
+/// can NOT match a root-seeded provider, since a root provider has no target
+/// type to unify against). The root effect `Evm` is the provider the toolchain
+/// already seeds at the program root, so it is `Evm` that carries the capability
+/// (`impl StorageIntrinsic for Evm`); this carrier documents/anchors the
+/// capability per target. Authority only, non-scarce.
 pub struct EvmIntrinsics { seal: Private }
 
 impl Evm {
@@ -566,13 +573,21 @@ impl RawMem for Evm {
 }
 
 impl RawStorage for Evm {
-    fn sload(self, _ slot: u256) -> u256 {
+    // The storage-intrinsic capability is threaded in through the `RawStorage`
+    // method obligation (`uses (_t: StorageIntrinsic)`); forward it to the gated
+    // `ops::sload`/`ops::sstore` (matched trait-keyed, byte-identical).
+    fn sload(self, _ slot: u256) -> u256 uses (_t: StorageIntrinsic) {
         ops::sload(slot)
     }
-    fn sstore(mut self, slot: u256, value: u256) {
+    fn sstore(mut self, slot: u256, value: u256) uses (_t: StorageIntrinsic) {
         ops::sstore(slot: slot, value: value)
     }
 }
+
+// The EVM root effect carries the EVM-storage intrinsic capability (#93): the
+// toolchain seeds `Evm` at the program root, so gating the storage `extern` ops
+// on `uses (_t: StorageIntrinsic)` resolves against this impl on an EVM build.
+impl core::contracts::StorageIntrinsic for Evm {}
 
 impl RawOps for Evm {
     fn calldataload(self, _ offset: u256) -> u256 {
