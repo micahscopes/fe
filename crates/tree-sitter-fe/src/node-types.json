@@ -4825,6 +4825,16 @@
     "type": "impl_trait",
     "named": true,
     "fields": {
+      "alias": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "impl_trait_alias",
+            "named": true
+          }
+        ]
+      },
       "body": {
         "multiple": false,
         "required": true,
@@ -4854,6 +4864,16 @@
             "named": true
           }
         ]
+      },
+      "with": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "impl_trait_with",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
@@ -4873,6 +4893,38 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "impl_trait_alias",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "impl_trait_with",
+    "named": true,
+    "fields": {
+      "path": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "path",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -8978,10 +9030,1574 @@
       "required": true,
       "types": [
         {
+          "type": "where_const_predicate",
+          "named": true
+        },
+        {
+          "type": "where_const_predicate_block_first",
+          "named": true
+        },
+        {
           "type": "where_predicate",
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "where_const_binary_expression",
+    "named": true,
+    "fields": {
+      "left": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      },
+      "operator": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "!=",
+            "named": false
+          },
+          {
+            "type": "%",
+            "named": false
+          },
+          {
+            "type": "&",
+            "named": false
+          },
+          {
+            "type": "&&",
+            "named": false
+          },
+          {
+            "type": "*",
+            "named": false
+          },
+          {
+            "type": "**",
+            "named": false
+          },
+          {
+            "type": "+",
+            "named": false
+          },
+          {
+            "type": "-",
+            "named": false
+          },
+          {
+            "type": "/",
+            "named": false
+          },
+          {
+            "type": "<<",
+            "named": false
+          },
+          {
+            "type": "<=",
+            "named": false
+          },
+          {
+            "type": "==",
+            "named": false
+          },
+          {
+            "type": ">",
+            "named": false
+          },
+          {
+            "type": ">=",
+            "named": false
+          },
+          {
+            "type": ">>",
+            "named": false
+          },
+          {
+            "type": "^",
+            "named": false
+          },
+          {
+            "type": "|",
+            "named": false
+          }
+        ]
+      },
+      "right": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "where_const_call_expression",
+    "named": true,
+    "fields": {
+      "arguments": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "call_arg_list",
+            "named": true
+          }
+        ]
+      },
+      "function": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "where_const_field_expression",
+    "named": true,
+    "fields": {
+      "field": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "integer_literal",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "where_const_index_expression",
+    "named": true,
+    "fields": {
+      "index": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "array_repeat_expression",
+            "named": true
+          },
+          {
+            "type": "assignment_expression",
+            "named": true
+          },
+          {
+            "type": "augmented_assignment_expression",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "macro_call_expression",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "method_call_expression",
+            "named": true
+          },
+          {
+            "type": "mode_expression",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "record_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "with_expression",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "where_const_instantiation_expression",
+    "named": true,
+    "fields": {
+      "type_arguments": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "generic_arg_list",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "where_const_method_call_expression",
+    "named": true,
+    "fields": {
+      "arguments": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "call_arg_list",
+            "named": true
+          }
+        ]
+      },
+      "method": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "receiver": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      },
+      "type_arguments": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "generic_arg_list",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "where_const_or_expression",
+    "named": true,
+    "fields": {
+      "left": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      },
+      "operator": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "||",
+            "named": false
+          }
+        ]
+      },
+      "right": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_binary_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_field_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_index_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_method_call_expression",
+            "named": true
+          },
+          {
+            "type": "where_const_unary_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "where_const_paren_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "array_expression",
+          "named": true
+        },
+        {
+          "type": "array_repeat_expression",
+          "named": true
+        },
+        {
+          "type": "assignment_expression",
+          "named": true
+        },
+        {
+          "type": "augmented_assignment_expression",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "cast_expression",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "index_expression",
+          "named": true
+        },
+        {
+          "type": "instantiation_expression",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "macro_call_expression",
+          "named": true
+        },
+        {
+          "type": "match_expression",
+          "named": true
+        },
+        {
+          "type": "method_call_expression",
+          "named": true
+        },
+        {
+          "type": "mode_expression",
+          "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "qualified_path_expression",
+          "named": true
+        },
+        {
+          "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "record_expression",
+          "named": true
+        },
+        {
+          "type": "scoped_path",
+          "named": true
+        },
+        {
+          "type": "tuple_expression",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "with_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "where_const_predicate",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "where_const_binary_expression",
+          "named": true
+        },
+        {
+          "type": "where_const_call_expression",
+          "named": true
+        },
+        {
+          "type": "where_const_method_call_expression",
+          "named": true
+        },
+        {
+          "type": "where_const_or_expression",
+          "named": true
+        },
+        {
+          "type": "where_const_paren_expression",
+          "named": true
+        },
+        {
+          "type": "where_const_predicate_block",
+          "named": true
+        },
+        {
+          "type": "where_const_unary_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "where_const_predicate_block",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "array_expression",
+          "named": true
+        },
+        {
+          "type": "array_repeat_expression",
+          "named": true
+        },
+        {
+          "type": "assignment_expression",
+          "named": true
+        },
+        {
+          "type": "augmented_assignment_expression",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "cast_expression",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "index_expression",
+          "named": true
+        },
+        {
+          "type": "instantiation_expression",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "macro_call_expression",
+          "named": true
+        },
+        {
+          "type": "match_expression",
+          "named": true
+        },
+        {
+          "type": "method_call_expression",
+          "named": true
+        },
+        {
+          "type": "mode_expression",
+          "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "qualified_path_expression",
+          "named": true
+        },
+        {
+          "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "record_expression",
+          "named": true
+        },
+        {
+          "type": "scoped_path",
+          "named": true
+        },
+        {
+          "type": "tuple_expression",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "with_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "where_const_predicate_block_first",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "array_expression",
+          "named": true
+        },
+        {
+          "type": "array_repeat_expression",
+          "named": true
+        },
+        {
+          "type": "assignment_expression",
+          "named": true
+        },
+        {
+          "type": "augmented_assignment_expression",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "cast_expression",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "index_expression",
+          "named": true
+        },
+        {
+          "type": "instantiation_expression",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "macro_call_expression",
+          "named": true
+        },
+        {
+          "type": "match_expression",
+          "named": true
+        },
+        {
+          "type": "method_call_expression",
+          "named": true
+        },
+        {
+          "type": "mode_expression",
+          "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "qualified_path_expression",
+          "named": true
+        },
+        {
+          "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "record_expression",
+          "named": true
+        },
+        {
+          "type": "scoped_path",
+          "named": true
+        },
+        {
+          "type": "tuple_expression",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "with_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "where_const_unary_expression",
+    "named": true,
+    "fields": {
+      "operand": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Self",
+            "named": false
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "array_repeat_expression",
+            "named": true
+          },
+          {
+            "type": "assignment_expression",
+            "named": true
+          },
+          {
+            "type": "augmented_assignment_expression",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "ingot",
+            "named": false
+          },
+          {
+            "type": "instantiation_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "macro_call_expression",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "method_call_expression",
+            "named": true
+          },
+          {
+            "type": "mode_expression",
+            "named": true
+          },
+          {
+            "type": "paren_expression",
+            "named": true
+          },
+          {
+            "type": "qualified_path_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "record_expression",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": false
+          },
+          {
+            "type": "super",
+            "named": false
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "with_expression",
+            "named": true
+          }
+        ]
+      },
+      "operator": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "!",
+            "named": false
+          },
+          {
+            "type": "+",
+            "named": false
+          },
+          {
+            "type": "-",
+            "named": false
+          },
+          {
+            "type": "~",
+            "named": false
+          }
+        ]
+      }
     }
   },
   {
@@ -9501,6 +11117,10 @@
   },
   {
     "type": ">>=",
+    "named": false
+  },
+  {
+    "type": "Constraint",
     "named": false
   },
   {
