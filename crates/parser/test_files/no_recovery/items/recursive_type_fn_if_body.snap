@@ -1,0 +1,7 @@
+---
+source: crates/parser/tests/no_recovery.rs
+expression: output
+input_file: test_files/no_recovery/items/recursive_type_fn_if_body.fe
+---
+`if` is not allowed in a recursive type fn body@97..97
+expected type@97..97

@@ -7,7 +7,7 @@ use super::{
     func::FuncDefScope,
     param::{
         FuncParamListScope, TraitRefScope, TypeBoundListScope, WhereBracePolicy,
-        parse_generic_params_opt, parse_where_clause_opt,
+        parse_generic_params_opt, parse_kind_bound, parse_where_clause_opt,
     },
     parse_list,
     path::PathScope,
@@ -142,6 +142,18 @@ impl super::Parse for ItemScope {
                 parser.error("derive provider selection scopes do not support item modifiers");
             }
             parser.parse_cp(DeriveProviderScopeScope::default(), checkpoint)?;
+            return Ok(());
+        }
+
+        // `recursive type fn` is recognized contextually (like `derive`/`with`):
+        // `recursive` is not a reserved keyword, so an item head that starts with
+        // the identifier `recursive` is a recursive type fn. `pub` is allowed
+        // (the visibility rule, spec 1.7); `unsafe` is not.
+        if parser.is_ident("recursive") {
+            if modifiers.is_unsafe {
+                parser.error("`recursive type fn` cannot be `unsafe`");
+            }
+            parser.parse_cp(RecursiveTypeFnScope::default(), checkpoint)?;
             return Ok(());
         }
 
@@ -1092,6 +1104,245 @@ impl super::Parse for TypeAliasScope {
             parse_type(parser, None)?;
         }
         Ok(())
+    }
+}
+
+// `recursive type fn Name<Params.., const N: usize>() -> (KIND) where .. {
+//     match N { LIT => TYPE .. _ => TYPE }
+// }`
+//
+// The hand-written parser is authoritative; the tree-sitter grammar is a
+// deferred follow-up (like const-predicates). This scope parses the item shape
+// and enforces the grammar-level restrictions with named diagnostics (empty
+// value-parameter list, integer/`_` arm patterns, mandatory `=>`, a single
+// `match` body, no `if`/`let`/nested-`match` at an arm head). The deeper
+// definition-time laws (exactly one `const` subject declared last, self-call
+// only by DefId, the `{N - k}`/`{N / k}` subject-shape whitelist, exhaustiveness
+// and termination) are checked in HIR well-formedness, mirroring how
+// `ConstGenericParam` trait bounds are parsed permissively and "checked in hir".
+define_scope! { RecursiveTypeFnScope, RecursiveTypeFn }
+impl super::Parse for RecursiveTypeFnScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.set_newline_as_trivia(false);
+        debug_assert!(parser.is_ident("recursive"));
+        parser.bump(); // contextual `recursive`
+        if !parser.bump_if(SyntaxKind::TypeKw) {
+            parser.error("expected `type` after `recursive`");
+        }
+        if !parser.bump_if(SyntaxKind::FnKw) {
+            parser.error("expected `fn` after `recursive type`");
+        }
+
+        parser.set_scope_recovery_stack(&[
+            SyntaxKind::Ident,
+            SyntaxKind::Lt,
+            SyntaxKind::LParen,
+            SyntaxKind::Arrow,
+            SyntaxKind::WhereKw,
+            SyntaxKind::LBrace,
+        ]);
+
+        if parser.find_and_pop(
+            SyntaxKind::Ident,
+            ExpectedKind::Name(SyntaxKind::RecursiveTypeFn),
+        )? {
+            parser.bump();
+        }
+
+        parser.expect_and_pop_recovery_stack()?;
+        parse_generic_params_opt(parser, false)?;
+
+        // The value-parameter list is mandatory and must be empty (reserved for
+        // future value-level inputs, spec 1.1 rule 3).
+        if parser.find_and_pop(
+            SyntaxKind::LParen,
+            ExpectedKind::Syntax(SyntaxKind::RecursiveTypeFn),
+        )? {
+            parser.bump();
+            if parser.current_kind() != Some(SyntaxKind::RParen) {
+                parser.error(
+                    "`recursive type fn` takes no value parameters; the parameter list must be empty `()`",
+                );
+            }
+            parser.bump_or_recover(
+                SyntaxKind::RParen,
+                "expected `)` to close the empty parameter list",
+            )?;
+        }
+
+        parser.expect_and_pop_recovery_stack()?;
+        if parser.bump_if(SyntaxKind::Arrow) {
+            parser.parse(TypeFnRetKindScope::default())?;
+        }
+
+        // The `where` clause and body may begin on a following line.
+        parser.set_newline_as_trivia(true);
+        parser.expect_and_pop_recovery_stack()?;
+        parse_where_clause_opt(parser, WhereBracePolicy::Lookahead)?;
+
+        parser.set_newline_as_trivia(true);
+        if parser.find_and_pop(
+            SyntaxKind::LBrace,
+            ExpectedKind::Body(SyntaxKind::RecursiveTypeFn),
+        )? {
+            parser.parse(TypeFnBodyScope::default())?;
+        }
+
+        Ok(())
+    }
+}
+
+define_scope! { TypeFnRetKindScope, TypeFnRetKind }
+impl super::Parse for TypeFnRetKindScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.set_newline_as_trivia(false);
+        parse_kind_bound(parser)
+    }
+}
+
+define_scope! { TypeFnBodyScope, TypeFnBody }
+impl super::Parse for TypeFnBodyScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.bump_expected(SyntaxKind::LBrace);
+        parser.set_newline_as_trivia(true);
+
+        // The body is exactly one `match` on the subject (spec 1.1 rule 2).
+        if parser.find(
+            SyntaxKind::MatchKw,
+            ExpectedKind::Body(SyntaxKind::TypeFnBody),
+        )? {
+            parser.parse(TypeFnMatchScope::default())?;
+        }
+
+        parser.set_newline_as_trivia(true);
+        parser.bump_or_recover(
+            SyntaxKind::RBrace,
+            "expected `}` to close the recursive type fn body",
+        )
+    }
+}
+
+define_scope! { TypeFnMatchScope, TypeFnMatch }
+impl super::Parse for TypeFnMatchScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.set_newline_as_trivia(false);
+        parser.bump_expected(SyntaxKind::MatchKw);
+
+        // The subject is a bare identifier (the `const` parameter). That it
+        // names exactly the declared subject is verified in HIR.
+        if parser.current_kind() == Some(SyntaxKind::Ident) {
+            parser.bump();
+        } else {
+            parser.error("expected the recursive type fn subject (the `const` parameter)");
+        }
+
+        if parser.find(
+            SyntaxKind::LBrace,
+            ExpectedKind::Body(SyntaxKind::TypeFnMatch),
+        )? {
+            parser.parse(TypeFnArmListScope::default())?;
+        }
+        Ok(())
+    }
+}
+
+define_scope! {
+    TypeFnArmListScope,
+    TypeFnArmList,
+    (SyntaxKind::Newline, SyntaxKind::RBrace, SyntaxKind::Comma)
+}
+impl super::Parse for TypeFnArmListScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.bump_expected(SyntaxKind::LBrace);
+
+        loop {
+            parser.set_newline_as_trivia(true);
+            if matches!(parser.current_kind(), Some(SyntaxKind::RBrace) | None) {
+                break;
+            }
+
+            parser.parse(TypeFnArmScope::default())?;
+            parser.set_newline_as_trivia(false);
+
+            parser.expect(
+                &[SyntaxKind::Comma, SyntaxKind::Newline, SyntaxKind::RBrace],
+                None,
+            )?;
+            let comma = parser.bump_if(SyntaxKind::Comma);
+            let nl = parser.bump_if(SyntaxKind::Newline);
+            if !(comma || nl) {
+                break;
+            }
+        }
+
+        parser.bump_or_recover(SyntaxKind::RBrace, "expected `}` to close the match arms")
+    }
+}
+
+define_scope! { TypeFnArmScope, TypeFnArm }
+impl super::Parse for TypeFnArmScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.set_newline_as_trivia(false);
+
+        parser.parse(TypeFnArmPatScope::default())?;
+
+        parser.set_scope_recovery_stack(&[SyntaxKind::FatArrow]);
+        if parser.find_and_pop(SyntaxKind::FatArrow, ExpectedKind::Unspecified)? {
+            parser.bump();
+        }
+
+        // The arm right-hand side is a type. Partial constructs are not
+        // expressible, but `if`/`let`/`match` heads are rejected with named
+        // diagnostics so the "no if/let/nested match" rule is not silently
+        // accepted (spec 1.1 rule 2).
+        match parser.current_kind() {
+            Some(SyntaxKind::MatchKw) => {
+                parser.error("nested `match` is not allowed in a recursive type fn body");
+            }
+            Some(SyntaxKind::IfKw) => {
+                parser.error("`if` is not allowed in a recursive type fn body");
+            }
+            Some(SyntaxKind::LetKw) => {
+                parser.error("`let` is not allowed in a recursive type fn body");
+            }
+            _ => {}
+        }
+
+        parse_type(parser, None)?;
+        Ok(())
+    }
+}
+
+define_scope! { TypeFnArmPatScope, TypeFnArmPat }
+impl super::Parse for TypeFnArmPatScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        parser.set_newline_as_trivia(false);
+        match parser.current_kind() {
+            Some(SyntaxKind::Int) => {
+                parser.bump();
+                Ok(())
+            }
+            Some(SyntaxKind::Underscore) => {
+                parser.bump();
+                Ok(())
+            }
+            _ => parser
+                .error_and_recover("expected an integer literal or `_` recursive type fn arm pattern"),
+        }
     }
 }
 

@@ -1,0 +1,15 @@
+recursive type fn RPow<F, const N: usize>() -> (* -> *)
+    where F: * -> * + Functor
+{
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+recursive type fn Bush<const N: usize>() -> (* -> *) {
+    match N {
+        0 => Pair
+        _ => Comp<Bush<{N - 1}>, Bush<{N - 1}>>
+    }
+}

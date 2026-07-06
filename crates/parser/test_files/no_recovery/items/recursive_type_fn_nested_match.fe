@@ -1,0 +1,6 @@
+recursive type fn Bad<const N: usize>() -> (* -> *) {
+    match N {
+        0 => Par
+        _ => match N { 0 => Par _ => Par }
+    }
+}

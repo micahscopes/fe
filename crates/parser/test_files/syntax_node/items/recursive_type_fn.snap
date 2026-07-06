@@ -1,0 +1,295 @@
+---
+source: crates/parser/tests/syntax_node.rs
+expression: node
+input_file: test_files/syntax_node/items/recursive_type_fn.fe
+---
+Root@0..310
+  ItemList@0..309
+    Item@0..165
+      RecursiveTypeFn@0..165
+        Ident@0..9 "recursive"
+        WhiteSpace@9..10 " "
+        TypeKw@10..14 "type"
+        WhiteSpace@14..15 " "
+        FnKw@15..17 "fn"
+        WhiteSpace@17..18 " "
+        Ident@18..22 "RPow"
+        GenericParamList@22..41
+          Lt@22..23 "<"
+          TypeGenericParam@23..24
+            Ident@23..24 "F"
+          Comma@24..25 ","
+          WhiteSpace@25..26 " "
+          ConstGenericParam@26..40
+            ConstKw@26..31 "const"
+            WhiteSpace@31..32 " "
+            Ident@32..33 "N"
+            Colon@33..34 ":"
+            WhiteSpace@34..35 " "
+            PathType@35..40
+              Path@35..40
+                PathSegment@35..40
+                  Ident@35..40 "usize"
+          Gt@40..41 ">"
+        LParen@41..42 "("
+        RParen@42..43 ")"
+        WhiteSpace@43..44 " "
+        Arrow@44..46 "->"
+        WhiteSpace@46..47 " "
+        TypeFnRetKind@47..55
+          LParen@47..48 "("
+          KindBoundAbs@48..54
+            KindBoundMono@48..49
+              Star@48..49 "*"
+            WhiteSpace@49..50 " "
+            Arrow@50..52 "->"
+            WhiteSpace@52..53 " "
+            KindBoundMono@53..54
+              Star@53..54 "*"
+          RParen@54..55 ")"
+        Newline@55..56 "\n"
+        WhiteSpace@56..60 "    "
+        WhereClause@60..85
+          WhereKw@60..65 "where"
+          WhiteSpace@65..66 " "
+          WherePredicate@66..85
+            PathType@66..67
+              Path@66..67
+                PathSegment@66..67
+                  Ident@66..67 "F"
+            TypeBoundList@67..85
+              Colon@67..68 ":"
+              WhiteSpace@68..69 " "
+              TypeBound@69..75
+                KindBoundAbs@69..75
+                  KindBoundMono@69..70
+                    Star@69..70 "*"
+                  WhiteSpace@70..71 " "
+                  Arrow@71..73 "->"
+                  WhiteSpace@73..74 " "
+                  KindBoundMono@74..75
+                    Star@74..75 "*"
+              WhiteSpace@75..76 " "
+              Plus@76..77 "+"
+              WhiteSpace@77..78 " "
+              TypeBound@78..85
+                TraitRef@78..85
+                  Path@78..85
+                    PathSegment@78..85
+                      Ident@78..85 "Functor"
+        Newline@85..86 "\n"
+        TypeFnBody@86..165
+          LBrace@86..87 "{"
+          Newline@87..88 "\n"
+          WhiteSpace@88..92 "    "
+          TypeFnMatch@92..163
+            MatchKw@92..97 "match"
+            WhiteSpace@97..98 " "
+            Ident@98..99 "N"
+            WhiteSpace@99..100 " "
+            TypeFnArmList@100..163
+              LBrace@100..101 "{"
+              Newline@101..102 "\n"
+              WhiteSpace@102..110 "        "
+              TypeFnArm@110..118
+                TypeFnArmPat@110..111
+                  Int@110..111 "0"
+                WhiteSpace@111..112 " "
+                FatArrow@112..114 "=>"
+                WhiteSpace@114..115 " "
+                PathType@115..118
+                  Path@115..118
+                    PathSegment@115..118
+                      Ident@115..118 "Par"
+              Newline@118..119 "\n"
+              WhiteSpace@119..127 "        "
+              TypeFnArm@127..157
+                TypeFnArmPat@127..128
+                  Underscore@127..128 "_"
+                WhiteSpace@128..129 " "
+                FatArrow@129..131 "=>"
+                WhiteSpace@131..132 " "
+                PathType@132..157
+                  Path@132..157
+                    PathSegment@132..157
+                      Ident@132..136 "Comp"
+                      GenericArgList@136..157
+                        Lt@136..137 "<"
+                        TypeGenericArg@137..153
+                          PathType@137..153
+                            Path@137..153
+                              PathSegment@137..153
+                                Ident@137..141 "RPow"
+                                GenericArgList@141..153
+                                  Lt@141..142 "<"
+                                  TypeGenericArg@142..143
+                                    PathType@142..143
+                                      Path@142..143
+                                        PathSegment@142..143
+                                          Ident@142..143 "F"
+                                  Comma@143..144 ","
+                                  WhiteSpace@144..145 " "
+                                  ConstGenericArg@145..152
+                                    BlockExpr@145..152
+                                      LBrace@145..146 "{"
+                                      ExprStmt@146..151
+                                        BinExpr@146..151
+                                          PathExpr@146..147
+                                            Path@146..147
+                                              PathSegment@146..147
+                                                Ident@146..147 "N"
+                                          WhiteSpace@147..148 " "
+                                          Minus@148..149 "-"
+                                          WhiteSpace@149..150 " "
+                                          LitExpr@150..151
+                                            Lit@150..151
+                                              Int@150..151 "1"
+                                      RBrace@151..152 "}"
+                                  Gt@152..153 ">"
+                        Comma@153..154 ","
+                        WhiteSpace@154..155 " "
+                        TypeGenericArg@155..156
+                          PathType@155..156
+                            Path@155..156
+                              PathSegment@155..156
+                                Ident@155..156 "F"
+                        Gt@156..157 ">"
+              Newline@157..158 "\n"
+              WhiteSpace@158..162 "    "
+              RBrace@162..163 "}"
+          Newline@163..164 "\n"
+          RBrace@164..165 "}"
+    Newline@165..167 "\n\n"
+    Item@167..309
+      RecursiveTypeFn@167..309
+        Ident@167..176 "recursive"
+        WhiteSpace@176..177 " "
+        TypeKw@177..181 "type"
+        WhiteSpace@181..182 " "
+        FnKw@182..184 "fn"
+        WhiteSpace@184..185 " "
+        Ident@185..189 "Bush"
+        GenericParamList@189..205
+          Lt@189..190 "<"
+          ConstGenericParam@190..204
+            ConstKw@190..195 "const"
+            WhiteSpace@195..196 " "
+            Ident@196..197 "N"
+            Colon@197..198 ":"
+            WhiteSpace@198..199 " "
+            PathType@199..204
+              Path@199..204
+                PathSegment@199..204
+                  Ident@199..204 "usize"
+          Gt@204..205 ">"
+        LParen@205..206 "("
+        RParen@206..207 ")"
+        WhiteSpace@207..208 " "
+        Arrow@208..210 "->"
+        WhiteSpace@210..211 " "
+        TypeFnRetKind@211..219
+          LParen@211..212 "("
+          KindBoundAbs@212..218
+            KindBoundMono@212..213
+              Star@212..213 "*"
+            WhiteSpace@213..214 " "
+            Arrow@214..216 "->"
+            WhiteSpace@216..217 " "
+            KindBoundMono@217..218
+              Star@217..218 "*"
+          RParen@218..219 ")"
+        WhiteSpace@219..220 " "
+        TypeFnBody@220..309
+          LBrace@220..221 "{"
+          Newline@221..222 "\n"
+          WhiteSpace@222..226 "    "
+          TypeFnMatch@226..307
+            MatchKw@226..231 "match"
+            WhiteSpace@231..232 " "
+            Ident@232..233 "N"
+            WhiteSpace@233..234 " "
+            TypeFnArmList@234..307
+              LBrace@234..235 "{"
+              Newline@235..236 "\n"
+              WhiteSpace@236..244 "        "
+              TypeFnArm@244..253
+                TypeFnArmPat@244..245
+                  Int@244..245 "0"
+                WhiteSpace@245..246 " "
+                FatArrow@246..248 "=>"
+                WhiteSpace@248..249 " "
+                PathType@249..253
+                  Path@249..253
+                    PathSegment@249..253
+                      Ident@249..253 "Pair"
+              Newline@253..254 "\n"
+              WhiteSpace@254..262 "        "
+              TypeFnArm@262..301
+                TypeFnArmPat@262..263
+                  Underscore@262..263 "_"
+                WhiteSpace@263..264 " "
+                FatArrow@264..266 "=>"
+                WhiteSpace@266..267 " "
+                PathType@267..301
+                  Path@267..301
+                    PathSegment@267..301
+                      Ident@267..271 "Comp"
+                      GenericArgList@271..301
+                        Lt@271..272 "<"
+                        TypeGenericArg@272..285
+                          PathType@272..285
+                            Path@272..285
+                              PathSegment@272..285
+                                Ident@272..276 "Bush"
+                                GenericArgList@276..285
+                                  Lt@276..277 "<"
+                                  ConstGenericArg@277..284
+                                    BlockExpr@277..284
+                                      LBrace@277..278 "{"
+                                      ExprStmt@278..283
+                                        BinExpr@278..283
+                                          PathExpr@278..279
+                                            Path@278..279
+                                              PathSegment@278..279
+                                                Ident@278..279 "N"
+                                          WhiteSpace@279..280 " "
+                                          Minus@280..281 "-"
+                                          WhiteSpace@281..282 " "
+                                          LitExpr@282..283
+                                            Lit@282..283
+                                              Int@282..283 "1"
+                                      RBrace@283..284 "}"
+                                  Gt@284..285 ">"
+                        Comma@285..286 ","
+                        WhiteSpace@286..287 " "
+                        TypeGenericArg@287..300
+                          PathType@287..300
+                            Path@287..300
+                              PathSegment@287..300
+                                Ident@287..291 "Bush"
+                                GenericArgList@291..300
+                                  Lt@291..292 "<"
+                                  ConstGenericArg@292..299
+                                    BlockExpr@292..299
+                                      LBrace@292..293 "{"
+                                      ExprStmt@293..298
+                                        BinExpr@293..298
+                                          PathExpr@293..294
+                                            Path@293..294
+                                              PathSegment@293..294
+                                                Ident@293..294 "N"
+                                          WhiteSpace@294..295 " "
+                                          Minus@295..296 "-"
+                                          WhiteSpace@296..297 " "
+                                          LitExpr@297..298
+                                            Lit@297..298
+                                              Int@297..298 "1"
+                                      RBrace@298..299 "}"
+                                  Gt@299..300 ">"
+                        Gt@300..301 ">"
+              Newline@301..302 "\n"
+              WhiteSpace@302..306 "    "
+              RBrace@306..307 "}"
+          Newline@307..308 "\n"
+          RBrace@308..309 "}"
+  Newline@309..310 "\n"
