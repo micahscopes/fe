@@ -900,3 +900,26 @@ debug, targeted (`cargo test -p fe-hir --lib
 analysis::ty::type_fn_induct::tests::demo_`, 4 passed). The pre-existing 17
 `type_fn_induct` and 29 `type_fn` tests are unchanged. Next step: the capstone
 OVERVIEW doc (the reason-to-exist writeup that this demonstration underpins).
+
+---
+
+## Capstone: `docs/type-fn/OVERVIEW.md`
+
+Wrote the review-facing capstone document for Sean, the architect, and Micah:
+motivation (why this is the plan section 4 keystone rung, who benefits),
+what the feature is (the three pieces: the restricted `recursive type fn`
+form, ground normalization, the induction engine), architecture (how it rides
+the FCO carrier, the ty-layer/WF/normalization/engine pieces), the soundness
+story (Fire-Triangle containment, the gate-don't-select cross-check, zero
+baseline perturbation, the two release CIs, and the specific holes the four
+Fable steering reviews caught before or during build), the Slice 3a
+demonstration, an honest BUILT-vs-DEFERRED ledger, and how to evaluate the
+branch (architect-gated via plan owner decision O3, commit list, verification
+commands).
+
+Cross-checked the two release-CI numbers the doc cites (Slice-1 boundary
+2475/2475 at HEAD `adfeaaec4`, Slice-2 boundary 2502/2502 at HEAD `d3d88a85b`)
+against the actual `cargo nextest run --release --workspace --all-features
+--no-fail-fast --locked` logs from those runs (both `NEXTEST_EXIT=0`) rather
+than restating the BUILD_LOG prose alone; the FCO base's 2451/2451 comes from
+the `fco-sgk` PR #1506 record. No code changed; this is a docs-only commit.
