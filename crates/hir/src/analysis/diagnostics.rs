@@ -1783,6 +1783,25 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
+            Self::TypeFnInImplHeader { span } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "cannot implement a trait for a `recursive type fn` application".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "a `recursive type fn` application may not appear in an impl header"
+                        .to_string(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "a `recursive type fn` application is transparent: it unfolds to its normal \
+                     form, so an impl on it would make coherence depend on arithmetic"
+                        .to_string(),
+                    "implement the trait for the combinator types the type fn expands to instead"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
             // TODO: add hint about indirection (eg *T)
             Self::RecursiveType(cycle) => CompleteDiagnostic {
                 severity: Severity::Error,

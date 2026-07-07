@@ -70,6 +70,17 @@ pub(crate) fn lower_impl_trait<'db>(
     db: &'db dyn HirAnalysisDb,
     impl_trait: ImplTrait<'db>,
 ) -> Option<Binder<ImplementorId<'db>>> {
+    // S2.0 (a): spec sec 5.1 / sec 9.9 impl-target ban. An impl whose header
+    // mentions a `recursive type fn` application (symbolic OR ground) does not
+    // produce an implementor, so it never registers in the trait-impl table.
+    // This is the soundness half of the ban: without it, `impl Tr for
+    // RPow<Pair, 1>` would eager-expand and register as a live impl on the
+    // normal form `Comp<Par, Pair>` (accept-by-expansion). The diagnostic is
+    // emitted separately by `implementor_with_errors`.
+    if crate::analysis::ty::type_fn::impl_header_type_fn_site(db, impl_trait).is_some() {
+        return None;
+    }
+
     // Delegate trait-ref lowering and ingot checks to the semantic helper on
     // `ImplTrait`. If lowering fails or the ingot rule is violated, this
     // returns `None`.

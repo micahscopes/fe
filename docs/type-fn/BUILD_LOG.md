@@ -330,3 +330,67 @@ now eager-expanded (S1.5), so `Dup<u8, 3>` (made WF with a self-call) lowers to
 `cargo check --workspace` clean; 19 `type_fn` + 2 `ty::tests` type-fn unit tests
 pass (targeted, debug). Full release `nextest` CI is the orchestrator's at the
 slice-1 boundary.
+
+---
+
+## S2.0 (a): explicit impl-target ban (spec sec 5.1 / sec 9.9)
+
+Slice-1 boundary release CI passed 2475/2475 (orchestrator, at HEAD `adfeaaec4`)
+before this slice started. S2.0 is the Slice-2 precondition: it welds the trap
+doors shut BEFORE the S2.1 gate lift, with NO semantics change (the gate stays
+closed; the `SymbolicTypeFnUnsupported` reject is UNTOUCHED). Per Fable
+steering-03 sec 5 (S2.0) and sec 1.4 G1.
+
+Landed the headline of S2.0: an EXPLICIT, INDEPENDENT ban on a `recursive type
+fn` application appearing in an `impl` header, symbolic OR ground. Until now the
+ban was delivered only IMPLICITLY by the S1.5 symbolic reject (a symbolic header
+lowers to `Invalid(SymbolicTypeFnUnsupported)`); a GROUND header
+(`impl Tr for RPow<Pair, 1>`) was in fact ACCEPTED-BY-EXPANSION (eager-expanded
+to an impl on the normal form `Comp<Par, Pair>`). Both are now rejected.
+
+What it rejects and how it hooks in:
+
+- New structural check `type_fn::impl_header_type_fn_site(db, impl_trait) ->
+  Option<ImplHeaderTypeFnSite>` walks the impl's HIR types (self type, then
+  trait-ref args) and reports the FIRST occurrence of a `recursive type fn`
+  head, recursing through path generic args, tuples, arrays, ptr/mode wrappers
+  ("in impl headers anywhere"). It is purely structural over HIR paths (resolved
+  via the early `resolve_ident_to_bucket`/`resolve_leaf_scope`), run BEFORE any
+  lowering/normalization, so it recognizes symbolic AND ground uniformly and
+  cannot be un-done by the S2.1 gate lift.
+- Two hooks, so the ban is both a DIAGNOSTIC and a soundness barrier:
+  1. `implementor_with_errors` (`core/semantic/mod.rs`): checked FIRST, before
+     `self.ty(db)`; on a hit returns `(None, [TypeFnInImplHeader])`, so the ban
+     is the single clean diagnostic (no trailing symbolic-unsupported /
+     missing-assoc noise) and surfaces through `ImplTraitAnalysisPass`.
+  2. `lower_impl_trait` (`analysis/ty/trait_lower.rs`): returns `None` on a hit,
+     so a banned impl NEVER registers in the trait-impl table. This is the
+     soundness half: it stops `impl Tr for RPow<Pair, 1>` from becoming a live
+     impl on `Comp<Par, Pair>`, and drops the pre-existing latent risk of the
+     symbolic case registering with an everything-unifying `Invalid` self type.
+- New diagnostic `TyLowerDiag::TypeFnInImplHeader { span }` (code 48), rendered
+  in `analysis/diagnostics.rs`: "cannot implement a trait for a `recursive type
+  fn` application", with notes on transparency and the "impl on the combinators"
+  remedy. Span points at the self-type or trait-ref site.
+
+Verified there was NO pre-existing `TyBase::TypeFn` impl-target check
+(`trait_lower.rs` / `trait_def.rs` / `def_analysis`: zero hits), matching the
+steering-03 G1 finding.
+
+v1 narrowing (documented in code): only SINGLE-SEGMENT type-fn heads are
+recognized (`resolve_ident_to_bucket` accepts root paths only), mirroring the
+S1.4 single-segment self-detection. A qualified/aliased head
+(`impl Tr for m::RPow<..>`): its symbolic form is still caught by the S1.5 gate;
+the ground qualified form is a v1 gap tracked with the other qualified-path
+cases.
+
+`SymbolicTypeFnUnsupported` reject: UNCHANGED (still at
+`path_resolver.rs:1928-1934`); the `rejects_symbolic_type_fn_outside_body` test
+still passes. Gate stays closed.
+
+Verification: `cargo check --workspace` clean (no warnings). All 23
+`analysis::ty::type_fn::tests` pass (19 pre-existing unchanged + 4 new:
+`rejects_impl_on_symbolic_type_fn_application`,
+`rejects_impl_on_ground_type_fn_application`,
+`rejects_impl_on_nested_type_fn_application`, `allows_impl_on_combinator`
+over-fire guard).

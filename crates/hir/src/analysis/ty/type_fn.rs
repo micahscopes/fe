@@ -32,7 +32,8 @@ use crate::analysis::ty::ty_lower::{lower_hir_ty, lower_kind};
 use crate::core::hir_def::scope_graph::ScopeId;
 use crate::core::hir_def::{
     ArithBinOp, BinOp, Body, ConstGenericArgValue, Expr, GenericArg, GenericParam, IdentId,
-    IntegerId, ItemKind, LitKind, Partial, PathId, Stmt, TypeFnDef, TypeFnPat, TypeId, TypeKind,
+    ImplTrait, IntegerId, ItemKind, LitKind, Partial, PathId, Stmt, TypeFnDef, TypeFnPat, TypeId,
+    TypeKind,
 };
 
 /// A single step the recursion subject takes at a self-call (spec sec 3.3),
@@ -795,6 +796,128 @@ pub(crate) fn scope_in_type_fn_body<'db>(db: &'db dyn HirAnalysisDb, scope: Scop
     false
 }
 
+// ---------------------------------------------------------------------------
+// S2.0 (a): explicit spec sec 5.1 / sec 9.9 impl-target ban.
+//
+// A `recursive type fn` application may not appear anywhere in an impl header:
+// neither AS the impl target (self type) nor IN it (nested in the self type),
+// nor in a trait-ref argument. This is banned SYMBOLIC OR GROUND, independently
+// of the S1.5 `SymbolicTypeFnUnsupported` reject.
+//
+// Why an independent, structural check: a type-fn application is transparent
+// (`RPow<F, 1>` IS `Comp<Par, F>` after one unfold step), so an impl on one
+// would make coherence depend on arithmetic. For a symbolic header the S1.5
+// reject already refuses lowering, but Slice 2.1 lifts that reject; for a
+// GROUND header S1.5 eager-expands the self type to its normal form BEFORE any
+// check sees it, which would silently accept `impl Tr for RPow<Pair, 1>` as an
+// impl on `Comp<Par, Pair>` (accept-by-expansion, spec-forbidden). The ban must
+// therefore run STRUCTURALLY on the impl's HIR types, before expansion, so it
+// catches both and cannot be un-done by a later gate lift.
+//
+// v1 narrowing (documented, mirrors the S1.4 single-segment self-detection):
+// only single-segment type-fn heads are recognized; a qualified/aliased head
+// (`impl Tr for m::RPow<..>`) is not caught here (its symbolic form is still
+// rejected by the S1.5 gate; the ground qualified form is a v1 gap tracked with
+// the other qualified-path cases).
+// ---------------------------------------------------------------------------
+
+/// Where in an impl header a `recursive type fn` application was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImplHeaderTypeFnSite {
+    /// In the impl's self type (`impl .. for RPow<..>` or nested within it).
+    SelfType,
+    /// In a trait-ref argument (`impl Tr<RPow<..>> for ..`).
+    TraitRef,
+}
+
+/// Returns the site of a `recursive type fn` application in `impl_trait`'s
+/// header, if any (spec sec 5.1 / sec 9.9). Structural over the HIR types, run
+/// before S1.5 eager expansion, so it recognizes symbolic AND ground
+/// applications. The self type is checked first.
+pub(crate) fn impl_header_type_fn_site<'db>(
+    db: &'db dyn HirAnalysisDb,
+    impl_trait: ImplTrait<'db>,
+) -> Option<ImplHeaderTypeFnSite> {
+    let scope = impl_trait.scope();
+
+    if let Some(ty) = impl_trait.type_ref(db).to_opt()
+        && hir_ty_mentions_type_fn(db, ty, scope)
+    {
+        return Some(ImplHeaderTypeFnSite::SelfType);
+    }
+
+    if let Some(trait_ref) = impl_trait.hir_trait_ref(db).to_opt()
+        && let Some(args) = trait_ref.generic_args(db)
+        && generic_args_mention_type_fn(db, args, scope)
+    {
+        return Some(ImplHeaderTypeFnSite::TraitRef);
+    }
+
+    None
+}
+
+/// `true` if `ty` is, or structurally contains, a single-segment `recursive
+/// type fn` head, resolved in `scope`.
+fn hir_ty_mentions_type_fn<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TypeId<'db>,
+    scope: ScopeId<'db>,
+) -> bool {
+    match ty.data(db) {
+        TypeKind::Path(Partial::Present(path)) => {
+            path_head_is_type_fn(db, *path, scope)
+                || generic_args_mention_type_fn(db, path.generic_args(db), scope)
+        }
+        TypeKind::Ptr(Partial::Present(inner)) | TypeKind::Mode(_, Partial::Present(inner)) => {
+            hir_ty_mentions_type_fn(db, *inner, scope)
+        }
+        TypeKind::Tuple(elems) => elems
+            .data(db)
+            .iter()
+            .filter_map(|e| e.to_opt())
+            .any(|e| hir_ty_mentions_type_fn(db, e, scope)),
+        TypeKind::Array(Partial::Present(elem), _) => {
+            hir_ty_mentions_type_fn(db, *elem, scope)
+        }
+        _ => false,
+    }
+}
+
+/// `true` if any type argument in `args` is, or contains, a type-fn head.
+fn generic_args_mention_type_fn<'db>(
+    db: &'db dyn HirAnalysisDb,
+    args: crate::core::hir_def::GenericArgListId<'db>,
+    scope: ScopeId<'db>,
+) -> bool {
+    args.data(db).iter().any(|arg| match arg {
+        GenericArg::Type(t) => t
+            .ty
+            .to_opt()
+            .is_some_and(|ty| hir_ty_mentions_type_fn(db, ty, scope)),
+        // Const args are integer subjects and assoc-type args are projections;
+        // neither is a type-fn head position for the ban.
+        GenericArg::Const(_) | GenericArg::AssocType(_) => false,
+    })
+}
+
+/// `true` if the leaf of `path` (single-segment only, v1) resolves to a
+/// `recursive type fn` item.
+fn path_head_is_type_fn<'db>(
+    db: &'db dyn HirAnalysisDb,
+    path: PathId<'db>,
+    scope: ScopeId<'db>,
+) -> bool {
+    // `resolve_ident_to_bucket` (via `resolve_leaf_scope`) only accepts a root
+    // (single-segment) path; a qualified head is the documented v1 gap.
+    if path.parent(db).is_some() {
+        return false;
+    }
+    matches!(
+        resolve_leaf_scope(db, path, scope),
+        Some(ScopeId::Item(ItemKind::TypeFn(_)))
+    )
+}
+
 /// Interns a ground subject `value: usize` as the canonical
 /// `Evaluated(LitInt)` const, reusing the root subject's integral type so the
 /// unfolder-built subject shares a `ConstTyId`/`TyId` with call-site lowering
@@ -1488,6 +1611,96 @@ recursive type fn Bush<const N: usize>() -> (*) {
         assert!(
             rendered.contains("symbolic type-fn application not yet supported"),
             "expected a symbolic-type-fn diagnostic, got:\n{rendered}"
+        );
+    }
+
+    // --- S2.0 (a): impl-target ban (spec sec 5.1 / sec 9.9) ---
+
+    /// A generic `impl` whose self type is a SYMBOLIC `recursive type fn`
+    /// application (`RPow<F, N>`) is rejected with the named ban diagnostic. This
+    /// is the headline S2.0 check: it is independent of the S1.5 symbolic reject
+    /// (which Slice 2.1 lifts), so lifting that reject cannot un-ban the impl.
+    #[test]
+    fn rejects_impl_on_symbolic_type_fn_application() {
+        use crate::test_db::format_diagnostics;
+
+        let src = format!(
+            "{NORM_FIXTURES}\ntrait LScan {{}}\n\
+             impl<F, const N: usize> LScan for RPow<F, N> {{}}\n"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_impl_ban_sym.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        let rendered = format_diagnostics(&db, &diags);
+        assert!(
+            rendered.contains("cannot implement a trait for a `recursive type fn` application"),
+            "expected the impl-target ban diagnostic, got:\n{rendered}"
+        );
+    }
+
+    /// The GROUND-header case is banned too (spec's expand-vs-reject decision:
+    /// REJECT). Without the structural ban, `impl LScan for RPow<Pair, 1>` would
+    /// eager-expand at lowering and silently register as an impl on the normal
+    /// form `Comp<Par, Pair>` (accept-by-expansion), making impl-header meaning
+    /// depend on normalization timing.
+    #[test]
+    fn rejects_impl_on_ground_type_fn_application() {
+        use crate::test_db::format_diagnostics;
+
+        let src = format!(
+            "{NORM_FIXTURES}\ntrait LScan {{}}\nimpl LScan for RPow<Pair, 1> {{}}\n"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_impl_ban_ground.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        let rendered = format_diagnostics(&db, &diags);
+        assert!(
+            rendered.contains("cannot implement a trait for a `recursive type fn` application"),
+            "expected the impl-target ban diagnostic on a ground header, got:\n{rendered}"
+        );
+    }
+
+    /// A type-fn application NESTED in the self type (`Wrapper<RPow<F, N>>`) is
+    /// also banned ("in impl headers anywhere", spec sec 9.9).
+    #[test]
+    fn rejects_impl_on_nested_type_fn_application() {
+        use crate::test_db::format_diagnostics;
+
+        let src = format!(
+            "{NORM_FIXTURES}\nstruct Wrapper<G> {{}}\ntrait LScan {{}}\n\
+             impl<F, const N: usize> LScan for Wrapper<RPow<F, N>> {{}}\n"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_impl_ban_nested.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        let rendered = format_diagnostics(&db, &diags);
+        assert!(
+            rendered.contains("cannot implement a trait for a `recursive type fn` application"),
+            "expected the impl-target ban diagnostic on a nested header, got:\n{rendered}"
+        );
+    }
+
+    /// Guard against over-firing: an ordinary impl on a plain ADT whose fields
+    /// happen to mention nothing type-fn-related is NOT banned. (`Comp` is a
+    /// combinator; impls on it are exactly what the spec directs users to.)
+    #[test]
+    fn allows_impl_on_combinator() {
+        use crate::test_db::format_diagnostics;
+
+        let src = format!(
+            "{NORM_FIXTURES}\ntrait LScan {{}}\nimpl<F, G> LScan for Comp<F, G> {{}}\n"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_impl_ok.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        let rendered = format_diagnostics(&db, &diags);
+        assert!(
+            !rendered.contains("cannot implement a trait for a `recursive type fn` application"),
+            "impl on a plain combinator must not trip the ban, got:\n{rendered}"
         );
     }
 }

@@ -4835,7 +4835,26 @@ impl<'db> ImplTrait<'db> {
         Vec<TyDiagCollection<'db>>,
     ) {
         use crate::analysis::name_resolution::{ExpectedPathKind, diagnostics::PathResDiag};
-        use crate::analysis::ty::diagnostics::TraitLowerDiag;
+        use crate::analysis::ty::diagnostics::{TraitLowerDiag, TyLowerDiag};
+
+        // S2.0 (a): spec sec 5.1 / sec 9.9 impl-target ban. A `recursive type
+        // fn` application may not appear in the impl header (self type or a
+        // trait-ref argument), symbolic OR ground. This is checked structurally
+        // BEFORE `self.ty(db)` eager-expands a ground self type to its normal
+        // form, and independently of the S1.5 `SymbolicTypeFnUnsupported`
+        // reject, so a later gate lift cannot un-ban it. Reporting it first (and
+        // withholding the implementor) also keeps the diagnostic clean: no
+        // trailing symbolic-unsupported / missing-assoc noise for a banned impl.
+        if let Some(site) =
+            crate::analysis::ty::type_fn::impl_header_type_fn_site(db, self)
+        {
+            use crate::analysis::ty::type_fn::ImplHeaderTypeFnSite;
+            let span = match site {
+                ImplHeaderTypeFnSite::SelfType => self.span().ty().into(),
+                ImplHeaderTypeFnSite::TraitRef => self.span().trait_ref().into(),
+            };
+            return (None, vec![TyLowerDiag::TypeFnInImplHeader { span }.into()]);
+        }
 
         // First check implementor type
         let ty = self.ty(db);

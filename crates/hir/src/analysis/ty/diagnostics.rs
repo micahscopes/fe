@@ -113,6 +113,16 @@ pub enum TyLowerDiag<'db> {
         limit: usize,
     },
 
+    /// A `recursive type fn` application appears in an `impl` header (its self
+    /// type or a trait-ref argument), symbolic or ground (spec sec 5.1 / sec
+    /// 9.9). Banned independently of the S1.5 symbolic reject: a type-fn
+    /// application is transparent (equal to its normal form after unfolding), so
+    /// an impl on one would make coherence depend on arithmetic. Impls must live
+    /// on the combinators the type fn expands to.
+    TypeFnInImplHeader {
+        span: DynLazySpan<'db>,
+    },
+
     StringTooLarge {
         span: DynLazySpan<'db>,
         max: usize,
@@ -306,6 +316,7 @@ impl TyLowerDiag<'_> {
             Self::TypeFnIllFormed { .. } => 45,
             Self::TypeFnSymbolicUnsupported { .. } => 46,
             Self::TypeFnRecursionLimit { .. } => 47,
+            Self::TypeFnInImplHeader { .. } => 48,
         }
     }
 }
