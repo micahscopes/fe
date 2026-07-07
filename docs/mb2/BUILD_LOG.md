@@ -363,3 +363,37 @@ fixes a latent caller/impl-param CAPTURE bug and keeps GAT params rigid.
   GAT default merge into bindings (`assoc_type_bindings_for_trait_inst`, currently
   guarded-out for arity > 0), const GAT params (resolver still returns invalid).
   A4's arity check reuses the decl-authority the G1 arity gate uses.
+
+## 2026-07-07 - fe-uitest: regenerate stale hkt_assoc_type_constructor snapshot
+
+Release CI (A-track, 2533/2534) flagged one stale snapshot:
+`fe-uitest::ty run_ty_def__hkt_assoc_type_constructor`. Not a regression, a
+snapshot that predates the A-track landing.
+
+- **Root cause**: the fixture's old snapshot pinned the base-branch behavior
+  where `type Ptr<T>` in a trait/impl item list was a PARSE ERROR (GAT syntax
+  not yet supported), cascading into 7 diagnostics (2 parse errors x2 sites,
+  `Ptr` not found, 2 arity-mismatch errors from the parse failure truncating
+  `Ptr`'s recorded arity to 0, and a spurious missing-assoc-type-in-impl error).
+  A1-A3/A2b.1/A2b.2 landed the full GAT parse + kind + projection engine on this
+  branch (already complete at HEAD, not just A1's parsing), so the fixture's
+  `trait Backend { type Ptr<T> }` / `impl Backend for Evm { type Ptr<T> = u256 }`
+  now parses and type-checks end to end.
+- **Reviewed the new output before accepting** (not a blind regen): new `diags`
+  is empty (zero diagnostics). Confirmed this is the correct outcome, not a
+  swallowed error: `Evm::Ptr<u256>` projects through the concrete impl to `u256`
+  (RHS doesn't reference `T`, so nothing to thread) matching `evm_word`'s
+  declared return type; `B::Ptr<u256>` for abstract `B: Backend` stays an opaque
+  projection, and `word_ptr`'s parameter/return types are the same projection
+  expression so the identity body trivially checks without needing resolution.
+  This is exactly the pattern already proven by the committed
+  `crates/hir/test_files/ty_check/gat_projection_resolves.snap`
+  (`EvmBackend::Ptr<u32>` -> `u256` concrete, `B::Ptr<u32>` opaque-but-typed) and
+  matches the BUILD_LOG's "A-track GAT + HKT foundation COMPLETE" entry for
+  A2b.2. No ICE, no unexpected error.
+- Regenerated via `INSTA_UPDATE=always cargo test -p fe-uitest --test ty
+  run_ty_def__hkt_assoc_type_constructor -- --exact`; new snapshot is the
+  6-line zero-diagnostic form (matches sibling clean fixtures like
+  `associated_types.snap`).
+- **Verify**: targeted test green; `cargo check --workspace` clean (source
+  unchanged, snapshot-only fix).
