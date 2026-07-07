@@ -56,6 +56,21 @@ impl<'db, U> UnificationStore<'db> for U where
 {
 }
 
+/// `true` iff `ty` is a GAT binder param (type or const), i.e. one of an
+/// associated type's own generic params (owner is an assoc-type def scope). SSOT
+/// predicate is [`crate::analysis::ty::ty_def::TyParam::is_assoc_ty_param`]; this
+/// lifts it to a `TyId` over both the type-param and const-param shapes. Used by
+/// seam S1 to keep such params rigid under fresh-var instantiation.
+fn is_assoc_ty_param_ty<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> bool {
+    match ty.data(db) {
+        TyData::TyParam(param) => param.is_assoc_ty_param(),
+        TyData::ConstTy(const_ty) => {
+            matches!(const_ty.data(db), ConstTyData::TyParam(param, _) if param.is_assoc_ty_param())
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone)]
 pub struct UnificationTableBase<'db, U>
 where
@@ -378,7 +393,27 @@ where
     where
         T: TyFoldable<'db>,
     {
-        value.instantiate_with(self.db, |ty| self.new_var_from_param(ty))
+        // Seam S1 (A2b.2): keep GAT params RIGID. `instantiate_with` folds every
+        // non-effect `TyParam` in the value into a fresh inference var; for an
+        // implementor whose `types` map RHS threads its assoc def's own params
+        // (`type Buffer<T> = Store<T>`), those GAT params are unconstrained by the
+        // receiver unification, so a var would make `try_extract`'s
+        // canonical-vars-only check reject the candidate and projection would stay
+        // opaque forever. Leaving them rigid lets extraction pass; the extracted
+        // RHS arrives as `Store<TyParam{owner: ImplTraitType, idx 0}>` for the
+        // dedicated projection arm to substitute. Because no pre-A2b type carries
+        // an assoc-owned param, this is behavior-invisible to the whole baseline,
+        // and placing it here (globally, not just `with_impl_assoc_ty`) also stops
+        // any other implementor-folding fresh-var site from minting an
+        // unconstrained var that would unify with anything.
+        let db = self.db;
+        value.instantiate_with(db, |ty| {
+            if is_assoc_ty_param_ty(db, ty) {
+                ty
+            } else {
+                self.new_var_from_param(ty)
+            }
+        })
     }
 
     pub fn instantiate_to_term(&mut self, mut ty: TyId<'db>) -> TyId<'db> {

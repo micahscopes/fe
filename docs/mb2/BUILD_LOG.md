@@ -268,3 +268,98 @@ PROJECTION of `B::Buffer<X>` still degrades to opaque exactly as before.
   from opaque to resolved and re-enable the full A3 fixture set (three-way
   interned-id confluence, G2 anti-conflation, symbolic opacity, caller-param
   non-capture, impl-param binding, the A3-erratum regression).
+
+## 2026-07-07 - Slice A2b.2: flip GAT projection (S1 + S2) + full A3 fixture set
+
+Wired the two engine seams from steering-06 sec 2, flipping GAT projection from
+opaque to resolved-through-the-impl-RHS-with-the-arg-threaded. A GAT whose impl
+RHS threads its own generic param (`type Buffer<T> = Store<T>`) now PROJECTS:
+`EvmB::Buffer<RBin<Pair, 3>>` normalizes to `Store<Comp<Comp<Comp<Par, Pair>,
+Pair>, Pair>>` (the arg unfolded AND threaded), confluently. Soundness-critical:
+fixes a latent caller/impl-param CAPTURE bug and keeps GAT params rigid.
+
+- **SSOT predicate** (`ty_def.rs`): `TyParam::is_assoc_ty_param(&self) -> bool =
+  matches!(self.owner, ScopeId::TraitType(..) | ScopeId::ImplTraitType(..))`.
+  One predicate; both seams key on it. The owner class is fresh/empty for every
+  pre-A2b type (every legacy `TyParam` owns an ITEM scope, per the A2b.1 audit),
+  so anything keyed on it is a provable no-op for the whole baseline.
+- **S1 (keep GAT params RIGID)** (`unify.rs`, `instantiate_with_fresh_vars`):
+  wrapped the fresh-var closure so an assoc-owned param (type or const, via the
+  new `is_assoc_ty_param_ty` `TyId` lift) is returned UNCHANGED (rigid); every
+  other param still folds to a fresh inference var as before. Placed GLOBALLY
+  (not just `with_impl_assoc_ty`) so no implementor-folding fresh-var site can
+  mint an unconstrained GAT-param var that unifies with anything. Rigid params
+  are not vars, so `try_extract`'s `uses_only_query_canonical_vars` check passes
+  (verified: it only rejects non-canonical `TyVar`s, walks through rigid
+  `TyParam`s) and the extracted RHS arrives as `Store<TyParam{owner:
+  ImplTraitType, idx 0}>` for the projection arm to substitute. Before S1, the
+  GAT param folded to an unconstrained var, extraction rejected the candidate,
+  and projection stayed opaque forever.
+- **S2 (substitute by OWNER CLASS)** (`normalize.rs`, `subst_gat_args`): replaced
+  the unscoped `Binder::instantiate` (which mapped EVERY free param to
+  `args[idx]`) with a small `GatArgSubst` folder that substitutes `args[idx]`
+  ONLY for assoc-owned params; every other param (an impl/caller param bound into
+  the RHS by receiver unification, possibly sharing the same numeric index) is
+  left untouched. Falls through to `super_fold_with` so an assoc-owned param is
+  replaced wherever it appears in the RHS tree (nested `AssocTy`/`TyApp`/`ConstTy`
+  spines). Narrowed the free-param scan `max_free_param_idx` -> `max_gat_param_idx`
+  to assoc-owned params only (the old trait-`Self`-forces-`usize::MAX` hack is now
+  unnecessary: `Self` is never assoc-owned, so simply never recorded). The
+  decline-to-opaque contract is retained: if any assoc-owned param has `idx >=
+  args.len()` the whole substitution declines (returns `rhs`, projection stays the
+  opaque canonical form). This closes the latent capture bug: a GAT RHS param can
+  never capture a caller/impl param that shares its numeric index.
+- **Non-capture is PROVEN, not asserted vacuously**: temporarily reverting S2's
+  folder guard to `!param.is_effect()` (old by-index behavior) makes
+  `gat_projection_caller_param_non_capture` FAIL with `PairOf<u32, u32>` (caller
+  `U` captured); temporarily broadening `max_gat_param_idx` back to all params
+  makes `gat_projection_erratum_bare_impl_param_non_capture` FAIL (`WrapV<U>::
+  Buffer<u32>` -> `u32` instead of `U`). With S1+S2 both pass (`PairOf<U, u32>` /
+  `U`). Both experiments reverted.
+- **Full A3 fixture set re-enabled** (unit tests in `type_fn_induct.rs`, fixture
+  `Backend { type Buffer<T> }` with `EvmB -> Store<T>`, `Wrap<V> -> PairOf<V, T>`,
+  `WrapV<V> -> V`):
+  - `gat_projection_threaded_three_way_confluence`: `a = normalize(EvmB::Buffer<
+    RBin<Pair, 3>>)` (engine: unfold-then-project), `b = normalize(Store<RBin<Pair,
+    3>>)` (project-first), `c = Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`
+    (hand-built NF); `a == b == c` by interned id, no type-fn head survives,
+    idempotent (steering-05 sec 6c deliverable, previously blocked on the scope
+    wiring).
+  - `gat_projection_threaded_g2_anti_conflation`: `EvmB::Buffer<u32>` -> `Store<u32>`
+    and `EvmB::Buffer<u8>` -> `Store<u8>` are DISTINCT `TyId`s (the A2b.1 cache
+    re-key + S2-by-owner make G2 observable, not just structural).
+  - `gat_projection_threaded_symbolic_arg_stays_opaque`: `EvmB::Buffer<RBin<F, N>>`
+    (F, N rigid) projects to `Store<RBin<F, N>>` (arg threaded verbatim), the arg's
+    opaque type-fn head intact, `find_unsaturated_type_fn` silent (saturation
+    invariant / MIR tripwire hold).
+  - `gat_projection_caller_param_non_capture` (the S2 soundness test): `Wrap<U>::
+    Buffer<u32>` with RHS `PairOf<V, T>` and caller param `U` sharing `T`'s idx 0
+    -> `PairOf<U, u32>`, never `PairOf<u32, u32>`.
+  - `gat_projection_impl_param_binding` (S1+S2): `Wrap<u8>::Buffer<u32>` ->
+    `PairOf<u8, u32>` (concrete receiver binds `V`, arg binds `T`).
+  - `gat_projection_erratum_bare_impl_param_non_capture` (steering-06 acceptance
+    6): `type Buffer<T> = V`; concrete `WrapV<u8>::Buffer<u32>` -> `u8`, generic
+    `WrapV<U>::Buffer<u32>` -> `U`, never `args[0]`.
+  - End-to-end zero-diagnostic fixture `ty_check/gat_typefn_confluence.fe` (the
+    real flip proof through the full ty_check pass): `x: EvmB::Buffer<RBin<Pair, 3>>`
+    unifies at `takes_nf(x)` with `Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`,
+    and the nonlinear `DupB::Buffer<RBin<Pair, 2>>` unifies at `takes_dup(x)` with
+    `PairOf<NF, NF>`. Snapshot shows the threaded types, zero `invalid`.
+- The existing A3 tests (`gat_applied_projection_resolves_through_impl`,
+  `gat_projection_folds_ground_type_fn_arg`,
+  `typefn_ground_normalization_through_folder_unchanged`,
+  `gat_projection_symbolic_type_fn_arg_stays_opaque`) stay green unchanged (the
+  `assoc_decl_arity > 0` gate + applied-route-only G3 budget did not regress).
+- **Verify**: `cargo check --workspace` clean; `analysis::ty::type_fn` 66/66,
+  ty_check 116/116 (incl. the new fixture + the A2b.1 pinned-shape tests + the GAT
+  kind test), constraints 14/14, trait_resolution_conformance 25/25, the 9 A3 GAT
+  projection tests green. Full release CI is the orchestrator's run.
+- **A-track GAT + HKT foundation COMPLETE** (A1 params -> A2 kinds -> A3
+  confluence core -> A2b.1 scope wiring -> A2b.2 projection flip): a GAT projects
+  through its impl RHS with args threaded, confluently with type-fn unfold, sound
+  against caller/impl-param capture. Orchestrator can run the release CI.
+- **NEXT: A4** (GAT impl conformance; steering-before-build): arity/kind of the
+  impl RHS against the trait decl, GAT where-clause bounds SATISFACTION, trait-side
+  GAT default merge into bindings (`assoc_type_bindings_for_trait_inst`, currently
+  guarded-out for arity > 0), const GAT params (resolver still returns invalid).
+  A4's arity check reuses the decl-authority the G1 arity gate uses.

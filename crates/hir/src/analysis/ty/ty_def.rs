@@ -1667,6 +1667,23 @@ impl<'db> TyParam<'db> {
         matches!(self.variant, Variant::Implicit)
     }
 
+    /// `true` iff this parameter is a GAT binder, i.e. one of an associated
+    /// type's OWN generic params, whose owner is an assoc-type DEF-node scope
+    /// (`TraitType` on the trait side, `ImplTraitType` on the impl side).
+    ///
+    /// SSOT for the two A2b.2 engine seams (S1/S2). The owner class is fresh and
+    /// empty for every pre-A2b type (every legacy `TyParam` owner is an ITEM
+    /// scope), so any behavior keyed on this predicate is a provable no-op for
+    /// the whole baseline. Carries a LOCAL index `0..k` distinct from any item
+    /// param's index space, and its identity (interned by full owner+idx) can
+    /// never conflate with an impl/caller param that happens to share `idx`.
+    pub fn is_assoc_ty_param(&self) -> bool {
+        matches!(
+            self.owner,
+            ScopeId::TraitType(..) | ScopeId::ImplTraitType(..)
+        )
+    }
+
     /// `true` iff this is an induction-engine opaque (type-fn CTFE slice S2.2a).
     /// Load-bearing: the strict engine mints these as rigid IH placeholders, and
     /// leak tripwires assert an induction opaque never reaches a stored/MIR/source

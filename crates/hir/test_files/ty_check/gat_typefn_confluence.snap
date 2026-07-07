@@ -1,0 +1,70 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/gat_typefn_confluence.fe
+---
+note:
+   ┌─ gat_typefn_confluence.fe:49:66
+   │
+49 │ fn takes_nf(_ x: Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+   │                                                                  ^^ ()
+
+note:
+   ┌─ gat_typefn_confluence.fe:53:47
+   │
+53 │   fn confluence(x: EvmB::Buffer<RBin<Pair, 3>>) {
+   │ ╭───────────────────────────────────────────────^
+54 │ │     takes_nf(x)
+55 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_typefn_confluence.fe:54:5
+   │
+54 │     takes_nf(x)
+   │     ^^^^^^^^ fn takes_nf
+
+note:
+   ┌─ gat_typefn_confluence.fe:54:5
+   │
+54 │     takes_nf(x)
+   │     ^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_typefn_confluence.fe:54:14
+   │
+54 │     takes_nf(x)
+   │              ^ Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ gat_typefn_confluence.fe:57:85
+   │
+57 │ fn takes_dup(_ x: PairOf<Comp<Comp<Par, Pair>, Pair>, Comp<Comp<Par, Pair>, Pair>>) {}
+   │                                                                                     ^^ ()
+
+note:
+   ┌─ gat_typefn_confluence.fe:59:40
+   │
+59 │   fn dup(x: DupB::Buffer<RBin<Pair, 2>>) {
+   │ ╭────────────────────────────────────────^
+60 │ │     takes_dup(x)
+61 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_typefn_confluence.fe:60:5
+   │
+60 │     takes_dup(x)
+   │     ^^^^^^^^^ fn takes_dup
+
+note:
+   ┌─ gat_typefn_confluence.fe:60:5
+   │
+60 │     takes_dup(x)
+   │     ^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_typefn_confluence.fe:60:15
+   │
+60 │     takes_dup(x)
+   │               ^ PairOf<Comp<Comp<Par, Pair>, Pair>, Comp<Comp<Par, Pair>, Pair>>

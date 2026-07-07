@@ -11,7 +11,6 @@ use common::indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
 use super::{
-    binder::Binder,
     canonical::Canonical,
     canonical::Canonicalized,
     fold::{TyFoldable, TyFolder},
@@ -296,20 +295,29 @@ impl<'db> TypeNormalizer<'db> {
         proj
     }
 
-    /// Substitute the resolved impl RHS's free parameters (the assoc definition's
-    /// own generic params, positional) with the projection arguments by index.
+    /// Seam S2 (A2b.2): substitute the resolved impl RHS's GAT binders (the assoc
+    /// definition's OWN generic params, positional, local indices `0..k`) with the
+    /// projection arguments by index -- and ONLY those params.
     ///
-    /// For an argument-independent RHS (`type Ptr<T> = u256`) there are no free
-    /// params and this is the identity. When the RHS threads its params
-    /// (`type Buffer<T> = Store<T>`), each is a positional `TyParam` and
-    /// `Binder::instantiate` maps it by index. The substitution is applied only
-    /// when every free param index is in range (`< args.len()`), so it can never
-    /// index out of bounds; an out-of-range RHS (a param shape A3 does not cover)
-    /// is returned unsubstituted and the re-fold leaves it opaque.
+    /// This substitutes by OWNER CLASS, not blindly by index. A caller/impl param
+    /// bound into the RHS by receiver unification (`type Buffer<T> = Pair<V, T>`
+    /// projected through `Wrap<U>`, where `U` is a caller param that happens to
+    /// share `T`'s numeric index) is left UNTOUCHED, closing the latent capture
+    /// bug: only params whose owner is an assoc-type def scope
+    /// ([`TyParam::is_assoc_ty_param`]) are replaced.
+    ///
+    /// For an argument-independent RHS (`type Ptr<T> = u256`) there are no
+    /// assoc-owned params and this is the identity. If any assoc-owned param has
+    /// `idx >= args.len()` the whole substitution DECLINES (returns `rhs`
+    /// unchanged, projection degrades to the opaque canonical form) rather than
+    /// indexing out of bounds -- defense-in-depth for a shape A3 does not cover.
     fn subst_gat_args(&self, rhs: TyId<'db>, args: &[TyId<'db>]) -> TyId<'db> {
-        match max_free_param_idx(self.db, rhs) {
+        match max_gat_param_idx(self.db, rhs) {
             None => rhs,
-            Some(max) if max < args.len() => Binder::bind(rhs).instantiate(self.db, args),
+            Some(max) if max < args.len() => {
+                let mut folder = GatArgSubst { args };
+                rhs.fold_with(self.db, &mut folder)
+            }
             Some(_) => rhs,
         }
     }
@@ -466,24 +474,53 @@ impl<'db> TypeNormalizer<'db> {
     }
 }
 
-/// The maximum index among a type's free (non-effect) type/const parameters, or
-/// `None` if it has none. Used by GAT projection to decide whether the resolved
-/// impl RHS can be safely instantiated with the projection arguments by index. A
-/// trait-`Self` parameter forces `usize::MAX` so the caller's `max < args.len()`
-/// range check declines substitution (`Self` is never a GAT argument).
-fn max_free_param_idx<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<usize> {
+/// Seam S2 (A2b.2) substitution folder: replace GAT binders (assoc-owned params)
+/// with the projection args by index; leave every other param (impl/caller params
+/// bound into the RHS by receiver unification) untouched. Falling through to
+/// `super_fold_with` recurses through nested `AssocTy`/`TyApp`/`ConstTy` spines,
+/// so an assoc-owned param is substituted wherever it appears in the RHS tree.
+/// Callers gate on [`max_gat_param_idx`] so `args[param.idx]` is always in range.
+struct GatArgSubst<'db, 'a> {
+    args: &'a [TyId<'db>],
+}
+
+impl<'db> TyFolder<'db> for GatArgSubst<'db, '_> {
+    fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        match ty.data(db) {
+            TyData::TyParam(param) if param.is_assoc_ty_param() => {
+                return self.args[param.idx];
+            }
+            TyData::ConstTy(const_ty) => {
+                if let super::const_ty::ConstTyData::TyParam(param, _) = const_ty.data(db)
+                    && param.is_assoc_ty_param()
+                {
+                    return self.args[param.idx];
+                }
+            }
+            _ => {}
+        }
+        ty.super_fold_with(db, self)
+    }
+}
+
+/// The maximum index among a type's assoc-owned (GAT-binder) type/const
+/// parameters, or `None` if it has none. Narrowed from the old
+/// all-free-params scan to ONLY assoc-owned params (seam S2): impl/caller params
+/// carried in the RHS are irrelevant to the arg-count range check, and the old
+/// trait-`Self`-forces-`usize::MAX` hack becomes unnecessary (`Self` is never
+/// assoc-owned, so it is simply never recorded and never substituted). Used by
+/// GAT projection to decide whether the resolved impl RHS can be safely
+/// substituted with the projection arguments by index.
+fn max_gat_param_idx<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<usize> {
     struct ParamScan<'db> {
         db: &'db dyn HirAnalysisDb,
         max: Option<usize>,
     }
     impl<'db> ParamScan<'db> {
         fn record(&mut self, param: &TyParam<'db>) {
-            let idx = if param.is_trait_self() {
-                usize::MAX
-            } else {
-                param.idx
-            };
-            self.max = Some(self.max.map_or(idx, |m| m.max(idx)));
+            if param.is_assoc_ty_param() {
+                self.max = Some(self.max.map_or(param.idx, |m| m.max(param.idx)));
+            }
         }
     }
     impl<'db> TyVisitor<'db> for ParamScan<'db> {

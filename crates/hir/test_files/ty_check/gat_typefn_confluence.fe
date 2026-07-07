@@ -1,0 +1,61 @@
+// A2b.2: the projection FLIP (S1 + S2). With the two engine seams in place, a
+// GAT projection whose impl RHS THREADS its own generic parameter
+// (`type Buffer<T> = Store<T>`) now resolves THROUGH the impl RHS with the
+// (normalized) argument threaded, instead of degrading to opaque. The
+// `takes_nf(x)` / `takes_dup(x)` calls are the teeth: a zero-diagnostic
+// type-check means the projection actually substituted the normalized argument
+// into the RHS, confluently with the type-fn unfold (steering-05 sec 6b).
+
+struct Par {}
+struct Pair {}
+struct Comp<A, B> {
+    a: A,
+    b: B,
+}
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+trait Backend {
+    type Buffer<T>
+}
+
+struct Store<T> {
+    t: T,
+}
+
+struct PairOf<A, B> {
+    a: A,
+    b: B,
+}
+
+struct EvmB {}
+struct DupB {}
+
+impl Backend for EvmB {
+    type Buffer<T> = Store<T>
+}
+
+// Nonlinear RHS: pins the duplication case (steering-05 sec 3.2). Both copies of
+// the arg are one interned redex, so both orders reach the identical normal form.
+impl Backend for DupB {
+    type Buffer<T> = PairOf<T, T>
+}
+
+fn takes_nf(_ x: Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+
+// The projection `EvmB::Buffer<RBin<Pair, 3>>` must be definitionally equal to
+// `Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>` (unfold-then-project, threaded).
+fn confluence(x: EvmB::Buffer<RBin<Pair, 3>>) {
+    takes_nf(x)
+}
+
+fn takes_dup(_ x: PairOf<Comp<Comp<Par, Pair>, Pair>, Comp<Comp<Par, Pair>, Pair>>) {}
+
+fn dup(x: DupB::Buffer<RBin<Pair, 2>>) {
+    takes_dup(x)
+}

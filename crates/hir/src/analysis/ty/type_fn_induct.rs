@@ -1857,4 +1857,339 @@ impl Backend for EvmB {
         let norm = normalize_ty(&db, applied, top_mod.scope(), empty);
         assert_eq!(norm, prim(&db, PrimTy::U256));
     }
+
+    // ------------------------------------------------------------------
+    // A2b.2: the projection FLIP (seams S1 + S2). The RHS bodies below THREAD
+    // the assoc def's own generic parameter (`type Buffer<T> = Store<T>`), which
+    // needs the A2b.1 scope wiring to resolve `T` AND the two engine seams to
+    // project it: S1 keeps the GAT param rigid under fresh-var instantiation (so
+    // extraction succeeds), S2 substitutes the projection args ONLY for
+    // assoc-owned params (so a caller/impl param sharing the same numeric index
+    // is never captured). These are the full A3 soundness cross-checks.
+    // ------------------------------------------------------------------
+
+    const GAT_THREADED_FIXTURES: &str = r#"
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+struct Store<T> {}
+struct PairOf<A, B> {}
+struct Wrap<V> {}
+struct WrapV<V> {}
+struct Holder<U> {}
+struct EvmB {}
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+trait Backend {
+    type Buffer<T>
+}
+
+impl Backend for EvmB {
+    type Buffer<T> = Store<T>
+}
+
+impl<V> Backend for Wrap<V> {
+    type Buffer<T> = PairOf<V, T>
+}
+
+impl<V> Backend for WrapV<V> {
+    type Buffer<T> = V
+}
+"#;
+
+    fn find_struct<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> crate::hir_def::Struct<'db> {
+        *top_mod
+            .all_structs(db)
+            .iter()
+            .find(|s| s.name(db).to_opt().is_some_and(|i| i.data(db) == name))
+            .unwrap_or_else(|| panic!("missing struct `{name}`"))
+    }
+
+    /// Steering-05 sec 6c: the three-way interned-id confluence on a THREADED
+    /// projection. With `type Buffer<T> = Store<T>`,
+    ///   a = normalize(EvmB::Buffer<RBin<Pair, 3>>)  (engine: unfold-then-project),
+    ///   b = normalize(Store<RBin<Pair, 3>>)         (project-first: RHS with the
+    ///                                                 un-normalized arg substituted),
+    ///   c = the hand-built normal form Store<Comp<Comp<Comp<Par,Pair>,Pair>,Pair>>,
+    /// and `a == b == c` by interned id (plus idempotence). This is the deliverable
+    /// the A3 BUILD_LOG named as blocked on the scope wiring; S1+S2 unblock it.
+    #[test]
+    fn gat_projection_threaded_three_way_confluence() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::analysis::ty::type_fn::collect_type_fn_heads;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_threaded_conf.fe"), GAT_THREADED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let evmb = adt_ty(&db, top_mod, "EvmB");
+        let store = adt_ty(&db, top_mod, "Store");
+        let par = adt_ty(&db, top_mod, "Par");
+        let pair = adt_ty(&db, top_mod, "Pair");
+        let comp = adt_ty(&db, top_mod, "Comp");
+        let rbin = find_tf(&db, top_mod, "RBin");
+        let scope = top_mod.scope();
+        let empty = PredicateListId::empty_list(&db);
+
+        let inst = TraitInstId::new_simple(&db, backend, vec![evmb]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
+
+        // a: the engine order (fold the ground type-fn arg, then project).
+        let rbin3 = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[pair, usize_subject(&db, 3)]);
+        let applied = TyId::foldl(&db, head, &[rbin3]);
+        let a = normalize_ty(&db, applied, scope, empty);
+
+        // b: project-first (RHS with the un-normalized arg already substituted).
+        let store_rbin3 = TyId::foldl(&db, store, &[rbin3]);
+        let b = normalize_ty(&db, store_rbin3, scope, empty);
+
+        // c: hand-built normal form Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>.
+        let c1 = TyId::foldl(&db, comp, &[par, pair]);
+        let c2 = TyId::foldl(&db, comp, &[c1, pair]);
+        let c3 = TyId::foldl(&db, comp, &[c2, pair]);
+        let c = TyId::foldl(&db, store, &[c3]);
+
+        assert_eq!(
+            a, c,
+            "project-after-unfold must reach Store<NF>, got {}",
+            a.pretty_print(&db)
+        );
+        assert_eq!(
+            b, c,
+            "unfold-after-project must reach Store<NF>, got {}",
+            b.pretty_print(&db)
+        );
+        assert_eq!(a, b, "the two orders must reach the IDENTICAL interned TyId");
+        assert!(
+            collect_type_fn_heads(&db, a).is_empty(),
+            "no type-fn head may survive the threaded projection"
+        );
+        // Idempotence (either entry order agrees).
+        assert_eq!(normalize_ty(&db, a, scope, empty), a, "a is a fixed point");
+        assert_eq!(normalize_ty(&db, c, scope, empty), c, "c is a fixed point");
+    }
+
+    /// G2 anti-conflation, now OBSERVABLE (the A2b.1 cache re-key + S2 make it
+    /// real): `EvmB::Buffer<u32>` and `EvmB::Buffer<u8>` project to DISTINCT types
+    /// `Store<u32>` and `Store<u8>`, never conflated to one.
+    #[test]
+    fn gat_projection_threaded_g2_anti_conflation() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_threaded_g2.fe"), GAT_THREADED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let evmb = adt_ty(&db, top_mod, "EvmB");
+        let store = adt_ty(&db, top_mod, "Store");
+        let scope = top_mod.scope();
+        let empty = PredicateListId::empty_list(&db);
+
+        let inst = TraitInstId::new_simple(&db, backend, vec![evmb]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
+
+        let u32t = prim(&db, PrimTy::U32);
+        let u8t = prim(&db, PrimTy::U8);
+        let b32 = normalize_ty(&db, TyId::foldl(&db, head, &[u32t]), scope, empty);
+        let b8 = normalize_ty(&db, TyId::foldl(&db, head, &[u8t]), scope, empty);
+
+        assert_eq!(b32, TyId::foldl(&db, store, &[u32t]), "Buffer<u32> -> Store<u32>");
+        assert_eq!(b8, TyId::foldl(&db, store, &[u8t]), "Buffer<u8> -> Store<u8>");
+        assert_ne!(b32, b8, "distinct args must project to DISTINCT types (no conflation)");
+    }
+
+    /// Symbolic opacity on a THREADED projection: `EvmB::Buffer<RBin<F, N>>` with
+    /// `F`, `N` rigid symbolic params PROJECTS (the impl resolves, `B` concrete)
+    /// but the type-fn arg stays OPAQUE and is threaded verbatim into the RHS:
+    /// `Store<RBin<F, N>>`. No unfold, no crash; the saturation invariant holds.
+    #[test]
+    fn gat_projection_threaded_symbolic_arg_stays_opaque() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::analysis::ty::ty_def::find_unsaturated_type_fn;
+        use crate::analysis::ty::type_fn::type_fn_app_head;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_threaded_sym.fe"), GAT_THREADED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let evmb = adt_ty(&db, top_mod, "EvmB");
+        let store = adt_ty(&db, top_mod, "Store");
+        let rbin = find_tf(&db, top_mod, "RBin");
+        let params = collect_generic_params(&db, GenericParamOwner::TypeFn(rbin));
+        let f = params.param_by_original_idx(&db, 0).expect("RBin.T");
+        let n = params.param_by_original_idx(&db, 1).expect("RBin.N");
+        let sym = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[f, n]);
+        assert!(
+            type_fn_app_head(&db, sym).is_some(),
+            "the symbolic arg carries a live type-fn head"
+        );
+
+        let inst = TraitInstId::new_simple(&db, backend, vec![evmb]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
+        let applied = TyId::foldl(&db, head, &[sym]);
+        let t = normalize_ty(&db, applied, top_mod.scope(), PredicateListId::empty_list(&db));
+
+        // Projection happened, and the opaque arg was threaded through verbatim.
+        assert_eq!(
+            t,
+            TyId::foldl(&db, store, &[sym]),
+            "symbolic projection must be Store<RBin<F, N>> (arg verbatim), got {}",
+            t.pretty_print(&db)
+        );
+        assert!(
+            type_fn_app_head(&db, sym).is_some(),
+            "the threaded arg's opaque head is intact"
+        );
+        assert!(
+            find_unsaturated_type_fn(&db, t).is_none(),
+            "the saturation invariant holds (the opaque app is saturated)"
+        );
+    }
+
+    /// Caller-param NON-CAPTURE (the S2 soundness test). `type Buffer<T> =
+    /// PairOf<V, T>` projected through a GENERIC receiver `Wrap<U>` where `U` is a
+    /// caller param whose numeric index (0) EQUALS the GAT param `T`'s index (0).
+    /// The projection must bind `T` to the projection arg (`u32`) and leave the
+    /// caller's `U` intact: `PairOf<U, u32>`, NEVER `PairOf<u32, u32>`. The old
+    /// unscoped by-index substitution would rewrite BOTH index-0 params to
+    /// `args[0]` and silently capture `U`; S2's owner-class folder does not.
+    #[test]
+    fn gat_projection_caller_param_non_capture() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_non_capture.fe"), GAT_THREADED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let wrap = adt_ty(&db, top_mod, "Wrap");
+        let pairof = adt_ty(&db, top_mod, "PairOf");
+        let holder = find_struct(&db, top_mod, "Holder");
+        let u = collect_generic_params(&db, GenericParamOwner::Struct(holder))
+            .param_by_original_idx(&db, 0)
+            .expect("Holder.U");
+        let u32t = prim(&db, PrimTy::U32);
+        let scope = top_mod.scope();
+        let empty = PredicateListId::empty_list(&db);
+
+        // Receiver Wrap<U>: U is a caller param (owner = Holder), idx 0 -- the SAME
+        // numeric index the GAT param T carries in the RHS PairOf<V, T>.
+        let recv = TyId::foldl(&db, wrap, &[u]);
+        let inst = TraitInstId::new_simple(&db, backend, vec![recv]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
+        let applied = TyId::foldl(&db, head, &[u32t]);
+        let t = normalize_ty(&db, applied, scope, empty);
+
+        let expected = TyId::foldl(&db, pairof, &[u, u32t]); // PairOf<U, u32>
+        let captured = TyId::foldl(&db, pairof, &[u32t, u32t]); // PairOf<u32, u32>
+        assert_eq!(
+            t, expected,
+            "the GAT param T must bind to the projection arg, leaving caller U intact; got {}",
+            t.pretty_print(&db)
+        );
+        assert_ne!(
+            t, captured,
+            "the caller param U must NOT be captured by the projection arg"
+        );
+    }
+
+    /// Impl-param binding (S1 + S2 together): a concrete receiver `Wrap<u8>`
+    /// binds the impl param `V` to `u8`, and the GAT param `T` to the projection
+    /// arg `u32`: `Wrap<u8>::Buffer<u32>` -> `PairOf<u8, u32>`.
+    #[test]
+    fn gat_projection_impl_param_binding() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_impl_bind.fe"), GAT_THREADED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let wrap = adt_ty(&db, top_mod, "Wrap");
+        let pairof = adt_ty(&db, top_mod, "PairOf");
+        let u8t = prim(&db, PrimTy::U8);
+        let u32t = prim(&db, PrimTy::U32);
+        let scope = top_mod.scope();
+        let empty = PredicateListId::empty_list(&db);
+
+        let recv = TyId::foldl(&db, wrap, &[u8t]);
+        let inst = TraitInstId::new_simple(&db, backend, vec![recv]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
+        let applied = TyId::foldl(&db, head, &[u32t]);
+        let t = normalize_ty(&db, applied, scope, empty);
+
+        assert_eq!(
+            t,
+            TyId::foldl(&db, pairof, &[u8t, u32t]),
+            "Wrap<u8>::Buffer<u32> must project to PairOf<u8, u32>, got {}",
+            t.pretty_print(&db)
+        );
+    }
+
+    /// The A3-erratum regression (steering-06 sec 2 / acceptance 6): an impl RHS
+    /// that is the bare impl param `type Buffer<T> = V`. With a CONCRETE receiver
+    /// `WrapV<u8>` the projection is the receiver's `V` instantiation `u8`, never
+    /// `args[0]`. With a GENERIC receiver `WrapV<U>` (caller param `U` at idx 0)
+    /// the projection is the caller's `U`, never `args[0]` -- the latent capture
+    /// the old by-index substitution would have hit (`V.idx = 0 < args.len()`).
+    #[test]
+    fn gat_projection_erratum_bare_impl_param_non_capture() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_erratum.fe"), GAT_THREADED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let wrapv = adt_ty(&db, top_mod, "WrapV");
+        let holder = find_struct(&db, top_mod, "Holder");
+        let u = collect_generic_params(&db, GenericParamOwner::Struct(holder))
+            .param_by_original_idx(&db, 0)
+            .expect("Holder.U");
+        let u8t = prim(&db, PrimTy::U8);
+        let u32t = prim(&db, PrimTy::U32);
+        let buffer = IdentId::new(&db, "Buffer".to_string());
+        let scope = top_mod.scope();
+        let empty = PredicateListId::empty_list(&db);
+
+        // Concrete receiver: WrapV<u8>::Buffer<u32> -> u8 (the receiver's V).
+        let inst_c = TraitInstId::new_simple(&db, backend, vec![TyId::foldl(&db, wrapv, &[u8t])]);
+        let head_c = TyId::assoc_ty(&db, inst_c, buffer);
+        let t_c = normalize_ty(&db, TyId::foldl(&db, head_c, &[u32t]), scope, empty);
+        assert_eq!(t_c, u8t, "concrete receiver projects to its own V (u8), never args[0]");
+        assert_ne!(t_c, u32t, "the projection arg must NOT leak into a bare-impl-param RHS");
+
+        // Generic receiver: WrapV<U>::Buffer<u32> -> U (the caller param), never u32.
+        let inst_g = TraitInstId::new_simple(&db, backend, vec![TyId::foldl(&db, wrapv, &[u])]);
+        let head_g = TyId::assoc_ty(&db, inst_g, buffer);
+        let t_g = normalize_ty(&db, TyId::foldl(&db, head_g, &[u32t]), scope, empty);
+        assert_eq!(t_g, u, "generic receiver projects to the caller param U, never args[0]");
+        assert_ne!(t_g, u32t, "the caller param must NOT be captured (the latent A3 erratum)");
+    }
 }
