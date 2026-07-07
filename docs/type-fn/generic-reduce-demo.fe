@@ -1,0 +1,99 @@
+// =============================================================================
+// Generic reduction over a type-fn-defined shape family (Slice 3a demo)
+//
+// The Conal-Elliott "generic parallel algorithm" pattern in miniature (see
+// generic-parallel-fe-sketch.fe). ONE generic algorithm is stated over a whole
+// FAMILY of shapes built by a `recursive type fn`, and its trait obligation is
+// discharged BY THE INDUCTION ENGINE, with NO hand-written `where` bound.
+//
+// This file is the readable artifact; the compiled-and-asserted mirror is the
+// `DEMO` fixture + tests in
+//   crates/hir/src/analysis/ty/type_fn_induct.rs
+// (search `Slice 3a`). Everything below type-checks green there.
+//
+// What the pipeline does, end to end:
+//   parser            : `recursive type fn RPow<F, const N: usize>() -> (*)`
+//   ground normalize  : `RPow<Pair, 3>` -> `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>`
+//   symbolic induction: `RPow<F, N>: Reduce` discharged from `F: Reduce` alone
+// =============================================================================
+
+
+// --- The combinators the shapes are built from. -----------------------------
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+
+// --- The reduction marker: a CONSTRAINED trait family. -----------------------
+//
+// A single leaf `Par` reduces. A composite `Comp<A, B>` reduces ONLY when both
+// halves reduce. That constraint on the combinator impl is what makes the
+// induction hypothesis LOAD-BEARING: a blanket `impl<A, B> Reduce for Comp<A, B>`
+// would discharge every induction step vacuously, and the demo would prove
+// nothing. Here `impl<A: Reduce, B: Reduce> Reduce for Comp<A, B>` forces the
+// engine to actually carry `Reduce(inner)` through the recursion.
+trait Reduce {}
+impl Reduce for Par {}
+impl Reduce for Pair {}
+impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {}
+
+
+// --- The carrier that raises the obligation. ---------------------------------
+//
+// A `Reducer<S>` may only be formed for a shape `S` that reduces. Naming it in a
+// signature is the application site whose well-formedness must discharge
+// `S: Reduce`.
+struct Reducer<S> where S: Reduce {}
+
+
+// --- The shape family: right- and left-associated functor exponentiation. ----
+//
+// `RPow<Pair, N>` and `LPow<Pair, N>` are both perfect binary trees of 2^N
+// leaves, built from the same `Comp`/`Par` combinators, differing only in
+// association (top-down vs bottom-up). One `recursive type fn` each; the
+// compiler checks termination on the decreasing subject `N`.
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+recursive type fn LPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<F, LPow<F, {N - 1}>>
+    }
+}
+
+
+// --- THE PAYOFF: one generic algorithm over the whole shape family. ----------
+//
+// Neither signature carries `where RPow<F, N>: Reduce` / `where LPow<F, N>:
+// Reduce`. The obligation raised by `Reducer<..>` is discharged by the induction
+// engine from `F: Reduce` alone: base arm `Reduce(Par)`, step arm
+// `Reduce(Comp<.., F>)` under the induction hypothesis + `F: Reduce`.
+fn reduce_rpow<F: Reduce, const N: usize>(x: Reducer<RPow<F, N>>) {}
+fn reduce_lpow<F: Reduce, const N: usize>(x: Reducer<LPow<F, N>>) {}
+
+
+// --- Negative twins (rejected; see the tests). -------------------------------
+//
+// (A) Drop `F: Reduce` and `reduce_rpow` is rejected: the step arm's `Reduce(F)`
+//     subgoal is UnSat, the engine proves nothing, the trait-bound error fires.
+//         fn reduce_rpow<F, const N: usize>(x: Reducer<RPow<F, N>>) {}
+//
+// (B) Remove `impl<A: Reduce, B: Reduce> Reduce for Comp<A, B>` and, even WITH
+//     `F: Reduce`, `reduce_rpow` is rejected: nothing reduces a `Comp`, so the
+//     induction step is UnSat. The discharge genuinely rides the combinator
+//     impl, not a standing/blanket fact.
+
+
+// --- Ground cross-check (the discharge is real, and it is the engine). -------
+//
+// `RPow<Pair, 3>` normalizes to `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>`, and
+// `Reduce` holds at the ground level via the SAME real impl whether asked of the
+// un-normalized application or its normal form. Symbolically, the discharge is
+// the induction route: `ImplementorOrigin::Assumption` via the engine, NOT a
+// blanket impl (the ordinary solver alone returns UnSat on the opaque head) and
+// NOT vacuous (without `F: Reduce` the engine declines).

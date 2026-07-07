@@ -804,3 +804,99 @@ test) pass in debug, targeted. Zero baseline perturbation: the engine is gated o
 `type_fn_app_head(..).is_some()`, which no baseline goal satisfies, so no baseline
 tracked query acquires a new dependency edge. Full release `nextest` CI is the
 orchestrator's at the Slice-2 boundary (this slice ends Slice 2).
+
+---
+
+## S3a: the Conal-Elliott payoff demonstration (whole pipeline, one narrative)
+
+A realistic, realistically-named demonstration that exercises the WHOLE pipeline
+(parser -> type fn -> ground normalization -> symbolic induction) and shows the
+feature's REASON TO EXIST: ONE generic algorithm stated over a type-fn-defined
+shape family, whose trait obligation is discharged BY THE INDUCTION ENGINE with
+NO hand-written `where` bound. This is the Conal-Elliott "generic parallel
+algorithm" pattern in miniature. No engine/semantics change: this slice adds
+tests and a readable artifact only.
+
+### What was added
+
+- `docs/type-fn/generic-reduce-demo.fe`: the human-readable demonstration
+  PROGRAM. In docs/ (NOT a test_files dir), so no harness compiles it and the
+  `tree_sitter_parse_strict` concern does not arise; its compiled-and-asserted
+  mirror is the `DEMO` const in the tests below (kept in sync manually; the tests
+  are the source of truth).
+- `crates/hir/src/analysis/ty/type_fn_induct.rs` (`tests`, "Slice 3a" section):
+  a `DEMO` fixture plus four tests.
+
+### The demonstration program
+
+- Shape family via two `recursive type fn`s: `RPow<F, N>` (right, top-down) and
+  `LPow<F, N>` (left, bottom-up), both perfect binary trees of 2^N leaves reduced
+  over the SAME `Comp`/`Par` combinators, differing only in association.
+- A CONSTRAINED trait family: `trait Reduce`, `impl Reduce for Par`, and the
+  load-bearing `impl<A: Reduce, B: Reduce> Reduce for Comp<A, B>` (the constraint
+  makes the induction hypothesis non-vacuous; a blanket `Comp` impl would
+  discharge every step arm for free).
+- The obligation site: `struct Reducer<S> where S: Reduce {}`; naming it in a
+  signature is the application whose WF must discharge `S: Reduce`.
+- The generic algorithm: `fn reduce_rpow<F: Reduce, const N: usize>(x:
+  Reducer<RPow<F, N>>) {}` and the `LPow` twin, with NO `where RPow<F, N>:
+  Reduce` / `where LPow<F, N>: Reduce` bound.
+
+### What the four tests prove
+
+- `demo_generic_reduce_over_shape_family_no_where_bound` (POSITIVE payoff): both
+  `reduce_rpow` and `reduce_lpow` type-check to ZERO diagnostics; the engine
+  discharges `RPow<F, N>: Reduce` and `LPow<F, N>: Reduce` from `F: Reduce` alone.
+- `demo_negative_twin_arg_not_reduce_rejected` (NEGATIVE, non-vacuous): drop
+  `F: Reduce` and `reduce_rpow` is rejected (the step arm's `Reduce(F)` subgoal is
+  UnSat, so the engine proves nothing).
+- `demo_negative_twin_combinator_impl_removed_rejected` (NEGATIVE, impl is
+  load-bearing): remove the `Comp` impl and, even WITH `F: Reduce`, `reduce_rpow`
+  is rejected (nothing reduces a `Comp`; the induction step is UnSat).
+- `demo_ground_normalization_and_engine_discharge_route` (the confirmation, in the
+  demo's own vocabulary; mirrors S2.2b `engine_cross_check_gate_matches_ground_select`):
+  1. NORMALIZATION: `RPow<Pair, 3>` reduces (interned-id equality against a
+     hand-built tree, robust to pretty-print spacing) to
+     `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` with no type-fn head left; ground
+     `Reduce` selects the IDENTICAL `Hir` implementor on the un-normalized app and
+     on the normal form.
+  2. ENGINE ROUTE (symbolic `Reduce(RPow<F, N>)`): `try_prove_by_induction` returns
+     `Proven` from `F: Reduce` and `try_discharge_by_induction` (C2) accepts it;
+     the discharge is the INDUCTION route, NOT blanket and NOT vacuous, pinned three
+     ways: (a) NOT blanket -- the ORDINARY solver (never the engine, which is
+     consulted only from the WF layer) with only `F: Reduce` returns UnSat on the
+     opaque type-fn head; (b) route is `ImplementorOrigin::Assumption` -- injecting
+     the goal as an assumption (exactly what C2 does) resolves via the Assumption
+     origin; (c) NOT vacuous -- dropping `F: Reduce` makes the engine `NotProven`.
+
+### Surface-syntax gaps recorded (nothing faked)
+
+The demonstration proves the TYPE-LEVEL payoff (a generic item over the shape
+family whose membership obligation is discharged by induction with no `where`
+bound) end-to-end and green. Two honest narrowings versus the full
+`generic-parallel-fe-sketch.fe`:
+
+1. RETURN KIND `*`, not `* -> *`. The working type fns return `(*)`, so
+   `RPow<F, N>`/`Comp<A, B>`/`Par` are `*`-kinded DATA-shape trees, and `Reduce`
+   is implemented on those `*`-kinded ADTs. The sketch's higher-kinded
+   `-> (* -> *)` functors (whose instances you `map`/`zip`/`scan` over `Self<A>`)
+   are NOT exercised; the S1.3 return-kind rule admits `*` and arrows over `*`,
+   but the engine's minimal class + these fixtures live at the `*`-kinded form.
+2. OBLIGATION RAISED BY A WF CARRIER, not by a value-level method call. The
+   `Reducer<S> where S: Reduce` carrier raises `S: Reduce` as a signature
+   well-formedness obligation. A value-carrying generic algorithm -- build a value
+   of the shape type and call `x.reduce()` / `<RPow<F, N> as Reduce>::reduce()`
+   through a symbolic type-fn head, then monomorphize to concrete SSA -- is not
+   demonstrated; method resolution through a symbolic type-fn head and the
+   value/codegen path are beyond the S1-S2 type-level discharge this build lands.
+   The load-bearing Conal-Elliott insight (generic code over the family with no
+   per-instantiation `where` proof) is fully shown; the value/codegen half is the
+   next surface to open.
+
+### Verification
+
+`cargo check --workspace` clean (no warnings). The four `demo_*` tests pass in
+debug, targeted (`cargo test -p fe-hir --lib
+analysis::ty::type_fn_induct::tests::demo_`, 4 passed). The pre-existing 17
+`type_fn_induct` and 29 `type_fn` tests are unchanged. Next step: the capstone
+OVERVIEW doc (the reason-to-exist writeup that this demonstration underpins).

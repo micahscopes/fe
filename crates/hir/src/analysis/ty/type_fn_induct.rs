@@ -1366,4 +1366,261 @@ recursive type fn Bush<const N: usize>() -> (*) {
             }
         }
     }
+
+    // ==================================================================
+    // Slice 3a: the Conal-Elliott generic-parallel payoff demonstration.
+    //
+    // The whole pipeline (parser -> type fn -> ground normalization ->
+    // symbolic induction) in one coherent, realistically-named program that
+    // shows the feature's REASON TO EXIST: ONE generic algorithm over a
+    // type-fn-defined shape family, whose `RPow<F, N>: Reduce` / `LPow<F, N>:
+    // Reduce` obligation is discharged BY THE INDUCTION ENGINE with NO
+    // hand-written `where` bound. This is the Conal-Elliott "generic parallel
+    // algorithm" pattern in miniature (see generic-parallel-fe-sketch.fe and
+    // docs/type-fn/BUILD_LOG.md, S3a). The readable program artifact is
+    // docs/type-fn/generic-reduce-demo.fe; the DEMO const below is its
+    // compiled-and-asserted mirror.
+    // ==================================================================
+
+    /// The demonstration program's fixed declarations. Shape family
+    /// `RPow`/`LPow` (right/left functor exponentiation) reducing over
+    /// `Comp`/`Par`; a `Reduce` trait with a CONSTRAINED combinator impl
+    /// (`impl<A: Reduce, B: Reduce> Reduce for Comp<A, B>`) so the induction
+    /// hypothesis is load-bearing (a blanket `Comp` impl would discharge every
+    /// step arm vacuously); a `Reducer<S> where S: Reduce` carrier whose use in
+    /// a signature is the obligation site.
+    const DEMO: &str = r#"
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+trait Reduce {}
+impl Reduce for Par {}
+impl Reduce for Pair {}
+impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {}
+
+struct Reducer<S> where S: Reduce {}
+
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+recursive type fn LPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<F, LPow<F, {N - 1}>>
+    }
+}
+"#;
+
+    /// Full-pass diagnostics for the demonstration program plus `tail`.
+    fn demo_diags(tail: &str) -> String {
+        use crate::test_db::format_diagnostics;
+        let src = format!("{DEMO}\n{tail}\n");
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s3a_demo.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        format_diagnostics(&db, &diags)
+    }
+
+    fn find_trait<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> crate::hir_def::Trait<'db> {
+        *top_mod
+            .all_traits(db)
+            .iter()
+            .find(|t| t.name(db).to_opt().is_some_and(|i| i.data(db) == name))
+            .unwrap_or_else(|| panic!("missing trait `{name}`"))
+    }
+
+    /// THE PAYOFF (end-to-end POSITIVE). ONE generic algorithm over the shape
+    /// family — `reduce_rpow` for the right-associated shapes, `reduce_lpow`
+    /// for the left — type-checks with NO `where RPow<F, N>: Reduce` /
+    /// `where LPow<F, N>: Reduce` bound. The obligation `Reducer<..>` raises is
+    /// discharged by the induction engine from `F: Reduce` alone. This is the
+    /// feature's reason to exist: a generic item stated over the whole shape
+    /// family without spelling out the per-instantiation membership proof.
+    #[test]
+    fn demo_generic_reduce_over_shape_family_no_where_bound() {
+        let rendered = demo_diags(
+            "fn reduce_rpow<F: Reduce, const N: usize>(x: Reducer<RPow<F, N>>) {}\n\
+             fn reduce_lpow<F: Reduce, const N: usize>(x: Reducer<LPow<F, N>>) {}",
+        );
+        assert!(
+            rendered.is_empty(),
+            "the induction engine should discharge `RPow<F, N>: Reduce` and \
+             `LPow<F, N>: Reduce` from `F: Reduce` with no `where` bound, got:\n{rendered}"
+        );
+    }
+
+    /// NEGATIVE twin A (conservatism, not vacuous): drop `F: Reduce` and the
+    /// same generic algorithm is correctly REJECTED. The step arm's `Reduce(F)`
+    /// subgoal is UnSat, so the engine proves nothing and the ordinary
+    /// trait-bound diagnostic fires. Proof power rides on the real precondition.
+    #[test]
+    fn demo_negative_twin_arg_not_reduce_rejected() {
+        let rendered =
+            demo_diags("fn reduce_rpow<F, const N: usize>(x: Reducer<RPow<F, N>>) {}");
+        assert!(
+            rendered.contains("is not satisfied") || rendered.contains("doesn't implement"),
+            "without `F: Reduce` the demo must be rejected, got:\n{rendered}"
+        );
+    }
+
+    /// NEGATIVE twin B (the combinator impl is load-bearing): REMOVE the
+    /// `impl<A: Reduce, B: Reduce> Reduce for Comp<A, B>` and, even WITH
+    /// `F: Reduce`, the algorithm is rejected — the induction step arm
+    /// `Reduce(Comp<..>)` is UnSat because nothing reduces a `Comp` any more.
+    /// Confirms the discharge genuinely rides the combinator impl, not a
+    /// standing/blanket fact.
+    #[test]
+    fn demo_negative_twin_combinator_impl_removed_rejected() {
+        use crate::test_db::format_diagnostics;
+        let no_comp = DEMO.replace("impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {}\n", "");
+        let src =
+            format!("{no_comp}\nfn reduce_rpow<F: Reduce, const N: usize>(x: Reducer<RPow<F, N>>) {{}}\n");
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s3a_demo_nocomp.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        let rendered = format_diagnostics(&db, &diags);
+        assert!(
+            rendered.contains("is not satisfied") || rendered.contains("doesn't implement"),
+            "with the `Comp` combinator impl removed the demo must be rejected, got:\n{rendered}"
+        );
+    }
+
+    /// The CONCRETE instantiation + the ENGINE-ROUTE confirmation: the two
+    /// halves of "this is real, and it is the induction route (not blanket, not
+    /// vacuous)". Mirrors, in the demonstration's own vocabulary, the S2.2b
+    /// `engine_cross_check_gate_matches_ground_select` cross-check.
+    ///
+    /// (1) NORMALIZATION: `RPow<Pair, 3>` reduces to
+    ///     `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` with no type-fn head left,
+    ///     and `Reduce` holds at the ground level via the SAME real (`Hir`)
+    ///     impl whether asked of the un-normalized app or its normal form.
+    /// (2) ENGINE ROUTE: the symbolic `Reduce(RPow<F, N>)` is
+    ///     - Proven by `try_prove_by_induction` from `F: Reduce`, and accepted
+    ///       by `try_discharge_by_induction` (the C2 wrapper);
+    ///     - NOT a blanket impl: the ORDINARY solver (no engine) with only
+    ///       `F: Reduce` cannot discharge the opaque type-fn head (UnSat), and
+    ///       the C2 discharge resolves via `ImplementorOrigin::Assumption`;
+    ///     - NOT vacuous: drop `F: Reduce` and the engine DECLINES.
+    #[test]
+    fn demo_ground_normalization_and_engine_discharge_route() {
+        use crate::analysis::ty::trait_def::ImplementorOrigin;
+        use crate::analysis::ty::type_fn::normalize_type_fn_app;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s3a_route.fe"), DEMO);
+        let (top_mod, _) = db.top_mod(file);
+        let rpow = find_tf(&db, top_mod, "RPow");
+        let reduce = find_trait(&db, top_mod, "Reduce");
+        let pair_ty = adt_ty(&db, top_mod, "Pair");
+
+        // (1) NORMALIZATION: RPow<Pair, 3> -> Comp<Comp<Comp<Par, Pair>, Pair>, Pair>.
+        let app3 = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[pair_ty, usize_subject(&db, 3)]);
+        let nf3 = normalize_type_fn_app(&db, app3);
+        // Assert structurally (interned-id equality) against the hand-built
+        // depth-3 right-nested Comp tree — robust to pretty-print spacing.
+        let par_ty = adt_ty(&db, top_mod, "Par");
+        let comp_ty = adt_ty(&db, top_mod, "Comp");
+        let c1 = TyId::foldl(&db, comp_ty, &[par_ty, pair_ty]); // Comp<Par, Pair>
+        let c2 = TyId::foldl(&db, comp_ty, &[c1, pair_ty]); // Comp<Comp<Par, Pair>, Pair>
+        let c3 = TyId::foldl(&db, comp_ty, &[c2, pair_ty]); // Comp<Comp<Comp<Par, Pair>, Pair>, Pair>
+        assert_eq!(
+            nf3,
+            c3,
+            "RPow<Pair, 3> must normalize to the depth-3 right-nested Comp tree, got {}",
+            nf3.pretty_print(&db)
+        );
+        assert!(
+            collect_type_fn_heads(&db, nf3).is_empty(),
+            "the normal form must carry no type-fn head"
+        );
+
+        // Ground `Reduce` holds identically on the un-normalized app and its
+        // normal form, via the SAME real (Hir) impl.
+        let ground_cx = TraitSolveCx::new(&db, top_mod.scope());
+        let g_unnorm = TraitInstId::new_simple(&db, reduce, vec![app3]);
+        let g_norm = TraitInstId::new_simple(&db, reduce, vec![nf3]);
+        let impl_unnorm = match is_goal_satisfiable(&db, ground_cx, g_unnorm) {
+            GoalSatisfiability::Satisfied(sol) => sol.value.implementor,
+            other => panic!("Reduce(RPow<Pair, 3>) must be Satisfied ground, got {other:?}"),
+        };
+        let impl_norm = match is_goal_satisfiable(&db, ground_cx, g_norm) {
+            GoalSatisfiability::Satisfied(sol) => sol.value.implementor,
+            other => panic!("Reduce(NF) must be Satisfied ground, got {other:?}"),
+        };
+        assert_eq!(
+            impl_unnorm, impl_norm,
+            "ground `Reduce` must select the identical impl on the app and its normal form"
+        );
+        assert!(
+            matches!(impl_norm.origin(&db), ImplementorOrigin::Hir(_)),
+            "ground selection must pin a real Hir impl, not an assumption"
+        );
+
+        // (2) ENGINE ROUTE (symbolic `Reduce(RPow<F, N>)`).
+        let params = collect_generic_params(&db, GenericParamOwner::TypeFn(rpow));
+        let f_param = params.param_by_original_idx(&db, 0).expect("RPow.F");
+        let n_param = params.param_by_original_idx(&db, 1).expect("RPow.N");
+        let sym_app = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[f_param, n_param]);
+        assert!(
+            type_fn_app_head(&db, sym_app).is_some(),
+            "the symbolic app must keep a live type-fn head"
+        );
+        let sym_goal = TraitInstId::new_simple(&db, reduce, vec![sym_app]);
+        let f_reduce = TraitInstId::new_simple(&db, reduce, vec![f_param]);
+        let f_assm = PredicateListId::new(&db, vec![f_reduce]);
+
+        // Proven by the engine from `F: Reduce`; the C2 wrapper accepts it.
+        let cx_f = TraitSolveCx::new(&db, rpow.scope()).with_assumptions(f_assm);
+        assert_eq!(
+            try_prove_by_induction(&db, cx_f, sym_goal),
+            StrictResult::Proven,
+            "the engine must prove `Reduce(RPow<F, N>)` from `F: Reduce`"
+        );
+        assert!(
+            try_discharge_by_induction(&db, cx_f, sym_goal),
+            "the C2 discharge wrapper must accept the engine proof"
+        );
+
+        // NOT a blanket impl: the ORDINARY solver (never the engine, which is
+        // consulted only from the WF layer) with only `F: Reduce` cannot
+        // discharge the opaque type-fn head — there is no impl whose self-type
+        // head is the type fn (S2.0 ban) and no blanket impl.
+        assert!(
+            !is_goal_satisfiable(&db, cx_f, sym_goal).is_satisfied(),
+            "the ordinary solver must NOT discharge the opaque head (no blanket impl)"
+        );
+
+        // The discharge route is ImplementorOrigin::Assumption: inject the goal
+        // as an assumption (exactly what `try_discharge_by_induction`/C2 does)
+        // and read the solution origin.
+        let injected = PredicateListId::new(&db, vec![f_reduce, sym_goal]);
+        let cx_injected = TraitSolveCx::new(&db, rpow.scope()).with_assumptions(injected);
+        match is_goal_satisfiable(&db, cx_injected, sym_goal) {
+            GoalSatisfiability::Satisfied(sol) => assert!(
+                matches!(sol.value.implementor.origin(&db), ImplementorOrigin::Assumption),
+                "the symbolic discharge must ride the Assumption route, got {:?}",
+                sol.value.implementor.origin(&db)
+            ),
+            other => panic!("the injected-assumption goal must be Satisfied, got {other:?}"),
+        }
+
+        // NOT vacuous: drop `F: Reduce` and the engine declines.
+        let cx_bare = TraitSolveCx::new(&db, rpow.scope());
+        assert_eq!(
+            try_prove_by_induction(&db, cx_bare, sym_goal),
+            StrictResult::NotProven,
+            "without `F: Reduce` the engine must decline (the proof power is non-vacuous)"
+        );
+    }
 }
