@@ -1,0 +1,81 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/actor_runtime_storage.fe
+---
+note:
+   ┌─ actor_runtime_storage.fe:51:63
+   │
+51 │   fn mandelbrot_step_re(z_re: u64, z_im: u64, c_re: u64) -> u64 {
+   │ ╭───────────────────────────────────────────────────────────────^
+52 │ │     let re_sq: u64 = z_re * z_re
+53 │ │     let im_sq: u64 = z_im * z_im
+54 │ │     re_sq + c_re
+55 │ │ }
+   │ ╰─^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:52:9
+   │
+52 │     let re_sq: u64 = z_re * z_re
+   │         ^^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:52:22
+   │
+52 │     let re_sq: u64 = z_re * z_re
+   │                      ^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:52:22
+   │
+52 │     let re_sq: u64 = z_re * z_re
+   │                      ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:52:29
+   │
+52 │     let re_sq: u64 = z_re * z_re
+   │                             ^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:53:9
+   │
+53 │     let im_sq: u64 = z_im * z_im
+   │         ^^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:53:22
+   │
+53 │     let im_sq: u64 = z_im * z_im
+   │                      ^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:53:22
+   │
+53 │     let im_sq: u64 = z_im * z_im
+   │                      ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:53:29
+   │
+53 │     let im_sq: u64 = z_im * z_im
+   │                             ^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:54:5
+   │
+54 │     re_sq + c_re
+   │     ^^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:54:5
+   │
+54 │     re_sq + c_re
+   │     ^^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_runtime_storage.fe:54:13
+   │
+54 │     re_sq + c_re
+   │             ^^^^ u64

@@ -1,0 +1,145 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/actor_mandelbrot_kernel.fe
+---
+note:
+   ┌─ actor_mandelbrot_kernel.fe:25:52
+   │
+25 │   fn step_re(z_re: u64, z_im: u64, c_re: u64) -> u64 {
+   │ ╭────────────────────────────────────────────────────^
+26 │ │     let re_sq: u64 = z_re * z_re
+27 │ │     let im_sq: u64 = z_im * z_im
+28 │ │     re_sq + c_re
+29 │ │ }
+   │ ╰─^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:26:9
+   │
+26 │     let re_sq: u64 = z_re * z_re
+   │         ^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:26:22
+   │
+26 │     let re_sq: u64 = z_re * z_re
+   │                      ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:26:22
+   │
+26 │     let re_sq: u64 = z_re * z_re
+   │                      ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:26:29
+   │
+26 │     let re_sq: u64 = z_re * z_re
+   │                             ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:27:9
+   │
+27 │     let im_sq: u64 = z_im * z_im
+   │         ^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:27:22
+   │
+27 │     let im_sq: u64 = z_im * z_im
+   │                      ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:27:22
+   │
+27 │     let im_sq: u64 = z_im * z_im
+   │                      ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:27:29
+   │
+27 │     let im_sq: u64 = z_im * z_im
+   │                             ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:28:5
+   │
+28 │     re_sq + c_re
+   │     ^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:28:5
+   │
+28 │     re_sq + c_re
+   │     ^^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:28:13
+   │
+28 │     re_sq + c_re
+   │             ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:31:52
+   │
+31 │   fn step_im(z_re: u64, z_im: u64, c_im: u64) -> u64 {
+   │ ╭────────────────────────────────────────────────────^
+32 │ │     let prod: u64 = z_re * z_im
+33 │ │     prod + prod + c_im
+34 │ │ }
+   │ ╰─^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:32:9
+   │
+32 │     let prod: u64 = z_re * z_im
+   │         ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:32:21
+   │
+32 │     let prod: u64 = z_re * z_im
+   │                     ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:32:21
+   │
+32 │     let prod: u64 = z_re * z_im
+   │                     ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:32:28
+   │
+32 │     let prod: u64 = z_re * z_im
+   │                            ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:33:5
+   │
+33 │     prod + prod + c_im
+   │     ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:33:5
+   │
+33 │     prod + prod + c_im
+   │     ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:33:5
+   │
+33 │     prod + prod + c_im
+   │     ^^^^^^^^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:33:12
+   │
+33 │     prod + prod + c_im
+   │            ^^^^ u64
+
+note:
+   ┌─ actor_mandelbrot_kernel.fe:33:19
+   │
+33 │     prod + prod + c_im
+   │                   ^^^^ u64

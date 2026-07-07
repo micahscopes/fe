@@ -2062,12 +2062,24 @@ impl HasKind for TyData<'_> {
         match self {
             TyData::TyVar(ty_var) => ty_var.kind(db),
             TyData::TyParam(ty_param) => ty_param.kind.clone(),
-            TyData::AssocTy(assoc) => assoc
-                .trait_
-                .def(db)
-                .assoc_ty(db, assoc.name)
-                .and_then(|decl| super::ty_lower::lower_kind_in_bounds(&decl.bounds))
-                .unwrap_or(Kind::Star),
+            TyData::AssocTy(assoc) => {
+                match assoc.trait_.def(db).assoc_ty(db, assoc.name) {
+                    Some(decl) => {
+                        // An explicit kind bound wins (e.g. `type F: * -> *`).
+                        // Otherwise the kind is derived from the associated
+                        // type's own generic params: `type Ptr<T>` has one
+                        // param, so its kind is `* -> *`; `type Word` has none,
+                        // so `*`. (D1 Sub-PR 2.)
+                        if let Some(kind) = super::ty_lower::lower_kind_in_bounds(&decl.bounds) {
+                            kind
+                        } else {
+                            let n_params = decl.generic_params.len(db);
+                            (0..n_params).fold(Kind::Star, |acc, _| Kind::abs(Kind::Star, acc))
+                        }
+                    }
+                    None => Kind::Star,
+                }
+            }
             TyData::QualifiedTy(_) => Kind::Star,
             TyData::ConstraintTerm(_) => Kind::Constraint,
             TyData::TraitCtor(trait_) => {

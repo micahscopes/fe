@@ -1,0 +1,88 @@
+// Actor model with Functor-based storage
+// Each storage ref type (StorPtr, MemRef, BufferRef) is a Functor
+// map = load-transform-store, zero-cost after monomorphization + inlining
+
+extern {
+    fn todo() -> !
+}
+
+trait Fn<T, U> {
+    fn call(self, _ value: own T) -> U
+}
+
+trait Functor
+    where Self: * -> *
+{
+    fn map<T, U, F: Fn<T, U>>(self: own Self<T>, _ func: F) -> Self<U>
+}
+
+// --- EVM storage: StorPtr is a Functor ---
+
+struct StorPtr<T> {
+    slot: u256
+}
+
+impl Functor for StorPtr {
+    fn map<T, U, F: Fn<T, U>>(self: own StorPtr<T>, _ func: F) -> StorPtr<U> {
+        // sload self.slot, apply func, sstore result
+        todo()
+    }
+}
+
+// --- Native storage: MemRef is a Functor ---
+
+struct MemRef<T> {
+    ptr: u64
+}
+
+impl Functor for MemRef {
+    fn map<T, U, F: Fn<T, U>>(self: own MemRef<T>, _ func: F) -> MemRef<U> {
+        todo()
+    }
+}
+
+// --- GPU storage: BufferRef is a Functor ---
+
+struct BufferRef<T> {
+    index: u32
+}
+
+impl Functor for BufferRef {
+    fn map<T, U, F: Fn<T, U>>(self: own BufferRef<T>, _ func: F) -> BufferRef<U> {
+        todo()
+    }
+}
+
+// --- Operations as zero-size Fn structs ---
+
+struct Increment {}
+impl Fn<u256, u256> for Increment {
+    fn call(self, _ value: own u256) -> u256 {
+        value + 1
+    }
+}
+
+struct Double {}
+impl Fn<u256, u256> for Double {
+    fn call(self, _ value: own u256) -> u256 {
+        value * 2
+    }
+}
+
+// --- Usage: same pattern works on any Functor storage ref ---
+
+fn increment_evm(count: own StorPtr<u256>) -> StorPtr<u256> {
+    count.map(Increment{})
+}
+
+fn double_evm(count: own StorPtr<u256>) -> StorPtr<u256> {
+    count.map(Double{})
+}
+
+fn increment_native(count: own MemRef<u256>) -> MemRef<u256> {
+    count.map(Increment{})
+}
+
+fn increment_gpu(count: own BufferRef<u256>) -> BufferRef<u256> {
+    count.map(Increment{})
+}

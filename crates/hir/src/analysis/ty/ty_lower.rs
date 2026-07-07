@@ -1152,7 +1152,11 @@ pub(crate) fn lower_generic_arg_list<'db>(
             },
 
             GenericArg::AssocType(_assoc_type_arg) => {
-                // TODO: ?
+                // Associated type bindings (e.g. `Trait<Item = u256>`) are not
+                // positional type arguments; they are trait-resolution business,
+                // handled separately during trait resolution. Return an invalid
+                // placeholder here (filtered by the caller).
+                // TODO(D1-sub-pr-3): collect these and pass to TraitInstId.
                 TyId::invalid(db, InvalidCause::Other)
             }
         })

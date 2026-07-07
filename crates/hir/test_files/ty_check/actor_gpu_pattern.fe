@@ -1,0 +1,47 @@
+// Actor-as-GPU-kernel pattern using Backend HKTs
+//
+// Fe's contract model maps to GPU compute:
+//   recv arms → kernel entry points
+//   uses clause → resource bindings
+//   effects → address space capabilities
+
+trait Backend {
+    type Ptr<T>
+    type Word
+    type Buffer<T>
+}
+
+// EVM: everything is u256, storage is slot-based
+struct Evm {}
+impl Backend for Evm {
+    type Ptr<T> = u256
+    type Word = u256
+    type Buffer<T> = u256
+}
+
+// Native: real pointers, u64 words
+struct Native {}
+impl Backend for Native {
+    type Ptr<T> = u64
+    type Word = u64
+    type Buffer<T> = u64
+}
+
+// GPU: i32 indices into storage buffers
+struct Gpu {}
+impl Backend for Gpu {
+    type Ptr<T> = u32
+    type Word = u64
+    type Buffer<T> = u32
+}
+
+// Pure computation — same on all backends
+fn mandelbrot_step_re(z_re: u64, z_im: u64, c_re: u64) -> u64 {
+    let re_sq: u64 = z_re * z_re
+    let im_sq: u64 = z_im * z_im
+    re_sq + c_re
+}
+
+fn sigma(x: u64) -> u64 {
+    x * x + x
+}

@@ -55,6 +55,54 @@ fn never_type_is_not_type_applicable() {
     assert!(never.applicable_ty(&db).is_none());
 }
 
+/// D1 Sub-PR 2 milestone: a trait associated type's kind is derived from its
+/// own generic params. `type Ptr<T>` (one param) has kind `* -> *`; `type Word`
+/// (no params) has kind `*`.
+#[test]
+fn gat_kind_from_generic_params() {
+    use fe_hir::analysis::ty::trait_def::TraitInstId;
+    use fe_hir::hir_def::IdentId;
+
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "gat_kind_from_generic_params.fe".into(),
+        r#"
+trait Backend {
+    type Ptr<T>
+    type Word
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+
+    let backend = *top_mod
+        .all_traits(&db)
+        .iter()
+        .find(|t| t.name(&db).to_opt().is_some_and(|i| i.data(&db) == "Backend"))
+        .expect("missing Backend trait");
+    let inst = TraitInstId::new_simple(&db, backend, vec![]);
+
+    let ptr = inst
+        .assoc_ty(&db, IdentId::new(&db, "Ptr".to_string()))
+        .expect("missing assoc ty Ptr");
+    assert_eq!(
+        *ptr.kind(&db),
+        Kind::Abs(Box::new((Kind::Star, Kind::Star))),
+        "type Ptr<T> should have kind * -> *, got {}",
+        ptr.kind(&db)
+    );
+
+    let word = inst
+        .assoc_ty(&db, IdentId::new(&db, "Word".to_string()))
+        .expect("missing assoc ty Word");
+    assert_eq!(
+        *word.kind(&db),
+        Kind::Star,
+        "type Word should have kind *, got {}",
+        word.kind(&db)
+    );
+}
+
 #[test]
 fn never_for_iterator_reports_type_must_be_known() {
     let mut db = HirAnalysisTestDb::default();

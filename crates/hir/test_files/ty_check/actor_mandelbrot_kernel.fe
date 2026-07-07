@@ -1,0 +1,34 @@
+// Actor keyword test: actor MandelbrotKernel
+// actor is the generic form; contract = actor + EvmRuntime
+
+trait Storage {
+    type Ref<T>
+}
+
+trait Runtime {
+    type Store: Storage
+    type Word
+}
+
+struct GpuStorage {}
+impl Storage for GpuStorage {
+    type Ref<T> = u32
+}
+
+struct GpuRuntime {}
+impl Runtime for GpuRuntime {
+    type Store = GpuStorage
+    type Word = u64
+}
+
+// Pure Mandelbrot step — works on any runtime
+fn step_re(z_re: u64, z_im: u64, c_re: u64) -> u64 {
+    let re_sq: u64 = z_re * z_re
+    let im_sq: u64 = z_im * z_im
+    re_sq + c_re
+}
+
+fn step_im(z_re: u64, z_im: u64, c_im: u64) -> u64 {
+    let prod: u64 = z_re * z_im
+    prod + prod + c_im
+}

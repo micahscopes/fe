@@ -1,0 +1,55 @@
+// Actor interface: Runtime + Storage traits
+// Storage: pluggable state with HKT Ref<T>
+// Runtime: the host that ties storage + encoding + word size
+
+trait Storage {
+    type Ref<T>
+}
+
+trait Runtime {
+    type Store: Storage
+    type Word
+}
+
+// EVM runtime: storage slots, u256 words
+struct EvmStorage {}
+impl Storage for EvmStorage {
+    type Ref<T> = u256
+}
+
+struct EvmRuntime {}
+impl Runtime for EvmRuntime {
+    type Store = EvmStorage
+    type Word = u256
+}
+
+// Native runtime: memory pointers, u64 words
+struct NativeStorage {}
+impl Storage for NativeStorage {
+    type Ref<T> = u64
+}
+
+struct NativeRuntime {}
+impl Runtime for NativeRuntime {
+    type Store = NativeStorage
+    type Word = u64
+}
+
+// GPU runtime: buffer indices, u64 words
+struct GpuStorage {}
+impl Storage for GpuStorage {
+    type Ref<T> = u32
+}
+
+struct GpuRuntime {}
+impl Runtime for GpuRuntime {
+    type Store = GpuStorage
+    type Word = u64
+}
+
+// Pure computation — works on any runtime
+fn mandelbrot_step_re(z_re: u64, z_im: u64, c_re: u64) -> u64 {
+    let re_sq: u64 = z_re * z_re
+    let im_sq: u64 = z_im * z_im
+    re_sq + c_re
+}

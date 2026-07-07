@@ -1,0 +1,120 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/actor_gpu_pattern.fe
+---
+note:
+   ┌─ actor_gpu_pattern.fe:39:63
+   │
+39 │   fn mandelbrot_step_re(z_re: u64, z_im: u64, c_re: u64) -> u64 {
+   │ ╭───────────────────────────────────────────────────────────────^
+40 │ │     let re_sq: u64 = z_re * z_re
+41 │ │     let im_sq: u64 = z_im * z_im
+42 │ │     re_sq + c_re
+43 │ │ }
+   │ ╰─^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:40:9
+   │
+40 │     let re_sq: u64 = z_re * z_re
+   │         ^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:40:22
+   │
+40 │     let re_sq: u64 = z_re * z_re
+   │                      ^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:40:22
+   │
+40 │     let re_sq: u64 = z_re * z_re
+   │                      ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:40:29
+   │
+40 │     let re_sq: u64 = z_re * z_re
+   │                             ^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:41:9
+   │
+41 │     let im_sq: u64 = z_im * z_im
+   │         ^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:41:22
+   │
+41 │     let im_sq: u64 = z_im * z_im
+   │                      ^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:41:22
+   │
+41 │     let im_sq: u64 = z_im * z_im
+   │                      ^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:41:29
+   │
+41 │     let im_sq: u64 = z_im * z_im
+   │                             ^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:42:5
+   │
+42 │     re_sq + c_re
+   │     ^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:42:5
+   │
+42 │     re_sq + c_re
+   │     ^^^^^^^^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:42:13
+   │
+42 │     re_sq + c_re
+   │             ^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:45:25
+   │
+45 │   fn sigma(x: u64) -> u64 {
+   │ ╭─────────────────────────^
+46 │ │     x * x + x
+47 │ │ }
+   │ ╰─^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:46:5
+   │
+46 │     x * x + x
+   │     ^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:46:5
+   │
+46 │     x * x + x
+   │     ^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:46:5
+   │
+46 │     x * x + x
+   │     ^^^^^^^^^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:46:9
+   │
+46 │     x * x + x
+   │         ^ u64
+
+note:
+   ┌─ actor_gpu_pattern.fe:46:13
+   │
+46 │     x * x + x
+   │             ^ u64

@@ -1,0 +1,230 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/actor_functor_storage.fe
+---
+note:
+   ┌─ actor_functor_storage.fe:26:78
+   │
+26 │       fn map<T, U, F: Fn<T, U>>(self: own StorPtr<T>, _ func: F) -> StorPtr<U> {
+   │ ╭──────────────────────────────────────────────────────────────────────────────^
+27 │ │         // sload self.slot, apply func, sstore result
+28 │ │         todo()
+29 │ │     }
+   │ ╰─────^ StorPtr<U>
+
+note:
+   ┌─ actor_functor_storage.fe:28:9
+   │
+28 │         todo()
+   │         ^^^^ fn todo
+
+note:
+   ┌─ actor_functor_storage.fe:28:9
+   │
+28 │         todo()
+   │         ^^^^^^ StorPtr<U>
+
+note:
+   ┌─ actor_functor_storage.fe:39:76
+   │
+39 │       fn map<T, U, F: Fn<T, U>>(self: own MemRef<T>, _ func: F) -> MemRef<U> {
+   │ ╭────────────────────────────────────────────────────────────────────────────^
+40 │ │         todo()
+41 │ │     }
+   │ ╰─────^ MemRef<U>
+
+note:
+   ┌─ actor_functor_storage.fe:40:9
+   │
+40 │         todo()
+   │         ^^^^ fn todo
+
+note:
+   ┌─ actor_functor_storage.fe:40:9
+   │
+40 │         todo()
+   │         ^^^^^^ MemRef<U>
+
+note:
+   ┌─ actor_functor_storage.fe:51:82
+   │
+51 │       fn map<T, U, F: Fn<T, U>>(self: own BufferRef<T>, _ func: F) -> BufferRef<U> {
+   │ ╭──────────────────────────────────────────────────────────────────────────────────^
+52 │ │         todo()
+53 │ │     }
+   │ ╰─────^ BufferRef<U>
+
+note:
+   ┌─ actor_functor_storage.fe:52:9
+   │
+52 │         todo()
+   │         ^^^^ fn todo
+
+note:
+   ┌─ actor_functor_storage.fe:52:9
+   │
+52 │         todo()
+   │         ^^^^^^ BufferRef<U>
+
+note:
+   ┌─ actor_functor_storage.fe:60:46
+   │
+60 │       fn call(self, _ value: own u256) -> u256 {
+   │ ╭──────────────────────────────────────────────^
+61 │ │         value + 1
+62 │ │     }
+   │ ╰─────^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:61:9
+   │
+61 │         value + 1
+   │         ^^^^^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:61:9
+   │
+61 │         value + 1
+   │         ^^^^^^^^^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:61:17
+   │
+61 │         value + 1
+   │                 ^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:67:46
+   │
+67 │       fn call(self, _ value: own u256) -> u256 {
+   │ ╭──────────────────────────────────────────────^
+68 │ │         value * 2
+69 │ │     }
+   │ ╰─────^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:68:9
+   │
+68 │         value * 2
+   │         ^^^^^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:68:9
+   │
+68 │         value * 2
+   │         ^^^^^^^^^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:68:17
+   │
+68 │         value * 2
+   │                 ^ u256
+
+note:
+   ┌─ actor_functor_storage.fe:74:61
+   │
+74 │   fn increment_evm(count: own StorPtr<u256>) -> StorPtr<u256> {
+   │ ╭─────────────────────────────────────────────────────────────^
+75 │ │     count.map(Increment{})
+76 │ │ }
+   │ ╰─^ StorPtr<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:75:5
+   │
+75 │     count.map(Increment{})
+   │     ^^^^^ StorPtr<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:75:5
+   │
+75 │     count.map(Increment{})
+   │     ^^^^^^^^^^^^^^^^^^^^^^ StorPtr<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:75:15
+   │
+75 │     count.map(Increment{})
+   │               ^^^^^^^^^^^ Increment
+
+note:
+   ┌─ actor_functor_storage.fe:78:58
+   │
+78 │   fn double_evm(count: own StorPtr<u256>) -> StorPtr<u256> {
+   │ ╭──────────────────────────────────────────────────────────^
+79 │ │     count.map(Double{})
+80 │ │ }
+   │ ╰─^ StorPtr<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:79:5
+   │
+79 │     count.map(Double{})
+   │     ^^^^^ StorPtr<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:79:5
+   │
+79 │     count.map(Double{})
+   │     ^^^^^^^^^^^^^^^^^^^ StorPtr<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:79:15
+   │
+79 │     count.map(Double{})
+   │               ^^^^^^^^ Double
+
+note:
+   ┌─ actor_functor_storage.fe:82:62
+   │
+82 │   fn increment_native(count: own MemRef<u256>) -> MemRef<u256> {
+   │ ╭──────────────────────────────────────────────────────────────^
+83 │ │     count.map(Increment{})
+84 │ │ }
+   │ ╰─^ MemRef<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:83:5
+   │
+83 │     count.map(Increment{})
+   │     ^^^^^ MemRef<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:83:5
+   │
+83 │     count.map(Increment{})
+   │     ^^^^^^^^^^^^^^^^^^^^^^ MemRef<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:83:15
+   │
+83 │     count.map(Increment{})
+   │               ^^^^^^^^^^^ Increment
+
+note:
+   ┌─ actor_functor_storage.fe:86:65
+   │
+86 │   fn increment_gpu(count: own BufferRef<u256>) -> BufferRef<u256> {
+   │ ╭─────────────────────────────────────────────────────────────────^
+87 │ │     count.map(Increment{})
+88 │ │ }
+   │ ╰─^ BufferRef<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:87:5
+   │
+87 │     count.map(Increment{})
+   │     ^^^^^ BufferRef<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:87:5
+   │
+87 │     count.map(Increment{})
+   │     ^^^^^^^^^^^^^^^^^^^^^^ BufferRef<u256>
+
+note:
+   ┌─ actor_functor_storage.fe:87:15
+   │
+87 │     count.map(Increment{})
+   │               ^^^^^^^^^^^ Increment

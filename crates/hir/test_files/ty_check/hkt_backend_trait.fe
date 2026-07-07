@@ -1,0 +1,20 @@
+// HKT Backend trait: type Foo<T> in traits
+
+trait Backend {
+    type Ptr<T>
+    type Word
+}
+
+struct EvmBackend {}
+
+impl Backend for EvmBackend {
+    type Ptr<T> = u256
+    type Word = u256
+}
+
+struct NativeBackend {}
+
+impl Backend for NativeBackend {
+    type Ptr<T> = u64
+    type Word = u64
+}
