@@ -347,6 +347,7 @@ fn walk<'db>(
                 | ItemKind::Contract(_)
                 | ItemKind::Enum(_)
                 | ItemKind::TypeAlias(_)
+                | ItemKind::TypeFn(_)
                 | ItemKind::Trait(_) => Domain::Type,
 
                 ItemKind::TopMod(_)

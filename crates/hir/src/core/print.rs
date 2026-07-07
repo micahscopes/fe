@@ -1199,6 +1199,7 @@ impl<'db> ItemKind<'db> {
             ItemKind::Contract(c) => c.pretty_print(db),
             ItemKind::Enum(e) => e.pretty_print(db),
             ItemKind::TypeAlias(t) => t.pretty_print(db),
+            ItemKind::TypeFn(t) => t.pretty_print(db),
             ItemKind::Impl(i) => i.pretty_print(db),
             ItemKind::Trait(t) => t.pretty_print(db),
             ItemKind::ImplTrait(i) => i.pretty_print(db),
@@ -1793,6 +1794,67 @@ impl<'db> TypeAlias<'db> {
         result.push_str(" = ");
         let ty = unwrap_partial(self.type_ref(db), "TypeAlias::type_ref");
         result.push_str(&ty.pretty_print(db));
+
+        result
+    }
+}
+
+impl<'db> TypeFnDef<'db> {
+    /// Pretty-prints a recursive type fn.
+    pub fn pretty_print(self, db: &'db dyn HirDb) -> String {
+        let mut result = String::new();
+
+        // Attributes
+        result.push_str(&self.attributes(db).pretty_print_with_newline(db));
+
+        // Visibility
+        result.push_str(self.vis(db).pretty_print());
+
+        result.push_str("recursive type fn ");
+
+        // Name
+        let name = unwrap_partial(self.name(db), "TypeFnDef::name");
+        result.push_str(name.data(db));
+
+        // Generic parameters (includes the const subject)
+        result.push_str(&self.generic_params(db).pretty_print_params(db));
+
+        result.push_str("()");
+
+        // Return kind
+        if let Partial::Present(kind) = self.ret_kind(db) {
+            result.push_str(" -> (");
+            result.push_str(&kind.pretty_print());
+            result.push(')');
+        }
+
+        // Where clause
+        result.push_str(&self.where_clause(db).pretty_print(db));
+
+        result.push_str(" {\n");
+        if let Partial::Present(subject) = self.match_subject(db) {
+            result.push_str("    match ");
+            result.push_str(subject.data(db));
+            result.push_str(" {\n");
+            for arm in self.arms(db) {
+                result.push_str("        ");
+                match &arm.pat {
+                    Partial::Present(TypeFnPat::Lit(lit)) => {
+                        result.push_str(&lit.data(db).to_string())
+                    }
+                    Partial::Present(TypeFnPat::Wild) => result.push('_'),
+                    Partial::Absent => result.push_str("<missing>"),
+                }
+                result.push_str(" => ");
+                match arm.ty.to_opt() {
+                    Some(ty) => result.push_str(&ty.pretty_print(db)),
+                    None => result.push_str("<missing>"),
+                }
+                result.push('\n');
+            }
+            result.push_str("    }\n");
+        }
+        result.push('}');
 
         result
     }

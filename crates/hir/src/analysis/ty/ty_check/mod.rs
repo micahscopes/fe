@@ -1224,6 +1224,15 @@ impl<'db> TyChecker<'db> {
                     .bound(bound_idx)
                     .trait_bound()
                     .into(),
+                GenericParamOwner::TypeFn(type_fn) => type_fn
+                    .span()
+                    .generic_params()
+                    .param(param_idx)
+                    .into_type_param()
+                    .bounds()
+                    .bound(bound_idx)
+                    .trait_bound()
+                    .into(),
                 GenericParamOwner::Impl(impl_) => impl_
                     .span()
                     .generic_params()
@@ -1274,6 +1283,14 @@ impl<'db> TyChecker<'db> {
                     .trait_bound()
                     .into(),
                 WhereClauseOwner::Enum(enum_) => enum_
+                    .span()
+                    .where_clause()
+                    .predicate(pred_idx)
+                    .bounds()
+                    .bound(bound_idx)
+                    .trait_bound()
+                    .into(),
+                WhereClauseOwner::TypeFn(type_fn) => type_fn
                     .span()
                     .where_clause()
                     .predicate(pred_idx)

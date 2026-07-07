@@ -270,6 +270,20 @@ impl<'db> ScopeGraphBuilder<'db> {
                     .unwrap_or_else(EdgeKind::anon)
             }
 
+            TypeFn(inner) => {
+                self.graph.add_lex_edge(item_node, parent_node);
+                self.add_generic_param_scope(
+                    item_node,
+                    inner.into(),
+                    inner.generic_params(self.db),
+                );
+                inner
+                    .name(self.db)
+                    .to_opt()
+                    .map(EdgeKind::type_)
+                    .unwrap_or_else(EdgeKind::anon)
+            }
+
             Impl(inner) => {
                 self.graph.add_lex_edge(item_node, parent_node);
                 self.add_generic_param_scope(

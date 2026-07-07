@@ -147,6 +147,7 @@ fn for_each_fixture_instance(
             | ItemKind::DeriveProviderScope(_)
             | ItemKind::DeriveDecl(_)
             | ItemKind::TypeAlias(_)
+            | ItemKind::TypeFn(_)
             | ItemKind::StaticAssert(_)
             | ItemKind::Use(_)
             | ItemKind::TopMod(_)

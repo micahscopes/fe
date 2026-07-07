@@ -353,6 +353,7 @@ impl ToDoc for ast::Item {
             Some(ItemKind::Contract(contract)) => contract.to_doc(ctx),
             Some(ItemKind::Enum(enum_)) => enum_.to_doc(ctx),
             Some(ItemKind::TypeAlias(type_alias)) => type_alias.to_doc(ctx),
+            Some(ItemKind::RecursiveTypeFn(type_fn)) => type_fn.to_doc(ctx),
             Some(ItemKind::Impl(impl_)) => impl_.to_doc(ctx),
             Some(ItemKind::DeriveProviderScope(scope)) => scope.to_doc(ctx),
             Some(ItemKind::DeriveDecl(decl)) => decl.to_doc(ctx),
@@ -1624,6 +1625,15 @@ impl ToDoc for ast::TypeAlias {
             .append(alias)
             .append(generics)
             .append(ty_doc)
+    }
+}
+
+impl ToDoc for ast::RecursiveTypeFn {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        // `recursive type fn` does not have a specialized layout yet; render it
+        // like other not-yet-specialized item-like nodes (preserves the source
+        // token stream, including comments, without reformatting the body).
+        token_doc_item_like(ctx, self.syntax())
     }
 }
 

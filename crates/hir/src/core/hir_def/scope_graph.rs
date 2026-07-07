@@ -10,7 +10,7 @@ use salsa::Update;
 use super::{
     AssocConstDecl, AssocTyDecl, AttrListId, Body, Const, Contract, Enum, EnumVariant, ExprId,
     FieldDef, FieldParent, Func, FuncParam, GenericParam, IdentId, Impl, ImplTrait, ItemKind, Mod,
-    Struct, TopLevelMod, Trait, TypeAlias, Use, VariantDef, VariantKind, Visibility,
+    Struct, TopLevelMod, Trait, TypeAlias, TypeFnDef, Use, VariantDef, VariantKind, Visibility,
     scope_graph_viz::ScopeGraphFormatter,
 };
 use crate::{
@@ -672,6 +672,7 @@ item_from_scope! {
     Contract<'db>,
     Enum<'db>,
     TypeAlias<'db>,
+    TypeFnDef<'db>,
     Impl<'db>,
     Trait<'db>,
     ImplTrait<'db>,

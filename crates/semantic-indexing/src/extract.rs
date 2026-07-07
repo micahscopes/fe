@@ -397,6 +397,11 @@ impl<'db> DocExtractor<'db> {
             ItemKind::Trait(_) => Some(DocItemKind::Trait),
             ItemKind::Contract(_) => Some(DocItemKind::Contract),
             ItemKind::TypeAlias(_) => Some(DocItemKind::TypeAlias),
+            // TODO(type-fn slice 3 polish): give `recursive type fn` its own
+            // `DocItemKind` variant; for now it renders like a type alias
+            // (both are type-level definitions) rather than adding a new
+            // cross-crate `fe-web::DocItemKind` variant in this slice.
+            ItemKind::TypeFn(_) => Some(DocItemKind::TypeAlias),
             ItemKind::Const(_) => Some(DocItemKind::Const),
             ItemKind::Impl(_) => Some(DocItemKind::Impl),
             ItemKind::ImplTrait(_) => Some(DocItemKind::ImplTrait),

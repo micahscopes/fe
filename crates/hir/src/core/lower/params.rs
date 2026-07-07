@@ -282,7 +282,10 @@ impl<'db> TypeBound<'db> {
 }
 
 impl KindBound {
-    fn lower_ast_opt(_ctxt: &mut FileLowerCtxt<'_>, ast: Option<ast::KindBound>) -> Partial<Self> {
+    pub(super) fn lower_ast_opt(
+        _ctxt: &mut FileLowerCtxt<'_>,
+        ast: Option<ast::KindBound>,
+    ) -> Partial<Self> {
         let Some(ast) = ast else {
             return Partial::Absent;
         };

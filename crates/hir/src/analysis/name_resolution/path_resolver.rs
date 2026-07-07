@@ -124,6 +124,12 @@ pub enum PathResErrorKind<'db> {
     },
 
     MethodSelection(MethodSelectionError<'db>),
+
+    /// The path resolves to a `recursive type fn` definition, but the
+    /// ty-layer representation (`TyBase::TypeFn`, spec sec 4.8 slice S1.3)
+    /// does not exist yet. HIR-level definition and name resolution land in
+    /// S1.2; using the item as a type is a later slice.
+    TypeFnNotYetSupported,
 }
 
 impl<'db> PathResError<'db> {
@@ -228,6 +234,10 @@ impl<'db> PathResError<'db> {
                     "Receiver type must be known".to_string()
                 }
             },
+            PathResErrorKind::TypeFnNotYetSupported => {
+                "recursive type fn is not yet usable as a type (ty layer not implemented)"
+                    .to_string()
+            }
         }
     }
 
@@ -437,6 +447,16 @@ impl<'db> PathResError<'db> {
                     .ty();
                 PathResDiag::ExpectedType(ty_span.into(), ident, given_kind)
             }
+
+            // The ty-layer representation of a `recursive type fn` does not
+            // exist yet (spec sec 4.8 slice S1.3); surface it as an ordinary
+            // "expected a type" diagnostic rather than a distinct diagnostic
+            // kind, since callers already expect the type domain here.
+            PathResErrorKind::TypeFnNotYetSupported => PathResDiag::ExpectedType(
+                span,
+                ident,
+                "recursive type fn (not yet usable as a type)",
+            ),
         };
         Some(diag)
     }
@@ -1886,6 +1906,17 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                             }
                         }
                     }
+                }
+
+                // The ty-layer representation of a `recursive type fn`
+                // (`TyBase::TypeFn`) does not exist yet (spec sec 4.8 slice
+                // S1.3); resolving a path to one is a clean, named error
+                // rather than a panic.
+                ItemKind::TypeFn(_) => {
+                    return Err(PathResError::new(
+                        PathResErrorKind::TypeFnNotYetSupported,
+                        path,
+                    ));
                 }
 
                 ItemKind::DeriveProviderScope(_)

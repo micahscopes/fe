@@ -869,6 +869,7 @@ fn names_competing_definition<'db>(
         | ItemKind::Struct(_)
         | ItemKind::Enum(_)
         | ItemKind::TypeAlias(_)
+        | ItemKind::TypeFn(_)
         | ItemKind::Contract(_) => {
             item
             .name(db)

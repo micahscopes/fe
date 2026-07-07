@@ -7,7 +7,7 @@ use crate::{
     HirDb,
     hir_def::{
         Body, Contract, Enum, Expr, ExprId, Func, Impl, ImplTrait, Pat, PatId, Struct, Trait,
-        TypeAlias, Use, UsePathId,
+        TypeAlias, TypeFnDef, Use, UsePathId,
     },
     span::lazy_spans::{LazyBodySpan, LazyExprSpan, LazyPatSpan, LazyPathSpan, LazyUsePathSpan},
     visitor::{Visitor, VisitorCtxt, walk_expr, walk_pat, walk_path, walk_use_path},
@@ -225,6 +225,17 @@ pub fn type_alias_references<'db>(
     let mut collector = ReferenceCollector::new(db, false);
     let mut ctxt = VisitorCtxt::with_type_alias(db, type_alias);
     collector.visit_type_alias(&mut ctxt, type_alias);
+    collector.refs
+}
+
+#[salsa::tracked(return_ref)]
+pub fn type_fn_references<'db>(
+    db: &'db dyn HirDb,
+    type_fn: TypeFnDef<'db>,
+) -> Vec<ReferenceView<'db>> {
+    let mut collector = ReferenceCollector::new(db, false);
+    let mut ctxt = VisitorCtxt::with_type_fn(db, type_fn);
+    collector.visit_type_fn(&mut ctxt, type_fn);
     collector.refs
 }
 

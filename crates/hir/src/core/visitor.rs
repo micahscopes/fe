@@ -17,7 +17,7 @@ use crate::{
         GenericArgListId, GenericParam, GenericParamListId, IdentId, Impl, ImplTrait, ItemKind,
         KindBound, LitKind, MatchArm, Mod, Partial, Pat, PatId, PathId, PathKind, QuoteBody,
         StaticAssert, Stmt, StmtId, Struct, TopLevelMod, Trait, TraitRefId, TupleTypeId, TypeAlias,
-        TypeBound, TypeId, TypeKind, Use, UseAlias, UsePathId, UsePathSegment, VariantDef,
+        TypeBound, TypeFnDef, TypeId, TypeKind, Use, UseAlias, UsePathId, UsePathSegment, VariantDef,
         VariantDefListId, VariantKind, WhereClauseId, WherePredicate,
         attr::{self, AttrArgValue},
         scope_graph::ScopeId,
@@ -35,8 +35,9 @@ pub mod prelude {
         walk_generic_param, walk_generic_param_list, walk_impl, walk_impl_trait, walk_item,
         walk_kind_bound, walk_mod, walk_pat, walk_path, walk_static_assert, walk_stmt, walk_struct,
         walk_super_trait_list, walk_top_mod, walk_trait, walk_trait_ref, walk_type,
-        walk_type_alias, walk_type_bound, walk_type_bound_list, walk_use, walk_use_path,
-        walk_variant_def, walk_variant_def_list, walk_where_clause, walk_where_predicate,
+        walk_type_alias, walk_type_bound, walk_type_bound_list, walk_type_fn, walk_use,
+        walk_use_path, walk_variant_def, walk_variant_def_list, walk_where_clause,
+        walk_where_predicate,
     };
     pub use crate::core::span::lazy_spans::*;
 }
@@ -129,6 +130,14 @@ pub trait Visitor<'db> {
         alias: TypeAlias<'db>,
     ) {
         walk_type_alias(self, ctxt, alias)
+    }
+
+    fn visit_type_fn(
+        &mut self,
+        ctxt: &mut VisitorCtxt<'db, LazyTypeFnSpan<'db>>,
+        type_fn: TypeFnDef<'db>,
+    ) {
+        walk_type_fn(self, ctxt, type_fn)
     }
 
     fn visit_impl(&mut self, ctxt: &mut VisitorCtxt<'db, LazyImplSpan<'db>>, impl_: Impl<'db>) {
@@ -465,6 +474,10 @@ pub fn walk_item<'db, V>(
         ItemKind::TypeAlias(alias) => {
             let mut new_ctxt = VisitorCtxt::with_type_alias(ctxt.db, alias);
             visitor.visit_type_alias(&mut new_ctxt, alias)
+        }
+        ItemKind::TypeFn(type_fn) => {
+            let mut new_ctxt = VisitorCtxt::with_type_fn(ctxt.db, type_fn);
+            visitor.visit_type_fn(&mut new_ctxt, type_fn)
         }
         ItemKind::Impl(impl_) => {
             let mut new_ctxt = VisitorCtxt::with_impl(ctxt.db, impl_);
@@ -946,6 +959,63 @@ pub fn walk_type_alias<'db, V>(
                 visitor.visit_ty(ctxt, ty);
             },
         )
+    }
+}
+
+/// Walks a `recursive type fn` item: name, attributes, generic params
+/// (including the const subject), where clause, and each arm's
+/// right-hand-side type. The match subject identifier and arm patterns are
+/// not expressions/paths and have no sub-visits (S1.4 resolves the subject
+/// against the declared const parameter by `DefId`).
+pub fn walk_type_fn<'db, V>(
+    visitor: &mut V,
+    ctxt: &mut VisitorCtxt<'db, LazyTypeFnSpan<'db>>,
+    type_fn: TypeFnDef<'db>,
+) where
+    V: Visitor<'db> + ?Sized,
+{
+    if let Some(id) = type_fn.name(ctxt.db).to_opt() {
+        ctxt.with_new_ctxt(
+            |span| span.name(),
+            |ctxt| {
+                visitor.visit_ident(ctxt, id);
+            },
+        )
+    }
+
+    ctxt.with_new_ctxt(
+        |span| span.attributes(),
+        |ctxt| {
+            let id = type_fn.attributes(ctxt.db);
+            visitor.visit_attribute_list(ctxt, id);
+        },
+    );
+
+    ctxt.with_new_ctxt(
+        |span| span.generic_params(),
+        |ctxt| {
+            let id = type_fn.generic_params(ctxt.db);
+            visitor.visit_generic_param_list(ctxt, id);
+        },
+    );
+
+    ctxt.with_new_ctxt(
+        |span| span.where_clause(),
+        |ctxt| {
+            let id = type_fn.where_clause(ctxt.db);
+            visitor.visit_where_clause(ctxt, id);
+        },
+    );
+
+    for (idx, arm) in type_fn.arms(ctxt.db).iter().enumerate() {
+        if let Some(ty) = arm.ty.to_opt() {
+            ctxt.with_new_ctxt(
+                |span| span.body().match_().arms().arm(idx).ty(),
+                |ctxt| {
+                    visitor.visit_ty(ctxt, ty);
+                },
+            );
+        }
     }
 }
 
@@ -2608,6 +2678,7 @@ where
             ChainRoot::Contract(contract) => contract.top_mod(self.db),
             ChainRoot::Enum(enum_) => enum_.top_mod(self.db),
             ChainRoot::TypeAlias(alias) => alias.top_mod(self.db),
+            ChainRoot::TypeFn(type_fn) => type_fn.top_mod(self.db),
             ChainRoot::Impl(impl_) => impl_.top_mod(self.db),
             ChainRoot::Trait(trait_) => trait_.top_mod(self.db),
             ChainRoot::ImplTrait(impl_trait) => impl_trait.top_mod(self.db),
@@ -2786,6 +2857,7 @@ define_item_ctxt_ctor! {
     (LazyContractSpan<'db>, with_contract(contract: Contract<'db>)),
     (LazyEnumSpan<'db>, with_enum(enum_: Enum<'db>)),
     (LazyTypeAliasSpan<'db>, with_type_alias(type_alias: TypeAlias<'db>)),
+    (LazyTypeFnSpan<'db>, with_type_fn(type_fn: TypeFnDef<'db>)),
     (LazyImplSpan<'db>, with_impl(impl_: Impl<'db>)),
     (LazyTraitSpan<'db>, with_trait(trait_: Trait<'db>)),
     (LazyImplTraitSpan<'db>, with_impl_trait(impl_trait: ImplTrait<'db>)),

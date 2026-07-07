@@ -229,6 +229,7 @@ fn collect_top_mod_semantic_borrow_diagnostic_vouchers<'db>(
             | ItemKind::DeriveProviderScope(_)
             | ItemKind::DeriveDecl(_)
             | ItemKind::TypeAlias(_)
+            | ItemKind::TypeFn(_)
             | ItemKind::StaticAssert(_)
             | ItemKind::Use(_)
             | ItemKind::TopMod(_)

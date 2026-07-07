@@ -1,6 +1,6 @@
 use rowan::ast::{AstNode, support};
 
-use super::{TraitRef, TupleType, TypeBoundList, ast_node, use_tree::UsePath};
+use super::{KindBound, TraitRef, TupleType, TypeBoundList, ast_node, use_tree::UsePath};
 use crate::{FeLang, SyntaxKind as SK, SyntaxToken};
 
 ast_node! {
@@ -42,6 +42,7 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Msg))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Enum))
             .or_else(|| support::child(self.syntax()).map(ItemKind::TypeAlias))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::RecursiveTypeFn))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Impl))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Trait))
             .or_else(|| support::child(self.syntax()).map(ItemKind::ImplTrait))
@@ -357,6 +358,13 @@ ast_node! {
     pub struct TypeFnRetKind,
     SK::TypeFnRetKind,
 }
+impl TypeFnRetKind {
+    /// Returns the kind bound wrapped by the `(..)` return kind, e.g. the
+    /// `* -> *` in `-> (* -> *)`.
+    pub fn kind_bound(&self) -> Option<KindBound> {
+        support::child(self.syntax())
+    }
+}
 
 ast_node! {
     /// `{ match N { .. } }` body of a recursive type fn.
@@ -415,6 +423,17 @@ ast_node! {
     /// `Int` or `_` recursive type fn arm pattern.
     pub struct TypeFnArmPat,
     SK::TypeFnArmPat,
+}
+impl TypeFnArmPat {
+    /// Returns the integer literal token, when this arm pattern is `Int`.
+    pub fn int_token(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Int)
+    }
+
+    /// Returns the `_` token, when this arm pattern is the wildcard.
+    pub fn underscore_token(&self) -> Option<SyntaxToken> {
+        support::token(self.syntax(), SK::Underscore)
+    }
 }
 
 ast_node! {
@@ -945,6 +964,7 @@ pub enum ItemKind {
     Msg(Msg),
     Enum(Enum),
     TypeAlias(TypeAlias),
+    RecursiveTypeFn(RecursiveTypeFn),
     Impl(Impl),
     Trait(Trait),
     ImplTrait(ImplTrait),

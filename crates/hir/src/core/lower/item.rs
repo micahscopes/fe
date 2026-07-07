@@ -8,8 +8,8 @@ use super::{
 use crate::{
     hir_def::{
         AttrListId, Body, BodyKind, CompBinOp, EffectParamListId, FuncParamListId,
-        GenericParamListId, IdentId, Partial, PathId, TraitRefId, TupleTypeId, TypeBound, TypeId,
-        WhereClauseId, item::*,
+        GenericParamListId, IdentId, IntegerId, KindBound, Partial, PathId, TraitRefId,
+        TupleTypeId, TypeBound, TypeId, WhereClauseId, item::*,
     },
     lower::msg::lower_msg_as_mod,
     span::HirOrigin,
@@ -354,6 +354,15 @@ impl<'db> ItemKind<'db> {
                 );
                 TypeAlias::lower_ast(ctxt, alias);
             }
+            ast::ItemKind::RecursiveTypeFn(type_fn) => {
+                validate_unsupported_item_attrs(
+                    ctxt,
+                    type_fn.attr_list(),
+                    "recursive type fn",
+                    type_fn.name().map(|name| name.text().to_string()),
+                );
+                TypeFnDef::lower_ast(ctxt, type_fn);
+            }
             ast::ItemKind::Impl(impl_) => {
                 validate_unsupported_item_attrs(ctxt, impl_.attr_list(), "impl", None);
                 Impl::lower_ast(ctxt, impl_);
@@ -663,6 +672,78 @@ impl<'db> TypeAlias<'db> {
             origin,
         );
         ctxt.leave_item_scope(alias)
+    }
+}
+
+impl<'db> TypeFnDef<'db> {
+    pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::RecursiveTypeFn) -> Self {
+        let name = IdentId::lower_token_partial(ctxt, ast.name());
+        let id = ctxt.joined_id(TrackedItemVariant::TypeFn(name));
+        ctxt.enter_item_scope(id, false);
+
+        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let vis = super::lower_visibility(&ast);
+        let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
+        let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
+        let ret_kind = KindBound::lower_ast_opt(ctxt, ast.ret_kind().and_then(|rk| rk.kind_bound()));
+
+        let match_ = ast.body().and_then(|body| body.match_());
+        let match_subject =
+            IdentId::lower_token_partial(ctxt, match_.as_ref().and_then(|m| m.subject()));
+        let arms = match_
+            .and_then(|m| m.arms())
+            .map(|arm_list| {
+                arm_list
+                    .into_iter()
+                    .map(|arm| TypeFnArmData::lower_ast(ctxt, arm))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let origin = HirOrigin::raw(&ast);
+
+        let type_fn = Self::new(
+            ctxt.db(),
+            id,
+            name,
+            attributes,
+            vis,
+            generic_params,
+            where_clause,
+            ret_kind,
+            match_subject,
+            arms,
+            ctxt.top_mod(),
+            origin,
+        );
+        ctxt.leave_item_scope(type_fn)
+    }
+}
+
+impl<'db> TypeFnArmData<'db> {
+    fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TypeFnArm) -> Self {
+        let pat = TypeFnPat::lower_ast_opt(ctxt, ast.pat());
+        let ty = TypeId::lower_ast_partial(ctxt, ast.ty());
+        Self { pat, ty }
+    }
+}
+
+impl<'db> TypeFnPat<'db> {
+    fn lower_ast_opt(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: Option<ast::TypeFnArmPat>,
+    ) -> Partial<Self> {
+        let Some(ast) = ast else {
+            return Partial::Absent;
+        };
+
+        if let Some(tok) = ast.int_token() {
+            Partial::Present(Self::Lit(IntegerId::lower_token(ctxt, tok)))
+        } else if ast.underscore_token().is_some() {
+            Partial::Present(Self::Wild)
+        } else {
+            Partial::Absent
+        }
     }
 }
 

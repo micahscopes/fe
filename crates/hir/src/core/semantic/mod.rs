@@ -3680,6 +3680,7 @@ impl<'db> WhereClauseView<'db> {
             WhereClauseOwner::Func(f) => f.span().where_clause(),
             WhereClauseOwner::Struct(s) => s.span().where_clause(),
             WhereClauseOwner::Enum(e) => e.span().where_clause(),
+            WhereClauseOwner::TypeFn(t) => t.span().where_clause(),
             WhereClauseOwner::Impl(i) => i.span().where_clause(),
             WhereClauseOwner::Trait(t) => t.span().where_clause(),
             WhereClauseOwner::ImplTrait(i) => i.span().where_clause(),

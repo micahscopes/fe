@@ -484,7 +484,15 @@ impl<'db> LitKind<'db> {
 
 impl<'db> IntegerId<'db> {
     fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::LitInt) -> Self {
-        let text = ast.token().text();
+        Self::lower_token(ctxt, ast.token().clone())
+    }
+
+    /// Lowers a raw integer-literal token directly, for sites that bump the
+    /// token without wrapping it in an `ast::LitInt` node (e.g. a recursive
+    /// type fn arm pattern, `crates/parser/src/parser/item.rs`'s
+    /// `TypeFnArmPatScope`).
+    pub(super) fn lower_token(ctxt: &mut FileLowerCtxt<'db>, token: SyntaxToken) -> Self {
+        let text = token.text();
         // Parser ensures that the text is valid pair with a radix and a number.
         if text.len() < 2 {
             return Self::new(ctxt.db(), BigUint::from_str_radix(text, 10).unwrap());
