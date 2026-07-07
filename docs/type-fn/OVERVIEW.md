@@ -115,7 +115,13 @@ fn reduce_rpow<F: Reduce, const N: usize>(x: Reducer<RPow<F, N>>) {}
 - **Normalization** (`unfold_type_fn_step` / `normalize_type_fn_app`) is two
   `BigUint` operations per step, never the CTFE machine, with a rooted memo
   entry, an iterative worklist, and a fixed fuel budget (~4096) kept OUTSIDE the
-  salsa memo key (so a subterm and a root reduce identically). Ground apps are
+  salsa memo key (so a subterm and a root reduce identically). The worklist
+  covers BOTH weak-head reduction AND the structural child descent
+  (`normalize_all`), so native Rust stack usage is O(1) in the fuel budget: an
+  over-budget subject whose normal form is a deep spine (e.g. `RPow<Pair, 5000>`)
+  reaches the `TypeFnRecursionLimit` diagnostic on the ordinary analysis path
+  instead of overflowing the native stack (the fuel backstop is a real backstop,
+  not one only reachable on an enlarged-stack thread). Ground apps are
   eager-expanded at the S1.3 path-lowering site (the guarantee mechanism, so a
   ground `TyBase::TypeFn` never survives into a stored type), with
   `TypeNormalizer::fold_ty` as a second line for substitution-formed apps and a

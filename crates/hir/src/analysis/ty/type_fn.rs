@@ -1124,35 +1124,79 @@ pub(crate) fn normalize_type_fn_app<'db>(
 
 /// Reduces `ty`'s head to a non-type-fn constructor, then normalizes its
 /// children, threading a single shared step counter (never reset across the
-/// recursion, so confluence holds).
+/// traversal, so confluence holds).
+///
+/// The structural child descent runs on an EXPLICIT worklist rather than native
+/// Rust recursion (Fable steering-02 scheme A). Native stack usage is therefore
+/// O(1) in the fuel budget: reaching the ~4096-step ceiling returns the
+/// `TypeFnRecursionLimit` diagnostic instead of exhausting the native stack (a
+/// left/right-spine-deep normal form such as `RPow<Pair, 5000>` would otherwise
+/// cost one native frame per unfold and crash the compiler before the ceiling
+/// check could fire). Step accounting, memoization, and arm selection are
+/// unchanged: `unfold_type_fn_step` stays the single memoized head step, a
+/// subterm and a root reduce identically (fuel is a shared counter, never a memo
+/// key), and exhaustion returns the dedicated error at the root, never a
+/// partially-unfolded app.
 fn normalize_all<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, steps: &mut usize) -> TyId<'db> {
-    let mut cur = ty;
-    while ground_type_fn_app(db, cur).is_some() {
-        *steps += 1;
-        if *steps > TYPE_FN_UNFOLD_CEILING {
-            return TyId::invalid(
-                db,
-                InvalidCause::TypeFnRecursionLimit {
-                    limit: TYPE_FN_UNFOLD_CEILING,
-                },
-            );
-        }
-        let stepped = unfold_type_fn_step(db, cur);
-        if stepped == cur {
-            break; // no progress (unreachable given strict decrease); avoid a spin
-        }
-        cur = stepped;
+    // A unit of deferred structural work. `Expand` weak-head-reduces a node and
+    // schedules its children; `Combine` rebuilds a spine once its `arity`
+    // children have been normalized onto `results`. Locally generic over `'db`
+    // so it can carry interned `TyId`s across the loop.
+    enum Task<'db> {
+        Expand(TyId<'db>),
+        Combine(TyId<'db>, usize),
     }
 
-    let (base, args) = cur.decompose_ty_app(db);
-    if args.is_empty() {
-        return cur;
+    let mut work: Vec<Task<'db>> = vec![Task::Expand(ty)];
+    let mut results: Vec<TyId<'db>> = Vec::new();
+
+    while let Some(task) = work.pop() {
+        match task {
+            Task::Expand(node) => {
+                // Iterative weak-head reduction (already O(1) stack). The shared
+                // counter bounds TOTAL steps across the whole traversal.
+                let mut cur = node;
+                while ground_type_fn_app(db, cur).is_some() {
+                    *steps += 1;
+                    if *steps > TYPE_FN_UNFOLD_CEILING {
+                        // Dedicated error at the root, never a partial app.
+                        return TyId::invalid(
+                            db,
+                            InvalidCause::TypeFnRecursionLimit {
+                                limit: TYPE_FN_UNFOLD_CEILING,
+                            },
+                        );
+                    }
+                    let stepped = unfold_type_fn_step(db, cur);
+                    if stepped == cur {
+                        break; // no progress (unreachable given strict decrease)
+                    }
+                    cur = stepped;
+                }
+
+                let (base, args) = cur.decompose_ty_app(db);
+                if args.is_empty() {
+                    results.push(cur);
+                } else {
+                    // Rebuild once the children land on `results`. Push children
+                    // in reverse so LIFO expands them left-to-right and their
+                    // results arrive in order (matching the prior recursion).
+                    work.push(Task::Combine(base, args.len()));
+                    for arg in args.iter().rev() {
+                        work.push(Task::Expand(*arg));
+                    }
+                }
+            }
+            Task::Combine(base, arity) => {
+                let at = results.len() - arity;
+                let new_args = results.split_off(at);
+                results.push(TyId::foldl(db, base, &new_args));
+            }
+        }
     }
-    let new_args: Vec<TyId<'db>> = args
-        .iter()
-        .map(|a| normalize_all(db, *a, steps))
-        .collect();
-    TyId::foldl(db, base, &new_args)
+
+    debug_assert_eq!(results.len(), 1, "normalize_all must yield exactly one root");
+    results.pop().unwrap_or(ty)
 }
 
 /// One-step substitution folder: substitutes the def's type params and subject
@@ -1762,6 +1806,29 @@ recursive type fn Bush<const N: usize>() -> (*) {
         );
     }
 
+    /// Runs the ORDINARY full analysis pass (the same `run_on_top_mod` route
+    /// the `fe` CLI and language server take) on `src` and returns the rendered
+    /// diagnostics. No enlarged-stack thread: this must succeed on the default
+    /// test-thread stack, which is the whole point of the stack-safety fix.
+    fn ordinary_analysis_diags(src: &str) -> String {
+        use crate::test_db::format_diagnostics;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_recursion_limit.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        format_diagnostics(&db, &diags)
+    }
+
+    fn assert_recursion_limit_diag(rendered: &str) {
+        assert!(
+            rendered.contains("type function unfolding exceeds depth limit")
+                && rendered.contains("exceeds the limit of 4096 steps")
+                && rendered.contains("far larger than intended"),
+            "expected the recursion-limit diagnostic with its cause note, got:\n{rendered}"
+        );
+    }
+
     /// Robustness fixture: a subject large enough to hit the
     /// `TYPE_FN_UNFOLD_CEILING` fuel ceiling, exercising the improved
     /// `TypeFnRecursionLimit` diagnostic (S3b) against a REAL trigger rather
@@ -1771,48 +1838,36 @@ recursive type fn Bush<const N: usize>() -> (*) {
     /// exponential blowup (the ceiling check aborts the reduction shortly
     /// after N = 4096, not at the full N = 5000).
     ///
-    /// FINDING (recorded, not fixed here; out of scope for a diagnostics/
-    /// hover-only slice): `normalize_all` is a plain recursive Rust function,
-    /// one stack frame per unfold step. Reaching the ~4096-step ceiling at
-    /// all therefore costs ~4096 native stack frames, which overflows an
-    /// ordinary 8 MiB default thread stack in a debug build BEFORE the
-    /// ceiling check can return its diagnostic (confirmed: this test SIGABRTs
-    /// with a real stack overflow on the default test-thread stack). Neither
-    /// the `fe` CLI nor the language server spawns an enlarged-stack thread
-    /// for analysis (grepped the codebase for `stack_size`: zero hits), so a
-    /// real user hitting a large enough `N` today would crash the compiler
-    /// rather than see this diagnostic. The fuel ceiling bounds STEPS, not
-    /// STACK DEPTH; converting `normalize_all`'s structural-child recursion
-    /// to an explicit worklist would close this, but that is an engine change
-    /// to the S1.5 normalizer, not a diagnostic/hover edit, so it is left as a
-    /// follow-up rather than folded into this slice. This test spawns its own
-    /// large-stack thread purely to reach the diagnostic and confirm its
-    /// text; that accommodation is NOT present in the real compiler.
+    /// This runs on the ORDINARY analysis path with NO enlarged-stack
+    /// accommodation. `RPow<Pair, 5000>`'s normal form is a ~4096-deep
+    /// left-nested `Comp` spine; before the S3c stack-safety fix,
+    /// `normalize_all`'s native structural recursion cost one Rust frame per
+    /// unfold and SIGABRTed with a real stack overflow here, BEFORE the ceiling
+    /// check could return its diagnostic (neither the `fe` CLI nor the language
+    /// server spawns an enlarged-stack analysis thread). With `normalize_all`'s
+    /// child descent now on an explicit worklist, native stack usage is O(1) in
+    /// the fuel budget and the clean diagnostic is reachable on the real path.
     #[test]
     fn recursion_limit_hit_with_helpful_diagnostic() {
-        use crate::test_db::format_diagnostics;
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: RPow<Pair, 5000> }}\n");
+        assert_recursion_limit_diag(&ordinary_analysis_diags(&src));
+    }
 
-        let result = std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
-            .spawn(|| {
-                let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: RPow<Pair, 5000> }}\n");
-                let mut db = HirAnalysisTestDb::default();
-                let file =
-                    db.new_stand_alone(Utf8PathBuf::from("type_fn_recursion_limit.fe"), &src);
-                let (top_mod, _) = db.top_mod(file);
-                let diags = db.run_on_top_mod(top_mod);
-                format_diagnostics(&db, &diags)
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+    /// Companion to the above across the OTHER over-budget self-call shapes, all
+    /// on the ordinary (default-stack) path with no crash:
+    ///   * `LPow<Pair, 5000>` -- self-call in the SECOND arg, a RIGHT-nested
+    ///     `Comp` spine (distinct deep-spine crash class from `RPow`).
+    ///   * `Bush<20>` -- MULTI self-call (`Comp<Bush<{N-1}>, Bush<{N-1}>>`);
+    ///     `normalize_all` re-traverses both branches, so the shared step
+    ///     counter reaches the ceiling by breadth (2^(N+1)-1 steps) rather than
+    ///     by a single deep spine, exercising a different route to exhaustion.
+    #[test]
+    fn recursion_limit_reachable_across_self_call_shapes() {
+        let lpow = format!("{NORM_FIXTURES}\nstruct Probe {{ p: LPow<Pair, 5000> }}\n");
+        assert_recursion_limit_diag(&ordinary_analysis_diags(&lpow));
 
-        assert!(
-            result.contains("type function unfolding exceeds depth limit")
-                && result.contains("exceeds the limit of 4096 steps")
-                && result.contains("far larger than intended"),
-            "expected the recursion-limit diagnostic with its cause note, got:\n{result}"
-        );
+        let bush = format!("{NORM_FIXTURES}\nstruct Probe {{ p: Bush<20> }}\n");
+        assert_recursion_limit_diag(&ordinary_analysis_diags(&bush));
     }
 
     /// Robustness fixture: a self-call nested several combinator layers deep in

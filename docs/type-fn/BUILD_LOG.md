@@ -1154,3 +1154,78 @@ analysis::ty::type_fn::tests::recursion_limit_hit_with_helpful_diagnostic`
 and `::accepts_and_normalizes_deeply_nested_self_call`). Full `cargo test -p
 fe-hir --lib analysis::ty::type_fn` (55 tests: 32 `type_fn` + `21`
 `type_fn_induct` before this slice, now 34 + 21 = 55) green.
+
+## S3c: make ground normalization stack-safe (the fuel backstop is now reachable)
+
+Fixes the crash-on-legal-input defect recorded in the S3b (3 of 3) FINDING
+above: `normalize_all`, the S1.5 normalization driver, head-reduced a rooted
+application with an ITERATIVE counter but descended into structural children
+with NATIVE Rust recursion. A normal form that is a deep spine (`RPow<Pair,
+N>` -> `Comp<Comp<...>, Pair>`, one `Comp` per unfold) therefore cost one
+native frame per step; reaching the ~4096-step fuel ceiling cost ~4096
+frames and overflowed the ordinary 8 MiB stack BEFORE the ceiling check
+could return `TypeFnRecursionLimit`. Neither the `fe` CLI nor the language
+server runs analysis on an enlarged-stack thread (grep-confirmed: zero
+`stack_size` spawns), so a large subject constant crashed the real compiler.
+The fuel backstop the OVERVIEW advertises was unreachable on the real path;
+only the S3b test reached the diagnostic, and only because it spawned its own
+256 MiB-stack thread.
+
+### The fix (Fable steering-02 scheme A: explicit worklist, PREFERRED route)
+
+`normalize_all` (`crates/hir/src/analysis/ty/type_fn.rs`) now runs its
+structural child descent on an EXPLICIT worklist (`Vec<Task>` +
+`Vec<results>` on the heap) instead of native recursion. `Task::Expand`
+weak-head-reduces a node (the head loop is unchanged) and, once reduced,
+pushes a `Task::Combine(base, arity)` plus its children (in reverse, so LIFO
+expands them left-to-right and their results arrive in order); `Combine`
+`split_off`s the last `arity` results and rebuilds `TyId::foldl(base, ..)`.
+Native Rust stack usage is now O(1) in the fuel budget; the work/result Vecs
+grow on the heap and are bounded by the step budget. This is exactly the
+traversal order and output of the old recursion, so every under-budget input
+normalizes to the identical `TyId` and counts identical steps.
+
+Semantics preserved, per Fable steering-02 sec 4: `unfold_type_fn_step` stays
+the single memoized weak-head step (memo key still just the app, no fuel); a
+subterm and a root reduce identically (shared counter, never a memo key);
+arm selection and `BigUint` stepping are untouched. One deliberate
+tightening: on exhaustion the function now returns the dedicated
+`InvalidCause::TypeFnRecursionLimit` at the ROOT, never the partially
+unfolded app. The old recursion embedded the invalid deep inside a `Comp<..>`
+spine (the exact "partial form escaping into unification" that steering-02
+sec 4 warns against); returning it at the root is both cleaner and what the
+spec intends. The diagnostic surfaces identically either way (`ty_error.rs`
+reports a top-level `TyData::Invalid` at line 210 and an embedded one via
+`visit_invalid`, both with the field-annotation span).
+
+### Verification (REAL compiler path, no enlarged-stack accommodation)
+
+`recursion_limit_hit_with_helpful_diagnostic` rewritten to run on the
+ORDINARY `run_on_top_mod` analysis path (the same entry the CLI/LSP use) with
+NO large-stack thread; `RPow<Pair, 5000>` now returns the clean
+`TypeFnRecursionLimit` diagnostic (message + "exceeds the limit of 4096
+steps" + "far larger than intended") with no crash. New companion test
+`recursion_limit_reachable_across_self_call_shapes` covers the other
+over-budget shapes on the same ordinary path: `LPow<Pair, 5000>` (self-call
+in the second arg, a right-nested spine, distinct deep-spine crash class) and
+`Bush<20>` (multi self-call; the shared counter reaches the ceiling by
+breadth, 2^(N+1)-1 steps, not by a single deep spine). Both green on the
+default test-thread stack.
+
+`docs/type-fn/OVERVIEW.md` normalization bullet updated: the worklist now
+covers BOTH head reduction and the structural child descent, so native stack
+usage is O(1) and the fuel backstop is a real backstop rather than one only
+reachable on an enlarged-stack thread.
+
+Verification: `cargo check --workspace` clean. `cargo test -p fe-hir --lib
+analysis::ty::type_fn` green (56 tests: the two recursion-limit tests plus
+one added, all prior ground-normalization / induction / demo / hover-gate
+tests unchanged and green). No em-dashes; no AI attribution.
+
+Follow-up (out of scope, unchanged by this fix): an ACCEPTED under-budget but
+deep normal form (e.g. `RPow<Pair, 4095>`, a ~4095-deep `Comp` spine) is
+produced fine, but downstream native-recursive `TyId` consumers
+(pretty-print, `ty_flags`, MIR lowering) would still recurse to that depth,
+the same general deep-type limitation any hand-written deeply-nested type has.
+The type-fn NORMALIZER no longer contributes to it; a global depth cap on
+those consumers is a separate concern.
