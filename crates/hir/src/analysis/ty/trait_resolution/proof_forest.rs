@@ -289,6 +289,29 @@ impl<'db> GeneratorNodeData<'db> {
         let cands =
             impls_for_trait_in_ingots(db, primary, secondary, Canonical::new(db, extracted_goal));
 
+        // S2.1 soundness tripwire (spec sec 5, ladder S2.1; sec 1.4 G1). When the
+        // goal's self type is an OPAQUE `recursive type fn` application (symbolic
+        // subject, so it did not eager-expand), the S2.0 impl-target ban
+        // guarantees no registered impl has a type-fn self-type head. Assert it:
+        // the only sound discharge routes for such a goal are a blanket impl
+        // (self type a bare param, valid at every ground instantiation) and the
+        // caller's assumptions leg. A candidate whose self-type head is itself a
+        // `TyBase::TypeFn` would mean the ban leaked, letting coherence depend on
+        // subject arithmetic (the S2.1 "gate, don't select" hazard).
+        #[cfg(debug_assertions)]
+        if crate::analysis::ty::type_fn::type_fn_app_head(db, extracted_goal.self_ty(db)).is_some() {
+            for cand in cands.iter() {
+                let cand_self = cand.instantiate_identity().self_ty(db);
+                debug_assert!(
+                    crate::analysis::ty::type_fn::type_fn_app_head(db, cand_self).is_none(),
+                    "S2.1 soundness tripwire: an impl candidate has a `recursive \
+                     type fn` self-type head for an opaque type-fn goal; the S2.0 \
+                     impl-target ban must keep this goal dischargeable only via \
+                     caller assumptions (blanket impls excepted)",
+                );
+            }
+        }
+
         Self {
             table,
             query,

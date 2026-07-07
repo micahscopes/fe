@@ -1901,7 +1901,7 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                 ItemKind::TypeFn(type_fn) => {
                     use crate::analysis::ty::type_fn::{
                         normalize_type_fn_app, scope_in_type_fn_body,
-                        type_fn_app_subject_is_ground,
+                        symbolic_type_fn_position_is_stored, type_fn_app_subject_is_ground,
                     };
                     let base = TyId::type_fn(db, type_fn);
                     let ty = TyId::foldl(db, base, &args);
@@ -1912,8 +1912,8 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                         )),
                         // Saturated. Ground expansion happens HERE (spec sec 4.8
                         // slice S1.5): it is the guarantee mechanism that keeps
-                        // `TyBase::TypeFn` out of stored types (ADT fields, fn
-                        // sigs) which are never routed through the normalizer.
+                        // `TyBase::TypeFn` out of stored types (ADT fields) which
+                        // are never routed through the normalizer.
                         None if scope_in_type_fn_body(db, scope) => {
                             // Inside a recursive type fn body: leave the
                             // self-call opaque; the unfolder owns it, and eager
@@ -1923,13 +1923,30 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                         None if type_fn_app_subject_is_ground(db, ty) => {
                             PathRes::Ty(normalize_type_fn_app(db, ty))
                         }
-                        None => {
-                            // v1 rejects a symbolic subject outside a type fn
-                            // body (Slice 2 lifts this to an obligation).
+                        // Symbolic subject outside a type fn body. The gate is
+                        // POSITION-AWARE (spec sec 5, ladder S2.1):
+                        None if symbolic_type_fn_position_is_stored(scope) => {
+                            // ADT field / other stored ADT position: a stored
+                            // type cannot carry an unresolved symbolic app (no
+                            // normalizer runs over it; layout is undefined). Keep
+                            // rejecting (S2.2+ may lift the stored surface).
                             PathRes::Ty(TyId::invalid(
                                 db,
                                 InvalidCause::SymbolicTypeFnUnsupported,
                             ))
+                        }
+                        None => {
+                            // S2.1: fn signature / where clause / body-typing
+                            // position. Propagate the saturated app OPAQUELY. The
+                            // resulting `P(RPow<F, M>)` obligation reaches the
+                            // trait solver, dischargeable EXCLUSIVELY via the
+                            // caller's assumptions (a `where RPow<F, M>: P`
+                            // bound): the S2.0 impl-target ban guarantees no impl
+                            // candidate has a type-fn self-type head, and there is
+                            // no induction engine yet. The type fn's own where
+                            // clause discharges at this symbolic site through the
+                            // `ty_constraints` `TyBase::TypeFn` arm (S2.0 (b)).
+                            PathRes::Ty(ty)
                         }
                     }
                 }

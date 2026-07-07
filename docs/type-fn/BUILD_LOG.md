@@ -471,3 +471,105 @@ Verification: `cargo check --workspace` clean (no warnings); all 25
 `analysis::ty::type_fn::tests` pass (targeted, debug), incl. the 3 new S2.0
 (b)/(c) tests. Full release `nextest` CI is the orchestrator's at the slice
 boundary.
+
+---
+
+## S2.1: symbolic propagation + assumption-only discharge (ZERO new proof power)
+
+Per Fable steering-03 sec 5 (ladder S2.1) and sec 1.4 G1/G5. Lifts the S1.5
+symbolic reject at the single gate into an OPAQUE saturated `TyBase::TypeFn`
+application, but POSITION-AWARE: only in non-stored positions. Symbolic
+obligations `P(RPow<F, M>)` now reach the solver and are dischargeable
+EXCLUSIVELY via the existing assumptions leg (a caller `where RPow<F, M>: P`
+bound). No induction engine, no solver strictness change: every accepted
+symbolic obligation is an assumption that existing machinery re-checks ground at
+every instantiation.
+
+### The gate became position-aware (path_resolver.rs `ItemKind::TypeFn` arm)
+
+The symbolic-subject-outside-a-body branch splits on
+`symbolic_type_fn_position_is_stored(scope)` (new, in `type_fn.rs`):
+
+- STORED ADT positions (`scope.item()` is `Struct`/`Enum`/`Contract`): keep
+  rejecting with `InvalidCause::SymbolicTypeFnUnsupported`. Field types,
+  where-clauses, generic bounds and defaults of an ADT all lower under the ADT
+  item's own scope, so a single nearest-item test covers them. A stored field is
+  never routed through the ground normalizer and an unresolved symbolic app has
+  no defined layout, so this surface stays closed (S2.2+ may lift it). The
+  (rare) ADT where-clause case is conservatively folded in; the S2.1 discharge
+  workload lives on fn/impl/trait where clauses, which are NOT stored.
+- Everything else (fn signatures, where clauses on fns/traits/impls, method
+  bodies, type aliases): propagate the saturated app OPAQUELY (`PathRes::Ty(ty)`
+  on the live `TyBase::TypeFn` head). An ADT method's signature/body is an
+  `ItemKind::Func` scope, so it is correctly non-stored; only the ADT's own
+  positions resolve their nearest item to the ADT.
+
+The existing `scope_in_type_fn_body` (leave self-calls opaque) and the ground
+eager-expansion branches are unchanged and still take precedence.
+
+### Assumption-only discharge, and no other route for the opaque head
+
+An opaque obligation `P(RPow<F, M>)` enters the ordinary solver. The S2.0
+impl-target ban guarantees no registered impl has a `TyBase::TypeFn` self-type
+head, so the only sound discharge routes are (a) a blanket impl (self type a
+bare param; valid at every ground instantiation) and (b) the caller's
+assumptions leg (`proof_forest.rs` `goal_needs_assumptions`: the goal's self
+type `has_param`, so assumptions are consulted and unified; a hit yields
+`ImplementorId::assumption` / `ImplementorOrigin::Assumption`). No induction
+engine exists, so there is no engine route. The type fn's own where clause
+discharges at the symbolic site through the S2.0 (b) `ty_constraints`
+`TyBase::TypeFn` arm.
+
+SOUNDNESS TRIPWIRE (`proof_forest.rs` `GeneratorNodeData::new`, debug-only):
+when the goal's self type is an opaque type-fn application
+(`type_fn_app_head(..).is_some()`), `debug_assert!` that NO candidate implementor
+has a type-fn self-type head. This directly pins the S2.0 ban: a leaked type-fn-
+headed impl is exactly the sec 1.4 G1 "coherence depends on arithmetic" hazard.
+Blanket impls remain the documented sound exception.
+
+### ICE audit
+
+Opaque symbolic heads now flow through fn signatures / where clauses / bodies.
+The S1.3 Category-C `TyBase` consumers already carry `TypeFn` arms
+(`pretty_print`/`kind`/`as_scope`/`name_span`/`applicable_ty`, the visitor hook,
+visibility, diagnostics rendering); MIR stays unreachable (a generic def is not
+monomorphized by the analysis pass, and `normalize_ty` reduces any app that
+becomes ground at instantiation, with the `stable_key.rs` tripwire as backstop).
+Verified end-to-end by a full-pass test that puts an opaque app in a parameter
+type, a return type, and a `return x` body with zero diagnostics.
+
+### Tests (all targeted, debug; the gate-don't-select cross-check is the core)
+
+- `s21_symbolic_obligation_discharged_by_assumption` (POSITIVE): a generic fn
+  whose signature forces `RPow<F, M>: Marker` (via a `Requires<T> where T:
+  Marker` wrapper parameter) type-checks WITH the `where RPow<F, M>: Marker`
+  assumption. No diagnostics.
+- `s21_symbolic_obligation_fails_without_assumption` (NEGATIVE): the same fn
+  WITHOUT the bound fails with the trait-bound-not-satisfied diagnostic (opaque
+  head, no impl candidate, no assumption).
+- `rejects_symbolic_type_fn_outside_body` (NEGATIVE position, pre-existing,
+  re-documented): a symbolic app in an ADT FIELD stays rejected.
+- `s21_opaque_head_flows_through_signature_no_ice` (AUDIT): param/return/body
+  opaque flow, no ICE, no spurious diag.
+- `s21_cross_check_gate_matches_ground_select` (CROSS-CHECK, gate-don't-select):
+  GATE leg: `Marker(RPow<F, N>)` (RPow's own rigid params) is Satisfied ONLY from
+  the assumption, with `ImplementorOrigin::Assumption`; UnSat without it. SELECT
+  leg: for n in {0, 1, 2, 4, 7}, ground resolution of the UN-normalized
+  `Marker(RPow<Pair, n>)` and of the pre-normalized `Marker(NF_n)` return the
+  IDENTICAL unique `ImplementorId` (hence identical origin + `SelDiscriminator`),
+  with `ImplementorOrigin::Hir`, and `select_impl` == `Selection::Unique` of it
+  on both forms. Since the instantiated assumption becomes exactly
+  `RPow<Pair, n>: Marker` at a call site, the gate never diverges from ground
+  selection on the normal form. (An e2e codegen twin snapshot was not built;
+  ground reduction + selection identity is pinned directly at the solver level.)
+
+Explicitly OUT OF SCOPE (S2.2+, a Fable steering pass runs first): the induction
+engine, strict-`Satisfied`-only engine hardening, per-occurrence opaque params,
+the deferred `lemma_satisfied` helper, fixpoint goal-set growth, ADT-field
+symbolic positions.
+
+Verification: `cargo check --workspace` clean (no warnings); all 29
+`analysis::ty::type_fn::tests` pass (targeted, debug), incl. the 5 new S2.1
+tests. The debug tripwire is active during the cross-check (debug build) at each
+n and does not fire. Full release `nextest` CI is the orchestrator's at the
+slice boundary.

@@ -796,6 +796,48 @@ pub(crate) fn scope_in_type_fn_body<'db>(db: &'db dyn HirAnalysisDb, scope: Scop
     false
 }
 
+/// S2.1 position-awareness for the symbolic gate (spec sec 5, ladder S2.1).
+///
+/// `true` if `scope` is a STORED ADT type position: a struct/enum/contract
+/// field, or a where-clause / generic-param bound / default of such an item
+/// (all of which are lowered under the ADT item's own scope). A symbolic
+/// `recursive type fn` application must STILL be rejected here in S2.1: a stored
+/// field is never routed through the ground normalizer, and an unresolved
+/// symbolic app has no defined layout. Everything else (fn signatures, where
+/// clauses on fns/traits/impls, method bodies, type aliases) is NOT stored, so
+/// the gate propagates the symbolic app OPAQUELY there and the obligation flows
+/// to the solver.
+///
+/// This is scope-granular: an ADT method's signature/body is an
+/// `ItemKind::Func` scope (its nearest item), so it is correctly NOT stored;
+/// only the ADT's own field/where/bound positions resolve their nearest item to
+/// the `Struct`/`Enum`/`Contract`. The (rare, conservatively-rejected) ADT
+/// where-clause case is deliberately folded in with fields to keep the check a
+/// single nearest-item test; the S2.1 discharge workload lives on fn/impl/trait
+/// where clauses, which are not stored.
+pub(crate) fn symbolic_type_fn_position_is_stored<'db>(scope: ScopeId<'db>) -> bool {
+    matches!(
+        scope.item(),
+        ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Contract(_)
+    )
+}
+
+/// The `recursive type fn` def at the head of a saturated application `ty`,
+/// regardless of whether the subject is ground or symbolic. Returns `None` for
+/// any other head. Used by the S2.1 soundness tripwire in the trait solver to
+/// recognise an OPAQUE type-fn goal (a symbolic subject leaves the head a
+/// `TyBase::TypeFn`, so `ground_type_fn_app` would decline).
+pub(crate) fn type_fn_app_head<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<TypeFnDef<'db>> {
+    let (base, _args) = ty.decompose_ty_app(db);
+    match base.data(db) {
+        TyData::TyBase(TyBase::TypeFn(def)) => Some(*def),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // S2.0 (a): explicit spec sec 5.1 / sec 9.9 impl-target ban.
 //
@@ -1592,10 +1634,13 @@ recursive type fn Bush<const N: usize>() -> (*) {
         );
     }
 
-    /// A symbolic type-fn application OUTSIDE a type fn body (here a struct field
-    /// mentioning the struct's own const param) is rejected in v1 (spec sec
-    /// 5.3 / Slice 2 lifts it). We assert the diagnostic surfaces from the full
-    /// analysis pass.
+    /// A symbolic type-fn application in an ADT FIELD position (here a struct
+    /// field mentioning the struct's own const param) stays rejected under S2.1:
+    /// the gate is position-aware and keeps rejecting stored positions (a stored
+    /// field is never routed through the normalizer, and an unresolved symbolic
+    /// app has no defined layout). Fn-signature / where-clause / body positions
+    /// are lifted to opaque propagation elsewhere (see the S2.1 tests below). We
+    /// assert the diagnostic surfaces from the full analysis pass.
     #[test]
     fn rejects_symbolic_type_fn_outside_body() {
         use crate::test_db::format_diagnostics;
@@ -1834,6 +1879,225 @@ recursive type fn Bare<F, const N: usize>() -> (*) {
             ty_constraints(&db, build_app(&db, top_mod, "Bare")).is_empty(&db),
             "a `where`-less type fn must carry no precondition"
         );
+    }
+
+    // --- S2.1: symbolic propagation + assumption-only discharge ---
+
+    /// Shared S2.1 fixture. `RPow` is a `*`-returning recursion; `Marker` has
+    /// impls on every combinator (`Par`/`Pair`/`Comp`), so every ground normal
+    /// form of `RPow<_, n>` is `Marker`. `Requires<T> where T: Marker` is a
+    /// wrapper whose USE in a signature FORCES the obligation `T: Marker` to be
+    /// discharged (an empty struct is enough: its where clause is a WF
+    /// precondition of the applied type). The gate is exercised in a fn-signature
+    /// position, so the symbolic `RPow<F, M>` propagates opaquely.
+    const S21_FIXTURES: &str = r#"
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+trait Marker {}
+impl Marker for Par {}
+impl Marker for Pair {}
+impl<F, G> Marker for Comp<F, G> {}
+
+struct Requires<T> where T: Marker {}
+
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+"#;
+
+    fn s21_diags(tail: &str) -> String {
+        use crate::test_db::format_diagnostics;
+        let src = format!("{S21_FIXTURES}\n{tail}\n");
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s21.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        format_diagnostics(&db, &diags)
+    }
+
+    /// POSITIVE: a generic fn whose signature forces `RPow<F, M>: Marker` (via
+    /// the `Requires` wrapper on a parameter) type-checks when the caller-written
+    /// `where RPow<F, M>: Marker` assumption is present. The symbolic obligation
+    /// reaches the solver and is discharged from that assumption; zero new proof
+    /// power.
+    #[test]
+    fn s21_symbolic_obligation_discharged_by_assumption() {
+        let rendered = s21_diags(
+            "fn use_it<F, const M: usize>(x: Requires<RPow<F, M>>) where RPow<F, M>: Marker {}",
+        );
+        assert!(
+            rendered.is_empty(),
+            "the symbolic obligation should be discharged by the assumption, but got:\n{rendered}"
+        );
+    }
+
+    /// NEGATIVE (missing assumption): the SAME fn WITHOUT the `where RPow<F, M>:
+    /// Marker` bound fails. The opaque type-fn head has no impl candidate (the
+    /// S2.0 ban) and no assumption, so the obligation is UnSat and the ordinary
+    /// trait-bound diagnostic fires. This pins the conservatism direction: the
+    /// assumption is load-bearing, not decorative.
+    #[test]
+    fn s21_symbolic_obligation_fails_without_assumption() {
+        let rendered = s21_diags("fn use_it<F, const M: usize>(x: Requires<RPow<F, M>>) {}");
+        assert!(
+            rendered.contains("is not satisfied") || rendered.contains("doesn't implement"),
+            "expected a trait-bound-not-satisfied diagnostic without the assumption, got:\n{rendered}"
+        );
+    }
+
+    /// AUDIT: an opaque symbolic type-fn application flows through a fn parameter
+    /// type, a return type, and a trivial body without ICE, and with no spurious
+    /// diagnostic (RPow here has no where clause, so its use carries no
+    /// precondition). Exercises the passes the steering flagged as potentially
+    /// touching a symbolic head now that it reaches signatures/bodies (ty_check,
+    /// signature WF, print). MIR is not reached: a generic definition is not
+    /// monomorphized by the analysis pass.
+    #[test]
+    fn s21_opaque_head_flows_through_signature_no_ice() {
+        let rendered = s21_diags(
+            "fn id_opaque<F, const M: usize>(x: RPow<F, M>) -> RPow<F, M> { return x }",
+        );
+        assert!(
+            rendered.is_empty(),
+            "an opaque type-fn app in a signature/body must type-check cleanly, got:\n{rendered}"
+        );
+    }
+
+    /// CROSS-CHECK (the core S2.1 "gate, don't select" soundness test). Two legs.
+    ///
+    /// GATE leg (symbolic): the opaque obligation `Marker(RPow<F, N>)` (F, N are
+    /// RPow's own rigid params) is Satisfied ONLY from the assumption
+    /// `RPow<F, N>: Marker`, and its witness carries
+    /// `ImplementorOrigin::Assumption` (never an impl: the S2.0 ban leaves no
+    /// impl candidate whose self-type head is the opaque type fn, and there is no
+    /// induction engine yet). Drop the assumption and it is UnSat. This is the
+    /// only S2.1 discharge route, and the permanent user escape hatch.
+    ///
+    /// SELECT leg (ground): for n in {0, 1, 2, 4, 7}, ground resolution of the
+    /// UN-normalized `Marker(RPow<Pair, n>)` and of the pre-normalized
+    /// `Marker(NF_n)` yield the IDENTICAL unique implementor. Equal `ImplementorId`
+    /// means equal `(ImplementorId, ImplementorOrigin, SelDiscriminator)` (the
+    /// latter two are pure functions of the implementor), and `select_impl`
+    /// returns `Selection::Unique` of it on BOTH forms. Since the instantiated
+    /// assumption becomes exactly `RPow<Pair, n>: Marker` at a call site, the
+    /// gate can never diverge from what ground selection picks on the normal form.
+    #[test]
+    fn s21_cross_check_gate_matches_ground_select() {
+        use super::{make_subject_ty, normalize_type_fn_app};
+        use crate::analysis::ty::adt_def::AdtRef;
+        use crate::analysis::ty::trait_def::{ImplementorOrigin, TraitInstId};
+        use crate::analysis::ty::trait_resolution::{
+            GoalSatisfiability, PredicateListId, Selection, TraitSolveCx, is_goal_satisfiable,
+        };
+        use crate::analysis::ty::ty_def::{PrimTy, TyBase, TyData, TyId};
+        use crate::analysis::ty::ty_lower::collect_generic_params;
+        use crate::hir_def::{GenericParamOwner, ItemKind};
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s21_xcheck.fe"), S21_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let rpow = find_tf(&db, top_mod, "RPow");
+        let marker = *top_mod
+            .all_traits(&db)
+            .iter()
+            .find(|t| t.name(&db).to_opt().is_some_and(|i| i.data(&db) == "Marker"))
+            .expect("missing Marker trait");
+        let adt_ty = |name: &str| {
+            let s = top_mod
+                .all_structs(&db)
+                .iter()
+                .copied()
+                .find(|s| s.name(&db).to_opt().is_some_and(|i| i.data(&db) == name))
+                .unwrap_or_else(|| panic!("missing struct `{name}`"));
+            TyId::adt(&db, AdtRef::try_from_item(ItemKind::Struct(s)).unwrap().as_adt(&db))
+        };
+        let pair_ty = adt_ty("Pair");
+
+        // --- GATE leg: the symbolic obligation is dischargeable only by the
+        // assumption, with Assumption provenance. ---
+        let params = collect_generic_params(&db, GenericParamOwner::TypeFn(rpow));
+        let f_param = params.param_by_original_idx(&db, 0).expect("RPow.F");
+        let n_param = params.param_by_original_idx(&db, 1).expect("RPow.N");
+        let sym_app = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[f_param, n_param]);
+        // The head stays a live, opaque `TyBase::TypeFn` application.
+        assert!(
+            super::type_fn_app_head(&db, sym_app).is_some(),
+            "symbolic app must keep a live type-fn head"
+        );
+        let sym_goal = TraitInstId::new_simple(&db, marker, vec![sym_app]);
+
+        let cx_no_assume = TraitSolveCx::new(&db, rpow.scope());
+        assert!(
+            matches!(
+                is_goal_satisfiable(&db, cx_no_assume, sym_goal),
+                GoalSatisfiability::UnSat(_)
+            ),
+            "without the assumption the opaque obligation must be UnSat (no impl candidate)"
+        );
+
+        let assumptions = PredicateListId::new(&db, vec![sym_goal]);
+        let cx_assume = TraitSolveCx::new(&db, rpow.scope()).with_assumptions(assumptions);
+        match is_goal_satisfiable(&db, cx_assume, sym_goal) {
+            GoalSatisfiability::Satisfied(sol) => assert!(
+                matches!(sol.value.implementor.origin(&db), ImplementorOrigin::Assumption),
+                "the symbolic discharge must come from the assumption, not an impl"
+            ),
+            other => panic!("expected Satisfied-from-assumption, got {other:?}"),
+        }
+
+        // --- SELECT leg: ground resolution at each n agrees on the normal form. ---
+        let usize_ty = TyId::new(&db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)));
+        let cx = TraitSolveCx::new(&db, top_mod.scope());
+        for n in [0u32, 1, 2, 4, 7] {
+            let subject = make_subject_ty(&db, num_bigint::BigUint::from(n), usize_ty);
+            let app = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[pair_ty, subject]);
+            let nf = normalize_type_fn_app(&db, app);
+            assert!(
+                super::collect_type_fn_heads(&db, nf).is_empty(),
+                "NF_{n} still carries a type-fn head: {}",
+                nf.pretty_print(&db)
+            );
+
+            let goal_unnorm = TraitInstId::new_simple(&db, marker, vec![app]);
+            let goal_norm = TraitInstId::new_simple(&db, marker, vec![nf]);
+
+            let impl_unnorm = match is_goal_satisfiable(&db, cx, goal_unnorm) {
+                GoalSatisfiability::Satisfied(sol) => sol.value.implementor,
+                other => panic!("Marker(RPow<Pair, {n}>) must be Satisfied ground, got {other:?}"),
+            };
+            let impl_norm = match is_goal_satisfiable(&db, cx, goal_norm) {
+                GoalSatisfiability::Satisfied(sol) => sol.value.implementor,
+                other => panic!("Marker(NF_{n}) must be Satisfied ground, got {other:?}"),
+            };
+
+            // Equal ImplementorId => equal origin + SelDiscriminator.
+            assert_eq!(
+                impl_unnorm, impl_norm,
+                "gate/select divergence at n={n}: the un-normalized ground app and the \
+                 normal form selected different implementors"
+            );
+            assert!(
+                matches!(impl_norm.origin(&db), ImplementorOrigin::Hir(_)),
+                "ground selection at n={n} must pin a real impl, not an assumption"
+            );
+
+            // `select_impl` returns Unique(that impl) on BOTH forms.
+            for (label, goal) in [("normal form", goal_norm), ("un-normalized", goal_unnorm)] {
+                match cx.select_impl(&db, goal) {
+                    Selection::Unique(sel) => assert_eq!(
+                        sel, impl_norm,
+                        "select_impl on the {label} at n={n} picked a different impl"
+                    ),
+                    other => panic!("select_impl on the {label} at n={n} was not Unique: {other:?}"),
+                }
+            }
+        }
     }
 
     /// Guard against over-firing: an ordinary impl on a plain ADT whose fields
