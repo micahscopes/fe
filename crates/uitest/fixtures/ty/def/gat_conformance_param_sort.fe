@@ -1,0 +1,15 @@
+// mb2-a4.1: GAT param SORT conformance (6-0024). The trait declares a TYPE
+// param at position 0; the impl declares a CONST param there. Sorts disagree,
+// so the signature does not conform. (A genuine sort DISagreement is a
+// conformance error, distinct from the A4.4 const-GAT-param deferral, which
+// only fires when both sides agree on `const`.)
+
+struct Evm {}
+
+trait Backend {
+    type Buf<T>
+}
+
+impl Backend for Evm {
+    type Buf<const N: u32> = u256
+}

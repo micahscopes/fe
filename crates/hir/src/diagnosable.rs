@@ -783,6 +783,123 @@ impl<'db> ImplTrait<'db> {
         diags
     }
 
+    /// Diagnostics for GAT signature conformance of impl associated types
+    /// against the trait declaration (mb2-a4.1). Pure binder-shape comparison
+    /// (SOLVER-FREE) via [`gat_signature_conforms`]:
+    /// - 6-0023 param count mismatch,
+    /// - 6-0024 param sort mismatch (type vs const),
+    /// - 6-0025 param kind mismatch,
+    /// - 6-0026 impl declares an assoc type the trait does not have (was
+    ///   silent).
+    ///
+    /// The DECL is the authority (the same `assoc_decl_arity` the A3 G1 gate
+    /// reads). This closes the escaped-rigid / conflation hazard where an impl
+    /// `type Ptr<T>` with a divergent binder is projected without a re-check.
+    pub fn diags_assoc_type_conformance(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Vec<TyDiagCollection<'db>> {
+        use ty::diagnostics::ImplDiag;
+        use ty::ty_lower::{GatSigMismatch, gat_signature_conforms};
+
+        let mut diags = Vec::new();
+        let Some(implementor) = lower_impl_trait(db, self) else {
+            return diags;
+        };
+        let implementor = implementor.instantiate_identity();
+        let trait_hir = implementor.trait_def(db);
+
+        for (impl_idx, def) in self.types(db).iter().enumerate() {
+            let Some(name) = def.name.to_opt() else { continue };
+
+            let Some(decl) = trait_hir.assoc_ty(db, name) else {
+                // 6-0026: impl declares an assoc type the trait does not have.
+                diags.push(
+                    ImplDiag::AssocTypeNotDefinedInTrait {
+                        primary: self.span().associated_type(impl_idx).name().into(),
+                        trait_: trait_hir,
+                        type_name: name,
+                    }
+                    .into(),
+                );
+                continue;
+            };
+
+            // Trait-side declaration span (secondary "declared here" label).
+            let trait_decl_span = trait_hir
+                .assoc_types(db)
+                .find(|v| v.name(db) == Some(name))
+                .map(|v| v.span());
+
+            match gat_signature_conforms(db, decl, def) {
+                Ok(()) => {}
+                Err(GatSigMismatch::ParamCount { expected, given }) => {
+                    // Anchor at the assoc type NAME (always resolvable): the
+                    // impl may have zero generic params (`type Ptr = ...`), in
+                    // which case the generic-param-list span is empty.
+                    let trait_decl_span = trait_decl_span
+                        .map(|s| s.name().into())
+                        .unwrap_or_else(|| self.span().ty().into());
+                    diags.push(
+                        ImplDiag::AssocTypeParamNumMismatch {
+                            primary: self.span().associated_type(impl_idx).name().into(),
+                            trait_decl_span,
+                            type_name: name,
+                            expected,
+                            given,
+                        }
+                        .into(),
+                    );
+                }
+                Err(GatSigMismatch::ParamSort { param_idx }) => {
+                    let trait_decl_span = trait_decl_span
+                        .map(|s| s.generic_params().param(param_idx).into())
+                        .unwrap_or_else(|| self.span().ty().into());
+                    diags.push(
+                        ImplDiag::AssocTypeParamSortMismatch {
+                            primary: self
+                                .span()
+                                .associated_type(impl_idx)
+                                .generic_params()
+                                .param(param_idx)
+                                .into(),
+                            trait_decl_span,
+                            type_name: name,
+                            param_idx,
+                        }
+                        .into(),
+                    );
+                }
+                Err(GatSigMismatch::ParamKind {
+                    param_idx,
+                    expected,
+                    given,
+                }) => {
+                    let trait_decl_span = trait_decl_span
+                        .map(|s| s.generic_params().param(param_idx).into())
+                        .unwrap_or_else(|| self.span().ty().into());
+                    diags.push(
+                        ImplDiag::AssocTypeParamKindMismatch {
+                            primary: self
+                                .span()
+                                .associated_type(impl_idx)
+                                .generic_params()
+                                .param(param_idx)
+                                .into(),
+                            trait_decl_span,
+                            type_name: name,
+                            param_idx,
+                            expected,
+                            given,
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+        diags
+    }
+
     /// Diagnostics for missing associated consts (required by the trait).
     pub fn diags_missing_assoc_consts(
         self,
@@ -1827,6 +1944,7 @@ impl<'db> Diagnosable<'db> for ImplTrait<'db> {
         out.extend(self.diags_trait_ref_and_wf(db));
         out.extend(self.diags_assoc_types_wf(db));
         out.extend(self.diags_missing_assoc_types(db));
+        out.extend(self.diags_assoc_type_conformance(db));
         out.extend(self.diags_assoc_types_bounds(db));
         out.extend(self.diags_missing_assoc_consts(db));
         out.extend(self.diags_assoc_consts(db));

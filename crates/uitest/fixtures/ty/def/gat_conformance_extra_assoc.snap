@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_conformance_extra_assoc.fe
+---
+error[6-0026]: associated type not defined in trait
+   ┌─ gat_conformance_extra_assoc.fe:13:10
+   │
+13 │     type Bogus<T> = u256
+   │          ^^^^^ associated type `Bogus` is not defined in trait `Backend`

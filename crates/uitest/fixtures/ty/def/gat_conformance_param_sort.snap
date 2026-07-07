@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_conformance_param_sort.fe
+---
+error[6-0024]: associated type parameter sort mismatch
+   ┌─ gat_conformance_param_sort.fe:14:14
+   │
+10 │     type Buf<T>
+   │              - trait declares the associated type here
+   ·
+14 │     type Buf<const N: u32> = u256
+   │              ^^^^^^^^^^^^ parameter 0 of associated type `Buf` has a different sort (type vs const) than the trait declaration

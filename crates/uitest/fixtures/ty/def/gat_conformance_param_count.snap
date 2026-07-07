@@ -1,0 +1,22 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_conformance_param_count.fe
+---
+error[6-0023]: associated type parameter count mismatch
+   ┌─ gat_conformance_param_count.fe:13:10
+   │
+10 │     type Ptr<T>
+   │          --- trait declares the associated type here
+   ·
+13 │     type Ptr = u256
+   │          ^^^ associated type `Ptr` expects 1 generic parameter(s), but 0 given
+
+error[6-0023]: associated type parameter count mismatch
+   ┌─ gat_conformance_param_count.fe:23:10
+   │
+20 │     type Ptr<T>
+   │          --- trait declares the associated type here
+   ·
+23 │     type Ptr<T, U> = u256
+   │          ^^^ associated type `Ptr` expects 1 generic parameter(s), but 2 given

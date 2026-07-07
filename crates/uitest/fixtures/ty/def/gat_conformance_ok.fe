@@ -1,0 +1,16 @@
+// mb2-a4.1: a CONFORMING generic-associated-type impl. The impl's
+// `type Map<K, V>` matches the trait decl's binder exactly (param count, sort,
+// and per-param kind), so NO signature-conformance diagnostic (6-0023..6-0026)
+// fires. This pins the always-sound conforming path.
+
+struct Pair<K, V> {}
+
+struct Evm {}
+
+trait Backend {
+    type Map<K, V>
+}
+
+impl Backend for Evm {
+    type Map<K, V> = Pair<K, V>
+}

@@ -5738,6 +5738,113 @@ impl DiagnosticVoucher for ImplDiag<'_> {
                     error_code,
                 }
             }
+
+            Self::AssocTypeParamNumMismatch {
+                primary,
+                trait_decl_span,
+                type_name,
+                expected,
+                given,
+            } => CompleteDiagnostic {
+                severity,
+                message: "associated type parameter count mismatch".to_string(),
+                sub_diagnostics: vec![
+                    SubDiagnostic {
+                        style: LabelStyle::Primary,
+                        message: format!(
+                            "associated type `{}` expects {expected} generic parameter(s), but \
+                             {given} given",
+                            type_name.data(db),
+                        ),
+                        span: primary.resolve(db),
+                    },
+                    SubDiagnostic {
+                        style: LabelStyle::Secondary,
+                        message: "trait declares the associated type here".to_string(),
+                        span: trait_decl_span.resolve(db),
+                    },
+                ],
+                notes: vec![],
+                error_code,
+            },
+
+            Self::AssocTypeParamSortMismatch {
+                primary,
+                trait_decl_span,
+                type_name,
+                param_idx,
+            } => CompleteDiagnostic {
+                severity,
+                message: "associated type parameter sort mismatch".to_string(),
+                sub_diagnostics: vec![
+                    SubDiagnostic {
+                        style: LabelStyle::Primary,
+                        message: format!(
+                            "parameter {param_idx} of associated type `{}` has a different sort \
+                             (type vs const) than the trait declaration",
+                            type_name.data(db),
+                        ),
+                        span: primary.resolve(db),
+                    },
+                    SubDiagnostic {
+                        style: LabelStyle::Secondary,
+                        message: "trait declares the associated type here".to_string(),
+                        span: trait_decl_span.resolve(db),
+                    },
+                ],
+                notes: vec![],
+                error_code,
+            },
+
+            Self::AssocTypeParamKindMismatch {
+                primary,
+                trait_decl_span,
+                type_name,
+                param_idx,
+                expected,
+                given,
+            } => CompleteDiagnostic {
+                severity,
+                message: "associated type parameter kind mismatch".to_string(),
+                sub_diagnostics: vec![
+                    SubDiagnostic {
+                        style: LabelStyle::Primary,
+                        message: format!(
+                            "parameter {param_idx} of associated type `{}` has `{given}` kind, but \
+                             the trait declares `{expected}` kind",
+                            type_name.data(db),
+                        ),
+                        span: primary.resolve(db),
+                    },
+                    SubDiagnostic {
+                        style: LabelStyle::Secondary,
+                        message: "trait declares the associated type here".to_string(),
+                        span: trait_decl_span.resolve(db),
+                    },
+                ],
+                notes: vec![],
+                error_code,
+            },
+
+            Self::AssocTypeNotDefinedInTrait {
+                primary,
+                trait_,
+                type_name,
+            } => CompleteDiagnostic {
+                severity,
+                message: "associated type not defined in trait".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!(
+                        "associated type `{}` is not defined in trait `{}`",
+                        type_name.data(db),
+                        trait_.name(db).unwrap().data(db)
+                    ),
+                    span: primary.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
         }
     }
 }

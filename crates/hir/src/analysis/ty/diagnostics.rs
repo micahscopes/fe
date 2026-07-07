@@ -1527,6 +1527,44 @@ pub enum ImplDiag<'db> {
         impl_m: CallableDef<'db>,
         trait_m: CallableDef<'db>,
     },
+
+    /// The impl's associated type has a different generic-param COUNT than the
+    /// trait decl (mb2-a4.1). Mirror of `MethodTypeParamNumMismatch`.
+    AssocTypeParamNumMismatch {
+        primary: DynLazySpan<'db>,
+        trait_decl_span: DynLazySpan<'db>,
+        type_name: IdentId<'db>,
+        expected: usize,
+        given: usize,
+    },
+
+    /// The impl's associated type param disagrees on SORT (type vs const)
+    /// (mb2-a4.1).
+    AssocTypeParamSortMismatch {
+        primary: DynLazySpan<'db>,
+        trait_decl_span: DynLazySpan<'db>,
+        type_name: IdentId<'db>,
+        param_idx: usize,
+    },
+
+    /// The impl's associated type param disagrees on KIND (mb2-a4.1). Mirror of
+    /// `MethodTypeParamKindMismatch`.
+    AssocTypeParamKindMismatch {
+        primary: DynLazySpan<'db>,
+        trait_decl_span: DynLazySpan<'db>,
+        type_name: IdentId<'db>,
+        param_idx: usize,
+        expected: Kind,
+        given: Kind,
+    },
+
+    /// The impl declares an associated type the trait does not have (mb2-a4.1).
+    /// Previously SILENT; parity fix mirroring `ConstNotDefinedInTrait`.
+    AssocTypeNotDefinedInTrait {
+        primary: DynLazySpan<'db>,
+        trait_: Trait<'db>,
+        type_name: IdentId<'db>,
+    },
 }
 
 impl ImplDiag<'_> {
@@ -1555,6 +1593,10 @@ impl ImplDiag<'_> {
             Self::InherentConstShadowsVariant { .. } => 20,
             Self::InherentConstShadowsFn { .. } => 21,
             Self::MethodConstPredicateMismatch { .. } => 22,
+            Self::AssocTypeParamNumMismatch { .. } => 23,
+            Self::AssocTypeParamSortMismatch { .. } => 24,
+            Self::AssocTypeParamKindMismatch { .. } => 25,
+            Self::AssocTypeNotDefinedInTrait { .. } => 26,
         }
     }
 }

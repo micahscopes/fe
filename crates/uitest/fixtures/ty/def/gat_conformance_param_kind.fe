@@ -1,0 +1,17 @@
+// mb2-a4.1: GAT param KIND conformance (6-0025). The trait declares its param
+// with a higher kind (`G: * -> *`); the impl declares the same-position param
+// with the default `*` kind. A kind mismatch is real unsoundness:
+// `project_applied` kind-checks the args against the DECL, then substitutes
+// them into an RHS type-checked under the IMPL's kinds with no kind re-check.
+// (This case is only testable end-to-end with the HasKind decl-kind alignment
+// that honors per-param kind bounds.)
+
+struct Evm {}
+
+trait Backend {
+    type Wrap<G: * -> *>
+}
+
+impl Backend for Evm {
+    type Wrap<G> = u256
+}

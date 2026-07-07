@@ -1,0 +1,24 @@
+// mb2-a4.1: GAT param COUNT conformance (6-0023), both directions. The trait
+// DECL is the authority (same arity the A3 G1 gate reads).
+
+struct Evm {}
+struct Wasm {}
+
+// impl arity (0) < decl arity (1): the RHS would ignore its arg, so
+// `X::Ptr<u32>` == `X::Ptr<u8>` -- the same conflation class as H2.
+trait Low {
+    type Ptr<T>
+}
+impl Low for Evm {
+    type Ptr = u256
+}
+
+// impl arity (2) > decl arity (1): the RHS carries an assoc-owned rigid param
+// the decl authority never substitutes, so a rigid `TyParam` leaks into use
+// sites -- the genuinely dangerous escaped-rigid direction.
+trait High {
+    type Ptr<T>
+}
+impl High for Wasm {
+    type Ptr<T, U> = u256
+}

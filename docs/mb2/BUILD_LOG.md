@@ -397,3 +397,60 @@ snapshot that predates the A-track landing.
   `associated_types.snap`).
 - **Verify**: targeted test green; `cargo check --workspace` clean (source
   unchanged, snapshot-only fix).
+
+## 2026-07-07 - Slice A4.1a: GAT signature conformance + H1 hazard + decl-kind alignment
+
+First A4.1 increment (steering-07). Decision-free, SOLVER-FREE. Closes live
+hazard H1 and adds the four signature-conformance diagnostics.
+
+- **H1 (unguarded default merge) closed.** `assoc_type_bindings_for_trait_inst`
+  (`core/semantic/mod.rs`) ran an UNSCOPED `Binder::instantiate` on trait
+  defaults with no arity check. `InstantiateFolder::fold_ty` (`binder.rs:136`)
+  substitutes EVERY non-effect `TyParam` by raw `args[param.idx]`: a GAT default
+  `type Buffer<T> = DefaultBuf<T>` (arity 1) captured `Self`
+  (`DefaultBuf<args[0]>` = `DefaultBuf<SelfTy>`), and an arity-2 default
+  index-panicked (`args[1]` out of bounds on a `Self`-only trait). Interim
+  guard: skip the merge for `view.generic_params(db).len(db) > 0`. Projection of
+  an omitted GAT binding stays OPAQUE (always sound); `diags_missing_assoc_types`
+  still counts the default as present, so no fixture churn. The capture-proof
+  merge via `instantiate_scoped` remains A4.3.
+- **Signature conformance (6-0023..6-0026).** New pure predicate
+  `gat_signature_conforms(db, decl, def)` (`ty_lower.rs`, next to `gat_param_ty`)
+  compares binder shape only: param COUNT, per-param SORT (type vs const), and
+  per-param KIND (`lower_kind_in_bounds(..).unwrap_or(Star)`, the same rule
+  `gat_param_ty` mints with). The DECL is the authority (the `assoc_decl_arity`
+  the A3 G1 gate reads). New `ImplTrait::diags_assoc_type_conformance`
+  (`diagnosable.rs`) walks the impl's `types` and emits new named ImplDiag codes:
+  - `6-0023 AssocTypeParamNumMismatch` (count; both directions),
+  - `6-0024 AssocTypeParamSortMismatch` (type vs const),
+  - `6-0025 AssocTypeParamKindMismatch` (kind),
+  - `6-0026 AssocTypeNotDefinedInTrait` (impl-declared assoc type absent from the
+    trait; SILENT before this slice).
+  Hooked into `Diagnosable for ImplTrait::diags` after
+  `diags_missing_assoc_types`, before `diags_assoc_types_bounds`.
+- **HasKind decl-kind alignment.** `HasKind for AssocTy` (`ty_def.rs`) hardcoded
+  `*` per param (`(0..n).fold(Star, |acc,_| abs(Star, acc))`), so a decl
+  `type F<G: * -> *>` got kind `* -> *` instead of `(* -> *) -> *` and its
+  applied form could never kind-check. Now folds per-param
+  `lower_kind_in_bounds(..).unwrap_or(Star)` in reverse. Byte-identical for the
+  all-`*` baseline; makes the 6-0025 kind check testable end to end.
+- **Tests.** fe-hir unit tests `gat_default_arity1_not_merged_no_capture`
+  (binding stays absent, no `DefaultBuf<Self>` capture) and
+  `gat_default_arity2_no_ice` (no index-panic) pin H1. uitest fixtures under
+  `ty/def/`: `gat_conformance_ok` (conforming arity-2, zero diagnostics),
+  `gat_conformance_param_count` (6-0023 both directions), `_param_sort`
+  (6-0024), `_param_kind` (6-0025, exercises the decl-kind alignment),
+  `_extra_assoc` (6-0026); each shows exactly its own code, no cascade.
+- **Churn (intended):** `ty/def/trait_impl_trait_env_admissibility.snap` gained
+  two 6-0026 errors for its `ExtraOnlyItem`/`MixedExtraItem` impls declaring a
+  `type Extra` the trait lacks (previously silent; the exact 6-0026 hazard).
+  Reviewed and accepted. All other existing GAT fixtures
+  (`hkt_assoc_type_constructor`, `gat_projection_resolves`,
+  `gat_typefn_confluence`, `actor_*`) are conforming: byte-identical.
+- **Verify:** `cargo check --workspace` clean; fe-uitest `ty` 114 green (5 new +
+  the accepted admissibility); fe-hir `ty_check`/`constraints`/
+  `trait_resolution_conformance`/`def_analysis` targeted green; H1 unit tests
+  green. Full release CI is the orchestrator's run.
+- **NEXT: A4.1b** = H2 gate (reject GAT trait-ref bindings `Backend<Buffer=X>`)
+  and A4.4 const-GAT-param decl-site deferral; then A4.2 (GAT where-bound
+  discharge via owner-remap + strict_prove).

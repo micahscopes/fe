@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_conformance_param_kind.fe
+---
+error[6-0025]: associated type parameter kind mismatch
+   ┌─ gat_conformance_param_kind.fe:16:15
+   │
+12 │     type Wrap<G: * -> *>
+   │               --------- trait declares the associated type here
+   ·
+16 │     type Wrap<G> = u256
+   │               ^ parameter 0 of associated type `Wrap` has `*` kind, but the trait declares `(* -> *)` kind

@@ -1,8 +1,8 @@
 use crate::core::hir_def::{
-    Body, CallableDef, ConstGenericArgValue, Expr, GenericArg, GenericArgListId, GenericParam,
-    GenericParamOwner, GenericParamView, IdentId, KindBound as HirKindBound, Partial, PathId, Stmt,
-    TypeAlias as HirTypeAlias, TypeBound, TypeId as HirTyId, TypeKind as HirTyKind, TypeMode,
-    scope_graph::ScopeId,
+    AssocTyDecl, AssocTyDef, Body, CallableDef, ConstGenericArgValue, Expr, GenericArg,
+    GenericArgListId, GenericParam, GenericParamOwner, GenericParamView, IdentId,
+    KindBound as HirKindBound, Partial, PathId, Stmt, TypeAlias as HirTypeAlias, TypeBound,
+    TypeId as HirTyId, TypeKind as HirTyKind, TypeMode, scope_graph::ScopeId,
 };
 use rustc_hash::FxHashMap;
 use salsa::Update;
@@ -1846,13 +1846,154 @@ pub(crate) fn gat_param_ty<'db>(
     }
 }
 
+/// A GAT signature (binder) conformance failure between an impl assoc-type def
+/// and the trait decl it is matched to by name. The DECL is the authority (the
+/// same authority the A3 G1 gate reads via `assoc_decl_arity`).
+pub(crate) enum GatSigMismatch {
+    /// Generic-parameter count differs from the decl.
+    ParamCount { expected: usize, given: usize },
+    /// The `param_idx`-th param disagrees on SORT (type vs const).
+    ParamSort { param_idx: usize },
+    /// The `param_idx`-th type param disagrees on KIND.
+    ParamKind {
+        param_idx: usize,
+        expected: Kind,
+        given: Kind,
+    },
+}
+
+/// Pure signature/kind conformance of an impl associated-type DEF against the
+/// trait DECL it is matched to by name (mb2-a4.1). SOLVER-FREE: this compares
+/// binder shape only (param count, per-param sort, per-param kind).
+///
+/// The kind of a type param is computed EXACTLY as `gat_param_ty` mints it
+/// (`lower_kind_in_bounds(..).unwrap_or(Star)`), so the check compares what the
+/// engine actually substitutes into the RHS. A kind mismatch is real
+/// unsoundness: `project_applied` kind-checks the applied ARGS against the
+/// DECL, then substitutes them into an RHS type-checked under the IMPL's kinds
+/// with no kind re-check.
+///
+/// Const-param positions on both sides are treated as sort-conforming here;
+/// const GAT params are separately deferred with a clean decl-site diagnostic
+/// (A4.4). Returns the FIRST mismatch found (count before per-param).
+pub(crate) fn gat_signature_conforms<'db>(
+    db: &'db dyn HirAnalysisDb,
+    decl: &AssocTyDecl<'db>,
+    def: &AssocTyDef<'db>,
+) -> Result<(), GatSigMismatch> {
+    let decl_params = decl.generic_params.data(db);
+    let def_params = def.generic_params.data(db);
+
+    if decl_params.len() != def_params.len() {
+        return Err(GatSigMismatch::ParamCount {
+            expected: decl_params.len(),
+            given: def_params.len(),
+        });
+    }
+
+    for (param_idx, (decl_p, def_p)) in decl_params.iter().zip(def_params.iter()).enumerate() {
+        match (decl_p, def_p) {
+            (GenericParam::Type(decl_t), GenericParam::Type(def_t)) => {
+                let expected = lower_kind_in_bounds(&decl_t.bounds).unwrap_or(Kind::Star);
+                let given = lower_kind_in_bounds(&def_t.bounds).unwrap_or(Kind::Star);
+                if expected != given {
+                    return Err(GatSigMismatch::ParamKind {
+                        param_idx,
+                        expected,
+                        given,
+                    });
+                }
+            }
+            // Const-const: sorts agree; const GAT param support is deferred.
+            (GenericParam::Const(_), GenericParam::Const(_)) => {}
+            // type-vs-const in either direction.
+            _ => return Err(GatSigMismatch::ParamSort { param_idx }),
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        hir_def::{ItemKind, TopLevelMod},
+        hir_def::{ImplTrait, ItemKind, TopLevelMod},
         test_db::HirAnalysisTestDb,
     };
+
+    fn find_impl_trait<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+    ) -> ImplTrait<'db> {
+        top_mod
+            .children_non_nested(db)
+            .find_map(|item| match item {
+                ItemKind::ImplTrait(it) => Some(it),
+                _ => None,
+            })
+            .expect("missing impl trait")
+    }
+
+    // H1 (mb2-a4.1): an impl OMITTING a GAT (arity 1) default must NOT get the
+    // default merged via the unscoped `Binder::instantiate`, which would
+    // capture `Self` (`DefaultBuf<T>` -> `DefaultBuf<SelfTy>`, silently wrong).
+    // The interim guard declines the merge, so the binding stays OPAQUE (absent
+    // from the map); projection degrades to the always-sound opaque form.
+    #[test]
+    fn gat_default_arity1_not_merged_no_capture() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "gat_default_arity1.fe".into(),
+            r#"
+struct DefaultBuf<T> {}
+struct Evm {}
+trait Backend {
+    type Buffer<T> = DefaultBuf<T>
+}
+impl Backend for Evm {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let impl_trait = find_impl_trait(&db, top_mod);
+        let trait_inst = impl_trait.trait_inst(&db).expect("well-formed trait inst");
+        let bindings = impl_trait.assoc_type_bindings_for_trait_inst(&db, trait_inst);
+        let buffer = IdentId::new(&db, "Buffer".to_string());
+        assert!(
+            bindings.get(&buffer).is_none(),
+            "GAT default must not be merged (would capture Self); got binding {:?}",
+            bindings.get(&buffer)
+        );
+    }
+
+    // H1 (mb2-a4.1): an arity-2 GAT default with an impl omitting the binding
+    // previously index-panicked (ICE) in the unscoped merge
+    // (`args[param.idx]`, param.idx=1 out of bounds when the trait carries only
+    // `Self`). The guard declines the merge, so analysis completes with no ICE.
+    #[test]
+    fn gat_default_arity2_no_ice() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "gat_default_arity2.fe".into(),
+            r#"
+struct Pair<T, U> {}
+struct Evm {}
+trait Backend {
+    type Buffer<T, U> = Pair<T, U>
+}
+impl Backend for Evm {}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let impl_trait = find_impl_trait(&db, top_mod);
+        let trait_inst = impl_trait.trait_inst(&db).expect("well-formed trait inst");
+        // Must not panic (the merge is declined for arity > 0).
+        let bindings = impl_trait.assoc_type_bindings_for_trait_inst(&db, trait_inst);
+        let buffer = IdentId::new(&db, "Buffer".to_string());
+        assert!(bindings.get(&buffer).is_none());
+        // The full analysis pass must also complete without an ICE.
+        let _ = db.run_on_top_mod(top_mod);
+    }
 
     fn find_func<'db>(
         db: &'db HirAnalysisTestDb,

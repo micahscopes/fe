@@ -2109,8 +2109,28 @@ impl HasKind for TyData<'_> {
                         if let Some(kind) = super::ty_lower::lower_kind_in_bounds(&decl.bounds) {
                             kind
                         } else {
-                            let n_params = decl.generic_params.len(db);
-                            (0..n_params).fold(Kind::Star, |acc, _| Kind::abs(Kind::Star, acc))
+                            // Derive the decl kind from the assoc type's own
+                            // generic params, honoring each param's per-param
+                            // kind bound (mirroring `gat_param_ty`), so a
+                            // higher-kinded GAT param `type F<G: * -> *>` gets
+                            // decl kind `(* -> *) -> *`, not `* -> *`. Folding
+                            // in reverse builds the right-associated arrow
+                            // `k0 -> (k1 -> *)`. Behavior-identical to the old
+                            // hardcoded-`*`-per-param fold for the all-`*`
+                            // baseline.
+                            decl.generic_params.data(db).iter().rev().fold(
+                                Kind::Star,
+                                |acc, p| {
+                                    let param_kind = match p {
+                                        crate::hir_def::GenericParam::Type(t) => {
+                                            super::ty_lower::lower_kind_in_bounds(&t.bounds)
+                                                .unwrap_or(Kind::Star)
+                                        }
+                                        crate::hir_def::GenericParam::Const(_) => Kind::Star,
+                                    };
+                                    Kind::abs(param_kind, acc)
+                                },
+                            )
                         }
                     }
                     None => Kind::Star,

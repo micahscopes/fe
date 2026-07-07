@@ -1,0 +1,14 @@
+// mb2-a4.1: an impl declares an associated type the trait does NOT have
+// (6-0026). This was SILENT before this slice (consts had 6-0014, methods
+// 6-0001, but assoc types had no parity variant). Decision-free parity fix.
+
+struct Evm {}
+
+trait Backend {
+    type Ptr<T>
+}
+
+impl Backend for Evm {
+    type Ptr<T> = u256
+    type Bogus<T> = u256
+}

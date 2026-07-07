@@ -4774,6 +4774,22 @@ impl<'db> ImplTrait<'db> {
                 continue;
             };
 
+            // H1 interim guard (mb2-a4.1): the unscoped `Binder::instantiate`
+            // substitutes EVERY non-effect `TyParam` by raw `args[param.idx]`
+            // with no owner check. Since a GAT (arity > 0) default lowers its
+            // own params to `TyParam{owner: TraitType(t,i), idx j}`, feeding
+            // them through this unscoped fold either captures `Self`
+            // (`DefaultBuf<T>` -> `DefaultBuf<args[0]>` = `DefaultBuf<SelfTy>`,
+            // silently wrong) at arity 1, or index-panics at arity >= 2 when
+            // `param.idx` exceeds `trait_inst.args`. Decline the default merge
+            // for GAT defaults for now: projection stays opaque (always sound,
+            // never wrong) and `diags_missing_assoc_types` still counts the
+            // default as present. The capture-proof merge via
+            // `instantiate_scoped` is A4.3.
+            if view.generic_params(db).len(db) > 0 {
+                continue;
+            }
+
             types
                 .entry(name)
                 .or_insert_with(|| Binder::bind(default).instantiate(db, trait_inst.args(db)));
