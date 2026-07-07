@@ -281,6 +281,14 @@ pub(crate) enum TraitArgError<'db> {
     ConstHoleNotAllowed {
         arg_idx: usize,
     },
+    /// A trait-ref binding `Trait<AssocName = Ty>` targeted a GENERIC (arity>0)
+    /// associated type (a GAT). Unsupported in v1: such a binding would
+    /// silently conflate GAT instantiations through the normalizer's
+    /// assumptions leg (`Backend<Buffer = X>` returns `X` for `B::Buffer<u32>`
+    /// AND `B::Buffer<u8>`). Hazard H2 (mb2-a4.1).
+    GatBindingUnsupported {
+        name: IdentId<'db>,
+    },
     Ignored,
 }
 
@@ -324,6 +332,15 @@ fn lower_trait_ref_impl_inner<'db>(
             },
             GenericArg::AssocType(AssocTypeGenericArg { name, ty }) => {
                 if let (Some(name), Some(ty)) = (name.to_opt(), ty.to_opt()) {
+                    // H2 (mb2-a4.1): reject a binding of a GENERIC (arity>0)
+                    // assoc type; it would conflate GAT instantiations through
+                    // the assumptions leg. Binder syntax for GAT bindings is
+                    // future surface (fco-guts: pick the narrow default).
+                    if t.assoc_ty(db, name)
+                        .is_some_and(|decl| decl.generic_params.len(db) > 0)
+                    {
+                        return Err(TraitArgError::GatBindingUnsupported { name });
+                    }
                     let ty = lower_hir_ty_with_minter(db, ty, scope, assumptions, &minter);
                     assoc_bindings.insert(name, ty);
                 }
@@ -453,6 +470,16 @@ pub(crate) fn lower_hir_constraint_application<'db>(
             },
             GenericArg::AssocType(AssocTypeGenericArg { name, ty }) => {
                 if let (Some(name), Some(ty)) = (name.to_opt(), ty.to_opt()) {
+                    // H2 (mb2-a4.1): never record a GENERIC (arity>0) assoc-type
+                    // binding (would conflate). This boundless-constraint path
+                    // is diagnostic-free by contract, so restrict silently; the
+                    // trait-bound form (`lower_trait_ref_impl_inner`) rejects by
+                    // name.
+                    if t.assoc_ty(db, name)
+                        .is_some_and(|decl| decl.generic_params.len(db) > 0)
+                    {
+                        continue;
+                    }
                     let ty = lower_hir_ty_with_minter(db, ty, scope, assumptions, &minter);
                     assoc_bindings.insert(name, ty);
                 }

@@ -1,0 +1,20 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_const_param_deferred.fe
+---
+error[3-0049]: const generic parameters on associated types are not yet supported
+   ┌─ gat_const_param_deferred.fe:11:15
+   │
+11 │     type Slot<const N: u32>
+   │               ^^^^^^^^^^^^ const generic parameter on an associated type
+   │
+   = use a type generic parameter, or track the demand for const associated-type parameters
+
+error[3-0049]: const generic parameters on associated types are not yet supported
+   ┌─ gat_const_param_deferred.fe:15:15
+   │
+15 │     type Slot<const N: u32> = u256
+   │               ^^^^^^^^^^^^ const generic parameter on an associated type
+   │
+   = use a type generic parameter, or track the demand for const associated-type parameters

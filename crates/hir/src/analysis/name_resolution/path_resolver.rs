@@ -115,6 +115,13 @@ pub enum PathResErrorKind<'db> {
         arg_idx: usize,
     },
 
+    /// A trait-ref binding `Trait<AssocName = Ty>` targeted a GENERIC (arity>0)
+    /// associated type; unsupported in v1 (would conflate GAT instantiations).
+    /// Hazard H2 (mb2-a4.1).
+    GatBindingUnsupported {
+        name: IdentId<'db>,
+    },
+
     /// Trait path generic argument expected a type; wrong domain was found.
     /// Carries the argument index and offending ident/kind for precise diagnostics.
     TraitGenericArgType {
@@ -203,6 +210,9 @@ impl<'db> PathResError<'db> {
             }
             PathResErrorKind::TraitConstHoleArg { .. } => {
                 "Layout hole is not allowed in trait generic arguments".to_string()
+            }
+            PathResErrorKind::GatBindingUnsupported { .. } => {
+                "Generic associated type cannot be bound in a trait reference".to_string()
             }
             PathResErrorKind::TraitGenericArgType { .. } => {
                 "Trait generic argument expects a type".to_string()
@@ -324,6 +334,10 @@ impl<'db> PathResError<'db> {
                     span: hole_span.into(),
                     ident,
                 }
+            }
+
+            PathResErrorKind::GatBindingUnsupported { name } => {
+                PathResDiag::GatBindingUnsupported { span, name }
             }
 
             PathResErrorKind::InvalidPathSegment(res) => PathResDiag::InvalidPathSegment {
@@ -1895,6 +1909,9 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                                     }
                                     TraitArgError::ConstHoleNotAllowed { arg_idx } => {
                                         PathResErrorKind::TraitConstHoleArg { arg_idx }
+                                    }
+                                    TraitArgError::GatBindingUnsupported { name } => {
+                                        PathResErrorKind::GatBindingUnsupported { name }
                                     }
                                     TraitArgError::Ignored => PathResErrorKind::ParseError,
                                 };

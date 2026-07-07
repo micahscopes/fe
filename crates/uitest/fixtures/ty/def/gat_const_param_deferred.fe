@@ -1,0 +1,16 @@
+// mb2-a4.1 A4.4: const generic parameters on associated types are DEFERRED in
+// v1. Rather than the raw resolver `invalid` (kept as the backstop), a clean
+// named decl-site diagnostic fires at BOTH the trait decl param and the impl
+// def param, and conformance/bounds do not spray downstream `invalid`s
+// (anti-cascade). Const GAT param support has no verified demand yet; the
+// type-param path is the template if it is ever built.
+
+struct Evm {}
+
+trait Backend {
+    type Slot<const N: u32>
+}
+
+impl Backend for Evm {
+    type Slot<const N: u32> = u256
+}

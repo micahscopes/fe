@@ -1,0 +1,13 @@
+// mb2-a4.1 H2: a trait-ref binding `Backend<Buffer = Store>` of a GENERIC
+// (arity>0) associated type would silently conflate GAT instantiations through
+// the normalizer's assumptions leg (it returns `Store` for `B::Buffer<u32>`
+// AND `B::Buffer<u8>` alike, the identity `subst_gat_args` never threads args).
+// v1 rejects the binding form by name rather than conflate.
+
+struct Store {}
+
+trait Backend {
+    type Buffer<T>
+}
+
+fn use_gat_binding<B: Backend<Buffer = Store>>(_ b: B) {}

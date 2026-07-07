@@ -1355,6 +1355,24 @@ impl DiagnosticVoucher for PathResDiag<'_> {
                 error_code,
             },
 
+            Self::GatBindingUnsupported { span, name } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: format!(
+                    "generic associated type `{}` cannot be bound with `{} = ...`",
+                    name.data(db),
+                    name.data(db)
+                ),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "generic associated type bindings in trait references are not \
+                              supported"
+                        .to_string(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
+
             Self::TypeMustBeKnown(span) => CompleteDiagnostic {
                 severity: Severity::Error,
                 message: "type must be known here".to_string(),
@@ -1820,6 +1838,23 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                      form, so an impl on it would make coherence depend on arithmetic"
                         .to_string(),
                     "implement the trait for the combinator types the type fn expands to instead"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
+            Self::GatConstParamUnsupported { span } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "const generic parameters on associated types are not yet supported"
+                    .to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "const generic parameter on an associated type".to_string(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "use a type generic parameter, or track the demand for const associated-type \
+                     parameters"
                         .to_string(),
                 ],
                 error_code,

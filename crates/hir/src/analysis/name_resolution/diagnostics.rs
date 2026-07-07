@@ -95,6 +95,13 @@ pub enum PathResDiag<'db> {
         ident: IdentId<'db>,
     },
 
+    /// A trait-ref binding `Trait<AssocName = Ty>` targeted a GENERIC (arity>0)
+    /// associated type; unsupported in v1. Hazard H2 (mb2-a4.1).
+    GatBindingUnsupported {
+        span: DynLazySpan<'db>,
+        name: IdentId<'db>,
+    },
+
     // Method selection related diagnostics
     TypeMustBeKnown(DynLazySpan<'db>),
     AmbiguousInherentMethod {
@@ -135,6 +142,7 @@ impl<'db> PathResDiag<'db> {
             Self::ArgKindMismatch { span, .. } => span.top_mod(db).unwrap(),
             Self::ArgTypeMismatch { span, .. } => span.top_mod(db).unwrap(),
             Self::TraitConstHoleArg { span, .. } => span.top_mod(db).unwrap(),
+            Self::GatBindingUnsupported { span, .. } => span.top_mod(db).unwrap(),
             Self::TypeMustBeKnown(span) => span.top_mod(db).unwrap(),
             Self::AmbiguousInherentMethod { primary, .. } => primary.top_mod(db).unwrap(),
             Self::AmbiguousTrait { primary, .. } => primary.top_mod(db).unwrap(),
@@ -182,6 +190,7 @@ impl<'db> PathResDiag<'db> {
             Self::ArgKindMismatch { .. } => 12,
             Self::ArgTypeMismatch { .. } => 13,
             Self::TraitConstHoleArg { .. } => 19,
+            Self::GatBindingUnsupported { .. } => 21,
             Self::TypeMustBeKnown(..) => 14,
             Self::AmbiguousInherentMethod { .. } => 15,
             Self::AmbiguousTrait { .. } => 16,

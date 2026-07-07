@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_trait_ref_binding_rejected.fe
+---
+error[2-0021]: generic associated type `Buffer` cannot be bound with `Buffer = ...`
+   ┌─ gat_trait_ref_binding_rejected.fe:13:23
+   │
+13 │ fn use_gat_binding<B: Backend<Buffer = Store>>(_ b: B) {}
+   │                       ^^^^^^^ generic associated type bindings in trait references are not supported

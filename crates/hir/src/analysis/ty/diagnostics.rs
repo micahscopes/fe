@@ -123,6 +123,13 @@ pub enum TyLowerDiag<'db> {
         span: DynLazySpan<'db>,
     },
 
+    /// A const generic parameter on an associated type (a const GAT param).
+    /// Deferred in v1 (mb2-a4.1 / A4.4) with this clean decl-site diagnostic;
+    /// `gat_param_ty`'s `invalid` remains the backstop.
+    GatConstParamUnsupported {
+        span: DynLazySpan<'db>,
+    },
+
     StringTooLarge {
         span: DynLazySpan<'db>,
         max: usize,
@@ -317,6 +324,7 @@ impl TyLowerDiag<'_> {
             Self::TypeFnSymbolicUnsupported { .. } => 46,
             Self::TypeFnRecursionLimit { .. } => 47,
             Self::TypeFnInImplHeader { .. } => 48,
+            Self::GatConstParamUnsupported { .. } => 49,
         }
     }
 }

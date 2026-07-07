@@ -518,6 +518,28 @@ impl<'db> Trait<'db> {
         diags
     }
 
+    /// A4.4 (mb2-a4.1): const generic params on associated types are DEFERRED.
+    /// Emit a clean decl-site diagnostic for each const param on this trait's
+    /// associated-type declarations (`gat_param_ty`'s resolver-`invalid` stays
+    /// the backstop). Anti-cascade: a clear single message per param rather
+    /// than a spray of downstream `invalid`s.
+    pub fn diags_gat_const_params(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
+        let mut diags = Vec::new();
+        for assoc in self.assoc_types(db) {
+            for (j, param) in assoc.generic_params(db).data(db).iter().enumerate() {
+                if matches!(param, GenericParam::Const(_)) {
+                    diags.push(
+                        TyLowerDiag::GatConstParamUnsupported {
+                            span: assoc.span().generic_params().param(j).into(),
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+        diags
+    }
+
     /// Diagnostics for generic parameter issues (duplicates, defined in parent).
     pub fn diags_generic_params(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
         let owner = GenericParamOwner::Trait(self);
@@ -832,7 +854,29 @@ impl<'db> ImplTrait<'db> {
                 .map(|v| v.span());
 
             match gat_signature_conforms(db, decl, def) {
-                Ok(()) => {}
+                Ok(()) => {
+                    // A4.4 (mb2-a4.1): the binder shape conforms; if it uses
+                    // const GAT params (both sides agree on `const`), that
+                    // feature is deferred. Emit a clean decl-site diagnostic at
+                    // each impl-side const param (the trait-side is flagged by
+                    // `Trait::diags_gat_const_params`). Anti-cascade: no raw
+                    // resolver `invalid` spray.
+                    for (j, param) in def.generic_params.data(db).iter().enumerate() {
+                        if matches!(param, GenericParam::Const(_)) {
+                            diags.push(
+                                TyLowerDiag::GatConstParamUnsupported {
+                                    span: self
+                                        .span()
+                                        .associated_type(impl_idx)
+                                        .generic_params()
+                                        .param(j)
+                                        .into(),
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                }
                 Err(GatSigMismatch::ParamCount { expected, given }) => {
                     // Anchor at the assoc type NAME (always resolvable): the
                     // impl may have zero generic params (`type Ptr = ...`), in
@@ -1907,6 +1951,7 @@ impl<'db> Diagnosable<'db> for Trait<'db> {
     fn diags(self, db: &'db dyn HirAnalysisDb) -> Vec<Self::Diagnostic> {
         let mut out = Vec::new();
         out.extend(self.diags_assoc_defaults(db));
+        out.extend(self.diags_gat_const_params(db));
         out.extend(self.diags_super_traits(db));
 
         for pred in WhereClauseOwner::Trait(self).clause(db).predicates(db) {
