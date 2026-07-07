@@ -8,6 +8,7 @@ use hir::{
         ProviderAddressSpace,
         term::pretty_print_term,
         ty_check::{CheckPremise, DischargeRoute, EffectParamSite, LocalBinding, ParamSite},
+        type_fn::type_fn_application_normal_form,
     },
     core::semantic::{
         EffectEnvView, ProviderSource,
@@ -238,6 +239,31 @@ fn call_expr_for_reference<'db>(
     }
 }
 
+/// Renders the ground normal form of a `recursive type fn` application under
+/// the cursor (spec sec 6.2, build slice S3b), e.g. hovering `RPow<Pair, 3>`
+/// shows `Normal form: Comp<Comp<Comp<Par, Pair>, Pair>, Pair>`. Only fires
+/// when the hovered path names a `recursive type fn` item AND the
+/// application is saturated and ground; a bare/partial occurrence or a
+/// symbolic subject has no normal form to show, and neither does hovering
+/// anything that is not a type fn at all.
+///
+/// Deliberately does NOT gate on the resolved `Target`: ground normalization
+/// happens transparently inside ordinary path resolution (the same
+/// eager-expansion guarantee the compiler relies on elsewhere), so a ground
+/// application's resolved target already names the REDUCED combinator, not
+/// the type fn. `type_fn_application_normal_form` re-derives the "names a
+/// type fn" gate itself from the path's own written head.
+fn type_fn_normal_form_footer<'db>(
+    db: &'db DriverDataBase,
+    reference: &ReferenceView<'db>,
+) -> Option<String> {
+    let ReferenceView::Path(path_view) = reference else {
+        return None;
+    };
+    let normal_form = type_fn_application_normal_form(db, path_view.path, path_view.scope)?;
+    Some(format!("Normal form: `{normal_form}`"))
+}
+
 /// Renders the trait obligations that type checking discharged for the call
 /// under the cursor, naming the impl the solver committed to for each goal.
 /// Records without a committed solution are omitted.
@@ -394,9 +420,14 @@ pub fn hover_helper(
         let Some(target) = resolution.first() else {
             return Ok((None, doc_path));
         };
-        let Some(info) = hover_markdown_for_target(db, r, target) else {
+        let Some(mut info) = hover_markdown_for_target(db, r, target) else {
             return Ok((None, doc_path));
         };
+        if let Some(footer) = type_fn_normal_form_footer(db, r) {
+            info.push('\n');
+            info.push_str(&footer);
+            info.push('\n');
+        }
         info
     };
 

@@ -1004,3 +1004,95 @@ Verification: `cargo check --workspace` clean. Targeted `cargo test -p fe-hir
 `rejects_symbolic_type_fn_outside_body`) green. No uitest/snapshot fixture
 renders type-fn diagnostic text (grepped the repo; only parser CST-node
 snapshots mention "recursive type fn"), so no snapshot regen was needed.
+
+---
+
+## S3b (2 of 2): ground-normal-form hover, wired into the real language server
+
+Surfaces the ground normal form of a `recursive type fn` application on
+hover, e.g. hovering `RPow<Pair, 3>` in source shows `Normal form:
+Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` alongside the ordinary item info,
+following the existing footer pattern hover.rs already uses for discharged
+trait obligations / const predicates (`discharged_obligations_footer`,
+`discharged_const_predicates_footer`). LSP wiring is fully landed, not
+deferred: no follow-up needed here.
+
+### A real bug found and worked around along the way
+
+First attempt gated the new hover footer on the LSP's already-resolved
+`Target::Scope(scope)` being `ItemKind::TypeFn(_)`, on the assumption that
+hovering a type-fn application resolves its scope to the type fn item
+(mirroring how `Target::Local` carries the checked type for a value). Wiring
+this and testing it through a real mock-LSP session
+(`mock_lsp_hover_shows_type_fn_ground_normal_form`) surfaced that the
+assumption is backwards for exactly the case this feature needs: ground
+normalization happens transparently INSIDE ordinary path resolution (the
+S1.3 eager-expansion guarantee spec sec 4.1), so `resolve_path` on a GROUND
+`RPow<Pair, 3>` returns `PathRes::Ty` of the already-reduced
+`Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` — and the goto/hover-navigation
+helper `resolve_path_with_recv_fallback` that turns a `PathRes` into a
+`Target::Scope` therefore reports the scope of `Comp` (the reduced
+combinator's own definition), never `RPow`. Confirmed with a throwaway probe
+test dumping `find_enclosing_items`/`reference_at`/`target_at` results
+directly (not committed): hovering the `RPow` token genuinely resolves, by
+design elsewhere in this branch, to `Comp`'s item scope. So gating on the
+RESOLVED target can never fire for a ground application — exactly backwards
+from what a "ground normal form" feature needs, and the reverse case
+(gate DOES fire, application is symbolic) is precisely the case with no
+normal form to show.
+
+Fix: `type_fn_application_normal_form` re-derives its own "does this path
+name a type fn" gate directly from the path's WRITTEN head, via the early
+name resolver (`resolve_leaf_scope`, the same one `type_fn.rs`'s WF checker
+already uses for self-call detection), BEFORE calling the full
+`resolve_path` that performs ground normalization. `hover.rs`'s footer no
+longer looks at `Target` at all; it hands the raw `PathView`'s path + scope
+straight to the hir-layer function and lets it decide. This is not a
+narrowing gap or a v1 limitation: it is the correct fix, and it is the
+reason the mock-LSP test (not just the hir-layer unit test) was worth
+writing before calling this done.
+
+### What was added
+
+- `crates/hir/src/analysis/ty/type_fn.rs`:
+  `type_fn_application_normal_form(db, path, scope) -> Option<String>`.
+  Gates on `resolve_leaf_scope` naming a `TypeFnDef` item, then calls the
+  ordinary `resolve_path` (same route the compiler takes for any other
+  occurrence of the path) and returns the pretty-printed result only if it
+  is invalid-free and carries no residual `TyBase::TypeFn` head (i.e. it was
+  ground and reduced all the way). Returns `None` for: a path that does not
+  name a type fn, a bare/partial occurrence, a symbolic subject rejected at
+  a stored position, or a live opaque symbolic application. No new
+  normalization path: reuses `normalize_type_fn_app` transitively through
+  the same `resolve_path` route S1.3/S1.5 already built, so there is nothing
+  new to keep in sync with the compiler's own reduction.
+- `crates/language-server/src/functionality/hover.rs`:
+  `type_fn_normal_form_footer(db, reference)`, wired into `hover_helper`
+  alongside the pre-existing obligation/const-predicate footers, appending
+  `` Normal form: `<pretty>` `` when the function above returns `Some`.
+- Tests: 3 targeted `fe-hir` unit tests
+  (`hover_normal_form_for_ground_application`,
+  `hover_normal_form_none_for_symbolic_application`,
+  `hover_normal_form_none_for_unsaturated_application`) feeding a
+  source-derived `PathId` + scope straight from a struct field's HIR type
+  (mirroring exactly what `hover.rs` feeds it, no hand-built `TyId`), plus
+  one real end-to-end mock-LSP test
+  (`mock_lsp_hover_shows_type_fn_ground_normal_form` in
+  `mock_client_tests.rs`) driving the actual server through `did_open` /
+  `did_change` / `hover` and asserting the rendered footer text.
+
+Verification: `cargo check --workspace` clean. `cargo test -p fe-hir --lib
+analysis::ty::type_fn::tests::hover_normal_form` (3/3) and `cargo test -p
+fe-language-server --lib mock_client_tests::mock_lsp_hover` (4/4, all
+pre-existing hover tests plus the new one) green. Ran the full
+`mock_client_tests` module both in isolation and alongside the rest of the
+suite: one PRE-EXISTING flaky test unrelated to this work,
+`repro_concurrent_goto_burst_does_not_deadlock` (a concurrency-timing stress
+test, documented in its own docstring as sensitive to available CPU
+permits), fails under parallel load in this sandbox; confirmed by stashing
+all changes from this slice and reproducing the identical failure on
+unmodified HEAD `dd08e87e0`. Not a regression from this work.
+
+No behavior change beyond diagnostics/hover: `type_fn_application_normal_form`
+has zero non-test, non-hover callers, and reuses existing queries read-only
+(no new salsa-tracked query, no new mutation of any existing one).

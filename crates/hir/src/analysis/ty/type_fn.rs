@@ -732,6 +732,53 @@ pub(super) fn collect_type_fn_heads<'db>(
     collector.heads
 }
 
+/// Hover support (spec sec 6.2, build slice S3b): if `path` at `scope` NAMES a
+/// `recursive type fn` item AND is a saturated GROUND application, returns the
+/// pretty-printed normal form it reduces to. This is exactly the reduction the
+/// S1.3 path-lowering site performs whenever such an application is reached
+/// (the eager-expansion guarantee, spec sec 4.1), so there is no separate
+/// normalization path to keep in sync: the same `resolve_path` ->
+/// ground-app -> `normalize_type_fn_app` route the compiler takes for any
+/// other occurrence.
+///
+/// The "names a type fn" check is done FIRST via the early name resolver
+/// (before the full `resolve_path` below), and is load-bearing, not an
+/// optimization: ground normalization happens transparently INSIDE ordinary
+/// path resolution (the same eager-expansion guarantee), so a ground
+/// application's fully resolved `PathRes::Ty` already names the REDUCED
+/// combinator, not the type fn. Gating on what the full resolution returns
+/// would therefore never fire for the ground case this function exists to
+/// handle; the path's own written head is the only reliable signal.
+///
+/// Returns `None` when there is nothing to show: `path` does not name a
+/// `recursive type fn` at all, the application fails to resolve, is invalid
+/// (a bare or partially-applied occurrence, or a symbolic subject rejected at
+/// a stored position), or still carries a live `TyBase::TypeFn` head (an
+/// opaque symbolic application: it has no normal form to display).
+pub fn type_fn_application_normal_form<'db>(
+    db: &'db dyn HirAnalysisDb,
+    path: PathId<'db>,
+    scope: ScopeId<'db>,
+) -> Option<String> {
+    use crate::analysis::name_resolution::{PathRes, resolve_path};
+
+    if !matches!(
+        resolve_leaf_scope(db, path, scope),
+        Some(ScopeId::Item(ItemKind::TypeFn(_)))
+    ) {
+        return None;
+    }
+
+    let resolved = resolve_path(db, path, scope, PredicateListId::empty_list(db), false).ok()?;
+    let PathRes::Ty(ty) = resolved else {
+        return None;
+    };
+    if ty.has_invalid(db) || !collect_type_fn_heads(db, ty).is_empty() {
+        return None;
+    }
+    Some(ty.pretty_print(db).to_string())
+}
+
 // ---------------------------------------------------------------------------
 // S1.5 ground normalization (spec sec 4.1 / 4.2).
 //
@@ -1617,6 +1664,84 @@ recursive type fn Bush<const N: usize>() -> (*) {
             probe_field_pretty(&src, "Probe"),
             "Comp<Pair, Comp<Pair, Par>>"
         );
+    }
+
+    /// Extracts the HIR path of a struct's single-field type, for feeding into
+    /// [`super::type_fn_application_normal_form`] the same way `hover.rs` would:
+    /// a `PathId` + the scope it occurs in, straight from source (no hand-built
+    /// `TyId`).
+    fn probe_field_path<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        struct_name: &str,
+    ) -> (crate::hir_def::PathId<'db>, crate::hir_def::scope_graph::ScopeId<'db>) {
+        use crate::hir_def::{Partial, TypeKind};
+
+        let structs = top_mod.all_structs(db);
+        let s = structs
+            .iter()
+            .copied()
+            .find(|s| s.name(db).to_opt().is_some_and(|i| i.data(db) == struct_name))
+            .unwrap_or_else(|| panic!("missing probe struct `{struct_name}`"));
+        let field = &s.hir_fields(db).data(db)[0];
+        let ty = field.type_ref().to_opt().expect("field must have a type");
+        let TypeKind::Path(Partial::Present(path)) = ty.data(db) else {
+            panic!("expected a path type");
+        };
+        (*path, s.scope())
+    }
+
+    /// Ground-normal-form hover support (S3b): hovering a GROUND `recursive
+    /// type fn` application resolves (via the exact `resolve_path` route the
+    /// compiler itself uses) to its normal form, straight from a source-level
+    /// `PathId` + scope, mirroring what `language-server`'s `hover.rs` feeds
+    /// it.
+    #[test]
+    fn hover_normal_form_for_ground_application() {
+        use super::type_fn_application_normal_form;
+
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: RPow<Pair, 3> }}\n");
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_hover.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let (path, scope) = probe_field_path(&db, top_mod, "Probe");
+
+        assert_eq!(
+            type_fn_application_normal_form(&db, path, scope),
+            Some("Comp<Comp<Comp<Par, Pair>, Pair>, Pair>".to_string())
+        );
+    }
+
+    /// A SYMBOLIC application (here in a stored ADT field, which S2.1 keeps
+    /// rejecting) has no normal form: hover must show nothing rather than a
+    /// stale or misleading value.
+    #[test]
+    fn hover_normal_form_none_for_symbolic_application() {
+        use super::type_fn_application_normal_form;
+
+        let src = format!(
+            "{NORM_FIXTURES}\nstruct Wrap<const M: usize> {{ p: RPow<Pair, M> }}\n"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_hover_sym.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let (path, scope) = probe_field_path(&db, top_mod, "Wrap");
+
+        assert_eq!(type_fn_application_normal_form(&db, path, scope), None);
+    }
+
+    /// A bare/partial (unsaturated) occurrence has no normal form either.
+    #[test]
+    fn hover_normal_form_none_for_unsaturated_application() {
+        use super::type_fn_application_normal_form;
+
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: RPow<Pair> }}\n");
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_hover_partial.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let (path, scope) = probe_field_path(&db, top_mod, "Probe");
+
+        assert_eq!(type_fn_application_normal_form(&db, path, scope), None);
     }
 
     #[test]

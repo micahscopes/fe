@@ -1006,6 +1006,46 @@ fn caller() {
     client.shutdown().await;
 }
 
+#[tokio::test]
+async fn mock_lsp_hover_shows_type_fn_ground_normal_form() {
+    let mut client = MockLspClient::start().await;
+    client.initialize().await;
+
+    let uri = lib_url();
+    client.did_open(&uri, "");
+    client.settle(500).await;
+
+    let code = r#"struct Par {}
+struct Pair {}
+struct Comp<A, B> {}
+
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+struct Holder {
+    shape: RPow<Pair, 3>
+}
+"#;
+    client.did_change(&uri, 700, code);
+    client.settle(1000).await;
+
+    // Hovering the `RPow` application in the field type surfaces the ground
+    // normal form it reduces to, alongside the ordinary `RPow` item info.
+    let field_hover = hover_eventually(&mut client, &uri, 12, 12).await;
+    let field_text = hover_text(&field_hover);
+    assert!(
+        field_text.contains("Normal form:")
+            && field_text.contains("Comp<Comp<Comp<Par, Pair>, Pair>, Pair>"),
+        "expected field hover to include the type-fn normal form, got:\n{field_text}"
+    );
+
+    client.shutdown().await;
+}
+
 /// Regression test for the "goto def → freeze" bug observed in Zed.
 ///
 /// # History
