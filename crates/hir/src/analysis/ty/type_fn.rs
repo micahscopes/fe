@@ -19,10 +19,14 @@ use num_bigint::BigUint;
 
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution::{NameDomain, resolve_ident_to_bucket};
+use crate::analysis::ty::const_expr::ConstExpr;
+use crate::analysis::ty::const_ty::{ConstTyData, ConstTyId, EvaluatedConstTy};
 use crate::analysis::ty::diagnostics::{TyLowerDiag, TypeFnWfError};
+use crate::analysis::ty::fold::{TyFoldable, TyFolder};
 use crate::analysis::ty::trait_resolution::PredicateListId;
 use crate::analysis::ty::ty_def::{
-    PrimTy, TyBase, TyData, find_unsaturated_type_fn, kind_mentions_constraint,
+    InvalidCause, PrimTy, TyBase, TyData, TyId, find_unsaturated_type_fn,
+    kind_mentions_constraint, type_fn_sig,
 };
 use crate::analysis::ty::ty_lower::{lower_hir_ty, lower_kind};
 use crate::core::hir_def::scope_graph::ScopeId;
@@ -724,6 +728,328 @@ fn collect_type_fn_heads<'db>(
     collector.heads
 }
 
+// ---------------------------------------------------------------------------
+// S1.5 ground normalization (spec sec 4.1 / 4.2).
+//
+// Ground reduction is the ONLY reduction (spec sec 5.3 / Slice 2 preview):
+// symbolic subjects stay opaque and are rejected outside type-fn bodies. The
+// unfolder consumes ONLY [`TypeFnWfData`], applies each [`SubjectStep`] as a
+// direct `BigUint` op (never the CTFE machine), and represents self-calls as new
+// smaller SATURATED ground application nodes. Fuel is a ROOTED local counter in
+// [`normalize_type_fn_app`], never part of a salsa memo key (so a subterm and a
+// root reduce identically: no memo poisoning, confluence preserved).
+// ---------------------------------------------------------------------------
+
+/// The unfold-step ceiling for a single rooted application (spec sec 4.2, hard
+/// compiler ceiling 4096). It is deliberately NOT part of any salsa memo key: it
+/// lives only in [`normalize_type_fn_app`]'s local counter.
+const TYPE_FN_UNFOLD_CEILING: usize = 4096;
+
+/// Decomposes a saturated GROUND `recursive type fn` application into its def,
+/// forwarded arguments, the ground subject value, and the subject's const type.
+/// Returns `None` unless the head is a `TyBase::TypeFn`, the spine is saturated,
+/// and the subject slot is an `Evaluated(LitInt)` const.
+fn ground_type_fn_app<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<(TypeFnDef<'db>, &'db [TyId<'db>], BigUint, TyId<'db>)> {
+    let (base, args) = ty.decompose_ty_app(db);
+    let TyData::TyBase(TyBase::TypeFn(def)) = base.data(db) else {
+        return None;
+    };
+    if args.len() != type_fn_sig(db, *def).arity {
+        return None;
+    }
+    let TyData::ConstTy(cid) = args.last()?.data(db) else {
+        return None;
+    };
+    let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(value), subj_ty) = cid.data(db) else {
+        return None;
+    };
+    Some((*def, args, value.data(db).clone(), *subj_ty))
+}
+
+/// `true` if `ty` is a saturated ground type-fn application ready to unfold.
+pub(crate) fn type_fn_app_subject_is_ground<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> bool {
+    ground_type_fn_app(db, ty).is_some()
+}
+
+/// `true` if `scope` is (nested in) a `recursive type fn` body. Ground expansion
+/// at the path-lowering site is suppressed here: inside a body a literal-subject
+/// self-call (`F<{2}>`) is ground, but expanding it eagerly would re-enter
+/// `type_fn_wf` (which lowers arm RHSs) and cycle. The unfolder owns self-calls.
+pub(crate) fn scope_in_type_fn_body<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> bool {
+    let mut cur = Some(scope);
+    while let Some(s) = cur {
+        if matches!(
+            s,
+            ScopeId::Item(ItemKind::TypeFn(_)) | ScopeId::GenericParam(ItemKind::TypeFn(_), _)
+        ) {
+            return true;
+        }
+        cur = s.parent(db);
+    }
+    false
+}
+
+/// Interns a ground subject `value: usize` as the canonical
+/// `Evaluated(LitInt)` const, reusing the root subject's integral type so the
+/// unfolder-built subject shares a `ConstTyId`/`TyId` with call-site lowering
+/// (spec sec 4.1 canonical-interning requirement).
+fn make_subject_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    value: BigUint,
+    subject_ty: TyId<'db>,
+) -> TyId<'db> {
+    let cid = ConstTyId::new(
+        db,
+        ConstTyData::Evaluated(EvaluatedConstTy::LitInt(IntegerId::new(db, value)), subject_ty),
+    );
+    TyId::const_ty(db, cid)
+}
+
+/// Re-distills the [`SubjectStep`] of a self-call subject argument at unfold time
+/// (Fable steering: occurrence-local re-distillation, not positional matching),
+/// reusing the same syntactic destructuring as [`Checker::distill_subject`]. The
+/// subject body is READ, never evaluated.
+fn subject_step_from_body<'db>(
+    db: &'db dyn HirAnalysisDb,
+    body: Body<'db>,
+) -> Option<SubjectStep<'db>> {
+    match body_root_expr(db, body)? {
+        Expr::Bin(_, rhs, BinOp::Arith(ArithBinOp::Sub)) => {
+            Some(SubjectStep::Sub(expr_int_lit(db, body, rhs)?))
+        }
+        Expr::Bin(_, rhs, BinOp::Arith(ArithBinOp::Div)) => {
+            Some(SubjectStep::Div(expr_int_lit(db, body, rhs)?))
+        }
+        Expr::Lit(LitKind::Int(m)) => Some(SubjectStep::Lit(m)),
+        _ => None,
+    }
+}
+
+/// Applies a distilled [`SubjectStep`] to a ground subject as a direct `BigUint`
+/// operation (spec sec 3.3 / 4.1). NEVER the CTFE machine.
+fn apply_subject_step<'db>(
+    db: &'db dyn HirAnalysisDb,
+    step: SubjectStep<'db>,
+    subject: &BigUint,
+) -> BigUint {
+    match step {
+        SubjectStep::Sub(k) => {
+            let k = k.data(db);
+            debug_assert!(subject >= k, "WF guarantees the subject does not underflow");
+            subject - k
+        }
+        SubjectStep::Div(k) => subject / k.data(db),
+        SubjectStep::Lit(m) => m.data(db).clone(),
+    }
+}
+
+/// One-step weak-head unfold of a ground type-fn application (spec sec 4.1):
+/// select the arm by the ground subject, substitute type args + subject into the
+/// arm RHS, and rebuild each self-call as a new smaller ground application node.
+/// Pure (no fuel), so it is safe to memoize; the DAG sharing this gives is what
+/// makes `Bush<8>` a handful of entries rather than an exponential tree.
+#[salsa::tracked]
+pub(crate) fn unfold_type_fn_step<'db>(
+    db: &'db dyn HirAnalysisDb,
+    app: TyId<'db>,
+) -> TyId<'db> {
+    let Some((def, args, subject, subject_ty)) = ground_type_fn_app(db, app) else {
+        return TyId::invalid(db, InvalidCause::Other);
+    };
+    let result = type_fn_wf(db, def);
+    let Some(data) = result.data.as_ref() else {
+        return TyId::invalid(db, InvalidCause::Other);
+    };
+
+    // Arm selection: the unique literal arm for this subject, else the mandatory
+    // final `_` arm (exhaustiveness is a WF invariant).
+    let arm = data
+        .arms
+        .iter()
+        .find(|a| matches!(a.pat, TypeFnPat::Lit(m) if m.data(db) == &subject))
+        .or_else(|| data.arms.iter().find(|a| matches!(a.pat, TypeFnPat::Wild)));
+    let Some(arm) = arm else {
+        return TyId::invalid(db, InvalidCause::Other);
+    };
+
+    // Lower the arm RHS in the def's scope. Because that scope is inside a type
+    // fn body, the path-lowering site leaves self-calls opaque (no eager
+    // expansion, no `type_fn_wf` re-entry).
+    let body_ty = lower_hir_ty(db, arm.rhs_ty, def.scope(), PredicateListId::empty_list(db));
+
+    let mut unfolder = Unfolder {
+        db,
+        def,
+        subst_args: args,
+        subject,
+        subject_ty,
+        subject_idx: data.subject_idx,
+    };
+    body_ty.fold_with(db, &mut unfolder)
+}
+
+/// Fully normalizes a ground type-fn application to its concrete normal form
+/// (spec sec 4.1). The rooted step counter (scheme A: single memo entry,
+/// iterative head reduction + structural child recursion, fresh constant budget)
+/// keeps fuel OUT of the memo key.
+#[salsa::tracked]
+pub(crate) fn normalize_type_fn_app<'db>(
+    db: &'db dyn HirAnalysisDb,
+    app: TyId<'db>,
+) -> TyId<'db> {
+    let mut steps = 0usize;
+    normalize_all(db, app, &mut steps)
+}
+
+/// Reduces `ty`'s head to a non-type-fn constructor, then normalizes its
+/// children, threading a single shared step counter (never reset across the
+/// recursion, so confluence holds).
+fn normalize_all<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, steps: &mut usize) -> TyId<'db> {
+    let mut cur = ty;
+    while ground_type_fn_app(db, cur).is_some() {
+        *steps += 1;
+        if *steps > TYPE_FN_UNFOLD_CEILING {
+            return TyId::invalid(
+                db,
+                InvalidCause::TypeFnRecursionLimit {
+                    limit: TYPE_FN_UNFOLD_CEILING,
+                },
+            );
+        }
+        let stepped = unfold_type_fn_step(db, cur);
+        if stepped == cur {
+            break; // no progress (unreachable given strict decrease); avoid a spin
+        }
+        cur = stepped;
+    }
+
+    let (base, args) = cur.decompose_ty_app(db);
+    if args.is_empty() {
+        return cur;
+    }
+    let new_args: Vec<TyId<'db>> = args
+        .iter()
+        .map(|a| normalize_all(db, *a, steps))
+        .collect();
+    TyId::foldl(db, base, &new_args)
+}
+
+/// One-step substitution folder: substitutes the def's type params and subject
+/// into an arm RHS, and rebuilds each self-call spine as a new smaller ground
+/// application. Never folds a self-call's `UnEvaluated` subject (that would be
+/// the CTFE leak); instead it re-distills the step and reinterns the result.
+struct Unfolder<'db, 'a> {
+    db: &'db dyn HirAnalysisDb,
+    def: TypeFnDef<'db>,
+    /// The root application's arguments, indexed by original param index (type
+    /// params first, subject literal last).
+    subst_args: &'a [TyId<'db>],
+    subject: BigUint,
+    subject_ty: TyId<'db>,
+    subject_idx: usize,
+}
+
+impl<'db> Unfolder<'db, '_> {
+    /// The smaller ground subject a self-call steps to, or `None` if the subject
+    /// arg is not a recognized (WF-validated) form. The subject arithmetic is a
+    /// direct `BigUint` op read off the lowered const expression; the CTFE
+    /// machine is never entered.
+    fn self_call_subject(&self, s: TyId<'db>) -> Option<TyId<'db>> {
+        let TyData::ConstTy(cid) = s.data(self.db) else {
+            return None;
+        };
+        match cid.data(self.db) {
+            // A literal-subject self-call `F<{2}>` is already the smaller ground
+            // subject.
+            ConstTyData::Evaluated(EvaluatedConstTy::LitInt(_), _) => Some(s),
+            // The usual `{N - k}` / `{N / k}` lowers to an abstract arith node.
+            ConstTyData::Abstract(expr, _) => {
+                let ConstExpr::ArithBinOp { op, rhs, .. } = expr.data(self.db) else {
+                    return None;
+                };
+                let k = self.const_lit(*rhs)?;
+                let value = match op {
+                    ArithBinOp::Sub => {
+                        debug_assert!(self.subject >= k, "WF guarantees no underflow");
+                        &self.subject - &k
+                    }
+                    ArithBinOp::Div => &self.subject / &k,
+                    _ => return None,
+                };
+                Some(make_subject_ty(self.db, value, self.subject_ty))
+            }
+            // Some lowerings keep the subject `UnEvaluated`; re-distill its body.
+            ConstTyData::UnEvaluated { body, .. } => {
+                let step = subject_step_from_body(self.db, *body)?;
+                let value = apply_subject_step(self.db, step, &self.subject);
+                Some(make_subject_ty(self.db, value, self.subject_ty))
+            }
+            _ => None,
+        }
+    }
+
+    /// The `BigUint` a `ConstTy(Evaluated(LitInt))` type carries, if any.
+    fn const_lit(&self, ty: TyId<'db>) -> Option<BigUint> {
+        let TyData::ConstTy(cid) = ty.data(self.db) else {
+            return None;
+        };
+        let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(v), _) = cid.data(self.db) else {
+            return None;
+        };
+        Some(v.data(self.db).clone())
+    }
+}
+
+impl<'db> TyFolder<'db> for Unfolder<'db, '_> {
+    fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        // Intercept a self-call spine BEFORE its subject can be folded/evaluated.
+        let (base, args) = ty.decompose_ty_app(db);
+        if let TyData::TyBase(TyBase::TypeFn(d)) = base.data(db) {
+            if *d != self.def {
+                // Tripwire: the WF cross-check forbids foreign heads.
+                return TyId::invalid(db, InvalidCause::Other);
+            }
+            let n = args.len().saturating_sub(1);
+            let mut new_args: Vec<TyId<'db>> =
+                args[..n].iter().map(|a| a.fold_with(db, self)).collect();
+            let Some(new_subject) = args.get(n).copied().and_then(|s| self.self_call_subject(s))
+            else {
+                return TyId::invalid(db, InvalidCause::Other);
+            };
+            new_args.push(new_subject);
+            return TyId::foldl(db, base, &new_args);
+        }
+
+        match ty.data(db) {
+            TyData::TyParam(p) if !p.is_effect() && p.idx < self.subst_args.len() => {
+                self.subst_args[p.idx]
+            }
+            TyData::ConstTy(cid) => match cid.data(db) {
+                // The bare subject `N` used as a whitelisted const arg: reuse the
+                // root's interned subject literal (canonical interning).
+                ConstTyData::TyParam(p, _) if p.idx == self.subject_idx => {
+                    self.subst_args[self.subject_idx]
+                }
+                ConstTyData::UnEvaluated { body, .. } => match body_root_expr(db, *body) {
+                    Some(Expr::Path(Partial::Present(_))) => self.subst_args[self.subject_idx],
+                    Some(Expr::Lit(LitKind::Int(m))) => {
+                        make_subject_ty(db, m.data(db).clone(), cid.ty(db))
+                    }
+                    _ => ty,
+                },
+                _ => ty,
+            },
+            _ => ty.super_fold_with(db, self),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use camino::Utf8PathBuf;
@@ -1035,5 +1361,133 @@ recursive type fn Bush<const N: usize>() -> (*) {
                 other => panic!("expected Sub(1), got {other:?}"),
             }
         }
+    }
+
+    // --- S1.5 ground normalization positive tests ---
+
+    /// The shared combinator + type-fn fixtures used by the normalization tests.
+    /// All combinators are kind `*` so the arm RHSs type-check without kind
+    /// bounds; the reduction shapes match spec sec 4.1.
+    const NORM_FIXTURES: &str = r#"
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+recursive type fn LPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<F, LPow<F, {N - 1}>>
+    }
+}
+
+recursive type fn Half<const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<Half<{N / 2}>, Pair>
+    }
+}
+
+recursive type fn Bush<const N: usize>() -> (*) {
+    match N {
+        0 => Pair
+        _ => Comp<Bush<{N - 1}>, Bush<{N - 1}>>
+    }
+}
+"#;
+
+    /// Lowers the single field type of a no-generic-param probe struct. Because
+    /// the field's scope is not inside a recursive type fn body, the ground
+    /// type-fn application in it is eager-expanded at path lowering, so this
+    /// returns the concrete normal form.
+    fn probe_field_pretty(src: &str, struct_name: &str) -> String {
+        use super::collect_type_fn_heads;
+        use crate::analysis::ty::adt_def::AdtRef;
+        use crate::analysis::ty::ty_def::TyId;
+        use crate::hir_def::ItemKind;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_norm.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+        let structs = top_mod.all_structs(&db);
+        let s = structs
+            .iter()
+            .copied()
+            .find(|s| s.name(&db).to_opt().is_some_and(|i| i.data(&db) == struct_name))
+            .unwrap_or_else(|| panic!("missing probe struct `{struct_name}`"));
+        let adt = AdtRef::try_from_item(ItemKind::Struct(s)).unwrap().as_adt(&db);
+        let ty = TyId::adt(&db, adt);
+        let field = ty.field_types(&db)[0];
+        // No `TyBase::TypeFn` may survive normalization.
+        assert!(
+            collect_type_fn_heads(&db, field).is_empty(),
+            "normal form still contains a type fn: {}",
+            field.pretty_print(&db)
+        );
+        field.pretty_print(&db).to_string()
+    }
+
+    #[test]
+    fn normalizes_rpow_pair_3() {
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: RPow<Pair, 3> }}\n");
+        assert_eq!(
+            probe_field_pretty(&src, "Probe"),
+            "Comp<Comp<Comp<Par, Pair>, Pair>, Pair>"
+        );
+    }
+
+    #[test]
+    fn normalizes_lpow_pair_2() {
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: LPow<Pair, 2> }}\n");
+        assert_eq!(
+            probe_field_pretty(&src, "Probe"),
+            "Comp<Pair, Comp<Pair, Par>>"
+        );
+    }
+
+    #[test]
+    fn normalizes_half_div_4() {
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: Half<4> }}\n");
+        assert_eq!(
+            probe_field_pretty(&src, "Probe"),
+            "Comp<Comp<Comp<Par, Pair>, Pair>, Pair>"
+        );
+    }
+
+    #[test]
+    fn normalizes_bush_multi_self_call_2() {
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: Bush<2> }}\n");
+        assert_eq!(
+            probe_field_pretty(&src, "Probe"),
+            "Comp<Comp<Pair, Pair>, Comp<Pair, Pair>>"
+        );
+    }
+
+    /// A symbolic type-fn application OUTSIDE a type fn body (here a struct field
+    /// mentioning the struct's own const param) is rejected in v1 (spec sec
+    /// 5.3 / Slice 2 lifts it). We assert the diagnostic surfaces from the full
+    /// analysis pass.
+    #[test]
+    fn rejects_symbolic_type_fn_outside_body() {
+        use crate::test_db::format_diagnostics;
+
+        let src = format!(
+            "{NORM_FIXTURES}\nstruct Wrap<const M: usize> {{ p: RPow<Pair, M> }}\n"
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_symbolic.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        let rendered = format_diagnostics(&db, &diags);
+        assert!(
+            rendered.contains("symbolic type-fn application not yet supported"),
+            "expected a symbolic-type-fn diagnostic, got:\n{rendered}"
+        );
     }
 }

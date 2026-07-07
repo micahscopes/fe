@@ -1899,6 +1899,10 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                 // parameter. Over-application past a saturated (`*`-kinded)
                 // head is already a `KindMismatch` inside `foldl`.
                 ItemKind::TypeFn(type_fn) => {
+                    use crate::analysis::ty::type_fn::{
+                        normalize_type_fn_app, scope_in_type_fn_body,
+                        type_fn_app_subject_is_ground,
+                    };
                     let base = TyId::type_fn(db, type_fn);
                     let ty = TyId::foldl(db, base, &args);
                     match find_unsaturated_type_fn(db, ty) {
@@ -1906,7 +1910,27 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                             db,
                             InvalidCause::TypeFnNotSaturated { expected, given },
                         )),
-                        None => PathRes::Ty(ty),
+                        // Saturated. Ground expansion happens HERE (spec sec 4.8
+                        // slice S1.5): it is the guarantee mechanism that keeps
+                        // `TyBase::TypeFn` out of stored types (ADT fields, fn
+                        // sigs) which are never routed through the normalizer.
+                        None if scope_in_type_fn_body(db, scope) => {
+                            // Inside a recursive type fn body: leave the
+                            // self-call opaque; the unfolder owns it, and eager
+                            // expansion here would re-enter `type_fn_wf`.
+                            PathRes::Ty(ty)
+                        }
+                        None if type_fn_app_subject_is_ground(db, ty) => {
+                            PathRes::Ty(normalize_type_fn_app(db, ty))
+                        }
+                        None => {
+                            // v1 rejects a symbolic subject outside a type fn
+                            // body (Slice 2 lifts this to an obligation).
+                            PathRes::Ty(TyId::invalid(
+                                db,
+                                InvalidCause::SymbolicTypeFnUnsupported,
+                            ))
+                        }
                     }
                 }
 

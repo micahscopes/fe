@@ -99,6 +99,20 @@ pub enum TyLowerDiag<'db> {
         error: TypeFnWfError<'db>,
     },
 
+    /// A `recursive type fn` application with a symbolic subject appears outside
+    /// a recursive type fn body (spec slice S1.5; v1 reduces ground applications
+    /// only). Lifted by Slice 2's induction engine (spec sec 5.3).
+    TypeFnSymbolicUnsupported {
+        span: DynLazySpan<'db>,
+    },
+
+    /// Normalizing a ground `recursive type fn` application exceeded the unfold
+    /// step ceiling (spec sec 4.2 / 8.1).
+    TypeFnRecursionLimit {
+        span: DynLazySpan<'db>,
+        limit: usize,
+    },
+
     StringTooLarge {
         span: DynLazySpan<'db>,
         max: usize,
@@ -290,6 +304,8 @@ impl TyLowerDiag<'_> {
             Self::TypeFnNotSaturated { .. } => 43,
             Self::TypeFnConstraintRetKind { .. } => 44,
             Self::TypeFnIllFormed { .. } => 45,
+            Self::TypeFnSymbolicUnsupported { .. } => 46,
+            Self::TypeFnRecursionLimit { .. } => 47,
         }
     }
 }

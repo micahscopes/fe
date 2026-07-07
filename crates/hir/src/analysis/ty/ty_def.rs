@@ -1227,6 +1227,20 @@ pub enum InvalidCause<'db> {
         given: usize,
     },
 
+    /// A `recursive type fn` application whose subject is symbolic (a const
+    /// parameter or an unevaluated const) occurs OUTSIDE a recursive type fn
+    /// body. v1 reduces only GROUND applications; symbolic obligations are the
+    /// job of the Slice 2 induction engine (spec sec 5.3). This is the single
+    /// occurrence-site gate Slice 2 lifts.
+    SymbolicTypeFnUnsupported,
+
+    /// Normalizing a ground `recursive type fn` application exceeded the unfold
+    /// step ceiling (spec sec 4.2). Carries the compiler ceiling; the root
+    /// application is named by the diagnostic span.
+    TypeFnRecursionLimit {
+        limit: usize,
+    },
+
     StringTooLarge {
         max: usize,
         given: usize,
@@ -1382,6 +1396,8 @@ impl InvalidCause<'_> {
             InvalidCause::NotFullyApplied
             | InvalidCause::TooManyGenericArgs { .. }
             | InvalidCause::TypeFnNotSaturated { .. }
+            | InvalidCause::SymbolicTypeFnUnsupported
+            | InvalidCause::TypeFnRecursionLimit { .. }
             | InvalidCause::InvalidConstParamTy
             | InvalidCause::RecursiveConstParamTy
             | InvalidCause::ParseError

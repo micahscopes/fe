@@ -134,7 +134,18 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                 self.cache.insert(*assoc_ty, Some(folded));
                 folded
             }
-            _ => ty.super_fold_with(db, self),
+            _ => {
+                // Second line of the S1.5 containment (the path-lowering site is
+                // the first): a substitution-formed ground type-fn application
+                // reduces to its concrete normal form here, so `TyBase::TypeFn`
+                // does not survive body checking. Symbolic subjects stay opaque.
+                let folded = ty.super_fold_with(db, self);
+                if super::type_fn::type_fn_app_subject_is_ground(self.db, folded) {
+                    super::type_fn::normalize_type_fn_app(self.db, folded)
+                } else {
+                    folded
+                }
+            }
         }
     }
 }

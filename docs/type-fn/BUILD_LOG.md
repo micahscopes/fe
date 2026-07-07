@@ -260,3 +260,73 @@ single-segment route, caught by `ForeignTypeFnCall`); the pre-existing
 `Comp<*, *>` type-checks) since the old fixture's `* -> *` args to a `*`-param
 `Comp` were a latent `KindMismatch` the cross-check surfaced. 14/14 type_fn unit
 tests pass; `cargo check --workspace` clean.
+
+---
+
+## S1.5: ground normalization on the corrected design
+
+Ground (subject = concrete integer) `recursive type fn` applications now reduce
+to their concrete normal form; symbolic subjects stay opaque inside type-fn
+bodies and are rejected outside (v1; Slice 2 lifts). Reduction consumes ONLY the
+distilled `TypeFnWfData`, applies each `SubjectStep` as a direct `BigUint` op,
+and never enters the CTFE machine.
+
+New machinery in `crates/hir/src/analysis/ty/type_fn.rs`:
+
+- `unfold_type_fn_step(db, app)` (salsa, pure one step): selects the arm by the
+  ground subject, lowers the arm RHS in the def's scope, and folds it with
+  `Unfolder`, which substitutes the def's type params + subject and rebuilds each
+  self-call spine as a NEW smaller SATURATED ground application. The self-call
+  subject is re-distilled occurrence-locally from the LOWERED const (an
+  `Abstract(ArithBinOp)`, or `Evaluated(LitInt)` / `UnEvaluated` fallbacks) and
+  stepped by `BigUint`; its `UnEvaluated`/`Abstract` body is never folded (that
+  is the CTFE leak the design severs) and the result is reinterned as a canonical
+  `Evaluated(LitInt)` reusing the root subject's integral type. Memoizing the
+  step is what makes `Bush<n>` a DAG, not an exponential tree.
+- `normalize_type_fn_app(db, app)` (salsa driver): scheme A per the steering, a
+  single memo entry with a ROOTED local step counter (`normalize_all`, iterative
+  head reduction + structural child recursion). The `~4096` ceiling is a plain
+  constant, NOT part of any memo key, so a subterm and a root reduce identically
+  (no fuel poisoning, confluence preserved); on breach it returns a dedicated
+  `InvalidCause::TypeFnRecursionLimit`, never a partial app.
+
+Containment (three lines):
+
+1. GUARANTEE at the S1.3 path-lowering site (`path_resolver.rs`
+   `ItemKind::TypeFn` arm): a saturated app is eager-expanded via
+   `normalize_type_fn_app` when its subject is ground AND the lowering scope is
+   NOT inside a recursive type fn body (`scope_in_type_fn_body`). Inside a body
+   the self-call is left opaque (the unfolder owns it, and expanding there would
+   re-enter `type_fn_wf` and cycle). A symbolic subject outside a body is a hard
+   `InvalidCause::SymbolicTypeFnUnsupported` ("symbolic type-fn application not
+   yet supported"). This keeps `TyBase::TypeFn` out of stored types (ADT fields,
+   fn sigs) that are never routed through the normalizer.
+2. `TypeNormalizer::fold_ty` also reduces any substitution-formed ground app
+   (second line, for body checking).
+3. `stable_key.rs` TypeFn arm upgraded to a `debug_assert!(false, ...)` tripwire
+   (keeps the release-safe key), the last-line MIR-boundary guard (spec sec 7.4).
+
+Diagnostics: two new `InvalidCause` variants (`SymbolicTypeFnUnsupported`,
+`TypeFnRecursionLimit`) route through `ty_error.rs` to two new occurrence-site
+`TyLowerDiag` variants (`TypeFnSymbolicUnsupported` code 46, `TypeFnRecursionLimit`
+code 47), following the `TypeFnNotSaturated` precedent (NOT the def-site
+`TypeFnIllFormed` family).
+
+Reductions verified (targeted tests, all green):
+- `RPow<Pair, 3>` -> `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>`
+- `LPow<Pair, 2>` -> `Comp<Pair, Comp<Pair, Par>>`
+- `Half<4>` (a `{N / 2}` Div case) -> `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>`
+- `Bush<2>` (multi-self-call) -> `Comp<Comp<Pair, Pair>, Comp<Pair, Pair>>`
+- symbolic `RPow<Pair, M>` in a signature rejected outside a body; self-calls
+  stay opaque inside (the tests reduce, which requires the arm-lowering opacity).
+Each positive test asserts `collect_type_fn_heads` is empty on the normal form
+(no `TyBase::TypeFn` survives).
+
+The S1.3 `type_fn_saturation_walk` "Saturated" case was updated: a ground app is
+now eager-expanded (S1.5), so `Dup<u8, 3>` (made WF with a self-call) lowers to
+`u8`, not to a stored `TyBase::TypeFn` head. The Partial/Bare unsaturated cases
+(caught by the saturation walk before expansion) are unchanged.
+
+`cargo check --workspace` clean; 19 `type_fn` + 2 `ty::tests` type-fn unit tests
+pass (targeted, debug). Full release `nextest` CI is the orchestrator's at the
+slice-1 boundary.

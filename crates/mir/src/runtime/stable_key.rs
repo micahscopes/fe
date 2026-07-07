@@ -557,10 +557,19 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
                 ),
             },
             // A `recursive type fn` is normalized away before MIR (spec sec
-            // 7.4); the S1.5 MIR-boundary assert makes any residual occurrence a
-            // hard error. Give it a stable key defensively so this key function
-            // never panics in the interim.
-            TyBase::TypeFn(type_fn) => format!("type_fn${}", item_identity(db, (*type_fn).into())),
+            // 7.4): ground applications are expanded at path-lowering and by the
+            // normalizer, and symbolic applications are rejected. Reaching MIR
+            // with a residual `TyBase::TypeFn` is therefore a containment bug;
+            // this is the last-line tripwire (spec sec 7.4 defensive assert). The
+            // release build keeps a stable key so it never panics in production.
+            TyBase::TypeFn(type_fn) => {
+                debug_assert!(
+                    false,
+                    "TyBase::TypeFn reached the MIR stable-key boundary; S1.5 \
+                     normalization/expansion should have removed it (spec sec 7.4)"
+                );
+                format!("type_fn${}", item_identity(db, (*type_fn).into()))
+            }
         },
         TyData::TyParam(param) => {
             format!(

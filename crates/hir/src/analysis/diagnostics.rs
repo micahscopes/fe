@@ -1755,6 +1755,34 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
+            Self::TypeFnSymbolicUnsupported { span } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "symbolic type-fn application not yet supported".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "the recursion subject here is not a ground integer".to_string(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "v1 reduces `recursive type fn` applications only when the subject is a \
+                     concrete integer; a symbolic subject is planned for a later slice"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
+            Self::TypeFnRecursionLimit { span, limit } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "type function unfolding exceeds depth limit".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!("unfolding this application exceeds the limit of {limit} steps"),
+                    span: span.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
+
             // TODO: add hint about indirection (eg *T)
             Self::RecursiveType(cycle) => CompleteDiagnostic {
                 severity: Severity::Error,

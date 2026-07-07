@@ -416,6 +416,14 @@ fn diag_from_invalid_cause<'db>(
         }
         .into(),
 
+        InvalidCause::SymbolicTypeFnUnsupported => {
+            TyLowerDiag::TypeFnSymbolicUnsupported { span }.into()
+        }
+
+        InvalidCause::TypeFnRecursionLimit { limit } => {
+            TyLowerDiag::TypeFnRecursionLimit { span, limit }.into()
+        }
+
         InvalidCause::StringTooLarge { max, given } => {
             TyLowerDiag::StringTooLarge { span, max, given }.into()
         }

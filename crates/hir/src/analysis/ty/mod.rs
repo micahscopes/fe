@@ -1008,7 +1008,7 @@ impl Copy for Explicit {}
 recursive type fn Dup<T, const N: usize>() -> (*) {
     match N {
         0 => T
-        _ => T
+        _ => Dup<T, {N - 1}>
     }
 }
 
@@ -1053,16 +1053,13 @@ struct Saturated {
             })
         ));
 
-        // Fully applied: not invalid, and still a stored (unnormalized) type-fn
-        // application head (intensional identity, spec sec 6.1).
+        // Fully applied and GROUND: eager-expanded at the lowering site to its
+        // concrete normal form (S1.5 guarantee mechanism, Fable steering finding
+        // 5), so no `TyBase::TypeFn` survives in the stored field type. Here
+        // `Dup<u8, 3>` reduces through `Dup<u8, {N-1}>` to the base arm `T` = u8.
         let saturated = field_ty("Saturated");
         assert!(!saturated.has_invalid(&db));
-        let (base, args) = saturated.decompose_ty_app(&db);
-        assert!(matches!(
-            base.data(&db),
-            TyData::TyBase(super::ty_def::TyBase::TypeFn(_))
-        ));
-        assert_eq!(args.len(), 2);
+        assert_eq!(saturated.pretty_print(&db), "u8");
     }
 
     /// S1.3 return-kind rule: v1 `recursive type fn` return kinds are `*` and
