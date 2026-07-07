@@ -1096,3 +1096,61 @@ unmodified HEAD `dd08e87e0`. Not a regression from this work.
 No behavior change beyond diagnostics/hover: `type_fn_application_normal_form`
 has zero non-test, non-hover callers, and reuses existing queries read-only
 (no new salsa-tracked query, no new mutation of any existing one).
+
+---
+
+## S3b (3 of 3): robustness fixtures (fuel ceiling, deep nesting)
+
+Two targeted tests in `crates/hir/src/analysis/ty/type_fn.rs`. No engine or
+diagnostic-text change in this slice; the diagnostic text was already landed
+in S3b (1 of 2).
+
+### `recursion_limit_hit_with_helpful_diagnostic`
+
+Exercises the real `TypeFnRecursionLimit` trigger end to end (`RPow<Pair,
+5000>`, `{N - 1}` step so the ceiling breach costs one native stack frame per
+unfold), asserting the FULL improved diagnostic (message, "exceeds the limit
+of 4096 steps", and the new "far larger than intended" cause note) renders
+from a real `run_on_top_mod` pass, not just from unit-testing the render
+function in isolation.
+
+**A genuine robustness gap was found while writing this, and is recorded
+rather than fixed (out of scope for a diagnostics/hover slice).**
+`normalize_all` (`type_fn.rs`) is a plain recursive Rust function: reducing
+a `recursive type fn` head costs one native call frame per unfold step. The
+first version of this test, run on the default test-thread stack, SIGABRTs
+with a real stack overflow at N = 5000 -- well BEFORE the `steps >
+TYPE_FN_UNFOLD_CEILING` check can fire and return the diagnostic. Confirmed
+this is not a test artifact: grepped the whole codebase for `stack_size`
+(zero hits), so neither the `fe` CLI nor the language server spawns an
+enlarged-stack thread for analysis; a real user hitting a large enough `N`
+today crashes the compiler process instead of seeing this diagnostic. The
+~4096-step fuel ceiling bounds STEPS, not STACK DEPTH, and reaching the
+ceiling at all already costs ~4096 stack frames on the way there. The test
+itself spawns its own 256 MiB-stack thread purely so it can reach and assert
+on the diagnostic text; that accommodation exists ONLY in the test, not in
+the real compiler. The real fix -- converting `normalize_all`'s structural-
+child recursion to an explicit worklist (the ROOT-level driver,
+`normalize_type_fn_app`, already uses an iterative worklist for head
+reduction per the S1.5 design; only the per-child structural recursion is
+still plain recursive Rust) -- is an engine change to the S1.5 normalizer,
+not a diagnostic/hover edit, so it is left as a follow-up rather than folded
+into this slice.
+
+### `accepts_and_normalizes_deeply_nested_self_call`
+
+A `recursive type fn` (`Deep<F, N>`) whose self-call sits three combinator
+layers deep in the arm RHS (`Comp<Comp<Comp<Deep<F, {N-1}>, F>, F>, F>`
+rather than a bare self-call at the top, which is what every other fixture
+in this file happens to use). WF, distillation, and ground normalization all
+already recurse through generic args unconditionally (`walk_arm_ty`'s
+`PathClass::Other` arm), so this is confidence/regression coverage rather
+than a new code path: pins that depth genuinely works, asserting `Deep<Pair,
+2>` normalizes to the full 6-`Comp`-node expansion.
+
+Verification: `cargo check --workspace` clean. Both new tests green,
+targeted (`cargo test -p fe-hir --lib
+analysis::ty::type_fn::tests::recursion_limit_hit_with_helpful_diagnostic`
+and `::accepts_and_normalizes_deeply_nested_self_call`). Full `cargo test -p
+fe-hir --lib analysis::ty::type_fn` (55 tests: 32 `type_fn` + `21`
+`type_fn_induct` before this slice, now 34 + 21 = 55) green.

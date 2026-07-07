@@ -1762,6 +1762,88 @@ recursive type fn Bush<const N: usize>() -> (*) {
         );
     }
 
+    /// Robustness fixture: a subject large enough to hit the
+    /// `TYPE_FN_UNFOLD_CEILING` fuel ceiling, exercising the improved
+    /// `TypeFnRecursionLimit` diagnostic (S3b) against a REAL trigger rather
+    /// than only unit-testing its rendered text in isolation. `RPow`'s
+    /// `{N - 1}` step takes exactly one unfold per decrement, so a plain
+    /// literal comfortably past the ~4096-step ceiling is enough; no
+    /// exponential blowup (the ceiling check aborts the reduction shortly
+    /// after N = 4096, not at the full N = 5000).
+    ///
+    /// FINDING (recorded, not fixed here; out of scope for a diagnostics/
+    /// hover-only slice): `normalize_all` is a plain recursive Rust function,
+    /// one stack frame per unfold step. Reaching the ~4096-step ceiling at
+    /// all therefore costs ~4096 native stack frames, which overflows an
+    /// ordinary 8 MiB default thread stack in a debug build BEFORE the
+    /// ceiling check can return its diagnostic (confirmed: this test SIGABRTs
+    /// with a real stack overflow on the default test-thread stack). Neither
+    /// the `fe` CLI nor the language server spawns an enlarged-stack thread
+    /// for analysis (grepped the codebase for `stack_size`: zero hits), so a
+    /// real user hitting a large enough `N` today would crash the compiler
+    /// rather than see this diagnostic. The fuel ceiling bounds STEPS, not
+    /// STACK DEPTH; converting `normalize_all`'s structural-child recursion
+    /// to an explicit worklist would close this, but that is an engine change
+    /// to the S1.5 normalizer, not a diagnostic/hover edit, so it is left as a
+    /// follow-up rather than folded into this slice. This test spawns its own
+    /// large-stack thread purely to reach the diagnostic and confirm its
+    /// text; that accommodation is NOT present in the real compiler.
+    #[test]
+    fn recursion_limit_hit_with_helpful_diagnostic() {
+        use crate::test_db::format_diagnostics;
+
+        let result = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: RPow<Pair, 5000> }}\n");
+                let mut db = HirAnalysisTestDb::default();
+                let file =
+                    db.new_stand_alone(Utf8PathBuf::from("type_fn_recursion_limit.fe"), &src);
+                let (top_mod, _) = db.top_mod(file);
+                let diags = db.run_on_top_mod(top_mod);
+                format_diagnostics(&db, &diags)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert!(
+            result.contains("type function unfolding exceeds depth limit")
+                && result.contains("exceeds the limit of 4096 steps")
+                && result.contains("far larger than intended"),
+            "expected the recursion-limit diagnostic with its cause note, got:\n{result}"
+        );
+    }
+
+    /// Robustness fixture: a self-call nested several combinator layers deep in
+    /// an arm's RHS (`Comp<Comp<Comp<RPow<F, {{N-1}}>, F>, F>, F>` rather than a
+    /// bare self-call at the top). The arm-RHS walk (`walk_arm_ty`) already
+    /// recurses through generic args unconditionally; this pins that deep
+    /// nesting genuinely works end to end (WF, distillation, and ground
+    /// normalization), not just at the shallow depth every other fixture in
+    /// this file happens to use.
+    #[test]
+    fn accepts_and_normalizes_deeply_nested_self_call() {
+        let src = r#"
+struct Par {}
+struct Pair {}
+struct Comp<A, B> {}
+
+recursive type fn Deep<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<Comp<Comp<Deep<F, {N - 1}>, F>, F>, F>
+    }
+}
+
+struct Probe { p: Deep<Pair, 2> }
+"#;
+        assert_eq!(
+            probe_field_pretty(src, "Probe"),
+            "Comp<Comp<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>, Pair>, Pair>"
+        );
+    }
+
     /// A symbolic type-fn application in an ADT FIELD position (here a struct
     /// field mentioning the struct's own const param) stays rejected under S2.1:
     /// the gate is position-aware and keeps rejecting stored positions (a stored
