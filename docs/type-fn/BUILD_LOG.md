@@ -394,3 +394,80 @@ Verification: `cargo check --workspace` clean (no warnings). All 23
 `rejects_impl_on_ground_type_fn_application`,
 `rejects_impl_on_nested_type_fn_application`, `allows_impl_on_combinator`
 over-fire guard).
+
+---
+
+## S2.0 (b) + (c): precondition discharge + mono-time normalization
+
+The other two S2.0 items from steering-03 sec 5. Both turned out to be
+substantially satisfied by S1.5 machinery; recorded here per the "verify and
+record rather than duplicate" instruction, with the one genuine SSOT addition
+that (b) warranted.
+
+### (c) mono-time normalization: ALREADY SATISFIED by S1.5 (verified)
+
+Spec sec 7.4 asks for normalization "when an instance's substitution is applied"
+so no `TyBase::TypeFn` reaches MIR. VERIFIED this is already in place:
+
+- MIR instance substitution routes EVERY instance type through the ty-layer
+  `normalize_ty` AFTER generic-arg substitution:
+  `semantic/instance/semantic.rs::instantiate_normalized_ty` (subst via
+  `instantiate_checked`, then `normalize_ty`), `RuntimeInstance::normalized_ty`
+  / `normalized_field_types`, and `mir/runtime/lower/type_info.rs:255,276`.
+- `normalize_ty` -> `TypeNormalizer::fold_ty` (`normalize.rs:137-148`, the S1.5
+  "second containment line") reduces any substitution-formed GROUND type-fn
+  application to its normal form; symbolic subjects stay opaque. So a symbolic
+  app that becomes ground at instantiation is normalized before MIR, and the
+  `stable_key.rs` `TyBase::TypeFn` `debug_assert!` tripwire stays the backstop.
+
+No new mono plumbing was needed (adding a second normalize pass would duplicate
+the existing one). Added ONE focused unit test,
+`normalize_ty_reduces_ground_type_fn_app`, that HAND-BUILDS a saturated ground
+`RPow<Pair, 3>` (bypassing path lowering's first-line eager expansion) and feeds
+it to `normalize_ty` (the exact function MIR consumes post-substitution),
+asserting it reduces to `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` with no type-fn
+head surviving.
+
+### (b) application-precondition discharge
+
+Spec sec 2.4: the type fn's `where` clause is its application precondition, to be
+discharged at every application site.
+
+VERIFIED current state (matches steering-03 sec 1.5): a GROUND site
+eager-expands at path lowering BEFORE any WF check sees the application, so the
+type fn's OWN `where` clause is presently discharged only INDIRECTLY, via the
+combinator constraints of the expanded normal form (the ordinary `ty_constraints`
++ `check_ty_wf` machinery on `Comp<..>`). The resulting concrete type's
+well-formedness is enforced; only the direct attribution to the type fn is
+missing, and there is no unsoundness (ground apps are fully computed, not
+symbolic; the gate is closed).
+
+LANDED the SSOT half of (b): a `TyBase::TypeFn` arm in `ty_constraints`
+(`trait_resolution/constraint.rs`) that returns the type fn's `where` clause
+(`collect_constraints(GenericParamOwner::TypeFn(def))`) instantiated at the
+application args, exactly parallel to the existing `TyBase::Adt` / `TyBase::Func`
+arms. This makes the precondition a first-class WF constraint of any SURVIVING
+type-fn application, discharged by the ordinary `check_ty_wf` machinery. It is a
+deliberate no-op at reachable S2.0 positions (ground apps expand first; symbolic
+apps are rejected, so no `TyBase::TypeFn` head reaches `ty_constraints`), so it
+cannot change S2.0 behavior (gate stays closed); it is the mechanism S2.1's
+symbolic obligations (`P(RPow<F, M>)`) will consume to discharge the precondition
+from caller assumptions, giving ground/symbolic parity. Unit test
+`ty_constraints_carries_type_fn_where_clause` pins it: `RPow` with
+`where F: Marker` yields `Pair: Marker` on a hand-built `RPow<Pair, 3>`; a
+`where`-less twin yields the empty list.
+
+DEFERRED into S2.1 (recorded, not built): the DIRECT ground-occurrence discharge
+that reports a precondition violation NAMING the type fn at the site. Its clean
+home is the shared occurrence-site check that lands with symbolic propagation in
+S2.1 (where the surviving symbolic app discharges the precondition through the
+`ty_constraints` arm above). Doing it in the S2.0 ground branch of the
+path-resolver `ItemKind::TypeFn` arm would require calling the trait solver from
+path resolution (salsa-cycle / perf risk) for a non-soundness-critical, gate-
+closed parity/diagnostic improvement, which is not worth destabilizing a
+must-stay-green precondition slice.
+
+Verification: `cargo check --workspace` clean (no warnings); all 25
+`analysis::ty::type_fn::tests` pass (targeted, debug), incl. the 3 new S2.0
+(b)/(c) tests. Full release `nextest` CI is the orchestrator's at the slice
+boundary.

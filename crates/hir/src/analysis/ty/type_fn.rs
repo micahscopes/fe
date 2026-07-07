@@ -1683,6 +1683,159 @@ recursive type fn Bush<const N: usize>() -> (*) {
         );
     }
 
+    /// S2.0 (c): mono-time normalization. Exercises the SECOND S1.5 containment
+    /// line (`TypeNormalizer::fold_ty`, `normalize.rs`), which is exactly the
+    /// hook MIR instance substitution relies on: every instance type is routed
+    /// through `normalize_ty` (`instantiate_normalized_ty` /
+    /// `RuntimeInstance::normalized_ty` / `runtime/lower/type_info.rs`) AFTER
+    /// generic-arg substitution, so a symbolic app that becomes ground at
+    /// instantiation reduces to its normal form before reaching MIR (the
+    /// `stable_key.rs` `TyBase::TypeFn` tripwire stays the backstop). Here the
+    /// post-substitution ground app is HAND-BUILT (bypassing path lowering,
+    /// which would eager-expand it at the first containment line) and fed to
+    /// `normalize_ty`, proving that path reduces it.
+    #[test]
+    fn normalize_ty_reduces_ground_type_fn_app() {
+        use super::{collect_type_fn_heads, make_subject_ty};
+        use crate::analysis::ty::adt_def::AdtRef;
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::analysis::ty::ty_def::{PrimTy, TyBase, TyData, TyId};
+        use crate::hir_def::ItemKind;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_mono.fe"), NORM_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let rpow = find_tf(&db, top_mod, "RPow");
+        let pair_struct = top_mod
+            .all_structs(&db)
+            .iter()
+            .copied()
+            .find(|s| s.name(&db).to_opt().is_some_and(|i| i.data(&db) == "Pair"))
+            .expect("missing Pair");
+        let pair_ty = TyId::adt(
+            &db,
+            AdtRef::try_from_item(ItemKind::Struct(pair_struct))
+                .unwrap()
+                .as_adt(&db),
+        );
+        let usize_ty = TyId::new(&db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)));
+        let subject = make_subject_ty(&db, num_bigint::BigUint::from(3u32), usize_ty);
+
+        // Assemble the saturated ground application `RPow<Pair, 3>` directly.
+        let base = TyId::type_fn(&db, rpow);
+        let app = TyId::foldl(&db, base, &[pair_ty, subject]);
+        // It is a live, unexpanded `TyBase::TypeFn` head.
+        assert!(
+            !collect_type_fn_heads(&db, app).is_empty(),
+            "hand-built app should carry a live type-fn head"
+        );
+
+        // The MIR-consumed `normalize_ty` reduces it to the concrete normal form.
+        let normal = normalize_ty(
+            &db,
+            app,
+            top_mod.scope(),
+            PredicateListId::empty_list(&db),
+        );
+        assert!(
+            collect_type_fn_heads(&db, normal).is_empty(),
+            "normalized type must not carry a type-fn head: {}",
+            normal.pretty_print(&db)
+        );
+        assert_eq!(
+            normal.pretty_print(&db),
+            "Comp<Comp<Comp<Par, Pair>, Pair>, Pair>"
+        );
+    }
+
+    /// S2.0 (b): the `recursive type fn`'s `where` clause is its application
+    /// precondition (spec sec 2.4), carried as a first-class WF constraint of any
+    /// SURVIVING type-fn application. `ty_constraints` on a hand-built
+    /// `RPow<Pair, 3>` (whose def declares `where F: Marker`) yields the
+    /// precondition instantiated at the arg (`Pair: Marker`), which the ordinary
+    /// `check_ty_wf` machinery then discharges. This is the SSOT S2.1's symbolic
+    /// obligations consume; it is a no-op at reachable S2.0 positions (a ground
+    /// application eager-expands before this is consulted; a symbolic one is
+    /// rejected). A `where`-less type fn yields the empty list, pinning that the
+    /// constraint comes from the clause, not the head.
+    #[test]
+    fn ty_constraints_carries_type_fn_where_clause() {
+        use super::make_subject_ty;
+        use crate::analysis::ty::adt_def::AdtRef;
+        use crate::analysis::ty::trait_resolution::constraint::ty_constraints;
+        use crate::analysis::ty::ty_def::{PrimTy, TyBase, TyData, TyId};
+        use crate::hir_def::ItemKind;
+
+        let src = r#"
+trait Marker {}
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+recursive type fn RPow<F, const N: usize>() -> (*) where F: Marker {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+recursive type fn Bare<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<Bare<F, {N - 1}>, F>
+    }
+}
+"#;
+        // Assembles the saturated ground app `<tf><Pair, 3>` directly (bypassing
+        // path lowering, which would eager-expand it).
+        fn build_app<'db>(
+            db: &'db HirAnalysisTestDb,
+            top_mod: TopLevelMod<'db>,
+            tf_name: &str,
+        ) -> TyId<'db> {
+            let tf = find_tf(db, top_mod, tf_name);
+            assert!(
+                type_fn_wf(db, tf).data.is_some(),
+                "`{tf_name}` should be well-formed"
+            );
+            let pair_struct = top_mod
+                .all_structs(db)
+                .iter()
+                .copied()
+                .find(|s| s.name(db).to_opt().is_some_and(|i| i.data(db) == "Pair"))
+                .expect("missing Pair");
+            let pair_ty = TyId::adt(
+                db,
+                AdtRef::try_from_item(ItemKind::Struct(pair_struct))
+                    .unwrap()
+                    .as_adt(db),
+            );
+            let usize_ty = TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::Usize)));
+            let subject = make_subject_ty(db, num_bigint::BigUint::from(3u32), usize_ty);
+            TyId::foldl(db, TyId::type_fn(db, tf), &[pair_ty, subject])
+        }
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_precond.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+
+        // The `where F: Marker` fn yields the instantiated precondition.
+        let preds = ty_constraints(&db, build_app(&db, top_mod, "RPow"));
+        let rendered = preds.pretty_print(&db);
+        assert!(
+            !preds.is_empty(&db) && rendered.contains("Marker") && rendered.contains("Pair"),
+            "expected the instantiated precondition `Pair: Marker`, got: {rendered}"
+        );
+
+        // The `where`-less fn yields nothing (the constraint is the clause).
+        assert!(
+            ty_constraints(&db, build_app(&db, top_mod, "Bare")).is_empty(&db),
+            "a `where`-less type fn must carry no precondition"
+        );
+    }
+
     /// Guard against over-firing: an ordinary impl on a plain ADT whose fields
     /// happen to mention nothing type-fn-related is NOT banned. (`Comp` is a
     /// combinator; impls on it are exactly what the spec directs users to.)

@@ -152,6 +152,20 @@ pub(crate) fn ty_constraints<'db>(
             func_def.params(db),
             collect_func_def_constraints(db, *func_def, true),
         ),
+        // S2.0 (b): the `recursive type fn`'s `where` clause is its application
+        // precondition (spec sec 2.4). Making it a first-class WF constraint of
+        // any SURVIVING type-fn application is the SSOT home: the same ordinary
+        // `check_ty_wf` machinery that discharges an ADT's `where` clause then
+        // discharges the type fn's, at every position a `TyBase::TypeFn` head
+        // reaches type checking. In S2.0 the gate is closed, so this is a no-op
+        // for reachable positions (a ground application eager-expands to its
+        // normal form BEFORE this is consulted, and a symbolic one is rejected);
+        // S2.1 opens symbolic flow, and a symbolic `RPow<F, M>` obligation then
+        // discharges this precondition through this arm from caller assumptions.
+        TyData::TyBase(TyBase::TypeFn(def)) => (
+            collect_generic_params(db, GenericParamOwner::TypeFn(*def)).params(db),
+            collect_constraints(db, GenericParamOwner::TypeFn(*def)),
+        ),
         _ => {
             return PredicateListId::empty_list(db);
         }
