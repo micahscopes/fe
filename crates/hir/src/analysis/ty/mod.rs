@@ -16,10 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec1::SmallVec;
 use trait_def::impls_for_trait_def;
 use trait_resolution::constraint::super_trait_cycle;
-use ty_def::{
-    BorrowKind, InvalidCause, TyBase, TyData, TyId, instantiate_adt_field_ty,
-    kind_mentions_constraint, type_fn_sig,
-};
+use ty_def::{BorrowKind, InvalidCause, TyBase, TyData, TyId, instantiate_adt_field_ty};
 use ty_lower::{collect_generic_params, lower_type_alias};
 
 use crate::analysis::name_resolution::{PathRes, resolve_path};
@@ -54,6 +51,7 @@ pub mod provider_goal;
 pub(crate) mod scratch;
 pub mod term;
 pub mod trait_def;
+pub mod type_fn;
 pub mod trait_lower;
 pub mod trait_resolution; // This line was previously 'pub mod name_resolution;'
 pub mod ty_check;
@@ -862,12 +860,12 @@ impl ModuleAnalysisPass for TypeAliasAnalysisPass {
     }
 }
 
-/// Definition-level analysis for `recursive type fn` items (spec sec 4.8 slice
-/// S1.3 portion). This slice enforces only the ty-layer return-kind rule: v1
-/// return kinds are `*` and arrows over `*`, so a declared `Constraint` return
-/// kind is rejected (the reused parser `parse_kind_bound` accepts it). The full
-/// definition well-formedness check (grammar / exhaustiveness / termination /
-/// self-call) lands in S1.4.
+/// Definition-level well-formedness analysis for `recursive type fn` items
+/// (spec sec 1.1 / 1.2 / 3, slice S1.4). Delegates to the memoized
+/// [`type_fn::type_fn_wf`] query, which enforces the full checklist (subject
+/// param, exhaustiveness, termination, self-call-only, grammar, where clause,
+/// return kind) and, only on success, produces the distilled arm data the S1.5
+/// unfold queries consume.
 pub struct RecursiveTypeFnAnalysisPass {}
 
 impl ModuleAnalysisPass for RecursiveTypeFnAnalysisPass {
@@ -877,12 +875,9 @@ impl ModuleAnalysisPass for RecursiveTypeFnAnalysisPass {
         top_mod: TopLevelMod<'db>,
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         let mut diags: Vec<Box<dyn DiagnosticVoucher + 'db>> = vec![];
-        for &type_fn in top_mod.all_type_fns(db) {
-            let sig = type_fn_sig(db, type_fn);
-            if kind_mentions_constraint(&sig.ret_kind) {
-                diags.push(Box::new(TyLowerDiag::TypeFnConstraintRetKind {
-                    span: type_fn.span().ret_kind().into(),
-                }) as _);
+        for &def in top_mod.all_type_fns(db) {
+            for diag in &type_fn::type_fn_wf(db, def).diags {
+                diags.push(Box::new(diag.clone()) as _);
             }
         }
         diags
@@ -1082,14 +1077,14 @@ struct Saturated {
 recursive type fn Bad<const N: usize>() -> (Constraint) {
     match N {
         0 => u8
-        _ => u8
+        _ => Bad<{N - 1}>
     }
 }
 
 recursive type fn Good<const N: usize>() -> (*) {
     match N {
         0 => u8
-        _ => u8
+        _ => Good<{N - 1}>
     }
 }
 "#,

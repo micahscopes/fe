@@ -136,3 +136,87 @@ fe-hir unit tests pass in debug (`cargo test -p fe-hir --lib type_fn_`, 15.5s):
 `Dup<u8, 3>` stays a well-formed unnormalized `TyBase::TypeFn` application) and
 `type_fn_constraint_return_kind_rejected` (`Constraint` return kind rejected via
 the sig and end-to-end via the pass; `*` accepted; subject-only arity is 1).
+
+## 2026-07-07 - Slice 1.4: definition WF + distilled arm data (the S1.5 gate)
+
+Landed the definition-site well-formedness checker and the distilled arm
+representation that structurally gates unfolding.
+
+New analysis module `crates/hir/src/analysis/ty/type_fn.rs`:
+
+- Distilled types (S1.5 consumes exactly these):
+  - `SubjectStep = Sub(IntegerId) | Div(IntegerId) | Lit(IntegerId)` (spec
+    sec 3.3), a `salsa::Update` `Copy` enum. `IntegerId` (interned `BigUint`)
+    keeps it salsa-friendly.
+  - `TypeFnArmData { pat: TypeFnPat, rhs_ty: TypeId, self_calls: Vec<SubjectStep> }`
+    (analysis-layer; distinct from the HIR `hir_def::TypeFnArmData` which is the
+    raw `pat`+`ty` store). `rhs_ty` is the HIR `TypeId`, retained intensionally
+    (spec sec 6.1); S1.5 substitutes/lowers it.
+  - `TypeFnWfData { def, subject_idx, arms: Vec<TypeFnArmData> }`.
+  - `TypeFnWfResult { data: Option<TypeFnWfData>, diags: Vec<TyLowerDiag> }`.
+- `#[salsa::tracked(return_ref)] fn type_fn_wf(db, def) -> TypeFnWfResult`. `data`
+  is `Some` IFF `diags` is empty and all arms are structurally complete, so
+  "WF gates unfolding" is a STRUCTURAL fact (the future unfold queries take
+  `TypeFnWfData`, which cannot exist for an ill-formed def).
+
+Checks enforced, each a named `TypeFnWfError` (rendered via the new
+`TyLowerDiag::TypeFnIllFormed { primary, error }`, code 45):
+- subject param: exactly one `const _: usize`, declared last
+  (`MissingSubject` / `MultipleSubjects` / `SubjectNotLast` / `SubjectNotUsize`);
+- `match` scrutinee equals the subject (`ScrutineeMismatch`);
+- exhaustiveness: mandatory final `_` (`MissingWildcardArm`), no arms after it
+  (`ArmAfterWildcard`), no duplicate literals (`DuplicateArmLit`);
+- at least one self-call (`NoSelfCall`, keyed on a `saw_self_call` flag so an
+  ill-formed self-call still counts as present);
+- no foreign type-fn application, self-detected by DefId (`ForeignTypeFnCall`);
+- no assoc-type projection in an arm RHS (`AssocProjInArm`);
+- arm RHS restricted to the body TypeExpr grammar: paths + self-calls only,
+  tuple/array/ptr/mode/`!` rejected (`DisallowedArmType`);
+- termination (spec sec 3.3), per self-call, independently: whitelisted
+  `{N - k}` (k>=1, arm lower bound `L >= k`) / `{N / k}` (k>=2, `L >= 1`) /
+  literal `m < L`; else `SubjectNotDecreasing` / `SubjectMayUnderflow` /
+  `SubjectDivZeroFixpoint` / `LiteralSubjectNotSmaller`. The base-case trap
+  (`{N - 1}` in arm `0`) falls out as `SubjectMayUnderflow` (L=0 < 1);
+- self-call type args = the def's own type params forwarded verbatim, in order
+  (`SelfCallArgsNotVerbatim`) - removes the polymorphic-recursion soundness
+  class from Slice 2 (Fable steering);
+- `where` clause carries only type-param bounds (`WhereNotTypeParamBound`;
+  const predicates and bounds on the subject rejected);
+- return kind required (`MissingReturnKind`); `Constraint` return kind rejected
+  via the S1.3 `TypeFnConstraintRetKind` (folded into `type_fn_wf`).
+
+Structural CTFE-acyclicity kept intact (Fable steering finding 2): the subject
+is destructured purely syntactically (`Bin(Sub|Div)(Path(subject), IntLit)` or an
+integer literal, unwrapping the parser's single-stmt block), and self-call
+detection uses the EARLY name resolver (`resolve_ident_to_bucket`), which never
+lowers generic args. No body block is ever handed to `evaluate_const_ty`, so its
+`NotIntExpr` -> CTFE fall-through stays unreachable from type-fn bodies. The one
+lowering call (`lower_hir_ty` on each arm RHS, to exercise S1.3's
+`find_unsaturated_type_fn` on the definition itself) runs ONLY after all subjects
+are validated and only on otherwise-WF defs, so it never routes an unvalidated
+block through the evaluator; a residual unsaturated occurrence there emits
+`TypeFnNotSaturated` and withholds the data.
+
+v1 narrowing (documented): self-calls must be single-segment (the syntactic self
+identifier); multi-segment references are inspected only for a root-type-param
+assoc projection. Alias/qualified-path self- or foreign-type-fn references are
+not special-cased here (no motivating workload needs them; caught downstream).
+
+Wiring: `RecursiveTypeFnAnalysisPass` now delegates to `type_fn_wf` (the S1.3
+inline constraint-ret-kind check was folded in). New public accessors on
+`TypeFnDef` (`hir_generic_params`, `hir_where_clause`, `match_subject_ident`,
+`hir_arms`) expose the raw HIR to the analysis layer (mirroring `ret_kind_bound`).
+The S1.3 `type_fn_constraint_return_kind_rejected` fixtures gained self-calls so
+`Bad`/`Good` are WF except for the property under test (pass still emits exactly
+one diag).
+
+Verification: `cargo check --workspace` clean (no warnings). 10 new focused
+fe-hir unit tests pass in debug (`cargo test -p fe-hir --lib
+analysis::ty::type_fn::tests`, 32s): negatives for two const subjects, subject
+not last, missing `_`, duplicate literal, `{N-1}` in the `0` arm (underflow),
+`{N+1}` and `{N-1+1}` (non-whitelisted), no self-call, and an assoc-type
+projection; plus a `Bush`-style multi-self-call POSITIVE that produces
+`data.arms[1].self_calls == [Sub(1), Sub(1)]`. The two S1.3 tests still pass.
+
+Deliberately NOT in this slice (S1.5): normalization/unfolding queries consuming
+`TypeFnWfData`, the `TypeNormalizer::fold_ty` hook, and the MIR-boundary assert.

@@ -1257,6 +1257,31 @@ impl<'db> TypeFnDef<'db> {
     pub fn ret_kind_bound(self, db: &'db dyn HirDb) -> Partial<KindBound> {
         self.ret_kind(db)
     }
+
+    /// The raw HIR generic-param list.
+    ///
+    /// Exposed for the definition well-formedness check (spec slice S1.4), which
+    /// verifies "exactly one `const _: usize` subject, declared last" against the
+    /// raw list (order and const-ness), not the lowered param set.
+    pub fn hir_generic_params(self, db: &'db dyn HirDb) -> GenericParamListId<'db> {
+        self.generic_params(db)
+    }
+
+    /// The raw HIR where-clause.
+    pub fn hir_where_clause(self, db: &'db dyn HirDb) -> WhereClauseId<'db> {
+        self.where_clause(db)
+    }
+
+    /// The raw, UNRESOLVED identifier following `match` in the body (spec slice
+    /// S1.4 checks it equals the declared const subject).
+    pub fn match_subject_ident(self, db: &'db dyn HirDb) -> Partial<IdentId<'db>> {
+        self.match_subject(db)
+    }
+
+    /// The raw HIR match arms (`PAT => TYPE`).
+    pub fn hir_arms(self, db: &'db dyn HirDb) -> &'db Vec<TypeFnArmData<'db>> {
+        self.arms(db)
+    }
 }
 
 #[salsa::tracked]

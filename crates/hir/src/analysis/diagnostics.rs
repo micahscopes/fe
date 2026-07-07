@@ -1743,6 +1743,18 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
+            Self::TypeFnIllFormed { primary, error } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: error.message(db),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: error.message(db),
+                    span: primary.resolve(db),
+                }],
+                notes: error.notes(),
+                error_code,
+            },
+
             // TODO: add hint about indirection (eg *T)
             Self::RecursiveType(cycle) => CompleteDiagnostic {
                 severity: Severity::Error,

@@ -13,7 +13,7 @@ use crate::{analysis::ty::ty_check::EffectParamOwner, span::DynLazySpan};
 use crate::{
     core::hir_def::{
         Body, CallableDef, CompBinOp, Enum, FieldIndex, FieldParent, Func, GenericParamOwner,
-        IdentId, ImplTrait,
+        IdentId, ImplTrait, IntegerId,
     },
     hir_def::TypeAlias,
 };
@@ -89,6 +89,14 @@ pub enum TyLowerDiag<'db> {
     /// accepts `Constraint`, so it is rejected here.
     TypeFnConstraintRetKind {
         span: DynLazySpan<'db>,
+    },
+
+    /// A `recursive type fn` definition violates one of the well-formedness
+    /// rules of spec sec 1.1 / 1.2 / 3 (definition slice S1.4). The specific
+    /// rule is carried by [`TypeFnWfError`], which selects the rendered message.
+    TypeFnIllFormed {
+        primary: DynLazySpan<'db>,
+        error: TypeFnWfError<'db>,
     },
 
     StringTooLarge {
@@ -281,6 +289,151 @@ impl TyLowerDiag<'_> {
             Self::ContractFieldExplicitConstHole { .. } => 42,
             Self::TypeFnNotSaturated { .. } => 43,
             Self::TypeFnConstraintRetKind { .. } => 44,
+            Self::TypeFnIllFormed { .. } => 45,
+        }
+    }
+}
+
+/// The specific definition well-formedness rule a `recursive type fn` violates
+/// (spec sec 1.1 / 1.2 / 3, slice S1.4). Selects the message rendered for a
+/// [`TyLowerDiag::TypeFnIllFormed`]. The distilled arm representation
+/// ([`super::super::ty::type_fn::TypeFnWfData`]) is produced ONLY when no such
+/// error is raised, so well-formedness structurally gates unfolding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Update)]
+pub enum TypeFnWfError<'db> {
+    /// No `const _: usize` recursion subject parameter is declared.
+    MissingSubject,
+    /// More than one `const` parameter is declared (only the single subject is
+    /// allowed in v1).
+    MultipleSubjects { count: usize },
+    /// The `const` subject parameter is not the last generic parameter.
+    SubjectNotLast,
+    /// The `const` subject parameter's declared type is not `usize`.
+    SubjectNotUsize,
+    /// The `match` scrutinee identifier is not the declared subject parameter.
+    ScrutineeMismatch { subject: IdentId<'db> },
+    /// The `match` has no mandatory final `_` (wildcard) arm.
+    MissingWildcardArm,
+    /// A literal arm appears after the `_` arm.
+    ArmAfterWildcard,
+    /// Two arms share the same literal pattern.
+    DuplicateArmLit { value: IntegerId<'db> },
+    /// The body contains no self-call in any arm (spec sec 1.1 rule 5).
+    NoSelfCall,
+    /// An application of another (non-self) type fn appears in an arm; the
+    /// type-fn call graph may contain only self-loops (spec sec 1.2 / 3.6).
+    ForeignTypeFnCall,
+    /// An associated-type projection (`G::Assoc`) appears in an arm RHS (spec
+    /// sec 1.1 rule 2, sec 9 item 10).
+    AssocProjInArm,
+    /// An arm RHS uses a type form outside the body TypeExpr grammar (tuple,
+    /// array, pointer, `mut`/`ref`/`own`, `!`); spec sec 1.1.
+    DisallowedArmType,
+    /// A self-call subject is not one of the whitelisted decreasing forms
+    /// (`{N - k}`, `{N / k}`, or a smaller literal); spec sec 3.3.
+    SubjectNotDecreasing,
+    /// A `{N - k}` subject may underflow in this arm (`L < k`); spec sec 3.3.
+    SubjectMayUnderflow,
+    /// A `{N / k}` subject can hit the `N = 0` fixpoint in this arm; spec
+    /// sec 3.3.
+    SubjectDivZeroFixpoint,
+    /// A literal self-call subject `m` is not strictly smaller than the arm's
+    /// lower bound `L`; spec sec 3.3.
+    LiteralSubjectNotSmaller,
+    /// A self-call's type arguments are not the definition's own type params
+    /// forwarded verbatim, in order (v1 narrowing removing polymorphic
+    /// recursion; Fable steering S1.4).
+    SelfCallArgsNotVerbatim,
+    /// The `where` clause carries a bound that is not a bound on a type
+    /// parameter (a const predicate or a bound on the subject); spec sec 1.1
+    /// rule 6.
+    WhereNotTypeParamBound,
+    /// A return kind (`-> (KIND)`) is required (the parser makes it optional).
+    MissingReturnKind,
+}
+
+impl<'db> TypeFnWfError<'db> {
+    /// The one-line diagnostic message for this rule violation.
+    pub(crate) fn message(&self, db: &'db dyn HirAnalysisDb) -> String {
+        match self {
+            Self::MissingSubject => {
+                "a `recursive type fn` must declare a `const _: usize` recursion subject".into()
+            }
+            Self::MultipleSubjects { count } => format!(
+                "a `recursive type fn` must declare exactly one `const` parameter, but {count} \
+                 were declared"
+            ),
+            Self::SubjectNotLast => {
+                "the `const` subject of a `recursive type fn` must be the last generic parameter"
+                    .into()
+            }
+            Self::SubjectNotUsize => {
+                "the `const` subject of a `recursive type fn` must have type `usize`".into()
+            }
+            Self::ScrutineeMismatch { subject } => format!(
+                "the `match` scrutinee must be the subject parameter `{}`",
+                subject.data(db)
+            ),
+            Self::MissingWildcardArm => {
+                "the `match` of a `recursive type fn` must end with a `_` arm".into()
+            }
+            Self::ArmAfterWildcard => "no arm may appear after the `_` arm".into(),
+            Self::DuplicateArmLit { value } => {
+                format!("duplicate match arm for `{}`", value.data(db))
+            }
+            Self::NoSelfCall => {
+                "a `recursive type fn` must contain at least one self-call; use a `type fn` \
+                 selector or a `type` alias instead"
+                    .into()
+            }
+            Self::ForeignTypeFnCall => {
+                "a `recursive type fn` body may only apply itself, not another type fn".into()
+            }
+            Self::AssocProjInArm => {
+                "associated-type projections are not allowed in a `recursive type fn` body".into()
+            }
+            Self::DisallowedArmType => {
+                "this type form is not allowed in a `recursive type fn` arm".into()
+            }
+            Self::SubjectNotDecreasing => {
+                "the subject of a recursive call must be strictly smaller than the subject".into()
+            }
+            Self::SubjectMayUnderflow => "recursive type fn argument may underflow".into(),
+            Self::SubjectDivZeroFixpoint => {
+                "recursive type fn argument does not decrease at `N = 0`".into()
+            }
+            Self::LiteralSubjectNotSmaller => {
+                "a literal recursive-call subject must be strictly smaller than this arm's lower \
+                 bound"
+                    .into()
+            }
+            Self::SelfCallArgsNotVerbatim => {
+                "a self-call's type arguments must be the type fn's own type parameters, forwarded \
+                 in order"
+                    .into()
+            }
+            Self::WhereNotTypeParamBound => {
+                "a `recursive type fn` `where` clause may only bound its type parameters".into()
+            }
+            Self::MissingReturnKind => {
+                "a `recursive type fn` must declare a return kind (`-> (*)`)".into()
+            }
+        }
+    }
+
+    /// Supplementary notes rendered under the primary label.
+    pub(crate) fn notes(&self) -> Vec<String> {
+        match self {
+            Self::SubjectNotDecreasing => vec![
+                "accepted subject forms: `{N - k}` with k >= 1, and `{N / k}` with k >= 2"
+                    .to_string(),
+            ],
+            Self::SubjectMayUnderflow => vec![
+                "move the recursive call to an arm where the subject is large enough, or return a \
+                 base shape here"
+                    .to_string(),
+            ],
+            _ => vec![],
         }
     }
 }
