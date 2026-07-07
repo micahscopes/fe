@@ -1,0 +1,36 @@
+// A3 (guard G1): a saturated applied GAT projection `EvmBackend::Ptr<u32>`
+// resolves through the concrete impl. Before A3 this errored with a kind/arg
+// mismatch (the impl RHS was applied to the segment args); now the applied
+// projection is the normalizer's single source of truth.
+//
+// NOTE: the impl RHS bodies here are argument-independent (`= u256`). A
+// projection whose RHS THREADS its own generic parameter (`type Ptr<T> = Arr<T>`)
+// additionally needs the associated-type generic-param SCOPE wiring, which A1/A2
+// left as a TODO (`scope_builder.rs`, `add_trait_type_scope`); see the A3
+// BUILD_LOG entry. The confluence machinery (G1/G2/G3) is complete and lands
+// here; the arg-threading fixture is a follow-up once that scope wiring exists.
+
+trait Backend {
+    type Ptr<T>
+    type Word
+}
+
+struct EvmBackend {}
+
+impl Backend for EvmBackend {
+    type Ptr<T> = u256
+    type Word = u256
+}
+
+fn takes_word(_ a: u256) {}
+
+// Signature + body: the projection must be definitionally equal to u256.
+fn projects(p: EvmBackend::Ptr<u32>) {
+    takes_word(p)
+}
+
+// The opaque generic form stays well-typed (no impl to project through), and the
+// bare GAT head is left opaque rather than mangled.
+fn generic_ptr<B: Backend>(p: B::Ptr<u32>) -> B::Ptr<u32> {
+    p
+}

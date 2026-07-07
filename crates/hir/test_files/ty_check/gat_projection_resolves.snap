@@ -1,0 +1,52 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/gat_projection_resolves.fe
+---
+note:
+   ┌─ gat_projection_resolves.fe:25:26
+   │
+25 │ fn takes_word(_ a: u256) {}
+   │                          ^^ ()
+
+note:
+   ┌─ gat_projection_resolves.fe:28:38
+   │
+28 │   fn projects(p: EvmBackend::Ptr<u32>) {
+   │ ╭──────────────────────────────────────^
+29 │ │     takes_word(p)
+30 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_projection_resolves.fe:29:5
+   │
+29 │     takes_word(p)
+   │     ^^^^^^^^^^ fn takes_word
+
+note:
+   ┌─ gat_projection_resolves.fe:29:5
+   │
+29 │     takes_word(p)
+   │     ^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_projection_resolves.fe:29:16
+   │
+29 │     takes_word(p)
+   │                ^ u256
+
+note:
+   ┌─ gat_projection_resolves.fe:34:59
+   │
+34 │   fn generic_ptr<B: Backend>(p: B::Ptr<u32>) -> B::Ptr<u32> {
+   │ ╭───────────────────────────────────────────────────────────^
+35 │ │     p
+36 │ │ }
+   │ ╰─^ B::Ptr<u32>
+
+note:
+   ┌─ gat_projection_resolves.fe:35:5
+   │
+35 │     p
+   │     ^ B::Ptr<u32>

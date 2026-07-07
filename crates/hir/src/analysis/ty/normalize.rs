@@ -11,13 +11,14 @@ use common::indexmap::IndexMap;
 use rustc_hash::FxHashMap;
 
 use super::{
+    binder::Binder,
     canonical::Canonical,
     canonical::Canonicalized,
     fold::{TyFoldable, TyFolder},
     trait_def::{TraitInstId, impls_for_ty_with_constraints},
     trait_resolution::{PredicateListId, ProvisionEnv},
     ty_def::{AssocTy, TyData, TyId, TyParam},
-    visitor::{TyVisitable, TyVisitor},
+    visitor::{TyVisitable, TyVisitor, walk_ty},
 };
 use crate::analysis::{
     HirAnalysisDb,
@@ -41,12 +42,29 @@ pub fn normalize_ty<'db>(
     ty.fold_with(db, &mut normalizer)
 }
 
+/// Normalizer-local step budget for GAT projection (guard G3, steering-05 sec
+/// 3.3). Projection is NOT structurally decreasing (`type L<T> = Foo::L<Box<T>>`
+/// mints a strictly growing chain of pairwise-distinct interned redexes that the
+/// in-progress cycle marker never revisits), so termination is by counter, not by
+/// structure. On exhaustion projection degrades to the OPAQUE canonical form (the
+/// same "leave unresolved" degrade the cycle guard uses). Constant and tunable;
+/// deliberately NOT part of any salsa memo key (`TypeNormalizer` is a plain
+/// folder, so this counter cannot poison a memo). Shared across the bare and
+/// applied projection routes, covering the bare-route growth cousin for free.
+const PROJECTION_STEP_BUDGET: usize = 256;
+
 pub struct TypeNormalizer<'db> {
     db: &'db dyn HirAnalysisDb,
     scope: ScopeId<'db>,
     assumptions: PredicateListId<'db>,
-    // Projection cache: None = in progress (cycle guard), Some(ty) = normalized result
-    cache: FxHashMap<AssocTy<'db>, Option<TyId<'db>>>,
+    // Projection cache: None = in progress (cycle guard), Some(ty) = normalized
+    // result. Keyed on the FULL canonical redex `TyId` (guard G2): the applied
+    // form `B::Buffer<u32>` and `B::Buffer<u8>` must not conflate, and a bare
+    // `AssocTy` head keys on its own node. Interning preserves the sharing the
+    // old `AssocTy`-struct key gave.
+    cache: FxHashMap<TyId<'db>, Option<TyId<'db>>>,
+    // Shared projection step counter for G3 (see `PROJECTION_STEP_BUDGET`).
+    projection_steps: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -97,6 +115,7 @@ impl<'db> TypeNormalizer<'db> {
             scope,
             assumptions,
             cache: FxHashMap::default(),
+            projection_steps: 0,
         }
     }
 }
@@ -113,7 +132,23 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                 ty
             }
             TyData::AssocTy(assoc_ty) => {
-                match self.cache.entry(*assoc_ty) {
+                // Guard G1 (bare arm): a bare GAT head `B::Buffer` (decl carries
+                // generic params) is UNSATURATED by definition. Resolving it in
+                // isolation is meaningless: `ImplementorId::assoc_ty` returns the
+                // impl RHS with the assoc def's own params dangling, so any
+                // resolution here would be wrong. Leave it OPAQUE (still fold
+                // internals so the trait self type normalizes). The applied form
+                // is projected by the dedicated arm in `_` below; a bare GAT head
+                // used AT `* -> *` kind is un-projectable by construction (its
+                // diagnostic belongs to A4/A5, not here; A3 must only not mangle
+                // it).
+                if self.assoc_decl_arity(assoc_ty) > 0 {
+                    let folded = ty.super_fold_with(db, self);
+                    return folded;
+                }
+
+                // G2: key the projection cache on the node itself.
+                match self.cache.entry(ty) {
                     Entry::Occupied(entry) => match entry.get() {
                         Some(cached) => return *cached,
                         None => return ty, // cycle: leave unresolved
@@ -123,18 +158,51 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                     }
                 }
 
+                // NOTE (deviation from steering-05 sec 3.3, measured): the G3 step
+                // budget is charged on the APPLIED route only, NOT here. The bare
+                // route retains its pre-A3 discipline (the in-progress `None`
+                // cycle guard above). Sharing the counter across the bare route
+                // regressed breadth-heavy normalizations (a single effect/contract
+                // `normalize_ty` legitimately resolves well over 256 DISTINCT bare
+                // associated types, which is breadth, not the divergence depth G3
+                // targets). The bare-route growth cousin is UNVERIFIED/unreachable
+                // today (steering's own note); if it ever surfaces it needs a
+                // depth-scoped guard, not a breadth counter.
                 if let Some(replacement) = self.try_resolve_assoc_ty(ty, assoc_ty) {
                     let normalized = self.fold_ty(db, replacement);
-                    self.cache.insert(*assoc_ty, Some(normalized));
+                    self.cache.insert(ty, Some(normalized));
                     return normalized;
                 }
 
                 // Not resolved; still fold internals (e.g., normalize self type)
                 let folded = ty.super_fold_with(db, self);
-                self.cache.insert(*assoc_ty, Some(folded));
+                self.cache.insert(ty, Some(folded));
                 folded
             }
             _ => {
+                // Guard G1 (applied arm): the applied GAT projection form
+                // `TyApp*(AssocTy(inst, name), a1..ak)`. `decompose_ty_app` peels
+                // the full spine; a bare-`AssocTy` base with a nonempty spine is
+                // exactly `B::Buffer<..>`. The generic `super_fold_with` path is
+                // WRONG for it (it folds the bare `AssocTy` head in isolation,
+                // hitting the wrong resolution and then re-applying the spine args
+                // on top, an `ArgNumMismatch`/`KindMismatch`), so it gets its own
+                // arm. This keeps the normalizer the single source of truth for
+                // GAT projection (steering-05 sec 4).
+                let (base, spine) = ty.decompose_ty_app(self.db);
+                if !spine.is_empty()
+                    && let TyData::AssocTy(assoc) = base.data(self.db)
+                    // Only a GAT (the decl carries generic params) is a projection
+                    // redex in applied form. A NON-generic associated type whose
+                    // VALUE is a `* -> *` constructor (`type Foo = SomeCtor`, used
+                    // as `T::Foo<X>`) is NOT a GAT: it must keep the pre-A3 path
+                    // (resolve the bare head, then apply the spine), so it is left
+                    // to `super_fold_with` below.
+                    && self.assoc_decl_arity(assoc) > 0
+                {
+                    return self.project_applied(*assoc, spine);
+                }
+
                 // Second line of the S1.5 containment (the path-lowering site is
                 // the first): a substitution-formed ground type-fn application
                 // reduces to its concrete normal form here, so `TyBase::TypeFn`
@@ -151,6 +219,101 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
 }
 
 impl<'db> TypeNormalizer<'db> {
+    /// The number of generic parameters the associated type's DECL carries
+    /// (the authority for saturation, per the A2 kind arm). Zero for a plain
+    /// associated type.
+    fn assoc_decl_arity(&self, assoc: &AssocTy<'db>) -> usize {
+        assoc
+            .trait_
+            .def(self.db)
+            .assoc_ty(self.db, assoc.name)
+            .map(|decl| decl.generic_params.len(self.db))
+            .unwrap_or(0)
+    }
+
+    /// Guard G1 (applied arm): project a saturated applied GAT
+    /// `TyApp*(AssocTy(inst, name), a1..ak)` through its impl.
+    ///
+    /// Canonical order (steering-05 sec 3.1): (1) fold the spine arguments with
+    /// the SAME normalizer (a ground type-fn argument reaches combinator normal
+    /// form here, UNFOLD-before-PROJECT); (2) rebuild the canonical redex `proj`
+    /// and consult/enter the cycle-guard cache under its full `TyId` (G2); (3)
+    /// resolve the impl and substitute the assoc def's own params with the
+    /// normalized args by index; (4) re-fold the substituted RHS (catching
+    /// substitution-formed ground type-fn apps); (5) on failure / arity mismatch
+    /// / budget / cycle, return the OPAQUE canonical form `proj`.
+    fn project_applied(&mut self, assoc: AssocTy<'db>, spine: &[TyId<'db>]) -> TyId<'db> {
+        // Step 1: fold the spine arguments and the trait instance.
+        let args: Vec<TyId<'db>> = spine.iter().map(|a| self.fold_ty(self.db, *a)).collect();
+        let folded_trait = assoc.trait_.fold_with(self.db, self);
+        let folded_assoc = AssocTy {
+            trait_: folded_trait,
+            name: assoc.name,
+        };
+
+        // Step 2: rebuild the canonical redex and enter the cache (G2).
+        let head = TyId::assoc_ty(self.db, folded_trait, assoc.name);
+        let proj = TyId::foldl(self.db, head, &args);
+
+        match self.cache.entry(proj) {
+            Entry::Occupied(entry) => match entry.get() {
+                Some(cached) => return *cached,
+                None => return proj, // cycle: opaque canonical form
+            },
+            Entry::Vacant(entry) => {
+                entry.insert(None);
+            }
+        }
+
+        // Arity guard: only a spine that exactly saturates the decl is a
+        // projectable redex. A non-generic assoc type reached in applied form, or
+        // a spine longer/shorter than `k`, is left opaque (kind-impossible
+        // post-A2 for `*`-returning GATs; conformance is A4's job).
+        if self.assoc_decl_arity(&folded_assoc) != args.len() {
+            self.cache.insert(proj, Some(proj));
+            return proj;
+        }
+
+        // Step G3: charge the shared projection budget; degrade to opaque on
+        // exhaustion (projection is not structurally decreasing).
+        self.projection_steps += 1;
+        if self.projection_steps > PROJECTION_STEP_BUDGET {
+            self.cache.insert(proj, Some(proj));
+            return proj;
+        }
+
+        // Steps 3-4: resolve the impl RHS, substitute the args by param index,
+        // re-fold the substituted RHS.
+        if let Some(rhs) = self.try_resolve_assoc_ty(head, &folded_assoc) {
+            let substituted = self.subst_gat_args(rhs, &args);
+            let normalized = self.fold_ty(self.db, substituted);
+            self.cache.insert(proj, Some(normalized));
+            return normalized;
+        }
+
+        // Step 5: unresolved (generic `B`, ambiguity) -> opaque canonical form.
+        self.cache.insert(proj, Some(proj));
+        proj
+    }
+
+    /// Substitute the resolved impl RHS's free parameters (the assoc definition's
+    /// own generic params, positional) with the projection arguments by index.
+    ///
+    /// For an argument-independent RHS (`type Ptr<T> = u256`) there are no free
+    /// params and this is the identity. When the RHS threads its params
+    /// (`type Buffer<T> = Store<T>`), each is a positional `TyParam` and
+    /// `Binder::instantiate` maps it by index. The substitution is applied only
+    /// when every free param index is in range (`< args.len()`), so it can never
+    /// index out of bounds; an out-of-range RHS (a param shape A3 does not cover)
+    /// is returned unsubstituted and the re-fold leaves it opaque.
+    fn subst_gat_args(&self, rhs: TyId<'db>, args: &[TyId<'db>]) -> TyId<'db> {
+        match max_free_param_idx(self.db, rhs) {
+            None => rhs,
+            Some(max) if max < args.len() => Binder::bind(rhs).instantiate(self.db, args),
+            Some(_) => rhs,
+        }
+    }
+
     fn try_resolve_assoc_ty(&mut self, ty: TyId<'db>, assoc: &AssocTy<'db>) -> Option<TyId<'db>> {
         // 1) Check if the trait instance itself carries an explicit binding
         if let Some(&bound_ty) = assoc.trait_.assoc_type_bindings(self.db).get(&assoc.name) {
@@ -301,4 +464,49 @@ impl<'db> TypeNormalizer<'db> {
             _ => None,
         }
     }
+}
+
+/// The maximum index among a type's free (non-effect) type/const parameters, or
+/// `None` if it has none. Used by GAT projection to decide whether the resolved
+/// impl RHS can be safely instantiated with the projection arguments by index. A
+/// trait-`Self` parameter forces `usize::MAX` so the caller's `max < args.len()`
+/// range check declines substitution (`Self` is never a GAT argument).
+fn max_free_param_idx<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<usize> {
+    struct ParamScan<'db> {
+        db: &'db dyn HirAnalysisDb,
+        max: Option<usize>,
+    }
+    impl<'db> ParamScan<'db> {
+        fn record(&mut self, param: &TyParam<'db>) {
+            let idx = if param.is_trait_self() {
+                usize::MAX
+            } else {
+                param.idx
+            };
+            self.max = Some(self.max.map_or(idx, |m| m.max(idx)));
+        }
+    }
+    impl<'db> TyVisitor<'db> for ParamScan<'db> {
+        fn db(&self) -> &'db dyn HirAnalysisDb {
+            self.db
+        }
+        fn visit_ty(&mut self, ty: TyId<'db>) {
+            match ty.data(self.db) {
+                TyData::TyParam(param) if !param.is_effect() => self.record(param),
+                TyData::ConstTy(const_ty) => {
+                    if let super::const_ty::ConstTyData::TyParam(param, _) = const_ty.data(self.db) {
+                        if !param.is_effect() {
+                            self.record(param);
+                        }
+                    } else {
+                        walk_ty(self, ty);
+                    }
+                }
+                _ => walk_ty(self, ty),
+            }
+        }
+    }
+    let mut scan = ParamScan { db, max: None };
+    ty.visit_with(&mut scan);
+    scan.max
 }

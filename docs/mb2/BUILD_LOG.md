@@ -101,3 +101,91 @@ type's kind is now derived from its own generic params.
 - NEXT: A3 (STEERING before build) = GAT projection resolution +
   `gat_typefn_confluence.fe` (`B::Buffer<RBin<3><u32>>`), which needs a Fable
   steering pass first per the ladder. Not started.
+
+## 2026-07-07 - Slice A3: GAT projection / type-fn unfold confluence core
+
+Implemented the confluence CORE per steering-05 (guards G1/G2/G3): the normalizer
+is now the single source of truth for GAT projection, and the projection and
+type-fn reductions interleave confluently in one bottom-up fold pass (no global
+fixpoint loop).
+
+- **G1 (applied-form arm)**, `normalize.rs` `TypeNormalizer::fold_ty`: the `_`
+  arm now intercepts a `TyApp*(AssocTy(inst, name), a1..ak)` whose decl carries
+  generic params (a GAT), BEFORE `super_fold_with` would fold the bare `AssocTy`
+  head in isolation (which returns the impl RHS with the assoc def's own params
+  dangling, then re-applies the spine and errors). `project_applied` runs the
+  canonical order: fold the spine args (UNFOLD-before-PROJECT), rebuild the
+  canonical redex `proj`, resolve the impl, substitute the assoc def's own params
+  by index (`subst_gat_args`, range-guarded so it is panic-free and an identity
+  for arg-independent RHS bodies), then RE-FOLD the substituted RHS. The bare
+  `AssocTy` arm gained the mirror guard: a bare GAT head (`decl` has generic
+  params) DECLINES resolution and is left opaque (unsaturated by construction;
+  its diagnostic is A4/A5). Non-generic associated types applied to args
+  (`type Foo = SomeCtor`, `T::Foo<X>`, `* -> *` value) are explicitly NOT GATs and
+  keep the pre-A3 path (resolve the bare head, then apply) - the applied arm and
+  the bare guard both gate on `assoc_decl_arity > 0`. Regression-checked: gating
+  on arity was load-bearing (an early cut that intercepted every
+  `TyApp(AssocTy, _)` broke effect/contract normalization; all 112 ty_check
+  fixtures green after the arity gate).
+- **G1 mirror**, `path_resolver.rs` `find_associated_type` dedup loop (~:1048):
+  for a GAT candidate the impls route hands back the impl RHS; foldl-applying the
+  segment args onto that `*`-kinded RHS errored (`ArgNumMismatch`/`KindMismatch`).
+  Now, when the assoc decl has generic params, the candidate is the OPAQUE
+  projection node `TyId::assoc_ty(inst, name)`, so the foldl builds the
+  well-kinded applied form and the existing `normalize_ty` projects it through the
+  ONE engine (the new arm). No second substitution path.
+- **G2 (cache re-key)**, `normalize.rs`: the projection memo/cycle-guard is
+  re-keyed from `FxHashMap<AssocTy, _>` to `FxHashMap<TyId, _>`, keyed on the full
+  canonical redex node (`proj` for applied, the bare node for bare). Interning
+  makes this a bijection with the old key for the bare case and additionally keeps
+  `B::Buffer<u32>` and `B::Buffer<u8>` from conflating.
+- **G3 (step budget)**, `normalize.rs`: a normalizer-local
+  `PROJECTION_STEP_BUDGET = 256` charged on the APPLIED projection route degrades a
+  non-structurally-decreasing projection (`type L<T> = Foo::L<Box<T>>`) to the
+  OPAQUE canonical form instead of diverging. Budget lives in the folder, never in
+  a salsa memo key. DEVIATION from steering sec 3.3 (measured): the counter is NOT
+  shared with the bare route. Sharing it regressed breadth-heavy normalizations (a
+  single effect/contract `normalize_ty` legitimately resolves well over 256
+  DISTINCT bare associated types - breadth, not the divergence depth G3 targets).
+  The bare route keeps its pre-existing `None` in-progress cycle guard; its growth
+  cousin is UNVERIFIED/unreachable today (steering's own note) and, if it ever
+  surfaces, needs a depth-scoped guard, not a breadth counter.
+- Tests (`type_fn_induct` module): `gat_applied_projection_resolves_through_impl`
+  (`EvmBackend::Ptr<u32>` -> `u256` by interned id, was `invalid(KindMismatch)`
+  pre-A3; distinct-arg key also resolves; idempotent),
+  `gat_projection_folds_ground_type_fn_arg` (the ground type-fn ARG `RBin<Pair,3>`
+  folds during step 1, projection resolves, no `TyBase::TypeFn` leaks,
+  `find_unsaturated_type_fn` silent), `typefn_ground_normalization_through_folder_unchanged`
+  (regression guard for the `_`-arm restructuring: ground normalization + NF fixed
+  point), `gat_projection_symbolic_type_fn_arg_stays_opaque` (`RBin<F, N>` with `N`
+  rigid stays opaque under normalization, bare and under a projection wrapper).
+  Fixture `gat_projection_resolves.fe` (zero-diagnostic): `EvmBackend::Ptr<u32>`
+  projects through the impl to `u256` (the `takes_word(p)` teeth type-check), and
+  the generic `B::Ptr<u32>` / bare GAT head stay opaque.
+- Verify: `cargo check --workspace` clean; ty_check 112/112 (incl. the new
+  fixture), `analysis::ty::type_fn` 60/60, constraints 14/14,
+  trait_resolution_conformance 25/25, the 4 new A3 unit tests green. Full release
+  CI at the A3/A4 milestone boundary is the orchestrator's run.
+- MEASURED BLOCKER (the remainder, blocks the full three-way fixture): the
+  associated-type generic-param SCOPE wiring that A1/A2 left as a TODO
+  (`scope_builder.rs::add_trait_type_scope`, "Add generic param scopes for
+  trait_type.generic_params") is NOT done. Consequence, measured on day one: an
+  impl RHS that THREADS its own generic param (`type Buffer<T> = Store<T>`) lowers
+  to `Store<invalid(PathResolutionFailed(T)))` because `T` is not in the scope
+  graph (`GenericParamOwner` has no assoc-type variant; assoc-type params have no
+  `ScopeId`). So today every resolvable projection is argument-INDEPENDENT, which
+  is why the fixtures/tests above use `= u256`-style RHS bodies. The full
+  steering-05 deliverables that need arg-threaded results - the three-way
+  interned-id assertion `a == b == c` on `Store<RBin<Pair,3>>`, the G2
+  anti-conflation OBSERVATION (`Buffer<u32>` vs `Buffer<u8>` differing), the
+  symbolic-opaque `Store<RBin<F,N>>`, and a G3 divergence fixture - all require
+  this wiring. It is a genuine gap in the D1 reland (A1/A2 fixtures never used a
+  GAT param in an RHS, so they did not catch it), not A3 confluence work. The
+  confluence machinery here is complete and correct-by-construction for the
+  threaded case; it becomes end-to-end the moment the scope wiring lands.
+- NEXT (recommended, steering-before-build): a prerequisite slice A2b = wire the
+  associated-type generic-param scope (new `ScopeId` variant or `GenericParamOwner`
+  extension for trait-type / impl-assoc-type params + `scope_builder` nodes +
+  `path_resolver` resolution), which unblocks the full A3 fixtures; THEN A4 (GAT
+  impl conformance). A4's arity check depends on the same decl-authority the G1
+  arity gate uses.

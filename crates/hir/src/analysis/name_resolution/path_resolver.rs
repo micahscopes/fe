@@ -1046,10 +1046,29 @@ where
             );
             let mut dedup: IndexMap<TyId<'db>, (TraitInstId<'db>, TyId<'db>)> = IndexMap::new();
             for (inst, ty_candidate) in assoc_tys.iter().copied() {
-                let applied = if seg_args.is_empty() {
-                    ty_candidate
+                // Guard G1 mirror (steering-05 sec 4 item 6): for a GENERIC
+                // associated type (a GAT), the impls route hands back the impl
+                // RHS as the candidate; foldl-applying the segment args on top of
+                // that `*`-kinded RHS errors (`ArgNumMismatch` / `KindMismatch`).
+                // Instead, the candidate must be the OPAQUE projection node so the
+                // foldl builds the well-kinded applied form `B::Buffer<..>` and the
+                // `normalize_ty` below projects it through the ONE engine (the
+                // normalizer's applied-projection arm). This keeps the normalizer
+                // the single source of truth for GAT projection; there is no second
+                // substitution path here.
+                let is_gat = inst
+                    .def(db)
+                    .assoc_ty(db, ident)
+                    .is_some_and(|decl| decl.generic_params.len(db) > 0);
+                let candidate = if is_gat {
+                    TyId::assoc_ty(db, inst, ident)
                 } else {
-                    TyId::foldl(db, ty_candidate, &seg_args)
+                    ty_candidate
+                };
+                let applied = if seg_args.is_empty() {
+                    candidate
+                } else {
+                    TyId::foldl(db, candidate, &seg_args)
                 };
                 if let TyData::Invalid(InvalidCause::TooManyGenericArgs { expected, given }) =
                     applied.data(db)

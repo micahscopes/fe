@@ -1623,4 +1623,238 @@ recursive type fn LPow<F, const N: usize>() -> (*) {
             "without `F: Reduce` the engine must decline (the proof power is non-vacuous)"
         );
     }
+
+    // ------------------------------------------------------------------
+    // A3: GAT projection / type-fn unfold confluence (steering-05).
+    //
+    // NOTE on scope: the impl associated-type RHS bodies below are
+    // argument-INDEPENDENT (`= u256`). A projection whose RHS threads its own
+    // generic parameter (`type Buffer<T> = Store<T>`) additionally needs the
+    // associated-type generic-param SCOPE wiring, which A1/A2 left as a TODO
+    // (`scope_builder.rs::add_trait_type_scope`): today such an RHS lowers to
+    // `Store<invalid(PathResolutionFailed(T))>` because `T` is not in the scope
+    // graph. The confluence MACHINERY (G1 applied-form arm + mirror, G2 cache
+    // re-key, G3 step budget) is complete and exercised here for what the scope
+    // supports; the full three-way `Store<RBin<..>>` interned-id assertion and
+    // the G2 anti-conflation observation land once that scope wiring exists.
+    // ------------------------------------------------------------------
+
+    const GAT_FIXTURES: &str = r#"
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+trait Backend {
+    type Ptr<T>
+    type Buffer<T>
+    type Word
+}
+
+struct EvmBackend {}
+struct EvmB {}
+
+impl Backend for EvmBackend {
+    type Ptr<T> = u256
+    type Buffer<T> = u256
+    type Word = u256
+}
+
+impl Backend for EvmB {
+    type Ptr<T> = u256
+    type Buffer<T> = u256
+    type Word = u256
+}
+"#;
+
+    fn prim<'db>(db: &'db HirAnalysisTestDb, prim: PrimTy) -> TyId<'db> {
+        TyId::new(db, TyData::TyBase(TyBase::Prim(prim)))
+    }
+
+    /// Guard G1 (applied arm): a saturated applied GAT projection
+    /// `EvmBackend::Ptr<u32>` resolves through the concrete impl to its RHS,
+    /// instead of the pre-A3 `invalid(KindMismatch)` (the bare-head resolution
+    /// followed by re-applying the spine args). Guard G2: a DISTINCT argument
+    /// keys a distinct cache slot and also resolves (no conflation, no crash).
+    #[test]
+    fn gat_applied_projection_resolves_through_impl() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_proj_resolve.fe"), GAT_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let evm = adt_ty(&db, top_mod, "EvmBackend");
+        let inst = TraitInstId::new_simple(&db, backend, vec![evm]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Ptr".to_string()));
+        let scope = top_mod.scope();
+        let empty = PredicateListId::empty_list(&db);
+        let u256 = prim(&db, PrimTy::U256);
+
+        let p32 = TyId::foldl(&db, head, &[prim(&db, PrimTy::U32)]);
+        let p8 = TyId::foldl(&db, head, &[prim(&db, PrimTy::U8)]);
+        // The applied form is a well-kinded `TyApp(AssocTy, arg)`, not an
+        // `Invalid`: the mirror fix keeps the projection node opaque so the
+        // spine builds cleanly.
+        assert!(
+            matches!(p32.data(&db), TyData::TyApp(..)),
+            "applied projection must be a well-kinded TyApp, got {}",
+            p32.pretty_print(&db)
+        );
+
+        // G1: resolves through the impl.
+        assert_eq!(
+            normalize_ty(&db, p32, scope, empty),
+            u256,
+            "EvmBackend::Ptr<u32> must project to u256"
+        );
+        // G2: the distinct-arg key resolves too (no conflation / crash).
+        assert_eq!(normalize_ty(&db, p8, scope, empty), u256);
+        // Idempotence.
+        let n = normalize_ty(&db, p32, scope, empty);
+        assert_eq!(normalize_ty(&db, n, scope, empty), n);
+    }
+
+    /// The canonical order (UNFOLD-before-PROJECT): the ground type-fn ARGUMENT
+    /// `RBin<Pair, 3>` reaches its combinator normal form during step 1, then the
+    /// projection resolves through the impl. No `TyBase::TypeFn` head leaks and
+    /// the saturation invariant holds (`find_unsaturated_type_fn` is silent).
+    #[test]
+    fn gat_projection_folds_ground_type_fn_arg() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::analysis::ty::ty_def::find_unsaturated_type_fn;
+        use crate::analysis::ty::type_fn::{collect_type_fn_heads, type_fn_app_head};
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_proj_tf_arg.fe"), GAT_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let backend = find_trait(&db, top_mod, "Backend");
+        let evmb = adt_ty(&db, top_mod, "EvmB");
+        let inst = TraitInstId::new_simple(&db, backend, vec![evmb]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
+
+        let rbin = find_tf(&db, top_mod, "RBin");
+        let pair = adt_ty(&db, top_mod, "Pair");
+        let arg = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[pair, usize_subject(&db, 3)]);
+        assert!(
+            type_fn_app_head(&db, arg).is_some(),
+            "the argument is a live ground type-fn app"
+        );
+
+        let applied = TyId::foldl(&db, head, &[arg]);
+        let norm = normalize_ty(
+            &db,
+            applied,
+            top_mod.scope(),
+            PredicateListId::empty_list(&db),
+        );
+        // T-independent RHS: projects to the concrete u256; no head leaked.
+        assert_eq!(norm, prim(&db, PrimTy::U256));
+        assert!(
+            collect_type_fn_heads(&db, norm).is_empty(),
+            "no type-fn head may survive: {}",
+            norm.pretty_print(&db)
+        );
+        assert!(
+            find_unsaturated_type_fn(&db, norm).is_none(),
+            "saturation invariant must hold"
+        );
+    }
+
+    /// Regression guard for the A3 `_`-arm restructuring: `normalize_ty` (the
+    /// `TypeNormalizer` folder, now carrying the applied-projection arm) still
+    /// reduces a ground type-fn application to its combinator normal form, and the
+    /// normal form is a fixed point (idempotence, either entry order agrees).
+    #[test]
+    fn typefn_ground_normalization_through_folder_unchanged() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_tf_conf.fe"), GAT_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let rbin = find_tf(&db, top_mod, "RBin");
+        let pair = adt_ty(&db, top_mod, "Pair");
+        let par = adt_ty(&db, top_mod, "Par");
+        let comp = adt_ty(&db, top_mod, "Comp");
+        let scope = top_mod.scope();
+        let empty = PredicateListId::empty_list(&db);
+
+        let app = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[pair, usize_subject(&db, 3)]);
+        // Hand-built NF: Comp<Comp<Comp<Par, Pair>, Pair>, Pair>.
+        let c1 = TyId::foldl(&db, comp, &[par, pair]);
+        let c2 = TyId::foldl(&db, comp, &[c1, pair]);
+        let c3 = TyId::foldl(&db, comp, &[c2, pair]);
+
+        let a = normalize_ty(&db, app, scope, empty);
+        assert_eq!(a, c3, "ground type-fn app must fold to the NF through the folder");
+        assert_eq!(normalize_ty(&db, c3, scope, empty), c3, "NF is a fixed point");
+        assert_eq!(normalize_ty(&db, a, scope, empty), a, "idempotent");
+    }
+
+    /// The symbolic case: a `RBin<F, N>` argument with `N` a rigid symbolic const
+    /// param stays OPAQUE under normalization (no unfold, no crash) both bare and
+    /// under a projection wrapper. The saturation invariant is intact.
+    #[test]
+    fn gat_projection_symbolic_type_fn_arg_stays_opaque() {
+        use crate::analysis::ty::normalize::normalize_ty;
+        use crate::analysis::ty::trait_resolution::PredicateListId;
+        use crate::analysis::ty::ty_def::find_unsaturated_type_fn;
+        use crate::analysis::ty::ty_lower::collect_generic_params;
+        use crate::analysis::ty::type_fn::type_fn_app_head;
+        use crate::core::hir_def::GenericParamOwner;
+        use crate::hir_def::IdentId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("gat_proj_sym.fe"), GAT_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+
+        let rbin = find_tf(&db, top_mod, "RBin");
+        let params = collect_generic_params(&db, GenericParamOwner::TypeFn(rbin));
+        let f = params.param_by_original_idx(&db, 0).expect("RBin.T");
+        let n = params.param_by_original_idx(&db, 1).expect("RBin.N");
+        let sym = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[f, n]);
+        assert!(
+            type_fn_app_head(&db, sym).is_some(),
+            "symbolic app must carry a live type-fn head"
+        );
+
+        // In a generic context, the symbolic subject keeps the app opaque.
+        let scope = rbin.scope();
+        let empty = PredicateListId::empty_list(&db);
+        let nf = normalize_ty(&db, sym, scope, empty);
+        assert!(
+            type_fn_app_head(&db, nf).is_some(),
+            "symbolic app must stay opaque (no unfold), got {}",
+            nf.pretty_print(&db)
+        );
+        assert!(
+            find_unsaturated_type_fn(&db, nf).is_none(),
+            "the opaque symbolic app is saturated"
+        );
+
+        // Projecting over the symbolic arg must not crash. B is concrete (EvmB),
+        // so the projection resolves (arg-independent RHS -> u256); the point is
+        // that folding the symbolic arg in step 1 neither unfolds nor panics.
+        let backend = find_trait(&db, top_mod, "Backend");
+        let evmb = adt_ty(&db, top_mod, "EvmB");
+        let inst = TraitInstId::new_simple(&db, backend, vec![evmb]);
+        let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
+        let applied = TyId::foldl(&db, head, &[sym]);
+        let norm = normalize_ty(&db, applied, top_mod.scope(), empty);
+        assert_eq!(norm, prim(&db, PrimTy::U256));
+    }
 }
