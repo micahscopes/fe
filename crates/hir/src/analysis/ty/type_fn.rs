@@ -644,7 +644,7 @@ impl<'db> Checker<'db> {
 
 /// Resolves a single-segment path's leaf name to a scope via the early name
 /// resolver (no generic-argument lowering).
-fn resolve_leaf_scope<'db>(
+pub(super) fn resolve_leaf_scope<'db>(
     db: &'db dyn HirAnalysisDb,
     path: PathId<'db>,
     scope: ScopeId<'db>,
@@ -656,7 +656,7 @@ fn resolve_leaf_scope<'db>(
 
 /// The root expression of a const-argument body, unwrapping a single-statement
 /// block (the parser wraps a braced subject `{N - 1}` in a block).
-fn body_root_expr<'db>(db: &'db dyn HirAnalysisDb, body: Body<'db>) -> Option<Expr<'db>> {
+pub(super) fn body_root_expr<'db>(db: &'db dyn HirAnalysisDb, body: Body<'db>) -> Option<Expr<'db>> {
     let root_id = body.expr(db);
     let root = body.exprs(db)[root_id].clone().to_opt();
     if let Some(Expr::Block(stmts)) = &root
@@ -694,7 +694,10 @@ fn expr_int_lit<'db>(
 }
 
 /// The bare identifier a type is, if it is a single-segment path with no args.
-fn bare_path_ident<'db>(db: &'db dyn HirAnalysisDb, ty: TypeId<'db>) -> Option<IdentId<'db>> {
+pub(super) fn bare_path_ident<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TypeId<'db>,
+) -> Option<IdentId<'db>> {
     match ty.data(db) {
         TypeKind::Path(Partial::Present(path)) => path.as_ident(db),
         _ => None,
@@ -705,7 +708,7 @@ fn bare_path_ident<'db>(db: &'db dyn HirAnalysisDb, ty: TypeId<'db>) -> Option<I
 /// (Fable steering finding 2 cross-check). Because type-fn occurrences are
 /// always in head position of a saturated `TyApp` spine, this is exactly the set
 /// of type-fn references in the type.
-fn collect_type_fn_heads<'db>(
+pub(super) fn collect_type_fn_heads<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: crate::analysis::ty::ty_def::TyId<'db>,
 ) -> Vec<TypeFnDef<'db>> {

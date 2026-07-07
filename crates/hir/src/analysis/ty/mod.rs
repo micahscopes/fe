@@ -52,6 +52,7 @@ pub(crate) mod scratch;
 pub mod term;
 pub mod trait_def;
 pub mod type_fn;
+pub(crate) mod type_fn_induct;
 pub mod trait_lower;
 pub mod trait_resolution; // This line was previously 'pub mod name_resolution;'
 pub mod ty_check;

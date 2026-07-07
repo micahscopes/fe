@@ -1667,6 +1667,14 @@ impl<'db> TyParam<'db> {
         matches!(self.variant, Variant::Implicit)
     }
 
+    /// `true` iff this is an induction-engine opaque (type-fn CTFE slice S2.2a).
+    /// Load-bearing: the strict engine mints these as rigid IH placeholders, and
+    /// leak tripwires assert an induction opaque never reaches a stored/MIR/source
+    /// position (see [`Self::original_idx`] / [`Self::scope`], which panic on it).
+    pub fn is_induction(&self) -> bool {
+        matches!(self.variant, Variant::Induction)
+    }
+
     pub(super) fn normal_param(
         name: IdentId<'db>,
         idx: usize,
@@ -1724,6 +1732,32 @@ impl<'db> TyParam<'db> {
         }
     }
 
+    /// Mint a rigid induction-hypothesis opaque (type-fn CTFE slice S2.2a).
+    ///
+    /// A dedicated [`Variant::Induction`] (steering-04 C3): because `TyParam`
+    /// interns and unifies by the full tuple `(name, idx, kind, variant, owner)`
+    /// (`unify.rs` identity arm), the distinct variant alone makes an induction
+    /// opaque unequal to EVERY real param of the same owner, so it cannot
+    /// spuriously unify with one. It is still `TyParam`-shaped, so `visit_param`
+    /// sets `HAS_PARAM` (load-bearing: the solver's assumptions leg only fires for
+    /// param-carrying goals). `idx` should be minted past the owner's real param
+    /// count (belt over the variant's suspenders); the name is a reserved marker
+    /// that renders in diagnostics but cannot be a source identifier.
+    pub fn induction_opaque(
+        name: IdentId<'db>,
+        idx: usize,
+        kind: Kind,
+        scope: ScopeId<'db>,
+    ) -> Self {
+        Self {
+            name,
+            idx,
+            kind,
+            variant: Variant::Induction,
+            owner: scope,
+        }
+    }
+
     pub fn original_idx(&self, db: &'db dyn HirAnalysisDb) -> usize {
         match self.variant {
             Variant::Normal | Variant::TraitSelf => {
@@ -1737,6 +1771,13 @@ impl<'db> TyParam<'db> {
             Variant::Effect => self.idx,
             Variant::EffectProvider => self.idx,
             Variant::Implicit => self.idx,
+            // Leak tripwire (type-fn CTFE slice S2.2a): an induction opaque has no
+            // source-level generic param, so asking for its original source index
+            // means it escaped the strict engine into a generic-resolution
+            // position. That would be shared-state perturbation; fail loudly.
+            Variant::Induction => {
+                panic!("induction opaque leaked into `original_idx` (type-fn CTFE tripwire)")
+            }
         }
     }
 
@@ -1749,6 +1790,10 @@ impl<'db> TyParam<'db> {
             Variant::Effect => ScopeId::FuncParam(self.owner.item(), self.idx as u16),
             Variant::EffectProvider => self.owner,
             Variant::Implicit => self.owner,
+            // Leak tripwire (type-fn CTFE slice S2.2a): see `original_idx`.
+            Variant::Induction => {
+                panic!("induction opaque leaked into `scope` (type-fn CTFE tripwire)")
+            }
         }
     }
 }
@@ -1766,6 +1811,11 @@ enum Variant {
     EffectProvider,
     /// Synthetic generic parameter that does not map to a source-level generic parameter.
     Implicit,
+    /// Rigid induction-hypothesis opaque minted by the type-fn CTFE induction
+    /// engine (slice S2.2a). Never maps to a source param; distinct from every
+    /// other variant so it can never unify with a real param. It must never
+    /// escape the strict engine (leak tripwires in `original_idx`/`scope`).
+    Induction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::From, Update)]

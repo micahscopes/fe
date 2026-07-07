@@ -701,8 +701,12 @@ pub(crate) fn normalize_trait_inst_preserving_validity<'db>(
     }
 }
 
+// `pub(crate)` (steering-04 §5 "beyond a pub export if needed"): the type-fn
+// CTFE strict-satisfaction helper (`type_fn_induct::strict_prove`) calls this
+// tracked entry READ-ONLY. No behavior change: same tracked query every other
+// consumer reads, no new writes.
 #[salsa::tracked(return_ref)]
-fn is_query_satisfiable<'db>(
+pub(crate) fn is_query_satisfiable<'db>(
     db: &'db dyn HirAnalysisDb,
     origin_ingot: Ingot<'db>,
     query: Canonical<TraitSolverQuery<'db>>,

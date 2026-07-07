@@ -573,3 +573,123 @@ Verification: `cargo check --workspace` clean (no warnings); all 29
 tests. The debug tripwire is active during the cross-check (debug build) at each
 n and does not fire. Full release `nextest` CI is the orchestrator's at the
 slice boundary.
+
+## S2.2a: induction-engine preconditions (strict engine + opaque minting + minimal-class recognizer; ZERO proof power)
+
+Fable steering-04 §5 S2.2a. This slice lands the three trapdoor primitives the
+minimal induction engine (S2.2b) will consume, each executable and unit-tested
+now. It is INERT: every new item has ZERO non-test callers, nothing is wired into
+any discharge site, so it adds zero proof power and cannot perturb the baseline
+by construction.
+
+New file: `crates/hir/src/analysis/ty/type_fn_induct.rs` (module
+`analysis::ty::type_fn_induct`, `#![allow(dead_code)]` documenting the zero-caller
+state until S2.2b). Supporting additive changes: `is_query_satisfiable` bumped
+private -> `pub(crate)` (the "pub export if needed" the steering allows);
+`resolve_leaf_scope`/`body_root_expr`/`collect_type_fn_heads`/`bare_path_ident`
+in `type_fn.rs` bumped private -> `pub(super)` for read-only reuse; a dedicated
+`Variant::Induction` + `TyParam::induction_opaque`/`is_induction` in `ty_def.rs`.
+
+### 1. Strict satisfaction (steering-04 §1.2 / §1.3)
+
+`enum StrictResult { Proven, NotProven }` is a DISTINCT type from
+`GoalSatisfiability`, so no engine result can be routed through the permissive
+`is_satisfied` / UnSat-only WF pattern by accident. `NotProven` means "no lemma",
+never "refuted for all n" (no negative lemmas).
+
+`strict_prove(db, origin_ingot, goal, assumptions) -> StrictResult`
+(`origin_ingot` restored to the task shorthand because impl visibility is keyed
+on it): builds the SAME `CanonicalGoalQuery` the ordinary solver builds, runs a
+HAS_INVALID/HAS_VAR PRE-FLIGHT on the whole canonical query (goal + bound-extended
+assumptions) and declines before querying (`Invalid` unifies with everything, and
+`is_query_satisfiable` turns HAS_INVALID into `ContainsInvalid` which
+`is_satisfied` then passes: the two traps compose), then calls the EXISTING
+tracked `is_query_satisfiable` READ-ONLY and maps:
+
+- strict `Satisfied(_)` -> `Proven`
+- `NeedsConfirmation(_)` (empty = depth-cap give-up `proof_forest.rs:161-164`;
+  non-empty = multi-solution / coexistence) -> `NotProven`
+- `ContainsInvalid` -> `NotProven` (belt; unreachable after the pre-flight)
+- `UnSat(_)` -> `NotProven`
+
+No change to the global solver, `is_satisfied`, `GoalSatisfiability`, or the proof
+forest. Salsa: the strict path reads the same tracked query every consumer reads
+and adds no writes.
+
+### 2. Opaque IH minting (steering-04 §1.3 / C3)
+
+`mint_induction_opaque(db, def, arm_idx, occurrence_idx, kind) -> TyId`
+deterministically mints a rigid `TyParam` with the dedicated `Variant::Induction`.
+It is `TyParam`-shaped, so `visit_param` sets `HAS_PARAM` (LOAD-BEARING: the
+solver's assumptions leg only fires for param-carrying goals,
+`proof_forest.rs:396-400`), yet the distinct variant makes it UNEQUAL to every
+real param under identity unification (`unify.rs` TyParam arm), so it can never
+spuriously unify with a real param. Fresh per occurrence (distinct rigids prove
+strictly less, the conservative direction). Index is minted past the owner's real
+param count (`OPAQUE_IDX_BASE = 1<<20`); the reserved `<ih#arm.occ>` name renders
+in diagnostics but cannot be a source identifier.
+
+Tripwires: a debug collision assert at mint time (opaque != every real param, idx
+past the real count); and `Variant::Induction` PANICS in `TyParam::original_idx`
+and `TyParam::scope` (an opaque asked for its source index / scope has leaked into
+a generic-resolution position, which would be shared-state perturbation).
+
+### 3. Minimal-class recognizer (steering-04 §5 S2.2a item 3)
+
+`minimal_class(db, wf, goal) -> MinimalClass` (`InClass` | `Declined(reason)`),
+PURE over `(TypeFnWfData, goal)`, no solver call, no minting. Declining is always
+sound (S2.2b falls back to the S2.1 assumption route), so every uncertain shape
+declines with a `ClassDecline` reason. Checks: no assoc-type bindings; self type
+is a live application of THIS type fn; bare rigid const subject
+(`ConstTy(TyParam(normal))`, which an opaque is NOT); forwarded type args
+var/invalid/hole/type-fn-free; unary trait (subject-free trait args, a sound
+deferred widening for multi-arg traits); <=1 self-call per arm; and the G3 guard
+(no bare-subject value argument on a non-self-call path). The G3 walk is a
+read-only mirror of the WF checker's `walk_arm_ty`+`check_arm_const_arg`, catching
+the bare subject whether it parses as a `GenericArg::Const` (non-int-literal) or a
+`GenericArg::Type` bare path equal to the subject name (a bare identifier parses
+as a type until lowering slots it into a const param).
+
+### Anti-vacuity divergence (mandatory pin)
+
+`strict_diverges_from_permissive_on_needs_confirmation`: two coexisting impls make
+`Marker(Amb)` a genuine multi-solution `NeedsConfirmation` (var-free, so the
+pre-flight does not fire first, exercising the mapping arm). In ONE test:
+`is_goal_satisfiable(..).is_satisfied()` is TRUE while `strict_prove` returns
+`NotProven`. A second pin `strict_diverges_from_permissive_on_contains_invalid`
+does the same for the `ContainsInvalid` trap. Both prove the strict check is
+genuinely stricter, not a synonym.
+
+### Tests (all targeted, debug; 12 new)
+
+- strict: `strict_maps_unique_satisfied_to_proven` (Satisfied->Proven, permissive
+  agrees), `strict_maps_unsat_to_not_proven` (UnSat->NotProven, both agree),
+  plus the two divergence pins above.
+- opaque: `opaque_mint_distinct_and_rigid` (distinct occurrences -> distinct
+  TyIds; deterministic re-mint; HAS_PARAM set, HAS_VAR not; `unify(O,O)` ok,
+  `unify(O1,O2)` err, `unify(O, concrete)` err), `opaque_no_collision_and_distinct_queries`
+  (no collision with any real param; goals differing only in O1 vs O2 canonicalize
+  differently).
+- recognizer: `minimal_class_admits_rpow` (InClass), and declines for
+  multi-self-call (`Bush`), the G3 bare-subject const arg (a WELL-FORMED `G3Bad`
+  with `Wrapper<G3Bad<F,{N-1}>, N>`), a ground subject, a non-type-fn goal, and a
+  type-fn head in a forwarded type arg.
+
+Verification: `cargo check --workspace` clean (no warnings); all 12 new tests
+pass; the adjacent 29 `analysis::ty::type_fn::tests` (incl. the S2.1 cross-check)
+still pass. Zero non-test callers of every new item (grep-confirmed), so the 2475
+baseline is untouched by construction. Full release `nextest` CI is the
+orchestrator's at the slice boundary.
+
+### Next step (S2.2b): wire the minimal induction engine
+
+At the `type_fn_app_head(goal.self_ty).is_some()` discharge site (the S2.1
+`check_ty_wf` / `check_trait_inst_wf` UnSat branch), behind C1 (consult OUTSIDE
+the tracked solve, never inside `proof_forest`), gated by `minimal_class ==
+InClass`: build per-occurrence opaques via `mint_induction_opaque`, inject the IH
+`{P(O)}` into assumptions and re-query via `strict_prove`; literal/base arms
+discharge GROUND (C5). On all-arms-Proven, discharge per C2 (assumption-injection
+re-query, `ImplementorOrigin::Assumption` required). Cross-check
+`default_tier_selection(db, ground_goal) == None` at n in {0,1,2,4,7}, with the
+constrained-combinator fixture `impl<A: Marker, B: Marker> Marker for Comp<A,B>`
+so the IH is load-bearing (C4), plus the IH anti-vacuity twin.
