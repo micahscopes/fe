@@ -77,6 +77,7 @@ pub(super) fn synthesize_provider_impl<'db>(
                         types.push(AssocTyDef {
                             attributes: builder.empty_attrs(),
                             name: Partial::Present(*name),
+                            generic_params: builder.empty_generic_params(),
                             type_ref: Partial::Present(ty),
                         });
                     }

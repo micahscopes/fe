@@ -523,7 +523,12 @@ impl<'db> ScopeGraphBuilder<'db> {
                 .to_opt()
                 .map(EdgeKind::trait_type)
                 .unwrap_or_else(EdgeKind::anon);
-            self.graph.add_edge(parent_node, trait_type_node, kind)
+            self.graph.add_edge(parent_node, trait_type_node, kind);
+
+            // TODO(D1-sub-pr-2): Add generic param scopes for trait_type.generic_params.
+            // Requires extending ScopeId::GenericParam to accept TraitType as parent,
+            // or adding a new ScopeId variant for trait-type generic params.
+            // Currently the generic params are stored in HIR but not in the scope graph.
         }
     }
 

@@ -1,0 +1,31 @@
+// HKT: associated types with generic parameters
+
+trait Backend {
+    type Ptr<T>
+    type Word
+    type Storage<T>
+}
+
+struct EvmBackend {}
+impl Backend for EvmBackend {
+    type Ptr<T> = u256
+    type Word = u256
+    type Storage<T> = u256
+}
+
+// Multiple generic params
+trait Collection {
+    type Map<K, V>
+    type Set<T>
+}
+
+// Generic params with bounds
+trait TypedBackend {
+    type Ptr<T: Copy>
+    type Container<T: Default>: Clone
+}
+
+// Generic params with default type
+trait Configurable {
+    type Handler<E> = DefaultHandler<E>
+}

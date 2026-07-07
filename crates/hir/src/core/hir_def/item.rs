@@ -1407,6 +1407,7 @@ impl<'db> Trait<'db> {
 pub struct AssocTyDecl<'db> {
     pub attributes: AttrListId<'db>,
     pub name: Partial<IdentId<'db>>,
+    pub generic_params: GenericParamListId<'db>,
     pub bounds: Vec<TypeBound<'db>>,
     pub default: Option<TypeId<'db>>,
 }
@@ -1534,6 +1535,7 @@ impl<'db> ImplTrait<'db> {
 pub struct AssocTyDef<'db> {
     pub attributes: AttrListId<'db>,
     pub name: Partial<IdentId<'db>>,
+    pub generic_params: GenericParamListId<'db>,
     pub(crate) type_ref: Partial<TypeId<'db>>,
 }
 

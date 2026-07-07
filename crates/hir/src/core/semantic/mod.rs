@@ -5124,6 +5124,13 @@ impl<'db> TraitAssocTypeView<'db> {
         self.decl(db).name.to_opt()
     }
 
+    pub fn generic_params(
+        self,
+        db: &'db dyn HirDb,
+    ) -> crate::core::hir_def::GenericParamListId<'db> {
+        self.decl(db).generic_params
+    }
+
     pub fn span(self) -> crate::span::item::LazyTraitTypeSpan<'db> {
         self.owner.span().item_list().assoc_type(self.idx)
     }

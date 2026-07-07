@@ -293,6 +293,7 @@ where
         AssocTyDef {
             attributes: self.empty_attrs(),
             name: Partial::Present(self.ident(name)),
+            generic_params: self.empty_generic_params(),
             type_ref,
         }
     }

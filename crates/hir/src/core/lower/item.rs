@@ -881,8 +881,12 @@ impl<'db> Trait<'db> {
 
 impl<'db> AssocTyDecl<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TraitTypeItem) -> Self {
+        use crate::core::hir_def::GenericParamListId;
+        use parser::ast::GenericParamsOwner;
+
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
         let name = IdentId::lower_token_partial(ctxt, ast.name());
+        let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let bounds = ast
             .bounds()
             .map(|bounds| {
@@ -898,6 +902,7 @@ impl<'db> AssocTyDecl<'db> {
         AssocTyDecl {
             attributes,
             name,
+            generic_params,
             bounds,
             default,
         }
@@ -985,10 +990,15 @@ impl<'db> ImplTrait<'db> {
 
 impl<'db> AssocTyDef<'db> {
     fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::TraitTypeItem) -> Self {
+        use crate::core::hir_def::GenericParamListId;
+        use parser::ast::GenericParamsOwner;
+
         let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         AssocTyDef {
             attributes,
             name: IdentId::lower_token_partial(ctxt, ast.name()),
+            generic_params,
             type_ref: TypeId::lower_ast_partial(ctxt, ast.ty()),
         }
     }

@@ -1,0 +1,265 @@
+---
+source: crates/parser/tests/syntax_node.rs
+expression: node
+input_file: test_files/syntax_node/items/trait_assoc_type_generic.fe
+---
+Root@0..541
+  Comment@0..48 "// HKT: associated ty ..."
+  Newline@48..50 "\n\n"
+  ItemList@50..540
+    Item@50..117
+      Trait@50..117
+        TraitKw@50..55 "trait"
+        WhiteSpace@55..56 " "
+        Ident@56..63 "Backend"
+        WhiteSpace@63..64 " "
+        TraitItemList@64..117
+          LBrace@64..65 "{"
+          Newline@65..66 "\n"
+          WhiteSpace@66..70 "    "
+          TraitTypeItem@70..81
+            TypeKw@70..74 "type"
+            WhiteSpace@74..75 " "
+            Ident@75..78 "Ptr"
+            GenericParamList@78..81
+              Lt@78..79 "<"
+              TypeGenericParam@79..80
+                Ident@79..80 "T"
+              Gt@80..81 ">"
+          Newline@81..82 "\n"
+          WhiteSpace@82..86 "    "
+          TraitTypeItem@86..95
+            TypeKw@86..90 "type"
+            WhiteSpace@90..91 " "
+            Ident@91..95 "Word"
+          Newline@95..96 "\n"
+          WhiteSpace@96..100 "    "
+          TraitTypeItem@100..115
+            TypeKw@100..104 "type"
+            WhiteSpace@104..105 " "
+            Ident@105..112 "Storage"
+            GenericParamList@112..115
+              Lt@112..113 "<"
+              TypeGenericParam@113..114
+                Ident@113..114 "T"
+              Gt@114..115 ">"
+          Newline@115..116 "\n"
+          RBrace@116..117 "}"
+    Newline@117..119 "\n\n"
+    Item@119..139
+      Struct@119..139
+        StructKw@119..125 "struct"
+        WhiteSpace@125..126 " "
+        Ident@126..136 "EvmBackend"
+        WhiteSpace@136..137 " "
+        RecordFieldDefList@137..139
+          LBrace@137..138 "{"
+          RBrace@138..139 "}"
+    Newline@139..140 "\n"
+    Item@140..242
+      ImplTrait@140..242
+        ImplKw@140..144 "impl"
+        WhiteSpace@144..145 " "
+        TraitRef@145..152
+          Path@145..152
+            PathSegment@145..152
+              Ident@145..152 "Backend"
+        WhiteSpace@152..153 " "
+        ForKw@153..156 "for"
+        WhiteSpace@156..157 " "
+        PathType@157..167
+          Path@157..167
+            PathSegment@157..167
+              Ident@157..167 "EvmBackend"
+        WhiteSpace@167..168 " "
+        TraitItemList@168..242
+          LBrace@168..169 "{"
+          Newline@169..170 "\n"
+          WhiteSpace@170..174 "    "
+          TraitTypeItem@174..192
+            TypeKw@174..178 "type"
+            WhiteSpace@178..179 " "
+            Ident@179..182 "Ptr"
+            GenericParamList@182..185
+              Lt@182..183 "<"
+              TypeGenericParam@183..184
+                Ident@183..184 "T"
+              Gt@184..185 ">"
+            WhiteSpace@185..186 " "
+            Eq@186..187 "="
+            WhiteSpace@187..188 " "
+            PathType@188..192
+              Path@188..192
+                PathSegment@188..192
+                  Ident@188..192 "u256"
+          Newline@192..193 "\n"
+          WhiteSpace@193..197 "    "
+          TraitTypeItem@197..213
+            TypeKw@197..201 "type"
+            WhiteSpace@201..202 " "
+            Ident@202..206 "Word"
+            WhiteSpace@206..207 " "
+            Eq@207..208 "="
+            WhiteSpace@208..209 " "
+            PathType@209..213
+              Path@209..213
+                PathSegment@209..213
+                  Ident@209..213 "u256"
+          Newline@213..214 "\n"
+          WhiteSpace@214..218 "    "
+          TraitTypeItem@218..240
+            TypeKw@218..222 "type"
+            WhiteSpace@222..223 " "
+            Ident@223..230 "Storage"
+            GenericParamList@230..233
+              Lt@230..231 "<"
+              TypeGenericParam@231..232
+                Ident@231..232 "T"
+              Gt@232..233 ">"
+            WhiteSpace@233..234 " "
+            Eq@234..235 "="
+            WhiteSpace@235..236 " "
+            PathType@236..240
+              Path@236..240
+                PathSegment@236..240
+                  Ident@236..240 "u256"
+          Newline@240..241 "\n"
+          RBrace@241..242 "}"
+    Newline@242..244 "\n\n"
+    Comment@244..270 "// Multiple generic p ..."
+    Newline@270..271 "\n"
+    Item@271..326
+      Trait@271..326
+        TraitKw@271..276 "trait"
+        WhiteSpace@276..277 " "
+        Ident@277..287 "Collection"
+        WhiteSpace@287..288 " "
+        TraitItemList@288..326
+          LBrace@288..289 "{"
+          Newline@289..290 "\n"
+          WhiteSpace@290..294 "    "
+          TraitTypeItem@294..308
+            TypeKw@294..298 "type"
+            WhiteSpace@298..299 " "
+            Ident@299..302 "Map"
+            GenericParamList@302..308
+              Lt@302..303 "<"
+              TypeGenericParam@303..304
+                Ident@303..304 "K"
+              Comma@304..305 ","
+              WhiteSpace@305..306 " "
+              TypeGenericParam@306..307
+                Ident@306..307 "V"
+              Gt@307..308 ">"
+          Newline@308..309 "\n"
+          WhiteSpace@309..313 "    "
+          TraitTypeItem@313..324
+            TypeKw@313..317 "type"
+            WhiteSpace@317..318 " "
+            Ident@318..321 "Set"
+            GenericParamList@321..324
+              Lt@321..322 "<"
+              TypeGenericParam@322..323
+                Ident@322..323 "T"
+              Gt@323..324 ">"
+          Newline@324..325 "\n"
+          RBrace@325..326 "}"
+    Newline@326..328 "\n\n"
+    Comment@328..357 "// Generic params wit ..."
+    Newline@357..358 "\n"
+    Item@358..440
+      Trait@358..440
+        TraitKw@358..363 "trait"
+        WhiteSpace@363..364 " "
+        Ident@364..376 "TypedBackend"
+        WhiteSpace@376..377 " "
+        TraitItemList@377..440
+          LBrace@377..378 "{"
+          Newline@378..379 "\n"
+          WhiteSpace@379..383 "    "
+          TraitTypeItem@383..400
+            TypeKw@383..387 "type"
+            WhiteSpace@387..388 " "
+            Ident@388..391 "Ptr"
+            GenericParamList@391..400
+              Lt@391..392 "<"
+              TypeGenericParam@392..399
+                Ident@392..393 "T"
+                TypeBoundList@393..399
+                  Colon@393..394 ":"
+                  WhiteSpace@394..395 " "
+                  TypeBound@395..399
+                    TraitRef@395..399
+                      Path@395..399
+                        PathSegment@395..399
+                          Ident@395..399 "Copy"
+              Gt@399..400 ">"
+          Newline@400..401 "\n"
+          WhiteSpace@401..405 "    "
+          TraitTypeItem@405..438
+            TypeKw@405..409 "type"
+            WhiteSpace@409..410 " "
+            Ident@410..419 "Container"
+            GenericParamList@419..431
+              Lt@419..420 "<"
+              TypeGenericParam@420..430
+                Ident@420..421 "T"
+                TypeBoundList@421..430
+                  Colon@421..422 ":"
+                  WhiteSpace@422..423 " "
+                  TypeBound@423..430
+                    TraitRef@423..430
+                      Path@423..430
+                        PathSegment@423..430
+                          Ident@423..430 "Default"
+              Gt@430..431 ">"
+            TypeBoundList@431..438
+              Colon@431..432 ":"
+              WhiteSpace@432..433 " "
+              TypeBound@433..438
+                TraitRef@433..438
+                  Path@433..438
+                    PathSegment@433..438
+                      Ident@433..438 "Clone"
+          Newline@438..439 "\n"
+          RBrace@439..440 "}"
+    Newline@440..442 "\n\n"
+    Comment@442..477 "// Generic params wit ..."
+    Newline@477..478 "\n"
+    Item@478..540
+      Trait@478..540
+        TraitKw@478..483 "trait"
+        WhiteSpace@483..484 " "
+        Ident@484..496 "Configurable"
+        WhiteSpace@496..497 " "
+        TraitItemList@497..540
+          LBrace@497..498 "{"
+          Newline@498..499 "\n"
+          WhiteSpace@499..503 "    "
+          TraitTypeItem@503..538
+            TypeKw@503..507 "type"
+            WhiteSpace@507..508 " "
+            Ident@508..515 "Handler"
+            GenericParamList@515..518
+              Lt@515..516 "<"
+              TypeGenericParam@516..517
+                Ident@516..517 "E"
+              Gt@517..518 ">"
+            WhiteSpace@518..519 " "
+            Eq@519..520 "="
+            WhiteSpace@520..521 " "
+            PathType@521..538
+              Path@521..538
+                PathSegment@521..538
+                  Ident@521..535 "DefaultHandler"
+                  GenericArgList@535..538
+                    Lt@535..536 "<"
+                    TypeGenericArg@536..537
+                      PathType@536..537
+                        Path@536..537
+                          PathSegment@536..537
+                            Ident@536..537 "E"
+                    Gt@537..538 ">"
+          Newline@538..539 "\n"
+          RBrace@539..540 "}"
+  Newline@540..541 "\n"

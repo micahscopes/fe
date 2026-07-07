@@ -488,6 +488,7 @@ define_lazy_span_node!(
     @node {
         (ty, ty, LazyTySpan),
         (attributes, attr_list, LazyAttrListSpan),
+        (generic_params, generic_params, LazyGenericParamListSpan),
     }
 );
 

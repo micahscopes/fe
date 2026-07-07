@@ -1289,9 +1289,12 @@ impl ToDoc for ast::TraitTypeItem {
             .map(|ty| alloc.text(" = ").append(ty.to_doc(ctx)))
             .unwrap_or_else(|| alloc.nil());
 
+        let generics = generics_doc(self, ctx);
+
         attrs
             .append(alloc.text("type "))
             .append(name)
+            .append(generics)
             .append(bounds_doc)
             .append(ty_doc)
     }
