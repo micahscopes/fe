@@ -577,6 +577,19 @@ impl<'db> TopLevelMod<'db> {
             .collect()
     }
 
+    /// Returns all `recursive type fn` definitions in the top level module
+    /// including ones in nested modules.
+    #[salsa::tracked(return_ref)]
+    pub fn all_type_fns(self, db: &'db dyn HirDb) -> Vec<TypeFnDef<'db>> {
+        self.all_items(db)
+            .iter()
+            .filter_map(|item| match item {
+                ItemKind::TypeFn(type_fn) => Some(*type_fn),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Returns all traits in the top level module including ones in nested
     /// modules.
     #[salsa::tracked(return_ref)]
@@ -1234,6 +1247,15 @@ impl<'db> TypeFnDef<'db> {
 
     pub fn scope(self) -> ScopeId<'db> {
         ScopeId::from_item(self.into())
+    }
+
+    /// The declared return kind (`-> (KIND)`) of the type fn.
+    ///
+    /// Exposed for the analysis (ty) layer, which builds the ty-layer signature
+    /// (`TypeFnSig`, spec slice S1.3) and cannot read the `pub(in crate::core)`
+    /// field getter directly.
+    pub fn ret_kind_bound(self, db: &'db dyn HirDb) -> Partial<KindBound> {
+        self.ret_kind(db)
     }
 }
 

@@ -40,7 +40,7 @@ use crate::analysis::{
             GoalSatisfiability, PredicateListId, TraitSolveCx, constraint::collect_constraints,
             is_goal_satisfiable,
         },
-        ty_def::{InvalidCause, Kind, TyBase, TyData, TyId},
+        ty_def::{InvalidCause, Kind, TyBase, TyData, TyId, find_unsaturated_type_fn},
         ty_lower::{
             ConstDefaultCompletion, TyAlias, collect_generic_params, lower_generic_arg_list,
             lower_hir_ty_with_minter, lower_type_alias,
@@ -124,12 +124,6 @@ pub enum PathResErrorKind<'db> {
     },
 
     MethodSelection(MethodSelectionError<'db>),
-
-    /// The path resolves to a `recursive type fn` definition, but the
-    /// ty-layer representation (`TyBase::TypeFn`, spec sec 4.8 slice S1.3)
-    /// does not exist yet. HIR-level definition and name resolution land in
-    /// S1.2; using the item as a type is a later slice.
-    TypeFnNotYetSupported,
 }
 
 impl<'db> PathResError<'db> {
@@ -234,10 +228,6 @@ impl<'db> PathResError<'db> {
                     "Receiver type must be known".to_string()
                 }
             },
-            PathResErrorKind::TypeFnNotYetSupported => {
-                "recursive type fn is not yet usable as a type (ty layer not implemented)"
-                    .to_string()
-            }
         }
     }
 
@@ -447,16 +437,6 @@ impl<'db> PathResError<'db> {
                     .ty();
                 PathResDiag::ExpectedType(ty_span.into(), ident, given_kind)
             }
-
-            // The ty-layer representation of a `recursive type fn` does not
-            // exist yet (spec sec 4.8 slice S1.3); surface it as an ordinary
-            // "expected a type" diagnostic rather than a distinct diagnostic
-            // kind, since callers already expect the type domain here.
-            PathResErrorKind::TypeFnNotYetSupported => PathResDiag::ExpectedType(
-                span,
-                ident,
-                "recursive type fn (not yet usable as a type)",
-            ),
         };
         Some(diag)
     }
@@ -1908,15 +1888,26 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                     }
                 }
 
-                // The ty-layer representation of a `recursive type fn`
-                // (`TyBase::TypeFn`) does not exist yet (spec sec 4.8 slice
-                // S1.3); resolving a path to one is a clean, named error
-                // rather than a panic.
-                ItemKind::TypeFn(_) => {
-                    return Err(PathResError::new(
-                        PathResErrorKind::TypeFnNotYetSupported,
-                        path,
-                    ));
+                // A `recursive type fn` lowers to the ty-layer base
+                // `TyBase::TypeFn` applied to its generic args (spec sec 4.8
+                // slice S1.3). Applications reuse the ordinary curried `TyApp`
+                // via `foldl`. The structural saturation walk then rejects any
+                // occurrence (bare, partial, or nested in a generic arg) that
+                // is not applied to exactly the signature arity: kind checking
+                // cannot catch this because the const subject slot renders as
+                // `Star`, so an unsaturated head kind-matches a `* -> *`
+                // parameter. Over-application past a saturated (`*`-kinded)
+                // head is already a `KindMismatch` inside `foldl`.
+                ItemKind::TypeFn(type_fn) => {
+                    let base = TyId::type_fn(db, type_fn);
+                    let ty = TyId::foldl(db, base, &args);
+                    match find_unsaturated_type_fn(db, ty) {
+                        Some((_, expected, given)) => PathRes::Ty(TyId::invalid(
+                            db,
+                            InvalidCause::TypeFnNotSaturated { expected, given },
+                        )),
+                        None => PathRes::Ty(ty),
+                    }
                 }
 
                 ItemKind::DeriveProviderScope(_)

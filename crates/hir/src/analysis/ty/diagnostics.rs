@@ -74,6 +74,23 @@ pub enum TyLowerDiag<'db> {
         given: usize,
     },
 
+    /// A `recursive type fn` occurrence is not saturated to its signature arity
+    /// (spec slice S1.3 saturation walk). Emitted for bare and partially-applied
+    /// occurrences, including ones nested inside generic arguments; kind
+    /// checking cannot catch these because the const subject renders as `Star`.
+    TypeFnNotSaturated {
+        span: DynLazySpan<'db>,
+        expected: usize,
+        given: usize,
+    },
+
+    /// A `recursive type fn` declares a `Constraint` return kind. v1 return
+    /// kinds are `*` and arrows over `*` only (spec sec 2.1); the reused parser
+    /// accepts `Constraint`, so it is rejected here.
+    TypeFnConstraintRetKind {
+        span: DynLazySpan<'db>,
+    },
+
     StringTooLarge {
         span: DynLazySpan<'db>,
         max: usize,
@@ -262,6 +279,8 @@ impl TyLowerDiag<'_> {
             Self::ContractFieldNonSlotConstHole { .. } => 40,
             Self::ContractFieldHandleSpaceUnresolved { .. } => 41,
             Self::ContractFieldExplicitConstHole { .. } => 42,
+            Self::TypeFnNotSaturated { .. } => 43,
+            Self::TypeFnConstraintRetKind { .. } => 44,
         }
     }
 }

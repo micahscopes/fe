@@ -357,7 +357,7 @@ fn readable_type_component<'db>(db: &'db DriverDataBase, ty: TyId<'db>) -> Optio
             .name(db)
             .to_opt()
             .map(|name| name.data(db).to_string()),
-        TyData::TyBase(TyBase::Prim(_) | TyBase::Func(_))
+        TyData::TyBase(TyBase::Prim(_) | TyBase::Func(_) | TyBase::TypeFn(_))
         | TyData::TyParam(_)
         | TyData::QualifiedTy(_) => {
             let component = base.pretty_print(db).to_string();

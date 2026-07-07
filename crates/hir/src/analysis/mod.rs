@@ -13,7 +13,7 @@ use self::name_resolution::ImportAnalysisPass;
 use self::ty::{
     AdtDefAnalysisPass, BodyAnalysisPass, ContractAnalysisPass, DefConflictAnalysisPass,
     FuncAnalysisPass, ImplAnalysisPass, ImplTraitAnalysisPass, MsgSelectorAnalysisPass,
-    TraitAnalysisPass, TypeAliasAnalysisPass,
+    RecursiveTypeFnAnalysisPass, TraitAnalysisPass, TypeAliasAnalysisPass,
 };
 
 #[salsa::db]
@@ -38,6 +38,7 @@ pub fn initialize_analysis_pass() -> AnalysisPassManager {
     pass_manager.add_module_pass("Import", Box::new(ImportAnalysisPass {}));
     pass_manager.add_module_pass("AdtDef", Box::new(AdtDefAnalysisPass {}));
     pass_manager.add_module_pass("TypeAlias", Box::new(TypeAliasAnalysisPass {}));
+    pass_manager.add_module_pass("RecursiveTypeFn", Box::new(RecursiveTypeFnAnalysisPass {}));
     pass_manager.add_module_pass("Trait", Box::new(TraitAnalysisPass {}));
     pass_manager.add_module_pass("Impl", Box::new(ImplAnalysisPass {}));
     pass_manager.add_module_pass("ImplTrait", Box::new(ImplTraitAnalysisPass {}));

@@ -67,6 +67,10 @@ fn pretty_print_ty_for_mismatch<'db>(db: &'db dyn SpannedHirAnalysisDb, ty: TyId
                     .scope()
                     .pretty_path(db)
                     .unwrap_or_else(|| ty.pretty_print(db).to_string()),
+                TyBase::TypeFn(type_fn) => type_fn
+                    .scope()
+                    .pretty_path(db)
+                    .unwrap_or_else(|| ty.pretty_print(db).to_string()),
                 TyBase::Prim(_) | TyBase::Func(_) => ty.pretty_print(db).to_string(),
             }
         }
@@ -1697,6 +1701,42 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 sub_diagnostics: vec![SubDiagnostic {
                     style: LabelStyle::Primary,
                     message: format!("expected {expected} arguments, but {given} were given"),
+                    span: span.resolve(db),
+                }],
+                notes: vec![],
+                error_code,
+            },
+
+            Self::TypeFnNotSaturated {
+                span,
+                expected,
+                given,
+            } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "recursive type fn must be fully applied".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: format!(
+                        "expected {expected} argument{}, but {given} {} given",
+                        if *expected == 1 { "" } else { "s" },
+                        if *given == 1 { "was" } else { "were" },
+                    ),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "a `recursive type fn` may only appear fully applied to its type \
+                     parameters and its `const` subject"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
+            Self::TypeFnConstraintRetKind { span } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "recursive type fn return kind cannot be `Constraint`".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "return kind must be `*` or an arrow over `*`".to_string(),
                     span: span.resolve(db),
                 }],
                 notes: vec![],

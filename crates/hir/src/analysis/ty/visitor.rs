@@ -66,6 +66,9 @@ pub trait TyVisitor<'db> {
     fn visit_func(&mut self, func: CallableDef<'db>) {}
 
     #[allow(unused_variables)]
+    fn visit_type_fn(&mut self, type_fn: crate::hir_def::TypeFnDef<'db>) {}
+
+    #[allow(unused_variables)]
     fn visit_const_ty(&mut self, const_ty: &ConstTyId<'db>) {
         walk_const_ty(self, const_ty)
     }
@@ -106,6 +109,7 @@ where
         TyBase::Adt(adt) => visitor.visit_adt(*adt),
         TyBase::Contract(c) => visitor.visit_contract(*c),
         TyBase::Func(func) => visitor.visit_func(*func),
+        TyBase::TypeFn(type_fn) => visitor.visit_type_fn(*type_fn),
     }
 }
 

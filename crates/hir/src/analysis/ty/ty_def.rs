@@ -5,7 +5,7 @@ use std::fmt;
 use crate::{
     hir_def::{
         Body, Enum, ExprId, GenericParamOwner, IdentId, IntegerId, ItemKind, PathId,
-        TypeAlias as HirTypeAlias, VariantKind,
+        TypeAlias as HirTypeAlias, TypeFnDef, VariantKind,
         prim_ty::{IntTy as HirIntTy, PrimTy as HirPrimTy, UintTy as HirUintTy},
         scope_graph::ScopeId,
     },
@@ -401,6 +401,13 @@ impl<'db> TyId<'db> {
         Self::new(db, TyData::TyBase(TyBase::Func(func)))
     }
 
+    /// The bare (unapplied) ty-layer head of a `recursive type fn`. Callers
+    /// apply args via [`TyId::foldl`] and MUST enforce full saturation with the
+    /// arity walk; a bare or partial head kind-matches a `* -> *` parameter.
+    pub(crate) fn type_fn(db: &'db dyn HirAnalysisDb, type_fn: TypeFnDef<'db>) -> Self {
+        Self::new(db, TyData::TyBase(TyBase::TypeFn(type_fn)))
+    }
+
     pub fn is_func(self, db: &dyn HirAnalysisDb) -> bool {
         matches!(self.base_ty(db).data(db), TyData::TyBase(TyBase::Func(_)))
     }
@@ -594,6 +601,7 @@ impl<'db> TyId<'db> {
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.scope(db)),
             TyData::TyBase(TyBase::Contract(c)) => Some(c.scope()),
             TyData::TyBase(TyBase::Func(func)) => Some(func.scope()),
+            TyData::TyBase(TyBase::TypeFn(type_fn)) => Some(type_fn.scope()),
             TyData::TyBase(TyBase::Prim(..)) => None,
             TyData::ConstTy(const_ty) => match const_ty.data(db) {
                 ConstTyData::TyVar(..) => None,
@@ -622,6 +630,7 @@ impl<'db> TyId<'db> {
             TyData::TyBase(TyBase::Adt(adt)) => Some(adt.name_span(db)),
             TyData::TyBase(TyBase::Contract(c)) => c.scope().name_span(db),
             TyData::TyBase(TyBase::Func(func)) => Some(func.name_span()),
+            TyData::TyBase(TyBase::TypeFn(type_fn)) => Some(type_fn.span().name().into()),
             TyData::TyBase(TyBase::Prim(_)) => None,
 
             TyData::ConstTy(ty) => match ty.data(db) {
@@ -1005,6 +1014,17 @@ impl<'db> TyId<'db> {
                 param.and_then(|ty| ty.const_ty_ty(db))
             }
 
+            // The type-fn subject `const N: usize` is a const slot; recognizing
+            // it here lets `foldl` evaluate the subject arg against `usize`
+            // (otherwise a saturated `F<.., k>` would reject `k` as a value in a
+            // type position). Type-param slots return `None` and lower as types,
+            // exactly like the `Func` case above.
+            TyBase::TypeFn(type_fn) => {
+                let params =
+                    collect_generic_params(db, GenericParamOwner::TypeFn(*type_fn)).params(db);
+                params.get(args.len()).copied().and_then(|ty| ty.const_ty_ty(db))
+            }
+
             TyBase::Prim(PrimTy::Array) => {
                 if args.len() == 1 {
                     Some(TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::Usize))))
@@ -1197,6 +1217,16 @@ pub enum InvalidCause<'db> {
         given: usize,
     },
 
+    /// A `recursive type fn` occurrence is not saturated to its signature arity
+    /// (spec slice S1.3 saturation walk). Because the const subject slot renders
+    /// as `Star`, an unapplied or partial occurrence kind-matches a `* -> *`
+    /// parameter, so kind checking cannot reject it; this cause is produced by
+    /// the structural arity walk instead.
+    TypeFnNotSaturated {
+        expected: usize,
+        given: usize,
+    },
+
     StringTooLarge {
         max: usize,
         given: usize,
@@ -1351,6 +1381,7 @@ impl InvalidCause<'_> {
             ),
             InvalidCause::NotFullyApplied
             | InvalidCause::TooManyGenericArgs { .. }
+            | InvalidCause::TypeFnNotSaturated { .. }
             | InvalidCause::InvalidConstParamTy
             | InvalidCause::RecursiveConstParamTy
             | InvalidCause::ParseError
@@ -1727,6 +1758,19 @@ pub enum TyBase<'db> {
     Adt(AdtDef<'db>),
     Contract(crate::hir_def::Contract<'db>),
     Func(CallableDef<'db>),
+    /// A `recursive type fn` (type-to-type CTFE, spec sec 4.8 slice S1.3).
+    ///
+    /// The `TypeFnDef` handle carries the ty-layer signature (arity + return
+    /// kind) OUT of the kind language, exactly as `TyBase::Adt` carries an
+    /// `AdtDef` whose const params render as `Kind::Star`. Read the signature
+    /// via [`type_fn_sig`]. Applications reuse the ordinary curried `TyApp`
+    /// node, so `fold`/`visitor`/`binder` traversals are unchanged.
+    ///
+    /// Because the const subject slot renders as `Star`, an unapplied or
+    /// partially-applied occurrence kind-MATCHES a `* -> *` parameter; kind
+    /// checking cannot reject it. The structural saturation walk
+    /// ([`find_unsaturated_type_fn`]) is what enforces full application.
+    TypeFn(TypeFnDef<'db>),
 }
 
 impl<'db> TyBase<'db> {
@@ -1793,6 +1837,12 @@ impl<'db> TyBase<'db> {
                     .map(|n| n.data(db).to_string())
                     .unwrap_or_else(|| "<unknown>".to_string())
             ),
+
+            Self::TypeFn(type_fn) => type_fn
+                .name(db)
+                .to_opt()
+                .map(|i| i.data(db).to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
         }
     }
 
@@ -1993,6 +2043,7 @@ impl HasKind for TyBase<'_> {
             TyBase::Adt(adt) => adt.kind(db),
             TyBase::Contract(_) => Kind::Star, // Contracts have no generic params
             TyBase::Func(func) => func.kind(db),
+            TyBase::TypeFn(type_fn) => type_fn.kind(db),
         }
     }
 }
@@ -2029,6 +2080,105 @@ impl HasKind for CallableDef<'_> {
         }
 
         kind
+    }
+}
+
+impl HasKind for TypeFnDef<'_> {
+    fn kind(&self, db: &dyn HirAnalysisDb) -> Kind {
+        // Mirrors `AdtDef::kind`: one `*`-arrow per generic param (the const
+        // subject renders as `Star`, its const-ty `usize` having `*` kind),
+        // but the arrow chain ends in the DECLARED return kind rather than
+        // `Star`. Because the subject collapses to `Star`, this base kind can
+        // never distinguish "fully applied" from "partial"; the saturation
+        // walk does that structurally.
+        let sig = type_fn_sig(db, *self);
+        let mut kind = sig.ret_kind;
+        for param in collect_generic_params(db, GenericParamOwner::TypeFn(*self))
+            .params(db)
+            .iter()
+            .rev()
+        {
+            kind = Kind::abs(param.kind(db).clone(), kind);
+        }
+
+        kind
+    }
+}
+
+/// The ty-layer signature of a `recursive type fn`, carried OUTSIDE the kind
+/// language (spec sec 2.1, slice S1.3), exactly as `AdtDef` carries its const
+/// params outside `Kind`. The const subject slot renders as `Kind::Star` in the
+/// base kind, so `arity` (NOT kind checking) is what the saturation walk uses.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeFnSig {
+    /// Total number of generic params that saturate an application: every type
+    /// param plus the single `const N: usize` subject. A well-formed occurrence
+    /// is the head of a `TyApp` spine of exactly this many args.
+    pub arity: usize,
+    /// The declared return kind (`-> (KIND)`), lowered. v1 forbids `Constraint`
+    /// anywhere in it; see [`kind_mentions_constraint`].
+    pub ret_kind: Kind,
+}
+
+/// Computes the ty-layer signature of a `recursive type fn`.
+///
+/// A plain (non-tracked) reader: `arity` comes from the memoized
+/// `collect_generic_params` query and `ret_kind` is a cheap lowering of the
+/// HIR return-kind bound. Kept non-tracked because `Kind` is not a salsa
+/// `Update` value.
+pub(crate) fn type_fn_sig<'db>(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> TypeFnSig {
+    let arity = collect_generic_params(db, GenericParamOwner::TypeFn(def))
+        .params(db)
+        .len();
+    let ret_kind = def
+        .ret_kind_bound(db)
+        .to_opt()
+        .map(|k| super::ty_lower::lower_kind(&k))
+        .unwrap_or(Kind::Star);
+    TypeFnSig { arity, ret_kind }
+}
+
+/// Structural saturation / arity walk (spec slice S1.3; Fable steering finding
+/// 1). Recursively descends a lowered `TyId`, returning the first
+/// `TyBase::TypeFn` occurrence that is NOT the head of a `TyApp` spine of
+/// exactly its signature arity, INCLUDING occurrences nested inside generic
+/// arguments. Kind checking cannot catch these: the const subject slot renders
+/// as `Star`, so a bare or partially-applied type fn kind-matches a `* -> *`
+/// parameter.
+///
+/// Returns `(def, expected_arity, given_args)` for the offending occurrence.
+/// Over-application is not reported here; applying past a saturated (`*`-kinded)
+/// head is already a `KindMismatch` from [`TyId::app`].
+pub(crate) fn find_unsaturated_type_fn<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> Option<(TypeFnDef<'db>, usize, usize)> {
+    let (base, args) = ty.decompose_ty_app(db);
+    if let TyData::TyBase(TyBase::TypeFn(def)) = base.data(db) {
+        let arity = type_fn_sig(db, *def).arity;
+        if args.len() != arity {
+            return Some((*def, arity, args.len()));
+        }
+    }
+    for arg in args {
+        if let Some(hit) = find_unsaturated_type_fn(db, *arg) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Returns `true` if a lowered return kind mentions `Kind::Constraint` anywhere.
+/// v1 `recursive type fn` return kinds are `*` and arrows over `*` only (spec
+/// sec 2.1); the reused parser `parse_kind_bound` accepts `Constraint`, so this
+/// is rejected in the ty layer.
+pub(crate) fn kind_mentions_constraint(kind: &Kind) -> bool {
+    match kind {
+        Kind::Constraint => true,
+        Kind::Abs(inner) => {
+            kind_mentions_constraint(&inner.0) || kind_mentions_constraint(&inner.1)
+        }
+        Kind::Star | Kind::Any => false,
     }
 }
 

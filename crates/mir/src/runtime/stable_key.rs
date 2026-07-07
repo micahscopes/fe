@@ -556,6 +556,11 @@ pub fn type_identity<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> String {
                     variant.name(db).unwrap_or("variant")
                 ),
             },
+            // A `recursive type fn` is normalized away before MIR (spec sec
+            // 7.4); the S1.5 MIR-boundary assert makes any residual occurrence a
+            // hard error. Give it a stable key defensively so this key function
+            // never panics in the interim.
+            TyBase::TypeFn(type_fn) => format!("type_fn${}", item_identity(db, (*type_fn).into())),
         },
         TyData::TyParam(param) => {
             format!(

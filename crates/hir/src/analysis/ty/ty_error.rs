@@ -409,6 +409,13 @@ fn diag_from_invalid_cause<'db>(
         }
         .into(),
 
+        InvalidCause::TypeFnNotSaturated { expected, given } => TyLowerDiag::TypeFnNotSaturated {
+            span,
+            expected,
+            given,
+        }
+        .into(),
+
         InvalidCause::StringTooLarge { max, given } => {
             TyLowerDiag::StringTooLarge { span, max, given }.into()
         }

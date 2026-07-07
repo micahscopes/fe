@@ -752,7 +752,7 @@ fn callee_from_func_ty<'db>(
     let (base, _args) = func_ty.decompose_ty_app(db);
     let callable = match base.data(db) {
         TyData::TyBase(TyBase::Func(callable)) => *callable,
-        TyData::TyBase(TyBase::Prim(_) | TyBase::Adt(_) | TyBase::Contract(_))
+        TyData::TyBase(TyBase::Prim(_) | TyBase::Adt(_) | TyBase::Contract(_) | TyBase::TypeFn(_))
         | TyData::TyVar(_)
         | TyData::TyParam(_)
         | TyData::AssocTy(_)

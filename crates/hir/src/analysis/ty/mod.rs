@@ -16,7 +16,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec1::SmallVec;
 use trait_def::impls_for_trait_def;
 use trait_resolution::constraint::super_trait_cycle;
-use ty_def::{BorrowKind, InvalidCause, TyBase, TyData, TyId, instantiate_adt_field_ty};
+use ty_def::{
+    BorrowKind, InvalidCause, TyBase, TyData, TyId, instantiate_adt_field_ty,
+    kind_mentions_constraint, type_fn_sig,
+};
 use ty_lower::{collect_generic_params, lower_type_alias};
 
 use crate::analysis::name_resolution::{PathRes, resolve_path};
@@ -859,16 +862,50 @@ impl ModuleAnalysisPass for TypeAliasAnalysisPass {
     }
 }
 
+/// Definition-level analysis for `recursive type fn` items (spec sec 4.8 slice
+/// S1.3 portion). This slice enforces only the ty-layer return-kind rule: v1
+/// return kinds are `*` and arrows over `*`, so a declared `Constraint` return
+/// kind is rejected (the reused parser `parse_kind_bound` accepts it). The full
+/// definition well-formedness check (grammar / exhaustiveness / termination /
+/// self-call) lands in S1.4.
+pub struct RecursiveTypeFnAnalysisPass {}
+
+impl ModuleAnalysisPass for RecursiveTypeFnAnalysisPass {
+    fn run_on_module<'db>(
+        &mut self,
+        db: &'db dyn HirAnalysisDb,
+        top_mod: TopLevelMod<'db>,
+    ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
+        let mut diags: Vec<Box<dyn DiagnosticVoucher + 'db>> = vec![];
+        for &type_fn in top_mod.all_type_fns(db) {
+            let sig = type_fn_sig(db, type_fn);
+            if kind_mentions_constraint(&sig.ret_kind) {
+                diags.push(Box::new(TyLowerDiag::TypeFnConstraintRetKind {
+                    span: type_fn.span().ret_kind().into(),
+                }) as _);
+            }
+        }
+        diags
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use camino::Utf8PathBuf;
     use common::indexmap::IndexMap;
 
     use super::{
-        PredicateListId, TraitSolveCx, adt_def::AdtRef, copy_goal_has_possible_impl,
-        corelib::resolve_core_trait, trait_def::TraitInstId, ty_def::TyId, ty_is_copy,
+        PredicateListId, RecursiveTypeFnAnalysisPass, TraitSolveCx,
+        adt_def::{AdtDef, AdtRef},
+        copy_goal_has_possible_impl,
+        corelib::resolve_core_trait,
+        trait_def::TraitInstId,
+        ty_def::{InvalidCause, TyData, TyId, kind_mentions_constraint, type_fn_sig},
+        ty_is_copy,
     };
-    use crate::{hir_def::ItemKind, test_db::HirAnalysisTestDb};
+    use crate::{
+        analysis::analysis_pass::ModuleAnalysisPass, hir_def::ItemKind, test_db::HirAnalysisTestDb,
+    };
 
     fn named_struct_ty<'db>(
         db: &'db HirAnalysisTestDb,
@@ -938,5 +975,145 @@ impl Copy for Explicit {}
 
         assert!(copy_goal_has_possible_impl(&db, solve_cx, copy_explicit));
         assert!(ty_is_copy(&db, top_mod.scope(), explicit, assumptions));
+    }
+
+    fn named_adt<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: crate::hir_def::TopLevelMod<'db>,
+        name: &str,
+    ) -> AdtDef<'db> {
+        let struct_ = top_mod
+            .children_non_nested(db)
+            .find_map(|item| match item {
+                ItemKind::Struct(struct_)
+                    if struct_
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(db) == name) =>
+                {
+                    Some(struct_)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing `{name}` struct"));
+        AdtRef::from(struct_).as_adt(db)
+    }
+
+    /// S1.3 saturation walk: a bare or partially-applied `recursive type fn`
+    /// occurrence lowers to `Invalid(TypeFnNotSaturated)`, while a fully-applied
+    /// one lowers to a well-formed `TyBase::TypeFn` application. The const
+    /// subject renders as `Star`, so kind checking alone cannot make this
+    /// distinction; the structural arity walk does.
+    #[test]
+    fn type_fn_saturation_walk_rejects_partial_application() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("type_fn_saturation_walk.fe"),
+            r#"
+recursive type fn Dup<T, const N: usize>() -> (*) {
+    match N {
+        0 => T
+        _ => T
+    }
+}
+
+struct Partial {
+    x: Dup<u8>,
+}
+
+struct Bare {
+    x: Dup,
+}
+
+struct Saturated {
+    x: Dup<u8, 3>,
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+
+        let field_ty = |struct_name: &str| {
+            named_adt(&db, top_mod, struct_name).fields(&db)[0]
+                .ty(&db, 0)
+                .instantiate_identity()
+        };
+
+        // Arity 2 (`T` + subject `N`); one explicit arg is a partial application.
+        let partial = field_ty("Partial");
+        assert!(matches!(
+            partial.data(&db),
+            TyData::Invalid(InvalidCause::TypeFnNotSaturated {
+                expected: 2,
+                given: 1
+            })
+        ));
+
+        // Zero args is a bare, unapplied occurrence.
+        let bare = field_ty("Bare");
+        assert!(matches!(
+            bare.data(&db),
+            TyData::Invalid(InvalidCause::TypeFnNotSaturated {
+                expected: 2,
+                given: 0
+            })
+        ));
+
+        // Fully applied: not invalid, and still a stored (unnormalized) type-fn
+        // application head (intensional identity, spec sec 6.1).
+        let saturated = field_ty("Saturated");
+        assert!(!saturated.has_invalid(&db));
+        let (base, args) = saturated.decompose_ty_app(&db);
+        assert!(matches!(
+            base.data(&db),
+            TyData::TyBase(super::ty_def::TyBase::TypeFn(_))
+        ));
+        assert_eq!(args.len(), 2);
+    }
+
+    /// S1.3 return-kind rule: v1 `recursive type fn` return kinds are `*` and
+    /// arrows over `*` only. A declared `Constraint` return kind is rejected
+    /// (the reused parser `parse_kind_bound` accepts it).
+    #[test]
+    fn type_fn_constraint_return_kind_rejected() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("type_fn_ret_kind.fe"),
+            r#"
+recursive type fn Bad<const N: usize>() -> (Constraint) {
+    match N {
+        0 => u8
+        _ => u8
+    }
+}
+
+recursive type fn Good<const N: usize>() -> (*) {
+    match N {
+        0 => u8
+        _ => u8
+    }
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+
+        let type_fn_by_name = |name: &str| {
+            *top_mod
+                .all_type_fns(&db)
+                .iter()
+                .find(|tf| tf.name(&db).to_opt().is_some_and(|i| i.data(&db) == name))
+                .unwrap_or_else(|| panic!("missing `{name}` type fn"))
+        };
+
+        let bad = type_fn_by_name("Bad");
+        let good = type_fn_by_name("Good");
+
+        assert!(kind_mentions_constraint(&type_fn_sig(&db, bad).ret_kind));
+        assert!(!kind_mentions_constraint(&type_fn_sig(&db, good).ret_kind));
+        // Both declare a single generic param: the `const N: usize` subject.
+        assert_eq!(type_fn_sig(&db, good).arity, 1);
+
+        // End-to-end: the analysis pass emits exactly one diagnostic (for `Bad`).
+        let diags = RecursiveTypeFnAnalysisPass {}.run_on_module(&db, top_mod);
+        assert_eq!(diags.len(), 1);
     }
 }
