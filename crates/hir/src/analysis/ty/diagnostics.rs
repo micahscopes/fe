@@ -436,7 +436,8 @@ impl<'db> TypeFnWfError<'db> {
                 "this type form is not allowed in a `recursive type fn` arm".into()
             }
             Self::SubjectNotDecreasing => {
-                "the subject of a recursive call must be strictly smaller than the subject".into()
+                "the subject of a recursive call must strictly decrease toward the base case"
+                    .into()
             }
             Self::SubjectMayUnderflow => "recursive type fn argument may underflow".into(),
             Self::SubjectDivZeroFixpoint => {
@@ -474,8 +475,56 @@ impl<'db> TypeFnWfError<'db> {
     /// Supplementary notes rendered under the primary label.
     pub(crate) fn notes(&self) -> Vec<String> {
         match self {
+            Self::MissingSubject => vec![
+                "declare a `const _: usize` parameter as the last generic parameter, e.g. \
+                 `recursive type fn RPow<F, const N: usize>() -> (*) { .. }`"
+                    .to_string(),
+            ],
+            Self::MultipleSubjects { .. } => vec![
+                "keep exactly one `const` parameter; move any others to type parameters or \
+                 replace them with literals"
+                    .to_string(),
+            ],
+            Self::SubjectNotLast => vec![
+                "move the `const` subject to the end of the generic parameter list, after all \
+                 type parameters"
+                    .to_string(),
+            ],
+            Self::SubjectNotUsize => vec![
+                "declare the subject as `const N: usize`; other const types are not supported as \
+                 a recursion subject"
+                    .to_string(),
+            ],
+            Self::MissingWildcardArm => vec![
+                "add a final `_ => ..` arm covering every value the literal arms do not match"
+                    .to_string(),
+            ],
+            Self::ArmAfterWildcard => vec![
+                "move this arm before the `_` arm, or remove it if it is unreachable".to_string(),
+            ],
+            Self::DuplicateArmLit { .. } => vec![
+                "merge the two arms, or change one of the literals so each value is matched once"
+                    .to_string(),
+            ],
+            Self::ForeignTypeFnCall => vec![
+                "only calls to this type fn's own name are allowed in its body; to reuse another \
+                 type fn's shape, apply it outside and pass the result in as a type parameter"
+                    .to_string(),
+            ],
+            Self::AssocProjInArm => vec![
+                "associated-type projections require trait resolution, which cannot run before \
+                 this type fn's arms are validated; use a concrete type or a self-call instead"
+                    .to_string(),
+            ],
+            Self::DisallowedArmType => vec![
+                "an arm's right-hand side must be a path type (a self-call or a concrete/generic \
+                 type); tuples, arrays, pointers, `mut`/`ref`/`own` modes, and `!` are not allowed \
+                 here"
+                    .to_string(),
+            ],
             Self::SubjectNotDecreasing => vec![
-                "accepted subject forms: `{N - k}` with k >= 1, and `{N / k}` with k >= 2"
+                "accepted subject forms: `{N - k}` with k >= 1, `{N / k}` with k >= 2, or a \
+                 literal strictly smaller than this arm's lower bound"
                     .to_string(),
             ],
             Self::SubjectMayUnderflow => vec![
@@ -483,12 +532,42 @@ impl<'db> TypeFnWfError<'db> {
                  base shape here"
                     .to_string(),
             ],
+            Self::SubjectDivZeroFixpoint => vec![
+                "`{N / k}` never decreases past `N = 0`; add an earlier arm (e.g. a literal `0` \
+                 arm) that returns a base shape before the subject can reach zero"
+                    .to_string(),
+            ],
+            Self::LiteralSubjectNotSmaller => vec![
+                "use a literal strictly less than this arm's lower bound, or switch to a \
+                 `{N - k}` / `{N / k}` step instead"
+                    .to_string(),
+            ],
+            Self::SelfCallArgsNotVerbatim => vec![
+                "forward this type fn's own type parameters unchanged and in order; \
+                 substituting a different type here would allow unbounded polymorphic \
+                 recursion, which this restriction rules out"
+                    .to_string(),
+            ],
+            Self::WhereNotTypeParamBound => vec![
+                "only bounds on this type fn's own type parameters are allowed here; const \
+                 predicates and bounds on the subject are rejected"
+                    .to_string(),
+            ],
+            Self::MissingReturnKind => vec![
+                "add a return kind, e.g. `-> (*)` for a plain type".to_string(),
+            ],
+            Self::DisallowedArmConstArg => vec![
+                "only an integer literal or the bare subject `N` may appear here; a computed \
+                 const expression would need to run through compile-time evaluation with no \
+                 termination guarantee"
+                    .to_string(),
+            ],
             Self::ForeignTypeFnRefInArm => vec![
                 "mutually-referencing type fns are rejected here because they can form \
                  non-terminating normalization cycles"
                     .to_string(),
             ],
-            _ => vec![],
+            Self::ScrutineeMismatch { .. } | Self::NoSelfCall => vec![],
         }
     }
 }

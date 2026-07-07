@@ -1739,7 +1739,11 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                     message: "return kind must be `*` or an arrow over `*`".to_string(),
                     span: span.resolve(db),
                 }],
-                notes: vec![],
+                notes: vec![
+                    "a `recursive type fn` produces a type, not an obligation; the return kind \
+                     describes the kind of type it produces, e.g. `*` for a plain type"
+                        .to_string(),
+                ],
                 error_code,
             },
 
@@ -1757,15 +1761,25 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
 
             Self::TypeFnSymbolicUnsupported { span } => CompleteDiagnostic {
                 severity: Severity::Error,
-                message: "symbolic type-fn application not yet supported".to_string(),
+                message: "recursive type fn application with a symbolic subject cannot be stored \
+                          here"
+                    .to_string(),
                 sub_diagnostics: vec![SubDiagnostic {
                     style: LabelStyle::Primary,
-                    message: "the recursion subject here is not a ground integer".to_string(),
+                    message: "this position stores a concrete type with a fixed layout (a \
+                              struct/enum/contract field, or its `where` clause), and the \
+                              recursion subject here is not a ground integer"
+                        .to_string(),
                     span: span.resolve(db),
                 }],
                 notes: vec![
-                    "v1 reduces `recursive type fn` applications only when the subject is a \
-                     concrete integer; a symbolic subject is planned for a later slice"
+                    "symbolic subjects ARE supported in function/trait/impl signatures, `where` \
+                     clauses, and bodies: the obligation is proven automatically where possible, \
+                     or otherwise discharged by adding a `where <the application>: <Trait>` bound"
+                        .to_string(),
+                    "to use this shape in a stored field, either supply a concrete `const` \
+                     subject, or move the type-fn-typed value to a non-stored position (e.g. a \
+                     function parameter) instead"
                         .to_string(),
                 ],
                 error_code,
@@ -1779,7 +1793,16 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                     message: format!("unfolding this application exceeds the limit of {limit} steps"),
                     span: span.resolve(db),
                 }],
-                notes: vec![],
+                notes: vec![
+                    "this is usually caused by a `const` subject far larger than intended, or a \
+                     chain of self-calls whose nesting keeps growing with each step (e.g. a very \
+                     large `N` passed to a `recursive type fn`); check the constant flowing into \
+                     this application"
+                        .to_string(),
+                    "the unfold ceiling is a fixed compiler limit, not user-configurable; reduce \
+                     the subject or restructure the computation so fewer steps are needed"
+                        .to_string(),
+                ],
                 error_code,
             },
 

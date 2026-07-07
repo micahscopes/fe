@@ -923,3 +923,84 @@ against the actual `cargo nextest run --release --workspace --all-features
 --no-fail-fast --locked` logs from those runs (both `NEXTEST_EXIT=0`) rather
 than restating the BUILD_LOG prose alone; the FCO base's 2451/2451 comes from
 the `fco-sgk` PR #1506 record. No code changed; this is a docs-only commit.
+
+---
+
+## S3b (1 of 2): diagnostic quality pass (reviewer polish, no behavior change)
+
+Audited every type-fn diagnostic named in the S3b task (WF family / code 45,
+`TypeFnInImplHeader` 48, `TypeFnSymbolicUnsupported` 46, `TypeFnNotSaturated` /
+`TypeFnConstraintRetKind` 43/44, `TypeFnRecursionLimit` 47) against the current
+gating logic in `path_resolver.rs` / `type_fn.rs`, not just the rendered text,
+to make sure wording still matches what actually triggers each one. Text/notes
+only: no diagnostic's trigger condition, span source, or error code changed.
+
+**Found and fixed one real staleness, not just a wording nit.**
+`TypeFnSymbolicUnsupported`'s message ("symbolic type-fn application not yet
+supported") and note ("v1 reduces ... only when the subject is a concrete
+integer; a symbolic subject is planned for a later slice") were written at
+S1.5, before S2.1 lifted the gate for non-stored positions and S2.2b's
+induction engine started proving symbolic obligations outright. Checked
+`path_resolver.rs`'s `ItemKind::TypeFn` arm: this diagnostic is reachable
+ONLY from `symbolic_type_fn_position_is_stored(scope)`, i.e. a symbolic
+subject in a stored ADT position (a struct/enum/contract field or its `where`
+clause) — every other position (fn/trait/impl signatures, `where` clauses,
+bodies) has propagated the application opaquely to the solver since S2.1. The
+old text told the user a categorically false thing: that symbolic type fns
+are unsupported, when the real (and permanent, not "not yet") restriction is
+narrower and the escape hatch (moving the obligation to a non-stored
+position, where it can be proven automatically or discharged with a `where
+<app>: <Trait>` bound) already exists in the same release. New message:
+"recursive type fn application with a symbolic subject cannot be stored
+here", naming the actual position class in the sub-diagnostic, plus two notes
+naming the escape hatch and the fix. Updated the one test that pinned the old
+substring (`rejects_symbolic_type_fn_outside_body`, now asserts on `"cannot
+be stored here"`).
+
+**`TypeFnRecursionLimit`** had zero notes. Added two: naming the likely
+cause (a `const` subject far larger than intended, or self-call nesting that
+keeps growing) and stating the ceiling is a fixed compiler constant, not
+user-configurable (matching the honest status in `OVERVIEW.md` sec 6 item 3,
+which still tracks making it a manifest-config knob as a separate, unbuilt,
+follow-up).
+
+**`TypeFnNotSaturated`** (43) already showed expected-vs-given arity in its
+sub-diagnostic and named the fix in its note; left as is, message/notes were
+already clear.
+
+**`TypeFnConstraintRetKind`** (44) had zero notes; added one explaining a type
+fn's return kind describes the KIND of type it produces (not an obligation),
+since `Constraint` there reads as a plausible-but-wrong thing to reach for.
+
+**`TypeFnIllFormed` family (code 45, 21 `TypeFnWfError` variants).** 8 of 21
+already had a clear one-line message and 3 already had a note
+(`SubjectNotDecreasing`, `SubjectMayUnderflow`, `ForeignTypeFnRefInArm`).
+Added notes to the remaining 16 (all naming the concrete fix, not restating
+the message): `MissingSubject`, `MultipleSubjects`, `SubjectNotLast`,
+`SubjectNotUsize`, `MissingWildcardArm`, `ArmAfterWildcard`,
+`DuplicateArmLit`, `ForeignTypeFnCall`, `AssocProjInArm`, `DisallowedArmType`,
+`SubjectDivZeroFixpoint`, `LiteralSubjectNotSmaller`,
+`SelfCallArgsNotVerbatim`, `WhereNotTypeParamBound`, `MissingReturnKind`,
+`DisallowedArmConstArg`. Also widened `SubjectNotDecreasing`'s existing note
+to name all three accepted subject forms (`{N - k}`, `{N / k}`, and a smaller
+literal — it previously named only the first two), and reworded
+`SubjectNotDecreasing`'s message itself, which read as comparing "the
+subject" to itself ("must be strictly smaller than the subject") -> "must
+strictly decrease toward the base case". `ScrutineeMismatch` and `NoSelfCall`
+were left note-free: their one-line messages already name the fix directly
+(the exact expected identifier; the two concrete alternatives), so a note
+would only restate them. The `notes()` match is now exhaustive over the 21
+variants (was a trailing `_ => vec![]`), so a future new variant must be
+given an explicit note decision rather than silently falling through.
+
+Primary spans were audited variant-by-variant against `type_fn.rs`'s
+`Checker`: all point at the right node already (arm-specific errors at
+`arm_ty_span(idx)`, subject-shape errors at the generic-param list, the
+scrutinee mismatch at the `match` subject, wildcard/duplicate-arm errors at
+the arm list or the specific arm). No span changed.
+
+Verification: `cargo check --workspace` clean. Targeted `cargo test -p fe-hir
+--lib analysis::ty::type_fn::tests` (29/29, incl. the updated
+`rejects_symbolic_type_fn_outside_body`) green. No uitest/snapshot fixture
+renders type-fn diagnostic text (grepped the repo; only parser CST-node
+snapshots mention "recursive type fn"), so no snapshot regen was needed.

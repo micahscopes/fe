@@ -1657,7 +1657,7 @@ recursive type fn Bush<const N: usize>() -> (*) {
         let diags = db.run_on_top_mod(top_mod);
         let rendered = format_diagnostics(&db, &diags);
         assert!(
-            rendered.contains("symbolic type-fn application not yet supported"),
+            rendered.contains("cannot be stored here"),
             "expected a symbolic-type-fn diagnostic, got:\n{rendered}"
         );
     }
