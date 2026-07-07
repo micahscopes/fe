@@ -693,3 +693,114 @@ re-query, `ImplementorOrigin::Assumption` required). Cross-check
 `default_tier_selection(db, ground_goal) == None` at n in {0,1,2,4,7}, with the
 constrained-combinator fixture `impl<A: Marker, B: Marker> Marker for Comp<A,B>`
 so the IH is load-bearing (C4), plus the IH anti-vacuity twin.
+
+## S2.2b: the minimal induction engine, WIRED IN (course-of-values, gate-don't-select)
+
+Fable steering-04 §5 S2.2b. Wires the S2.2a primitives into the WF discharge
+sites as the actual engine, adding the first symbolic-type-fn PROOF POWER. Slice 2
+is complete after this.
+
+### How it hooks in (C1: OUTSIDE the tracked solve)
+
+Two new engine entry points in `type_fn_induct.rs`:
+
+- `try_prove_by_induction(db, solve_cx, goal) -> StrictResult`: runs
+  course-of-values induction over the WF-checked subject metric.
+- `try_discharge_by_induction(db, solve_cx, goal) -> bool`: the discharge wrapper
+  (C2).
+
+Wiring: at BOTH WF discharge sites the S2.1 fixtures exercise, the `check_ty_wf`
+constraint loop (`trait_resolution/mod.rs`, the `RPow<F,N>: Marker` route from a
+`Requires<..>` where clause) and `check_trait_inst_wf`, the existing `UnSat`
+branch now first tries the engine:
+
+```
+if type_fn_app_head(db, goal.self_ty(db)).is_some()
+    && type_fn_induct::try_discharge_by_induction(db, solve_cx, goal)
+{ continue; }   // engine proved it -> treat as WF
+return WellFormedness::IllFormed { goal, subgoal };   // S2.1 fallback unchanged
+```
+
+This is the well-formedness layer, NOT inside `ProofForest`/`is_query_satisfiable`
+(C1: the third instance of the codebase's "consult outside the tracked solve"
+rule, alongside CTFE const-predicates and scoped provisions). The engine only ever
+calls the STRICT `strict_prove` helper (never the permissive solver, never
+`check_ty_wf`/`check_trait_inst_wf`), so solver->engine is one-directional and
+there is no salsa cycle (verified: `proof_forest.rs` does not call the WF queries).
+The `type_fn_app_head(..).is_some()` gate means BASELINE goals (no type-fn head)
+never reach the engine: zero baseline perturbation by input-disjointness.
+
+### The arm-by-arm induction + per-occurrence opaque flow
+
+For a symbolic goal `P(F<A, N>)` in the minimal class (`minimal_class == InClass`,
+else immediate decline -> S2.1 fallback), for each arm of `F` (from
+`TypeFnWfData`), lower the arm RHS in the def's scope (self-calls stay opaque) and
+fold it with `InductionSubst`, which (a) replaces the WHOLE spine of each self-call
+with a FRESH per-occurrence rigid induction opaque `O_i` (via
+`mint_induction_opaque`, never recursing into the self-call's args) and (b)
+substitutes the def's type params with the forwarded args `A`:
+
+- BASE arm (no self-call, C5): `P(body)` strictly proved GROUND under the caller
+  assumptions only (the substituted body is exactly the ground normal form at the
+  matched subject; a `debug_assert` pins it type-fn-head-free).
+- STEP arm (self-calls): inject the induction hypotheses `{P(O_i)}` into the
+  assumptions and strictly prove `P(body')`.
+
+All arms `Proven` -> engine `Proven`; any arm `NotProven` -> `NotProven` (decline;
+NO negative lemma, never a partial proof). On `Proven`, C2 consumes the lemma by
+RE-RUNNING the query with the goal INJECTED as an assumption and accepting only a
+strict proof; for the opaque type-fn head that proof can come ONLY from the
+injected assumption (the S2.0 impl-target ban leaves no impl candidate), so the
+discharge is the exact S2.1 `ImplementorOrigin::Assumption` route and mono
+re-resolves ground.
+
+### Soundness tests (gate-don't-select is the whole point; all green, targeted)
+
+New CONSTRAINED-combinator fixture `impl<A: Marker, B: Marker> Marker for
+Comp<A, B>` so the IH is genuinely load-bearing (C4):
+
+- `engine_proves_constrained_rpow_without_where_bound` (e2e POSITIVE): a fn whose
+  signature forces `RPow<F, N>: Marker` type-checks with NO `where` bound, from
+  `F: Marker` alone. The new proof power.
+- `engine_declines_when_arg_not_marker` (e2e NEGATIVE, conservatism): the same fn
+  with `F` NOT `Marker` is DECLINED (the step arm's `Marker(F)` subgoal is UnSat)
+  and the ordinary trait-bound diagnostic fires.
+- `engine_cross_check_gate_matches_ground_select` (the CORE cross-check): the
+  engine PROVES `Marker(RPow<F, N>)` from `F: Marker` (and the C2 wrapper accepts
+  it), DECLINES without it; and for n in {0,1,2,4,7} ground resolution of the
+  un-normalized `Marker(RPow<Pair, n>)` and of the normal form `Marker(NF_n)`
+  select the IDENTICAL unique implementor (equal `ImplementorId` => equal origin +
+  `SelDiscriminator`), pin a real `Hir` impl, are `select_impl::Unique` on both
+  forms, AND `default_tier_selection == None` at every n (the tier / N1 dedup never
+  engages: the engine never proves a coexistence shape).
+- `engine_ih_is_load_bearing` (IH ANTI-VACUITY twin): the step-arm goal
+  `Marker(Comp<O, F>)` is `Proven` under `{Marker(O), Marker(F)}` and `NotProven`
+  with only `{Marker(F)}` — removing the injected IH genuinely breaks the arm.
+- `engine_declines_multi_self_call_shared_opaque` (SHARED-OPAQUE negative): the
+  two-self-call `Bush` is `Declined(MultiSelfCallArm)` by the class gate, so the
+  engine returns `NotProven` — the gate (not luck) forecloses the `Comp<A, A>`
+  hazard. Per-occurrence distinctness itself is pinned by the S2.2a
+  `opaque_mint_distinct_and_rigid`.
+
+### Deviation (documented): one S2.1 test's premise was lifted
+
+`s21_symbolic_obligation_fails_without_assumption` asserted the S2.1-era ABSENCE of
+proof power. Under its (deliberately UNCONSTRAINED, per C4) `impl<F,G> Marker for
+Comp<F,G>` fixture, `RPow<F, n>: Marker` is UNCONDITIONALLY true (`Par` at 0,
+unconstrained `Comp` at n>=1), so the engine now SOUNDLY proves it without an
+assumption. Renamed to `s21_symbolic_obligation_proven_by_induction_engine` and
+flipped to assert clean compilation, with a doc note. All OTHER S2.1 tests
+(positive, cross-check, opaque-flow) and the shared `S21_FIXTURES` are UNCHANGED,
+so the S2.1 cross-check keeps its exact original coverage; the conservatism pin it
+gave up moves to `engine_declines_when_arg_not_marker` (constrained fixture, where
+`F: Marker` is truly load-bearing). No other test changed.
+
+### Verification
+
+`cargo check --workspace` clean (no warnings). All 17
+`analysis::ty::type_fn_induct::tests` (12 S2.2a + 5 new engine tests) and all 29
+`analysis::ty::type_fn::tests` (incl. the S2.1 cross-check, with the one renamed
+test) pass in debug, targeted. Zero baseline perturbation: the engine is gated on
+`type_fn_app_head(..).is_some()`, which no baseline goal satisfies, so no baseline
+tracked query acquires a new dependency edge. Full release `nextest` CI is the
+orchestrator's at the Slice-2 boundary (this slice ends Slice 2).

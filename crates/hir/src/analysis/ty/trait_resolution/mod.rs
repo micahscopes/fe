@@ -13,6 +13,8 @@ use crate::analysis::{
         diagnostics::{TraitConstraintDiag, TyDiagCollection},
         trait_resolution::{constraint::ty_constraints, proof_forest::ProofForest},
         ty_check::ty_const_predicate_violation,
+        type_fn::type_fn_app_head,
+        type_fn_induct,
         unify::UnificationTable,
     },
 };
@@ -805,6 +807,16 @@ pub(crate) fn check_ty_wf<'db>(
 
         if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query)
         {
+            // S2.2b: a symbolic `recursive type fn` membership obligation
+            // `P(F<..., N>)` may be dischargeable by course-of-values induction.
+            // The engine is consulted HERE, at the WF layer, OUTSIDE the tracked
+            // proof-forest solve (C1); it discharges via assumption-injection (C2)
+            // and otherwise leaves the goal UnSat (the S2.1 fallback).
+            if type_fn_app_head(db, goal.self_ty(db)).is_some()
+                && type_fn_induct::try_discharge_by_induction(db, solve_cx, goal)
+            {
+                continue;
+            }
             let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
             return WellFormedness::IllFormed { goal, subgoal };
         }
@@ -1066,6 +1078,12 @@ pub(crate) fn check_trait_inst_wf<'db>(
         let query = CanonicalGoalQuery::new(db, goal, assumptions);
         if let GoalSatisfiability::UnSat(subgoal) = is_goal_query_satisfiable(db, solve_cx, &query)
         {
+            // S2.2b: same induction-engine discharge as `check_ty_wf` (C1/C2).
+            if type_fn_app_head(db, goal.self_ty(db)).is_some()
+                && type_fn_induct::try_discharge_by_induction(db, solve_cx, goal)
+            {
+                continue;
+            }
             let subgoal = subgoal.map(|subgoal| query.extract_subgoal(&mut table, subgoal));
             return WellFormedness::IllFormed { goal, subgoal };
         }

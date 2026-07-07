@@ -1939,17 +1939,24 @@ recursive type fn RPow<F, const N: usize>() -> (*) {
         );
     }
 
-    /// NEGATIVE (missing assumption): the SAME fn WITHOUT the `where RPow<F, M>:
-    /// Marker` bound fails. The opaque type-fn head has no impl candidate (the
-    /// S2.0 ban) and no assumption, so the obligation is UnSat and the ordinary
-    /// trait-bound diagnostic fires. This pins the conservatism direction: the
-    /// assumption is load-bearing, not decorative.
+    /// S2.2b BEHAVIOR CHANGE (supersedes the S2.1 "fails without assumption"
+    /// pin). With the induction engine wired into the WF discharge site, the SAME
+    /// fn WITHOUT the `where RPow<F, M>: Marker` bound now type-checks. This is
+    /// SOUND: under the unconstrained `impl<F, G> Marker for Comp<F, G>` every
+    /// ground normal form of `RPow<F, n>` (`Par` at 0, `Comp<..>` at n>=1) is
+    /// unconditionally `Marker`, so the engine proves the membership by induction
+    /// (base arm `Marker(Par)`; step arm `Marker(Comp<O, F>)` discharged by the
+    /// unconstrained impl) and discharges it via assumption-injection (C2). The
+    /// CONSERVATISM direction (the engine DECLINES, at the same WF site, when an
+    /// arm precondition is genuinely absent) is pinned in `type_fn_induct` by
+    /// `engine_declines_when_arg_not_marker` against a CONSTRAINED combinator impl,
+    /// where `RPow<F, n>: Marker` truly requires `F: Marker`.
     #[test]
-    fn s21_symbolic_obligation_fails_without_assumption() {
+    fn s21_symbolic_obligation_proven_by_induction_engine() {
         let rendered = s21_diags("fn use_it<F, const M: usize>(x: Requires<RPow<F, M>>) {}");
         assert!(
-            rendered.contains("is not satisfied") || rendered.contains("doesn't implement"),
-            "expected a trait-bound-not-satisfied diagnostic without the assumption, got:\n{rendered}"
+            rendered.is_empty(),
+            "the induction engine should prove the unconditional membership, but got:\n{rendered}"
         );
     }
 

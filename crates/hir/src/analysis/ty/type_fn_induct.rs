@@ -1,11 +1,15 @@
-//! Type-to-type CTFE induction engine PRECONDITIONS (spec sec 5.3, ladder
-//! S2.2a; Fable steering-04 §5). This module is deliberately INERT: every item
-//! here has ZERO non-test callers. Nothing is wired into any obligation or WF
-//! discharge site (that is S2.2b), so it has zero proof power by construction
-//! and cannot perturb the 2475 baseline.
+//! Type-to-type CTFE minimal induction engine (spec sec 5.3, ladder S2.2a/b;
+//! Fable steering-04 §5). S2.2a landed the three trapdoor primitives; S2.2b wires
+//! them into the WF discharge sites as [`try_prove_by_induction`] /
+//! [`try_discharge_by_induction`], the ENGINE proper.
 //!
-//! It provides the three trapdoor primitives the minimal induction engine will
-//! consume, each executable and unit-tested now, before any proof power exists:
+//! The engine is consulted ONLY from the WF/obligation discharge layer
+//! (`check_ty_wf` / `check_trait_inst_wf`'s `UnSat` branch), which is OUTSIDE the
+//! tracked `is_query_satisfiable` proof-forest solve (C1). Baseline goals carry no
+//! `recursive type fn` head, so the engine is never reached for them
+//! (input-disjointness): the 2475 baseline is untouched.
+//!
+//! The primitives:
 //!
 //! 1. [`strict_prove`] / [`StrictResult`] — a STRICT satisfaction check that is
 //!    a SEPARATE type from [`GoalSatisfiability`], so no engine result can ever
@@ -26,26 +30,35 @@
 //!
 //! 3. [`minimal_class`] — a pure recognizer over `TypeFnWfData` + the requested
 //!    goal deciding whether a symbolic type-fn goal is in the S2.2b minimal
-//!    class, so S2.2b engages the engine ONLY there and otherwise falls back to
-//!    the S2.1 assumption path. Every decline carries a [`ClassDecline`] reason.
+//!    class, so the engine engages ONLY there and otherwise falls back to the S2.1
+//!    assumption path. Every decline carries a [`ClassDecline`] reason.
+//!
+//! 4. [`try_prove_by_induction`] — the engine: course-of-values induction over the
+//!    WF-checked subject metric, one strict solve per arm, per-occurrence opaque
+//!    IHs on step arms, ground discharge on base arms. All arms `Proven` ->
+//!    lemma `Proven`; any arm `NotProven` -> decline (no negative lemma).
 
-// S2.2a INVARIANT: every item below is exercised ONLY by this module's tests
-// until S2.2b wires the engine into a discharge site. The dead-code allow makes
-// that "zero non-test callers" guarantee explicit; S2.2b's real callers remove
-// the need for it.
+// A handful of the S2.2a `ClassDecline` reasons / primitives are only exercised by
+// this module's tests (they gate shapes no in-tree fixture reaches yet); keep the
+// dead-code allow so those documented decline reasons stay compiled without
+// warnings. The engine entry points and their helpers have real callers.
 #![allow(dead_code)]
 
 use crate::Ingot;
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::ty::const_ty::{ConstTyData, ConstTyId};
+use crate::analysis::ty::fold::{TyFoldable, TyFolder};
 use crate::analysis::ty::trait_def::TraitInstId;
 use crate::analysis::ty::trait_resolution::{
-    CanonicalGoalQuery, GoalSatisfiability, PredicateListId, is_query_satisfiable,
+    CanonicalGoalQuery, GoalSatisfiability, PredicateListId, TraitSolveCx, is_query_satisfiable,
 };
-use crate::analysis::ty::ty_def::{Kind, TyFlags, TyId, TyParam};
+use crate::analysis::ty::ty_def::{
+    InvalidCause, Kind, TyBase, TyData, TyFlags, TyId, TyParam, type_fn_sig,
+};
+use crate::analysis::ty::ty_lower::lower_hir_ty;
 use crate::analysis::ty::type_fn::{
     TypeFnWfData, bare_path_ident, body_root_expr, collect_type_fn_heads, resolve_leaf_scope,
-    type_fn_app_head,
+    type_fn_app_head, type_fn_wf,
 };
 use crate::core::hir_def::{
     ConstGenericArgValue, Expr, GenericArg, GenericParam, IdentId, ItemKind, LitKind, Partial,
@@ -492,6 +505,218 @@ fn arm_body_has_bare_subject_const_arg<'db>(
     false
 }
 
+// ---------------------------------------------------------------------------
+// 4. The minimal induction engine (steering-04 §5 S2.2b).
+// ---------------------------------------------------------------------------
+
+/// Attempt to discharge a symbolic type-fn membership obligation `P(F<..., N>)`
+/// by course-of-values induction over the WF-checked subject metric.
+///
+/// PLACEMENT (C1): this is THE ENGINE. It is consulted ONLY from the WF /
+/// obligation discharge layer ([`try_discharge_by_induction`], called from
+/// `check_ty_wf` / `check_trait_inst_wf`'s `UnSat` branch), which is OUTSIDE the
+/// tracked `is_query_satisfiable` proof-forest solve. It never runs inside a
+/// `ProofForest`, and it only ever calls the STRICT [`strict_prove`] helper
+/// (never the permissive solver, and never `check_ty_wf`/`check_trait_inst_wf`),
+/// so the solver -> engine edge stays one-directional and no salsa cycle exists.
+///
+/// SCHEME: for each arm of `F` (from [`TypeFnWfData`]):
+/// - a BASE arm (no self-call) discharges GROUND (C5): the arm RHS is lowered and
+///   the forwarded type args substituted, giving exactly the ground normal form
+///   at the matched subject, and `P(body)` is strictly proved under the caller
+///   assumptions only;
+/// - a STEP arm (with self-calls) replaces EACH self-call occurrence with a FRESH
+///   per-occurrence rigid opaque `O_i` (steering-04 §2: distinct rigids prove
+///   strictly less than a shared one, the conservative direction), injects the
+///   induction hypotheses `{P(O_i)}` into the assumptions, and strictly proves
+///   `P(body')` (body with the opaques substituted for the self-calls and the
+///   forwarded args substituted for the def's type params).
+///
+/// Returns [`StrictResult::Proven`] ONLY when EVERY arm is `Proven`; otherwise
+/// [`StrictResult::NotProven`], and the caller falls back to the S2.1 assumption
+/// route unchanged (no negative lemma is ever recorded). Never emits a partial or
+/// uncertain proof. Outside the S2.2b minimal class (per [`minimal_class`]) it
+/// declines immediately.
+pub(crate) fn try_prove_by_induction<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+) -> StrictResult {
+    let self_ty = goal.self_ty(db);
+    let Some(head_def) = type_fn_app_head(db, self_ty) else {
+        return StrictResult::NotProven;
+    };
+    let wf_result = type_fn_wf(db, head_def);
+    let Some(wf) = wf_result.data.as_ref() else {
+        return StrictResult::NotProven;
+    };
+    // The class gate is the whole soundness argument (steering-04 §2): it rules
+    // out multi-self-call arms (the shared-opaque hazard), var/hole/invalid/
+    // type-fn args, non-unary/assoc goals, and the G3 bare-subject-value hazard.
+    if minimal_class(db, wf, goal) != MinimalClass::InClass {
+        return StrictResult::NotProven;
+    }
+
+    // Decompose the saturated app: forwarded type args precede the bare subject.
+    // `app_args` is the substitution vector, indexed by the def's lowered param
+    // index exactly as the S1.5 `Unfolder` indexes its `subst_args`.
+    let (_base, app_args) = self_ty.decompose_ty_app(db);
+    if app_args.is_empty() {
+        return StrictResult::NotProven;
+    }
+
+    let ret_kind = type_fn_sig(db, head_def).ret_kind;
+    let origin_ingot = solve_cx.origin_ingot();
+    let caller_assumptions = solve_cx.assumptions();
+
+    for (arm_idx, arm) in wf.arms.iter().enumerate() {
+        // Lower the arm RHS in the def's scope: because that scope is inside a
+        // type fn body, the path-lowering site leaves self-calls opaque (live
+        // `TyBase::TypeFn` heads), which is exactly what the substitution needs
+        // to intercept. Empty assumptions: the arm RHS lowering never solves.
+        let body_ty = lower_hir_ty(
+            db,
+            arm.rhs_ty,
+            head_def.scope(),
+            PredicateListId::empty_list(db),
+        );
+
+        let mut subst = InductionSubst {
+            db,
+            def: head_def,
+            subst_args: app_args,
+            arm_idx,
+            ret_kind: ret_kind.clone(),
+            occurrence: 0,
+            opaques: Vec::new(),
+        };
+        let body = body_ty.fold_with(db, &mut subst);
+
+        // A foreign type-fn head (WF-impossible) tripwires to `Invalid`; decline.
+        if body.has_invalid(db) {
+            return StrictResult::NotProven;
+        }
+
+        let arm_goal = replace_self_ty(db, goal, body);
+
+        let assumptions = if subst.opaques.is_empty() {
+            // BASE arm (C5): ground discharge, no IH. The body carries no type-fn
+            // head (no self-call, and foreign heads are WF-banned); assert it so a
+            // future widening cannot silently strict-solve an un-normalized head.
+            debug_assert!(
+                collect_type_fn_heads(db, body).is_empty(),
+                "a base arm body must be type-fn-head-free"
+            );
+            caller_assumptions
+        } else {
+            // STEP arm: inject the per-occurrence induction hypotheses `{P(O_i)}`.
+            let mut preds = caller_assumptions.list(db).clone();
+            for &opaque in &subst.opaques {
+                preds.push(replace_self_ty(db, goal, opaque));
+            }
+            PredicateListId::new(db, preds)
+        };
+
+        if strict_prove(db, origin_ingot, arm_goal, assumptions) != StrictResult::Proven {
+            return StrictResult::NotProven;
+        }
+    }
+
+    StrictResult::Proven
+}
+
+/// Discharge site wrapper (C2). On engine `Proven`, consume the lemma by
+/// RE-RUNNING the ordinary query with the goal INJECTED as an assumption,
+/// accepting only a strict proof. For the opaque type-fn head that proof can come
+/// ONLY from that injected assumption (the S2.0 impl-target ban leaves no impl
+/// candidate whose self-type head is the opaque type fn), so the discharge is the
+/// exact S2.1 assumption route (`ImplementorOrigin::Assumption`): gate-don't-select
+/// holds by construction, and mono re-resolves ground. Returns `true` iff the
+/// obligation is discharged; `false` falls back to the S2.1 `IllFormed` path.
+pub(crate) fn try_discharge_by_induction<'db>(
+    db: &'db dyn HirAnalysisDb,
+    solve_cx: TraitSolveCx<'db>,
+    goal: TraitInstId<'db>,
+) -> bool {
+    if try_prove_by_induction(db, solve_cx, goal) != StrictResult::Proven {
+        return false;
+    }
+    let injected = {
+        let mut preds = solve_cx.assumptions().list(db).clone();
+        preds.push(goal);
+        PredicateListId::new(db, preds)
+    };
+    strict_prove(db, solve_cx.origin_ingot(), goal, injected) == StrictResult::Proven
+}
+
+/// Rebuild `goal` with its self type replaced by `new_self`, preserving the trait
+/// def, the remaining trait args, and any associated-type bindings.
+fn replace_self_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    goal: TraitInstId<'db>,
+    new_self: TyId<'db>,
+) -> TraitInstId<'db> {
+    let mut args = goal.args(db).clone();
+    args[0] = new_self;
+    TraitInstId::new(db, goal.def(db), args, goal.assoc_type_bindings(db).clone())
+}
+
+/// One-arm substitution folder (steering-04 §2). It (a) replaces the WHOLE spine
+/// of each self-call `F<...>` with a FRESH per-occurrence rigid induction opaque
+/// (never recursing into the self-call's args), and (b) substitutes the def's
+/// type params with the forwarded application args. Mirrors the S1.5 [`Unfolder`],
+/// but mints an opaque hypothesis where the unfolder builds a smaller ground app.
+struct InductionSubst<'db, 'a> {
+    db: &'db dyn HirAnalysisDb,
+    def: TypeFnDef<'db>,
+    /// The application's arguments, indexed by the def's lowered param index
+    /// (type params first, subject last), exactly as [`Unfolder`]'s `subst_args`.
+    subst_args: &'a [TyId<'db>],
+    arm_idx: usize,
+    /// The def's return kind: the kind of a saturated self-call, hence of the
+    /// opaque that abstracts it.
+    ret_kind: Kind,
+    /// Per-occurrence counter, incremented at each self-call in source order.
+    occurrence: usize,
+    /// The opaques minted in this arm, in occurrence order, for IH injection.
+    opaques: Vec<TyId<'db>>,
+}
+
+impl<'db> TyFolder<'db> for InductionSubst<'db, '_> {
+    fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        // Intercept a self-call spine BEFORE its subject/args can be folded.
+        let (base, _args) = ty.decompose_ty_app(db);
+        if let TyData::TyBase(TyBase::TypeFn(d)) = base.data(db) {
+            if *d != self.def {
+                // Foreign head: WF forbids this in an arm; tripwire to Invalid so
+                // the arm declines rather than proving over a foreign application.
+                return TyId::invalid(db, InvalidCause::Other);
+            }
+            let opaque = mint_induction_opaque(
+                db,
+                self.def,
+                self.arm_idx,
+                self.occurrence,
+                self.ret_kind.clone(),
+            );
+            self.occurrence += 1;
+            self.opaques.push(opaque);
+            return opaque;
+        }
+
+        match ty.data(db) {
+            // The def's type params -> the forwarded application args. The subject
+            // (a `ConstTy`-wrapped param, idx == subject_idx) is never a bare
+            // `TyParam`, and the G3 class guard bans it from non-self-call value
+            // positions, so it is not substituted here.
+            TyData::TyParam(p) if !p.is_effect() && p.idx < self.subst_args.len() => {
+                self.subst_args[p.idx]
+            }
+            _ => ty.super_fold_with(db, self),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,5 +1101,269 @@ impl Marker for Amb {}
             minimal_class(&db, &wf, goal),
             MinimalClass::Declined(ClassDecline::ArgHasTypeFn)
         );
+    }
+
+    // ------------------------------------------------------------------
+    // 4. The minimal induction engine (S2.2b).
+    // ------------------------------------------------------------------
+
+    /// CONSTRAINED-combinator fixture (steering-04 C4): `Comp`'s `Marker` impl is
+    /// `impl<A: Marker, B: Marker> Marker for Comp<A, B>`, so the step arm goal
+    /// `Marker(Comp<O, F>)` is UnSat without the IH `Marker(O)` and the caller's
+    /// `F: Marker`, and Proven with them. This makes the induction hypothesis
+    /// LOAD-BEARING (unlike the S2.1 unconstrained impl, which discharges the arm
+    /// ignoring the IH). `Bush` is a two-self-call def used for the shared-opaque
+    /// decline pin.
+    const CONSTRAINED_FIXTURES: &str = r#"
+struct Par {}
+struct Pair {}
+struct Comp<F, G> {}
+
+trait Marker {}
+impl Marker for Par {}
+impl Marker for Pair {}
+impl<A: Marker, B: Marker> Marker for Comp<A, B> {}
+
+struct Requires<T> where T: Marker {}
+
+recursive type fn RPow<F, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RPow<F, {N - 1}>, F>
+    }
+}
+
+recursive type fn Bush<const N: usize>() -> (*) {
+    match N {
+        0 => Pair
+        _ => Comp<Bush<{N - 1}>, Bush<{N - 1}>>
+    }
+}
+"#;
+
+    /// Full-pass diagnostics for the constrained fixture plus `tail`.
+    fn constrained_diags(tail: &str) -> String {
+        use crate::test_db::format_diagnostics;
+        let src = format!("{CONSTRAINED_FIXTURES}\n{tail}\n");
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s22b_e2e.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        let diags = db.run_on_top_mod(top_mod);
+        format_diagnostics(&db, &diags)
+    }
+
+    /// END-TO-END POSITIVE (C4): a generic fn whose signature forces
+    /// `RPow<F, N>: Marker` (via the `Requires` wrapper) type-checks with NO
+    /// explicit `where RPow<F, N>: Marker` bound — the induction engine proves the
+    /// membership from `F: Marker` alone. This is the new proof power.
+    #[test]
+    fn engine_proves_constrained_rpow_without_where_bound() {
+        let rendered = constrained_diags(
+            "fn use_it<F: Marker, const N: usize>(x: Requires<RPow<F, N>>) {}",
+        );
+        assert!(
+            rendered.is_empty(),
+            "the engine should prove `RPow<F, N>: Marker` from `F: Marker`, but got:\n{rendered}"
+        );
+    }
+
+    /// END-TO-END NEGATIVE (C4 conservatism): the SAME fn with `F` NOT `Marker`
+    /// is correctly DECLINED — the step arm's `Marker(F)` subgoal is UnSat, so the
+    /// engine proves nothing and the ordinary trait-bound diagnostic fires. Proof
+    /// power is gated on the real precondition, not vacuous.
+    #[test]
+    fn engine_declines_when_arg_not_marker() {
+        let rendered =
+            constrained_diags("fn use_it<F, const N: usize>(x: Requires<RPow<F, N>>) {}");
+        assert!(
+            rendered.contains("is not satisfied") || rendered.contains("doesn't implement"),
+            "without `F: Marker` the engine must decline (UnSat), got:\n{rendered}"
+        );
+    }
+
+    /// The IH ANTI-VACUITY twin (mandatory): build the step-arm goal
+    /// `Marker(Comp<O, F>)` directly and show the injected IH `Marker(O)` is
+    /// genuinely required — Proven WITH `{Marker(O), Marker(F)}`, NotProven with
+    /// only `{Marker(F)}`. If this were vacuous (unconstrained `Comp` impl) both
+    /// would pass; the constrained impl makes the hypothesis load-bearing.
+    #[test]
+    fn engine_ih_is_load_bearing() {
+        let mut db = HirAnalysisTestDb::default();
+        let file =
+            db.new_stand_alone(Utf8PathBuf::from("type_fn_s22b_ih.fe"), CONSTRAINED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+        let ingot = top_mod.scope().ingot(&db);
+        let rpow = find_tf(&db, top_mod, "RPow");
+        let marker = marker_trait(&db, top_mod);
+
+        let params = collect_generic_params(&db, GenericParamOwner::TypeFn(rpow));
+        let f_param = params.param_by_original_idx(&db, 0).expect("RPow.F");
+        // A fresh per-occurrence opaque, exactly as the engine mints for the single
+        // self-call in the wildcard (arm index 1, occurrence 0).
+        let o = mint_induction_opaque(&db, rpow, 1, 0, Kind::Star);
+        let comp = adt_ty(&db, top_mod, "Comp");
+        let comp_o_f = TyId::foldl(&db, comp, &[o, f_param]);
+        let arm_goal = TraitInstId::new_simple(&db, marker, vec![comp_o_f]);
+
+        let f_marker = TraitInstId::new_simple(&db, marker, vec![f_param]);
+        let o_marker = TraitInstId::new_simple(&db, marker, vec![o]);
+
+        let with_ih = PredicateListId::new(&db, vec![f_marker, o_marker]);
+        assert_eq!(
+            strict_prove(&db, ingot, arm_goal, with_ih),
+            StrictResult::Proven,
+            "the step arm must be Proven under the IH `Marker(O)` and `Marker(F)`"
+        );
+
+        let without_ih = PredicateListId::new(&db, vec![f_marker]);
+        assert_eq!(
+            strict_prove(&db, ingot, arm_goal, without_ih),
+            StrictResult::NotProven,
+            "removing the IH `Marker(O)` must make the step arm NotProven (anti-vacuity)"
+        );
+    }
+
+    /// SHARED-OPAQUE NEGATIVE (steering-04 §2): the two-self-call `Bush` is OUTSIDE
+    /// the minimal class (the shared-opaque hazard `Comp<A, A>` lives here), so the
+    /// CLASS GATE declines it and the engine proves nothing — the gate, not luck,
+    /// prevents an engine from proving a lemma a `Comp<A, A>`-style impl would let
+    /// slip. (Per-occurrence distinctness itself is pinned by
+    /// `opaque_mint_distinct_and_rigid`.)
+    #[test]
+    fn engine_declines_multi_self_call_shared_opaque() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s22b_bush.fe"), CONSTRAINED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+        let bush = find_tf(&db, top_mod, "Bush");
+        let wf = type_fn_wf(&db, bush).data.clone().expect("Bush well-formed");
+        let marker = marker_trait(&db, top_mod);
+        let goal = TraitInstId::new_simple(&db, marker, vec![symbolic_app(&db, bush, 0)]);
+
+        assert_eq!(
+            minimal_class(&db, &wf, goal),
+            MinimalClass::Declined(ClassDecline::MultiSelfCallArm),
+            "the class gate must decline the two-self-call def"
+        );
+        let cx = TraitSolveCx::new(&db, bush.scope());
+        assert_eq!(
+            try_prove_by_induction(&db, cx, goal),
+            StrictResult::NotProven,
+            "the engine must not prove a lemma over a multi-self-call def"
+        );
+    }
+
+    /// The GATE-DON'T-SELECT cross-check (the core S2.2b soundness test). Two legs.
+    ///
+    /// GATE leg (symbolic): the engine PROVES `Marker(RPow<F, N>)` from `F: Marker`
+    /// alone (no `RPow<F, N>: Marker` assumption), and the C2 discharge wrapper
+    /// accepts it; drop `F: Marker` and the engine DECLINES (NotProven).
+    ///
+    /// SELECT leg (ground): for n in {0, 1, 2, 4, 7}, ground resolution of the
+    /// un-normalized `Marker(RPow<Pair, n>)` and of the normal form `Marker(NF_n)`
+    /// select the IDENTICAL unique implementor (equal `ImplementorId` implies equal
+    /// origin + `SelDiscriminator`), pinning a real `Hir` impl, with `select_impl`
+    /// Unique on both forms AND `default_tier_selection == None` at every n (the N1
+    /// dedup / tier never engages: the engine never proves a coexistence shape).
+    #[test]
+    fn engine_cross_check_gate_matches_ground_select() {
+        use crate::analysis::ty::trait_def::ImplementorOrigin;
+        use crate::analysis::ty::trait_resolution::Selection;
+        use crate::analysis::ty::type_fn::normalize_type_fn_app;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file =
+            db.new_stand_alone(Utf8PathBuf::from("type_fn_s22b_xcheck.fe"), CONSTRAINED_FIXTURES);
+        let (top_mod, _) = db.top_mod(file);
+        let rpow = find_tf(&db, top_mod, "RPow");
+        let marker = marker_trait(&db, top_mod);
+        let pair_ty = adt_ty(&db, top_mod, "Pair");
+
+        // --- GATE leg: the engine proves the symbolic goal from `F: Marker`. ---
+        let params = collect_generic_params(&db, GenericParamOwner::TypeFn(rpow));
+        let f_param = params.param_by_original_idx(&db, 0).expect("RPow.F");
+        let n_param = params.param_by_original_idx(&db, 1).expect("RPow.N");
+        let sym_app = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[f_param, n_param]);
+        assert!(
+            type_fn_app_head(&db, sym_app).is_some(),
+            "symbolic app must keep a live type-fn head"
+        );
+        let sym_goal = TraitInstId::new_simple(&db, marker, vec![sym_app]);
+
+        let f_marker = TraitInstId::new_simple(&db, marker, vec![f_param]);
+        let assumptions = PredicateListId::new(&db, vec![f_marker]);
+        let cx_f_marker = TraitSolveCx::new(&db, rpow.scope()).with_assumptions(assumptions);
+
+        assert_eq!(
+            try_prove_by_induction(&db, cx_f_marker, sym_goal),
+            StrictResult::Proven,
+            "the engine must prove `Marker(RPow<F, N>)` from `F: Marker`"
+        );
+        assert!(
+            try_discharge_by_induction(&db, cx_f_marker, sym_goal),
+            "the C2 discharge wrapper must accept the engine proof"
+        );
+
+        // Conservatism: without `F: Marker` the engine declines.
+        let cx_bare = TraitSolveCx::new(&db, rpow.scope());
+        assert_eq!(
+            try_prove_by_induction(&db, cx_bare, sym_goal),
+            StrictResult::NotProven,
+            "without `F: Marker` the engine must decline"
+        );
+
+        // --- SELECT leg: ground resolution agrees at each n, tier never engages. ---
+        let ground_cx = TraitSolveCx::new(&db, top_mod.scope());
+        for n in [0u32, 1, 2, 4, 7] {
+            let subject = usize_subject(&db, n);
+            let app = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[pair_ty, subject]);
+            let nf = normalize_type_fn_app(&db, app);
+            assert!(
+                collect_type_fn_heads(&db, nf).is_empty(),
+                "NF_{n} still carries a type-fn head: {}",
+                nf.pretty_print(&db)
+            );
+
+            let goal_unnorm = TraitInstId::new_simple(&db, marker, vec![app]);
+            let goal_norm = TraitInstId::new_simple(&db, marker, vec![nf]);
+
+            let impl_unnorm = match is_goal_satisfiable(&db, ground_cx, goal_unnorm) {
+                GoalSatisfiability::Satisfied(sol) => sol.value.implementor,
+                other => panic!("Marker(RPow<Pair, {n}>) must be Satisfied ground, got {other:?}"),
+            };
+            let impl_norm = match is_goal_satisfiable(&db, ground_cx, goal_norm) {
+                GoalSatisfiability::Satisfied(sol) => sol.value.implementor,
+                other => panic!("Marker(NF_{n}) must be Satisfied ground, got {other:?}"),
+            };
+            // Equal ImplementorId => equal origin + SelDiscriminator.
+            assert_eq!(
+                impl_unnorm, impl_norm,
+                "gate/select divergence at n={n}: un-normalized and normal form differ"
+            );
+            assert!(
+                matches!(impl_norm.origin(&db), ImplementorOrigin::Hir(_)),
+                "ground selection at n={n} must pin a real impl, not an assumption"
+            );
+
+            // The tier never engages: the engine never proves a coexistence shape.
+            assert!(
+                ground_cx.default_tier_selection(&db, goal_norm).is_none(),
+                "default_tier_selection must be None on NF_{n} (tier never engaged)"
+            );
+            assert!(
+                ground_cx.default_tier_selection(&db, goal_unnorm).is_none(),
+                "default_tier_selection must be None on RPow<Pair, {n}> (tier never engaged)"
+            );
+
+            // select_impl returns Unique(that impl) on BOTH forms.
+            for (label, goal) in [("normal form", goal_norm), ("un-normalized", goal_unnorm)] {
+                match ground_cx.select_impl(&db, goal) {
+                    Selection::Unique(sel) => assert_eq!(
+                        sel, impl_norm,
+                        "select_impl on the {label} at n={n} picked a different impl"
+                    ),
+                    other => panic!("select_impl on the {label} at n={n} not Unique: {other:?}"),
+                }
+            }
+        }
     }
 }
