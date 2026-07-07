@@ -350,6 +350,19 @@ pub enum TypeFnWfError<'db> {
     WhereNotTypeParamBound,
     /// A return kind (`-> (KIND)`) is required (the parser makes it optional).
     MissingReturnKind,
+    /// An arm-RHS `const` generic argument on a non-self-call path is neither an
+    /// integer literal nor the bare subject `N`. Anything richer (e.g.
+    /// `{helper(N)}`) would, after substitution, force an `UnEvaluated` const
+    /// through the CTFE machine, reopening the type-fn -> CTFE edge with no
+    /// termination cover (Fable steering finding 1a). Restricted at WF.
+    DisallowedArmConstArg,
+    /// The lowered arm RHS contains a `TyBase::TypeFn` head that is not the
+    /// defining type fn, or a self-referential head count that does not match the
+    /// syntactic self-calls. This catches qualified paths, aliases, and any other
+    /// route that bypasses the single-segment `classify_path` self-detection and
+    /// could otherwise form a `normalize(F) -> normalize(G) -> normalize(F)`
+    /// salsa cycle (Fable steering finding 2 / hole 2).
+    ForeignTypeFnRefInArm,
 }
 
 impl<'db> TypeFnWfError<'db> {
@@ -418,6 +431,16 @@ impl<'db> TypeFnWfError<'db> {
             Self::MissingReturnKind => {
                 "a `recursive type fn` must declare a return kind (`-> (*)`)".into()
             }
+            Self::DisallowedArmConstArg => {
+                "a `const` argument in a `recursive type fn` arm must be an integer literal or the \
+                 bare subject"
+                    .into()
+            }
+            Self::ForeignTypeFnRefInArm => {
+                "a `recursive type fn` body may only reference itself directly, not through a \
+                 qualified path, alias, or another type fn"
+                    .into()
+            }
         }
     }
 
@@ -431,6 +454,11 @@ impl<'db> TypeFnWfError<'db> {
             Self::SubjectMayUnderflow => vec![
                 "move the recursive call to an arm where the subject is large enough, or return a \
                  base shape here"
+                    .to_string(),
+            ],
+            Self::ForeignTypeFnRefInArm => vec![
+                "mutually-referencing type fns are rejected here because they can form \
+                 non-terminating normalization cycles"
                     .to_string(),
             ],
             _ => vec![],

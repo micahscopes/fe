@@ -182,6 +182,27 @@ impl<'db> Checker<'db> {
                         given,
                     });
                 }
+
+                // Hole 2 (Fable steering finding 2): every `TyBase::TypeFn` head
+                // in the lowered RHS must be THIS def, and the number of
+                // self-referential heads must equal the syntactic self-call
+                // count. This closes qualified-path / alias / foreign routes that
+                // bypass the single-segment `classify_path` self-detection and
+                // could otherwise form a `normalize(F) -> normalize(G) ->
+                // normalize(F)` salsa cycle before normalization ever runs.
+                // The cross-check reads type-fn HEADS off the lowered spine; a
+                // kind error in the RHS collapses a spine into `Invalid` and
+                // would drop a head, so only run it on a valid lowering (a
+                // kind-ill-typed RHS is reported at its use sites already).
+                if !lowered.has_invalid(db) {
+                    let heads = collect_type_fn_heads(db, lowered);
+                    if heads.iter().any(|d| *d != def) || heads.len() != arm.self_calls.len() {
+                        self.diags.push(TyLowerDiag::TypeFnIllFormed {
+                            primary: self.arm_ty_span(arm_idx),
+                            error: TypeFnWfError::ForeignTypeFnRefInArm,
+                        });
+                    }
+                }
             }
         }
 
@@ -434,7 +455,7 @@ impl<'db> Checker<'db> {
                                     self.walk_arm_ty(arm_idx, ty, l, calls);
                                 }
                             }
-                            GenericArg::Const(_) => {}
+                            GenericArg::Const(c) => self.check_arm_const_arg(arm_idx, c),
                         }
                     }
                 }
@@ -447,6 +468,32 @@ impl<'db> Checker<'db> {
             | TypeKind::Never => {
                 self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmType)
             }
+        }
+    }
+
+    /// Restricts an arm-RHS `const` generic argument that appears on a
+    /// non-self-call path (spec sec 1.5; Fable steering finding 1a). Only an
+    /// integer literal or the bare subject `N` is allowed. Anything richer would
+    /// lower to a `ConstTyData::UnEvaluated` whose later forcing re-enters the
+    /// CTFE machine (`evaluate_const_ty`'s `NotIntExpr` fall-through), reopening
+    /// the type-fn -> CTFE edge with no termination cover.
+    fn check_arm_const_arg(&mut self, arm_idx: usize, arg: &crate::core::hir_def::ConstGenericArg<'db>) {
+        let db = self.db;
+        let subject = match self.subject_name {
+            Some(s) => s,
+            None => return,
+        };
+        let ConstGenericArgValue::Expr(Partial::Present(body)) = arg.value else {
+            self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmConstArg);
+            return;
+        };
+        let ok = match body_root_expr(db, body) {
+            Some(Expr::Lit(LitKind::Int(_))) => true,
+            Some(Expr::Path(Partial::Present(p))) => p.as_ident(db) == Some(subject),
+            _ => false,
+        };
+        if !ok {
+            self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmConstArg);
         }
     }
 
@@ -649,6 +696,34 @@ fn bare_path_ident<'db>(db: &'db dyn HirAnalysisDb, ty: TypeId<'db>) -> Option<I
     }
 }
 
+/// Collects every `TyBase::TypeFn` head occurring anywhere in a lowered type
+/// (Fable steering finding 2 cross-check). Because type-fn occurrences are
+/// always in head position of a saturated `TyApp` spine, this is exactly the set
+/// of type-fn references in the type.
+fn collect_type_fn_heads<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: crate::analysis::ty::ty_def::TyId<'db>,
+) -> Vec<TypeFnDef<'db>> {
+    use crate::analysis::ty::visitor::{TyVisitable, TyVisitor};
+
+    struct Collector<'db> {
+        db: &'db dyn HirAnalysisDb,
+        heads: Vec<TypeFnDef<'db>>,
+    }
+    impl<'db> TyVisitor<'db> for Collector<'db> {
+        fn db(&self) -> &'db dyn HirAnalysisDb {
+            self.db
+        }
+        fn visit_type_fn(&mut self, type_fn: TypeFnDef<'db>) {
+            self.heads.push(type_fn);
+        }
+    }
+
+    let mut collector = Collector { db, heads: vec![] };
+    ty.visit_with(&mut collector);
+    collector.heads
+}
+
 #[cfg(test)]
 mod tests {
     use camino::Utf8PathBuf;
@@ -830,6 +905,99 @@ recursive type fn Bad<F, const N: usize>() -> (*)
         );
     }
 
+    /// Hole 1 (Fable steering finding 1a): a non-literal, non-`N` `const` arg on
+    /// a non-self-call path in an arm RHS is rejected, so no `UnEvaluated` const
+    /// can later force through the CTFE machine.
+    #[test]
+    fn rejects_disallowed_arm_const_arg() {
+        assert_bad(
+            r#"
+struct Wrapper<F, const K: usize> {}
+
+recursive type fn Bad<const N: usize>() -> (*) {
+    match N {
+        0 => u8
+        _ => Wrapper<Bad<{N - 1}>, {N + N}>
+    }
+}
+"#,
+            |e| matches!(e, TypeFnWfError::DisallowedArmConstArg),
+        );
+    }
+
+    /// Hole 1: even the bare subject inside a self-call is fine, but a helper-ish
+    /// call `{f(N)}` as a plain const arg is rejected.
+    #[test]
+    fn rejects_helper_call_const_arg() {
+        assert_bad(
+            r#"
+struct Wrapper<F, const K: usize> {}
+
+recursive type fn Bad<const N: usize>() -> (*) {
+    match N {
+        0 => u8
+        _ => Wrapper<Bad<{N - 1}>, {N - 1}>
+    }
+}
+"#,
+            |e| matches!(e, TypeFnWfError::DisallowedArmConstArg),
+        );
+    }
+
+    /// Hole 2 (Fable steering finding 2): a foreign type-fn reference reached via
+    /// a qualified path bypasses the single-segment `classify_path` self-detection
+    /// but is caught by the lowered-RHS cross-check, so a mutual-reference cycle
+    /// never reaches normalization.
+    #[test]
+    fn rejects_foreign_type_fn_via_qualified_path() {
+        assert_bad(
+            r#"
+mod m {
+    pub recursive type fn G<const N: usize>() -> (*) {
+        match N {
+            0 => u8
+            _ => G<{N - 1}>
+        }
+    }
+}
+
+recursive type fn Bad<const N: usize>() -> (*) {
+    match N {
+        0 => u8
+        1 => Bad<{N - 1}>
+        _ => m::G<3>
+    }
+}
+"#,
+            |e| matches!(e, TypeFnWfError::ForeignTypeFnRefInArm),
+        );
+    }
+
+    /// A direct mutual reference between two type fns is rejected at WF (here by
+    /// the single-segment `ForeignTypeFnCall` check), so the pair never forms a
+    /// `normalize(F) -> normalize(G) -> normalize(F)` cycle.
+    #[test]
+    fn rejects_direct_mutual_recursion() {
+        assert_bad(
+            r#"
+recursive type fn Other<const N: usize>() -> (*) {
+    match N {
+        0 => u8
+        _ => Bad<{N - 1}>
+    }
+}
+
+recursive type fn Bad<const N: usize>() -> (*) {
+    match N {
+        0 => u8
+        _ => Other<{N - 1}>
+    }
+}
+"#,
+            |e| matches!(e, TypeFnWfError::ForeignTypeFnCall),
+        );
+    }
+
     /// A `Bush`-style multi-self-call definition is well-formed: both self-calls
     /// distill to `Sub(1)` and the distilled data is produced.
     #[test]
@@ -841,7 +1009,7 @@ recursive type fn Bad<F, const N: usize>() -> (*)
 struct Pair {}
 struct Comp<F, G> {}
 
-recursive type fn Bush<const N: usize>() -> (* -> *) {
+recursive type fn Bush<const N: usize>() -> (*) {
     match N {
         0 => Pair
         _ => Comp<Bush<{N - 1}>, Bush<{N - 1}>>

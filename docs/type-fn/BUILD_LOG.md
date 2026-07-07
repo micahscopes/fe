@@ -220,3 +220,43 @@ projection; plus a `Bush`-style multi-self-call POSITIVE that produces
 
 Deliberately NOT in this slice (S1.5): normalization/unfolding queries consuming
 `TypeFnWfData`, the `TypeNormalizer::fold_ty` hook, and the MIR-boundary assert.
+
+---
+
+## S1.4b: close two type-fn WF holes (Fable steering-02 findings 1a + 2)
+
+Prerequisite amendment before any normalization, per the S1.5 steering. Closes
+the two residual paths the pre-build review found in the committed S1.4 code, so
+the type-fn -> CTFE edge is severed structurally and no mutual-reference cycle
+can reach normalization.
+
+HOLE 1 (Fire-Triangle leak, finding 1a): `walk_arm_ty`'s `Other` arm ignored
+`GenericArg::Const`, so `Wrapper<{helper(N)}, ...>` passed WF; after S1.5
+substitution the `UnEvaluated` const would force through `evaluate_const_ty`'s
+`NotIntExpr` fall-through into the real CTFE machine, reopening the edge with no
+termination cover. FIX: `check_arm_const_arg` restricts every arm-RHS const
+argument on a non-self-call path to an integer literal or the bare subject `N`;
+anything else (incl. a `_` hole) raises the new named
+`TypeFnWfError::DisallowedArmConstArg`.
+
+HOLE 2 (salsa cycle, finding 2): `classify_path` detects type-fn-ness only for
+single-segment paths, so a qualified path or alias to another type fn bypasses
+the `ForeignTypeFnCall` ban; two mutually-referencing defs would then cycle
+`normalize(F<n>) -> normalize(G<n+1>) -> normalize(F<n>)`. FIX: a lowered-RHS
+cross-check (`collect_type_fn_heads`, a `TyVisitor` over `visit_type_fn`) walks
+each lowered arm RHS and requires every `TyBase::TypeFn` head to equal the
+defining def with occurrence count == `self_calls.len()`; otherwise the new named
+`TypeFnWfError::ForeignTypeFnRefInArm` fires. The cross-check is gated on
+`!lowered.has_invalid(db)` so a kind-ill-typed RHS (whose collapsed `Invalid`
+spine would drop a head) does not produce a spurious foreign-ref error; kind
+errors surface at use sites as before.
+
+Tests (targeted, all green): `rejects_disallowed_arm_const_arg` and
+`rejects_helper_call_const_arg` (hole 1); `rejects_foreign_type_fn_via_qualified_path`
+(hole 2 cross-check, via `m::G<3>` which passes hole 1 with a literal subject but
+lowers to a foreign `G` head) and `rejects_direct_mutual_recursion` (the direct
+single-segment route, caught by `ForeignTypeFnCall`); the pre-existing
+`accepts_bush_multi_self_call` positive was made kind-correct (`Bush -> (*)` so
+`Comp<*, *>` type-checks) since the old fixture's `* -> *` args to a `*`-param
+`Comp` were a latent `KindMismatch` the cross-check surfaced. 14/14 type_fn unit
+tests pass; `cargo check --workspace` clean.
