@@ -89,10 +89,24 @@ pub enum ScopeId<'db> {
 
     /// Trait associated type scope.
     TraitType(Trait<'db>, u16),
+    /// Impl-trait associated type definition scope (mirror of `TraitType`).
+    ///
+    /// This is the def-node for an impl-side associated type (`type Buffer<T> =
+    /// ...`). It is attached to the impl via an anonymous edge so it never
+    /// enters name lookup as a name; it exists purely to own the assoc type's
+    /// own generic params and to anchor RHS lowering.
+    ImplTraitType(ImplTrait<'db>, u16),
     /// Trait associated const scope.
     TraitConst(Trait<'db>, u16),
     /// Inherent impl associated const scope.
     ImplConst(Impl<'db>, u16),
+
+    /// A generic parameter of a trait associated type: `(trait, assoc idx,
+    /// param idx)`. Parent is the `TraitType` def node.
+    TraitTypeParam(Trait<'db>, u16, u16),
+    /// A generic parameter of an impl-trait associated type def: `(impl-trait,
+    /// assoc idx, param idx)`. Parent is the `ImplTraitType` def node.
+    ImplTraitTypeParam(ImplTrait<'db>, u16, u16),
 
     /// A function parameter scope.
     FuncParam(ItemKind<'db>, u16),
@@ -113,8 +127,11 @@ impl<'db> ScopeId<'db> {
             ScopeId::Item(item) => item.top_mod(db),
             ScopeId::GenericParam(item, _) => item.top_mod(db),
             ScopeId::TraitType(t, _) => t.top_mod(db),
+            ScopeId::ImplTraitType(i, _) => i.top_mod(db),
             ScopeId::TraitConst(t, _) => t.top_mod(db),
             ScopeId::ImplConst(i, _) => i.top_mod(db),
+            ScopeId::TraitTypeParam(t, _, _) => t.top_mod(db),
+            ScopeId::ImplTraitTypeParam(i, _, _) => i.top_mod(db),
             ScopeId::FuncParam(item, _) => item.top_mod(db),
             ScopeId::Field(p, _) => p.top_mod(db),
             ScopeId::Variant(v) => v.enum_.top_mod(db),
@@ -155,8 +172,11 @@ impl<'db> ScopeId<'db> {
             ScopeId::GenericParam(item, _) => item,
             ScopeId::FuncParam(item, _) => item,
             ScopeId::TraitType(t, _) => t.into(),
+            ScopeId::ImplTraitType(i, _) => i.into(),
             ScopeId::TraitConst(t, _) => t.into(),
             ScopeId::ImplConst(i, _) => i.into(),
+            ScopeId::TraitTypeParam(t, ..) => t.into(),
+            ScopeId::ImplTraitTypeParam(i, ..) => i.into(),
             ScopeId::Field(FieldParent::Struct(s), _) => s.into(),
             ScopeId::Field(FieldParent::Contract(c), _) => c.into(),
             ScopeId::Field(FieldParent::Variant(v), _) | ScopeId::Variant(v) => v.enum_.into(),
@@ -186,6 +206,7 @@ impl<'db> ScopeId<'db> {
                 Some(def.attributes)
             }
             ScopeId::TraitType(t, idx) => t.types(db).get(idx as usize).map(|d| d.attributes),
+            ScopeId::ImplTraitType(i, idx) => i.types(db).get(idx as usize).map(|d| d.attributes),
             ScopeId::TraitConst(t, idx) => t.consts(db).get(idx as usize).map(|d| d.attributes),
             ScopeId::ImplConst(i, idx) => i.consts(db).get(idx as usize).map(|d| d.attributes),
             _ => None,
@@ -317,6 +338,7 @@ impl<'db> ScopeId<'db> {
         match self {
             ScopeId::Item(item) => item.is_type(),
             ScopeId::GenericParam(..) => true,
+            ScopeId::TraitTypeParam(..) | ScopeId::ImplTraitTypeParam(..) => true,
             _ => false,
         }
     }
@@ -353,8 +375,25 @@ impl<'db> ScopeId<'db> {
             }
 
             ScopeId::TraitType(t, idx) => t.assoc_ty_by_index(db, idx as usize).name.to_opt(),
+            ScopeId::ImplTraitType(i, idx) => i.types(db).get(idx as usize)?.name.to_opt(),
             ScopeId::TraitConst(t, idx) => t.const_by_index(idx as usize).name(db),
             ScopeId::ImplConst(i, idx) => i.consts(db).get(idx as usize)?.name.to_opt(),
+
+            ScopeId::TraitTypeParam(t, i, j) => t
+                .assoc_ty_by_index(db, i as usize)
+                .generic_params
+                .data(db)
+                .get(j as usize)?
+                .name()
+                .to_opt(),
+            ScopeId::ImplTraitTypeParam(imp, i, j) => imp
+                .types(db)
+                .get(i as usize)?
+                .generic_params
+                .data(db)
+                .get(j as usize)?
+                .name()
+                .to_opt(),
 
             ScopeId::Block(..) => None,
         }
@@ -387,6 +426,36 @@ impl<'db> ScopeId<'db> {
             ScopeId::TraitType(t, idx) => {
                 Some(t.span().item_list().assoc_type(idx as usize).name().into())
             }
+            ScopeId::ImplTraitType(i, idx) => {
+                Some(i.span().associated_type(idx as usize).name().into())
+            }
+
+            ScopeId::TraitTypeParam(t, i, j) => {
+                let param = t.assoc_ty_by_index(db, i as usize).generic_params.data(db);
+                let param_span = t
+                    .span()
+                    .item_list()
+                    .assoc_type(i as usize)
+                    .generic_params()
+                    .param(j as usize);
+                match param.get(j as usize)? {
+                    GenericParam::Type(_) => Some(param_span.into_type_param().name().into()),
+                    GenericParam::Const(_) => Some(param_span.into_const_param().name().into()),
+                }
+            }
+            ScopeId::ImplTraitTypeParam(imp, i, j) => {
+                let param = imp.types(db).get(i as usize)?.generic_params.data(db);
+                let param_span = imp
+                    .span()
+                    .associated_type(i as usize)
+                    .generic_params()
+                    .param(j as usize);
+                match param.get(j as usize)? {
+                    GenericParam::Type(_) => Some(param_span.into_type_param().name().into()),
+                    GenericParam::Const(_) => Some(param_span.into_const_param().name().into()),
+                }
+            }
+
             ScopeId::TraitConst(t, idx) => {
                 Some(t.span().item_list().assoc_const(idx as usize).name().into())
             }
@@ -403,6 +472,9 @@ impl<'db> ScopeId<'db> {
             ScopeId::Item(item) => item.kind_name(),
             ScopeId::GenericParam(_, _) => "type",
             ScopeId::TraitType(..) => "associated type",
+            ScopeId::ImplTraitType(..) => "associated type",
+            ScopeId::TraitTypeParam(..) => "type",
+            ScopeId::ImplTraitTypeParam(..) => "type",
             ScopeId::TraitConst(..) => "associated const",
             ScopeId::ImplConst(..) => "associated const",
             ScopeId::FuncParam(_, _) => "value",

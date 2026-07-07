@@ -821,6 +821,30 @@ impl NameDomain {
                 }
             }
             ScopeId::TraitType(..) => Self::TYPE,
+            // Def node reached only via anon edges; never terminates a named
+            // query. Kept exhaustive for completeness.
+            ScopeId::ImplTraitType(..) => Self::TYPE,
+            ScopeId::TraitTypeParam(t, i, j) => {
+                match t
+                    .assoc_ty_by_index(db, i as usize)
+                    .generic_params
+                    .data(db)
+                    .get(j as usize)
+                {
+                    Some(GenericParam::Const(_)) => NameDomain::TYPE | NameDomain::VALUE,
+                    _ => NameDomain::TYPE,
+                }
+            }
+            ScopeId::ImplTraitTypeParam(imp, i, j) => {
+                match imp
+                    .types(db)
+                    .get(i as usize)
+                    .and_then(|d| d.generic_params.data(db).get(j as usize))
+                {
+                    Some(GenericParam::Const(_)) => NameDomain::TYPE | NameDomain::VALUE,
+                    _ => NameDomain::TYPE,
+                }
+            }
             ScopeId::TraitConst(..) => Self::VALUE,
             ScopeId::ImplConst(..) => Self::VALUE,
             ScopeId::Field(..) => Self::FIELD,

@@ -1761,6 +1761,18 @@ impl<'db> TyParam<'db> {
     pub fn original_idx(&self, db: &'db dyn HirAnalysisDb) -> usize {
         match self.variant {
             Variant::Normal | Variant::TraitSelf => {
+                // A GAT binder (owner = an assoc-type def node) carries a LOCAL
+                // index `0..k` with no implicit-param offset, so its `idx` is
+                // already the original source index. Its owner is not a
+                // `GenericParamOwner` item, so the item-based lookup below does
+                // not apply.
+                if matches!(
+                    self.owner,
+                    ScopeId::TraitType(..) | ScopeId::ImplTraitType(..)
+                ) {
+                    return self.idx;
+                }
+
                 let owner = GenericParamOwner::from_item_opt(self.owner.item()).unwrap();
                 let param_set = collect_generic_params(db, owner);
                 let offset = param_set.offset_to_explicit_params_position(db);
@@ -1784,9 +1796,16 @@ impl<'db> TyParam<'db> {
     pub fn scope(&self, db: &'db dyn HirAnalysisDb) -> ScopeId<'db> {
         match self.variant {
             Variant::TraitSelf => self.owner,
-            Variant::Normal => {
-                ScopeId::GenericParam(self.owner.item(), self.original_idx(db) as u16)
-            }
+            Variant::Normal => match self.owner {
+                // A GAT binder resolves to its dedicated assoc-type param scope,
+                // NOT an item generic-param scope (which does not exist for it).
+                // `idx` is the LOCAL param index `j`.
+                ScopeId::TraitType(t, i) => ScopeId::TraitTypeParam(t, i, self.idx as u16),
+                ScopeId::ImplTraitType(imp, i) => {
+                    ScopeId::ImplTraitTypeParam(imp, i, self.idx as u16)
+                }
+                _ => ScopeId::GenericParam(self.owner.item(), self.original_idx(db) as u16),
+            },
             Variant::Effect => ScopeId::FuncParam(self.owner.item(), self.idx as u16),
             Variant::EffectProvider => self.owner,
             Variant::Implicit => self.owner,

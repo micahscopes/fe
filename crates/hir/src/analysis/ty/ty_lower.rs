@@ -1818,6 +1818,34 @@ pub(super) fn lower_kind_in_bounds<'db>(bounds: &[TypeBound<'db>]) -> Option<Kin
     None
 }
 
+/// Mint the rigid `TyParam` for the `j`-th generic parameter of an associated
+/// type definition (a GAT binder). Pinned representation (steering-06 sec 1.1):
+/// LOCAL index `j` (`0..k`, NOT the enclosing item's continued index space) and
+/// `owner` = the assoc-type def-node scope (`ScopeId::TraitType` /
+/// `ScopeId::ImplTraitType`), an owner class no other `TyParam` mint site
+/// produces. This distinctness is what makes A2b.2's owner-keyed projection
+/// seams a provable no-op for every pre-A2b type.
+pub(crate) fn gat_param_ty<'db>(
+    db: &'db dyn HirAnalysisDb,
+    param: &GenericParam<'db>,
+    j: usize,
+    owner: ScopeId<'db>,
+) -> TyId<'db> {
+    match param {
+        GenericParam::Type(p) => {
+            let Partial::Present(name) = p.name else {
+                return TyId::invalid(db, InvalidCause::Other);
+            };
+            let kind = lower_kind_in_bounds(&p.bounds).unwrap_or(Kind::Star);
+            let ty_param = TyParam::normal_param(name, j, kind, owner);
+            TyId::new(db, TyData::TyParam(ty_param))
+        }
+        // TODO(A2b): const GAT params. Today they are equally unusable (via
+        // PathResolutionFailed); demand is unverified.
+        GenericParam::Const(_) => TyId::invalid(db, InvalidCause::Other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

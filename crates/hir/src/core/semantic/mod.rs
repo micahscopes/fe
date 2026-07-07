@@ -4998,11 +4998,20 @@ impl<'db> ImplAssocTypeView<'db> {
         self.owner
     }
 
+    /// The assoc-type def-node scope (`ScopeId::ImplTraitType`), under which
+    /// the RHS lowers so that the assoc type's own generic params (`type
+    /// Buffer<T> = ...`) resolve. For an arity-0 assoc type this is
+    /// result-identical to the impl item scope (the def node's only outgoing
+    /// edge is lex -> impl), so existing assoc types are byte-identical.
+    fn def_scope(self) -> ScopeId<'db> {
+        ScopeId::ImplTraitType(self.owner, self.idx as u16)
+    }
+
     /// Semantic type of this associated type implementation.
     pub fn ty(self, db: &'db dyn HirAnalysisDb) -> Option<TyId<'db>> {
         let hir = self.owner.types(db)[self.idx].type_ref.to_opt()?;
         let assumptions = constraints_for(db, self.owner.into());
-        Some(lower_hir_ty(db, hir, self.owner.scope(), assumptions))
+        Some(lower_hir_ty(db, hir, self.def_scope(), assumptions))
     }
 
     /// All type-related diagnostics for this associated type.
@@ -5014,13 +5023,12 @@ impl<'db> ImplAssocTypeView<'db> {
         let ty_span = self.span().ty();
         let assumptions = constraints_for(db, self.owner.into());
 
-        let errs =
-            collect_ty_lower_errors(db, self.owner.scope(), hir, ty_span.clone(), assumptions);
+        let errs = collect_ty_lower_errors(db, self.def_scope(), hir, ty_span.clone(), assumptions);
         if !errs.is_empty() {
             return errs;
         }
 
-        let ty = lower_hir_ty(db, hir, self.owner.scope(), assumptions);
+        let ty = lower_hir_ty(db, hir, self.def_scope(), assumptions);
         check_ty_wf(
             db,
             ProvisionEnv::for_scope(self.owner.scope(), param_env(db, self.owner.into()))
@@ -5149,7 +5157,11 @@ impl<'db> TraitAssocTypeView<'db> {
         let hir = self.decl(db).default?;
         let trait_ = self.owner;
         let assumptions = constraints_for(db, trait_.into());
-        Some(lower_hir_ty(db, hir, trait_.scope(), assumptions))
+        // Lower the default under the assoc-type def node so the assoc type's
+        // own generic params resolve; arity-0 assoc types are result-identical
+        // to lowering under the trait item scope.
+        let scope = ScopeId::TraitType(trait_, self.idx as u16);
+        Some(lower_hir_ty(db, hir, scope, assumptions))
     }
 
     /// Semantic trait bounds using the trait's own `Self` as the subject.
@@ -5231,7 +5243,10 @@ struct AssocTypeBounds<'db> {
 impl<'db> AssocTypeBounds<'db> {
     fn bounds(self, db: &'db dyn HirAnalysisDb) -> impl Iterator<Item = TraitInstId<'db>> + 'db {
         let owner_trait = self.base.owner;
-        let scope = owner_trait.scope();
+        // Anchor bound lowering at the assoc-type def node so `type Buffer<T>:
+        // ...` can name `T` in its own bounds. Result-identical to the trait
+        // item scope for arity-0 assoc types.
+        let scope = ScopeId::TraitType(owner_trait, self.base.idx as u16);
         let assumptions = constraints_for(db, owner_trait.into());
         self.base.bounds(db).filter_map(move |b| {
             b.to_trait_inst(db, self.subject, self.owner_self, scope, assumptions)

@@ -42,8 +42,8 @@ use crate::analysis::{
         },
         ty_def::{InvalidCause, Kind, TyBase, TyData, TyId, find_unsaturated_type_fn},
         ty_lower::{
-            ConstDefaultCompletion, TyAlias, collect_generic_params, lower_generic_arg_list,
-            lower_hir_ty_with_minter, lower_type_alias,
+            ConstDefaultCompletion, TyAlias, collect_generic_params, gat_param_ty,
+            lower_generic_arg_list, lower_hir_ty_with_minter, lower_type_alias,
         },
         unify::UnificationTable,
     },
@@ -1985,6 +1985,31 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                 let ty = TyId::foldl(db, ty, &args);
                 PathRes::Ty(ty)
             }
+
+            ScopeId::TraitTypeParam(t, i, j) => {
+                let param = &t
+                    .assoc_ty_by_index(db, i as usize)
+                    .generic_params
+                    .data(db)[j as usize];
+                // Pinned rigid GAT binder: LOCAL idx `j`, owner = the assoc-type
+                // def node (`TraitType`). `foldl` gives higher-kinded
+                // application + kind checking exactly like the `GenericParam`
+                // arm.
+                let ty = gat_param_ty(db, param, j as usize, ScopeId::TraitType(t, i));
+                PathRes::Ty(TyId::foldl(db, ty, &args))
+            }
+
+            ScopeId::ImplTraitTypeParam(imp, i, j) => {
+                let param = &imp.types(db)[i as usize].generic_params.data(db)[j as usize];
+                let ty = gat_param_ty(db, param, j as usize, ScopeId::ImplTraitType(imp, i));
+                PathRes::Ty(TyId::foldl(db, ty, &args))
+            }
+
+            // Anon-edged def node; never terminates a named query, so it is
+            // unreachable as a name-resolution target.
+            ScopeId::ImplTraitType(..) => unreachable!(
+                "ImplTraitType is an anon-edged def node and is never name-resolved"
+            ),
 
             ScopeId::TraitType(t, idx) => {
                 let trait_def = t;

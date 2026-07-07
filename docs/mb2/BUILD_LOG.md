@@ -189,3 +189,82 @@ fixpoint loop).
   `path_resolver` resolution), which unblocks the full A3 fixtures; THEN A4 (GAT
   impl conformance). A4's arity check depends on the same decl-authority the G1
   arity gate uses.
+
+## 2026-07-07 - Slice A2b.1: assoc-type generic-param scope nodes + resolution
+
+Implemented Approach B from steering-06: dedicated `ScopeId` variants for the
+assoc-type-param scopes (plus one def-node variant for the impl side), with the
+resulting GAT `TyParam` minted directly in the path resolver. NO engine behavior
+change (S1 `instantiate_with_fresh_vars` / S2 `subst_gat_args` untouched); a
+threaded GAT (`type Buffer<T> = Store<T>`) now RESOLVES its `T`, but the
+PROJECTION of `B::Buffer<X>` still degrades to opaque exactly as before.
+
+- **Three new `ScopeId` variants** (`hir_def/scope_graph.rs`):
+  `ImplTraitType(ImplTrait, u16)` (impl-side assoc-type DEF node, anon-edged so it
+  never enters name lookup), `TraitTypeParam(Trait, u16, u16)`,
+  `ImplTraitTypeParam(ImplTrait, u16, u16)`. Trait side reuses the existing
+  `TraitType` node as the param parent. Wired the exhaustive matches: `top_mod`,
+  `item` (all -> enclosing item), `name`, `name_span`, `kind_name`, `attrs`,
+  `is_type` (`scope_graph.rs`); `NameDomain::from_scope` (`name_resolver.rs`, direct
+  HIR read, no `GenericParamOwner`); the big resolver scope match (`path_resolver.rs`);
+  `has_references.rs` (-> `EMPTY_REFS`); `From<ScopeId> for SymbolKind`
+  (`symbol.rs`). Non-exhaustive tooling matches (scip_batch `_ => None`, completion
+  `_`, lsif `matches!`) needed no change; no LS snapshot churn.
+- **Scope-node construction** (`lower/scope_builder.rs`): `add_trait_type_scope`
+  now adds a `TraitTypeParam` child per param under the `TraitType` def node
+  (deleting the old D1 TODO); new `add_impl_trait_type_scope` (called from the
+  `ImplTrait` arm of `leave_item_scope`) adds an anon-edged `ImplTraitType` def
+  node per assoc type with `ImplTraitTypeParam` children. Params carry
+  `generic_param(name)` edges (else `anon`); the impl def node uses `anon` so it is
+  never name-addressable.
+- **Resolution + pinned shape** (`ty_lower.rs::gat_param_ty`, `path_resolver.rs`):
+  new `TraitTypeParam` / `ImplTraitTypeParam` arms mint
+  `TyParam { idx: j (LOCAL 0..k), kind: from bounds else Star, owner: the
+  assoc-type DEF-node scope }` then `TyId::foldl` (same higher-kinded application +
+  kind checking as the `GenericParam` arm). `ImplTraitType` (def node) arm is
+  `unreachable!` (anon edge). Const GAT params: `invalid` + TODO (deferred, as
+  today). **Owner-class-distinctness audit**: every pre-existing `TyParam` mint
+  site owns an ITEM scope (`GenericParam`/`FuncParam`/trait `Self`/item scope); the
+  assoc-type DEF-node owner class (`TraitType` / `ImplTraitType`) is fresh and
+  empty, so no existing `TyParam` is perturbed. This is the no-regression backbone
+  A2b.2's owner-keyed seams will rely on.
+- **Lowering re-anchor** (`core/semantic/mod.rs`): `ImplAssocTypeView::{ty,
+  ty_diags}` lower the RHS under `ImplTraitType(owner, idx)` (via a new `def_scope`
+  helper); `TraitAssocTypeView::default_ty` and `AssocTypeBounds::bounds` under
+  `TraitType(owner, idx)`. WF/assumptions env (`ProvisionEnv::for_scope`,
+  `constraints_for`) deliberately KEPT on the item scope; only name resolution
+  moved. For arity-0 assoc types the def node's only outgoing edge is lex -> item,
+  so results are identical (only salsa query keys change).
+- **DEVIATION from steering (necessary, in-scope):** `TyParam::scope` /
+  `original_idx` (`ty_def.rs`) assumed an ITEM owner for `Variant::Normal` and
+  reconstructed `GenericParam(owner.item(), original_idx)`. A GAT param is
+  `Variant::Normal` with a NON-item owner, so `scope()` fabricated a non-existent
+  `GenericParam(ImplTrait, 0)` scope -> panic in `is_scope_visible_from` during RHS
+  lowering. Fix: for an assoc-type-def owner, `scope()` returns the dedicated
+  `TraitTypeParam` / `ImplTraitTypeParam` scope and `original_idx` returns the local
+  `idx` (no implicit-param offset). This is pure resolution plumbing, not an S1/S2
+  engine seam. (The steering's "fresh owner class = pure no-op" claim held for
+  behavior *keyed on* owner class, but `scope()`/`original_idx` are existing
+  behavior that *branch on* owner shape, so they had to learn the new class.)
+- **Acceptance**: fixture `ty_check/gat_param_scope_resolves.fe` (impl
+  `type Buffer<T> = Store<T>`) is ZERO-diagnostic (proves `T` resolves, not
+  `PathResolutionFailed`); unit test `gat_impl_rhs_param_resolves_to_pinned_ty_param`
+  pins `Store<TyParam{idx==0, owner==ImplTraitType(imp, 0)}>`;
+  `gat_trait_default_param_resolves_to_pinned_ty_param` pins the trait-side default
+  under `TraitType(t, 0)`. The bounded-GAT trait-side case is NOT in the auto-run
+  fixture (its `Store<T>: Producer<T>` satisfaction check is A4, deferred); the
+  trait-side param resolution is proven via the `default_ty` unit test instead.
+- **Verify**: `cargo check --workspace` clean; ty_check 115/115 (all pre-existing
+  assoc-type fixtures byte-identical, incl. `gat_projection_resolves` still opaque
+  for `B::Ptr<u32>`), constraints 14/14, def_analysis 1/1,
+  trait_resolution_conformance 25/25, the 3 new GAT tests green. Full release CI is
+  the orchestrator's run.
+- **NEXT: A2b.2** (projection wiring, the two engine seams): S1 keep GAT params
+  RIGID in `instantiate_with_fresh_vars` (skip params whose owner is an assoc-type
+  def scope; add the `TyParam::is_assoc_ty_param` SSOT predicate); S2 rewrite
+  `subst_gat_args` to substitute `args[idx]` ONLY for assoc-owned params (owner-
+  class folder, decline-to-opaque if `idx >= args.len()`), narrowing
+  `max_free_param_idx` to assoc-owned params; then flip `B::Buffer<X>` projection
+  from opaque to resolved and re-enable the full A3 fixture set (three-way
+  interned-id confluence, G2 anti-conflation, symbolic opacity, caller-param
+  non-capture, impl-param binding, the A3-erratum regression).

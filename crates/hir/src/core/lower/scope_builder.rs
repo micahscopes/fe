@@ -5,7 +5,7 @@ use crate::{
     HirDb,
     hir_def::{
         Body, Enum, EnumVariant, ExprId, FieldDefListId, FieldParent, FuncParamListId,
-        FuncParamName, GenericParamListId, GenericParamOwner, HirIngot, Impl, ItemKind,
+        FuncParamName, GenericParamListId, GenericParamOwner, HirIngot, Impl, ImplTrait, ItemKind,
         TopLevelMod, TrackedItemId, TrackedItemVariant, Trait, Use, VariantDefListId, VariantKind,
         Visibility,
         scope_graph::{EdgeKind, Scope, ScopeEdge, ScopeGraph, ScopeId},
@@ -322,6 +322,7 @@ impl<'db> ScopeGraphBuilder<'db> {
                     inner.into(),
                     inner.generic_params(self.db),
                 );
+                self.add_impl_trait_type_scope(item_node, inner);
                 self.graph
                     .add_edge(item_node, item_node, EdgeKind::self_ty());
                 EdgeKind::anon()
@@ -525,10 +526,55 @@ impl<'db> ScopeGraphBuilder<'db> {
                 .unwrap_or_else(EdgeKind::anon);
             self.graph.add_edge(parent_node, trait_type_node, kind);
 
-            // TODO(D1-sub-pr-2): Add generic param scopes for trait_type.generic_params.
-            // Requires extending ScopeId::GenericParam to accept TraitType as parent,
-            // or adding a new ScopeId variant for trait-type generic params.
-            // Currently the generic params are stored in HIR but not in the scope graph.
+            // Generic param scopes for this associated type's own params
+            // (`type Buffer<T>`), so `T` is visible in the assoc type's bounds
+            // and default. Mirrors `add_generic_param_scope`, but the params
+            // hang off the assoc-type def node (not the trait item) and use the
+            // dedicated `TraitTypeParam` owner.
+            for (j, param) in trait_type.generic_params.data(self.db).iter().enumerate() {
+                let param_scope_id = ScopeId::TraitTypeParam(trait_, i as u16, j as u16);
+                let param_scope = Scope::new(param_scope_id, Visibility::Private);
+                let param_node = self.graph.push(param_scope_id, param_scope);
+
+                self.graph.add_lex_edge(param_node, trait_type_node);
+                let kind = param
+                    .name()
+                    .to_opt()
+                    .map(EdgeKind::generic_param)
+                    .unwrap_or_else(EdgeKind::anon);
+                self.graph.add_edge(trait_type_node, param_node, kind);
+            }
+        }
+    }
+
+    /// Adds the impl-side associated-type def nodes and their generic-param
+    /// scopes. Each assoc type def (`type Buffer<T> = ...`) gets an anon-edged
+    /// `ImplTraitType` node (name-invisible, since impl assoc types are not
+    /// name-addressable through the scope graph), with one `ImplTraitTypeParam`
+    /// child per generic param so `T` resolves inside the RHS.
+    fn add_impl_trait_type_scope(&mut self, parent_node: NodeId, impl_trait: ImplTrait<'db>) {
+        for (i, assoc) in impl_trait.types(self.db).iter().enumerate() {
+            let scope_id = ScopeId::ImplTraitType(impl_trait, i as u16);
+            let scope = Scope::new(scope_id, Visibility::Private);
+            let assoc_node = self.graph.push(scope_id, scope);
+
+            self.graph.add_lex_edge(assoc_node, parent_node);
+            // Anon edge: the def node must never terminate a named query.
+            self.graph.add_edge(parent_node, assoc_node, EdgeKind::anon());
+
+            for (j, param) in assoc.generic_params.data(self.db).iter().enumerate() {
+                let param_scope_id = ScopeId::ImplTraitTypeParam(impl_trait, i as u16, j as u16);
+                let param_scope = Scope::new(param_scope_id, Visibility::Private);
+                let param_node = self.graph.push(param_scope_id, param_scope);
+
+                self.graph.add_lex_edge(param_node, assoc_node);
+                let kind = param
+                    .name()
+                    .to_opt()
+                    .map(EdgeKind::generic_param)
+                    .unwrap_or_else(EdgeKind::anon);
+                self.graph.add_edge(assoc_node, param_node, kind);
+            }
         }
     }
 

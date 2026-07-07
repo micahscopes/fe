@@ -1,0 +1,5 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/gat_param_scope_resolves.fe
+---

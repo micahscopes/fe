@@ -103,6 +103,144 @@ trait Backend {
     );
 }
 
+/// A2b.1 core contract: an impl-side GAT param used in the RHS resolves to a
+/// rigid `TyParam` with the PINNED representation (steering-06 sec 1.1): LOCAL
+/// index 0 and `owner == ScopeId::ImplTraitType(imp, assoc_idx)` (the
+/// assoc-type def node, an owner class no other `TyParam` mint site produces).
+/// A2b.2 and A3 projection depend on exactly this shape.
+#[test]
+fn gat_impl_rhs_param_resolves_to_pinned_ty_param() {
+    use fe_hir::analysis::ty::ty_def::TyData;
+    use fe_hir::hir_def::scope_graph::ScopeId;
+
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "gat_impl_rhs_param_resolves_to_pinned_ty_param.fe".into(),
+        r#"
+trait Backend {
+    type Buffer<T>
+}
+
+struct Store<T> {
+    value: T,
+}
+
+struct EvmBackend {}
+
+impl Backend for EvmBackend {
+    type Buffer<T> = Store<T>
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+
+    // No name-resolution (or any other) diagnostics: `T` in the RHS resolves.
+    db.assert_no_diags(top_mod);
+
+    // Locate the `impl Backend for EvmBackend`'s `Buffer` assoc-type view.
+    let (imp, assoc_idx, view) = top_mod
+        .all_impl_traits(&db)
+        .iter()
+        .find_map(|&imp| {
+            imp.assoc_types(&db)
+                .enumerate()
+                .find(|(_, v)| v.name(&db).is_some_and(|n| n.data(&db) == "Buffer"))
+                .map(|(idx, v)| (imp, idx, v))
+        })
+        .expect("missing `type Buffer<T>` in an impl-trait block");
+
+    let ty = view
+        .ty(&db)
+        .expect("`type Buffer<T> = Store<T>` should lower");
+
+    // RHS is `Store<T>`: an application of the `Store` ADT to the pinned param.
+    let (_base, args) = ty.decompose_ty_app(&db);
+    assert_eq!(
+        args.len(),
+        1,
+        "expected `Store<T>` with one type arg, got `{}`",
+        ty.pretty_print(&db)
+    );
+
+    let TyData::TyParam(param) = args[0].data(&db) else {
+        panic!(
+            "expected the RHS arg to be a rigid TyParam, got `{}`",
+            args[0].pretty_print(&db)
+        );
+    };
+
+    assert_eq!(param.idx, 0, "GAT param must carry LOCAL index 0");
+    assert_eq!(
+        param.owner,
+        ScopeId::ImplTraitType(imp, assoc_idx as u16),
+        "GAT param owner must be the assoc-type def node (ImplTraitType), not the impl item scope"
+    );
+}
+
+/// A2b.1 trait side: a GAT param used in the assoc type's own default resolves
+/// to a rigid `TyParam` owned by the trait-side def node
+/// (`ScopeId::TraitType(t, assoc_idx)`), local idx 0. Mirrors the impl-side
+/// contract; proves the trait-side scope re-anchor (default/bounds lower under
+/// the `TraitType` def node).
+#[test]
+fn gat_trait_default_param_resolves_to_pinned_ty_param() {
+    use fe_hir::analysis::ty::ty_def::TyData;
+    use fe_hir::hir_def::scope_graph::ScopeId;
+
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "gat_trait_default_param_resolves_to_pinned_ty_param.fe".into(),
+        r#"
+struct Store<T> {
+    value: T,
+}
+
+trait Backend {
+    type Buffer<T> = Store<T>
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+
+    let (backend, assoc_idx, view) = top_mod
+        .all_traits(&db)
+        .iter()
+        .find(|t| t.name(&db).to_opt().is_some_and(|i| i.data(&db) == "Backend"))
+        .and_then(|&t| {
+            t.assoc_types(&db)
+                .enumerate()
+                .find(|(_, v)| v.name(&db).is_some_and(|n| n.data(&db) == "Buffer"))
+                .map(|(idx, v)| (t, idx, v))
+        })
+        .expect("missing `type Buffer<T>` in trait `Backend`");
+
+    let ty = view
+        .default_ty(&db)
+        .expect("`type Buffer<T> = Store<T>` default should lower");
+
+    let (_base, args) = ty.decompose_ty_app(&db);
+    assert_eq!(
+        args.len(),
+        1,
+        "expected `Store<T>` with one type arg, got `{}`",
+        ty.pretty_print(&db)
+    );
+
+    let TyData::TyParam(param) = args[0].data(&db) else {
+        panic!(
+            "expected the default's arg to be a rigid TyParam, got `{}`",
+            args[0].pretty_print(&db)
+        );
+    };
+
+    assert_eq!(param.idx, 0, "trait-side GAT param must carry LOCAL index 0");
+    assert_eq!(
+        param.owner,
+        ScopeId::TraitType(backend, assoc_idx as u16),
+        "trait-side GAT param owner must be the `TraitType` def node"
+    );
+}
+
 #[test]
 fn never_for_iterator_reports_type_must_be_known() {
     let mut db = HirAnalysisTestDb::default();

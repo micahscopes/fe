@@ -1,0 +1,26 @@
+// A2b.1: an associated type's own generic params now have a scope.
+//
+// `type Buffer<T> = Store<T>` lowers with `T` RESOLVED to a rigid `TyParam`
+// pinned to the assoc-type def node (local idx 0, owner =
+// `ScopeId::ImplTraitType(imp, 0)`), instead of `PathResolutionFailed`. The
+// unit test `gat_impl_rhs_param_resolves_to_pinned_ty_param` pins that shape.
+//
+// NO projection is performed here: projection of `EvmBackend::Buffer<X>` still
+// degrades to opaque (A2b.2 flips that), so this fixture exercises only the
+// scope + resolution, never a concrete projection. Bound SATISFACTION for GAT
+// params is A4 and deliberately not exercised (the GAT here is unbounded).
+
+trait Backend {
+    type Buffer<T>
+}
+
+struct Store<T> {
+    value: T,
+}
+
+struct EvmBackend {}
+
+impl Backend for EvmBackend {
+    // `T` in the RHS resolves to the pinned rigid param.
+    type Buffer<T> = Store<T>
+}
