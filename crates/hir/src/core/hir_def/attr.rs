@@ -347,6 +347,34 @@ impl<'db> AttrListId<'db> {
             })
             .last()
     }
+    /// The backend target selected by the last `#[target(<name>)]` attribute in
+    /// this list, if any (A6 root-mint: per-compilation-unit target selection).
+    /// Reuses the existing single-ident config-attribute idiom (the same shape as
+    /// `#[arithmetic(unchecked)]`); no new grammar. The `<name>` is resolved to a
+    /// capability root by the closed target registry in `analysis::ty`.
+    pub fn target_name(self, db: &'db dyn HirDb) -> Option<IdentId<'db>> {
+        self.data(db)
+            .iter()
+            .filter_map(|attr| {
+                let Attr::Normal(normal_attr) = attr else {
+                    return None;
+                };
+                let path = normal_attr.path.to_opt()?;
+                let ident = path.as_ident(db)?;
+                if ident.data(db) != "target" {
+                    return None;
+                }
+                let [arg] = normal_attr.args.as_slice() else {
+                    return None;
+                };
+                if arg.has_value {
+                    return None;
+                }
+                arg.key.to_opt()?.as_ident(db)
+            })
+            .last()
+    }
+
     pub fn inline_attr(self, db: &'db dyn HirDb) -> Option<InlineAttr> {
         match parse_inline_attr_specs(self.data(db).iter().filter_map(|attr| {
             let Attr::Normal(normal_attr) = attr else {

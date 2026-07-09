@@ -70,7 +70,72 @@ pub use provider::{
     provider_semantics, registered_root_providers,
 };
 
-const DEFAULT_TARGET_TY_PATH: &[&str] = &["std", "evm", "EvmTarget"];
+/// The closed set of compiler-known backend targets, each mapped to the `std`
+/// path of its capability root (the type carrying `impl Target for <root>`).
+///
+/// A6 root-mint generalization: this REPLACES the single hardcoded
+/// `["std","evm","EvmTarget"]` default. The active target for a compilation unit
+/// (see [`active_target_ty_path`]) selects one entry; its
+/// `<root as Target>::RootEffect` is seeded at the program root and is what gates
+/// the target's intrinsic capabilities. Adding a backend is one entry here plus
+/// its `impl Target` in `std`; each target mints its OWN `Target::Intrinsics`
+/// family through the existing channel (no new mechanism).
+///
+/// The set is closed and compiler-known here because the backends are
+/// compiler-known. How the active target is *selected per real compilation unit*
+/// (a build-driver / per-ingot `target = "..."` config field, the analog of the
+/// existing per-ingot `arithmetic` knob) is the deferred seam; the
+/// `#[target(<name>)]` attribute read by [`active_target_ty_path`] is the
+/// harness-level override that makes the cross-target negative writable today.
+const TARGET_REGISTRY: &[(&str, &[&str])] = &[
+    ("evm", &["std", "evm", "EvmTarget"]),
+    ("wasm", &["std", "wasm", "WasmTarget"]),
+];
+
+/// The default target when no `#[target(...)]` override is in scope. Keeping this
+/// `evm` makes every pre-A6 compilation byte-identical (the old behavior was the
+/// single `EvmTarget` hardcode).
+const DEFAULT_TARGET_NAME: &str = "evm";
+
+/// The `std`-path segments of the capability root for the backend target active
+/// at `scope`. Walks enclosing modules then the file for a `#[target(<name>)]`
+/// attribute (mirroring how `arithmetic_mode` resolves the per-module arithmetic
+/// knob); falls back to [`DEFAULT_TARGET_NAME`]. An unknown `<name>` also falls
+/// back to the default (the override is a harness knob, not user-facing surface,
+/// so a typo degrades to the default rather than minting a new diagnostic).
+fn active_target_ty_path<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> &'static [&'static str] {
+    let name = active_target_name(db, scope);
+    TARGET_REGISTRY
+        .iter()
+        .find(|(candidate, _)| Some(*candidate) == name.as_deref())
+        .or_else(|| TARGET_REGISTRY.iter().find(|(n, _)| *n == DEFAULT_TARGET_NAME))
+        .map(|(_, path)| *path)
+        .expect("target registry must contain the default target")
+}
+
+/// The `#[target(<name>)]` selection in scope, if any. `None` means "use the
+/// default".
+fn active_target_name<'db>(
+    db: &'db dyn HirAnalysisDb,
+    scope: ScopeId<'db>,
+) -> Option<String> {
+    // Walk enclosing modules (and finally the file's top module, which is in the
+    // `parent_module` chain) for the innermost `#[target(...)]`, mirroring how
+    // `arithmetic_mode` resolves the per-module arithmetic knob.
+    let mut cursor = scope.parent_module(db);
+    while let Some(module_scope) = cursor {
+        if let Some(attrs) = module_scope.item().attrs(db)
+            && let Some(name) = attrs.target_name(db)
+        {
+            return Some(name.data(db).to_string());
+        }
+        cursor = module_scope.parent_module(db);
+    }
+    None
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectHandleMetadata<'db> {
@@ -633,19 +698,28 @@ pub fn resolve_default_root_effect_ty<'db>(
             _ => None,
         }
     };
-    // Prefer the absolute `std::evm::EvmTarget` path: this is byte-identical to the
+    // A6 root-mint: resolve the ACTIVE target's capability root (per compilation
+    // unit), not a single hardcoded default. `active_target_ty_path` returns the
+    // std-path segments for the target selected by an in-scope `#[target(...)]`
+    // attribute, defaulting to `evm` (so pre-A6 units are byte-identical).
+    //
+    // Prefer the absolute `std::<..>::<Target>` path: this is byte-identical to the
     // prior resolution for a user ingot (so the MIR root-provider seeding resolves
-    // the exact same `Evm` TyId). Fall back to the ingot-relative path only when
-    // that misses, which happens when std is analyzed standalone (`analyze_stdlib`,
-    // where std self-refs use `ingot::`) so the ambient intrinsic-capability grant
-    // still resolves there.
+    // the exact same root-effect TyId). Fall back to the ingot-relative path only
+    // when that misses, which happens when std is analyzed standalone
+    // (`analyze_stdlib`, where std self-refs use `ingot::`) so the ambient
+    // intrinsic-capability grant still resolves there.
+    let target_path = active_target_ty_path(db, scope);
+    let (root_ingot, target_segments) = target_path
+        .split_first()
+        .expect("target registry paths are non-empty");
     let target_ty =
-        resolve_target_ty(PathId::from_segments(db, DEFAULT_TARGET_TY_PATH)).or_else(|| {
-            resolve_target_ty(
-                corelib::lib_root_path(db, scope, "std")
-                    .push_str(db, "evm")
-                    .push_str(db, "EvmTarget"),
-            )
+        resolve_target_ty(PathId::from_segments(db, target_path)).or_else(|| {
+            let mut relative = corelib::lib_root_path(db, scope, root_ingot);
+            for segment in target_segments {
+                relative = relative.push_str(db, segment);
+            }
+            resolve_target_ty(relative)
         })?;
 
     let target_trait = corelib::resolve_core_trait(db, scope, &["contracts", "Target"])?;

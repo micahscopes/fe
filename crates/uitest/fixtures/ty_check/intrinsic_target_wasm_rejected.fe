@@ -1,0 +1,17 @@
+#![target(wasm)]
+
+// A6 root-mint, honest negative: the EVM-only storage intrinsic used under a
+// NON-EVM target is REJECTED. The `#[target(wasm)]` file-level override selects
+// `std::wasm::WasmTarget` as this unit's capability root; its root effect
+// `std::wasm::WasmHost` deliberately does NOT implement `StorageIntrinsic`, so
+// the obligation raised by the `use_storage_intrinsic()` call (the exact
+// trait-keyed gate `std::evm::ops::sload` carries) is left `Missing` and reported
+// as `8-0036` at the use site. Under the EVM target the same code is clean
+// (`intrinsic_target_evm_ok.fe`): this is the cross-target gate A6 unblocks.
+use core::contracts::StorageIntrinsic
+
+fn use_storage_intrinsic() uses (_t: StorageIntrinsic) {}
+
+fn caller() {
+    use_storage_intrinsic()
+}

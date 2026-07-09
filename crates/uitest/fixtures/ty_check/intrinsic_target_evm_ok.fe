@@ -1,0 +1,16 @@
+// A6 root-mint, positive leg: the EVM-storage intrinsic capability is granted
+// ambiently under the EVM target (the default when no `#[target(...)]` override
+// is in scope). `use_storage_intrinsic` carries the exact trait-keyed obligation
+// `std::evm::ops::sload`/`sstore` carry (`uses (_t: StorageIntrinsic)`); the call
+// in `caller` raises it, and the seeded EVM root effect `std::evm::effects::Evm`
+// implements `StorageIntrinsic`, so it is granted ambiently. No `8-0036`.
+//
+// This also pins that the A6 generalization is byte-identical for a unit with no
+// target override: the default target is still `evm`.
+use core::contracts::StorageIntrinsic
+
+fn use_storage_intrinsic() uses (_t: StorageIntrinsic) {}
+
+fn caller() {
+    use_storage_intrinsic()
+}

@@ -1,5 +1,9 @@
 use core::backend::{Backend, Supports, Global, Constant, Local}
 use core::MemPtr
+use core::contracts::{Target, ContractHost}
+use core::effect_ref::StorPtr
+use super::evm::MemoryBytes
+use super::abi::Sol
 
 /// A TYPE-LEVEL wasm backend.
 ///
@@ -38,3 +42,71 @@ impl Backend for WasmBackend {
 impl Supports<Global> for WasmBackend {}
 impl Supports<Constant> for WasmBackend {}
 impl Supports<Local> for WasmBackend {}
+
+// ---------------------------------------------------------------------------
+// A6 root-mint: the wasm capability root (`impl Target for WasmTarget`).
+// ---------------------------------------------------------------------------
+//
+// This is the second per-target capability root alongside `std::evm::EvmTarget`,
+// making the single hardcoded default target selectable (A6 root-mint
+// generalization). It is a TYPE-LEVEL stub: no wasm code-generation pipeline
+// exists on this branch (wasm EXECUTION is blocked on the Sonatina seam port).
+// The bodies of the `ContractHost` methods call `core::panic()` (never-typed)
+// because they are never lowered in the sandbox; the type-level surface matters:
+// selecting this target seeds `WasmHost` as the program root, and `WasmHost`
+// deliberately does NOT implement `core::contracts::StorageIntrinsic`, so an
+// EVM-storage intrinsic used under the wasm target is rejected (`8-0036`), the
+// honest cross-target negative this slice unblocks.
+//
+// A wasm SMART-CONTRACT target genuinely is a `ContractHost` (CosmWasm / Stylus /
+// Soroban are contract hosts), which is why `WasmTarget` composes with the
+// `Target` trait. A GPU compute target is NOT a contract host, so `GpuTarget` is
+// deferred to the B-track SPIR-V slices where the compute-dispatch entry model
+// (not `ContractHost`) is designed; see the A6 build-log entry.
+pub struct WasmTarget {}
+
+struct WasmPrivate {}
+
+/// The wasm target's root effect. Seeded at the program root when the wasm
+/// target is selected; carries `ContractHost` but NOT `StorageIntrinsic`.
+pub struct WasmHost { seal: WasmPrivate }
+
+/// The wasm target's intrinsic-capability carrier (`<WasmTarget as Target>::Intrinsics`).
+/// Names the per-target intrinsic capability family (design #93); the wasm
+/// intrinsic families are added by later B-track slices.
+pub struct WasmIntrinsics { seal: WasmPrivate }
+
+impl Target for WasmTarget {
+    type RootEffect = WasmHost
+    type DefaultAbi = Sol
+    type Intrinsics = WasmIntrinsics
+}
+
+impl ContractHost for WasmHost {
+    type Input = MemoryBytes
+    type InitInput = MemoryBytes
+
+    fn input(self) -> MemoryBytes {
+        core::panic()
+    }
+    fn init_input<F>(mut self, _ runtime: F) -> MemoryBytes {
+        core::panic()
+    }
+    fn field<T>(mut self, _ slot: u256) -> StorPtr<T> {
+        core::panic()
+    }
+    fn create_contract<F>(mut self, _ runtime: F) -> ! {
+        core::panic()
+    }
+    fn abort(self) -> ! {
+        core::panic()
+    }
+    fn return_bytes(self, ptr: u256, len: u256) -> ! {
+        core::panic()
+    }
+}
+
+// DELIBERATELY NO `impl StorageIntrinsic for WasmHost`: the wasm target's root
+// effect lacks the EVM-storage intrinsic capability, so `sload`/`sstore`-shaped
+// obligations (`uses (_t: StorageIntrinsic)`) raised in a wasm-targeted unit are
+// left `Missing` and reported as `8-0036`. This is the cross-target gate.

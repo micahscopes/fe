@@ -1035,3 +1035,106 @@ GAT had surfaced an A4 owner/capture gap this would have stopped; it did not).
   `DEFAULT_TARGET_TY_PATH` hardcode, per-target capability roots (`EvmTarget`/
   `WasmTarget`/`GpuTarget`) minting per-family intrinsics through
   `Target::Intrinsics`, unblocking the honest `sload`-rejected-on-non-EVM negative.
+
+## 2026-07-09 - Slice A6: root-mint generalization (per-target capability roots)
+
+Generalized the single hardcoded default target into PER-TARGET capability roots
+(steering-09 A6), so multiple backends each mint their own intrinsic family
+through the existing `Target::Intrinsics` / root-provider channel. No new system:
+this IS the effect system's own generalization. The honest cross-target negative
+is now writable and GREEN: an EVM-storage intrinsic used under the wasm target is
+rejected (`8-0036`); the same code under EVM is clean.
+
+- **The hardcode replaced.** `crates/hir/src/analysis/ty/mod.rs` deleted
+  `const DEFAULT_TARGET_TY_PATH: &[&str] = &["std","evm","EvmTarget"]` (was read
+  at the single site `resolve_default_root_effect_ty`). In its place: a closed,
+  compiler-known `TARGET_REGISTRY: &[(&str, &[&str])]` mapping a backend name to
+  its `std` capability-root path (`("evm", ["std","evm","EvmTarget"])`,
+  `("wasm", ["std","wasm","WasmTarget"])`), plus `DEFAULT_TARGET_NAME = "evm"`.
+  `resolve_default_root_effect_ty` now resolves the ACTIVE target's root via
+  `active_target_ty_path(db, scope)` (absolute path + the same ingot-relative
+  `analyze_stdlib` fallback, generalized over `path.split_first()`), then mints
+  `<active target as Target>::RootEffect` exactly as before. Default `evm` keeps
+  every pre-A6 unit byte-identical.
+- **Active-target selection = a per-module `#[target(<name>)]` attribute**, the
+  harness-level override steering-09 called for. `active_target_name` walks
+  enclosing modules then the file (the `parent_module` chain), reading the last
+  `#[target(...)]` via a new `AttrListId::target_name` (`core/hir_def/attr.rs`),
+  mirroring EXACTLY how `arithmetic_mode`/`#[arithmetic(unchecked)]` resolves the
+  per-module arithmetic knob. NO new grammar (attributes already parse; `target`
+  is not a restricted-context attr, so it needs no allow-list entry). Unknown
+  name degrades to the default (the override is a harness knob, not user surface,
+  so a typo does not mint a diagnostic).
+- **Targets added: Evm (existing) + Wasm (new).** `ingots/std/src/wasm.fe` gains
+  `WasmTarget` + its root effect `WasmHost` + `WasmIntrinsics` carrier, alongside
+  the existing type-level `WasmBackend`. `impl Target for WasmTarget` sets
+  `type RootEffect = WasmHost`, `type Intrinsics = WasmIntrinsics`,
+  `type DefaultAbi = Sol`. `WasmHost` implements `ContractHost` (required by the
+  `RootEffect: ContractHost` bound) with `core::panic()` (never-typed) bodies -- a
+  TYPE-LEVEL stub, since no wasm codegen exists on this branch -- reusing
+  `MemoryBytes` as `type Input`/`InitInput`. It DELIBERATELY does NOT implement
+  `StorageIntrinsic`: that omission IS the cross-target gate.
+- **Honest negative (the payoff).** Two uitest `ty_check` fixtures, each a plain
+  fn carrying `uses (_t: StorageIntrinsic)` (the exact gate `std::evm::ops::sload`
+  carries) called from a `caller`:
+  - `intrinsic_target_evm_ok.fe` (no `#[target]` -> default evm): the seeded EVM
+    root effect `Evm` implements `StorageIntrinsic`, obligation granted ambiently,
+    ZERO diagnostics. Also pins the default is byte-identical.
+  - `intrinsic_target_wasm_rejected.fe` (`#![target(wasm)]`): `WasmHost` lacks
+    `StorageIntrinsic`, so the obligation is `Missing` ->
+    **`error[8-0036]: missing effect `StorageIntrinsic` required by
+    `use_storage_intrinsic`` at `:16:5`** (the `use_storage_intrinsic()` call).
+    Snapshots reviewed and confirmed.
+- **Blast-radius measurement.** `DEFAULT_TARGET_TY_PATH` had exactly ONE read
+  (`resolve_default_root_effect_ty`); `resolve_default_root_effect_ty` has 3
+  callers (`provider.rs` root-provider seeding, `ty_check/expr.rs`
+  `intrinsic_capability_granted_by_root` + the effect-metadata site). All 3 route
+  through the single generalized function, so the change is a one-site
+  generalization with three transitive consumers -- the smallest correct edit. No
+  by-index folds, no new solver path; only the target the existing machinery
+  resolves changed.
+- **KEY SEMANTIC FINDING (reported, not a blocker).** The ambient grant is
+  evaluated at the OBLIGATION SITE's scope (`self.env.scope()`), so a compilation
+  unit's active target gates ITS OWN intrinsic uses. Consequence: `std::evm`'s
+  internal `sload` uses (e.g. inside `StorageMap::get`) are always granted under
+  std's own default (evm) target and never surface to a wasm-targeted caller --
+  so the cross-target negative is observable for a storage intrinsic RAISED in
+  the target-selected unit (fixture-local `uses StorageIntrinsic`), NOT by calling
+  into `std::evm::StorageMap` from a wasm unit. This is coherent ("you may use a
+  storage intrinsic if YOUR unit targets a backend that supports it") and is why
+  the negative fixtures gate their OWN `uses (_t: StorageIntrinsic)` fn rather
+  than reaching through std. In a real multi-backend build a wasm unit would not
+  link `std::evm` at all; the capability gate is the belt-and-suspenders.
+- **Design fork RESOLVED-AS-DEFERRED (per steering: report, do not guess).** How
+  the active target is *selected per real compilation unit* is genuinely
+  undesigned today (the old hardcode WAS the entire selection). The real home is
+  a build-driver / per-ingot `target = "..."` config field (the direct analog of
+  the existing per-ingot `arithmetic` knob in `common::config::IngotConfig`); that
+  is a build-driver slice, out of A6 scope. A6 ships the minimal harness override
+  (`#[target(...)]`) that makes the negative writable now and leaves the config
+  seam for later. NO coherence rule is needed for per-target roots: the resolver
+  picks ONE active target by path (never multi-seeds), and the several
+  `impl Target` in std have distinct `Self` types (`EvmTarget`/`WasmTarget`), so
+  `does_impl_trait_conflict` sees no overlap.
+- **Gpu deferred (composes-cleanly check FAILED, as steering-09 anticipated).**
+  `Target::RootEffect: ContractHost` is a contract-execution notion (calldata
+  `Input`, storage-slot `field<T> -> StorPtr<T>`, `return_bytes`/`abort`
+  entrypoints). A wasm SMART-CONTRACT target genuinely is a `ContractHost`
+  (CosmWasm/Stylus/Soroban), so `WasmTarget` composes. A GPU COMPUTE target is
+  not a contract host at all, so a `GpuTarget` would be forced into nonsense
+  `ContractHost` stubs. `GpuTarget` is therefore deferred to the B4/B5 SPIR-V
+  slices, where the compute-dispatch entry model (not `ContractHost`) is designed.
+  Evm+Wasm shipped; Gpu noted as follow-up, exactly per the task's fallback.
+- **Verify:** `cargo check --workspace` clean; `corelib` ALONE 19/19
+  (`analyze_corelib`/`analyze_stdlib` green -> core+std build with `WasmTarget`/
+  `WasmHost`, `ContractHost` conformance + the `RootEffect: ContractHost` bound
+  satisfied); uitest `ty_check` 239/239 (237 pre-existing byte-identical + the 2
+  new target fixtures); the EVM positive `cli_output` `storage_intrinsic_capability`
+  byte-identical; fe-hir `trait_resolution_conformance` 25/25,
+  `effect_binding_resolution` + `effect_key_normalization` green, `ty_check`
+  backend/actor/gat 18/18. Snapshots reviewed and confirmed. Full release CI is
+  the orchestrator's run (note: this slice recompiles ingots + fe-hir).
+- **A6 READY. NEXT: B1** (atomics surface): `Ref<T,S>`'s first real consumer, the
+  `AtomicCap<S>`-family `uses`/`with` capability on the `StorageIntrinsic` idiom
+  (Global/Shared providers only), with the EVM-executable RMW leg. Term-level
+  capability, no type-level machinery, per steering-09.

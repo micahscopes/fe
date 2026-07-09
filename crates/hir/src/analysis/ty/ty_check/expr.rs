@@ -2260,10 +2260,13 @@ impl<'db> TyChecker<'db> {
     ///
     /// Recognized intrinsic capabilities are the marker traits in `core::contracts`
     /// (currently `StorageIntrinsic`); rolling the gate to the remaining EVM op
-    /// families extends this set. The grant holds only when the default target's
-    /// root effect (`<DefaultTarget as Target>::RootEffect`, e.g. `std::evm::effects::Evm`)
-    /// actually implements the capability, so a future non-EVM target whose root
-    /// effect does not implement it gets no ambient grant (the cross-target gate).
+    /// families extends this set. The grant holds only when the ACTIVE target's
+    /// root effect (`<ActiveTarget as Target>::RootEffect`, resolved per
+    /// compilation unit by `resolve_default_root_effect_ty` / A6 root-mint;
+    /// `std::evm::effects::Evm` by default) actually implements the capability. A
+    /// non-EVM target whose root effect does not implement it (e.g. `WasmHost`
+    /// under `#[target(wasm)]`) gets no ambient grant, so the obligation is left
+    /// `Missing` and reported `8-0036` at the use site: the cross-target gate.
     fn intrinsic_capability_granted_by_root(&self, trait_query: &TraitPatternKey<'db>) -> bool {
         let scope = self.env.scope();
         if resolve_core_trait(self.db, scope, &["contracts", "StorageIntrinsic"])
