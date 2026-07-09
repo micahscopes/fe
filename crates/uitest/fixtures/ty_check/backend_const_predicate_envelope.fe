@@ -1,0 +1,30 @@
+// mb2 A5.2 (assoc-const-in-predicate probe, negative half). Companion to the
+// note-dump keystone `crates/hir/test_files/ty_check/backend_schedule_confluence.fe`,
+// which cannot carry a refuted predicate (its harness asserts no diagnostics).
+//
+// A concrete `where` const predicate over the REAL cross-ingot
+// `core::backend::Backend` assoc const `MAX_PAR_LOG2` becomes a first-class
+// obligation at each call site and is discharged by CTFE under that call's type
+// substitution:
+//
+//   envelope<EvmBackend>()  -> EvmBackend::MAX_PAR_LOG2 == 14 -> 14 == 14 -> holds
+//   envelope<WasmBackend>() -> WasmBackend::MAX_PAR_LOG2 == 14 -> 20 == 14 -> refuted
+//
+// The negative is a HARD error on the chosen call (8-0085), never a silently
+// skipped candidate: it proves the predicate machinery genuinely reaches the
+// backend's own assoc const (per-backend facts differ; the same predicate is
+// satisfied by one impl and refuted by the other).
+
+use core::backend::Backend
+use std::evm::EvmBackend
+use std::wasm::WasmBackend
+
+fn envelope<B: Backend>() where B::MAX_PAR_LOG2 == 14 {}
+
+fn use_evm() {
+    envelope<EvmBackend>()
+}
+
+fn use_wasm() {
+    envelope<WasmBackend>()
+}

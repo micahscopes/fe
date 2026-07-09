@@ -802,3 +802,70 @@ ready this would have stopped; it was ready).
   concrete `where` const predicate) is separate; this slice already demonstrates
   the weaker assoc-const-in-const-ARG-position path works cross-ingot, which
   narrows that probe.
+
+## 2026-07-09 - Slice A5.2: "type is the schedule" confluence keystone over the real `Backend`
+
+**Fixture-only slice (no compiler code changes).** The confluence, the symbolic
+opacity, AND the assoc-const-in-predicate probe all held on the existing engine;
+nothing in the type system needed touching. Two fixtures added.
+
+- **Keystone note-dump fixture** `crates/hir/test_files/ty_check/backend_schedule_confluence.fe`
+  (fe-hir note-dump harness; standalone, links the REAL `core` + `std`, out of
+  any `tree_sitter_parse_strict` dir). The Conal-style combinators (`Par`/`Pair`/
+  `Comp`) and the recursive schedule type fn `RBin` are defined fixture-locally
+  (the Conal library proper is A9); `RBin`'s recursion is on the const depth `N`,
+  threading the element `T` at each leaf. Three legs, all zero-diagnostic, the
+  `.snap` records the observed normal forms:
+  1. **Keystone confluence through the real trait.** `EvmBackend::Buffer<RBin<Pair, 3>>`
+     normalizes to **`StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`** and
+     `EvmBackend::Buffer<RBin<Pair, 4>>` to
+     **`StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>`**: the
+     projection PROJECTS through the real impl (`type Buffer<T> = StorPtr<T>`) AND
+     UNFOLDS the schedule type fn, reaching one canonical NF. The `takes_nf*`
+     acceptor calls are the teeth (zero-diagnostic == definitional equality at the
+     boundary). Confluence (A3 property, steering-08 §5, preserved): the
+     normalizer reaches a single interned NF regardless of whether the
+     Buffer-projection or the type-fn unfold fires first, so project-first and
+     unfold-first are the same type. Two depths keep the schedule non-trivial.
+  2. **Symbolic opacity (gate-don't-select).** With symbolic `B: Backend`,
+     `sym_buffer` records **`B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>`** and
+     `sym_word` records **`B::Word`**: both projections stay OPAQUE (no spurious
+     projection to a concrete storage ctor), yet the SCHEDULE argument still
+     normalizes under the rigid element `T` (`RBin<T, 3>` unfolds even though the
+     projection head is gated on the unknown backend). The schedule reduces under
+     an opaque projection; the projection itself waits for a concrete backend.
+  3. **Assoc-const-in-predicate, positive leg.** `envelope<B: Backend>() where
+     B::MAX_PAR_LOG2 == 14` type-checks at `envelope<EvmBackend>()` (EvmBackend's
+     `MAX_PAR_LOG2` resolves to 14). Zero-diagnostic in the note-dump harness.
+
+- **Assoc-const-in-predicate probe: WORKS over the real cross-ingot trait.** The
+  predicate machinery reaches the real `core::Backend` assoc const and discharges
+  per instantiation under CTFE. The refuted half cannot live in the note-dump
+  harness (`ty_check.rs:25` asserts no diagnostics), so the positive+negative pair
+  lives in the uitest companion
+  `crates/uitest/fixtures/ty_check/backend_const_predicate_envelope.fe`:
+  `envelope<EvmBackend>()` (14 == 14) is clean; `envelope<WasmBackend>()`
+  (`WasmBackend::MAX_PAR_LOG2` == 20, so 20 == 14) is a HARD **error[8-0085]** at
+  the exact violating call, never a silently skipped candidate. Same predicate,
+  two backends, distinct facts, one refuted -- the negative proves the machinery
+  genuinely reaches each backend's own assoc const. This is the PREDICATE path
+  (A5.1 already showed the const-ARG path); no gap to file, no follow-up rung
+  needed for this probe.
+
+- **The full (project/unfold) x (ground/symbolic) confluence matrix over the real
+  trait is now closed at the backend-trait level:** ground-project-and-unfold
+  (leg 1), symbolic-opaque-with-unfolded-schedule (leg 2). Composed with the A5.0
+  merged-default x type-fn fixture and A5.1 anti-conflation, "type is the
+  schedule" (design-doc §3 clause 1) is demonstrated end-to-end through the real
+  `core::Backend` + `std::evm::EvmBackend`: a shape type flows through GAT
+  projection + type-fn unfold + assoc-const predicate discharge in a single
+  ty_check pass.
+
+- **Verify (all foreground).** `cargo check --workspace` clean (fixture-only, no
+  Rust changed). Compare-mode green: `backend_schedule_confluence` (new),
+  `gat_typefn_confluence`, `gat_default_typefn_confluence`, `gat_default_merge`,
+  `gat_projection_resolves`, `backend_anti_conflation` (6/6); uitest
+  `backend_const_predicate_envelope` (1/1, the 8-0085 negative). `corelib` NOT
+  re-run (A5.1 already proved the ingot build; this slice only adds fixtures).
+  Full release CI is warranted at this slice boundary and is the orchestrator's
+  run.

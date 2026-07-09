@@ -1,0 +1,127 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/backend_schedule_confluence.fe
+---
+note:
+   ┌─ backend_schedule_confluence.fe:70:69
+   │
+70 │ fn takes_nf3(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+   │                                                                     ^^ ()
+
+note:
+   ┌─ backend_schedule_confluence.fe:75:54
+   │
+75 │   fn confluence3(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+   │ ╭──────────────────────────────────────────────────────^
+76 │ │     takes_nf3(x)
+77 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_schedule_confluence.fe:76:5
+   │
+76 │     takes_nf3(x)
+   │     ^^^^^^^^^ fn takes_nf3
+
+note:
+   ┌─ backend_schedule_confluence.fe:76:5
+   │
+76 │     takes_nf3(x)
+   │     ^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_schedule_confluence.fe:76:15
+   │
+76 │     takes_nf3(x)
+   │               ^ StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ backend_schedule_confluence.fe:79:81
+   │
+79 │ fn takes_nf4(_ x: StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>) {}
+   │                                                                                 ^^ ()
+
+note:
+   ┌─ backend_schedule_confluence.fe:82:54
+   │
+82 │   fn confluence4(x: EvmBackend::Buffer<RBin<Pair, 4>>) {
+   │ ╭──────────────────────────────────────────────────────^
+83 │ │     takes_nf4(x)
+84 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_schedule_confluence.fe:83:5
+   │
+83 │     takes_nf4(x)
+   │     ^^^^^^^^^ fn takes_nf4
+
+note:
+   ┌─ backend_schedule_confluence.fe:83:5
+   │
+83 │     takes_nf4(x)
+   │     ^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_schedule_confluence.fe:83:15
+   │
+83 │     takes_nf4(x)
+   │               ^ StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ backend_schedule_confluence.fe:90:81
+   │
+90 │   fn sym_buffer<B: Backend, T>(x: B::Buffer<RBin<T, 3>>) -> B::Buffer<RBin<T, 3>> {
+   │ ╭─────────────────────────────────────────────────────────────────────────────────^
+91 │ │     x
+92 │ │ }
+   │ ╰─^ B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>
+
+note:
+   ┌─ backend_schedule_confluence.fe:91:5
+   │
+91 │     x
+   │     ^ B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>
+
+note:
+   ┌─ backend_schedule_confluence.fe:96:48
+   │
+96 │   fn sym_word<B: Backend>(w: B::Word) -> B::Word {
+   │ ╭────────────────────────────────────────────────^
+97 │ │     w
+98 │ │ }
+   │ ╰─^ B::Word
+
+note:
+   ┌─ backend_schedule_confluence.fe:97:5
+   │
+97 │     w
+   │     ^ B::Word
+
+note:
+    ┌─ backend_schedule_confluence.fe:103:55
+    │
+103 │ fn envelope<B: Backend>() where B::MAX_PAR_LOG2 == 14 {}
+    │                                                       ^^ ()
+
+note:
+    ┌─ backend_schedule_confluence.fe:105:19
+    │
+105 │   fn use_envelope() {
+    │ ╭───────────────────^
+106 │ │     envelope<EvmBackend>()
+107 │ │ }
+    │ ╰─^ ()
+
+note:
+    ┌─ backend_schedule_confluence.fe:106:5
+    │
+106 │     envelope<EvmBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^ fn envelope<EvmBackend>
+
+note:
+    ┌─ backend_schedule_confluence.fe:106:5
+    │
+106 │     envelope<EvmBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^ ()

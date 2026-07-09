@@ -1,0 +1,107 @@
+// mb2 A5.2: the "type is the schedule" confluence keystone, now over the REAL
+// `core::backend::Backend` trait and the real `std::evm::EvmBackend` impl (a
+// standalone ty_check fixture; `new_stand_alone` seeds both the builtin `core`
+// AND `std` ingots, so this is the real cross-ingot trait, not a test-local one).
+//
+// The Conal-style combinators (`Par`/`Pair`/`Comp`) and the recursive schedule
+// type fn `RBin` are defined fixture-locally: the Conal library proper is a later
+// slice (A9), so we only borrow its shape here. `RBin<T, N>` is the "schedule":
+// its recursion is on the const `N` (the depth), threading the symbolic element
+// `T` at each leaf.
+//
+//   RBin<T, 0> = Par
+//   RBin<T, N> = Comp<RBin<T, N-1>, T>
+//
+// so, ground:
+//   RBin<Pair, 3> = Comp<Comp<Comp<Par, Pair>, Pair>, Pair>
+//   RBin<Pair, 4> = Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>
+//
+// This fixture demonstrates three things in a SINGLE ty_check pass, all
+// zero-diagnostic (the note-dump `.snap` records the observed normal forms):
+//
+//  1. THE KEYSTONE CONFLUENCE. `EvmBackend::Buffer<RBin<Pair, N>>` normalizes
+//     through full ty_check by BOTH projecting through the impl
+//     (`type Buffer<T> = StorPtr<T>`) AND unfolding the schedule type fn,
+//     reaching ONE canonical normal form. The `takes_nf*` acceptors are the
+//     teeth: a zero-diagnostic call is definitional equality at the boundary, so
+//     the projected+unfolded type reached exactly the hand-written normal form.
+//     Confluence (the A3 property, steering-08 sec 5): the normalizer reaches a
+//     single interned normal form regardless of whether the Buffer-projection or
+//     the type-fn unfold fires first, so project-first and unfold-first are the
+//     same type. Two depths (3 and 4) keep the schedule non-trivial.
+//
+//  2. SYMBOLIC OPACITY (gate-don't-select). With a symbolic `B: Backend`, both
+//     `B::Buffer<..>` and `B::Word` stay OPAQUE: no spurious projection to a
+//     concrete storage ctor. Note the discipline in the recorded normal form of
+//     `sym_buffer`: the projection head `B::Buffer<..>` is gated on the unknown
+//     backend, yet the SCHEDULE argument still normalizes
+//     (`RBin<T, 3>` unfolds to `Comp<Comp<Comp<Par, T>, T>, T>` under the rigid
+//     element `T`). The schedule reduces even under an opaque projection; the
+//     projection itself waits for a concrete backend.
+//
+//  3. ASSOC-CONST-IN-PREDICATE (positive leg). A concrete `where` const
+//     predicate over the real trait's assoc const discharges cross-ingot:
+//     `envelope<B: Backend>() where B::MAX_PAR_LOG2 == 14` type-checks at
+//     `envelope<EvmBackend>()` because `EvmBackend::MAX_PAR_LOG2` resolves to 14.
+//     The refuted (negative) case cannot live here (the note-dump harness asserts
+//     no diagnostics); its 8-0085 companion is
+//     `crates/uitest/fixtures/ty_check/backend_const_predicate_envelope.fe`.
+
+use core::backend::Backend
+use core::StorPtr
+use std::evm::EvmBackend
+
+struct Par {}
+struct Pair {}
+struct Comp<A, B> {
+    a: A,
+    b: B,
+}
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+// ---- 1. keystone confluence: project THROUGH the real impl + unfold the schedule ----
+
+fn takes_nf3(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+
+// `EvmBackend::Buffer<RBin<Pair, 3>>` must be definitionally equal to
+// `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`: project (Buffer = StorPtr)
+// then unfold the schedule, confluently with unfold-then-project.
+fn confluence3(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+    takes_nf3(x)
+}
+
+fn takes_nf4(_ x: StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>) {}
+
+// A deeper schedule, so the normal form is non-trivial.
+fn confluence4(x: EvmBackend::Buffer<RBin<Pair, 4>>) {
+    takes_nf4(x)
+}
+
+// ---- 2. symbolic opacity: B::Buffer<..> and B::Word stay opaque ----
+
+// The projection head stays opaque (`B::Buffer<..>`), but the schedule argument
+// still unfolds: recorded NF is `B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>`.
+fn sym_buffer<B: Backend, T>(x: B::Buffer<RBin<T, 3>>) -> B::Buffer<RBin<T, 3>> {
+    x
+}
+
+// `B::Word` has no impl to project through under a symbolic `B`: it renders as
+// the projection form `B::Word`, not a resolved concrete word type.
+fn sym_word<B: Backend>(w: B::Word) -> B::Word {
+    w
+}
+
+// ---- 3. assoc-const-in-predicate, positive leg (satisfied for EvmBackend) ----
+
+// `MAX_PAR_LOG2` is 14 for EvmBackend; the predicate discharges at the call site.
+fn envelope<B: Backend>() where B::MAX_PAR_LOG2 == 14 {}
+
+fn use_envelope() {
+    envelope<EvmBackend>()
+}
