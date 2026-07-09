@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_unguarded_where_clause_caller_unsat.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_unguarded_where_clause_caller_unsat.fe:27:8
+   │
+27 │     c: Consumer<Wasm, u8>
+   │        ^^^^^^^^^^^^^^^^^^ `WasmBuf<u8>` doesn't implement `Functor`

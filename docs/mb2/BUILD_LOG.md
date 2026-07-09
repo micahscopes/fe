@@ -1387,3 +1387,124 @@ composition = modus ponens at every reachable instance.
   UNGUARDED decls -- `extend_all_bounds` applied-subject derivation +
   instantiate-on-match), the documented prerequisite before A9 wants
   `B::Buffer<X>: Functor`.
+
+## 2026-07-09 - Slice A7.2: leg-3 consumer revival for UNGUARDED GAT decls (the A9 unlock)
+
+The third A7 rung (steering-10 "A7.2: leg 3 for unguarded decls"). A consumer
+that has `B: Backend` in scope may now USE the RHS bound of an UNGUARDED bounded
+GAT (`type Buffer<T>: Functor`) as a universal assumption `B::Buffer<X>: Functor`
+for any `X`, and it discharges by ordinary trait solving. This is exactly Rust's
+"item bounds on projections": the bound is a fact of the trait contract (every
+conforming impl proved it via A4.2 for all `T`), so no explicit where-clause is
+needed. Guarded decls stay skipped (A7.3, deferred). A7.1 (the guard duality) is
+untouched.
+
+Two mechanisms, mirroring how an applied-projection ADT where-clause becomes an
+assumption today:
+
+- **`extend_all_bounds` applied-subject revival (`trait_resolution/mod.rs` step 2).**
+  FIX-1's blanket "arity>0 skip" is NARROWED to "arity>0 WITH a param guard".
+  The exact fork:
+  - `decl_arity == 0`: bare `Self::AssocType` subject, unchanged (input-disjoint).
+  - `decl_arity > 0 && trait_type.has_param_guards(db)`: STILL skipped (A7.3).
+    `has_param_guards` is SYNTACTIC (any `TypeBound::Trait` on any param), so an
+    UNLOWERABLE guard still counts as guarded and is not revived (its decl-site
+    diag owns the error).
+  - `decl_arity > 0 && !has_param_guards`: REVIVED with the APPLIED subject
+    `TraitAssocTypeView::applied_decl_subject(db, pred)` =
+    `foldl(assoc_ty(pred, name), [r0..r_{k-1}])` where
+    `r_j = gat_param_ty(decl_params[j], j, ScopeId::TraitType(owner, idx))` --
+    the SAME rigid mint `AssocTypeBounds::bounds` uses to lower the RHS bound's
+    own `T` refs, so the revived predicate's subject spine and its bound-arg
+    references share ONE interned rigid (owner-exactness). The subject is
+    correctly `*`-kinded and saturated, so the ill-kinded bare `* -> *` head the
+    A5.0 FIX-1 pin guards against never returns. Distinguishing condition,
+    stated once: `decl_arity > 0 && !has_param_guards(db)` (applied revival) vs
+    the bare-head / guarded cases (skip).
+
+- **Solver instantiate-on-match (`proof_forest.rs` assumptions loop).** The
+  revived universal carries the decl's own rigids, which never direct-unify with
+  a use-site goal `B::Buffer<X>: Functor`. After the direct unify fails,
+  `sanctioned_applied_gat_assumption(db, assumption)` gates on EXACTLY the
+  sanctioned shape -- the SUBJECT (`self_ty`) decomposes to an `AssocTy` head
+  whose spine is the decl's own rigids `0..k` in order AND fully saturates the
+  decl, AND no `is_assoc_ty_param` rigid occurs outside that decl's scope. On a
+  match, `GatUniversalInstantiator` (a scoped, cached `Binder`-style fold keyed
+  on the decl def-node scope) lifts EXACTLY those rigids to fresh vars via
+  `table.new_var_from_param` (one var per param index, cached so a rigid maps to
+  the same var in both the subject spine and the bound args) and retries the
+  unify; success records the `ImplementorId::assumption` witness as the direct
+  path does. No other rigid is ever treated as a var; a non-matching
+  rigid-carrying assumption is skipped entirely.
+
+- **A5.0 pin RESTATED in place (`ty_lower.rs`).** The revival deliberately puts
+  an assoc-owned rigid into `param_env` -- so the literal "no assoc-owned rigid"
+  assertion cannot survive A7.2 by design (the pin's fixture `type Elem<T>:
+  Producer<T>` IS the exact unguarded RHS-bounded shape the revival targets). Per
+  steering-10 test 12 / I3, `gat_bound_no_assoc_owned_param_in_param_env` is
+  restated (NAME KEPT for continuity; invariant is now
+  `gat_bound_assoc_owned_rigids_only_in_applied_universal_shape`): (a) the
+  revival fired (>=1 env predicate carries an assoc rigid), (b) EVERY such
+  predicate is in the sanctioned shape (independent reimpl of the gate, not a
+  tautological call), (c) TEETH -- the ill-kinded bare head
+  `Self::Elem: Producer<r0>` (the exact A5.0 leak shape) is REJECTED by the gate.
+  The soundness property the pin guards (no dangerous bare-head rigid leak) is
+  preserved and strengthened; the sanctioned applied rigid is admissible by I3
+  (a universal instantiated at each use).
+
+- **Owner-exactness / no by-index fold.** The revival reuses the A7-shared
+  `gat_param_ty` mint and the existing `assoc_type_bounds` lowering route (same
+  rigids by construction); the instantiator is owner-exact (keyed on the decl
+  scope, `param.owner == scope`), never a blanket rigid->var pass. No new
+  by-index fold introduced.
+
+- **Could the revival reintroduce a rigid in `param_env`? Yes -- but only the
+  SANCTIONED one, never the bare rigid.** The applied subject is `*`-kinded and
+  saturated; the gate `sanctioned_applied_gat_assumption` refuses the bare head,
+  an out-of-order spine, a partial spine, and another decl's rigids (unit test
+  `gat_instantiate_on_match_gate_rejects_non_universals`), and the instantiator
+  lifts ONLY that one decl scope's rigids. So no bare / lifting-lemma-violating
+  rigid returns; this is the designed I3 shape, not a soundness fork.
+
+- **Acceptance (`crates/uitest/fixtures/ty/def/`, all reviewed).**
+  `gat_unguarded_universal_body_use` (derived bound USED in a generic body via
+  the reliable ADT `ty_constraints` channel `NeedsShow<B::Item<X>>`: ZERO
+  diags). `gat_unguarded_universal_no_overderive` (only the DECLARED bound is
+  revived: `NeedsDraw<B::Item<X>>` -> 6-0003 `B::Item<X>` doesn't implement
+  `Draw`). `gat_unguarded_where_clause_caller_ok` (EXPLICIT
+  `where B::Buf<X>: Functor`; `Consumer<Evm, u8>` -> `EvmBuf<u8>: Functor` holds:
+  ZERO diags). `gat_unguarded_where_clause_caller_unsat` (`Consumer<Wasm, u8>` ->
+  6-0003 `WasmBuf<u8>` doesn't implement `Functor` at the use site: the dual
+  bites at the caller). The turbofish-call channel `f<Arg>()` was NOT used: it is
+  the documented A7.1 baseline gap (call-site explicit generic args leak); the
+  fixtures ride the solid leg-2 ADT `ty_constraints` + `check_ty_wf` channel.
+
+- **Unit tests (`trait_resolution::tests`).** Test 11
+  `gat_unguarded_universal_consumed_via_instantiate_on_match`: `B::Item<X>: Show`
+  is Satisfied under `B: Cont` (derived + instantiate-on-match) and UnSat without
+  `B: Cont` (no over-derivation). Test 13
+  `gat_instantiate_on_match_gate_rejects_non_universals`: the gate accepts the
+  saturated in-order applied subject and refuses out-of-order / partial /
+  other-decl / bare-head.
+
+- **Verify (all foreground / targeted, orchestrator owns full release CI).**
+  `cargo check --workspace` clean (24.3s). uitest `run_ty_def` 104/104 (4 new
+  A7.2 + 100 pre-existing BYTE-IDENTICAL under `INSTA_UPDATE=no`, incl. all six
+  UNGUARDED bounded-GAT fixtures `gat_bound_conforming` / `_not_satisfied` /
+  `_where_clause_missing` / `_from_where_clause` / `gat_default_bounded_merge` /
+  `_unsat` -- the AssocTy-subject derived assumption is disjoint from their
+  Adt-subject conformance goals). uitest `run_ty_check` 241/241 byte-identical.
+  fe-hir GAT/solver/type_fn/conformance targeted: restated A5.0 pin GREEN, A7.1
+  `gat_param_guard_invariants_i1_i2` GREEN, tests 11/13 GREEN, keystone
+  confluence BYTE-IDENTICAL (`backend_schedule_confluence`, `backend_anti_conflation`,
+  `backend_storage_class`, `hkt_backend_trait`, `gat_typefn_confluence`,
+  `gat_default_typefn_confluence`; real Backend Buffer/Ref are unbounded so the
+  revival is inert -- zero RHS bounds to revive). `corelib` ALONE 19/19
+  (`analyze_corelib` / `analyze_stdlib` + release twins). NO pre-existing snapshot
+  changed.
+
+- **A7.2 SOUND + READY; A9 UNBLOCKED.** Once A9 adds `type Buffer<T>: Functor`
+  to the real `Backend`, backend-generic library code gets `B::Buffer<X>:
+  Functor` for free from `B: Backend`, discharged concretely per impl. A7.3
+  (guarded-universal symbolic consumption, needs conditional-assumption plumbing
+  in the forest) remains deferred and named; nothing in A9 requires it.

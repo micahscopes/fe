@@ -5278,6 +5278,52 @@ impl<'db> TraitAssocTypeView<'db> {
         }
         out
     }
+
+    /// True iff any of this GAT decl's params carries a `TypeBound::Trait`
+    /// guard (`type Elem<T: G>`). SYNTACTIC (never lowers), so an UNLOWERABLE
+    /// guard (`T: NoSuchTrait`) still counts as guarded here: A7.2's leg-3
+    /// revival is UNGUARDED-only, and a decl the user annotated with a guard
+    /// must not be revived just because the guard failed to resolve (the
+    /// decl-site WF diag `Trait::diags_gat_param_guards` owns that error).
+    /// Guarded-universal symbolic consumption is A7.3 (deferred), so guarded
+    /// decls stay skipped in `extend_all_bounds`.
+    pub fn has_param_guards(self, db: &'db dyn HirDb) -> bool {
+        self.generic_params(db).data(db).iter().any(|p| match p {
+            GenericParam::Type(t) => {
+                t.bounds.iter().any(|b| matches!(b, TypeBound::Trait(_)))
+            }
+            GenericParam::Const(_) => false,
+        })
+    }
+
+    /// A7.2 leg-3: the APPLIED subject `pred::Name<r0..r_{k-1}>` used to revive
+    /// an UNGUARDED arity>0 GAT's RHS bound as a universal assumption. The spine
+    /// is the decl's OWN rigids minted at the decl def-node scope
+    /// (`ScopeId::TraitType(owner, idx)`), EXACTLY the anchoring
+    /// `AssocTypeBounds::bounds` uses when it lowers the RHS bound's own `T`
+    /// references, so the revived bound's subject spine and its bound-arg `T`
+    /// share ONE interned rigid (owner-exactness; the analogue of A7.1 (I2)).
+    /// The subject is correctly `*`-kinded (saturated), so the ill-kinded bare
+    /// `* -> *` head the A5.0 FIX-1 pin guards against never returns; the
+    /// solver's instantiate-on-match rule generalizes exactly these rigids per
+    /// use. `pred` carries the concrete `Self`/trait args (`B` in `B::Name`).
+    pub fn applied_decl_subject(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        pred: crate::analysis::ty::trait_def::TraitInstId<'db>,
+    ) -> Option<crate::analysis::ty::ty_def::TyId<'db>> {
+        use crate::analysis::ty::ty_def::TyId;
+        let name = self.name(db)?;
+        let scope = ScopeId::TraitType(self.owner, self.idx as u16);
+        let rigids: Vec<TyId<'db>> = self
+            .generic_params(db)
+            .data(db)
+            .iter()
+            .enumerate()
+            .map(|(j, p)| gat_param_ty(db, p, j, scope))
+            .collect();
+        Some(TyId::foldl(db, TyId::assoc_ty(db, pred, name), &rigids))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

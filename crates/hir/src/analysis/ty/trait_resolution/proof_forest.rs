@@ -16,13 +16,15 @@ use crate::analysis::{
     ty::{
         binder::Binder,
         canonical::Canonical,
-        fold::TyFoldable,
+        const_ty::ConstTyData,
+        fold::{TyFoldable, TyFolder},
         trait_def::{ImplementorId, TraitInstId, impls_for_trait_in_ingots},
-        ty_def::{TyData, TyId},
+        ty_def::{TyData, TyId, TyParam},
         unify::PersistentUnificationTable,
         visitor::{TyVisitable, TyVisitor},
     },
 };
+use crate::hir_def::scope_graph::ScopeId;
 const MAXIMUM_SOLUTION_NUM: usize = 2;
 /// The maximum depth of any type that the solver will consider.
 ///
@@ -454,6 +456,35 @@ impl GeneratorNode {
                     self.register_solution_with(pf, &mut table, selected_impl);
                     return true;
                 }
+
+                // A7.2 leg-3 instantiate-on-match. A derived UNGUARDED-GAT
+                // universal `Self::Buffer<r0..>: Functor` carries the decl's OWN
+                // rigids (`extend_all_bounds`'s applied-subject revival). Rigids
+                // are not vars, so it can NEVER direct-unify with a use-site goal
+                // `Self::Buffer<X>: Functor`. If (and only if) the assumption is
+                // EXACTLY the sanctioned applied-GAT-subject shape -- the self
+                // type is `AssocTy<r0..r_{k-1}>` with the decl's own rigids in
+                // order, fully saturated, and NO assoc-owned rigid appears
+                // outside that spine -- generalize precisely those rigids to
+                // fresh inference vars (a scoped, `Binder`-style instantiation
+                // keyed on the decl def-node scope, never a blanket rigid->var
+                // pass) and retry. The gate keeps every other rigid rigid, so a
+                // non-matching rigid-carrying assumption is skipped entirely.
+                if let Some(decl_scope) = sanctioned_applied_gat_assumption(db, assumption) {
+                    let mut table = g_node.table.clone();
+                    let mut inst = GatUniversalInstantiator {
+                        scope: decl_scope,
+                        table: &mut table,
+                        cache: FxHashMap::default(),
+                    };
+                    let instantiated = assumption.fold_with(db, &mut inst);
+                    if table.unify(instantiated, normalized_goal).is_ok() {
+                        let selected_impl =
+                            ImplementorId::assumption(db, extracted_goal.fold_with(db, &mut table));
+                        self.register_solution_with(pf, &mut table, selected_impl);
+                        return true;
+                    }
+                }
             }
         }
 
@@ -483,6 +514,139 @@ impl GeneratorNode {
 
         let child = g_node.children[0];
         child.unresolved_subgoal(pf)
+    }
+}
+
+/// A7.2 leg-3 gate: recognize an env assumption that is EXACTLY a revived
+/// unguarded-GAT universal (`Self::Buffer<r0..r_{k-1}>: Bound`), returning the
+/// decl def-node scope whose rigids the solver may generalize. Returns `None`
+/// (skip instantiate-on-match) for every other assumption, including any
+/// rigid-carrying predicate NOT in the sanctioned shape.
+///
+/// Sanctioned shape (all required):
+/// 1. the assumption's SUBJECT (`self_ty`) decomposes to an `AssocTy` head
+///    applied to a spine that is EXACTLY that decl's own rigids `0..k` in order
+///    and fully saturates the decl (`spine.len() == arity`); and
+/// 2. NO `is_assoc_ty_param` rigid appears anywhere in the assumption outside
+///    that decl's scope.
+///
+/// This rejects (leg-3 test 13) a bare/partial head (`spine.len() != arity`),
+/// an out-of-order spine (`spine[j].idx != j`), and another decl's rigids
+/// (owner mismatch), each of which fails a clause above. It is the operational
+/// twin of the restated A5.0 pin
+/// (`gat_bound_assoc_owned_rigids_only_in_applied_universal_shape`): the only
+/// assoc-owned rigids the solver ever treats as universally quantified are the
+/// spine of a saturated applied GAT subject.
+pub(super) fn sanctioned_applied_gat_assumption<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+) -> Option<ScopeId<'db>> {
+    let self_ty = inst.self_ty(db);
+    let (base, spine) = self_ty.decompose_ty_app(db);
+    let TyData::AssocTy(assoc) = base.data(db) else {
+        return None;
+    };
+    // The decl def-node scope (`ScopeId::TraitType(t, decl_idx)`) whose rigids
+    // this universal quantifies over.
+    let decl_scope = assoc.scope(db)?;
+    let trait_def = assoc.trait_.def(db);
+    let decl_view = trait_def
+        .assoc_types(db)
+        .find(|v| v.name(db) == Some(assoc.name))?;
+    let arity = decl_view.generic_params(db).data(db).len();
+    if arity == 0 || spine.len() != arity {
+        return None;
+    }
+    // Spine must be the decl's own rigids 0..k in order (owner-exact).
+    for (j, &arg) in spine.iter().enumerate() {
+        let TyData::TyParam(param) = arg.data(db) else {
+            return None;
+        };
+        if !param.is_assoc_ty_param() || param.owner != decl_scope || param.idx != j {
+            return None;
+        }
+    }
+    // No assoc-owned rigid may occur outside this decl's scope anywhere in the
+    // predicate (belt: with the derivation rule no other rigid-carrying shape
+    // exists in envs; this makes the gate self-checking).
+    if !all_assoc_rigids_in_scope(db, inst, decl_scope) {
+        return None;
+    }
+    Some(decl_scope)
+}
+
+/// True iff every `is_assoc_ty_param` rigid reachable in `inst` is owned by
+/// `scope`. Used to reject an assumption whose bound args smuggle a rigid from
+/// a different decl into the sanctioned-shape gate.
+fn all_assoc_rigids_in_scope<'db>(
+    db: &'db dyn HirAnalysisDb,
+    inst: TraitInstId<'db>,
+    scope: ScopeId<'db>,
+) -> bool {
+    struct Scan<'db> {
+        db: &'db dyn HirAnalysisDb,
+        scope: ScopeId<'db>,
+        ok: bool,
+    }
+    impl<'db> TyVisitor<'db> for Scan<'db> {
+        fn db(&self) -> &'db dyn HirAnalysisDb {
+            self.db
+        }
+        fn visit_param(&mut self, ty_param: &TyParam<'db>) {
+            if ty_param.is_assoc_ty_param() && ty_param.owner != self.scope {
+                self.ok = false;
+            }
+        }
+    }
+    let mut scan = Scan { db, scope, ok: true };
+    inst.visit_with(&mut scan);
+    scan.ok
+}
+
+/// A7.2 leg-3 universal instantiation: replace every rigid owned by the decl
+/// def-node `scope` with a FRESH inference var (one per param index, cached so
+/// the same rigid maps to the same var across both the subject spine and the
+/// bound args), leaving all other rigids intact. This is the scoped analogue of
+/// `PersistentUnificationTable::instantiate_with_fresh_vars`' seam-S1 closure:
+/// there the whole table keeps assoc params rigid, here we deliberately lift a
+/// SINGLE decl's params to vars for a universal-elimination match, and only
+/// after `sanctioned_applied_gat_assumption` proved the shape.
+struct GatUniversalInstantiator<'db, 'a> {
+    scope: ScopeId<'db>,
+    table: &'a mut PersistentUnificationTable<'db>,
+    cache: FxHashMap<usize, TyId<'db>>,
+}
+
+impl<'db> TyFolder<'db> for GatUniversalInstantiator<'db, '_> {
+    fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        match ty.data(db) {
+            TyData::TyParam(param)
+                if param.is_assoc_ty_param() && param.owner == self.scope =>
+            {
+                if let Some(&var) = self.cache.get(&param.idx) {
+                    var
+                } else {
+                    let var = self.table.new_var_from_param(ty);
+                    self.cache.insert(param.idx, var);
+                    var
+                }
+            }
+            TyData::ConstTy(const_ty) => match const_ty.data(db) {
+                ConstTyData::TyParam(param, _)
+                    if param.is_assoc_ty_param() && param.owner == self.scope =>
+                {
+                    if let Some(&var) = self.cache.get(&param.idx) {
+                        var
+                    } else {
+                        let var = self.table.new_var_from_param(ty);
+                        self.cache.insert(param.idx, var);
+                        var
+                    }
+                }
+                _ => ty.super_fold_with(db, self),
+            },
+            _ => ty.super_fold_with(db, self),
+        }
     }
 }
 

@@ -2061,20 +2061,31 @@ impl Backend for Evm {}
         let _ = db.run_on_top_mod(top_mod);
     }
 
-    // mb2-a5.0 (steering-08 FIX 1): PIN the A4.2 lifting-lemma premise "no
-    // assumption in `param_env` mentions an assoc-def-owned rigid". Before the
-    // fix, `PredicateListId::extend_all_bounds` step 2 derived a bare-head
-    // assumption for EVERY bounded assoc type INCLUDING GATs (arity > 0),
-    // splicing the `TraitType`-owned GAT rigid (from the bound arg) into the
-    // assumption set. With the arity>0 skip, a bounded GAT contributes NO
-    // assumption, so no `is_assoc_ty_param` rigid (owner class
-    // `TraitType`/`ImplTraitType`) appears anywhere in the impl's `param_env`.
-    // This is the recursive `impl<B: Backend> Backend for Wrap<B>` shape where
-    // the leaked rigid was the identical interned param used in the
-    // merged-default discharge goal. (The correctly-kinded revival is the A7
-    // consumer leg; see the skip comment in `extend_all_bounds`.)
+    // mb2-a5.0 (steering-08 FIX 1) RESTATED by A7.2 leg-3 (steering-10 test 12
+    // / I3). Named `gat_bound_no_assoc_owned_param_in_param_env` for continuity;
+    // the invariant it pins is now
+    // `gat_bound_assoc_owned_rigids_only_in_applied_universal_shape`.
+    //
+    // ORIGINAL A5.0 premise: "no assumption in `param_env` mentions an
+    // assoc-def-owned rigid" -- because deriving a bare-head assumption
+    // `Self::Elem: Producer<r0>` for a GAT spliced the `TraitType`-owned rigid
+    // into an ILL-KINDED predicate (`* -> *` head as subject), violating the
+    // A4.2 lifting-lemma premise.
+    //
+    // A7.2 DELIBERATELY revives the UNGUARDED bounded GAT `type Elem<T>:
+    // Producer<T>` as a universal assumption, so an assoc-owned rigid now DOES
+    // appear in `param_env` -- but ONLY inside the correctly-`*`-kinded
+    // SANCTIONED applied-GAT-subject shape `Self::Elem<r0>: Producer<r0>` (the
+    // subject is the saturated applied projection, not the bare head). The
+    // restated pin therefore asserts the STRONGER, still-sound invariant: every
+    // predicate that carries an `is_assoc_ty_param` rigid is in the sanctioned
+    // shape, and the ill-kinded bare-head form is REJECTED by the same gate
+    // (teeth). This composes with the solver instantiate-on-match rule
+    // (universal elimination at each use), which is what keeps the lifting
+    // lemma's guarded reading valid.
     #[test]
     fn gat_bound_no_assoc_owned_param_in_param_env() {
+        use crate::analysis::ty::trait_def::TraitInstId;
         use crate::analysis::ty::visitor::{TyVisitable, TyVisitor};
         use crate::semantic::param_env;
 
@@ -2109,38 +2120,107 @@ impl<B> Backend for Wrap<B> where B: Backend {
             .expect("missing `impl Backend for Wrap<B>`");
 
         // The impl's own assumption environment. Its where-clause `B: Backend`
-        // is the predicate whose bounded GAT `Elem<T>: Producer<T>` triggered
-        // `extend_all_bounds` step 2 (and, pre-fix, the leak).
+        // is the predicate whose unguarded bounded GAT `Elem<T>: Producer<T>`
+        // triggers `extend_all_bounds` step 2's applied-subject revival.
         let env = param_env(&db, impl_trait.into());
 
-        // Scan every predicate arg (recursively) for an assoc-def-owned rigid.
-        struct AssocOwnedParamScan<'db> {
-            db: &'db dyn HirAnalysisDb,
-            found: bool,
-        }
-        impl<'db> TyVisitor<'db> for AssocOwnedParamScan<'db> {
-            fn db(&self) -> &'db dyn HirAnalysisDb {
-                self.db
+        // Does an inst mention an assoc-def-owned rigid anywhere?
+        fn mentions_assoc_rigid<'db>(db: &'db dyn HirAnalysisDb, inst: TraitInstId<'db>) -> bool {
+            struct Scan<'db> {
+                db: &'db dyn HirAnalysisDb,
+                found: bool,
             }
-            fn visit_param(&mut self, ty_param: &TyParam<'db>) {
-                if ty_param.is_assoc_ty_param() {
-                    self.found = true;
+            impl<'db> TyVisitor<'db> for Scan<'db> {
+                fn db(&self) -> &'db dyn HirAnalysisDb {
+                    self.db
+                }
+                fn visit_param(&mut self, ty_param: &TyParam<'db>) {
+                    if ty_param.is_assoc_ty_param() {
+                        self.found = true;
+                    }
                 }
             }
+            let mut scan = Scan { db, found: false };
+            inst.visit_with(&mut scan);
+            scan.found
         }
 
-        let mut scan = AssocOwnedParamScan {
-            db: &db,
-            found: false,
-        };
-        env.visit_with(&mut scan);
+        // Independent reimplementation of the sanctioned-shape gate (a pin must
+        // not tautologically call the code it guards): the subject decomposes to
+        // an `AssocTy` head whose spine is EXACTLY the decl's own rigids `0..k`
+        // in order and fully saturates the decl.
+        fn is_sanctioned_shape<'db>(db: &'db dyn HirAnalysisDb, inst: TraitInstId<'db>) -> bool {
+            let (base, spine) = inst.self_ty(db).decompose_ty_app(db);
+            let TyData::AssocTy(assoc) = base.data(db) else {
+                return false;
+            };
+            let Some(decl_scope) = assoc.scope(db) else {
+                return false;
+            };
+            let Some(decl_view) = assoc
+                .trait_
+                .def(db)
+                .assoc_types(db)
+                .find(|v| v.name(db) == Some(assoc.name))
+            else {
+                return false;
+            };
+            let arity = decl_view.generic_params(db).data(db).len();
+            if arity == 0 || spine.len() != arity {
+                return false;
+            }
+            spine.iter().enumerate().all(|(j, &arg)| match arg.data(db) {
+                TyData::TyParam(param) => {
+                    param.is_assoc_ty_param() && param.owner == decl_scope && param.idx == j
+                }
+                _ => false,
+            })
+        }
 
+        // (a) The revival fired: at least one env predicate carries an
+        //     assoc-owned rigid (proves the applied-subject revival is live).
+        let with_rigid: Vec<_> = env
+            .list(&db)
+            .iter()
+            .copied()
+            .filter(|&inst| mentions_assoc_rigid(&db, inst))
+            .collect();
         assert!(
-            !scan.found,
-            "param_env leaked an assoc-def-owned rigid (A4.2 lifting-lemma \
-             premise violated); `extend_all_bounds` must skip arity>0 assoc-type \
-             decls. Offending env: {}",
+            !with_rigid.is_empty(),
+            "A7.2 revival did not fire: expected a sanctioned applied-universal \
+             `Self::Elem<r0>: Producer<r0>` in `param_env`. Env: {}",
             env.pretty_print(&db)
+        );
+
+        // (b) Every such predicate is in the SANCTIONED shape (no ill-kinded
+        //     bare-head/unsanctioned rigid survives).
+        for inst in &with_rigid {
+            assert!(
+                is_sanctioned_shape(&db, *inst),
+                "param_env carries an UNSANCTIONED assoc-owned rigid (A5.0 \
+                 lifting-lemma premise violated in the dangerous form); only the \
+                 applied-GAT-subject universal shape is admissible. Offending: {}",
+                inst.pretty_print(&db, true)
+            );
+        }
+
+        // (c) Teeth: the ill-kinded BARE head `Self::Elem: Producer<r0>` (the
+        //     exact A5.0 leak shape) must be REJECTED by the gate. Build it by
+        //     stripping the application off a real sanctioned predicate.
+        let sanctioned = with_rigid[0];
+        let (bare_head, _spine) = sanctioned.self_ty(&db).decompose_ty_app(&db);
+        let mut bare_args = sanctioned.args(&db).clone();
+        bare_args[0] = bare_head;
+        let bare = TraitInstId::new(
+            &db,
+            sanctioned.def(&db),
+            bare_args,
+            sanctioned.assoc_type_bindings(&db).clone(),
+        );
+        assert!(
+            !is_sanctioned_shape(&db, bare),
+            "the bare-head `Self::Elem: Producer<r0>` (A5.0 leak shape) must NOT \
+             be recognized as the sanctioned applied-universal shape"
         );
     }
 

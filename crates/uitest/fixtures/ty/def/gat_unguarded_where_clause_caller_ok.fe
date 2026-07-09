@@ -1,0 +1,30 @@
+// mb2-a7.2 (task acceptance): a consumer states an EXPLICIT where-clause whose
+// subject is an APPLIED unguarded-GAT projection: `where B::Buf<X>: Functor`.
+// The clause is imposed on the consumer's own use sites and discharges by
+// ordinary trait solving. Instantiating `Consumer<Evm, u8>` normalizes
+// `Evm::Buf<u8>` to `EvmBuf<u8>`, which IS a `Functor`, so the obligation is
+// satisfied. ZERO diagnostics.
+
+trait Functor {}
+
+trait Backendish {
+    type Buf<T>
+}
+
+struct Evm {}
+
+struct EvmBuf<T> {}
+
+impl Backendish for Evm {
+    type Buf<T> = EvmBuf<T>
+}
+
+impl<T> Functor for EvmBuf<T> {}
+
+struct Consumer<B: Backendish, X>
+where B::Buf<X>: Functor
+{}
+
+struct Outer {
+    c: Consumer<Evm, u8>
+}

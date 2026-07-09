@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_unguarded_universal_no_overderive.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_unguarded_universal_no_overderive.fe:18:8
+   │
+18 │     f: NeedsDraw<B::Item<X>>
+   │        ^^^^^^^^^^^^^^^^^^^^^ `B::Item<X>` doesn't implement `Draw`

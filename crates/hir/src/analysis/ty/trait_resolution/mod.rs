@@ -1276,31 +1276,51 @@ impl<'db> PredicateListId<'db> {
                     continue;
                 };
 
-                // FIX 1 (mb2-a5.0 / steering-08): SKIP bounded GATs (arity > 0).
-                // Deriving a bare-head assumption `Self::AssocType: Bound` for a
-                // GAT uses the `* -> *` BARE head as the subject and (because
-                // `lower_trait_ref` never kind-checks the Self slot) splices the
-                // `TraitType`-owned GAT rigid from the bound arg into the
-                // assumption set. That leaks an assoc-def-owned rigid into
-                // `param_env`, violating the A4.2 lifting-lemma premise that no
-                // assumption mentions such a rigid. The correctly-kinded revival
-                // (APPLIED subject `Self::AssocType<rigid..>` saturated with the
-                // decl's own rigids + a solver instantiation-on-match rule) is the
-                // A7 "GAT bound duality" consumer leg (steering-08 Part 2 point 4,
-                // leg 3). Arity determined via the same authority A4.1/A4.2 read
-                // (the decl's `generic_params`); arity-0 derivation is unchanged
-                // (input-disjoint), so the baseline is byte-identical.
-                if trait_type.generic_params(db).data(db).len() > 0 {
-                    continue;
-                }
+                // FIX 1 (mb2-a5.0 / steering-08) NARROWED by A7.2 leg-3
+                // (steering-10). The arity>0 case splits:
+                //
+                //  - arity 0: derive the bare `Self::AssocType: Bound`
+                //    assumption, unchanged (input-disjoint baseline).
+                //
+                //  - arity>0 WITH a param guard (`type Elem<T: G>: P<T>`): STILL
+                //    skipped. Guarded-universal symbolic consumption is A7.3
+                //    (deferred): matching such a universal at a use site would
+                //    have to discharge the antecedent `G[..]` at match time, and
+                //    without that plumbing a derived guarded universal re-opens
+                //    the leg-1-without-leg-2 hole. Skipping = fewer assumptions =
+                //    sound.
+                //
+                //  - arity>0 UNGUARDED (`type Buffer<T>: Functor`, the A9
+                //    prerequisite): REVIVED. FIX-1's original hazard was that a
+                //    BARE `* -> *` head as the assumption subject splices the
+                //    `TraitType`-owned GAT rigid from the bound arg into an
+                //    ill-kinded predicate. The revival instead builds the
+                //    correctly-`*`-kinded APPLIED subject `Self::Buffer<r0..>`
+                //    saturated with the decl's OWN rigids (via
+                //    `applied_decl_subject`, owner-exact), so the bound's subject
+                //    spine and its bound-arg references share one interned rigid.
+                //    Those rigids ARE assoc-owned, so the assumption lands in the
+                //    env in the SANCTIONED applied-GAT-subject shape; the solver's
+                //    instantiate-on-match rule (proof_forest) generalizes exactly
+                //    those rigids per use. The A5.0 pin is restated to enforce
+                //    "assoc-owned rigids appear ONLY in this sanctioned shape".
+                let decl_arity = trait_type.generic_params(db).data(db).len();
+                let subject = if decl_arity == 0 {
+                    // Create the associated type: Self::AssocType (bare, arity 0).
+                    TyId::assoc_ty(db, pred, assoc_ty_name)
+                } else {
+                    if trait_type.has_param_guards(db) {
+                        // Guarded GAT: A7.3 (deferred). Stay skipped.
+                        continue;
+                    }
+                    // Unguarded arity>0 GAT: revive with the applied subject.
+                    let Some(applied) = trait_type.applied_decl_subject(db, pred) else {
+                        continue;
+                    };
+                    applied
+                };
 
-                // Create the associated type: Self::AssocType
-                let assoc_ty = TyId::assoc_ty(db, pred, assoc_ty_name);
-
-                let _assumptions =
-                    PredicateListId::new(db, all_predicates.iter().copied().collect::<Vec<_>>());
-
-                for mut trait_inst in assoc_ty.assoc_type_bounds(db, trait_type) {
+                for mut trait_inst in subject.assoc_type_bounds(db, trait_type) {
                     // Substitute `Self` and associated types using the original predicate instance
                     let mut subst = AssocTySubst::new(pred);
                     trait_inst = trait_inst.fold_with(db, &mut subst);
@@ -1485,6 +1505,224 @@ fn without_a<T>() -> bool {
             is_goal_query_satisfiable(&db, without_cx, &without_query),
             GoalSatisfiability::UnSat(_)
         ));
+    }
+
+    // mb2-a7.2 leg-3 (steering-10 test 11): an UNGUARDED bounded GAT
+    // (`type Item<T>: Show`) is consumed symbolically inside generic code. The
+    // solver must satisfy `B::Item<X>: Show` from the derived applied-subject
+    // universal (`extend_all_bounds` revival) via instantiate-on-match -- with
+    // `B: Cont` in scope. The SAME goal WITHOUT `B: Cont` in scope stays UnSat
+    // (no over-derivation): the bound is a fact of the trait contract, not of
+    // thin air.
+    #[test]
+    fn gat_unguarded_universal_consumed_via_instantiate_on_match() {
+        use common::indexmap::IndexMap;
+
+        use crate::hir_def::IdentId;
+
+        fn query_for<'db>(
+            db: &'db HirAnalysisTestDb,
+            func: Func<'db>,
+            cont: Trait<'db>,
+            show: Trait<'db>,
+        ) -> (CanonicalGoalQuery<'db>, TraitSolveCx<'db>) {
+            let params = collect_generic_params(db, func.into()).explicit_params(db);
+            let b = params[0];
+            let x = params[1];
+            // `B::Item<X>`: project `Item` on `B: Cont`, applied to `X`.
+            let cont_inst = TraitInstId::new(db, cont, vec![b], IndexMap::new());
+            let item = IdentId::new(db, "Item".to_string());
+            let b_item = TyId::assoc_ty(db, cont_inst, item);
+            let b_item_x = TyId::foldl(db, b_item, &[x]);
+            let goal = TraitInstId::new(db, show, vec![b_item_x], IndexMap::new());
+            let assumptions =
+                collect_func_def_constraints(db, func.into(), true).instantiate_identity();
+            let query = CanonicalGoalQuery::new(db, goal, assumptions);
+            let solve_cx = TraitSolveCx::new(db, func.scope()).with_assumptions(assumptions);
+            (query, solve_cx)
+        }
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "gat_unguarded_universal_consumed.fe".into(),
+            r#"
+trait Show {}
+trait Cont {
+    type Item<T>: Show
+}
+fn with_cont<B: Cont, X>() -> bool {
+    true
+}
+fn without_cont<B, X>() -> bool {
+    true
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+
+        let find_trait = |name: &str| {
+            top_mod
+                .all_traits(&db)
+                .iter()
+                .copied()
+                .find(|t| t.name(&db).to_opt().is_some_and(|n| n.data(&db) == name))
+                .unwrap()
+        };
+        let find_func = |name: &str| {
+            top_mod
+                .all_funcs(&db)
+                .iter()
+                .copied()
+                .find(|f| f.name(&db).to_opt().is_some_and(|n| n.data(&db) == name))
+                .unwrap()
+        };
+        let cont = find_trait("Cont");
+        let show = find_trait("Show");
+        let with_cont = find_func("with_cont");
+        let without_cont = find_func("without_cont");
+
+        let (with_query, with_cx) = query_for(&db, with_cont, cont, show);
+        let (without_query, without_cx) = query_for(&db, without_cont, cont, show);
+
+        // With `B: Cont`: the derived universal `B::Item<r0>: Show` matches
+        // `B::Item<X>: Show` by instantiating the decl rigid.
+        assert!(
+            matches!(
+                is_goal_query_satisfiable(&db, with_cx, &with_query),
+                GoalSatisfiability::Satisfied(_)
+            ),
+            "B::Item<X>: Show must be satisfiable under `B: Cont` via \
+             instantiate-on-match"
+        );
+        // Without `B: Cont`: no derivation, no impl -> UnSat (no over-derivation).
+        assert!(
+            matches!(
+                is_goal_query_satisfiable(&db, without_cx, &without_query),
+                GoalSatisfiability::UnSat(_)
+            ),
+            "B::Item<X>: Show must stay UnSat without `B: Cont` in scope"
+        );
+    }
+
+    // mb2-a7.2 leg-3 (steering-10 test 13): the instantiate-on-match gate
+    // `sanctioned_applied_gat_assumption` accepts EXACTLY the saturated,
+    // in-order applied-GAT-subject shape and refuses every corruption of it:
+    // out-of-order spine, partial application, another decl's rigids, and the
+    // bare head. This is what confines rigid-generalization to genuine
+    // universals (the pin's teeth, at the gate level).
+    #[test]
+    fn gat_instantiate_on_match_gate_rejects_non_universals() {
+        use common::indexmap::IndexMap;
+
+        use super::proof_forest::sanctioned_applied_gat_assumption;
+        use crate::analysis::ty::ty_lower::gat_param_ty;
+        use crate::hir_def::IdentId;
+        use crate::hir_def::scope_graph::ScopeId;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "gat_instantiate_gate.fe".into(),
+            r#"
+trait Show {}
+trait Cont {
+    type Item<T, U>: Show
+}
+trait Other {
+    type Thing<T, U>: Show
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let find_trait = |name: &str| {
+            top_mod
+                .all_traits(&db)
+                .iter()
+                .copied()
+                .find(|t| t.name(&db).to_opt().is_some_and(|n| n.data(&db) == name))
+                .unwrap()
+        };
+        let cont = find_trait("Cont");
+        let other = find_trait("Other");
+        let show = find_trait("Show");
+
+        let item_idx = cont
+            .assoc_types(&db)
+            .position(|v| v.name(&db).is_some_and(|n| n.data(&db) == "Item"))
+            .unwrap();
+        let thing_idx = other
+            .assoc_types(&db)
+            .position(|v| v.name(&db).is_some_and(|n| n.data(&db) == "Thing"))
+            .unwrap();
+        let item_view = cont.assoc_types(&db).nth(item_idx).unwrap();
+        let thing_view = other.assoc_types(&db).nth(thing_idx).unwrap();
+        let item_scope = ScopeId::TraitType(cont, item_idx as u16);
+        let thing_scope = ScopeId::TraitType(other, thing_idx as u16);
+
+        let item_params = item_view.generic_params(&db);
+        let item_params = item_params.data(&db);
+        let thing_params = thing_view.generic_params(&db);
+        let thing_params = thing_params.data(&db);
+        let r0 = gat_param_ty(&db, &item_params[0], 0, item_scope);
+        let r1 = gat_param_ty(&db, &item_params[1], 1, item_scope);
+        let o0 = gat_param_ty(&db, &thing_params[0], 0, thing_scope);
+
+        // `Cont::Item` head over a dummy self (the gate keys on the decl, not
+        // the receiver, so `()` as `Self` is fine).
+        let cont_inst = TraitInstId::new(&db, cont, vec![TyId::unit(&db)], IndexMap::new());
+        let item = IdentId::new(&db, "Item".to_string());
+        let head = TyId::assoc_ty(&db, cont_inst, item);
+
+        // Sanctioned: `Cont::Item<r0, r1>: Show` (saturated, in order).
+        let sanctioned = TraitInstId::new(
+            &db,
+            show,
+            vec![TyId::foldl(&db, head, &[r0, r1])],
+            IndexMap::new(),
+        );
+        assert_eq!(
+            sanctioned_applied_gat_assumption(&db, sanctioned),
+            Some(item_scope),
+            "the saturated in-order applied-GAT subject must be recognized"
+        );
+
+        // Out of order: `Cont::Item<r1, r0>`.
+        let reversed = TraitInstId::new(
+            &db,
+            show,
+            vec![TyId::foldl(&db, head, &[r1, r0])],
+            IndexMap::new(),
+        );
+        assert!(
+            sanctioned_applied_gat_assumption(&db, reversed).is_none(),
+            "an out-of-order spine must be rejected"
+        );
+
+        // Partial application: `Cont::Item<r0>`.
+        let partial =
+            TraitInstId::new(&db, show, vec![TyId::foldl(&db, head, &[r0])], IndexMap::new());
+        assert!(
+            sanctioned_applied_gat_assumption(&db, partial).is_none(),
+            "a partially applied GAT subject must be rejected"
+        );
+
+        // Another decl's rigids in the spine: `Cont::Item<o0, r1>`.
+        let cross = TraitInstId::new(
+            &db,
+            show,
+            vec![TyId::foldl(&db, head, &[o0, r1])],
+            IndexMap::new(),
+        );
+        assert!(
+            sanctioned_applied_gat_assumption(&db, cross).is_none(),
+            "a spine mixing another decl's rigid must be rejected"
+        );
+
+        // Bare head: `Cont::Item: Show` (no application at all).
+        let bare = TraitInstId::new(&db, show, vec![head], IndexMap::new());
+        assert!(
+            sanctioned_applied_gat_assumption(&db, bare).is_none(),
+            "the bare `* -> * -> *` head must be rejected"
+        );
     }
 }
 

@@ -1,0 +1,19 @@
+// mb2-a7.2 leg-3 (negative, no over-derivation): only the DECLARED GAT bound is
+// revived. `Cont` declares `type Item<T>: Show`, NOT `: Draw`. `Holder`'s field
+// type `NeedsDraw<B::Item<X>>` raises `B::Item<X>: Draw`, which is NOT derivable
+// from `B: Cont`, so it is REJECTED. The revival is exactly the trait contract,
+// never more.
+
+trait Show {}
+
+trait Draw {}
+
+trait Cont {
+    type Item<T>: Show
+}
+
+struct NeedsDraw<S: Draw> {}
+
+struct Holder<B: Cont, X> {
+    f: NeedsDraw<B::Item<X>>
+}

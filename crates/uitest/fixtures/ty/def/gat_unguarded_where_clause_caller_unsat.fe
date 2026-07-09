@@ -1,0 +1,28 @@
+// mb2-a7.2 (task acceptance, the dual bites at the use site): the consumer's
+// where-clause `where B::Buf<X>: Functor` becomes an obligation at each
+// instantiation. Instantiating `Consumer<Wasm, u8>` normalizes `Wasm::Buf<u8>`
+// to `WasmBuf<u8>`, for which there is NO `Functor` impl, so the obligation is
+// UNSATISFIED and reported at the use site. `Consumer` itself type-checks; the
+// rejection is the instantiator's.
+
+trait Functor {}
+
+trait Backendish {
+    type Buf<T>
+}
+
+struct Wasm {}
+
+struct WasmBuf<T> {}
+
+impl Backendish for Wasm {
+    type Buf<T> = WasmBuf<T>
+}
+
+struct Consumer<B: Backendish, X>
+where B::Buf<X>: Functor
+{}
+
+struct Outer {
+    c: Consumer<Wasm, u8>
+}

@@ -1,0 +1,20 @@
+// mb2-a7.2 leg-3 (steering-10, the A9 unlock): an UNGUARDED bounded GAT
+// `type Item<T>: Show` is CONSUMED symbolically inside generic code. `Holder`'s
+// field type `NeedsShow<B::Item<X>>` raises the obligation `B::Item<X>: Show`
+// (from `NeedsShow`'s own `S: Show` bound, the reliable ADT `ty_constraints`
+// channel). It discharges from the universal assumption DERIVED from `B: Cont`
+// (the `extend_all_bounds` applied-subject revival + the solver
+// instantiate-on-match rule). No explicit where-clause is needed: the bound is
+// a fact of the `Cont` contract. ZERO diagnostics.
+
+trait Show {}
+
+trait Cont {
+    type Item<T>: Show
+}
+
+struct NeedsShow<S: Show> {}
+
+struct Holder<B: Cont, X> {
+    f: NeedsShow<B::Item<X>>
+}
