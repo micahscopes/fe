@@ -1,0 +1,15 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend_atomic_supports_gate.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ backend_atomic_supports_gate.fe:18:12
+   │
+18 │     atomic.add(r, v)
+   │            ^^^ `EvmBackend` doesn't implement `Supports<Shared>`
+   │
+   ┌─ src/atomic.fe:36:18
+   │
+36 │         where B: Supports<S>
+   │                  ----------- required by this bound on `add`

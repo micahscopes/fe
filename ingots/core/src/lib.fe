@@ -14,6 +14,7 @@ pub use functional::{Fn, Functor, Applicative, Monad}
 pub use effect_ref::{AddressSpace, EffectHandle, EffectHandleMut, EffectRef, EffectRefMut, MemPtr, StaticSlot, StorPtr}
 pub use contracts::{self, *}
 pub use backend::{Backend, Supports, Global, Constant, Shared, Local}
+pub use atomic::Atomic
 pub use range::{Bound, Known, Unknown, Range}
 pub use seq::Seq
 

@@ -1,0 +1,49 @@
+// mb2 B1 (negative): the {Global, Shared} grant gate enforced BY CONSTRUCTION.
+// `Atomic<B, S>` has providers ONLY for `S = Global` (EVM root effect `Evm`) and
+// `S = Shared`/`Global` (the GPU `GpuAtomics` witness). `Constant` and `Local`
+// have NO `Atomic` provider anywhere, and no backend other than EVM/GPU has one,
+// so an op requiring such a capability compiles NOWHERE: the ordinary missing-
+// effect error `8-0036`, at the exact call that could not discharge it.
+//
+// Note these classes ARE supported by EVM (`EvmBackend: Supports<Constant>` and
+// `Supports<Local>` both hold, grant matrix), so the failure isolates the
+// capability-provider gate: holding `Supports<S>` is NOT enough; there must be an
+// `Atomic<B, S>` PROVIDER, and for Constant/Local there is none.
+
+use core::backend::{Constant, Local, Global}
+use core::atomic::Atomic
+use std::evm::{EvmBackend, EvmRef}
+use std::wasm::{WasmBackend, WasmRef}
+
+fn needs_constant_atomic(r: EvmRef<u256, Constant>, v: u256) -> u256
+    uses (atomic: mut Atomic<EvmBackend, Constant>)
+{
+    atomic.add(r, v)
+}
+
+fn needs_local_atomic(r: EvmRef<u256, Local>, v: u256) -> u256
+    uses (atomic: mut Atomic<EvmBackend, Local>)
+{
+    atomic.add(r, v)
+}
+
+// A backend with no `Atomic` provider at all: wasm supports `Global`
+// (`WasmBackend: Supports<Global>` holds) but has no `Atomic<WasmBackend, _>`
+// impl anywhere, so the op is ungrantable.
+fn needs_wasm_atomic(r: WasmRef<u64, Global>, v: u64) -> u64
+    uses (atomic: mut Atomic<WasmBackend, Global>)
+{
+    atomic.add(r, v)
+}
+
+fn use_constant_bad(r: EvmRef<u256, Constant>) {
+    needs_constant_atomic(r, v: 1)
+}
+
+fn use_local_bad(r: EvmRef<u256, Local>) {
+    needs_local_atomic(r, v: 1)
+}
+
+fn use_wasm_bad(r: WasmRef<u64, Global>) {
+    needs_wasm_atomic(r, v: 1)
+}

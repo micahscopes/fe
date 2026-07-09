@@ -1,4 +1,5 @@
 use core::backend::{Backend, Supports, Global, Constant, Shared, Local}
+use core::atomic::Atomic
 
 /// A TYPE-LEVEL GPU backend.
 ///
@@ -44,3 +45,49 @@ impl Supports<Global> for GpuBackend {}
 impl Supports<Constant> for GpuBackend {}
 impl Supports<Shared> for GpuBackend {}
 impl Supports<Local> for GpuBackend {}
+
+// ---------------------------------------------------------------------------
+// mb2 B1: the GPU atomic capability (DECLARATION-LEVEL only).
+// ---------------------------------------------------------------------------
+//
+// The grant matrix wants a `Shared` atomic witness (SPIR-V defines atomics on
+// both `StorageBuffer`/`Global` and `Workgroup`/`Shared`), and only the GPU
+// backend supports `Shared`. `GpuAtomics` carries `Atomic<GpuBackend, Global>`
+// and `Atomic<GpuBackend, Shared>` so the {Global, Shared} grant set is
+// non-degenerate (Shared has a provider that exists SOMEWHERE), while
+// `Constant`/`Local` still have none anywhere.
+//
+// These are TYPE-LEVEL stubs: no GPU pipeline exists on this branch, so the
+// bodies are never lowered (SPIR-V atomics lowering is B5, seam-GO-gated; GPU
+// execution is B6, environment-blocked). The bodies call `core::panic()`
+// (never-typed), exactly the `WasmHost` `ContractHost` stub posture. `GpuBackend`
+// supports both classes, so the `where GpuBackend: Supports<S>` op bound holds.
+pub struct GpuAtomics {}
+
+// As with the EVM impl, the trait method's `where B: Supports<S>` instantiates
+// to a CONCRETE `GpuBackend: Supports<{Global,Shared}>` (both hold by the grant
+// matrix above) and is not restated here (Fe rejects concrete-type where-bounds,
+// `6-0005`); it discharges automatically.
+impl Atomic<GpuBackend, Global> for GpuAtomics {
+    fn add(mut self, _ r: GpuRef<u32, Global>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn exchange(mut self, _ r: GpuRef<u32, Global>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn cas(mut self, _ r: GpuRef<u32, Global>, old: u32, new: u32) -> u32 {
+        core::panic()
+    }
+}
+
+impl Atomic<GpuBackend, Shared> for GpuAtomics {
+    fn add(mut self, _ r: GpuRef<u32, Shared>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn exchange(mut self, _ r: GpuRef<u32, Shared>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn cas(mut self, _ r: GpuRef<u32, Shared>, old: u32, new: u32) -> u32 {
+        core::panic()
+    }
+}

@@ -1,0 +1,28 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend_atomic_no_provider.fe
+---
+error[8-0036]: missing effect `Atomic<EvmBackend, Constant>` required by `needs_constant_atomic`
+   ┌─ backend_atomic_no_provider.fe:40:5
+   │
+40 │     needs_constant_atomic(r, v: 1)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `needs_constant_atomic` requires effect `Atomic<EvmBackend, Constant>` to be in scope
+   │
+   = provide it with `with (Atomic<EvmBackend, Constant> = value)` or require it via `uses Atomic<EvmBackend, Constant>`
+
+error[8-0036]: missing effect `Atomic<EvmBackend, Local>` required by `needs_local_atomic`
+   ┌─ backend_atomic_no_provider.fe:44:5
+   │
+44 │     needs_local_atomic(r, v: 1)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `needs_local_atomic` requires effect `Atomic<EvmBackend, Local>` to be in scope
+   │
+   = provide it with `with (Atomic<EvmBackend, Local> = value)` or require it via `uses Atomic<EvmBackend, Local>`
+
+error[8-0036]: missing effect `Atomic<WasmBackend, Global>` required by `needs_wasm_atomic`
+   ┌─ backend_atomic_no_provider.fe:48:5
+   │
+48 │     needs_wasm_atomic(r, v: 1)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^ `needs_wasm_atomic` requires effect `Atomic<WasmBackend, Global>` to be in scope
+   │
+   = provide it with `with (Atomic<WasmBackend, Global> = value)` or require it via `uses Atomic<WasmBackend, Global>`

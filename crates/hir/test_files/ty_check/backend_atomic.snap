@@ -1,0 +1,208 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/backend_atomic.fe
+---
+note:
+   ┌─ backend_atomic.fe:34:1
+   │
+34 │ ╭ {
+35 │ │     atomic.add(r, v)
+36 │ │ }
+   │ ╰─^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:35:5
+   │
+35 │     atomic.add(r, v)
+   │     ^^^^^^ atomic
+
+note:
+   ┌─ backend_atomic.fe:35:5
+   │
+35 │     atomic.add(r, v)
+   │     ^^^^^^^^^^^^^^^^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:35:16
+   │
+35 │     atomic.add(r, v)
+   │                ^ B::Ref<B::Word, Global>
+
+note:
+   ┌─ backend_atomic.fe:35:19
+   │
+35 │     atomic.add(r, v)
+   │                   ^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:43:1
+   │
+43 │ ╭ {
+44 │ │     atomic.exchange(r, v)
+45 │ │ }
+   │ ╰─^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:44:5
+   │
+44 │     atomic.exchange(r, v)
+   │     ^^^^^^ atomic
+
+note:
+   ┌─ backend_atomic.fe:44:5
+   │
+44 │     atomic.exchange(r, v)
+   │     ^^^^^^^^^^^^^^^^^^^^^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:44:21
+   │
+44 │     atomic.exchange(r, v)
+   │                     ^ B::Ref<B::Word, Global>
+
+note:
+   ┌─ backend_atomic.fe:44:24
+   │
+44 │     atomic.exchange(r, v)
+   │                        ^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:53:1
+   │
+53 │ ╭ {
+54 │ │     atomic.cas(r, old, new)
+55 │ │ }
+   │ ╰─^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:54:5
+   │
+54 │     atomic.cas(r, old, new)
+   │     ^^^^^^ atomic
+
+note:
+   ┌─ backend_atomic.fe:54:5
+   │
+54 │     atomic.cas(r, old, new)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:54:16
+   │
+54 │     atomic.cas(r, old, new)
+   │                ^ B::Ref<B::Word, Global>
+
+note:
+   ┌─ backend_atomic.fe:54:19
+   │
+54 │     atomic.cas(r, old, new)
+   │                   ^^^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:54:24
+   │
+54 │     atomic.cas(r, old, new)
+   │                        ^^^ B::Word
+
+note:
+   ┌─ backend_atomic.fe:61:1
+   │
+61 │ ╭ {
+62 │ │     atomic.add(r, v)
+63 │ │ }
+   │ ╰─^ u256
+
+note:
+   ┌─ backend_atomic.fe:62:5
+   │
+62 │     atomic.add(r, v)
+   │     ^^^^^^ atomic
+
+note:
+   ┌─ backend_atomic.fe:62:5
+   │
+62 │     atomic.add(r, v)
+   │     ^^^^^^^^^^^^^^^^ u256
+
+note:
+   ┌─ backend_atomic.fe:62:16
+   │
+62 │     atomic.add(r, v)
+   │                ^ EvmRef<u256, Global>
+
+note:
+   ┌─ backend_atomic.fe:62:19
+   │
+62 │     atomic.add(r, v)
+   │                   ^ u256
+
+note:
+   ┌─ backend_atomic.fe:67:1
+   │
+67 │ ╭ {
+68 │ │     atomic.cas(r, old, new)
+69 │ │ }
+   │ ╰─^ u256
+
+note:
+   ┌─ backend_atomic.fe:68:5
+   │
+68 │     atomic.cas(r, old, new)
+   │     ^^^^^^ atomic
+
+note:
+   ┌─ backend_atomic.fe:68:5
+   │
+68 │     atomic.cas(r, old, new)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ u256
+
+note:
+   ┌─ backend_atomic.fe:68:16
+   │
+68 │     atomic.cas(r, old, new)
+   │                ^ EvmRef<u256, Global>
+
+note:
+   ┌─ backend_atomic.fe:68:19
+   │
+68 │     atomic.cas(r, old, new)
+   │                   ^^^ u256
+
+note:
+   ┌─ backend_atomic.fe:68:24
+   │
+68 │     atomic.cas(r, old, new)
+   │                        ^^^ u256
+
+note:
+   ┌─ backend_atomic.fe:75:1
+   │
+75 │ ╭ {
+76 │ │     atomic.add(r, v)
+77 │ │ }
+   │ ╰─^ u32
+
+note:
+   ┌─ backend_atomic.fe:76:5
+   │
+76 │     atomic.add(r, v)
+   │     ^^^^^^ atomic
+
+note:
+   ┌─ backend_atomic.fe:76:5
+   │
+76 │     atomic.add(r, v)
+   │     ^^^^^^^^^^^^^^^^ u32
+
+note:
+   ┌─ backend_atomic.fe:76:16
+   │
+76 │     atomic.add(r, v)
+   │                ^ GpuRef<u32, Shared>
+
+note:
+   ┌─ backend_atomic.fe:76:19
+   │
+76 │     atomic.add(r, v)
+   │                   ^ u32

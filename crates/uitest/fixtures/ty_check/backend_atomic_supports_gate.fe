@@ -1,0 +1,19 @@
+// mb2 B1 (negative): the `Supports<S>` op gate, orthogonal to the capability.
+// Each `Atomic` op carries `where B: Supports<S>`, so support of the storage
+// class is checked at the CALL SITE independently of holding the capability.
+//
+// Here the capability IS held (the `atomic` param provides `Atomic<EvmBackend,
+// Shared>`), yet `atomic.add` is rejected because `EvmBackend: Supports<Shared>`
+// has no impl (EVM has no workgroup concept): `6-0003`, at the op. This is the
+// "capability held but class unsupported" leg: type facts (`Supports<S>`) gate
+// even when the term-level capability is in scope.
+
+use core::backend::Shared
+use core::atomic::Atomic
+use std::evm::{EvmBackend, EvmRef}
+
+fn evm_shared_atomic(r: EvmRef<u256, Shared>, v: u256) -> u256
+    uses (atomic: mut Atomic<EvmBackend, Shared>)
+{
+    atomic.add(r, v)
+}

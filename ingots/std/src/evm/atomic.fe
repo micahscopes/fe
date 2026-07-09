@@ -1,0 +1,49 @@
+use core::atomic::Atomic
+use core::backend::Global
+use super::backend::{EvmBackend, EvmRef}
+use super::effects::Evm
+use ingot::evm::ops
+
+// mb2 B1: the EVM atomic capability, carried by the EVM root effect `Evm` (the
+// same provider that carries `StorageIntrinsic`). Only `Global` (persistent
+// storage) gets a provider: EVM has no workgroup, so there is no
+// `Atomic<EvmBackend, Shared>` here, and `Constant`/`Local` are not atomic
+// classes anywhere. The EVM is single-threaded, so a load-modify-store over the
+// existing `SLOAD`/`SSTORE` intrinsics IS a correct atomic read-modify-write:
+// no other execution can interleave between the load and the store within a
+// single call frame. The `ops::sload`/`ops::sstore` obligations
+// (`uses (_t: StorageIntrinsic)`) are granted ambiently by this same EVM root,
+// so these bodies lower and EXECUTE on the ordinary EVM path.
+//
+// The ops are REAL (not stubs): the B1 EVM leg is executable against the `revm`
+// contract harness (`fe test`). The erased "provider witnesses non-interleaving"
+// proof (that the single-threaded grant is sound as a concurrency claim) is
+// Stage-2 material and deferred.
+// The trait method's `where B: Supports<S>` bound instantiates here to the
+// CONCRETE `EvmBackend: Supports<Global>`, which holds by the grant-matrix impl
+// and is therefore NOT restated on these impl methods (Fe rejects a where-bound
+// on a concrete type, `6-0005`); the bound is discharged automatically.
+impl Atomic<EvmBackend, Global> for Evm {
+    fn add(mut self, _ r: EvmRef<u256, Global>, _ v: u256) -> u256 {
+        let slot = r.raw()
+        let old = ops::sload(slot)
+        ops::sstore(slot: slot, value: old + v)
+        old
+    }
+
+    fn exchange(mut self, _ r: EvmRef<u256, Global>, _ v: u256) -> u256 {
+        let slot = r.raw()
+        let old = ops::sload(slot)
+        ops::sstore(slot: slot, value: v)
+        old
+    }
+
+    fn cas(mut self, _ r: EvmRef<u256, Global>, old: u256, new: u256) -> u256 {
+        let slot = r.raw()
+        let current = ops::sload(slot)
+        if current == old {
+            ops::sstore(slot: slot, value: new)
+        }
+        current
+    }
+}

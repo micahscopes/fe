@@ -1,0 +1,73 @@
+// mb2 B1: the EVM-EXECUTABLE atomic read-modify-write leg. The `Atomic<
+// EvmBackend, Global>` capability's ops (`impl ... for Evm` in `std::evm::atomic`)
+// have REAL bodies over `SLOAD`/`SSTORE`; EVM is single-threaded, so a
+// load-modify-store within one call frame IS a correct atomic RMW. This fixture
+// deploys a contract that performs atomic ops on a fixed storage slot and drives
+// it through the `revm` harness (`fe test`), asserting the observed pre-op return
+// values and post-op storage state.
+
+use std::evm::{EvmBackend, EvmRef}
+use core::backend::Global
+use core::atomic::Atomic
+
+msg Msg {
+    #[selector = 1]
+    Bump -> u256,
+    #[selector = 2]
+    Swap -> u256,
+    #[selector = 3]
+    Cas -> u256,
+    #[selector = 4]
+    Get -> u256,
+}
+
+pub contract AtomicCounter {
+    recv Msg {
+        // Atomic fetch-add 5 at slot 0; returns the PRE-op value.
+        Bump -> u256 uses (atomic: mut Atomic<EvmBackend, Global>) {
+            let r = EvmRef::from_raw(0)
+            atomic.add(r, 5)
+        }
+        // Atomic exchange to 99 at slot 0; returns the PRE-op value.
+        Swap -> u256 uses (atomic: mut Atomic<EvmBackend, Global>) {
+            let r = EvmRef::from_raw(0)
+            atomic.exchange(r, 99)
+        }
+        // Atomic CAS at slot 0: if current == 99, store 7; returns the current
+        // (pre-op) value.
+        Cas -> u256 uses (atomic: mut Atomic<EvmBackend, Global>) {
+            let r = EvmRef::from_raw(0)
+            atomic.cas(r, old: 99, new: 7)
+        }
+        // Read current value via an atomic add of 0 (returns current).
+        Get -> u256 uses (atomic: mut Atomic<EvmBackend, Global>) {
+            let r = EvmRef::from_raw(0)
+            atomic.add(r, 0)
+        }
+    }
+}
+
+#[test]
+fn test_atomic_rmw() uses (evm: mut Evm) {
+    let c = evm.create2<AtomicCounter>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // slot 0 starts at 0: fetch-add 5 returns 0, slot -> 5.
+    let a = evm.call(addr: c, gas: 200000, value: 0, message: Msg::Bump {})
+    assert!(a == 0)
+    // fetch-add 5 again returns 5, slot -> 10.
+    let b = evm.call(addr: c, gas: 200000, value: 0, message: Msg::Bump {})
+    assert!(b == 5)
+    // read current: 10.
+    let g0 = evm.call(addr: c, gas: 200000, value: 0, message: Msg::Get {})
+    assert!(g0 == 10)
+    // exchange to 99 returns old (10), slot -> 99.
+    let e = evm.call(addr: c, gas: 200000, value: 0, message: Msg::Swap {})
+    assert!(e == 10)
+    // CAS(99 -> 7): current is 99 so swap happens, returns 99, slot -> 7.
+    let cas = evm.call(addr: c, gas: 200000, value: 0, message: Msg::Cas {})
+    assert!(cas == 99)
+    // read current: 7 (CAS succeeded).
+    let g1 = evm.call(addr: c, gas: 200000, value: 0, message: Msg::Get {})
+    assert!(g1 == 7)
+}

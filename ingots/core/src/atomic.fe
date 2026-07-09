@@ -1,0 +1,47 @@
+use super::backend::{Backend, Supports}
+
+/// Atomic read-modify-write capability over a class-typed reference
+/// `B::Ref<B::Word, S>` (mb2 B1, the first real consumer of `Ref<T, S>`).
+///
+/// This is a TERM-LEVEL capability, the next instance of the `StorageIntrinsic`
+/// idiom (`core::contracts`): a trait-keyed `uses (atomic: mut Atomic<B, S>)`
+/// obligation, carried by the target's root effect, authority-only and
+/// non-scarce; a missing provider is the ordinary `8-0036` obligation error.
+/// It is DELIBERATELY not a type-level fact: `Supports<S>` (in `core::backend`)
+/// states that a storage class EXISTS on a backend; `Atomic<B, S>` states that
+/// code may PERFORM an atomic op there. Type facts gate types; capabilities gate
+/// operations.
+///
+/// Layering (steering-09):
+/// - `B` is the backend, so a provider impl can name its own concrete ref struct
+///   (`Evm` implements `Atomic<EvmBackend, Global>` with real `SLOAD`/`SSTORE`
+///   bodies; EVM is single-threaded, so a load-modify-store IS atomic).
+/// - `S` is the storage-class marker. Providers exist ONLY for `S = Global` and
+///   `S = Shared` (SPIR-V defines atomics on `StorageBuffer` and `Workgroup`);
+///   `Atomic<_, Constant>` / `Atomic<_, Local>` have NO provider anywhere, so
+///   they compile nowhere, by construction. That IS the {Global, Shared} gate:
+///   no bespoke check, just provider absence + the ordinary obligation error.
+/// - Each op additionally requires `B: Supports<S>` at the CALL site, so holding
+///   the capability is not enough: an atomic on a class the backend does not
+///   support (e.g. `Shared` on `EvmBackend`) is rejected even where the
+///   capability is held.
+///
+/// The ops return the value that was present BEFORE the write (fetch-then-modify),
+/// matching SPIR-V `OpAtomicIAdd` / `OpAtomicExchange` / `OpAtomicCompareExchange`,
+/// whose lowering is B5 (seam-GO-gated). No memory-ordering surface in v1
+/// (single-threaded EVM has none; SPIR-V memory semantics arrive with B5).
+pub trait Atomic<B: Backend, S> {
+    /// Atomic fetch-add: read the word at `r`, store `old + v`, return `old`.
+    fn add(mut self, _ r: B::Ref<B::Word, S>, _ v: B::Word) -> B::Word
+        where B: Supports<S>
+
+    /// Atomic exchange: read the word at `r`, store `v`, return the old word.
+    fn exchange(mut self, _ r: B::Ref<B::Word, S>, _ v: B::Word) -> B::Word
+        where B: Supports<S>
+
+    /// Atomic compare-and-swap: read the current word at `r`; if it equals
+    /// `old`, store `new`. Return the word that was present (the pre-op value),
+    /// so the caller can tell whether the swap happened (`result == old`).
+    fn cas(mut self, _ r: B::Ref<B::Word, S>, old: B::Word, new: B::Word) -> B::Word
+        where B: Supports<S>
+}

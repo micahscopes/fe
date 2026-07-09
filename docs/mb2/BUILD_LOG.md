@@ -1138,3 +1138,139 @@ rejected (`8-0036`); the same code under EVM is clean.
   `AtomicCap<S>`-family `uses`/`with` capability on the `StorageIntrinsic` idiom
   (Global/Shared providers only), with the EVM-executable RMW leg. Term-level
   capability, no type-level machinery, per steering-09.
+
+## 2026-07-09 - Slice B1: atomics surface (`Atomic<B, S>` capability + EVM-executable RMW)
+
+The first B-track slice (steering-09 B1): a TERM-LEVEL atomic read-modify-write
+capability over the A5.3 `Ref<T, S>` GAT, the next instance of the
+`StorageIntrinsic` idiom. `Ref<T, S>`'s first real consumer. PURE INGOT +
+fixtures; ZERO Rust/compiler change (the parameterized trait-keyed `uses` PROBE
+succeeded on the existing effect machinery). No new atomics system: it reuses the
+`uses`/`with` capability-method form, the root-provider grant path, and provider
+absence as the class gate.
+
+- **The capability as written (`ingots/core/src/atomic.fe`, NEW):**
+  ```
+  pub trait Atomic<B: Backend, S> {
+      fn add(mut self, _ r: B::Ref<B::Word, S>, _ v: B::Word) -> B::Word
+          where B: Supports<S>
+      fn exchange(mut self, _ r: B::Ref<B::Word, S>, _ v: B::Word) -> B::Word
+          where B: Supports<S>
+      fn cas(mut self, _ r: B::Ref<B::Word, S>, old: B::Word, new: B::Word) -> B::Word
+          where B: Supports<S>
+  }
+  ```
+  Op set is EXACTLY steering-09's: `add` (fetch-add) / `exchange` / `cas`, each
+  returning the PRE-op value (matches SPIR-V `OpAtomicIAdd`/`OpAtomicExchange`/
+  `OpAtomicCompareExchange`, whose lowering is B5). NO memory-ordering surface in
+  v1 (single-threaded EVM has none; SPIR-V memory semantics arrive with B5). The
+  trait carries `B` so a provider impl can name its concrete ref struct. Surfaced
+  via `pub use atomic::Atomic` in `core/src/lib.fe` (NOT prelude). `B: Backend` is
+  an ordinary trait-generic-param bound (in-tree precedent `Derive<P: ..>`), NOT a
+  GAT-param bound, so the A7 three-legs rule is untouched.
+
+- **The two-layer gate (steering-09 layering doctrine):**
+  - `Supports<S>` (A5.3, type-level) states a class EXISTS on a backend.
+  - `Atomic<B, S>` (term-level capability) states code may PERFORM the op there.
+  Providers exist ONLY for `S in {Global, Shared}` (SPIR-V atomics live on
+  StorageBuffer + Workgroup). `Constant`/`Local` have NO `Atomic` provider
+  anywhere, so they compile NOWHERE, BY CONSTRUCTION: no bespoke check, just
+  provider absence + the ordinary `8-0036` obligation error. Each op ALSO carries
+  `where B: Supports<S>`, checked at the CALL site: holding the capability is not
+  enough (an atomic on `Shared` over `EvmBackend` is rejected `6-0003` even where
+  the capability is held).
+
+- **Providers (grant matrix as impl'd):**
+  | provider | backend | classes | bodies |
+  |---|---|---|---|
+  | `Evm` (std/evm/atomic.fe, NEW) | `EvmBackend` | `Global` | REAL RMW over `sload`/`sstore` |
+  | `GpuAtomics` (std/gpu.fe) | `GpuBackend` | `Global`, `Shared` | type-level stubs (`core::panic()`) |
+  `Evm` (the EVM root effect, same provider that carries `StorageIntrinsic`) gets
+  `Atomic<EvmBackend, Global>` with REAL bodies: EVM is single-threaded, so a
+  load-modify-store within one call frame IS a correct atomic RMW; the inner
+  `sload`/`sstore` obligations (`uses StorageIntrinsic`) are granted ambiently by
+  the same EVM root, so the bodies lower and EXECUTE on the ordinary EVM path.
+  `GpuAtomics` carries the ONLY `Shared` atomic witness (only GPU supports the
+  workgroup class), keeping the grant matrix non-degenerate; DECLARATION-LEVEL
+  only (no GPU pipeline; SPIR-V atomics lowering is B5, GPU exec is B6). NO wasm
+  `Atomic` provider (per task: wasm atomics stay a hole; the backend-lacking
+  negative uses it).
+  - `EvmRef` gained `pub from_raw(_ raw: u256) -> Self` / `pub raw(self) -> u256`
+    accessors + `impl Copy` (the B1 "ops arrive" addition A5.3 deferred), so a
+    contract forms a `Global`-class ref at a storage slot and the RMW ops read its
+    slot.
+
+- **The trait-keyed parameterized `uses` PROBE (steering-09's flagged risk):
+  SUCCEEDED, no fallback needed.** `uses (atomic: mut Atomic<B, S>)` whose key
+  mentions the enclosing fn's own generics (the `core::effect_ref::read`'s
+  `uses (value: H::Target)` precedent lifted to a trait key with generic ARGS)
+  resolves on the existing `evaluate_unkeyed_trait_provider` path: the note-dump
+  records `atomic.add(r, v): B::Word` over `B::Ref<B::Word, Global>` with the
+  projections intact, generic AND concrete. The assoc-type fallback
+  (`trait Atomic<S> { type B }`) was NOT needed and is not filed.
+
+- **DEVIATION (necessary, in-scope): impl methods DROP the `where B: Supports<S>`
+  clause.** Instantiated to a concrete backend (`EvmBackend`/`GpuBackend`), the
+  bound becomes `EvmBackend: Supports<Global>` etc., and Fe rejects a where-bound
+  on a CONCRETE type (`6-0005`, "trait bound for concrete type is not allowed").
+  The bound holds by the grant-matrix impl and discharges automatically, so the
+  impl methods omit it. The TRAIT method keeps the generic `where B: Supports<S>`
+  (the call-site gate). Found + fixed via the `corelib` `analyze_stdlib` run.
+
+- **Acceptance (all green, snapshots reviewed):**
+  1. **(positive note-dump)** `crates/hir/test_files/ty_check/backend_atomic.fe`
+     (+`.snap`), zero-diagnostic: (a) GENERIC backend (the probe) over all three
+     ops, types `B::Word` / `B::Ref<B::Word, Global>` intact; (b) concrete EVM
+     `Global` (`EvmRef<u256, Global>` -> `u256`); (c) concrete GPU `Shared`
+     (`GpuRef<u32, Shared>` -> `u32`, the only Shared witness).
+  2. **(negative, no-provider)** `crates/uitest/fixtures/ty_check/backend_atomic_no_provider.fe`:
+     three `error[8-0036]` -- `Atomic<EvmBackend, Constant>`, `Atomic<EvmBackend,
+     Local>` (both classes EVM DOES `Supports`, so the failure isolates the
+     capability-provider gate), and `Atomic<WasmBackend, Global>` (a backend with
+     no `Atomic` provider at all). All at the exact violating call.
+  3. **(negative, Supports gate)** `.../backend_atomic_supports_gate.fe`: one
+     `error[6-0003]` "`EvmBackend` doesn't implement `Supports<Shared>`" at the
+     `atomic.add` op, citing `where B: Supports<S> ... required by this bound on
+     add` -- capability HELD, class unsupported, op rejected.
+  4. **(EVM-EXECUTED RMW)** `crates/fe/tests/fixtures/fe_test/atomic_rmw.fe`: a
+     contract performs atomic `add`/`exchange`/`cas` on storage slot 0 through the
+     capability; the `#[test]` deploys + drives it under the `revm` harness
+     (`fe test`) and asserts the observed PRE-op returns and post-op state
+     (fetch-add 0->5->10 returns 0 then 5; get 10; exchange->99 returns 10;
+     cas(99->7) returns 99; get 7). `PASS [0.0033s] test_atomic_rmw`. This proves
+     the recv-arm capability is provisioned from the zero-sized root `Evm` (erased,
+     no runtime value) and the RMW bodies lower + run on the real EVM path.
+
+- **KEY FINDING (reported): the positive EVM `Global` case is granted AMBIENTLY by
+  the root, no `with` needed.** The root-seeded `Evm` provider frame satisfies a
+  trait-keyed `Atomic<EvmBackend, Global>` query via `evaluate_unkeyed_trait_provider`
+  (`Evm: Atomic<EvmBackend, Global>` holds); the no-provider negatives confirm the
+  root provides ONLY `Global` (Constant/Local/Wasm all `8-0036`). This is why the
+  executable recv arms need no capability plumbing beyond declaring the `uses`
+  param. NO extension of `intrinsic_capability_granted_by_root` was needed (that
+  hardcoded StorageIntrinsic ambient marker-grant is a DIFFERENT path, for the
+  value-less `_t` marker; the capability-method form rides the ordinary provider
+  frame instead, which also gives a dispatchable value).
+
+- **BufferClass convergence (section-1 decision adjudicated at B1, per steering):
+  STAYS DEFERRED.** B1 did not need `Buffer<T>` elements addressable as
+  `Ref<T, BufferClass>`; the RMW ops take a `Ref` directly (formed via
+  `EvmRef::from_raw`). No `type BufferClass` added.
+
+- **Verify (all foreground).** `cargo check --workspace` clean (11.92s; no Rust
+  changed). `corelib` ALONE 4/4 (`analyze_corelib`/`analyze_stdlib` +release twins
+  -> core+std build with the `Atomic` trait + EVM/GPU impls + `EvmRef` accessors).
+  fe-hir `ty_check` 122/122 (backend_atomic + all pre-existing byte-identical);
+  uitest `ty_check` 241/241 (2 new atomic negatives + 239 pre-existing
+  byte-identical, incl. `backend_storage_class_*`, `intrinsic_target_evm_ok`,
+  `intrinsic_target_wasm_rejected`); fe-hir `trait_resolution_conformance` +
+  `effect_binding_resolution` + `effect_key_normalization` green; the EVM-executed
+  `atomic_rmw` `fe test` PASS. NO pre-existing snapshot changed (git-verified).
+  Full release CI is the orchestrator's run (this slice recompiles NO Rust; only
+  the ingots + fixtures changed).
+
+- **B1 READY. NEXT: B2** (`Par` ladder: `Sequential` provider + `Converge`
+  reserved + barrier-derivation SPEC), OR A7 (GAT bound duality) per the
+  steering-09 interleave `A5.3 -> A6 -> B1 -> A7 -> B2+A9`. The A7 leg is the
+  documented prerequisite before A9 wants `B::Buffer<X>: Functor`; B2 is the next
+  pure B-track slice. Either is unblocked.

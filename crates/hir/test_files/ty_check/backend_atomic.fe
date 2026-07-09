@@ -1,0 +1,77 @@
+// mb2 B1: the atomics surface, the first real term-level CONSUMER of the A5.3
+// `Ref<T, S>` GAT. `Atomic<B, S>` (in `core::atomic`) is a capability in the
+// `StorageIntrinsic` idiom: a trait-keyed `uses (atomic: mut Atomic<B, S>)`
+// grants the read-modify-write ops `add` / `exchange` / `cas` over
+// `B::Ref<B::Word, S>`.
+//
+// Standalone ty_check fixtures link the REAL `core` AND `std`, so every op below
+// goes through the real cross-ingot capability trait. All legs are
+// zero-diagnostic; the note-dump `.snap` records the observed types.
+//
+// The legs:
+//   1. GENERIC backend positive: the parameterized trait-keyed `uses` PROBE
+//      (`uses (atomic: mut Atomic<B, S>)` where B, S are the fn's own generics,
+//      the `core::effect_ref::read`'s `uses (value: H::Target)` precedent lifted
+//      to a trait key). All three ops resolve; `B: Supports<Global>` discharges
+//      the op's `where B: Supports<S>` bound from the fn's bound.
+//   2. concrete EVM positive over `EvmRef<u256, Global>` (the executable leg's
+//      type surface; execution is `crates/fe/tests/fixtures/fe_test/atomic_*`).
+//   3. concrete GPU positive over `GpuRef<u32, Shared>`: the ONLY `Shared` atomic
+//      witness (SPIR-V defines atomics on Workgroup too; only GPU supports it).
+
+use core::backend::{Backend, Supports, Global, Shared}
+use core::atomic::Atomic
+use std::evm::{EvmBackend, EvmRef}
+use std::gpu::{GpuBackend, GpuRef}
+
+// ---- 1. generic backend positive (parameterized trait-keyed `uses` probe) ----
+
+fn atomic_add_generic<B: Backend + Supports<Global>>(
+    r: B::Ref<B::Word, Global>,
+    v: B::Word,
+) -> B::Word
+    uses (atomic: mut Atomic<B, Global>)
+{
+    atomic.add(r, v)
+}
+
+fn atomic_exchange_generic<B: Backend + Supports<Global>>(
+    r: B::Ref<B::Word, Global>,
+    v: B::Word,
+) -> B::Word
+    uses (atomic: mut Atomic<B, Global>)
+{
+    atomic.exchange(r, v)
+}
+
+fn atomic_cas_generic<B: Backend + Supports<Global>>(
+    r: B::Ref<B::Word, Global>,
+    old: B::Word,
+    new: B::Word,
+) -> B::Word
+    uses (atomic: mut Atomic<B, Global>)
+{
+    atomic.cas(r, old, new)
+}
+
+// ---- 2. concrete EVM positive (Global; the executable leg's type surface) ----
+
+fn evm_atomic_add(r: EvmRef<u256, Global>, v: u256) -> u256
+    uses (atomic: mut Atomic<EvmBackend, Global>)
+{
+    atomic.add(r, v)
+}
+
+fn evm_atomic_cas(r: EvmRef<u256, Global>, old: u256, new: u256) -> u256
+    uses (atomic: mut Atomic<EvmBackend, Global>)
+{
+    atomic.cas(r, old, new)
+}
+
+// ---- 3. concrete GPU positive (Shared; the only Shared atomic witness) ----
+
+fn gpu_atomic_add(r: GpuRef<u32, Shared>, v: u32) -> u32
+    uses (atomic: mut Atomic<GpuBackend, Shared>)
+{
+    atomic.add(r, v)
+}

@@ -17,6 +17,23 @@ pub struct EvmBackend {}
 /// B-track.
 pub struct EvmRef<T, S> { raw: u256 }
 
+impl<T, S> Copy for EvmRef<T, S> {}
+
+impl<T, S> EvmRef<T, S> {
+    /// Construct an EVM class-typed reference from a raw `u256` slot/offset
+    /// handle. The B1 atomics slice is the first consumer: a contract forms a
+    /// `Global`-class ref at a storage slot (`EvmRef::from_raw(slot)`) and hands
+    /// it to the `Atomic` capability's read-modify-write ops.
+    pub fn from_raw(_ raw: u256) -> Self {
+        Self { raw }
+    }
+
+    /// The raw `u256` slot/offset handle this reference names.
+    pub fn raw(self) -> u256 {
+        self.raw
+    }
+}
+
 impl Backend for EvmBackend {
     const WORD_BITS: usize = 256
     const OVERFLOW_WRAPS: bool = true
