@@ -1,0 +1,129 @@
+// mb2 B2: the Par/Sequential structure + barrier-derivation + the `Barrier<B, S>`
+// capability, over the REAL `core` + `std` (a standalone ty_check fixture;
+// `new_stand_alone` seeds both the builtin `core` AND `std`, so this is the real
+// cross-ingot capability trait and the real derivation vocabulary, not test-local).
+//
+// The Conal-style combinators (`Par`/`Pair`/`Comp`) and the `recursive type fn`
+// schedule builder `RBin` are defined fixture-locally (the `recursive type fn`
+// surface is hand-parser-only; the tree-sitter ingot grammar does not carry it, so
+// it cannot live in the ingot, exactly as A5.2 established). This fixture borrows
+// their shape and adds the barrier-DERIVATION `recursive type fn` `BarrierReq`,
+// which composes the real `core::barrier::{NoBarrier, BarrierAt}` outcome markers.
+//
+// THE PAR/SEQUENTIAL STRUCTURE + DERIVATION RULE (steering-09 B2):
+//   A schedule is a nest of `Comp<A, B>` (SEQUENTIAL composition = a phase
+//   boundary = a data dependency) bottoming at `Par` (a PARALLEL leaf = an
+//   independent subcomputation, no dependency). `RBin<T, N>` builds it by const
+//   recursion on the depth `N`, so `N` counts the `Comp` phase boundaries. The
+//   built type-fn `match` scrutinizes a const (not a type constructor), so the
+//   derivation folds over that same depth `N`:
+//
+//     RBin<T, 0>       = Par                          BarrierReq<0> = NoBarrier
+//     RBin<T, N>       = Comp<RBin<T, N-1>, T>        BarrierReq<N> = BarrierAt<BarrierReq<N-1>>
+//
+//   so a barrier is derived AT each `Comp` phase boundary (a data dependency) and
+//   NONE at the `Par` base (an independent leaf): `BarrierReq<N>` is a nest of `N`
+//   `BarrierAt` wrappers mirroring `RBin<_, N>`'s `N` `Comp` nodes one-for-one.
+//
+// All legs are zero-diagnostic; the note-dump `.snap` records the observed normal
+// forms. The `takes_*` acceptors are the teeth: a zero-diagnostic call is
+// definitional equality, so the derived requirement reached exactly the
+// hand-written normal form.
+
+use core::backend::{Backend, Supports, Global, Shared}
+use core::barrier::{Barrier, NoBarrier, BarrierAt}
+use std::evm::{EvmBackend, EvmRef}
+use std::gpu::{GpuBackend, GpuRef}
+
+struct Par {}
+struct Pair {}
+struct Comp<A, B> {
+    a: A,
+    b: B,
+}
+
+// The schedule builder (as in the A5.2 keystone): recursion on the depth `N`.
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+// The barrier-derivation: fold the schedule's phase depth to a barrier
+// requirement. `NoBarrier` at the pure-parallel base (`RBin<_, 0> = Par`, an
+// independent leaf, zero phase boundaries); one `BarrierAt` per `Comp` phase
+// boundary (a data dependency between phases). Derived from the SAME depth `N` as
+// the schedule, so the barrier structure is the image of the schedule structure.
+recursive type fn BarrierReq<const N: usize>() -> (*) {
+    match N {
+        0 => NoBarrier
+        _ => BarrierAt<BarrierReq<{N - 1}>>
+    }
+}
+
+// ---- 1. derivation: an ALL-PAR schedule (depth 0) derives NO barrier ----
+
+fn takes_no_barrier(_ x: NoBarrier) {}
+
+// `BarrierReq<0>` is definitionally `NoBarrier`: the independent `Par` leaf has no
+// phase boundary, so no barrier is derived.
+fn all_par_derives_none(x: BarrierReq<0>) {
+    takes_no_barrier(x)
+}
+
+// ---- 2. derivation: a schedule WITH dependencies (depth 3) derives barriers ----
+
+fn takes_three_barriers(_ x: BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>) {}
+
+// `BarrierReq<3>` is definitionally `BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>`:
+// three `Comp` phase boundaries derive three barriers, bottoming at `NoBarrier`.
+fn deps_derive_barriers(x: BarrierReq<3>) {
+    takes_three_barriers(x)
+}
+
+// ---- 3. confluence: the SAME depth `N` drives the schedule and its barriers ----
+
+fn takes_sched3(_ x: Comp<Comp<Comp<Par, Pair>, Pair>, Pair>) {}
+
+// One `N` produces both `RBin<Pair, 3>` (the schedule NF) and `BarrierReq<3>` (its
+// derived barriers): the derivation is genuinely FROM the parallel structure.
+fn schedule_and_barriers_from_same_n(s: RBin<Pair, 3>, b: BarrierReq<3>) {
+    takes_sched3(s)
+    takes_three_barriers(b)
+}
+
+// ---- 4. symbolic opacity: BarrierReq under a rigid depth stays opaque ----
+
+// With a rigid const `N`, `BarrierReq<N>` does not fold to a concrete outcome (no
+// spurious selection); it renders as the opaque projection, recorded in the NF.
+fn sym_barrier_req<const N: usize>(x: BarrierReq<N>) -> BarrierReq<N> {
+    x
+}
+
+// ---- 5. the Barrier capability: generic + concrete EVM Global + GPU Shared ----
+
+// Generic backend positive (the parameterized trait-keyed `uses` PROBE, as in B1):
+// `uses (barrier: mut Barrier<B, Global>)` with `B` the fn's own generic. The op's
+// `where B: Supports<S>` discharges from the fn's `Supports<Global>` bound.
+fn barrier_generic<B: Backend + Supports<Global>>()
+    uses (barrier: mut Barrier<B, Global>)
+{
+    barrier.barrier()
+}
+
+// Concrete EVM `Global` (the executable leg's type surface; execution is
+// `crates/fe/tests/fixtures/fe_test/barrier_noop.fe`).
+fn evm_barrier()
+    uses (barrier: mut Barrier<EvmBackend, Global>)
+{
+    barrier.barrier()
+}
+
+// Concrete GPU `Shared`: the only `Shared` barrier witness (SPIR-V defines
+// barriers over `Workgroup` too; only GPU supports it).
+fn gpu_shared_barrier()
+    uses (barrier: mut Barrier<GpuBackend, Shared>)
+{
+    barrier.barrier()
+}

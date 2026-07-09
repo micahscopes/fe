@@ -1,0 +1,29 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/backend_barrier_no_provider.fe
+---
+error[8-0036]: missing effect `Barrier<EvmBackend, Constant>` required by `needs_constant_barrier`
+   ┌─ backend_barrier_no_provider.fe:41:5
+   │
+41 │     needs_constant_barrier()
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^ `needs_constant_barrier` requires effect `Barrier<EvmBackend, Constant>` to be in scope
+   │
+   = provide it with `with (Barrier<EvmBackend, Constant> = value)` or require it via `uses Barrier<EvmBackend, Constant>`
+
+error[8-0036]: missing effect `Barrier<EvmBackend, Local>` required by `needs_local_barrier`
+   ┌─ backend_barrier_no_provider.fe:45:5
+   │
+45 │     needs_local_barrier()
+   │     ^^^^^^^^^^^^^^^^^^^^^ `needs_local_barrier` requires effect `Barrier<EvmBackend, Local>` to be in scope
+   │
+   = provide it with `with (Barrier<EvmBackend, Local> = value)` or require it via `uses Barrier<EvmBackend, Local>`
+
+error[8-0036]: missing effect `Barrier<WasmBackend, Global>` required by `needs_wasm_barrier`
+   ┌─ backend_barrier_no_provider.fe:49:5
+   │
+49 │     needs_wasm_barrier()
+   │     ^^^^^^^^^^^^^^^^^^^^ `needs_wasm_barrier` requires effect `Barrier<WasmBackend, Global>` to be in scope
+   │
+   = provide it with `with (Barrier<WasmBackend, Global> = value)` or require it via `uses Barrier<WasmBackend, Global>`

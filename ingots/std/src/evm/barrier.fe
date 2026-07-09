@@ -1,0 +1,28 @@
+use core::barrier::Barrier
+use core::backend::Global
+use super::backend::EvmBackend
+use super::effects::Evm
+
+// mb2 B2: the EVM barrier capability, carried by the EVM root effect `Evm` (the
+// same provider that carries `StorageIntrinsic` and `Atomic<EvmBackend, Global>`).
+// Only `Global` gets a provider: EVM has no workgroup, so there is no
+// `Barrier<EvmBackend, Shared>` here, and `Constant`/`Local` are not barrier
+// classes anywhere. The root-seeded `Evm` provider satisfies a trait-keyed
+// `Barrier<EvmBackend, Global>` query ambiently (the same path B1's `Atomic`
+// rides), so a `uses (barrier: mut Barrier<EvmBackend, Global>)` obligation is
+// granted with no `with` plumbing.
+//
+// The body is a REAL no-op (not a stub): EVM is single-threaded, so a phase
+// boundary needs no synchronization; the barrier lowers and EXECUTES as nothing on
+// the ordinary EVM path (`crates/fe/tests/fixtures/fe_test/barrier_noop.fe`). The
+// SPIR-V `OpControlBarrier` lowering over `Workgroup`/`Shared` is B5 (seam-GO-gated).
+//
+// The trait method's `where B: Supports<S>` instantiates here to the CONCRETE
+// `EvmBackend: Supports<Global>`, which holds by the grant-matrix impl and is
+// therefore NOT restated on this impl method (Fe rejects a where-bound on a
+// concrete type, `6-0005`); the bound discharges automatically.
+impl Barrier<EvmBackend, Global> for Evm {
+    fn barrier(mut self) {
+        // EVM single-threaded phase boundary: no synchronization required.
+    }
+}

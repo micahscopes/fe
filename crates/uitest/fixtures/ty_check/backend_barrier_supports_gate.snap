@@ -1,0 +1,16 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/backend_barrier_supports_gate.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ backend_barrier_supports_gate.fe:19:13
+   │
+19 │     barrier.barrier()
+   │             ^^^^^^^ `EvmBackend` doesn't implement `Supports<Shared>`
+   │
+   ┌─ src/barrier.fe:66:18
+   │
+66 │         where B: Supports<S>
+   │                  ----------- required by this bound on `barrier`

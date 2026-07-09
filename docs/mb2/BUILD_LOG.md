@@ -1631,3 +1631,144 @@ holds on the built substrate). Fable-steered (steer of 2026-07-09).
   induction); (4) the qualified-path final-segment GAT-arg lowering fix (so a
   free-fn `par_map` can NAME `<B::Buffer<X> as Functor<X>>::Out<Y>` in its
   return). None is required by A9.1; all grow the library.
+
+## 2026-07-09 - Slice B2: Par/Sequential structure + barrier-derivation + `Barrier<B, S>`
+
+The B-track's parallel-structure + barrier layer (steering-09 B2). Makes the
+Par/Sequential distinction and its barrier-derivation REAL and type-checked, and
+lands a term-level `Barrier<B, S>` capability in the B1 `Atomic` idiom with an
+EVM no-op body. `Converge` reserved. PURE INGOT + fixtures; ZERO Rust/compiler
+change (the barrier capability + the derivation ride the existing effect
+machinery + the type-fn schedule substrate; no new system).
+
+- **Par/Sequential STRUCTURE + the barrier-derivation RULE (as written).** The
+  schedule is a nest of `Comp<A, B>` (SEQUENTIAL composition = a phase boundary =
+  a data dependency between phases) bottoming at `Par` (a PARALLEL leaf = an
+  independent subcomputation, no dependency). `RBin<T, N>` builds it by const
+  recursion on the depth `N`, so `N` counts the `Comp` phase boundaries. The
+  derivation folds over that SAME depth `N` to a barrier requirement, one barrier
+  AT each `Comp` phase boundary, NONE at the `Par` base:
+
+  ```
+  RBin<T, 0> = Par                     BarrierReq<0> = NoBarrier
+  RBin<T, N> = Comp<RBin<T, N-1>, T>   BarrierReq<N> = BarrierAt<BarrierReq<N-1>>
+  ```
+
+  So `BarrierReq<N>` is a nest of `N` `BarrierAt` wrappers bottoming at
+  `NoBarrier`, the image of `RBin<_, N>`'s `N` `Comp` nodes one-for-one: the
+  barrier structure IS the image of the schedule structure. Outcome vocabulary
+  (`NoBarrier` / `BarrierAt<Rest>`) lives in `core::barrier`; the derivation fold
+  itself is a `recursive type fn` written in the fixture (hand-parser-only, so it
+  cannot live in the ingot, exactly as `RBin` cannot).
+
+- **STEERING-09 RECONCILIATION (resolved, NOT a fork; reported per the guard).**
+  The task prose frames `Par<A,B>` as a binary "two independent subcomputations"
+  node, but the BUILT `Par` is a NULLARY leaf (the `RBin` base) and the built
+  type-fn `match` scrutinizes a CONST only (WF: the scrutinee must be the subject
+  const param; arms are `LIT`/`_`, never a type-constructor pattern like
+  `Comp<a,b> =>`). So the derivation CANNOT fold structurally over `Comp<A,B>` vs
+  `Par<A,B>`; it folds over the schedule DEPTH `N`, which is how the built
+  substrate (the A5.2 keystone) represents the `Comp` phase structure. This is
+  SETTLED by steering-09 ("the `Par` provider derives barrier placement from the
+  `Comp` phase structure") + the built substrate, not guessed: the independent-vs-
+  sequenced distinction is realized as `Par` leaf (depth 0, no `Comp`, no barrier)
+  vs `Comp` nesting (depth > 0, one barrier per phase boundary). No binary
+  parallel-branch node is added (that would be new surface the closed
+  `Par`/`Pair`/`Comp` set + guts-over-sugar forbid). Flagged here so the
+  orchestrator can escalate to Fable if the binary-`Par<A,B>` reading was intended;
+  the derivation rule is identical either way (`Comp` = barrier, independent =
+  none).
+
+- **The `Barrier<B, S>` capability (`core/src/barrier.fe`, NEW).**
+  ```
+  pub trait Barrier<B: Backend, S> {
+      fn barrier(mut self) where B: Supports<S>
+  }
+  ```
+  The next instance of the B1 `Atomic<B, S>` idiom: a trait-keyed
+  `uses (barrier: mut Barrier<B, S>)` obligation carried by the target root,
+  authority-only, non-scarce, missing provider = the ordinary `8-0036`. `barrier`
+  takes no data arg (a barrier is control-flow synchronization, not a data op;
+  SPIR-V `OpControlBarrier` takes no pointer); `B`/`S` come from `Self`. Same
+  two-layer gate as `Atomic`: providers exist ONLY for `S in {Global, Shared}`
+  (`Constant`/`Local` compile nowhere by construction), and each op also carries
+  `where B: Supports<S>` checked at the CALL site. Surfaced via
+  `pub use barrier::{Barrier, NoBarrier, BarrierAt, Converge}` in `core/src/lib.fe`
+  (NOT prelude).
+
+- **The EVM no-op body (`std/src/evm/barrier.fe`, NEW).**
+  `impl Barrier<EvmBackend, Global> for Evm { fn barrier(mut self) {} }` -- a REAL
+  no-op (not a stub): EVM is single-threaded, so a phase boundary needs no
+  synchronization; the empty body lowers and runs as nothing on the ordinary EVM
+  path. Carried by the EVM root effect `Evm` (the same provider that carries
+  `StorageIntrinsic` + `Atomic<EvmBackend, Global>`), so a barrier obligation is
+  granted AMBIENTLY (the B1 finding: root-seeded `Evm` satisfies the trait-keyed
+  query via `evaluate_unkeyed_trait_provider`, no `with` plumbing). Wired via
+  `pub use barrier::{self, *}` in `std/src/evm.fe`. The GPU witness
+  (`std/src/gpu.fe`) gets `GpuBarriers` with `Barrier<GpuBackend, Global>` +
+  `Barrier<GpuBackend, Shared>` (the ONLY `Shared` barrier witness, keeping the
+  {Global, Shared} grant non-degenerate), declaration-level no-op stubs (would be
+  `OpControlBarrier` in B5). Concrete-instantiated impl methods DROP the
+  `where B: Supports<S>` (Fe rejects a concrete-type where-bound, `6-0005`; it
+  discharges automatically), exactly the B1 deviation.
+
+- **`Converge` RESERVED.** `pub struct Converge {}` declared in `core::barrier`,
+  no semantics, no provider -- keeps the closed parallel-capability set
+  (`Par`/`Atomic<S>`/`Converge`) closed so nothing else claims the name. The v2
+  fused-single-dispatch convergence obligation (erased, `workgroupBarrier`-shaped)
+  is B5, not built.
+
+- **Derivation demonstration (results).** Note-dump fixture
+  `crates/hir/test_files/ty_check/backend_barrier.fe` (+`.snap`, zero-diagnostic,
+  links real core+std), snapshot reviewed:
+  - **all-Par -> NO barrier:** `BarrierReq<0>` is definitionally `NoBarrier`
+    (pinned by the `takes_no_barrier` acceptor). The independent `Par` leaf has no
+    phase boundary.
+  - **dependency -> barrier:** `BarrierReq<3>` is definitionally
+    `BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>` (pinned by `takes_three_barriers`):
+    three `Comp` phase boundaries derive three barriers.
+  - **confluence:** one `N` drives both `RBin<Pair, 3>` ->
+    `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` and `BarrierReq<3>` -> the barrier
+    nest (the derivation is genuinely FROM the parallel structure).
+  - **symbolic opacity:** `BarrierReq<N>` under a rigid const stays opaque (no
+    spurious selection).
+  - **capability legs:** `Barrier<B, S>` op type-checks generic (the
+    parameterized trait-keyed `uses` probe), concrete EVM `Global`, and concrete
+    GPU `Shared`.
+
+- **Negative parity with B1.** uitest `ty_check` fixtures:
+  - `backend_barrier_no_provider.fe`: three `error[8-0036]` --
+    `Barrier<EvmBackend, Constant>`, `Barrier<EvmBackend, Local>` (both classes EVM
+    DOES support, isolating the capability-provider gate), and
+    `Barrier<WasmBackend, Global>` (a backend with no barrier provider). At the
+    exact violating calls.
+  - `backend_barrier_supports_gate.fe`: one `error[6-0003]` "`EvmBackend`
+    doesn't implement `Supports<Shared>`" at the op, citing
+    `where B: Supports<S> ... required by this bound on barrier` -- capability
+    HELD, class unsupported, op rejected.
+
+- **Verify (all foreground/targeted; orchestrator owns full release CI).**
+  `cargo check --workspace` clean (no Rust changed). `corelib` ALONE 5/5
+  (`analyze_corelib`/`analyze_stdlib`/`analyze_core_derives` + release twins ->
+  core+std build with the new `barrier` module + EVM/GPU providers). fe-hir
+  `ty_check` 124/124 (the new `backend_barrier` + ALL pre-existing BYTE-IDENTICAL
+  under enforced snapshots, incl. every keystone/atomic/conal/gat/storage-class
+  fixture). uitest `ty_check` 243/243 (the 2 new barrier negatives + 241
+  pre-existing byte-identical). `trait_resolution_conformance` 25/25.
+  `tree_sitter_parse_strict` green (the new ingot surface -- `core/barrier.fe`,
+  `evm/barrier.fe`, `gpu.fe` additions -- parses; ordinary structs/traits/impls,
+  no `recursive type fn` in the ingot). `parser.c` untracked/gitignored, not
+  committed.
+
+- **B2 READY. NEXT** (per steering-09 interleave `B2 + A9` paired, then A8/B3):
+  (1) A9.2 the EXECUTED instance (a `fe test` par_map over EVM storage + the real
+  `map` body via the B1 storage idiom, following the `atomic_rmw` revm pattern),
+  optionally wiring the derived barrier at the phase boundary; (2) the
+  steering-09 `Par` fork-join CAPABILITY + `Sequential` executed provider (the
+  runtime-relevant one, the semantics oracle) -- deferred here because the task's
+  minimal B2 scope is structure + derivation + the barrier capability, and the
+  executed `Par` provider needs an element/iteration model (paired with A9.2); (3)
+  A9.x library growth (`type Buffer<T>: Functor` on the real `Backend`; `Par`/`Comp`
+  as `Functor`; a real `scan`); (4) the owner-gated seam-port (B3) for the runtime
+  demos + SPIR-V barrier lowering (B5). The EVM no-op barrier via `fe test` is a
+  small optional add on the `atomic_rmw` pattern.

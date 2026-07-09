@@ -1,5 +1,6 @@
 use core::backend::{Backend, Supports, Global, Constant, Shared, Local}
 use core::atomic::Atomic
+use core::barrier::Barrier
 
 /// A TYPE-LEVEL GPU backend.
 ///
@@ -90,4 +91,31 @@ impl Atomic<GpuBackend, Shared> for GpuAtomics {
     fn cas(mut self, _ r: GpuRef<u32, Shared>, old: u32, new: u32) -> u32 {
         core::panic()
     }
+}
+
+// ---------------------------------------------------------------------------
+// mb2 B2: the GPU barrier capability (DECLARATION-LEVEL only).
+// ---------------------------------------------------------------------------
+//
+// Barriers, like atomics, live over `Global` (SPIR-V `StorageBuffer`) and `Shared`
+// (SPIR-V `Workgroup`), and only the GPU backend supports `Shared`. `GpuBarriers`
+// carries `Barrier<GpuBackend, Global>` and `Barrier<GpuBackend, Shared>` so the
+// {Global, Shared} barrier grant set is non-degenerate (the `Shared` barrier has a
+// provider that exists SOMEWHERE), while `Constant`/`Local` still have none.
+//
+// TYPE-LEVEL stubs: no GPU pipeline exists on this branch, so the bodies are never
+// lowered here. On GPU a `Shared` barrier lowers to `OpControlBarrier` at a
+// provider-inserted fork-join (B5, seam-GO-gated); GPU execution is B6
+// (environment-blocked). The bodies are no-ops (barrier returns nothing), the same
+// posture as the EVM impl; on GPU they become the real `OpControlBarrier` in B5.
+// `GpuBackend` supports both classes, so the `where GpuBackend: Supports<S>` op
+// bound holds and is not restated here (`6-0005`).
+pub struct GpuBarriers {}
+
+impl Barrier<GpuBackend, Global> for GpuBarriers {
+    fn barrier(mut self) {}
+}
+
+impl Barrier<GpuBackend, Shared> for GpuBarriers {
+    fn barrier(mut self) {}
 }

@@ -1,0 +1,92 @@
+use super::backend::{Backend, Supports}
+
+// mb2 B2: the barrier + Par/Sequential structure layer (steering-09 B2).
+//
+// This module carries THREE things, all riding machinery that already exists (the
+// B1 `StorageIntrinsic`/`Atomic` capability idiom + the type-fn schedule
+// substrate); it invents no new system:
+//
+//  1. `Barrier<B, S>`: a TERM-LEVEL barrier-synchronization capability, the next
+//     instance of the `Atomic<B, S>` idiom (a trait-keyed `uses (barrier: mut
+//     Barrier<B, S>)` obligation carried by the target root, authority-only,
+//     non-scarce, missing provider = the ordinary `8-0036`). Gated exactly like
+//     `Atomic`: providers exist ONLY for `S = Global` and `S = Shared`, and each
+//     op also demands `B: Supports<S>` at the call site.
+//  2. The barrier-DERIVATION vocabulary (`NoBarrier` / `BarrierAt<Rest>`): the
+//     outcome markers a schedule's phase structure folds to. Barriers are DERIVED
+//     from the parallel structure, never user-written (steering-09): a `Comp`
+//     phase boundary (a data dependency between phases) derives ONE barrier; the
+//     `Par` base (a pure-parallel leaf, independent, no dependency) derives none.
+//     The fold itself is a `recursive type fn` written in caller code (it is
+//     hand-parser-only, so it cannot live in the ingot yet, exactly as `RBin`
+//     cannot); this module supplies the outcome vocabulary it composes.
+//  3. `Converge`: RESERVED. Steering-09 keeps the parallel-capability set closed
+//     (`Par` / `Atomic<S>` / `Converge`); `Converge` is the v2 fused-single-
+//     dispatch convergence obligation (an erased obligation at a `Shared`-scratch
+//     fork-join, `workgroupBarrier`-shaped). It is DECLARED here so nothing else
+//     claims the name; its semantics are NOT implemented in this slice (that is
+//     the B5 fused-dispatch slice, seam-GO-gated).
+//
+// Layering doctrine (steering-09/10): `Supports<S>` (type-level, `core::backend`)
+// states a storage class EXISTS on a backend; `Barrier<B, S>` (term-level) states
+// code may PERFORM a barrier over that class. Type facts gate types; capabilities
+// gate operations. On EVM the barrier body is a genuine NO-OP: the machine is
+// single-threaded, so a phase boundary needs no synchronization; the capability +
+// the derivation are the real, type-checked artifacts. SPIR-V `OpControlBarrier`
+// lowering (over `Shared`/`Workgroup` at provider-inserted fork-join joins) is B5,
+// seam-GO-gated.
+
+/// Barrier-synchronization capability over a class-typed backend `B` and storage
+/// class `S` (mb2 B2). The next instance of the B1 `Atomic<B, S>` idiom.
+///
+/// - `B` is the backend, so a provider impl can name its own concrete surface
+///   (`Evm` implements `Barrier<EvmBackend, Global>` with a real NO-OP body; EVM
+///   is single-threaded, so a phase boundary is trivially synchronized).
+/// - `S` is the storage-class marker. Providers exist ONLY for `S = Global` and
+///   `S = Shared` (SPIR-V defines barriers over `StorageBuffer` and `Workgroup`);
+///   `Barrier<_, Constant>` / `Barrier<_, Local>` have NO provider anywhere, so
+///   they compile nowhere, by construction. That IS the {Global, Shared} gate: no
+///   bespoke check, just provider absence + the ordinary obligation error.
+/// - `barrier` additionally requires `B: Supports<S>` at the CALL site, so holding
+///   the capability is not enough: a barrier over a class the backend does not
+///   support (e.g. `Shared` on `EvmBackend`) is rejected even where the capability
+///   is held.
+///
+/// No memory-ordering / scope surface in v1 (single-threaded EVM has none; SPIR-V
+/// execution + memory scope operands arrive with the B5 lowering).
+pub trait Barrier<B: Backend, S> {
+    /// Synchronize at a derived phase boundary over storage class `S`.
+    ///
+    /// EVM: a real NO-OP (single-threaded, so no synchronization is needed; the
+    /// body lowers and runs as nothing). SPIR-V (B5): `OpControlBarrier` at a
+    /// provider-inserted fork-join, uniform by construction. Users never call this
+    /// directly in the design's intent; a `Par` provider inserts it at each `Comp`
+    /// phase boundary derived from the schedule structure.
+    fn barrier(mut self)
+        where B: Supports<S>
+}
+
+/// Barrier-derivation outcome: NO barrier is required.
+///
+/// The image of a pure-parallel leaf (the `Par` base of a schedule, an
+/// independent subcomputation with no phase boundary). Type-level only; carries no
+/// authority. See the module doc for the derivation rule.
+pub struct NoBarrier {}
+
+/// Barrier-derivation outcome: a barrier IS required at this phase boundary, with
+/// `Rest` the requirement for the remaining (inner) phases.
+///
+/// The image of a `Comp<A, B>` sequential composition (a data dependency between
+/// phases). A schedule of depth `N` (with `N` `Comp` boundaries) derives a nest of
+/// `N` `BarrierAt` wrappers bottoming at `NoBarrier`, mirroring the schedule shape
+/// one-for-one. `Rest` is phantom (type-level marker), like `Comp`'s params.
+pub struct BarrierAt<Rest> {}
+
+/// RESERVED (steering-09): the v2 fused-single-dispatch convergence obligation.
+///
+/// Kept in the closed parallel-capability set (`Par` / `Atomic<S>` / `Converge`)
+/// so nothing else claims the name. In the v2 fused-dispatch slice (B5) a schedule
+/// realized as ONE dispatch over `Shared` scratch turns each fork-join into an
+/// erased `Converge` obligation discharged by a `workgroupBarrier`. NOT implemented
+/// in this slice: declared only, no semantics, no provider.
+pub struct Converge {}

@@ -15,6 +15,7 @@ pub use effect_ref::{AddressSpace, EffectHandle, EffectHandleMut, EffectRef, Eff
 pub use contracts::{self, *}
 pub use backend::{Backend, Supports, Global, Constant, Shared, Local}
 pub use atomic::Atomic
+pub use barrier::{Barrier, NoBarrier, BarrierAt, Converge}
 pub use range::{Bound, Known, Unknown, Range}
 pub use seq::Seq
 

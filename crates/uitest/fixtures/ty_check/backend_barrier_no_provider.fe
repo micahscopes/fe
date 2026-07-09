@@ -1,0 +1,50 @@
+// mb2 B2 (negative): the {Global, Shared} barrier grant gate enforced BY
+// CONSTRUCTION, exactly as B1's atomics gate. `Barrier<B, S>` has providers ONLY
+// for `S = Global` (EVM root effect `Evm`) and `S = Global`/`Shared` (the GPU
+// `GpuBarriers` witness). `Constant` and `Local` have NO `Barrier` provider
+// anywhere, and no backend other than EVM/GPU has one, so an op requiring such a
+// capability compiles NOWHERE: the ordinary missing-effect error `8-0036`, at the
+// exact call that could not discharge it.
+//
+// Note `Constant`/`Local` ARE supported by EVM (`EvmBackend: Supports<Constant>`
+// and `Supports<Local>` both hold, grant matrix), so the failure isolates the
+// capability-provider gate: holding `Supports<S>` is NOT enough; there must be a
+// `Barrier<B, S>` PROVIDER, and for Constant/Local there is none.
+
+use core::backend::{Constant, Local, Global}
+use core::barrier::Barrier
+use std::evm::EvmBackend
+use std::wasm::WasmBackend
+
+fn needs_constant_barrier()
+    uses (barrier: mut Barrier<EvmBackend, Constant>)
+{
+    barrier.barrier()
+}
+
+fn needs_local_barrier()
+    uses (barrier: mut Barrier<EvmBackend, Local>)
+{
+    barrier.barrier()
+}
+
+// A backend with no `Barrier` provider at all: wasm supports `Global`
+// (`WasmBackend: Supports<Global>` holds) but has no `Barrier<WasmBackend, _>`
+// impl anywhere, so the op is ungrantable.
+fn needs_wasm_barrier()
+    uses (barrier: mut Barrier<WasmBackend, Global>)
+{
+    barrier.barrier()
+}
+
+fn use_constant_bad() {
+    needs_constant_barrier()
+}
+
+fn use_local_bad() {
+    needs_local_barrier()
+}
+
+fn use_wasm_bad() {
+    needs_wasm_barrier()
+}

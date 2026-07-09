@@ -1,0 +1,198 @@
+---
+source: crates/hir/tests/ty_check.rs
+assertion_line: 46
+expression: res
+input_file: test_files/ty_check/backend_barrier.fe
+---
+note:
+   ┌─ backend_barrier.fe:67:37
+   │
+67 │ fn takes_no_barrier(_ x: NoBarrier) {}
+   │                                     ^^ ()
+
+note:
+   ┌─ backend_barrier.fe:71:43
+   │
+71 │   fn all_par_derives_none(x: BarrierReq<0>) {
+   │ ╭───────────────────────────────────────────^
+72 │ │     takes_no_barrier(x)
+73 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_barrier.fe:72:5
+   │
+72 │     takes_no_barrier(x)
+   │     ^^^^^^^^^^^^^^^^ fn takes_no_barrier
+
+note:
+   ┌─ backend_barrier.fe:72:5
+   │
+72 │     takes_no_barrier(x)
+   │     ^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_barrier.fe:72:22
+   │
+72 │     takes_no_barrier(x)
+   │                      ^ NoBarrier
+
+note:
+   ┌─ backend_barrier.fe:77:74
+   │
+77 │ fn takes_three_barriers(_ x: BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>) {}
+   │                                                                          ^^ ()
+
+note:
+   ┌─ backend_barrier.fe:81:43
+   │
+81 │   fn deps_derive_barriers(x: BarrierReq<3>) {
+   │ ╭───────────────────────────────────────────^
+82 │ │     takes_three_barriers(x)
+83 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_barrier.fe:82:5
+   │
+82 │     takes_three_barriers(x)
+   │     ^^^^^^^^^^^^^^^^^^^^ fn takes_three_barriers
+
+note:
+   ┌─ backend_barrier.fe:82:5
+   │
+82 │     takes_three_barriers(x)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_barrier.fe:82:26
+   │
+82 │     takes_three_barriers(x)
+   │                          ^ BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>
+
+note:
+   ┌─ backend_barrier.fe:87:63
+   │
+87 │ fn takes_sched3(_ x: Comp<Comp<Comp<Par, Pair>, Pair>, Pair>) {}
+   │                                                               ^^ ()
+
+note:
+   ┌─ backend_barrier.fe:91:74
+   │
+91 │   fn schedule_and_barriers_from_same_n(s: RBin<Pair, 3>, b: BarrierReq<3>) {
+   │ ╭──────────────────────────────────────────────────────────────────────────^
+92 │ │     takes_sched3(s)
+93 │ │     takes_three_barriers(b)
+94 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_barrier.fe:92:5
+   │
+92 │     takes_sched3(s)
+   │     ^^^^^^^^^^^^ fn takes_sched3
+
+note:
+   ┌─ backend_barrier.fe:92:5
+   │
+92 │     takes_sched3(s)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_barrier.fe:92:18
+   │
+92 │     takes_sched3(s)
+   │                  ^ Comp<Comp<Comp<Par, Pair>, Pair>, Pair>
+
+note:
+   ┌─ backend_barrier.fe:93:5
+   │
+93 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^ fn takes_three_barriers
+
+note:
+   ┌─ backend_barrier.fe:93:5
+   │
+93 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_barrier.fe:93:26
+   │
+93 │     takes_three_barriers(b)
+   │                          ^ BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>
+
+note:
+    ┌─ backend_barrier.fe:100:71
+    │
+100 │   fn sym_barrier_req<const N: usize>(x: BarrierReq<N>) -> BarrierReq<N> {
+    │ ╭───────────────────────────────────────────────────────────────────────^
+101 │ │     x
+102 │ │ }
+    │ ╰─^ BarrierReq<const N: usize>
+
+note:
+    ┌─ backend_barrier.fe:101:5
+    │
+101 │     x
+    │     ^ BarrierReq<const N: usize>
+
+note:
+    ┌─ backend_barrier.fe:111:1
+    │
+111 │ ╭ {
+112 │ │     barrier.barrier()
+113 │ │ }
+    │ ╰─^ ()
+
+note:
+    ┌─ backend_barrier.fe:112:5
+    │
+112 │     barrier.barrier()
+    │     ^^^^^^^ barrier
+
+note:
+    ┌─ backend_barrier.fe:112:5
+    │
+112 │     barrier.barrier()
+    │     ^^^^^^^^^^^^^^^^^ ()
+
+note:
+    ┌─ backend_barrier.fe:119:1
+    │
+119 │ ╭ {
+120 │ │     barrier.barrier()
+121 │ │ }
+    │ ╰─^ ()
+
+note:
+    ┌─ backend_barrier.fe:120:5
+    │
+120 │     barrier.barrier()
+    │     ^^^^^^^ barrier
+
+note:
+    ┌─ backend_barrier.fe:120:5
+    │
+120 │     barrier.barrier()
+    │     ^^^^^^^^^^^^^^^^^ ()
+
+note:
+    ┌─ backend_barrier.fe:127:1
+    │
+127 │ ╭ {
+128 │ │     barrier.barrier()
+129 │ │ }
+    │ ╰─^ ()
+
+note:
+    ┌─ backend_barrier.fe:128:5
+    │
+128 │     barrier.barrier()
+    │     ^^^^^^^ barrier
+
+note:
+    ┌─ backend_barrier.fe:128:5
+    │
+128 │     barrier.barrier()
+    │     ^^^^^^^^^^^^^^^^^ ()
