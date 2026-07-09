@@ -1,0 +1,32 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/backend_ref_conformance.fe
+---
+error[6-0012]: missing associated type in trait implementation
+   ┌─ backend_ref_conformance.fe:41:18
+   │
+41 │ impl Backend for RefMissing {
+   │                  ^^^^^^^^^^ missing associated type `Ref` from trait `Backend`
+
+error[6-0023]: associated type parameter count mismatch
+   ┌─ backend_ref_conformance.fe:26:10
+   │
+26 │     type Ref<T> = u256
+   │          ^^^ associated type `Ref` expects 2 generic parameter(s), but 1 given
+   │
+   ┌─ src/backend.fe:49:10
+   │
+49 │     type Ref<T, S>
+   │          --- trait declares the associated type here
+
+error[6-0023]: associated type parameter count mismatch
+   ┌─ backend_ref_conformance.fe:37:10
+   │
+37 │     type Ref = u256
+   │          ^^^ associated type `Ref` expects 2 generic parameter(s), but 0 given
+   │
+   ┌─ src/backend.fe:49:10
+   │
+49 │     type Ref<T, S>
+   │          --- trait declares the associated type here

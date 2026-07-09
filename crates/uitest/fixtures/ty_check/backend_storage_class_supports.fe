@@ -1,0 +1,42 @@
+// mb2 A5.3 (b): the `Supports<S>` negative. Companion to the note-dump keystone
+// `crates/hir/test_files/ty_check/backend_storage_class.fe`, which cannot carry a
+// refuted bound (its harness asserts no diagnostics).
+//
+// `Supports<S>` gates whether a storage class is USABLE on a backend. Support is
+// declared per backend per class in `std` (the grant matrix); a MISSING impl is a
+// hard trait-bound-not-satisfied error at the exact instantiation that asked --
+// the same no-provider-no-compile shape the effect system enforces, but at the
+// TYPE layer. `GpuBackend` is the positive `Supports<Shared>` witness; EVM and
+// wasm genuinely lack the workgroup concept, so they deny it.
+//
+//   needs_shared<GpuBackend>()   -> GpuBackend: Supports<Shared>  -> holds
+//   needs_shared<EvmBackend>()   -> EvmBackend: Supports<Shared>  -> refuted
+//   needs_shared<WasmBackend>()  -> WasmBackend: Supports<Shared> -> refuted
+//
+// Plus the totality-loop closer: a NON-MARKER class (`u32`) PROJECTS through the
+// GAT (that leg is pinned zero-diagnostic in the note-dump fixture), but is
+// stopped at the `Supports` gate here -- `EvmBackend: Supports<u32>` has no impl.
+
+use core::backend::{Backend, Supports, Shared}
+use std::evm::EvmBackend
+use std::wasm::WasmBackend
+use std::gpu::GpuBackend
+
+fn needs_shared<B: Backend + Supports<Shared>>() {}
+fn needs_supports_u32<B: Backend + Supports<u32>>() {}
+
+fn use_gpu_ok() {
+    needs_shared<GpuBackend>()
+}
+
+fn use_evm_bad() {
+    needs_shared<EvmBackend>()
+}
+
+fn use_wasm_bad() {
+    needs_shared<WasmBackend>()
+}
+
+fn use_nonmarker_bad() {
+    needs_supports_u32<EvmBackend>()
+}

@@ -1,4 +1,4 @@
-use core::backend::Backend
+use core::backend::{Backend, Supports, Global, Constant, Local}
 use core::MemPtr
 
 /// A TYPE-LEVEL wasm backend.
@@ -15,10 +15,26 @@ use core::MemPtr
 /// (`MemPtr<T>`, a linear-memory handle from `core`).
 pub struct WasmBackend {}
 
+/// wasm class-typed reference: a uniform `u32` linear-memory offset. `T` and `S`
+/// are phantom (representation-only stand-in, like `WasmBackend::Buffer`): the
+/// class marker `S` lives in the TYPE. NO methods/ops in this slice.
+pub struct WasmRef<T, S> { addr: u32 }
+
 impl Backend for WasmBackend {
     const WORD_BITS: usize = 64
     const OVERFLOW_WRAPS: bool = false
     const MAX_PAR_LOG2: usize = 20
     type Word = u64
     type Buffer<T> = MemPtr<T>
+    type Ref<T, S> = WasmRef<T, S>
 }
+
+// Storage-class grant matrix for wasm (see `core::backend`). Mirrors EVM's honest
+// degradation: `Global` (linear-memory heap), `Constant` (data segment /
+// immutable region), `Local` (shadow stack / locals). `Shared` is ABSENT in v1:
+// no workgroup concept exists yet. The wasm-threads + shared-memory proposal plus
+// a `WasmWorkers` `Par` provider could later make `Supports<Shared> for
+// WasmBackend` true; adding it is one additive line.
+impl Supports<Global> for WasmBackend {}
+impl Supports<Constant> for WasmBackend {}
+impl Supports<Local> for WasmBackend {}

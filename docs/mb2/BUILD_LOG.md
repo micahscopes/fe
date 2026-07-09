@@ -897,3 +897,141 @@ The tree-sitter corpus only had non-generic `trait_assoc_type.fe`.
   3/3 (strict now 137/137, the 3 GAT ingot files parse clean); fe-web builds.
 - Local sandbox lacks `node`; used a `node`->`bun` shim for `tree-sitter
   generate` and the local `emcc` for `tree-sitter build --wasm`.
+
+## 2026-07-09 - Slice A5.3: storage-class abstraction (`Ref<T, S>` GAT + markers + `Supports<S>`)
+
+The careful-abstraction crux (steering-09): a SECOND GAT `type Ref<T, S>` on
+`core::Backend` (kind `* -> * -> *`), a closed set of four storage-class marker
+ZSTs in core, and a `Supports<S>` support trait, so the whole B-track (SPIR-V,
+atomics, barriers) hangs off ONE type-level mechanism. Pure additive surface
+(ingot `.fe` + fixtures); ZERO Rust/compiler change: the arity-2 GAT is USAGE of
+the A2/A3/A4 machinery, and it behaved. The soundness guard held (if the arity-2
+GAT had surfaced an A4 owner/capture gap this would have stopped; it did not).
+
+- **Core surface as written (`ingots/core/src/backend.fe`):**
+  ```
+  pub trait Backend {
+      const WORD_BITS: usize
+      const OVERFLOW_WRAPS: bool
+      const MAX_PAR_LOG2: usize
+      type Word
+      type Buffer<T>
+      type Ref<T, S>              // NEW: kind * -> * -> *, unbounded, TOTAL in S
+  }
+
+  pub struct Global {}            // -> SPIR-V StorageBuffer
+  pub struct Constant {}          // -> SPIR-V Uniform
+  pub struct Shared {}            // -> SPIR-V Workgroup
+  pub struct Local {}             // -> SPIR-V Function
+
+  pub trait Supports<S>: Backend {}   // support = TYPE-level fact; caps gate ops
+  ```
+  Markers live in CORE (steering-09 supersedes steering-08's std placement:
+  markers are pure ZST shapes, and the B-track wants core-level surface that
+  names classes). Surfaced via `pub use backend::{Backend, Supports, Global,
+  Constant, Shared, Local}` in `core/src/lib.fe`; NOT added to the prelude
+  (`prelude.fe` byte-identical, verified). Supertrait spelling `Supports<S>:
+  Backend` has in-tree precedent (`EffectRefMut<Target>: EffectRef<Target>`); the
+  probe (test leg 7) SUCCEEDED, so the supertrait ships and leg 7 stays.
+
+- **Per-backend impls (all in std). Grant matrix AS IMPL'D:**
+  | backend | repr struct | `Global` | `Constant` | `Shared` | `Local` |
+  |---|---|---|---|---|---|
+  | `EvmBackend` (std/evm/backend.fe) | `EvmRef<T,S> { raw: u256 }` | yes | yes | no | yes |
+  | `WasmBackend` (std/wasm.fe) | `WasmRef<T,S> { addr: u32 }` | yes | yes | no | yes |
+  | `GpuBackend` (std/gpu.fe, NEW) | `GpuRef<T,S> { handle: u32 }` | yes | yes | yes | yes |
+  Each backend adds `type Ref<T, S> = <B>Ref<T, S>` to its `impl Backend`.
+  Projection is TOTAL in S (no impl cases on S; each backend maps EVERY S,
+  markers and non-markers alike, to its uniform phantom-`S` repr struct). The
+  ref structs carry `T`/`S` as PHANTOM params (established Fe practice:
+  `MemPtr<T> { addr }`); representation-only, NO methods/ops/EffectHandle in this
+  slice (ops arrive effect-gated in B1). EVM/wasm degrade HONESTLY (deny only the
+  workgroup class they genuinely lack). `GpuBackend` is the new TYPE-LEVEL-only
+  positive `Supports<Shared>` witness (32/wraps/24/u32, so the anti-conflation
+  matrix stays three-way non-degenerate); mirrors `wasm.fe`'s posture (no GPU
+  pipeline exists; SPIR-V is seam-GO-gated; GPU exec never sandbox-testable).
+  `GpuBackend::Buffer<T> = GpuRef<T, Global>` is a per-impl representation choice
+  that buys a marker-through-RHS test. Surfaced via `pub use gpu::{self, *}` in
+  `std/src/lib.fe` (the `wasm.fe` route).
+
+- **The 6 acceptance surfaces (all green, snapshots reviewed):**
+  1. **(a) note-dump** `crates/hir/test_files/ty_check/backend_storage_class.fe`
+     (+ `.snap`), zero-diagnostic, all 8 legs. Observed normal forms:
+     - arity-2 ground + POSITIONAL pin: `EvmBackend::Ref<u32, Global>` ->
+       `EvmRef<u32, Global>` (a T/S swap would be the distinct `EvmRef<Global,
+       u32>` and the acceptor call would fail);
+     - anti-conflation: `WasmBackend::Ref<u32, Global>` -> `WasmRef<u32, Global>`,
+       `GpuBackend::Ref<u32, Shared>` -> `GpuRef<u32, Shared>`;
+     - marker-through-RHS: `GpuBackend::Buffer<u32>` -> `GpuRef<u32, Global>`;
+     - **KEYSTONE composition at arity 2**: `EvmBackend::Ref<RBin<Pair, 3>,
+       Global>` -> **`EvmRef<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Global>`**
+       (project through the real impl + type-fn UNFOLD in arg slot 0, class marker
+       `Global` riding slot 1, one canonical NF);
+     - symbolic opacity at arity 2: `sym_ref` -> `B::Ref<Comp<Comp<Comp<Par, T>,
+       T>, T>, Shared>` (head opaque, schedule unfolds, marker intact), `sym_class`
+       -> `B::Ref<T, S>` (fully opaque, no spurious anything);
+     - `Supports` positives (needs_shared@Gpu, needs_global@all three);
+     - supertrait derivation: `word_of<B: Supports<Global>>(w: B::Word) -> B::Word`
+       resolves `B::Word` from only the `Supports<Global>` bound;
+     - totality pin: `EvmBackend::Ref<u32, u32>` -> `EvmRef<u32, u32>` (a
+       NON-marker S PROJECTS; usability is gated at `Supports`, not projection).
+  2. **(b) uitest negative** `ty_check/backend_storage_class_supports.fe`:
+     `needs_shared<GpuBackend>()` clean in the SAME file; `needs_shared<EvmBackend>()`
+     and `needs_shared<WasmBackend>()` each **error[6-0003]** "doesn't implement
+     `Supports<Shared>`" at the exact violating call (:33:5, :37:5); plus the
+     totality-loop closer `needs_supports_u32<EvmBackend>()` -> **error[6-0003]**
+     "doesn't implement `Supports<u32>`" (:41:5, the non-marker S stopped at the
+     gate that (a)8 showed projects).
+  3. **(c) uitest negative** `ty_check/backend_storage_class_mismatch.fe`:
+     `EvmBackend::Ref<u32, Local>` passed where `EvmBackend::Ref<u32, Global>` is
+     demanded -> **error[8-0000]** "expected `EvmRef<u32, Global>`, but
+     `EvmRef<u32, Local>` is given" at :17:18. The mismatch renders the PROJECTED
+     forms with `Local`/`Global` distinct in slot 1 (DX hazard-6 observation:
+     rendering is clean, class is legible).
+  4. **(d) uitest conformance at arity 2** `ty/def/backend_ref_conformance.fe`
+     (wrong impls of the REAL `core::Backend`): `type Ref<T>` (arity 1) ->
+     **error[6-0023]** "expects 2 generic parameter(s), but 1 given"; `type Ref`
+     (arity 0) -> **error[6-0023]** "...but 0 given"; `Ref` omitted ->
+     **error[6-0012]** "missing associated type `Ref`". Each cites the decl
+     authority `type Ref<T, S>` at `src/backend.fe:49:10`; no cascade.
+  5. **(e) regression re-runs:** FIX-1 pin `gat_bound_no_assoc_owned_param_in_
+     param_env` green (in the 165-test `analysis::ty` lib run); G3 budget +
+     confluence tests green (`type_fn_induct` in the same run); full A5.1/A5.2 +
+     all gat fixtures byte-identical; corelib 19/19; tree_sitter strict green.
+  6. **(f) full CI** is the orchestrator's boundary run.
+
+- **A4 arity-2 soundness CONFIRMED (no gap).** `Ref<T, S>` is the first REAL
+  trait exercising def-param idx 1 through the full core+std path. The positional
+  pin (a1) proves slot 0=T / slot 1=S substitute at the correct index; the
+  keystone (a4) proves slot 0 unfolds while slot 1 (marker) rides intact
+  (index-exact substitution at arity 2); the symbolic legs (a5) prove opacity
+  with no spurious capture; the conformance negatives (d) prove the decl-authority
+  arity check reads 2. No new by-index fold was added (zero Rust change), so the
+  `InstantiateScopedFolder`/`TraitScopeSubstFolder`/`GatOwnerRemap` owner-exactness
+  is untouched. `Supports` coherence: 10 impls differ only in trait ARG,
+  `does_impl_trait_conflict` fired nothing (corelib built clean). No GAT param
+  bounds snuck in (`Ref<T,S>` and `Supports<S>` both unbounded). N4: zero Rust
+  change, `Ref` is one more GAT the existing engine handles; MIR reads implementor
+  identity discriminators, never the assoc-type set (invariant structurally held).
+
+- **Verify (all foreground, release).** `cargo check --workspace` clean; corelib
+  19/19 (core+std build with the new required `Ref` member + `Supports` supertrait
+  + GpuBackend); fe-hir `analysis::ty` lib 165/165 (FIX-1 pin + G3 + confluence +
+  strict_prove pins), ty_check integration 121/121 (A5.1/A5.2 byte-identical),
+  `trait_resolution_conformance` 25/25; uitest `ty` 124/124 + `ty_check` 237/237
+  (all pre-existing byte-identical); `tree_sitter_parse_strict` green (the 2-ary
+  GAT + markers + supertrait parse with NO grammar change; A5.1b's
+  `optional(generic_param_list)` already covers arity 2). Full release CI is the
+  orchestrator's run.
+
+- **Deviation from steering-09:** the (d) missing-`Ref` leg renders as
+  **6-0012** (missing associated type), not the steering's loosely-phrased
+  "6-0023/24/25-family" -- 6-0012 is the semantically-correct code for an OMITTED
+  required assoc type (a param-count mismatch would be wrong here); the two
+  arity-mismatch legs are 6-0023 as specced. No other deviation. Wasm facts stay
+  64/u64/20 (A5.1's canonical values), GPU is 32/u32/24 per steering-09.
+
+- **A5.3 READY. NEXT: A6** (root-mint generalization): delete the
+  `DEFAULT_TARGET_TY_PATH` hardcode, per-target capability roots (`EvmTarget`/
+  `WasmTarget`/`GpuTarget`) minting per-family intrinsics through
+  `Target::Intrinsics`, unblocking the honest `sload`-rejected-on-non-EVM negative.

@@ -1,0 +1,133 @@
+// mb2 A5.3: the storage-class abstraction over the REAL `core::backend::Backend`
+// trait's second GAT `type Ref<T, S>` (kind `* -> * -> *`) and its three `std`
+// impls (`EvmRef`/`WasmRef`/`GpuRef`), plus the four core storage-class markers
+// (`Global`/`Constant`/`Shared`/`Local`) and the `Supports<S>` support trait.
+//
+// Standalone ty_check fixtures link the builtin `core` AND `std` ingots
+// (`new_stand_alone` seeds both), so every projection below goes through the real
+// cross-ingot trait, not a test-local one. All legs are zero-diagnostic; the
+// note-dump `.snap` records the observed normal forms.
+//
+// The eight legs (steering-09 sec 5a):
+//   1. ground arity-2 projection + POSITIONAL pin (T/S not swapped)
+//   2. cross-backend anti-conflation (three distinct ref reprs)
+//   3. marker-through-RHS (a GAT RHS mentioning a core marker)
+//   4. keystone composition at arity 2 (project + type-fn unfold in slot 0,
+//      marker riding slot 1, one canonical NF)
+//   5. symbolic opacity at arity 2 (head opaque, schedule unfolds, marker intact;
+//      plus fully-symbolic S)
+//   6. `Supports` positive legs
+//   7. supertrait derivation (`B: Backend` flows from `B: Supports<Global>`)
+//   8. totality pin (a non-marker `S` PROJECTS; usability is gated elsewhere)
+
+use core::backend::{Backend, Supports, Global, Shared}
+use std::evm::{EvmBackend, EvmRef}
+use std::wasm::{WasmBackend, WasmRef}
+use std::gpu::{GpuBackend, GpuRef}
+
+struct Par {}
+struct Pair {}
+struct Comp<A, B> {
+    a: A,
+    b: B,
+}
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+// ---- 1. ground arity-2 projection + positional pin ----
+
+// `EvmBackend::Ref<u32, Global>` must be definitionally equal to
+// `EvmRef<u32, Global>`. Zero-diagnostic == definitional equality, which also
+// pins POSITIONAL substitution: a T/S swap would yield the DISTINCT type
+// `EvmRef<Global, u32>` and the call would fail.
+fn takes_evm_global(_ x: EvmRef<u32, Global>) {}
+
+fn evm_ground(x: EvmBackend::Ref<u32, Global>) {
+    takes_evm_global(x)
+}
+
+// ---- 2. cross-backend anti-conflation ----
+
+fn takes_wasm_global(_ x: WasmRef<u32, Global>) {}
+fn takes_gpu_shared(_ x: GpuRef<u32, Shared>) {}
+
+fn wasm_ref(x: WasmBackend::Ref<u32, Global>) {
+    takes_wasm_global(x)
+}
+
+fn gpu_ref(x: GpuBackend::Ref<u32, Shared>) {
+    takes_gpu_shared(x)
+}
+
+// ---- 3. marker-through-RHS substitution ----
+
+// `GpuBackend::Buffer<u32>` projects through the impl RHS `GpuRef<T, Global>`,
+// substituting the core marker `Global` through the GAT RHS: NF `GpuRef<u32, Global>`.
+fn takes_gpu_global_buffer(_ x: GpuRef<u32, Global>) {}
+
+fn gpu_buffer(x: GpuBackend::Buffer<u32>) {
+    takes_gpu_global_buffer(x)
+}
+
+// ---- 4. keystone composition at arity 2 ----
+
+// `EvmBackend::Ref<RBin<Pair, 3>, Global>`: project through the real impl
+// (`Ref<T, S> = EvmRef<T, S>`) AND unfold the schedule type fn in ARG SLOT 0,
+// with the class marker riding SLOT 1, reaching one canonical NF
+// `EvmRef<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Global>`.
+fn takes_nf(_ x: EvmRef<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Global>) {}
+
+fn keystone(x: EvmBackend::Ref<RBin<Pair, 3>, Global>) {
+    takes_nf(x)
+}
+
+// ---- 5. symbolic opacity at arity 2 ----
+
+// The projection head stays opaque (`B::Ref<..>`), the schedule arg still unfolds
+// under the rigid element `T`, and the class marker `Shared` rides slot 1 intact:
+// recorded NF `B::Ref<Comp<Comp<Comp<Par, T>, T>, T>, Shared>`.
+fn sym_ref<B: Backend, T>(x: B::Ref<RBin<T, 3>, Shared>) -> B::Ref<RBin<T, 3>, Shared> {
+    x
+}
+
+// Fully symbolic class param: nothing to project, nothing to unfold; the whole
+// `B::Ref<T, S>` stays opaque with no spurious anything.
+fn sym_class<B: Backend, T, S>(x: B::Ref<T, S>) -> B::Ref<T, S> {
+    x
+}
+
+// ---- 6. Supports positive legs ----
+
+fn needs_shared<B: Backend + Supports<Shared>>() {}
+fn needs_global<B: Backend + Supports<Global>>() {}
+
+fn use_supports() {
+    needs_shared<GpuBackend>()
+    needs_global<EvmBackend>()
+    needs_global<WasmBackend>()
+    needs_global<GpuBackend>()
+}
+
+// ---- 7. supertrait derivation ----
+
+// `B: Backend` flows from `B: Supports<Global>` via the supertrait bound, so
+// `B::Word` (a `Backend` member) is nameable with only the `Supports<Global>`
+// bound written.
+fn word_of<B: Supports<Global>>(w: B::Word) -> B::Word {
+    w
+}
+
+// ---- 8. totality pin ----
+
+// A non-marker `S` (here `u32`) PROJECTS: a GAT is a total type function, so
+// `EvmBackend::Ref<u32, u32>` normalizes to `EvmRef<u32, u32>`. Rejection of an
+// unsupported/non-marker class happens at the `Supports` gate (see the uitest
+// negative `backend_storage_class_supports.fe`), NOT at projection.
+fn nonsense_projects(x: EvmBackend::Ref<u32, u32>) -> EvmRef<u32, u32> {
+    x
+}

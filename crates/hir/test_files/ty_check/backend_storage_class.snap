@@ -1,0 +1,301 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/backend_storage_class.fe
+---
+note:
+   ┌─ backend_storage_class.fe:48:47
+   │
+48 │ fn takes_evm_global(_ x: EvmRef<u32, Global>) {}
+   │                                               ^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:50:48
+   │
+50 │   fn evm_ground(x: EvmBackend::Ref<u32, Global>) {
+   │ ╭────────────────────────────────────────────────^
+51 │ │     takes_evm_global(x)
+52 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_storage_class.fe:51:5
+   │
+51 │     takes_evm_global(x)
+   │     ^^^^^^^^^^^^^^^^ fn takes_evm_global
+
+note:
+   ┌─ backend_storage_class.fe:51:5
+   │
+51 │     takes_evm_global(x)
+   │     ^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:51:22
+   │
+51 │     takes_evm_global(x)
+   │                      ^ EvmRef<u32, Global>
+
+note:
+   ┌─ backend_storage_class.fe:56:49
+   │
+56 │ fn takes_wasm_global(_ x: WasmRef<u32, Global>) {}
+   │                                                 ^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:57:47
+   │
+57 │ fn takes_gpu_shared(_ x: GpuRef<u32, Shared>) {}
+   │                                               ^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:59:47
+   │
+59 │   fn wasm_ref(x: WasmBackend::Ref<u32, Global>) {
+   │ ╭───────────────────────────────────────────────^
+60 │ │     takes_wasm_global(x)
+61 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_storage_class.fe:60:5
+   │
+60 │     takes_wasm_global(x)
+   │     ^^^^^^^^^^^^^^^^^ fn takes_wasm_global
+
+note:
+   ┌─ backend_storage_class.fe:60:5
+   │
+60 │     takes_wasm_global(x)
+   │     ^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:60:23
+   │
+60 │     takes_wasm_global(x)
+   │                       ^ WasmRef<u32, Global>
+
+note:
+   ┌─ backend_storage_class.fe:63:45
+   │
+63 │   fn gpu_ref(x: GpuBackend::Ref<u32, Shared>) {
+   │ ╭─────────────────────────────────────────────^
+64 │ │     takes_gpu_shared(x)
+65 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_storage_class.fe:64:5
+   │
+64 │     takes_gpu_shared(x)
+   │     ^^^^^^^^^^^^^^^^ fn takes_gpu_shared
+
+note:
+   ┌─ backend_storage_class.fe:64:5
+   │
+64 │     takes_gpu_shared(x)
+   │     ^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:64:22
+   │
+64 │     takes_gpu_shared(x)
+   │                      ^ GpuRef<u32, Shared>
+
+note:
+   ┌─ backend_storage_class.fe:71:54
+   │
+71 │ fn takes_gpu_global_buffer(_ x: GpuRef<u32, Global>) {}
+   │                                                      ^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:73:43
+   │
+73 │   fn gpu_buffer(x: GpuBackend::Buffer<u32>) {
+   │ ╭───────────────────────────────────────────^
+74 │ │     takes_gpu_global_buffer(x)
+75 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_storage_class.fe:74:5
+   │
+74 │     takes_gpu_global_buffer(x)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ fn takes_gpu_global_buffer
+
+note:
+   ┌─ backend_storage_class.fe:74:5
+   │
+74 │     takes_gpu_global_buffer(x)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:74:29
+   │
+74 │     takes_gpu_global_buffer(x)
+   │                             ^ GpuRef<u32, Global>
+
+note:
+   ┌─ backend_storage_class.fe:83:75
+   │
+83 │ fn takes_nf(_ x: EvmRef<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Global>) {}
+   │                                                                           ^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:85:56
+   │
+85 │   fn keystone(x: EvmBackend::Ref<RBin<Pair, 3>, Global>) {
+   │ ╭────────────────────────────────────────────────────────^
+86 │ │     takes_nf(x)
+87 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_storage_class.fe:86:5
+   │
+86 │     takes_nf(x)
+   │     ^^^^^^^^ fn takes_nf
+
+note:
+   ┌─ backend_storage_class.fe:86:5
+   │
+86 │     takes_nf(x)
+   │     ^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_storage_class.fe:86:14
+   │
+86 │     takes_nf(x)
+   │              ^ EvmRef<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Global>
+
+note:
+   ┌─ backend_storage_class.fe:94:88
+   │
+94 │   fn sym_ref<B: Backend, T>(x: B::Ref<RBin<T, 3>, Shared>) -> B::Ref<RBin<T, 3>, Shared> {
+   │ ╭────────────────────────────────────────────────────────────────────────────────────────^
+95 │ │     x
+96 │ │ }
+   │ ╰─^ B::Ref<Comp<Comp<Comp<Par, T>, T>, T>, Shared>
+
+note:
+   ┌─ backend_storage_class.fe:95:5
+   │
+95 │     x
+   │     ^ B::Ref<Comp<Comp<Comp<Par, T>, T>, T>, Shared>
+
+note:
+    ┌─ backend_storage_class.fe:100:65
+    │
+100 │   fn sym_class<B: Backend, T, S>(x: B::Ref<T, S>) -> B::Ref<T, S> {
+    │ ╭─────────────────────────────────────────────────────────────────^
+101 │ │     x
+102 │ │ }
+    │ ╰─^ B::Ref<T, S>
+
+note:
+    ┌─ backend_storage_class.fe:101:5
+    │
+101 │     x
+    │     ^ B::Ref<T, S>
+
+note:
+    ┌─ backend_storage_class.fe:106:50
+    │
+106 │ fn needs_shared<B: Backend + Supports<Shared>>() {}
+    │                                                  ^^ ()
+
+note:
+    ┌─ backend_storage_class.fe:107:50
+    │
+107 │ fn needs_global<B: Backend + Supports<Global>>() {}
+    │                                                  ^^ ()
+
+note:
+    ┌─ backend_storage_class.fe:109:19
+    │
+109 │   fn use_supports() {
+    │ ╭───────────────────^
+110 │ │     needs_shared<GpuBackend>()
+111 │ │     needs_global<EvmBackend>()
+112 │ │     needs_global<WasmBackend>()
+113 │ │     needs_global<GpuBackend>()
+114 │ │ }
+    │ ╰─^ ()
+
+note:
+    ┌─ backend_storage_class.fe:110:5
+    │
+110 │     needs_shared<GpuBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^ fn needs_shared<GpuBackend>
+
+note:
+    ┌─ backend_storage_class.fe:110:5
+    │
+110 │     needs_shared<GpuBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+    ┌─ backend_storage_class.fe:111:5
+    │
+111 │     needs_global<EvmBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^ fn needs_global<EvmBackend>
+
+note:
+    ┌─ backend_storage_class.fe:111:5
+    │
+111 │     needs_global<EvmBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+    ┌─ backend_storage_class.fe:112:5
+    │
+112 │     needs_global<WasmBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^^ fn needs_global<WasmBackend>
+
+note:
+    ┌─ backend_storage_class.fe:112:5
+    │
+112 │     needs_global<WasmBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+    ┌─ backend_storage_class.fe:113:5
+    │
+113 │     needs_global<GpuBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^ fn needs_global<GpuBackend>
+
+note:
+    ┌─ backend_storage_class.fe:113:5
+    │
+113 │     needs_global<GpuBackend>()
+    │     ^^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+    ┌─ backend_storage_class.fe:121:56
+    │
+121 │   fn word_of<B: Supports<Global>>(w: B::Word) -> B::Word {
+    │ ╭────────────────────────────────────────────────────────^
+122 │ │     w
+123 │ │ }
+    │ ╰─^ B::Word
+
+note:
+    ┌─ backend_storage_class.fe:122:5
+    │
+122 │     w
+    │     ^ B::Word
+
+note:
+    ┌─ backend_storage_class.fe:131:72
+    │
+131 │   fn nonsense_projects(x: EvmBackend::Ref<u32, u32>) -> EvmRef<u32, u32> {
+    │ ╭────────────────────────────────────────────────────────────────────────^
+132 │ │     x
+133 │ │ }
+    │ ╰─^ EvmRef<u32, u32>
+
+note:
+    ┌─ backend_storage_class.fe:132:5
+    │
+132 │     x
+    │     ^ EvmRef<u32, u32>

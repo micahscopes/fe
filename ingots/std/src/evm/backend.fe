@@ -1,4 +1,4 @@
-use core::backend::Backend
+use core::backend::{Backend, Supports, Global, Constant, Local}
 use core::StorPtr
 
 /// The EVM code-generation backend, the one backend with a real in-tree pipeline
@@ -10,10 +10,26 @@ use core::StorPtr
 /// from `core`); the real bulk-storage type arrives with the codegen slices.
 pub struct EvmBackend {}
 
+/// EVM class-typed reference: a uniform `u256` slot/offset handle. `T` and `S`
+/// are phantom (representation-only stand-in, exactly the `Buffer` posture): the
+/// class marker `S` lives in the TYPE, not the value. NO methods, NO read/write,
+/// NO `EffectHandle` impl in this slice; operations arrive effect-gated in the
+/// B-track.
+pub struct EvmRef<T, S> { raw: u256 }
+
 impl Backend for EvmBackend {
     const WORD_BITS: usize = 256
     const OVERFLOW_WRAPS: bool = true
     const MAX_PAR_LOG2: usize = 14
     type Word = u256
     type Buffer<T> = StorPtr<T>
+    type Ref<T, S> = EvmRef<T, S>
 }
+
+// Storage-class grant matrix for EVM (see `core::backend`). EVM degrades
+// HONESTLY: it supports the three classes it genuinely has -- `Global` (persistent
+// storage, SLOAD/SSTORE), `Constant` (calldata/code, read-only), `Local`
+// (transient memory) -- and denies `Shared` (no workgroup concept exists on EVM).
+impl Supports<Global> for EvmBackend {}
+impl Supports<Constant> for EvmBackend {}
+impl Supports<Local> for EvmBackend {}

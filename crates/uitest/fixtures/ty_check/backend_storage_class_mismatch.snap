@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend_storage_class_mismatch.fe
+---
+error[8-0000]: type mismatch
+   ┌─ backend_storage_class_mismatch.fe:17:18
+   │
+17 │     takes_global(x)
+   │                  ^ expected `EvmRef<u32, Global>`, but `EvmRef<u32, Local>` is given

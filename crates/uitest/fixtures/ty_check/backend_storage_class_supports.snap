@@ -1,0 +1,31 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/backend_storage_class_supports.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ backend_storage_class_supports.fe:33:5
+   │
+25 │ fn needs_shared<B: Backend + Supports<Shared>>() {}
+   │                              ---------------- required by this bound on `needs_shared`
+   ·
+33 │     needs_shared<EvmBackend>()
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^ `EvmBackend` doesn't implement `Supports<Shared>`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ backend_storage_class_supports.fe:37:5
+   │
+25 │ fn needs_shared<B: Backend + Supports<Shared>>() {}
+   │                              ---------------- required by this bound on `needs_shared`
+   ·
+37 │     needs_shared<WasmBackend>()
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^ `WasmBackend` doesn't implement `Supports<Shared>`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ backend_storage_class_supports.fe:41:5
+   │
+26 │ fn needs_supports_u32<B: Backend + Supports<u32>>() {}
+   │                                    ------------- required by this bound on `needs_supports_u32`
+   ·
+41 │     needs_supports_u32<EvmBackend>()
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EvmBackend` doesn't implement `Supports<u32>`

@@ -5,19 +5,23 @@
 /// or below), per the provider-placement rule (a generated/downstream impl must
 /// sit below the goal trait's ingot so its absolute path resolves).
 ///
-/// This is the minimal v1 cut (mb2 A5.1). It exposes three kinds of fact:
+/// This is the v1 cut (mb2 A5.1 + A5.3). It exposes four kinds of fact:
 /// - backend FACTS as associated consts, consumed by the concrete `where`
 ///   const-predicate machinery so a library can state its envelope as a
 ///   compiler-checked contract;
 /// - a `Word` representation type (kind `*`);
 /// - a single-arity `Buffer<T>` bulk-storage constructor (a generic associated
 ///   type, kind `* -> *`), the workhorse every downstream story projects
-///   through.
+///   through;
+/// - a two-arity `Ref<T, S>` class-typed reference constructor (a generic
+///   associated type, kind `* -> * -> *`), where `S` is a storage-class marker
+///   (`Global`/`Constant`/`Shared`/`Local`, below).
 ///
-/// Deliberately minimal: there is NO bound on `Buffer` yet (the `: Functor`
-/// forwarding/duality bound is a later slice), NO `Ref<T, S>`/address-space
-/// surface yet (also a later slice), and NO capability/effect gating (later
-/// still). Keep it a plain trait.
+/// Deliberately minimal: there is NO bound on `Buffer`/`Ref` yet (the
+/// `: Functor` forwarding/duality bound is a later slice), NO bound on the
+/// class param `S` (a `StorageClass` bound is A7-era), and NO capability/effect
+/// gating on the refs (operations on `Ref` arrive effect-gated in the B-track).
+/// Keep it a plain trait.
 pub trait Backend {
     /// Machine word width in bits (EVM 256, wasm 64, ...).
     const WORD_BITS: usize
@@ -35,4 +39,38 @@ pub trait Backend {
     /// Bulk storage constructor. A generic associated type of kind `* -> *`;
     /// intentionally unbounded in v1.
     type Buffer<T>
+
+    /// Class-typed reference constructor. `S` is a storage-class marker
+    /// (`Global`/`Constant`/`Shared`/`Local`); the marker is part of the TYPE,
+    /// so a reference into one class can never be passed where another class is
+    /// demanded. Projection is TOTAL in `S` (any `S` projects, since a GAT is a
+    /// total type function that cannot case on its args); whether a class is
+    /// USABLE on a backend is gated by `Supports<S>`, not here.
+    type Ref<T, S>
 }
+
+/// Storage-class markers. Type-level only; a value of a marker type carries no
+/// authority and no meaning. The set is CLOSED in v1 (extending it is a
+/// steering-level decision, additive and non-breaking: new marker + `Supports`
+/// impls). Names are backend-neutral with a normative SPIR-V mapping:
+///
+///   `Global`   -> SPIR-V `StorageBuffer` (kernel/world-visible read-write data)
+///   `Constant` -> SPIR-V `Uniform`       (read-only parameters, size-limited)
+///   `Shared`   -> SPIR-V `Workgroup`     (barrier-synchronized per-group scratch)
+///   `Local`    -> SPIR-V `Function`      (invocation-private)
+///
+/// Deliberately NOT in the prelude (`Global`/`Local` are collision-prone bare
+/// names); surface them as `core::backend::{Global, Constant, Shared, Local}`.
+pub struct Global {}
+pub struct Constant {}
+pub struct Shared {}
+pub struct Local {}
+
+/// Declares that a backend has storage class `S` at all: `B::Ref<T, S>` is only
+/// USABLE (constructible, operable) where `B: Supports<S>` holds. A missing impl
+/// is a missing-bound error at the exact instantiation that asked (the same
+/// no-provider-no-compile shape the effect system enforces, but at the TYPE
+/// layer, which is where representation facts belong). Marker only: no methods,
+/// no authority, no scarcity. `Supports<S>` gates TYPES; capabilities (B-track)
+/// gate OPERATIONS.
+pub trait Supports<S>: Backend {}

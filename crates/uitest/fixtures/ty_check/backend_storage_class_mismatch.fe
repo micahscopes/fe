@@ -1,0 +1,18 @@
+// mb2 A5.3 (c): the wrong-class mismatch. The storage-class marker `S` is part of
+// the TYPE `B::Ref<T, S>`, so a reference into one class can never be passed where
+// another class is demanded, even on the SAME backend with the SAME element type.
+//
+// `EvmBackend::Ref<u32, Local>` (transient memory) passed where
+// `EvmBackend::Ref<u32, Global>` (persistent storage) is demanded is a hard type
+// mismatch at the call. The snapshot RECORDS how the mismatch renders (the
+// projected `EvmRef<..>` forms, `Local` vs `Global` in slot 1); per steering-09
+// DX hazard 6 the rendering quality is observed and logged, not gated on here.
+
+use core::backend::{Backend, Global, Local}
+use std::evm::EvmBackend
+
+fn takes_global(_ x: EvmBackend::Ref<u32, Global>) {}
+
+fn use_wrong_class(x: EvmBackend::Ref<u32, Local>) {
+    takes_global(x)
+}

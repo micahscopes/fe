@@ -1,0 +1,47 @@
+// mb2 A5.3 (d): GAT signature conformance at ARITY 2, against the REAL
+// `core::backend::Backend` trait (whose `type Ref<T, S>` declares two params).
+// This is the arity-2 teeth for the A4 owner-exact/conformance stack: the DECL
+// is the authority. Each impl below conforms on every member EXCEPT `Ref`, so
+// exactly its own `Ref` diagnostic fires, no cascade.
+//
+//   (i)   `type Ref<T>`   -- arity 1 < decl arity 2  -> 6-0023 count mismatch
+//   (ii)  `type Ref`      -- arity 0 < decl arity 2  -> 6-0023 count mismatch
+//   (iii) `Ref` omitted   -- missing associated type -> missing-assoc-type diag
+
+use core::backend::Backend
+
+struct RefArity1 {}
+struct RefArity0 {}
+struct RefMissing {}
+
+// (i) impl arity (1) < decl arity (2): the RHS ignores the class param, so
+// `X::Ref<u32, Global>` == `X::Ref<u32, Local>` -- the class-conflation the
+// two-param decl exists to prevent.
+impl Backend for RefArity1 {
+    const WORD_BITS: usize = 256
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 14
+    type Word = u256
+    type Buffer<T> = u256
+    type Ref<T> = u256
+}
+
+// (ii) impl arity (0) < decl arity (2): a bare `type Ref` collapses every
+// instantiation to one type.
+impl Backend for RefArity0 {
+    const WORD_BITS: usize = 256
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 14
+    type Word = u256
+    type Buffer<T> = u256
+    type Ref = u256
+}
+
+// (iii) `Ref` omitted entirely: a missing required associated type.
+impl Backend for RefMissing {
+    const WORD_BITS: usize = 256
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 14
+    type Word = u256
+    type Buffer<T> = u256
+}

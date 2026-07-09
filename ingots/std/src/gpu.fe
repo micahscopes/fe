@@ -1,0 +1,46 @@
+use core::backend::{Backend, Supports, Global, Constant, Shared, Local}
+
+/// A TYPE-LEVEL GPU backend.
+///
+/// This is NOT a code-generation backend: NO GPU pipeline exists on this branch.
+/// SPIR-V generation is seam-GO-gated (Sonatina seam port, owner-ratified,
+/// outside this branch's autonomy); GPU EXECUTION is never sandbox-testable (no
+/// GPU here). `GpuBackend` exists purely as the positive `Supports<Shared>`
+/// witness so the storage-class discipline is non-degenerate in BOTH directions:
+/// with zero `Supports<Shared>` impls in-tree, the negative test could not
+/// distinguish "these backends lack the class" from "the discharge machinery
+/// cannot prove `Supports<Shared>` at all". Mirrors `wasm.fe`'s posture exactly.
+///
+/// Its facts genuinely differ from both existing backends (32-bit words, wrapping
+/// arithmetic, a 24-log2 parallel envelope), so the anti-conflation matrix stays
+/// three-way non-degenerate.
+pub struct GpuBackend {}
+
+/// GPU class-typed reference: a uniform `u32` opaque handle. `T` and `S` are
+/// phantom (representation-only stand-in, like the other backends' refs); the
+/// class marker `S` lives in the TYPE and, in the B-track, keys the SPIR-V
+/// storage-class decoration on the lowered pointer. NO methods/ops in this slice.
+pub struct GpuRef<T, S> { handle: u32 }
+
+impl Backend for GpuBackend {
+    const WORD_BITS: usize = 32
+    // WGSL defines wrapping arithmetic; SPIR-V has no overflow detection (this
+    // "wraps in practice, no trap exists" is a doc caveat, not a guarantee).
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 24
+    type Word = u32
+    // Impl-side representation choice: a GPU buffer honestly IS a global-class
+    // device allocation, so the backend picks `GpuRef<T, Global>` as its buffer.
+    // This is per-impl representation, not trait doctrine, and it exercises marker
+    // substitution through a GAT RHS.
+    type Buffer<T> = GpuRef<T, Global>
+    type Ref<T, S> = GpuRef<T, S>
+}
+
+// Storage-class grant matrix for GPU (see `core::backend`): all four classes.
+// `Shared` (SPIR-V `Workgroup`) is the class no other backend supports; this is
+// the positive witness that keeps the discipline non-degenerate.
+impl Supports<Global> for GpuBackend {}
+impl Supports<Constant> for GpuBackend {}
+impl Supports<Shared> for GpuBackend {}
+impl Supports<Local> for GpuBackend {}
