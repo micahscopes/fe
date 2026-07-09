@@ -1,0 +1,24 @@
+use core::backend::Backend
+use core::MemPtr
+
+/// A TYPE-LEVEL wasm backend.
+///
+/// This is NOT a code-generation backend: no wasm pipeline exists on this branch
+/// (wasm EXECUTION is blocked on the Sonatina seam port, not on anything here).
+/// `WasmBackend` exists purely so the `Backend` abstraction is non-degenerate
+/// from day one: its facts genuinely differ from `EvmBackend` (64-bit words,
+/// trapping arithmetic, a linear-memory `Buffer`), so anti-conflation
+/// (`EvmBackend::Buffer<T>` vs `WasmBackend::Buffer<T>`) is observable.
+///
+/// It lives at the `std` root rather than under `evm/` precisely because it is
+/// not the EVM target. `Buffer<T>` is a representation-only stand-in
+/// (`MemPtr<T>`, a linear-memory handle from `core`).
+pub struct WasmBackend {}
+
+impl Backend for WasmBackend {
+    const WORD_BITS: usize = 64
+    const OVERFLOW_WRAPS: bool = false
+    const MAX_PAR_LOG2: usize = 20
+    type Word = u64
+    type Buffer<T> = MemPtr<T>
+}

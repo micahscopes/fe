@@ -10,6 +10,7 @@ pub use ops::{
     signextend,
 }
 pub use target::{self, *}
+pub use backend::{self, *}
 pub use intrinsic::{code_region_len, code_region_offset, contract_field_slot}
 pub use mem::{self, *}
 pub use mutex::{self, *}

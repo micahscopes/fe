@@ -1,0 +1,136 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/backend_anti_conflation.fe
+---
+note:
+   ┌─ backend_anti_conflation.fe:27:34
+   │
+27 │ fn takes_arr_256(_ x: [u8; 256]) {}
+   │                                  ^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:28:32
+   │
+28 │ fn takes_arr_64(_ x: [u8; 64]) {}
+   │                                ^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:30:50
+   │
+30 │   fn evm_word_bits(x: [u8; EvmBackend::WORD_BITS]) {
+   │ ╭──────────────────────────────────────────────────^
+31 │ │     takes_arr_256(x)
+32 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:31:5
+   │
+31 │     takes_arr_256(x)
+   │     ^^^^^^^^^^^^^ fn takes_arr_256
+
+note:
+   ┌─ backend_anti_conflation.fe:31:5
+   │
+31 │     takes_arr_256(x)
+   │     ^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:31:19
+   │
+31 │     takes_arr_256(x)
+   │                   ^ [u8; 256]
+
+note:
+   ┌─ backend_anti_conflation.fe:34:52
+   │
+34 │   fn wasm_word_bits(x: [u8; WasmBackend::WORD_BITS]) {
+   │ ╭────────────────────────────────────────────────────^
+35 │ │     takes_arr_64(x)
+36 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:35:5
+   │
+35 │     takes_arr_64(x)
+   │     ^^^^^^^^^^^^ fn takes_arr_64
+
+note:
+   ┌─ backend_anti_conflation.fe:35:5
+   │
+35 │     takes_arr_64(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:35:18
+   │
+35 │     takes_arr_64(x)
+   │                  ^ [u8; 64]
+
+note:
+   ┌─ backend_anti_conflation.fe:40:37
+   │
+40 │ fn takes_storptr(_ x: StorPtr<u32>) {}
+   │                                     ^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:41:35
+   │
+41 │ fn takes_memptr(_ x: MemPtr<u32>) {}
+   │                                   ^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:43:43
+   │
+43 │   fn evm_buffer(x: EvmBackend::Buffer<u32>) {
+   │ ╭───────────────────────────────────────────^
+44 │ │     takes_storptr(x)
+45 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:44:5
+   │
+44 │     takes_storptr(x)
+   │     ^^^^^^^^^^^^^ fn takes_storptr
+
+note:
+   ┌─ backend_anti_conflation.fe:44:5
+   │
+44 │     takes_storptr(x)
+   │     ^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:44:19
+   │
+44 │     takes_storptr(x)
+   │                   ^ StorPtr<u32>
+
+note:
+   ┌─ backend_anti_conflation.fe:47:45
+   │
+47 │   fn wasm_buffer(x: WasmBackend::Buffer<u32>) {
+   │ ╭─────────────────────────────────────────────^
+48 │ │     takes_memptr(x)
+49 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:48:5
+   │
+48 │     takes_memptr(x)
+   │     ^^^^^^^^^^^^ fn takes_memptr
+
+note:
+   ┌─ backend_anti_conflation.fe:48:5
+   │
+48 │     takes_memptr(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_anti_conflation.fe:48:18
+   │
+48 │     takes_memptr(x)
+   │                  ^ MemPtr<u32>

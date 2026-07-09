@@ -1,0 +1,49 @@
+// mb2 A5.1: anti-conflation of the REAL core-ingot `Backend` trait's two `std`
+// impls. Standalone ty_check fixtures link the builtin `core` AND `std` ingots
+// (`new_stand_alone` seeds both), so this exercises the real
+// `core::backend::Backend`, `std::evm::EvmBackend`, and `std::wasm::WasmBackend`
+// -- not test-local traits.
+//
+// The teeth are two-fold, both zero-diagnostic (plus the generated `.snap`
+// note-dump records the two differing normal forms on the projected exprs):
+//
+//  1. CONST facts: `EvmBackend::WORD_BITS` (256) vs `WasmBackend::WORD_BITS`
+//     (64) drive const-array sizes. Each acceptor call type-checks iff the
+//     assoc const resolved to that backend's OWN value; if the two impls were
+//     conflated, one array length would mismatch and the call would fail.
+//
+//  2. GAT projection: `EvmBackend::Buffer<u32>` projects to `StorPtr<u32>` and
+//     `WasmBackend::Buffer<u32>` projects to `MemPtr<u32>` -- distinct nominal
+//     types. The paired acceptor calls type-check iff the two `Buffer<T>`
+//     projections are NOT conflated.
+
+use core::backend::Backend
+use core::{StorPtr, MemPtr}
+use std::evm::EvmBackend
+use std::wasm::WasmBackend
+
+// ---- const facts: WORD_BITS differs (256 vs 64) ----
+
+fn takes_arr_256(_ x: [u8; 256]) {}
+fn takes_arr_64(_ x: [u8; 64]) {}
+
+fn evm_word_bits(x: [u8; EvmBackend::WORD_BITS]) {
+    takes_arr_256(x)
+}
+
+fn wasm_word_bits(x: [u8; WasmBackend::WORD_BITS]) {
+    takes_arr_64(x)
+}
+
+// ---- GAT projection: Buffer<T> differs (StorPtr vs MemPtr) ----
+
+fn takes_storptr(_ x: StorPtr<u32>) {}
+fn takes_memptr(_ x: MemPtr<u32>) {}
+
+fn evm_buffer(x: EvmBackend::Buffer<u32>) {
+    takes_storptr(x)
+}
+
+fn wasm_buffer(x: WasmBackend::Buffer<u32>) {
+    takes_memptr(x)
+}

@@ -710,3 +710,95 @@ exploitable at HEAD" reading: the leaked assumption was inert (its bare
   symmetrically on invalid assumptions, the explicit-vs-merged split is a single
   predicate, and the (explicit/merged) x (ground/symbolic) confluence matrix is
   fully pinned. Ready for A5.1 (the real core-ingot `Backend` trait).
+
+## 2026-07-09 - Slice A5.1: real `Backend` trait in core + two divergent impls in std
+
+The `Backend` boundary becomes REAL (steering-08 Part 2, A5.1): a core-ingot
+trait carrying SHAPES only, two concrete impls in std with genuinely different
+facts, and an anti-conflation fixture that proves the two backends are not
+conflated. Pure additive surface (three new `.fe` ingot files + three
+re-export lines + one test fixture); no compiler/Rust change. `Backend` is
+surface USAGE of the A2/A4 GAT + assoc-const machinery, so no grammar or
+lowering was touched (the soundness guard: if the core-ingot surface were not
+ready this would have stopped; it was ready).
+
+- **The trait (`ingots/core/src/backend.fe`, real Fe syntax as written):**
+  ```
+  pub trait Backend {
+      const WORD_BITS: usize
+      const OVERFLOW_WRAPS: bool
+      const MAX_PAR_LOG2: usize
+      type Word
+      type Buffer<T>
+  }
+  ```
+  `core` carries the shape only; every impl lives downstream (provider-placement
+  rule). Minimal v1: `Word` (kind `*`) + `Buffer<T>` (a GAT, kind `* -> *`),
+  NO bound on `Buffer` (the `: Functor` duality is A7), NO `Ref<T,S>`/address
+  spaces (A5.3), NO capability/effect gating (A6+). Surfaced as `core::Backend`
+  via `pub use backend::Backend` in `core/src/lib.fe` (NOT added to the prelude,
+  to avoid an ingot-wide auto-import).
+  - **Syntax adjustment vs steering-08:** steering-08 wrote the trait inline with
+    `;`-separated members (`const WORD_BITS: usize;`). Real Fe assoc members are
+    newline-delimited with NO trailing `;` and NO single-line brace form (matches
+    `core::contracts::Target`, `core::num::WordValue`). Member names/types/kinds
+    are otherwise exactly as specced. No grammar gap: assoc-const-in-trait and
+    1-ary GAT-in-trait both already parse+lower+kind (A2/A4); the core ingot now
+    exercises them for the first time and stays green.
+
+- **Two divergent impls (facts genuinely differ so anti-conflation is real):**
+  | fact | `EvmBackend` (std/evm/backend.fe) | `WasmBackend` (std/wasm.fe) |
+  |---|---|---|
+  | `WORD_BITS` | `256` | `64` |
+  | `OVERFLOW_WRAPS` | `true` (EVM wraps) | `false` (wasm traps) |
+  | `MAX_PAR_LOG2` | `14` | `20` |
+  | `type Word` | `u256` | `u64` |
+  | `type Buffer<T>` | `StorPtr<T>` | `MemPtr<T>` |
+  `Buffer` bodies reuse EXISTING `core` constructors (no invented runtime type):
+  `StorPtr<T>` (persistent-storage handle) for EVM, `MemPtr<T>` (linear-memory
+  handle) for wasm -- representation-only stand-ins, semantically apt and, being
+  distinct nominal types, cleanly divergent. `Word`/const values follow the
+  steering-08 A5.1 + design-doc §2.2 spec (Wasm = 64/u64/20); the task prompt's
+  illustrative "32/u32" example is superseded by the spec's canonical 64/u64.
+  - **`WasmBackend` placement (justified):** at the `std` ROOT
+    (`ingots/std/src/wasm.fe`), a sibling of `evm/`, NOT under `evm/`, because it
+    is not the EVM target. It is explicitly commented type-level only: no wasm
+    codegen pipeline exists on this branch (wasm EXECUTION is blocked on the
+    Sonatina seam port, not on anything here). It exists so the abstraction is
+    non-degenerate from day one and anti-conflation is observable. `EvmBackend`
+    is co-located with the `EvmTarget`/`EvmIntrinsics` carriers in `evm/`, per
+    the target-family idiom. Surfaced via `pub use backend::{self, *}` in
+    `std/src/evm.fe` and `pub use wasm::{self, *}` in `std/src/lib.fe`.
+
+- **Anti-conflation fixture** `ty_check/backend_anti_conflation.fe` (fe-hir
+  note-dump harness; kept out of any `tree_sitter_parse_strict` dir). Standalone
+  ty_check fixtures link the builtin `core` AND `std` (`new_stand_alone` seeds
+  both), so this exercises the REAL `core::backend::Backend` + real std impls,
+  not test-local traits. Zero-diagnostic teeth (paired acceptor calls) + the
+  `.snap` note-dump record the two differing normal forms:
+  - `EvmBackend::WORD_BITS` drives `[u8; N]` to `[u8; 256]`; `WasmBackend::WORD_BITS`
+    to `[u8; 64]` (const-fact divergence; assoc-const-in-const-array-size, the
+    `trait_assoc_const.fe` pattern, works cross-ingot).
+  - `EvmBackend::Buffer<u32>` projects to `StorPtr<u32>`; `WasmBackend::Buffer<u32>`
+    to `MemPtr<u32>` (GAT-projection divergence, distinct nominal types).
+  A conflation of either impl would fail exactly one paired acceptor call.
+
+- **Proof core+std still build (the key regression surface).** `corelib.rs`
+  `analyze_corelib` + `analyze_stdlib` (and their `_under_release_profile`
+  twins) run the real `module_tree` ingot check: **19/19 green**, so the core
+  ingot (now carrying a GAT+assoc-const trait) and the std ingot (now carrying
+  both impls) both type-check clean.
+
+- **Verify (all foreground, release).** `cargo check --workspace` clean;
+  `corelib` 19/19; fe-hir `ty_check` 110/110 (incl. the new fixture + the
+  type-fn confluence fixtures); `trait_resolution_conformance` 25/25; uitest
+  `ty` + `ty_check` 234/234 (no GAT/type-def/const-predicate fixture regressed).
+  Full release CI is the orchestrator's run.
+
+- **A5.2 unblocked?** YES. A5.2 (the "type is the schedule" confluence keystone)
+  needs exactly what now exists: a REAL core-ingot `Backend` with a projectable
+  `Buffer<T>` GAT and assoc-const facts, reachable from a standalone fixture. The
+  probe A5.2 must still run (whether an assoc-const reference discharges in a
+  concrete `where` const predicate) is separate; this slice already demonstrates
+  the weaker assoc-const-in-const-ARG-position path works cross-ingot, which
+  narrows that probe.

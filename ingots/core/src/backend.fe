@@ -1,0 +1,38 @@
+/// The compile-time interface every code-generation target (EVM, wasm, ...)
+/// presents to backend-generic Fe libraries.
+///
+/// `core` carries the SHAPE only; every concrete impl lives downstream (in `std`
+/// or below), per the provider-placement rule (a generated/downstream impl must
+/// sit below the goal trait's ingot so its absolute path resolves).
+///
+/// This is the minimal v1 cut (mb2 A5.1). It exposes three kinds of fact:
+/// - backend FACTS as associated consts, consumed by the concrete `where`
+///   const-predicate machinery so a library can state its envelope as a
+///   compiler-checked contract;
+/// - a `Word` representation type (kind `*`);
+/// - a single-arity `Buffer<T>` bulk-storage constructor (a generic associated
+///   type, kind `* -> *`), the workhorse every downstream story projects
+///   through.
+///
+/// Deliberately minimal: there is NO bound on `Buffer` yet (the `: Functor`
+/// forwarding/duality bound is a later slice), NO `Ref<T, S>`/address-space
+/// surface yet (also a later slice), and NO capability/effect gating (later
+/// still). Keep it a plain trait.
+pub trait Backend {
+    /// Machine word width in bits (EVM 256, wasm 64, ...).
+    const WORD_BITS: usize
+
+    /// Whether integer arithmetic wraps on overflow (EVM wraps; wasm/native trap).
+    const OVERFLOW_WRAPS: bool
+
+    /// log2 of the parallel-work envelope a `Par` provider may use on this
+    /// target.
+    const MAX_PAR_LOG2: usize
+
+    /// The target's machine-word representation type.
+    type Word
+
+    /// Bulk storage constructor. A generic associated type of kind `* -> *`;
+    /// intentionally unbounded in v1.
+    type Buffer<T>
+}

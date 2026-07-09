@@ -1,0 +1,19 @@
+use core::backend::Backend
+use core::StorPtr
+
+/// The EVM code-generation backend, the one backend with a real in-tree pipeline
+/// behind it.
+///
+/// Co-located with the EVM target carriers (`EvmTarget`/`EvmIntrinsics`): its
+/// facts are EVM-specific (256-bit words, wrapping arithmetic). `Buffer<T>` is a
+/// representation-only stand-in here (`StorPtr<T>`, a persistent-storage handle
+/// from `core`); the real bulk-storage type arrives with the codegen slices.
+pub struct EvmBackend {}
+
+impl Backend for EvmBackend {
+    const WORD_BITS: usize = 256
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 14
+    type Word = u256
+    type Buffer<T> = StorPtr<T>
+}
