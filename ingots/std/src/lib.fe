@@ -3,4 +3,5 @@ pub use eip712
 pub use evm
 pub use wasm::{self, *}
 pub use gpu::{self, *}
+pub use conal
 pub use prelude

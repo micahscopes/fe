@@ -1,0 +1,102 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/conal_par_map.fe
+---
+note:
+   ┌─ conal_par_map.fe:36:1
+   │
+36 │ ╭ {
+37 │ │     let out = buf.par_map<Y, F>(f)
+38 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_par_map.fe:37:9
+   │
+37 │     let out = buf.par_map<Y, F>(f)
+   │         ^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ conal_par_map.fe:37:15
+   │
+37 │     let out = buf.par_map<Y, F>(f)
+   │               ^^^ B::Buffer<X>
+
+note:
+   ┌─ conal_par_map.fe:37:15
+   │
+37 │     let out = buf.par_map<Y, F>(f)
+   │               ^^^^^^^^^^^^^^^^^^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ conal_par_map.fe:37:33
+   │
+37 │     let out = buf.par_map<Y, F>(f)
+   │                                 ^ F
+
+note:
+   ┌─ conal_par_map.fe:45:76
+   │
+45 │       fn call(self, _ t: own Comp<Comp<Comp<Par, Pair>, Pair>, Pair>) -> u64 {
+   │ ╭────────────────────────────────────────────────────────────────────────────^
+46 │ │         todo()
+47 │ │     }
+   │ ╰─────^ u64
+
+note:
+   ┌─ conal_par_map.fe:46:9
+   │
+46 │         todo()
+   │         ^^^^ fn todo
+
+note:
+   ┌─ conal_par_map.fe:46:9
+   │
+46 │         todo()
+   │         ^^^^^^ u64
+
+note:
+   ┌─ conal_par_map.fe:50:38
+   │
+50 │ fn takes_word_buf(_ x: StorPtr<u64>) {}
+   │                                      ^^ ()
+
+note:
+   ┌─ conal_par_map.fe:59:71
+   │
+59 │   fn use_concrete(buf: EvmBackend::Buffer<RBin<Pair, 3>>, f: MapToWord) {
+   │ ╭───────────────────────────────────────────────────────────────────────^
+60 │ │     takes_word_buf(buf.par_map<u64, MapToWord>(f))
+61 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_par_map.fe:60:5
+   │
+60 │     takes_word_buf(buf.par_map<u64, MapToWord>(f))
+   │     ^^^^^^^^^^^^^^ fn takes_word_buf
+
+note:
+   ┌─ conal_par_map.fe:60:5
+   │
+60 │     takes_word_buf(buf.par_map<u64, MapToWord>(f))
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ conal_par_map.fe:60:20
+   │
+60 │     takes_word_buf(buf.par_map<u64, MapToWord>(f))
+   │                    ^^^ StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ conal_par_map.fe:60:20
+   │
+60 │     takes_word_buf(buf.par_map<u64, MapToWord>(f))
+   │                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ StorPtr<u64>
+
+note:
+   ┌─ conal_par_map.fe:60:48
+   │
+60 │     takes_word_buf(buf.par_map<u64, MapToWord>(f))
+   │                                                ^ MapToWord

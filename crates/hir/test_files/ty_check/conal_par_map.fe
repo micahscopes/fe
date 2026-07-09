@@ -1,0 +1,61 @@
+// mb2 A9.1 HEADLINE: the Conal parallel-map library over the REAL multi-backend
+// `Backend`. A standalone ty_check fixture (`new_stand_alone` seeds the builtin
+// `core` AND `std`), so this exercises the real `std::conal` library and the real
+// `std::evm::EvmBackend`, not test-local traits. Every leg is zero-diagnostic; the
+// note-dump `.snap` records the observed normal forms.
+//
+// The schedule builder `RBin` is written fixture-locally because `recursive type
+// fn` is hand-parser-only (not in the tree-sitter ingot grammar); it composes the
+// library's `Comp`/`Par`/`Pair` combinator vocabulary. "The type is the schedule":
+// the buffer's element is instantiated at a schedule shape.
+//
+//   RBin<T, 0> = Par
+//   RBin<T, N> = Comp<RBin<T, N-1>, T>
+// so RBin<Pair, 3> = Comp<Comp<Comp<Par, Pair>, Pair>, Pair>.
+
+use core::Fn
+use core::Backend
+use core::StorPtr
+use std::conal::{Functor, Par, Pair, Comp}
+use std::evm::EvmBackend
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+// ---- (1) backend-generic consumer: the A7.2 applied-form Functor route ----
+// `B` is symbolic, so `B::Buffer<X>` is an opaque projection; the bound
+// `where B::Buffer<X>: Functor<X>` holds as an assumption and `par_map` dispatches
+// through it. The note-dump records `out` as `B::Buffer<X>::Out<Y>` (the
+// element-changed result projected through the assumed Functor bound).
+fn par_map_generic<B: Backend, X, Y, F: Fn<X, Y>>(buf: B::Buffer<X>, _ f: F)
+    where B::Buffer<X>: Functor<X>
+{
+    let out = buf.par_map<Y, F>(f)
+}
+
+// ---- (2) concrete instantiation: EvmBackend + the schedule RBin<Pair, 3> ----
+// `MapToWord` consumes a schedule-shaped token (the ground NF of `RBin<Pair, 3>`)
+// and produces a `u64` leaf.
+struct MapToWord {}
+impl Fn<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, u64> for MapToWord {
+    fn call(self, _ t: own Comp<Comp<Comp<Par, Pair>, Pair>, Pair>) -> u64 {
+        todo()
+    }
+}
+
+fn takes_word_buf(_ x: StorPtr<u64>) {}
+
+// `buf: EvmBackend::Buffer<RBin<Pair, 3>>` projects through the real impl
+// (`type Buffer<T> = StorPtr<T>`) AND unfolds the schedule type fn, so it
+// normalizes to `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>` (the schedule
+// NF in the buffer element). `par_map` maps that shaped element to `u64`; the
+// bound `StorPtr<NF>: Functor<NF>` discharges via the library instance, and the
+// result `<StorPtr<NF> as Functor<NF>>::Out<u64>` is `StorPtr<u64>` (pinned by
+// `takes_word_buf`).
+fn use_concrete(buf: EvmBackend::Buffer<RBin<Pair, 3>>, f: MapToWord) {
+    takes_word_buf(buf.par_map<u64, MapToWord>(f))
+}

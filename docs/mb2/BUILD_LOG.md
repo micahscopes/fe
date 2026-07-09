@@ -1508,3 +1508,126 @@ assumption today:
   Functor` for free from `B: Backend`, discharged concretely per impl. A7.3
   (guarded-universal symbolic consumption, needs conditional-assumption plumbing
   in the forest) remains deferred and named; nothing in A9 requires it.
+
+## 2026-07-09 - Slice A9.1: minimal Conal parallel library (Functor + par_map)
+
+The HEADLINE deliverable's first minimal slice: a real, demonstrable Conal
+parallel library over the multi-backend `Backend`, built ON the A7.2 applied-form
+route. ONE typeclass + ONE generic algorithm + one demonstrated instantiation.
+PURE INGOT + fixture; ZERO Rust/compiler change (the spike proved the machinery
+holds on the built substrate). Fable-steered (steer of 2026-07-09).
+
+- **SPIKE FIRST (the steering gate): the assoc-type-carrying Functor bound
+  DISCHARGES.** Before building, a self-contained probe confirmed all four
+  unknowns of an element-changing `*`-kinded functor `Functor<X> { type Out<Y>;
+  fn map<Y, F: Fn<X,Y>>(self, f) -> Self::Out<Y> }`:
+  - (a) `where B::Buffer<X>: Functor<X>` HOLDS as an assumption (A7.2 route),
+  - (b) `.map`/`.par_map` RESOLVE on the OPAQUE `B::Buffer<X>` via that bound,
+  - (c) the projection `Self::Out<Y>` COMPUTES for the symbolic receiver: the
+    generic call records `out : B::Buffer<X>::Out<Y>` (threaded with `<Y>`),
+  - (d) end to end at `EvmB` + `RBin<Pair, 3>`: the schedule NF appears in the
+    buffer type and the Functor discharges over it.
+  Outcome: PROCEED (no Fable/spike pass needed). No new type-system machinery.
+- **ONE SURFACE-SYNTAX LIMITATION found + characterized (NOT a discharge gap,
+  NOT patched).** Naming the element-changed projection in a free-function RETURN
+  position fails two ways: the qualified path `<B::Buffer<X> as Functor<X>>::
+  Out<Y>` DROPS the final-segment GAT arg `<Y>` (lowers to the bare `* -> *`
+  head, `3-0000` kind error), and the chained `B::Buffer<X>::Out<Y>` cannot
+  resolve `Out` through the projection (`2-0002`). The projection itself is
+  sound and computes (proven by the note-dump); only the free-fn SIGNATURE
+  spelling is blocked. WORKAROUND (no compiler change): the algorithm is a trait
+  DEFAULT METHOD returning `Self::Out<Y>` (the Self-projection lowers correctly,
+  same as `trait_projection.fe`'s `Self::Item`), and the backend-generic use
+  observes the result via note-dump rather than a return annotation. The
+  qualified-path final-segment GAT-arg threading is a delicate `path_resolver`/
+  `ty_lower` fix filed as an A9.x candidate, deliberately NOT undertaken here
+  (guardrail: no new type-system machinery in an A9 fixture slice).
+- **The library (`ingots/std/src/conal.fe`, NEW, real Fe as written):**
+  ```
+  pub struct Par {}
+  pub struct Pair {}
+  pub struct Comp<A, B> {}
+
+  pub trait Functor<X> {
+      type Out<Y>
+      fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> Self::Out<Y>
+      fn par_map<Y, F: Fn<X, Y>>(self, _ f: F) -> Self::Out<Y> {
+          self.map<Y, F>(f)
+      }
+  }
+
+  impl<X> Functor<X> for StorPtr<X> {
+      type Out<Y> = StorPtr<Y>
+      fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> StorPtr<Y> { todo() }
+  }
+  ```
+  `Functor<X>` is `*`-kinded and APPLIED-FORM (bound on the container `Buf<X>`,
+  not the `* -> *` constructor) by NECESSITY: the built substrate leaves a bare
+  GAT head opaque (A3), so the HKT `core::functional::Functor` (`Self: * -> *`)
+  does NOT resolve for an abstract backend; the applied-form is exactly what A7.2
+  discharges. `par_map` is the ONE algorithm, a default method dispatching
+  through `map` (the design's trivially-parallel warm-up map kernel; parallelism
+  is the `Par` provider's B2 concern, so at the type level it forwards to `map`).
+  Reuses `core::Fn` and `core::StorPtr`; combinators `Par`/`Pair`/`Comp` are the
+  schedule vocabulary. Surfaced as `std::conal` via module-only `pub use conal`
+  in `std/src/lib.fe` (NOT globbed, so the name `Functor` does not collide with
+  core's glob-exported HKT `Functor`; not in any prelude).
+- **DESIGN-vs-REALITY reconciliation (the load-bearing item, resolved, no fork).**
+  Design doc sec 2.2/5.2 centers on the HKT `* -> *` Functor and runs the
+  algorithm over a schedule TRIE `LBin<N><Elem>`. The BUILT substrate uses the
+  schedule as the `*`-kinded ELEMENT of `Buffer` (`Buffer<RBin<Pair,N>>` ->
+  `StorPtr<Comp<...>>`, the A5.2 keystone shape) and discharges the APPLIED-form
+  bound. This slice follows the built substrate: `Functor` is applied-form, the
+  schedule is the buffer's element type ("the type is the schedule" as A5.2
+  realized it), and `map` changes that element to a leaf value. The structure-
+  carrying reading (`Par`/`Comp` themselves `Functor`, a real `scan` needing S2.3
+  goal-set induction) is a later slice. Reported at escalation; steer ratified
+  the applied-form element-changing `Functor<X>` with `Out<Y>`.
+- **The headline fixture** `crates/hir/test_files/ty_check/conal_par_map.fe`
+  (+`.snap`, note-dump harness; standalone, links the REAL `core` + `std`, out of
+  any `tree_sitter_parse_strict` dir). `RBin` (the `recursive type fn` schedule
+  builder) stays fixture-local (hand-parser-only; the tree-sitter ingot grammar
+  does not carry `recursive type fn`, so it cannot live in the ingot), composing
+  the library's `Comp`/`Par`/`Pair`. Two zero-diagnostic legs, snapshot reviewed:
+  1. **Backend-generic (A7.2 route).** `par_map_generic<B: Backend, X, Y, F>`
+     carrying `where B::Buffer<X>: Functor<X>` calls `buf.par_map<Y, F>(f)`; the
+     note-dump records `out : B::Buffer<X>::Out<Y>` (the element-changed result
+     projected through the ASSUMED bound over a symbolic backend).
+  2. **Concrete instantiation.** `buf: EvmBackend::Buffer<RBin<Pair, 3>>`
+     normalizes to **`StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`** (project
+     through the real impl + unfold the schedule type fn), and
+     `buf.par_map<u64, MapToWord>(f)` is **`StorPtr<u64>`** (the mapped result
+     type; `<StorPtr<NF> as Functor<NF>>::Out<u64>`), pinned by the `takes_word_buf`
+     acceptor. The schedule NF flows through the buffer element and the Functor
+     discharges over it: "the type is the schedule" realized in a USABLE library,
+     not just a fixture.
+- **EXECUTION DEFERRED to A9.2 (per the steer's "do not force it").** `map`'s
+  body is a type-level stub (`todo()`): a real executable par_map on EVM needs a
+  genuine buffer/element model with per-element load/apply/store over storage
+  (the A5 `Buffer` is an explicit representation-only stand-in, no element
+  iteration exists yet) plus the B1 storage-effect plumbing and a `fe test`
+  contract. That is more than a minimal first slice, so it is the next A9 slice,
+  not forced here. The B1 `atomic_rmw` revm pattern is the model to follow.
+- **Verify (all foreground/targeted; orchestrator owns full release CI).**
+  `cargo check --workspace` clean (no Rust changed). `corelib` ALONE 19/19
+  (`analyze_corelib`/`analyze_stdlib` + release twins -> core+std build with the
+  new `conal` module). fe-hir `ty_check` 123/123 (the new `conal_par_map` fixture
+  + ALL pre-existing BYTE-IDENTICAL under enforced snapshots, incl. every
+  keystone/A7/backend fixture: `backend_schedule_confluence`, `gat_typefn_
+  confluence`, `gat_default_typefn_confluence`, `backend_storage_class`,
+  `backend_anti_conflation`, `hkt_backend_trait`, `backend_atomic`). fe-hir
+  `trait_resolution_conformance` 25/25. `tree_sitter_parse_strict` green (conal.fe
+  parses: GAT `type Out<Y>`, default trait method, `Comp<A,B>` all covered by the
+  A5.1b grammar; NO grammar change). `parser.c` untracked/gitignored, not
+  committed. The `analysis::ty::type_fn` unit module was NOT re-run (zero Rust
+  change cannot regress it; the type-fn-through-ty_check fixtures are covered by
+  the 123/123 byte-identical run).
+- **A9.1 READY. NEXT: A9.2** options, each its own slice: (1) the EXECUTED
+  instance (a `fe test` contract that `par_map`s over EVM storage, real `map`
+  body via the B1 storage-effect idiom); (2) bound the REAL `core::Backend` with
+  `type Buffer<T>: Functor` (the A7.2-stated unlock, forces `StorPtr`/`MemPtr`/
+  `GpuRef` Functor impls, keep `corelib` green); (3) the structure-carrying Conal
+  reading (`Par`/`Comp` as `Functor`) and a real `scan` (needs S2.3 goal-set
+  induction); (4) the qualified-path final-segment GAT-arg lowering fix (so a
+  free-fn `par_map` can NAME `<B::Buffer<X> as Functor<X>>::Out<Y>` in its
+  return). None is required by A9.1; all grow the library.
