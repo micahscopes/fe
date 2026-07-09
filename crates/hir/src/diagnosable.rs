@@ -1329,6 +1329,21 @@ impl<'db> ImplTrait<'db> {
         let assumptions = param_env(db, self.into());
         let solve_cx = ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db);
 
+        // FIX 2 (mb2-a5.0 / steering-08): mirror `strict_prove`'s assumptions-side
+        // pre-flight. If the impl's own assumptions carry an `Invalid` (e.g. a
+        // typo'd where-clause, already diagnosed elsewhere), `strict_prove`
+        // declines on EVERY goal below (`Invalid` unifies with everything), which
+        // would spray a spurious `TraitBoundNotSat` for every GAT bound in this
+        // impl. Suppress the bound diagnostics in that case, symmetric to the
+        // existing goal-side `has_invalid` guard (this is the assumptions half of
+        // the same pre-flight). `HAS_VAR` is deliberately NOT checked: it cannot
+        // legitimately occur here and should stay loud if it ever does.
+        if crate::analysis::ty::visitor::collect_flags(db, assumptions)
+            .contains(crate::analysis::ty::ty_def::TyFlags::HAS_INVALID)
+        {
+            return diags;
+        }
+
         for assoc in implementor.assoc_type_views(db) {
             let Some(name) = assoc.name(db) else { continue };
 
@@ -1347,11 +1362,19 @@ impl<'db> ImplTrait<'db> {
             // target owner + param binders. May be absent if the binding came
             // from a merged trait default (A4.3 forward-compat); in v1 arity>0
             // defaults are guarded out so this is present for every GAT.
+            //
+            // FIX 3 (mb2-a5.0 / steering-08): key the explicit-vs-merged split on
+            // the SAME condition the merge used. `assoc_type_bindings_for_trait_inst`
+            // treats an impl assoc as explicitly bound iff `v.name(db).zip(v.ty(db))`
+            // is `Some`, i.e. iff `ImplAssocTypeView::ty(db).is_some()`. A
+            // parse-broken def has a name but no ty; it must route to the
+            // merged-default (None) leg, not be taken for an explicit binding whose
+            // owner-remap against a trait-side-rigid subject would fail spuriously.
             let def_lookup = self
-                .types(db)
-                .iter()
+                .assoc_types(db)
                 .enumerate()
-                .find(|(_, d)| d.name.to_opt() == Some(name));
+                .find(|(_, v)| v.name(db) == Some(name) && v.ty(db).is_some())
+                .map(|(def_idx, _)| (def_idx, &self.types(db)[def_idx]));
 
             for bound_inst in assoc.bounds(db) {
                 let mut folder = TraitScopeSubstFolder {

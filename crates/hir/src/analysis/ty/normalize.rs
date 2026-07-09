@@ -48,8 +48,13 @@ pub fn normalize_ty<'db>(
 /// structure. On exhaustion projection degrades to the OPAQUE canonical form (the
 /// same "leave unresolved" degrade the cycle guard uses). Constant and tunable;
 /// deliberately NOT part of any salsa memo key (`TypeNormalizer` is a plain
-/// folder, so this counter cannot poison a memo). Shared across the bare and
-/// applied projection routes, covering the bare-route growth cousin for free.
+/// folder, so this counter cannot poison a memo). Charged on the APPLIED
+/// projection route ONLY (see the measured deviation note at the applied
+/// projection site below); the BARE route keeps its pre-A3 in-progress
+/// cycle-marker discipline, so a breadth-heavy pass that legitimately resolves
+/// many DISTINCT bare associated types is not throttled by this depth-oriented
+/// counter. The unverified bare-route growth cousin, if it ever surfaces, needs
+/// a depth-scoped guard rather than this breadth counter.
 const PROJECTION_STEP_BUDGET: usize = 256;
 
 pub struct TypeNormalizer<'db> {
@@ -62,7 +67,8 @@ pub struct TypeNormalizer<'db> {
     // `AssocTy` head keys on its own node. Interning preserves the sharing the
     // old `AssocTy`-struct key gave.
     cache: FxHashMap<TyId<'db>, Option<TyId<'db>>>,
-    // Shared projection step counter for G3 (see `PROJECTION_STEP_BUDGET`).
+    // Applied-route projection step counter for G3 (see `PROJECTION_STEP_BUDGET`;
+    // charged on the applied projection only, not the bare route).
     projection_steps: usize,
 }
 

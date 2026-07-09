@@ -1,0 +1,62 @@
+// mb2-a5.0 (steering-08 FIX 4): the last untested cell of the
+// (explicit / merged) x (ground / symbolic type-fn) matrix -- MERGED DEFAULT
+// composed with a TYPE-FN. This closes the pairing that `gat_default_merge`
+// (merged default x concrete arg) and `gat_typefn_confluence` (explicit
+// binding x type-fn) left open: a trait-side GAT default is merged into an
+// impl that OMITS the binding (`instantiate_scoped`, A4.3), then the
+// projection resolves THROUGH the inherited default WHILE a recursive type fn
+// unfolds, confluently (project-through-merged-default then unfold == the
+// direct normal form; steering-05 sec 6b).
+//
+// The teeth are the use sites: `db.assert_no_diags` plus a zero-diagnostic
+// type-check means the inherited default actually PROJECTED and the type-fn
+// actually UNFOLDED to the hand-written normal form (a three-way interned-id
+// equality, expressed as definitional equality at the call boundary).
+
+struct Par {}
+struct Pair {}
+struct Comp<A, B> {
+    a: A,
+    b: B,
+}
+
+struct Store<T> {
+    t: T,
+}
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+struct Evm {}
+
+trait Backend {
+    // Plain merged default; the type-fn arrives as a GROUND projection arg.
+    type Cell<T> = Store<T>
+    // Merged default whose RHS body is itself a type-fn application over the
+    // rigid GAT param (symbolic-in-body); projecting substitutes the concrete
+    // arg and unfolds the recursive type fn through the inherited default.
+    type Buffer<T> = Store<RBin<T, 3>>
+}
+
+// Omits both bindings -> inherits both defaults.
+impl Backend for Evm {}
+
+// Merged default x GROUND type-fn arg: `Evm::Cell<RBin<Pair, 2>>` inherits
+// `Store<T>` at `T = RBin<Pair, 2>` and unfolds the arg to
+// `Store<Comp<Comp<Par, Pair>, Pair>>`.
+fn takes_cell_nf(_ x: Store<Comp<Comp<Par, Pair>, Pair>>) {}
+fn merged_ground_typefn(x: Evm::Cell<RBin<Pair, 2>>) {
+    takes_cell_nf(x)
+}
+
+// Merged default x SYMBOLIC type-fn body: `Evm::Buffer<Pair>` inherits
+// `Store<RBin<T, 3>>` at `T = Pair` and unfolds to
+// `Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`.
+fn takes_buffer_nf(_ x: Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+fn merged_symbolic_typefn(x: Evm::Buffer<Pair>) {
+    takes_buffer_nf(x)
+}

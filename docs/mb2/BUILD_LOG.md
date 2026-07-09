@@ -618,3 +618,95 @@ is now a complete conformance-and-discharge core.
   merged capture-proof and re-checked per impl. Every A4 substitution is
   owner-exact (`instantiate_scoped` / `TraitScopeSubstFolder` / `GatOwnerRemap`);
   no unscoped `Binder::instantiate` remains on the assoc-def-owned param path.
+
+## 2026-07-09 - Slice A5.0: A4 fix pack (entry gate for A5)
+
+The A5 entry gate (steering-08 Part 1 FIX list). One commit, four fixes; FIX 1
+is the soundness item (restores an A4.2 premise before A5 stacks a consumer leg
+on it), FIX 2-4 are hygiene/parity/doc. No behavior change on the current
+corpus: `cargo check --workspace` clean and every pre-existing snapshot stayed
+byte-identical (uitest `ty` 123/123, fe-hir `ty_check` gat fixtures, `param_env`
+7/7, `constraints` 14/14 incl. `deep_assoc_bounds`, `trait_resolution_conformance`
+25/25, `type_fn` 68/68), which independently confirms steering-08's "not
+exploitable at HEAD" reading: the leaked assumption was inert (its bare
+`* -> *` subject head could never meet a discharge goal's `TyApp`/ADT head).
+
+- **FIX 1 (REQUIRED, soundness) - stop leaking assoc-def-owned rigids into
+  `param_env`.** `PredicateListId::extend_all_bounds` step 2
+  (`trait_resolution/mod.rs`) derived a bare-head assumption `Self::AssocType:
+  Bound` for EVERY bounded assoc-type decl, GATs included. For a GAT the subject
+  is the BARE `* -> *` head and the bound arg is the `TraitType`-owned GAT rigid;
+  `lower_trait_ref` never kind-checks the Self slot, so the ill-kinded predicate
+  entered the assumption set, mentioning the assoc-def-owned rigid and violating
+  the A4.2 lifting-lemma premise "no assumption in `param_env` mentions the
+  rigid". FIX: skip decls with `trait_type.generic_params(db).data(db).len() > 0`
+  (arity read from the SAME authority A4.1/A4.2 use). Arity-0 derivation is
+  input-disjoint, so the baseline is byte-identical. The correctly-kinded
+  revival (APPLIED subject `Self::AssocType<rigid..>` + a solver
+  instantiate-on-match rule) is deferred to the A7 "GAT bound duality" consumer
+  leg; the skip comment names it.
+  - **Pin test** `gat_bound_no_assoc_owned_param_in_param_env` (`ty_lower.rs`):
+    the recursive `impl<B> Backend for Wrap<B> where B: Backend` shape (trait has
+    bounded GAT `type Elem<T>: Producer<T>`) -- a `TyVisitor` over the impl's
+    `param_env` asserts NO `is_assoc_ty_param` rigid (owner class
+    `TraitType`/`ImplTraitType`) appears in any predicate. TEETH CONFIRMED: with
+    the arity>0 skip temporarily disabled the env is `{B: Backend, B::Elem:
+    Producer<T>}` and the test fails; with the skip it is `{B: Backend}` and it
+    passes. This is exactly the shape where the leaked rigid was the identical
+    interned param used in the A4.3 merged-default discharge goal.
+- **FIX 2 (parity) - assumptions-side `HAS_INVALID` suppression.** In
+  `ImplTrait::diags_assoc_types_bounds` (`diagnosable.rs`), `strict_prove`'s
+  pre-flight declines on `HAS_INVALID` over the WHOLE canonical query (goal PLUS
+  assumptions), but the method only guarded the GOAL side. So an unrelated
+  invalid where-clause (already diagnosed elsewhere) made `strict_prove` decline
+  on every GAT bound and sprayed spurious `TraitBoundNotSat`. Added the
+  assumptions half: if `collect_flags(db, assumptions)` has `HAS_INVALID`, return
+  no bound diagnostics (symmetric to the existing goal-side `has_invalid` guard).
+  `HAS_VAR` is deliberately left loud (it cannot legitimately occur here).
+- **FIX 3 (seam) - `def_lookup` provenance alignment.** The explicit-vs-merged
+  split in `diags_assoc_types_bounds` keyed on HIR-name presence while the merge
+  (`assoc_type_bindings_for_trait_inst`) keys on `v.name(db).zip(v.ty(db))`, i.e.
+  `ImplAssocTypeView::ty(db).is_some()`. A parse-broken def (name present, `ty`
+  None) took the explicit remap leg against a trait-side-rigid subject (spurious
+  strict failure) instead of the merged-default leg. Re-keyed `def_lookup` to
+  `find(|(_, v)| v.name(db) == Some(name) && v.ty(db).is_some())` so the remap
+  leg and the merge can never disagree.
+- **FIX 4 (doc + fixture).** Corrected the stale `PROJECTION_STEP_BUDGET` doc
+  comment (`normalize.rs`): it claimed the G3 counter is "shared across the bare
+  and applied projection routes", but the code (and the documented A3 deviation)
+  charges it on the APPLIED route only; the bare route keeps its in-progress
+  cycle-marker discipline. Comment-only, no behavior change. Also added the last
+  untested matrix cell (merged-default x type-fn) as a fixture:
+  - `ty_check/gat_default_typefn_confluence.fe` (fe-hir, zero-diagnostic).
+    `impl Backend for Evm` OMITS both GATs, inheriting two trait defaults; the
+    teeth are two use sites whose accepted call arg (definitional equality =
+    three-way interned-id) pins the projection+unfold confluence THROUGH the
+    merged default: (a) plain default `type Cell<T> = Store<T>` projected over a
+    GROUND type-fn arg -- `Evm::Cell<RBin<Pair, 2>>` normalizes to
+    `Store<Comp<Comp<Par, Pair>, Pair>>`; (b) default whose RHS body is itself a
+    type-fn application over the rigid GAT param -- `type Buffer<T> =
+    Store<RBin<T, 3>>`, `Evm::Buffer<Pair>` normalizes to
+    `Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`. Placed as a sibling of
+    `gat_typefn_confluence`/`gat_default_merge` in `test_files/ty_check` (not
+    `uitest/ty/def`, which is diagnostics-only) because asserting confluence
+    needs the body-type-check note-dump harness; kept out of any
+    `tree_sitter_parse_strict` dir per the standing constraint.
+- **N4 A5-entry sanity grep (the check the A4.3 log promised).** Confirmed
+  MIR/codegen never reads an implementor's `types` binding map for layout: the
+  only implementor reads in `crates/mir`/`crates/codegen` are the
+  identity/discriminator hashes in `mir/runtime/stable_key.rs`
+  (`selected_implementor_discriminator` -> `implementor_discriminator_identity`).
+  Projection substitutes before layout ever sees a binding; the invariant holds.
+- **Verify.** `cargo check --workspace` clean; new pin test + new confluence
+  fixture green; A4.2 `gat_bound_*` + A4.3 `gat_default_*` fixtures still green
+  (uitest `ty` 123/123, all byte-identical); fe-hir `type_fn` 68/68,
+  `trait_resolution_conformance` 25/25, `param_env` 7/7, `constraints` 14/14,
+  `def_analysis`, `ty_check` gat fixtures 10/10. No snapshot regenerated: FIX 1
+  changed no observable diagnostic (leaked assumption inert), FIX 2/3 fire only
+  on already-red / parse-broken code the corpus does not exercise. Full release
+  CI is the orchestrator's run.
+- **A4-HARDENED.** The A4.2 lifting-lemma premise is now true in letter (no
+  assoc-def-owned rigid in any `param_env`), the strict-discharge legs decline
+  symmetrically on invalid assumptions, the explicit-vs-merged split is a single
+  predicate, and the (explicit/merged) x (ground/symbolic) confluence matrix is
+  fully pinned. Ready for A5.1 (the real core-ingot `Backend` trait).

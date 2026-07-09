@@ -1,0 +1,70 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/gat_default_typefn_confluence.fe
+---
+note:
+   ┌─ gat_default_typefn_confluence.fe:51:59
+   │
+51 │ fn takes_cell_nf(_ x: Store<Comp<Comp<Par, Pair>, Pair>>) {}
+   │                                                           ^^ ()
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:52:54
+   │
+52 │   fn merged_ground_typefn(x: Evm::Cell<RBin<Pair, 2>>) {
+   │ ╭──────────────────────────────────────────────────────^
+53 │ │     takes_cell_nf(x)
+54 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:53:5
+   │
+53 │     takes_cell_nf(x)
+   │     ^^^^^^^^^^^^^ fn takes_cell_nf
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:53:5
+   │
+53 │     takes_cell_nf(x)
+   │     ^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:53:19
+   │
+53 │     takes_cell_nf(x)
+   │                   ^ Store<Comp<Comp<Par, Pair>, Pair>>
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:59:73
+   │
+59 │ fn takes_buffer_nf(_ x: Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+   │                                                                         ^^ ()
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:60:49
+   │
+60 │   fn merged_symbolic_typefn(x: Evm::Buffer<Pair>) {
+   │ ╭─────────────────────────────────────────────────^
+61 │ │     takes_buffer_nf(x)
+62 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:61:5
+   │
+61 │     takes_buffer_nf(x)
+   │     ^^^^^^^^^^^^^^^ fn takes_buffer_nf
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:61:5
+   │
+61 │     takes_buffer_nf(x)
+   │     ^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_default_typefn_confluence.fe:61:21
+   │
+61 │     takes_buffer_nf(x)
+   │                     ^ Store<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>

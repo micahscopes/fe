@@ -1233,6 +1233,24 @@ impl<'db> PredicateListId<'db> {
                     continue;
                 };
 
+                // FIX 1 (mb2-a5.0 / steering-08): SKIP bounded GATs (arity > 0).
+                // Deriving a bare-head assumption `Self::AssocType: Bound` for a
+                // GAT uses the `* -> *` BARE head as the subject and (because
+                // `lower_trait_ref` never kind-checks the Self slot) splices the
+                // `TraitType`-owned GAT rigid from the bound arg into the
+                // assumption set. That leaks an assoc-def-owned rigid into
+                // `param_env`, violating the A4.2 lifting-lemma premise that no
+                // assumption mentions such a rigid. The correctly-kinded revival
+                // (APPLIED subject `Self::AssocType<rigid..>` saturated with the
+                // decl's own rigids + a solver instantiation-on-match rule) is the
+                // A7 "GAT bound duality" consumer leg (steering-08 Part 2 point 4,
+                // leg 3). Arity determined via the same authority A4.1/A4.2 read
+                // (the decl's `generic_params`); arity-0 derivation is unchanged
+                // (input-disjoint), so the baseline is byte-identical.
+                if trait_type.generic_params(db).data(db).len() > 0 {
+                    continue;
+                }
+
                 // Create the associated type: Self::AssocType
                 let assoc_ty = TyId::assoc_ty(db, pred, assoc_ty_name);
 

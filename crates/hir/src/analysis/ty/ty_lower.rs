@@ -2061,6 +2061,89 @@ impl Backend for Evm {}
         let _ = db.run_on_top_mod(top_mod);
     }
 
+    // mb2-a5.0 (steering-08 FIX 1): PIN the A4.2 lifting-lemma premise "no
+    // assumption in `param_env` mentions an assoc-def-owned rigid". Before the
+    // fix, `PredicateListId::extend_all_bounds` step 2 derived a bare-head
+    // assumption for EVERY bounded assoc type INCLUDING GATs (arity > 0),
+    // splicing the `TraitType`-owned GAT rigid (from the bound arg) into the
+    // assumption set. With the arity>0 skip, a bounded GAT contributes NO
+    // assumption, so no `is_assoc_ty_param` rigid (owner class
+    // `TraitType`/`ImplTraitType`) appears anywhere in the impl's `param_env`.
+    // This is the recursive `impl<B: Backend> Backend for Wrap<B>` shape where
+    // the leaked rigid was the identical interned param used in the
+    // merged-default discharge goal. (The correctly-kinded revival is the A7
+    // consumer leg; see the skip comment in `extend_all_bounds`.)
+    #[test]
+    fn gat_bound_no_assoc_owned_param_in_param_env() {
+        use crate::analysis::ty::visitor::{TyVisitable, TyVisitor};
+        use crate::semantic::param_env;
+
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "gat_bound_param_env.fe".into(),
+            r#"
+trait Producer<T> {}
+struct Store<T> {}
+impl<U> Producer<U> for Store<U> {}
+struct Wrap<B> {}
+trait Backend {
+    type Elem<T>: Producer<T>
+}
+impl<B> Backend for Wrap<B> where B: Backend {
+    type Elem<T> = Store<T>
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        // Select the `impl Backend for Wrap<B>` (the one defining `Elem`), not
+        // the blanket `impl<U> Producer<U> for Store<U>` that `find_impl_trait`
+        // would return first.
+        let impl_trait = top_mod
+            .all_impl_traits(&db)
+            .iter()
+            .copied()
+            .find(|imp| {
+                imp.assoc_types(&db)
+                    .any(|v| v.name(&db).is_some_and(|n| n.data(&db) == "Elem"))
+            })
+            .expect("missing `impl Backend for Wrap<B>`");
+
+        // The impl's own assumption environment. Its where-clause `B: Backend`
+        // is the predicate whose bounded GAT `Elem<T>: Producer<T>` triggered
+        // `extend_all_bounds` step 2 (and, pre-fix, the leak).
+        let env = param_env(&db, impl_trait.into());
+
+        // Scan every predicate arg (recursively) for an assoc-def-owned rigid.
+        struct AssocOwnedParamScan<'db> {
+            db: &'db dyn HirAnalysisDb,
+            found: bool,
+        }
+        impl<'db> TyVisitor<'db> for AssocOwnedParamScan<'db> {
+            fn db(&self) -> &'db dyn HirAnalysisDb {
+                self.db
+            }
+            fn visit_param(&mut self, ty_param: &TyParam<'db>) {
+                if ty_param.is_assoc_ty_param() {
+                    self.found = true;
+                }
+            }
+        }
+
+        let mut scan = AssocOwnedParamScan {
+            db: &db,
+            found: false,
+        };
+        env.visit_with(&mut scan);
+
+        assert!(
+            !scan.found,
+            "param_env leaked an assoc-def-owned rigid (A4.2 lifting-lemma \
+             premise violated); `extend_all_bounds` must skip arity>0 assoc-type \
+             decls. Offending env: {}",
+            env.pretty_print(&db)
+        );
+    }
+
     fn find_func<'db>(
         db: &'db HirAnalysisTestDb,
         top_mod: TopLevelMod<'db>,
