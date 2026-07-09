@@ -1,0 +1,25 @@
+// mb2-a4.3: a BOUNDED GAT default is merged into an impl that omits the
+// binding, and its trait-side bound is RE-DISCHARGED per-impl (strictly, under
+// the impl's own param_env). The trait declares `type Elem<T>: Producer<T> =
+// Store<T>`; the blanket `impl<U> Producer<U> for Store<U>` satisfies the bound
+// for all rigid `T`, so both the trait-site advisory check AND the per-impl
+// merged-default discharge pass. Zero diagnostics.
+//
+// The merged default's subject and bound arg are BOTH trait-side-owned
+// (`instantiate_scoped` left the GAT param rigid as `TraitType`-owned), so the
+// A4.2 owner-remap is SKIPPED and the already-consistent goal is strict-proved.
+
+trait Producer<T> {}
+
+struct Store<T> {}
+
+impl<U> Producer<U> for Store<U> {}
+
+struct Evm {}
+
+trait Backend {
+    type Elem<T>: Producer<T> = Store<T>
+}
+
+// Omits `Elem` -> inherits the bounded default `Store<T>`.
+impl Backend for Evm {}

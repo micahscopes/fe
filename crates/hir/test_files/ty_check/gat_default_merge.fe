@@ -1,0 +1,61 @@
+// A4.3: a trait-side GAT DEFAULT is merged into an impl that OMITS the binding,
+// via `instantiate_scoped` (capture-proof: the default's own binder params stay
+// RIGID, and then project exactly like an explicit binding). An impl that
+// OVERRIDES a defaulted GAT wins (override, no double-merge). Exercises both
+// capture shapes: arity 1 (the S2 Self-capture shape) and arity 2 (the
+// unscoped-index-panic shape).
+//
+// The teeth are the use sites: a zero-diagnostic type-check means the inherited
+// default actually projected (`Evm::Buffer<u32>` -> `Store<u32>`), not stayed
+// opaque, and did not capture `Self` (`Store<Evm>`) or ICE.
+
+struct Store<T> {
+    t: T,
+}
+
+struct Pair<A, B> {
+    a: A,
+    b: B,
+}
+
+struct Evm {}
+struct Native {}
+
+trait Backend {
+    type Buffer<T> = Store<T>
+    type Cell<T, U> = Pair<T, U>
+}
+
+// Omits both bindings -> inherits both defaults.
+impl Backend for Evm {}
+
+// Overrides `Buffer`, inherits `Cell`.
+impl Backend for Native {
+    type Buffer<T> = Pair<T, T>
+}
+
+// Inherited arity-1 default: `Evm::Buffer<u32>` normalizes to `Store<u32>`
+// (threaded arg, no `Self`-capture).
+fn takes_store_u32(_ x: Store<u32>) {}
+fn inherited_buffer(x: Evm::Buffer<u32>) {
+    takes_store_u32(x)
+}
+
+// Inherited arity-2 default: `Evm::Cell<u32, u64>` normalizes to
+// `Pair<u32, u64>` (no index panic; both args threaded in order).
+fn takes_pair_u32_u64(_ x: Pair<u32, u64>) {}
+fn inherited_cell(x: Evm::Cell<u32, u64>) {
+    takes_pair_u32_u64(x)
+}
+
+// Override wins: `Native::Buffer<u32>` is `Pair<u32, u32>`, NOT `Store<u32>`.
+fn takes_pair_u32_u32(_ x: Pair<u32, u32>) {}
+fn overridden_buffer(x: Native::Buffer<u32>) {
+    takes_pair_u32_u32(x)
+}
+
+// Native still inherits `Cell`: `Native::Cell<u8, u16>` -> `Pair<u8, u16>`.
+fn takes_pair_u8_u16(_ x: Pair<u8, u16>) {}
+fn native_inherited_cell(x: Native::Cell<u8, u16>) {
+    takes_pair_u8_u16(x)
+}

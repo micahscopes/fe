@@ -1,0 +1,18 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_default_bounded_unsat.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_default_bounded_unsat.fe:16:1
+   │
+16 │ ╭ trait Backend {
+17 │ │     type Elem<T>: Producer<T> = Bad<T>
+18 │ │ }
+   │ ╰─^ `Bad<T>` doesn't implement `Producer<T>`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_default_bounded_unsat.fe:21:18
+   │
+21 │ impl Backend for Evm {}
+   │                  ^^^ `Bad<T>` doesn't implement `Producer<T>`

@@ -4774,25 +4774,28 @@ impl<'db> ImplTrait<'db> {
                 continue;
             };
 
-            // H1 interim guard (mb2-a4.1): the unscoped `Binder::instantiate`
-            // substitutes EVERY non-effect `TyParam` by raw `args[param.idx]`
-            // with no owner check. Since a GAT (arity > 0) default lowers its
-            // own params to `TyParam{owner: TraitType(t,i), idx j}`, feeding
-            // them through this unscoped fold either captures `Self`
-            // (`DefaultBuf<T>` -> `DefaultBuf<args[0]>` = `DefaultBuf<SelfTy>`,
-            // silently wrong) at arity 1, or index-panics at arity >= 2 when
-            // `param.idx` exceeds `trait_inst.args`. Decline the default merge
-            // for GAT defaults for now: projection stays opaque (always sound,
-            // never wrong) and `diags_missing_assoc_types` still counts the
-            // default as present. The capture-proof merge via
-            // `instantiate_scoped` is A4.3.
-            if view.generic_params(db).len(db) > 0 {
-                continue;
-            }
-
-            types
-                .entry(name)
-                .or_insert_with(|| Binder::bind(default).instantiate(db, trait_inst.args(db)));
+            // A4.3 default merge via `instantiate_scoped` (capture-proof).
+            // `instantiate_scoped` substitutes ONLY params owned by the trait
+            // ITEM scope (`Self` at idx 0 + the trait's own generic params,
+            // exactly aligned with `trait_inst.args` by construction). A GAT
+            // default's own binder params (`TyParam{owner: TraitType(t,i), idx
+            // j}`) have a DISTINCT owner, so they are left RIGID in the stored
+            // binding: `type Buffer<T> = DefaultBuf<T>` merges to
+            // `DefaultBuf<TyParam{owner: TraitType(t,0), idx 0}>`, never the H1
+            // capture `DefaultBuf<Self>` (arity 1) and never the arity-2 index
+            // panic (an unscoped `Binder::instantiate` did `args[param.idx]` for
+            // EVERY param, so `args[1]` on a `Self`-only trait was OOB). The GAT
+            // params stay rigid until projection substitutes them
+            // (`subst_gat_args`, which matches both `TraitType` and
+            // `ImplTraitType` owners), so a merged default projects exactly like
+            // an explicit binding. For an ARITY-0 default every free param is
+            // trait-item-owned (no GAT binder params exist), so the scoped and
+            // unscoped folders act on the identical param set: RESULT-IDENTICAL
+            // to the pre-A4.3 merge. Its trait-side bound is re-discharged
+            // per-impl by `diags_assoc_types_bounds` (the merged-default leg).
+            types.entry(name).or_insert_with(|| {
+                Binder::bind(default).instantiate_scoped(db, trait_def.scope(), trait_inst.args(db))
+            });
         }
 
         types

@@ -1383,31 +1383,55 @@ impl<'db> ImplTrait<'db> {
                     continue;
                 }
 
-                // ---- Arity>0 GAT leg (mb2-a4.2): owner-exact remap + strict prove.
-                let (Some(decl), Some(decl_idx), Some((def_idx, def))) =
-                    (decl, decl_idx, def_lookup)
-                else {
-                    // Merged trait default (no explicit impl def): subject and
-                    // bound are then both trait-side-owned and already
-                    // consistent, so the remap is skipped and A4.3 discharges it.
-                    // Unreachable in v1 (the GAT default merge is guarded out).
-                    continue;
-                };
+                // ---- Arity>0 GAT leg: two shapes reach here.
+                //
+                //  (a) EXPLICIT impl def (`def_lookup` present, mb2-a4.2): the
+                //      goal is MIXED-OWNER -- the subject is the impl RHS
+                //      (`Store<T_impl>`, owner `ImplTraitType`), the bound arg is
+                //      the trait-decl param (`T_trait`, owner `TraitType`). The
+                //      owner-exact `GatOwnerRemap` rewrites `T_trait` to the SAME
+                //      impl-side rigid the RHS carries, reconciling subject +
+                //      bound onto ONE rigid, then strict-proves.
+                //
+                //  (b) MERGED trait default (`def_lookup` None, mb2-a4.3): the
+                //      subject IS the trait-side default RHS
+                //      (`assoc_type_bindings_for_trait_inst` merged it via
+                //      `instantiate_scoped`, which left the GAT params rigid as
+                //      `TraitType`-owned), so subject and bound arg are ALREADY
+                //      the SAME trait-side rigid -- there is NO impl-side rigid to
+                //      remap onto, so the remap is SKIPPED. The bound is still
+                //      discharged STRICTLY under THIS impl's `param_env` (uniform
+                //      per-impl check; the trait-site `diags_assoc_defaults` check
+                //      stays advisory, the binding-site strict check is the one
+                //      that licenses projection of the inherited default). A
+                //      merged default carries only the trait's own assumptions,
+                //      so re-discharging under the impl env can only ADD
+                //      assumptions (the impl's where-clauses), never smuggle an
+                //      impl-specific obligation past: if the impl needs an extra
+                //      assumption to satisfy the default's bound and lacks it,
+                //      the strict prove rejects it here.
+                let goal = match def_lookup {
+                    Some((def_idx, def)) => {
+                        // Anti-cascade: a non-conforming binder was already
+                        // diagnosed by `diags_assoc_type_conformance`
+                        // (6-0023..25). Skip its bound so the user sees exactly
+                        // the signature mismatch, no trailing noise.
+                        let (Some(decl), Some(decl_idx)) = (decl, decl_idx) else {
+                            continue;
+                        };
+                        if gat_signature_conforms(db, decl, def).is_err() {
+                            continue;
+                        }
 
-                // Anti-cascade: a non-conforming binder was already diagnosed by
-                // `diags_assoc_type_conformance` (6-0023..25). Skip its bound so
-                // the user sees exactly the signature mismatch, no trailing
-                // bound-not-satisfied noise.
-                if gat_signature_conforms(db, decl, def).is_err() {
-                    continue;
-                }
-
-                let mut remap = GatOwnerRemap {
-                    decl_scope: ScopeId::TraitType(trait_hir, decl_idx as u16),
-                    impl_owner: ScopeId::ImplTraitType(self, def_idx as u16),
-                    def_params: def.generic_params.data(db),
+                        let mut remap = GatOwnerRemap {
+                            decl_scope: ScopeId::TraitType(trait_hir, decl_idx as u16),
+                            impl_owner: ScopeId::ImplTraitType(self, def_idx as u16),
+                            def_params: def.generic_params.data(db),
+                        };
+                        bound_inst.fold_with(db, &mut remap)
+                    }
+                    None => bound_inst,
                 };
-                let goal = bound_inst.fold_with(db, &mut remap);
 
                 // Suppress on already-invalid goals: `strict_prove`'s pre-flight
                 // declines HAS_INVALID, so a diagnostic here would be pure noise

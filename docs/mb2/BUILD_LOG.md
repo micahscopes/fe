@@ -525,3 +525,96 @@ satisfy for ALL rigid `T`. Discharged in `ImplTrait::diags_assoc_types_bounds`
 - **NEXT: A4.3** = trait-side GAT default merge via `instantiate_scoped`
   (replace the A4.1 H1 guard; A4.2's remap-SKIP exception for merged defaults is
   already in place).
+
+## 2026-07-09 - Slice A4.3: trait-side GAT default merge via `instantiate_scoped`
+
+The last A4 slice (steering-07 sec 3). Replaces the A4.1 H1 interim GUARD (which
+declined the merge for `arity > 0`, leaving inherited GAT defaults permanently
+opaque) with the REAL capture-proof merge, and wires A4.2's discharge to cover
+the merged case. A4 (4.1 conformance + 4.2 bound discharge + 4.3 default merge)
+is now a complete conformance-and-discharge core.
+
+- **The merge (`assoc_type_bindings_for_trait_inst`, `core/semantic/mod.rs`).**
+  The H1 guard `if view.generic_params(db).len(db) > 0 { continue; }` + the
+  unscoped `Binder::bind(default).instantiate(db, trait_inst.args(db))` are
+  replaced by `Binder::bind(default).instantiate_scoped(db, trait_def.scope(),
+  trait_inst.args(db))`. `instantiate_scoped` (`binder.rs`, the existing
+  `InstantiateScopedFolder`) substitutes ONLY params whose `owner ==
+  trait_def.scope()`. Capture-proof by construction:
+  - Trait-ITEM params (`Self` at idx 0 + the trait's own generic params, owner
+    `ScopeId::Item(trait)` = `trait_def.scope()`, exactly aligned with
+    `trait_inst.args` since the arity-0 merge already indexed them by that same
+    idx) are substituted to the concrete args.
+  - A GAT default's OWN binder params carry owner `ScopeId::TraitType(t, i)`
+    (`is_assoc_ty_param`), a DISTINCT owner class, so they are LEFT RIGID in the
+    stored binding: `type Buffer<T> = DefaultBuf<T>` merges to
+    `DefaultBuf<TyParam{owner: TraitType(t,0), idx 0}>`, NEVER the H1 arity-1
+    `Self`-capture `DefaultBuf<Self>` and NEVER the arity-2 index panic
+    (`args[1]` OOB on a `Self`-only trait). The rigid GAT param is then
+    substituted at PROJECTION time by `subst_gat_args` (whose `is_assoc_ty_param`
+    predicate matches BOTH `TraitType` and `ImplTraitType` owners), so a merged
+    default projects EXACTLY like an explicit binding: `Evm::Buffer<u32>` ->
+    `Store<u32>`, arity-1 AND arity-2, threaded, confluent with type-fn unfold.
+  - **Arity-0 input-disjointness:** an arity-0 default has NO GAT binder params,
+    so every free param is trait-item-owned and the scoped folder substitutes
+    the identical set the unscoped folder did. RESULT-IDENTICAL, not merely
+    relaxed. Proven by the ty_check suite staying 117/117 byte-identical (it
+    carries the `type X = Self`-style arity-0-default fixtures).
+- **Soundness question RESOLVED (steering-07 sec 3 settles it): RE-DISCHARGE
+  the merged default's bound per-impl, under the impl's `param_env`, remap
+  SKIPPED.** A merged default was written with only the trait's own assumptions;
+  re-discharging under the impl env can only ADD assumptions (the impl's
+  where-clauses), never smuggle an impl-specific obligation past. Wired the
+  `def_lookup` None arm A4.2 left in `diags_assoc_types_bounds`
+  (`diagnosable.rs`): for a merged default the subject IS the trait-side default
+  RHS (`instantiate_scoped` left its GAT params rigid as `TraitType`-owned), so
+  subject and bound arg are ALREADY the same trait-side rigid -- there is no
+  impl-side rigid to remap onto, so `GatOwnerRemap` is SKIPPED and the
+  already-consistent goal is `strict_prove`d under THIS impl's `solve_cx`. The
+  explicit-impl leg (mixed-owner remap) is unchanged. The trait-site
+  `diags_assoc_defaults` check stays permissive/advisory; the binding-site
+  strict check is the one that licenses projection of the inherited default.
+- **H1 unit tests re-pointed** (`ty_lower.rs`): `gat_default_arity1_not_merged_
+  no_capture` -> `gat_default_arity1_merged_no_capture` (asserts the binding is
+  now PRESENT and is `DefaultBuf<TyParam{is_assoc_ty_param, owner TraitType(t,0),
+  idx 0}>`, never `DefaultBuf<Evm>`); `gat_default_arity2_no_ice` ->
+  `gat_default_arity2_merged_no_ice` (binding present = `Pair<T0, T1>` both GAT
+  params rigid, full analysis pass no ICE).
+- **New fixtures.**
+  - `ty_check/gat_default_merge.fe` (fe-hir, zero-diagnostic): trait
+    `type Buffer<T> = Store<T>` + `type Cell<T, U> = Pair<T, U>`; `impl for Evm`
+    omits both (inherits), `impl for Native` overrides `Buffer`. Teeth:
+    `Evm::Buffer<u32>` types as `Store<u32>` (arity-1 inherited),
+    `Evm::Cell<u32, u64>` as `Pair<u32, u64>` (arity-2 inherited),
+    `Native::Buffer<u32>` as `Pair<u32, u32>` (OVERRIDE wins, no double-merge),
+    `Native::Cell<u8, u16>` as `Pair<u8, u16>` (Native still inherits Cell). The
+    snapshot pins all four projected types.
+  - `ty/def/gat_default_bounded_merge.fe` (uitest, zero-diag): bounded default
+    `type Elem<T>: Producer<T> = Store<T>` + blanket `impl<U> Producer<U> for
+    Store<U>`, impl omits it -> passes both the trait-site advisory check and the
+    per-impl strict merged-default discharge.
+  - `ty/def/gat_default_bounded_unsat.fe` (uitest, NEGATIVE): bounded default
+    `type Elem<T>: Producer<T> = Bad<T>` with NO satisfying impl -> rejected.
+    Snapshot shows TWO `6-0003 trait bound not satisfied`: one at the trait
+    (advisory `diags_assoc_defaults`) and one at the inheriting `impl Backend for
+    Evm` HEADER (the A4.3 per-impl merged-default strict discharge fired; span
+    falls back to the impl header since a merged default has no impl assoc-ty
+    span). This is the constructible negative the task asked for; NOT the C3c
+    multi-witness shape A4.2 documented as unconstructible.
+- **No snapshot masked a regression:** the H1-guard did not emit any diagnostic
+  (it silently declined the merge), so no diagnostic DISAPPEARS; the only
+  behavior change is inherited GAT defaults now PROJECT (previously opaque) and
+  bounded ones are now CHECKED. All 6 new files are additive; every pre-existing
+  snapshot is byte-identical (123 uitest `ty` + 117 fe-hir `ty_check`).
+- **Verify:** `cargo check --workspace` clean; 2 re-pointed fe-hir unit tests
+  green; fe-hir `ty_check` 117/117, `type_fn` 66/66,
+  `trait_resolution_conformance` 25/25, `constraints` + `def_analysis` green;
+  full uitest `ty` 123/123 (incl. the 3 new A4.3 fixtures + the A4.2 gat_bound
+  fixtures, all byte-identical). Full release CI is the orchestrator's run.
+- **A4 COMPLETE** (4.1 signature/kind conformance + hazard closure -> 4.2 strict
+  GAT bound discharge -> 4.3 capture-proof default merge + per-impl re-discharge):
+  a GAT impl is checked for signature conformance, its declared bounds are
+  discharged strictly for all rigid params, and a trait-side GAT default is
+  merged capture-proof and re-checked per impl. Every A4 substitution is
+  owner-exact (`instantiate_scoped` / `TraitScopeSubstFolder` / `GatOwnerRemap`);
+  no unscoped `Binder::instantiate` remains on the assoc-def-owned param path.

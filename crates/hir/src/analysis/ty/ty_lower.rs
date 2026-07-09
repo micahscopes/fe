@@ -1935,13 +1935,27 @@ mod tests {
             .expect("missing impl trait")
     }
 
-    // H1 (mb2-a4.1): an impl OMITTING a GAT (arity 1) default must NOT get the
-    // default merged via the unscoped `Binder::instantiate`, which would
-    // capture `Self` (`DefaultBuf<T>` -> `DefaultBuf<SelfTy>`, silently wrong).
-    // The interim guard declines the merge, so the binding stays OPAQUE (absent
-    // from the map); projection degrades to the always-sound opaque form.
+    // Helper: find trait `Backend` in a top mod.
+    fn find_backend_trait<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+    ) -> crate::hir_def::Trait<'db> {
+        top_mod
+            .all_traits(db)
+            .iter()
+            .copied()
+            .find(|t| t.name(db).to_opt().is_some_and(|i| i.data(db) == "Backend"))
+            .expect("missing trait `Backend`")
+    }
+
+    // A4.3 (mb2-a4.3): an impl OMITTING a GAT (arity 1) default now gets the
+    // default MERGED via `instantiate_scoped` (replacing the A4.1 H1 guard).
+    // The merge is capture-proof: only trait-ITEM params (`Self`) are
+    // substituted; the GAT binder param stays RIGID (owner `TraitType`), so
+    // `type Buffer<T> = DefaultBuf<T>` merges to `DefaultBuf<T_rigid>`, NEVER
+    // the H1 capture `DefaultBuf<Self>` = `DefaultBuf<Evm>`.
     #[test]
-    fn gat_default_arity1_not_merged_no_capture() {
+    fn gat_default_arity1_merged_no_capture() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "gat_default_arity1.fe".into(),
@@ -1959,19 +1973,45 @@ impl Backend for Evm {}
         let trait_inst = impl_trait.trait_inst(&db).expect("well-formed trait inst");
         let bindings = impl_trait.assoc_type_bindings_for_trait_inst(&db, trait_inst);
         let buffer = IdentId::new(&db, "Buffer".to_string());
+
+        let binding = *bindings
+            .get(&buffer)
+            .expect("A4.3 must merge the trait-side GAT default into the impl");
+
+        // Merged value is `DefaultBuf<T>` with the GAT param LEFT RIGID.
+        let (_base, args) = binding.decompose_ty_app(&db);
+        assert_eq!(
+            args.len(),
+            1,
+            "expected `DefaultBuf<T>`, got `{}`",
+            binding.pretty_print(&db)
+        );
+        let TyData::TyParam(param) = args[0].data(&db) else {
+            panic!(
+                "merged default's arg must stay a RIGID GAT param (capture-proof), got `{}`",
+                args[0].pretty_print(&db)
+            );
+        };
+        assert_eq!(param.idx, 0, "GAT param must carry LOCAL index 0");
         assert!(
-            bindings.get(&buffer).is_none(),
-            "GAT default must not be merged (would capture Self); got binding {:?}",
-            bindings.get(&buffer)
+            param.is_assoc_ty_param(),
+            "merged default's param must be a rigid GAT param, not a captured `Self`"
+        );
+        let backend = find_backend_trait(&db, top_mod);
+        assert_eq!(
+            param.owner,
+            ScopeId::TraitType(backend, 0),
+            "merged GAT default param must stay owned by the `TraitType` def node (rigid)"
         );
     }
 
-    // H1 (mb2-a4.1): an arity-2 GAT default with an impl omitting the binding
-    // previously index-panicked (ICE) in the unscoped merge
-    // (`args[param.idx]`, param.idx=1 out of bounds when the trait carries only
-    // `Self`). The guard declines the merge, so analysis completes with no ICE.
+    // A4.3 (mb2-a4.3): an arity-2 GAT default with an impl omitting the binding
+    // previously index-panicked (ICE) in the unscoped merge (`args[param.idx]`,
+    // `param.idx == 1` OOB on a `Self`-only trait). `instantiate_scoped` leaves
+    // BOTH GAT params rigid, so the merge is a well-formed `Pair<T, U>` and the
+    // full analysis pass completes with no ICE.
     #[test]
-    fn gat_default_arity2_no_ice() {
+    fn gat_default_arity2_merged_no_ice() {
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(
             "gat_default_arity2.fe".into(),
@@ -1987,10 +2027,36 @@ impl Backend for Evm {}
         let (top_mod, _) = db.top_mod(file);
         let impl_trait = find_impl_trait(&db, top_mod);
         let trait_inst = impl_trait.trait_inst(&db).expect("well-formed trait inst");
-        // Must not panic (the merge is declined for arity > 0).
+        // Must not panic (the arity-2 merge no longer index-panics).
         let bindings = impl_trait.assoc_type_bindings_for_trait_inst(&db, trait_inst);
         let buffer = IdentId::new(&db, "Buffer".to_string());
-        assert!(bindings.get(&buffer).is_none());
+        let binding = *bindings
+            .get(&buffer)
+            .expect("A4.3 must merge the arity-2 GAT default");
+
+        // Both GAT params stay rigid (owner `TraitType`), local idx 0 and 1.
+        let (_base, args) = binding.decompose_ty_app(&db);
+        assert_eq!(
+            args.len(),
+            2,
+            "expected `Pair<T, U>`, got `{}`",
+            binding.pretty_print(&db)
+        );
+        let backend = find_backend_trait(&db, top_mod);
+        for (i, arg) in args.iter().enumerate() {
+            let TyData::TyParam(param) = arg.data(&db) else {
+                panic!(
+                    "arity-2 merged default arg {i} must be a rigid GAT param, got `{}`",
+                    arg.pretty_print(&db)
+                );
+            };
+            assert_eq!(param.idx, i, "GAT param must carry its LOCAL index");
+            assert_eq!(
+                param.owner,
+                ScopeId::TraitType(backend, 0),
+                "arity-2 merged GAT param {i} must stay rigid (TraitType-owned)"
+            );
+        }
         // The full analysis pass must also complete without an ICE.
         let _ = db.run_on_top_mod(top_mod);
     }

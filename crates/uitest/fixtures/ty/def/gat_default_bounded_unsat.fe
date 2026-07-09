@@ -1,0 +1,21 @@
+// mb2-a4.3 (negative): a BOUNDED GAT default whose bound is NOT satisfiable is
+// REJECTED at every impl that inherits it, not silently trusted. The trait
+// declares `type Elem<T>: Producer<T> = Bad<T>`, but there is NO impl making
+// `Bad<T>` a `Producer<T>`, so the merged default cannot discharge the bound for
+// any `T`. The per-impl strict discharge (the merged-default leg of
+// `diags_assoc_types_bounds`) reports `TraitBoundNotSat` at the inheriting impl,
+// and the trait-site advisory check reports it once at the trait. This is the
+// negative counterpart to `gat_default_bounded_merge`.
+
+trait Producer<T> {}
+
+struct Bad<T> {}
+
+struct Evm {}
+
+trait Backend {
+    type Elem<T>: Producer<T> = Bad<T>
+}
+
+// Inherits the unsatisfiable bounded default.
+impl Backend for Evm {}

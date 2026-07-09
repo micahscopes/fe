@@ -1,0 +1,136 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/gat_default_merge.fe
+---
+note:
+   ┌─ gat_default_merge.fe:39:37
+   │
+39 │ fn takes_store_u32(_ x: Store<u32>) {}
+   │                                     ^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:40:42
+   │
+40 │   fn inherited_buffer(x: Evm::Buffer<u32>) {
+   │ ╭──────────────────────────────────────────^
+41 │ │     takes_store_u32(x)
+42 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_default_merge.fe:41:5
+   │
+41 │     takes_store_u32(x)
+   │     ^^^^^^^^^^^^^^^ fn takes_store_u32
+
+note:
+   ┌─ gat_default_merge.fe:41:5
+   │
+41 │     takes_store_u32(x)
+   │     ^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:41:21
+   │
+41 │     takes_store_u32(x)
+   │                     ^ Store<u32>
+
+note:
+   ┌─ gat_default_merge.fe:46:44
+   │
+46 │ fn takes_pair_u32_u64(_ x: Pair<u32, u64>) {}
+   │                                            ^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:47:43
+   │
+47 │   fn inherited_cell(x: Evm::Cell<u32, u64>) {
+   │ ╭───────────────────────────────────────────^
+48 │ │     takes_pair_u32_u64(x)
+49 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_default_merge.fe:48:5
+   │
+48 │     takes_pair_u32_u64(x)
+   │     ^^^^^^^^^^^^^^^^^^ fn takes_pair_u32_u64
+
+note:
+   ┌─ gat_default_merge.fe:48:5
+   │
+48 │     takes_pair_u32_u64(x)
+   │     ^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:48:24
+   │
+48 │     takes_pair_u32_u64(x)
+   │                        ^ Pair<u32, u64>
+
+note:
+   ┌─ gat_default_merge.fe:52:44
+   │
+52 │ fn takes_pair_u32_u32(_ x: Pair<u32, u32>) {}
+   │                                            ^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:53:46
+   │
+53 │   fn overridden_buffer(x: Native::Buffer<u32>) {
+   │ ╭──────────────────────────────────────────────^
+54 │ │     takes_pair_u32_u32(x)
+55 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_default_merge.fe:54:5
+   │
+54 │     takes_pair_u32_u32(x)
+   │     ^^^^^^^^^^^^^^^^^^ fn takes_pair_u32_u32
+
+note:
+   ┌─ gat_default_merge.fe:54:5
+   │
+54 │     takes_pair_u32_u32(x)
+   │     ^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:54:24
+   │
+54 │     takes_pair_u32_u32(x)
+   │                        ^ Pair<u32, u32>
+
+note:
+   ┌─ gat_default_merge.fe:58:42
+   │
+58 │ fn takes_pair_u8_u16(_ x: Pair<u8, u16>) {}
+   │                                          ^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:59:52
+   │
+59 │   fn native_inherited_cell(x: Native::Cell<u8, u16>) {
+   │ ╭────────────────────────────────────────────────────^
+60 │ │     takes_pair_u8_u16(x)
+61 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_default_merge.fe:60:5
+   │
+60 │     takes_pair_u8_u16(x)
+   │     ^^^^^^^^^^^^^^^^^ fn takes_pair_u8_u16
+
+note:
+   ┌─ gat_default_merge.fe:60:5
+   │
+60 │     takes_pair_u8_u16(x)
+   │     ^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_default_merge.fe:60:23
+   │
+60 │     takes_pair_u8_u16(x)
+   │                       ^ Pair<u8, u16>
