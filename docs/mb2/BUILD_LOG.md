@@ -1772,3 +1772,51 @@ machinery + the type-fn schedule substrate; no new system).
   as `Functor`; a real `scan`); (4) the owner-gated seam-port (B3) for the runtime
   demos + SPIR-V barrier lowering (B5). The EVM no-op barrier via `fe test` is a
   small optional add on the `atomic_rmw` pattern.
+
+## 2026-07-09 - Finding record: the B2 "revm-hang" + CI-number history note
+
+Doc-only entry (no code), written BEFORE any A9.2 code lands so the finding is
+durable in-tree rather than living only in a session transcript (per the
+milestone-review sec 2.7 action item). Two things: (1) the undocumented B2
+revm-hang, (2) a CI-number history note because the in-tree log stopped
+recording full-CI numbers after the A0 baseline.
+
+### The B2 revm-hang (as REPORTED, undiagnosed at time of writing)
+
+- **Symptom.** When the B2 slice tried to add the OPTIONAL executed EVM no-op
+  barrier `fe test` (the `barrier_noop.fe` the `backend_barrier.fe:116` /
+  `evm/barrier.fe:17` comments reference but which does NOT exist in-tree), the
+  `fe test` run HUNG under the `revm` harness: reported ~8+ minutes wall, ~0%
+  CPU (a blocked / deadlock-shaped state, not a busy loop), and was killed
+  rather than completing.
+- **Stage.** The hang was at EXECUTION (revm-driving the deployed contract),
+  NOT at type-check / compile: the `backend_barrier.fe` note-dump fixture
+  type-checks clean and is committed green (fe-hir ty_check 124/124 at B2), and
+  the barrier capability + EVM no-op body compile. So this is a
+  codegen/lowering-or-harness runtime symptom, not a front-end one.
+- **Scope at time of writing.** UNDIAGNOSED. Not known whether the cause is a
+  real codegen/lowering bug (e.g. an empty-body capability method miscompiling,
+  or a `uses`-provisioned no-op producing a degenerate MIR/loop) or a
+  fixture/harness issue (a malformed contract that never returns, a revm gas /
+  loop condition in the hand-written test body). It was never reduced to a
+  minimal repro and never written down until now; the B2 entry simply listed the
+  executed barrier test as an "optional add", omitting the hang entirely.
+- **Next.** The A9.2 pre-step (STEP 0 of this build pass) reproduces it minimally
+  with a foreground `timeout`, determines cause, and either fixes it (if small +
+  localized to the EXISTING EVM lowering) or STOP-reports (if it would touch the
+  owner-gated Sonatina seam / `crates/codegen`). Diagnosis outcome is recorded in
+  the following BUILD_LOG entry.
+
+### CI-number history note (the in-tree gap)
+
+The log records `cargo nextest run --release --workspace --all-features
+--no-fail-fast --locked` counts only at the A0 baseline (2512, `81cf8e083`) and
+the A-track snapshot-regen note (2533/2534); every slice since defers the full
+release run to the orchestrator and did NOT record the number. For continuity,
+the orchestrator/milestone-review endpoints are: **2558 @ A5.2** (the review's
+cited baseline) ... **2589 @ B2** (HEAD `eaf3e115b`, all passing). Intermediate
+slices (A5.1b/A5.3/A6/B1/A7.1/A7.2/A9.1/B2) each added only ingot + fixture +
+additive-Rust surface and were green at the orchestrator's boundary runs, but
+their individual counts were not captured in-tree; the net delta 2558 -> 2589 is
+the new backend/atomic/barrier/conal fixtures landed across the B + A7 + A9
+tracks.
