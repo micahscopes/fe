@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_param_bound_unlowerable_guard.fe
+---
+error[2-0002]: `NoSuchTrait` is not found
+   ┌─ gat_param_bound_unlowerable_guard.fe:10:18
+   │
+10 │     type Elem<T: NoSuchTrait>: Producer<T>
+   │                  ^^^^^^^^^^^ `NoSuchTrait` is not found

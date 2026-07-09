@@ -1,6 +1,7 @@
 use std::hash::Hash;
 
 use crate::core::hir_def::IdentId;
+use crate::hir_def::scope_graph::ScopeId;
 use crate::hir_def::{ItemKind, Trait};
 use common::indexmap::{IndexMap, IndexSet};
 
@@ -514,6 +515,78 @@ fn ty_contains<'db>(db: &'db dyn HirAnalysisDb, haystack: TyId<'db>, needle: TyI
     };
     haystack.visit_with(&mut visitor);
     visitor.found
+}
+
+/// Trait-ITEM param -> trait arg substitution, owner-exact on a trait item
+/// scope (`ScopeId::Item(Trait)`). GAT binder params (owner = an assoc-type DEF
+/// node, `ScopeId::TraitType`) are NOT touched here; they are reconciled by the
+/// callee-side `GatOwnerRemap` (diagnosable.rs) or the caller-side
+/// [`GatDeclParamSubst`]. Shared SSOT folder for the A7 GAT-bound duality: the
+/// A4.2 leg-1 impl-RHS discharge (diagnosable.rs) and the A7.1 leg-2 caller
+/// projection obligation (constraint.rs) both fold guards through this ONE
+/// folder, never two copies.
+pub(crate) struct TraitScopeSubstFolder<'db, 'a> {
+    pub trait_scope: ScopeId<'db>,
+    pub trait_args: &'a [TyId<'db>],
+}
+
+impl<'db> TyFolder<'db> for TraitScopeSubstFolder<'db, '_> {
+    fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        match ty.data(db) {
+            TyData::TyParam(param) if !param.is_effect() && param.owner == self.trait_scope => {
+                self.trait_args.get(param.idx).copied().unwrap_or(ty)
+            }
+
+            TyData::ConstTy(const_ty) => match const_ty.data(db) {
+                ConstTyData::TyParam(param, _)
+                    if !param.is_effect() && param.owner == self.trait_scope =>
+                {
+                    self.trait_args.get(param.idx).copied().unwrap_or(ty)
+                }
+
+                _ => ty.super_fold_with(db, self),
+            },
+
+            _ => ty.super_fold_with(db, self),
+        }
+    }
+}
+
+/// A7.1 leg-2 caller-side GAT decl-param substitution: rewrite each decl GAT
+/// binder rigid (`TyParam { owner == decl_scope, idx k }`) to the projection's
+/// k-th spine argument. Owner-exact on the single decl def-node scope, so an
+/// impl/caller param that shares a numeric index (owner != `decl_scope`) is left
+/// intact (the S2 non-capture discipline). This is the exact match shape of the
+/// callee-side `GatOwnerRemap`, but with a direct-arg target instead of a
+/// re-minted impl-side rigid: it substitutes the guard's subject (`T_j` ->
+/// `X_j`) AND any sibling-param references inside the guard's args. `.get(k)`
+/// guards the saturation precheck (callers pass a spine of exactly the decl's
+/// arity).
+pub(crate) struct GatDeclParamSubst<'db, 'a> {
+    pub decl_scope: ScopeId<'db>,
+    pub args: &'a [TyId<'db>],
+}
+
+impl<'db> TyFolder<'db> for GatDeclParamSubst<'db, '_> {
+    fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+        match ty.data(db) {
+            TyData::TyParam(param) if !param.is_effect() && param.owner == self.decl_scope => {
+                self.args.get(param.idx).copied().unwrap_or(ty)
+            }
+
+            TyData::ConstTy(const_ty) => match const_ty.data(db) {
+                ConstTyData::TyParam(param, _)
+                    if !param.is_effect() && param.owner == self.decl_scope =>
+                {
+                    self.args.get(param.idx).copied().unwrap_or(ty)
+                }
+
+                _ => ty.super_fold_with(db, self),
+            },
+
+            _ => ty.super_fold_with(db, self),
+        }
+    }
 }
 
 /// A type folder that substitutes associated types based on a trait instance's bindings

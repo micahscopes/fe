@@ -1,0 +1,12 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_param_bound_hkt_saturation.fe
+---
+error[3-0050]: a bounded associated type must be fully applied here
+   ┌─ gat_param_bound_hkt_saturation.fe:20:30
+   │
+20 │ fn hkt_escape<B: Backend>(x: HCell<B::Elem>) {}
+   │                              ^^^^^^^^^^^^^^ this associated type declares bounds on its parameters and cannot be passed as a partially applied type constructor
+   │
+   = apply the associated type to all of its arguments (each argument is then checked against the parameter's declared bounds), rather than passing it bare at a higher kind

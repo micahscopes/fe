@@ -130,6 +130,22 @@ pub enum TyLowerDiag<'db> {
         span: DynLazySpan<'db>,
     },
 
+    /// A7.1 saturation rule: a GAT that declares trait bounds on its parameters
+    /// (`type Elem<T: G>`) is used as a bare/partially-applied type constructor
+    /// instead of being fully applied. A partial guarded head passed at `* -> *`
+    /// would let the guard escape use-site (leg 2) enforcement.
+    GatUnsaturatedGuarded {
+        span: DynLazySpan<'db>,
+    },
+
+    /// A7.1 leg 0 (impl-side authority rule): an impl associated-type DEF binder
+    /// carries a TRAIT bound (`type Elem<T: Extra> = ..`). GAT parameter trait
+    /// bounds are declared on the trait, which is the single guard authority;
+    /// the impl binder may only repeat kind bounds.
+    GatImplBinderTraitBound {
+        span: DynLazySpan<'db>,
+    },
+
     StringTooLarge {
         span: DynLazySpan<'db>,
         max: usize,
@@ -325,6 +341,8 @@ impl TyLowerDiag<'_> {
             Self::TypeFnRecursionLimit { .. } => 47,
             Self::TypeFnInImplHeader { .. } => 48,
             Self::GatConstParamUnsupported { .. } => 49,
+            Self::GatUnsaturatedGuarded { .. } => 50,
+            Self::GatImplBinderTraitBound { .. } => 51,
         }
     }
 }

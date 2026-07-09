@@ -5,12 +5,12 @@ use super::{
     const_ty::{ConstTyData, EvaluatedConstTy},
     fold::{AssocTySubst, TyFoldable},
     trait_def::{ImplementorId, ImplementorOrigin, TraitInstId, impls_for_trait_in_ingots},
-    ty_def::{TyData, TyFlags, TyId},
+    ty_def::{AssocTy, TyData, TyFlags, TyId},
 };
 use crate::analysis::{
     HirAnalysisDb,
     ty::{
-        diagnostics::{TraitConstraintDiag, TyDiagCollection},
+        diagnostics::{TraitConstraintDiag, TyDiagCollection, TyLowerDiag},
         trait_resolution::{constraint::ty_constraints, proof_forest::ProofForest},
         ty_check::ty_const_predicate_violation,
         type_fn::type_fn_app_head,
@@ -764,6 +764,17 @@ pub(crate) fn check_ty_wf<'db>(
             if !wf.is_wf() {
                 return wf;
             }
+            // A7.1 saturation rule: a guarded GAT must be FULLY applied wherever
+            // it occurs. A bare/partial guarded head passed at constructor kind
+            // (an HKT arg, a type-fn arg, an alias RHS) would smuggle the guard
+            // past leg 2, since the eventual application then happens through an
+            // opaque `F<X>` where no guard is computable. Fe has genuine `* -> *`
+            // positions (Rust does not), so this is closed explicitly by
+            // REJECTING rather than deferring. Unguarded GATs keep full bare-head
+            // freedom; zero baseline inhabitants for the guarded case.
+            if guarded_gat_unsaturated(db, *assoc, args) {
+                return WellFormedness::IllFormedUnsaturatedGuardedGat;
+            }
         }
         TyData::QualifiedTy(inst) => {
             let wf = check_projected_trait_use_wf(db, solve_cx, *inst);
@@ -928,6 +939,30 @@ fn check_const_expr_wf<'db>(
     WellFormedness::WellFormed
 }
 
+/// True when `assoc<spine..>` is a GUARDED GAT projection whose spine does not
+/// exactly saturate the decl (A7.1 saturation rule). Unguarded GATs and exactly
+/// saturated guarded ones return false. `spine` is the applied-argument list of
+/// the whole projection type (`ty.decompose_ty_app`), so a bare head has an
+/// empty spine and is caught here wherever `check_ty_wf` visits it.
+fn guarded_gat_unsaturated<'db>(
+    db: &'db dyn HirAnalysisDb,
+    assoc: AssocTy<'db>,
+    spine: &[TyId<'db>],
+) -> bool {
+    let trait_def = assoc.trait_.def(db);
+    let Some(decl_view) = trait_def
+        .assoc_types(db)
+        .find(|v| v.name(db) == Some(assoc.name))
+    else {
+        return false;
+    };
+    let arity = decl_view.generic_params(db).data(db).len();
+    if arity == 0 || spine.len() == arity {
+        return false;
+    }
+    !decl_view.gat_param_guard_insts(db).is_empty()
+}
+
 fn check_projected_trait_use_wf<'db>(
     db: &'db dyn HirAnalysisDb,
     solve_cx: TraitSolveCx<'db>,
@@ -1008,6 +1043,11 @@ pub(crate) enum WellFormedness<'db> {
     IllFormedConstPredicate {
         predicate: Body<'db>,
     },
+    /// A7.1 saturation rule: a guarded GAT (`type Elem<T: G>`) appears as a
+    /// bare/partial head at constructor kind instead of being fully applied,
+    /// which would let the guard escape leg-2 enforcement through an opaque HKT
+    /// position. Rendered as a `TyLowerDiag` at the offending type's span.
+    IllFormedUnsaturatedGuardedGat,
 }
 
 impl<'db> WellFormedness<'db> {
@@ -1032,6 +1072,9 @@ impl<'db> WellFormedness<'db> {
             ),
             WellFormedness::IllFormedConstPredicate { predicate } => {
                 Some(TraitConstraintDiag::ConstPredicateNotSat { span, predicate }.into())
+            }
+            WellFormedness::IllFormedUnsaturatedGuardedGat => {
+                Some(TyLowerDiag::GatUnsaturatedGuarded { span }.into())
             }
         }
     }

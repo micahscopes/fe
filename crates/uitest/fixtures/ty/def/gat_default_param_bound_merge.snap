@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_default_param_bound_merge.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_default_param_bound_merge.fe:24:16
+   │
+24 │ fn use_site(x: Evm::Elem<NotMarked>) {}
+   │                ^^^^^^^^^^^^^^^^^^^^ `NotMarked` doesn't implement `Marker`

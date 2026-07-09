@@ -1860,6 +1860,44 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                 error_code,
             },
 
+            Self::GatUnsaturatedGuarded { span } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "a bounded associated type must be fully applied here".to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "this associated type declares bounds on its parameters and cannot be \
+                              passed as a partially applied type constructor"
+                        .to_string(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "apply the associated type to all of its arguments (each argument is then \
+                     checked against the parameter's declared bounds), rather than passing it bare \
+                     at a higher kind"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
+            Self::GatImplBinderTraitBound { span } => CompleteDiagnostic {
+                severity: Severity::Error,
+                message: "trait bounds on associated-type parameters are declared on the trait, \
+                          not the impl"
+                    .to_string(),
+                sub_diagnostics: vec![SubDiagnostic {
+                    style: LabelStyle::Primary,
+                    message: "the impl binder may only repeat kind bounds; remove this trait bound"
+                        .to_string(),
+                    span: span.resolve(db),
+                }],
+                notes: vec![
+                    "the trait declaration is the single authority for associated-type parameter \
+                     bounds; every use site proves them and every impl may assume them"
+                        .to_string(),
+                ],
+                error_code,
+            },
+
             // TODO: add hint about indirection (eg *T)
             Self::RecursiveType(cycle) => CompleteDiagnostic {
                 severity: Severity::Error,

@@ -1,0 +1,34 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_param_bound_concrete_unsat.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_param_bound_concrete_unsat.fe:32:17
+   │
+32 │ fn use_param(x: Evm::Elem<NotMarked>) {}
+   │                 ^^^^^^^^^^^^^^^^^^^^ `NotMarked` doesn't implement `Marker`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_param_bound_concrete_unsat.fe:36:24
+   │
+36 │     fn use_return() -> Evm::Elem<NotMarked>
+   │                        ^^^^^^^^^^^^^^^^^^^^ `NotMarked` doesn't implement `Marker`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_param_bound_concrete_unsat.fe:41:8
+   │
+41 │     f: Evm::Elem<NotMarked>
+   │        ^^^^^^^^^^^^^^^^^^^^ `NotMarked` doesn't implement `Marker`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_param_bound_concrete_unsat.fe:45:18
+   │
+45 │ fn use_nested(x: Wrapper<Evm::Elem<NotMarked>>) {}
+   │                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `NotMarked` doesn't implement `Marker`
+
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_param_bound_concrete_unsat.fe:48:14
+   │
+48 │ type Alias = Evm::Elem<NotMarked>
+   │              ^^^^^^^^^^^^^^^^^^^^ `NotMarked` doesn't implement `Marker`

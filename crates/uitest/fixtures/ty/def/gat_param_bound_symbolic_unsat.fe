@@ -1,0 +1,18 @@
+// mb2-a7.1 (caller leg 2, the relay rule): a symbolic caller that forms
+// `B::Elem<X>` WITHOUT carrying the guard. The obligation `X: Marker` is
+// rejected AT THE GENERIC DEFINITION (6-0003), not at its call sites. This is
+// the relay rule that makes substitution-formed instances safe: a callee whose
+// signature forms `B::Elem<X>` must declare `X: Marker` (or a bound entailing
+// it), and that declared constraint is then instantiated and proven at every
+// call site by the existing call-obligation machinery. Fail-closed,
+// gate-don't-select: no impl is selected.
+
+trait Marker {}
+
+trait Producer<T> {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+
+fn g<B: Backend, X>(x: B::Elem<X>) {}

@@ -146,6 +146,18 @@ pub(crate) fn ty_constraints<'db>(
     ty: TyId<'db>,
 ) -> PredicateListId<'db> {
     let (base, args) = ty.decompose_ty_app(db);
+
+    // A7.1 leg 2 (caller): a guarded GAT projection `S::Elem<X>` incurs the
+    // decl's param guards instantiated at the projection's receiver + spine as
+    // ordinary WF obligations, raised and solved by `check_ty_wf` exactly like
+    // an ADT's `where`-clause bounds. Input-disjoint from the baseline: this
+    // returns EMPTY for every unguarded GAT (Backend::Buffer/Ref, etc.), so the
+    // keystone/backend snapshots are untouched. See the callee dual (leg 1) in
+    // `ImplTrait::diags_assoc_types_bounds`.
+    if let TyData::AssocTy(assoc) = base.data(db) {
+        return gat_projection_guard_constraints(db, *assoc, args);
+    }
+
     let (params, base_constraints) = match base.data(db) {
         TyData::TyBase(TyBase::Adt(adt)) => (adt.params(db), collect_adt_constraints(db, *adt)),
         TyData::TyBase(TyBase::Func(func_def)) => (
@@ -181,6 +193,79 @@ pub(crate) fn ty_constraints<'db>(
     }
 
     base_constraints.instantiate(db, &args)
+}
+
+/// A7.1 leg 2 (caller): the guard obligations a guarded GAT projection
+/// `S::Elem<X_0, .., X_{k-1}>` must discharge at every well-formed-checked
+/// position. Each of the decl's param guards (`type Elem<T_j: G>`) is
+/// instantiated by the SSOT iterator [`gat_param_guard_insts`] and then
+/// substituted:
+///
+///  1. `TraitScopeSubstFolder`: the trait's `Self` and item params -> this
+///     projection's receiver (`assoc.trait_.self_ty`) and trait args. Works for
+///     symbolic (`B::Elem<X>`) and concrete (`Evm::Elem<u8>`) receivers alike.
+///  2. `GatDeclParamSubst` (owner-exact): the decl's own GAT rigids
+///     (`T_j` and any sibling references inside a guard's args) -> the spine
+///     args `X_j`.
+///
+/// The returned predicates ride the ordinary `check_ty_wf` -> solver path,
+/// which rejects an unsatisfied guard with 6-0003 at the checked type's span
+/// (`X` doesn't implement `G`), and discharges a symbolic `X: G` from the
+/// caller's own bounds (gate-don't-select: no impl is consulted). Non-saturating
+/// spines are handled by the saturation WF rule (`check_ty_wf`), NOT here: a
+/// var-subjected guard would solve permissively and mask the HKT escape, so we
+/// deliberately do NOT fresh-var-generalize a partial spine.
+fn gat_projection_guard_constraints<'db>(
+    db: &'db dyn HirAnalysisDb,
+    assoc: crate::analysis::ty::ty_def::AssocTy<'db>,
+    spine_args: &[TyId<'db>],
+) -> PredicateListId<'db> {
+    use crate::analysis::ty::fold::{GatDeclParamSubst, TraitScopeSubstFolder, TyFoldable as _};
+
+    let trait_def = assoc.trait_.def(db);
+    let Some(decl_view) = trait_def
+        .assoc_types(db)
+        .find(|v| v.name(db) == Some(assoc.name))
+    else {
+        return PredicateListId::empty_list(db);
+    };
+
+    let arity = decl_view.generic_params(db).data(db).len();
+    // Unapplied / partially-applied guarded head: owned by the saturation rule,
+    // not by a permissive var-generalized obligation here.
+    if arity == 0 || spine_args.len() != arity {
+        return PredicateListId::empty_list(db);
+    }
+
+    let guards = decl_view.gat_param_guard_insts(db);
+    if guards.is_empty() {
+        // Unguarded GAT (Buffer/Ref/...): byte-identical baseline (empty).
+        return PredicateListId::empty_list(db);
+    }
+
+    // The decl def-node scope keys `GatDeclParamSubst`; identical to the scope
+    // `gat_param_guard_insts` minted the guard subjects at (owner-exactness).
+    let Some(decl_scope) = assoc.scope(db) else {
+        return PredicateListId::empty_list(db);
+    };
+    let trait_scope = trait_def.scope();
+    let trait_args = assoc.trait_.args(db);
+
+    let mut out = Vec::with_capacity(guards.len());
+    for (_j, guard) in guards {
+        let mut ts = TraitScopeSubstFolder {
+            trait_scope,
+            trait_args,
+        };
+        let guard = guard.fold_with(db, &mut ts);
+        let mut ds = GatDeclParamSubst {
+            decl_scope,
+            args: spine_args,
+        };
+        let guard = guard.fold_with(db, &mut ds);
+        out.push(guard);
+    }
+    PredicateListId::new(db, out)
 }
 
 /// Collect super traits of the given trait.

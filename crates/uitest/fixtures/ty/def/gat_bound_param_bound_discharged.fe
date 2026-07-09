@@ -1,0 +1,36 @@
+// mb2-a7.1 (GAT bound duality, callee leg 1): the pin fixture
+// `gat_bound_param_bound_not_assumed.fe` FLIPPED. The decl
+// `type Elem<T: Marker>: Producer<T>` now lets the impl RHS ASSUME `T: Marker`
+// when discharging its bound, so `Store<T>: Producer<T>` (which needs
+// `U: Marker` via the blanket impl) DISCHARGES with ZERO diagnostics at the
+// impl.
+//
+// This is the callee half of the A7 duality. It is sound ONLY paired with the
+// caller obligation (leg 2): every projection `Evm::Elem<X>` must prove
+// `X: Marker` at its use site (see gat_param_bound_concrete_unsat.fe and
+// gat_param_bound_symbolic_unsat.fe). Legs 1+2 land atomically in one commit.
+//
+// This fixture is also the (I2) owner-exactness positive: the guard's subject
+// rigid must be the SAME interned rigid the RHS subject `Store<T>` carries. A
+// mis-remapped guard is vacuous (never unifies), which regresses this fixture
+// back to rejection.
+
+trait Marker {}
+
+trait Producer<T> {}
+
+struct Store<T> {}
+
+impl<U> Producer<U> for Store<U>
+where U: Marker
+{}
+
+struct Evm {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+
+impl Backend for Evm {
+    type Elem<T> = Store<T>
+}

@@ -1,0 +1,30 @@
+// mb2-a7.1 (caller leg 2, the clean concrete case): projecting
+// `Evm::Elem<Marked>` where `Marked: Marker` satisfies the guard at every use
+// site. Zero diagnostics. The mirror of gat_param_bound_concrete_unsat.fe.
+
+trait Marker {}
+trait Producer<T> {}
+struct Store<T> {}
+impl<U> Producer<U> for Store<U> where U: Marker {}
+struct Evm {}
+struct Marked {}
+impl Marker for Marked {}
+struct Wrapper<T> {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+
+impl Backend for Evm {
+    type Elem<T> = Store<T>
+}
+
+fn use_param(x: Evm::Elem<Marked>) {}
+
+extern {
+    fn use_return() -> Evm::Elem<Marked>
+}
+
+fn use_nested(x: Wrapper<Evm::Elem<Marked>>) {}
+
+type Alias = Evm::Elem<Marked>

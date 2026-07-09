@@ -1274,3 +1274,116 @@ absence as the class gate.
   steering-09 interleave `A5.3 -> A6 -> B1 -> A7 -> B2+A9`. The A7 leg is the
   documented prerequisite before A9 wants `B::Buffer<X>: Functor`; B2 is the next
   pure B-track slice. Either is unblocked.
+
+## 2026-07-09 - Slice A7.1: GAT bound duality (legs 1+2 atomic, the soundness crux)
+
+The paired soundness slice (steering-09 sequence `A5.3 -> A6 -> B1 -> A7`, full
+design in steering-10). A7.1 relaxes the deliberately-conservative A4.2
+restriction "a GAT param bound is NOT assumed when discharging the RHS" and
+lands BOTH halves of the duality in ONE commit: leg 1 (callee assumes the guard)
+and leg 2 (every caller projection proves the guard). Leg 1 alone is unsound;
+leg 2 alone is the sound status quo; they are one atomic pair. A7.2 (leg 3
+consumer revival for UNGUARDED decls) and A7.3 (guarded-universal symbolic
+consumption) remain deferred, NOT built.
+
+Semantics assigned to `type Elem<T: G>: P<T>`: callee theorem
+`forall T. G(T) => P(R_I<T>, T)` (leg 1, guarded universal introduction with
+hypotheses); caller invariant `G(X)` at every formable `S::Elem<X>` (leg 2);
+composition = modus ponens at every reachable instance.
+
+- **Leg 0 SSOT (`core/semantic/mod.rs`): `TraitAssocTypeView::gat_param_guard_insts`.**
+  Lowers a GAT decl's param guards ONCE at the decl def-node scope
+  (`ScopeId::TraitType(t, i)`), subject = `gat_param_ty(params[j], j, that scope)`,
+  each `TypeBound::Trait` via `lower_trait_ref` with `owner_self = t.self_param`,
+  `assumptions = constraints_for(t)`. Yields `(j, TraitInstId)`. An unlowerable
+  guard is dropped HERE and only here, so leg 1 and leg 2 consume an identical
+  guard set by construction (the symmetry SSOT). Both legs and the decl-site diag
+  read this one accessor; neither re-lowers.
+
+- **Leg 1 (callee, `ImplTrait::diags_assoc_types_bounds`):** per assoc type,
+  collect the guards, fold each through the SAME pipeline the RHS goal takes
+  (`TraitScopeSubstFolder` always; then explicit leg `GatOwnerRemap` to the
+  impl-side rigid, merged-default leg no remap), and merge them into the
+  `strict_prove` ASSUMPTIONS ONLY (`discharge_assumptions`). `param_env` /
+  `collect_constraints` / `extend_all_bounds` are NOT touched; A5.0 FIX-1's
+  arity>0 skip is NOT narrowed. `CanonicalGoalQuery::new` runs `extend_all_bounds`
+  over the discharge assumptions per-query, so the guard's supertrait closure
+  happens INSIDE the discharge query and nowhere else. FIX-2 parity: a guard with
+  `Invalid` args suppresses this assoc's bound diags. Also relaxed the trait-side
+  analog `Trait::diags_assoc_defaults` so a guarded GAT DEFAULT assumes its own
+  guards (needed for the merged-default acceptance).
+
+- **Leg 2 (caller, `ty_constraints` `AssocTy` arm + `gat_projection_guard_constraints`):**
+  a saturated guarded projection `S::Elem<X>` returns the decl's guards
+  instantiated by `TraitScopeSubstFolder` (Self/trait params -> receiver/args)
+  then the new owner-exact `GatDeclParamSubst` (decl rigids -> spine args). The
+  EXISTING `check_ty_wf` recursion raises+solves `X: G` at every WF-checked
+  position, rejecting with the ordinary 6-0003 at the written type's span; a
+  symbolic `X: G` discharges from the caller's own bounds (gate-don't-select, no
+  impl consulted). Non-saturating spines return empty (owned by the saturation
+  rule, NOT fresh-var-generalized -- that would mask the HKT escape). Unguarded
+  GATs return empty (input-disjoint baseline; keystone snapshots untouched).
+
+- **Saturation rule (`check_ty_wf` `AssocTy` arm + `WellFormedness::IllFormedUnsaturatedGuardedGat`
+  -> new `TyLowerDiag::GatUnsaturatedGuarded`, code 3-0050):** a guarded GAT
+  passed as a bare/partial head at `* -> *` (HKT arg, type-fn arg, alias RHS) is
+  IllFormed. Closes the HKT escape by REJECTING, not deferring. Unguarded GATs
+  keep bare-head freedom.
+
+- **Leg 0 authority + WF diags:** `Trait::diags_gat_param_guards` re-runs the
+  guard lowering and OWNS the decl-site error for an unresolvable guard path
+  (2-0002), plus `check_ty_wf` over lowered guard args. Impl-side binder trait
+  bounds (`type Elem<T: Extra> = ..`) rejected in `diags_assoc_type_conformance`
+  with new `TyLowerDiag::GatImplBinderTraitBound` (code 3-0051): the decl is the
+  single guard authority; the impl binder may only repeat kind bounds. Shared
+  folder homes: `TraitScopeSubstFolder` moved to `ty/fold.rs` (was a local copy
+  in diagnosable.rs) + new `GatDeclParamSubst` beside it; owner-exact only.
+
+- **Callee injection + pins (I1/I2).** Injection point is ONE: the
+  `discharge_assumptions` merge at the single `strict_prove` call. (I1) the guard
+  never enters `param_env`; (I2) the guard's subject rigid IS the decl's own GAT
+  rigid (interned-identical to the RHS subject pre-remap). New unit test
+  `gat_param_guard_invariants_i1_i2` pins both mechanically (param_env scan has no
+  assoc-owned rigid even with a guarded recursive impl; guard subject ==
+  `gat_param_ty(decl_params[0], 0, TraitType(Backend, idx))`). The A5.0 FIX-1 pin
+  `gat_bound_no_assoc_owned_param_in_param_env` stays GREEN and unchanged.
+
+- **Acceptance fixtures (`crates/uitest/fixtures/ty/def/`, all reviewed).**
+  Flipped the pin: `gat_bound_param_bound_not_assumed` -> `..._discharged`
+  (impl RHS now discharges under the guard, ZERO diags). `..._symbolic_ok`
+  (carry the guard: clean), `..._symbolic_unsat` (missing guard: 6-0003 AT THE
+  DEFINITION -- the relay rule, the soundness-load-bearing case).
+  `..._concrete_unsat` (5 sites: param/return/field/nested/alias each 6-0003 on
+  the pre-normalization redex), `..._concrete_ok` (empty). `..._hkt_saturation`
+  (guarded `HCell<B::Elem>` -> 3-0050; unguarded control `HCell<B::Buffer>`
+  ACCEPTED). `..._callsite_arg` (ADT control `g<Foo<NotMarked>>()` and GAT twin
+  `g<Evm::Elem<NotMarked>>()` BOTH leak -> PARITY holds; call-site-explicit-arg
+  is a pre-existing baseline gap shared with every ADT bound, filed NOT patched
+  per steering caveat 2). `..._default_param_bound_merge` (inherited guarded
+  default accepted; use-site NotMarked rejected). `..._impl_binder` (3-0051),
+  `..._unlowerable_guard` (2-0002 at the decl).
+
+- **STOP-checked, no gap.** Every projection/formation site raises the obligation
+  or is explicitly covered by steering-10: def-site type positions bite on the
+  redex; the concrete where-clause subject is rejected earlier by the pre-existing
+  concrete-bound rule (6-0005); the call-site-explicit-arg leak is a documented
+  baseline gap with ADT-parity (twin matches control), not an A7 regression. No
+  uncovered no-obligation site found.
+
+- **Verify (all foreground).** `cargo check --workspace` clean (14.87s). uitest
+  `run_ty_def` 100/100 (10 new A7.1 + 90 pre-existing BYTE-IDENTICAL, incl. all
+  `gat_bound_*`/`gat_default_*`/`gat_conformance_*`). fe-hir GAT unit tests 15/15
+  (A5.0 pin + new I1/I2 + A4.2 `gat_bound_mixed_*` + A4.3 `gat_default_*` +
+  `gat_projection_*`). fe-hir `ty_check` 122/122 + `trait_resolution_conformance`
+  green -- keystone confluence BYTE-IDENTICAL (`backend_schedule_confluence`,
+  `gat_typefn_confluence`, `gat_default_typefn_confluence`, `backend_storage_class`,
+  `backend_anti_conflation`, `hkt_backend_trait`; Buffer/Ref unguarded so leg 2
+  returns empty for every keystone projection). `corelib` ALONE 19/19
+  (`analyze_corelib`/`analyze_stdlib` +release twins). NO pre-existing snapshot
+  changed. Full release CI is the orchestrator's run (recompiles fe-hir).
+
+- **A7.1 SOUND + READY.** Both legs landed atomically; leg 1 is inert without leg
+  2 and vice versa, and both ship here. NEXT: A7.2 (leg 3 consumer revival for
+  UNGUARDED decls -- `extend_all_bounds` applied-subject derivation +
+  instantiate-on-match), the documented prerequisite before A9 wants
+  `B::Buffer<X>: Functor`.

@@ -1,0 +1,15 @@
+// mb2-a7.1 (caller leg 2, gate-don't-select, the clean case): a symbolic
+// caller that carries the guard as its OWN bound. `fn f<B: Backend, X: Marker>`
+// forms `B::Elem<X>`; the leg-2 obligation `X: Marker` discharges from the
+// caller's own bound. No impl is consulted or selected (the obligation is a
+// function of the decl + the projection's args only). Zero diagnostics.
+
+trait Marker {}
+
+trait Producer<T> {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+
+fn f<B: Backend, X: Marker>(x: B::Elem<X>) {}

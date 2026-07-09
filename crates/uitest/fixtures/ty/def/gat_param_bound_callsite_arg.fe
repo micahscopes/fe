@@ -1,0 +1,33 @@
+// mb2-a7.1 (caller leg 2, the call-site generic-arg channel + ADT control
+// twin): probe whether an EXPLICIT call-site generic argument's own
+// constraints are discharged. `g<Evm::Elem<NotMarked>>()` (GAT twin) is checked
+// against `g<Foo<NotMarked>>()` (ADT control, `struct Foo<T> where T: Marker`).
+// Parity assertion: whatever the ADT control does on this channel, the GAT twin
+// must do identically. If the control rejects, both reject; if the control
+// leaks, that is a pre-existing tree-wide gap shared with every ADT bound (NOT
+// an A7 regression), filed as its own item rather than patched here.
+
+trait Marker {}
+struct Evm {}
+struct NotMarked {}
+struct Store<T> {}
+trait Producer<T> {}
+impl<U> Producer<U> for Store<U> where U: Marker {}
+
+struct Foo<T> where T: Marker {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+impl Backend for Evm {
+    type Elem<T> = Store<T>
+}
+
+fn g<T>() {}
+
+fn callsite() {
+    // ADT control:
+    g<Foo<NotMarked>>()
+    // GAT twin (must match the control):
+    g<Evm::Elem<NotMarked>>()
+}

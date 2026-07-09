@@ -1,0 +1,11 @@
+// mb2-a7.1 (leg 0, decl-site guard WF): a GAT param guard whose trait path does
+// not resolve (`type Elem<T: NoSuchTrait>`) is an error AT THE DECL. The
+// "silently dropped on both sides" state (leg 1 assumes nothing, leg 2 proves
+// nothing) cannot survive in accepted code: the unresolvable guard path is
+// diagnosed at the declaration site.
+
+trait Producer<T> {}
+
+trait Backend {
+    type Elem<T: NoSuchTrait>: Producer<T>
+}

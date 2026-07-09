@@ -1,0 +1,12 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_param_bound_impl_binder.fe
+---
+error[3-0051]: trait bounds on associated-type parameters are declared on the trait, not the impl
+   ┌─ gat_param_bound_impl_binder.fe:21:15
+   │
+21 │     type Elem<T: Extra> = Store<T>
+   │               ^^^^^^^^ the impl binder may only repeat kind bounds; remove this trait bound
+   │
+   = the trait declaration is the single authority for associated-type parameter bounds; every use site proves them and every impl may assume them

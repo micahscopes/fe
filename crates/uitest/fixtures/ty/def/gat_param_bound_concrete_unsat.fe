@@ -1,0 +1,48 @@
+// mb2-a7.1 (caller leg 2, the dual bites; the concrete negative matrix):
+// projecting `Evm::Elem<NotMarked>` at a use site incurs `NotMarked: Marker`
+// as an ordinary WF obligation, exactly as `Store<NotMarked>` would demand it.
+// `NotMarked` has no `Marker` impl, so EACH formation site is REJECTED with
+// 6-0003 at the WRITTEN type (the WF check sees the pre-normalization redex).
+// Nothing is reported at the impl (the callee leg accepted the RHS under the
+// guard). One site per formation syntax pins the "no projection site missed"
+// claim for the concrete receiver.
+//
+// The where-clause-subject channel (`where Evm::Elem<NotMarked>: ..`) is
+// omitted here: a CONCRETE where-clause subject is rejected by the pre-existing
+// concrete-type-bound rule (6-0005) before leg 2 runs, so it does not exercise
+// this obligation. See gat_param_bound_symbolic_* for the symbolic subject.
+
+trait Marker {}
+trait Producer<T> {}
+struct Store<T> {}
+impl<U> Producer<U> for Store<U> where U: Marker {}
+struct Evm {}
+struct NotMarked {}
+struct Wrapper<T> {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+
+impl Backend for Evm {
+    type Elem<T> = Store<T>
+}
+
+// (a) function param type
+fn use_param(x: Evm::Elem<NotMarked>) {}
+
+// (b) return type (extern, so no body-normalization noise)
+extern {
+    fn use_return() -> Evm::Elem<NotMarked>
+}
+
+// (c) struct field decl type
+struct HasField {
+    f: Evm::Elem<NotMarked>
+}
+
+// (d) nested occurrence
+fn use_nested(x: Wrapper<Evm::Elem<NotMarked>>) {}
+
+// (e) type alias RHS
+type Alias = Evm::Elem<NotMarked>

@@ -87,7 +87,7 @@ use crate::analysis::ty::trait_resolution::constraint::{
     collect_func_def_constraints,
 };
 use crate::analysis::ty::ty_def::{TyBase, TyData, TyParam, strip_derived_adt_layout_args};
-use crate::analysis::ty::ty_lower::{GenericParamTypeSet, collect_generic_params};
+use crate::analysis::ty::ty_lower::{GenericParamTypeSet, collect_generic_params, gat_param_ty};
 use crate::analysis::ty::visitor::{TyVisitable, TyVisitor, walk_ty};
 use crate::analysis::ty::{
     diagnostics::{TraitConstraintDiag, TyDiagCollection},
@@ -4362,6 +4362,12 @@ impl<'db> Impl<'db> {
             WellFormedness::IllFormedConstPredicate { predicate } => {
                 InherentImplAdmissibility::IllFormedConstPredicate { ty, predicate }
             }
+            // A7.1: an inherent impl target that is a bare guarded GAT head is
+            // not a well-formed nominal target; reject it cleanly (unreachable
+            // in practice, since a projection cannot be an inherent-impl target).
+            WellFormedness::IllFormedUnsaturatedGuardedGat => {
+                InherentImplAdmissibility::InvalidTy { ty }
+            }
         }
     }
 
@@ -5222,6 +5228,55 @@ impl<'db> TraitAssocTypeView<'db> {
             owner_self,
         }
         .bounds(db)
+    }
+
+    /// The GAT parameter guards (`type Elem<T: G>` -> `T: G`) as trait insts
+    /// over this decl's OWN rigids (A7 leg-0 SSOT). For type param `j`, the
+    /// subject is `gat_param_ty(db, params[j], j, ScopeId::TraitType(owner,
+    /// idx))` (the exact rigid the A4.2 `GatOwnerRemap` and the A7.1
+    /// `GatDeclParamSubst` key on); each `TypeBound::Trait` is lowered by
+    /// `lower_trait_ref` at the assoc-type DEF-node scope (the same anchoring
+    /// `AssocTypeBounds::bounds` uses for RHS bounds), with `owner_self =
+    /// owner.self_param(db)` and `assumptions = constraints_for(owner)`. Guard
+    /// args may therefore name `Self`, the trait's item params, and sibling GAT
+    /// params of the same decl; all are minted owner-exactly so both consuming
+    /// legs substitute them the same way.
+    ///
+    /// Yields `(param_idx j, TraitInstId)`. A guard whose `lower_trait_ref`
+    /// fails (e.g. an unresolvable trait path) is dropped HERE and only here:
+    /// leg 1 (callee: assume `G(T)` when discharging the RHS) and leg 2 (caller:
+    /// prove `G(X)` at every projection `S::Elem<X>`) both read exactly this
+    /// iterator, so the guard set assumed callee-side and the set proved
+    /// caller-side are one salsa result by construction. That symmetry is what
+    /// makes a dropped guard a symmetric no-op rather than an unsoundness hole;
+    /// the decl-site guard WF diagnostic (`Trait::diags_gat_param_guards`) owns
+    /// the visible error.
+    pub fn gat_param_guard_insts(
+        self,
+        db: &'db dyn HirAnalysisDb,
+    ) -> Vec<(usize, TraitInstId<'db>)> {
+        let trait_ = self.owner;
+        let scope = ScopeId::TraitType(trait_, self.idx as u16);
+        let owner_self = trait_.self_param(db);
+        let assumptions = constraints_for(db, trait_.into());
+        let params = self.generic_params(db).data(db);
+
+        let mut out = Vec::new();
+        for (j, param) in params.iter().enumerate() {
+            let GenericParam::Type(p) = param else {
+                continue;
+            };
+            let subject = gat_param_ty(db, param, j, scope);
+            for bound in &p.bounds {
+                if let TypeBound::Trait(tr) = bound
+                    && let Ok(inst) =
+                        lower_trait_ref(db, subject, *tr, scope, assumptions, Some(owner_self))
+                {
+                    out.push((j, inst));
+                }
+            }
+        }
+        out
     }
 }
 

@@ -1,0 +1,22 @@
+// mb2-a7.1 (leg 0, impl-side authority rule): GAT parameter TRAIT bounds are
+// declared on the trait DECL, the single guard authority. An impl assoc-type
+// DEF binder that carries a trait bound (`type Elem<T: Extra> = ..`) is
+// REJECTED with the new diagnostic; the impl binder may only repeat kind
+// bounds. This closes the hole where an impl assumes a guard the decl never
+// demanded of callers. The blanket `Producer` impl is present so the RHS bound
+// discharges cleanly, isolating the binder-rejection diagnostic.
+
+trait Marker {}
+trait Extra {}
+trait Producer<T> {}
+struct Store<T> {}
+impl<U> Producer<U> for Store<U> where U: Marker {}
+struct Evm {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+
+impl Backend for Evm {
+    type Elem<T: Extra> = Store<T>
+}

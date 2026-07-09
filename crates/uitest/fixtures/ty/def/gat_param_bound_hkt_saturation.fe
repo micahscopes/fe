@@ -1,0 +1,23 @@
+// mb2-a7.1 (the saturation rule, closing the HKT escape): a guarded GAT
+// (`type Elem<T: Marker>`) may not be passed as a bare/partial type constructor
+// at a `* -> *` position, because the eventual application would then happen
+// through an opaque `F<X>` where no guard is computable (Fe has genuine HKT
+// positions; Rust does not). `HCell<B::Elem>` is REJECTED by the saturation
+// rule (new diagnostic). The unguarded control `HCell<B::Buffer>` keeps full
+// bare-head freedom and stays ACCEPTED.
+
+trait Marker {}
+trait Producer<T> {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+    type Buffer<T>
+}
+
+struct HCell<F: * -> *> {}
+
+// guarded bare head at `* -> *`: REJECTED (saturation)
+fn hkt_escape<B: Backend>(x: HCell<B::Elem>) {}
+
+// unguarded control: bare `B::Buffer` at `* -> *` stays ACCEPTED
+fn hkt_control<B: Backend>(x: HCell<B::Buffer>) {}

@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_param_bound_symbolic_unsat.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_param_bound_symbolic_unsat.fe:18:24
+   │
+18 │ fn g<B: Backend, X>(x: B::Elem<X>) {}
+   │                        ^^^^^^^^^^ `X` doesn't implement `Marker`

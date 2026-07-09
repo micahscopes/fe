@@ -1,0 +1,24 @@
+// mb2-a7.1 (merged-default guard, the None remap leg): the trait carries a
+// GUARDED GAT with a DEFAULT: `type Elem<T: Marker>: Producer<T> =
+// DefaultStore<T>`. An impl that INHERITS the default is accepted: the merged
+// default's RHS bound `DefaultStore<T>: Producer<T>` (needs `U: Marker` via the
+// blanket) discharges under the guard `T: Marker` through the merged-default
+// leg (def_lookup None, NO owner-remap: subject and guard already share the
+// trait-side rigid). A use site with `NotMarked` is rejected at the use.
+
+trait Marker {}
+trait Producer<T> {}
+struct DefaultStore<T> {}
+impl<U> Producer<U> for DefaultStore<U> where U: Marker {}
+struct Evm {}
+struct NotMarked {}
+
+trait Backend {
+    type Elem<T: Marker>: Producer<T> = DefaultStore<T>
+}
+
+// inherits the guarded default; accepted (merged-default discharge under guard)
+impl Backend for Evm {}
+
+// use site: `NotMarked` violates the guard, rejected at the use
+fn use_site(x: Evm::Elem<NotMarked>) {}

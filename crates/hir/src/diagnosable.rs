@@ -486,16 +486,34 @@ impl<'db> Diagnosable<'db> for TypeAlias<'db> {
 impl<'db> Trait<'db> {
     /// Diagnostics for associated type defaults (bounds satisfaction), in the trait's context.
     pub fn diags_assoc_defaults(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
+        use ty::trait_resolution::PredicateListId;
+
         let mut diags = Vec::new();
         let assumptions = param_env(db, self.into());
         for assoc in self.assoc_types(db) {
             let Some(default_ty) = assoc.default_ty(db) else {
                 continue;
             };
+            // A7.1 (trait-side analog of the leg-1 discharge): a GUARDED GAT
+            // default may assume its own param guards (`type Elem<T: Marker>: ..
+            // = DefaultStore<T>` assumes `T: Marker`) when checking its RHS
+            // bound. The guard subjects are trait-side rigids, minted at the same
+            // `TraitType` scope as `default_ty`'s own rigids, so NO remap is
+            // needed -- merge them into the assumptions for this default's bound
+            // check only (discharge context; never `param_env`). Empty for every
+            // unguarded default (byte-identical baseline).
+            let guards = assoc.gat_param_guard_insts(db);
+            let default_assumptions = if guards.is_empty() {
+                assumptions
+            } else {
+                let mut merged = assumptions.list(db).clone();
+                merged.extend(guards.into_iter().map(|(_, g)| g));
+                PredicateListId::new(db, merged)
+            };
             for trait_inst in assoc.bounds_on_subject(db, default_ty) {
                 match ty::trait_resolution::is_goal_satisfiable(
                     db,
-                    ty::trait_resolution::ProvisionEnv::for_scope(self.scope(), assumptions)
+                    ty::trait_resolution::ProvisionEnv::for_scope(self.scope(), default_assumptions)
                         .solve_cx(db),
                     trait_inst,
                 ) {
@@ -534,6 +552,106 @@ impl<'db> Trait<'db> {
                         }
                         .into(),
                     );
+                }
+            }
+        }
+        diags
+    }
+
+    /// A7.1 leg 0 (decl-site guard WF): each GAT param TRAIT bound (`type
+    /// Elem<T: G>` -> `T: G`) is the guard the A7 duality assumes callee-side
+    /// (leg 1) and proves caller-side (leg 2). A guard whose trait path does NOT
+    /// resolve is dropped by the SSOT accessor `gat_param_guard_insts` on both
+    /// legs symmetrically (sound, but silent); this leg re-runs the SAME
+    /// lowering and OWNS the visible error, so the "silently dropped on both
+    /// sides" state cannot survive in accepted code. For a guard that DOES
+    /// lower, its args are checked for well-formedness. Mirror of
+    /// `WherePredicateBoundView::diags_for_subject`'s path/domain/cycle arms.
+    pub fn diags_gat_param_guards(self, db: &'db dyn HirAnalysisDb) -> Vec<TyDiagCollection<'db>> {
+        use name_resolution::{ExpectedPathKind, diagnostics::PathResDiag};
+        use ty::trait_lower::{self, TraitRefLowerError};
+        use ty::trait_resolution::{ProvisionEnv, check_ty_wf};
+        use ty::ty_lower::gat_param_ty;
+
+        let mut diags = Vec::new();
+        let assumptions = crate::semantic::constraints_for(db, self.into());
+        let owner_self = self.self_param(db);
+        for (assoc_idx, assoc) in self.assoc_types(db).enumerate() {
+            let decl_scope = ScopeId::TraitType(self, assoc_idx as u16);
+            for (j, param) in assoc.generic_params(db).data(db).iter().enumerate() {
+                let GenericParam::Type(p) = param else {
+                    continue;
+                };
+                let subject = gat_param_ty(db, param, j, decl_scope);
+                for (k, bound) in p.bounds.iter().enumerate() {
+                    let crate::hir_def::TypeBound::Trait(tr) = bound else {
+                        continue;
+                    };
+                    let bound_span = assoc
+                        .span()
+                        .generic_params()
+                        .param(j)
+                        .into_type_param()
+                        .bounds()
+                        .bound(k)
+                        .trait_bound();
+                    match trait_lower::lower_trait_ref(
+                        db,
+                        subject,
+                        *tr,
+                        decl_scope,
+                        assumptions,
+                        Some(owner_self),
+                    ) {
+                        Ok(inst) => {
+                            // The guard lowered; check its args are well-formed.
+                            let solve_cx =
+                                ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db);
+                            for &arg in inst.args(db) {
+                                if let Some(diag) = check_ty_wf(db, solve_cx, arg)
+                                    .into_diag(bound_span.clone().path().into())
+                                {
+                                    diags.push(diag);
+                                }
+                            }
+                        }
+                        Err(TraitRefLowerError::PathResError(err)) => {
+                            if let Some(path) = tr.path(db).to_opt()
+                                && let Some(diag) = err.into_diag(
+                                    db,
+                                    path,
+                                    bound_span.path(),
+                                    ExpectedPathKind::Trait,
+                                )
+                            {
+                                diags.push(diag.into());
+                            }
+                        }
+                        Err(TraitRefLowerError::InvalidDomain(res)) => {
+                            if let Some(path) = tr.path(db).to_opt()
+                                && let Some(ident) = path.ident(db).to_opt()
+                            {
+                                diags.push(
+                                    PathResDiag::ExpectedTrait(
+                                        bound_span.path().into(),
+                                        ident,
+                                        res.kind_name(),
+                                    )
+                                    .into(),
+                                );
+                            }
+                        }
+                        Err(TraitRefLowerError::Cycle) => {
+                            diags.push(cyclic_trait_ref_diag(
+                                bound_span.path().into(),
+                                "trait bound",
+                            ));
+                        }
+                        Err(
+                            TraitRefLowerError::UnsafeLocalBoundBlanketImpl
+                            | TraitRefLowerError::Ignored,
+                        ) => {}
+                    }
                 }
             }
         }
@@ -865,6 +983,33 @@ impl<'db> ImplTrait<'db> {
                         if matches!(param, GenericParam::Const(_)) {
                             diags.push(
                                 TyLowerDiag::GatConstParamUnsupported {
+                                    span: self
+                                        .span()
+                                        .associated_type(impl_idx)
+                                        .generic_params()
+                                        .param(j)
+                                        .into(),
+                                }
+                                .into(),
+                            );
+                        }
+
+                        // A7.1 leg 0 (impl-side authority rule): GAT parameter
+                        // TRAIT bounds are declared on the trait DECL, which is
+                        // the single guard authority (`gat_param_guard_insts`).
+                        // The impl binder may only REPEAT kind bounds (compared
+                        // by `gat_signature_conforms`); a trait bound here would
+                        // let the impl assume a guard the decl never demanded of
+                        // callers, so it is rejected. Zero baseline inhabitants
+                        // (no impl GAT binder carries a trait bound today), so
+                        // this strictness lands on a new leg only.
+                        if let GenericParam::Type(p) = param
+                            && p.bounds
+                                .iter()
+                                .any(|b| matches!(b, crate::hir_def::TypeBound::Trait(_)))
+                        {
+                            diags.push(
+                                TyLowerDiag::GatImplBinderTraitBound {
                                     span: self
                                         .span()
                                         .associated_type(impl_idx)
@@ -1233,43 +1378,12 @@ impl<'db> ImplTrait<'db> {
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Vec<TyDiagCollection<'db>> {
+        use ty::fold::TraitScopeSubstFolder;
         use ty::fold::TyFoldable as _;
         use ty::trait_lower::lower_impl_trait;
-        use ty::trait_resolution::{GoalSatisfiability, ProvisionEnv, is_goal_satisfiable};
+        use ty::trait_resolution::{GoalSatisfiability, PredicateListId, ProvisionEnv, is_goal_satisfiable};
         use ty::ty_lower::{gat_param_ty, gat_signature_conforms};
         use ty::type_fn_induct::{StrictResult, strict_prove};
-
-        // Trait-ITEM param -> trait arg (owner-exact on the trait item scope).
-        // GAT binder params (owner = the assoc-type DEF node, `TraitType`) are
-        // NOT touched here; they are reconciled by `GatOwnerRemap` below.
-        struct TraitScopeSubstFolder<'db, 'a> {
-            trait_scope: ScopeId<'db>,
-            trait_args: &'a [TyId<'db>],
-        }
-
-        impl<'db> ty::fold::TyFolder<'db> for TraitScopeSubstFolder<'db, '_> {
-            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
-                match ty.data(db) {
-                    ty::ty_def::TyData::TyParam(param)
-                        if !param.is_effect() && param.owner == self.trait_scope =>
-                    {
-                        self.trait_args.get(param.idx).copied().unwrap_or(ty)
-                    }
-
-                    ty::ty_def::TyData::ConstTy(const_ty) => match const_ty.data(db) {
-                        ty::const_ty::ConstTyData::TyParam(param, _)
-                            if !param.is_effect() && param.owner == self.trait_scope =>
-                        {
-                            self.trait_args.get(param.idx).copied().unwrap_or(ty)
-                        }
-
-                        _ => ty.super_fold_with(db, self),
-                    },
-
-                    _ => ty.super_fold_with(db, self),
-                }
-            }
-        }
 
         // Owner-exact GAT param remap (mb2-a4.2). Rewrites each trait-decl GAT
         // param (`TyParam{owner == TraitType(t, decl_idx), idx j}`) to the
@@ -1376,6 +1490,76 @@ impl<'db> ImplTrait<'db> {
                 .find(|(_, v)| v.name(db) == Some(name) && v.ty(db).is_some())
                 .map(|(def_idx, _)| (def_idx, &self.types(db)[def_idx]));
 
+            // ---- A7.1 leg 1 (callee): the GAT-bound duality relaxation.
+            // Fold this decl's GAT param guards (`type Elem<T: G>` -> `T: G`)
+            // through the SAME pipeline the RHS goal takes, then merge them into
+            // the strict-prove ASSUMPTIONS. The impl RHS may now assume `T: G`
+            // exactly as the decl demands `G` of every caller (leg 2, the dual).
+            //
+            // Injection is confined to this discharge context (I1): guards NEVER
+            // enter `param_env` / `collect_constraints` / `extend_all_bounds`,
+            // so the A5.0 FIX-1 pin `gat_bound_no_assoc_owned_param_in_param_env`
+            // stays green and stays teeth. `CanonicalGoalQuery::new` runs
+            // `extend_all_bounds` over these assumptions per-query, closing the
+            // guard under supertraits INSIDE the discharge query and nowhere
+            // else. The guard's subject rigid is the SAME interned rigid the RHS
+            // subject carries (I2), by construction of the shared folders +
+            // `gat_param_ty` mint (explicit leg: `GatOwnerRemap` to the impl-side
+            // rigid; merged-default leg: no remap, trait-side rigid already
+            // shared). See mb2-fable-steering-10, "A7 callee side".
+            let decl_view = trait_hir.assoc_types(db).find(|v| v.name(db) == Some(name));
+            let mut discharge_guards: Vec<ty::trait_def::TraitInstId<'db>> = Vec::new();
+            if arity > 0
+                && let Some(decl_view) = decl_view
+            {
+                for (_j, guard) in decl_view.gat_param_guard_insts(db) {
+                    // Step 1 (both legs): trait Self + item params -> this impl's
+                    // trait args, through the shared `TraitScopeSubstFolder`.
+                    let mut folder = TraitScopeSubstFolder {
+                        trait_scope,
+                        trait_args,
+                    };
+                    let guard = guard.fold_with(db, &mut folder);
+                    // Step 2 (explicit leg only): decl rigids -> the impl-side
+                    // rigids the RHS subject carries. Merged-default leg (None):
+                    // no remap; subject and guard already share the trait-side
+                    // rigid.
+                    let guard = if let (Some((def_idx, def)), Some(decl_idx)) = (def_lookup, decl_idx)
+                    {
+                        let mut remap = GatOwnerRemap {
+                            decl_scope: ScopeId::TraitType(trait_hir, decl_idx as u16),
+                            impl_owner: ScopeId::ImplTraitType(self, def_idx as u16),
+                            def_params: def.generic_params.data(db),
+                        };
+                        guard.fold_with(db, &mut remap)
+                    } else {
+                        guard
+                    };
+                    discharge_guards.push(guard);
+                }
+            }
+
+            // FIX 2 parity (A7.1): a guard carrying `Invalid` (an unlowerable
+            // arg, already diagnosed at the decl by `diags_gat_param_guards`)
+            // would make `strict_prove` decline every RHS bound and spray noise.
+            // Suppress this assoc type's bound diagnostics, symmetric to the
+            // goal-side `has_invalid` guard below and the assumptions-side FIX-2
+            // pre-flight above.
+            if discharge_guards
+                .iter()
+                .any(|g| g.args(db).iter().any(|ty| ty.has_invalid(db)))
+            {
+                continue;
+            }
+
+            let discharge_assumptions = if discharge_guards.is_empty() {
+                assumptions
+            } else {
+                let mut merged = assumptions.list(db).clone();
+                merged.extend(discharge_guards.iter().copied());
+                PredicateListId::new(db, merged)
+            };
+
             for bound_inst in assoc.bounds(db) {
                 let mut folder = TraitScopeSubstFolder {
                     trait_scope,
@@ -1464,7 +1648,7 @@ impl<'db> ImplTrait<'db> {
                     continue;
                 }
 
-                if strict_prove(db, solve_cx.origin_ingot(), goal, solve_cx.assumptions())
+                if strict_prove(db, solve_cx.origin_ingot(), goal, discharge_assumptions)
                     != StrictResult::Proven
                 {
                     let assoc_ty_span = self
@@ -2158,6 +2342,7 @@ impl<'db> Diagnosable<'db> for Trait<'db> {
         let mut out = Vec::new();
         out.extend(self.diags_assoc_defaults(db));
         out.extend(self.diags_gat_const_params(db));
+        out.extend(self.diags_gat_param_guards(db));
         out.extend(self.diags_super_traits(db));
 
         for pred in WhereClauseOwner::Trait(self).clause(db).predicates(db) {

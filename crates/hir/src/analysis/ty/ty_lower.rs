@@ -2144,6 +2144,109 @@ impl<B> Backend for Wrap<B> where B: Backend {
         );
     }
 
+    // mb2-a7.1 (I1 + I2): the GAT-bound duality relaxation must NOT leak a
+    // guard into `param_env` (I1), and the guard's subject rigid must be the
+    // decl's own GAT rigid (I2) -- the exact rigid the RHS subject carries after
+    // the shared `GatOwnerRemap`, which is what makes the discharge sound.
+    #[test]
+    fn gat_param_guard_invariants_i1_i2() {
+        use crate::analysis::ty::visitor::{TyVisitable, TyVisitor};
+        use crate::semantic::param_env;
+
+        let mut db = HirAnalysisTestDb::default();
+        // A GUARDED GAT on a recursive impl: the same `extend_all_bounds`
+        // step-2 shape as the A5.0 pin, now with a param guard present. I1 must
+        // hold even though leg 1 injects the guard at the discharge query.
+        let file = db.new_stand_alone(
+            "gat_param_guard_i1_i2.fe".into(),
+            r#"
+trait Marker {}
+trait Producer<T> {}
+struct Store<T> {}
+impl<U> Producer<U> for Store<U> where U: Marker {}
+struct Wrap<B> {}
+trait Backend {
+    type Elem<T: Marker>: Producer<T>
+}
+impl<B> Backend for Wrap<B> where B: Backend {
+    type Elem<T> = Store<T>
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+
+        // (I1) The guard never enters `param_env`: scan for any assoc-owned rigid.
+        let impl_trait = top_mod
+            .all_impl_traits(&db)
+            .iter()
+            .copied()
+            .find(|imp| {
+                imp.assoc_types(&db)
+                    .any(|v| v.name(&db).is_some_and(|n| n.data(&db) == "Elem"))
+            })
+            .expect("missing `impl Backend for Wrap<B>`");
+        let env = param_env(&db, impl_trait.into());
+        struct Scan<'db> {
+            db: &'db dyn HirAnalysisDb,
+            found: bool,
+        }
+        impl<'db> TyVisitor<'db> for Scan<'db> {
+            fn db(&self) -> &'db dyn HirAnalysisDb {
+                self.db
+            }
+            fn visit_param(&mut self, ty_param: &TyParam<'db>) {
+                if ty_param.is_assoc_ty_param() {
+                    self.found = true;
+                }
+            }
+        }
+        let mut scan = Scan {
+            db: &db,
+            found: false,
+        };
+        env.visit_with(&mut scan);
+        assert!(
+            !scan.found,
+            "I1 violated: a param guard leaked an assoc-owned rigid into \
+             `param_env`. Offending env: {}",
+            env.pretty_print(&db)
+        );
+
+        // (I2) The guard's subject rigid IS the decl's own GAT rigid.
+        let backend = find_backend_trait(&db, top_mod);
+        let elem_view = backend
+            .assoc_types(&db)
+            .find(|v| v.name(&db).is_some_and(|n| n.data(&db) == "Elem"))
+            .expect("missing `Elem`");
+        let decl_idx = backend
+            .assoc_types(&db)
+            .position(|v| v.name(&db).is_some_and(|n| n.data(&db) == "Elem"))
+            .unwrap();
+        let guards = elem_view.gat_param_guard_insts(&db);
+        assert_eq!(guards.len(), 1, "expected exactly one guard `T: Marker`");
+        let (j, guard) = guards[0];
+        assert_eq!(j, 0, "guard is on GAT param 0");
+
+        let decl_params = elem_view.generic_params(&db).data(&db);
+        let expected_subject = gat_param_ty(
+            &db,
+            &decl_params[0],
+            0,
+            ScopeId::TraitType(backend, decl_idx as u16),
+        );
+        assert_eq!(
+            guard.self_ty(&db),
+            expected_subject,
+            "I2 violated: guard subject must be the decl's own GAT rigid \
+             (interned-identical to what the RHS subject carries pre-remap); got `{}`",
+            guard.self_ty(&db).pretty_print(&db)
+        );
+        assert!(
+            guard.self_ty(&db).is_param(&db),
+            "guard subject must be a rigid param"
+        );
+    }
+
     fn find_func<'db>(
         db: &'db HirAnalysisTestDb,
         top_mod: TopLevelMod<'db>,
