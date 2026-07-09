@@ -1820,3 +1820,99 @@ additive-Rust surface and were green at the orchestrator's boundary runs, but
 their individual counts were not captured in-tree; the net delta 2558 -> 2589 is
 the new backend/atomic/barrier/conal fixtures landed across the B + A7 + A9
 tracks.
+
+## 2026-07-09 - Slice A9.2: the EXECUTED Conal instance on EVM (par_map RUNS)
+
+Converts the Conal library headline from "type-checks" to "RUNS on EVM",
+entirely in-sandbox, following the B1 `atomic_rmw` revm pattern. Also resolves
+the STEP-0 gate (the B2 revm-hang diagnosis) and lands the previously-missing
+`barrier_noop.fe`. PURE INGOT + fixtures; ZERO Rust/compiler change (uses the
+existing `StorPtr` storage effect lowering + the `Fn`/`Functor`/`with` machinery;
+invents no codegen). Did NOT touch the owner-gated Sonatina seam / `crates/codegen`.
+
+### STEP 0 (gate): the B2 revm-hang is NOT a codegen bug -- it does not reproduce
+
+Reproduced the exact reported shape minimally
+(`crates/fe/tests/fixtures/fe_test/barrier_noop.fe`, now committed = the file the
+`backend_barrier.fe:116` / `evm/barrier.fe:17` comments referenced but which was
+missing): a contract recv arm provisioning `uses (barrier: mut Barrier<EvmBackend,
+Global>)`, calling the EVM no-op `barrier.barrier()` body, deployed + driven under
+revm. Run FOREGROUND with a 120s `timeout` at HEAD (release binary, embedded std,
+AND debug): `PASS [~0.002s]`, no hang, no deadlock. The empty-body capability
+method lowers and runs as nothing; the barrier obligation is granted ambiently by
+the root `Evm` (the B1 finding). So the earlier ~8-min/0%-CPU hang was a
+FIXTURE/HARNESS artifact of whatever uncommitted, differently-shaped barrier
+fixture the B2 pass wrote, NOT a real codegen/lowering bug in the EVM path. GATE
+CLEARED -> proceeded to the executed par_map, and wired the barrier end-to-end.
+
+### The executed element model (`ingots/std/src/conal.fe`, additive)
+
+- **`StorWordBuf`** -- a minimal fixed-length buffer of `u256` words over
+  consecutive storage slots (element `i` at slot `base + i`). `get(i)` is an
+  `sload`, `set(i, v)` an `sstore`, both via `StorPtr::from_raw(slot)` + the
+  `with (ptr) { read(ptr) / write(ptr, v) }` effect idiom (the `Storage`-space
+  lowering = the B1 sload/sstore path). A small fixed-length buffer is the
+  minimal shape; the bulk-storage/iteration library is a later slice.
+- **`impl Functor<u256> for StorWordBuf`** with a REAL `map` body: loop over the
+  `len` input words, `sload` each, apply `f: u256 -> Y`, `sstore` each result to
+  the output buffer (placed at `base + len`). The mapped result type `Y` is
+  stored through the layout-generic `write` (no `Copy` bound on `Y`), so this is
+  a faithful `Functor<u256>` for any `Y`, EXECUTED at `Y = u256`. `par_map` is
+  the inherited default forwarding to `map` (parallelism is structural; EVM is
+  single-threaded), so `par_map` RUNS element-wise over EVM storage.
+
+- **DESIGN NOTE (reported): why a distinct buffer type, not a replaced
+  `StorPtr<X>` body.** The review's literal ask ("replace the `todo()` map body
+  for the `StorPtr<X>: Functor<X>` instance") is not coherently satisfiable while
+  keeping A9.1 byte-identical: (1) the generic `impl<X> Functor<X> for StorPtr<X>`
+  is the A9.1 keystone, mapped over schedule shapes (`Comp<..>`) that carry no
+  runtime word, so a real word `sload`/`sstore` body does not type-check for
+  abstract `X`; (2) Fe coherence forbids an overlapping specialized
+  `impl Functor<u256> for StorPtr<X>`; (3) adding `X: Copy` to `Functor::map`
+  ripples into `par_map_generic`, breaking `conal_par_map.snap` byte-identity.
+  So the generic `StorPtr<X>` instance stays the TYPE-LEVEL keystone (`todo()`
+  body, never executed), and the EXECUTED proof lives on the concrete
+  `StorWordBuf`, coherent alongside it. This delivers the deliverable ("the
+  library RUNS on EVM") without perturbing the A9.1/keystone/B2 fixtures. Two
+  engine facts confirmed by probe during design: `f.call` is invocable N times in
+  a generic no-`Copy` context (so a real multi-element map is possible), and
+  `write` is unbounded on the value type (so a generic `Y` is storable).
+
+### The executed fe test (`crates/fe/tests/fixtures/fe_test/conal_par_map_exec.fe`)
+
+Contract `ConalExec` fills an input buffer, `par_map`s a concrete `f` over it,
+and the `#[test]` deploys + drives it under revm asserting the output contents:
+- `RunAddOne`: fill `[10,20,30,40]` at slots 100..103, `par_map` add-one
+  (output 104..107), fire the derived phase-boundary `barrier.barrier()` (the B2
+  barrier wired end-to-end), return the output sum. Asserted: sum `104`,
+  per-element `11/21/31/41` (via `GetOut`).
+- `RunTimes3`: fill `[1,2,3,4]` at 200..203, `par_map` times-three, return sum
+  `30`.
+Result at HEAD (release binary, embedded std, 120s timeout): `PASS [0.0019s]
+test_conal_par_map_exec`; debug (disk ingots) `PASS` too. So `par_map` genuinely
+EXECUTES element-wise over EVM storage: input -> par_map(add-one) -> asserted
+output, and the derived barrier fires without hanging.
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- `cargo check --workspace` clean (3.9s; no Rust changed).
+- `corelib` ALONE 19/19 (`analyze_stdlib`/`analyze_corelib`/`analyze_core_derives`
+  + release twins) -> core+std build with `StorWordBuf` + its `Functor` instance,
+  debug AND release profile.
+- fe-hir `ty_check` 124/124, ZERO `.snap.new`: A9.1 `conal_par_map`, B2
+  `backend_barrier`, the A5.2 keystone (`backend_schedule_confluence`), and every
+  GAT/atomic/storage fixture BYTE-IDENTICAL (the additions are new struct + new
+  impl + new fixtures only; they touch no existing surface).
+- `tree_sitter_parse_strict` green (the new `conal.fe` surface -- `StorWordBuf`,
+  its methods, the `Functor` impl -- parses; ordinary structs/impls/`with`, no
+  `recursive type fn` in the ingot). `parser.c` untracked/gitignored, not committed.
+- Executed `conal_par_map_exec` fe test PASS + `barrier_noop` fe test PASS under
+  revm (release AND debug), each with a `timeout` so a hang would be caught.
+
+### Scope + owner-gated confirmation
+
+Reused the B1 storage idiom + the existing EVM effect lowering only; invented no
+codegen. Did NOT touch the owner-gated Sonatina seam-port / `crates/codegen`
+backends (B3/B4/B5); A9.2 needed none of it. No STOP blocker. A9.2 = the Conal
+library RUNS on EVM (executed `par_map`), with the B2 barrier derivation exercised
+end-to-end.

@@ -1,0 +1,100 @@
+// mb2 A9.2: the EXECUTED Conal `par_map` over EVM storage. This converts the
+// Conal library headline from "type-checks" to "RUNS": `std::conal::StorWordBuf`
+// is a minimal fixed-length word buffer over consecutive storage slots, its
+// `Functor<u256>` instance's `map` body does a REAL element-wise load / apply /
+// store (via `StorPtr`'s `Storage`-space effect lowering = the B1 `sload`/`sstore`
+// idiom), and `par_map` (the inherited default) forwards to it. This contract
+// fills an input buffer, `par_map`s a concrete `f` over it, and the `#[test]`
+// deploys + drives it under revm, asserting the output buffer contents.
+//
+// The B2 derived barrier is wired end-to-end: `RunAddOne` performs the
+// phase-boundary `barrier.barrier()` (a genuine no-op on single-threaded EVM,
+// STEP-0-verified not to hang) after the map, so the barrier capability is
+// exercised on the executed path.
+
+use std::conal::{Functor, StorWordBuf}
+use core::Fn
+use core::barrier::Barrier
+use core::backend::Global
+use std::evm::EvmBackend
+
+/// Concrete element map: add one.
+struct AddOne {}
+impl Fn<u256, u256> for AddOne {
+    fn call(self, _ v: own u256) -> u256 {
+        v + 1
+    }
+}
+
+/// Concrete element map: multiply by three.
+struct Times3 {}
+impl Fn<u256, u256> for Times3 {
+    fn call(self, _ v: own u256) -> u256 {
+        v * 3
+    }
+}
+
+msg Msg {
+    #[selector = 1]
+    RunAddOne -> u256,
+    #[selector = 2]
+    GetOut { i: u256 } -> u256,
+    #[selector = 3]
+    RunTimes3 -> u256,
+}
+
+pub contract ConalExec {
+    recv Msg {
+        // Fill input buffer [10, 20, 30, 40] at slots 100..103, `par_map` add-one
+        // over it (output at 104..107), fire the derived phase-boundary barrier,
+        // and return the sum of outputs (11 + 21 + 31 + 41 = 104).
+        RunAddOne -> u256 uses (evm: mut Evm, barrier: mut Barrier<EvmBackend, Global>) {
+            let inp = StorWordBuf::new(base: 100, len: 4)
+            inp.set(0, 10)
+            inp.set(1, 20)
+            inp.set(2, 30)
+            inp.set(3, 40)
+            let out = inp.par_map<u256, AddOne>(AddOne {})
+            barrier.barrier()
+            out.get(0) + out.get(1) + out.get(2) + out.get(3)
+        }
+
+        // Read output element `i` (the add-one output buffer is based at slot 104).
+        GetOut { i } -> u256 uses (evm: mut Evm) {
+            let out = StorWordBuf::new(base: 104, len: 4)
+            out.get(i)
+        }
+
+        // Fill input [1, 2, 3, 4] at slots 200..203, `par_map` times-three
+        // (output at 204..207), return the sum of outputs (3 + 6 + 9 + 12 = 30).
+        RunTimes3 -> u256 uses (evm: mut Evm) {
+            let inp = StorWordBuf::new(base: 200, len: 4)
+            inp.set(0, 1)
+            inp.set(1, 2)
+            inp.set(2, 3)
+            inp.set(3, 4)
+            let out = inp.par_map<u256, Times3>(Times3 {})
+            out.get(0) + out.get(1) + out.get(2) + out.get(3)
+        }
+    }
+}
+
+#[test]
+fn test_conal_par_map_exec() uses (evm: mut Evm) {
+    let c = evm.create2<ConalExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // add-one over [10, 20, 30, 40] -> [11, 21, 31, 41], sum 104.
+    let s = evm.call(addr: c, gas: 300000, value: 0, message: Msg::RunAddOne {})
+    assert!(s == 104)
+
+    // element-wise output contents.
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetOut { i: 0 }) == 11)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetOut { i: 1 }) == 21)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetOut { i: 2 }) == 31)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetOut { i: 3 }) == 41)
+
+    // multiply-by-3 over [1, 2, 3, 4] -> [3, 6, 9, 12], sum 30.
+    let m = evm.call(addr: c, gas: 300000, value: 0, message: Msg::RunTimes3 {})
+    assert!(m == 30)
+}

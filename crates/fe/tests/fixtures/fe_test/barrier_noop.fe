@@ -1,0 +1,36 @@
+// mb2 STEP 0 repro: the OPTIONAL EVM no-op barrier `fe test` the B2 slice
+// reported hanging under revm. Minimal shape: a contract recv arm provisions the
+// term-level `Barrier<EvmBackend, Global>` capability (`uses (barrier: mut ...)`,
+// granted ambiently by the root `Evm`), calls the EVM no-op `barrier()` body (a
+// genuine no-op: EVM is single-threaded), then returns a sentinel. The `#[test]`
+// deploys + drives it under revm and asserts the sentinel, so a hang at execution
+// is caught by the harness timeout rather than passing silently.
+
+use core::barrier::Barrier
+use core::backend::Global
+use std::evm::EvmBackend
+
+msg Msg {
+    #[selector = 1]
+    Sync -> u256,
+}
+
+pub contract BarrierNoop {
+    recv Msg {
+        // Provision the barrier capability, perform the derived phase-boundary
+        // barrier (a no-op on EVM), then return a sentinel value.
+        Sync -> u256 uses (barrier: mut Barrier<EvmBackend, Global>) {
+            barrier.barrier()
+            42
+        }
+    }
+}
+
+#[test]
+fn test_barrier_noop() uses (evm: mut Evm) {
+    let c = evm.create2<BarrierNoop>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    let r = evm.call(addr: c, gas: 200000, value: 0, message: Msg::Sync {})
+    assert!(r == 42)
+}

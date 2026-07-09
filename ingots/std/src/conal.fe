@@ -39,6 +39,8 @@
 
 use core::Fn
 use core::StorPtr
+use core::EffectHandle
+use core::effect_ref::{read, write}
 
 /// Schedule combinator vocabulary. In this slice these are `*`-kinded shape
 /// tokens: a schedule type such as `RBin<Pair, N>` normalizes to a nest of these,
@@ -83,5 +85,97 @@ impl<X> Functor<X> for StorPtr<X> {
 
     fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> StorPtr<Y> {
         todo()
+    }
+}
+
+// -----------------------------------------------------------------------------
+// mb2 A9.2: the EXECUTED element model (the library RUNS on EVM).
+// -----------------------------------------------------------------------------
+//
+// `StorWordBuf` is a MINIMAL fixed-length word buffer over consecutive EVM
+// storage slots (`base`, `base+1`, ..., `base+len-1`), and its `Functor<u256>`
+// instance's `map` body is REAL: it loads each element (`sload` via the B1
+// storage idiom, reached through `StorPtr`'s `Storage`-space effect lowering),
+// applies `f`, and stores the result to the output buffer's slot (`sstore`). So
+// `par_map` (the default, forwarding to `map`) EXECUTES element-wise over EVM
+// storage. Proven by `crates/fe/tests/fixtures/fe_test/conal_par_map_exec.fe`
+// under revm.
+//
+// WHY a distinct buffer type rather than replacing the `StorPtr<X>` instance's
+// `todo()`: the generic `impl<X> Functor<X> for StorPtr<X>` above is the A9.1
+// TYPE-LEVEL keystone (`EvmBackend::Buffer<T> = StorPtr<T>`, mapped over schedule
+// shapes like `Comp<..>` that carry no runtime value). Its `map` cannot execute
+// while staying generic over `X`: a real load returns a `u256` word, which only
+// type-checks when the element is a word, and Fe coherence forbids a specialized
+// overlapping `impl Functor<u256> for StorPtr<X>`. So the executed proof lives on
+// a concrete word buffer, coherent alongside the generic type-level instance,
+// leaving the A9.1 keystone byte-identical. Element = `u256`; the mapped result
+// type `Y` is stored via the layout-generic `write` (no `Copy` needed on `Y`),
+// so the instance is a faithful `Functor<u256>` for any result `Y`, executed at
+// `Y = u256`.
+
+/// A minimal fixed-length buffer of `u256` words over consecutive EVM storage
+/// slots. Element `i` lives at storage slot `base + i`. This is the A9.2
+/// EXECUTED element model for the Conal library (a small fixed-length buffer is
+/// the minimal shape; the full bulk-storage/iteration library is a later slice).
+pub struct StorWordBuf {
+    base: u256,
+    len: u256,
+}
+
+impl Copy for StorWordBuf {}
+
+impl StorWordBuf {
+    /// A buffer of `len` words based at storage slot `base`.
+    pub fn new(base: u256, len: u256) -> Self {
+        Self { base, len }
+    }
+
+    /// First storage slot of the buffer's region.
+    pub fn base(self) -> u256 {
+        self.base
+    }
+
+    /// Number of word elements.
+    pub fn len(self) -> u256 {
+        self.len
+    }
+
+    /// Load the word at index `i` (an `sload` of slot `base + i`).
+    pub fn get(self, _ i: u256) -> u256 {
+        let p: StorPtr<u256> = StorPtr::from_raw(self.base + i)
+        with (p) { read(p) }
+    }
+
+    /// Store `value` at index `i` (an `sstore` to slot `base + i`).
+    pub fn set(self, _ i: u256, _ value: u256) {
+        let p: StorPtr<u256> = StorPtr::from_raw(self.base + i)
+        with (p) { write(p, value) }
+    }
+}
+
+/// The EXECUTED Conal instance: `par_map` runs element-wise over EVM storage.
+///
+/// `map` loads each of the `len` input words, applies `f: u256 -> Y`, and stores
+/// each result to the output buffer (placed contiguously after the input at
+/// `base + len`). The result type `Y` is stored through the layout-generic
+/// `write`, so this is a real `Functor<u256>` for any `Y`; it EXECUTES on EVM at
+/// `Y = u256` (see the A9.2 fe test). `par_map` is the inherited default
+/// forwarding to `map` (parallelism is structural; EVM is single-threaded).
+impl Functor<u256> for StorWordBuf {
+    type Out<Y> = StorWordBuf
+
+    fn map<Y, F: Fn<u256, Y>>(self, _ f: F) -> StorWordBuf {
+        let out = StorWordBuf { base: self.base + self.len, len: self.len }
+        let mut i: u256 = 0
+        while i < self.len {
+            let src: StorPtr<u256> = StorPtr::from_raw(self.base + i)
+            let x: u256 = with (src) { read(src) }
+            let y: Y = f.call(x)
+            let dst: StorPtr<Y> = StorPtr::from_raw(out.base + i)
+            with (dst) { write(dst, y) }
+            i += 1
+        }
+        out
     }
 }
