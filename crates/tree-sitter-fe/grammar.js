@@ -107,6 +107,7 @@ module.exports = grammar({
       $.use_statement,
       $.const_definition,
       $.function_definition,
+      $.recursive_type_fn,
       $.struct_definition,
       $.enum_definition,
       $.contract_definition,
@@ -505,6 +506,76 @@ module.exports = grammar({
       optional($.generic_param_list),
       '=',
       field('type', $._type),
+    ),
+
+    // Recursive type function (the mb2 keystone surface):
+    //   [pub] recursive type fn Name<T, const N: usize>() -> (KIND)
+    //       [where ..] { match N { LIT => TYPE .. _ => TYPE } }
+    //
+    // Mirrors the hand-written parser (crates/parser/src/parser/item.rs,
+    // `RecursiveTypeFnScope`): `recursive` is a contextual keyword recognized
+    // before `type fn`, `pub` is allowed but `unsafe` is not, the value-parameter
+    // list is empty `()` (reserved), the return kind is a parenthesized `kind_bound`
+    // (`(*)`, `(* -> *)`), and the body is EXACTLY one `match` on the const subject
+    // whose arms map an integer literal or `_` to a TYPE. Deeper laws (single const
+    // subject declared last, self-call by DefId, `{N - k}` subject shape,
+    // exhaustiveness/termination) are checked in HIR, exactly as the hand-written
+    // parser defers them.
+    recursive_type_fn: $ => seq(
+      optional($.attribute_list),
+      optional($.visibility),
+      'recursive',
+      'type',
+      'fn',
+      field('name', $.identifier),
+      optional($.generic_param_list),
+      '(',
+      ')',
+      optional(seq('->', field('return_kind', $.type_fn_ret_kind))),
+      optional($.where_clause),
+      field('body', $.type_fn_body),
+    ),
+
+    // The parenthesized return kind of a recursive type fn (`(*)`, `(* -> *)`).
+    // A bare `kind_bound`, whose paren form carries the enclosing parentheses.
+    type_fn_ret_kind: $ => $.kind_bound,
+
+    // `{ match N { .. } }` -- the body is exactly one `match` on the subject.
+    type_fn_body: $ => seq(
+      '{',
+      $.type_fn_match,
+      '}',
+    ),
+
+    // `match SUBJECT { <arm>* }` inside a recursive type fn body. The subject is a
+    // bare identifier (the declared const parameter; verified in HIR). Distinct
+    // from the expression-level `match_expression`: arms produce TYPES.
+    type_fn_match: $ => seq(
+      'match',
+      field('subject', $.identifier),
+      field('arms', $.type_fn_arm_list),
+    ),
+
+    type_fn_arm_list: $ => seq(
+      '{',
+      repeat($.type_fn_arm),
+      '}',
+    ),
+
+    // `<pat> => <type>`. Arms are newline- or comma-separated (newlines are
+    // trivia, so the separator is an optional comma), matching the hand-written
+    // parser's comma-or-newline arm terminator.
+    type_fn_arm: $ => seq(
+      field('pattern', $.type_fn_arm_pat),
+      '=>',
+      field('value', $._type),
+      optional(','),
+    ),
+
+    // An integer literal (`0`, `1`, ..) or the catch-all `_`.
+    type_fn_arm_pat: $ => choice(
+      $.integer_literal,
+      '_',
     ),
 
     // Module definition

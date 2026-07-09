@@ -1,0 +1,50 @@
+// mb2 A9.3: the schedule builder `RBin` is now LIBRARY-RESIDENT in `std::conal`.
+// The tree-sitter ingot grammar learned the `recursive type fn` surface, so the
+// canonical schedule builder can live in the `std::conal` ingot instead of being
+// redeclared as a fixture-local `recursive type fn` in every caller (as the A5.2
+// keystone, A9.1 and B2 fixtures still do). This fixture imports `RBin` FROM the
+// library (there is NO local `recursive type fn` here) and reproduces the A5.2
+// keystone confluence using the LIBRARY builder.
+//
+// A standalone ty_check fixture (`new_stand_alone` seeds the builtin `core` AND
+// `std`, so this exercises the real `std::conal::RBin`, the real
+// `core::backend::Backend`, and the real `std::evm::EvmBackend`). Every leg is
+// zero-diagnostic; the note-dump `.snap` records the observed normal forms, and
+// the `takes_nf*` acceptors are the teeth (a zero-diagnostic call is definitional
+// equality at the boundary).
+//
+//   RBin<T, 0> = Par
+//   RBin<T, N> = Comp<RBin<T, N-1>, T>
+// so RBin<Pair, 3> = Comp<Comp<Comp<Par, Pair>, Pair>, Pair>.
+
+use core::backend::Backend
+use core::StorPtr
+use std::conal::{RBin, Par, Pair, Comp}
+use std::evm::EvmBackend
+
+// ---- keystone confluence with the LIBRARY RBin ----
+
+fn takes_nf3(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+
+// `EvmBackend::Buffer<RBin<Pair, 3>>` is definitionally equal to
+// `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>` using the LIBRARY `RBin`:
+// project through the real impl (`type Buffer<T> = StorPtr<T>`), then unfold the
+// library schedule type fn, confluently with unfold-then-project.
+fn confluence3(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+    takes_nf3(x)
+}
+
+fn takes_nf4(_ x: StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>) {}
+
+// A deeper schedule, so the library normal form is non-trivial.
+fn confluence4(x: EvmBackend::Buffer<RBin<Pair, 4>>) {
+    takes_nf4(x)
+}
+
+// ---- symbolic opacity: the LIBRARY schedule unfolds under an opaque projection ----
+
+// The projection head stays opaque (`B::Buffer<..>`), but the library `RBin<T, 3>`
+// still unfolds: recorded NF is `B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>`.
+fn sym_buffer<B: Backend, T>(x: B::Buffer<RBin<T, 3>>) -> B::Buffer<RBin<T, 3>> {
+    x
+}

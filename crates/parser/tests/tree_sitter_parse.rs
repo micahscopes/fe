@@ -9,7 +9,6 @@ const MAX_ERRORS_PER_FILE: usize = 5;
 const EXCLUDED_FILES: &[&str] = &[
     "parse_error.fe",        // cli_output: intentional parse error
     "quote.fe",              // exprs: `quote { .. }` is not yet in the tree-sitter grammar
-    "recursive_type_fn.fe",  // items: `recursive type fn` is hand-written-parser only; tree-sitter grammar deferred
     "trait_assoc_type_generic.fe", // items: generic params on trait associated types are hand-written-parser only; tree-sitter grammar deferred
 ];
 

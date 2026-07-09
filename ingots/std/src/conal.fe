@@ -25,10 +25,10 @@
 //! schedule shape (e.g. `RBin<Pair, N>`, a `recursive type fn`), so
 //! `EvmBackend::Buffer<RBin<Pair, 3>>` normalizes to
 //! `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>` and `par_map` runs over
-//! that shape. The `recursive type fn` itself is written in caller code (it is
-//! hand-parser-only; the tree-sitter ingot grammar does not carry it yet), so
-//! this library supplies the schedule COMBINATOR vocabulary (`Par`/`Pair`/`Comp`)
-//! and the caller composes it.
+//! that shape. As of mb2 A9.3 the schedule builder `RBin` is LIBRARY-RESIDENT
+//! (surfaced from this module alongside the `Par`/`Pair`/`Comp` combinator
+//! vocabulary it composes), the tree-sitter ingot grammar having learned the
+//! `recursive type fn` surface; a caller need only `use std::conal::RBin`.
 //!
 //! Scope of this slice (minimal on purpose): ONE instance, for the EVM backend's
 //! buffer container (`StorPtr<X>`). The `map` body is a type-level stub
@@ -50,6 +50,28 @@ use core::effect_ref::{read, write}
 pub struct Par {}
 pub struct Pair {}
 pub struct Comp<A, B> {}
+
+/// The canonical balanced-binary schedule builder (mb2 A9.3), now LIBRARY-RESIDENT
+/// (moved out of the fixtures once the tree-sitter ingot grammar learned the
+/// `recursive type fn` surface). Recursion is on the const depth `N` (the count of
+/// `Comp` phase boundaries), threading the symbolic element `T` at each leaf:
+///
+///   RBin<T, 0> = Par
+///   RBin<T, N> = Comp<RBin<T, N-1>, T>
+///
+/// so `RBin<Pair, 3>` normalizes to `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>`.
+/// "The type is the schedule": a caller instantiates a backend buffer's element at
+/// `RBin<_, N>`, so `EvmBackend::Buffer<RBin<Pair, 3>>` normalizes to
+/// `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>` and `par_map` runs over that
+/// shape (the same depth `N` drives the B2 barrier derivation). This is the CLOSED
+/// combinator set: `RBin` composes the `Par`/`Comp` vocabulary above, adding no new
+/// combinator.
+pub recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
 
 /// A `*`-kinded, applied-form, element-changing functor over a backend container.
 ///

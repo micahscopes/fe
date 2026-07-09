@@ -1,0 +1,85 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/conal_library_rbin.fe
+---
+note:
+   ┌─ conal_library_rbin.fe:27:69
+   │
+27 │ fn takes_nf3(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+   │                                                                     ^^ ()
+
+note:
+   ┌─ conal_library_rbin.fe:33:54
+   │
+33 │   fn confluence3(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+   │ ╭──────────────────────────────────────────────────────^
+34 │ │     takes_nf3(x)
+35 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_library_rbin.fe:34:5
+   │
+34 │     takes_nf3(x)
+   │     ^^^^^^^^^ fn takes_nf3
+
+note:
+   ┌─ conal_library_rbin.fe:34:5
+   │
+34 │     takes_nf3(x)
+   │     ^^^^^^^^^^^^ ()
+
+note:
+   ┌─ conal_library_rbin.fe:34:15
+   │
+34 │     takes_nf3(x)
+   │               ^ StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ conal_library_rbin.fe:37:81
+   │
+37 │ fn takes_nf4(_ x: StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>) {}
+   │                                                                                 ^^ ()
+
+note:
+   ┌─ conal_library_rbin.fe:40:54
+   │
+40 │   fn confluence4(x: EvmBackend::Buffer<RBin<Pair, 4>>) {
+   │ ╭──────────────────────────────────────────────────────^
+41 │ │     takes_nf4(x)
+42 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_library_rbin.fe:41:5
+   │
+41 │     takes_nf4(x)
+   │     ^^^^^^^^^ fn takes_nf4
+
+note:
+   ┌─ conal_library_rbin.fe:41:5
+   │
+41 │     takes_nf4(x)
+   │     ^^^^^^^^^^^^ ()
+
+note:
+   ┌─ conal_library_rbin.fe:41:15
+   │
+41 │     takes_nf4(x)
+   │               ^ StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ conal_library_rbin.fe:48:81
+   │
+48 │   fn sym_buffer<B: Backend, T>(x: B::Buffer<RBin<T, 3>>) -> B::Buffer<RBin<T, 3>> {
+   │ ╭─────────────────────────────────────────────────────────────────────────────────^
+49 │ │     x
+50 │ │ }
+   │ ╰─^ B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>
+
+note:
+   ┌─ conal_library_rbin.fe:49:5
+   │
+49 │     x
+   │     ^ B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>
