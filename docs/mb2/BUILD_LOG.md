@@ -2018,3 +2018,86 @@ No STOP blocker: the grammar composed cleanly (zero conflicts) and the ingot hol
 the type-fn (corelib green). A9.3 = tree-sitter learns `recursive type fn`, the
 canonical `RBin` becomes library-resident in `std::conal`, and a library-using
 fixture proves the moved builder reaches the identical keystone normal form.
+
+## 2026-07-09 - Slice A5.4: the DX floor (diagnostics-only, no behavior change)
+
+The plan's gap-3 / milestone-review item 6 "DX floor": the two blocking HKT
+error-message hazards (kind-mismatch phrasing, and the projection/kind errors a
+user hits when spelling a bounded-GAT or a qualified GAT projection) must read
+well before any PUBLIC `Backend` trait. PURE diagnostic TEXT: message/sub/notes
+only, ZERO type-system behavior change. Every touched fixture keeps its code,
+span, marker, and pass/fail verdict; only the rendered wording changed. Two of
+the three named diagnostic classes were clean message-only wins; the third
+(lead-with-source) requires data-flow plumbing and is STOP-deferred (below).
+
+- **Kind-mismatch phrasing, `3-0050` (`TyLowerDiag::GatUnsaturatedGuarded`).** The
+  saturation-rule reject for a bounded GAT passed bare at `* -> *`. Before it just
+  asserted "a bounded associated type must be fully applied here" without naming
+  the kinds or the reason. After it leads with the EXPECTED vs ACTUAL kind and the
+  WHY:
+    - header: "expected a fully-applied type (kind `*`), found a bounded
+      associated type used at a higher kind"
+    - primary: "this bounded associated type is passed as a partially-applied type
+      constructor (kind `* -> *`), but a fully-applied type (kind `*`) is expected
+      here"
+    - note 1 (the why): "because it declares bounds on its parameters, those
+      bounds can only be checked once it is applied to a concrete argument; passing
+      it bare at a higher kind would let the bounds escape checking"
+    - note 2 (the fix): "apply the associated type to all of its arguments here ..."
+  Fixture: `ty/def/gat_param_bound_hkt_saturation.snap` (message-only; still one
+  `3-0050` at 20:30, unguarded control still accepted).
+
+- **Unresolved/under-applied projection, `3-0000` (`TyLowerDiag::ExpectedStarKind`).**
+  This is the code the A9.1 characterization named for the qualified-path
+  final-segment GAT-arg drop (`<B::Buffer<X> as Functor<X>>::Out<Y>` lowering to a
+  bare `* -> *` head). Before: "expected `*` kind here" with NO note (no actionable
+  hint). After: the primary reads "expected a fully-applied type (kind `*`) here"
+  and a new actionable note is added: "a partially-applied type constructor (kind
+  `* -> *`) is not a concrete type here; apply it to all of its type arguments so
+  that it has kind `*`" (the "missing arg" suggestion the review asked for).
+  `ExpectedStarKind` is a general diagnostic (all four emission sites are
+  under-applied/higher-kinded-where-`*`-expected), so the note is uniformly
+  correct; it improves EVERY `3-0000` case, not just the GAT one. Fixtures:
+  `ty/def/not_fully_applied.snap` (8x) + `ty/def/not_star_kind.snap` (10x), all
+  message-only, all codes/spans/verdicts identical (the incidental `2-0002`
+  undefined-`T` errors in `not_star_kind` are untouched).
+
+- **STOP-deferred: the type-fn-in-projection "lead-with-source" rule (item 3).**
+  The ask (a `recursive type fn` application inside a projection should render the
+  SOURCE type as written, not the internal normalized form) cannot be done as
+  message-text-only. The site that would render the normalized subject is
+  `TraitConstraintDiag::TraitBoundNotSat` (`6-0003`), whose `primary_goal` reaches
+  the renderer already reduced to its combinator normal form; the un-normalized
+  source form is NOT carried to the diagnostic. Making it lead-with-source requires
+  PLUMBING the pre-normalization source type (or an "as-written" provenance handle)
+  through to the diag builder, which is a data-flow change, i.e. behavior-adjacent,
+  not text-only. Per the slice's scope guard ("if improving a message would require
+  a real resolution/type-system behavior change, do NOT do it here") this belongs
+  with the qualified-path/lowering work, not the DX-text floor. The type-fn error
+  diagnostics that DO fire (`TypeFnNotSaturated`, `TypeFnRecursionLimit`,
+  `TypeFnSymbolicUnsupported`) already lead with the source SPAN and read well, so
+  nothing user-facing regresses by deferring this.
+
+- **The `2-0002` half of the unresolved-projection item was left untouched on
+  purpose.** The chained `B::Buffer<X>::Out<Y>` failure renders as the general
+  name-resolution "`X` is not found" (`2-0002`), shared across dozens of unrelated
+  fixtures (imports, cycles, missing paths) and already clear; adding a
+  GAT-specific "use `Self::Out<Y>` in a trait method" workaround there would need
+  the same GAT-projection context detection the item-3 lowering slice owns. The
+  `3-0000` improvement above is the message-only part of that suggestion.
+
+- **Verify (all foreground; orchestrator owns full release CI).**
+  `cargo check --workspace` clean (11.6s). `fe-uitest` `run_ty_def` FULL suite
+  104/104 with exactly the 3 intended snaps changed and ZERO `.snap.new` (every
+  other `ty/def` fixture byte-identical). `corelib` ALONE 19/19. `fe-hir`
+  `ty_check` 125/125 with zero `.snap.new` (all keystone/conal/backend/gat-typefn
+  fixtures byte-identical: the rendering change touches only error paths, and those
+  fixtures are zero-diagnostic). `fe-parser` `tree_sitter_parse_strict` GREEN.
+  Each changed snap reviewed line-by-line: same error code, same span, same caret,
+  verdict unchanged; only wording/notes differ.
+
+No STOP blocker for the two shipped classes; item 3 (lead-with-source) is the one
+STOP-deferred as behavior-adjacent. A5.4 = DX floor: the kind-mismatch phrasing
+(`3-0050`) and the under-applied-projection suggestion (`3-0000`) now read clearly
+and actionably; the lead-with-source rule awaits the source-form plumbing that
+belongs to the qualified-path lowering slice.

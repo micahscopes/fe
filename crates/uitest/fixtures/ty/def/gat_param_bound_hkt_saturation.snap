@@ -3,10 +3,11 @@ source: crates/uitest/tests/ty.rs
 expression: diags
 input_file: fixtures/ty/def/gat_param_bound_hkt_saturation.fe
 ---
-error[3-0050]: a bounded associated type must be fully applied here
+error[3-0050]: expected a fully-applied type (kind `*`), found a bounded associated type used at a higher kind
    ┌─ gat_param_bound_hkt_saturation.fe:20:30
    │
 20 │ fn hkt_escape<B: Backend>(x: HCell<B::Elem>) {}
-   │                              ^^^^^^^^^^^^^^ this associated type declares bounds on its parameters and cannot be passed as a partially applied type constructor
+   │                              ^^^^^^^^^^^^^^ this bounded associated type is passed as a partially-applied type constructor (kind `* -> *`), but a fully-applied type (kind `*`) is expected here
    │
-   = apply the associated type to all of its arguments (each argument is then checked against the parameter's declared bounds), rather than passing it bare at a higher kind
+   = because it declares bounds on its parameters, those bounds can only be checked once it is applied to a concrete argument; passing it bare at a higher kind would let the bounds escape checking
+   = apply the associated type to all of its arguments here (each argument is then checked against the parameter's declared bounds)

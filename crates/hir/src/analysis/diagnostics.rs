@@ -1669,10 +1669,14 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
                     message: "expected `*` kind in this context".to_string(),
                     sub_diagnostics: vec![SubDiagnostic {
                         style: LabelStyle::Primary,
-                        message: "expected `*` kind here".to_string(),
+                        message: "expected a fully-applied type (kind `*`) here".to_string(),
                         span: span.resolve(db),
                     }],
-                    notes: vec![],
+                    notes: vec![
+                        "a partially-applied type constructor (kind `* -> *`) is not a concrete \
+                         type here; apply it to all of its type arguments so that it has kind `*`"
+                            .to_string(),
+                    ],
                     error_code,
                 }
             }
@@ -1862,18 +1866,24 @@ impl DiagnosticVoucher for TyLowerDiag<'_> {
 
             Self::GatUnsaturatedGuarded { span } => CompleteDiagnostic {
                 severity: Severity::Error,
-                message: "a bounded associated type must be fully applied here".to_string(),
+                message: "expected a fully-applied type (kind `*`), found a bounded associated \
+                          type used at a higher kind"
+                    .to_string(),
                 sub_diagnostics: vec![SubDiagnostic {
                     style: LabelStyle::Primary,
-                    message: "this associated type declares bounds on its parameters and cannot be \
-                              passed as a partially applied type constructor"
+                    message: "this bounded associated type is passed as a partially-applied type \
+                              constructor (kind `* -> *`), but a fully-applied type (kind `*`) is \
+                              expected here"
                         .to_string(),
                     span: span.resolve(db),
                 }],
                 notes: vec![
-                    "apply the associated type to all of its arguments (each argument is then \
-                     checked against the parameter's declared bounds), rather than passing it bare \
-                     at a higher kind"
+                    "because it declares bounds on its parameters, those bounds can only be \
+                     checked once it is applied to a concrete argument; passing it bare at a \
+                     higher kind would let the bounds escape checking"
+                        .to_string(),
+                    "apply the associated type to all of its arguments here (each argument is then \
+                     checked against the parameter's declared bounds)"
                         .to_string(),
                 ],
                 error_code,
