@@ -1,0 +1,26 @@
+// mb2-a4.2: the ASSUMPTIONS leg, NEGATIVE. Identical to
+// `gat_bound_from_where_clause` except the impl DROPS its `where V: Base`
+// clause. Now the `Producer` impl's subgoal `V: Base` is not in the impl's
+// `param_env`, so the strict discharge fails: `TraitBoundNotSat` at the impl
+// assoc-ty span. Pins that the bound really is discharged under the impl's own
+// assumptions, not vacuously.
+
+trait Base {}
+
+trait Producer<T> {}
+
+struct Pair<A, B> {}
+
+impl<A, B> Producer<B> for Pair<A, B>
+where A: Base
+{}
+
+struct Wrap<V> {}
+
+trait Backend {
+    type Elem<T>: Producer<T>
+}
+
+impl<V> Backend for Wrap<V> {
+    type Elem<T> = Pair<V, T>
+}

@@ -2016,6 +2016,102 @@ impl Backend for Evm {}
             .expect("missing function")
     }
 
+    fn find_backend_impl<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+    ) -> ImplTrait<'db> {
+        // The GAT-carrying impl (non-empty `types`); the blanket `Producer` impl
+        // has no associated types.
+        top_mod
+            .children_non_nested(db)
+            .find_map(|item| match item {
+                ItemKind::ImplTrait(it) if !it.types(db).is_empty() => Some(it),
+                _ => None,
+            })
+            .expect("missing GAT impl trait")
+    }
+
+    // A4.2 mixed-index NON-CAPTURE (the S2 cousin, steering-07 sec 2): the impl
+    // param `V` (owner = impl item scope, local idx 0) and the GAT param `T`
+    // (owner `ImplTraitType`, local idx 0) SHARE a numeric index. The owner-exact
+    // remap rewrites only the trait-decl-owned bound param `T_trait`, leaving `V`
+    // intact, so the goal stays `Producer<Pair<V, T_gat>, T_gat>` and its subgoal
+    // is `V: Base` -- dischargeable from the impl's `where V: Base` assumption.
+    //
+    // A by-index remap (the capture bug this pins against) would rewrite `V` too
+    // (idx 0), collapsing the subject to `Pair<T_gat, T_gat>` and turning the
+    // subgoal into the UNPROVABLE `T_gat: Base` (a rigid GAT param, no
+    // assumption). So an EMPTY diagnostic set is behavioral proof that `V` was
+    // left intact: capture would produce `TraitBoundNotSat`.
+    #[test]
+    fn gat_bound_mixed_index_non_capture() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "gat_bound_mixed_index.fe".into(),
+            r#"
+trait Base {}
+trait Producer<T> {}
+struct Pair<A, B> {}
+impl<A, B> Producer<B> for Pair<A, B>
+where A: Base
+{}
+struct Wrap<V> {}
+trait Backend {
+    type Elem<T>: Producer<T>
+}
+impl<V> Backend for Wrap<V>
+where V: Base
+{
+    type Elem<T> = Pair<V, T>
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let impl_trait = find_backend_impl(&db, top_mod);
+        let diags = impl_trait.diags_assoc_types_bounds(&db);
+        assert!(
+            diags.is_empty(),
+            "mixed-index GAT bound spuriously failed: the remap captured the \
+             impl param `V` (by-index) instead of only the trait-decl GAT param; \
+             got {} diagnostic(s)",
+            diags.len()
+        );
+    }
+
+    // Companion negative: dropping the `where V: Base` clause removes the only
+    // assumption the subgoal `V: Base` can be discharged from, so the strict
+    // leg must now REJECT. Pins that the pass above is a real discharge under
+    // the impl's assumptions, not a vacuous accept.
+    #[test]
+    fn gat_bound_mixed_index_without_assumption_rejected() {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(
+            "gat_bound_mixed_index_no_where.fe".into(),
+            r#"
+trait Base {}
+trait Producer<T> {}
+struct Pair<A, B> {}
+impl<A, B> Producer<B> for Pair<A, B>
+where A: Base
+{}
+struct Wrap<V> {}
+trait Backend {
+    type Elem<T>: Producer<T>
+}
+impl<V> Backend for Wrap<V> {
+    type Elem<T> = Pair<V, T>
+}
+"#,
+        );
+        let (top_mod, _) = db.top_mod(file);
+        let impl_trait = find_backend_impl(&db, top_mod);
+        let diags = impl_trait.diags_assoc_types_bounds(&db);
+        assert!(
+            !diags.is_empty(),
+            "GAT bound should be rejected without the `V: Base` assumption"
+        );
+    }
+
     // K02a revival (re-port of effort2 1184fbbf0): a `Constraint` kind bound
     // lowers to `Kind::Constraint`, so `P: * -> Constraint` is `* -> Constraint`.
     #[test]

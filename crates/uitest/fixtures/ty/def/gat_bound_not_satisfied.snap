@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_bound_not_satisfied.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_bound_not_satisfied.fe:19:20
+   │
+19 │     type Elem<T> = Store<T>
+   │                    ^^^^^^^^ `Store<T>` doesn't implement `Producer<T>`

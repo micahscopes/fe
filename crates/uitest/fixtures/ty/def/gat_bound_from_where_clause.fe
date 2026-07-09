@@ -1,0 +1,35 @@
+// mb2-a4.2: the ASSUMPTIONS leg. The GAT bound `Producer<T>` on the RHS
+// `Pair<V, T>` is discharged only via the impl's own where-clause `V: Base`
+// (the `Producer` impl requires `A: Base` on its first arg). The impl's
+// `param_env` carries `V: Base`, so the strict discharge succeeds: zero
+// diagnostics.
+//
+// This is ALSO the mixed-index non-capture case: the impl param `V` (owner =
+// the impl item scope, local idx 0) and the GAT param `T` (owner
+// `ImplTraitType`, local idx 0) share a numeric index. The owner-exact remap
+// rewrites only the trait-decl-owned bound param, leaving `V` intact; a
+// by-index remap would rewrite `V` too and the `V: Base` subgoal would become
+// the unprovable `T: Base`. The pass here is behavioral evidence of
+// non-capture (see the `gat_bound_mixed_index_non_capture` unit test).
+
+trait Base {}
+
+trait Producer<T> {}
+
+struct Pair<A, B> {}
+
+impl<A, B> Producer<B> for Pair<A, B>
+where A: Base
+{}
+
+struct Wrap<V> {}
+
+trait Backend {
+    type Elem<T>: Producer<T>
+}
+
+impl<V> Backend for Wrap<V>
+where V: Base
+{
+    type Elem<T> = Pair<V, T>
+}

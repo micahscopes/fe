@@ -1,0 +1,20 @@
+// mb2-a4.2: a NON-CONFORMING generic-associated-type BOUND. The trait declares
+// `type Elem<T>: Producer<T>`, but there is NO impl making `Store<T>` a
+// `Producer<T>`, so the impl RHS does not satisfy the bound for any `T`. The
+// strict discharge fails and reports `TraitBoundNotSat` at the impl assoc-ty
+// span (and nothing else). This is the negative counterpart to
+// `gat_bound_conforming` (which adds the blanket `Producer` impl).
+
+trait Producer<T> {}
+
+struct Store<T> {}
+
+struct Evm {}
+
+trait Backend {
+    type Elem<T>: Producer<T>
+}
+
+impl Backend for Evm {
+    type Elem<T> = Store<T>
+}

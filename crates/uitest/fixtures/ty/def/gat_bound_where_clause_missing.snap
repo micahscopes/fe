@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty.rs
+expression: diags
+input_file: fixtures/ty/def/gat_bound_where_clause_missing.fe
+---
+error[6-0003]: trait bound is not satisfied
+   ┌─ gat_bound_where_clause_missing.fe:25:20
+   │
+25 │     type Elem<T> = Pair<V, T>
+   │                    ^^^^^^^^^^ `Pair<V, T>` doesn't implement `Producer<T>`

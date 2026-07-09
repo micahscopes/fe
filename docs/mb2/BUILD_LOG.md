@@ -454,3 +454,74 @@ hazard H1 and adds the four signature-conformance diagnostics.
 - **NEXT: A4.1b** = H2 gate (reject GAT trait-ref bindings `Backend<Buffer=X>`)
   and A4.4 const-GAT-param decl-site deferral; then A4.2 (GAT where-bound
   discharge via owner-remap + strict_prove).
+
+## 2026-07-07 - Slice A4.2: GAT where-clause bound satisfaction (soundness crux)
+
+The A4 soundness core (steering-07 sec 2). A trait-side GAT bound
+(`type Elem<T>: Producer<T>`) imposes a UNIVERSAL obligation the impl RHS must
+satisfy for ALL rigid `T`. Discharged in `ImplTrait::diags_assoc_types_bounds`
+(`diagnosable.rs`) with an owner-exact remap + the STRICT solver.
+
+- **Owner-exact remap (`GatOwnerRemap`).** The bound goal is MIXED-OWNER today:
+  the subject comes from the impl RHS (`Store<T_impl>`, `T_impl` owner
+  `ImplTraitType`) while the trait-decl bound arg is `T_trait` (owner
+  `TraitType`), so a correct blanket impl spuriously UnSats (the two rigids read
+  as distinct). This is exactly the case A2b.1 GUARDED OUT of its fixture. The
+  new folder rewrites every `TyParam{owner == TraitType(t, decl_idx), idx j}`
+  (and the const-ty mirror) to the impl-side rigid `gat_param_ty(db,
+  def.generic_params[j], j, ImplTraitType(imp, def_idx))` -- minted by the SAME
+  helper the impl RHS's params were minted with (`path_resolver.rs`
+  `ImplTraitTypeParam` arm), so interned identity matches by construction and
+  subject + bound end up sharing ONE rigid. Owner-exact on the single def-node
+  scope of THIS decl; local idx looked up only within `def_params`, so an
+  impl/caller param sharing a numeric index (owner != `decl_scope`) is left
+  intact (S2 non-capture). `decl_idx`/`def_idx` are looked up independently
+  (`trait.assoc_types` position / `impl.types` position); they may differ.
+- **Strict discharge (`type_fn_induct::strict_prove`).** The remapped goal is
+  discharged on the STRICT path, NOT the permissive `is_goal_satisfiable`. Only
+  strict `Proven` is accepted; `NotProven` -> `TraitBoundNotSat` at the impl
+  assoc-ty span. Rationale: the permissive UnSat-only pattern counts the
+  depth-cap give-up `NeedsConfirmation(empty)` as success, a real hole for a
+  "for all T" claim that later consumer legs (A5+) will TRUST. `origin_ingot` +
+  `assumptions` come from the SAME `ProvisionEnv::for_scope(self.scope(),
+  param_env).solve_cx` today's check builds (verified equivalence: strict_prove
+  builds the identical canonical query and reads the identical tracked entry).
+  Emission is suppressed when the goal `has_invalid` (strict_prove's pre-flight
+  declines those; emitting would be noise on already-diagnosed code, e.g. a
+  const-GAT param whose A4.4 diag already fired).
+- **Anti-cascade.** The strict leg runs only when `gat_signature_conforms(db,
+  decl, def) == Ok` (the A4.1 predicate); a non-conforming binder was already
+  diagnosed (6-0023..25), so its bound is skipped, no trailing noise.
+- **v1 restriction (documented + pinned).** GAT param BOUNDS are NOT added as
+  assumptions (`type Elem<T: Marker>: Producer<T>` discharges with NO `T: Marker`
+  assumption). Sound-but-stricter: a valid RHS can be rejected. The relaxation
+  is UNSOUND unless the DUAL caller-side obligation (use sites prove `X: Marker`)
+  lands in the SAME slice; neither exists yet, they are one future paired slice.
+- **Arity-0 byte-identical.** The `arity == 0` leg is the unchanged permissive
+  UnSat-only discharge (input-disjointness: the strict leg only fires for
+  `decl arity > 0`, a class with zero baseline inhabitants).
+- **Tests.** uitest `ty/def`: `gat_bound_conforming` (blanket-satisfied GAT
+  bound, ZERO diag -- the A2b.1-deferred mixed-owner case now PASSES),
+  `gat_bound_not_satisfied` (no blanket impl -> `TraitBoundNotSat` at the RHS
+  span), `gat_bound_from_where_clause` (assumptions leg: `Pair<V, T>: Producer<T>`
+  dischargeable from `where V: Base`, ZERO diag), `gat_bound_where_clause_missing`
+  (drop the clause -> rejected), `gat_bound_param_bound_not_assumed` (the strict
+  v1 pin). fe-hir unit tests `gat_bound_mixed_index_non_capture` (impl param `V`
+  and GAT param `T` sharing local idx 0; empty diags is behavioral proof the
+  remap left `V` intact -- a by-index capture would turn the `V: Base` subgoal
+  into the unprovable `T: Base`) and `gat_bound_mixed_index_without_assumption_rejected`.
+- **Deviation (reported, not a weakened test):** the C3c "two coexisting impls
+  (derived default + override)" strictness fixture is NOT constructible on this
+  tree -- that multi-witness `NeedsConfirmation(non-empty)` shape is only
+  reachable post-C3c (steering-07 sec 2 says "possible post-C3c"). The
+  over-strictness and its sanctioned relaxation point are documented in the code
+  comment instead; strict_prove's own divergence pins already cover the
+  `NeedsConfirmation`/`ContainsInvalid` -> NotProven mapping.
+- **Verify:** `cargo check --workspace` clean; the 5 new uitest `ty/def`
+  fixtures + 2 new fe-hir unit tests green; existing fe-hir
+  `ty_check`/`constraints`/`trait_resolution_conformance`/`type_fn` +
+  arity-0 assoc-bound fixtures byte-identical. Full release CI is the
+  orchestrator's run.
+- **NEXT: A4.3** = trait-side GAT default merge via `instantiate_scoped`
+  (replace the A4.1 H1 guard; A4.2's remap-SKIP exception for merged defaults is
+  already in place).

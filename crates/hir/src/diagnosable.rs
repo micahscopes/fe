@@ -1201,13 +1201,47 @@ impl<'db> ImplTrait<'db> {
     }
 
     /// Diagnostics for associated type bounds on implemented assoc types.
+    ///
+    /// Two legs, gated on the trait DECL's GAT arity (the `assoc_decl_arity`
+    /// authority the A3 G1 gate reads):
+    ///
+    /// - **Arity 0** (a baseline assoc-type bound, `type Item: Bound`): the
+    ///   unchanged permissive UnSat-only discharge. BYTE-IDENTICAL to pre-A4.2
+    ///   (input-disjointness: the strict leg below only touches `arity > 0`).
+    /// - **Arity > 0** (a GAT bound, `type Elem<T>: Producer<T>`, mb2-a4.2):
+    ///   the bound is a UNIVERSAL claim over ALL rigid `T`, so it is discharged
+    ///   on the STRICT path ([`type_fn_induct::strict_prove`]) rather than the
+    ///   permissive solver. The goal is MIXED-OWNER today: the subject comes
+    ///   from the impl RHS (`Store<T_impl>`, owner `ImplTraitType`) while the
+    ///   trait-decl bound arg is `T_trait` (owner `TraitType`), so a correct
+    ///   blanket impl spuriously UnSats (the two rigids read as distinct -- the
+    ///   failure A2b.1 guarded out). [`GatOwnerRemap`] rewrites the
+    ///   `TraitType`-owned bound params to the SAME impl-side rigids
+    ///   `gat_param_ty` minted into the RHS (owner-exact, minted by the same
+    ///   helper, so interned identity matches), reconciling subject and bound
+    ///   onto ONE rigid. Only strict `Proven` is accepted: the permissive
+    ///   UnSat-only pattern counts the depth-cap give-up as success, a real
+    ///   hole for a "for all T" claim that later consumer legs will trust.
+    ///
+    /// v1 restriction (mb2-a4.2): a GAT param BOUND (`type Elem<T: Copy>: ...`)
+    /// is NOT added as an assumption here. Sound-but-stricter: an RHS needing
+    /// `T: Copy` is rejected even though the decl demands it of callers. The
+    /// relaxation is UNSOUND unless the DUAL caller-side obligation (use sites
+    /// prove `X: Copy`) lands in the SAME slice; neither exists yet, they are
+    /// one future paired slice.
     pub fn diags_assoc_types_bounds(
         self,
         db: &'db dyn HirAnalysisDb,
     ) -> Vec<TyDiagCollection<'db>> {
         use ty::fold::TyFoldable as _;
         use ty::trait_lower::lower_impl_trait;
+        use ty::trait_resolution::{GoalSatisfiability, ProvisionEnv, is_goal_satisfiable};
+        use ty::ty_lower::{gat_param_ty, gat_signature_conforms};
+        use ty::type_fn_induct::{StrictResult, strict_prove};
 
+        // Trait-ITEM param -> trait arg (owner-exact on the trait item scope).
+        // GAT binder params (owner = the assoc-type DEF node, `TraitType`) are
+        // NOT touched here; they are reconciled by `GatOwnerRemap` below.
         struct TraitScopeSubstFolder<'db, 'a> {
             trait_scope: ScopeId<'db>,
             trait_args: &'a [TyId<'db>],
@@ -1237,17 +1271,87 @@ impl<'db> ImplTrait<'db> {
             }
         }
 
+        // Owner-exact GAT param remap (mb2-a4.2). Rewrites each trait-decl GAT
+        // param (`TyParam{owner == TraitType(t, decl_idx), idx j}`) to the
+        // impl-side rigid `gat_param_ty(db, def_params[j], j,
+        // ImplTraitType(imp, def_idx))` -- minted by the SAME helper the impl
+        // RHS's own params were minted with (`path_resolver.rs`
+        // `ImplTraitTypeParam` arm), so interned identity matches by
+        // construction and subject + bound end up sharing ONE rigid. Owner-exact
+        // on the single def-node scope of THIS decl; the LOCAL idx is looked up
+        // only within `def_params`, so an impl/caller param sharing a numeric
+        // index (owner != `decl_scope`) is left intact (the S2 non-capture
+        // discipline). The `.get(idx)` guard is belt over the A4.1 arity check.
+        struct GatOwnerRemap<'db, 'a> {
+            decl_scope: ScopeId<'db>,
+            impl_owner: ScopeId<'db>,
+            def_params: &'a [GenericParam<'db>],
+        }
+
+        impl<'db> ty::fold::TyFolder<'db> for GatOwnerRemap<'db, '_> {
+            fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+                match ty.data(db) {
+                    ty::ty_def::TyData::TyParam(param)
+                        if !param.is_effect() && param.owner == self.decl_scope =>
+                    {
+                        match self.def_params.get(param.idx) {
+                            Some(p) => gat_param_ty(db, p, param.idx, self.impl_owner),
+                            None => ty,
+                        }
+                    }
+
+                    ty::ty_def::TyData::ConstTy(const_ty) => match const_ty.data(db) {
+                        ty::const_ty::ConstTyData::TyParam(param, _)
+                            if !param.is_effect() && param.owner == self.decl_scope =>
+                        {
+                            match self.def_params.get(param.idx) {
+                                Some(p) => gat_param_ty(db, p, param.idx, self.impl_owner),
+                                None => ty,
+                            }
+                        }
+
+                        _ => ty.super_fold_with(db, self),
+                    },
+
+                    _ => ty.super_fold_with(db, self),
+                }
+            }
+        }
+
         let mut diags = Vec::new();
         let Some(implementor) = lower_impl_trait(db, self) else {
             return diags;
         };
         let implementor = implementor.instantiate_identity();
         let trait_args = implementor.trait_(db).args(db);
-        let trait_scope = implementor.trait_def(db).scope();
+        let trait_hir = implementor.trait_def(db);
+        let trait_scope = trait_hir.scope();
         let assumptions = param_env(db, self.into());
+        let solve_cx = ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db);
 
         for assoc in implementor.assoc_type_views(db) {
             let Some(name) = assoc.name(db) else { continue };
+
+            // The trait DECL is the arity authority; its idx (position in
+            // `trait.types`, == the enumeration order of `assoc_types`) is also
+            // the GAT bound params' owner idx.
+            let decl = trait_hir.assoc_ty(db, name);
+            let decl_idx = trait_hir
+                .assoc_types(db)
+                .position(|v| v.name(db) == Some(name));
+            let arity = decl
+                .map(|d| d.generic_params.data(db).len())
+                .unwrap_or(0);
+
+            // The impl-side def (idx = position in `impl.types`), for the remap
+            // target owner + param binders. May be absent if the binding came
+            // from a merged trait default (A4.3 forward-compat); in v1 arity>0
+            // defaults are guarded out so this is present for every GAT.
+            let def_lookup = self
+                .types(db)
+                .iter()
+                .enumerate()
+                .find(|(_, d)| d.name.to_opt() == Some(name));
 
             for bound_inst in assoc.bounds(db) {
                 let mut folder = TraitScopeSubstFolder {
@@ -1255,12 +1359,67 @@ impl<'db> ImplTrait<'db> {
                     trait_args,
                 };
                 let bound_inst = bound_inst.fold_with(db, &mut folder);
-                use ty::trait_resolution::{GoalSatisfiability, ProvisionEnv, is_goal_satisfiable};
-                if let GoalSatisfiability::UnSat(_) = is_goal_satisfiable(
-                    db,
-                    ProvisionEnv::for_scope(self.scope(), assumptions).solve_cx(db),
-                    bound_inst,
-                ) {
+
+                // ---- Arity-0 baseline leg: permissive UnSat-only. BYTE-IDENTICAL.
+                if arity == 0 {
+                    if let GoalSatisfiability::UnSat(_) =
+                        is_goal_satisfiable(db, solve_cx, bound_inst)
+                    {
+                        let assoc_ty_span = self
+                            .associated_type_span(db, name)
+                            .map(|s| s.ty().into())
+                            .unwrap_or_else(|| self.span().ty().into());
+
+                        diags.push(
+                            TraitConstraintDiag::TraitBoundNotSat {
+                                span: assoc_ty_span,
+                                primary_goal: bound_inst,
+                                unsat_subgoal: None,
+                                required_by: None,
+                            }
+                            .into(),
+                        );
+                    }
+                    continue;
+                }
+
+                // ---- Arity>0 GAT leg (mb2-a4.2): owner-exact remap + strict prove.
+                let (Some(decl), Some(decl_idx), Some((def_idx, def))) =
+                    (decl, decl_idx, def_lookup)
+                else {
+                    // Merged trait default (no explicit impl def): subject and
+                    // bound are then both trait-side-owned and already
+                    // consistent, so the remap is skipped and A4.3 discharges it.
+                    // Unreachable in v1 (the GAT default merge is guarded out).
+                    continue;
+                };
+
+                // Anti-cascade: a non-conforming binder was already diagnosed by
+                // `diags_assoc_type_conformance` (6-0023..25). Skip its bound so
+                // the user sees exactly the signature mismatch, no trailing
+                // bound-not-satisfied noise.
+                if gat_signature_conforms(db, decl, def).is_err() {
+                    continue;
+                }
+
+                let mut remap = GatOwnerRemap {
+                    decl_scope: ScopeId::TraitType(trait_hir, decl_idx as u16),
+                    impl_owner: ScopeId::ImplTraitType(self, def_idx as u16),
+                    def_params: def.generic_params.data(db),
+                };
+                let goal = bound_inst.fold_with(db, &mut remap);
+
+                // Suppress on already-invalid goals: `strict_prove`'s pre-flight
+                // declines HAS_INVALID, so a diagnostic here would be pure noise
+                // on code with an existing error (e.g. a const-GAT param, whose
+                // decl-site diagnostic A4.4 already emitted).
+                if goal.args(db).iter().any(|ty| ty.has_invalid(db)) {
+                    continue;
+                }
+
+                if strict_prove(db, solve_cx.origin_ingot(), goal, solve_cx.assumptions())
+                    != StrictResult::Proven
+                {
                     let assoc_ty_span = self
                         .associated_type_span(db, name)
                         .map(|s| s.ty().into())
@@ -1269,7 +1428,7 @@ impl<'db> ImplTrait<'db> {
                     diags.push(
                         TraitConstraintDiag::TraitBoundNotSat {
                             span: assoc_ty_span,
-                            primary_goal: bound_inst,
+                            primary_goal: goal,
                             unsat_subgoal: None,
                             required_by: None,
                         }

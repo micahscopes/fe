@@ -1,0 +1,24 @@
+// mb2-a4.2: a CONFORMING generic-associated-type BOUND. The trait declares
+// `type Elem<T>: Producer<T>`; the impl RHS `Store<T>` satisfies `Producer<T>`
+// for ALL rigid `T` via the blanket `impl<U> Producer<U> for Store<U>`.
+//
+// This is exactly the mixed-owner case A2b.1 GUARDED OUT of its fixture: the
+// subject `Store<T_impl>` (owner `ImplTraitType`) and the bound arg `T_trait`
+// (owner `TraitType`) are reconciled onto ONE rigid by the owner-exact remap,
+// then discharged strictly. Zero diagnostics pins the spurious-UnSat fix.
+
+trait Producer<T> {}
+
+struct Store<T> {}
+
+impl<U> Producer<U> for Store<U> {}
+
+struct Evm {}
+
+trait Backend {
+    type Elem<T>: Producer<T>
+}
+
+impl Backend for Evm {
+    type Elem<T> = Store<T>
+}
