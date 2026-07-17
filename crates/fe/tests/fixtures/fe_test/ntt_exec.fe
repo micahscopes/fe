@@ -1,0 +1,443 @@
+// mb2 N1: the EXECUTED number-theoretic transform (NTT) on EVM (revm `fe test`).
+//
+// The crypto proof-gen flagship's fe/EVM REFERENCE leg. A radix-2 iterative
+// Cooley-Tukey NTT over the prime field `F_q`, `q = 12289 = 3 * 2^12 + 1` (the
+// NTT-friendly prime of Falcon / NewHope; 2-adicity 12, sizes to 4096). Every
+// product of two reduced residues is `< q^2 ~ 1.5e8`, so a native u256 multiply
+// then `% q` is exact on EVM (no bignum, no multi-limb: that is the deferred
+// limb-engine project). Built over the C0-C2 Conal element model (`StorWordBuf`,
+// element `i` at storage slot `base + i`), with the masked-ring arithmetic of the
+// Clifford C-lane fixtures replaced here by mod-q field arithmetic.
+//
+// THE KERNEL IS THE SCHEDULE (design section 3.2). A size-n NTT is `log2(n)`
+// butterfly STAGES; each stage is `n/2` INDEPENDENT butterflies (the `Par`
+// leaves) and each stage boundary is a data dependency (a `Comp` boundary = one
+// derived barrier). This N1 leg is the SEQUENTIAL reference: the butterflies run
+// one after another. N2 forks each stage's butterfly set under the D6.3 `Par`
+// provider with a `barrier.barrier()` at each stage boundary (`log2(n)` DERIVED
+// barriers on a depth-indexed real algorithm), byte-identical storage vs this N1.
+// No `Par`/barrier wiring here.
+//
+// TWIDDLES. `w_n` is a primitive n-th root of unity mod q (`w_n = g^((q-1)/n)`,
+// generator `g = 11`): `w_8 = 8246`, `w_16 = 4134`. This fixture COMPUTES the
+// per-stage twiddle powers at RUNTIME via `powmod_q` (square-and-multiply) rather
+// than baking a `const` table: the design's in-fixture fallback, recorded because
+// the fe `const`/CTFE path for `pow_mod` over a runtime index was not pursued in
+// this slice (the schedule structure, not the memoization, is N1's subject). The
+// inverse transform's `w^-1` and `n^-1` are Fermat inverses (`powmod_q(a, q-2)`).
+//
+// THE THREE LEGS (design section 3.2, "the demo's teeth"), all pinned to the
+// cross-backend probe oracle (`F_12289`, cyclic convention `X[k] = sum_j x[j] *
+// w^(j*k) mod q`, which the harness already verified wasm == spirv == rayon):
+//   1. FORWARD NTT == the pinned probe vector (sizes 8 and 16).
+//   2. INTT round-trip: `INTT(NTT(a)) == a` (sizes 8 and 16).
+//   3. THE CONVOLUTION THEOREM (the prover hot loop): `INTT(NTT(a) .* NTT(b))`
+//      equals the schoolbook cyclic convolution `a * b mod q` (mod X^n - 1),
+//      i.e. polynomial multiplication, computed BOTH ways in-fixture and asserted
+//      equal per coefficient (sizes 8 and 16). Production Falcon/NewHope NTTs are
+//      negacyclic (mod X^n + 1, a psi-twist pre/post scaling): a named cheap
+//      follow-up, not this slice. No performance claims; 2^20 / BN254 stays the
+//      aspiration the plan owns.
+
+use std::conal::StorWordBuf
+use std::evm::EvmBackend
+
+// The field `F_q`, q = 12289 = 3 * 2^12 + 1.
+const Q: u256 = 12289
+// Primitive 8th / 16th roots of unity mod q (g = 11; w_n = g^((q-1)/n)).
+const W8: u256 = 8246
+const W16: u256 = 4134
+
+// Storage regions (all disjoint; each holds up to 16 words). Every result slot is
+// freshly written by the op that produces it, so no cross-case zeroing is needed
+// except the schoolbook accumulator (which clears itself).
+const A_BASE: u256 = 100      // input a
+const B_BASE: u256 = 200      // input b
+const FA_BASE: u256 = 300     // NTT(a)
+const FB_BASE: u256 = 400     // NTT(b)
+const PT_BASE: u256 = 500     // NTT(a) .* NTT(b)
+const OUT_BASE: u256 = 600    // the op result (read back via GetOut)
+const SCHOOL_BASE: u256 = 700 // schoolbook cyclic convolution (read via GetSchool)
+const WORK_BASE: u256 = 800   // scratch: forward output staged for the INTT
+
+// ---- the field `F_q`: add / sub / mul mod q, and modular exponentiation ----
+
+/// field add: inputs reduced (`< q`), so `a + b < 2q < 2^256`.
+fn addmod_q(_ a: u256, _ b: u256) -> u256 {
+    (a + b) % Q
+}
+/// field sub: `a + q - b` is always in `(0, 2q)` for reduced `a, b`, so no
+/// underflow and one `% q` normalizes.
+fn submod_q(_ a: u256, _ b: u256) -> u256 {
+    (a + Q - b) % Q
+}
+/// field mul: reduced inputs give a product `< q^2 ~ 1.5e8`, exact in u256.
+fn mulmod_q(_ a: u256, _ b: u256) -> u256 {
+    (a * b) % Q
+}
+/// modular exponentiation (square-and-multiply); the twiddle-power and Fermat
+/// -inverse engine.
+fn powmod_q(_ base: u256, _ exp: u256) -> u256 {
+    let mut r: u256 = 1
+    let mut b = base % Q
+    let mut e = exp
+    while e > 0 {
+        if e % 2 == 1 {
+            r = mulmod_q(r, b)
+        }
+        b = mulmod_q(b, b)
+        e = e / 2
+    }
+    r
+}
+/// multiplicative inverse via Fermat's little theorem: `a^(q-2) mod q`.
+fn inv_q(_ a: u256) -> u256 {
+    powmod_q(a, Q - 2)
+}
+
+// ---- bit-reversal (the Cooley-Tukey load permutation), arithmetic-only ----
+
+/// reverse the low `bits` bits of `x` (uses `%`/`/` only, mirroring the Clifford
+/// popcount idiom; no bitwise operators needed).
+fn bitrev(_ x: u256, _ bits: u256) -> u256 {
+    let mut r: u256 = 0
+    let mut v = x
+    let mut b: u256 = 0
+    while b < bits {
+        r = r * 2 + v % 2
+        v = v / 2
+        b += 1
+    }
+    r
+}
+
+/// log2 of a power-of-two length (the stage count = the `BarrierReq<log2 n>`
+/// depth).
+fn log2n(_ n: u256) -> u256 {
+    let mut bits: u256 = 0
+    let mut v = n
+    while v > 1 {
+        v = v / 2
+        bits += 1
+    }
+    bits
+}
+
+/// bit-reversal copy: `dst[reverse(i)] = src[i]` for all `i` (the CT load).
+fn bitrev_copy(_ src: StorWordBuf, _ dst: StorWordBuf, _ bits: u256) {
+    let n = src.len()
+    let mut i: u256 = 0
+    while i < n {
+        dst.set(bitrev(i, bits), src.get(i))
+        i += 1
+    }
+}
+
+// ---- the butterfly stages: THE SCHEDULE executed sequentially ----
+
+/// In-place radix-2 DIT butterflies over a bit-reversed buffer, root `w` (the
+/// forward `w_n` or its inverse for the INTT). Stage `len` = 2, 4, ..., n is one
+/// `Comp` boundary; each stage runs `n/2` independent butterflies (the `Par`
+/// leaves). Computes `A[k] = sum_j a[j] * w^(j*k) mod q`.
+fn butterfly(_ a: StorWordBuf, _ w: u256) {
+    let n = a.len()
+    let mut len: u256 = 2
+    while len <= n {
+        // primitive len-th root for this stage = w^(n/len).
+        let wlen = powmod_q(w, n / len)
+        let half = len / 2
+        let mut i: u256 = 0
+        while i < n {
+            let mut wc: u256 = 1
+            let mut j: u256 = 0
+            while j < half {
+                let u = a.get(i + j)
+                let v = mulmod_q(a.get(i + j + half), wc)
+                a.set(i + j, addmod_q(u, v))
+                a.set(i + j + half, submod_q(u, v))
+                wc = mulmod_q(wc, wlen)
+                j += 1
+            }
+            i += len
+        }
+        len = len * 2
+    }
+}
+
+/// forward transform with root `w`: bit-reversal load then the butterfly stages.
+fn transform(_ src: StorWordBuf, _ dst: StorWordBuf, _ w: u256) {
+    bitrev_copy(src, dst, log2n(src.len()))
+    butterfly(dst, w)
+}
+
+/// inverse NTT: the same transform with `w^-1`, scaled by `n^-1` (both Fermat
+/// inverses). `INTT(NTT(a)) == a`.
+fn intt(_ src: StorWordBuf, _ dst: StorWordBuf, _ w: u256) {
+    transform(src, dst, inv_q(w))
+    let n = src.len()
+    let ninv = inv_q(n % Q)
+    let mut i: u256 = 0
+    while i < n {
+        dst.set(i, mulmod_q(dst.get(i), ninv))
+        i += 1
+    }
+}
+
+/// pointwise product `out[i] = x[i] * y[i] mod q` (the frequency-domain multiply
+/// of the convolution theorem).
+fn pointwise(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf) {
+    let n = x.len()
+    let mut i: u256 = 0
+    while i < n {
+        out.set(i, mulmod_q(x.get(i), y.get(i)))
+        i += 1
+    }
+}
+
+/// schoolbook cyclic convolution `out[(i+j) mod n] += x[i] * y[j] mod q` (the
+/// independent O(n^2) oracle the NTT convolution is checked against).
+fn cyclic_conv(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf) {
+    let n = x.len()
+    let mut k: u256 = 0
+    while k < n {
+        out.set(k, 0)
+        k += 1
+    }
+    let mut i: u256 = 0
+    while i < n {
+        let mut j: u256 = 0
+        while j < n {
+            let idx = (i + j) % n
+            out.set(idx, addmod_q(out.get(idx), mulmod_q(x.get(i), y.get(j))))
+            j += 1
+        }
+        i += 1
+    }
+}
+
+// ---- input loaders (the pinned test vectors) ----
+
+/// the pinned size-8 forward-NTT probe input `[5,15,39,77,129,195,275,369]`.
+fn load_probe8(_ a: StorWordBuf) {
+    a.set(0, 5)
+    a.set(1, 15)
+    a.set(2, 39)
+    a.set(3, 77)
+    a.set(4, 129)
+    a.set(5, 195)
+    a.set(6, 275)
+    a.set(7, 369)
+}
+
+/// `[1, 2, ..., n]`.
+fn load_iota(_ a: StorWordBuf) {
+    let n = a.len()
+    let mut i: u256 = 0
+    while i < n {
+        a.set(i, i + 1)
+        i += 1
+    }
+}
+
+/// `[n, n-1, ..., 1]`.
+fn load_iota_rev(_ a: StorWordBuf) {
+    let n = a.len()
+    let mut i: u256 = 0
+    while i < n {
+        a.set(i, n - i)
+        i += 1
+    }
+}
+
+msg Msg {
+    // Run a scenario's op, leaving results in OUT (slots 600..) and, for the
+    // convolution cases, the schoolbook check in SCHOOL (slots 700..). Read back
+    // per-slot via GetOut / GetSchool.
+    #[selector = 1]
+    Setup { case: u256 } -> u256,
+    #[selector = 2]
+    GetOut { i: u256 } -> u256,
+    #[selector = 3]
+    GetSchool { i: u256 } -> u256,
+}
+
+pub contract NttExec {
+    recv Msg {
+        Setup { case } -> u256 uses (evm: mut Evm) {
+            if case == 1 {
+                // forward NTT, size 8, of the pinned probe vector.
+                let a = StorWordBuf::new(base: A_BASE, len: 8)
+                load_probe8(a)
+                transform(a, StorWordBuf::new(base: OUT_BASE, len: 8), W8)
+            } else if case == 2 {
+                // forward NTT, size 16, of [1..16].
+                let a = StorWordBuf::new(base: A_BASE, len: 16)
+                load_iota(a)
+                transform(a, StorWordBuf::new(base: OUT_BASE, len: 16), W16)
+            } else if case == 3 {
+                // round-trip, size 8: INTT(NTT(probe8)) == probe8.
+                let a = StorWordBuf::new(base: A_BASE, len: 8)
+                load_probe8(a)
+                let tmp = StorWordBuf::new(base: WORK_BASE, len: 8)
+                transform(a, tmp, W8)
+                intt(tmp, StorWordBuf::new(base: OUT_BASE, len: 8), W8)
+            } else if case == 4 {
+                // round-trip, size 16: INTT(NTT([1..16])) == [1..16].
+                let a = StorWordBuf::new(base: A_BASE, len: 16)
+                load_iota(a)
+                let tmp = StorWordBuf::new(base: WORK_BASE, len: 16)
+                transform(a, tmp, W16)
+                intt(tmp, StorWordBuf::new(base: OUT_BASE, len: 16), W16)
+            } else if case == 5 {
+                // convolution theorem, size 8: a = [1..8], b = [8..1].
+                let a = StorWordBuf::new(base: A_BASE, len: 8)
+                let b = StorWordBuf::new(base: B_BASE, len: 8)
+                load_iota(a)
+                load_iota_rev(b)
+                let fa = StorWordBuf::new(base: FA_BASE, len: 8)
+                let fb = StorWordBuf::new(base: FB_BASE, len: 8)
+                transform(a, fa, W8)
+                transform(b, fb, W8)
+                let pt = StorWordBuf::new(base: PT_BASE, len: 8)
+                pointwise(fa, fb, pt)
+                intt(pt, StorWordBuf::new(base: OUT_BASE, len: 8), W8)
+                cyclic_conv(a, b, StorWordBuf::new(base: SCHOOL_BASE, len: 8))
+            } else {
+                // convolution theorem, size 16: a = [1..16], b = [16..1].
+                let a = StorWordBuf::new(base: A_BASE, len: 16)
+                let b = StorWordBuf::new(base: B_BASE, len: 16)
+                load_iota(a)
+                load_iota_rev(b)
+                let fa = StorWordBuf::new(base: FA_BASE, len: 16)
+                let fb = StorWordBuf::new(base: FB_BASE, len: 16)
+                transform(a, fa, W16)
+                transform(b, fb, W16)
+                let pt = StorWordBuf::new(base: PT_BASE, len: 16)
+                pointwise(fa, fb, pt)
+                intt(pt, StorWordBuf::new(base: OUT_BASE, len: 16), W16)
+                cyclic_conv(a, b, StorWordBuf::new(base: SCHOOL_BASE, len: 16))
+            }
+            0
+        }
+
+        GetOut { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: OUT_BASE, len: 16).get(i)
+        }
+
+        GetSchool { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: SCHOOL_BASE, len: 16).get(i)
+        }
+    }
+}
+
+// Assert each leg per coefficient against the cross-backend probe oracle
+// (`F_12289`, cyclic convention). The probe already proved these vectors equal
+// across wasm (wasmtime), SPIR-V (lavapipe), and rayon; this fixture is the
+// fe/EVM leg of that same equality.
+#[test]
+fn test_ntt_exec() uses (evm: mut Evm) {
+    let c = evm.create2<NttExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // ---- leg 1: forward NTT == the pinned probe vectors ----
+
+    // size 8: NTT([5,15,39,77,129,195,275,369])
+    //       = [1104,6528,7157,1035,12081,7898,4772,8621]  (the probe's pinned sample)
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 1 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1104)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 6528)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 7157)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 1035)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 12081)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 7898)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 4772)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 8621)
+
+    // size 16: NTT([1..16]) (same convention, w_16 = 4134)
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 2 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 136)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 12066)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 3914)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 12153)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 449)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 6137)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 3000)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 4222)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 8 }) == 12281)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 9 }) == 8051)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 10 }) == 9273)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 11 }) == 6136)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 12 }) == 11824)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 13 }) == 120)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 14 }) == 8359)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 15 }) == 207)
+
+    // ---- leg 2: INTT round-trip == input ----
+
+    // size 8: INTT(NTT(probe8)) == [5,15,39,77,129,195,275,369]
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 3 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 5)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 15)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 39)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 77)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 129)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 195)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 275)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 369)
+
+    // size 16: INTT(NTT([1..16])) == [1..16]
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 4 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 6)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 10 }) == 11)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 15 }) == 16)
+
+    // ---- leg 3: THE CONVOLUTION THEOREM (the prover hot loop) ----
+    // INTT(NTT(a) .* NTT(b)) == schoolbook cyclic convolution a*b mod q, asserted
+    // per coefficient AND cross-checked against the in-fixture schoolbook oracle.
+
+    // size 8: a=[1..8], b=[8..1] -> [176,156,144,140,144,156,176,204]
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 5 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 176)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 156)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 144)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 140)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 144)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 156)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 176)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 204)
+    // NTT convolution == schoolbook, coefficient by coefficient.
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 0 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 1 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 2 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 3 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 4 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 5 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 6 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 7 }))
+
+    // size 16: a=[1..16], b=[16..1]
+    // -> [1376,1272,1184,1112,1056,1016,992,984,992,1016,1056,1112,1184,1272,1376,1496]
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 6 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1376)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 1272)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 1184)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 1112)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 1056)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 1016)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 992)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 984)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 8 }) == 992)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 9 }) == 1016)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 10 }) == 1056)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 11 }) == 1112)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 12 }) == 1184)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 13 }) == 1272)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 14 }) == 1376)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 15 }) == 1496)
+    // NTT convolution == schoolbook (endpoints + middle sampled).
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 0 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 7 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 8 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 8 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 15 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSchool { i: 15 }))
+}

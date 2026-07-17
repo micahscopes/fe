@@ -2736,3 +2736,98 @@ under D6.3 Par == the sequential oracle, byte-identical), C4 (rotor sandwich). T
 remaining ladder is the G-lane (the cross-backend execution-equality harness OUTSIDE
 the fe workspace) and the `docs/mb2/` demo write-up, neither of which is fe-tree
 fixture work.
+
+## 2026-07-18 - Slice N1: executed NTT on EVM (the crypto proof-gen reference) [crypto-review section 3.2 / 4]
+
+The founding "crypto proof gen" flagship's fe/EVM REFERENCE leg. A single new
+fixture, `crates/fe/tests/fixtures/fe_test/ntt_exec.fe`, executes a
+number-theoretic transform under revm and pins every coefficient to the
+cross-backend probe oracle. Mirrors the C2 Clifford C-lane pattern exactly
+(fixed-n numeric kernel over `StorWordBuf`, contract `Setup`/`GetOut` message
+interface, per-slot pinned asserts in a `#[test]`), with the C2 masked-ring
+arithmetic (`& m`) replaced by mod-q field arithmetic.
+
+### Field, kernel, and the schedule structure
+
+- **Field** `F_q`, `q = 12289 = 3 * 2^12 + 1` (the Falcon / NewHope NTT prime;
+  2-adicity 12, sizes to 4096). Products of two reduced residues are `< q^2 ~
+  1.5e8`, so a native u256 multiply then `% q` is EXACT on EVM: no bignum, no
+  multi-limb (that stays the deferred limb-engine project). Field ops
+  `addmod_q`/`submod_q`/`mulmod_q` use `+`/`-`/`*`/`%` on u256 directly (no
+  overflow possible at these magnitudes; `submod_q` is `(a + q - b) % q`, always
+  positive for reduced inputs). `powmod_q` (square-and-multiply) is the twiddle
+  and Fermat-inverse engine.
+- **Kernel** = radix-2 iterative Cooley-Tukey DIT: an arithmetic-only
+  bit-reversal load (`bitrev` uses `%`/`/`, the Clifford popcount idiom, no
+  bitwise operators), then `log2(n)` in-place butterfly STAGES. THE SCHEDULE:
+  stage `len` = 2, 4, ..., n is one `Comp` boundary; each stage's `n/2`
+  butterflies are the `Par` leaves; the stage count = the `BarrierReq<log2 n>`
+  depth. This N1 leg runs the butterflies SEQUENTIALLY (the reference); N2 forks
+  each stage under D6.3 `Par` with a derived barrier per boundary. No Par/barrier
+  wired here.
+- **Twiddles** `w_n = g^((q-1)/n)`, `g = 11`: `w_8 = 8246`, `w_16 = 4134`. This
+  fixture COMPUTES per-stage twiddle powers at RUNTIME via `powmod_q` rather than
+  baking a `const` table (the review's in-design fallback; the fe `const`/CTFE
+  path for `pow_mod` over a runtime index was NOT pursued this slice, recorded per
+  the N1 optional-probe note). Inverse transform uses Fermat inverses `w^-1`,
+  `n^-1` (`powmod_q(a, q-2)`).
+
+### The three legs, all executed and pinned (== the probe oracle)
+
+Convention = CYCLIC (mod X^n - 1), forward `X[k] = sum_j x[j] * w^(j*k) mod q`.
+Confirmed to MATCH the probe by re-deriving in an independent oracle: naive DFT ==
+iterative CT, and the pinned size-8 probe sample reproduces EXACTLY, so no
+convention issue to resolve (bit-reversal order, twiddle direction, and
+cyclic-vs-negacyclic all agree with the harness first try).
+
+1. **Forward NTT == probe.** Size 8: `NTT([5,15,39,77,129,195,275,369]) =
+   [1104,6528,7157,1035,12081,7898,4772,8621]` (the review's pinned sample,
+   verbatim). Size 16: `NTT([1..16]) = [136,12066,3914,12153,449,6137,3000,4222,
+   12281,8051,9273,6136,11824,120,8359,207]` (same convention, `w_16`; computed by
+   the same verified oracle). All 24 coefficients asserted.
+2. **INTT round-trip == input.** `INTT(NTT(a)) == a` at sizes 8 and 16.
+3. **The convolution theorem (the prover hot loop).** `INTT(NTT(a) .* NTT(b))`
+   equals the schoolbook cyclic convolution `a * b mod q`, computed BOTH ways
+   IN-FIXTURE (`cyclic_conv` is the independent O(n^2) oracle) and asserted equal
+   per coefficient AND against the pinned vector. Size 8 `[1..8] * [8..1] =
+   [176,156,144,140,144,156,176,204]`; size 16 `[1..16] * [16..1] =
+   [1376,1272,1184,1112,1056,1016,992,984,992,1016,1056,1112,1184,1272,1376,1496]`.
+   This is the number-theoretic transform computing a polynomial multiplication,
+   the operation that dominates zk-prover runtime. Production Falcon/NewHope NTTs
+   are negacyclic (mod X^n + 1, a psi-twist pre/post scaling): the named cheap
+   follow-up, not this slice. NO performance claims; 2^20 / BN254 stays the plan's
+   aspiration.
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- `ntt_exec` PASSES under revm: direct debug-fe run `PASS [0.0386s]` exit 0
+  (timeout-guarded), and the CI harness path `cargo test -p fe --test cli_output
+  ntt_exec` reports `test_fe_test__ntt_exec ... ok`.
+- `cargo check --workspace` clean (3.4s, no Rust changed); `corelib` green
+  (`cargo test -p fe-hir --test corelib` 19/19, incl. `analyze_corelib` +
+  `analyze_stdlib` both profiles); `tree_sitter_parse_strict` green (the fixture
+  touches no parser suite).
+- Existing clifford/conal fixtures BYTE-IDENTICAL: `git status` shows ONLY the one
+  new file `ntt_exec.fe`; no `.snap` rewritten, C2 (`clifford_gp_exec.fe`)
+  untouched. Neighbors re-run green: `clifford_gp_exec`, `clifford_gp_par_exec`.
+- Rust + ingots UNTOUCHED (fixtures-only; no new type-system machinery, no
+  std/core surface, no Par/barrier wiring = N2, no multi-limb = limb-engine
+  project). Did NOT push, did NOT run full release CI.
+
+### Deviations
+
+- Twiddles computed at runtime via `powmod_q` rather than baked `const` tables
+  (the review's stated N1 fallback; the CTFE-const-table probe is deferred). The
+  schedule STRUCTURE, not the twiddle memoization, is N1's subject.
+- Size-16 round-trip and the size-16 convolution cross-check assert a sampled
+  subset of coefficients (endpoints + middle) rather than all 16, since the full
+  forward-16 and both convolution vectors are already pinned exhaustively;
+  size-8 asserts every coefficient of every leg.
+
+N1 is COMPLETE and green: the NTT executes on EVM under revm, the forward
+transform matches the cross-backend probe oracle, the INTT round-trips, and the
+convolution theorem computes a polynomial product equal to the schoolbook oracle,
+all pinned per coefficient. NEXT: N2 = `ntt_par_exec.fe` + `ntt_schedule.fe` (the
+fork-join leg: each stage's butterfly set split under D6.3 `par.fork` with a
+derived `barrier.barrier()` at each stage boundary, `log2(n)` DERIVED barriers on
+a depth-indexed real algorithm, byte-identical storage vs N1).
