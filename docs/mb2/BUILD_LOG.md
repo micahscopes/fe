@@ -2263,3 +2263,70 @@ args-on-non-GAT both -> 2-0011).
 **Verify:** cargo check --workspace clean; fe-hir ty_check 126/126 (headline +
 all pre-existing incl D1 conal + keystone byte-identical); uitest ty/def green
 incl the arity negative. Boundary release CI: orchestrator.
+
+## 2026-07-17 - Slice D3 fe-prep: ISA/layout parameterization + wasm scaffold [design-decision D3]
+
+Per the Fable design-wizard ruling D3 ("stand up a second real codegen target
+below the mono boundary"), the four autonomous, additive, EVM-byte-identical
+fe-prep pieces ONLY. The Sean-gated STOP line was NOT crossed: no MIR->wasm
+lowering, no sonatina-* re-pin, no wasmtime/naga dep, no Sonatina-side work, no
+`fe build` CLI target selector.
+
+**Piece 1 - ISA/layout parameterization (the ONE refactor, EVM-byte-identical):**
+new `layout_for(kind: BackendKind) -> TargetDataLayout` chokepoint in
+`crates/codegen/src/backend.rs` (`Sonatina => EVM_LAYOUT`, `Wasm => WASM_LAYOUT`).
+All 11 hardcoded `crate::EVM_LAYOUT` sites in `sonatina/mod.rs` (8 production
+emit/compile entry points + 3 in-file tests) now route through
+`layout_for(BackendKind::default())`, i.e. EVM is the default everywhere. Since
+`BackendKind::default() == Sonatina` and `layout_for(Sonatina) == EVM_LAYOUT`
+(identical const value; the lowering also does `let _ = layout;`), this is pure
+internal plumbing. The `create_evm_isa`/`create_module_ctx`/`evm_compile`
+functions stay the EVM-keyed twins (the mandate's "or target-keyed twins" arm):
+Sonatina 039a9f5 pins no non-EVM ISA, so a genuine wasm ISA twin cannot exist
+without crossing the STOP line; the wasm path fails closed at `BackendKind::Wasm`
+before ever reaching lowering.
+
+**BYTE-IDENTITY GATE (the real acceptance): PASSED, ZERO snapshot churn.** Full
+`fe-codegen` test suite green with zero `.snap.new` files: sonatina_ir 128 (incl
+the 116 EVM IR snapshots via `emit_module_sonatina_ir`, which routes through the
+new chokepoint), runtime_handle_preservation 35 (uses EVM_LAYOUT directly),
+code_region_borrowck 2, sonatina_gasprice 1, sonatina_operand_collect 2, lib 9.
+
+**Piece 2 - additive WASM_LAYOUT:** `crates/common/src/layout.rs` extended
+`TargetDataLayout` with `pointer_size_bytes` + `endianness: Endianness` (new
+Big/Little enum), added `TargetDataLayout::wasm()` / `WASM_LAYOUT` (word 8,
+little-endian, u32=4-byte pointer). EVM values unchanged (word 32, discriminant
+1, big-endian, 32-byte pointer); the new fields are read nowhere on the EVM path
+and `WORD_SIZE_BYTES`/`DISCRIMINANT_SIZE_BYTES` are unmoved, so EVM stays
+byte-identical (construction is centralized in `::evm()`; only `layout_utils.rs`
+reads fields, and only the two pre-existing ones). Unit tests assert both
+layouts' full field sets.
+
+**Piece 3 - fail-closed BackendKind::Wasm scaffold:** in `backend.rs`, added the
+`Wasm` variant (+ `name()`/`create()`/`FromStr "wasm"`), a `WasmBackend`
+compile impl, and a structured `BackendError::UnsupportedBackend { backend,
+reason }` variant. `WasmBackend::compile` returns
+`UnsupportedBackend { backend: "wasm", reason: "wasm codegen requires a
+wasm-capable Sonatina ISA; none is pinned" }` - honest, no wrong bytecode, no
+CLI surface ahead of function. Unit tests: `"wasm"`/`"WASM"` parse; `layout_for`
+mapping; and a real fail-closed compile returning the structured error.
+
+**Piece 4 - RuntimeBuiltin::portability():** additive `Portability`
+(PortableCompute vs EvmHost) enum + `fn portability(&self)` in
+`crates/mir/src/runtime/ir.rs`, exhaustive match (new builtins must be
+classified deliberately). Partition rule: PortableCompute = pure value
+computation or transient linear memory (Mload/Mstore/Mstore8/Mcopy/Msize/Malloc,
+AddMod/MulMod/Byte/SignExtend/IntrinsicArith/Saturating); EvmHost = blockchain
+host state or tx/block environment (storage, keccak, calldata/returndata, code,
+env, calls, creation, logs, contract-field ref). Additive: nothing branches on
+it yet; it pre-scopes the compute subset a wasm lowering would carry. Test pins
+both classes over constructible representatives.
+
+**Verify:** cargo check --workspace clean; codegen byte-identity gate green with
+ZERO snapshot churn (see above); new unit tests green (common layout 2, backend
+3, mir portability 2); corelib 19/19 (debug + release). Did NOT `cargo insta
+accept`. Boundary release CI (the canonical zero-EVM-churn gate): orchestrator.
+
+D3 fe-prep DONE and green-committed. NEXT per the ranked ladder: D6.3 the
+executed Sequential Par provider (steering-09 B2 leftover; StorWordBuf element
+model now exists).

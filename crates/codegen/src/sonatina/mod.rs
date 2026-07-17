@@ -21,7 +21,7 @@ use sonatina_verifier::{
 };
 
 use crate::{
-    OptLevel, TargetDataLayout, TestMetadata, TestModuleOutput,
+    BackendKind, OptLevel, TargetDataLayout, TestMetadata, TestModuleOutput, layout_for,
     runtime_package::ensure_runtime_package_has_roots,
     test_output::{TestRootMetadataError, runtime_test_root_metadata},
 };
@@ -587,7 +587,7 @@ pub fn emit_module_sonatina_ir(
     top_mod: TopLevelMod<'_>,
 ) -> Result<String, LowerError> {
     let package = build_runtime_package(db, top_mod)?;
-    emit_runtime_package_sonatina_ir(db, &package, crate::EVM_LAYOUT)
+    emit_runtime_package_sonatina_ir(db, &package, layout_for(BackendKind::default()))
 }
 
 pub fn emit_module_sonatina_ir_optimized(
@@ -598,7 +598,7 @@ pub fn emit_module_sonatina_ir_optimized(
 ) -> Result<String, LowerError> {
     let package = build_runtime_package(db, top_mod)?;
     let package = select_runtime_package_contract(db, package, contract)?;
-    emit_runtime_package_sonatina_ir_optimized(db, &package, crate::EVM_LAYOUT, opt_level)
+    emit_runtime_package_sonatina_ir_optimized(db, &package, layout_for(BackendKind::default()), opt_level)
 }
 
 pub fn emit_ingot_sonatina_ir(db: &DriverDataBase, ingot: Ingot<'_>) -> Result<String, LowerError> {
@@ -611,7 +611,7 @@ pub fn emit_ingot_sonatina_ir(db: &DriverDataBase, ingot: Ingot<'_>) -> Result<S
         modules.push(emit_runtime_package_sonatina_ir(
             db,
             &package,
-            crate::EVM_LAYOUT,
+            layout_for(BackendKind::default()),
         )?);
     }
     if modules.is_empty() {
@@ -635,7 +635,7 @@ pub fn emit_ingot_sonatina_ir_optimized(
         modules.push(emit_runtime_package_sonatina_ir_optimized(
             db,
             &package,
-            crate::EVM_LAYOUT,
+            layout_for(BackendKind::default()),
             opt_level,
         )?);
     }
@@ -654,7 +654,7 @@ pub fn validate_module_sonatina_ir(
     top_mod: TopLevelMod<'_>,
 ) -> Result<String, LowerError> {
     let package = build_runtime_package(db, top_mod)?;
-    compile_runtime_package_sonatina(db, &package, crate::EVM_LAYOUT)?;
+    compile_runtime_package_sonatina(db, &package, layout_for(BackendKind::default()))?;
     Ok("ok\n".to_string())
 }
 
@@ -666,7 +666,7 @@ pub fn emit_module_sonatina_bytecode(
 ) -> Result<BTreeMap<String, SonatinaContractBytecode>, LowerError> {
     let package = build_runtime_package(db, top_mod)?;
     let package = select_runtime_package_contract(db, package, contract)?;
-    emit_runtime_package_sonatina_bytecode(db, &package, crate::EVM_LAYOUT, opt_level)
+    emit_runtime_package_sonatina_bytecode(db, &package, layout_for(BackendKind::default()), opt_level)
 }
 
 pub fn emit_ingot_sonatina_bytecode(
@@ -678,7 +678,7 @@ pub fn emit_ingot_sonatina_bytecode(
     let mut outputs = BTreeMap::new();
     for package in select_ingot_runtime_packages(db, ingot, contract)? {
         for (name, bytecode) in
-            emit_runtime_package_sonatina_bytecode(db, &package, crate::EVM_LAYOUT, opt_level)?
+            emit_runtime_package_sonatina_bytecode(db, &package, layout_for(BackendKind::default()), opt_level)?
         {
             if outputs.insert(name.clone(), bytecode).is_some() {
                 return Err(LowerError::Internal(format!(
@@ -708,7 +708,7 @@ pub fn emit_test_module_sonatina(
     if package.root_objects(db).is_empty() {
         return Ok(TestModuleOutput { tests: Vec::new() });
     }
-    let module = compile_runtime_package_sonatina(db, &package, crate::EVM_LAYOUT)?;
+    let module = compile_runtime_package_sonatina(db, &package, layout_for(BackendKind::default()))?;
     ensure_module_sonatina_ir_valid(&module)?;
     let artifacts = compile_runtime_objects(module, opt_level, options.emit_observability)?;
     let artifacts_by_name = artifacts
@@ -847,7 +847,7 @@ mod tests {
         let package = build_test_runtime_package(&db, top_mod, None)
             .expect("test runtime package should build");
 
-        let module = compile_runtime_package_sonatina(&db, &package, crate::EVM_LAYOUT)
+        let module = compile_runtime_package_sonatina(&db, &package, layout_for(BackendKind::default()))
             .expect("test runtime package should lower to Sonatina IR");
         let dumped = ModuleWriter::new(&module).dump_string();
         let map_helpers = dumped
@@ -899,7 +899,7 @@ mod tests {
         let package = build_test_runtime_package(&db, top_mod, None)
             .expect("test runtime package should build");
 
-        let module = compile_runtime_package_sonatina(&db, &package, crate::EVM_LAYOUT)
+        let module = compile_runtime_package_sonatina(&db, &package, layout_for(BackendKind::default()))
             .expect("test runtime package should lower to Sonatina IR");
         let dumped = ModuleWriter::new(&module).dump_string();
 
@@ -928,7 +928,7 @@ mod tests {
         let package = build_test_runtime_package(&db, top_mod, None)
             .expect("test runtime package should build");
 
-        let module = compile_runtime_package_sonatina(&db, &package, crate::EVM_LAYOUT)
+        let module = compile_runtime_package_sonatina(&db, &package, layout_for(BackendKind::default()))
             .expect("test runtime package should lower to Sonatina IR");
         let dumped = ModuleWriter::new(&module).dump_string();
 

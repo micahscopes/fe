@@ -1331,6 +1331,116 @@ pub enum RuntimeBuiltin<'db> {
     },
 }
 
+/// Backend portability of a runtime builtin.
+///
+/// Additive classification only: nothing branches on this yet. It records which
+/// builtins are pure, target-neutral computation (the subset any non-EVM
+/// lowering, e.g. a future wasm compute path, can carry directly) versus those
+/// tied to the EVM host / execution environment (persistent storage, tx/block
+/// context, calldata, code, cross-contract calls, logs, contract creation).
+///
+/// The boundary follows one rule: an op is `PortableCompute` when its semantics
+/// are pure value computation or operate only on transient linear memory
+/// (which has a direct analog on other targets); it is `EvmHost` when it reads
+/// or mutates blockchain host state or the transaction/block environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Portability {
+    /// Pure value computation or target-neutral transient linear memory.
+    PortableCompute,
+    /// Tied to the EVM host / execution environment; no target-neutral meaning.
+    EvmHost,
+}
+
+impl<'db> RuntimeBuiltin<'db> {
+    /// Classifies this builtin as [`Portability::PortableCompute`] or
+    /// [`Portability::EvmHost`].
+    ///
+    /// Additive: no lowering branches on this yet. The match is exhaustive, so
+    /// any new builtin must be classified deliberately rather than defaulting.
+    pub fn portability(&self) -> Portability {
+        use Portability::{EvmHost, PortableCompute};
+        match self {
+            // Transient linear memory: direct analogs on any target's memory.
+            RuntimeBuiltin::Mload { .. }
+            | RuntimeBuiltin::Mstore { .. }
+            | RuntimeBuiltin::Mstore8 { .. }
+            | RuntimeBuiltin::Mcopy { .. }
+            | RuntimeBuiltin::Msize
+            | RuntimeBuiltin::Malloc { .. } => PortableCompute,
+
+            // Pure arithmetic / value computation.
+            RuntimeBuiltin::AddMod { .. }
+            | RuntimeBuiltin::MulMod { .. }
+            | RuntimeBuiltin::Byte { .. }
+            | RuntimeBuiltin::SignExtend { .. }
+            | RuntimeBuiltin::IntrinsicArith { .. }
+            | RuntimeBuiltin::Saturating { .. } => PortableCompute,
+
+            // Persistent storage.
+            RuntimeBuiltin::Sload { .. } | RuntimeBuiltin::Sstore { .. } => EvmHost,
+
+            // Keccak256 is an EVM host op.
+            RuntimeBuiltin::Keccak256 { .. } => EvmHost,
+
+            // Calldata and return data.
+            RuntimeBuiltin::CallDataSize
+            | RuntimeBuiltin::CallDataLoad { .. }
+            | RuntimeBuiltin::CallDataCopy { .. }
+            | RuntimeBuiltin::CallDataSelector
+            | RuntimeBuiltin::ReturnDataSize
+            | RuntimeBuiltin::ReturnDataCopy { .. } => EvmHost,
+
+            // Own and external code.
+            RuntimeBuiltin::CodeSize
+            | RuntimeBuiltin::CodeCopy { .. }
+            | RuntimeBuiltin::ExtCodeSize { .. }
+            | RuntimeBuiltin::ExtCodeCopy { .. }
+            | RuntimeBuiltin::ExtCodeHash { .. }
+            | RuntimeBuiltin::CurrentCodeRegionLen
+            | RuntimeBuiltin::CodeRegionOffset { .. }
+            | RuntimeBuiltin::CodeRegionLen { .. } => EvmHost,
+
+            // Transaction / block environment.
+            RuntimeBuiltin::CallValue
+            | RuntimeBuiltin::Address
+            | RuntimeBuiltin::Caller
+            | RuntimeBuiltin::Origin
+            | RuntimeBuiltin::GasPrice
+            | RuntimeBuiltin::CoinBase
+            | RuntimeBuiltin::Balance { .. }
+            | RuntimeBuiltin::Timestamp
+            | RuntimeBuiltin::Number
+            | RuntimeBuiltin::PrevRandao
+            | RuntimeBuiltin::GasLimit
+            | RuntimeBuiltin::ChainId
+            | RuntimeBuiltin::BaseFee
+            | RuntimeBuiltin::SelfBalance
+            | RuntimeBuiltin::BlockHash { .. }
+            | RuntimeBuiltin::BlobHash { .. }
+            | RuntimeBuiltin::BlobBaseFee
+            | RuntimeBuiltin::Gas => EvmHost,
+
+            // Cross-contract calls.
+            RuntimeBuiltin::Call { .. }
+            | RuntimeBuiltin::StaticCall { .. }
+            | RuntimeBuiltin::DelegateCall { .. } => EvmHost,
+
+            // Contract creation.
+            RuntimeBuiltin::Create { .. } | RuntimeBuiltin::Create2 { .. } => EvmHost,
+
+            // Event logs.
+            RuntimeBuiltin::Log0 { .. }
+            | RuntimeBuiltin::Log1 { .. }
+            | RuntimeBuiltin::Log2 { .. }
+            | RuntimeBuiltin::Log3 { .. }
+            | RuntimeBuiltin::Log4 { .. } => EvmHost,
+
+            // Contract storage field reference.
+            RuntimeBuiltin::MakeContractFieldRef { .. } => EvmHost,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
 pub enum SaturatingBinOp {
     Add,
@@ -1543,5 +1653,100 @@ impl<'db> RuntimeProgramView<'db> for &'db dyn MirDb {
 
     fn code_region(&self, _id: RuntimeCodeRegion<'db>) -> Option<ResolvedCodeRegion<'db>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod portability_tests {
+    use super::*;
+    use cranelift_entity::EntityRef;
+
+    fn v() -> RValueId {
+        RValueId::new(0)
+    }
+
+    #[test]
+    fn portable_compute_partition() {
+        let a = v();
+        let portable: &[RuntimeBuiltin<'static>] = &[
+            // transient linear memory
+            RuntimeBuiltin::Mload { addr: a },
+            RuntimeBuiltin::Mstore { addr: a, value: a },
+            RuntimeBuiltin::Mstore8 { addr: a, value: a },
+            RuntimeBuiltin::Mcopy {
+                dst: a,
+                src: a,
+                len: a,
+            },
+            RuntimeBuiltin::Msize,
+            RuntimeBuiltin::Malloc { size: a },
+            // pure arithmetic
+            RuntimeBuiltin::AddMod {
+                lhs: a,
+                rhs: a,
+                modulus: a,
+            },
+            RuntimeBuiltin::MulMod {
+                lhs: a,
+                rhs: a,
+                modulus: a,
+            },
+            RuntimeBuiltin::Byte { pos: a, value: a },
+            RuntimeBuiltin::SignExtend { byte: a, value: a },
+        ];
+        for builtin in portable {
+            assert_eq!(
+                builtin.portability(),
+                Portability::PortableCompute,
+                "expected PortableCompute for {builtin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn evm_host_partition() {
+        let a = v();
+        let host: &[RuntimeBuiltin<'static>] = &[
+            RuntimeBuiltin::Sload { slot: a },
+            RuntimeBuiltin::Sstore { slot: a, value: a },
+            RuntimeBuiltin::Keccak256 { offset: a, len: a },
+            RuntimeBuiltin::CallDataLoad { offset: a },
+            RuntimeBuiltin::CallDataSize,
+            RuntimeBuiltin::CallDataSelector,
+            RuntimeBuiltin::ReturnDataSize,
+            RuntimeBuiltin::CodeSize,
+            RuntimeBuiltin::ExtCodeHash { addr: a },
+            RuntimeBuiltin::CallValue,
+            RuntimeBuiltin::Caller,
+            RuntimeBuiltin::Origin,
+            RuntimeBuiltin::GasPrice,
+            RuntimeBuiltin::Balance { addr: a },
+            RuntimeBuiltin::Timestamp,
+            RuntimeBuiltin::ChainId,
+            RuntimeBuiltin::SelfBalance,
+            RuntimeBuiltin::Gas,
+            RuntimeBuiltin::Call {
+                gas: a,
+                addr: a,
+                value: a,
+                args_offset: a,
+                args_len: a,
+                ret_offset: a,
+                ret_len: a,
+            },
+            RuntimeBuiltin::Create {
+                value: a,
+                offset: a,
+                len: a,
+            },
+            RuntimeBuiltin::Log0 { offset: a, len: a },
+        ];
+        for builtin in host {
+            assert_eq!(
+                builtin.portability(),
+                Portability::EvmHost,
+                "expected EvmHost for {builtin:?}"
+            );
+        }
     }
 }

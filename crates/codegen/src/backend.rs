@@ -64,6 +64,13 @@ impl BackendOutput {
 pub enum BackendError {
     RuntimeLower(mir::LowerError),
     Sonatina(String),
+    /// A backend was selected whose codegen path is not available in this
+    /// build. Fail-closed and honest: it names the backend and the concrete
+    /// reason rather than emitting wrong bytecode.
+    UnsupportedBackend {
+        backend: &'static str,
+        reason: String,
+    },
 }
 
 impl fmt::Display for BackendError {
@@ -71,6 +78,9 @@ impl fmt::Display for BackendError {
         match self {
             BackendError::RuntimeLower(err) => write!(f, "{err}"),
             BackendError::Sonatina(message) => write!(f, "sonatina error: {message}"),
+            BackendError::UnsupportedBackend { backend, reason } => {
+                write!(f, "{backend} backend unavailable: {reason}")
+            }
         }
     }
 }
@@ -103,20 +113,26 @@ pub trait Backend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackendKind {
+    /// The EVM backend (Sonatina EVM ISA). The default everywhere.
     #[default]
     Sonatina,
+    /// The wasm backend. Scaffold only: it fails closed until a wasm-capable
+    /// Sonatina ISA is pinned (see [`WasmBackend`]).
+    Wasm,
 }
 
 impl BackendKind {
     pub fn name(&self) -> &'static str {
         match self {
             BackendKind::Sonatina => "sonatina",
+            BackendKind::Wasm => "wasm",
         }
     }
 
     pub fn create(&self) -> Box<dyn Backend> {
         match self {
             BackendKind::Sonatina => Box::new(SonatinaBackend),
+            BackendKind::Wasm => Box::new(WasmBackend),
         }
     }
 }
@@ -127,8 +143,25 @@ impl std::str::FromStr for BackendKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "sonatina" => Ok(BackendKind::Sonatina),
-            _ => Err(format!("unknown backend: {s} (expected 'sonatina')")),
+            "wasm" => Ok(BackendKind::Wasm),
+            _ => Err(format!(
+                "unknown backend: {s} (expected 'sonatina' or 'wasm')"
+            )),
         }
+    }
+}
+
+/// The single chokepoint mapping a backend to its target data layout.
+///
+/// Every EVM codegen entry point routes its layout through here with
+/// `BackendKind::default()` (EVM), so the EVM path is byte-identical: this is
+/// pure internal plumbing that makes the layout a function of the backend
+/// rather than a hardcoded constant. `BackendKind::Wasm` yields `WASM_LAYOUT`,
+/// which nothing consumes yet (the wasm backend fails closed).
+pub fn layout_for(kind: BackendKind) -> TargetDataLayout {
+    match kind {
+        BackendKind::Sonatina => crate::EVM_LAYOUT,
+        BackendKind::Wasm => crate::WASM_LAYOUT,
     }
 }
 
@@ -160,5 +193,84 @@ impl Backend for SonatinaBackend {
             BackendError::Sonatina(format!("missing bytecode for `{object_name}`"))
         })?;
         Ok(BackendOutput::Bytecode(contract.runtime.clone()))
+    }
+}
+
+/// The wasm backend scaffold. It exists so that `BackendKind::Wasm` and the
+/// `"wasm"` selector resolve to a real, honest, fail-closed compile impl. There
+/// is no wasm-capable Sonatina ISA pinned, so it emits no bytecode: it returns
+/// a structured [`BackendError::UnsupportedBackend`] rather than pretending.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WasmBackend;
+
+impl Backend for WasmBackend {
+    fn name(&self) -> &'static str {
+        "wasm"
+    }
+
+    fn compile(
+        &self,
+        _db: &DriverDataBase,
+        _top_mod: TopLevelMod<'_>,
+        _layout: TargetDataLayout,
+        _opt_level: OptLevel,
+    ) -> Result<BackendOutput, BackendError> {
+        Err(BackendError::UnsupportedBackend {
+            backend: "wasm",
+            reason: "wasm codegen requires a wasm-capable Sonatina ISA; none is pinned"
+                .to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::InputDb;
+    use url::Url;
+
+    #[test]
+    fn backend_kind_parses_wasm() {
+        assert_eq!("wasm".parse::<BackendKind>().unwrap(), BackendKind::Wasm);
+        assert_eq!("WASM".parse::<BackendKind>().unwrap(), BackendKind::Wasm);
+        assert_eq!(BackendKind::Wasm.name(), "wasm");
+    }
+
+    #[test]
+    fn layout_for_maps_backends() {
+        assert_eq!(layout_for(BackendKind::Sonatina), crate::EVM_LAYOUT);
+        assert_eq!(layout_for(BackendKind::default()), crate::EVM_LAYOUT);
+        assert_eq!(layout_for(BackendKind::Wasm), crate::WASM_LAYOUT);
+    }
+
+    #[test]
+    fn wasm_backend_compile_fails_closed() {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///wasm_fail_closed.fe").expect("test URL should parse");
+        db.workspace()
+            .touch(&mut db, url.clone(), Some("pub fn f() {}\n".to_string()));
+        let file = db.workspace().get(&db, &url).expect("file should load");
+        let top_mod = db.top_mod(file);
+
+        let err = BackendKind::Wasm
+            .create()
+            .compile(
+                &db,
+                top_mod,
+                layout_for(BackendKind::Wasm),
+                OptLevel::O0,
+            )
+            .expect_err("wasm backend must fail closed");
+
+        match err {
+            BackendError::UnsupportedBackend { backend, reason } => {
+                assert_eq!(backend, "wasm");
+                assert!(
+                    reason.contains("wasm-capable Sonatina ISA"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected UnsupportedBackend, got: {other:?}"),
+        }
     }
 }

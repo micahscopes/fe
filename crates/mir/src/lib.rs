@@ -16,6 +16,7 @@ pub use runtime::{
     RuntimeFunctionOwner, RuntimeInlineHint, RuntimeInterfaceSignature, RuntimeLinkage,
     RuntimeLocalRoot, RuntimeObject, RuntimePackage, RuntimeParam, RuntimePlace,
     RuntimeProgramView, RuntimeReturnPlan, RuntimeSection, RuntimeSectionName, RuntimeSectionRef,
+    Portability,
     RuntimeSyntheticSpec, SaturatingBinOp, ScalarClass, ScalarRepr, ScalarRole, StructLayout,
     VariantId, array_elem_size_bytes, build_runtime_package, build_test_runtime_package,
     enum_tag_size_bytes, enum_variant_field_offset_bytes, format_runtime_body,
