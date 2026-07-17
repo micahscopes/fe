@@ -239,6 +239,42 @@ impl<'db, 'a> CandidateAssembler<'db, 'a> {
                 cx.rollback_to(snapshot);
             }
         });
+
+        // D2 lobe 2: applied-GAT projection receiver `B::Buffer<X>`. The
+        // assumptions loop above only unifies against the RAW param_env, so a
+        // consumer with `B: Backend` (and no explicit `where B::Buffer<X>:
+        // Functor<X>`) never discovers `Functor`'s methods on `B::Buffer<X>`
+        // (2-0010). Revive the decl's RHS bounds `type Buffer<T>: Functor<T>` as
+        // `Functor<X>` (owner-exact remap, shared with `find_associated_type`
+        // via `applied_decl_bounds_for_args`) and offer their methods as
+        // candidates. Assembly is not assertion: `check_inst` re-proves
+        // `B::Buffer<X>: Functor<X>` through the solver (the A7.2 item-bound
+        // revival) before confirming, so a `B` that fails the contract yields a
+        // precise 6-0003, never a silently-assumed method.
+        //
+        // Match the RAW receiver, NOT its capability inner: the caller tries an
+        // auto-ref/deref chain (`View<B::Buffer<X>>`, then `B::Buffer<X>`, ...)
+        // in order and takes the FIRST that resolves. Firing on the capability
+        // inner would resolve the method on the `View` form and pin
+        // `selected_receiver_ty` to the view, so the method's by-value `self`
+        // (`B::Buffer<X>`) then fails to unify at instantiation. Keying off the
+        // raw receiver lets the view step return NotFound and fall through to the
+        // value step, exactly as the explicit-where-bound route does.
+        let (head, spine) = self.receiver.original().decompose_ty_app(self.db);
+        if !spine.is_empty()
+            && let TyData::AssocTy(assoc) = head.data(self.db)
+        {
+            let pred = assoc.trait_;
+            if let Some(decl_view) = pred
+                .def(self.db)
+                .assoc_types(self.db)
+                .find(|v| v.name(self.db) == Some(assoc.name))
+            {
+                for bound_inst in decl_view.applied_decl_bounds_for_args(self.db, pred, spine) {
+                    self.insert_trait_method_cand(bound_inst);
+                }
+            }
+        }
     }
 
     fn allow_trait(&self, trait_def: Trait<'db>) -> bool {

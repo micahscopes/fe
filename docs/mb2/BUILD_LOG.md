@@ -2229,3 +2229,37 @@ references `src/backend.fe`, so no other churn.
 
 D1 DONE and green-committed. NEXT: D2 (qualified-path GAT-arg lowering; lobe 1
 mandatory, lobe 2 = the decl-bound consumer revival recorded as the finding above).
+
+## 2026-07-17 - Slice D2: qualified-path GAT-arg lowering (both lobes) [design-decision D2]
+
+Per the Fable design-wizard ruling D2. Two lobes, both shipped.
+
+**Lobe 1 (path_resolver.rs QualifiedTy fast-path, ~:911):** the arm returned the
+projection head WITHOUT lowering the tail segment's generic args, so
+`<B::Buffer<X> as Functor<X>>::Out<Y>` silently DROPPED `<Y>` and the resulting
+`* -> *` head hit `3-0000`. Now the tail args lower via `lower_generic_arg_list`
+(the sibling probe's discipline): zero-arg paths return the exact pre-D2 value
+(byte-identical, input-disjoint); with args, a GAT tail folds `foldl` over the
+opaque projection candidate, a non-GAT over-application folds to
+`TooManyGenericArgs` -> `2-0011` arg-number mismatch at the write site.
+
+**Lobe 2 (find_associated_type chained arm + method_selection.rs + a new SSOT
+accessor `applied_decl_bounds_for_args` in semantic/mod.rs):** an applied GAT
+receiver `B::Buffer<X>` (a TyApp with an AssocTy head) now consults (a) explicit
+where-bound assumptions by exact rigid self-ty match, and (b) the D1 DECL BOUND
+`type Buffer<T>: Functor<T>` revived as `Functor<X>` via the A7.2 owner-exact
+`GatDeclParamSubst` folder. This closes the D1-recorded consumer-revival gap: a
+symbolic `B: Backend` now gets `Functor` on `B::Buffer<X>` (chained
+`::Out<Y>` resolves, `.par_map`/`.map` dispatch) with NO explicit where-bound.
+SOUNDNESS: the decl bound is a requirement every backend impl MUST prove (D1
+strict discharge enforces it, negative fixture confirms), so reviving it for any
+`B: Backend` assumes nothing unproven; restricted to UNGUARDED decls per A7.2.
+
+**Fixtures:** `gat_qualified_path_out.fe` (headline, over the REAL core::Backend:
+all three legs zero-diagnostic with no where-bound, pre-D2 were 3-0000/2-0002/
+2-0010); `gat_qualified_path_arity.fe` (lobe-1 negatives: over-arity GAT tail +
+args-on-non-GAT both -> 2-0011).
+
+**Verify:** cargo check --workspace clean; fe-hir ty_check 126/126 (headline +
+all pre-existing incl D1 conal + keystone byte-identical); uitest ty/def green
+incl the arity negative. Boundary release CI: orchestrator.

@@ -1,0 +1,162 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/gat_qualified_path_out.fe
+---
+note:
+   ┌─ gat_qualified_path_out.fe:25:1
+   │
+25 │ ╭ {
+26 │ │     todo()
+27 │ │ }
+   │ ╰─^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:26:5
+   │
+26 │     todo()
+   │     ^^^^ fn todo
+
+note:
+   ┌─ gat_qualified_path_out.fe:26:5
+   │
+26 │     todo()
+   │     ^^^^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:35:1
+   │
+35 │ ╭ {
+36 │ │     todo()
+37 │ │ }
+   │ ╰─^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:36:5
+   │
+36 │     todo()
+   │     ^^^^ fn todo
+
+note:
+   ┌─ gat_qualified_path_out.fe:36:5
+   │
+36 │     todo()
+   │     ^^^^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:42:77
+   │
+42 │   fn method_par_map<B: Backend, X, Y, F: Fn<X, Y>>(buf: B::Buffer<X>, _ f: F) {
+   │ ╭─────────────────────────────────────────────────────────────────────────────^
+43 │ │     let out = buf.par_map<Y, F>(f)
+44 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_qualified_path_out.fe:43:9
+   │
+43 │     let out = buf.par_map<Y, F>(f)
+   │         ^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:43:15
+   │
+43 │     let out = buf.par_map<Y, F>(f)
+   │               ^^^ B::Buffer<X>
+
+note:
+   ┌─ gat_qualified_path_out.fe:43:15
+   │
+43 │     let out = buf.par_map<Y, F>(f)
+   │               ^^^^^^^^^^^^^^^^^^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:43:33
+   │
+43 │     let out = buf.par_map<Y, F>(f)
+   │                                 ^ F
+
+note:
+   ┌─ gat_qualified_path_out.fe:47:73
+   │
+47 │   fn method_map<B: Backend, X, Y, F: Fn<X, Y>>(buf: B::Buffer<X>, _ f: F) {
+   │ ╭─────────────────────────────────────────────────────────────────────────^
+48 │ │     let mapped = buf.map<Y, F>(f)
+49 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_qualified_path_out.fe:48:9
+   │
+48 │     let mapped = buf.map<Y, F>(f)
+   │         ^^^^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:48:18
+   │
+48 │     let mapped = buf.map<Y, F>(f)
+   │                  ^^^ B::Buffer<X>
+
+note:
+   ┌─ gat_qualified_path_out.fe:48:18
+   │
+48 │     let mapped = buf.map<Y, F>(f)
+   │                  ^^^^^^^^^^^^^^^^ B::Buffer<X>::Out<Y>
+
+note:
+   ┌─ gat_qualified_path_out.fe:48:32
+   │
+48 │     let mapped = buf.map<Y, F>(f)
+   │                                ^ F
+
+note:
+   ┌─ gat_qualified_path_out.fe:55:37
+   │
+55 │ fn takes_storptr(_ x: StorPtr<u64>) {}
+   │                                     ^^ ()
+
+note:
+   ┌─ gat_qualified_path_out.fe:57:49
+   │
+57 │   fn use_concrete(_ buf: EvmBackend::Buffer<u32>) {
+   │ ╭─────────────────────────────────────────────────^
+58 │ │     let out: <EvmBackend::Buffer<u32> as Functor<u32>>::Out<u64> = todo()
+59 │ │     takes_storptr(out)
+60 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ gat_qualified_path_out.fe:58:9
+   │
+58 │     let out: <EvmBackend::Buffer<u32> as Functor<u32>>::Out<u64> = todo()
+   │         ^^^ StorPtr<u64>
+
+note:
+   ┌─ gat_qualified_path_out.fe:58:68
+   │
+58 │     let out: <EvmBackend::Buffer<u32> as Functor<u32>>::Out<u64> = todo()
+   │                                                                    ^^^^ fn todo
+
+note:
+   ┌─ gat_qualified_path_out.fe:58:68
+   │
+58 │     let out: <EvmBackend::Buffer<u32> as Functor<u32>>::Out<u64> = todo()
+   │                                                                    ^^^^^^ StorPtr<u64>
+
+note:
+   ┌─ gat_qualified_path_out.fe:59:5
+   │
+59 │     takes_storptr(out)
+   │     ^^^^^^^^^^^^^ fn takes_storptr
+
+note:
+   ┌─ gat_qualified_path_out.fe:59:5
+   │
+59 │     takes_storptr(out)
+   │     ^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ gat_qualified_path_out.fe:59:19
+   │
+59 │     takes_storptr(out)
+   │                   ^^^ StorPtr<u64>

@@ -1,0 +1,28 @@
+// mb2 D2 lobe 1 negatives: the qualified-path GAT-arg lowering must report an
+// argument-number mismatch on wrong arity, NEVER silently drop the tail arg.
+// Pre-D2 the `QualifiedTy` fast-path never looked at the tail segment's generic
+// args, so `<Cont<X> as Mapper<X>>::Out<Y>` dropped `<Y>` (surfacing downstream
+// as `3-0000 expected * kind`); now the args lower and apply, and a wrong count
+// folds to `TooManyGenericArgs` -> arg-number mismatch at the write site.
+
+trait Mapper<X> {
+    type Out<Y>
+    type Elem
+}
+
+struct Cont<X> {}
+
+impl<X> Mapper<X> for Cont<X> {
+    type Out<Y> = Cont<Y>
+    type Elem = X
+}
+
+// (1) OVER-ARITY on a GAT tail: `Out<Y>` takes ONE type arg; two are given.
+struct OverArity<X, Y, Z> {
+    field: <Cont<X> as Mapper<X>>::Out<Y, Z>,
+}
+
+// (2) ARGS ON A NON-GAT assoc type: `Elem` takes zero type args; one is given.
+struct ArgsOnNonGat<X, Z> {
+    field: <Cont<X> as Mapper<X>>::Elem<Z>,
+}

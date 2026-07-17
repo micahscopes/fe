@@ -5324,6 +5324,47 @@ impl<'db> TraitAssocTypeView<'db> {
             .collect();
         Some(TyId::foldl(db, TyId::assoc_ty(db, pred, name), &rigids))
     }
+
+    /// D2 lobe 2: the decl's RHS trait bounds instantiated for an APPLIED GAT
+    /// projection receiver `pred::Name<args..>`. Reuses the A7.2 applied-subject
+    /// derivation (`applied_decl_subject` mints the decl's OWN rigids at the
+    /// decl def-node scope and `assoc_type_bounds` lowers the RHS bounds over
+    /// that rigid subject), then owner-exactly remaps those rigids to the
+    /// receiver's actual spine `args` via the shared caller-side
+    /// [`GatDeclParamSubst`]: `type Buffer<T>: Functor<T>` yields `Functor<X>`
+    /// with subject `pred::Buffer<X>`. That is the "item bound on a projection"
+    /// fact of the trait contract (every impl proved it strictly under A4.2), so
+    /// a consumer with `pred` in scope may name `pred::Buffer<X>::Out` (and
+    /// method-resolve through `Functor`) with no explicit where-bound. UNGUARDED
+    /// only (a guarded decl's antecedent is A7.3, not discharged here) and only
+    /// for a SATURATED spine; the remap is owner-exact, never an ad-hoc by-index
+    /// substitution.
+    pub fn applied_decl_bounds_for_args(
+        self,
+        db: &'db dyn HirAnalysisDb,
+        pred: crate::analysis::ty::trait_def::TraitInstId<'db>,
+        args: &[crate::analysis::ty::ty_def::TyId<'db>],
+    ) -> Vec<crate::analysis::ty::trait_def::TraitInstId<'db>> {
+        use crate::analysis::ty::fold::{GatDeclParamSubst, TyFoldable};
+        if self.has_param_guards(db) {
+            return Vec::new();
+        }
+        let params = self.generic_params(db).data(db);
+        if params.is_empty() || params.len() != args.len() {
+            return Vec::new();
+        }
+        let Some(subject) = self.applied_decl_subject(db, pred) else {
+            return Vec::new();
+        };
+        let decl_scope = ScopeId::TraitType(self.owner, self.idx as u16);
+        subject
+            .assoc_type_bounds(db, self)
+            .map(|inst| {
+                let mut remap = GatDeclParamSubst { decl_scope, args };
+                inst.fold_with(db, &mut remap)
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

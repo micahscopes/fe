@@ -911,7 +911,56 @@ where
             if let TyData::QualifiedTy(trait_inst) = ty.data(db) {
                 // Associated type projection
                 if let Some(assoc_ty) = trait_inst.assoc_ty(db, ident) {
-                    let r = PathRes::Ty(assoc_ty);
+                    // D2 lobe 1: lower and apply any tail-segment generic args
+                    // (`::Out<Y>`) exactly as the sibling generic assoc-type
+                    // probe below does. Before this, the qualified fast-path
+                    // returned the projection head WITHOUT looking at
+                    // `path.generic_args(db)`, so `<A as Tr>::Out<Y>` silently
+                    // DROPPED `<Y>`; a GAT tail head then has kind `* -> *` and
+                    // the downstream star-kind check fires 3-0000.
+                    let seg_args = lower_generic_arg_list(
+                        db,
+                        path.generic_args(db),
+                        scope,
+                        assumptions,
+                        LayoutHoleArgSite::Path(path),
+                        minter,
+                    );
+                    if seg_args.is_empty() {
+                        // Zero-arg qualified path (the common case): return the
+                        // exact pre-D2 value, byte-identical by construction.
+                        let r = PathRes::Ty(assoc_ty);
+                        observer(path, &r);
+                        return Ok(r);
+                    }
+                    // Tail-segment args present. For a GAT tail the well-kinded
+                    // candidate is the OPAQUE projection node (`* -> *`), so the
+                    // foldl builds the applied form and the normalizer downstream
+                    // projects it through the ONE engine (no second substitution
+                    // path). A non-GAT assoc type carrying args is over-applied
+                    // and folds to `TooManyGenericArgs` -> `ArgNumMismatch`.
+                    let is_gat = trait_inst
+                        .def(db)
+                        .assoc_ty(db, ident)
+                        .is_some_and(|decl| decl.generic_params.len(db) > 0);
+                    let candidate = if is_gat {
+                        TyId::assoc_ty(db, *trait_inst, ident)
+                    } else {
+                        assoc_ty
+                    };
+                    let applied = TyId::foldl(db, candidate, &seg_args);
+                    if let TyData::Invalid(InvalidCause::TooManyGenericArgs { expected, given }) =
+                        applied.data(db)
+                    {
+                        return Err(PathResError::new(
+                            PathResErrorKind::ArgNumMismatch {
+                                expected: *expected,
+                                given: *given,
+                            },
+                            path,
+                        ));
+                    }
+                    let r = PathRes::Ty(applied);
                     observer(path, &r);
                     return Ok(r);
                 }
@@ -1019,7 +1068,7 @@ where
             }
 
             // Find raw associated types, then dedup by normalized result here.
-            let assoc_tys = match find_associated_type(
+            let mut assoc_tys = match find_associated_type(
                 db,
                 scope,
                 Canonicalized::new(db, ty),
@@ -1036,6 +1085,49 @@ where
                     ));
                 }
             };
+
+            // D2 lobe 2: an applied GAT projection receiver `B::Buffer<X>` is a
+            // `TyApp` with an `AssocTy` head. `find_associated_type` deliberately
+            // leaves it alone (it is shared with the normalizer's projection
+            // engine, which must stay the single GAT-projection SSOT), so the
+            // chained tail `B::Buffer<X>::Out<Y>` is resolved HERE, in path
+            // resolution only. Consult (a) explicit assumptions
+            // (`where B::Buffer<X>: Functor<X>`) by exact rigid self-ty match and
+            // (b) the decl bound (`type Buffer<T>: Functor<T>` -> `Functor<X>`,
+            // owner-exact remap via `applied_decl_bounds_for_args`). The foldl
+            // below applies the tail's own `<Y>`; the normalizer then keeps the
+            // saturated projection opaque for a symbolic `B` exactly as today.
+            let (recv_head, recv_spine) = ty.decompose_ty_app(db);
+            if !recv_spine.is_empty()
+                && let TyData::AssocTy(recv_assoc) = recv_head.data(db)
+            {
+                // Leg (a): explicit where-bound. The receiver is rigid, so a
+                // structural self-ty match is exact (no unification needed); the
+                // A7.2-revived universal carries decl rigids and never matches
+                // here (it lives only inside solver queries, not this env).
+                for &pred in assumptions.list(db) {
+                    if pred.self_ty(db) == ty
+                        && let Some(assoc_ty) = pred.assoc_ty(db, ident)
+                    {
+                        assoc_tys.push((pred, assoc_ty));
+                    }
+                }
+                // Leg (b): decl-bound revival (no consumer where-bound needed).
+                let recv_pred = recv_assoc.trait_;
+                if let Some(decl_view) = recv_pred
+                    .def(db)
+                    .assoc_types(db)
+                    .find(|v| v.name(db) == Some(recv_assoc.name))
+                {
+                    for bound_inst in
+                        decl_view.applied_decl_bounds_for_args(db, recv_pred, recv_spine)
+                    {
+                        if bound_inst.def(db).assoc_ty(db, ident).is_some() {
+                            assoc_tys.push((bound_inst, TyId::assoc_ty(db, bound_inst, ident)));
+                        }
+                    }
+                }
+            }
 
             if assoc_tys.is_empty() {
                 return Err(PathResError::new(
