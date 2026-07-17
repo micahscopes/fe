@@ -2330,3 +2330,78 @@ accept`. Boundary release CI (the canonical zero-EVM-churn gate): orchestrator.
 D3 fe-prep DONE and green-committed. NEXT per the ranked ladder: D6.3 the
 executed Sequential Par provider (steering-09 B2 leftover; StorWordBuf element
 model now exists).
+
+---
+
+## D6.3: executed Sequential Par provider (the semantics oracle)
+
+Ranked-ladder item 3. The steering-09 B2 leftover, now buildable because A9.2's
+`StorWordBuf` element model exists. A term-level `Par` fork-join CAPABILITY (the
+closed-set `Par`/`Atomic<S>`/`Converge` member), an EVM `Sequential` provider that
+executes the two independent halves LEFT-THEN-RIGHT, and a revm fe test that forks
+over two DISJOINT `StorWordBuf` regions and asserts the combined state equals the
+sequential reference. PURE INGOT + fixture: ZERO Rust touched.
+
+**The thunk signature (the ONE open design point) type-checks CLEANLY. No
+STOP-escalate.** Probed the minimal two-thunk shape first, as ruled:
+
+```fe
+fn fork<L, R, FL: Fn<(), L>, FR: Fn<(), R>>(mut self, _ left: FL, _ right: FR) -> (L, R)
+```
+
+Each half is a NULLARY `core::Fn` thunk (`Fn<(), _>`), which is not new surface at
+all: it is the EXACT proven closure shape of `Option::ok_or_else` /
+`Option::unwrap_or_else` (`fn call(self, _ args: own ()) -> R`, called `f.call(())`;
+see `option.fe:47/68` and the `option_ok_or.fe` fixture). So the two-thunk-over-
+disjoint-state shape expresses independent halves with existing machinery; no
+handlers, no effect-system extension, no new combinator. `corelib` (core+std)
+analyzes clean debug+release, which is where the provider's `left.call(())` /
+`right.call(())` / `(l, r)` body and the trait's thunk-bound signature get checked
+generically. The `mut self` receiver and `B`-in-head-only keying follow the
+`Barrier` precedent exactly.
+
+**`core::par::Par<B: Backend>`** (new `ingots/core/src/par.fe`): the next instance
+of the B1/B2 `Atomic`/`Barrier` capability idiom (trait-keyed
+`uses (par: mut Par<B>)`, root-carried, authority-only, non-scarce, missing
+provider = ordinary `8-0036`). DELIBERATELY module-visible only (NOT added to
+core's root re-exports), mirroring the D1 decision to keep `core::conal::Functor`
+out of the root: `std::conal::Par` is a `*`-kinded schedule LEAF struct, so two
+root-level `Par`s would collide. The two coexist module-disambiguated
+(`core::par::Par` the term-level capability vs `std::conal::Par` the type-level
+schedule leaf, separate and untouched). Filesystem module discovery picks up
+`core::par` with no lib.fe entry (the `core::conal` precedent).
+
+**`Sequential` provider** (`impl Par<EvmBackend> for Evm` in new
+`ingots/std/src/evm/par.fe`, registered via `pub use par::{self, *}` in
+`std/src/evm.fe` alongside `atomic`/`barrier`): body is REAL, not a stub:
+`let l = left.call(())`, then `let r = right.call(())`, return `(l, r)`. EVM is
+single-threaded, so the fork is realized as left-then-right SEQUENTIAL execution;
+because the halves are independent (disjoint state, neither reads the other), that
+sequential run IS the reference fork-join semantics a real parallel backend
+(SPIR-V, B5) must match. That is the SEMANTICS ORACLE, the point of the slice.
+
+**Fork-join fe test** (`crates/fe/tests/fixtures/fe_test/conal_par_fork.fe`):
+`DoubleRegion` (doubles its region in place) forked against `IncRegion`
+(increments its region in place), over DISJOINT regions (left slots 300..302,
+right slots 400..402). Reference: left [1,2,3]->[2,4,6] sum 12, right
+[10,20,30]->[11,21,31] sum 63; joined sum 75. Asserts the joined `(left_sum,
+right_sum)` (75) AND the full combined final storage state (left doubled, right
+incremented) equal the sequential reference. Execution-order independence
+(left-then-right == the combined expected state) is the PINNED property; disjoint
+regions make any order land on the same state. PASS under revm in 0.0045s, NO
+hang. (One inference nit: the `(L,R)` tuple result needs a binding annotation
+`let joined: (u256, u256) = par.fork(...)` for tuple-field projection to resolve,
+`8-0014`; a one-line, expected ergonomic pin, not a capability finding.)
+
+**Verify (all foreground, timeout-guarded revm):** corelib analyze 5/5 (debug +
+release, core+std with the new capability + provider); `conal_par_fork` PASS under
+revm (disjoint regions -> asserted combined state 75 + [2,4,6]/[11,21,31], no
+hang); neighbors green (`atomic_rmw`, `barrier_noop`, `conal_par_map_exec`,
+`option_ok_or`); `cargo check --workspace` clean; `tree_sitter_parse_strict` green
+(ordinary trait/impl surface, no grammar change). Rust UNTOUCHED (pure ingot +
+fixture). Did NOT run full release CI (orchestrator's job).
+
+D6.3 DONE and green. NEXT per the ranked ladder: D6.4 ground-N phase-structured
+scan on EVM (fixed-depth `RBin<Pair, 2..3>` over `StorWordBuf`, phase boundaries
+firing the derived `Barrier`, executed under revm; explicitly NOT the generic
+`LScan` `Comp` instance, which stays steering-gated).

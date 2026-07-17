@@ -1,0 +1,58 @@
+use super::backend::Backend
+use super::functional::Fn
+
+// mb2 D6.3: the term-level fork-join PARALLEL capability (the semantics oracle,
+// the steering-09 B2 leftover). It rides machinery that already exists (the
+// B1/B2 `Atomic`/`Barrier` capability idiom + the proven nullary-`Fn` thunk shape
+// of `Option::ok_or_else`); it invents no new system. It is the NEXT instance of
+// the exact `Atomic<B, S>` / `Barrier<B, S>` idiom: a trait-keyed
+// `uses (par: mut Par<B>)` obligation carried by the target's root effect,
+// authority-only and non-scarce; a missing provider is the ordinary `8-0036`
+// obligation error.
+//
+// Two `Par`s coexist, module-disambiguated (the D1 two-`Functor` precedent):
+//  - `core::par::Par` (THIS trait) is the closed-set term-level parallel
+//    CAPABILITY (`Par` / `Atomic<S>` / `Converge`), the operation that runs two
+//    independent subcomputations.
+//  - `std::conal::Par` is the type-level schedule LEAF (a `*`-kinded shape token,
+//    the pure-parallel base of a schedule). It is a separate, untouched thing.
+// So this trait is DELIBERATELY module-visible only (`core::par::Par`) and is NOT
+// added to core's root re-exports, exactly as `core::conal::Functor` is kept out
+// of the root to avoid colliding with the HKT `Functor`: two root-level `Par`s
+// would collide.
+//
+// Layering doctrine (steering-09/10): a term-level capability, NOT a type fact and
+// NOT a new combinator. `Par` here gates an OPERATION (may this code fork two
+// halves); it adds nothing to the closed `Par`/`Pair`/`Comp` schedule-combinator
+// set. Providers realize the fork per backend; the EVM provider is `Sequential`
+// (see `std::evm::par`).
+
+/// Term-level fork-join parallel capability over a backend `B` (mb2 D6.3).
+///
+/// `fork` runs TWO INDEPENDENT subcomputations (`left`, `right`) over DISJOINT
+/// state and joins their results as `(left_result, right_result)`. Each
+/// subcomputation is a NULLARY THUNK: a `core::Fn`-implementing closure that
+/// captures its own disjoint region, takes unit, and returns its result. This is
+/// the proven `Fn<(), _>` closure shape (`Option::ok_or_else` /
+/// `Option::unwrap_or_else` use exactly it), so the thunk signature type-checks on
+/// existing machinery; it is not new surface.
+///
+/// The two thunks touch disjoint regions BY CONSTRUCTION (the caller wires them
+/// over non-overlapping buffers), and `fork` reads neither thunk's captured state,
+/// so their execution order cannot affect the combined result. That
+/// ORDER-INDEPENDENCE is the pinned semantics: a provider may run the halves in
+/// any order (or truly in parallel) and must land on the same combined state.
+///
+/// `B` is the backend, matching the `Atomic`/`Barrier` idiom: a provider names its
+/// backend (`impl Par<EvmBackend> for Evm`), and each backend supplies its own
+/// realization. EVM is single-threaded, so its provider (`Sequential`) runs the
+/// halves LEFT-THEN-RIGHT, and because the halves are independent that sequential
+/// run IS the reference fork-join semantics a real parallel backend (SPIR-V, B5)
+/// must match. `B` appears only in the trait head, not in the op's value params;
+/// that is the `Barrier` precedent (its `barrier` op is likewise `B`-in-head-only
+/// and resolves the `uses (barrier: mut Barrier<B, S>)` obligation ambiently).
+pub trait Par<B: Backend> {
+    /// Fork two independent nullary thunks over disjoint state, join their results
+    /// as `(left_result, right_result)`.
+    fn fork<L, R, FL: Fn<(), L>, FR: Fn<(), R>>(mut self, _ left: FL, _ right: FR) -> (L, R)
+}

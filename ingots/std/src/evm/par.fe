@@ -1,0 +1,32 @@
+use core::par::Par
+use core::Fn
+use super::backend::EvmBackend
+use super::effects::Evm
+
+// mb2 D6.3: the EVM `Sequential` Par provider, carried by the EVM root effect
+// `Evm` (the same provider that carries `StorageIntrinsic`, `Atomic<EvmBackend,
+// Global>`, and `Barrier<EvmBackend, Global>`). A `uses (par: mut Par<EvmBackend>)`
+// obligation is granted ambiently by the root-seeded `Evm`, the same path B1's
+// `Atomic` and B2's `Barrier` ride; no `with` plumbing.
+//
+// EVM is single-threaded, so the fork of two INDEPENDENT subcomputations is
+// realized as SEQUENTIAL execution of the two halves, LEFT-THEN-RIGHT. Because the
+// halves are independent (disjoint state; `fork` reads neither half's captured
+// state), that left-then-right execution IS the reference fork-join semantics: a
+// real parallel backend (SPIR-V, B5) must produce the same combined state. This is
+// the SEMANTICS ORACLE, the whole point of the slice.
+//
+// The body is REAL (not a stub): `left.call(())` then `right.call(())`, each a
+// nullary `core::Fn` thunk (the proven `Option::ok_or_else` closure shape), joined
+// as `(l, r)`. It EXECUTES on the ordinary EVM path (each thunk performs its
+// disjoint-region storage work via the A9.2 `StorWordBuf` load/apply/store idiom),
+// proven under revm by `crates/fe/tests/fixtures/fe_test/conal_par_fork.fe`.
+impl Par<EvmBackend> for Evm {
+    fn fork<L, R, FL: Fn<(), L>, FR: Fn<(), R>>(mut self, _ left: FL, _ right: FR) -> (L, R) {
+        // Sequential realization: run the left half fully, then the right half.
+        // Order-independent because the halves are disjoint (the pinned property).
+        let l = left.call(())
+        let r = right.call(())
+        (l, r)
+    }
+}

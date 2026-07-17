@@ -1,0 +1,124 @@
+// mb2 D6.3: the EXECUTED Sequential Par provider (the semantics oracle). The
+// term-level `core::par::Par<EvmBackend>` capability's `fork` op runs TWO
+// INDEPENDENT subcomputations over DISJOINT `StorWordBuf` regions; the EVM
+// `Sequential` provider (`impl Par<EvmBackend> for Evm` in `std::evm::par`) is
+// single-threaded, so it realizes the fork as LEFT-THEN-RIGHT execution. Because
+// the two halves are disjoint (neither reads the other's state), that sequential
+// run IS the reference fork-join semantics: any evaluation order lands on the same
+// combined state. This fixture forks a "double the left region" thunk against an
+// "increment the right region" thunk, runs it through the provider, and asserts
+// (a) the joined result `(left_sum, right_sum)` and (b) the combined final storage
+// state equal the sequential reference. Execution-order independence
+// (left-then-right == the combined expected state) is the PINNED property.
+//
+// The thunks are the proven `Fn<(), _>` nullary-closure shape (the same shape
+// `Option::ok_or_else` uses): each captures its own disjoint `StorWordBuf`, takes
+// unit, mutates its region in place (via the A9.2 load/apply/store idiom), and
+// returns the sum of its post-op region.
+
+use std::conal::StorWordBuf
+use core::Fn
+use core::par::Par
+use std::evm::EvmBackend
+
+/// Left half: double every word in its captured region (in place); return the
+/// post-op sum. Disjoint from the right region by construction.
+struct DoubleRegion { region: StorWordBuf }
+impl Fn<(), u256> for DoubleRegion {
+    fn call(self, _ unit: own ()) -> u256 {
+        let mut i: u256 = 0
+        let mut sum: u256 = 0
+        while i < self.region.len() {
+            let v = self.region.get(i) * 2
+            self.region.set(i, v)
+            sum = sum + v
+            i += 1
+        }
+        sum
+    }
+}
+
+/// Right half: increment every word in its captured region (in place); return the
+/// post-op sum. Disjoint from the left region by construction.
+struct IncRegion { region: StorWordBuf }
+impl Fn<(), u256> for IncRegion {
+    fn call(self, _ unit: own ()) -> u256 {
+        let mut i: u256 = 0
+        let mut sum: u256 = 0
+        while i < self.region.len() {
+            let v = self.region.get(i) + 1
+            self.region.set(i, v)
+            sum = sum + v
+            i += 1
+        }
+        sum
+    }
+}
+
+msg Msg {
+    #[selector = 1]
+    RunFork -> u256,
+    #[selector = 2]
+    GetLeft { i: u256 } -> u256,
+    #[selector = 3]
+    GetRight { i: u256 } -> u256,
+}
+
+pub contract ParForkExec {
+    recv Msg {
+        // Fill the LEFT region [1, 2, 3] at slots 300..302 and the RIGHT region
+        // [10, 20, 30] at slots 400..402 (disjoint). Fork "double left" against
+        // "increment right" through the Sequential provider. Reference result:
+        //   left  -> [2, 4, 6],   left_sum  = 12
+        //   right -> [11, 21, 31], right_sum = 63
+        // Return left_sum + right_sum = 75 (both halves ran, over disjoint state).
+        RunFork -> u256 uses (evm: mut Evm, par: mut Par<EvmBackend>) {
+            let left_buf = StorWordBuf::new(base: 300, len: 3)
+            left_buf.set(0, 1)
+            left_buf.set(1, 2)
+            left_buf.set(2, 3)
+
+            let right_buf = StorWordBuf::new(base: 400, len: 3)
+            right_buf.set(0, 10)
+            right_buf.set(1, 20)
+            right_buf.set(2, 30)
+
+            let joined: (u256, u256) = par.fork(DoubleRegion { region: left_buf }, IncRegion { region: right_buf })
+            joined.0 + joined.1
+        }
+
+        // Read left region slot 300 + i (post-fork).
+        GetLeft { i } -> u256 uses (evm: mut Evm) {
+            let left_buf = StorWordBuf::new(base: 300, len: 3)
+            left_buf.get(i)
+        }
+
+        // Read right region slot 400 + i (post-fork).
+        GetRight { i } -> u256 uses (evm: mut Evm) {
+            let right_buf = StorWordBuf::new(base: 400, len: 3)
+            right_buf.get(i)
+        }
+    }
+}
+
+#[test]
+fn test_conal_par_fork() uses (evm: mut Evm) {
+    let c = evm.create2<ParForkExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // Fork: left doubles [1,2,3]->[2,4,6] (sum 12), right increments
+    // [10,20,30]->[11,21,31] (sum 63); joined sum 75.
+    let s = evm.call(addr: c, gas: 400000, value: 0, message: Msg::RunFork {})
+    assert!(s == 75)
+
+    // The combined final storage state equals the sequential reference: the LEFT
+    // region was doubled and the RIGHT region incremented, each over its own
+    // disjoint slots (order-independent).
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetLeft { i: 0 }) == 2)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetLeft { i: 1 }) == 4)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetLeft { i: 2 }) == 6)
+
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetRight { i: 0 }) == 11)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetRight { i: 1 }) == 21)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetRight { i: 2 }) == 31)
+}
