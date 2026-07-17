@@ -2515,3 +2515,107 @@ C0 + C1 DONE and green. NEXT per the ladder: C2, the sequential geometric produc
 fns, `wedge` via the `l = 0` twin, reverse/involute/grade loops; the C2 acceptance
 suite of design section 4, Cl(2) then Cl(3), plus the masked-`gp3_u32` cross-check
 ring twin). C2 leans on C1 + nothing new; still no Par, the fork-join gp is C3.
+
+## 2026-07-17 - Slice C2: sequential geometric product on EVM (the sign oracle) [design 2.4 / 4]
+
+The SEQUENTIAL geometric product, the reference the wasm/SPIR-V twins (the G-lane)
+will be checked against. One new fixture, fixtures-ONLY (Rust + ingots untouched;
+`git status` shows only `clifford_gp_exec.fe` added, no `.snap` rewritten):
+`crates/fe/tests/fixtures/fe_test/clifford_gp_exec.fe`, executed under revm, all
+pinned values PASS.
+
+### The recursion, as written (design 1.3, per-level unrolled per design 2.4)
+
+Split on the top generator `e = e_n` (`x = x1 + x2*e`, `x1, x2` in the subalgebra on
+`e_1..e_{n-1}`, `e` written last = the sorted storage order); `l = e*e` the metric
+(`l = 1` Euclidean gp, `l = 0` the wedge twin), `w^` grade involution. Then
+`x*y = (x1*y1 + l*(x2*y2^)) + (x1*y2 + x2*y1^)*e`, realized as the per-level fns:
+
+- `gp0(x, y, out, m)` = the n=0 base case, the scalar ring multiply
+  `out[0] = x[0] *ring y[0]`.
+- `gp1/gp2/gp3(x, y, out, l, m)` each call the PREVIOUS level FOUR times over the
+  even/odd half-buffers (`even_half`/`odd_half` = O(1) slot arithmetic, no data
+  moved: lower half = blades without `e_n`, upper half = blades with `e_n`
+  stripped), materialize the two grade involutions `y2^`/`y1^` into per-level
+  scratch (`involute_buf`, a popcount-parity loop; the design's "materialize with a
+  popcount-sign loop" option, exact at every level because involution commutes with
+  the split), then `combine`: `out_even[j] = s0[j] + l*s1[j]`,
+  `out_odd[j] = s2[j] + s3[j]`. Per-level fixed scratch is safe because the recursion
+  is sequential (level-k scratch is live only while one `gp{k}` frame runs).
+- `run_gp` dispatches to the level by buffer length (2 -> gp1, 4 -> gp2, 8 -> gp3).
+
+This is EXACTLY the code an A8 SGK provider would emit at ground `N` (the "Garamon
+generator as a compiler provider" future); generic-N gp is the honestly-deferred A8
+piece and is NOT built (STOP-listed; not touched).
+
+### The ring, parameterized by a mask `m` (one recursion, three uses)
+
+The coefficient ring is `Z / 2^W`, `W` selected by a mask threaded through every op:
+`radd = a.wrapping_add(b) & m`, `rmul = a.wrapping_mul(b) & m`,
+`rneg = (0).wrapping_sub(a) & m` (the raw wrapping EVM `add`/`sub`/`mul` opcodes,
+`core::ops::Wrapping{Add,Sub,Mul}` on `u256`). `m = FULL` (2^256-1, `& FULL` =
+identity) is the EVM-native `Z / 2^256` leg (two's-complement negatives, `-1 =
+2^256-1`, consistent with C1's `neg`); `m = MASK32` (2^32-1) is the masked-u32 twin
+(`gp3_u32`, design 3.3), the two-op mask that makes the EVM leg speak the SAME ring
+as the wasm/SPIR-V twins. WHY wrapping (not C1's checked ops): gp multiplies signed
+intermediates, and checked `*` on a two's-complement negative (2^256-k) reverts;
+`wrapping_*` IS the `Z/2^256` ring's native arithmetic (design 1.4), so this is the
+faithful ring, not a workaround. Same metric hook drives `wedge` (`l = 0`).
+
+### The pinned acceptance suite (revm, all PASS; matched the sign oracle first try)
+
+The gp matched the pinned sign oracle on the FIRST run, no sign-flipping: the
+recursion was cross-checked before coding against an INDEPENDENT flat bitmap product
+(blade = bitmask, `e_A * e_B` on index `A XOR B` with the popcount reordering sign),
+both agreeing on every case (build-side Python oracle). Asserted, slot = blade
+bitstring:
+- Cl(2) HEADLINE: `(1+2e1+3e2+4e12)*(5+6e1+7e2+8e12) = 6 + 20e1 + 14e2 + 24e12`.
+- `e12*e12 = -1` (slot 0 = 2^256-1): the pseudoscalar square, the sign the recursion
+  exists to get right.
+- generators: `e1*e2 = e12`, `e2*e1 = -e12` (slot 3 = 2^256-1), `e1*e1 = 1`,
+  `e2*e2 = 1`.
+- complex numbers: `(1+2e12)*(3+4e12) = -5 + 10e12` (slot 0 = 2^256-5).
+- Cl(3) dense: `(1..8)*(9..16) = [-238,-188,246,232,-166,-116,190,192]` (negatives
+  as their 2^256-k two's-complement), all 8 slots.
+- Cl(3) quaternion structure: `e12^2 = e13^2 = e23^2 = -1`; anticommutation
+  `e12*e13 = -e23` (slot 6 = -1) vs `e13*e12 = +e23` (slot 6 = 1).
+- wedge (`l = 0`): `e1 ^ e1 = 0`, `e1 ^ e2 = e12`,
+  dense `= 5 + 16e1 + 22e2 + 24e12`.
+- reverse/involute/grade: `rev(dense3) = [1,2,3,-4,5,-6,-7,-8]` (incl. `rev(e123) =
+  -e123`), `involute(dense3) = [1,-2,-3,4,-5,6,7,-8]` (odd-grade slots negated),
+  `grade1(dense3) = [0,2,3,0,5,0,0,0]` (keeps {1,2,4}).
+- masked-u32 twin (`gp3_u32`, for the G-lane): Cl(2) dense `[6,20,14,24]` (no wrap,
+  identical digits); `e12^2 = 2^32-1` in the u32 ring; and the GENUINELY-WRAPPING
+  vector `(70000+70000e1)^2 = 1210065408` in both slots (exact = 9800000000 > 2^32,
+  so u256 gives 9800000000 and u32 gives 1210065408: the `WORD_BITS`/`OVERFLOW_WRAPS`
+  lesson, and the ring-agreement vector the G-lane will match).
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- `clifford_gp_exec` PASSES under revm (`PASS [0.0164s] test_clifford_gp_exec`,
+  timeout-guarded, no hang; debug fe binary, fresh corelib). gp calls given 30M gas
+  (64 leaf multiplies + scratch traffic, well under). NO gas/perf claims.
+- `cargo check --workspace` clean; `corelib` green BOTH profiles (`analyze_corelib`
+  + `analyze_corelib_under_release_profile` ok, 122s); `tree_sitter_parse_strict`
+  green; `fmt_semantic_roundtrip` green for the new fixture.
+- Existing clifford/conal fixtures byte-identical: `git status` shows ONLY the one
+  new file, no `.snap` rewritten. Neighbors re-run green: `clifford_ops_exec`,
+  `conal_par_map_exec`, `conal_par_fork`.
+- Rust + ingots UNTOUCHED (fixtures-only, no new type-system machinery, no std/core
+  surface). Did NOT push, did NOT run full release CI.
+
+### Sign-oracle status + deviations
+
+- gp MATCHED the pinned oracle (headline product + `e12^2 = -1` + all quaternion
+  relations) with no sign issue to resolve; the pre-coding bitmap cross-check is why.
+- Deviation from the design's menu: used the ring's native `wrapping_*` (not C1's
+  checked ops + explicit `neg` helper), because signed intermediate products require
+  it; the two's-complement REPRESENTATION is identical to C1's (`-1 = 2^256-1`), only
+  the computation is via the wrapping opcodes. Chose the "materialize involution"
+  option over flag-threading (design blessed both).
+
+C2 DONE and green. NEXT: the G-lane (cross-backend execution-equality, the separate
+harness OUTSIDE the fe workspace: wasm-SIMD / SPIR-V-under-lavapipe / rayon, all
+equal to the C2 reference and to the pinned masked-u32 vector above). C3 (fork-join
+gp under D6.3's `Par`, byte-identical to this sequential oracle) is the other next
+increment; both lean on this C2 reference.

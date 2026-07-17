@@ -1,0 +1,579 @@
+// mb2 C2: the EXECUTED Clifford GEOMETRIC PRODUCT on EVM (revm `fe test`).
+//
+// The sequential reference geometric product, the sign oracle the wasm/SPIR-V
+// twins (the G-lane) will be checked against. Built over the C0+C1 element model
+// (`StorWordBuf`, blade bitstring `i` at slot `base + i`) in the coefficient ring
+// `Z / 2^256` (design 1.4), with two's-complement negatives (`-1 = 2^256 - 1`).
+//
+// THE RECURSION (design 1.3, re-derived, tests are the sign oracle). Split a
+// multivector on the top generator `e = e_n` (`x = x1 + x2*e`, with `x1, x2` in
+// the subalgebra on `e_1..e_{n-1}`, `e` written last = the storage order); `l =
+// e*e` is the metric (`l = 1` Euclidean gp, `l = 0` the wedge twin); `w^` is grade
+// involution (negate odd-grade blades). Then:
+//
+//     x * y = (x1*y1 + l*(x2*y2^))  +  (x1*y2 + x2*y1^) * e
+//
+// realized as PER-LEVEL UNROLLED fns `gp0..gp3` (design 2.4): `gp0` = scalar ring
+// multiply (the n=0 base case); each `gp{k}` calls `gp{k-1}` FOUR times over the
+// even/odd half-buffers (O(1) slot arithmetic, no data movement), materializes the
+// two grade involutions into scratch, and combines. This fixed-n unrolled form is
+// EXACTLY the code an A8 SGK provider would generate at ground `N` (the "Garamon
+// generator as a compiler provider" future); generic-N gp is the honestly-deferred
+// A8 piece and is NOT built here.
+//
+// THE RING IS PARAMETERIZED BY A MASK `m` (one recursion, three uses):
+//   - `m = FULL` (2^256-1): the EVM-native `Z / 2^256` ring; `& FULL` is identity,
+//     so the ops are the raw wrapping EVM `add`/`sub`/`mul` (`wrapping_*`).
+//   - `m = MASK32` (2^32-1): the cross-backend `Z / 2^32` ring (design 3.3), the
+//     two-op mask (`& 0xFFFFFFFF` after each ring op) that makes the EVM leg speak
+//     the SAME ring as the wasm/SPIR-V twins (native u32 wrap). This is `gp3_u32`.
+// and by `l` (metric): `l = 1` geometric product, `l = 0` outer (wedge) product.
+//
+// Scope: `Cl(2)` (dim 4) then `Cl(3)` (dim 8), the design's headline depths (the
+// even subalgebras are the complex numbers and the quaternions). Sequential only:
+// the four per-level sub-products run one after another (C3 forks them under the
+// D6.3 `Par` provider; this C2 leg is that fork's byte-identical oracle).
+
+use std::conal::StorWordBuf
+use core::ops::{WrappingAdd, WrappingSub, WrappingMul}
+use std::evm::EvmBackend
+
+// `-1` in `Z / 2^256`; also the FULL mask (`& FULL` = identity, so the full-ring
+// ops are the raw wrapping EVM opcodes).
+const U256_MAX: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+const FULL: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+// `2^32 - 1`: the cross-backend `Z / 2^32` ring mask (design 3.3).
+const MASK32: u256 = 4294967295
+
+// storage regions (all disjoint; scratch high, per-level, reused across the
+// sequential sibling sub-products).
+const XBASE: u256 = 10   // input x   (slots 10..17)
+const YBASE: u256 = 30   // input y   (slots 30..37)
+const OBASE: u256 = 50   // output    (slots 50..57)
+
+// per-level scratch: 4 sub-product buffers (s0..s3) + 1 grade-involution buffer
+// (yi), each of length 2^(k-1). Level k's scratch is live only while a single
+// gp{k} frame executes (the recursion is sequential), so fixed bases are safe.
+const S1_S0: u256 = 1000   // level 1 (h=1): 5 slots @ 1000..1004
+const S1_S1: u256 = 1001
+const S1_S2: u256 = 1002
+const S1_S3: u256 = 1003
+const S1_YI: u256 = 1004
+const S2_S0: u256 = 1010   // level 2 (h=2): 5 buffers of len 2 @ 1010..1019
+const S2_S1: u256 = 1012
+const S2_S2: u256 = 1014
+const S2_S3: u256 = 1016
+const S2_YI: u256 = 1018
+const S3_S0: u256 = 1030   // level 3 (h=4): 5 buffers of len 4 @ 1030..1049
+const S3_S1: u256 = 1034
+const S3_S2: u256 = 1038
+const S3_S3: u256 = 1042
+const S3_YI: u256 = 1046
+
+// ---- the coefficient ring `Z / 2^W`, W selected by the mask `m` ----
+
+/// ring add: wrapping EVM `add`, masked to the ring width.
+fn radd(_ a: u256, _ b: u256, _ m: u256) -> u256 {
+    a.wrapping_add(b) & m
+}
+/// ring multiply: wrapping EVM `mul`, masked.
+fn rmul(_ a: u256, _ b: u256, _ m: u256) -> u256 {
+    a.wrapping_mul(b) & m
+}
+/// ring negate: `0 - a` (two's complement), masked. `rneg(1, FULL) = 2^256-1`;
+/// `rneg(1, MASK32) = 2^32-1`.
+fn rneg(_ a: u256, _ m: u256) -> u256 {
+    (0 as u256).wrapping_sub(a) & m
+}
+
+// ---- popcount parity for grade signs (indices are small, n <= 3) ----
+
+/// number of set bits of `x` (blade grade = popcount of its bitstring index).
+fn popcount(_ x: u256) -> u256 {
+    let mut n = x
+    let mut c: u256 = 0
+    while n > 0 {
+        c += n % 2
+        n = n / 2
+    }
+    c
+}
+
+// ---- the blade tree children ARE slot arithmetic (design 2.2) ----
+
+/// blades WITHOUT the top generator `e_n`: the buffer's lower half.
+fn even_half(_ m: StorWordBuf) -> StorWordBuf {
+    StorWordBuf::new(base: m.base(), len: m.len() / 2)
+}
+/// blades WITH `e_n` (with `e_n` stripped): the buffer's upper half.
+fn odd_half(_ m: StorWordBuf) -> StorWordBuf {
+    StorWordBuf::new(base: m.base() + m.len() / 2, len: m.len() / 2)
+}
+
+/// grade involution `w^` of a sub-buffer: negate the odd-grade slots (odd
+/// popcount of the LOCAL index). Materialized into `dst` (`src != dst`); the
+/// design's "popcount-sign loop" involution option, exact at every recursion
+/// level because involution commutes with the top-generator split.
+fn involute_buf(_ src: StorWordBuf, _ dst: StorWordBuf, _ m: u256) {
+    let mut j: u256 = 0
+    while j < src.len() {
+        if popcount(j) % 2 == 1 {
+            dst.set(j, rneg(src.get(j), m))
+        } else {
+            dst.set(j, src.get(j))
+        }
+        j += 1
+    }
+}
+
+/// the recursion's combine step (design 2.4 phase B), for half-length `h`:
+///   out_even[j] = s0[j] + l*s1[j]      (l = the metric of the top generator)
+///   out_odd[j]  = s2[j] + s3[j]
+fn combine(
+    _ s0: StorWordBuf, _ s1: StorWordBuf, _ s2: StorWordBuf, _ s3: StorWordBuf,
+    _ out: StorWordBuf, _ h: u256, _ l: u256, _ m: u256,
+) {
+    let mut j: u256 = 0
+    while j < h {
+        out.set(j, radd(s0.get(j), rmul(l, s1.get(j), m), m))
+        out.set(j + h, radd(s2.get(j), s3.get(j), m))
+        j += 1
+    }
+}
+
+// ---- the per-level unrolled geometric product (design 2.4) ----
+
+/// n = 0: the scalar ring multiply (the recursion base case). No metric/involution.
+fn gp0(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ m: u256) {
+    out.set(0, rmul(x.get(0), y.get(0), m))
+}
+
+/// n = 1 (dim 2): four scalar sub-products, then combine.
+fn gp1(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: S1_S0, len: 1)
+    let s1 = StorWordBuf::new(base: S1_S1, len: 1)
+    let s2 = StorWordBuf::new(base: S1_S2, len: 1)
+    let s3 = StorWordBuf::new(base: S1_S3, len: 1)
+    let yi = StorWordBuf::new(base: S1_YI, len: 1)
+    gp0(x1, y1, s0, m)                        // x1*y1
+    involute_buf(y2, yi, m)
+    gp0(x2, yi, s1, m)                        // x2*y2^
+    gp0(x1, y2, s2, m)                        // x1*y2
+    involute_buf(y1, yi, m)
+    gp0(x2, yi, s3, m)                        // x2*y1^
+    combine(s0, s1, s2, s3, out, 1, l, m)
+}
+
+/// n = 2 (dim 4, Cl(2)): four gp1 sub-products, then combine.
+fn gp2(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: S2_S0, len: 2)
+    let s1 = StorWordBuf::new(base: S2_S1, len: 2)
+    let s2 = StorWordBuf::new(base: S2_S2, len: 2)
+    let s3 = StorWordBuf::new(base: S2_S3, len: 2)
+    let yi = StorWordBuf::new(base: S2_YI, len: 2)
+    gp1(x1, y1, s0, l, m)                     // x1*y1
+    involute_buf(y2, yi, m)
+    gp1(x2, yi, s1, l, m)                     // x2*y2^
+    gp1(x1, y2, s2, l, m)                     // x1*y2
+    involute_buf(y1, yi, m)
+    gp1(x2, yi, s3, l, m)                     // x2*y1^
+    combine(s0, s1, s2, s3, out, 2, l, m)
+}
+
+/// n = 3 (dim 8, Cl(3)): four gp2 sub-products, then combine. The demo headline.
+fn gp3(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: S3_S0, len: 4)
+    let s1 = StorWordBuf::new(base: S3_S1, len: 4)
+    let s2 = StorWordBuf::new(base: S3_S2, len: 4)
+    let s3 = StorWordBuf::new(base: S3_S3, len: 4)
+    let yi = StorWordBuf::new(base: S3_YI, len: 4)
+    gp2(x1, y1, s0, l, m)                     // x1*y1
+    involute_buf(y2, yi, m)
+    gp2(x2, yi, s1, l, m)                     // x2*y2^
+    gp2(x1, y2, s2, l, m)                     // x1*y2
+    involute_buf(y1, yi, m)
+    gp2(x2, yi, s3, l, m)                     // x2*y1^
+    combine(s0, s1, s2, s3, out, 4, l, m)
+}
+
+/// dispatch to the per-level fn by dimension (2^n = the buffer length).
+fn run_gp(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let n = x.len()
+    if n == 1 {
+        gp0(x, y, out, m)
+    } else if n == 2 {
+        gp1(x, y, out, l, m)
+    } else if n == 4 {
+        gp2(x, y, out, l, m)
+    } else {
+        gp3(x, y, out, l, m)
+    }
+}
+
+// ---- the index-DEPENDENT unary ops (design 2.3): popcount-sign loops ----
+
+/// reverse `~`: sign `(-1)^(k(k-1)/2)`, k = grade = popcount(index). Negates the
+/// grades where floor(k/2) is odd (grades 2,3 for n <= 3): `rev(e123) = -e123`.
+fn reverse_buf(_ src: StorWordBuf, _ dst: StorWordBuf, _ m: u256) {
+    let mut j: u256 = 0
+    while j < src.len() {
+        if (popcount(j) / 2) % 2 == 1 {
+            dst.set(j, rneg(src.get(j), m))
+        } else {
+            dst.set(j, src.get(j))
+        }
+        j += 1
+    }
+}
+
+/// grade-1 projection: keep the grade-1 (popcount == 1) slots, zero the rest.
+fn grade1_buf(_ src: StorWordBuf, _ dst: StorWordBuf) {
+    let mut j: u256 = 0
+    while j < src.len() {
+        if popcount(j) == 1 {
+            dst.set(j, src.get(j))
+        } else {
+            dst.set(j, 0)
+        }
+        j += 1
+    }
+}
+
+/// zero a `len`-slot buffer (inputs must be fully initialized: storage persists
+/// across message calls, so a case must clear stale coefficients from prior ones).
+fn zero_buf(_ b: StorWordBuf) {
+    let mut i: u256 = 0
+    while i < b.len() {
+        b.set(i, 0)
+        i += 1
+    }
+}
+
+msg Msg {
+    // Set up a scenario's inputs, run its op, leave the result in the output
+    // region (slots 50..57). Read back per-slot via GetOut.
+    #[selector = 1]
+    Setup { case: u256 } -> u256,
+    #[selector = 2]
+    GetOut { i: u256 } -> u256,
+}
+
+pub contract CliffordGpExec {
+    recv Msg {
+        Setup { case } -> u256 uses (evm: mut Evm) {
+            let x = StorWordBuf::new(base: XBASE, len: 8)
+            let y = StorWordBuf::new(base: YBASE, len: 8)
+            zero_buf(x)
+            zero_buf(y)
+
+            if case == 1 {
+                // Cl(2) HEADLINE: (1+2e1+3e2+4e12)*(5+6e1+7e2+8e12) = 6+20e1+14e2+24e12
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                y.set(0, 5)
+                y.set(1, 6)
+                y.set(2, 7)
+                y.set(3, 8)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, FULL)
+            } else if case == 2 {
+                // e1 * e2 = e12  (slot 3 = 1)
+                x.set(1, 1)
+                y.set(2, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, FULL)
+            } else if case == 3 {
+                // e2 * e1 = -e12  (slot 3 = 2^256-1)
+                x.set(2, 1)
+                y.set(1, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, FULL)
+            } else if case == 4 {
+                // e1 * e1 = 1  (slot 0 = 1)
+                x.set(1, 1)
+                y.set(1, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, FULL)
+            } else if case == 5 {
+                // e2 * e2 = 1  (slot 0 = 1)
+                x.set(2, 1)
+                y.set(2, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, FULL)
+            } else if case == 6 {
+                // e12 * e12 = -1  (slot 0 = 2^256-1): the pseudoscalar square.
+                x.set(3, 1)
+                y.set(3, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, FULL)
+            } else if case == 7 {
+                // complex numbers: (1+2e12)*(3+4e12) = -5 + 10e12
+                x.set(0, 1)
+                x.set(3, 2)
+                y.set(0, 3)
+                y.set(3, 4)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, FULL)
+            } else if case == 8 {
+                // Cl(3) dense: (1..8)*(9..16) = [-238,-188,246,232,-166,-116,190,192]
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                x.set(4, 5)
+                x.set(5, 6)
+                x.set(6, 7)
+                x.set(7, 8)
+                y.set(0, 9)
+                y.set(1, 10)
+                y.set(2, 11)
+                y.set(3, 12)
+                y.set(4, 13)
+                y.set(5, 14)
+                y.set(6, 15)
+                y.set(7, 16)
+                run_gp(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: YBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), 1, FULL)
+            } else if case == 9 {
+                // Cl(3) e12^2 = -1  (e12 = slot 3)
+                x.set(3, 1)
+                y.set(3, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: YBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), 1, FULL)
+            } else if case == 10 {
+                // Cl(3) e13^2 = -1  (e13 = slot 5)
+                x.set(5, 1)
+                y.set(5, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: YBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), 1, FULL)
+            } else if case == 11 {
+                // Cl(3) e23^2 = -1  (e23 = slot 6)
+                x.set(6, 1)
+                y.set(6, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: YBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), 1, FULL)
+            } else if case == 12 {
+                // e12 * e13 = -e23  (slot 6 = 2^256-1): quaternion anticommutation.
+                x.set(3, 1)
+                y.set(5, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: YBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), 1, FULL)
+            } else if case == 13 {
+                // e13 * e12 = +e23  (slot 6 = 1): the reversed order flips the sign.
+                x.set(5, 1)
+                y.set(3, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: YBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), 1, FULL)
+            } else if case == 14 {
+                // wedge e1 ^ e1 = 0  (l = 0)
+                x.set(1, 1)
+                y.set(1, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 0, FULL)
+            } else if case == 15 {
+                // wedge e1 ^ e2 = e12  (slot 3 = 1, l = 0)
+                x.set(1, 1)
+                y.set(2, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 0, FULL)
+            } else if case == 16 {
+                // wedge dense: (1+2e1+3e2+4e12) ^ (5+6e1+7e2+8e12) = 5+16e1+22e2+24e12
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                y.set(0, 5)
+                y.set(1, 6)
+                y.set(2, 7)
+                y.set(3, 8)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 0, FULL)
+            } else if case == 17 {
+                // reverse(1+2e1+3e2+4e12+5e3+6e13+7e23+8e123) = [1,2,3,-4,5,-6,-7,-8]
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                x.set(4, 5)
+                x.set(5, 6)
+                x.set(6, 7)
+                x.set(7, 8)
+                reverse_buf(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), FULL)
+            } else if case == 18 {
+                // involute(dense3) = [1,-2,-3,4,-5,6,7,-8]: negate odd-grade slots.
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                x.set(4, 5)
+                x.set(5, 6)
+                x.set(6, 7)
+                x.set(7, 8)
+                involute_buf(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8), FULL)
+            } else if case == 19 {
+                // grade1(dense3) = [0,2,3,0,5,0,0,0]: keep slots {1,2,4}.
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                x.set(4, 5)
+                x.set(5, 6)
+                x.set(6, 7)
+                x.set(7, 8)
+                grade1_buf(StorWordBuf::new(base: XBASE, len: 8), StorWordBuf::new(base: OBASE, len: 8))
+            } else if case == 20 {
+                // gp3_u32 twin, Cl(2) dense in Z/2^32: no wrap, identical digits.
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                y.set(0, 5)
+                y.set(1, 6)
+                y.set(2, 7)
+                y.set(3, 8)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, MASK32)
+            } else if case == 21 {
+                // gp3_u32 twin: e12^2 = -1 = 2^32-1 in the cross-backend ring.
+                x.set(3, 1)
+                y.set(3, 1)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, MASK32)
+            } else {
+                // gp3_u32 twin, GENUINELY WRAPPING: (70000+70000e1)^2 in Z/2^32.
+                // exact = 9800000000 + 9800000000 e1; mod 2^32 = 1210065408 (both
+                // slots). This is the G-lane's ring-agreement vector (u256 would
+                // give 9800000000, u32 gives 1210065408: the WORD_BITS lesson).
+                x.set(0, 70000)
+                x.set(1, 70000)
+                y.set(0, 70000)
+                y.set(1, 70000)
+                run_gp(StorWordBuf::new(base: XBASE, len: 4), StorWordBuf::new(base: YBASE, len: 4), StorWordBuf::new(base: OBASE, len: 4), 1, MASK32)
+            }
+            0
+        }
+
+        GetOut { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: OBASE, len: 8).get(i)
+        }
+    }
+}
+
+// Assert one scenario's `k` output slots against the pinned reference (design 4),
+// cross-checked against an independent bitmap product (XOR index + reordering
+// sign) in the build's Python oracle.
+#[test]
+fn test_clifford_gp_exec() uses (evm: mut Evm) {
+    let c = evm.create2<CliffordGpExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // ---- Cl(2) ----
+
+    // HEADLINE: (1+2e1+3e2+4e12)*(5+6e1+7e2+8e12) = 6 + 20e1 + 14e2 + 24e12
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 1 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 6)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 20)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 14)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 24)
+
+    // e1*e2 = e12 (slot 3 = 1)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 2 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 1)
+
+    // e2*e1 = -e12 (slot 3 = 2^256-1)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 3 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == U256_MAX)
+
+    // e1*e1 = 1, e2*e2 = 1 (slot 0 = 1)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 4 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 5 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1)
+
+    // e12*e12 = -1 (slot 0 = 2^256-1): the sign the whole recursion exists to get right.
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 6 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == U256_MAX)
+
+    // complex: (1+2e12)*(3+4e12) = -5 + 10e12 (slot 0 = 2^256-5, slot 3 = 10)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 7 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == U256_MAX - 4)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 10)
+
+    // ---- Cl(3) ----
+
+    // dense: (1..8)*(9..16) = [-238,-188,246,232,-166,-116,190,192]
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 8 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == U256_MAX - 237)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == U256_MAX - 187)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 246)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 232)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == U256_MAX - 165)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == U256_MAX - 115)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 190)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 192)
+
+    // quaternion structure: e12^2 = e13^2 = e23^2 = -1 (slot 0 = 2^256-1)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 9 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == U256_MAX)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 10 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == U256_MAX)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 11 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == U256_MAX)
+
+    // anticommutation: e12*e13 = -e23 (slot 6 = -1), e13*e12 = +e23 (slot 6 = 1)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 12 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == U256_MAX)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 13 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 1)
+
+    // ---- wedge (l = 0) ----
+
+    // e1 ^ e1 = 0
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 14 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 0)
+    // e1 ^ e2 = e12 (slot 3 = 1)
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 15 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 1)
+    // dense wedge = 5 + 16e1 + 22e2 + 24e12
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 16 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 5)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 16)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 22)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 24)
+
+    // ---- reverse / involute / grade projection ----
+
+    // reverse(dense3) = [1,2,3,-4,5,-6,-7,-8]
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 17 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 3)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == U256_MAX - 3)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == U256_MAX - 5)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == U256_MAX - 7)
+    // involute(dense3) = [1,-2,-3,4,-5,6,7,-8]
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 18 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == U256_MAX - 1)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 4)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == U256_MAX - 7)
+    // grade1(dense3) = [0,2,3,0,5,0,0,0]
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 19 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 2)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 3)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 5)
+
+    // ---- the masked-u32 twin (gp3_u32, the G-lane cross-check ring, design 3.3) ----
+
+    // Cl(2) dense in Z/2^32: no wrap, identical digits to the u256 leg.
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 20 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 6)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 20)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 14)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 24)
+    // e12^2 = -1 = 2^32-1 in the u32 ring.
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 21 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == MASK32)
+    // GENUINELY WRAPPING: (70000+70000e1)^2 = 1210065408 in both slots (mod 2^32).
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Setup { case: 22 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1210065408)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 1210065408)
+}
