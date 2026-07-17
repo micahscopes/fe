@@ -1,0 +1,258 @@
+// mb2 C4: the rotor SANDWICH `R v ~R` on EVM (revm `fe test`), the capstone flourish.
+//
+// A ROTOR `R` is a unit even-grade multivector; it rotates a vector `v` by the
+// sandwich `R v ~R` (`~R` = reverse of `R`). This is the geometric-algebra form of
+// a rotation, built here from exactly two geometric products and one reverse, all
+// reused from the C2 sequential gp (`clifford_gp_exec.fe`) and the C0/C1 reverse:
+//
+//     rotate(v) = R * v * ~R
+//
+// The pinned case is the exact 180-DEGREE rotor of Cl(2): `R = e12` (the unit
+// pseudoscalar of the plane, `e12 = exp(e12 * pi/2)`, cos(pi/2)=0 + sin(pi/2)*e12),
+// whose reverse is `~R = -e12`. A half-turn negates every grade-1 vector:
+//
+//     R e1 ~R = e12 e1 (-e12) = -e2 (-e12) = -e1        (e1 -> -e1)
+//     R e2 ~R = e12 e2 (-e12) =  e1 (-e12) = -e2        (e2 -> -e2)
+//
+// (Hand-checked against the bitmap product: `e12 * e1` lands on `11 XOR 01 = e2`
+// with one reordering swap = sign -1, then the second product `-e2 * -e12` lands on
+// `10 XOR 11 = e1` with sign -1; the composite is `-e1`.) The 180-degree rotor is
+// the integer-exact case over the ring `Z / 2^256`: a 90-degree rotor would need
+// `cos(45) = 1/sqrt(2)`, which the ring cannot represent, so 180 degrees (`R = e12`,
+// all coefficients in {0, 1, -1}) is the pinned, ring-faithful rotation. Result
+// coefficients: `-1 = 2^256 - 1` (design 1.4, the two's-complement ring), byte-
+// identical to the C2/C3 sign convention.
+//
+// Reuses the C2 recursion verbatim (`gp0`/`gp1`/`gp2`, `combine`, `involute_buf`,
+// the `even_half`/`odd_half` slot arithmetic, `reverse_buf`). Scope: Cl(2). No new
+// type-system machinery.
+
+use std::conal::StorWordBuf
+use core::ops::{WrappingAdd, WrappingSub, WrappingMul}
+use std::evm::EvmBackend
+
+const U256_MAX: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+const FULL: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+
+// regions (all disjoint from the scratch arena at 1000+).
+const RBASE: u256 = 10    // rotor R    (slots 10..13)
+const VBASE: u256 = 30    // vector v   (slots 30..33)
+const RREV: u256 = 50     // ~R         (slots 50..53)
+const TMP: u256 = 70      // R*v        (slots 70..73)
+const OBASE: u256 = 90    // result R*v*~R (slots 90..93)
+
+// per-level scratch (sequential: the two gps in the sandwich run one after the
+// other, so a fixed shared arena is safe).
+const S2_S0: u256 = 1000
+const S2_S1: u256 = 1002
+const S2_S2: u256 = 1004
+const S2_S3: u256 = 1006
+const S2_YI: u256 = 1008
+const S1_S0: u256 = 1010
+const S1_S1: u256 = 1011
+const S1_S2: u256 = 1012
+const S1_S3: u256 = 1013
+const S1_YI: u256 = 1014
+
+// ---- the coefficient ring `Z / 2^256` (m = FULL) ----
+
+fn radd(_ a: u256, _ b: u256, _ m: u256) -> u256 {
+    a.wrapping_add(b) & m
+}
+fn rmul(_ a: u256, _ b: u256, _ m: u256) -> u256 {
+    a.wrapping_mul(b) & m
+}
+fn rneg(_ a: u256, _ m: u256) -> u256 {
+    (0 as u256).wrapping_sub(a) & m
+}
+
+fn popcount(_ x: u256) -> u256 {
+    let mut n = x
+    let mut c: u256 = 0
+    while n > 0 {
+        c += n % 2
+        n = n / 2
+    }
+    c
+}
+
+fn even_half(_ m: StorWordBuf) -> StorWordBuf {
+    StorWordBuf::new(base: m.base(), len: m.len() / 2)
+}
+fn odd_half(_ m: StorWordBuf) -> StorWordBuf {
+    StorWordBuf::new(base: m.base() + m.len() / 2, len: m.len() / 2)
+}
+
+/// grade involution `w^`: negate the odd-grade slots (materialized into `dst`).
+fn involute_buf(_ src: StorWordBuf, _ dst: StorWordBuf, _ m: u256) {
+    let mut j: u256 = 0
+    while j < src.len() {
+        if popcount(j) % 2 == 1 {
+            dst.set(j, rneg(src.get(j), m))
+        } else {
+            dst.set(j, src.get(j))
+        }
+        j += 1
+    }
+}
+
+/// reverse `~`: sign `(-1)^(k(k-1)/2)`, k = popcount(index). Negates grades {2,3}.
+/// `~e12 = -e12`.
+fn reverse_buf(_ src: StorWordBuf, _ dst: StorWordBuf, _ m: u256) {
+    let mut j: u256 = 0
+    while j < src.len() {
+        if (popcount(j) / 2) % 2 == 1 {
+            dst.set(j, rneg(src.get(j), m))
+        } else {
+            dst.set(j, src.get(j))
+        }
+        j += 1
+    }
+}
+
+/// combine step (design 2.4 phase B): out_even = s0 + l*s1; out_odd = s2 + s3.
+fn combine(
+    _ s0: StorWordBuf, _ s1: StorWordBuf, _ s2: StorWordBuf, _ s3: StorWordBuf,
+    _ out: StorWordBuf, _ h: u256, _ l: u256, _ m: u256,
+) {
+    let mut j: u256 = 0
+    while j < h {
+        out.set(j, radd(s0.get(j), rmul(l, s1.get(j), m), m))
+        out.set(j + h, radd(s2.get(j), s3.get(j), m))
+        j += 1
+    }
+}
+
+// ---- the per-level unrolled geometric product (design 2.4), Cl(2) scope ----
+
+fn gp0(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ m: u256) {
+    out.set(0, rmul(x.get(0), y.get(0), m))
+}
+
+fn gp1(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: S1_S0, len: 1)
+    let s1 = StorWordBuf::new(base: S1_S1, len: 1)
+    let s2 = StorWordBuf::new(base: S1_S2, len: 1)
+    let s3 = StorWordBuf::new(base: S1_S3, len: 1)
+    let yi = StorWordBuf::new(base: S1_YI, len: 1)
+    gp0(x1, y1, s0, m)
+    involute_buf(y2, yi, m)
+    gp0(x2, yi, s1, m)
+    gp0(x1, y2, s2, m)
+    involute_buf(y1, yi, m)
+    gp0(x2, yi, s3, m)
+    combine(s0, s1, s2, s3, out, 1, l, m)
+}
+
+fn gp2(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: S2_S0, len: 2)
+    let s1 = StorWordBuf::new(base: S2_S1, len: 2)
+    let s2 = StorWordBuf::new(base: S2_S2, len: 2)
+    let s3 = StorWordBuf::new(base: S2_S3, len: 2)
+    let yi = StorWordBuf::new(base: S2_YI, len: 2)
+    gp1(x1, y1, s0, l, m)
+    involute_buf(y2, yi, m)
+    gp1(x2, yi, s1, l, m)
+    gp1(x1, y2, s2, l, m)
+    involute_buf(y1, yi, m)
+    gp1(x2, yi, s3, l, m)
+    combine(s0, s1, s2, s3, out, 2, l, m)
+}
+
+/// geometric product dispatch by dimension (Cl(2) here: len 4 -> gp2).
+fn run_gp(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let n = x.len()
+    if n == 1 {
+        gp0(x, y, out, m)
+    } else if n == 2 {
+        gp1(x, y, out, l, m)
+    } else {
+        gp2(x, y, out, l, m)
+    }
+}
+
+/// the rotor sandwich `R v ~R` (design 2.3, C4): reverse R, then TWO geometric
+/// products (`R*v`, then `*~R`). `l = 1` (Euclidean gp). Reuses run_gp + reverse.
+fn sandwich(_ r: StorWordBuf, _ v: StorWordBuf, _ rrev: StorWordBuf, _ tmp: StorWordBuf, _ out: StorWordBuf, _ m: u256) {
+    reverse_buf(r, rrev, m)              // ~R
+    run_gp(r, v, tmp, 1, m)              // R * v
+    run_gp(tmp, rrev, out, 1, m)         // (R * v) * ~R
+}
+
+fn zero_buf(_ b: StorWordBuf) {
+    let mut i: u256 = 0
+    while i < b.len() {
+        b.set(i, 0)
+        i += 1
+    }
+}
+
+msg Msg {
+    #[selector = 1]
+    Rotate { case: u256 } -> u256,
+    #[selector = 2]
+    GetOut { i: u256 } -> u256,
+}
+
+pub contract CliffordRotorExec {
+    recv Msg {
+        // Rotor R = e12 (slot 3), vector v selected per case; leave R*v*~R in OBASE.
+        Rotate { case } -> u256 uses (evm: mut Evm) {
+            let r = StorWordBuf::new(base: RBASE, len: 4)
+            let v = StorWordBuf::new(base: VBASE, len: 4)
+            zero_buf(r)
+            zero_buf(v)
+
+            // R = e12 (the 180-degree rotor of the plane).
+            r.set(3, 1)
+
+            if case == 1 {
+                v.set(1, 1)   // v = e1 ; expect R v ~R = -e1 (slot 1 = -1)
+            } else {
+                v.set(2, 1)   // v = e2 ; expect R v ~R = -e2 (slot 2 = -1)
+            }
+
+            sandwich(
+                r, v,
+                StorWordBuf::new(base: RREV, len: 4),
+                StorWordBuf::new(base: TMP, len: 4),
+                StorWordBuf::new(base: OBASE, len: 4),
+                FULL,
+            )
+            0
+        }
+
+        GetOut { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: OBASE, len: 4).get(i)
+        }
+    }
+}
+
+// The pinned rotation: the 180-degree rotor R = e12 sends e1 -> -e1 and e2 -> -e2.
+#[test]
+fn test_clifford_rotor_sandwich() uses (evm: mut Evm) {
+    let c = evm.create2<CliffordRotorExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // R e1 ~R = -e1: slot 1 = 2^256-1, all other slots 0 (a pure grade-1 result).
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Rotate { case: 1 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == U256_MAX)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 0)
+
+    // R e2 ~R = -e2: slot 2 = 2^256-1, all other slots 0.
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::Rotate { case: 2 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 0)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == U256_MAX)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 0)
+}

@@ -2619,3 +2619,120 @@ harness OUTSIDE the fe workspace: wasm-SIMD / SPIR-V-under-lavapipe / rayon, all
 equal to the C2 reference and to the pinned masked-u32 vector above). C3 (fork-join
 gp under D6.3's `Par`, byte-identical to this sequential oracle) is the other next
 increment; both lean on this C2 reference.
+
+## 2026-07-17 - Slice C3 + C4: fork-join geometric product + rotor sandwich [design 2.4 / 4 / 5.C3 / 5.C4]
+
+The final two fe-side Clifford slices, closing the C0-C4 capstone ladder. TWO new
+fixtures, fixtures-ONLY (Rust + ingots untouched; `git status` shows only the two
+added files, no `.snap` rewritten): `clifford_gp_par_exec.fe` (C3) and
+`clifford_rotor_exec.fe` (C4), both executed under revm, all pinned values PASS.
+
+### C3: the fork-join geometric product (Par == the sequential oracle)
+
+The geometric product's top-level split (design 1.3) has TWO INDEPENDENT
+partial-product branches. Splitting on the top generator `e = e_n`
+(`x = x1 + x2*e`, `l = e*e` the metric, `w^` grade involution):
+
+    x*y = (x1*y1 + l*(x2*y2^)) + (x1*y2 + x2*y1^)*e
+           \______ EVEN _______/   \______ ODD ________/
+
+The EVEN output half (slots 0..h) needs only `s0 = x1*y1` and `s1 = x2*y2^`; the
+ODD half (slots h..2h) needs only `s2 = x1*y2` and `s3 = x2*y1^`. The two branches
+read only the (shared, read-only) inputs and write DISJOINT scratch, so they are
+independent BY CONSTRUCTION: exactly the D6.3 `core::par::Par::fork` contract. The
+fixture wires the EVEN branch (`EvenBranch`) against the ODD branch (`OddBranch`),
+each a nullary `Fn<(), u256>` thunk (the proven `conal_par_fork.fe` shape) that
+captures its disjoint sub-buffers + its own scratch arena and computes its two
+partial products, and forks them through the D6.3 `Par` capability:
+
+    let joined: (u256, u256) = par.fork(even, odd)   // Sequential provider: L then R
+    barrier.barrier()                                 // the derived phase boundary
+    combine(L_s0, L_s1, R_s2, R_s3, out_par, half, l, m)
+
+- WHICH partials go through the fork: LEFT branch = {`x1*y1`, `x2*y2^`} (the EVEN
+  half's inputs), RIGHT branch = {`x1*y2`, `x2*y1^`} (the ODD half's inputs). The
+  task's "x1y1/x2y2 vs x1y2/x2y1 halves" split. After the join, one
+  `Barrier<EvmBackend, Global>::barrier()` (a genuine no-op on single-threaded EVM,
+  the B2 `Comp`-level barrier wired at a real, not decorative, phase boundary), then
+  the sequential `combine`. The `evm` + `par` + `barrier` capabilities coexist in
+  ONE `uses` clause with no effect-row friction (the first fixture to combine all
+  three; the D6.3 ruling's "surface any friction" trigger did not fire).
+- Genuine disjointness (not shared-scratch luck): the ONE change from C2 is that
+  the per-level scratch base is a PARAMETER `sb` (`gp1`/`gp2` take it), so the LEFT
+  and RIGHT branches use disjoint scratch arenas (1000+ and 2000+) all the way down
+  the recursion. A truly parallel provider would not race; order-independence is
+  real, not an artifact of scratch aliasing. `even_half`/`odd_half`, `combine`,
+  `involute_buf`, `gp0`/`gp1`/`gp2`, the masked ring are otherwise C2 verbatim.
+- The PINNED PROPERTY: the fixture computes BOTH paths in-contract (fork-join into
+  OPAR, an in-contract sequential reference `gp_seq_top` into OSEQ) and asserts them
+  BYTE-IDENTICAL slot by slot, AND asserts OPAR equals C2's pinned oracle values. So
+  byte-identity is a direct in-fixture fact, not a cross-fixture inference. Cases:
+  Cl(2) headline `(1+2e1+3e2+4e12)*(5+6e1+7e2+8e12) = [6,20,14,24]`; Cl(3) dense
+  `(1..8)*(9..16) = [-238,-188,246,232,-166,-116,190,192]` (the DEEPER fork: the top
+  split's sub-products are `gp2`, not `gp1`), all 8 slots; and `e12*e12 = -1`
+  (slot 0 = 2^256-1, a sign carried through the fork). Every case: fork-join ==
+  sequential (order-independence pin) AND == the C2 oracle.
+- Result: `PASS test_clifford_gp_par_exec`, first run, no divergence from C2. The
+  D6.3 `Sequential`-provider-is-the-reference contract exercised beyond its own unit
+  test, on a real algorithm. Par-structured parallel == sequential reference.
+
+### C4: the rotor sandwich (the capstone flourish)
+
+`R v ~R`: a rotor `R` (unit even-grade) rotates a vector `v` by two geometric
+products and one reverse, all reused from C2 (`run_gp`, `reverse_buf`). The pinned
+case is the 180-degree rotor of Cl(2), `R = e12` (`= cos(pi/2) + sin(pi/2) e12`),
+whose reverse is `~R = -e12`. A half-turn negates every grade-1 vector:
+
+    R e1 ~R = e12 e1 (-e12) = -e2 (-e12) = -e1     (e1 -> -e1, slot 1 = 2^256-1)
+    R e2 ~R = e12 e2 (-e12) =  e1 (-e12) = -e2     (e2 -> -e2, slot 2 = 2^256-1)
+
+both hand-checked against the bitmap product. 180 degrees is the integer-EXACT case
+over `Z / 2^256`: a 90-degree rotor needs `cos(45) = 1/sqrt(2)`, unrepresentable in
+the ring, so `R = e12` (coefficients in {0, 1, -1}) is the pinned, ring-faithful
+rotation. `sandwich(r, v, ...) = reverse(r); run_gp(r, v, tmp); run_gp(tmp, ~r, out)`.
+Result: `PASS test_clifford_rotor_sandwich`, both rotations pinned (pure grade-1
+outputs, all other slots 0). C4 BUILT, not deferred (it was not fiddly: two gp calls
++ one reverse, exact pinned values, `-1 = 2^256-1` matching the C2/C3 convention).
+
+The optional Coq-echo induction leg (design 5.C4, the S2.2b engine proving a marker
+`M(RBin<T, N>)` at symbolic `N`) is NOT built: it is explicitly optional and gated
+on the induction-class gate, and the rotor already delivers the C4 capstone. Left
+as named-deferred, not ground (reverify-inherited-blockers cuts both ways: no
+class-gate widening for a demo).
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- `clifford_gp_par_exec` and `clifford_rotor_exec` both PASS under revm (debug fe
+  binary, fresh corelib; `PASS [0.0092s]` and `PASS [0.0047s]`, timeout-guarded, no
+  hang). gp/rotor calls given 30M gas (well under). NO gas/perf claims.
+- `cargo check --workspace` clean; `corelib` green BOTH profiles (`analyze_corelib`
+  + `analyze_corelib_under_release_profile` ok, +stdlib, 173s); `tree_sitter_parse_
+  strict` green (my files touch none of its suites); `test_fe_test` CI harness path
+  green for both new fixtures.
+- Existing clifford/conal/par fixtures BYTE-IDENTICAL: `git status` shows ONLY the
+  two new files, no `.snap` rewritten, C2 (`clifford_gp_exec.fe`) untouched (C4 is a
+  SEPARATE fixture precisely to keep the C2 oracle byte-identical). Neighbors re-run
+  green: `clifford_gp_exec`, `clifford_ops_exec`, `conal_par_fork`,
+  `conal_par_map_exec`, `barrier_noop`, `atomic_rmw`.
+- Rust + ingots UNTOUCHED (fixtures-only, no new type-system machinery, no std/core
+  surface, no generic-N gp: A8/STOP not touched). Did NOT push, did NOT run full
+  release CI.
+
+### Deviations
+
+- C3's scratch-base parameter `sb` on `gp1`/`gp2` is the one delta from C2's fixed
+  scratch constants; it is REQUIRED for genuine branch disjointness (order
+  independence must not depend on the Sequential provider's L-then-R timing). The
+  recursion body is otherwise C2 verbatim.
+- The C3 barrier is placed ONCE, at the top-level combine boundary (the derived
+  phase boundary between the forked partial products and the combine), not `n` times
+  down the recursion: the fork is at the top level only in this realization, so one
+  honest derived-boundary barrier, not an over-claimed nest.
+- C4 shipped (not deferred). The optional induction leg deferred (see above).
+
+The Fe-side Clifford capstone C0-C4 is COMPLETE and green: C0/C1 (blade-tree
+headline + add/scale/neg), C2 (sequential gp = the sign oracle), C3 (fork-join gp
+under D6.3 Par == the sequential oracle, byte-identical), C4 (rotor sandwich). The
+remaining ladder is the G-lane (the cross-backend execution-equality harness OUTSIDE
+the fe workspace) and the `docs/mb2/` demo write-up, neither of which is fe-tree
+fixture work.

@@ -1,0 +1,439 @@
+// mb2 C3: the FORK-JOIN Clifford geometric product on EVM (revm `fe test`).
+//
+// The geometric product's top-level split (design 1.3/2.4) has TWO INDEPENDENT
+// partial-product branches. Split on the top generator `e = e_n` (`x = x1 + x2*e`,
+// `x1, x2` in the subalgebra on `e_1..e_{n-1}`, `e` written last = the storage
+// order); `l = e*e` the metric (`l = 1` Euclidean gp), `w^` grade involution:
+//
+//     x * y = (x1*y1 + l*(x2*y2^))  +  (x1*y2 + x2*y1^) * e
+//              \_______ EVEN _______/    \_______ ODD ________/
+//
+// The EVEN output half (slots 0..h) needs only s0 = x1*y1 and s1 = x2*y2^; the ODD
+// output half (slots h..2h) needs only s2 = x1*y2 and s3 = x2*y1^. The two branches
+// read only the (shared, read-only) inputs and write DISJOINT scratch, so they are
+// independent BY CONSTRUCTION: exactly the D6.3 `Par::fork` contract. This fixture
+// runs the EVEN branch against the ODD branch through the D6.3 `core::par::Par`
+// capability (the EVM `Sequential` provider, `left.call(()) then right.call(())`),
+// crosses a DERIVED phase boundary (`Barrier::barrier`, a genuine no-op on
+// single-threaded EVM, the `Comp`-level barrier of the schedule), then combines.
+//
+// THE PINNED PROPERTY (design 4, C3): the fork-join result is BYTE-IDENTICAL to the
+// sequential geometric product, slot by slot, AND equals C2's pinned oracle values
+// (`clifford_gp_exec.fe`). That single equality is the D6.3 order-independence
+// property (`Sequential` provider == reference fork-join semantics) demonstrated on
+// a REAL algorithm, plus the B2 barrier wired at a derived (not decorative) phase
+// boundary. Both paths are computed in-contract (fork-join into OPAR, the
+// sequential reference into OSEQ) and asserted equal here, so byte-identity is a
+// direct in-fixture fact, not a cross-fixture inference.
+//
+// Reuses C2's per-level recursion verbatim (`gp0`/`gp1`/`gp2`, `combine`,
+// `involute_buf`, the `even_half`/`odd_half` slot arithmetic, the masked ring),
+// with the ONE change the fork needs: the per-level scratch base is a PARAMETER
+// `sb`, so the two forked branches use genuinely DISJOINT scratch arenas (order
+// independence must be real, not an artifact of shared scratch that a truly
+// parallel provider would race on). No new type-system machinery; no generic-N gp.
+
+use std::conal::StorWordBuf
+use core::ops::{WrappingAdd, WrappingSub, WrappingMul}
+use core::par::Par
+use core::barrier::Barrier
+use core::backend::Global
+use core::Fn
+use std::evm::EvmBackend
+
+// `-1` in `Z / 2^256`; also the FULL mask (`& FULL` = identity, raw wrapping ops).
+const U256_MAX: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+const FULL: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+
+// input / output regions (all disjoint).
+const XBASE: u256 = 10    // input x   (slots 10..17)
+const YBASE: u256 = 30    // input y   (slots 30..37)
+const OPAR: u256 = 50     // fork-join output (slots 50..57)
+const OSEQ: u256 = 70     // sequential reference output (slots 70..77)
+
+// LEFT branch (EVEN) scratch arena: two result buffers (len <= 4), one involution
+// buffer, one 15-slot per-level gp working scratch. All disjoint from the right
+// arena, so the two forked branches never touch the same slot.
+const L_S0: u256 = 1000   // res x1*y1
+const L_S1: u256 = 1010   // res x2*y2^
+const L_INV: u256 = 1020  // holds y2^
+const L_GP: u256 = 1030   // gp working scratch (1030..1044)
+
+// RIGHT branch (ODD) scratch arena.
+const R_S2: u256 = 2000   // res x1*y2
+const R_S3: u256 = 2010   // res x2*y1^
+const R_INV: u256 = 2020  // holds y1^
+const R_GP: u256 = 2030   // gp working scratch (2030..2044)
+
+// SEQUENTIAL reference scratch arena (a third disjoint region).
+const Q_S0: u256 = 3000
+const Q_S1: u256 = 3010
+const Q_S2: u256 = 3020
+const Q_S3: u256 = 3030
+const Q_INV: u256 = 3040
+const Q_GP: u256 = 3050   // gp working scratch (3050..3064)
+
+// ---- the coefficient ring `Z / 2^W`, W selected by the mask `m` (as C2) ----
+
+fn radd(_ a: u256, _ b: u256, _ m: u256) -> u256 {
+    a.wrapping_add(b) & m
+}
+fn rmul(_ a: u256, _ b: u256, _ m: u256) -> u256 {
+    a.wrapping_mul(b) & m
+}
+fn rneg(_ a: u256, _ m: u256) -> u256 {
+    (0 as u256).wrapping_sub(a) & m
+}
+
+// ---- popcount parity for grade signs (indices small, n <= 3) ----
+
+fn popcount(_ x: u256) -> u256 {
+    let mut n = x
+    let mut c: u256 = 0
+    while n > 0 {
+        c += n % 2
+        n = n / 2
+    }
+    c
+}
+
+// ---- the blade tree children ARE slot arithmetic (design 2.2) ----
+
+fn even_half(_ m: StorWordBuf) -> StorWordBuf {
+    StorWordBuf::new(base: m.base(), len: m.len() / 2)
+}
+fn odd_half(_ m: StorWordBuf) -> StorWordBuf {
+    StorWordBuf::new(base: m.base() + m.len() / 2, len: m.len() / 2)
+}
+
+/// grade involution `w^` of a sub-buffer: negate the odd-grade slots (materialized
+/// into `dst`, `src != dst`). Exact at every level (involution commutes with the
+/// top-generator split).
+fn involute_buf(_ src: StorWordBuf, _ dst: StorWordBuf, _ m: u256) {
+    let mut j: u256 = 0
+    while j < src.len() {
+        if popcount(j) % 2 == 1 {
+            dst.set(j, rneg(src.get(j), m))
+        } else {
+            dst.set(j, src.get(j))
+        }
+        j += 1
+    }
+}
+
+/// the recursion's combine step (design 2.4 phase B), half-length `h`:
+///   out_even[j] = s0[j] + l*s1[j];   out_odd[j] = s2[j] + s3[j]
+fn combine(
+    _ s0: StorWordBuf, _ s1: StorWordBuf, _ s2: StorWordBuf, _ s3: StorWordBuf,
+    _ out: StorWordBuf, _ h: u256, _ l: u256, _ m: u256,
+) {
+    let mut j: u256 = 0
+    while j < h {
+        out.set(j, radd(s0.get(j), rmul(l, s1.get(j), m), m))
+        out.set(j + h, radd(s2.get(j), s3.get(j), m))
+        j += 1
+    }
+}
+
+// ---- the per-level unrolled geometric product; scratch base `sb` is a PARAMETER
+// (the ONE change from C2, so disjoint branches get disjoint scratch) ----
+
+/// n = 0: the scalar ring multiply (the recursion base case).
+fn gp0(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ m: u256) {
+    out.set(0, rmul(x.get(0), y.get(0), m))
+}
+
+/// n = 1 (dim 2): four scalar sub-products, then combine. Scratch: sb..sb+4.
+fn gp1(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256, _ sb: u256) {
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: sb, len: 1)
+    let s1 = StorWordBuf::new(base: sb + 1, len: 1)
+    let s2 = StorWordBuf::new(base: sb + 2, len: 1)
+    let s3 = StorWordBuf::new(base: sb + 3, len: 1)
+    let yi = StorWordBuf::new(base: sb + 4, len: 1)
+    gp0(x1, y1, s0, m)                        // x1*y1
+    involute_buf(y2, yi, m)
+    gp0(x2, yi, s1, m)                        // x2*y2^
+    gp0(x1, y2, s2, m)                        // x1*y2
+    involute_buf(y1, yi, m)
+    gp0(x2, yi, s3, m)                        // x2*y1^
+    combine(s0, s1, s2, s3, out, 1, l, m)
+}
+
+/// n = 2 (dim 4, Cl(2)): four gp1 sub-products, then combine. Scratch: sb..sb+14
+/// (own s0..yi at sb..sb+9 len 2; gp1's scratch at sb+10).
+fn gp2(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256, _ sb: u256) {
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: sb, len: 2)
+    let s1 = StorWordBuf::new(base: sb + 2, len: 2)
+    let s2 = StorWordBuf::new(base: sb + 4, len: 2)
+    let s3 = StorWordBuf::new(base: sb + 6, len: 2)
+    let yi = StorWordBuf::new(base: sb + 8, len: 2)
+    gp1(x1, y1, s0, l, m, sb + 10)           // x1*y1
+    involute_buf(y2, yi, m)
+    gp1(x2, yi, s1, l, m, sb + 10)           // x2*y2^
+    gp1(x1, y2, s2, l, m, sb + 10)           // x1*y2
+    involute_buf(y1, yi, m)
+    gp1(x2, yi, s3, l, m, sb + 10)           // x2*y1^
+    combine(s0, s1, s2, s3, out, 2, l, m)
+}
+
+/// dispatch a sub-product to the level below by dimension (the top-level split's
+/// children are gp1 for Cl(2), gp2 for Cl(3)). Scratch base `sb`.
+fn sub_gp(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256, _ sb: u256) {
+    let n = x.len()
+    if n == 1 {
+        gp0(x, y, out, m)
+    } else if n == 2 {
+        gp1(x, y, out, l, m, sb)
+    } else {
+        gp2(x, y, out, l, m, sb)
+    }
+}
+
+// ---- the SEQUENTIAL reference: the top-level split run left-to-right (this IS
+// C2's gp{n} top level, parameterized scratch). The fork-join oracle. ----
+
+fn gp_seq_top(_ x: StorWordBuf, _ y: StorWordBuf, _ out: StorWordBuf, _ l: u256, _ m: u256) {
+    let half = x.len() / 2
+    let x1 = even_half(x)
+    let x2 = odd_half(x)
+    let y1 = even_half(y)
+    let y2 = odd_half(y)
+    let s0 = StorWordBuf::new(base: Q_S0, len: half)
+    let s1 = StorWordBuf::new(base: Q_S1, len: half)
+    let s2 = StorWordBuf::new(base: Q_S2, len: half)
+    let s3 = StorWordBuf::new(base: Q_S3, len: half)
+    let inv = StorWordBuf::new(base: Q_INV, len: half)
+    sub_gp(x1, y1, s0, l, m, Q_GP)           // x1*y1
+    involute_buf(y2, inv, m)
+    sub_gp(x2, inv, s1, l, m, Q_GP)          // x2*y2^
+    sub_gp(x1, y2, s2, l, m, Q_GP)           // x1*y2
+    involute_buf(y1, inv, m)
+    sub_gp(x2, inv, s3, l, m, Q_GP)          // x2*y1^
+    combine(s0, s1, s2, s3, out, half, l, m)
+}
+
+// ---- the two INDEPENDENT fork branches (nullary `Fn<(), _>` thunks, the proven
+// `conal_par_fork.fe` shape): each captures its disjoint sub-buffers + scratch
+// arena and computes its two partial products into DISJOINT storage ----
+
+/// EVEN branch: the two partial products the EVEN output half needs.
+///   s0 = x1*y1;  s1 = x2*y2^   (into the LEFT arena; returns 0)
+struct EvenBranch {
+    x1: StorWordBuf, x2: StorWordBuf, y1: StorWordBuf, y2: StorWordBuf,
+    s0: StorWordBuf, s1: StorWordBuf, inv: StorWordBuf,
+    sb: u256, l: u256, m: u256,
+}
+impl Fn<(), u256> for EvenBranch {
+    fn call(self, _ unit: own ()) -> u256 {
+        sub_gp(self.x1, self.y1, self.s0, self.l, self.m, self.sb)   // x1*y1
+        involute_buf(self.y2, self.inv, self.m)
+        sub_gp(self.x2, self.inv, self.s1, self.l, self.m, self.sb)  // x2*y2^
+        0
+    }
+}
+
+/// ODD branch: the two partial products the ODD output half needs.
+///   s2 = x1*y2;  s3 = x2*y1^   (into the RIGHT arena; returns 0)
+struct OddBranch {
+    x1: StorWordBuf, x2: StorWordBuf, y1: StorWordBuf, y2: StorWordBuf,
+    s2: StorWordBuf, s3: StorWordBuf, inv: StorWordBuf,
+    sb: u256, l: u256, m: u256,
+}
+impl Fn<(), u256> for OddBranch {
+    fn call(self, _ unit: own ()) -> u256 {
+        sub_gp(self.x1, self.y2, self.s2, self.l, self.m, self.sb)   // x1*y2
+        involute_buf(self.y1, self.inv, self.m)
+        sub_gp(self.x2, self.inv, self.s3, self.l, self.m, self.sb)  // x2*y1^
+        0
+    }
+}
+
+fn zero_buf(_ b: StorWordBuf) {
+    let mut i: u256 = 0
+    while i < b.len() {
+        b.set(i, 0)
+        i += 1
+    }
+}
+
+msg Msg {
+    // Set up a scenario's inputs, run BOTH the fork-join gp (into OPAR) and the
+    // sequential reference gp (into OSEQ). Read back per-slot to assert equality.
+    #[selector = 1]
+    RunBoth { case: u256 } -> u256,
+    #[selector = 2]
+    GetPar { i: u256 } -> u256,
+    #[selector = 3]
+    GetSeq { i: u256 } -> u256,
+}
+
+pub contract CliffordGpParExec {
+    recv Msg {
+        RunBoth { case } -> u256 uses (evm: mut Evm, par: mut Par<EvmBackend>, barrier: mut Barrier<EvmBackend, Global>) {
+            let x = StorWordBuf::new(base: XBASE, len: 8)
+            let y = StorWordBuf::new(base: YBASE, len: 8)
+            zero_buf(x)
+            zero_buf(y)
+
+            // dim (= buffer length) selected per case: Cl(2) = 4, Cl(3) = 8.
+            let mut dim: u256 = 4
+            if case == 1 {
+                // Cl(2) HEADLINE: (1+2e1+3e2+4e12)*(5+6e1+7e2+8e12) = 6+20e1+14e2+24e12
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                y.set(0, 5)
+                y.set(1, 6)
+                y.set(2, 7)
+                y.set(3, 8)
+                dim = 4
+            } else if case == 2 {
+                // Cl(3) dense: (1..8)*(9..16) = [-238,-188,246,232,-166,-116,190,192].
+                // The DEEPER fork: the top split's sub-products are gp2, not gp1.
+                x.set(0, 1)
+                x.set(1, 2)
+                x.set(2, 3)
+                x.set(3, 4)
+                x.set(4, 5)
+                x.set(5, 6)
+                x.set(6, 7)
+                x.set(7, 8)
+                y.set(0, 9)
+                y.set(1, 10)
+                y.set(2, 11)
+                y.set(3, 12)
+                y.set(4, 13)
+                y.set(5, 14)
+                y.set(6, 15)
+                y.set(7, 16)
+                dim = 8
+            } else {
+                // e12 * e12 = -1 (slot 0 = 2^256-1): a sign carried through the fork.
+                x.set(3, 1)
+                y.set(3, 1)
+                dim = 4
+            }
+
+            let half = dim / 2
+            let l: u256 = 1
+            let m: u256 = FULL
+
+            let xb = StorWordBuf::new(base: XBASE, len: dim)
+            let yb = StorWordBuf::new(base: YBASE, len: dim)
+            let x1 = even_half(xb)
+            let x2 = odd_half(xb)
+            let y1 = even_half(yb)
+            let y2 = odd_half(yb)
+
+            // FORK-JOIN path: the EVEN and ODD branches over DISJOINT scratch arenas.
+            let even = EvenBranch {
+                x1: x1, x2: x2, y1: y1, y2: y2,
+                s0: StorWordBuf::new(base: L_S0, len: half),
+                s1: StorWordBuf::new(base: L_S1, len: half),
+                inv: StorWordBuf::new(base: L_INV, len: half),
+                sb: L_GP, l: l, m: m,
+            }
+            let odd = OddBranch {
+                x1: x1, x2: x2, y1: y1, y2: y2,
+                s2: StorWordBuf::new(base: R_S2, len: half),
+                s3: StorWordBuf::new(base: R_S3, len: half),
+                inv: StorWordBuf::new(base: R_INV, len: half),
+                sb: R_GP, l: l, m: m,
+            }
+            // Run the two independent branches through the D6.3 Par capability (the
+            // EVM Sequential provider realizes the fork left-then-right; disjoint
+            // scratch makes that order-independent).
+            let joined: (u256, u256) = par.fork(even, odd)
+            let _ = joined.0 + joined.1
+
+            // The DERIVED phase boundary between the forked partial products and the
+            // combine (a genuine no-op on single-threaded EVM; the B2 barrier wired
+            // at a real, not decorative, `Comp`-level boundary).
+            barrier.barrier()
+
+            // combine reads the four partial products (LEFT s0,s1 + RIGHT s2,s3) and
+            // writes the fork-join output.
+            let out_par = StorWordBuf::new(base: OPAR, len: dim)
+            combine(
+                StorWordBuf::new(base: L_S0, len: half),
+                StorWordBuf::new(base: L_S1, len: half),
+                StorWordBuf::new(base: R_S2, len: half),
+                StorWordBuf::new(base: R_S3, len: half),
+                out_par, half, l, m,
+            )
+
+            // SEQUENTIAL reference path (the fork-join oracle) into OSEQ.
+            let out_seq = StorWordBuf::new(base: OSEQ, len: dim)
+            gp_seq_top(xb, yb, out_seq, l, m)
+            0
+        }
+
+        GetPar { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: OPAR, len: 8).get(i)
+        }
+
+        GetSeq { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: OSEQ, len: 8).get(i)
+        }
+    }
+}
+
+// The pinned property: fork-join == sequential, slot by slot, AND == C2's oracle.
+#[test]
+fn test_clifford_gp_par_exec() uses (evm: mut Evm) {
+    let c = evm.create2<CliffordGpParExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // Cl(2) HEADLINE: fork-join (1+2e1+3e2+4e12)*(5+6e1+7e2+8e12) = 6+20e1+14e2+24e12,
+    // BYTE-IDENTICAL to the sequential gp and to C2's pinned oracle.
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::RunBoth { case: 1 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 0 }) == 6)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 1 }) == 20)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 2 }) == 14)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 3 }) == 24)
+    // fork-join == sequential, slot by slot (the order-independence pin).
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 0 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 0 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 1 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 1 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 2 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 2 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 3 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 3 }))
+
+    // Cl(3) dense: the DEEPER fork (top split's sub-products are gp2). Full byte
+    // identity vs the sequential oracle over all 8 slots, and vs C2's pinned dense
+    // vector [-238,-188,246,232,-166,-116,190,192].
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::RunBoth { case: 2 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 0 }) == U256_MAX - 237)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 1 }) == U256_MAX - 187)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 2 }) == 246)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 3 }) == 232)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 4 }) == U256_MAX - 165)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 5 }) == U256_MAX - 115)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 6 }) == 190)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 7 }) == 192)
+    // fork-join == sequential over every slot.
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 0 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 0 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 1 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 1 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 2 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 2 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 3 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 3 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 4 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 4 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 5 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 5 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 6 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 6 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 7 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 7 }))
+
+    // e12 * e12 = -1 (slot 0 = 2^256-1): the pseudoscalar-square sign carried
+    // through the fork, byte-identical to the sequential path.
+    evm.call(addr: c, gas: 30000000, value: 0, message: Msg::RunBoth { case: 3 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 0 }) == U256_MAX)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 0 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 0 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 1 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 1 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 2 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 2 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetPar { i: 3 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 3 }))
+}
