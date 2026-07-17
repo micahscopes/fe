@@ -2101,3 +2101,131 @@ STOP-deferred as behavior-adjacent. A5.4 = DX floor: the kind-mismatch phrasing
 (`3-0050`) and the under-applied-projection suggestion (`3-0000`) now read clearly
 and actionably; the lead-with-source rule awaits the source-form plumbing that
 belongs to the qualified-path lowering slice.
+
+## 2026-07-17 - Slice D1: `Functor` -> `core::conal` + bounded `core::Backend::Buffer<T>: Functor<T>`
+
+Executes the Fable D1 ruling (`mb2-design-decisions-01.md` section D1): move the
+applied-form Conal functor into `core`, BOUND the real `core::backend::Backend`
+with `type Buffer<T>: Functor<T>`, and satisfy the bound on all three backends.
+This converts the whole Conal library's membership story from library CONVENTION
+into a compiler-checked CONTRACT: a backend whose buffer is not an applied-form
+Functor now dies at the impl site, not silently later.
+
+### What moved / changed (additive on the type system; NO new machinery)
+
+- **New `ingots/core/src/conal.fe`.** The applied-form trait moved VERBATIM in
+  shape from `std::conal` (GAT `type Out<Y>`, `fn map`, default `par_map`
+  forwarding to `map`), now `core::conal::Functor<X>`. Module-visible only, NOT
+  added to core's root re-exports (`lib.fe` already exports the HKT `Functor` by
+  name; two root `Functor`s would collide). Module doc carries the two-Functor
+  DOCTRINE (below). Auto-discovered as a module (Fe modules = files; `derive`,
+  `num`, `prelude` are already in-tree without a `lib.fe` line) and referenced by
+  `backend.fe`'s `use super::conal::Functor`, so no `lib.fe` edit.
+
+- **The two-Functor doctrine, written into both module docs.**
+  `core::functional::Functor` is CONSTRUCTOR-polymorphism for concrete `* -> *`
+  constructors (real users `Option` at `option.fe:91`, `Result<E>` at
+  `result.fe:107`, plus Applicative/Monad); a bare GAT head stays opaque (A3) so
+  it can never serve a symbolic `B::Buffer`. `core::conal::Functor<X>` is the
+  applied-form element-changing interface A4.2 discharges per impl. Governing
+  rule recorded: no new core surface bounds on the HKT form; anything
+  backend-shaped bounds on the conal form. They COEXIST by design (disjoint user
+  bases, distinct discharge machinery), NOT pending a merge. The conal trait NAME
+  stays `Functor` (module-disambiguated); renaming is deferred-tunable per
+  guts-over-sugar.
+
+- **`core::backend::Backend` bounded.** `type Buffer<T>` -> `type Buffer<T>:
+  Functor<T>` (header updated: `Buffer` bounded, `Ref`/`Word` stay UNBOUNDED in
+  v1). Rides the EXISTING A4.2 strict discharge + A7.2 machinery; the shape is
+  `gat_bound_conforming.fe`'s (`type Elem<T>: Producer<T>`), unchanged.
+
+- **Bound satisfied on all three backends.** `impl<X> Functor<X> for StorPtr<X>`
+  (EVM buffer) and `impl<X> Functor<X> for MemPtr<X>` (wasm buffer) with `map =
+  todo()`; `impl<X> Functor<X> for GpuRef<X, Global>` (GPU buffer, in `std::gpu`)
+  with `map = core::panic()` (this discharge SUBSTITUTES the class marker
+  `Global` through the GAT RHS, a genuinely new coverage point). The A9.2 EXECUTED
+  `impl Functor<u256> for StorWordBuf` is untouched and still runs.
+
+- **`std::conal` compatibility re-export.** Trait text deleted; `pub use
+  core::conal::Functor` added (the precedented cross-ingot pattern of
+  `std/src/abi.fe`), so `use std::conal::Functor` and every fixture writing it
+  keep working. `Par`/`Pair`/`Comp`/`RBin`, `StorWordBuf` + its executed instance
+  are unchanged.
+
+### DEVIATION from the ruling's execution steps 3-4: impls for core-owned buffer types live in CORE, not std (COHERENCE-forced)
+
+The ruling (step 3) said to keep `impl Functor for StorPtr` in `std` and claimed
+"no orphan enforcement blocks it, verified". MEASUREMENT disproves that claim:
+with `Functor` now a `core` trait and `StorPtr`/`MemPtr` `core` types, an impl in
+`std` is `error[5-0000] external trait cannot be implemented for external type`.
+The admissibility rule (`core/semantic/mod.rs:4656`) admits an impl only in the
+TRAIT's ingot or the TYPE's ingot; for `StorPtr`/`MemPtr` both are `core`, so the
+impls MOVED to `core::conal` (alongside the trait). Impls for std-LOCAL container
+types (`GpuRef<_, Global>`, `StorWordBuf`) correctly stay in `std`. This is NOT a
+discharge gap and NOT forcing: coherence dictates the placement, the machinery
+proves `StorPtr<T>: Functor<T>` cleanly, and corelib is green. (An instance of
+reverify-inherited-blockers: the ruling's parenthetical verdict was stale; the
+build is the authority.)
+
+### The teeth (negative fixture)
+
+`crates/uitest/fixtures/ty/def/backend_buffer_not_functor.fe`: a fixture-local
+`struct NotAFunctor<T>` and `impl Backend for BadBackend { type Buffer<T> =
+NotAFunctor<T>; ... }` against the REAL `core::Backend`. Fires exactly ONE
+diagnostic, `error[6-0003] trait bound is not satisfied`, "`NotAFunctor<T>`
+doesn't implement `Functor<T>`", at the `type Buffer<T> = NotAFunctor<T>` RHS
+(span 27:22), no cascade (`Ref<T, S> = u256` is fine, Ref unbounded). This is the
+A4.2 strict discharge firing on the new core bound: the bound has teeth on the
+real trait.
+
+### FINDING (recorded, the D1/D2 boundary): the decl bound does NOT yet feed CONSUMER method resolution
+
+The ruling's step 5 assumed a consumer could DROP `where B::Buffer<X>: Functor<X>`
+because "the bound now arrives from `B: Backend`". A probe fixture with a
+no-where-bound `fn pm<B: Backend, X, Y, F>(buf: B::Buffer<X>, f: F) { buf.par_map
+<Y,F>(f) }` FAILS: `error[2-0010] no method named par_map found` on the symbolic
+`B::Buffer<X>`. The decl bound `type Buffer<T>: Functor<T>` is proven at the
+DEFINITION side (impls must discharge it strictly; corelib green) but is NOT yet
+revived into the consumer's assumption set for method resolution. This is exactly
+what D1 ruling step 7 flagged as a STOP+record item, and it is precisely D2 ruling
+lobe 2's scope (the decl-bounds scan that, after D1, "reads the bound off `type
+Buffer<T>: Functor<T>` itself, so the chained spelling works with NO consumer
+where-bound"). So: NOT a soundness gap, NOT forced; D1 ships with consumers still
+restating the where-bound (the existing `conal_par_map.fe` route, still green),
+and D2 lobe 2 removes it. The speculative positive fixture was withdrawn (not
+shipped red); this observation is the honest consumer-side status.
+
+### Fixtures swept for the new required bound
+
+Only ONE fixture-local impl of the REAL `core::Backend` exists (`rg "impl Backend
+for"` sweep; all other `impl Backend for` are LOCAL test traits named `Backend`):
+`backend_ref_conformance.fe` (Ref-arity teeth, `type Buffer<T> = u256`). Gave it a
+fixture-local `struct Buf<T>` + `impl<T> Functor<T> for Buf<T>` and switched each
+`Buffer` RHS to `Buf<T>`, so the Buffer bound discharges and only the intended
+`Ref` diagnostics fire (no masking `6-0003`). Its `.snap` changed by LINE NUMBERS
+only (added imports + the local Functor; and `backend.fe`'s `type Ref<T, S>` decl
+moved 49 -> 57 from the new import/doc): identical codes/messages/verdicts
+(`6-0012` missing `Ref`, two `6-0023` arity mismatches). No other ty/def snap
+references `src/backend.fe`, so no other churn.
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- `corelib` ALONE 19/19 (debug + release): core+std BOTH type-check with the new
+  required `type Buffer<T>: Functor<T>` bound and the four backend Functor impls.
+  THE key regression, green. The bound discharged CLEANLY on all three backends.
+- `fe-uitest run_ty_def` FULL suite (105 fixtures, `--no-fail-fast`): 103
+  byte-identical + the 2 intended (`backend_buffer_not_functor` new,
+  `backend_ref_conformance` line-shift), each reviewed and accepted per-snapshot
+  (NOT `insta accept` blanket); zero stray `.snap.new`.
+- `fe-hir ty_check` conal/backend/gat subset 16/16 byte-identical (the real-Backend
+  consumers `conal_par_map`, `conal_library_rbin`, `backend_schedule_confluence`,
+  `backend_anti_conflation`, `backend_barrier`, `backend_atomic`,
+  `backend_storage_class` all still green: the bound is transparent to consumers
+  of the real backends, whose buffers now satisfy it via the core/std instances).
+- Executed `conal_par_map_exec` under revm: 2/2 PASS (with a 500s timeout guard; no
+  hang). The A9.2 executed path is intact.
+- `tree_sitter_parse_strict` GREEN (ordinary trait surface, no grammar change).
+- `cargo check --workspace` clean (no Rust changed; sanity).
+
+D1 DONE and green-committed. NEXT: D2 (qualified-path GAT-arg lowering; lobe 1
+mandatory, lobe 2 = the decl-bound consumer revival recorded as the finding above).

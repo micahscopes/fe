@@ -1,3 +1,5 @@
+use super::conal::Functor
+
 /// The compile-time interface every code-generation target (EVM, wasm, ...)
 /// presents to backend-generic Fe libraries.
 ///
@@ -5,23 +7,26 @@
 /// or below), per the provider-placement rule (a generated/downstream impl must
 /// sit below the goal trait's ingot so its absolute path resolves).
 ///
-/// This is the v1 cut (mb2 A5.1 + A5.3). It exposes four kinds of fact:
+/// This is the v1 cut (mb2 A5.1 + A5.3, `Buffer` bound added in D1). It exposes
+/// four kinds of fact:
 /// - backend FACTS as associated consts, consumed by the concrete `where`
 ///   const-predicate machinery so a library can state its envelope as a
 ///   compiler-checked contract;
 /// - a `Word` representation type (kind `*`);
 /// - a single-arity `Buffer<T>` bulk-storage constructor (a generic associated
 ///   type, kind `* -> *`), the workhorse every downstream story projects
-///   through;
+///   through, now BOUNDED `: Functor<T>` (D1);
 /// - a two-arity `Ref<T, S>` class-typed reference constructor (a generic
 ///   associated type, kind `* -> * -> *`), where `S` is a storage-class marker
 ///   (`Global`/`Constant`/`Shared`/`Local`, below).
 ///
-/// Deliberately minimal: there is NO bound on `Buffer`/`Ref` yet (the
-/// `: Functor` forwarding/duality bound is a later slice), NO bound on the
-/// class param `S` (a `StorageClass` bound is A7-era), and NO capability/effect
-/// gating on the refs (operations on `Ref` arrive effect-gated in the B-track).
-/// Keep it a plain trait.
+/// `Buffer<T>` is bounded `: core::conal::Functor<T>` (D1): every backend's
+/// buffer must be an applied-form Functor over its element, so backend-generic
+/// code receives `B::Buffer<X>: Functor<X>` from `B: Backend` alone (the A7.2
+/// duality) instead of restating a per-consumer `where`-bound. `Ref<T, S>` and
+/// `Word` remain UNBOUNDED in v1 (a class bound on `S` is A7-era, and there is
+/// no capability/effect gating on the refs: operations on `Ref` arrive
+/// effect-gated in the B-track). Otherwise a plain trait.
 pub trait Backend {
     /// Machine word width in bits (EVM 256, wasm 64, ...).
     const WORD_BITS: usize
@@ -36,9 +41,12 @@ pub trait Backend {
     /// The target's machine-word representation type.
     type Word
 
-    /// Bulk storage constructor. A generic associated type of kind `* -> *`;
-    /// intentionally unbounded in v1.
-    type Buffer<T>
+    /// Bulk storage constructor. A generic associated type of kind `* -> *`.
+    /// Bounded: every backend's buffer is an applied-form Functor over its
+    /// element (the A7.2 duality: impls prove it strictly per backend at the
+    /// impl site under A4.2 strict discharge; consumers receive it from
+    /// `B: Backend`).
+    type Buffer<T>: Functor<T>
 
     /// Class-typed reference constructor. `S` is a storage-class marker
     /// (`Global`/`Constant`/`Shared`/`Local`); the marker is part of the TYPE,

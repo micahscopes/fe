@@ -1,0 +1,103 @@
+//! The applied-form Conal functor (mb2 D1: moved to `core` from `std::conal`).
+//!
+//! This module is the SSOT for backend-generic container mapping. It holds ONE
+//! trait, `core::conal::Functor<X>`, the *-kinded APPLIED-FORM element-changing
+//! functor that `core::backend::Backend::Buffer<T>` is now bounded on
+//! (`type Buffer<T>: Functor<T>`). It is deliberately module-visible only
+//! (`core::conal::Functor`) and NOT added to core's root re-exports: `lib.fe`
+//! already exports the HKT `Functor` by name, and two root-level `Functor`s
+//! would collide. `std::conal` compatibility re-exports this trait
+//! (`pub use core::conal::Functor`) so `use std::conal::Functor` keeps working.
+//!
+//! ## The two-Functor doctrine (why both `Functor`s exist and coexist)
+//!
+//! Fe carries TWO traits named `Functor`. They are mechanically distinct, have
+//! disjoint user bases, and coexist by design (not by accident, and not pending
+//! a merge):
+//!
+//!  - `core::functional::Functor` is CONSTRUCTOR-polymorphism for concrete
+//!    `* -> *` type constructors (`Self: * -> *`). Its real users are `Option`
+//!    (`option.fe`) and `Result<E>` (`result.fe`), and it anchors the
+//!    Applicative/Monad tier. A bare GAT head (`B::Buffer`) stays opaque (A3),
+//!    so this `Self: * -> *` constructor bound can NEVER serve a symbolic
+//!    `B::Buffer`; it is the wrong tool for backend-generic code.
+//!
+//!  - `core::conal::Functor<X>` (this trait) is the APPLIED-FORM element-changing
+//!    mapping interface: `Self` is the applied container (e.g. `B::Buffer<X>`),
+//!    `X` its element, `map` transforms `X -> Y` producing `Self::Out<Y>`. This
+//!    is exactly the shape A4.2 discharges per impl and A7.2 revives for
+//!    consumers. It is strictly more expressive where it matters: an instance
+//!    like `StorWordBuf: Functor<u256>` with `Out<Y> = StorWordBuf` describes a
+//!    container that is not a type constructor at all, an instance the HKT trait
+//!    cannot even state.
+//!
+//! DOCTRINE (governing rule for new surface): no new core surface may bound on
+//! the HKT `core::functional::Functor`; anything backend-shaped bounds on this
+//! applied-form `core::conal::Functor`. Whether the `functional.fe`
+//! Applicative/Monad tier is later re-expressed in applied form is a
+//! team/merge-hardening question, explicitly NOT an mb2 action; the two coexist.
+
+use super::functional::Fn
+use super::effect_ref::{StorPtr, MemPtr}
+
+/// A `*`-kinded, applied-form, element-changing functor over a backend container.
+///
+/// `Self` is the APPLIED container (e.g. `B::Buffer<X>`), `X` its element type.
+/// `map` transforms the element `X -> Y`, producing the container named by the
+/// associated type `Out<Y>`. Discharged through the A7.2 applied-subject route:
+/// a consumer with `B: Backend` in scope receives `B::Buffer<X>: Functor<X>`
+/// directly from the `type Buffer<T>: Functor<T>` decl bound (the duality: impls
+/// prove it strictly per backend, consumers receive it from `B: Backend`).
+pub trait Functor<X> {
+    /// The container that results from mapping the element to `Y`.
+    type Out<Y>
+
+    /// Map the callable `f: X -> Y` over the container.
+    fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> Self::Out<Y>
+
+    /// The ONE generic parallel-map algorithm, written once and dispatching
+    /// through `map`. Trivially parallel (the design's warm-up map kernel): at
+    /// the type level a parallel map is a map, so this forwards to `map`; the
+    /// actual parallel execution is the `Par` provider's concern (B2). The
+    /// `Self::Out<Y>` return is nameable via the Self-projection.
+    fn par_map<Y, F: Fn<X, Y>>(self, _ f: F) -> Self::Out<Y> {
+        self.map<Y, F>(f)
+    }
+}
+
+// The Functor impls for the core-owned buffer container types (`StorPtr`, the
+// EVM buffer stand-in; `MemPtr`, the wasm buffer stand-in) live HERE, in core,
+// not in `std::conal` where the trait used to be. COHERENCE forces this: with
+// `Functor` now a core trait and `StorPtr`/`MemPtr` core types, an impl in `std`
+// is `external trait for external type` (`5-0000`); an impl is admissible only
+// in the trait's ingot or the type's ingot, both of which are core. (Impls for
+// std-LOCAL container types stay in std: `StorWordBuf` and `GpuRef<_, Global>`.)
+
+/// The EVM backend's buffer container is a `Functor`. `EvmBackend::Buffer<T>` is
+/// `StorPtr<T>` (a persistent-storage handle), so this instance is what makes
+/// `EvmBackend::Buffer<X>: Functor<X>` hold, satisfying the D1
+/// `type Buffer<T>: Functor<T>` bound on `core::Backend`. `map` is a type-level
+/// stub (`todo()`) here (the A9.1 keystone shape); the EXECUTED EVM element model
+/// is `std::conal::StorWordBuf`'s `Functor<u256>` instance (A9.2), which runs a
+/// real per-element load/apply/store.
+impl<X> Functor<X> for StorPtr<X> {
+    type Out<Y> = StorPtr<Y>
+
+    fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> StorPtr<Y> {
+        super::todo()
+    }
+}
+
+/// The wasm backend's buffer container is a `Functor`. `WasmBackend::Buffer<T>`
+/// is `MemPtr<T>` (a linear-memory handle), so this instance is what makes
+/// `WasmBackend::Buffer<X>: Functor<X>` hold. `map` is a type-level stub
+/// (`todo()`), matching `WasmBackend`'s type-level-only posture: no wasm
+/// code-generation pipeline exists on this branch (wasm EXECUTION is blocked on
+/// the Sonatina seam port), so this body is never lowered here.
+impl<X> Functor<X> for MemPtr<X> {
+    type Out<Y> = MemPtr<Y>
+
+    fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> MemPtr<Y> {
+        super::todo()
+    }
+}

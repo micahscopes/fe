@@ -4,16 +4,20 @@
 //! technique expressed over the multi-backend `core::backend::Backend`
 //! abstraction. It provides exactly ONE typeclass and ONE generic algorithm:
 //!
-//!  - `Functor<X>`: a *-kinded, APPLIED-FORM, element-changing functor. `map`
-//!    transforms `X -> Y`; the result container is named by the associated type
-//!    `Out<Y>`. It is deliberately bound on the APPLIED container (`Buf<X>`), not
-//!    on the `* -> *` constructor, because that is the shape the built substrate
-//!    discharges: a bare GAT head stays opaque (A3), so a consumer bound
-//!    `where B::Buffer<X>: Functor<X>` rides the A7.2 applied-subject route, and a
-//!    method returning `Self::Out<Y>` projects through the impl by ordinary
-//!    trait solving. (This is a distinct trait from the HKT `core::functional::
-//!    Functor`, whose `Self: * -> *` constructor bound the built machinery does
-//!    NOT resolve for an abstract backend; see the A9.1 BUILD_LOG entry.)
+//!  - `Functor<X>`: a *-kinded, APPLIED-FORM, element-changing functor. As of
+//!    mb2 D1 the trait itself lives in `core::conal` (it now BOUNDS
+//!    `core::backend::Backend::Buffer<T>`, so it had to move to core, which
+//!    cannot name a `std` trait); this module compatibility re-exports it
+//!    (`pub use core::conal::Functor`) so `use std::conal::Functor` still works.
+//!    `map` transforms `X -> Y`; the result container is named by the associated
+//!    type `Out<Y>`. It is bound on the APPLIED container (`Buf<X>`), not on the
+//!    `* -> *` constructor, because that is the shape the built substrate
+//!    discharges: a bare GAT head stays opaque (A3). Post-D1 a consumer receives
+//!    `B::Buffer<X>: Functor<X>` from `B: Backend` directly (the decl bound), no
+//!    per-consumer `where`-bound needed. (This is a DISTINCT trait from the HKT
+//!    `core::functional::Functor`, whose `Self: * -> *` constructor bound the
+//!    built machinery does NOT resolve for an abstract backend; the two-Functor
+//!    doctrine lives in the `core::conal` module doc.)
 //!
 //!  - `par_map`: the ONE generic algorithm, a default method dispatching through
 //!    `map`. It is the design's trivially-parallel warm-up map kernel (zero
@@ -41,6 +45,13 @@ use core::Fn
 use core::StorPtr
 use core::EffectHandle
 use core::effect_ref::{read, write}
+
+// The applied-form Conal functor lives in `core::conal` (mb2 D1: it bounds
+// `core::backend::Backend::Buffer<T>`, so it had to move to a crate `core` can
+// name). `std::conal` compatibility re-exports it, the precedented cross-ingot
+// re-export pattern of `std/src/abi.fe`, so existing `use std::conal::Functor`
+// (and the fixtures that write it) keep working unchanged.
+pub use core::conal::Functor
 
 /// Schedule combinator vocabulary. In this slice these are `*`-kinded shape
 /// tokens: a schedule type such as `RBin<Pair, N>` normalizes to a nest of these,
@@ -73,42 +84,12 @@ pub recursive type fn RBin<T, const N: usize>() -> (*) {
     }
 }
 
-/// A `*`-kinded, applied-form, element-changing functor over a backend container.
-///
-/// `Self` is the APPLIED container (e.g. `B::Buffer<X>`), `X` its element type.
-/// `map` transforms the element `X -> Y`, producing the container named by the
-/// associated type `Out<Y>`. Discharged through the A7.2 applied-subject route:
-/// a consumer with `B: Backend` in scope can carry `where B::Buffer<X>: Functor<X>`
-/// and it resolves per concrete backend.
-pub trait Functor<X> {
-    /// The container that results from mapping the element to `Y`.
-    type Out<Y>
-
-    /// Map the callable `f: X -> Y` over the container.
-    fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> Self::Out<Y>
-
-    /// The ONE generic parallel-map algorithm, written once and dispatching
-    /// through `map`. Trivially parallel (the design's warm-up map kernel): at
-    /// the type level a parallel map is a map, so this forwards to `map`; the
-    /// actual parallel execution is the `Par` provider's concern (B2). The
-    /// `Self::Out<Y>` return is nameable via the Self-projection.
-    fn par_map<Y, F: Fn<X, Y>>(self, _ f: F) -> Self::Out<Y> {
-        self.map<Y, F>(f)
-    }
-}
-
-/// The EVM backend's buffer container is a `Functor`. `EvmBackend::Buffer<T>` is
-/// `StorPtr<T>` (a persistent-storage handle, the representation-only stand-in of
-/// the A5 slices), so this instance is what makes `EvmBackend::Buffer<X>:
-/// Functor<X>` hold. `map` is a type-level stub in this slice; the executed
-/// instance (real per-element load/apply/store over storage) is the next A9 slice.
-impl<X> Functor<X> for StorPtr<X> {
-    type Out<Y> = StorPtr<Y>
-
-    fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> StorPtr<Y> {
-        todo()
-    }
-}
+// The Functor impls for the core-owned buffer container types (`StorPtr` for
+// EVM, `MemPtr` for wasm) live in `core::conal` alongside the trait, NOT here:
+// with `Functor` now a core trait and `StorPtr`/`MemPtr` core types, an impl in
+// `std` is `external trait for external type` (`5-0000`). Only impls for
+// std-LOCAL container types live in this module (`StorWordBuf`, below) or in
+// `std::gpu` (`GpuRef<_, Global>`).
 
 // -----------------------------------------------------------------------------
 // mb2 A9.2: the EXECUTED element model (the library RUNS on EVM).

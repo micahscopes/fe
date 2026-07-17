@@ -1,0 +1,29 @@
+// mb2 D1: the TEETH of the `type Buffer<T>: Functor<T>` bound on the REAL
+// `core::backend::Backend`. This exercises the bound against the real core trait
+// (not a test-local one), the coverage the D1 milestone review named.
+//
+// `NotAFunctor<T>` has NO `Functor` impl, so a backend whose `Buffer<T>` RHS is
+// `NotAFunctor<T>` fails the A4.2 STRICT discharge at the impl assoc-ty span:
+// `6-0003 trait bound is not satisfied`, "`NotAFunctor<T>` doesn't implement
+// `Functor<T>`", pointing at the `type Buffer<T> = NotAFunctor<T>` RHS. This is
+// the negative counterpart to the three conforming std backends (`EvmBackend`'s
+// `StorPtr`, `WasmBackend`'s `MemPtr`, `GpuBackend`'s `GpuRef<_, Global>`), whose
+// buffers DO implement `Functor`; it proves the bound has teeth on the real trait.
+//
+// `Ref<T, S>` stays `u256` (Ref is UNBOUNDED in v1), so the ONLY diagnostic is
+// the Buffer one: no cascade.
+
+use core::backend::Backend
+
+struct NotAFunctor<T> {}
+
+struct BadBackend {}
+
+impl Backend for BadBackend {
+    const WORD_BITS: usize = 256
+    const OVERFLOW_WRAPS: bool = true
+    const MAX_PAR_LOG2: usize = 14
+    type Word = u256
+    type Buffer<T> = NotAFunctor<T>
+    type Ref<T, S> = u256
+}

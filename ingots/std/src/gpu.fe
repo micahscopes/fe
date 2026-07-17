@@ -1,6 +1,8 @@
 use core::backend::{Backend, Supports, Global, Constant, Shared, Local}
 use core::atomic::Atomic
 use core::barrier::Barrier
+use core::conal::Functor
+use core::Fn
 
 /// A TYPE-LEVEL GPU backend.
 ///
@@ -37,6 +39,25 @@ impl Backend for GpuBackend {
     // substitution through a GAT RHS.
     type Buffer<T> = GpuRef<T, Global>
     type Ref<T, S> = GpuRef<T, S>
+}
+
+/// The GPU backend's buffer container is a `Functor`, satisfying the D1
+/// `type Buffer<T>: Functor<T>` bound on the real `core::Backend`.
+/// `GpuBackend::Buffer<T>` is `GpuRef<T, Global>` (a global-class device
+/// allocation), so this impl discharges the bound by SUBSTITUTING the class
+/// marker `Global` through the GAT RHS: the bound demands `GpuRef<T, Global>:
+/// Functor<T>` for all `T`, and this impl proves exactly that (a genuinely new
+/// coverage point: the buffer subject is an applied two-arg type with a concrete
+/// class marker fixed in the impl head). `map` is a type-level stub
+/// (`core::panic()`, never-typed): no GPU pipeline exists on this branch (SPIR-V
+/// generation is seam-GO-gated; GPU execution is environment-blocked), so this
+/// body is never lowered here, matching the `GpuAtomics`/`GpuBarriers` stub posture.
+impl<X> Functor<X> for GpuRef<X, Global> {
+    type Out<Y> = GpuRef<Y, Global>
+
+    fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> GpuRef<Y, Global> {
+        core::panic()
+    }
 }
 
 // Storage-class grant matrix for GPU (see `core::backend`): all four classes.

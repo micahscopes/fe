@@ -7,12 +7,29 @@
 //   (i)   `type Ref<T>`   -- arity 1 < decl arity 2  -> 6-0023 count mismatch
 //   (ii)  `type Ref`      -- arity 0 < decl arity 2  -> 6-0023 count mismatch
 //   (iii) `Ref` omitted   -- missing associated type -> missing-assoc-type diag
+//
+// mb2 D1: `Buffer<T>` is now bounded `: Functor<T>` on the real `Backend`, so
+// each impl's `Buffer` RHS must satisfy it or a spurious `6-0003` would mask the
+// intended `Ref` diagnostics. A fixture-local `Buf<T>: Functor<T>` discharges the
+// Buffer bound cleanly, keeping ONLY the `Ref` diagnostics observable.
 
 use core::backend::Backend
+use core::conal::Functor
+use core::Fn
 
 struct RefArity1 {}
 struct RefArity0 {}
 struct RefMissing {}
+
+// A local buffer container satisfying the D1 `type Buffer<T>: Functor<T>` bound,
+// so the Buffer member is conforming and only the `Ref` arity teeth fire below.
+struct Buf<T> {}
+impl<T> Functor<T> for Buf<T> {
+    type Out<Y> = Buf<Y>
+    fn map<Y, F: Fn<T, Y>>(self, _ f: F) -> Buf<Y> {
+        todo()
+    }
+}
 
 // (i) impl arity (1) < decl arity (2): the RHS ignores the class param, so
 // `X::Ref<u32, Global>` == `X::Ref<u32, Local>` -- the class-conflation the
@@ -22,7 +39,7 @@ impl Backend for RefArity1 {
     const OVERFLOW_WRAPS: bool = true
     const MAX_PAR_LOG2: usize = 14
     type Word = u256
-    type Buffer<T> = u256
+    type Buffer<T> = Buf<T>
     type Ref<T> = u256
 }
 
@@ -33,7 +50,7 @@ impl Backend for RefArity0 {
     const OVERFLOW_WRAPS: bool = true
     const MAX_PAR_LOG2: usize = 14
     type Word = u256
-    type Buffer<T> = u256
+    type Buffer<T> = Buf<T>
     type Ref = u256
 }
 
@@ -43,5 +60,5 @@ impl Backend for RefMissing {
     const OVERFLOW_WRAPS: bool = true
     const MAX_PAR_LOG2: usize = 14
     type Word = u256
-    type Buffer<T> = u256
+    type Buffer<T> = Buf<T>
 }
