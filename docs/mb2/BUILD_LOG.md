@@ -2405,3 +2405,113 @@ D6.3 DONE and green. NEXT per the ranked ladder: D6.4 ground-N phase-structured
 scan on EVM (fixed-depth `RBin<Pair, 2..3>` over `StorWordBuf`, phase boundaries
 firing the derived `Barrier`, executed under revm; explicitly NOT the generic
 `LScan` `Comp` instance, which stays steering-gated).
+
+## 2026-07-17 - Slice C0 + C1: Clifford blade-tree headline + executed add/scale/neg
+
+The capstone demo's Fe-side foundation (design `mb2-clifford-demo-design.md`
+sections 0-4, C0 + C1 slices). The Fuchs-Thery binary-tree Clifford algebra's blade
+tree IS the `RBin<Pair, N>` normal form, and its coefficient-wise ops RUN on EVM
+over the A9.2 `StorWordBuf` element model. PURE FIXTURES: ZERO Rust touched, ZERO
+ingot surface added (forced by the merge-hardening HOLD + guts-over-sugar; a demo
+mints no public std/core surface). Two new files (one ty_check note-dump, one revm
+fe test) plus one reviewed `.snap`.
+
+### C0 probes (both positive; neither changes C1's shape)
+
+Probe 1, u256 subtraction / ring semantics under revm: Fe surface subtraction is
+CHECKED, not wrapping. `0 - 1` REVERTS and `U256_MAX + 1` REVERTS (pinned by a
+scratch fe test with `#[test(should_revert)]`, consistent with the existing
+`checked_arithmetic_matrix.fe` `unsigned_sub_underflow` legs). So the coefficient
+ring `Z / 2^256` cannot be realized through native `-`/`+` at the negation site;
+negation routes through the design 1.4 two's-complement helper `neg(c) = if c == 0
+{ 0 } else { (U256_MAX - c) + 1 }`, which never trips the checked ops (`U256_MAX -
+c` for `c` in `[1, U256_MAX]` never underflows; the `+ 1` never overflows). Verified
+round-trips (`neg(neg(5)) == 5`), `neg(1) == U256_MAX`, `neg(2) == U256_MAX - 1`.
+This is the design's PRE-AUTHORIZED in-design fallback, not an escalation.
+
+Probe 2, ground type-fn application in a stored ADT field: ACCEPTED. Both `struct
+S { x: RBin<Pair, 2> }` (a ground `recursive type fn` app) and `struct S {
+coeffs_shape: EvmBackend::Buffer<RBin<Pair, 3>> }` (the ground projection-plus-
+type-fn phantom) type-check and construct clean under `fe test`. So a `Cl(n)`
+multivector CAN carry its blade tree as a typed field. Recorded as a definition-
+level pinned leg in the ty_check headline (`Cl3Coeffs`); the executed model keeps
+`Mv { coeffs: StorWordBuf }` for construction simplicity (a `StorPtr` phantom would
+need a runtime handle to construct, no executed value), and nothing is lost because
+the ty_check fixture carries the blade-tree headline.
+
+### The type-level headline (`crates/hir/test_files/ty_check/clifford_blades.fe`)
+
+A note-dump ty_check fixture (`new_stand_alone` seeds real core + std), reusing the
+`conal_library_rbin.fe` (library `RBin`) + `backend_barrier.fe` (fixture-local
+`BarrierReq`) patterns. Every leg zero-diagnostic; the `takes_*` acceptors are the
+teeth (a zero-diagnostic call is definitional equality). Reviewed NFs in the
+`.snap`:
+
+- Cl(3) blade tree (THE HEADLINE): `EvmBackend::Buffer<RBin<Pair, 3>>` is
+  definitionally `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`. Byte-identical
+  to the pinned A5.2/A9.3 keystone normal form, now reframed as "the compiler
+  computed Cl(3)'s blade tree" (Garamon's per-dimension generation done by the type
+  normalizer). Cl(2) warm-up: `RBin<Pair, 2>` -> `StorPtr<Comp<Comp<Par, Pair>,
+  Pair>>`.
+- Same `N = 3` drives the barrier nest: `BarrierReq<3>` is definitionally
+  `BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>` (the gp recursion depth). One `N`,
+  three coupled structures.
+- Symbolic legs: `cl_coeffs<B: Backend, const N>(x: B::Buffer<RBin<Pair, N>>)` stays
+  opaque under rigid `N` (recorded `B::Buffer<RBin<Pair, const N: usize>>`, the same
+  rigid-const rendering as `backend_barrier.snap`'s `sym_barrier_req`); `sym_cl3<B,
+  T>` unfolds the schedule under a fixed depth 3 and an opaque `B::Buffer<..>`
+  (recorded `B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>`).
+- D2 leg (first real-domain consumer): `cl_mapped<B, X, Y, F>` carries NO `where
+  B::Buffer<X>: Functor<X>` bound (D1 decl-bound revival from `B: Backend` alone)
+  and names its element-changed return via the D2 qualified-path spelling
+  `<B::Buffer<X> as Functor<X>>::Out<Y>` (recorded `B::Buffer<X>::Out<Y>`), body
+  `buf.par_map<Y, F>(f)`.
+
+### The executed ops (`crates/fe/tests/fixtures/fe_test/clifford_ops_exec.fe`)
+
+A `Cl(n)` multivector type `Mv { coeffs: StorWordBuf }` (blade bitstring `i` at slot
+`base + i`; slot 0 = scalar, 1 = e1, 2 = e2, 3 = e12 for Cl(2)) with the design 2.3
+v1 op set, run under revm, pinned values PASS:
+
+- `scale(c)`: THE GENUINE Functor op. `Mv::scale` is `Functor::par_map` over a
+  CAPTURING `Scale { c }` closure (the A9.2 instance now doing Clifford work),
+  coefficient-wise scalar multiply. `[1,2,3,4] * 3 = [3,6,9,12]`, checksum 30
+  (deliberately rhymes with the `RunTimes3` leg: same machinery, algebra).
+- `neg`: also a genuine Functor op (index-free unary `par_map` over a `Neg {}`
+  closure), routing negation through the probe-1 two's-complement helper.
+  `neg([0,1,0,2]) = [0, -1, 0, -2]` with `-1 = 2^256 - 1`, `-2 = 2^256 - 2`,
+  asserted against the wrapped constants (the negatives cannot be summed into a
+  checksum, checked add would overflow, so they are asserted per-slot via GetNeg).
+- `add`: coefficient-wise, a concrete `Mv` METHOD (get/set loop), NOT a Functor op.
+  Honest zip-shaped gap (design 2.3): `Zip` is named-unbuilt substrate and minting
+  it is a STOP (new surface + the Fn2/arity question); the loop IS the zip
+  semantics, stated in the fixture. `[1,2,3,4] + [5,6,7,8] = [6,8,10,12]`, checksum
+  36.
+
+The genuine `Functor`/`par_map` op is `scale` (and `neg`, both index-free unary);
+`add` is a method, not a Functor op. The GEOMETRIC PRODUCT is NOT here (it is C2).
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- Blade-tree ty_check headline GREEN: `ty_check_standalone__clifford_blades ... ok`,
+  full suite `118 passed; 0 failed`. Reviewed NFs match the pinned keystone forms.
+- `clifford_ops_exec` PASSES under revm against the CURRENT corelib (debug fe binary
+  built post-D6.3; the release fe binary at target/release predates D6.3's `par.fe`
+  and is stale, which is why it cannot resolve `core::par` for the `conal_par_fork`
+  neighbor; irrelevant to this slice's pre-D6.3 surface). Timeout-guarded, no hang.
+- Existing conal/keystone/backend fixtures byte-identical: `git status` shows ONLY
+  the three new files; `INSTA_UPDATE` rewrote no other `.snap` (all deterministic).
+- Neighbors green: `conal_par_map_exec`, `conal_par_fork` (current binary),
+  `atomic_rmw`, `barrier_noop`.
+- `cargo check --workspace` clean; `corelib` (core+std) green; `tree_sitter_parse_
+  strict` green (my files touch none of its suites: it covers ingots + syntax_node +
+  fmt only; the new `fe_test` fixture is plain struct/impl/msg/contract syntax and
+  the fe binary already parsed + ran it).
+- Rust UNTOUCHED, no ingot surface added (pure fixtures + one snap). NO performance
+  or gas claims (standing rule). Did NOT push, did NOT run full release CI.
+
+C0 + C1 DONE and green. NEXT per the ladder: C2, the sequential geometric product
+(`even_half`/`odd_half`, involution/negation flag threading, per-level `gp0..gp3`
+fns, `wedge` via the `l = 0` twin, reverse/involute/grade loops; the C2 acceptance
+suite of design section 4, Cl(2) then Cl(3), plus the masked-`gp3_u32` cross-check
+ring twin). C2 leans on C1 + nothing new; still no Par, the fork-join gp is C3.

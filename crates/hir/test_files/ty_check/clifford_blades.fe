@@ -1,0 +1,123 @@
+// mb2 C1: THE TYPE-LEVEL HEADLINE. "The compiler computes Cl(n)'s blade tree."
+//
+// The multivector space of the Clifford algebra `Cl(n)` is indexed by subsets of
+// `{e1..en}`, i.e. binary strings of length `n`, i.e. the leaves of a depth-`n`
+// binary tree (Fuchs-Thery, AACA 2014: `Mv(n)` is a perfect binary tree of depth
+// `n`). Our `RBin<Pair, N>` (a `recursive type fn`, now library-resident in
+// `std::conal`) builds exactly that inductive object AT COMPILE TIME:
+//
+//   RBin<T, 0> = Par                         (the scalar leaf)
+//   RBin<T, N> = Comp<RBin<T, N-1>, T>       (one Comp level per generator)
+//
+// so a `Cl(n)` multivector's coefficient container over backend `B` is
+// `B::Buffer<RBin<Pair, n>>`, and on EVM (`EvmBackend::Buffer<T> = StorPtr<T>`)
+// that type normalizes, project + unfold CONFLUENTLY (the A3/A5.2 keystone), to
+// the pinned normal form. This is the demo's "Garamon inside the type system": the
+// per-`n` specialized blade-tree structure is computed by the type normalizer, not
+// an external generator emitting unverified source.
+//
+// A standalone ty_check fixture (`new_stand_alone` seeds the builtin `core` AND
+// `std`, so this exercises the real `std::conal::RBin`/`Functor`, the real
+// `core::backend::Backend`, and the real `std::evm::EvmBackend`), reusing the
+// `conal_library_rbin.fe` + `backend_barrier.fe` patterns. Every leg is
+// zero-diagnostic; the note-dump `.snap` records the observed normal forms, and the
+// `takes_*` acceptors are the teeth (a zero-diagnostic call is definitional
+// equality at the boundary, so the projected + unfolded type reached exactly the
+// hand-written blade-tree normal form).
+
+use core::backend::Backend
+use core::StorPtr
+use core::Fn
+use core::barrier::{NoBarrier, BarrierAt}
+use std::conal::{RBin, Par, Pair, Comp, Functor}
+use std::evm::EvmBackend
+
+// The barrier-derivation type fn (fixture-local, the `backend_barrier.fe` pattern;
+// `BarrierReq` is not library surface). Folds the SAME depth `N` as `RBin` to a
+// barrier requirement: `NoBarrier` at the `Par` leaf, one `BarrierAt` per `Comp`
+// phase boundary. For `Cl(n)`, `N` = blade-tree depth = gp recursion depth = the
+// count of derived barriers, all from ONE `N`.
+recursive type fn BarrierReq<const N: usize>() -> (*) {
+    match N {
+        0 => NoBarrier
+        _ => BarrierAt<BarrierReq<{N - 1}>>
+    }
+}
+
+// ---- 1. THE HEADLINE: the compiler computes the Cl(n) blade tree ----
+
+// Cl(2), dim 4: two generators, so the blade tree is `Comp<Comp<Par, Pair>, Pair>`
+// (the even subalgebra of Cl(2) is the complex numbers).
+fn takes_cl2_tree(_ x: StorPtr<Comp<Comp<Par, Pair>, Pair>>) {}
+
+// `EvmBackend::Buffer<RBin<Pair, 2>>` is definitionally
+// `StorPtr<Comp<Comp<Par, Pair>, Pair>>`: project through the impl
+// (`type Buffer<T> = StorPtr<T>`) and unfold the library schedule, confluently.
+fn cl2_blade_tree(x: EvmBackend::Buffer<RBin<Pair, 2>>) {
+    takes_cl2_tree(x)
+}
+
+// Cl(3), dim 8 (the keystone depth): the blade tree is
+// `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` (the even subalgebra of Cl(3) is the
+// quaternions). THE headline: "the compiler computed Cl(3)'s blade tree."
+fn takes_cl3_tree(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+
+fn cl3_blade_tree(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+    takes_cl3_tree(x)
+}
+
+// ---- 2. the SAME N drives the barrier nest (= the gp recursion depth) ----
+
+fn takes_three_barriers(_ x: BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>) {}
+
+// `BarrierReq<3>` is definitionally `BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>`:
+// the same `N = 3` that produces Cl(3)'s blade tree produces its three-deep barrier
+// nest (one per Comp phase boundary), the derived synchronization of the gp
+// recursion. One `N`, three coupled structures.
+fn cl3_barriers(b: BarrierReq<3>) {
+    takes_three_barriers(b)
+}
+
+// ---- 3. symbolic legs: the schedule flows opaquely under symbolic B ----
+
+// Rigid const `N` AND symbolic backend `B`: `RBin<Pair, N>` stays opaque under the
+// opaque `B::Buffer<..>` projection (no spurious selection); recorded NF is
+// `B::Buffer<RBin<Pair, N>>`. The backend-generic coefficient container of a
+// symbolic-dimension multivector.
+fn cl_coeffs<B: Backend, const N: usize>(
+    x: B::Buffer<RBin<Pair, N>>
+) -> B::Buffer<RBin<Pair, N>> {
+    x
+}
+
+// Fixed depth 3 but symbolic `B` and rigid element `T`: the projection head stays
+// opaque (`B::Buffer<..>`) yet the library schedule still unfolds; recorded NF is
+// `B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>` (the schedule reduces even under an
+// opaque projection).
+fn sym_cl3<B: Backend, T>(x: B::Buffer<RBin<T, 3>>) -> B::Buffer<RBin<T, 3>> {
+    x
+}
+
+// ---- 4. D2 leg: no-where-bound Functor revival + qualified-path Out<Y> ----
+
+// Carries NO `where B::Buffer<X>: Functor<X>` bound: the decl bound
+// (`type Buffer<T>: Functor<T>` on `core::Backend`, mb2 D1) revives it from
+// `B: Backend` alone, and the element-changed return is NAMED via the D2
+// qualified-path spelling `<B::Buffer<X> as Functor<X>>::Out<Y>`. The Clifford
+// demo is the first real-domain consumer of both D1's decl bound and D2's spelling.
+fn cl_mapped<B: Backend, X, Y, F: Fn<X, Y>>(
+    buf: B::Buffer<X>, f: F
+) -> <B::Buffer<X> as Functor<X>>::Out<Y> {
+    buf.par_map<Y, F>(f)
+}
+
+// ---- 5. probe #2 pinned: the ground blade tree as a STORED field ----
+
+// C0 probe #2 (positive): a ground type-fn application IS accepted in field
+// position, so a `Cl(3)` multivector CAN carry its blade tree as a typed field. The
+// executed element model (`clifford_ops_exec.fe`) keeps `Mv { coeffs: StorWordBuf }`
+// for construction simplicity; this struct records that the type-level twin is a
+// legal field, definition-level and zero-diagnostic.
+struct Cl3Coeffs {
+    shape: EvmBackend::Buffer<RBin<Pair, 3>>,
+}

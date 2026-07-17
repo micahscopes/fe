@@ -1,0 +1,160 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/clifford_blades.fe
+---
+note:
+   ┌─ clifford_blades.fe:51:62
+   │
+51 │ fn takes_cl2_tree(_ x: StorPtr<Comp<Comp<Par, Pair>, Pair>>) {}
+   │                                                              ^^ ()
+
+note:
+   ┌─ clifford_blades.fe:56:57
+   │
+56 │   fn cl2_blade_tree(x: EvmBackend::Buffer<RBin<Pair, 2>>) {
+   │ ╭─────────────────────────────────────────────────────────^
+57 │ │     takes_cl2_tree(x)
+58 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_blades.fe:57:5
+   │
+57 │     takes_cl2_tree(x)
+   │     ^^^^^^^^^^^^^^ fn takes_cl2_tree
+
+note:
+   ┌─ clifford_blades.fe:57:5
+   │
+57 │     takes_cl2_tree(x)
+   │     ^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_blades.fe:57:20
+   │
+57 │     takes_cl2_tree(x)
+   │                    ^ StorPtr<Comp<Comp<Par, Pair>, Pair>>
+
+note:
+   ┌─ clifford_blades.fe:63:74
+   │
+63 │ fn takes_cl3_tree(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+   │                                                                          ^^ ()
+
+note:
+   ┌─ clifford_blades.fe:65:57
+   │
+65 │   fn cl3_blade_tree(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+   │ ╭─────────────────────────────────────────────────────────^
+66 │ │     takes_cl3_tree(x)
+67 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_blades.fe:66:5
+   │
+66 │     takes_cl3_tree(x)
+   │     ^^^^^^^^^^^^^^ fn takes_cl3_tree
+
+note:
+   ┌─ clifford_blades.fe:66:5
+   │
+66 │     takes_cl3_tree(x)
+   │     ^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_blades.fe:66:20
+   │
+66 │     takes_cl3_tree(x)
+   │                    ^ StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ clifford_blades.fe:71:74
+   │
+71 │ fn takes_three_barriers(_ x: BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>) {}
+   │                                                                          ^^ ()
+
+note:
+   ┌─ clifford_blades.fe:77:35
+   │
+77 │   fn cl3_barriers(b: BarrierReq<3>) {
+   │ ╭───────────────────────────────────^
+78 │ │     takes_three_barriers(b)
+79 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_blades.fe:78:5
+   │
+78 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^ fn takes_three_barriers
+
+note:
+   ┌─ clifford_blades.fe:78:5
+   │
+78 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_blades.fe:78:26
+   │
+78 │     takes_three_barriers(b)
+   │                          ^ BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>
+
+note:
+   ┌─ clifford_blades.fe:89:31
+   │
+89 │   ) -> B::Buffer<RBin<Pair, N>> {
+   │ ╭───────────────────────────────^
+90 │ │     x
+91 │ │ }
+   │ ╰─^ B::Buffer<RBin<Pair, const N: usize>>
+
+note:
+   ┌─ clifford_blades.fe:90:5
+   │
+90 │     x
+   │     ^ B::Buffer<RBin<Pair, const N: usize>>
+
+note:
+   ┌─ clifford_blades.fe:97:78
+   │
+97 │   fn sym_cl3<B: Backend, T>(x: B::Buffer<RBin<T, 3>>) -> B::Buffer<RBin<T, 3>> {
+   │ ╭──────────────────────────────────────────────────────────────────────────────^
+98 │ │     x
+99 │ │ }
+   │ ╰─^ B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>
+
+note:
+   ┌─ clifford_blades.fe:98:5
+   │
+98 │     x
+   │     ^ B::Buffer<Comp<Comp<Comp<Par, T>, T>, T>>
+
+note:
+    ┌─ clifford_blades.fe:110:43
+    │
+110 │   ) -> <B::Buffer<X> as Functor<X>>::Out<Y> {
+    │ ╭───────────────────────────────────────────^
+111 │ │     buf.par_map<Y, F>(f)
+112 │ │ }
+    │ ╰─^ B::Buffer<X>::Out<Y>
+
+note:
+    ┌─ clifford_blades.fe:111:5
+    │
+111 │     buf.par_map<Y, F>(f)
+    │     ^^^ B::Buffer<X>
+
+note:
+    ┌─ clifford_blades.fe:111:5
+    │
+111 │     buf.par_map<Y, F>(f)
+    │     ^^^^^^^^^^^^^^^^^^^^ B::Buffer<X>::Out<Y>
+
+note:
+    ┌─ clifford_blades.fe:111:23
+    │
+111 │     buf.par_map<Y, F>(f)
+    │                       ^ F

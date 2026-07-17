@@ -1,0 +1,209 @@
+// mb2 C1: the EXECUTED Clifford multivector Functor ops on EVM (revm `fe test`).
+//
+// This is the Fuchs-Thery binary-tree Clifford algebra's executed foundation, run
+// over the A9.2 `StorWordBuf` element model (the same load/apply/store idiom the
+// `conal_par_map_exec.fe` proof uses, now doing algebra). A `Cl(n)` multivector is
+// `2^n` u256 coefficients over consecutive storage slots; blade bitstring `i` lives
+// at slot `base + i` (slot 0 = scalar, 1 = e1, 2 = e2, 3 = e12 for `Cl(2)`), so the
+// storage array IS the depth-`n` blade tree's leaves and the tree structure is slot
+// arithmetic (the type-level twin of this fact, `EvmBackend::Buffer<RBin<Pair, n>>`
+// -> the pinned keystone normal form, is `clifford_blades.fe`).
+//
+// The v1 op set (design 2.3), honestly scoped:
+//   - `scale(c)` : the GENUINE Functor op. `Mv::scale` is `par_map` over a
+//     capturing `Scale { c }` closure (the A9.2 `Functor::par_map` instance doing
+//     Clifford work), coefficient-wise scalar multiply. THE headline Functor op.
+//   - `neg`      : also a genuine Functor op (index-free unary `par_map` over a
+//     `Neg {}` closure). Ring negation in `Z / 2^256`: EVM surface subtraction is
+//     CHECKED (it reverts on underflow; verified by the C0 probe), so negation
+//     routes through the two's-complement helper `neg(c) = if c == 0 { 0 } else
+//     { (U256_MAX - c) + 1 }`, which never trips the checked ops. `-1` is the
+//     wrapped constant `2^256 - 1`.
+//   - `add`      : coefficient-wise, a concrete `Mv` METHOD (get/set loop), NOT a
+//     Functor op. Honest note (design 2.3): this is zip-shaped; a `Zip` typeclass
+//     is named-unbuilt substrate and minting one is a STOP (new surface + the
+//     Fn2/arity question). The loop IS the zip semantics, stated.
+//
+// The geometric product (the 4-way tree recursion) is NOT here: it is C2.
+
+use std::conal::{Functor, StorWordBuf}
+use core::Fn
+use std::evm::EvmBackend
+
+// `-1` in the coefficient ring `Z / 2^256` (design 1.4).
+const U256_MAX: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+
+/// Scalar-multiply closure (CAPTURING): the genuine `Functor::par_map` op doing
+/// Clifford work. Multiplies each coefficient by the captured scalar `c`.
+struct Scale { c: u256 }
+impl Fn<u256, u256> for Scale {
+    fn call(self, _ v: own u256) -> u256 {
+        v * self.c
+    }
+}
+
+/// Ring-negation closure: two's-complement negate in `Z / 2^256`. Surface `-` is
+/// checked (reverts on underflow), so this routes through the design 1.4 helper,
+/// which never underflows or overflows the checked ops.
+struct Neg {}
+impl Fn<u256, u256> for Neg {
+    fn call(self, _ v: own u256) -> u256 {
+        if v == 0 { 0 } else { (U256_MAX - v) + 1 }
+    }
+}
+
+/// A `Cl(n)` multivector: `2^n` u256 coefficients over consecutive storage slots
+/// (blade bitstring `i` at slot `base + i`). The type-level twin of `dim = 2^n` is
+/// `RBin<Pair, n>`'s `2^n` leaves.
+struct Mv { coeffs: StorWordBuf }
+impl Copy for Mv {}
+
+impl Mv {
+    fn new(base: u256, len: u256) -> Self {
+        Self { coeffs: StorWordBuf::new(base, len) }
+    }
+
+    fn get(self, _ i: u256) -> u256 {
+        self.coeffs.get(i)
+    }
+
+    fn set(self, _ i: u256, _ v: u256) {
+        self.coeffs.set(i, v)
+    }
+
+    /// scale: the GENUINE Functor op. `par_map` a capturing `Scale { c }` over the
+    /// coefficients; the mapped output buffer lands at `base + len` (A9.2 `map`).
+    fn scale(self, _ c: u256) -> Mv {
+        Mv { coeffs: self.coeffs.par_map<u256, Scale>(Scale { c: c }) }
+    }
+
+    /// neg: also a genuine Functor op (index-free unary `par_map`).
+    fn neg(self) -> Mv {
+        Mv { coeffs: self.coeffs.par_map<u256, Neg>(Neg {}) }
+    }
+
+    /// add: coefficient-wise, a concrete METHOD (get/set loop), NOT a Functor op.
+    /// The zip-shaped honest gap (design 2.3): `Zip` is named-unbuilt; this loop IS
+    /// the zip semantics. Output placed at `out_base`.
+    fn add(self, _ other: Mv, _ out_base: u256) -> Mv {
+        let out = Mv::new(base: out_base, len: self.coeffs.len())
+        let mut i: u256 = 0
+        while i < self.coeffs.len() {
+            out.set(i, self.get(i) + other.get(i))
+            i += 1
+        }
+        out
+    }
+}
+
+msg Msg {
+    #[selector = 1]
+    RunScale -> u256,
+    #[selector = 2]
+    GetScaled { i: u256 } -> u256,
+    #[selector = 3]
+    RunAdd -> u256,
+    #[selector = 4]
+    GetSum { i: u256 } -> u256,
+    #[selector = 5]
+    RunNeg -> u256,
+    #[selector = 6]
+    GetNeg { i: u256 } -> u256,
+}
+
+pub contract CliffordOpsExec {
+    recv Msg {
+        // Cl(2) multivector [1, 2, 3, 4] (= 1 + 2e1 + 3e2 + 4e12) at slots 100..103;
+        // scale-by-3 via `par_map` (the genuine Functor op), output at 104..107.
+        // Returns the checksum 3 + 6 + 9 + 12 = 30 (rhymes with the RunTimes3 leg:
+        // same machinery, now doing algebra).
+        RunScale -> u256 uses (evm: mut Evm) {
+            let m = Mv::new(base: 100, len: 4)
+            m.set(0, 1)
+            m.set(1, 2)
+            m.set(2, 3)
+            m.set(3, 4)
+            let scaled = m.scale(3)
+            scaled.get(0) + scaled.get(1) + scaled.get(2) + scaled.get(3)
+        }
+
+        // Read scaled output element `i` (based at slot 104).
+        GetScaled { i } -> u256 uses (evm: mut Evm) {
+            let out = Mv::new(base: 104, len: 4)
+            out.get(i)
+        }
+
+        // [1,2,3,4] at 200..203 plus [5,6,7,8] at 204..207, coefficient-wise into
+        // 208..211: [6, 8, 10, 12]. Returns the checksum 6 + 8 + 10 + 12 = 36.
+        RunAdd -> u256 uses (evm: mut Evm) {
+            let a = Mv::new(base: 200, len: 4)
+            a.set(0, 1)
+            a.set(1, 2)
+            a.set(2, 3)
+            a.set(3, 4)
+            let b = Mv::new(base: 204, len: 4)
+            b.set(0, 5)
+            b.set(1, 6)
+            b.set(2, 7)
+            b.set(3, 8)
+            let sum = a.add(b, 208)
+            sum.get(0) + sum.get(1) + sum.get(2) + sum.get(3)
+        }
+
+        // Read add output element `i` (based at slot 208).
+        GetSum { i } -> u256 uses (evm: mut Evm) {
+            let out = Mv::new(base: 208, len: 4)
+            out.get(i)
+        }
+
+        // neg([0, 1, 0, 2]) at 300..303 = [0, -1, 0, -2] via `par_map` (output at
+        // 304..307), with `-1 = 2^256 - 1`, `-2 = 2^256 - 2`. Returns the sum of the
+        // two ZERO slots (0 + 0 = 0): the negative slots cannot be summed (checked
+        // add would overflow), so they are asserted individually via GetNeg.
+        RunNeg -> u256 uses (evm: mut Evm) {
+            let m = Mv::new(base: 300, len: 4)
+            m.set(0, 0)
+            m.set(1, 1)
+            m.set(2, 0)
+            m.set(3, 2)
+            let negated = m.neg()
+            negated.get(0) + negated.get(2)
+        }
+
+        // Read neg output element `i` (based at slot 304).
+        GetNeg { i } -> u256 uses (evm: mut Evm) {
+            let out = Mv::new(base: 304, len: 4)
+            out.get(i)
+        }
+    }
+}
+
+#[test]
+fn test_clifford_ops_exec() uses (evm: mut Evm) {
+    let c = evm.create2<CliffordOpsExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // scale-by-3: [1,2,3,4] -> [3,6,9,12], checksum 30.
+    let s = evm.call(addr: c, gas: 300000, value: 0, message: Msg::RunScale {})
+    assert!(s == 30)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetScaled { i: 0 }) == 3)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetScaled { i: 1 }) == 6)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetScaled { i: 2 }) == 9)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetScaled { i: 3 }) == 12)
+
+    // add: [1,2,3,4] + [5,6,7,8] -> [6,8,10,12], checksum 36.
+    let a = evm.call(addr: c, gas: 300000, value: 0, message: Msg::RunAdd {})
+    assert!(a == 36)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetSum { i: 0 }) == 6)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetSum { i: 1 }) == 8)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetSum { i: 2 }) == 10)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetSum { i: 3 }) == 12)
+
+    // neg: [0,1,0,2] -> [0, -1, 0, -2] with -1 = 2^256 - 1, -2 = 2^256 - 2.
+    let n = evm.call(addr: c, gas: 300000, value: 0, message: Msg::RunNeg {})
+    assert!(n == 0)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetNeg { i: 0 }) == 0)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetNeg { i: 1 }) == U256_MAX)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetNeg { i: 2 }) == 0)
+    assert!(evm.call(addr: c, gas: 200000, value: 0, message: Msg::GetNeg { i: 3 }) == U256_MAX - 1)
+}
