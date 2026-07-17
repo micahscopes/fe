@@ -1,0 +1,106 @@
+// mb2 N2: THE TYPE-LEVEL HEADLINE for the NTT. "The schedule type IS the FFT."
+//
+// A radix-2 NTT of size `2^k` has exactly `k` butterfly STAGES. Each stage is `n/2`
+// INDEPENDENT butterflies (the `Par` leaves, a perfect matching on the `n` indices)
+// and each stage boundary is a data dependency (a `Comp` phase boundary = one
+// derived barrier). So the SAME `RBin<Pair, N>` / `BarrierReq<N>` schedule vocabulary
+// that computes the Clifford blade tree (`clifford_blades.fe`) computes the NTT's
+// stage structure, from ONE `N = k`:
+//
+//   RBin<Pair, 0> = Par                          BarrierReq<0> = NoBarrier
+//   RBin<Pair, N> = Comp<RBin<Pair, N-1>, Pair>  BarrierReq<N> = BarrierAt<BarrierReq<N-1>>
+//
+// so the size-8 NTT (`k = 3`) has stage structure `RBin<Pair, 3>`, normalizing (on
+// EVM, `EvmBackend::Buffer<T> = StorPtr<T>`) to `StorPtr<Comp<Comp<Comp<Par, Pair>,
+// Pair>, Pair>>` (three `Comp` phases = three stages), and derived synchronization
+// `BarrierReq<3>` = `BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>` (three stage
+// barriers, one per `Comp` boundary). Executed one-for-one by `ntt_par_exec.fe`
+// (3 `par.fork`s + 3 `barrier.barrier()`s).
+//
+// This is the crypto analogue of the Clifford blade-tree headline, and a CLEANER
+// fit: for the NTT the butterfly GENUINELY IS the Comp/Par structure (the stage = a
+// `Comp` boundary, the butterfly = a `Par` leaf), with no same-vs-analogy caveat.
+// The schedule type is the FFT's stage structure.
+//
+// A standalone ty_check fixture (`new_stand_alone` seeds the builtin `core` AND
+// `std`, so this exercises the real `std::conal::RBin`, the real `core::backend`, and
+// the real `std::evm::EvmBackend`), reusing the `clifford_blades.fe` /
+// `conal_library_rbin.fe` / `backend_barrier.fe` patterns. Every leg is
+// zero-diagnostic; the note-dump `.snap` records the observed normal forms, and the
+// `takes_*` acceptors are the teeth (a zero-diagnostic call is definitional equality
+// at the boundary, so the projected + unfolded type reached exactly the hand-written
+// stage-structure normal form).
+
+use core::backend::Backend
+use core::StorPtr
+use core::barrier::{NoBarrier, BarrierAt}
+use std::conal::{RBin, Par, Pair, Comp}
+use std::evm::EvmBackend
+
+// The barrier-derivation type fn (fixture-local, the `backend_barrier.fe` pattern;
+// `BarrierReq` is not library surface). Folds the SAME depth `N` as `RBin` to a
+// barrier requirement: `NoBarrier` at the `Par` leaf, one `BarrierAt` per `Comp`
+// phase boundary. For a size-2^k NTT, `N` = stage count = butterfly-tree depth = the
+// count of derived stage barriers, all from ONE `N`.
+recursive type fn BarrierReq<const N: usize>() -> (*) {
+    match N {
+        0 => NoBarrier
+        _ => BarrierAt<BarrierReq<{N - 1}>>
+    }
+}
+
+// ---- 1. THE HEADLINE: the size-8 NTT's stage structure = RBin<Pair, 3> ----
+
+// The size-8 NTT (`k = 3`) has three butterfly stages, so its stage structure is
+// `Comp<Comp<Comp<Par, Pair>, Pair>, Pair>` (three `Comp` phases bottoming at the
+// `Par` leaf).
+fn takes_ntt8_stages(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+
+// `EvmBackend::Buffer<RBin<Pair, 3>>` is definitionally
+// `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`: project through the impl
+// (`type Buffer<T> = StorPtr<T>`) and unfold the library schedule, confluently. THE
+// headline: "the compiler computed the size-8 NTT's three-stage schedule."
+fn ntt8_stage_tree(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+    takes_ntt8_stages(x)
+}
+
+// The size-16 NTT (`k = 4`) has four stages: `RBin<Pair, 4>` = one deeper `Comp`.
+fn takes_ntt16_stages(_ x: StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>) {}
+
+fn ntt16_stage_tree(x: EvmBackend::Buffer<RBin<Pair, 4>>) {
+    takes_ntt16_stages(x)
+}
+
+// ---- 2. the SAME N drives the barrier nest (= the stage count) ----
+
+fn takes_three_barriers(_ x: BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>) {}
+
+// `BarrierReq<3>` is definitionally `BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>`: the
+// same `N = 3` that produces the size-8 NTT's three-stage tree produces its
+// three-deep barrier nest (one derived barrier per `Comp` stage boundary), the
+// `ntt_par_exec.fe` barrier sequence. One `N`, both structures.
+fn ntt8_barriers(b: BarrierReq<3>) {
+    takes_three_barriers(b)
+}
+
+// ---- 3. schedule and barriers from the SAME N (the confluence pin) ----
+
+fn takes_sched3(_ x: Comp<Comp<Comp<Par, Pair>, Pair>, Pair>) {}
+
+// One `N = 3` produces both `RBin<Pair, 3>` (the stage tree) and `BarrierReq<3>` (its
+// derived stage barriers): the barrier nest is genuinely the image of the stage
+// structure, the `log2(n)` = 3 executed barriers of `ntt_par_exec.fe`.
+fn ntt8_schedule_and_barriers(s: RBin<Pair, 3>, b: BarrierReq<3>) {
+    takes_sched3(s)
+    takes_three_barriers(b)
+}
+
+// ---- 4. symbolic leg: the stage structure flows opaquely under symbolic B ----
+
+// Fixed depth 3 but symbolic backend `B`: the projection head stays opaque
+// (`B::Buffer<..>`) yet the library schedule still unfolds; recorded NF is
+// `B::Buffer<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>` (the NTT's backend-generic
+// stage container: the same three-stage tree, awaiting a concrete backend).
+fn sym_ntt8<B: Backend>(x: B::Buffer<RBin<Pair, 3>>) -> B::Buffer<RBin<Pair, 3>> {
+    x
+}

@@ -2831,3 +2831,120 @@ all pinned per coefficient. NEXT: N2 = `ntt_par_exec.fe` + `ntt_schedule.fe` (th
 fork-join leg: each stage's butterfly set split under D6.3 `par.fork` with a
 derived `barrier.barrier()` at each stage boundary, `log2(n)` DERIVED barriers on
 a depth-indexed real algorithm, byte-identical storage vs N1).
+
+## 2026-07-18 - Slice N2: the NTT wired through the Conal schedule [crypto-review section 4, N2]
+
+Takes N1's sequential NTT and makes "the schedule IS the FFT" literal in the
+tree: each butterfly STAGE is structured through the D6.3 fork-join capabilities
+(a `par.fork` per stage, a derived `barrier.barrier()` per stage boundary), and
+the size-8 NTT's stage structure is pinned at ty_check as the `RBin<Pair, 3>` /
+`BarrierReq<3>` schedule keystone. Two new fixtures, no Rust and no ingot change.
+
+### `ntt_par_exec.fe` (executed, revm): the fork-join / barrier NTT
+
+- **Structure.** A size-n radix-2 NTT is `log2(n)` butterfly stages. Within a
+  stage the `n/2` butterflies are a perfect matching on the `n` indices (every
+  butterfly touches a disjoint element pair), so the stage's butterfly set splits
+  into two INDEX-DISJOINT halves (`[0, n/4)` and `[n/4, n/2)`) run through
+  `par.fork` (the `Par` leaves); disjointness is by construction (any partition of
+  a matching is disjoint), exactly the C3 EVEN/ODD contract. A stage boundary is a
+  data dependency (stage `s+1` reads what stage `s` wrote) = a `Comp` phase
+  boundary = one `barrier.barrier()`. So a size-8 NTT executes **3 par.forks + 3
+  derived barriers = `BarrierReq<3>`**, size 16 executes **4 + 4 = `BarrierReq<4>`**,
+  one fork and one barrier per stage.
+- **The 2-way-per-stage split (per the slice's scope-realism note).** Each stage
+  forks into its two independent halves (not every butterfly into its own thunk),
+  matching C3's even/odd split; the schedule structure (`log2(n)` forks + barriers)
+  is fully demonstrated without `n/2` thunks per stage. The per-butterfly twiddle
+  is recomputed as `powmod_q(wlen, j)` (rather than N1's running `wc` accumulation)
+  so a forked half can start at an arbitrary butterfly index; the value is
+  identical (`wlen^j`), so storage stays byte-identical to N1.
+- **The pinned property (C3's, now on the NTT).** The forward legs compute BOTH
+  the fork-join transform (into OUT) and the sequential N1 reference (into SEQ)
+  in-contract and assert them EQUAL slot-by-slot, AND assert OUT == N1's pinned
+  probe-oracle vectors: `NTT([5,15,39,77,129,195,275,369]) =
+  [1104,6528,7157,1035,12081,7898,4772,8621]` (size 8, all 8 coeffs), `NTT([1..16])`
+  (size 16, all 16 coeffs, endpoints+middle vs the sequential reference). The
+  round-trip leg runs BOTH directions through the fork-join transform and is its
+  own oracle (`INTT(NTT(probe8)) == probe8`, all 8 coeffs). This is the D6.3
+  order-independence property (`Sequential` provider == reference fork-join
+  semantics) demonstrated on the NTT, with `log2(n)` barriers wired at real (not
+  decorative) `Comp`-level stage boundaries: a strictly stronger exercise than
+  C3's single boundary (a depth-indexed real algorithm).
+- **Effect-row coexistence: NO friction.** `evm` + `par` + `barrier` combine in
+  one `uses (evm: mut Evm, par: mut Par<EvmBackend>, barrier: mut Barrier<EvmBackend,
+  Global>)` clause exactly as C3 did. NEW this slice and clean first try: the
+  capabilities thread through HELPER fns that carry their own `uses (par, barrier)`
+  clause (`butterfly_par` / `transform_par` / `intt_par`, the ssz.fe
+  `uses (mem: mut RawMem)` composition precedent), and `par.fork` / `barrier.barrier`
+  are called in a LOOP (3-4 times, once per stage) off a `mut Par` / `mut Barrier`
+  binding, not just once. `ButterflyRange` is one nullary `Fn<(), u256>` thunk
+  struct forked twice per stage (both `FL` and `FR` monomorphize to it); the
+  `(u256, u256)` fork result takes a `let joined: (u256, u256) =` annotation, as C3.
+
+### `ntt_schedule.fe` (ty_check headline): the schedule type IS the FFT
+
+The crypto analogue of the Clifford blade-tree headline (`clifford_blades.fe`),
+and a CLEANER fit: for the NTT the butterfly GENUINELY IS the Comp/Par structure
+(a stage = a `Comp` boundary, a butterfly = a `Par` leaf), with no
+same-vs-analogy caveat. Reuses the `clifford_blades.fe` / `conal_library_rbin.fe`
+/ `backend_barrier.fe` patterns (the library `std::conal::RBin`, the fixture-local
+`BarrierReq` derivation over the real `core::barrier` markers). Reviewed normal
+forms in the generated `.snap`, all zero-diagnostic (`assert_no_diags`):
+
+- size-8 stage tree: `EvmBackend::Buffer<RBin<Pair, 3>>` normalizes to
+  `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>` (three `Comp` phases = three
+  stages), definitionally equal at the `takes_ntt8_stages` boundary;
+- size-16 stage tree: `RBin<Pair, 4>` normalizes to the four-deep `Comp` nest;
+- derived barriers: `BarrierReq<3>` = `BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>`
+  (three stage barriers, one per `Comp` boundary), the executed
+  `ntt_par_exec.fe` barrier sequence one-for-one;
+- the confluence pin (`ntt8_schedule_and_barriers`): one `N = 3` yields BOTH
+  `RBin<Pair, 3>` and `BarrierReq<3>`; the symbolic leg `sym_ntt8<B: Backend>`
+  keeps the schedule unfolding under an opaque `B::Buffer<..>` projection
+  (`B::Buffer<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`).
+
+The framing: the NTT of size `2^k` has exactly `k` butterfly stages = `k` `Comp`
+phases = `BarrierReq<k>` barriers; the schedule type is the FFT's stage structure.
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- `ntt_par_exec` PASSES under revm: debug-fe `PASS [0.0084s]` exit 0
+  (timeout-guarded); fork-join == sequential reference and == N1's pinned oracle,
+  slot by slot, for both forward sizes; the fork-join round-trip is the identity.
+- `ntt_schedule` ty_check green (zero-diagnostic; reviewed NF `RBin<Pair, 3>` +
+  `BarrierReq<3>`). Full `ty_check` suite green; the four keystones
+  (`ntt_schedule`, `clifford_blades`, `conal_library_rbin`, `backend_barrier`) all
+  ok, existing snaps BYTE-IDENTICAL (`git status` shows no `.snap` rewritten but
+  the new `ntt_schedule.snap`).
+- N1 `ntt_exec` + Clifford neighbors re-run green: `ntt_exec` `PASS [0.0163s]`,
+  `clifford_gp_exec` `PASS [0.0175s]`, `clifford_gp_par_exec` `PASS [0.0098s]`.
+- `cargo check --workspace` clean (11.6s, no Rust changed); `corelib` alone green
+  (19/19, `analyze_corelib` + `analyze_stdlib` both profiles, 176s);
+  `tree_sitter_parse_strict` green (fixtures touch no parser suite).
+- Rust + ingots UNTOUCHED (fixtures-only; no new type-system machinery, no
+  std/core surface, no multi-limb). `git status`: only the two new fixtures +
+  `ntt_schedule.snap`. Did NOT push, did NOT run full release CI.
+
+### Deviations
+
+- Per-stage 2-way split (the two independent halves per stage), not a fork per
+  individual butterfly (the slice's stated scope-realism option): `log2(n)` forks
+  + `log2(n)` barriers, matching C3's even/odd granularity, is enough to
+  demonstrate the schedule structure and keeps the thunk count small.
+- Per-butterfly twiddle recomputed via `powmod_q(wlen, j)` (equals N1's running
+  `wc = wlen^j`) so a forked half is index-startable mid-stage; storage stays
+  byte-identical.
+- N2 does NOT re-run the convolution leg through the fork-join transform (N1 pins
+  it exhaustively; the forward + round-trip fully exercise the Par/barrier schedule
+  structure, which is N2's subject). Forward sizes 8/16 + round-trip size 8 cover
+  the review's "forward NTT, and ideally the round-trip" ask.
+
+N2 is COMPLETE and green: the NTT is now fork-join / barrier-structured on EVM,
+byte-identical to N1's sequential values and to the sequential reference computed
+in-fixture, and the size-8 NTT's three-stage schedule is pinned at ty_check as
+`RBin<Pair, 3>` + `BarrierReq<3>` (the schedule type = the FFT's stage structure).
+`evm`+`par`+`barrier` coexisted with no effect-row friction. NEXT: N3 (G-lane):
+promote the probe NTT to a committed cross-backend `ntt-xbackend` harness with the
+EVM-pinned N1 vectors, the F1/F3 `clifford-xbackend` README wording fixes, and the
+F2 OS-threads race witness folded in as the committed load-bearing demonstration.

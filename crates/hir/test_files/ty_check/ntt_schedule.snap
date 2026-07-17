@@ -1,0 +1,170 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/ntt_schedule.fe
+---
+note:
+   ┌─ ntt_schedule.fe:57:77
+   │
+57 │ fn takes_ntt8_stages(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+   │                                                                             ^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:63:58
+   │
+63 │   fn ntt8_stage_tree(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+   │ ╭──────────────────────────────────────────────────────────^
+64 │ │     takes_ntt8_stages(x)
+65 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ ntt_schedule.fe:64:5
+   │
+64 │     takes_ntt8_stages(x)
+   │     ^^^^^^^^^^^^^^^^^ fn takes_ntt8_stages
+
+note:
+   ┌─ ntt_schedule.fe:64:5
+   │
+64 │     takes_ntt8_stages(x)
+   │     ^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:64:23
+   │
+64 │     takes_ntt8_stages(x)
+   │                       ^ StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ ntt_schedule.fe:68:90
+   │
+68 │ fn takes_ntt16_stages(_ x: StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>) {}
+   │                                                                                          ^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:70:59
+   │
+70 │   fn ntt16_stage_tree(x: EvmBackend::Buffer<RBin<Pair, 4>>) {
+   │ ╭───────────────────────────────────────────────────────────^
+71 │ │     takes_ntt16_stages(x)
+72 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ ntt_schedule.fe:71:5
+   │
+71 │     takes_ntt16_stages(x)
+   │     ^^^^^^^^^^^^^^^^^^ fn takes_ntt16_stages
+
+note:
+   ┌─ ntt_schedule.fe:71:5
+   │
+71 │     takes_ntt16_stages(x)
+   │     ^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:71:24
+   │
+71 │     takes_ntt16_stages(x)
+   │                        ^ StorPtr<Comp<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ ntt_schedule.fe:76:74
+   │
+76 │ fn takes_three_barriers(_ x: BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>) {}
+   │                                                                          ^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:82:36
+   │
+82 │   fn ntt8_barriers(b: BarrierReq<3>) {
+   │ ╭────────────────────────────────────^
+83 │ │     takes_three_barriers(b)
+84 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ ntt_schedule.fe:83:5
+   │
+83 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^ fn takes_three_barriers
+
+note:
+   ┌─ ntt_schedule.fe:83:5
+   │
+83 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:83:26
+   │
+83 │     takes_three_barriers(b)
+   │                          ^ BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>
+
+note:
+   ┌─ ntt_schedule.fe:88:63
+   │
+88 │ fn takes_sched3(_ x: Comp<Comp<Comp<Par, Pair>, Pair>, Pair>) {}
+   │                                                               ^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:93:67
+   │
+93 │   fn ntt8_schedule_and_barriers(s: RBin<Pair, 3>, b: BarrierReq<3>) {
+   │ ╭───────────────────────────────────────────────────────────────────^
+94 │ │     takes_sched3(s)
+95 │ │     takes_three_barriers(b)
+96 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ ntt_schedule.fe:94:5
+   │
+94 │     takes_sched3(s)
+   │     ^^^^^^^^^^^^ fn takes_sched3
+
+note:
+   ┌─ ntt_schedule.fe:94:5
+   │
+94 │     takes_sched3(s)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:94:18
+   │
+94 │     takes_sched3(s)
+   │                  ^ Comp<Comp<Comp<Par, Pair>, Pair>, Pair>
+
+note:
+   ┌─ ntt_schedule.fe:95:5
+   │
+95 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^ fn takes_three_barriers
+
+note:
+   ┌─ ntt_schedule.fe:95:5
+   │
+95 │     takes_three_barriers(b)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ ntt_schedule.fe:95:26
+   │
+95 │     takes_three_barriers(b)
+   │                          ^ BarrierAt<BarrierAt<BarrierAt<NoBarrier>>>
+
+note:
+    ┌─ ntt_schedule.fe:104:82
+    │
+104 │   fn sym_ntt8<B: Backend>(x: B::Buffer<RBin<Pair, 3>>) -> B::Buffer<RBin<Pair, 3>> {
+    │ ╭──────────────────────────────────────────────────────────────────────────────────^
+105 │ │     x
+106 │ │ }
+    │ ╰─^ B::Buffer<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+    ┌─ ntt_schedule.fe:105:5
+    │
+105 │     x
+    │     ^ B::Buffer<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>

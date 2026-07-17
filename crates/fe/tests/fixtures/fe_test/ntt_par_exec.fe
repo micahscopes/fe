@@ -1,0 +1,384 @@
+// mb2 N2: the NTT wired through the CONAL SCHEDULE on EVM (revm `fe test`).
+//
+// Takes N1's sequential number-theoretic transform (`ntt_exec.fe`, the crypto
+// proof-gen reference over `F_q`, `q = 12289`) and STRUCTURES each butterfly stage
+// through the D6.3 fork-join capabilities, making "the schedule IS the FFT" literal
+// in the executed tree. Nothing about the arithmetic changes; only the scheduling.
+//
+// THE SCHEDULE, EXECUTED (design section 3.2; the C3 fork-join pattern on a
+// depth-indexed real algorithm). A size-n radix-2 NTT is `log2(n)` butterfly STAGES:
+//
+//   - within a stage, the `n/2` butterflies are INDEPENDENT (a perfect matching on
+//     the `n` indices: every butterfly touches a disjoint element pair), so the
+//     stage's butterfly set splits into two INDEX-DISJOINT halves that run through
+//     the D6.3 `par.fork` (they ARE the `Par` leaves). The split is by butterfly
+//     index `[0, n/4)` vs `[n/4, n/2)`; disjointness is by construction (any
+//     partition of a matching is disjoint), exactly the C3 EVEN/ODD contract;
+//   - a stage boundary is a data dependency (stage `s+1` reads what stage `s` wrote)
+//     = a `Comp` phase boundary = ONE derived barrier: `barrier.barrier()` fires at
+//     each stage boundary. A size-8 NTT has `log2(8) = 3` stages = 3 forks + 3
+//     derived barriers = `BarrierReq<3>` (the depth-indexed derivation of
+//     `ntt_schedule.fe`, executed). Size 16 = 4 stages = `BarrierReq<4>`.
+//
+// THE PINNED PROPERTY (exactly C3's, now on the NTT): the Par-structured transform
+// is BYTE-IDENTICAL to the sequential NTT, slot by slot, AND equals N1's pinned
+// probe-oracle values. The forward legs compute BOTH paths in-contract (the
+// fork-join transform into OUT, the sequential N1 reference into SEQ) and assert
+// them equal here, so byte-identity is a direct in-fixture fact: the D6.3
+// order-independence property (`Sequential` provider == reference fork-join
+// semantics) demonstrated on the NTT, with `log2(n)` barriers wired at real (not
+// decorative) `Comp`-level stage boundaries. The round-trip leg runs BOTH the
+// forward and the inverse through the fork-join transform, and is its own oracle
+// (`INTT(NTT(a)) == a`), so the whole schedule structure round-trips.
+//
+// Reuses N1's field arithmetic (`addmod_q`/`submod_q`/`mulmod_q`/`powmod_q`,
+// `bitrev`/`log2n`/`bitrev_copy`) VERBATIM and N1's sequential `butterfly`/
+// `transform` as the oracle. The ONE structural addition is `butterfly_par`, which
+// forks each stage's butterfly range under `par.fork` with a `barrier.barrier()` per
+// stage. The per-butterfly twiddle is recomputed as `powmod_q(wlen, j)` (rather than
+// N1's running `wc` accumulation) so a forked half can start at an arbitrary
+// butterfly index; the value is identical (`wlen^j`), so storage stays byte-identical
+// to N1. `evm` + `par` + `barrier` combine in one `uses` clause, exactly as C3 did.
+// No new type-system machinery, no multi-limb, no generic-N transform.
+
+use std::conal::StorWordBuf
+use core::par::Par
+use core::barrier::Barrier
+use core::backend::Global
+use core::Fn
+use std::evm::EvmBackend
+
+// The field `F_q`, q = 12289 = 3 * 2^12 + 1 (the Falcon / NewHope NTT prime).
+const Q: u256 = 12289
+// Primitive 8th / 16th roots of unity mod q (g = 11; w_n = g^((q-1)/n)).
+const W8: u256 = 8246
+const W16: u256 = 4134
+
+// Storage regions (all disjoint; each holds up to 16 words).
+const A_BASE: u256 = 100    // input a
+const OUT_BASE: u256 = 300  // the fork-join (Par-structured) transform result
+const SEQ_BASE: u256 = 500  // the sequential N1 reference (the fork-join oracle)
+const WORK_BASE: u256 = 700 // round-trip intermediate (forward staged for the INTT)
+
+// ---- the field `F_q`: add / sub / mul mod q, and modular exponentiation (N1) ----
+
+fn addmod_q(_ a: u256, _ b: u256) -> u256 {
+    (a + b) % Q
+}
+fn submod_q(_ a: u256, _ b: u256) -> u256 {
+    (a + Q - b) % Q
+}
+fn mulmod_q(_ a: u256, _ b: u256) -> u256 {
+    (a * b) % Q
+}
+fn powmod_q(_ base: u256, _ exp: u256) -> u256 {
+    let mut r: u256 = 1
+    let mut b = base % Q
+    let mut e = exp
+    while e > 0 {
+        if e % 2 == 1 {
+            r = mulmod_q(r, b)
+        }
+        b = mulmod_q(b, b)
+        e = e / 2
+    }
+    r
+}
+fn inv_q(_ a: u256) -> u256 {
+    powmod_q(a, Q - 2)
+}
+
+// ---- bit-reversal load + log2 (N1, arithmetic-only) ----
+
+fn bitrev(_ x: u256, _ bits: u256) -> u256 {
+    let mut r: u256 = 0
+    let mut v = x
+    let mut b: u256 = 0
+    while b < bits {
+        r = r * 2 + v % 2
+        v = v / 2
+        b += 1
+    }
+    r
+}
+fn log2n(_ n: u256) -> u256 {
+    let mut bits: u256 = 0
+    let mut v = n
+    while v > 1 {
+        v = v / 2
+        bits += 1
+    }
+    bits
+}
+fn bitrev_copy(_ src: StorWordBuf, _ dst: StorWordBuf, _ bits: u256) {
+    let n = src.len()
+    let mut i: u256 = 0
+    while i < n {
+        dst.set(bitrev(i, bits), src.get(i))
+        i += 1
+    }
+}
+
+// ---- the SEQUENTIAL butterfly stages (N1 verbatim): the fork-join oracle ----
+
+fn butterfly(_ a: StorWordBuf, _ w: u256) {
+    let n = a.len()
+    let mut len: u256 = 2
+    while len <= n {
+        let wlen = powmod_q(w, n / len)
+        let half = len / 2
+        let mut i: u256 = 0
+        while i < n {
+            let mut wc: u256 = 1
+            let mut j: u256 = 0
+            while j < half {
+                let u = a.get(i + j)
+                let v = mulmod_q(a.get(i + j + half), wc)
+                a.set(i + j, addmod_q(u, v))
+                a.set(i + j + half, submod_q(u, v))
+                wc = mulmod_q(wc, wlen)
+                j += 1
+            }
+            i += len
+        }
+        len = len * 2
+    }
+}
+
+fn transform(_ src: StorWordBuf, _ dst: StorWordBuf, _ w: u256) {
+    bitrev_copy(src, dst, log2n(src.len()))
+    butterfly(dst, w)
+}
+
+// ---- the PAR-STRUCTURED butterfly stages: THE SCHEDULE executed as fork-join ----
+
+/// Process butterflies `[lo, hi)` of one stage (root-of-unity `wlen`, group size
+/// `len`). Butterfly `bf` = group `g = bf / half`, position `j = bf % half`, base
+/// `i = g * len`; it reads/writes only slots `i + j` and `i + j + half`, so distinct
+/// butterflies touch DISJOINT slots (a stage is a matching). The twiddle is
+/// `wlen^j`, recomputed by `powmod_q` so a forked half can start mid-stage; the value
+/// equals N1's running `wc`, so storage is byte-identical.
+fn butterfly_range(_ a: StorWordBuf, _ wlen: u256, _ len: u256, _ lo: u256, _ hi: u256) {
+    let half = len / 2
+    let mut bf = lo
+    while bf < hi {
+        let g = bf / half
+        let j = bf % half
+        let i = g * len
+        let wc = powmod_q(wlen, j)
+        let u = a.get(i + j)
+        let v = mulmod_q(a.get(i + j + half), wc)
+        a.set(i + j, addmod_q(u, v))
+        a.set(i + j + half, submod_q(u, v))
+        bf += 1
+    }
+}
+
+/// One INDEPENDENT half of a stage's butterfly set (the `Par` leaf): a nullary
+/// `Fn<(), u256>` thunk (the proven `conal_par_fork.fe` / C3 shape) capturing its
+/// buffer + stage parameters + its disjoint butterfly range `[lo, hi)`.
+struct ButterflyRange {
+    a: StorWordBuf,
+    wlen: u256,
+    len: u256,
+    lo: u256,
+    hi: u256,
+}
+impl Fn<(), u256> for ButterflyRange {
+    fn call(self, _ unit: own ()) -> u256 {
+        butterfly_range(self.a, self.wlen, self.len, self.lo, self.hi)
+        0
+    }
+}
+
+/// The Par-structured butterfly: each stage's `n/2` butterflies split into two
+/// index-disjoint halves run through `par.fork` (the `Par` leaves), and a
+/// `barrier.barrier()` fires at each stage boundary (the `Comp` phase boundary). A
+/// size-n transform executes `log2(n)` forks and `log2(n)` DERIVED barriers, one per
+/// stage: `BarrierReq<log2 n>`, executed.
+fn butterfly_par(_ a: StorWordBuf, _ w: u256)
+    uses (par: mut Par<EvmBackend>, barrier: mut Barrier<EvmBackend, Global>)
+{
+    let n = a.len()
+    let bf_count = n / 2   // butterflies per stage (constant across stages)
+    let mid = bf_count / 2 // the disjoint two-way split point
+    let mut len: u256 = 2
+    while len <= n {
+        // primitive len-th root for this stage = w^(n/len) (as N1).
+        let wlen = powmod_q(w, n / len)
+        let lo_half = ButterflyRange { a: a, wlen: wlen, len: len, lo: 0, hi: mid }
+        let hi_half = ButterflyRange { a: a, wlen: wlen, len: len, lo: mid, hi: bf_count }
+        // The two independent halves through the D6.3 Par capability (EVM
+        // Sequential provider: left-then-right; disjoint slots make that
+        // order-independent). One fork per stage = one `Par` fork-join.
+        let joined: (u256, u256) = par.fork(lo_half, hi_half)
+        let _ = joined.0 + joined.1
+        // The DERIVED phase boundary between this stage and the next (a genuine
+        // no-op on single-threaded EVM; the barrier wired at a real `Comp`-level
+        // stage boundary, one per stage).
+        barrier.barrier()
+        len = len * 2
+    }
+}
+
+fn transform_par(_ src: StorWordBuf, _ dst: StorWordBuf, _ w: u256)
+    uses (par: mut Par<EvmBackend>, barrier: mut Barrier<EvmBackend, Global>)
+{
+    bitrev_copy(src, dst, log2n(src.len()))
+    butterfly_par(dst, w)
+}
+
+/// inverse NTT through the fork-join transform: the same schedule with `w^-1`,
+/// scaled by `n^-1` (Fermat inverses). `INTT(NTT(a)) == a`.
+fn intt_par(_ src: StorWordBuf, _ dst: StorWordBuf, _ w: u256)
+    uses (par: mut Par<EvmBackend>, barrier: mut Barrier<EvmBackend, Global>)
+{
+    transform_par(src, dst, inv_q(w))
+    let n = src.len()
+    let ninv = inv_q(n % Q)
+    let mut i: u256 = 0
+    while i < n {
+        dst.set(i, mulmod_q(dst.get(i), ninv))
+        i += 1
+    }
+}
+
+// ---- input loaders (the pinned test vectors, N1) ----
+
+fn load_probe8(_ a: StorWordBuf) {
+    a.set(0, 5)
+    a.set(1, 15)
+    a.set(2, 39)
+    a.set(3, 77)
+    a.set(4, 129)
+    a.set(5, 195)
+    a.set(6, 275)
+    a.set(7, 369)
+}
+fn load_iota(_ a: StorWordBuf) {
+    let n = a.len()
+    let mut i: u256 = 0
+    while i < n {
+        a.set(i, i + 1)
+        i += 1
+    }
+}
+
+msg Msg {
+    // Run a scenario: the fork-join (Par-structured) transform into OUT and, for the
+    // forward cases, the sequential N1 reference into SEQ. Read back per-slot via
+    // GetOut / GetSeq.
+    #[selector = 1]
+    Setup { case: u256 } -> u256,
+    #[selector = 2]
+    GetOut { i: u256 } -> u256,
+    #[selector = 3]
+    GetSeq { i: u256 } -> u256,
+}
+
+pub contract NttParExec {
+    recv Msg {
+        Setup { case } -> u256
+            uses (evm: mut Evm, par: mut Par<EvmBackend>, barrier: mut Barrier<EvmBackend, Global>)
+        {
+            if case == 1 {
+                // forward NTT, size 8 (3 stages = 3 forks + 3 barriers = BarrierReq<3>).
+                let a = StorWordBuf::new(base: A_BASE, len: 8)
+                load_probe8(a)
+                transform_par(a, StorWordBuf::new(base: OUT_BASE, len: 8), W8)
+                transform(a, StorWordBuf::new(base: SEQ_BASE, len: 8), W8)
+            } else if case == 2 {
+                // forward NTT, size 16 (4 stages = 4 forks + 4 barriers = BarrierReq<4>).
+                let a = StorWordBuf::new(base: A_BASE, len: 16)
+                load_iota(a)
+                transform_par(a, StorWordBuf::new(base: OUT_BASE, len: 16), W16)
+                transform(a, StorWordBuf::new(base: SEQ_BASE, len: 16), W16)
+            } else {
+                // round-trip, size 8: INTT(NTT(probe8)) == probe8, BOTH directions
+                // through the fork-join transform.
+                let a = StorWordBuf::new(base: A_BASE, len: 8)
+                load_probe8(a)
+                let tmp = StorWordBuf::new(base: WORK_BASE, len: 8)
+                transform_par(a, tmp, W8)
+                intt_par(tmp, StorWordBuf::new(base: OUT_BASE, len: 8), W8)
+            }
+            0
+        }
+
+        GetOut { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: OUT_BASE, len: 16).get(i)
+        }
+
+        GetSeq { i } -> u256 uses (evm: mut Evm) {
+            StorWordBuf::new(base: SEQ_BASE, len: 16).get(i)
+        }
+    }
+}
+
+// The pinned property: the Par-structured NTT == the sequential N1 reference, slot
+// by slot, AND == N1's pinned probe-oracle vectors. Same NTT, now fork-join /
+// barrier-structured; byte-identical storage.
+#[test]
+fn test_ntt_par_exec() uses (evm: mut Evm) {
+    let c = evm.create2<NttParExec>(value: 0, args: (), salt: 1)
+    assert!(c.inner != 0)
+
+    // ---- forward NTT, size 8: fork-join == pinned probe == sequential reference ----
+    // NTT([5,15,39,77,129,195,275,369]) = [1104,6528,7157,1035,12081,7898,4772,8621]
+    // executed as 3 stages = 3 par.forks + 3 derived barriers (BarrierReq<3>).
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 1 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 1104)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 6528)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 7157)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 1035)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 12081)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 7898)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 4772)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 8621)
+    // fork-join == sequential reference, slot by slot (the order-independence pin).
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 0 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 1 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 2 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 3 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 4 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 5 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 6 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 7 }))
+
+    // ---- forward NTT, size 16: 4 stages = 4 par.forks + 4 barriers (BarrierReq<4>) ----
+    // NTT([1..16]) (w_16 = 4134), fork-join == pinned == sequential.
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 2 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 136)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 12066)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 3914)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 12153)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 449)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 6137)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 3000)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 4222)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 8 }) == 12281)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 9 }) == 8051)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 10 }) == 9273)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 11 }) == 6136)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 12 }) == 11824)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 13 }) == 120)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 14 }) == 8359)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 15 }) == 207)
+    // fork-join == sequential reference (endpoints + middle sampled).
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 0 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 7 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 8 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 8 }))
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 15 }) == evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetSeq { i: 15 }))
+
+    // ---- round-trip, size 8: BOTH directions through the fork-join transform ----
+    // INTT(NTT(probe8)) == probe8 (the schedule structure round-trips).
+    evm.call(addr: c, gas: 300000000, value: 0, message: Msg::Setup { case: 3 })
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 0 }) == 5)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 1 }) == 15)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 2 }) == 39)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 3 }) == 77)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 4 }) == 129)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 5 }) == 195)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 6 }) == 275)
+    assert!(evm.call(addr: c, gas: 400000, value: 0, message: Msg::GetOut { i: 7 }) == 369)
+}
