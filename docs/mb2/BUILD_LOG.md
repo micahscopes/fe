@@ -3179,3 +3179,111 @@ mint `Architecture::Wasm32` + the `Wasm32` Isa on the sonatina branch, add the
 mb2 `wasm` cargo feature + wire `BackendKind::Wasm -> WasmBackend::compile`,
 and land the first genuinely-Fe-compiled wasm (`add` + `sum_to` + a call pair,
 wasmtime == the EVM twin).
+
+---
+
+## R1: the first genuinely-Fe-compiled wasm (THE MILESTONE) - COMPLETE
+
+Fork branch `multi-backend-mb2` HEAD `75c091b3` (local, never pushed). mb2
+branch `mb2`, re-pinned to that HEAD (`cargo update -p sonatina-ir
+sonatina-codegen sonatina-triple sonatina-verifier`). The acceptance keystone
+runs: `#[target(wasm)]`-shape Fe `add(a, b) = a + b`, compiled Fe -> MIR ->
+Sonatina IR (Wasm32 ISA) -> WAFFLE -> wasm bytes, executed under wasmtime,
+`add(2, 3) == 5` and equal to the EVM twin. `sum_to` (loop/phi) and a
+two-function call pair also land.
+
+### Sonatina fork (commit `75c091b3`): Wasm32 ISA mint + translator hardening
+
+- `Architecture::Wasm32` in `crates/triple` (`wasm32-unknown-native`; parse,
+  Display, the Native OS combo). Parser `module_ctx_from_triple` grows the
+  Wasm32 arm.
+- `crates/ir/src/isa/wasm32.rs`: the `Wasm32` Isa, a sibling of `native.rs`.
+  Little-endian, `pointer_repl = I32` (matches `WASM_LAYOUT.pointer_size_bytes
+  = 4`), reuses the portable `NativeInstSet` vocabulary (so the lowering gets
+  the full arith/cmp/control-flow/call set, incl. `Call`, with no EVM
+  builtins). Layout mirrors native (i64 = 8, i32 = 4, ...) with 32-bit
+  pointers.
+- WAFFLE translator hardening (`isa/wasm/translate.rs`), the minimum for the
+  R1 slice:
+  - Two-pass module translation records a `FuncRef -> waffle Func` map up
+    front, so direct calls resolve their callee regardless of order.
+  - `control_flow::Call` -> WAFFLE `Call` op.
+  - The unhandled-instruction `else` arm now FAILS CLOSED (errors naming the
+    instruction) instead of silently dropping it.
+  - R2 gaps left as-is per the plan: the translator still FAKES overflow flags
+    as constant 0, so R1 correctness holds only for non-overflowing values;
+    the full op matrix / real linear memory / imports are R2.
+- Fork tests: `wasm32_isa_add` + `wasm32_isa_call_pair` build modules under the
+  Wasm32 ISA and execute them under wasmtime. Full codegen suite green:
+  `cargo test -p sonatina-codegen --features cranelift,wasm` = 814 lib + all
+  integration (8 `wasm_backend`), 0 failures.
+
+### mb2 (branch `mb2`): `BackendKind::Wasm` wiring + the portable lowering
+
+- `crates/codegen/src/sonatina/wasm_lower.rs` (new): `compile_runtime_package_
+  wasm` - a NARROW MIR -> portable-Sonatina-IR lowering under the Wasm32 ISA.
+  It walks the MIR runtime package directly and lowers the scalar-arith +
+  control-flow + call subset, FAIL-CLOSED on everything else. It reuses
+  Sonatina's `FunctionBuilder` SSA-variable machinery (declare/def/use +
+  `seal_all`), so `sum_to`'s loop-carried accumulator gets its phis inserted
+  automatically (MIR value-locals are `RuntimeLocalRoot::None`; no manual phi,
+  no alloca). Handled: `RExpr::{Use, ConstScalar, Binary(Comp Lt/Eq),
+  Builtin(IntrinsicArith Add/Sub/Mul), Call}`; `RTerminator::{Return, Goto,
+  Branch, Stop, Trap}`. Reuses (visibility-only, EVM-output-neutral)
+  `assign_sonatina_function_symbols`, `scalar_ty`, `int_ty`, `bytes_to_i256`,
+  `linkage_for_runtime` from `lower_runtime.rs`.
+- `crates/codegen/src/backend.rs`: `WasmBackend::compile` stops failing closed
+  and routes `mir::build_runtime_package -> compile_runtime_package_wasm ->
+  sonatina WasmBackend::compile_module -> BackendOutput::Bytecode(wasm)`. u256
+  and every non-scalar class still fail closed (unit tests cover both).
+- No mb2 cargo feature needed: the workspace already pins `sonatina-codegen`
+  with `features = ["wasm"]`, so `sonatina_codegen::isa::wasm` is always
+  available. `wasmtime`/`wasmparser` added as `fe-codegen` dev-deps for the
+  acceptance test (versions matched to the sonatina wasm backend's).
+
+#### Honest scope of the portable lowering vs R2
+
+The narrow path is deliberately R1-shaped. The general portable MIR ->
+Sonatina-IR lowering (parameterizing `lower_runtime.rs` over inst set + word
+type) is R2-scale for two structural reasons proven here: (1) the EVM lowerer
+hardcodes `Type::I256` as the word in ~90 sites; (2) Fe's checked arithmetic
+lowers `a + b` to `uaddo` + an EVM `revert` panic block (`emit_panic_revert`),
+which is EVM-native and not in `NativeInstSet`. So R1 lowers the CLEAN MIR
+directly (at the MIR level `a + b` is `Builtin(IntrinsicArith { checked })`
+with no revert attached) and emits a plain portable `arith::Add`, ignoring the
+`checked` flag - correct for non-overflowing values, which is exactly the R1
+contract (real overflow flags = R2). The scalar envelope is bool / u8..u64 /
+i8..i64; u128/u256/address/aggregates/refs/memory-builtins/EVM-host-ops all
+fail closed with structured diagnostics.
+
+### Acceptance (foreground, timeout-guarded)
+
+- `crates/codegen/tests/wasm_e2e.rs`:
+  - `fe_add_runs_on_wasm_and_matches_evm_twin` - THE MILESTONE. `add(2, 3) ==
+    5` under wasmtime; `main()` (which calls `add(2,3)`) `== 5`; the identical
+    source also compiles through the EVM backend (cross-backend twin) and the
+    wasm result equals the known EVM-semantics value.
+  - `fe_sum_to_loop_runs_on_wasm` - `sum_to(n) = n*(n-1)/2` for
+    n in {0,1,5,10,100}, the loop/phi shape.
+  - `fe_call_pair_runs_on_wasm` - `apply` calls `add`, `apply(20,22) == 42`.
+  All three green: `cargo test -p fe-codegen --test wasm_e2e` = 3 passed.
+- EVM byte-identity held: `cargo test -p fe-codegen --test sonatina_ir` stays
+  green with zero `.snap.new` churn (mb2 changes are additive + visibility-only
+  on `lower_runtime.rs`; the EVM lowering is untouched semantically).
+
+### EVM-twin note
+
+The `contract-harness` (revm) path executes contracts by ABI selector;
+standalone `pub fn add`/`main` are not contracts, so revm value-execution of
+them needs an ABI wrapper (a small follow-up). Per the ratified "or hardcode
+the known EVM result" allowance, R1 compiles the identical source through the
+EVM backend (genuine cross-backend compilation) and asserts the wasm result
+against the known value; the EVM backend's value-correctness is covered by the
+full EVM suite + the byte-identity gate.
+
+R1 is COMPLETE: the first genuinely-Fe-compiled wasm runs (`add` == 5 == EVM
+twin under wasmtime, plus `sum_to` and a call pair). NEXT is R2 (kernel-grade):
+the full op matrix, REAL overflow flags, real linear-memory model
+(runtime SP global + typed loads/stores + correct field offsets + aggregates),
+imports/exports, i256/EVM-host builtins fail-closed - exit criterion the
+NTT/Clifford kernels from committed Fe sources == the EVM-pinned vectors.

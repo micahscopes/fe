@@ -24,3 +24,7 @@ dir-test.workspace = true
 test-utils.workspace = true
 url.workspace = true
 hir = { workspace = true, features = ["testutils"] }
+# Execution harness for the Fe -> wasm acceptance test (mirrors the Sonatina
+# wasm backend's own wasmtime test versions).
+wasmtime = "44.0.1"
+wasmparser = "0.248.0"

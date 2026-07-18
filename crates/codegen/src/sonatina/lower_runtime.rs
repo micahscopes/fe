@@ -567,7 +567,7 @@ const SONATINA_FUNCTION_SYMBOL_STYLE: FunctionSymbolStyle = FunctionSymbolStyle 
     namespace_key: sonatina_symbol_namespace_key,
 };
 
-fn assign_sonatina_function_symbols<'db>(
+pub(super) fn assign_sonatina_function_symbols<'db>(
     db: &'db DriverDataBase,
     package: &RuntimePackage<'db>,
 ) -> FxHashMap<mir::RuntimeInstance<'db>, String> {
@@ -4626,14 +4626,14 @@ trait Pipe: Sized {
 
 impl<T> Pipe for T {}
 
-fn linkage_for_runtime(linkage: RuntimeLinkage) -> Linkage {
+pub(super) fn linkage_for_runtime(linkage: RuntimeLinkage) -> Linkage {
     match linkage {
         RuntimeLinkage::Private => Linkage::Private,
         RuntimeLinkage::Internal => Linkage::Public,
     }
 }
 
-fn scalar_ty<'db>(scalar: &ScalarClass<'db>) -> Type {
+pub(super) fn scalar_ty<'db>(scalar: &ScalarClass<'db>) -> Type {
     match scalar.repr {
         ScalarRepr::Bool => Type::I1,
         ScalarRepr::Int { bits, .. } => int_ty(bits),
@@ -4749,7 +4749,7 @@ fn intrinsic_unary_arg<'ctx, 'db, 'a>(
     lowerer.local_value(*value)
 }
 
-fn int_ty(bits: u16) -> Type {
+pub(super) fn int_ty(bits: u16) -> Type {
     match bits {
         0 | 1 => Type::I1,
         2..=8 => Type::I8,
@@ -4761,7 +4761,7 @@ fn int_ty(bits: u16) -> Type {
     }
 }
 
-fn fixed_bytes_ty(len: u16) -> Type {
+pub(super) fn fixed_bytes_ty(len: u16) -> Type {
     int_ty(len.saturating_mul(8))
 }
 
@@ -4778,7 +4778,7 @@ fn int_bits(ty: Type) -> u16 {
     }
 }
 
-fn bytes_to_i256(bytes: &[u8], signed: bool) -> I256 {
+pub(super) fn bytes_to_i256(bytes: &[u8], signed: bool) -> I256 {
     if bytes.is_empty() {
         return I256::zero();
     }

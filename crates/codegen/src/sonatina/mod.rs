@@ -1,4 +1,7 @@
 mod lower_runtime;
+mod wasm_lower;
+
+pub use wasm_lower::compile_runtime_package_wasm;
 
 use std::collections::{BTreeMap, VecDeque};
 

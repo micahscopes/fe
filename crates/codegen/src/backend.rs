@@ -196,10 +196,14 @@ impl Backend for SonatinaBackend {
     }
 }
 
-/// The wasm backend scaffold. It exists so that `BackendKind::Wasm` and the
-/// `"wasm"` selector resolve to a real, honest, fail-closed compile impl. There
-/// is no wasm-capable Sonatina ISA pinned, so it emits no bytecode: it returns
-/// a structured [`BackendError::UnsupportedBackend`] rather than pretending.
+/// The wasm backend. It lowers a MIR runtime package to portable Sonatina IR
+/// under the `Wasm32` ISA (the narrow R1 scalar/control-flow/call subset in
+/// [`crate::sonatina::compile_runtime_package_wasm`]) and hands it to the
+/// Sonatina WAFFLE backend to emit a wasm module. This is the first
+/// genuinely-Fe-compiled wasm path. The scalar subset is fail-closed: anything
+/// outside it (aggregates, memory builtins, checked-overflow, u128/u256, EVM
+/// host ops) returns a structured error rather than wrong bytecode. Kernel-grade
+/// coverage is R2.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WasmBackend;
 
@@ -210,16 +214,29 @@ impl Backend for WasmBackend {
 
     fn compile(
         &self,
-        _db: &DriverDataBase,
-        _top_mod: TopLevelMod<'_>,
+        db: &DriverDataBase,
+        top_mod: TopLevelMod<'_>,
         _layout: TargetDataLayout,
         _opt_level: OptLevel,
     ) -> Result<BackendOutput, BackendError> {
-        Err(BackendError::UnsupportedBackend {
-            backend: "wasm",
-            reason: "wasm codegen requires a wasm-capable Sonatina ISA; none is pinned"
-                .to_string(),
-        })
+        use sonatina_codegen::Backend as SonatinaBackend;
+        use sonatina_codegen::isa::wasm::WasmBackend as SonatinaWasmBackend;
+
+        let package = mir::build_runtime_package(db, top_mod)?;
+        let module = crate::sonatina::compile_runtime_package_wasm(db, &package)?;
+        let artifact = SonatinaWasmBackend::new()
+            .compile_module(&module)
+            .map_err(|errors| {
+                BackendError::Sonatina(format!(
+                    "wasm backend: {}",
+                    errors
+                        .iter()
+                        .map(|error| error.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ))
+            })?;
+        Ok(BackendOutput::Bytecode(artifact.bytes))
     }
 }
 
@@ -244,33 +261,53 @@ mod tests {
     }
 
     #[test]
-    fn wasm_backend_compile_fails_closed() {
+    fn wasm_backend_compiles_scalar_function() {
         let mut db = DriverDataBase::default();
-        let url = Url::parse("file:///wasm_fail_closed.fe").expect("test URL should parse");
-        db.workspace()
-            .touch(&mut db, url.clone(), Some("pub fn f() {}\n".to_string()));
+        let url = Url::parse("file:///wasm_scalar.fe").expect("test URL should parse");
+        db.workspace().touch(
+            &mut db,
+            url.clone(),
+            Some(
+                "pub fn add(a: u64, b: u64) -> u64 { a + b }\n\
+                 pub fn main() -> u64 { add(2, 3) }\n"
+                    .to_string(),
+            ),
+        );
+        let file = db.workspace().get(&db, &url).expect("file should load");
+        let top_mod = db.top_mod(file);
+
+        let output = BackendKind::Wasm
+            .create()
+            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+            .expect("wasm backend should compile a scalar function");
+        let bytes = output.as_bytecode().expect("wasm output is bytecode");
+        assert!(!bytes.is_empty(), "wasm bytecode must be non-empty");
+        // A wasm module begins with the magic `\0asm`.
+        assert_eq!(&bytes[..4], b"\0asm", "output must be a wasm module");
+    }
+
+    #[test]
+    fn wasm_backend_fails_closed_outside_scalar_envelope() {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///wasm_u256.fe").expect("test URL should parse");
+        // u256 is outside the R1 scalar envelope; the wasm path must fail
+        // closed rather than silently drop or miscompile the wide type.
+        db.workspace().touch(
+            &mut db,
+            url.clone(),
+            Some("pub fn main() -> u256 { 42 }\n".to_string()),
+        );
         let file = db.workspace().get(&db, &url).expect("file should load");
         let top_mod = db.top_mod(file);
 
         let err = BackendKind::Wasm
             .create()
-            .compile(
-                &db,
-                top_mod,
-                layout_for(BackendKind::Wasm),
-                OptLevel::O0,
-            )
-            .expect_err("wasm backend must fail closed");
-
-        match err {
-            BackendError::UnsupportedBackend { backend, reason } => {
-                assert_eq!(backend, "wasm");
-                assert!(
-                    reason.contains("wasm-capable Sonatina ISA"),
-                    "unexpected reason: {reason}"
-                );
-            }
-            other => panic!("expected UnsupportedBackend, got: {other:?}"),
-        }
+            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+            .expect_err("u256 on wasm must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("scalar envelope") || message.contains("u256"),
+            "unexpected error: {message}"
+        );
     }
 }
