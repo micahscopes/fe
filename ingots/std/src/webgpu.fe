@@ -4,8 +4,6 @@ use core::barrier::Barrier
 use core::conal::Functor
 use core::Fn
 use core::MemPtr
-use core::EffectHandle
-use core::num::IntDowncast
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
 /// A TYPE-LEVEL browser WebGPU backend (the WGSL device model under the browser's
@@ -267,8 +265,12 @@ pub trait Wait<B: Backend> {
 // The `WorkerGpu` provider: the FIRST extern-backed provider (arch 4.3's
 // `BrowserGpu`, worker-seated per interop 2.1). Its method bodies ARE the raw
 // `fe:webgpu` / `fe:async` import calls: the compiler now type-checks the exact op
-// set the broker services, and the class-typed / newtype surface is unwrapped to
-// the boundary `u32`s at the single point where authority meets the import table.
+// set the broker services. Per Amendment 4's transport-newtype extension the raw
+// externs now take the capability newtypes WHOLE (`WebGpuRef<u32, Global>`,
+// `KernelId`, `PendingId`), each transported as its single `u32` word by the ABI, so
+// these bodies are PURE PASS-THROUGH: no `.binding` / `.id` field read, no re-wrap,
+// no place/`Load`. The class-typed / newtype surface stays intact end-to-end and is
+// unwrapped to its word only by the transport ABI at the boundary itself.
 //
 // These bodies are REAL calls (not `core::panic()` stubs like the type-level
 // atomic / barrier witnesses): they lower to wasm imports (R3.1-R3.3) and EXECUTE
@@ -281,35 +283,26 @@ pub struct WorkerGpu {}
 
 impl Dispatch<WebGpuBackend> for WorkerGpu {
     fn create(mut self, _ len_words: u32) -> WebGpuRef<u32, Global> {
-        WebGpuRef { binding: gpu_buffer_create(len_words) }
+        gpu_buffer_create(len_words)
     }
 
     fn upload(mut self, _ src: MemPtr<u32>, _ len_words: u32, _ dst: WebGpuRef<u32, Global>) {
-        gpu_upload(mem_word_addr(src), len_words, dst.binding)
+        gpu_upload(src, len_words, dst)
     }
 
     fn dispatch(mut self, _ kernel: KernelId, _ groups: u32) {
-        gpu_dispatch(kernel.id, groups)
+        gpu_dispatch(kernel, groups)
     }
 
     fn readback_begin(mut self, _ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> PendingId {
-        PendingId { id: gpu_readback_begin(src.binding, len_words, mem_word_addr(dst)) }
+        gpu_readback_begin(src, len_words, dst)
     }
 }
 
 impl Wait<WebGpuBackend> for WorkerGpu {
     fn wait(mut self, _ pending: PendingId) {
-        async_wait(pending.id)
+        async_wait(pending)
     }
-}
-
-/// Narrow a linear-memory `MemPtr<u32>` to the boundary `u32` offset the wasm
-/// import table speaks (linear-memory offsets are `u32`). Private to the provider:
-/// the raw offset never surfaces in the capability's typed API.
-fn mem_word_addr(_ p: MemPtr<u32>) -> u32 {
-    let raw_addr: u256 = p.raw()
-    let offset: u32 = raw_addr.downcast_truncate()
-    offset
 }
 
 /// The synchronous-looking `readback` facade over the TWO capabilities (interop

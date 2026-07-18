@@ -28,9 +28,10 @@ use std::collections::HashMap;
 use driver::DriverDataBase;
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp};
 use mir::{
-    ConstScalar, IntrinsicArithBinOp, RBlockId, RExpr, RLocalId, RStmt, RTerminator, RuntimeBody,
-    RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage,
-    RuntimeLocalRoot, RuntimePackage, ScalarClass,
+    AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, RBlockId, RExpr,
+    RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin, RuntimeCarrier,
+    RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot,
+    RuntimePackage, ScalarClass,
 };
 use rustc_hash::FxHashMap;
 use sonatina_ir::{
@@ -133,6 +134,14 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     }
 
     fn function_symbol(&self, instance: RuntimeInstance<'db>) -> String {
+        // A DECLARED-EXTERNAL host import is named by its BASE op identifier (the
+        // stable name the broker binds - "the import table IS the op set"), NOT the
+        // internal Sonatina symbol, which is mangled per instance
+        // (`std__lib__webgpu__raw__gpu_buffer_create_HASH`). The fork's WAFFLE emitter
+        // uses this string verbatim as the wasm import field name.
+        if let Some(name) = mir::wasm_import_name(self.db, instance) {
+            return name;
+        }
         self.func_symbols
             .get(&instance)
             .cloned()
@@ -147,8 +156,31 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     }
 
     fn declare_functions(&mut self) -> Result<(), LowerError> {
+        // DECLARED-EXTERNAL host imports dedup to ONE import per `(module, op-name)`
+        // identity: the same `extern` reached through two effect-provider scopes
+        // (e.g. `main`'s `Dispatch` + `Wait` vs `main_begin`'s `Dispatch`) mints two
+        // instances, but they name the SAME broker op, so the import table must carry
+        // it once. Each instance maps to the shared import `FuncRef`; bodyless imports
+        // never lower a body (`lower_bodies` skips block-empty functions).
+        let mut import_refs: FxHashMap<(String, String), FuncRef> = FxHashMap::default();
         for function in self.package.functions(self.db) {
             let instance = function.instance(self.db);
+            if let Some(name) = mir::wasm_import_name(self.db, instance) {
+                let module =
+                    mir::wasm_import_module(self.db, instance).unwrap_or_else(|| "fe".to_string());
+                let key = (module, name);
+                if let Some(func_ref) = import_refs.get(&key) {
+                    self.func_map.insert(instance, *func_ref);
+                    continue;
+                }
+                let signature = self.lower_signature(function)?;
+                let func_ref = self.builder.declare_function(signature).map_err(|err| {
+                    LowerError::Internal(format!("failed to declare wasm function: {err}"))
+                })?;
+                import_refs.insert(key, func_ref);
+                self.func_map.insert(instance, func_ref);
+                continue;
+            }
             let signature = self.lower_signature(function)?;
             let func_ref = self.builder.declare_function(signature).map_err(|err| {
                 LowerError::Internal(format!("failed to declare wasm function: {err}"))
@@ -195,16 +227,68 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         Ok(())
     }
 
-    /// The Sonatina `Type` for a runtime class, restricted to the R1 scalar
-    /// envelope (bool, u8..u64 / i8..i64). Wider scalars (u128/u256/address) and
-    /// every non-scalar class fail closed.
+    /// The Sonatina `Type` for a runtime class. R1 covered the scalar envelope
+    /// (bool, u8..u64 / i8..i64); R3.4b adds the FIRST per-backend ABI facts: a
+    /// memory-space provider reference is the backend pointer word (i32), and a
+    /// single-scalar-field aggregate is its one field's scalar. Wider scalars
+    /// (u128/u256/address), non-memory provider refs, object/const refs, raw
+    /// addresses, and multi-field / empty aggregates all fail closed.
     fn ty_for_class(&self, class: &RuntimeClass<'db>) -> Result<Type, LowerError> {
         match class {
             RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar),
+            // R3.4b step 1: the `MemPtr<B::Word>` transport class is the backend
+            // pointer word: i32 on wasm32 (exactly the linear-memory offset the JS
+            // broker already sees). A `MemPtr<u32>` classifies as a memory-space
+            // `RawAddr` (a raw memory address, the class the runtime classifier
+            // actually assigns every host-minted region pointer and every region
+            // pointer crossing the WebGPU import boundary); a memory-space provider
+            // reference is admitted on the same footing. This is the wasm mirror of
+            // the EVM lowerer's I256 transport repr (`lower_runtime.rs`
+            // `ty_for_class`). Non-memory addresses/provider refs and object/const
+            // refs are R2 memory lowering and stay fail-closed (the catch-all below).
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                ..
+            }
+            | RuntimeClass::Ref {
+                kind:
+                    RefKind::Provider {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                ..
+            } => Ok(Type::I32),
+            // R3.4b step 2: a single-scalar-field aggregate (a `u32` newtype such
+            // as `PendingId` / `KernelId` / `WebGpuRef`) is represented as its one
+            // field's scalar. Multi-field and empty aggregates fail closed.
+            RuntimeClass::AggregateValue { layout } => {
+                let scalar = self.single_scalar_field(*layout).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target (R3.4b) supports only single-scalar-field aggregates; \
+                         `{class:?}` is not a one-field scalar newtype"
+                    ))
+                })?;
+                scalar_ty_r1(&scalar)
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) supports only scalar values; `{other:?}` \
                  (aggregate/ref/raw-addr) is not lowered yet"
             ))),
+        }
+    }
+
+    /// If `layout` is a struct with EXACTLY ONE field that is an R1-envelope
+    /// scalar, return that field's scalar class; otherwise `None` (multi-field,
+    /// empty, array, and enum layouts stay fail-closed). This is what lets the
+    /// `u32` newtypes (`PendingId` / `KernelId` / `WebGpuRef`) execute: their
+    /// runtime representation IS their single field's word.
+    fn single_scalar_field(&self, layout: LayoutId<'db>) -> Option<ScalarClass<'db>> {
+        match layout.data(self.db) {
+            Layout::Struct(struct_layout) => match &*struct_layout.fields {
+                [RuntimeClass::Scalar(scalar)] => Some(scalar.clone()),
+                _ => None,
+            },
+            Layout::Array(_) | Layout::Enum(_) => None,
         }
     }
 }
@@ -301,6 +385,17 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     fn lower_stmt(&mut self, stmt: &RStmt<'db>) -> Result<(), LowerError> {
         match stmt {
             RStmt::Assign { dst, expr } => {
+                // R3.4b step 3: a unit-returning call lowered as a statement. MIR
+                // emits `Assign { dst: <Erased unit temp>, expr: Call }` for a call
+                // whose callee returns unit (`body.rs` ~2972-2984); the Erased temp
+                // carries no value class, so there is no destination variable to
+                // define. Emit a no-result call instruction (the EVM precedent is
+                // `lower_runtime.rs` ~1276-1283).
+                if let RExpr::Call { callee, args } = expr
+                    && callee.body(self.module.db).signature.ret.is_none()
+                {
+                    return self.lower_call_stmt(*callee, args);
+                }
                 let value = self.lower_expr(expr, *dst)?;
                 let var = self.var_for(*dst)?;
                 self.fb.def_var(var, value);
@@ -310,6 +405,27 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 "wasm target (R1) statement `{other:?}` is not supported"
             ))),
         }
+    }
+
+    /// Lower a unit-returning call as a statement: a no-result `Call` instruction.
+    /// Mirrors `lower_call` but for the unit case (`lower_call` rejects unit-return
+    /// callees as value expressions; here the result is discarded by construction).
+    fn lower_call_stmt(
+        &mut self,
+        callee: RuntimeInstance<'db>,
+        args: &[RLocalId],
+    ) -> Result<(), LowerError> {
+        let is = self.inst_set();
+        let callee_ref = *self.module.func_map.get(&callee).ok_or_else(|| {
+            LowerError::Internal("wasm call target was not declared".to_string())
+        })?;
+        let mut arg_vals = Vec::with_capacity(args.len());
+        for arg in args {
+            arg_vals.push(self.local_value(*arg)?);
+        }
+        self.fb
+            .insert_inst_no_result(Call::new(is, callee_ref, arg_vals.into_iter().collect()));
+        Ok(())
     }
 
     fn lower_expr(&mut self, expr: &RExpr<'db>, dst: RLocalId) -> Result<ValueId, LowerError> {
@@ -323,10 +439,58 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             RExpr::Binary { op, lhs, rhs } => self.lower_binary(*op, *lhs, *rhs, dst),
             RExpr::Call { callee, args } => self.lower_call(*callee, args),
             RExpr::Builtin(builtin) => self.lower_builtin(builtin),
+            // R3.4b step 2: single-scalar-field newtype construction/projection is
+            // a no-op on the represented word. `AggregateMake` of one field yields
+            // that field's value; `AggregateExtract` at index 0 yields the
+            // aggregate's value (which IS the field's word). This is what executes
+            // the `u32` newtypes (`PendingId` / `KernelId` / `WebGpuRef`).
+            RExpr::AggregateMake { layout, fields } => self.lower_scalar_newtype_make(*layout, fields),
+            RExpr::AggregateExtract { value, index } => {
+                self.lower_scalar_newtype_extract(*value, *index)
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) expression `{other:?}` is not supported"
             ))),
         }
+    }
+
+    /// `AggregateMake` of a single-scalar-field newtype: the aggregate IS its one
+    /// field's word, so construction is `Use` of that field. Multi-field (and
+    /// empty) constructions fail closed.
+    fn lower_scalar_newtype_make(
+        &mut self,
+        layout: LayoutId<'db>,
+        fields: &[RLocalId],
+    ) -> Result<ValueId, LowerError> {
+        if self.module.single_scalar_field(layout).is_none() {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target (R3.4b) aggregate construction of `{layout:?}` is not a \
+                 single-scalar-field newtype (multi-field aggregates are R2)"
+            )));
+        }
+        let [field] = fields else {
+            return Err(LowerError::Internal(
+                "single-scalar-field aggregate must have exactly one field".to_string(),
+            ));
+        };
+        self.local_value(*field)
+    }
+
+    /// `AggregateExtract` of field 0 from a single-scalar-field newtype: the
+    /// extracted word IS the aggregate's value. Any other field index fails closed
+    /// (a single-scalar-field newtype has only field 0).
+    fn lower_scalar_newtype_extract(
+        &mut self,
+        value: RLocalId,
+        index: u32,
+    ) -> Result<ValueId, LowerError> {
+        if index != 0 {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target (R3.4b) aggregate extract at index {index} is not supported \
+                 (only field 0 of a single-scalar-field newtype)"
+            )));
+        }
+        self.local_value(value)
     }
 
     /// Fe's primitive `+`/`-`/`*` lower to `IntrinsicArith` builtins (not
