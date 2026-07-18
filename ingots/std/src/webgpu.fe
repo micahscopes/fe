@@ -1,0 +1,180 @@
+use core::backend::{Backend, Supports, Global, Constant, Shared, Local}
+use core::atomic::Atomic
+use core::barrier::Barrier
+use core::conal::Functor
+use core::Fn
+
+/// A TYPE-LEVEL browser WebGPU backend (the WGSL device model under the browser's
+/// PORTABLE limits).
+///
+/// This is NOT a code-generation backend on this branch: kernels are emitted by
+/// the external schedule-walker harness (the mini-Garamon `emit-web` binary) until
+/// B4 (fe-emitted WGSL) lands, and WebGPU EXECUTION is browser-only and never
+/// sandbox-verifiable (no WebGPU secure context here). `WebGpuBackend` exists so
+/// the browser demo's interface is a compiler-checked contract rather than a JS
+/// convention: the Fe side pins the storage classes, the parallel envelope, and
+/// the atomic/barrier grant matrix, and the JS host implements them op-for-op.
+///
+/// It is a DISTINCT backend, not a reuse of `GpuBackend`: the branch's whole
+/// discipline is anti-conflation of backend FACTS, and the browser's facts
+/// genuinely differ from the native-Vulkan posture `GpuBackend` carries. WGSL has
+/// no 64-bit integer, and the PORTABLE barrier-synchronized envelope is 256
+/// invocations per workgroup (`maxComputeInvocationsPerWorkgroup`, `2^8`), where
+/// `GpuBackend` assumes the native dispatch-grid envelope (`2^24`). That single
+/// distinguishing fact (`MAX_PAR_LOG2 = 8`) is what lets the type system reject a
+/// fused schedule that exceeds the WebGPU workgroup limit; see the
+/// `webgpu_envelope_rejection` jewel fixture. The anti-conflation matrix stays
+/// four-way non-degenerate (two GPU-shaped backends that must not conflate).
+pub struct WebGpuBackend {}
+
+/// WebGPU class-typed reference: a bind-group BINDING INDEX, which is what a
+/// WebGPU resource honestly is at the API boundary (not a pointer). `T` and `S`
+/// are phantom (representation-only stand-in, like the other backends' refs); the
+/// class marker `S` lives in the TYPE and keys the WGSL address space (see the
+/// marker -> WGSL table below). NO methods/ops in this slice.
+pub struct WebGpuRef<T, S> { binding: u32 }
+
+impl Backend for WebGpuBackend {
+    /// WGSL's numeric model is 32-bit; there is no u64 in the language.
+    const WORD_BITS: usize = 32
+    // WGSL defines wrapping integer arithmetic (same doc caveat as `GpuBackend`:
+    // "wraps in practice, no trap exists" is a doc note, not a guarantee).
+    const OVERFLOW_WRAPS: bool = true
+    /// The PORTABLE single-workgroup envelope: `maxComputeInvocationsPerWorkgroup`
+    /// is 256 on every WebGPU implementation, so `2^8` is the widest `Par` a
+    /// BARRIER-SYNCHRONIZED (fused single-dispatch) schedule may assume. This is
+    /// deliberately the workgroup envelope, not the dispatch grid (~`2^24`): v1
+    /// providers fuse within one workgroup; the phase-per-dispatch provider that
+    /// unlocks the grid envelope is a later, additive fact change. Opinionated
+    /// default per guts-over-sugar: tunable, never blocking.
+    const MAX_PAR_LOG2: usize = 8
+    type Word = u32
+    // Impl-side representation choice: a WebGPU device buffer honestly IS a
+    // global-class storage binding, so the backend picks `WebGpuRef<T, Global>`
+    // as its buffer, exactly the `GpuRef<T, Global>` posture. This is per-impl
+    // representation, not trait doctrine, and it exercises marker substitution
+    // through a GAT RHS.
+    type Buffer<T> = WebGpuRef<T, Global>
+    type Ref<T, S> = WebGpuRef<T, S>
+}
+
+/// The WebGPU backend's buffer container is a `Functor`, satisfying the D1
+/// `type Buffer<T>: Functor<T>` bound on `core::Backend`. `WebGpuBackend::Buffer<T>`
+/// is `WebGpuRef<T, Global>` (a global-class storage binding), so this impl
+/// discharges the bound by SUBSTITUTING the class marker `Global` through the GAT
+/// RHS. `map` is a type-level stub (`core::panic()`, never-typed): no WebGPU
+/// pipeline exists on this branch (kernels are harness-emitted; execution is
+/// browser-only), so this body is never lowered here, matching the
+/// `GpuRef` / `WebGpuAtomics` / `WebGpuBarriers` stub posture.
+impl<X> Functor<X> for WebGpuRef<X, Global> {
+    type Out<Y> = WebGpuRef<Y, Global>
+
+    fn map<Y, F: Fn<X, Y>>(self, _ f: F) -> WebGpuRef<Y, Global> {
+        core::panic()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Storage-class grant matrix for WebGPU: the marker -> WGSL address space rule.
+// ---------------------------------------------------------------------------
+//
+// WebGPU supports all four core storage classes (unlike EVM/wasm, which lack
+// `Shared`). The normative mapping (design 2.2), extending the core markers'
+// SPIR-V mapping into WGSL address spaces and the WebGPU binding surface:
+//
+//   | Fe marker | SPIR-V (core)   | WGSL address space          | WebGPU binding surface                          |
+//   |-----------|-----------------|-----------------------------|-------------------------------------------------|
+//   | Global    | StorageBuffer   | var<storage, read_write>    | "storage" / "read-only-storage" buffer binding  |
+//   | Constant  | Uniform         | var<uniform>                | "uniform" binding (64 KiB portable size limit)  |
+//   | Shared    | Workgroup       | var<workgroup>              | NOT bindable: module-scope only, no host traffic|
+//   | Local     | Function        | function-scope var          | not visible at the host/device boundary         |
+//
+// The load-bearing rule this pins: only `Global` and `Constant` refs can appear
+// in a kernel's host-visible signature, and the binding layout is DERIVED from
+// the class-typed signature (bindings assigned in parameter declaration order
+// within @group(0)). `Shared` state is module-scope in the kernel and never
+// crosses the boundary; `Local` never appears at the boundary. A JS host cannot
+// bind a `Shared` buffer wrongly because no such binding exists to construct, and
+// the Fe side cannot pass a `WebGpuRef<T, Shared>` where a dispatch surface wants
+// `Global` because the marker is in the type. `Supports<S>` gates the TYPE layer;
+// the term-level capabilities (atomics/barriers below) gate operations.
+impl Supports<Global> for WebGpuBackend {}
+impl Supports<Constant> for WebGpuBackend {}
+impl Supports<Shared> for WebGpuBackend {}
+impl Supports<Local> for WebGpuBackend {}
+
+// ---------------------------------------------------------------------------
+// The WebGPU atomic capability (DECLARATION-LEVEL only), the B1 idiom.
+// ---------------------------------------------------------------------------
+//
+// The grant matrix wants `Global` and `Shared` atomic witnesses (WGSL defines
+// `atomic<T>` in both `var<storage>` and `var<workgroup>`), so `WebGpuAtomics`
+// carries `Atomic<WebGpuBackend, Global>` and `Atomic<WebGpuBackend, Shared>`.
+// `Constant`/`Local` have NO provider anywhere, so they compile nowhere, by
+// construction: that IS the {Global, Shared} gate (no bespoke check, just
+// provider absence + the ordinary obligation error).
+//
+// These are TYPE-LEVEL stubs: no WebGPU pipeline exists on this branch, so the
+// bodies are never lowered here (the HARNESS kernels already execute their
+// semantics: WGSL `atomicAdd` / `atomicExchange` / `atomicCompareExchangeWeak` in
+// the phase and NTT kernels; fe-emitted WGSL is B4). The bodies call
+// `core::panic()` (never-typed), exactly the `GpuAtomics` stub posture.
+// `WebGpuBackend` supports both classes, so the `where WebGpuBackend: Supports<S>`
+// op bound holds and is not restated here (Fe rejects concrete-type where-bounds,
+// `6-0005`).
+pub struct WebGpuAtomics {}
+
+impl Atomic<WebGpuBackend, Global> for WebGpuAtomics {
+    fn add(mut self, _ r: WebGpuRef<u32, Global>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn exchange(mut self, _ r: WebGpuRef<u32, Global>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn cas(mut self, _ r: WebGpuRef<u32, Global>, old: u32, new: u32) -> u32 {
+        core::panic()
+    }
+}
+
+impl Atomic<WebGpuBackend, Shared> for WebGpuAtomics {
+    fn add(mut self, _ r: WebGpuRef<u32, Shared>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn exchange(mut self, _ r: WebGpuRef<u32, Shared>, _ v: u32) -> u32 {
+        core::panic()
+    }
+    fn cas(mut self, _ r: WebGpuRef<u32, Shared>, old: u32, new: u32) -> u32 {
+        core::panic()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The WebGPU barrier capability (DECLARATION-LEVEL only), the B2 idiom.
+// ---------------------------------------------------------------------------
+//
+// Barriers, like atomics, live over `Global` and `Shared`, so `WebGpuBarriers`
+// carries `Barrier<WebGpuBackend, Global>` (WGSL `storageBarrier()`) and
+// `Barrier<WebGpuBackend, Shared>` (WGSL `workgroupBarrier()`); `Constant`/`Local`
+// have none. TYPE-LEVEL stubs: no WebGPU pipeline exists on this branch, so the
+// bodies are never lowered here (the harness NTT kernel already executes the
+// `workgroupBarrier()` semantics, `log2(n) + 1` of them, one per `BarrierAt`
+// wrapper). The bodies are no-ops (barrier returns nothing), the `GpuBarriers`
+// posture. `WebGpuBackend` supports both classes, so the
+// `where WebGpuBackend: Supports<S>` op bound holds and is not restated (`6-0005`).
+pub struct WebGpuBarriers {}
+
+impl Barrier<WebGpuBackend, Global> for WebGpuBarriers {
+    fn barrier(mut self) {}
+}
+
+impl Barrier<WebGpuBackend, Shared> for WebGpuBarriers {
+    fn barrier(mut self) {}
+}
+
+// The compute-dispatch entry model (`Dispatch<B>` / `WebGpuTarget` / `WebGpuHost`,
+// design section 2.4) is DEFERRED for owner ratification: it is the one genuinely
+// new library surface in this design (the A6-deferred host-side entry model, a
+// `ContractHost` sibling), flagged ratify-at-review. It is NOT built here. The v1
+// browser demo's JS host implements the `Dispatch` op set (upload/dispatch/
+// readback) op-for-op meanwhile; the interface above is the committed, Fe-checked
+// contract the host mirrors.

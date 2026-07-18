@@ -1,0 +1,268 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/backend_webgpu_anti_conflation.fe
+---
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:34:32
+   │
+34 │ fn takes_arr_14(_ x: [u8; 14]) {}
+   │                                ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:35:32
+   │
+35 │ fn takes_arr_20(_ x: [u8; 20]) {}
+   │                                ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:36:32
+   │
+36 │ fn takes_arr_24(_ x: [u8; 24]) {}
+   │                                ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:37:30
+   │
+37 │ fn takes_arr_8(_ x: [u8; 8]) {}
+   │                              ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:39:47
+   │
+39 │   fn evm_par(x: [u8; EvmBackend::MAX_PAR_LOG2]) {
+   │ ╭───────────────────────────────────────────────^
+40 │ │     takes_arr_14(x)
+41 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:40:5
+   │
+40 │     takes_arr_14(x)
+   │     ^^^^^^^^^^^^ fn takes_arr_14
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:40:5
+   │
+40 │     takes_arr_14(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:40:18
+   │
+40 │     takes_arr_14(x)
+   │                  ^ [u8; 14]
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:43:49
+   │
+43 │   fn wasm_par(x: [u8; WasmBackend::MAX_PAR_LOG2]) {
+   │ ╭─────────────────────────────────────────────────^
+44 │ │     takes_arr_20(x)
+45 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:44:5
+   │
+44 │     takes_arr_20(x)
+   │     ^^^^^^^^^^^^ fn takes_arr_20
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:44:5
+   │
+44 │     takes_arr_20(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:44:18
+   │
+44 │     takes_arr_20(x)
+   │                  ^ [u8; 20]
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:47:47
+   │
+47 │   fn gpu_par(x: [u8; GpuBackend::MAX_PAR_LOG2]) {
+   │ ╭───────────────────────────────────────────────^
+48 │ │     takes_arr_24(x)
+49 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:48:5
+   │
+48 │     takes_arr_24(x)
+   │     ^^^^^^^^^^^^ fn takes_arr_24
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:48:5
+   │
+48 │     takes_arr_24(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:48:18
+   │
+48 │     takes_arr_24(x)
+   │                  ^ [u8; 24]
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:53:53
+   │
+53 │   fn webgpu_par(x: [u8; WebGpuBackend::MAX_PAR_LOG2]) {
+   │ ╭─────────────────────────────────────────────────────^
+54 │ │     takes_arr_8(x)
+55 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:54:5
+   │
+54 │     takes_arr_8(x)
+   │     ^^^^^^^^^^^ fn takes_arr_8
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:54:5
+   │
+54 │     takes_arr_8(x)
+   │     ^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:54:17
+   │
+54 │     takes_arr_8(x)
+   │                 ^ [u8; 8]
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:59:37
+   │
+59 │ fn takes_storptr(_ x: StorPtr<u32>) {}
+   │                                     ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:60:35
+   │
+60 │ fn takes_memptr(_ x: MemPtr<u32>) {}
+   │                                   ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:61:47
+   │
+61 │ fn takes_gpu_global(_ x: GpuRef<u32, Global>) {}
+   │                                               ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:62:53
+   │
+62 │ fn takes_webgpu_global(_ x: WebGpuRef<u32, Global>) {}
+   │                                                     ^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:64:43
+   │
+64 │   fn evm_buffer(x: EvmBackend::Buffer<u32>) {
+   │ ╭───────────────────────────────────────────^
+65 │ │     takes_storptr(x)
+66 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:65:5
+   │
+65 │     takes_storptr(x)
+   │     ^^^^^^^^^^^^^ fn takes_storptr
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:65:5
+   │
+65 │     takes_storptr(x)
+   │     ^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:65:19
+   │
+65 │     takes_storptr(x)
+   │                   ^ StorPtr<u32>
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:68:45
+   │
+68 │   fn wasm_buffer(x: WasmBackend::Buffer<u32>) {
+   │ ╭─────────────────────────────────────────────^
+69 │ │     takes_memptr(x)
+70 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:69:5
+   │
+69 │     takes_memptr(x)
+   │     ^^^^^^^^^^^^ fn takes_memptr
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:69:5
+   │
+69 │     takes_memptr(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:69:18
+   │
+69 │     takes_memptr(x)
+   │                  ^ MemPtr<u32>
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:72:43
+   │
+72 │   fn gpu_buffer(x: GpuBackend::Buffer<u32>) {
+   │ ╭───────────────────────────────────────────^
+73 │ │     takes_gpu_global(x)
+74 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:73:5
+   │
+73 │     takes_gpu_global(x)
+   │     ^^^^^^^^^^^^^^^^ fn takes_gpu_global
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:73:5
+   │
+73 │     takes_gpu_global(x)
+   │     ^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:73:22
+   │
+73 │     takes_gpu_global(x)
+   │                      ^ GpuRef<u32, Global>
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:77:49
+   │
+77 │   fn webgpu_buffer(x: WebGpuBackend::Buffer<u32>) {
+   │ ╭─────────────────────────────────────────────────^
+78 │ │     takes_webgpu_global(x)
+79 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:78:5
+   │
+78 │     takes_webgpu_global(x)
+   │     ^^^^^^^^^^^^^^^^^^^ fn takes_webgpu_global
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:78:5
+   │
+78 │     takes_webgpu_global(x)
+   │     ^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_anti_conflation.fe:78:25
+   │
+78 │     takes_webgpu_global(x)
+   │                         ^ WebGpuRef<u32, Global>

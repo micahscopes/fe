@@ -1,0 +1,65 @@
+// mb2 W3: the RBin<Pair, N> envelope-rejection JEWEL. The principled-interface
+// payoff, in one diagnostic: the type system rejects a fused schedule that exceeds
+// the WebGPU workgroup limit, reusing the A5.2 assoc-const-in-where-predicate
+// machinery (`where <const> <= B::MAX_PAR_LOG2`, cross-ingot, discharged by CTFE).
+//
+// A fused single-dispatch schedule `RBin<Pair, N>` occupies ONE barrier-
+// synchronized workgroup, so its depth `N` (the count of `Comp` phase boundaries;
+// `2^N` parallel leaves) must fit the backend's portable envelope:
+// `where N <= B::MAX_PAR_LOG2`. `WebGpuBackend::MAX_PAR_LOG2` is 8
+// (256 = `maxComputeInvocationsPerWorkgroup`):
+//
+//   fused_schedule<WebGpuBackend, 8>()  -> 8 <= 8  -> holds   (accepted)
+//   fused_schedule<WebGpuBackend, 9>()  -> 9 <= 8  -> refuted (8-0085: the depth-9
+//                                          schedule overflows the WebGPU workgroup)
+//   fused_schedule<GpuBackend, 9>()     -> 9 <= 24 -> holds   (accepted: the SAME
+//                                          schedule fits the native dispatch grid)
+//
+// The contrast is the thesis: `RBin<Pair, 9>` is not intrinsically illegal; it is
+// rejected on `WebGpuBackend` BECAUSE of that backend's own fact
+// (`MAX_PAR_LOG2 = 8`), and accepted on `GpuBackend` (`MAX_PAR_LOG2 = 24`). Backend
+// facts are compiler-checked contracts. The negative (8-0085) is a HARD error on
+// the chosen call, never a silently skipped candidate.
+
+use core::backend::Backend
+use std::gpu::GpuBackend
+use std::webgpu::WebGpuBackend
+
+struct Par {}
+struct Pair {}
+struct Comp<A, B> {
+    a: A,
+    b: B,
+}
+
+recursive type fn RBin<T, const N: usize>() -> (*) {
+    match N {
+        0 => Par
+        _ => Comp<RBin<T, {N - 1}>, T>
+    }
+}
+
+// The kernel/type demands the depth-`N` fused schedule `RBin<Pair, N>` over backend
+// `B`; the envelope predicate ties the schedule depth to the backend's workgroup
+// limit. The body is a type-level stub (`core::panic()`, never-typed): no WebGPU
+// pipeline exists on this branch.
+fn fused_schedule<B: Backend, const N: usize>() -> B::Buffer<RBin<Pair, N>>
+    where N <= B::MAX_PAR_LOG2 {
+    core::panic()
+}
+
+// Depth 8: 2^8 = 256 leaves, exactly the WebGPU portable envelope. Accepted.
+fn schedule_fits() {
+    let _s = fused_schedule<WebGpuBackend, 8>()
+}
+
+// Depth 9: 2^9 = 512 > 256. Refuted on WebGpuBackend (8-0085).
+fn schedule_overflows() {
+    let _s = fused_schedule<WebGpuBackend, 9>()
+}
+
+// The SAME depth-9 schedule fits GpuBackend's native envelope (24). Accepted,
+// proving the rejection is the WebGPU fact talking, not the schedule itself.
+fn same_schedule_fits_native() {
+    let _s = fused_schedule<GpuBackend, 9>()
+}

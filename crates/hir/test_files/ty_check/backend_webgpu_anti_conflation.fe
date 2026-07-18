@@ -1,0 +1,79 @@
+// mb2 W3: FOUR-way anti-conflation over the REAL `core::backend::Backend` trait's
+// four `std` impls (`EvmBackend` / `WasmBackend` / `GpuBackend` / `WebGpuBackend`).
+// W3 adds the fourth mirror; this fixture keeps the anti-conflation matrix
+// non-degenerate in the NEW direction: `WebGpuBackend` and `GpuBackend` are BOTH
+// 32-bit u32 GPU-shaped backends (their `WORD_BITS` and `Word` conflate), yet they
+// must not be confused. The distinguishing WebGPU fact is `MAX_PAR_LOG2 = 8` (the
+// portable 256-invocation workgroup envelope) vs `GpuBackend`'s 24 (the native
+// dispatch grid).
+//
+// Standalone ty_check fixtures link the builtin `core` AND `std` ingots
+// (`new_stand_alone` seeds both), so every projection goes through the real
+// cross-ingot trait, not a test-local one. Zero-diagnostic; the note-dump `.snap`
+// records the four differing normal forms.
+//
+//  1. `MAX_PAR_LOG2` facts, all four distinct (14 / 20 / 24 / 8): each drives a
+//     const-array size, and each acceptor type-checks iff the assoc const resolved
+//     to that backend's OWN value. 8 is the distinguishing WebGPU fact; if
+//     `WebGpuBackend` were conflated with `GpuBackend` (both `WORD_BITS = 32`), the
+//     8-vs-24 array length would mismatch and `webgpu_par` would fail.
+//
+//  2. `Buffer<u32>` GAT projections, all four distinct (`StorPtr` / `MemPtr` /
+//     `GpuRef<_, Global>` / `WebGpuRef<_, Global>`): the two GPU-shaped buffers
+//     (`GpuRef` vs `WebGpuRef`) are the new non-degeneracy the fourth mirror adds.
+
+use core::backend::{Backend, Global}
+use core::{StorPtr, MemPtr}
+use std::evm::EvmBackend
+use std::wasm::WasmBackend
+use std::gpu::{GpuBackend, GpuRef}
+use std::webgpu::{WebGpuBackend, WebGpuRef}
+
+// ---- MAX_PAR_LOG2 facts: 14 / 20 / 24 / 8, all distinct ----
+
+fn takes_arr_14(_ x: [u8; 14]) {}
+fn takes_arr_20(_ x: [u8; 20]) {}
+fn takes_arr_24(_ x: [u8; 24]) {}
+fn takes_arr_8(_ x: [u8; 8]) {}
+
+fn evm_par(x: [u8; EvmBackend::MAX_PAR_LOG2]) {
+    takes_arr_14(x)
+}
+
+fn wasm_par(x: [u8; WasmBackend::MAX_PAR_LOG2]) {
+    takes_arr_20(x)
+}
+
+fn gpu_par(x: [u8; GpuBackend::MAX_PAR_LOG2]) {
+    takes_arr_24(x)
+}
+
+// The distinguishing WebGPU fact: 8 (the portable workgroup envelope), NOT
+// `GpuBackend`'s 24, even though both backends share `WORD_BITS = 32`.
+fn webgpu_par(x: [u8; WebGpuBackend::MAX_PAR_LOG2]) {
+    takes_arr_8(x)
+}
+
+// ---- Buffer<u32> projections: all four distinct ----
+
+fn takes_storptr(_ x: StorPtr<u32>) {}
+fn takes_memptr(_ x: MemPtr<u32>) {}
+fn takes_gpu_global(_ x: GpuRef<u32, Global>) {}
+fn takes_webgpu_global(_ x: WebGpuRef<u32, Global>) {}
+
+fn evm_buffer(x: EvmBackend::Buffer<u32>) {
+    takes_storptr(x)
+}
+
+fn wasm_buffer(x: WasmBackend::Buffer<u32>) {
+    takes_memptr(x)
+}
+
+fn gpu_buffer(x: GpuBackend::Buffer<u32>) {
+    takes_gpu_global(x)
+}
+
+// The two GPU-shaped buffers must not conflate: `WebGpuRef`, not `GpuRef`.
+fn webgpu_buffer(x: WebGpuBackend::Buffer<u32>) {
+    takes_webgpu_global(x)
+}

@@ -2948,3 +2948,120 @@ in-fixture, and the size-8 NTT's three-stage schedule is pinned at ty_check as
 promote the probe NTT to a committed cross-backend `ntt-xbackend` harness with the
 EVM-pinned N1 vectors, the F1/F3 `clifford-xbackend` README wording fixes, and the
 F2 OS-threads race witness folded in as the committed load-bearing demonstration.
+
+## 2026-07-18 - Slice W3: the principled `WebGpuBackend` interface committed [webgpu-design section 2.1 / 2.2 / 2.3 / 2.5]
+
+W3 lands the browser WebGPU backend as a compiler-checked contract: a FOURTH
+`core::backend::Backend` mirror in `std`, riding the exact proven idioms (backend
+facts + `Ref<T, S>` + the `Supports<S>` matrix + the B1/B2 `Atomic`/`Barrier`
+capability + the A5.2 assoc-const-in-where-predicate machinery). No new
+type-system machinery; ingot + fixtures only, zero Rust changed. The v1 browser
+demo's JS host implements this interface's op set by hand until the fe->wasm host
+(V5, owner+Sean gated) exists.
+
+### `ingots/std/src/webgpu.fe` (the interface, design 2.1-2.3 verbatim)
+
+- `pub struct WebGpuBackend {}` with browser-portable FACTS, all distinct from the
+  other three backends: `WORD_BITS = 32`, `OVERFLOW_WRAPS = true`,
+  `MAX_PAR_LOG2 = 8` (the portable 256-invocation workgroup envelope,
+  `maxComputeInvocationsPerWorkgroup`; `2^8` is the widest barrier-synchronized
+  fused-dispatch `Par`), `type Word = u32`. `MAX_PAR_LOG2 = 8` is the
+  DISTINGUISHING WebGPU fact vs `GpuBackend`'s 24 (native dispatch grid): both are
+  32-bit u32 GPU-shaped backends, so this is what keeps them anti-conflated.
+- `pub struct WebGpuRef<T, S> { binding: u32 }`: a bind-group BINDING INDEX (what a
+  WebGPU resource honestly is at the API boundary, not a pointer). `type Buffer<T>
+  = WebGpuRef<T, Global>` (a global-class storage binding, the `GpuRef` posture);
+  `type Ref<T, S> = WebGpuRef<T, S>`.
+- `impl<X> Functor<X> for WebGpuRef<X, Global>` discharging the D1
+  `type Buffer<T>: Functor<T>` bound by substituting `Global` through the GAT RHS;
+  `map` is a `core::panic()` type-level stub (no pipeline lowers it here).
+- The FOUR `Supports<S>` rows: `Global`, `Constant`, `Shared`, `Local`. WebGPU
+  supports all four (unlike EVM/wasm, which lack `Shared`), the second positive
+  `Supports<Shared>` witness in-tree.
+- The marker -> WGSL address-space mapping (design 2.2) recorded as a normative
+  comment table in the module, so the interface is self-documenting:
+  `Global -> var<storage, read_write>` ("storage"/"read-only-storage" binding);
+  `Constant -> var<uniform>` ("uniform", 64 KiB portable limit);
+  `Shared -> var<workgroup>` (module-scope, NOT bindable, no host traffic);
+  `Local -> function-scope var` (invocation-private, not at the boundary). The
+  load-bearing rule stated: only `Global`/`Constant` refs appear in a host-visible
+  kernel signature, and the binding layout derives from the class-typed signature.
+- `WebGpuAtomics` (`Atomic<WebGpuBackend, {Global, Shared}>`, WGSL
+  `atomicAdd`/`atomicExchange`/`atomicCompareExchangeWeak`) and `WebGpuBarriers`
+  (`Barrier<WebGpuBackend, {Global, Shared}>`, WGSL `storageBarrier()` /
+  `workgroupBarrier()`), the B1/B2 idiom, type-level stub bodies (`core::panic()` /
+  no-op) exactly like `GpuAtomics`/`GpuBarriers`. `Constant`/`Local` have no
+  provider anywhere, so the {Global, Shared} gate stays provider-absence, no
+  bespoke check. Wired into `std/src/lib.fe` (`pub use webgpu::{self, *}`).
+
+### `Dispatch<B>` DEFERRED for owner ratification (NOT built)
+
+Design section 2.4 (`Dispatch<B>` compute-dispatch entry model +
+`WebGpuTarget`/`WebGpuHost`, the `ContractHost` sibling) is the ONE genuinely new
+library surface in the design and is flagged ratify-at-review by Fable + the
+design. It is NOT built here; a closing comment in `webgpu.fe` records the
+deferral. The v1 demo's JS host implements the `Dispatch` op set (upload/dispatch/
+readback) op-for-op meanwhile; the committed interface above is the Fe-checked
+contract the host mirrors.
+
+### Fixtures (both new, existing snaps byte-identical)
+
+- `crates/hir/test_files/ty_check/backend_webgpu_anti_conflation.fe` (+ `.snap`):
+  the note-dump FOUR-way anti-conflation. `MAX_PAR_LOG2` facts drive const-array
+  sizes 14/20/24/8 (all four distinct; 8 is the WebGPU fact, distinguishing it
+  from `GpuBackend`'s 24 even though both are `WORD_BITS = 32`); `Buffer<u32>`
+  projections resolve to four distinct reprs `StorPtr`/`MemPtr`/`GpuRef<_, Global>`/
+  `WebGpuRef<_, Global>` (the two GPU-shaped buffers are the new non-degeneracy).
+  Zero-diagnostic; recorded NFs confirm the four backends are not conflated.
+- `crates/uitest/fixtures/ty_check/webgpu_envelope_rejection.fe` (+ `.snap`): the
+  RBin<Pair, 9> rejection JEWEL. The EXACT design predicate discharged with NO
+  fallback:
+
+  ```
+  fn fused_schedule<B: Backend, const N: usize>() -> B::Buffer<RBin<Pair, N>>
+      where N <= B::MAX_PAR_LOG2 { core::panic() }
+  ```
+
+  `fused_schedule<WebGpuBackend, 8>()` accepted (8 <= 8); `fused_schedule<
+  WebGpuBackend, 9>()` REJECTED with `error[8-0085]: const predicate is not
+  satisfied` ("const predicate evaluated to `false` here"); `fused_schedule<
+  GpuBackend, 9>()` accepted (9 <= 24). The SAME `RBin<Pair, 9>` schedule is
+  rejected on WebGPU BECAUSE of its own `MAX_PAR_LOG2 = 8` fact and accepted on the
+  native GPU: backend facts are compiler-checked contracts, in one diagnostic. The
+  `<=` inequality (from `where_const_predicate_adt_wf.fe`) composed cleanly with
+  the assoc-const-in-predicate machinery (from `backend_const_predicate_envelope.fe`),
+  a const-generic param `N` vs a cross-ingot assoc const `B::MAX_PAR_LOG2`,
+  discharged by CTFE at each call under that call's substitution. No new machinery.
+
+### Verify (all foreground; orchestrator owns full release CI)
+
+- `cargo check --workspace` clean (11.2s, no Rust changed).
+- `corelib` ALONE green: `cargo test -p fe-hir --test corelib` 19/19
+  (`analyze_corelib` + `analyze_stdlib`, both debug and release profiles, 161s);
+  core + std build with `WebGpuBackend` wired in.
+- The two new fixtures green (reviewed snapshots): the anti-conflation note-dump
+  records the four distinct NFs; the jewel snap is exactly the single 8-0085 at the
+  WebGpuBackend-depth-9 call, the accepted legs silent.
+- Full `ty_check` suites green, existing snaps BYTE-IDENTICAL (`git status` shows
+  no `.snap` rewritten, only the two new fixtures + their new snaps).
+- `tree_sitter_parse_strict` green: `webgpu.fe` (in `ingots/std/src`, scanned by
+  the strict pass) parses under the tree-sitter grammar with the same constructs
+  as `gpu.fe`; the `recursive type fn` fixtures live in unscanned dirs, so no
+  `EXCLUDED_FILES` change was needed.
+- Rust UNTOUCHED (ingot + fixtures only; no new type-system machinery, no new
+  syntax, no multi-limb). Did NOT push, did NOT run full release CI.
+
+### Deviations
+
+- None on the interface. The RBin<Pair, 9> jewel used the EXACT design predicate
+  `where N <= B::MAX_PAR_LOG2` with no fallback (the probe succeeded first try).
+- `Dispatch<B>`/`WebGpuTarget`/`WebGpuHost` (design 2.4) deliberately NOT built,
+  per the soundness guard: deferred for owner ratification (new surface).
+
+W3 is COMPLETE and green: the browser WebGPU interface is a committed,
+compiler-checked contract (`std::webgpu`), the anti-conflation matrix is four-way
+non-degenerate with `MAX_PAR_LOG2 = 8` as the distinguishing WebGPU fact, and the
+type system rejects a fused `RBin<Pair, 9>` schedule that exceeds the WebGPU
+256-invocation workgroup limit while accepting it on the native GPU. `Dispatch` is
+flagged deferred-for-ratification for Micah. NEXT (owner-gated, not started): the
+2.4 entry-model ratification, then the V5 fe->wasm host and V6 fe-emitted WGSL.
