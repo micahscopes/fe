@@ -16,7 +16,10 @@ use hir::{
             ty_def::{TyData, TyId},
         },
     },
-    hir_def::{Contract, Func, IdentId, InlineHint, ItemKind, ManualContractRootAttr, TopLevelMod},
+    hir_def::{
+        Contract, Func, IdentId, InlineHint, ItemKind, ManualContractRootAttr, TopLevelMod,
+        Visibility,
+    },
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -47,11 +50,12 @@ use crate::{
     runtime::{
         AddressSpaceKind, ConstRegionId, ContractInitAbiPlan, ContractRecvAbiPlan, DispatchArm,
         DispatchDefault, EntryEffectArgPlan, InitArgsPlan, LayoutId, LayoutKey, RefKind, RefView,
-        ResolvedCodeRegion, RuntimeClass, RuntimeCodeRegion, RuntimeCodeRegionKey, RuntimeFunction,
-        RuntimeFunctionOwner, RuntimeInlineHint, RuntimeInputPlan, RuntimeLinkage, RuntimeObject,
-        RuntimePackage, RuntimePackagePlan, RuntimeReturnPlan, RuntimeSection, RuntimeSectionName,
-        RuntimeSectionRef, RuntimeSyntheticSpec, ScalarClass, ScalarRepr, ScalarRole,
-        TargetRootProviderBinding, TargetRootProviderMaterialization,
+        ResolvedCodeRegion, RuntimeBoundarySpec, RuntimeClass, RuntimeCodeRegion,
+        RuntimeCodeRegionKey, RuntimeFunction, RuntimeFunctionOwner, RuntimeInlineHint,
+        RuntimeInputPlan, RuntimeLinkage, RuntimeObject, RuntimePackage, RuntimePackagePlan,
+        RuntimeParamPlan, RuntimeReturnPlan, RuntimeSection, RuntimeSectionName, RuntimeSectionRef,
+        RuntimeSyntheticSpec, ScalarClass, ScalarRepr, ScalarRole, TargetRootProviderBinding,
+        TargetRootProviderMaterialization,
     },
     verify::verify_runtime_package,
 };
@@ -427,6 +431,319 @@ pub fn build_runtime_package<'db>(
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
     Ok(package)
+}
+
+/// The wasm backend's runtime-package builder (R3.4c enabler,
+/// wasm-worker/WebGPU interop doc section 9).
+///
+/// Unlike [`build_runtime_package`] (the EVM path), this admits value-param
+/// carrying `pub` top-level functions of the entry module as reachability
+/// ROOTS, and synthesizes NO root wrapper: the lowered entry functions ARE the
+/// exported objects (the WAFFLE backend exports every bodied function plus
+/// `memory`). It is an ADDITIVE sibling; it does not edit the EVM path, and
+/// `mir` carries no `BackendKind` (the per-backend fork lives at the `Backend`
+/// impls in codegen). The candidate/assembly lines are DUPLICATED from
+/// [`build_runtime_package`] on purpose (interop doc 9.5): factoring a shared
+/// helper would textually churn the EVM-byte-identity-sensitive path.
+///
+/// v0 effect-arg composition (interop doc 9.3): a wasm export root's
+/// host-visible signature is exactly its non-erased VALUE params, in
+/// declaration order; effect bindings contribute ZERO host-visible params. The
+/// surviving synthesized effect-arg set MUST be EMPTY (every effect erases: an
+/// ambient zero-sized provider, or a `with (...)`-established provider inside
+/// the body). A `pub` export root with a surviving (non-erased) effect binding
+/// is REJECTED with a named fail-closed diagnostic (a surviving effect would
+/// give the exported entry an extra parameter the host cannot supply). The
+/// general `WasmExportRoot` wrapper is a deferred extension with no current
+/// customer and is not built here.
+pub fn build_wasm_runtime_package<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+) -> Result<RuntimePackage<'db>, LowerError> {
+    // Contracts fail closed on wasm: no silent EVM-shaped behavior.
+    if !top_mod.all_contracts(db).is_empty()
+        || !discover_manual_contract_roots(db, top_mod)?.is_empty()
+    {
+        return Err(LowerError::Unsupported(
+            "the wasm backend does not support contracts".to_string(),
+        ));
+    }
+
+    let mut funcs = top_mod
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .filter(|func| func.top_mod(db) == top_mod)
+        .filter(|func| !func.is_extern(db) && !is_test_func(db, *func))
+        .collect::<Vec<_>>();
+    funcs.sort_by_key(|func| {
+        func.name(db)
+            .to_opt()
+            .map(|name| name.data(db).to_string())
+            .unwrap_or_default()
+    });
+
+    let mut entry_funcs = Vec::new();
+    let mut rejections = Vec::new();
+    for func in funcs.iter().copied() {
+        match wasm_runtime_root_candidate(db, func)? {
+            RuntimeRootCandidate::Root(func) => entry_funcs.push(func),
+            RuntimeRootCandidate::NotRoot => {}
+            RuntimeRootCandidate::Rejected(rejection) => rejections.push(rejection),
+        }
+    }
+    if let Some(rejection) = rejections
+        .iter()
+        .find(|rejection| is_main_func(db, rejection.func))
+    {
+        return Err(LowerError::Unsupported(format_runtime_root_rejection(
+            db, rejection,
+        )));
+    }
+    if entry_funcs.is_empty() {
+        if let Some(rejection) = rejections.first() {
+            return Err(LowerError::Unsupported(format_runtime_root_rejection(
+                db, rejection,
+            )));
+        }
+        return Ok(RuntimePackage::new(
+            db,
+            top_mod,
+            Vec::new(),
+            RuntimePackagePlan::new(db, Vec::new(), Vec::new(), Vec::new(), Vec::new(), None),
+        ));
+    }
+
+    // ENTRY-ONLY root seeding (interop doc 9, amended). Seed as roots only the
+    // admitted candidates that are NOT reachable as a callee within the entry
+    // ingot. A candidate reachable as a callee already materializes exactly once
+    // as its callee instance, bare-named via the export-everything policy (the
+    // R1 status quo). Seeding it as a root too would mint a SECOND, scope-only-
+    // distinct instance (the root uses the function's own `impl_env` scope; the
+    // callee uses the caller's) and collide its export symbol, mangling both.
+    // The reachability is an additive read-only pre-pass over the candidates'
+    // semantic call graph; no existing function is touched.
+    let reachable_as_callee = wasm_candidates_reachable_as_callee(db, top_mod, &entry_funcs)?;
+    let seed_funcs = entry_funcs
+        .iter()
+        .copied()
+        .filter(|func| !reachable_as_callee.contains(func))
+        .collect::<Vec<_>>();
+    // Mutual-recursion corollary: if every admitted candidate is a callee of
+    // another, the seed set is empty. There is no export entry then; fail closed
+    // naming the rule rather than emit an empty module.
+    if seed_funcs.is_empty() {
+        return Err(LowerError::Unsupported(
+            "the wasm backend found no export root: every `pub` top-level function of \
+             the entry module is reachable as a callee of another (mutually recursive \
+             `pub` entries exclude each other under entry-only root seeding). Provide at \
+             least one `pub` entry function that is not called by another `pub` entry"
+                .to_string(),
+        ));
+    }
+
+    // Seeded roots synthesize NO `MainRoot` wrapper: each lowered function IS its
+    // own export. The object's section entry is a real function instance (the
+    // verifier only requires a declared package function, interop doc 9.1), not a
+    // NeverReturns wrapper.
+    //
+    // The export receives its value params DIRECTLY as wasm function arguments
+    // (the host passes them), so each visible value param is classed by its
+    // by-value TRANSPORT representation (from its `RuntimeParamPlan`), not by the
+    // EVM entry ABI's in-memory representation. `runtime_instance_for_semantic`'s
+    // default classes an entry param as a memory reference (calldata-in-memory),
+    // whose body reads it with a `load`; on wasm the export instead takes the
+    // scalar/pointer directly (u64 -> i64, `MemPtr<B::Word>` -> i32). This is a
+    // per-backend ABI fact (interop doc 8 packet item c), applied via the additive
+    // override hook, not by editing the EVM path.
+    let mut package_roots = Vec::new();
+    let mut main_root = None;
+    for func in seed_funcs.iter().copied() {
+        let semantic = semantic_instance_for_root_owner(db, BodyOwner::Func(func))?;
+        let instance = runtime_instance_for_semantic_with_visible_param_overrides(
+            db,
+            semantic,
+            wasm_export_param_class,
+        );
+        if is_main_func(db, func) {
+            main_root = Some(instance);
+        }
+        package_roots.push(instance);
+    }
+    let entry = main_root.unwrap_or(package_roots[0]);
+    let package = build_non_contract_package(
+        db,
+        top_mod,
+        package_roots,
+        vec![(sanitize_object_name("main"), RuntimeSectionName::Main, entry)],
+        Some("main"),
+    )?;
+    verify_runtime_package(db, package)
+        .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
+    Ok(package)
+}
+
+/// Entry-only root seeding pre-pass (interop doc 9, amended): the subset of the
+/// admitted `candidates` that are reachable AS A CALLEE within the entry module,
+/// i.e. the target of a call edge in the transitive semantic call graph rooted at
+/// the candidates. Such a candidate materializes exactly once as its callee
+/// instance (bare-named via export-everything, the R1 status quo); seeding it as
+/// a root too would mint a second, scope-only-distinct instance and collide its
+/// export symbol.
+///
+/// The traversal follows semantic call edges but stays WITHIN the entry module
+/// (`func.top_mod(db) == top_mod`): a candidate is a top-level function of the
+/// entry module, and inter-candidate calls (directly, or through the module's
+/// private helpers) live there; library callees never call back into an entry
+/// candidate, so pruning at the module boundary is both correct and bounds the
+/// walk. This is an additive, read-only query; no existing function is touched.
+fn wasm_candidates_reachable_as_callee<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    candidates: &[Func<'db>],
+) -> Result<FxHashSet<Func<'db>>, LowerError> {
+    let candidate_set: FxHashSet<Func<'db>> = candidates.iter().copied().collect();
+    let mut reachable_as_callee = FxHashSet::default();
+    let mut visited: FxHashSet<SemanticInstance<'db>> = FxHashSet::default();
+    let mut stack: Vec<SemanticInstance<'db>> = Vec::new();
+    for func in candidates.iter().copied() {
+        // Every candidate already passed `root_semantic_instance_key` in
+        // `wasm_runtime_root_candidate`, so this cannot fail here.
+        let key = root_semantic_instance_key(db, BodyOwner::Func(func)).map_err(|err| {
+            LowerError::Unsupported(format!(
+                "wasm export-root reachability pre-pass: {}",
+                format_root_semantic_instance_rejection(db, &func_display_name(db, func), &err),
+            ))
+        })?;
+        let semantic = get_or_build_semantic_instance(db, key);
+        if visited.insert(semantic) {
+            stack.push(semantic);
+        }
+    }
+    while let Some(semantic) = stack.pop() {
+        for callee in semantic.callees(db) {
+            let callee_key = callee.key;
+            let BodyOwner::Func(callee_func) = callee_key.owner(db) else {
+                continue;
+            };
+            if callee_func.top_mod(db) != top_mod {
+                continue;
+            }
+            if candidate_set.contains(&callee_func) {
+                reachable_as_callee.insert(callee_func);
+            }
+            let callee_semantic = get_or_build_semantic_instance(db, callee_key);
+            if visited.insert(callee_semantic) {
+                stack.push(callee_semantic);
+            }
+        }
+    }
+    Ok(reachable_as_callee)
+}
+
+/// The wasm sibling of [`runtime_root_candidate`] (interop doc 9.2/9.3). Unlike
+/// the EVM candidate it ADMITS value-param-carrying functions as roots (the host
+/// passes the value params to the exported entry). Admission requires: `pub` and
+/// non-associated (checked here); non-extern/non-test and top-level (filtered by
+/// the caller); the same two semantic checks the EVM path applies (a monomorphic
+/// effect-concrete `root_semantic_instance_key`, and `entry_effect_arg_plans`
+/// succeeds); PLUS the v0 effect-erasure requirement of 9.3 (the synthesized
+/// effect-arg set is EMPTY and no interface param derives from an effect
+/// binding). The filter lines DUPLICATE `runtime_root_candidate` on purpose: the
+/// EVM path stays textually untouched (interop doc 9.5).
+fn wasm_runtime_root_candidate<'db>(
+    db: &'db dyn MirDb,
+    func: Func<'db>,
+) -> Result<RuntimeRootCandidate<'db>, LowerError> {
+    // Only `pub`, non-associated functions are export roots. Value params are
+    // ADMITTED (the enabler): there is no `func.params(db).next()` gate here.
+    if func.vis(db) != Visibility::Public || func.is_associated_func(db) {
+        return Ok(RuntimeRootCandidate::NotRoot);
+    }
+    let semantic = match root_semantic_instance_key(db, BodyOwner::Func(func)) {
+        Ok(key) => get_or_build_semantic_instance(db, key),
+        Err(err) => {
+            return Ok(RuntimeRootCandidate::Rejected(RuntimeRootRejection {
+                func,
+                reason: RuntimeRootRejectionReason::RootSemanticInstance(err),
+            }));
+        }
+    };
+    let entry_effect_args =
+        match entry_effect_arg_plans(db, EntryEffectContext::StandaloneFunc { func }, semantic) {
+            Ok(plans) => plans,
+            Err(err) => {
+                return Ok(RuntimeRootCandidate::Rejected(RuntimeRootRejection {
+                    func,
+                    reason: RuntimeRootRejectionReason::UnsupportedEntryEffect(err.to_string()),
+                }));
+            }
+        };
+    // v0 (9.3): the surviving synthesized effect-arg set MUST be EMPTY and no
+    // interface param may derive from an effect binding, so the exported
+    // signature is exactly the function's value params and NO wrapper is needed
+    // (`synthetic.rs` `build_root_call` is unreachable on the wasm path). A
+    // surviving effect binding would give the exported entry an extra parameter
+    // the host cannot supply: fail closed with the named rule.
+    if !entry_effect_args.is_empty() || wasm_root_has_surviving_effect_param(db, semantic) {
+        return Ok(RuntimeRootCandidate::Rejected(RuntimeRootRejection {
+            func,
+            reason: RuntimeRootRejectionReason::UnsupportedEntryEffect(format!(
+                "function `{}` cannot be a wasm export root because it has a surviving \
+                 (non-erased) effect parameter; wasm export roots must have fully-erased \
+                 effect parameters. Establish providers with `with (...)` inside the body, \
+                 or use an ambient zero-sized provider",
+                func_display_name(db, func),
+            )),
+        }));
+    }
+    Ok(RuntimeRootCandidate::Root(func))
+}
+
+/// Part (b) of the 9.3 v0 rule: does any owner effect binding SURVIVE erasure
+/// into the function's runtime interface signature? `runtime_visible_binding_plans`
+/// lists only non-erased bindings, so an owner effect binding present there is a
+/// non-erased effect INTERFACE param, and the exported entry would carry an
+/// extra host-visible parameter the caller cannot supply.
+fn wasm_root_has_surviving_effect_param<'db>(
+    db: &'db dyn MirDb,
+    semantic: SemanticInstance<'db>,
+) -> bool {
+    let owner = semantic.key(db).owner(db);
+    let effect_bindings = owner_effect_bindings(db, owner);
+    if effect_bindings.is_empty() {
+        return false;
+    }
+    runtime_visible_binding_plans(db, semantic).iter().any(|entry| {
+        effect_bindings
+            .iter()
+            .any(|binding| same_owner_effect_binding(entry.binding, *binding))
+    })
+}
+
+/// The by-value TRANSPORT class of a wasm export root's visible value param:
+/// the representation the host passes directly as a wasm function argument
+/// (u64 -> i64 scalar; `MemPtr<B::Word>` -> the memory-provider ref the wasm
+/// lowerer represents as i32). This mirrors the class a caller passing the same
+/// value would use (a param's `RuntimeParamPlan` boundary), so the exported
+/// entry's body consumes the argument directly instead of the EVM entry ABI's
+/// `load`-through-a-memory-reference. Params whose plan is not a direct exact
+/// boundary (borrow/view/abstract) get `None` here and fall back to the default
+/// class, which fails closed downstream in the wasm lowerer if it is reached
+/// (out of the R1/keystone envelope). Effect params never reach this hook: an
+/// admitted wasm root has none that survive erasure.
+fn wasm_export_param_class<'db>(
+    entry: &RuntimeVisibleBindingPlan<'db>,
+) -> Option<RuntimeClass<'db>> {
+    match &entry.plan {
+        RuntimeParamPlan::Boundary(
+            RuntimeBoundarySpec::ExactTransport(class) | RuntimeBoundarySpec::ExactShape(class),
+        ) => Some(class.clone()),
+        RuntimeParamPlan::Erased
+        | RuntimeParamPlan::Boundary(RuntimeBoundarySpec::BorrowLike { .. })
+        | RuntimeParamPlan::ReadOnlyView { .. }
+        | RuntimeParamPlan::PassActual => None,
+    }
 }
 
 pub fn build_test_runtime_package<'db>(
@@ -3003,3 +3320,5 @@ pub contract NoInitBox {}
         );
     }
 }
+
+
