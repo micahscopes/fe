@@ -144,6 +144,26 @@ pub fn lower_to_rmir<'db>(
     Ok(emitter.finish(signature))
 }
 
+/// A non-builtin `extern` function reached as a call target: it has no Fe body,
+/// and none of the recognized-builtin lowerings apply, so it is a
+/// DECLARED-EXTERNAL runtime function (a host import on the wasm target). Returns
+/// the `Func` when `semantic` is exactly such a declaration.
+///
+/// EVM byte-identity: EVM `extern`s are all recognized builtins
+/// (`runtime_builtin_func_kind` is `Some` for them, e.g. `sstore`/`keccak256`/
+/// `__div_u64`), so this returns `None` for every EVM extern and the EVM lowering
+/// path is untouched. Only a genuinely unrecognized `extern` (a portable host
+/// import, e.g. `host_add`) matches.
+pub(crate) fn declared_external_func<'db>(
+    db: &'db dyn MirDb,
+    semantic: SemanticInstance<'db>,
+) -> Option<Func<'db>> {
+    let BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+        return None;
+    };
+    (func.is_extern(db) && runtime_builtin_func_kind(db, func).is_none()).then_some(func)
+}
+
 fn check_runtime_body_supported<'db>(
     db: &'db dyn MirDb,
     key: SemanticInstanceKey<'db>,

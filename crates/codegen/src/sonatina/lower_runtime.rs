@@ -4630,6 +4630,11 @@ pub(super) fn linkage_for_runtime(linkage: RuntimeLinkage) -> Linkage {
     match linkage {
         RuntimeLinkage::Private => Linkage::Private,
         RuntimeLinkage::Internal => Linkage::Public,
+        // A declared-external (non-builtin `extern`) runtime function: no body,
+        // defined outside the module. On the wasm path the WAFFLE backend turns
+        // this into a `("fe", <symbol>)` host import (R3.1 pass-0). Not reached on
+        // the EVM path (EVM externs are all recognized builtins).
+        RuntimeLinkage::External => Linkage::External,
     }
 }
 

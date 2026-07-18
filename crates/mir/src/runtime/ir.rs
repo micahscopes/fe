@@ -799,6 +799,11 @@ pub struct RuntimeFunction<'db> {
 pub enum RuntimeLinkage {
     Private,
     Internal,
+    /// The symbol is declared here but DEFINED OUTSIDE the module: a non-builtin
+    /// `extern` function reached from a portable (wasm) unit. It carries no body
+    /// and lowers to a Sonatina `Linkage::External`, which the WAFFLE backend
+    /// turns into a wasm host import. Not used on the EVM path.
+    External,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]

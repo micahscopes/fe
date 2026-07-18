@@ -70,6 +70,24 @@ fn instantiate(bytes: &[u8]) -> (wasmtime::Store<()>, wasmtime::Instance) {
     (store, instance)
 }
 
+/// Collect the `(module, name)` of every function import in the emitted wasm,
+/// scanned from the bytes with `wasmparser` (asserted, not assumed).
+fn func_imports(bytes: &[u8]) -> Vec<(String, String)> {
+    use wasmparser::{Payload, TypeRef};
+    let mut imports = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let Payload::ImportSection(reader) = payload.expect("valid wasm payload") {
+            for import in reader.into_imports() {
+                let import = import.expect("valid import entry");
+                if let TypeRef::Func(_) = import.ty {
+                    imports.push((import.module.to_string(), import.name.to_string()));
+                }
+            }
+        }
+    }
+    imports
+}
+
 /// THE MILESTONE: `#[target(wasm)] pub fn add(a, b) -> a + b`, compiled Fe ->
 /// wasm, executed under wasmtime, add(2, 3) == 5, and equal to the EVM twin.
 #[test]
@@ -142,6 +160,64 @@ fn fe_sum_to_loop_runs_on_wasm() {
             "sum_to({n}) should be {expected}"
         );
     }
+}
+
+/// R3.2 THE MILESTONE: a Fe `extern` host function becomes a real wasm import.
+///
+/// `extern { pub unsafe fn host_add(a, b) -> u64 }` is a non-builtin extern (no
+/// Fe body, not a recognized runtime builtin), so it lowers to a DECLARED-
+/// EXTERNAL runtime function with `Linkage::External` and no body, which the
+/// WAFFLE backend (R3.1 pass-0) emits as a `("fe", "host_add")` wasm import.
+/// `use_host` calls it; wasmtime satisfies the import through a `Linker` stub.
+/// Because `host_add` has no body, the only way `use_host`/`main` can run at all
+/// is via the emitted import, so a passing run proves the import path end to end.
+#[test]
+fn fe_extern_host_import_runs_on_wasm() {
+    let source = "extern {\n\
+                  \x20   pub unsafe fn host_add(a: u64, b: u64) -> u64\n\
+                  }\n\
+                  pub fn use_host(a: u64, b: u64) -> u64 { host_add(a, b) }\n\
+                  pub fn main() -> u64 { use_host(2, 3) }\n";
+
+    let wasm = compile_to_wasm("wasm_host_import.fe", source);
+
+    // Scan the emitted bytes: the ("fe", "host_add") func import must be present.
+    let imports = func_imports(&wasm);
+    assert!(
+        imports.contains(&("fe".to_string(), "host_add".to_string())),
+        "expected a (\"fe\", \"host_add\") func import in the emitted wasm, found {imports:?}"
+    );
+
+    // Instantiate through a Linker that satisfies the import with a stub
+    // (host_add(a, b) = a + b). The plain empty-imports `Instance::new` path used
+    // by the other R1 tests cannot instantiate this module: it has an import.
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker
+        .func_wrap("fe", "host_add", |a: u64, b: u64| a + b)
+        .expect("binding the ('fe','host_add') host stub should succeed");
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("wasmtime should instantiate with the host import satisfied");
+
+    // use_host(a, b) calls the host import; the stub returns a + b.
+    let use_host = instance
+        .get_typed_func::<(u64, u64), u64>(&mut store, "use_host")
+        .expect("`use_host` export should exist");
+    assert_eq!(
+        use_host.call(&mut store, (2, 3)).unwrap(),
+        5,
+        "use_host(2, 3) should call the host import and return 5"
+    );
+    assert_eq!(use_host.call(&mut store, (40, 2)).unwrap(), 42);
+
+    // main() calls use_host(2, 3) internally, which calls the host import.
+    let main = instance
+        .get_typed_func::<(), u64>(&mut store, "main")
+        .expect("`main` export should exist");
+    assert_eq!(main.call(&mut store, ()).unwrap(), 5, "main() should be 5");
 }
 
 /// A two-function call pair compiled Fe -> wasm: `apply` calls `add`.

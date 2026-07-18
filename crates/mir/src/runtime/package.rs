@@ -28,7 +28,7 @@ use crate::{
         get_or_build_runtime_instance,
     },
     runtime::code_region::{code_region_symbol, runtime_code_region_for_manual_root},
-    runtime::lower::body::check_reachable_runtime_trait_calls_resolvable,
+    runtime::lower::body::{check_reachable_runtime_trait_calls_resolvable, declared_external_func},
     runtime::lower::classify::{
         RuntimeVisibleBindingPlan, runtime_effect_binding_plan, runtime_param_class,
         runtime_visible_binding_class,
@@ -1911,15 +1911,27 @@ fn runtime_function_for_instance<'db>(
     referenced_const_regions: Vec<ConstRegionId<'db>>,
 ) -> RuntimeFunction<'db> {
     match instance.key(db).source(db) {
-        RuntimeInstanceSource::Semantic(semantic) => make_runtime_function(
-            db,
-            instance,
-            symbol,
-            RuntimeLinkage::Private,
-            inline_hint_for_semantic(db, semantic),
-            RuntimeFunctionOwner::Semantic(semantic),
-            referenced_const_regions,
-        ),
+        RuntimeInstanceSource::Semantic(semantic) => {
+            // A non-builtin `extern` is a DECLARED-EXTERNAL runtime function (no
+            // body, defined outside the module): the wasm backend turns it into a
+            // `("fe", <symbol>)` host import. Every other semantic function is a
+            // locally-defined `Private` symbol (byte-identical to before; EVM
+            // externs are recognized builtins, never declared-external here).
+            let linkage = if declared_external_func(db, semantic).is_some() {
+                RuntimeLinkage::External
+            } else {
+                RuntimeLinkage::Private
+            };
+            make_runtime_function(
+                db,
+                instance,
+                symbol,
+                linkage,
+                inline_hint_for_semantic(db, semantic),
+                RuntimeFunctionOwner::Semantic(semantic),
+                referenced_const_regions,
+            )
+        }
         RuntimeInstanceSource::Synthetic(synthetic) => {
             let spec = synthetic.spec(db).clone();
             let inline_hint = match &spec {
