@@ -4,7 +4,9 @@ pub mod runtime;
 pub mod verify;
 
 pub use db::MirDb;
-pub use instance::{RuntimeInstance, RuntimeInstanceKey, get_or_build_runtime_instance};
+pub use instance::{
+    RuntimeInstance, RuntimeInstanceKey, get_or_build_runtime_instance, wasm_import_module,
+};
 pub use runtime::{
     AddressSpaceKind, ArrayLayout, BorrowAccess, BorrowTransportSet, ConstNode, ConstRegion,
     ConstRegionId, ConstScalar, ContractFieldSlot, EnumLayout, EnumVariantLayout,

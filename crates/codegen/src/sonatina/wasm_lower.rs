@@ -23,11 +23,13 @@
 //! locals in this subset are value-carried (`RuntimeLocalRoot::None`); any
 //! address-taken (`Slot`) local is out of R1 scope and fails closed.
 
+use std::collections::HashMap;
+
 use driver::DriverDataBase;
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp};
 use mir::{
     ConstScalar, IntrinsicArithBinOp, RBlockId, RExpr, RLocalId, RStmt, RTerminator, RuntimeBody,
-    RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInstance,
+    RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage,
     RuntimeLocalRoot, RuntimePackage, ScalarClass,
 };
 use rustc_hash::FxHashMap;
@@ -62,17 +64,21 @@ pub(crate) fn create_wasm32_isa() -> Wasm32 {
 
 /// Lower a MIR runtime package to a Sonatina IR `Module` built under the Wasm32
 /// ISA. The resulting module is handed to the Sonatina WAFFLE backend to emit
-/// wasm bytes.
+/// wasm bytes. The second return value is the symbol -> wasm-import-module side
+/// table (R3.3): the WAFFLE backend consults it to name each external
+/// declaration's import module, defaulting to the flat `"fe"` convention for
+/// symbols it does not list.
 pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
-) -> Result<Module, LowerError> {
+) -> Result<(Module, HashMap<String, String>), LowerError> {
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
     let mut lowerer = WasmModuleLowerer::new(db, builder, &isa, package);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
-    Ok(lowerer.finish())
+    let import_modules = lowerer.import_modules();
+    Ok((lowerer.finish(), import_modules))
 }
 
 struct WasmModuleLowerer<'db, 'a> {
@@ -103,6 +109,27 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
 
     fn finish(self) -> Module {
         self.builder.build()
+    }
+
+    /// The symbol -> wasm-import-module side table for external declarations
+    /// (R3.3). Each non-builtin `extern` whose block carries
+    /// `#[wasm_import(module = "...")]` maps its Sonatina symbol (which becomes
+    /// the import's field name) to that module string. Attribute-less externs are
+    /// omitted, so the WAFFLE backend falls back to the flat `"fe"` convention for
+    /// them. Keyed by the same symbol the lowering assigns, so it matches the
+    /// import name the backend reads.
+    fn import_modules(&self) -> HashMap<String, String> {
+        let mut modules = HashMap::new();
+        for function in self.package.functions(self.db) {
+            if function.linkage(self.db) != RuntimeLinkage::External {
+                continue;
+            }
+            let instance = function.instance(self.db);
+            if let Some(module) = mir::wasm_import_module(self.db, instance) {
+                modules.insert(self.function_symbol(instance), module);
+            }
+        }
+        modules
     }
 
     fn function_symbol(&self, instance: RuntimeInstance<'db>) -> String {

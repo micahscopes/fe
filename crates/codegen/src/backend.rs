@@ -223,8 +223,9 @@ impl Backend for WasmBackend {
         use sonatina_codegen::isa::wasm::WasmBackend as SonatinaWasmBackend;
 
         let package = mir::build_runtime_package(db, top_mod)?;
-        let module = crate::sonatina::compile_runtime_package_wasm(db, &package)?;
+        let (module, import_modules) = crate::sonatina::compile_runtime_package_wasm(db, &package)?;
         let artifact = SonatinaWasmBackend::new()
+            .with_import_modules(import_modules)
             .compile_module(&module)
             .map_err(|errors| {
                 BackendError::Sonatina(format!(

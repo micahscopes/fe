@@ -128,6 +128,24 @@ pub fn get_or_build_runtime_instance<'db>(
     RuntimeInstance::new(db, key)
 }
 
+/// The wasm import MODULE for a runtime function, from the
+/// `#[wasm_import(module = "...")]` attribute (R3.3) on its `extern` block, if
+/// present and well-formed. `None` for a locally-defined function, an
+/// attribute-less `extern`, or a synthetic instance; the wasm backend then falls
+/// back to the flat `"fe"` v0 import-module convention. Only a DECLARED-EXTERNAL
+/// (non-builtin `extern`) function can carry a module. EVM externs are recognized
+/// builtins, so `declared_external_func` returns `None` for them and this stays
+/// `None` (never consulted on the EVM path anyway).
+pub fn wasm_import_module<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> Option<String> {
+    let RuntimeInstanceSource::Semantic(semantic) = instance.key(db).source(db) else {
+        return None;
+    };
+    let func = declared_external_func(db, semantic)?;
+    hir::hir_def::ItemKind::Func(func)
+        .attrs(db)?
+        .wasm_import_module(db)
+}
+
 /// Materialize a DECLARED-EXTERNAL runtime function (a non-builtin `extern`,
 /// which the wasm backend emits as a `("fe", <symbol>)` host import): its
 /// signature only, no body. Fails closed if any parameter or the return type is

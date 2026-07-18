@@ -33,6 +33,13 @@ pub(super) enum AttrForm {
         allow_bare: bool,
         allowed_args: &'static [&'static str],
     },
+    /// Exactly one arg of the shape `<key> = "<string literal>"`, e.g.
+    /// `#[wasm_import(module = "fe:host")]`. Unlike `SingleArg` (keyword-only),
+    /// this REQUIRES a string-literal value; a non-string value or the wrong key
+    /// is an invalid form (R3.3).
+    KeyStrArg {
+        key: &'static str,
+    },
 }
 
 impl AttrForm {
@@ -55,6 +62,18 @@ impl AttrForm {
                         .key
                         .as_ref()
                         .is_some_and(|key| allowed_args.contains(&key.as_str()))
+            }
+            Self::KeyStrArg { key } => {
+                if attr.value.is_some() || !attr.has_args || attr.args.len() != 1 {
+                    return false;
+                }
+                let arg = &attr.args[0];
+                arg.key.as_deref() == Some(key)
+                    && matches!(
+                        &arg.value,
+                        Some(ast::AttrArgValueKind::Lit(lit))
+                            if matches!(lit.kind(), ast::LitKind::String(_))
+                    )
             }
         }
     }
@@ -284,6 +303,34 @@ fn report_attr_misuse<'db>(
         item_name: target.name,
     }
     .accumulate(db);
+}
+
+/// Lower a func's own attributes, PREPENDING any occurrences of `name` from an
+/// enclosing block's attribute list. Used for `#[wasm_import(...)]` on an
+/// `extern` block, which has no HIR node of its own (R3.3): the attribute
+/// logically applies to each `extern fn` inside, so it is propagated onto every
+/// inner `Func` (mirroring `#[link(wasm_import_module)]`, which is per-symbol).
+/// Only the named attribute is propagated; other block-level attributes are not
+/// (they are diagnosed on the block itself). With no matching block attribute
+/// this is identical to lowering the func's own attributes alone.
+pub(super) fn lower_attrs_with_propagated_named<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    own: Option<ast::AttrList>,
+    block: Option<ast::AttrList>,
+    name: &str,
+) -> AttrListId<'db> {
+    let mut attrs: Vec<Attr<'db>> = Vec::new();
+    for attr in block.into_iter().flatten() {
+        let is_named =
+            matches!(attr.kind(), ast::AttrKind::Normal(ref normal) if normal.is_named(name));
+        if is_named {
+            attrs.push(Attr::lower_ast(ctxt, attr));
+        }
+    }
+    for attr in own.into_iter().flatten() {
+        attrs.push(Attr::lower_ast(ctxt, attr));
+    }
+    AttrListId::new(ctxt.db(), attrs)
 }
 
 pub(super) fn lower_attrs_without_named<'db>(

@@ -1,0 +1,14 @@
+#[wasm_import(module = 42)]
+extern {
+    pub unsafe fn bad_module_value(a: u64) -> u64
+}
+
+#[wasm_import]
+extern {
+    pub unsafe fn bare_attr(a: u64) -> u64
+}
+
+#[wasm_import(namespace = "fe:host")]
+extern {
+    pub unsafe fn wrong_key(a: u64) -> u64
+}

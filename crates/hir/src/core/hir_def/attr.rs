@@ -375,6 +375,20 @@ impl<'db> AttrListId<'db> {
             .last()
     }
 
+    /// The wasm import MODULE named by an `#[wasm_import(module = "...")]`
+    /// attribute (R3.3), if present and well-formed. An `extern` block names its
+    /// host-import namespace this way (arch 4.2, precedent
+    /// `#[link(wasm_import_module)]`); the string threads to the emitted wasm
+    /// import's module field so the import lands as `(<module>, <fn name>)`
+    /// instead of the flat v0 `("fe", <fn name>)`. A missing, malformed, or empty
+    /// module string yields `None`, and the backend falls back to the `"fe"`
+    /// convention (an empty string is rejected here to match the lowering-time
+    /// `InvalidForm` diagnostic).
+    pub fn wasm_import_module(self, db: &'db dyn HirDb) -> Option<String> {
+        let module = self.get_attr(db, "wasm_import")?.str_arg(db, "module")?;
+        (!module.is_empty()).then_some(module)
+    }
+
     pub fn inline_attr(self, db: &'db dyn HirDb) -> Option<InlineAttr> {
         match parse_inline_attr_specs(self.data(db).iter().filter_map(|attr| {
             let Attr::Normal(normal_attr) = attr else {
@@ -489,6 +503,25 @@ impl<'db> NormalAttr<'db> {
             match &arg.value {
                 Some(AttrArgValue::Lit(super::LitKind::Int(int_id))) => {
                     Some(int_id.data(db).clone())
+                }
+                _ => None,
+            }
+        })
+    }
+
+    /// Returns the string value for an attribute argument with the given key.
+    ///
+    /// For example, `#[wasm_import(module = "fe:host")]` with key `"module"`
+    /// returns `Some("fe:host")` (surrounding quotes are already stripped in HIR).
+    pub fn str_arg(&self, db: &'db dyn HirDb, key: &str) -> Option<String> {
+        self.args.iter().find_map(|arg| {
+            let ident = arg.key.to_opt().and_then(|p| p.as_ident(db))?;
+            if ident.data(db) != key {
+                return None;
+            }
+            match &arg.value {
+                Some(AttrArgValue::Lit(super::LitKind::String(string_id))) => {
+                    Some(string_id.data(db).clone())
                 }
                 _ => None,
             }

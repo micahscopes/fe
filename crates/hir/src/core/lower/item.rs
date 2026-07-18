@@ -3,7 +3,10 @@ use salsa::Accumulator as _;
 
 use super::{
     FileLowerCtxt,
-    attr::{AttrForm, AttrRule, AttrTarget, report_unsupported_attr, validate_attr_rules},
+    attr::{
+        AttrForm, AttrRule, AttrTarget, lower_attrs_with_propagated_named, report_unsupported_attr,
+        validate_attr_rules,
+    },
 };
 use crate::{
     hir_def::{
@@ -80,10 +83,12 @@ const UNROLL_FORM: AttrForm = AttrForm::SingleArg {
     allowed_args: &["never"],
 };
 const BARE_FORM: AttrForm = AttrForm::Bare;
+const WASM_IMPORT_FORM: AttrForm = AttrForm::KeyStrArg { key: "module" };
 
 const ARITHMETIC_EXPECTED: &str = "`#[arithmetic(checked)]` or `#[arithmetic(unchecked)]`";
 const INLINE_EXPECTED: &str = "`#[inline]`, `#[inline(always)]`, or `#[inline(never)]`";
 const MUST_USE_EXPECTED: &str = "`#[must_use]`";
+const WASM_IMPORT_EXPECTED: &str = "`#[wasm_import(module = \"...\")]`";
 
 const ARITHMETIC_TARGETS: &str = "functions and modules";
 const EVENT_TARGETS: &str = "structs";
@@ -93,6 +98,7 @@ const DEFAULT_TARGETS: &str = super::derive::DEFAULT_ATTR_TARGETS;
 const MUST_USE_TARGETS: &str = "functions, structs, and enums";
 const PAYABLE_TARGETS: &str = "init blocks and recv arms";
 const INDEXED_TARGETS: &str = "event fields";
+const WASM_IMPORT_TARGETS: &str = "extern blocks";
 
 fn target(kind: &'static str, name: Option<String>) -> AttrTarget {
     AttrTarget::new(kind, name)
@@ -114,6 +120,7 @@ fn validate_mod_attrs<'db>(
             AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
         ],
     );
 }
@@ -130,6 +137,7 @@ pub(super) fn validate_module_inner_attrs<'db>(
             AttrRule::supported("arithmetic", ARITHMETIC_FORM, ARITHMETIC_EXPECTED),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
         ],
     );
 }
@@ -158,6 +166,7 @@ fn validate_func_attrs<'db>(
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
         ],
     );
 }
@@ -177,6 +186,7 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported("error", BARE_FORM, "`#[error]`"),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
             AttrRule::unsupported("default", DEFAULT_TARGETS),
         ],
     );
@@ -197,6 +207,7 @@ fn validate_enum_attrs<'db>(
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
             // `#[default]` marks a variant, not the enum itself.
             AttrRule::unsupported("default", DEFAULT_TARGETS),
         ],
@@ -220,6 +231,33 @@ fn validate_unsupported_item_attrs<'db>(
             AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+        ],
+    );
+}
+
+/// Validate the attributes on an `extern` BLOCK. `#[wasm_import(module = "...")]`
+/// (R3.3) is the one attribute supported here; it names the wasm import module
+/// for every `extern fn` in the block. Everything else is unsupported, matching
+/// `validate_unsupported_item_attrs` (which governed the extern block before
+/// this attribute existed).
+fn validate_extern_attrs<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    attrs: Option<ast::AttrList>,
+    name: Option<String>,
+) {
+    validate_attr_rules(
+        ctxt,
+        attrs,
+        target("extern", name),
+        &[
+            AttrRule::supported("wasm_import", WASM_IMPORT_FORM, WASM_IMPORT_EXPECTED),
+            AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
+            AttrRule::unsupported("event", EVENT_TARGETS),
+            AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::unsupported("derive", DERIVE_TARGETS),
+            AttrRule::unsupported("must_use", MUST_USE_TARGETS),
+            AttrRule::unsupported("payable", PAYABLE_TARGETS),
         ],
     );
 }
@@ -235,6 +273,7 @@ pub(super) fn validate_for_loop_attrs<'db>(
         &[
             AttrRule::supported("unroll", UNROLL_FORM, "`#[unroll]` or `#[unroll(never)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
         ],
     );
 }
@@ -416,7 +455,8 @@ impl<'db> ItemKind<'db> {
                 Use::lower_ast(ctxt, use_);
             }
             ast::ItemKind::Extern(extern_) => {
-                validate_unsupported_item_attrs(ctxt, extern_.attr_list(), "extern", None);
+                let block_attrs = extern_.attr_list();
+                validate_extern_attrs(ctxt, block_attrs.clone(), None);
                 if let Some(extern_block) = extern_.extern_block() {
                     for fn_ in extern_block {
                         validate_func_attrs(
@@ -426,7 +466,10 @@ impl<'db> ItemKind<'db> {
                             fn_.sig().name().map(|name| name.text().to_string()),
                             false,
                         );
-                        Func::lower_ast_extern(ctxt, fn_);
+                        // Propagate the block-level `#[wasm_import(module = ...)]`
+                        // (R3.3) onto each inner `Func`: the block has no HIR node,
+                        // so the attribute must ride on the funcs it applies to.
+                        Func::lower_ast_extern(ctxt, fn_, block_attrs.clone());
                     }
                 }
             }
@@ -461,20 +504,37 @@ impl<'db> Mod<'db> {
 
 impl<'db> Func<'db> {
     pub(super) fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Func) -> Self {
-        Self::lower_ast_impl(ctxt, ast, false)
+        Self::lower_ast_impl(ctxt, ast, false, None)
     }
 
-    pub(super) fn lower_ast_extern(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Func) -> Self {
-        Self::lower_ast_impl(ctxt, ast, true)
+    /// Lower an `extern fn`. `extern_block_attrs` is the enclosing `extern`
+    /// block's attribute list, from which the `#[wasm_import(module = ...)]`
+    /// attribute (if any) is propagated onto this func (R3.3).
+    pub(super) fn lower_ast_extern(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::Func,
+        extern_block_attrs: Option<ast::AttrList>,
+    ) -> Self {
+        Self::lower_ast_impl(ctxt, ast, true, extern_block_attrs)
     }
 
-    fn lower_ast_impl(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Func, is_extern: bool) -> Self {
+    fn lower_ast_impl(
+        ctxt: &mut FileLowerCtxt<'db>,
+        ast: ast::Func,
+        is_extern: bool,
+        extern_block_attrs: Option<ast::AttrList>,
+    ) -> Self {
         let sig = ast.sig();
         let name = IdentId::lower_token_partial(ctxt, sig.name());
         let id = ctxt.joined_id(TrackedItemVariant::Func(name));
         ctxt.enter_item_scope(id, false);
 
-        let attributes = AttrListId::lower_ast_opt(ctxt, ast.attr_list());
+        let attributes = lower_attrs_with_propagated_named(
+            ctxt,
+            ast.attr_list(),
+            extern_block_attrs,
+            "wasm_import",
+        );
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, sig.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, sig.where_clause());
         let params = sig

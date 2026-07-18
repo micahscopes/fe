@@ -220,6 +220,57 @@ fn fe_extern_host_import_runs_on_wasm() {
     assert_eq!(main.call(&mut store, ()).unwrap(), 5, "main() should be 5");
 }
 
+/// R3.3 THE MILESTONE: `#[wasm_import(module = "fe:host")]` on an extern block
+/// names the wasm import MODULE. `host_log` becomes a `("fe:host", "host_log")`
+/// import instead of the flat `("fe", "host_log")` v0 default. The module string
+/// threads HIR (block attribute propagated onto the extern `Func`) -> runtime
+/// package -> the WasmBackend side table -> WAFFLE import emission. wasmtime
+/// satisfies the import through a `Linker` bound at `("fe:host", "host_log")`.
+#[test]
+fn fe_wasm_import_module_attribute_names_module() {
+    let source = "#[wasm_import(module = \"fe:host\")]\n\
+                  extern {\n\
+                  \x20   pub unsafe fn host_log(a: u64, b: u64) -> u64\n\
+                  }\n\
+                  pub fn use_host(a: u64, b: u64) -> u64 { host_log(a, b) }\n\
+                  pub fn main() -> u64 { use_host(2, 3) }\n";
+
+    let wasm = compile_to_wasm("wasm_import_module.fe", source);
+
+    // The attribute's module is on the emitted import: ("fe:host", "host_log").
+    let imports = func_imports(&wasm);
+    assert!(
+        imports.contains(&("fe:host".to_string(), "host_log".to_string())),
+        "expected a (\"fe:host\", \"host_log\") func import in the emitted wasm, found {imports:?}"
+    );
+    // The flat "fe" module must NOT appear for this symbol (the attribute won).
+    assert!(
+        !imports.contains(&("fe".to_string(), "host_log".to_string())),
+        "the attribute module should replace the flat \"fe\" default, found {imports:?}"
+    );
+
+    // Instantiate through a Linker bound at the attribute's module namespace.
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker
+        .func_wrap("fe:host", "host_log", |a: u64, b: u64| a + b)
+        .expect("binding the ('fe:host','host_log') host stub should succeed");
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("wasmtime should instantiate with the fe:host import satisfied");
+
+    let main = instance
+        .get_typed_func::<(), u64>(&mut store, "main")
+        .expect("`main` export should exist");
+    assert_eq!(
+        main.call(&mut store, ()).unwrap(),
+        5,
+        "main() should call the fe:host import and return 5"
+    );
+}
+
 /// A two-function call pair compiled Fe -> wasm: `apply` calls `add`.
 #[test]
 fn fe_call_pair_runs_on_wasm() {

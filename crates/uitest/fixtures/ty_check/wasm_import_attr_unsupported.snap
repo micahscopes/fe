@@ -1,0 +1,23 @@
+---
+source: crates/uitest/tests/ty_check.rs
+assertion_line: 27
+expression: diags
+input_file: fixtures/ty_check/wasm_import_attr_unsupported.fe
+---
+error[12-0001]: unsupported `#[wasm_import]` attribute on fn `not_extern`
+  ┌─ wasm_import_attr_unsupported.fe:1:1
+  │
+1 │ #[wasm_import(module = "fe:host")]
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `#[wasm_import]` is only supported on extern blocks
+
+error[12-0001]: unsupported `#[wasm_import]` attribute on struct `NotExtern`
+  ┌─ wasm_import_attr_unsupported.fe:4:1
+  │
+4 │ #[wasm_import(module = "fe:host")]
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `#[wasm_import]` is only supported on extern blocks
+
+error[12-0001]: unsupported `#[wasm_import]` attribute on const `VALUE`
+  ┌─ wasm_import_attr_unsupported.fe:7:1
+  │
+7 │ #[wasm_import(module = "fe:host")]
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `#[wasm_import]` is only supported on extern blocks
