@@ -3,6 +3,10 @@ use core::atomic::Atomic
 use core::barrier::Barrier
 use core::conal::Functor
 use core::Fn
+use core::MemPtr
+use core::EffectHandle
+use core::num::IntDowncast
+use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
 /// A TYPE-LEVEL browser WebGPU backend (the WGSL device model under the browser's
 /// PORTABLE limits).
@@ -171,10 +175,154 @@ impl Barrier<WebGpuBackend, Shared> for WebGpuBarriers {
     fn barrier(mut self) {}
 }
 
-// The compute-dispatch entry model (`Dispatch<B>` / `WebGpuTarget` / `WebGpuHost`,
-// design section 2.4) is DEFERRED for owner ratification: it is the one genuinely
-// new library surface in this design (the A6-deferred host-side entry model, a
-// `ContractHost` sibling), flagged ratify-at-review. It is NOT built here. The v1
-// browser demo's JS host implements the `Dispatch` op set (upload/dispatch/
-// readback) op-for-op meanwhile; the interface above is the committed, Fe-checked
-// contract the host mirrors.
+// ===========================================================================
+// mb2 R3.4a: the compute-dispatch entry model, RATIFIED (arch 4.3 with
+// Amendments 1-3a; interop 3.2). The A6-deferred host-side entry model is now the
+// FIRST extern-backed provider: the `WorkerGpu` bodies below ARE the raw
+// `fe:webgpu` / `fe:async` import calls (`std::webgpu::raw`), so "the import table
+// IS the op set" becomes literal, type-checked code. WebGPU EXECUTION stays
+// browser-only and is never sandbox-verifiable; this surface is the
+// compiler-checked contract the broker mirrors op-for-op (the wasmtime
+// fake-device run is R3.4b).
+// ===========================================================================
+
+/// A compiled-kernel identity (arch 4.3's `Kernel`, pinned to the concrete
+/// `KernelId` per Amendment 3a). v1: an index into the page's pipeline table,
+/// pinned by `layout.json`; later, a compiler-emitted identity. A `u32` newtype,
+/// sibling of `PendingId` and the buffer-handle `WebGpuRef`: three u32-represented
+/// types that cannot cross-contaminate (a kernel id, a pending token, and a
+/// binding are distinct Fe types, so none can be passed where another is wanted).
+///
+/// Pinned to a concrete type rather than left as a `type Kernel` associated type,
+/// because the capability is consumed through an ABSTRACT `uses (gpu: mut
+/// Dispatch<WebGpuBackend>)` clause, where a provider-associated `Self::Kernel`
+/// would be opaque and a concrete `KernelId` argument could not be admitted. This
+/// realizes arch 4.3's ratified `Kernel = KernelId`.
+pub struct KernelId { id: u32 }
+
+impl KernelId {
+    /// Name a pinned pipeline-table kernel by its `layout.json` index.
+    pub fn new(_ id: u32) -> KernelId {
+        KernelId { id: id }
+    }
+}
+
+/// A pending host/device operation token (Amendment 3a). `Dispatch::readback_begin`
+/// mints one; `Wait::wait` consumes it. A `u32` newtype, distinct from `KernelId`
+/// and the buffer-handle, so a token can never stand in for a kernel id or a
+/// binding.
+pub struct PendingId { id: u32 }
+
+/// Host-side capability over a device backend `B`: the authority to allocate
+/// on-device storage, move words across the boundary, and launch kernels (arch
+/// 4.3, RATIFIED with Amendments 1-2). What `ContractHost` is to a chain target,
+/// `Dispatch` is to a compute target. Gated the house way (the `Atomic` / `Barrier`
+/// idiom): a `uses (gpu: mut Dispatch<B>)` obligation, authority-only, discharged
+/// by a provider; a missing provider is the ordinary `8-0036` obligation error.
+/// Each op additionally demands `B: Supports<Global>` at the call site: host
+/// traffic is `Global`-class only (the 2.2 grant matrix), so a backend without the
+/// class carries no dispatch surface.
+pub trait Dispatch<B: Backend> {
+    /// AMENDMENT 1: allocation is an op. The JS broker cannot be implemented
+    /// op-for-op without `createBuffer`, so the capability carries it. Returns a
+    /// `Global`-class device binding.
+    fn create(mut self, _ len_words: u32) -> B::Ref<B::Word, Global>
+        where B: Supports<Global>
+
+    /// Move `len_words` words from linear memory at `src` into the device buffer
+    /// `dst`.
+    fn upload(mut self, _ src: MemPtr<B::Word>, _ len_words: u32,
+              _ dst: B::Ref<B::Word, Global>)
+        where B: Supports<Global>
+
+    /// Launch `kernel` over `groups` workgroups; bindings are DERIVED from the
+    /// kernel's class-typed signature (the 2.2 rule: `Global` / `Constant` refs
+    /// only, declaration order within `@group(0)`).
+    fn dispatch(mut self, _ kernel: KernelId, _ groups: u32)
+        where B: Supports<Global>
+
+    /// AMENDMENT 2 + 3a: readback is a begin/complete pair, because WebGPU
+    /// readback (`mapAsync`) is genuinely asynchronous and the capability must not
+    /// lie about it. `readback_begin` requests the copy and returns a `PendingId`;
+    /// the holder later blocks on it through `Wait`, or the host calls the exported
+    /// `on_ready(token)` continuation in degraded mode.
+    fn readback_begin(mut self, _ src: B::Ref<B::Word, Global>,
+                      _ len_words: u32, _ dst: MemPtr<B::Word>) -> PendingId
+        where B: Supports<Global>
+}
+
+/// AMENDMENT 3: the authority to BLOCK the current agent until a pending
+/// host/device operation is resident. Blocking is an AUTHORITY (legal only where
+/// the agent may block), so it is its own capability, gated the house way by
+/// provider absence. The worker-side provider realizes it as `Atomics.wait` in the
+/// trampoline; NO main-thread provider exists, so Fe code demanding `Wait` cannot
+/// be composed into a main-thread entry: the type system enforces the spec's "no
+/// `Atomics.wait` on the main thread" rule by construction.
+pub trait Wait<B: Backend> {
+    /// Block until `pending` is resident.
+    fn wait(mut self, _ pending: PendingId)
+}
+
+// ---------------------------------------------------------------------------
+// The `WorkerGpu` provider: the FIRST extern-backed provider (arch 4.3's
+// `BrowserGpu`, worker-seated per interop 2.1). Its method bodies ARE the raw
+// `fe:webgpu` / `fe:async` import calls: the compiler now type-checks the exact op
+// set the broker services, and the class-typed / newtype surface is unwrapped to
+// the boundary `u32`s at the single point where authority meets the import table.
+//
+// These bodies are REAL calls (not `core::panic()` stubs like the type-level
+// atomic / barrier witnesses): they lower to wasm imports (R3.1-R3.3) and EXECUTE
+// against the broker (browser) or a wasmtime fake device (R3.4b). The trait
+// methods' `where B: Supports<Global>` bounds instantiate here to the CONCRETE
+// `WebGpuBackend: Supports<Global>` (which holds by the grant matrix above) and
+// are therefore NOT restated on these impl methods (Fe rejects a where-bound on a
+// concrete type, `6-0005`); they discharge automatically.
+pub struct WorkerGpu {}
+
+impl Dispatch<WebGpuBackend> for WorkerGpu {
+    fn create(mut self, _ len_words: u32) -> WebGpuRef<u32, Global> {
+        WebGpuRef { binding: gpu_buffer_create(len_words) }
+    }
+
+    fn upload(mut self, _ src: MemPtr<u32>, _ len_words: u32, _ dst: WebGpuRef<u32, Global>) {
+        gpu_upload(mem_word_addr(src), len_words, dst.binding)
+    }
+
+    fn dispatch(mut self, _ kernel: KernelId, _ groups: u32) {
+        gpu_dispatch(kernel.id, groups)
+    }
+
+    fn readback_begin(mut self, _ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> PendingId {
+        PendingId { id: gpu_readback_begin(src.binding, len_words, mem_word_addr(dst)) }
+    }
+}
+
+impl Wait<WebGpuBackend> for WorkerGpu {
+    fn wait(mut self, _ pending: PendingId) {
+        async_wait(pending.id)
+    }
+}
+
+/// Narrow a linear-memory `MemPtr<u32>` to the boundary `u32` offset the wasm
+/// import table speaks (linear-memory offsets are `u32`). Private to the provider:
+/// the raw offset never surfaces in the capability's typed API.
+fn mem_word_addr(_ p: MemPtr<u32>) -> u32 {
+    let raw_addr: u256 = p.raw()
+    let offset: u32 = raw_addr.downcast_truncate()
+    offset
+}
+
+/// The synchronous-looking `readback` facade over the TWO capabilities (interop
+/// 3.2): a `PendingId` minted by `Dispatch::readback_begin` is immediately
+/// consumed by `Wait::wait`, so from Fe the words are resident when `readback`
+/// returns. No compiler magic: the facade simply DEMANDS both capabilities in one
+/// `uses` clause and threads them, the C3 / N2 multi-capability precedent
+/// (`uses (evm: mut Evm, par: mut Par<EvmBackend>)`) lifted to two trait-keyed
+/// device capabilities. The doc writes this `... |> w.wait`; Fe has no pipe
+/// operator, so it is the equivalent two-statement body.
+pub fn readback(_ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>)
+    uses (gpu: mut Dispatch<WebGpuBackend>, w: mut Wait<WebGpuBackend>)
+{
+    let pending = gpu.readback_begin(src, len_words, dst)
+    w.wait(pending)
+}

@@ -1,0 +1,199 @@
+---
+source: crates/hir/tests/ty_check.rs
+assertion_line: 46
+expression: res
+input_file: test_files/ty_check/backend_webgpu_dispatch.fe
+---
+note:
+   ┌─ backend_webgpu_dispatch.fe:31:1
+   │
+31 │ ╭ {
+32 │ │     let buf = gpu.create(8)
+33 │ │     gpu.upload(input, 8, buf)
+34 │ │     gpu.dispatch(KernelId::new(0), 1)
+   · │
+37 │ │     // `out` is resident here; the browser compares against the pinned vectors.
+38 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:32:9
+   │
+32 │     let buf = gpu.create(8)
+   │         ^^^ WebGpuRef<u32, Global>
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:32:15
+   │
+32 │     let buf = gpu.create(8)
+   │               ^^^ gpu
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:32:15
+   │
+32 │     let buf = gpu.create(8)
+   │               ^^^^^^^^^^^^^ WebGpuRef<u32, Global>
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:32:26
+   │
+32 │     let buf = gpu.create(8)
+   │                          ^ u32
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:33:5
+   │
+33 │     gpu.upload(input, 8, buf)
+   │     ^^^ gpu
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:33:5
+   │
+33 │     gpu.upload(input, 8, buf)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:33:16
+   │
+33 │     gpu.upload(input, 8, buf)
+   │                ^^^^^ MemPtr<u32>
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:33:23
+   │
+33 │     gpu.upload(input, 8, buf)
+   │                       ^ u32
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:33:26
+   │
+33 │     gpu.upload(input, 8, buf)
+   │                          ^^^ WebGpuRef<u32, Global>
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:34:5
+   │
+34 │     gpu.dispatch(KernelId::new(0), 1)
+   │     ^^^ gpu
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:34:5
+   │
+34 │     gpu.dispatch(KernelId::new(0), 1)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:34:18
+   │
+34 │     gpu.dispatch(KernelId::new(0), 1)
+   │                  ^^^^^^^^^^^^^ fn new
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:34:18
+   │
+34 │     gpu.dispatch(KernelId::new(0), 1)
+   │                  ^^^^^^^^^^^^^^^^ KernelId
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:34:32
+   │
+34 │     gpu.dispatch(KernelId::new(0), 1)
+   │                                ^ u32
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:34:36
+   │
+34 │     gpu.dispatch(KernelId::new(0), 1)
+   │                                    ^ u32
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:35:9
+   │
+35 │     let p = gpu.readback_begin(buf, 8, out)
+   │         ^ PendingId
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:35:13
+   │
+35 │     let p = gpu.readback_begin(buf, 8, out)
+   │             ^^^ gpu
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:35:13
+   │
+35 │     let p = gpu.readback_begin(buf, 8, out)
+   │             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ PendingId
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:35:32
+   │
+35 │     let p = gpu.readback_begin(buf, 8, out)
+   │                                ^^^ WebGpuRef<u32, Global>
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:35:37
+   │
+35 │     let p = gpu.readback_begin(buf, 8, out)
+   │                                     ^ u32
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:35:40
+   │
+35 │     let p = gpu.readback_begin(buf, 8, out)
+   │                                        ^^^ MemPtr<u32>
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:36:5
+   │
+36 │     w.wait(p)
+   │     ^ w
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:36:5
+   │
+36 │     w.wait(p)
+   │     ^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:36:12
+   │
+36 │     w.wait(p)
+   │            ^ PendingId
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:46:1
+   │
+46 │ ╭ {
+47 │ │     readback(buf, 8, out)
+48 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:47:5
+   │
+47 │     readback(buf, 8, out)
+   │     ^^^^^^^^ fn readback
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:47:5
+   │
+47 │     readback(buf, 8, out)
+   │     ^^^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:47:14
+   │
+47 │     readback(buf, 8, out)
+   │              ^^^ WebGpuRef<u32, Global>
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:47:19
+   │
+47 │     readback(buf, 8, out)
+   │                   ^ u32
+
+note:
+   ┌─ backend_webgpu_dispatch.fe:47:22
+   │
+47 │     readback(buf, 8, out)
+   │                      ^^^ MemPtr<u32>

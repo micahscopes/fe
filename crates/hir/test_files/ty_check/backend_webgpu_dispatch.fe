@@ -1,0 +1,48 @@
+// mb2 R3.4a: the WebGPU compute-dispatch surface, exercised end to end at the
+// TYPE level (no execution: WebGPU is browser-only, never sandbox-verifiable). This
+// is the TWO-CAPABILITY facade probe: a straight-line Fe host routine that threads
+// BOTH the `Dispatch` and `Wait` capabilities in one `uses` clause, the C3 / N2
+// multi-capability precedent (`uses (evm: mut Evm, par: mut Par<EvmBackend>)`)
+// lifted to two trait-keyed device capabilities.
+//
+// `ntt8_on_gpu` (interop 3.2) is the deliverable's "high-level made concrete":
+// straight-line Fe over an async browser boundary. It create / upload / dispatch /
+// readback_begin / wait's a size-8 NTT; here every step is compiler-checked against
+// `Dispatch<WebGpuBackend>` + `Wait<WebGpuBackend>`. The body is a type-level probe:
+// no WebGPU pipeline exists on this branch, so nothing is lowered here (the executed
+// wasmtime fake-device run is R3.4b).
+//
+// Standalone ty_check fixtures link the REAL `core` AND `std`, so `Dispatch` /
+// `Wait` / `WebGpuBackend` / `KernelId` are the real cross-ingot surface, and the
+// `WorkerGpu` provider (whose bodies are the raw `fe:webgpu` / `fe:async` extern
+// calls) is what the two capabilities resolve against. Every leg is zero-diagnostic;
+// the note-dump `.snap` records the observed types (the newtypes and the
+// class-typed binding `WebGpuRef<u32, Global>` at each step).
+
+use core::MemPtr
+use core::backend::Global
+use std::webgpu::{Dispatch, Wait, WebGpuBackend, WebGpuRef, KernelId, readback}
+
+// ---- THE HEADLINE: straight-line create -> upload -> dispatch -> readback_begin
+//      -> wait, threading BOTH device capabilities in one `uses` clause. ----
+
+fn ntt8_on_gpu(_ input: MemPtr<u32>, _ out: MemPtr<u32>)
+    uses (gpu: mut Dispatch<WebGpuBackend>, w: mut Wait<WebGpuBackend>)
+{
+    let buf = gpu.create(8)
+    gpu.upload(input, 8, buf)
+    gpu.dispatch(KernelId::new(0), 1)
+    let p = gpu.readback_begin(buf, 8, out)
+    w.wait(p)
+    // `out` is resident here; the browser compares against the pinned vectors.
+}
+
+// ---- the std `readback` facade re-threads both capabilities: a caller that holds
+//      both device capabilities forwards them straight into the two-capability
+//      facade, proving the `uses (gpu, w)` row composes across a call boundary. ----
+
+fn readback_through_facade(_ buf: WebGpuRef<u32, Global>, _ out: MemPtr<u32>)
+    uses (gpu: mut Dispatch<WebGpuBackend>, w: mut Wait<WebGpuBackend>)
+{
+    readback(buf, 8, out)
+}

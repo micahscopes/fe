@@ -1,0 +1,60 @@
+// std::webgpu::raw (mb2 R3.4a): the PRIVATE wasm-import surface for the browser
+// WebGPU broker. User code never touches these; the `WorkerGpu` provider in the
+// parent `std::webgpu` module is the only caller, and the std `readback` facade
+// is the public entry. Each block names its wasm import module via the R3.3
+// `#[wasm_import(module = "...")]` attribute, so the import table IS the op set
+// (interop 4.1/4.2, normative). WebGPU EXECUTION is browser-only and never
+// sandbox-verifiable; these declarations are the compiler-checked contract the
+// broker mirrors op-for-op (the wasmtime fake-device run is R3.4b).
+//
+// Boundary discipline, FORCED by the wasm boundary: scalars only. Every handle,
+// token, pointer, and length crosses as a `u32`; results as `u32` or `u64`. No
+// aggregate crosses by value. The typed Fe newtypes (`PendingId`, `KernelId`) and
+// the class-typed `WebGpuRef` binding live one level up, in the parent module's
+// providers, which unwrap them to these raw `u32`s at the single point where
+// authority meets the import table.
+//
+// Module `fe:worker` (`task_begin` / `task_result`) is DELIBERATELY absent: the
+// worker task surface and its `Par<WasmBackend>` provider are a later slice.
+
+/// Module `fe:webgpu` (broker-serviced): allocate, upload, launch, begin-readback.
+#[wasm_import(module = "fe:webgpu")]
+extern {
+    /// Allocate a device storage buffer of `len_words` u32 words; return its
+    /// client-assigned binding handle (interop 4.1: `device.createBuffer`).
+    pub unsafe fn gpu_buffer_create(_ len_words: u32) -> u32
+
+    /// Copy `len_words` words out of linear memory at `src` into the device buffer
+    /// bound at `dst` (interop 4.1: `queue.writeBuffer`).
+    pub unsafe fn gpu_upload(_ src: u32, _ len_words: u32, _ dst: u32)
+
+    /// Launch `kernel` over `groups` workgroups; bindings are derived from the
+    /// kernel's class-typed signature (interop 4.1: encode + submit a compute pass).
+    pub unsafe fn gpu_dispatch(_ kernel: u32, _ groups: u32)
+
+    /// Begin an asynchronous readback of `len_words` words from the buffer bound at
+    /// `src` into linear memory at `dst`; return a fresh pending token (interop 4.1:
+    /// copy-to-staging + submit + `mapAsync`, completion signalled via `fe:async`).
+    pub unsafe fn gpu_readback_begin(_ src: u32, _ len_words: u32, _ dst: u32) -> u32
+}
+
+/// Module `fe:async`: the one genuinely-async data-path op's blocking completion.
+#[wasm_import(module = "fe:async")]
+extern {
+    /// Block the calling agent until the pending operation `pending` is resident
+    /// (interop 4.1: `Atomics.wait` on the token's status slot). In the degraded,
+    /// no-isolation mode this import is not provided at all; completions arrive as
+    /// the exported `on_ready(token)` continuation instead.
+    pub unsafe fn wait(_ pending: u32)
+}
+
+/// Module `fe:host` (unchanged from arch 4.2): logging and a monotonic clock.
+#[wasm_import(module = "fe:host")]
+extern {
+    /// Log `len` utf8 bytes at linear-memory `ptr` (interop 4.1: `console.log`).
+    pub unsafe fn host_log(_ ptr: u32, _ len: u32)
+
+    /// Milliseconds since the epoch (interop 4.1: `BigInt(Date.now())`; the i64
+    /// import surfaces as BigInt in JS, the trampoline owns the conversion).
+    pub unsafe fn host_now_ms() -> u64
+}
