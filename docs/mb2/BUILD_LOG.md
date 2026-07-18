@@ -3065,3 +3065,117 @@ type system rejects a fused `RBin<Pair, 9>` schedule that exceeds the WebGPU
 256-invocation workgroup limit while accepting it on the native GPU. `Dispatch` is
 flagged deferred-for-ratification for Micah. NEXT (owner-gated, not started): the
 2.4 entry-model ratification, then the V5 fe->wasm host and V6 fe-emitted WGSL.
+
+## 2026-07-18 - Slice R0: re-pin to the wasm-capable merged sonatina, EVM byte-identical [mb2-fewasm-webgpu-architecture section 2 / 6.R0]
+
+The first real Fe->wasm integration step: re-pin mb2's four `sonatina-*` deps
+off the fe pin `039a9f5` and onto the wasm-capable merged fork, with the `wasm`
+feature ON for codegen, holding EVM output BYTE-IDENTICAL. Dependency surgery
+only: mb2 Rust/ingots/fixtures UNTOUCHED, `git status` shows only `Cargo.toml`
++ `Cargo.lock` changed. R0 is a re-pin (NOT the R1 `BackendKind::Wasm` wiring,
+NOT the R2 MIR->wasm build).
+
+### The sonatina branch (LOCAL only, never pushed)
+
+Branch `multi-backend-mb2` created at Fable's measured trial merge and one
+feature-gate fix on top:
+
+- `4477346e` trial merge fe-pin (`039a9f5`) INTO `multi-backend` (upstream's
+  full EVM machine-IR era merged into the fork's additive ISAs; two conflict
+  hunks resolved in upstream's favor, both the `IsZero::new` signature).
+- `7aa6c2b0` trial: adapt `isa/evm/scratch_plan.rs` `Call::new` to the fork's
+  `&dyn InstSetBase` constructor (the one measured post-merge API fix).
+- `ba4750ee` fix(wasm): move `compute_element_size` to the feature-neutral
+  `isa/mod.rs`. REQUIRED for R0: the wasm translator called
+  `crate::isa::cranelift::translate::compute_element_size`, so `--features
+  wasm` WITHOUT `cranelift` (exactly mb2's pin) did not compile
+  (`wasm = ["dep:waffle", "dep:wasm-encoder"]` does not pull cranelift). The
+  helper is a pure layout function (`Type` + `ModuleCtx`, no cranelift types),
+  so it moves cleanly; both translators now call `crate::isa::compute_element_
+  size`. This is the section-2-ratified "fix the wasm/cranelift feature-gate
+  bug" line item. `pub mod spirv` is internally naga-gated, so it needed no
+  change.
+
+Location: `/tmp/claude-1000/-workspace/e806786e-dff4-43c1-b25f-849ba82a8a02/
+scratchpad/sonatina-merge-trial` (a git checkout with remotes micah/origin/
+sean). The branch is LOCAL and was NOT pushed; Micah pushes it to
+micahscopes/sonatina later for off-sandbox reproducibility (and it is the
+upstream-PR-shaped branch for Sean: additive ISAs + one small constructor
+refactor, upstream EVM untouched). mb2's pin is currently a `file://` git dep
+pointing at that local checkout by branch.
+
+Sonatina-side sanity (reusing `/workspace/sonatina-merge-trial-target`):
+`cargo build -p sonatina-codegen --features wasm` (NO cranelift) compiles clean
+(the feature-gate fix works); `cargo test -p sonatina-codegen --features
+cranelift,wasm --test wasm_backend` = 6/6 green (incl. the wasmtime-executed
+phi loop and the `cross_target_loop_cranelift_vs_wasm` differential). Fable
+already ran the full 814 lib + integration suites on the merge.
+
+### The re-pin (mb2 `Cargo.toml` lines 53-56)
+
+Swapped `git = "https://github.com/fe-lang/sonatina", rev = "039a9f5"` to
+`git = "file:///.../sonatina-merge-trial", branch = "multi-backend-mb2"` for
+all four of `sonatina-ir` / `-triple` / `-codegen` / `-verifier`, and added
+`features = ["wasm"]` on `sonatina-codegen` ONLY (the wasm feature is ON). The
+`[profile.dev/test.package]` opt-level=3 overrides are unchanged (same package
+names, still apply). `Cargo.lock` refreshed via `cargo metadata`: the six
+sonatina crates (ir/triple/codegen/verifier/macros/parser) now resolve to
+`git+file://...?branch=multi-backend-mb2#ba4750ee`; new deps `waffle 0.2.0` +
+`wasm-encoder 0.227.1` (and transitive `leb128`, `wasm-encoder 0.212`,
+`wasmparser` variants) pulled in. Zero remaining `fe-lang/sonatina` / `039a9f5`
+references in the lock.
+
+### THE GATE: EVM byte-identity (zero churn, PASSED)
+
+- `cargo test -p fe-codegen --test sonatina_ir` = 128/128 passed (the EVM IR
+  snapshots), 594.69s.
+- `cargo test -p fe-codegen` (the rest: gasprice, operand-collect, region
+  borrowck, runtime-handle-preservation, doctests) all green, 0 failed.
+- Tree-wide `find -name '*.snap.new'` = 0 after both the EVM IR gate AND the
+  full release nextest. `git status` shows ONLY `Cargo.toml` + `Cargo.lock`
+  (no `.snap` rewritten, no source changed). The re-pin introduced ZERO EVM
+  churn, confirming Fable's zero-churn ratification as a fact, not a hope.
+
+### mb2-side API adaptation: NONE required
+
+The workspace compiled against the merged sonatina with NO mb2-side call-site
+changes (the trial's single sonatina-side `scratch_plan` fix plus the
+feature-gate fix were sufficient). The fork's `&dyn InstSetBase` constructor
+refactor kept `new_unchecked` as a deprecated alias, so mb2's existing lowering
+call sites still resolve; the only new signal is a `#[warn(deprecated)]`
+warning on mb2's remaining `...::new_unchecked` uses (e.g. `Unreachable::
+new_unchecked`, "use `new` instead - it now accepts &dyn InstSetBase"). Left
+UNTOUCHED: it is EVM-output-neutral (the alias behaves identically) and
+migrating the call sites to the generic `new` is R1's lowering-parameterization
+work, not an R0 concern.
+
+### Full boundary CI (split recipe, green 2622/2622)
+
+Serialized, foreground, two commands (never killed):
+1. `CARGO_BUILD_JOBS=2 cargo build --release --workspace --all-features
+   --tests --locked --exclude fe-language-server --exclude fe-bench` -> exit 0,
+   7m28s (the big rebuild + waffle/wasm-encoder).
+2. `cargo nextest run --release --workspace --all-features --no-fail-fast
+   --locked --exclude fe-language-server --exclude fe-bench` -> `2622 tests
+   run: 2622 passed, 0 skipped`, 542.97s. Matches the boundary baseline exactly
+   (R0 is a dependency re-pin with zero EVM churn and no new fe tests).
+
+### Deviations
+
+- One extra sonatina-side commit beyond the trial's two: the
+  `compute_element_size` feature-gate fix (`ba4750ee`). It was ratified in
+  section 2's re-pin slice ("fix the wasm/cranelift feature-gate bug") but was
+  absent from the trial worktree; it is REQUIRED because mb2 enables
+  `features = ["wasm"]` without `cranelift`. Pure module move, no behavior
+  change, sonatina wasm/cranelift suites still green.
+- The pin is a `file://` LOCAL git dep (not a `micahscopes/sonatina` https
+  rev), because the branch stays local per the no-push rule. Micah re-points it
+  to the pushed fork rev when reproducibility off-sandbox is wanted.
+
+R0 is COMPLETE and green: mb2 builds against the wasm-capable merged sonatina
+with the `wasm` feature ON, EVM codegen is byte-identical (zero `.snap.new`,
+the gate), and the full split CI is 2622/2622. NEXT (R1, ratified-autonomous):
+mint `Architecture::Wasm32` + the `Wasm32` Isa on the sonatina branch, add the
+mb2 `wasm` cargo feature + wire `BackendKind::Wasm -> WasmBackend::compile`,
+and land the first genuinely-Fe-compiled wasm (`add` + `sum_to` + a call pair,
+wasmtime == the EVM twin).
