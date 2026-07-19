@@ -37,7 +37,7 @@
 
 use core::MemPtr
 use core::backend::Global
-use super::{WebGpuRef, KernelId, Pending}
+use super::{WebGpuRef, KernelId, Pending, WebGpuBackend}
 
 /// Module `fe:webgpu` (broker-serviced): allocate, upload, launch, begin-readback.
 #[wasm_import(module = "fe:webgpu")]
@@ -67,7 +67,7 @@ extern {
     /// `MemPtr<u32>` region pointer, and the returned token crosses WHOLE as
     /// `Pending<()>` (its single `u32` id word, i32; the phantom payload adds no
     /// field). The readback payload is unit: the words land in `dst`, not the token.
-    pub unsafe fn gpu_readback_begin(_ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> Pending<()>
+    pub unsafe fn gpu_readback_begin(_ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> Pending<WebGpuBackend, ()>
 }
 
 /// Module `fe:async`: the one genuinely-async data-path op's blocking completion.
@@ -86,7 +86,7 @@ extern {
     /// (`wait(_ pending: Pending<()>)` void); that non-generic form CANNOT type-check
     /// the abstract `wait<T> -> T` provider body (delivery returns unit, not `T`), so
     /// this generic form is the measured resolution awaiting a seat ruling.
-    pub unsafe fn wait<T>(_ pending: Pending<T>) -> T
+    pub unsafe fn wait<T>(_ pending: Pending<WebGpuBackend, T>) -> T
 }
 
 /// Module `fe:host` (unchanged from arch 4.2): logging and a monotonic clock.

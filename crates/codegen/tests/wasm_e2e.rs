@@ -322,7 +322,7 @@ pub fn main(_ input: MemPtr<u32>, _ output: MemPtr<u32>) {
     }
 }
 
-fn ntt8_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> Pending<()>
+fn ntt8_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> Pending<WebGpuBackend, ()>
     uses (gpu: mut Dispatch<WebGpuBackend>)
 {
     let buf = gpu.create(8)
@@ -331,17 +331,17 @@ fn ntt8_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> Pending<()>
     gpu.readback_begin(buf, 8, output)
 }
 
-pub fn main_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> Pending<()> {
+pub fn main_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> Pending<WebGpuBackend, ()> {
     with (Dispatch<WebGpuBackend> = WorkerGpu {}) {
         ntt8_begin(input, output)
     }
 }
 
-fn wait_ready(_ pending: own Pending<()>) uses (w: mut Wait<WebGpuBackend>) {
+fn wait_ready(_ pending: own Pending<WebGpuBackend, ()>) uses (w: mut Wait<WebGpuBackend>) {
     w.wait(pending)
 }
 
-pub fn on_ready(_ pending: own Pending<()>) {
+pub fn on_ready(_ pending: own Pending<WebGpuBackend, ()>) {
     with (Wait<WebGpuBackend> = WorkerGpu {}) {
         wait_ready(pending)
     }

@@ -6,6 +6,14 @@ use core::Fn
 use core::MemPtr
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
 
+// mb2 CE-3: the completion-cell control-effects vocabulary now lives
+// backend-generic in `core::pending`. Re-export it here for source
+// compatibility (the keystone fixtures and WebGPU code keep naming
+// `std::webgpu::{Pending, Wait, ...}`); the `WorkerGpu` provider below stays
+// DOWNSTREAM in std (provider-placement rule) and realizes `Wait<WebGpuBackend>`
+// over `Pending<WebGpuBackend, T>`.
+pub use core::pending::{Pending, Wait, Notify, Spawn, TaskId}
+
 /// A TYPE-LEVEL browser WebGPU backend (the WGSL device model under the browser's
 /// PORTABLE limits).
 ///
@@ -205,21 +213,6 @@ impl KernelId {
     }
 }
 
-/// A pending host/device operation token carrying a phantom PAYLOAD type `T`
-/// (control-effects CE-2; R1's WebGPU-local `Pending<T>`). `Dispatch::readback_begin`
-/// mints one; `Wait::wait` consumes it, DELIVERING the `T`. `T` is PHANTOM
-/// (representation-only): the token is one real `u32` id with no runtime trace of
-/// `T`, exactly the phantom-typed posture of `WebGpuRef<T, S>` (shipped precedent).
-/// No `Copy`, no `from_raw`: a token is minted ONLY by a begin-shaped op and consumed
-/// ONCE (`own`). It crosses the extern boundary WHOLE as its single `u32` word under
-/// the Amendment 4 transport rule (the `single_scalar_field` transport class treats
-/// it as its one word, so the wire shape is byte-identical to the bare `u32` while the
-/// phantom `T` stays intact end to end). Distinct from `KernelId` and the buffer-handle
-/// `WebGpuRef`, so a token can never stand in for a kernel id or a binding. The
-/// backend-generic `Pending<B, T>` and the `core::control` move are CE-3; this slice
-/// keeps the token WebGPU-local, adding only the payload axis.
-pub struct Pending<T> { id: u32 }
-
 /// Host-side capability over a device backend `B`: the authority to allocate
 /// on-device storage, move words across the boundary, and launch kernels (arch
 /// 4.3, RATIFIED with Amendments 1-2). What `ContractHost` is to a chain target,
@@ -250,37 +243,23 @@ pub trait Dispatch<B: Backend> {
 
     /// AMENDMENT 2 + 3a: readback is a begin/complete pair, because WebGPU
     /// readback (`mapAsync`) is genuinely asynchronous and the capability must not
-    /// lie about it. `readback_begin` requests the copy and returns a `Pending<()>`;
-    /// the readback token's payload is UNIT (residency IS the value: the words land
-    /// in `dst`, not in the token). The holder later blocks on it through `Wait`,
-    /// delivering the unit, or the host calls the exported `on_ready(token)`
-    /// continuation in degraded mode.
+    /// lie about it. `readback_begin` requests the copy and returns a
+    /// `Pending<B, ()>`; the readback token's payload is UNIT (residency IS the
+    /// value: the words land in `dst`, not in the token). The holder later blocks
+    /// on it through `Wait`, delivering the unit, or the host calls the exported
+    /// `on_ready(token)` continuation in degraded mode.
     fn readback_begin(mut self, _ src: B::Ref<B::Word, Global>,
-                      _ len_words: u32, _ dst: MemPtr<B::Word>) -> Pending<()>
+                      _ len_words: u32, _ dst: MemPtr<B::Word>) -> Pending<B, ()>
         where B: Supports<Global>
 }
 
-/// AMENDMENT 3: the authority to BLOCK the current agent until a pending
-/// host/device operation is resident. Blocking is an AUTHORITY (legal only where
-/// the agent may block), so it is its own capability, gated the house way by
-/// provider absence. The worker-side provider realizes it as `Atomics.wait` in the
-/// trampoline; NO main-thread provider exists, so Fe code demanding `Wait` cannot
-/// be composed into a main-thread entry: the type system enforces the spec's "no
-/// `Atomics.wait` on the main thread" rule by construction.
-pub trait Wait<B: Backend> {
-    /// Block until `pending` is resident, DELIVERING its payload `T`. Generic over
-    /// the payload (generic trait-method precedent: `core::conal::Functor::map`):
-    /// consumption and delivery are ONE fused act (R1). For the readback token
-    /// (`T = ()`) residency IS the value, so the provider blocks and returns unit;
-    /// the wider `T` grammar (word scalars, tasks) arrives with the `core::control`
-    /// move in CE-3. The token is CONSUMED (`own`): a `Pending<T>` is a one-shot
-    /// completion token, so `wait` takes ownership and a second `wait` on the same
-    /// token is a use-after-move type error. This closes the at-most-once-resume /
-    /// ABA hazard that a `View` (borrow) mode would leave open once host token slots
-    /// are recycled: the token cannot be waited on twice because it is moved into
-    /// the first `wait`.
-    fn wait<T>(mut self, _ pending: own Pending<T>) -> T
-}
+// AMENDMENT 3: the authority to BLOCK the current agent until a pending
+// host/device operation is resident (`Wait<B>`) now lives backend-generic in
+// `core::pending` (CE-3) and is re-exported at the top of this module. The
+// worker-side WebGPU provider (`WorkerGpu`) realizes it just below; NO
+// main-thread provider exists, so Fe code demanding `Wait` cannot be composed
+// into a main-thread entry (the spec's "no `Atomics.wait` on the main thread"
+// rule enforced by construction).
 
 // ---------------------------------------------------------------------------
 // The `WorkerGpu` provider: the FIRST extern-backed provider (arch 4.3's
@@ -315,7 +294,7 @@ impl Dispatch<WebGpuBackend> for WorkerGpu {
         gpu_dispatch(kernel, groups)
     }
 
-    fn readback_begin(mut self, _ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> Pending<()> {
+    fn readback_begin(mut self, _ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> Pending<WebGpuBackend, ()> {
         gpu_readback_begin(src, len_words, dst)
     }
 }
@@ -325,7 +304,7 @@ impl Wait<WebGpuBackend> for WorkerGpu {
     // import returns once the readback is resident, and the typed wait delivers unit
     // (residency IS the value). The token transports WHOLE as its one `u32` word
     // (Amendment 4), so the body is pure pass-through: no `.id` read, no re-wrap.
-    fn wait<T>(mut self, _ pending: own Pending<T>) -> T {
+    fn wait<T>(mut self, _ pending: own Pending<WebGpuBackend, T>) -> T {
         async_wait(pending)
     }
 }

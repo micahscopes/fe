@@ -1,0 +1,119 @@
+use super::backend::Backend
+
+// mb2 CE-3: the backend-generic completion-cell control-effects vocabulary,
+// lifted out of `std::webgpu` so it stops being WebGPU furniture and becomes
+// nameable by any library author over any backend `B`. The token rail, the
+// blocking authority, the reserved completer authority, and the task-spawn
+// authority all live here; PROVIDERS stay DOWNSTREAM in `std` (the
+// provider-placement rule), so this module declares the algebra and names no
+// realization. `std::webgpu` re-exports these for source compatibility.
+//
+// Module-visible, NOT re-exported from `core`'s root (the `core::par`
+// precedent): `pending` names are reached as `core::pending::{...}`, keeping
+// the root namespace clean. Nothing here is EVM-relevant (nothing is ever
+// pending on a synchronous chain target), so the EVM path never sees it.
+
+/// A pending host/device operation token carrying a phantom BACKEND `B` and a
+/// phantom PAYLOAD `T` (control-effects R1; generalized from the former
+/// WebGPU-local `Pending<T>` to carry `B`). A begin-shaped op mints one; a
+/// `Wait::wait` consumes it, DELIVERING the `T`. Both `B` and `T` are PHANTOM
+/// (representation-only): the token is one real `u32` id with no runtime trace
+/// of `B` or `T`, exactly the phantom-typed posture of `WebGpuRef<T, S>`
+/// (shipped precedent, nothing new to invent).
+///
+/// No `Copy`, no `from_raw`: a token is minted ONLY by a begin-shaped op and
+/// consumed ONCE (`own`). It crosses the extern boundary WHOLE as its single
+/// `u32` word under the Amendment 4 transport rule (the `single_scalar_field`
+/// transport class treats it as its one word, so the wire shape is
+/// byte-identical to the bare `u32` while the phantom `B` and `T` stay intact
+/// end to end). It is a DISTINCT type from the buffer-handle `WebGpuRef` and
+/// the compiled-kernel `KernelId`, so a token can never stand in for a binding
+/// or a kernel id.
+///
+/// Delivery is per-`T`, realized by the provider body (v1 `T` grammar, R1):
+///   - `T = ()` (readback): the raw blocking wait returns once the payload is
+///     resident; the typed wait returns unit. Residency IS the value.
+///   - `T = u64` (tasks): the provider blocks then reads the word result inside
+///     ONE typed `wait` call; the post-wait result read is never public
+///     surface, so its "legal only after wait" precondition dissolves into the
+///     fused act of consuming the token.
+/// Anything larger than a word is NOT a completion value; it is residency (the
+/// op takes a caller-provided destination and completes with `T = ()`).
+pub struct Pending<B: Backend, T> { id: u32 }
+
+/// The authority to BLOCK the current agent until a pending operation is
+/// resident (control-effects R2; lifted from `std::webgpu`, now
+/// backend-generic). Blocking is an AUTHORITY (legal only where the agent may
+/// block), so it is its own capability, gated the house way by provider
+/// absence: a missing provider is the ordinary `8-0036` obligation error. On
+/// WebGPU the worker-side provider realizes it as `Atomics.wait`; no
+/// main-thread provider exists, so Fe code demanding `Wait` cannot be composed
+/// into a main-thread entry (the spec's "no `Atomics.wait` on the main thread"
+/// rule enforced by construction).
+pub trait Wait<B: Backend> {
+    /// Block until `pending` is resident, DELIVERING its payload `T`. Generic
+    /// over the payload (generic trait-method precedent:
+    /// `core::conal::Functor::map`): consumption and delivery are ONE fused act
+    /// (R1). The token is CONSUMED (`own`): a `Pending<B, T>` is a one-shot
+    /// completion token, so `wait` takes ownership and a second `wait` on the
+    /// same token is a use-after-move type error. This closes the
+    /// at-most-once-resume / ABA hazard a borrow (`View`) mode would leave open
+    /// once host token slots are recycled.
+    fn wait<T>(mut self, _ pending: own Pending<B, T>) -> T
+}
+
+/// RESERVED completer authority (control-effects R2): the authority to COMPLETE
+/// a pending cell. DECLARATION ONLY in this ladder. `Notify` stays reserved so
+/// nothing else claims the seat; there are ZERO providers anywhere and the
+/// broker remains the only completer (which preserves the structural
+/// acyclicity argument: only the broker and fork children complete cells; no
+/// Fe agent can wait on a cell it must itself complete).
+///
+/// It is a DOOR, not a wall, and the door stays shut until the acyclicity story
+/// is worked. The future Fe-side design is a split-token pair (waiter half
+/// `Pending<B, T>`, completer half an affine `Notice<B, T>`, both minted
+/// together); that shape enforces at-most-once completion but NOT cycle-freedom,
+/// and full acyclicity typing (stratified mint scopes) is unsolved and is the
+/// gate condition for admitting any provider.
+///
+/// RESERVED-SIGNATURE NOTE: R2 leaves the exact method shape underspecified
+/// (the completer-half token type `Notice<B, T>` is horizon, deliberately NOT
+/// introduced in this slice). The method below is a MINIMAL reserved seat-holder
+/// over only ratified types: `own Pending<B, T>` stands in for a completion-cell
+/// handle (to be split into the affine completer half when the acyclicity story
+/// lands) and `value` is the payload to deliver. No provider realizes it.
+pub trait Notify<B: Backend> {
+    /// RESERVED (declaration only): deliver `value` into a pending cell. No
+    /// provider exists anywhere; the broker is the only completer today.
+    fn notify<T>(mut self, _ pending: own Pending<B, T>, _ value: T)
+}
+
+/// A task identity: a `u32` newtype into a module's exported task table
+/// (`fe_task(entry: u32, arg: u64) -> u64`, the ratified ABI; control-effects
+/// R3). Sibling of the compiled-kernel `KernelId` and the buffer-handle
+/// `WebGpuRef`: a task id, a kernel id, and a binding are DISTINCT Fe types, so
+/// none can be passed where another is wanted. A `u32`-represented newtype that
+/// crosses the boundary WHOLE as its one word.
+pub struct TaskId { id: u32 }
+
+impl TaskId {
+    /// Name a task-table entry by its index.
+    pub fn new(_ id: u32) -> TaskId {
+        TaskId { id: id }
+    }
+}
+
+/// RESERVED task-spawn authority (control-effects R3): fork-shaped authority in
+/// the same family as `core::par::Par`, non-scarce and provider-gated.
+/// DECLARATION ONLY in this ladder; the `WorkerPool` provider that mints real
+/// tasks lands in CE-5. The join is `w.wait(t)`: the token rail's SECOND client
+/// (`spawn` + `wait` IS the general async surface), not a parallel token
+/// system. `spawn`'s token DOES escape (an affine value, abandonment legal per
+/// the affine ruling), where `fork`'s tokens never escape their provider body.
+pub trait Spawn<B: Backend> {
+    /// Ship task-shaped work to a sibling agent. Mints the task's completion
+    /// cell; the returned token is the join edge, consumed later by
+    /// `Wait::wait` to deliver the word-sized result. DECLARATION ONLY (provider
+    /// is CE-5).
+    fn spawn(mut self, _ task: TaskId, _ arg: u64) -> Pending<B, u64>
+}
