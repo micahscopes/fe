@@ -198,24 +198,32 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
 
     fn lower_signature(&mut self, function: RuntimeFunction<'db>) -> Result<Signature, LowerError> {
         let body = function.instance(self.db).body(self.db);
-        let args = body
-            .signature
-            .params
-            .iter()
-            .map(|param| self.ty_for_class(&param.class))
-            .collect::<Result<Vec<_>, _>>()?;
-        let ret = body
-            .signature
-            .ret
-            .as_ref()
-            .map(|class| self.ty_for_class(class))
-            .transpose()?;
+        // R2.1: a scalar-tuple param/return FLATTENS into N wasm scalar
+        // params/results (one per element word); every other param/return maps
+        // 1:1 through `ty_for_class` exactly as before. The flattening order is
+        // preserved so the prologue's running wasm-arg index matches, and a
+        // scalar-tuple RETURN becomes a wasm multi-value result the host reads.
+        let mut args = Vec::with_capacity(body.signature.params.len());
+        for param in &body.signature.params {
+            if let Some(elem_tys) = self.scalar_tuple_element_tys(&param.class) {
+                args.extend(elem_tys);
+            } else {
+                args.push(self.ty_for_class(&param.class)?);
+            }
+        }
+        let ret_tys: Vec<Type> = match &body.signature.ret {
+            None => Vec::new(),
+            Some(class) => {
+                if let Some(elem_tys) = self.scalar_tuple_element_tys(class) {
+                    elem_tys
+                } else {
+                    vec![self.ty_for_class(class)?]
+                }
+            }
+        };
         let symbol = self.function_symbol(function.instance(self.db));
         let linkage = linkage_for_runtime(function.linkage(self.db));
-        Ok(match ret {
-            Some(ret) => Signature::new_single(&symbol, linkage, &args, ret),
-            None => Signature::new_unit(&symbol, linkage, &args),
-        })
+        Ok(Signature::new(&symbol, linkage, &args, &ret_tys))
     }
 
     fn lower_bodies(&mut self) -> Result<(), LowerError> {
@@ -297,6 +305,39 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             Layout::Array(_) | Layout::Enum(_) => None,
         }
     }
+
+    /// R2.1 (control-effects ladder section 7.4): the per-element Sonatina types
+    /// of a SCALAR-TUPLE aggregate, or `None` if `class` is not one. A scalar
+    /// tuple is a struct with TWO OR MORE fields where EVERY field is itself a
+    /// single wasm scalar word (each field lowers through `ty_for_class`: a plain
+    /// scalar, a `MemPtr`, or a single-scalar-field newtype such as `Pending<T>`).
+    /// This is the INTERFACE-level generalization of the single-scalar-field
+    /// newtype scalarization to N fields: a `(Pending<B,T1>, Pending<B,T2>)`
+    /// own-tuple param flattens into N wasm params, and a `(u64, u64)` return
+    /// flattens into N wasm results, with one SSA variable per element. It is NOT
+    /// a place/memory model: no element is ever addressed, offset, or stored.
+    ///
+    /// A ONE-field struct is deliberately excluded (it stays on the
+    /// `single_scalar_field` newtype path, which maps it to its one word). Any
+    /// field that is not a single scalar word (a nested aggregate, an array, an
+    /// enum, a wide scalar) makes the whole tuple fail closed (`None`): those need
+    /// the R2 memory model.
+    fn scalar_tuple_element_tys(&self, class: &RuntimeClass<'db>) -> Option<Vec<Type>> {
+        let RuntimeClass::AggregateValue { layout } = class else {
+            return None;
+        };
+        let Layout::Struct(struct_layout) = layout.data(self.db) else {
+            return None;
+        };
+        if struct_layout.fields.len() < 2 {
+            return None;
+        }
+        struct_layout
+            .fields
+            .iter()
+            .map(|field| self.ty_for_class(field).ok())
+            .collect()
+    }
 }
 
 /// R1 scalar type mapping: reuses the EVM path's `scalar_ty` but rejects
@@ -320,6 +361,14 @@ struct WasmFunctionLowerer<'ctx, 'db, 'a> {
     prologue_block: BlockId,
     block_map: Vec<BlockId>,
     vars: FxHashMap<RLocalId, Variable>,
+    /// R2.1: scalar-tuple locals carry ONE SSA variable per element word (a
+    /// `(Pending, Pending)` local is two i32 vars). A local is in exactly one of
+    /// `vars` (a single scalar word) or `tuple_vars` (a flattened scalar tuple),
+    /// never both. This is the value-model image of the tuple: it is never
+    /// addressed or stored, only its elements are read (`extract_value`), written
+    /// (`aggregate_make`), passed as flattened params, and returned as flattened
+    /// results.
+    tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
 }
 
 impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
@@ -333,15 +382,27 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
 
         // Declare one SSA variable per value-carried local. Address-taken
-        // (`Slot`) locals are R2; their reads/writes fail closed if reached.
+        // (`Slot`) locals are R2; their reads/writes fail closed if reached. R2.1:
+        // a scalar-tuple local gets ONE variable per element word (`tuple_vars`);
+        // every other value-carried local keeps its single `ty_for_class` variable
+        // (and a multi-field aggregate that is NOT a scalar tuple still fails
+        // closed there, unchanged).
         let mut vars = FxHashMap::default();
+        let mut tuple_vars: FxHashMap<RLocalId, Vec<Variable>> = FxHashMap::default();
         for (idx, local) in body.locals.iter().enumerate() {
             if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
                 continue;
             }
             if let RuntimeCarrier::Value(class) = &local.carrier {
-                let ty = module.ty_for_class(class)?;
-                vars.insert(RLocalId::from_u32(idx as u32), fb.declare_var(ty));
+                let local_id = RLocalId::from_u32(idx as u32);
+                if let Some(elem_tys) = module.scalar_tuple_element_tys(class) {
+                    let elem_vars =
+                        elem_tys.iter().map(|ty| fb.declare_var(*ty)).collect::<Vec<_>>();
+                    tuple_vars.insert(local_id, elem_vars);
+                } else {
+                    let ty = module.ty_for_class(class)?;
+                    vars.insert(local_id, fb.declare_var(ty));
+                }
             }
         }
 
@@ -352,6 +413,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             prologue_block,
             block_map,
             vars,
+            tuple_vars,
         })
     }
 
@@ -363,13 +425,25 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         let is = self.inst_set();
 
         // Prologue: bind incoming argument values to their parameter locals,
-        // then jump to the MIR entry block (block 0).
+        // then jump to the MIR entry block (block 0). R2.1: a scalar-tuple param
+        // was flattened into N wasm args, so we walk a RUNNING wasm-arg index and
+        // bind those N args to the param's N element variables. For every other
+        // param this is one arg to one variable, identical to before.
         self.fb.switch_to_block(self.prologue_block);
         let params = self.body.signature.params.clone();
-        for (idx, param) in params.iter().enumerate() {
-            let arg = self.fb.args()[idx];
-            let var = self.var_for(param.local)?;
-            self.fb.def_var(var, arg);
+        let arg_values: Vec<ValueId> = self.fb.args().to_vec();
+        let mut wasm_arg_idx = 0usize;
+        for param in params.iter() {
+            if let Some(elem_vars) = self.tuple_vars.get(&param.local).cloned() {
+                for elem_var in elem_vars {
+                    self.fb.def_var(elem_var, arg_values[wasm_arg_idx]);
+                    wasm_arg_idx += 1;
+                }
+            } else {
+                let var = self.var_for(param.local)?;
+                self.fb.def_var(var, arg_values[wasm_arg_idx]);
+                wasm_arg_idx += 1;
+            }
         }
         let entry = self.block_map[0];
         self.fb.insert_inst_no_result(Jump::new(is, entry));
@@ -401,6 +475,12 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     && callee.body(self.module.db).signature.ret.is_none()
                 {
                     return self.lower_call_stmt(*callee, args);
+                }
+                // R2.1: a scalar-tuple destination is produced element-wise (one
+                // SSA def per element word), not as a single value, so it takes a
+                // dedicated arm rather than the single-`ValueId` `lower_expr` path.
+                if self.tuple_vars.contains_key(dst) {
+                    return self.lower_tuple_assign(*dst, expr);
                 }
                 let value = self.lower_expr(expr, *dst)?;
                 let var = self.var_for(*dst)?;
@@ -434,6 +514,50 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         Ok(())
     }
 
+    /// R2.1: lower an assignment whose destination is a flattened scalar tuple.
+    /// The tuple is a set of per-element SSA variables, so it is DEFINED element
+    /// by element. The one producing form that lowers is `AggregateMake` (build
+    /// the tuple from its element locals, e.g. `(w.wait(p1), w.wait(p2))`);
+    /// receiving a tuple FROM a call would need a wasm MULTI-RESULT call, which
+    /// the WAFFLE Call path does not lower (it binds a single result), so that
+    /// stays fail-closed. Everything else fails closed too.
+    fn lower_tuple_assign(&mut self, dst: RLocalId, expr: &RExpr<'db>) -> Result<(), LowerError> {
+        match expr {
+            RExpr::AggregateMake { fields, .. } => {
+                let elem_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
+                })?;
+                if fields.len() != elem_vars.len() {
+                    return Err(LowerError::Internal(format!(
+                        "R2.1 scalar-tuple make has {} fields but the destination has {} \
+                         element words",
+                        fields.len(),
+                        elem_vars.len()
+                    )));
+                }
+                for (field, elem_var) in fields.iter().zip(elem_vars) {
+                    let value = self.local_value(*field)?;
+                    self.fb.def_var(elem_var, value);
+                }
+                Ok(())
+            }
+            RExpr::Call { .. } => Err(LowerError::Unsupported(
+                "wasm target (R2.1): a call returning a scalar-tuple aggregate needs a \
+                 MULTI-RESULT wasm call, which the value model does not lower (the WAFFLE \
+                 Call path binds a single result). Scalar-tuple params and returns lower at \
+                 function boundaries, but receiving a tuple FROM a call is R2/fork-level: \
+                 return the joined scalar, or export the tuple-returning function so the \
+                 host consumes its multi-value return."
+                    .to_string(),
+            )),
+            other => Err(LowerError::Unsupported(format!(
+                "wasm target (R2.1): scalar-tuple destination assigned from `{other:?}` is \
+                 not supported (only `aggregate_make` of a scalar tuple lowers; tuple copies \
+                 and tuple call results are R2)"
+            ))),
+        }
+    }
+
     fn lower_expr(&mut self, expr: &RExpr<'db>, dst: RLocalId) -> Result<ValueId, LowerError> {
         match expr {
             RExpr::Use(src) => self.local_value(*src),
@@ -452,6 +576,18 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             // the `u32` newtypes (`Pending<T>` / `KernelId` / `WebGpuRef`).
             RExpr::AggregateMake { layout, fields } => self.lower_scalar_newtype_make(*layout, fields),
             RExpr::AggregateExtract { value, index } => {
+                // R2.1: extracting element `index` of a flattened scalar tuple is
+                // a read of that element's SSA variable (the tuple destructuring
+                // `let (p1, p2) = pair`). Otherwise it is the single-scalar-field
+                // newtype identity.
+                if let Some(elem_var) = self
+                    .tuple_vars
+                    .get(value)
+                    .and_then(|elem_vars| elem_vars.get(*index as usize))
+                    .copied()
+                {
+                    return Ok(self.fb.use_var(elem_var));
+                }
                 self.lower_scalar_newtype_extract(*value, *index)
             }
             // R2.0 (Fable seat ruling, control-effects ladder section 7): the only
@@ -676,9 +812,18 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         let is = self.inst_set();
         match terminator {
             RTerminator::Return(Some(value)) => {
-                let value = self.local_value(*value)?;
-                self.fb
-                    .insert_inst_no_result(Return::new_single(is, value));
+                // R2.1: returning a flattened scalar tuple is a wasm MULTI-VALUE
+                // return of its element words (the host reads the N results). Every
+                // other return is the single-value form.
+                if let Some(elem_vars) = self.tuple_vars.get(value).cloned() {
+                    let values: Vec<ValueId> =
+                        elem_vars.iter().map(|var| self.fb.use_var(*var)).collect();
+                    self.fb.insert_return_values(&values);
+                } else {
+                    let value = self.local_value(*value)?;
+                    self.fb
+                        .insert_inst_no_result(Return::new_single(is, value));
+                }
             }
             // A unit return and a `Stop` (the synthetic main-root exit) both
             // become a plain wasm return.

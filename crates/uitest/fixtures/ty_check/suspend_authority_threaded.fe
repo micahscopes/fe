@@ -1,0 +1,31 @@
+// mb2 CE-6 (the POSITIVE twin of the suspend-authority jewel): you CAN suspend
+// where you DECLARE the authority. A frame that names the blocking authority in its
+// own `uses` row discharges `await2`/`await3`'s `Wait<B>` obligation by THREADING it
+// (the soft color, R6: one row entry, a signature-only cost, no type change). This
+// type-checks CLEANLY: the own-tuple consume (R4.1: both affine tokens moved out of
+// the tuple by `let (p1, p2) = pair`) and the generic multi-`T` return compose with
+// no diagnostics. Its negative twin (`suspend_authority_no_provider.fe`) is the same
+// call with no authority in scope, which is `8-0036`.
+
+use core::pending::{Pending, Wait, await2, await3}
+use std::wasm::WasmBackend
+
+fn join2_with_authority(
+    _ pair: own (Pending<WasmBackend, u64>, Pending<WasmBackend, u64>),
+) -> (u64, u64)
+    uses (w: mut Wait<WasmBackend>)
+{
+    await2(pair)
+}
+
+fn join3_with_authority(
+    _ triple: own (
+        Pending<WasmBackend, u64>,
+        Pending<WasmBackend, u64>,
+        Pending<WasmBackend, u64>,
+    ),
+) -> (u64, u64, u64)
+    uses (w: mut Wait<WasmBackend>)
+{
+    await3(triple)
+}

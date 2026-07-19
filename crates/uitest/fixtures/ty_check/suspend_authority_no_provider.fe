@@ -1,0 +1,36 @@
+// mb2 CE-6 (the suspend-authority NEGATIVE JEWEL): the twin of the keystone's
+// positive. Suspension is an AUTHORITY carried in the ordinary effect row, NOT a
+// type constructor on the return type (control-effects R6, the anti-coloring
+// pillar): a suspending function is `fn f(..) -> T uses (w: mut Wait<B>)`, it
+// returns `T`, there is no `Future`/`.await`/`Poll`/`Pin`. Fe's ONLY wall is
+// provider absence, placed where reality's wall is: there is no `Wait<WasmBackend>`
+// provider on a would-be main-thread frame, so a function demanding
+// `uses (w: mut Wait<WasmBackend>)` invoked with NO provider in scope is the
+// ordinary `8-0036` obligation error, at the exact call that could not discharge
+// it. This is the compile-time proof that you cannot suspend where you may not
+// block. Its positive twin is CE-5/CE-6's token rail: a `with (Wait<WasmBackend> =
+// WorkerPool {})` establishment discharges the same obligation and the join runs.
+
+use core::pending::{Pending, await2, await3}
+use std::wasm::WasmBackend
+
+// The fixed-arity join `await2` demands the blocking authority `Wait<WasmBackend>`
+// in its effect row. Invoked here with NO provider established and NO `uses` row to
+// re-export it, the obligation cannot be discharged: `8-0036`, the anti-coloring
+// gate, at the `await2` call.
+fn join2_without_authority(
+    _ pair: own (Pending<WasmBackend, u64>, Pending<WasmBackend, u64>),
+) -> (u64, u64) {
+    await2(pair)
+}
+
+// The three-arity sibling: the same suspend-authority wall, unchanged by arity.
+fn join3_without_authority(
+    _ triple: own (
+        Pending<WasmBackend, u64>,
+        Pending<WasmBackend, u64>,
+        Pending<WasmBackend, u64>,
+    ),
+) -> (u64, u64, u64) {
+    await3(triple)
+}

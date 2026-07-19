@@ -117,3 +117,38 @@ pub trait Spawn<B: Backend> {
     /// is CE-5).
     fn spawn(mut self, _ task: TaskId, _ arg: u64) -> Pending<B, u64>
 }
+
+/// Join TWO pending operations, delivering both payloads (control-effects R4.1,
+/// CE-6). The FIXED-ARITY join: it CONSUMES an `own` tuple of two tokens (both
+/// affine tokens moved out of the tuple by the destructuring `let (p1, p2)`), then
+/// waits both. R4 measured that consuming both elements of an `own (Pending,
+/// Pending)` through destructuring checks soundly, so this lands with no compiler
+/// work on the affinity side; it is the ordinary composition of two `Wait::wait`
+/// calls, packaged. It demands a single `Wait<B>` in its effect row (the one
+/// authority-gated colored op), so a caller with no `Wait<B>` provider in scope
+/// gets the ordinary `8-0036` obligation error: you cannot join where you may not
+/// block (the anti-coloring gate, R6).
+///
+/// True K-ary `await_all` over `[Pending<B, T>; K]` is DEFERRED (it needs a
+/// consuming-iteration idiom that does not exist today, R4.3); fixed-arity joins
+/// are the near form, and the schedule shape picks the arity.
+pub fn await2<B: Backend, T1, T2>(_ pair: own (Pending<B, T1>, Pending<B, T2>)) -> (T1, T2)
+    uses (w: mut Wait<B>)
+{
+    let (p1, p2) = pair
+    (w.wait(p1), w.wait(p2))
+}
+
+/// Join THREE pending operations (control-effects R4.1, CE-6): the three-arity
+/// sibling of `await2`. Same rail, same single `Wait<B>` authority, one more token
+/// consumed out of the `own` tuple. Beyond three, the honest interim is that K-ary
+/// joins live inside provider/facade bodies where K is statically known from the
+/// schedule shape (R4.3), not a user-held collection.
+pub fn await3<B: Backend, T1, T2, T3>(
+    _ triple: own (Pending<B, T1>, Pending<B, T2>, Pending<B, T3>),
+) -> (T1, T2, T3)
+    uses (w: mut Wait<B>)
+{
+    let (p1, p2, p3) = triple
+    (w.wait(p1), w.wait(p2), w.wait(p3))
+}

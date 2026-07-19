@@ -1,0 +1,20 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/suspend_authority_no_provider.fe
+---
+error[8-0036]: missing effect `Wait<B>` required by `await2`
+   ┌─ suspend_authority_no_provider.fe:24:5
+   │
+24 │     await2(pair)
+   │     ^^^^^^^^^^^^ `await2` requires effect `Wait<B>` to be in scope
+   │
+   = provide it with `with (Wait<B> = value)` or require it via `uses Wait<B>`
+
+error[8-0036]: missing effect `Wait<B>` required by `await3`
+   ┌─ suspend_authority_no_provider.fe:35:5
+   │
+35 │     await3(triple)
+   │     ^^^^^^^^^^^^^^ `await3` requires effect `Wait<B>` to be in scope
+   │
+   = provide it with `with (Wait<B> = value)` or require it via `uses Wait<B>`

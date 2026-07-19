@@ -860,11 +860,42 @@ pub fn coeff_pair(_ k0: u64, _ k1: u64) -> u64 {
         pair_via_rail(k0, k1)
     }
 }
+
+// CE-6 THE R2.1 PAYOFF: a two-token join through an await2-SHAPED own-tuple join.
+// `mint` spawns one task and lets its `Pending<WasmBackend, u64>` token ESCAPE
+// whole as its one `u32` word (the affine ruling: `spawn`'s token escapes); the
+// host holds two such tokens and hands them back as a PAIR. `join2` is the
+// await2-shaped join: it takes the `own (Pending, Pending)` tuple (R2.1: the
+// two-word tuple PARAM flattens into two wasm params with per-element vars),
+// consumes BOTH tokens out of the tuple by the destructuring `let (p1, p2) = pair`
+// (R4.1: own-tuple consume is sound), waits both, and returns the `(u64, u64)`
+// results as a wasm MULTI-VALUE result the host reads. This is the exact body of
+// `core::pending::await2`, specialized to `WorkerPool::wait`: the generic `await2`
+// itself cannot be Fe-CALLED on wasm because consuming a tuple FROM a call needs a
+// multi-result wasm call (a fork-level gap beyond R2.1's interface scope), but its
+// own-tuple param + tuple return lower at the export boundary, which is the payoff.
+fn spawn_one(_ k: u64) -> Pending<WasmBackend, u64>
+    uses (sp: mut Spawn<WasmBackend>)
+{
+    sp.spawn(TaskId::new(0), k)
+}
+
+pub fn mint(_ k: u64) -> Pending<WasmBackend, u64> {
+    with (Spawn<WasmBackend> = WorkerPool {}) {
+        spawn_one(k)
+    }
+}
+
+pub fn join2(_ pair: own (Pending<WasmBackend, u64>, Pending<WasmBackend, u64>)) -> (u64, u64) {
+    let mut w = WorkerPool {}
+    let (p1, p2) = pair
+    (w.wait(p1), w.wait(p2))
+}
 "#;
 
 fn worker_ntt8_src() -> String {
     [
-        "use std::worker::{Spawn, Wait, WorkerPool, TaskId}\n",
+        "use std::worker::{Spawn, Wait, WorkerPool, TaskId, Pending}\n",
         "use std::wasm::WasmBackend\n",
         WORKER_FIELD_ARITH,
         WORKER_NTT8_SPECIFIC,
@@ -1127,15 +1158,81 @@ fn fe_worker_ntt8_fork_join_equals_sequential_oracle() {
     );
 }
 
-/// CE-5: the LOCAL `Par<WasmBackend>` provider is BUILT and TYPE-CHECKS (it composes
-/// in `std::worker` and here at the Fe level); its wasm EXECUTION is gated on R2.1,
-/// because `fork`'s `(L, R)` join tuple is a MULTI-FIELD aggregate that the R1/R2.0
-/// wasm value model does not lower (ratified in the build-ladder section 7.4: tuple
-/// results stay word-carried until the scalar-tuple sliver R2.1 lands). This test
-/// PINS that boundary fail-closed: the `Par<WasmBackend>` fork-join type-checks but
-/// its wasm lowering stops exactly at the aggregate wall, not anywhere unexpected.
-/// The order-independence oracle itself is proven executably by the task rail's
-/// two-token `coeff_pair` above; the local provider is the same semantics, deferred.
+/// CE-6 THE R2.1 PAYOFF: a wasmtime two-token join driving TWO task completions
+/// through an await2-shaped `own (Pending, Pending)` join. `mint(k)` spawns a task
+/// and returns its escaping token (a `u32` slot); the host holds two tokens and
+/// passes them as a PAIR to `join2`, whose two-word tuple PARAM lowers via R2.1
+/// (flattened to two wasm params) and whose `(u64, u64)` result is a wasm
+/// MULTI-VALUE return the host reads. The two delivered values EQUAL the pinned
+/// sequential oracle `(NTT8_OUTPUT[0], NTT8_OUTPUT[1])`: both tokens' payloads flow
+/// through the own-tuple param, distinctly and correctly. This is CE-5's
+/// `coeff_pair` two-token join repackaged behind the await2 tuple boundary, proving
+/// the `(Pending, Pending)` own-tuple param now lowers.
+#[test]
+fn fe_worker_await2_shaped_two_token_join_equals_oracle() {
+    let src = worker_ntt8_src();
+    let wasm = compile_to_wasm("wasm_worker_await2.fe", &src);
+    let (mut store, instance) = instantiate_task_pool(&wasm);
+
+    // Mint two task tokens (the host holds their escaping `u32` slots).
+    let mint = instance
+        .get_typed_func::<i64, i32>(&mut store, "mint")
+        .expect("`mint` export should exist");
+    let t0 = mint.call(&mut store, 0).expect("mint(0) should spawn a task token");
+    let t1 = mint.call(&mut store, 1).expect("mint(1) should spawn a task token");
+
+    // Join both tokens through the await2-shaped own-tuple join. The `(Pending,
+    // Pending)` param arrives as two wasm params (R2.1); the `(u64, u64)` return is
+    // a wasm multi-value result.
+    let join2 = instance
+        .get_typed_func::<(i32, i32), (i64, i64)>(&mut store, "join2")
+        .expect("`join2` export should exist");
+    let (r0, r1) = join2
+        .call(&mut store, (t0, t1))
+        .expect("join2 should consume the own-tuple of two tokens and deliver both payloads");
+
+    assert_eq!(
+        r0 as u64, NTT8_OUTPUT[0] as u64,
+        "the first joined payload must equal the sequential oracle NTT8_OUTPUT[0]"
+    );
+    assert_eq!(
+        r1 as u64, NTT8_OUTPUT[1] as u64,
+        "the second joined payload must equal the sequential oracle NTT8_OUTPUT[1]"
+    );
+
+    // The op walk: two `mint`s (each task_begin), then `join2` waits both tokens
+    // (each: raw wait + raw task_result). 2 begins + 2*(wait+task_result) = 6 ops.
+    assert_eq!(
+        store.data().log.len(),
+        6,
+        "two mints + a two-token join should walk task_begin x2 then (wait, task_result) x2"
+    );
+    assert_eq!(
+        &store.data().log,
+        &[
+            "task_begin",
+            "task_begin",
+            "wait",
+            "task_result",
+            "wait",
+            "task_result"
+        ],
+        "the await2-shaped join must wait+deliver each token exactly once, in order"
+    );
+}
+
+/// CE-5/CE-6: the LOCAL `Par<WasmBackend>` provider is BUILT and TYPE-CHECKS (it
+/// composes in `std::worker` and here at the Fe level); its wasm EXECUTION stays
+/// fail-closed. R2.1 (CE-6) now lowers scalar-tuple params AND returns at function
+/// BOUNDARIES, so `fork`'s own `(L, R)` return signature would lower; the wall the
+/// `fork`-join hits is one rung deeper and unchanged by R2.1: the CALLER
+/// (`par_pair_local`) must RECEIVE the `(u64, u64)` tuple FROM the `fork` call,
+/// which needs a wasm MULTI-RESULT call (the WAFFLE Call path binds a single
+/// result) - a fork-level gap beyond R2.1's interface scope. This test PINS that
+/// the fork-join type-checks but its wasm lowering stops fail-closed at that
+/// aggregate/call boundary, not anywhere unexpected. The order-independence oracle
+/// is proven executably by the task rail's two-token `coeff_pair` and the
+/// await2-shaped `join2` above; the local provider is the same semantics, deferred.
 #[test]
 fn fe_worker_par_local_provider_typechecks_wasm_exec_is_r2_1() {
     let src = worker_par_src();
