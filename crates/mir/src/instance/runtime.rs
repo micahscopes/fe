@@ -176,7 +176,7 @@ pub fn wasm_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>)
 /// Whether a runtime class may cross the wasm host-import boundary. R3.2 admitted
 /// scalars only; R3.4b (Amendment 4) additionally admits the `MemPtr<B::Word>`
 /// transport class and, by the transport-newtype extension, the single-`u32`-field
-/// capability newtypes (`WebGpuRef<u32, Global>`, `KernelId`, `PendingId`). Each is
+/// capability newtypes (`WebGpuRef<u32, Global>`, `KernelId`, `Pending<T>`). Each is
 /// represented by the wasm lowerer as its single word (i32 on wasm32): a `MemPtr<u32>`
 /// classifies as a memory-space `RawAddr` (a raw memory address, the class the runtime
 /// classifier assigns every host-minted region pointer); a memory-space provider
@@ -205,7 +205,7 @@ fn is_wasm_import_boundary_class(db: &dyn MirDb, class: &RuntimeClass<'_>) -> bo
 }
 
 /// A single-scalar-field aggregate (a `u32` capability newtype such as `WebGpuRef`,
-/// `KernelId`, `PendingId`): it crosses the extern boundary WHOLE and transports as
+/// `KernelId`, `Pending<T>`): it crosses the extern boundary WHOLE and transports as
 /// its one field's scalar word. Multi-field / empty aggregates, arrays, and enums are
 /// NOT single-scalar-field newtypes and stay fail-closed. This is the boundary-gate
 /// twin of `wasm_lower::single_scalar_field`.

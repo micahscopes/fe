@@ -26,7 +26,7 @@
 //! section 7): a Ref-rooted place whose carrier is a memory-space provider ref,
 //! at the empty path or `[Field(0)]` on a single-scalar-field newtype, lowers as
 //! the identity on the transport word (`use_var`); it is what lets an own-mode
-//! word-carried token (`Wait::wait(_ pending: own PendingId)`) consume. Stores,
+//! word-carried token (`Wait::wait<T>(_ pending: own Pending<T>)`) consume. Stores,
 //! addresses, offsets, and object materializations remain R2 and fail closed.
 
 use std::collections::HashMap;
@@ -265,7 +265,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                 ..
             } => Ok(Type::I32),
             // R3.4b step 2: a single-scalar-field aggregate (a `u32` newtype such
-            // as `PendingId` / `KernelId` / `WebGpuRef`) is represented as its one
+            // as `Pending<T>` / `KernelId` / `WebGpuRef`) is represented as its one
             // field's scalar. Multi-field and empty aggregates fail closed.
             RuntimeClass::AggregateValue { layout } => {
                 let scalar = self.single_scalar_field(*layout).ok_or_else(|| {
@@ -286,7 +286,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     /// If `layout` is a struct with EXACTLY ONE field that is an R1-envelope
     /// scalar, return that field's scalar class; otherwise `None` (multi-field,
     /// empty, array, and enum layouts stay fail-closed). This is what lets the
-    /// `u32` newtypes (`PendingId` / `KernelId` / `WebGpuRef`) execute: their
+    /// `u32` newtypes (`Pending<T>` / `KernelId` / `WebGpuRef`) execute: their
     /// runtime representation IS their single field's word.
     fn single_scalar_field(&self, layout: LayoutId<'db>) -> Option<ScalarClass<'db>> {
         match layout.data(self.db) {
@@ -449,7 +449,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             // a no-op on the represented word. `AggregateMake` of one field yields
             // that field's value; `AggregateExtract` at index 0 yields the
             // aggregate's value (which IS the field's word). This is what executes
-            // the `u32` newtypes (`PendingId` / `KernelId` / `WebGpuRef`).
+            // the `u32` newtypes (`Pending<T>` / `KernelId` / `WebGpuRef`).
             RExpr::AggregateMake { layout, fields } => self.lower_scalar_newtype_make(*layout, fields),
             RExpr::AggregateExtract { value, index } => {
                 self.lower_scalar_newtype_extract(*value, *index)
@@ -457,7 +457,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             // R2.0 (Fable seat ruling, control-effects ladder section 7): the only
             // place read the wasm target lowers is an IDENTITY on an already
             // value-carried transport word. Own-mode consumption of a word-carried
-            // token (`Wait::wait(_ pending: own PendingId)`) reaches lowering as
+            // token (`Wait::wait<T>(_ pending: own Pending<T>)`) reaches lowering as
             // exactly this shape (`load *%p`); anything needing an address, an offset,
             // a store, or an object materialization is R2 proper and stays fail-closed.
             RExpr::Load { place } => self.lower_place_read(place),

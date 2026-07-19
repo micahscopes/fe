@@ -10,8 +10,9 @@
 // Boundary discipline, FORCED by the wasm boundary: single-word transport only.
 // Every handle, token, pointer, and length crosses as one `u32` word; results as
 // `u32` or `u64`. No MULTI-word aggregate crosses by value. Per Amendment 4 (below)
-// the typed Fe newtypes (`PendingId`, `KernelId`, and the class-typed `WebGpuRef`
-// binding) now cross the boundary WHOLE: each is a single-`u32`-field newtype, and
+// the typed Fe newtypes (`Pending<()>`, `KernelId`, and the class-typed `WebGpuRef`
+// binding) now cross the boundary WHOLE: each is a single-`u32`-field newtype (the
+// phantom `T` on `Pending<T>` adds no field), and
 // the transport ABI unwraps it to its one word (i32 on wasm32) at the boundary, so
 // the wire shape is byte-identical to passing the bare `u32` while the Fe types stay
 // intact end-to-end. This is what lets the `WorkerGpu` provider bodies be pure
@@ -23,7 +24,7 @@
 // AMENDMENT 4 (R3.4b memory ruling, interop section 8; transport-newtype extension):
 // the REGION-POINTER params speak `MemPtr<u32>` (the `WebGpuBackend` word) DIRECTLY,
 // not a pre-narrowed `u32`, and the CAPABILITY NEWTYPES (`WebGpuRef<u32, Global>`,
-// `KernelId`, `PendingId`) cross the boundary WHOLE on the same footing. The transport
+// `KernelId`, `Pending<()>`) cross the boundary WHOLE on the same footing. The transport
 // ABI lowers each across the extern boundary as its single word (i32 on wasm32) - for
 // `MemPtr` exactly the linear-memory offset the JS broker already sees, for the
 // newtypes exactly their one `u32` field - so every import's wire shape is unchanged.
@@ -36,7 +37,7 @@
 
 use core::MemPtr
 use core::backend::Global
-use super::{WebGpuRef, KernelId, PendingId}
+use super::{WebGpuRef, KernelId, Pending}
 
 /// Module `fe:webgpu` (broker-serviced): allocate, upload, launch, begin-readback.
 #[wasm_import(module = "fe:webgpu")]
@@ -64,8 +65,9 @@ extern {
     /// copy-to-staging + submit + `mapAsync`, completion signalled via `fe:async`).
     /// Amendment 4: `src` is the `WebGpuRef<u32, Global>` handle, `dst` is the
     /// `MemPtr<u32>` region pointer, and the returned token crosses WHOLE as
-    /// `PendingId` (its single `u32` id word, i32).
-    pub unsafe fn gpu_readback_begin(_ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> PendingId
+    /// `Pending<()>` (its single `u32` id word, i32; the phantom payload adds no
+    /// field). The readback payload is unit: the words land in `dst`, not the token.
+    pub unsafe fn gpu_readback_begin(_ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> Pending<()>
 }
 
 /// Module `fe:async`: the one genuinely-async data-path op's blocking completion.
@@ -75,8 +77,16 @@ extern {
     /// (interop 4.1: `Atomics.wait` on the token's status slot). In the degraded,
     /// no-isolation mode this import is not provided at all; completions arrive as
     /// the exported `on_ready(token)` continuation instead. Amendment 4: `pending`
-    /// crosses WHOLE as `PendingId`, transported as its single `u32` id word (i32).
-    pub unsafe fn wait(_ pending: PendingId)
+    /// crosses WHOLE as `Pending<T>`, transported as its single `u32` id word (i32).
+    /// The import BLOCKS until resident and DELIVERS the payload `T` (this is what
+    /// lets the generic `Wait::wait<T>` provider body type-check abstractly: delivery
+    /// returns `T`). For the readback token (`T = ()`) the payload is unit, so this
+    /// monomorphizes to today's `wait(i32)` void import (wire-identical). CE-2 PROBE
+    /// PENDING FABLE RATIFICATION: the ratified text keeps this extern "as today"
+    /// (`wait(_ pending: Pending<()>)` void); that non-generic form CANNOT type-check
+    /// the abstract `wait<T> -> T` provider body (delivery returns unit, not `T`), so
+    /// this generic form is the measured resolution awaiting a seat ruling.
+    pub unsafe fn wait<T>(_ pending: Pending<T>) -> T
 }
 
 /// Module `fe:host` (unchanged from arch 4.2): logging and a monotonic clock.

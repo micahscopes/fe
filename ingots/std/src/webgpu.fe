@@ -187,7 +187,7 @@ impl Barrier<WebGpuBackend, Shared> for WebGpuBarriers {
 /// A compiled-kernel identity (arch 4.3's `Kernel`, pinned to the concrete
 /// `KernelId` per Amendment 3a). v1: an index into the page's pipeline table,
 /// pinned by `layout.json`; later, a compiler-emitted identity. A `u32` newtype,
-/// sibling of `PendingId` and the buffer-handle `WebGpuRef`: three u32-represented
+/// sibling of `Pending<T>` and the buffer-handle `WebGpuRef`: three u32-represented
 /// types that cannot cross-contaminate (a kernel id, a pending token, and a
 /// binding are distinct Fe types, so none can be passed where another is wanted).
 ///
@@ -205,11 +205,20 @@ impl KernelId {
     }
 }
 
-/// A pending host/device operation token (Amendment 3a). `Dispatch::readback_begin`
-/// mints one; `Wait::wait` consumes it. A `u32` newtype, distinct from `KernelId`
-/// and the buffer-handle, so a token can never stand in for a kernel id or a
-/// binding.
-pub struct PendingId { id: u32 }
+/// A pending host/device operation token carrying a phantom PAYLOAD type `T`
+/// (control-effects CE-2; R1's WebGPU-local `Pending<T>`). `Dispatch::readback_begin`
+/// mints one; `Wait::wait` consumes it, DELIVERING the `T`. `T` is PHANTOM
+/// (representation-only): the token is one real `u32` id with no runtime trace of
+/// `T`, exactly the phantom-typed posture of `WebGpuRef<T, S>` (shipped precedent).
+/// No `Copy`, no `from_raw`: a token is minted ONLY by a begin-shaped op and consumed
+/// ONCE (`own`). It crosses the extern boundary WHOLE as its single `u32` word under
+/// the Amendment 4 transport rule (the `single_scalar_field` transport class treats
+/// it as its one word, so the wire shape is byte-identical to the bare `u32` while the
+/// phantom `T` stays intact end to end). Distinct from `KernelId` and the buffer-handle
+/// `WebGpuRef`, so a token can never stand in for a kernel id or a binding. The
+/// backend-generic `Pending<B, T>` and the `core::control` move are CE-3; this slice
+/// keeps the token WebGPU-local, adding only the payload axis.
+pub struct Pending<T> { id: u32 }
 
 /// Host-side capability over a device backend `B`: the authority to allocate
 /// on-device storage, move words across the boundary, and launch kernels (arch
@@ -241,11 +250,13 @@ pub trait Dispatch<B: Backend> {
 
     /// AMENDMENT 2 + 3a: readback is a begin/complete pair, because WebGPU
     /// readback (`mapAsync`) is genuinely asynchronous and the capability must not
-    /// lie about it. `readback_begin` requests the copy and returns a `PendingId`;
-    /// the holder later blocks on it through `Wait`, or the host calls the exported
-    /// `on_ready(token)` continuation in degraded mode.
+    /// lie about it. `readback_begin` requests the copy and returns a `Pending<()>`;
+    /// the readback token's payload is UNIT (residency IS the value: the words land
+    /// in `dst`, not in the token). The holder later blocks on it through `Wait`,
+    /// delivering the unit, or the host calls the exported `on_ready(token)`
+    /// continuation in degraded mode.
     fn readback_begin(mut self, _ src: B::Ref<B::Word, Global>,
-                      _ len_words: u32, _ dst: MemPtr<B::Word>) -> PendingId
+                      _ len_words: u32, _ dst: MemPtr<B::Word>) -> Pending<()>
         where B: Supports<Global>
 }
 
@@ -257,13 +268,18 @@ pub trait Dispatch<B: Backend> {
 /// be composed into a main-thread entry: the type system enforces the spec's "no
 /// `Atomics.wait` on the main thread" rule by construction.
 pub trait Wait<B: Backend> {
-    /// Block until `pending` is resident. The token is CONSUMED (`own`): a
-    /// `PendingId` is a one-shot completion token, so `wait` takes ownership and
-    /// a second `wait` on the same token is a use-after-move type error. This
-    /// closes the at-most-once-resume / ABA hazard that a `View` (borrow) mode
-    /// would leave open once host token slots are recycled: the token cannot be
-    /// waited on twice because it is moved into the first `wait`.
-    fn wait(mut self, _ pending: own PendingId)
+    /// Block until `pending` is resident, DELIVERING its payload `T`. Generic over
+    /// the payload (generic trait-method precedent: `core::conal::Functor::map`):
+    /// consumption and delivery are ONE fused act (R1). For the readback token
+    /// (`T = ()`) residency IS the value, so the provider blocks and returns unit;
+    /// the wider `T` grammar (word scalars, tasks) arrives with the `core::control`
+    /// move in CE-3. The token is CONSUMED (`own`): a `Pending<T>` is a one-shot
+    /// completion token, so `wait` takes ownership and a second `wait` on the same
+    /// token is a use-after-move type error. This closes the at-most-once-resume /
+    /// ABA hazard that a `View` (borrow) mode would leave open once host token slots
+    /// are recycled: the token cannot be waited on twice because it is moved into
+    /// the first `wait`.
+    fn wait<T>(mut self, _ pending: own Pending<T>) -> T
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +288,7 @@ pub trait Wait<B: Backend> {
 // `fe:webgpu` / `fe:async` import calls: the compiler now type-checks the exact op
 // set the broker services. Per Amendment 4's transport-newtype extension the raw
 // externs now take the capability newtypes WHOLE (`WebGpuRef<u32, Global>`,
-// `KernelId`, `PendingId`), each transported as its single `u32` word by the ABI, so
+// `KernelId`, `Pending<()>`), each transported as its single `u32` word by the ABI, so
 // these bodies are PURE PASS-THROUGH: no `.binding` / `.id` field read, no re-wrap,
 // no place/`Load`. The class-typed / newtype surface stays intact end-to-end and is
 // unwrapped to its word only by the transport ABI at the boundary itself.
@@ -299,21 +315,25 @@ impl Dispatch<WebGpuBackend> for WorkerGpu {
         gpu_dispatch(kernel, groups)
     }
 
-    fn readback_begin(mut self, _ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> PendingId {
+    fn readback_begin(mut self, _ src: WebGpuRef<u32, Global>, _ len_words: u32, _ dst: MemPtr<u32>) -> Pending<()> {
         gpu_readback_begin(src, len_words, dst)
     }
 }
 
 impl Wait<WebGpuBackend> for WorkerGpu {
-    fn wait(mut self, _ pending: own PendingId) {
+    // The readback token's payload is unit (`T = ()`): the raw blocking `wait(token)`
+    // import returns once the readback is resident, and the typed wait delivers unit
+    // (residency IS the value). The token transports WHOLE as its one `u32` word
+    // (Amendment 4), so the body is pure pass-through: no `.id` read, no re-wrap.
+    fn wait<T>(mut self, _ pending: own Pending<T>) -> T {
         async_wait(pending)
     }
 }
 
 /// The synchronous-looking `readback` facade over the TWO capabilities (interop
-/// 3.2): a `PendingId` minted by `Dispatch::readback_begin` is immediately
-/// consumed by `Wait::wait`, so from Fe the words are resident when `readback`
-/// returns. No compiler magic: the facade simply DEMANDS both capabilities in one
+/// 3.2): a `Pending<()>` minted by `Dispatch::readback_begin` is immediately
+/// consumed by `Wait::wait` (delivering unit), so from Fe the words are resident
+/// when `readback` returns. No compiler magic: the facade simply DEMANDS both capabilities in one
 /// `uses` clause and threads them, the C3 / N2 multi-capability precedent
 /// (`uses (evm: mut Evm, par: mut Par<EvmBackend>)`) lifted to two trait-keyed
 /// device capabilities. The doc writes this `... |> w.wait`; Fe has no pipe

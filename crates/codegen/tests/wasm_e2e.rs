@@ -298,12 +298,12 @@ const NTT8_OUTPUT: [u32; 8] = [1104, 6528, 7157, 1035, 12081, 7898, 4772, 8621];
 ///     BOTH `Dispatch` and `Wait`; when it returns, `output` is resident.
 ///   - `main_begin` + `on_ready`: the degraded/continuation twin. `main_begin`
 ///     composes WITHOUT `Wait` in scope (create..readback_begin only) and returns
-///     the `PendingId`; the host later drives `on_ready(token)`, which completes
+///     the `Pending<()>`; the host later drives `on_ready(token)`, which completes
 ///     the resident copy. This proves degraded mode composes by construction and
 ///     that readback is honestly asynchronous (no copy until completion).
 const WEBGPU_NTT8_SRC: &str = r#"
 use core::MemPtr
-use std::webgpu::{Dispatch, Wait, WebGpuBackend, KernelId, WorkerGpu, PendingId}
+use std::webgpu::{Dispatch, Wait, WebGpuBackend, KernelId, WorkerGpu, Pending}
 
 // The pinned NTT-8 kernel is the page's pipeline-table index 0 (layout.json).
 fn ntt8_on_gpu(_ input: MemPtr<u32>, _ output: MemPtr<u32>)
@@ -322,7 +322,7 @@ pub fn main(_ input: MemPtr<u32>, _ output: MemPtr<u32>) {
     }
 }
 
-fn ntt8_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> PendingId
+fn ntt8_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> Pending<()>
     uses (gpu: mut Dispatch<WebGpuBackend>)
 {
     let buf = gpu.create(8)
@@ -331,17 +331,17 @@ fn ntt8_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> PendingId
     gpu.readback_begin(buf, 8, output)
 }
 
-pub fn main_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> PendingId {
+pub fn main_begin(_ input: MemPtr<u32>, _ output: MemPtr<u32>) -> Pending<()> {
     with (Dispatch<WebGpuBackend> = WorkerGpu {}) {
         ntt8_begin(input, output)
     }
 }
 
-fn wait_ready(_ pending: PendingId) uses (w: mut Wait<WebGpuBackend>) {
+fn wait_ready(_ pending: own Pending<()>) uses (w: mut Wait<WebGpuBackend>) {
     w.wait(pending)
 }
 
-pub fn on_ready(_ pending: PendingId) {
+pub fn on_ready(_ pending: own Pending<()>) {
     with (Wait<WebGpuBackend> = WorkerGpu {}) {
         wait_ready(pending)
     }
@@ -533,7 +533,7 @@ fn instantiate_fake_device(wasm: &[u8]) -> (wasmtime::Store<FakeDevice>, wasmtim
 /// `wasm_lower::ty_for_class` + `runtime::is_wasm_import_boundary_class` corrected. (3)
 /// Amendment 4's transport-newtype extension (architect ruling): the raw externs take
 /// the single-`u32`-field capability newtypes (`WebGpuRef<u32, Global>`, `KernelId`,
-/// `PendingId`) WHOLE, each transported as its one word, so the `WorkerGpu` bodies are
+/// `Pending<()>`) WHOLE, each transported as its one word, so the `WorkerGpu` bodies are
 /// pure pass-through with ZERO field reads - no `RExpr::Load`/place needed, staying
 /// inside the SSA-value-only wasm model. (4) host-import field NAME is the extern's base
 /// op identifier (`mir::wasm_import_name`), decoupled from the mangled Sonatina symbol,
@@ -607,7 +607,7 @@ fn fe_webgpu_ntt8_runs_on_wasm_fake_device() {
 }
 
 /// R3.4b twin: the `on_ready` continuation lane. `main_begin` composes WITHOUT
-/// `Wait` (create..readback_begin) and returns the `PendingId`; the output region
+/// `Wait` (create..readback_begin) and returns the `Pending<()>`; the output region
 /// is UNCHANGED until the host drives `on_ready(token)`, which completes the copy
 /// with the same token (the async-honesty assert + the continuation re-entry).
 ///

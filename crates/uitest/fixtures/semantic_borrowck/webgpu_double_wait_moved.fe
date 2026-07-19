@@ -1,4 +1,4 @@
-// mb2: the AFFINE completion-token jewel. A `PendingId` is a one-shot host/device
+// mb2: the AFFINE completion-token jewel. A `Pending<()>` is a one-shot host/device
 // completion token (minted by `Dispatch::readback_begin`, consumed by `Wait::wait`),
 // so `Wait::wait` takes it by `own`: the token is MOVED into the first `wait` and a
 // second `wait` on the same token is a use-after-move error (16-0002). This closes
@@ -15,7 +15,7 @@ use core::backend::Global
 use std::webgpu::{Dispatch, Wait, WebGpuBackend, WebGpuRef}
 
 // Mints one completion token and waits on it TWICE. The first `w.wait(p)` moves `p`
-// (the `own PendingId` param), so the second `w.wait(p)` cannot use the moved token.
+// (the `own Pending<()>` param), so the second `w.wait(p)` cannot use the moved token.
 fn double_wait(_ buf: WebGpuRef<u32, Global>, _ out: MemPtr<u32>)
     uses (gpu: mut Dispatch<WebGpuBackend>, w: mut Wait<WebGpuBackend>)
 {
