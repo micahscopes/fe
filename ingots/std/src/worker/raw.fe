@@ -1,0 +1,80 @@
+// std::worker::raw (mb2 CE-5, folds R3.6): the PRIVATE wasm-import surface for the
+// worker TASK POOL, the completion-cell rail's SECOND client (after `std::webgpu`).
+// User code never touches these; the `WorkerPool` provider in the parent
+// `std::worker` module is the only caller, and the typed `Spawn::spawn` /
+// `Wait::wait` surface is the public entry. The extern block names its wasm import
+// module via the R3.3 `#[wasm_import(module = "fe:worker")]` attribute, so the
+// import table IS the op set (interop 4.1/4.2, normative), exactly as `fe:webgpu`
+// is for the GPU client. WORKER-POOL EXECUTION is browser-only and never
+// sandbox-verifiable; these declarations are the compiler-checked contract a
+// broker/worker mirrors op-for-op (the wasmtime one-worker CONTRACT run in
+// `crates/codegen/tests/wasm_e2e.rs` is the sandbox proof, NOT a real pool).
+//
+// Boundary discipline, FORCED by the wasm boundary (the `fe:webgpu` rule, reused
+// verbatim): single-word transport only. Every handle, token, and length crosses
+// as one `u32` word; results as `u32` or `u64`. No MULTI-word aggregate crosses by
+// value. Per Amendment 4 the typed Fe newtypes (`Pending<WasmBackend, u64>`,
+// `TaskId`) cross the boundary WHOLE: each is a single-`u32`-field newtype (the
+// phantom `B`/`T` on `Pending` add no field), and the transport ABI unwraps it to
+// its one word (i32 on wasm32) at the boundary, so the wire shape is byte-identical
+// to passing the bare `u32` while the Fe types stay intact end to end. This is what
+// lets the `WorkerPool` provider bodies be pure pass-through: no `.id` field read,
+// no re-wrap, no place/`Load`.
+//
+// THE TASK SHAPE (control-effects R3, NO closure shipping): a task is named by a
+// `TaskId` (an index into the module's own exported `fe_task(entry: u32, arg: u64)
+// -> u64` dispatch table) and carries ONE `u64` argument; it completes with ONE
+// `u64` result. NO closure crosses to a sibling agent (measured `6-0009`: an `Fn`
+// impl cannot even carry the `uses` row a real branch body needs, and there is no
+// coercion from `Fn<(), R>` to a task), so `(TaskId, arg)` is the sanctioned,
+// honest, REIFIED effect description that ships across isolated linear memories.
+//
+// THE FUSED WAIT (control-effects R1): `task_result` is NEVER public surface. Its
+// "legal only after wait" temporal precondition dissolves because the ONLY path to
+// the `u64` is `Wait::wait` consuming the affine token, and consuming it fuses the
+// blocking `wait` and the `task_result` read into ONE typed act (see the parent
+// module's `Wait<WasmBackend>` provider). `wait` and `task_result` are declared
+// generic over the phantom payload `T` (the `fe:async::wait<T>` precedent) so the
+// fused body type-checks abstractly for the trait's `wait<T> -> T`; the task client
+// only ever instantiates them at `T = u64`, where they monomorphize to the
+// `wait(i32)` void import and the `task_result(i32) -> i64` read.
+
+use core::pending::{Pending, TaskId}
+use ingot::wasm::WasmBackend
+
+/// Module `fe:worker` (task-pool-serviced): mint a task cell, block on it, read its
+/// result. The one-shot `READY -> CONSUMED` CAS that backstops the affine token
+/// dynamically (a host driving delivery twice) lives host-side in `task_result`.
+#[wasm_import(module = "fe:worker")]
+extern {
+    /// Ship task-shaped work: dispatch the module's exported `fe_task(entry, arg)`
+    /// on a sibling agent and return a fresh completion token (interop 4.1: post a
+    /// task message to a worker, mint the token's status slot). Amendment 4:
+    /// `entry` crosses WHOLE as `TaskId` (its single `u32` id word, i32), `arg` as
+    /// `u64` (i64), and the returned token crosses WHOLE as `Pending<WasmBackend,
+    /// u64>` (its single `u32` id word, i32). The `u64` result is NOT carried in the
+    /// token; it lands in the cell, delivered later by `task_result`.
+    pub unsafe fn task_begin(_ entry: TaskId, _ arg: u64) -> Pending<WasmBackend, u64>
+
+    /// Block the calling agent until the task cell `pending` is READY (interop 4.1:
+    /// `Atomics.wait` on the token's status slot). In the degraded, no-isolation
+    /// mode this import is not provided; completions arrive as an exported
+    /// continuation instead. It BLOCKS but delivers NOTHING: for a task token the
+    /// value is read separately by `task_result`, so this returns unit (the payload
+    /// residency, not the payload). Generic over the phantom `T` so it composes into
+    /// the trait's `wait<T>`; the task client instantiates it at `T = u64`, where it
+    /// monomorphizes to the `wait(i32)` void import. Amendment 4: `pending` crosses
+    /// WHOLE as its single `u32` id word (i32).
+    pub unsafe fn wait<T>(_ pending: Pending<WasmBackend, T>)
+
+    /// Read (and CONSUME, host-side) the task cell's `u64` result, DELIVERING it
+    /// (interop 4.1: load the result slot, then the one-shot `READY -> CONSUMED`
+    /// CAS). NEVER public surface (control-effects R1): it is fused into `Wait::wait`
+    /// AFTER `wait` has blocked, so its temporal precondition is discharged by
+    /// construction. The host CAS traps on a second delivery of the same token (the
+    /// affine token's DYNAMIC backstop; the static `own` mode is the primary guard).
+    /// Generic over `T` for the same abstract-fusion reason as `wait`; instantiated
+    /// at `T = u64`, it monomorphizes to `task_result(i32) -> i64`. Amendment 4:
+    /// `pending` crosses WHOLE as its single `u32` id word (i32).
+    pub unsafe fn task_result<T>(_ pending: Pending<WasmBackend, T>) -> T
+}

@@ -38,6 +38,21 @@ fn compile_to_wasm(name: &str, source: &str) -> Vec<u8> {
     bytes
 }
 
+/// Compile Fe source through the wasm backend, expecting a fail-closed error.
+fn compile_to_wasm_err(name: &str, source: &str) -> String {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{name}")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect_err("wasm compilation should fail closed")
+        .to_string()
+}
+
 /// Compile the same Fe source through the EVM backend (the cross-backend twin).
 /// Returns the EVM runtime bytecode, proving one source lowers on both targets.
 fn compile_to_evm(name: &str, source: &str) -> Vec<u8> {
@@ -705,4 +720,453 @@ fn fe_call_pair_runs_on_wasm() {
         .expect("`apply` export should exist");
     assert_eq!(apply.call(&mut store, (20, 22)).unwrap(), 42);
     assert_eq!(apply.call(&mut store, (2, 3)).unwrap(), 5);
+}
+
+// ===========================================================================
+// mb2 CE-5 (folds R3.6) THE CONTRACT: the worker TASK RAIL as the completion-cell
+// rail's SECOND client. A Fe-compiled-to-wasm program forks/joins the size-8 NTT
+// through the `spawn`/`Pending`/`wait` task rail (`std::worker`) against a wasmtime
+// DEGENERATE ONE-WORKER POOL, and the recompiled fork-join NTT EQUALS the sequential
+// oracle (`crates/fe/tests/fixtures/fe_test/ntt_exec.fe`, pinned `NTT8_OUTPUT`).
+//
+// The proof is a CONTRACT, not a real pool (R3): tasks are word-in / word-out leaves
+// named by `TaskId` into the module's exported `fe_task` dispatch (NO closure
+// shipping, R3), so the shared-buffer butterfly shape of the EVM `ntt_par_exec.fe`
+// cannot cross the rail; the faithful task-rail realization is the independent DFT
+// leaf `fe_task(0, k) -> X[k]` (cyclic convention `X[k] = sum_j x[j] w8^{jk} mod q`,
+// the same convention `ntt_exec.fe` pins). The one-worker pool executes `fe_task`
+// SYNCHRONOUSLY in-instance, stores the `u64` in the token's slot, marks it READY,
+// `wait` returns it, and a double `task_result` traps host-side (the affine token's
+// dynamic READY->CONSUMED backstop). Browser claims: NONE (this is the wasmtime
+// contract; the bun 2-worker pool run is a DEFERRED follow-on, not this slice).
+// ===========================================================================
+
+/// The shared field-`F_q` arithmetic (`q = 12289`) plus the pinned probe input and
+/// the NTT-8 coefficient leaf, all SCALAR `u64` (no linear memory: the wasm value
+/// model, R2.0). The wasm R1 op envelope is `+`/`-`/`*` and the comparisons `<`/`==`
+/// ONLY (`/`, `%`, shifts, bitwise are R2), so mod-`q` reduction is done by
+/// SUBTRACTION and the twiddle powers are BAKED constants (no `powmod`, whose bit
+/// loop needs `%`/`/`). Every product is `< q^2 ~ 1.5e8`, exact in `u64`. Prepended
+/// to each worker fixture source below.
+const WORKER_FIELD_ARITH: &str = r#"
+// mod-q by repeated subtraction (only `<` and `-`): x < q^2, so at most q-1
+// subtractions of q are needed; setting i = 12289 forces the loop to exit.
+fn reduce_q(_ x: u64) -> u64 {
+    let mut r = x
+    let mut i: u64 = 0
+    while i < 12289 {
+        if r < 12289 {
+            i = 12289
+        } else {
+            r = r - 12289
+            i = i + 1
+        }
+    }
+    r
+}
+
+fn addmod_q(_ a: u64, _ b: u64) -> u64 {
+    let s = a + b
+    if s < 12289 { s } else { s - 12289 }
+}
+
+fn mulmod_q(_ a: u64, _ b: u64) -> u64 {
+    reduce_q(a * b)
+}
+
+// Baked twiddle powers w8^i mod q for i in 0..7 (w8 = 8246, q = 12289). powmod is
+// R2 (its bit loop needs `%`/`/`), so the eight constants are inlined.
+fn wpow(_ i: u64) -> u64 {
+    if i == 0 { 1 }
+    else if i == 1 { 8246 }
+    else if i == 2 { 1479 }
+    else if i == 3 { 5146 }
+    else if i == 4 { 12288 }
+    else if i == 5 { 4043 }
+    else if i == 6 { 10810 }
+    else { 7143 }
+}
+
+fn probe8(_ j: u64) -> u64 {
+    if j == 0 { 5 }
+    else if j == 1 { 15 }
+    else if j == 2 { 39 }
+    else if j == 3 { 77 }
+    else if j == 4 { 129 }
+    else if j == 5 { 195 }
+    else if j == 6 { 275 }
+    else { 369 }
+}
+
+// One INDEPENDENT NTT leaf: coefficient k of the forward size-8 NTT over F_q,
+// cyclic convention X[k] = sum_j x[j] * w8^{jk} mod q (w8 = 8246). The twiddle
+// wc = w8^{jk} is advanced by multiplying w8^k each j-step (no powmod). PURE scalar,
+// no shared buffer: exactly the word-in / word-out task shape R3 sanctions.
+fn ntt8_coeff(_ k: u64) -> u64 {
+    let wk = wpow(k)
+    let mut s: u64 = 0
+    let mut wc: u64 = 1
+    let mut j: u64 = 0
+    while j < 8 {
+        s = addmod_q(s, mulmod_q(probe8(j), wc))
+        wc = mulmod_q(wc, wk)
+        j = j + 1
+    }
+    s
+}
+"#;
+
+/// THE TASK-RAIL fixture: `fe_task` dispatch + `Spawn`/`Wait` fork-join via the
+/// `WorkerPool` provider. `coeff` is a single-leaf join; `coeff_pair` is the two-way
+/// disjoint fork-join (N2's stage-split shape) holding TWO affine tokens at once.
+const WORKER_NTT8_SPECIFIC: &str = r#"
+// THE EXPORTED TASK TABLE (R3): the pool dispatches tasks by TaskId into this
+// exported `fe_task(entry: u32, arg: u64)`. v1 table has ONE entry (TaskId 0 = the
+// NTT-8 coefficient leaf, arg = k); a single-entry table needs no `entry` match, so
+// it lowers today. Multi-entry dispatch would match `entry` (a u32), which needs the
+// wasm i32-compare completion (R1 `==`/`<` currently lower i64 operands only) and is
+// a separate codegen concern, not this slice.
+pub fn fe_task(_ entry: u32, _ arg: u64) -> u64 {
+    ntt8_coeff(arg)
+}
+
+fn coeff_via_rail(_ k: u64) -> u64
+    uses (sp: mut Spawn<WasmBackend>, w: mut Wait<WasmBackend>)
+{
+    let token = sp.spawn(TaskId::new(0), k)   // fork: mint the task's completion cell
+    w.wait(token)                             // join: block + fused deliver of X[k]
+}
+
+pub fn coeff(_ k: u64) -> u64 {
+    with (Spawn<WasmBackend> = WorkerPool {}, Wait<WasmBackend> = WorkerPool {}) {
+        coeff_via_rail(k)
+    }
+}
+
+fn pair_via_rail(_ k0: u64, _ k1: u64) -> u64
+    uses (sp: mut Spawn<WasmBackend>, w: mut Wait<WasmBackend>)
+{
+    // Two-way disjoint fork (N2's stage split): mint BOTH tokens, then join BOTH.
+    // Two affine tokens are live simultaneously, each consumed exactly once (own).
+    let t0 = sp.spawn(TaskId::new(0), k0)
+    let t1 = sp.spawn(TaskId::new(0), k1)
+    let r0 = w.wait(t0)
+    let r1 = w.wait(t1)
+    addmod_q(r0, r1)
+}
+
+pub fn coeff_pair(_ k0: u64, _ k1: u64) -> u64 {
+    with (Spawn<WasmBackend> = WorkerPool {}, Wait<WasmBackend> = WorkerPool {}) {
+        pair_via_rail(k0, k1)
+    }
+}
+"#;
+
+fn worker_ntt8_src() -> String {
+    [
+        "use std::worker::{Spawn, Wait, WorkerPool, TaskId}\n",
+        "use std::wasm::WasmBackend\n",
+        WORKER_FIELD_ARITH,
+        WORKER_NTT8_SPECIFIC,
+    ]
+    .concat()
+}
+
+/// The LOCAL `Par<WasmBackend>` fork-join fixture: pure nullary thunks joined by the
+/// sequential (left-then-right) `WorkerPool` `Par` provider. No host imports (pure).
+const WORKER_PAR_SPECIFIC: &str = r#"
+// A pure NTT-coefficient leaf as a nullary Fn<(), u64> thunk (the conal_par_fork
+// shape). Effect-pure by construction (6-0009): no `uses` row, which is exactly why
+// it CANNOT reach the task rail (that is `spawn`'s job).
+struct CoeffThunk { k: u64 }
+impl Fn<(), u64> for CoeffThunk {
+    fn call(self, _ unit: own ()) -> u64 {
+        ntt8_coeff(self.k)
+    }
+}
+
+fn par_pair_local(_ k0: u64, _ k1: u64) -> u64
+    uses (par: mut Par<WasmBackend>)
+{
+    let joined: (u64, u64) = par.fork(CoeffThunk { k: k0 }, CoeffThunk { k: k1 })
+    addmod_q(joined.0, joined.1)
+}
+
+pub fn par_pair(_ k0: u64, _ k1: u64) -> u64 {
+    with (Par<WasmBackend> = WorkerPool {}) {
+        par_pair_local(k0, k1)
+    }
+}
+"#;
+
+fn worker_par_src() -> String {
+    [
+        "use std::worker::WorkerPool\n",
+        "use std::wasm::WasmBackend\n",
+        "use core::par::Par\n",
+        "use core::Fn\n",
+        WORKER_FIELD_ARITH,
+        WORKER_PAR_SPECIFIC,
+    ]
+    .concat()
+}
+
+/// The one-shot CAS backstop fixture: drops to the raw `fe:worker` imports (any host
+/// author could, at their own risk) and calls `task_result` TWICE on one token. Safe
+/// Fe cannot double-consume (the affine `own` mode is a use-after-move type error);
+/// this UNSAFE probe exercises the host-side dynamic READY->CONSUMED trap. `std` keeps
+/// its `raw::task_result` private, so this is not std public surface.
+const WORKER_CAS_SPECIFIC: &str = r#"
+pub fn fe_task(_ entry: u32, _ arg: u64) -> u64 {
+    ntt8_coeff(arg)
+}
+
+#[wasm_import(module = "fe:worker")]
+extern {
+    pub unsafe fn task_begin(_ entry: TaskId, _ arg: u64) -> Pending<WasmBackend, u64>
+    pub unsafe fn wait<T>(_ pending: Pending<WasmBackend, T>)
+    pub unsafe fn task_result<T>(_ pending: Pending<WasmBackend, T>) -> T
+}
+
+pub fn double_consume(_ k: u64) -> u64 {
+    let token = task_begin(TaskId::new(0), k)
+    wait(token)
+    let a = task_result(token)   // consume 1: READY -> CONSUMED, delivers X[k]
+    let b = task_result(token)   // consume 2: traps host-side (the CAS backstop)
+    addmod_q(a, b)               // unreachable
+}
+"#;
+
+fn worker_cas_src() -> String {
+    [
+        "use std::worker::{TaskId, Pending}\n",
+        "use std::wasm::WasmBackend\n",
+        WORKER_FIELD_ARITH,
+        WORKER_CAS_SPECIFIC,
+    ]
+    .concat()
+}
+
+/// The DEGENERATE ONE-WORKER POOL: a token-slot table plus an op-sequence log. It
+/// mirrors the `fe:worker` import op-set op-for-op. `task_begin` executes the
+/// exported `fe_task` SYNCHRONOUSLY in-instance, stores the `u64`, and marks the slot
+/// READY; `wait` is a no-op (already READY in the synchronous pool); `task_result`
+/// reads the word and performs the one-shot `READY -> CONSUMED` CAS, trapping on a
+/// second delivery of the same token.
+#[derive(Default)]
+struct FakeTaskPool {
+    /// Token table: `slots[token]` holds a task's `u64` result and its CAS state.
+    slots: Vec<TaskSlot>,
+    /// The op-sequence log, one entry per serviced import call.
+    log: Vec<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct TaskSlot {
+    value: u64,
+    consumed: bool,
+}
+
+/// Build a `Linker` that services the `fe:worker` import op-set with a `FakeTaskPool`
+/// and instantiate `wasm` against it.
+fn instantiate_task_pool(wasm: &[u8]) -> (wasmtime::Store<FakeTaskPool>, wasmtime::Instance) {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, FakeTaskPool::default());
+    let mut linker = wasmtime::Linker::new(&engine);
+
+    // task_begin(entry, arg) -> token: the DEGENERATE one-worker pool. Execute the
+    // exported `fe_task(entry, arg)` SYNCHRONOUSLY in-instance, store the u64, mark
+    // the slot READY, and return the token index. Reentrant call into the instance.
+    linker
+        .func_wrap(
+            "fe:worker",
+            "task_begin",
+            |mut caller: wasmtime::Caller<'_, FakeTaskPool>,
+             entry: i32,
+             arg: i64|
+             -> Result<i32, wasmtime::Error> {
+                let fe_task = caller
+                    .get_export("fe_task")
+                    .and_then(wasmtime::Extern::into_func)
+                    .ok_or_else(|| wasmtime::Error::msg("the emitted wasm must export `fe_task`"))?
+                    .typed::<(i32, i64), i64>(&caller)?;
+                // Reentrant, synchronous execution of the task body in-instance.
+                let result = fe_task.call(&mut caller, (entry, arg))?;
+                let dev = caller.data_mut();
+                dev.slots.push(TaskSlot {
+                    value: result as u64,
+                    consumed: false,
+                });
+                dev.log.push("task_begin");
+                Ok((dev.slots.len() - 1) as i32)
+            },
+        )
+        .expect("bind task_begin");
+
+    // wait(token): block until the slot is READY. Synchronous pool: already READY, so
+    // this is a no-op beyond a bounds check and the op log.
+    linker
+        .func_wrap(
+            "fe:worker",
+            "wait",
+            |mut caller: wasmtime::Caller<'_, FakeTaskPool>,
+             token: i32|
+             -> Result<(), wasmtime::Error> {
+                let dev = caller.data_mut();
+                if token < 0 || token as usize >= dev.slots.len() {
+                    return Err(wasmtime::Error::msg("wait: unknown pending token"));
+                }
+                dev.log.push("wait");
+                Ok(())
+            },
+        )
+        .expect("bind wait");
+
+    // task_result(token) -> u64: read the result and perform the one-shot
+    // READY -> CONSUMED CAS. A SECOND delivery of the same token TRAPS with the named
+    // diagnostic (the affine task token's dynamic backstop).
+    linker
+        .func_wrap(
+            "fe:worker",
+            "task_result",
+            |mut caller: wasmtime::Caller<'_, FakeTaskPool>,
+             token: i32|
+             -> Result<i64, wasmtime::Error> {
+                let dev = caller.data_mut();
+                let slot = dev
+                    .slots
+                    .get_mut(token as usize)
+                    .ok_or_else(|| wasmtime::Error::msg("task_result: unknown pending token"))?;
+                if slot.consumed {
+                    return Err(wasmtime::Error::msg(
+                        "fe:worker task_result trap: token already CONSUMED (one-shot \
+                         READY->CONSUMED CAS violated; affine task token double-consumed)",
+                    ));
+                }
+                slot.consumed = true;
+                let value = slot.value;
+                dev.log.push("task_result");
+                Ok(value as i64)
+            },
+        )
+        .expect("bind task_result");
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("wasmtime should instantiate with the fe:worker imports satisfied");
+    (store, instance)
+}
+
+/// CE-5 THE CONTRACT: the recompiled fork-join NTT-8 through the `spawn`/`wait` task
+/// rail EQUALS the sequential oracle (`NTT8_OUTPUT`) under the one-worker pool. Every
+/// coefficient is a task-rail leaf; the two-token join is the disjoint fork-join.
+#[test]
+fn fe_worker_ntt8_fork_join_equals_sequential_oracle() {
+    let src = worker_ntt8_src();
+    let wasm = compile_to_wasm("wasm_worker_ntt8.fe", &src);
+
+    // The task-rail import op-set is on the emitted wasm, module-named per R3.3.
+    let imports = func_imports(&wasm);
+    for expected in [
+        ("fe:worker", "task_begin"),
+        ("fe:worker", "wait"),
+        ("fe:worker", "task_result"),
+    ] {
+        assert!(
+            imports.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "expected import {expected:?} in the emitted wasm, found {imports:?}"
+        );
+    }
+
+    let (mut store, instance) = instantiate_task_pool(&wasm);
+    // The pool dispatches into the module's exported `fe_task` task table.
+    assert!(
+        instance.get_func(&mut store, "fe_task").is_some(),
+        "the emitted wasm must export the `fe_task` dispatch table"
+    );
+
+    // Every NTT-8 coefficient computed through the task rail equals the pinned oracle.
+    let coeff = instance
+        .get_typed_func::<i64, i64>(&mut store, "coeff")
+        .expect("`coeff` export should exist");
+    for (k, expected) in NTT8_OUTPUT.iter().enumerate() {
+        let got = coeff
+            .call(&mut store, k as i64)
+            .expect("coeff(k) should run the spawn/wait rail");
+        assert_eq!(
+            got as u64, *expected as u64,
+            "coeff({k}) through the task rail must equal the sequential oracle NTT8_OUTPUT[{k}]"
+        );
+    }
+
+    // The op-sequence per leaf is exactly the ratified walk: spawn (task_begin), then
+    // the fused wait (raw wait, then raw task_result). 8 coefficients = 8 * 3 ops.
+    assert_eq!(
+        store.data().log.len(),
+        NTT8_OUTPUT.len() * 3,
+        "each coefficient should walk task_begin + wait + task_result exactly once"
+    );
+    assert_eq!(
+        &store.data().log[0..3],
+        &["task_begin", "wait", "task_result"],
+        "the fused wait should call raw wait then raw task_result after the spawn"
+    );
+
+    // The two-way disjoint fork-join (two affine tokens live at once): X[0] + X[1].
+    let coeff_pair = instance
+        .get_typed_func::<(i64, i64), i64>(&mut store, "coeff_pair")
+        .expect("`coeff_pair` export should exist");
+    let joined = coeff_pair
+        .call(&mut store, (0, 1))
+        .expect("coeff_pair should fork two tokens and join both");
+    assert_eq!(
+        joined as u64,
+        ((NTT8_OUTPUT[0] as u64 + NTT8_OUTPUT[1] as u64) % 12289),
+        "the two-token fork-join must equal (X[0] + X[1]) mod q"
+    );
+}
+
+/// CE-5: the LOCAL `Par<WasmBackend>` provider is BUILT and TYPE-CHECKS (it composes
+/// in `std::worker` and here at the Fe level); its wasm EXECUTION is gated on R2.1,
+/// because `fork`'s `(L, R)` join tuple is a MULTI-FIELD aggregate that the R1/R2.0
+/// wasm value model does not lower (ratified in the build-ladder section 7.4: tuple
+/// results stay word-carried until the scalar-tuple sliver R2.1 lands). This test
+/// PINS that boundary fail-closed: the `Par<WasmBackend>` fork-join type-checks but
+/// its wasm lowering stops exactly at the aggregate wall, not anywhere unexpected.
+/// The order-independence oracle itself is proven executably by the task rail's
+/// two-token `coeff_pair` above; the local provider is the same semantics, deferred.
+#[test]
+fn fe_worker_par_local_provider_typechecks_wasm_exec_is_r2_1() {
+    let src = worker_par_src();
+    let err = compile_to_wasm_err("wasm_worker_par.fe", &src);
+    assert!(
+        err.contains("aggregate") || err.contains("single-scalar-field") || err.contains("R2"),
+        "Par<WasmBackend> fork-join should fail-close at the R2.1 aggregate (tuple) wall, \
+         got: {err}"
+    );
+}
+
+/// CE-5: the one-shot `READY -> CONSUMED` CAS backstop. Safe Fe cannot double-consume
+/// a token (affine `own`); this UNSAFE probe calls the raw `task_result` twice on one
+/// token and the SECOND delivery TRAPS host-side with the named diagnostic.
+#[test]
+fn fe_worker_double_consume_traps_host_side() {
+    let src = worker_cas_src();
+    let wasm = compile_to_wasm("wasm_worker_cas.fe", &src);
+    let (mut store, instance) = instantiate_task_pool(&wasm);
+
+    let double_consume = instance
+        .get_typed_func::<i64, i64>(&mut store, "double_consume")
+        .expect("`double_consume` export should exist");
+    let err = double_consume
+        .call(&mut store, 0)
+        .expect_err("a second task_result on one token must trap (the one-shot CAS backstop)");
+    // The named diagnostic lives in the host-error cause chain under the wasm trap
+    // backtrace; `{err:?}` renders the whole chain.
+    let rendered = format!("{err:?}");
+    assert!(
+        rendered.contains("already CONSUMED"),
+        "expected the named READY->CONSUMED CAS trap in the error chain, got: {rendered}"
+    );
 }

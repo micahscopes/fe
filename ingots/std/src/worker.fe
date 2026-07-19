@@ -1,0 +1,84 @@
+use core::par::Par
+use core::Fn
+use ingot::wasm::WasmBackend
+use raw::{task_begin, wait as block_ready, task_result}
+
+// mb2 CE-5 (folds R3.6): the worker TASK RAIL, the completion-cell rail's SECOND
+// client. `std::webgpu` proved the rail with GPU readback (`Pending<WebGpuBackend,
+// ()>`); this module proves it GENERALIZES to a second, genuinely different client
+// with a different payload (`Pending<WasmBackend, u64>`) over the SAME mint / wait /
+// complete substrate, realized per backend by provider presence. Nothing new in the
+// rail: `WorkerPool` is another extern-backed provider whose bodies ARE the raw
+// `fe:worker` import calls (`std::worker::raw`), exactly the `WorkerGpu` posture.
+//
+// The vocabulary (`Pending`, `Wait`, `Spawn`, `TaskId`) lives backend-generic in
+// `core::pending` (CE-3); this module re-exports it for source compatibility and
+// keeps the PROVIDER downstream in `std` (the provider-placement rule), so a
+// generated/authored `impl` gets a resolvable absolute path and the algebra names
+// no realization until here.
+pub use core::pending::{Pending, Wait, Spawn, TaskId}
+
+/// The worker task-pool provider (control-effects R3): a ZST that provides the task
+/// authorities on the wasm backend. It carries THREE traits over one cell rail:
+///   - `Spawn<WasmBackend>`: mint a task's completion cell (`task_begin`), the fork
+///     edge; the returned token is the join edge.
+///   - `Wait<WasmBackend>`: block on a token and DELIVER its `u64` result, the join;
+///     `task_result` is FUSED in here (R1) and never leaks as public surface.
+///   - `Par<WasmBackend>`: the LOCAL, sequential (left-then-right) fork/join
+///     realization, so backend-generic `Par` fork-join code still composes on wasm
+///     (R3: `WorkerPar` does NOT ship closures across workers; genuine host fan-out
+///     is spelled `spawn` + `wait`).
+/// A missing provider is the ordinary `8-0036` obligation error, the house gate.
+pub struct WorkerPool {}
+
+/// Ship task-shaped work to a sibling agent (control-effects R3). Pure pass-through
+/// per Amendment 4: `task` (`TaskId`) and the returned `Pending<WasmBackend, u64>`
+/// each cross the extern boundary WHOLE as their single `u32` word, so there is no
+/// `.id` read and no re-wrap. `spawn`'s token DOES escape as an affine value (unlike
+/// `fork`'s, which never leaves the provider body); abandonment (drop) is legal per
+/// the affine ruling.
+impl Spawn<WasmBackend> for WorkerPool {
+    fn spawn(mut self, _ task: TaskId, _ arg: u64) -> Pending<WasmBackend, u64> {
+        task_begin(task, arg)
+    }
+}
+
+/// Block on a task token and deliver its `u64` result (control-effects R1, the
+/// FUSED wait). For the task payload `T = u64` the body BLOCKS on the raw `wait`
+/// (payload residency) then reads the word via the raw `task_result`, INSIDE this
+/// one typed `wait` call: consuming the token IS getting the `u64`, so
+/// `task_result`'s "legal only after wait" precondition dissolves and it never
+/// becomes public surface. The token is CONSUMED (`own`): a second `wait` on the
+/// same token is a use-after-move TYPE error (the primary, static one-shot guard);
+/// the host-side `READY -> CONSUMED` CAS in `task_result` is the DYNAMIC backstop.
+///
+/// The two raw ops both borrow the token (VIEW mode, the `WorkerGpu::wait` posture
+/// where `async_wait` borrows and the `own` token is dropped at scope end); the raw
+/// `task_result` is declared generic `-> T`, so this body returns the trait's `T`
+/// abstractly (the `fe:async::wait<T>` precedent). The client only instantiates it
+/// at `T = u64`.
+impl Wait<WasmBackend> for WorkerPool {
+    fn wait<T>(mut self, _ pending: own Pending<WasmBackend, T>) -> T {
+        block_ready(pending)
+        task_result(pending)
+    }
+}
+
+/// The LOCAL `Par<WasmBackend>` provider (control-effects R3): fork two INDEPENDENT
+/// nullary thunks over DISJOINT state, join as `(left, right)`, realized SEQUENTIAL
+/// left-then-right in the calling worker. This is the `std::evm::par` `Sequential`
+/// posture, backend-swapped to wasm: because the halves are independent, that
+/// left-then-right run IS the reference fork-join semantics a real parallel backend
+/// must match (the order-independence oracle). The thunks are effect-pure by
+/// construction (`6-0009`): a `Par::fork` half CANNOT carry a `uses` row, which is
+/// exactly why capability-bearing work (the task rail) is spelled `spawn` + `wait`
+/// and NOT smuggled through a forked closure.
+impl Par<WasmBackend> for WorkerPool {
+    fn fork<L, R, FL: Fn<(), L>, FR: Fn<(), R>>(mut self, _ left: FL, _ right: FR) -> (L, R) {
+        // Sequential realization: run the left half fully, then the right half.
+        // Order-independent because the halves are disjoint (the pinned property).
+        let l = left.call(())
+        let r = right.call(())
+        (l, r)
+    }
+}
