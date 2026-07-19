@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/semantic_borrowck.rs
+assertion_line: 25
+expression: diags
+input_file: fixtures/semantic_borrowck/arr_const_index_distinct_move.fe
+---
+error[16-0002]: move conflict in `fn distinct_index_move`
+   ┌─ arr_const_index_distinct_move.fe:30:13
+   │
+29 │     consume(arr[0])
+   │             ------ value is moved here
+30 │     consume(arr[1])
+   │             ^^^^^^ cannot use a value after it was moved

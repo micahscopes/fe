@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/semantic_borrowck.rs
+assertion_line: 25
+expression: diags
+input_file: fixtures/semantic_borrowck/arr_dynamic_index_loop_move.fe
+---
+error[16-0002]: move conflict in `fn dynamic_index_loop_move`
+   ┌─ arr_dynamic_index_loop_move.fe:26:11
+   │
+26 │     while i < 2 {
+   │           ^ cannot use a value after it was moved
+27 │         consume(arr[i])
+   │                     - value is moved here

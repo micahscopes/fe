@@ -1,0 +1,31 @@
+// mb2 CE-4: distinct-index consumption's fate under the pre-approved FAIL-CLOSED floor.
+//
+// Moving `arr[0]` then `arr[1]` out of an owned array is SOUND (the two elements are
+// disjoint). Under proper per-constant-index tracking it would be allowed. But the
+// current place lowering coarsens BOTH constant indices to `Index(Dynamic)`, so they
+// `may_alias` as `May` and the second move is (over-conservatively) rejected as a move
+// conflict (16-0002).
+//
+// This is the CE-4 fail-closed floor: precise `Index(Constant)` tracking is the deferred
+// preferred arm (it lives in the shared place model `lower/place.rs`, feeds MIR/codegen,
+// and would churn EVM byte-identity, so it is out of scope for this slice per the STOP
+// condition). Nothing in-tree stores non-`Copy` values in arrays, so the over-rejection
+// regresses no shipped Fe. This fixture pins the floor's verdict EXPLICITLY; when the
+// preferred arm lands, this snapshot is the intended signal to flip to "accepted".
+
+struct Widget {
+    n: u32,
+}
+
+fn consume(_ w: own Widget) {}
+
+fn make() -> Widget {
+    Widget { n: 0 }
+}
+
+// Distinct constant indices consumed once each: sound, but rejected under the floor.
+fn distinct_index_move() {
+    let arr = [make(), make()]
+    consume(arr[0])
+    consume(arr[1])
+}

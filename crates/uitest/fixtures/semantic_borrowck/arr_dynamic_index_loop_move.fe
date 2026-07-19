@@ -1,0 +1,30 @@
+// mb2 CE-4 regression pin: a non-`Copy` move out of a DYNAMIC (runtime) array index in
+// a loop is correctly REJECTED (16-0002), and stays out of scope under either arm.
+//
+// The loop back-edge re-enters the body with `arr` already partially moved by the prior
+// iteration's `consume(arr[i])`, so the dynamic-index element `may_alias` the moved place
+// and the reuse is a use-after-move. Precise per-constant-index tracking would not change
+// this: a runtime index is genuinely `Index(Dynamic)` and must remain conservatively
+// May-aliasing. Consuming iteration over an owned array (own-array drain / array patterns)
+// is a separate horizon idiom, not built in this ladder. This fixture pins that the
+// dynamic case is rejected regardless.
+
+struct Widget {
+    n: u32,
+}
+
+fn consume(_ w: own Widget) {}
+
+fn make() -> Widget {
+    Widget { n: 0 }
+}
+
+// Dynamic index consumed across loop iterations: rejected.
+fn dynamic_index_loop_move() {
+    let arr = [make(), make()]
+    let mut i: u32 = 0
+    while i < 2 {
+        consume(arr[i])
+        i += 1
+    }
+}
