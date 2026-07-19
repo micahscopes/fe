@@ -1,0 +1,25 @@
+// mb2: the AFFINE completion-token jewel. A `PendingId` is a one-shot host/device
+// completion token (minted by `Dispatch::readback_begin`, consumed by `Wait::wait`),
+// so `Wait::wait` takes it by `own`: the token is MOVED into the first `wait` and a
+// second `wait` on the same token is a use-after-move error (16-0002). This closes
+// the at-most-once-resume / ABA hazard that a `View`-mode token would leave open
+// once the host recycles token slots: without affinity, `w.wait(p); w.wait(p)` would
+// type-check and block twice on a slot that may already have been reissued.
+//
+// The contrast with the positive path (the R3.4b keystone `ntt8_on_gpu`, which waits
+// EXACTLY ONCE) is the thesis: waiting once is fine; waiting twice is now a hard type
+// error, not a runtime hazard. The token's single-use discipline is compiler-checked.
+
+use core::MemPtr
+use core::backend::Global
+use std::webgpu::{Dispatch, Wait, WebGpuBackend, WebGpuRef}
+
+// Mints one completion token and waits on it TWICE. The first `w.wait(p)` moves `p`
+// (the `own PendingId` param), so the second `w.wait(p)` cannot use the moved token.
+fn double_wait(_ buf: WebGpuRef<u32, Global>, _ out: MemPtr<u32>)
+    uses (gpu: mut Dispatch<WebGpuBackend>, w: mut Wait<WebGpuBackend>)
+{
+    let p = gpu.readback_begin(buf, 8, out)
+    w.wait(p)
+    w.wait(p)
+}

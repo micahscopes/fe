@@ -21,17 +21,23 @@
 //! use + `seal_all`) exactly as the EVM lowerer does, so loop-carried values
 //! (`sum_to`'s accumulator) get their phis inserted automatically. MIR runtime
 //! locals in this subset are value-carried (`RuntimeLocalRoot::None`); any
-//! address-taken (`Slot`) local is out of R1 scope and fails closed.
+//! address-taken (`Slot`) local is out of R1 scope and fails closed. Place reads
+//! are fail-closed R2, with ONE admitted sliver (R2.0, control-effects ladder
+//! section 7): a Ref-rooted place whose carrier is a memory-space provider ref,
+//! at the empty path or `[Field(0)]` on a single-scalar-field newtype, lowers as
+//! the identity on the transport word (`use_var`); it is what lets an own-mode
+//! word-carried token (`Wait::wait(_ pending: own PendingId)`) consume. Stores,
+//! addresses, offsets, and object materializations remain R2 and fail closed.
 
 use std::collections::HashMap;
 
 use driver::DriverDataBase;
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp};
 use mir::{
-    AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, RBlockId, RExpr,
-    RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin, RuntimeCarrier,
-    RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot,
-    RuntimePackage, ScalarClass,
+    AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem, PlaceRoot,
+    RBlockId, RExpr, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin,
+    RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage,
+    RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
 };
 use rustc_hash::FxHashMap;
 use sonatina_ir::{
@@ -448,9 +454,65 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             RExpr::AggregateExtract { value, index } => {
                 self.lower_scalar_newtype_extract(*value, *index)
             }
+            // R2.0 (Fable seat ruling, control-effects ladder section 7): the only
+            // place read the wasm target lowers is an IDENTITY on an already
+            // value-carried transport word. Own-mode consumption of a word-carried
+            // token (`Wait::wait(_ pending: own PendingId)`) reaches lowering as
+            // exactly this shape (`load *%p`); anything needing an address, an offset,
+            // a store, or an object materialization is R2 proper and stays fail-closed.
+            RExpr::Load { place } => self.lower_place_read(place),
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) expression `{other:?}` is not supported"
             ))),
+        }
+    }
+
+    /// R2.0: lower a place READ that is an identity on an already value-carried
+    /// transport word. Admits a `Ref`-rooted place whose carrier is a memory-space
+    /// provider reference with a `ty_for_class`-admissible pointee, at the empty
+    /// path (the whole transport word) or `[Field(0)]` on a single-scalar-field
+    /// newtype (the field IS the word). This is the wasm image of the EVM lowerer's
+    /// `place_terminal_for_carrier` -> `ObjLoad` (a value-model read, no memory):
+    /// the identity `use_var` on the carrier local. Everything else (Slot/Provider/
+    /// Ptr roots, object/const ref carriers, non-memory provider spaces, deeper or
+    /// other paths, multi-field pointees, and all real linear memory) stays
+    /// fail-closed as R2. See the ladder doc section 7.2 for the exact boundary.
+    fn lower_place_read(&mut self, place: &RuntimePlace<'db>) -> Result<ValueId, LowerError> {
+        let PlaceRoot::Ref(v) = &place.root else {
+            return Err(unsupported_place(place));
+        };
+        let v = *v;
+        let class = self.body.value_class(v).ok_or_else(|| {
+            LowerError::Internal(format!("R2.0 place root {v:?} carries no value class"))
+        })?;
+        let RuntimeClass::Ref {
+            pointee,
+            kind:
+                RefKind::Provider {
+                    space: AddressSpaceKind::Memory,
+                    ..
+                },
+            ..
+        } = class
+        else {
+            return Err(unsupported_place(place));
+        };
+        // Reuse the `ty_for_class` admissibility SSOT; do not duplicate the envelope.
+        self.module.ty_for_class(pointee)?;
+        match &*place.path {
+            // Empty path: the load is the whole transport word.
+            [] => self.local_value(v),
+            // `[Field(0)]` on a single-scalar-field newtype: the field IS the word.
+            [PlaceElem::Field(idx)]
+                if idx.0 == 0
+                    && pointee
+                        .aggregate_layout()
+                        .and_then(|layout| self.module.single_scalar_field(layout))
+                        .is_some() =>
+            {
+                self.local_value(v)
+            }
+            _ => Err(unsupported_place(place)),
         }
     }
 
@@ -680,6 +742,18 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             .copied()
             .ok_or_else(|| LowerError::Internal(format!("unknown runtime block {block:?}")))
     }
+}
+
+/// R2.0 fail-closed error for a place read outside the admitted transport-word
+/// identity sliver (ladder doc section 7.2): addresses, offsets, stores, object
+/// materializations, deeper paths, multi-field pointees, and all real linear
+/// memory stay R2.
+fn unsupported_place(place: &RuntimePlace<'_>) -> LowerError {
+    LowerError::Unsupported(format!(
+        "wasm target: place read `{place:?}` is R2. Only an empty-path or `[Field(0)]` \
+         read on a memory-space provider-ref transport word lowers (R2.0); addresses, \
+         offsets, stores, and object materializations stay fail-closed."
+    ))
 }
 
 fn immediate_for_const_scalar(

@@ -257,8 +257,13 @@ pub trait Dispatch<B: Backend> {
 /// be composed into a main-thread entry: the type system enforces the spec's "no
 /// `Atomics.wait` on the main thread" rule by construction.
 pub trait Wait<B: Backend> {
-    /// Block until `pending` is resident.
-    fn wait(mut self, _ pending: PendingId)
+    /// Block until `pending` is resident. The token is CONSUMED (`own`): a
+    /// `PendingId` is a one-shot completion token, so `wait` takes ownership and
+    /// a second `wait` on the same token is a use-after-move type error. This
+    /// closes the at-most-once-resume / ABA hazard that a `View` (borrow) mode
+    /// would leave open once host token slots are recycled: the token cannot be
+    /// waited on twice because it is moved into the first `wait`.
+    fn wait(mut self, _ pending: own PendingId)
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +305,7 @@ impl Dispatch<WebGpuBackend> for WorkerGpu {
 }
 
 impl Wait<WebGpuBackend> for WorkerGpu {
-    fn wait(mut self, _ pending: PendingId) {
+    fn wait(mut self, _ pending: own PendingId) {
         async_wait(pending)
     }
 }

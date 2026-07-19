@@ -1,0 +1,13 @@
+---
+source: crates/uitest/tests/semantic_borrowck.rs
+assertion_line: 25
+expression: diags
+input_file: fixtures/semantic_borrowck/webgpu_double_wait_moved.fe
+---
+error[16-0002]: move conflict in `fn double_wait`
+   ┌─ webgpu_double_wait_moved.fe:24:12
+   │
+23 │     w.wait(p)
+   │            - `p` is moved here
+24 │     w.wait(p)
+   │            ^ cannot use a value after it was moved
