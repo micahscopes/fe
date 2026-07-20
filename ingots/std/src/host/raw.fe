@@ -1,0 +1,82 @@
+// std::host::raw (mb2 CE-7): the PRIVATE wasm-import surface for the HOST
+// EXTERNAL-COMPLETION lane, the completion-cell rail's THIRD kind of client
+// (after `std::webgpu`'s GPU readback and `std::worker`'s task pool). User code
+// never touches these; the `HostTimer` provider in the parent `std::host` module
+// is the only caller, and the typed `Timer` / `Recv` / `Wait` surface is the
+// public entry. The extern block names its wasm import module via the R3.3
+// `#[wasm_import(module = "fe:host")]` attribute, so the import table IS the op
+// set (interop 4.1/4.2, normative), exactly as `fe:webgpu` is for the GPU client
+// and `fe:worker` for the task client. HOST BROKER EXECUTION (real timers, posted
+// events over the SharedArrayBuffer rail) is browser/bun-only and never
+// sandbox-verifiable; these declarations are the compiler-checked contract a
+// broker mirrors op-for-op (the wasmtime degenerate CONTRACT run in
+// `crates/codegen/tests/wasm_e2e.rs` completes the cell SYNCHRONOUSLY in-instance
+// as the sandbox proof, NOT a real broker).
+//
+// R2 ACYCLICITY INVARIANT (broker-completes, never self-completes): the cells
+// minted by `sleep_begin` / `recv_begin` are completed by the EXTERNAL broker/host
+// (a `setTimeout` callback, a posted message), NEVER by the waiting agent. The Fe
+// agent only MINTS (begin) and BLOCKS (wait); it never writes the completion value
+// into the cell it waits on. That is what keeps the broker/fork completion graph
+// acyclic (ruling R2) and lets these external sources use the `Notify` door's
+// keyhole while `Notify` itself stays reserved.
+//
+// Boundary discipline, FORCED by the wasm boundary (the `fe:webgpu` / `fe:worker`
+// rule, reused verbatim): single-word transport only. Every token and length
+// crosses as one `u32` word; the clock and the wake timestamp as `u64`. No
+// MULTI-word aggregate crosses by value. Per Amendment 4 the typed Fe newtype
+// `Pending<WasmBackend, u64>` crosses the boundary WHOLE: it is a single-`u32`-field
+// newtype (the phantom `B`/`T` add no field), and the transport ABI unwraps it to
+// its one word (i32 on wasm32) at the boundary, so the wire shape is byte-identical
+// to passing the bare `u32` while the Fe types stay intact end to end. This is what
+// lets the `HostTimer` provider bodies be pure pass-through: no `.id` field read, no
+// re-wrap, no place/`Load`.
+//
+// THE FUSED WAIT (control-effects R1): `wait<T> -> T` is the SHARED blocking-deliver
+// op of the rail (the `fe:async::wait<T> -> T` shape). For the host-completion
+// payload `T = u64` it BLOCKS on the cell's status slot then DELIVERS the u64 the
+// broker wrote (the wake timestamp, or the posted event value) in ONE typed act, so
+// there is no separate post-wait result read to leak as public surface. It is
+// declared generic over the phantom `T` (the `fe:async::wait<T>` precedent) so it
+// composes into the trait's `wait<T> -> T`; the host client only ever instantiates
+// it at `T = u64`, where it monomorphizes to the `wait(i32) -> i64` import.
+
+use core::pending::Pending
+use ingot::wasm::WasmBackend
+
+/// Module `fe:host` (broker-serviced host-completion lane): read the clock, mint a
+/// broker-completed timer cell, mint a broker-completed host-event cell, and block
+/// on a cell delivering its `u64` payload.
+#[wasm_import(module = "fe:host")]
+extern {
+    /// Read the monotonic host clock in milliseconds (interop 4.1: `Date.now()`).
+    /// COLORLESS: an immediate value, no cell, no completion.
+    pub unsafe fn host_now() -> u64
+
+    /// Mint a completion cell the broker completes after `ms` milliseconds
+    /// (interop 4.1: `setTimeout(ms)` then write the wake timestamp into the cell's
+    /// result slot and `Atomics.store` READY + `Atomics.notify`). BROKER-COMPLETED
+    /// (R2): the waiting agent NEVER completes this cell. Amendment 4: `ms` crosses
+    /// as `u64` (i64), the returned token crosses WHOLE as `Pending<WasmBackend,
+    /// u64>` (its single `u32` id word, i32). The `u64` wake timestamp is NOT
+    /// carried in the token; it lands in the cell, delivered later by `wait`.
+    pub unsafe fn sleep_begin(_ ms: u64) -> Pending<WasmBackend, u64>
+
+    /// Mint a completion cell the broker completes when a host event is posted
+    /// (interop 4.1: a `postMessage`/host callback writes the event's `u64` payload
+    /// into the cell's result slot and signals READY). BROKER-COMPLETED (R2): the
+    /// host, not the waiting agent, completes the cell. Amendment 4: the returned
+    /// token crosses WHOLE as `Pending<WasmBackend, u64>` (its single `u32` id word,
+    /// i32).
+    pub unsafe fn recv_begin() -> Pending<WasmBackend, u64>
+
+    /// Block the calling agent until the cell `pending` is READY, DELIVERING its
+    /// `u64` payload (interop 4.1: `Atomics.wait` on the status slot, then read the
+    /// result slot). In the degraded, no-isolation mode this import is not provided;
+    /// completions arrive as an exported continuation instead (Amendment 3b: the one
+    /// `on_ready` continuation lane the degraded twins compose through). Generic over
+    /// the phantom `T` so it composes into the trait's `wait<T>`; the host client
+    /// instantiates it at `T = u64`, where it monomorphizes to `wait(i32) -> i64`.
+    /// Amendment 4: `pending` crosses WHOLE as its single `u32` id word (i32).
+    pub unsafe fn wait<T>(_ pending: Pending<WasmBackend, T>) -> T
+}

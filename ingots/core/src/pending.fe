@@ -118,6 +118,66 @@ pub trait Spawn<B: Backend> {
     fn spawn(mut self, _ task: TaskId, _ arg: u64) -> Pending<B, u64>
 }
 
+/// The clock + delay authority over a backend `B` (control-effects CE-7): the
+/// EXTERNAL-COMPLETION client family, the completion-cell rail's THIRD kind of
+/// client after GPU readback (`Pending<WebGpuBackend, ()>`) and worker tasks
+/// (`Pending<WasmBackend, u64>`). It is the rung that PROVES the rail generalizes
+/// past GPU and tasks: same mint / wait / complete substrate, a genuinely new
+/// source. `now` reads a monotonic clock (colorless, an immediate value, no
+/// cell); `sleep_begin(ms)` MINTS a completion cell whose payload is the wake
+/// timestamp. Blocking is an AUTHORITY, gated the house way by provider presence:
+/// a missing provider is the ordinary `8-0036` obligation error.
+///
+/// R2 ACYCLICITY INVARIANT (broker-completes, never self-completes): the cell
+/// minted by `sleep_begin` is completed by the EXTERNAL broker/host (a
+/// `setTimeout` callback that lives OUTSIDE the language), NEVER by the waiting
+/// agent. No Fe agent ever waits on a cell it must itself complete, so the
+/// broker/fork completion graph stays acyclic and no deadlock is representable
+/// (ruling R2). This is precisely what lets external sources take the `Notify`
+/// door's KEYHOLE (broker completion) while `Notify` itself stays reserved: no
+/// Fe-side self-completion provider is admitted until the stratified-mint-scope
+/// acyclicity story lands.
+///
+/// The completion value is a `u64` wake timestamp: `Pending<B, u64>`, consumed by
+/// `Wait::wait` in the usual fused act (the CE-2/CE-5 pattern). The begin op is
+/// colorless (minting is not blocking); only `wait` is the authority-gated
+/// colored op (the R6 anti-coloring gate).
+pub trait Timer<B: Backend> {
+    /// Read the monotonic host clock in milliseconds. COLORLESS: an immediate
+    /// value, not a pending cell (no completion, no `Wait`).
+    fn now(mut self) -> u64
+
+    /// Mint a completion cell the BROKER completes after `ms` milliseconds,
+    /// delivering the wake timestamp as the payload. Broker-completed (R2): the
+    /// waiting agent never completes this cell; the host's timer callback does,
+    /// which is what preserves acyclicity. The returned token is consumed once by
+    /// `Wait::wait`.
+    fn sleep_begin(mut self, _ ms: u64) -> Pending<B, u64>
+}
+
+/// The host-event RECEIVE authority over a backend `B` (control-effects CE-7):
+/// the SAME external-completion family as `Timer`, and the `std::reactive` event
+/// source (R7a: an event occurrence is a broker-completed cell). `recv_begin`
+/// MINTS a completion cell the broker completes when a host event is posted,
+/// delivering the event's `u64` payload.
+///
+/// A DISTINCT trait from `Timer` (R2's distinct-traits discipline): a clock and a
+/// message inbox are genuinely different host facilities, and the authority
+/// matrix is asymmetric per agent class, so each gets its own per-authority
+/// `8-0036` gate rather than being averaged into one mega-capability. Same cell
+/// semantics, same rail.
+///
+/// R2 ACYCLICITY INVARIANT (broker-completes, never self-completes): as with
+/// `Timer`, the cell is completed by the EXTERNAL host (a posted message outside
+/// the language), NEVER by the waiting agent, so acyclicity is preserved (ruling
+/// R2). Same keyhole-through-the-`Notify`-door posture.
+pub trait Recv<B: Backend> {
+    /// Mint a completion cell the broker completes when a host event is posted,
+    /// delivering the event's `u64` payload. Broker-completed (R2): the host, not
+    /// the waiting agent, completes the cell. Consumed once by `Wait::wait`.
+    fn recv_begin(mut self) -> Pending<B, u64>
+}
+
 /// Join TWO pending operations, delivering both payloads (control-effects R4.1,
 /// CE-6). The FIXED-ARITY join: it CONSUMES an `own` tuple of two tokens (both
 /// affine tokens moved out of the tuple by the destructuring `let (p1, p2)`), then

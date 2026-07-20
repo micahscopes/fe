@@ -1,0 +1,89 @@
+use ingot::wasm::WasmBackend
+use raw::{host_now, sleep_begin as raw_sleep_begin, recv_begin as raw_recv_begin, wait as block_deliver}
+
+// mb2 CE-7: the EXTERNAL-COMPLETION clients (`Timer` and `recv`), the
+// completion-cell rail's THIRD kind of client. `std::webgpu` proved the rail with
+// GPU readback (`Pending<WebGpuBackend, ()>`); `std::worker` proved it generalizes
+// to worker tasks (`Pending<WasmBackend, u64>`); this module proves it generalizes
+// AGAIN, to a source that is neither GPU nor a fork child: a clock/delay lane and a
+// host-event lane, both broker-completed. Three client families, ONE rail, zero new
+// surface beyond the two begin ops. Nothing new in the rail: `HostTimer` is another
+// extern-backed provider whose bodies ARE the raw `fe:host` import calls
+// (`std::host::raw`), exactly the `WorkerGpu` / `WorkerPool` posture.
+//
+// The vocabulary (`Pending`, `Timer`, `Recv`, `Wait`) lives backend-generic in
+// `core::pending` (CE-3/CE-7); this module re-exports it for source compatibility
+// and keeps the PROVIDER downstream in `std` (the provider-placement rule), so a
+// generated/authored `impl` gets a resolvable absolute path and the algebra names
+// no realization until here. Placed in a NEW `std::host` module rather than
+// `std::worker` because the host clock / delay / receive lane is a genuinely
+// DISTINCT authority family from the worker TASK pool (R2's distinct-authorities
+// discipline): overloading `std::worker` would conflate a task pool with a clock.
+//
+// R2 ACYCLICITY INVARIANT (broker-completes, never self-completes): every cell
+// minted here is completed by the EXTERNAL broker/host (a `setTimeout` callback, a
+// posted message), NEVER by the waiting agent. The Fe agent only MINTS (begin) and
+// BLOCKS (wait); it never writes the completion value into a cell it waits on. That
+// keeps the broker/fork completion graph acyclic (ruling R2) and is exactly why
+// these external sources may use the `Notify` door's keyhole while `Notify` itself
+// stays reserved (no Fe-side self-completion provider is admitted).
+pub use core::pending::{Pending, Timer, Recv, Wait}
+
+/// The host external-completion provider (control-effects CE-7): a ZST that
+/// provides the host-completion authorities on the wasm backend. It carries THREE
+/// traits over the ONE cell rail:
+///   - `Timer<WasmBackend>`: read the clock (`now`) and mint a broker-completed
+///     timer cell (`sleep_begin`, payload = the wake timestamp).
+///   - `Recv<WasmBackend>`: mint a broker-completed host-event cell (`recv_begin`,
+///     payload = the posted event's `u64`).
+///   - `Wait<WasmBackend>`: block on a cell and DELIVER its `u64` payload, the
+///     shared blocking-deliver op of the rail (`fe:async`-shaped), fused in one act
+///     (R1) so no post-wait result read leaks as public surface.
+/// A missing provider is the ordinary `8-0036` obligation error, the house gate.
+/// The `Wait<WasmBackend>` impl here is a DISTINCT impl for a DISTINCT self type
+/// from `WorkerPool`'s (std::worker); which realization a caller gets is chosen by
+/// the `with (Wait<WasmBackend> = ...)` frame, not by coherence.
+pub struct HostTimer {}
+
+/// Read the clock and mint the broker-completed timer cell (control-effects CE-7).
+/// `now` is COLORLESS (an immediate clock read, no cell). `sleep_begin` mints a cell
+/// the BROKER completes after `ms` (R2: the waiting agent never completes it); pure
+/// pass-through per Amendment 4 (the returned `Pending<WasmBackend, u64>` crosses
+/// WHOLE as its one `u32` word, so no `.id` read, no re-wrap).
+impl Timer<WasmBackend> for HostTimer {
+    fn now(mut self) -> u64 {
+        host_now()
+    }
+
+    fn sleep_begin(mut self, _ ms: u64) -> Pending<WasmBackend, u64> {
+        raw_sleep_begin(ms)
+    }
+}
+
+/// Mint the broker-completed host-event cell (control-effects CE-7). The cell is
+/// completed by the HOST when an event is posted (R2: the waiting agent never
+/// completes it), delivering the event's `u64` payload later via `Wait::wait`. Pure
+/// pass-through per Amendment 4 (the returned token crosses WHOLE as its one word).
+impl Recv<WasmBackend> for HostTimer {
+    fn recv_begin(mut self) -> Pending<WasmBackend, u64> {
+        raw_recv_begin()
+    }
+}
+
+/// Block on a host-completion cell and deliver its `u64` payload (control-effects
+/// R1, the FUSED wait). For the host-completion payload `T = u64` the body BLOCKS on
+/// the cell's status slot then reads the `u64` the BROKER wrote (the wake timestamp,
+/// or the posted event value), INSIDE this one typed `wait` call, via the shared
+/// `fe:host::wait<T> -> T` blocking-deliver op. The token is CONSUMED (`own`): a
+/// second `wait` on the same token is a use-after-move TYPE error. The raw op is
+/// declared generic `-> T` (the `fe:async::wait<T>` precedent) so this body returns
+/// the trait's `T` abstractly; the client only instantiates it at `T = u64`.
+///
+/// This is the SAME blocking-deliver shape the `WorkerGpu` provider uses for GPU
+/// readback (`async_wait`), reused at a different payload: the clearest evidence of
+/// "one rail" (a single blocking-deliver op serves three client families).
+impl Wait<WasmBackend> for HostTimer {
+    fn wait<T>(mut self, _ pending: own Pending<WasmBackend, T>) -> T {
+        block_deliver(pending)
+    }
+}

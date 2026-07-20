@@ -1267,3 +1267,241 @@ fn fe_worker_double_consume_traps_host_side() {
         "expected the named READY->CONSUMED CAS trap in the error chain, got: {rendered}"
     );
 }
+
+// ===========================================================================
+// CE-7: the EXTERNAL-COMPLETION clients (Timer + recv), the completion-cell rail's
+// THIRD kind of client (after GPU readback and worker tasks). The proof the rail
+// generalizes past GPU and fork children: three client families, ONE rail, zero new
+// surface beyond the two begin ops.
+// ===========================================================================
+
+/// The fake broker's monotonic clock (ms). `host_now` returns it; `sleep_begin(ms)`
+/// completes its cell with `BASE_CLOCK_MS + ms` as the wake timestamp.
+const BASE_CLOCK_MS: u64 = 1000;
+/// The posted host-event payload the fake broker completes a `recv_begin` cell with.
+const POSTED_EVENT: u64 = 0xE7E7;
+
+/// CE-7 THE HOST EXTERNAL-COMPLETION fixture: the `Timer` / `Recv` / `Wait` rail via
+/// the `HostTimer` provider. `sleep_wake(ms)` mints a broker-completed timer cell and
+/// waits it, delivering the wake timestamp; `recv_event` mints a broker-completed
+/// host-event cell and waits it, delivering the posted payload; `clock_now` reads the
+/// colorless clock. R2 acyclicity: the COMPLETER is the broker (the host linker fn),
+/// never the Fe waiter, which only mints (begin) and blocks (wait).
+const HOST_TIMER_SRC: &str = r#"
+use std::host::{HostTimer, Timer, Recv, Wait}
+use std::wasm::WasmBackend
+
+fn sleep_via_rail(_ ms: u64) -> u64
+    uses (t: mut Timer<WasmBackend>, w: mut Wait<WasmBackend>)
+{
+    let token = t.sleep_begin(ms)   // mint: the BROKER completes it, not us (R2)
+    w.wait(token)                   // block + fused deliver of the wake timestamp
+}
+
+pub fn sleep_wake(_ ms: u64) -> u64 {
+    with (Timer<WasmBackend> = HostTimer {}, Wait<WasmBackend> = HostTimer {}) {
+        sleep_via_rail(ms)
+    }
+}
+
+fn recv_via_rail() -> u64
+    uses (r: mut Recv<WasmBackend>, w: mut Wait<WasmBackend>)
+{
+    let token = r.recv_begin()      // mint: the HOST completes it, not us (R2)
+    w.wait(token)                   // block + fused deliver of the posted payload
+}
+
+pub fn recv_event() -> u64 {
+    with (Recv<WasmBackend> = HostTimer {}, Wait<WasmBackend> = HostTimer {}) {
+        recv_via_rail()
+    }
+}
+
+fn now_via_rail() -> u64
+    uses (t: mut Timer<WasmBackend>)
+{
+    t.now()
+}
+
+pub fn clock_now() -> u64 {
+    with (Timer<WasmBackend> = HostTimer {}) {
+        now_via_rail()
+    }
+}
+"#;
+
+/// The DEGENERATE HOST BROKER: a cell-slot table plus an op-sequence log. It mirrors
+/// the `fe:host` import op-set op-for-op and completes each cell SYNCHRONOUSLY
+/// in-instance (the sandbox has no real timers or message loop). `sleep_begin(ms)`
+/// completes the cell with the wake timestamp `BASE_CLOCK_MS + ms`; `recv_begin`
+/// completes with the posted event payload; `wait` reads the slot (already READY in
+/// the synchronous broker) and delivers it; `host_now` reads the fake clock. THE
+/// COMPLETER IS THIS HOST, external to the waiting agent, which is what preserves R2
+/// acyclicity (mirroring CE-5's `FakeTaskPool`). The real async form (mint now,
+/// complete after a genuine `setTimeout` over the SharedArrayBuffer rail) is the bun
+/// page-lane's job, deferred with the browser batch.
+#[derive(Default)]
+struct FakeBroker {
+    /// Cell table: `slots[token]` holds the `u64` value the BROKER wrote into the cell.
+    slots: Vec<u64>,
+    /// The op-sequence log, one entry per serviced import call.
+    log: Vec<&'static str>,
+}
+
+/// Build a `Linker` that services the `fe:host` import op-set with a `FakeBroker` and
+/// instantiate `wasm` against it.
+fn instantiate_host_broker(wasm: &[u8]) -> (wasmtime::Store<FakeBroker>, wasmtime::Instance) {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, FakeBroker::default());
+    let mut linker = wasmtime::Linker::new(&engine);
+
+    // host_now() -> ms: read the fake monotonic clock. Colorless: no cell, no wait.
+    linker
+        .func_wrap(
+            "fe:host",
+            "host_now",
+            |mut caller: wasmtime::Caller<'_, FakeBroker>| -> Result<i64, wasmtime::Error> {
+                caller.data_mut().log.push("host_now");
+                Ok(BASE_CLOCK_MS as i64)
+            },
+        )
+        .expect("bind host_now");
+
+    // sleep_begin(ms) -> token: the DEGENERATE broker. Complete the cell SYNCHRONOUSLY
+    // with the wake timestamp BASE_CLOCK_MS + ms (THE BROKER writes the value, NOT the
+    // Fe waiter: R2 acyclicity), and return the token index.
+    linker
+        .func_wrap(
+            "fe:host",
+            "sleep_begin",
+            |mut caller: wasmtime::Caller<'_, FakeBroker>,
+             ms: i64|
+             -> Result<i32, wasmtime::Error> {
+                let dev = caller.data_mut();
+                dev.slots.push(BASE_CLOCK_MS + ms as u64);
+                dev.log.push("sleep_begin");
+                Ok((dev.slots.len() - 1) as i32)
+            },
+        )
+        .expect("bind sleep_begin");
+
+    // recv_begin() -> token: complete the cell SYNCHRONOUSLY with the posted host-event
+    // payload (again the BROKER/HOST writes the value, not the Fe waiter: R2).
+    linker
+        .func_wrap(
+            "fe:host",
+            "recv_begin",
+            |mut caller: wasmtime::Caller<'_, FakeBroker>| -> Result<i32, wasmtime::Error> {
+                let dev = caller.data_mut();
+                dev.slots.push(POSTED_EVENT);
+                dev.log.push("recv_begin");
+                Ok((dev.slots.len() - 1) as i32)
+            },
+        )
+        .expect("bind recv_begin");
+
+    // wait(token) -> u64: block until the cell is READY (synchronous broker: already
+    // READY) and deliver the u64 the broker wrote. This is the shared blocking-deliver
+    // op of the rail (the `fe:async::wait<T> -> T` shape) at payload T = u64.
+    linker
+        .func_wrap(
+            "fe:host",
+            "wait",
+            |mut caller: wasmtime::Caller<'_, FakeBroker>,
+             token: i32|
+             -> Result<i64, wasmtime::Error> {
+                let dev = caller.data_mut();
+                let value = *dev
+                    .slots
+                    .get(token as usize)
+                    .ok_or_else(|| wasmtime::Error::msg("wait: unknown pending token"))?;
+                dev.log.push("wait");
+                Ok(value as i64)
+            },
+        )
+        .expect("bind wait");
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("wasmtime should instantiate with the fe:host imports satisfied");
+    (store, instance)
+}
+
+/// CE-7 THE CONTRACT: the external-completion rail delivers through `begin -> wait`.
+/// `sleep_begin -> wait` delivers the BROKER-written wake timestamp, `recv_begin ->
+/// wait` delivers the posted host event, and `now` reads the clock. This proves the
+/// SAME mint / wait / complete substrate serves a THIRD client family (neither GPU nor
+/// a fork child), with the completer external to the waiter (R2 acyclicity). The real
+/// async (genuine `setTimeout` parking on `Atomics.wait`) is the bun page-lane follow-on.
+#[test]
+fn fe_host_timer_recv_external_completion_rail() {
+    let wasm = compile_to_wasm("wasm_host_timer.fe", HOST_TIMER_SRC);
+
+    // The host-completion import op-set is on the emitted wasm, module-named per R3.3.
+    let imports = func_imports(&wasm);
+    for expected in [
+        ("fe:host", "sleep_begin"),
+        ("fe:host", "recv_begin"),
+        ("fe:host", "wait"),
+        ("fe:host", "host_now"),
+    ] {
+        assert!(
+            imports.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "expected import {expected:?} in the emitted wasm, found {imports:?}"
+        );
+    }
+
+    let (mut store, instance) = instantiate_host_broker(&wasm);
+
+    // sleep_begin -> wait delivers the BROKER-written wake timestamp (R2: the broker
+    // completes the cell, the Fe waiter never does). sleep_begin(16) with clock 1000
+    // wakes at 1016.
+    let sleep_wake = instance
+        .get_typed_func::<i64, i64>(&mut store, "sleep_wake")
+        .expect("`sleep_wake` export should exist");
+    let woke = sleep_wake
+        .call(&mut store, 16)
+        .expect("sleep_wake should mint a timer cell and wait it");
+    assert_eq!(
+        woke as u64,
+        BASE_CLOCK_MS + 16,
+        "sleep_begin -> wait must deliver the broker's wake timestamp (R2: broker completes, not the waiter)"
+    );
+
+    // The rail walk for a sleep: mint (sleep_begin) then the fused blocking-deliver (wait).
+    assert_eq!(
+        &store.data().log,
+        &["sleep_begin", "wait"],
+        "the sleep rail walk should be begin then the fused wait"
+    );
+
+    // recv_begin -> wait delivers the posted host-event payload (the recv lane).
+    let recv_event = instance
+        .get_typed_func::<(), i64>(&mut store, "recv_event")
+        .expect("`recv_event` export should exist");
+    let got = recv_event
+        .call(&mut store, ())
+        .expect("recv_event should mint a host-event cell and wait it");
+    assert_eq!(
+        got as u64, POSTED_EVENT,
+        "recv_begin -> wait must deliver the posted host event"
+    );
+
+    // now() reads the colorless clock: no cell minted, no wait.
+    let clock_now = instance
+        .get_typed_func::<(), i64>(&mut store, "clock_now")
+        .expect("`clock_now` export should exist");
+    let t = clock_now
+        .call(&mut store, ())
+        .expect("clock_now should read the host clock");
+    assert_eq!(t as u64, BASE_CLOCK_MS, "now() reads the host clock");
+
+    // Full op walk across all three calls: the two external-completion cells each walk
+    // begin then wait, and `now` is a single colorless clock read (no cell, no wait).
+    assert_eq!(
+        &store.data().log,
+        &["sleep_begin", "wait", "recv_begin", "wait", "host_now"],
+        "the full walk should be sleep(begin,wait), recv(begin,wait), now"
+    );
+}
