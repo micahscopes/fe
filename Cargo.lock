@@ -2538,6 +2538,7 @@ dependencies = [
  "fe-mir",
  "fe-test-utils",
  "hex",
+ "naga",
  "num-bigint",
  "pollster",
  "rustc-hash 2.1.1",

@@ -465,3 +465,435 @@ fn keystone_executes_equal_on_evm_wasm_and_spirv() {
         }
     }
 }
+
+// ===========================================================================
+// Slice B2 - the u32 BROWSER-PROFILE keystone (rung R-lava, browser-viable).
+//
+// The i64 keystone above proves the cross-backend wire, but i64 shaders cannot
+// run in a browser: WebGPU/WGSL has no 64-bit integers. This slice proves the
+// SAME machinery executes a u32-only kernel that IS browser-viable: it lowers
+// to a naga `Uint` scalar (not `Sint`), the emitted WGSL passes the
+// browser-shaped capability set (`Capabilities::default()`, NO SHADER_INT64 -
+// note sonatina itself validates with `Capabilities::all()`, so this is a
+// strictly stronger independent gate), and the lavapipe leg EXECUTES it after
+// requesting the device with NO required features (the exact feature set a
+// WebGPU browser exposes; dropping SHADER_INT64 is what makes this the browser
+// proof).
+//
+// The pin, 4261282562, was re-derived independently by an oracle before being
+// written here (never trust the doc's arithmetic): 1 -> 14 -> 210 -> 251 ->
+// 63252 -> 65278 -> 4261282562. Every intermediate is < 2^32; the result is
+// > 2^31 (top bit set), so any signed-i32 mishandling surfaces as a wrong
+// (negative) value; and 65278^2 = 4261217284 uses ~99.2% of the u32 range, so a
+// 16-bit-truncated or partially-widened multiply cannot silently pass.
+// ===========================================================================
+
+/// The single SSOT fixture: `include_str!`-ed here and (later) by the page
+/// generator, so the tested source and the shipped source are byte-identical by
+/// construction. It lives under `fixtures/spirv/` (not top-level `fixtures/`) so
+/// the `sonatina_ir` dir-test's `*.fe` glob (top-level only) does not pick it up
+/// and mint an incidental EVM-IR snapshot; the byte-identity gate stays 128/0.
+const KEYSTONE_U32_SOURCE: &str = include_str!("fixtures/spirv/poseidon_sigma_u32.fe");
+
+/// The independently oracle-verified pin. `1 -> 14 -> 210 -> 251 -> 63252 ->
+/// 65278 -> 4261282562`, all intermediates < 2^32, no wrap on any backend.
+const KEYSTONE_U32_EXPECTED: u32 = 4_261_282_562;
+
+/// The EVM leg's contract shim: a trivial `run()` recv arm returning the
+/// UNCHANGED kernel's u32 value widened to `u256`. Appended to the byte-identical
+/// `KEYSTONE_U32_SOURCE`, so the kernel body is the same Fe function on all three
+/// backends (the EVM leg adds only the recv arm).
+const KEYSTONE_U32_EVM_WRAPPER: &str = "\
+use std::abi::sol\n\
+\n\
+msg PoseidonU32Msg {\n\
+\x20   #[selector = sol(\"run()\")]\n\
+\x20   Run -> u256,\n\
+}\n\
+\n\
+pub contract PoseidonU32Exec {\n\
+\x20   recv PoseidonU32Msg {\n\
+\x20       Run -> u256 {\n\
+\x20           poseidon_sigma_u32() as u256\n\
+\x20       }\n\
+\x20   }\n\
+}\n";
+
+/// Compile the u32 keystone to wasm through `BackendKind::Wasm`.
+fn compile_keystone_u32_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///poseidon_sigma_u32_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(KEYSTONE_U32_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("u32 keystone should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// Execute the u32 keystone wasm under wasmtime. Fe `u32` lowers to wasm `i32`,
+/// so the export returns `i32`; reinterpret as `u32` (the pin > 2^31 comes back
+/// as a negative `i32`, which `as u32` restores exactly).
+fn run_wasm_poseidon_u32(bytes: &[u8]) -> u32 {
+    wasmparser::validate(bytes).expect("Fe-emitted wasm should be valid");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(), i32>(&mut store, "poseidon_sigma_u32")
+        .expect("`poseidon_sigma_u32` export should exist");
+    f.call(&mut store, ())
+        .expect("poseidon_sigma_u32() should run") as u32
+}
+
+/// Execute the u32 keystone's EVM bytecode under revm via the contract harness.
+fn run_evm_poseidon_u32() -> u32 {
+    use fe_contract_harness::{ExecutionOptions, FeContractHarness, bytes_to_u256};
+
+    let source = format!("{KEYSTONE_U32_SOURCE}\n{KEYSTONE_U32_EVM_WRAPPER}");
+    let harness = FeContractHarness::compile("PoseidonU32Exec", &source)
+        .expect("u32 keystone EVM contract should compile");
+    let mut instance = harness
+        .deploy_with_init()
+        .expect("u32 keystone EVM contract should deploy under revm");
+    let result = instance
+        .call_function("run()", &[], ExecutionOptions::default())
+        .expect("run() should execute under revm");
+    let value = bytes_to_u256(&result.return_data).expect("run() should return one u256 word");
+    // The pin is < 2^32, so the low limb, truncated to u32, is the exact value.
+    value.as_limbs()[0] as u32
+}
+
+/// Compile the u32 keystone Fe -> the wasm-path Sonatina Module -> naga-backed
+/// `SpirvBackend`, returning the full artifact (words + WGSL + compiler-stated
+/// layout).
+fn compile_keystone_u32_to_spirv() -> sonatina_codegen::isa::spirv::SpirvArtifact {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///poseidon_sigma_u32_gpu.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(KEYSTONE_U32_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("u32 keystone should build a wasm runtime package");
+    fe_codegen::compile_runtime_package_spirv(&db, &package)
+        .expect("u32 keystone should compile Fe -> naga-validated SPIR-V")
+}
+
+/// The browser-profile WGSL gate (static, GPU-free). Proves the emitted WGSL is
+/// browser-viable independently of any GPU: (1) it carries no 64-bit scalar
+/// token, (2) naga's `wgsl-in` front end round-trips it, and (3) it validates
+/// under `Capabilities::default()` - the browser-shaped set with NO SHADER_INT64.
+fn assert_browser_profile_wgsl(wgsl: &str) {
+    // (1) No 64-bit integer scalar tokens: browsers have no i64/u64.
+    for tok in ["i64", "u64"] {
+        assert!(
+            !wgsl.contains(tok),
+            "browser-profile WGSL must contain no `{tok}` scalar token; found one in:\n{wgsl}"
+        );
+    }
+    // Positive check: the u32 word must actually appear (guards against an empty
+    // or degenerate emit passing the negative token scan vacuously).
+    assert!(
+        wgsl.contains("u32"),
+        "u32 keystone WGSL should use the `u32` scalar; got:\n{wgsl}"
+    );
+
+    // (2) Reparse with the naga `wgsl-in` front end.
+    let reparsed = naga::front::wgsl::parse_str(wgsl)
+        .unwrap_or_else(|e| panic!("naga wgsl-in should reparse the emitted WGSL: {e:?}\n{wgsl}"));
+
+    // (3) Re-validate with the BROWSER capability set. sonatina validates with
+    // `Capabilities::all()` internally; this default set excludes SHADER_INT64,
+    // so acceptance here is the browser-profile proof, not a tautology.
+    let caps = naga::valid::Capabilities::default();
+    assert!(
+        !caps.contains(naga::valid::Capabilities::SHADER_INT64),
+        "the browser capability set must exclude SHADER_INT64"
+    );
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), caps)
+        .validate(&reparsed)
+        .unwrap_or_else(|e| {
+            panic!("browser-profile validation (no SHADER_INT64) should accept the u32 WGSL: {e:?}")
+        });
+}
+
+/// Execute the u32 keystone's WGSL on lavapipe (software Vulkan) via wgpu,
+/// requesting the device with **NO required features** - the browser profile.
+///
+/// This is the load-bearing browser proof: a WebGPU browser exposes no
+/// SHADER_INT64, so requesting an empty feature set here mirrors exactly what
+/// the kernel will face in Chrome. A u32-only kernel must execute on that
+/// feature set. ANTI-FUDGE (verbatim from S2): a missing adapter/device is a
+/// HARD FAILURE, never a silent skip; the only escape is `MB2_ALLOW_GPU_SKIP`,
+/// which downgrades the rung honestly.
+///
+/// Returns `Some(value)` when the GPU ran the shader, `None` only under skip.
+fn run_wgsl_u32_on_lavapipe(wgsl: &str) -> Option<u32> {
+    let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
+
+    let instance = wgpu::Instance::default();
+    let adapter = match pollster::block_on(instance.request_adapter(
+        &wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            ..Default::default()
+        },
+    )) {
+        Ok(a) => a,
+        Err(e) => {
+            if allow_skip {
+                eprintln!("  u32 SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}");
+                return None;
+            }
+            panic!(
+                "u32 SPIR-V leg: no GPU/Vulkan adapter available ({e:?}). The browser-profile \
+                 keystone requires lavapipe to EXECUTE; a missing device is a hard failure, not \
+                 a skip. Set VK_ICD_FILENAMES / LD_LIBRARY_PATH / WGPU_BACKEND=vulkan for \
+                 lavapipe, or MB2_ALLOW_GPU_SKIP to downgrade the rung on a genuinely GPU-less \
+                 host."
+            );
+        }
+    };
+
+    // BROWSER PROFILE: NO required features. Dropping SHADER_INT64 is precisely
+    // what a WebGPU browser offers; a real failure here means the kernel is NOT
+    // browser-viable, which is a STOP condition, not a skip.
+    let (device, queue) = match pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            ..Default::default()
+        },
+    )) {
+        Ok(dq) => dq,
+        Err(e) => {
+            if allow_skip {
+                eprintln!(
+                    "  u32 SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): device request failed: {e:?}"
+                );
+                return None;
+            }
+            panic!(
+                "u32 SPIR-V leg: browser-profile device request (NO required features) failed \
+                 ({e:?}). This is a hard failure, not a skip."
+            );
+        }
+    };
+
+    eprintln!(
+        "  u32 SPIR-V leg GPU adapter (BROWSER PROFILE, no required features): {}",
+        adapter.get_info().name
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("poseidon_sigma_u32"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+
+    // Same scalar SPIR-V shape as S2: a single-value `Output` struct at
+    // @group(0)@binding(0) plus an (unused, param-count-derived) `Input` at
+    // binding 1. Declare an EXPLICIT layout for both bindings. Buffers are 4
+    // bytes (a u32), the browser-profile delta from S2's 8-byte i64 buffers.
+    let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("poseidon_u32_output"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("poseidon_u32_input_unused"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("poseidon_u32_staging"),
+        size: 4,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("poseidon_u32_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("poseidon_u32_pl"),
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("poseidon_u32_pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("poseidon_u32_bg"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: input_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, 4);
+    queue.submit(Some(encoder.finish()));
+
+    let slice = staging_buf.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        tx.send(r).expect("map_async callback channel should be open");
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(std::time::Duration::from_secs(30)),
+    });
+    rx.recv()
+        .expect("map_async callback should fire")
+        .expect("staging buffer should map for read");
+    let data = slice.get_mapped_range();
+    let gpu_result = u32::from_le_bytes(data[0..4].try_into().expect("4 bytes read back"));
+    drop(data);
+    staging_buf.unmap();
+
+    Some(gpu_result)
+}
+
+/// B2, the browser-profile keystone: ONE u32 Fe function compiled by the Fe
+/// compiler to {EVM, wasm, SPIR-V}, EXECUTED on {revm, wasmtime, lavapipe with
+/// NO required features}, all returning the browser-viable pin 4261282562. The
+/// SPIR-V leg lowers to a naga `Uint` scalar and its WGSL passes the browser
+/// capability set. This is the in-sandbox proof that the kernel is browser-ready.
+#[test]
+fn u32_keystone_executes_equal_browser_profile() {
+    // --- Static browser-profile facts (GPU-free), asserted before execution. ---
+    let artifact = compile_keystone_u32_to_spirv();
+
+    // The u32 kernel must lower to a `Uint` word (NOT `Sint`): this is the
+    // content-derived-scalar guarantee (Fe u32 -> Sonatina I32 -> naga Uint/4).
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the u32 kernel must lower to a Uint word (WordKind::U32), not Sint/i64"
+    );
+    assert_eq!(
+        artifact.layout.result.width, 4,
+        "the u32 result must read back as 4 bytes"
+    );
+
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the u32 kernel");
+    assert_browser_profile_wgsl(wgsl);
+    eprintln!(
+        "  u32 WGSL passed the browser profile: no 64-bit tokens, wgsl-in reparse OK, \
+         validated with Capabilities::default() (no SHADER_INT64)"
+    );
+
+    // --- Executed legs. ---
+    // wasm leg: Fe -> wasm (BackendKind::Wasm) -> executed under wasmtime.
+    let wasm_bytes = compile_keystone_u32_to_wasm();
+    let wasm_result = run_wasm_poseidon_u32(&wasm_bytes);
+
+    // EVM leg: Fe -> EVM bytecode (BackendKind::Sonatina) -> executed under revm.
+    let evm_result = run_evm_poseidon_u32();
+
+    // SPIR-V leg: Fe -> SPIR-V -> executed on lavapipe with NO required features.
+    let spirv_opt = run_wgsl_u32_on_lavapipe(wgsl);
+
+    eprintln!("u32 keystone executed values (all must be {KEYSTONE_U32_EXPECTED}):");
+    eprintln!("  EVM    (revm)                    = {evm_result}");
+    eprintln!("  wasm   (wasmtime)                = {wasm_result}");
+    match spirv_opt {
+        Some(v) => eprintln!("  SPIR-V (lavapipe, browser profile) = {v}"),
+        None => eprintln!("  SPIR-V (lavapipe) = SKIPPED (MB2_ALLOW_GPU_SKIP)"),
+    }
+
+    // The two runtime-independent legs always execute and must equal the pin.
+    assert_eq!(
+        evm_result, KEYSTONE_U32_EXPECTED,
+        "Fe -> EVM executed under revm must be {KEYSTONE_U32_EXPECTED}"
+    );
+    assert_eq!(
+        wasm_result, KEYSTONE_U32_EXPECTED,
+        "Fe -> wasm executed under wasmtime must be {KEYSTONE_U32_EXPECTED}"
+    );
+    assert_eq!(
+        evm_result, wasm_result,
+        "the EVM and wasm executions of the same u32 Fe kernel must agree"
+    );
+
+    // The GPU leg: when it ran (the default, hard-failing path), it is the
+    // headline browser-profile proof. `None` only under MB2_ALLOW_GPU_SKIP.
+    match spirv_opt {
+        Some(spirv_result) => {
+            assert_eq!(
+                spirv_result, KEYSTONE_U32_EXPECTED,
+                "Fe -> SPIR-V executed on lavapipe (browser profile) must be \
+                 {KEYSTONE_U32_EXPECTED}"
+            );
+            assert_eq!(
+                wasm_result, spirv_result,
+                "the wasm and SPIR-V executions of the same u32 Fe kernel must agree"
+            );
+            eprintln!(
+                "B2: one u32 Fe function, executed-equal on revm / wasmtime / lavapipe \
+                 (browser profile, no SHADER_INT64) = {KEYSTONE_U32_EXPECTED}; browser-viable."
+            );
+        }
+        None => {
+            eprintln!(
+                "R-val only: u32 SPIR-V validated (browser profile) but NOT executed (GPU \
+                 skipped via MB2_ALLOW_GPU_SKIP). The browser-execution claim is NOT earned \
+                 on this run."
+            );
+        }
+    }
+}

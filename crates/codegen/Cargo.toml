@@ -42,6 +42,12 @@ wasmparser = "0.248.0"
 # backend's own `mandelbrot_snapshot_spirv_gpu` test (same wgpu/pollster pins).
 wgpu = { version = "29", features = ["vulkan-portability"] }
 pollster = "0.4.0"
+# The B2 browser-profile WGSL gate reparses the naga-emitted WGSL with the
+# `wgsl-in` front end and re-validates it with `Capabilities::default()` (the
+# browser-shaped capability set, NO SHADER_INT64 - sonatina itself validates
+# with `Capabilities::all()`, so this is a strictly stronger independent gate).
+# Same naga 29.0.4 already in the graph via wgpu, so no version fork.
+naga = { version = "29", features = ["wgsl-in"] }
 # The EVM leg of the S2 keystone executes the same Fe source's EVM bytecode
 # under revm. This is a dev-only (test-target) dependency, so the
 # codegen -> contract-harness -> codegen edge is a dev-dependency cycle, which
