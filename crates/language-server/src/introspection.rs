@@ -1041,6 +1041,102 @@ mod tests {
         OriginExportKey::try_from_raw_parts(kind, owner, local).unwrap()
     }
 
+    fn trace_workbench_visible_projection_fingerprint(
+        model: &serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "provenance": model.get("provenance").cloned().unwrap_or(serde_json::Value::Null),
+            "parity_summary": model.get("parity_summary").cloned().unwrap_or(serde_json::Value::Null),
+            "attribution_audit": model.get("attribution_audit").cloned().unwrap_or(serde_json::Value::Null),
+            "source": trace_workbench_source_fingerprint(
+                model.get("source").unwrap_or(&serde_json::Value::Null)
+            ),
+            "panels": trace_workbench_panel_fingerprints(model),
+            "indexes": {
+                let indexes = model.get("indexes").unwrap_or(&serde_json::Value::Null);
+                serde_json::json!({
+                    "source_lines": indexes.get("source_lines").cloned().unwrap_or(serde_json::Value::Null),
+                    "source_intervals": indexes.get("source_intervals").cloned().unwrap_or(serde_json::Value::Null),
+                    "pc_intervals": indexes.get("pc_intervals").cloned().unwrap_or(serde_json::Value::Null),
+                    "origin_to_rows": indexes.get("origin_to_rows").cloned().unwrap_or(serde_json::Value::Null),
+                    "component_to_rows": indexes.get("component_to_rows").cloned().unwrap_or(serde_json::Value::Null),
+                    "stable_identities": indexes.get("stable_identities").cloned().unwrap_or(serde_json::Value::Null),
+                })
+            },
+            "notes": model.get("notes").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    fn trace_workbench_source_fingerprint(source: &serde_json::Value) -> serde_json::Value {
+        let lines = source
+            .get("lines")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|line| {
+                serde_json::json!({
+                    "row_id": line.get("row_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "number": line.get("number").cloned().unwrap_or(serde_json::Value::Null),
+                    "text": line.get("text").cloned().unwrap_or(serde_json::Value::Null),
+                    "stable_identities": line.get("stable_identities").cloned().unwrap_or(serde_json::Value::Null),
+                    "classes": line.get("classes").cloned().unwrap_or(serde_json::Value::Null),
+                    "hover_groups": line.get("hover_groups").cloned().unwrap_or(serde_json::Value::Null),
+                    "selection_groups": line.get("selection_groups").cloned().unwrap_or(serde_json::Value::Null),
+                    "display_status": line.get("display_status").cloned().unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "line_count": source.get("line_count").cloned().unwrap_or(serde_json::Value::Null),
+            "lines": lines,
+        })
+    }
+
+    fn trace_workbench_panel_fingerprints(model: &serde_json::Value) -> Vec<serde_json::Value> {
+        model
+            .get("panels")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|panel| {
+                let rows = panel
+                    .get("rows")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(trace_workbench_row_fingerprint)
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "id": panel.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                    "title": panel.get("title").cloned().unwrap_or(serde_json::Value::Null),
+                    "subtitle": panel.get("subtitle").cloned().unwrap_or(serde_json::Value::Null),
+                    "representation": panel.get("representation").cloned().unwrap_or(serde_json::Value::Null),
+                    "summary": panel.get("summary").cloned().unwrap_or(serde_json::Value::Null),
+                    "rows": rows,
+                })
+            })
+            .collect()
+    }
+
+    fn trace_workbench_row_fingerprint(row: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "row_id": row.get("row_id").cloned().unwrap_or(serde_json::Value::Null),
+            "key": row.get("key").cloned().unwrap_or(serde_json::Value::Null),
+            "kind": row.get("kind").cloned().unwrap_or(serde_json::Value::Null),
+            "indent": row.get("indent").cloned().unwrap_or(serde_json::Value::Null),
+            "label": row.get("label").cloned().unwrap_or(serde_json::Value::Null),
+            "meta": row.get("meta").cloned().unwrap_or(serde_json::Value::Null),
+            "text": row.get("text").cloned().unwrap_or(serde_json::Value::Null),
+            "compact_text": row.get("compact_text").cloned().unwrap_or(serde_json::Value::Null),
+            "stable_identities": row.get("stable_identities").cloned().unwrap_or(serde_json::Value::Null),
+            "display_status": row.get("display_status").cloned().unwrap_or(serde_json::Value::Null),
+            "rail_classes": row.get("rail_classes").cloned().unwrap_or(serde_json::Value::Null),
+            "hover_groups": row.get("hover_groups").cloned().unwrap_or(serde_json::Value::Null),
+            "selection_groups": row.get("selection_groups").cloned().unwrap_or(serde_json::Value::Null),
+            "classes": row.get("classes").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    }
+
     fn node(key: OriginExportKey) -> TraceFact {
         TraceFact::OriginNode(OriginNodeFact::new(
             key.clone(),
