@@ -116,6 +116,85 @@ fn spirv_backend_driver_emits_valid_spirv_bytes() {
 }
 
 // ===========================================================================
+// Slice M0 - the Fe-AUTHORED escape-time loop+branch, VALIDATED (mandelbrot
+// ladder rung 0). See /workspace/mb2-mandelbrot-plan.md section 5.
+//
+// The one real unknown before any mandelbrot rendering: does a FE-AUTHORED
+// escape-time loop (a bounded while with an in-loop escape branch and an early
+// `return` of the iteration count) compile through the Fe compiler to
+// naga-VALIDATED SPIR-V at the u32 (browser) word? Every prior escape-time
+// module in the tree is hand-built Sonatina IR (the sonatina fork's
+// `mandelbrot_snapshot.rs::build_escape_time`, i64, authored in Rust via
+// ModuleBuilder) - never Fe source. The straight-line keystones (above) proved
+// the wire but exercised NO branches and NO loop, so the structurizer +
+// phi-locals had never run on Fe-authored control flow at the u32 word. M0
+// retires exactly that unknown. No fork change: unsigned Lt + Add + Mul +
+// branches are all already in-envelope.
+//
+// Honest label (same as the R-val keystone): VALIDATED, NOT executed. No GPU is
+// touched here; naga's validator accepting the module is the whole claim.
+// ===========================================================================
+
+/// The M0 SSOT fixture: a bounded while-loop, an in-loop escape branch, an early
+/// `return i`, u32-only. Lives under `fixtures/spirv/` so the top-level
+/// `sonatina_ir` dir-test `*.fe` glob does not mint an incidental EVM-IR snapshot.
+const ESCAPE_TIME_U32_SOURCE: &str = include_str!("fixtures/spirv/escape_time_u32.fe");
+
+/// M0: does a Fe-AUTHORED escape-time loop+branch compile to naga-validated
+/// SPIR-V? Mirrors `keystone_lowers_to_naga_validated_spirv` (validated, NOT
+/// executed - no GPU): Fe source -> wasm-path Sonatina Module -> naga-backed
+/// `SpirvBackend`, asserting the SPIR-V magic and a WGSL side artifact. Adds the
+/// browser-profile gate (u32 word, no 64-bit tokens, wgsl-in reparse,
+/// `Capabilities::default()`), so a green here earns "browser-viable validated
+/// SPIR-V for a Fe-authored escape-time loop+branch".
+#[test]
+fn escape_time_u32_lowers_to_naga_validated_spirv() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///escape_time_u32.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(ESCAPE_TIME_U32_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    // Same seam as the keystone: reuse the wasm-path Sonatina Module (no SPIR-V
+    // lowering port) and hand it to the naga-backed SpirvBackend. A failure here
+    // means the Fe-authored loop+branch did NOT survive MIR/Sonatina/structurizer
+    // or that naga rejected the structurized module.
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("escape-time kernel should build a wasm runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv(&db, &package).expect(
+        "Fe-authored escape-time loop+branch should compile to naga-validated SPIR-V unchanged",
+    );
+
+    assert!(
+        !artifact.words.is_empty(),
+        "SPIR-V word stream must be non-empty"
+    );
+    assert_eq!(
+        artifact.words[0], SPIRV_MAGIC,
+        "words[0] must be the SPIR-V magic 0x07230203 (got {:#010x})",
+        artifact.words[0]
+    );
+
+    // Browser profile: the u32 kernel must lower to a Uint word (not Sint/i64),
+    // and its WGSL must validate with NO SHADER_INT64. This is the M0 claim.
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the u32 escape-time kernel must lower to a Uint word (WordKind::U32), not Sint/i64"
+    );
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit a WGSL side artifact for the escape-time kernel");
+    assert_browser_profile_wgsl(wgsl);
+    eprintln!(
+        "M0: Fe-authored escape-time loop+branch -> naga-validated browser-profile SPIR-V \
+         (validated, NOT executed)"
+    );
+}
+
+// ===========================================================================
 // Slice S2 - the EXECUTED keystone (rung R-lava).
 //
 // R-val (above) proves the Fe-produced SPIR-V is a structurally valid compute

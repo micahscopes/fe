@@ -1,0 +1,41 @@
+// M0 (mandelbrot ladder rung 0): the FIRST Fe-AUTHORED escape-time probe.
+//
+// A bounded loop with an in-loop escape branch and an early `return` of the
+// iteration count - the exact control-flow shape a mandelbrot pixel kernel
+// needs, reduced to its minimum. u32-only (browser-safe, no SHADER_INT64).
+//
+// Every prior escape-time module in the tree was hand-built Sonatina IR (see
+// the sonatina fork's `mandelbrot_snapshot.rs::build_escape_time`, i64). This
+// is the first one authored as Fe SOURCE and driven Fe -> MIR -> Sonatina ->
+// naga: it exercises the structurizer + phi-locals at the u32 word, which the
+// straight-line keystone never did.
+//
+// Overflow-free by construction: next = acc*3+1 = 4,13,40,...,797161,2391484;
+// it crosses the 1_000_000 threshold at next=2391484 and returns i==12, long
+// before any intermediate could approach 2^32. Were the loop to exhaust it
+// would return i==20 (== the max-iteration count), the honest escape-time
+// convention.
+pub fn escape_time_u32() -> u32 {
+    let mut acc: u32 = 1
+    let mut i: u32 = 0
+    while i < 20 {
+        // Compute the next magnitude into a fresh local, then CONTINUE while it
+        // is below threshold, early-returning the iteration count on escape.
+        //
+        // Two R1 wasm-path (wasm_lower.rs) constraints shape this line:
+        //   1. Only `<` and `==` lower (the rest of the compare matrix is R2), so
+        //      the natural escape `next >= threshold` (`>=`) is written as the
+        //      complementary continue-condition `next < threshold` (`<`/Lt).
+        //   2. A variable used as the SECOND operand of a compare is copied into a
+        //      memory slot (address-taken, out of R1 scope); the FIRST operand is
+        //      used by value. So the variable `next` must sit on the LEFT.
+        let next: u32 = acc * 3 + 1
+        if next < 1000000 {
+            acc = next
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    i
+}
