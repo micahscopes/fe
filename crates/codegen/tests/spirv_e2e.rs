@@ -902,7 +902,12 @@ fn u32_keystone_executes_equal_browser_profile() {
         "the u32 kernel must lower to a Uint word (WordKind::U32), not Sint/i64"
     );
     assert_eq!(
-        artifact.layout.result.width, 4,
+        artifact
+            .layout
+            .result
+            .expect("scalar keystone must state a single-slot result (Grid mode has none)")
+            .width,
+        4,
         "the u32 result must read back as 4 bytes"
     );
 

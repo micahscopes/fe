@@ -109,7 +109,12 @@ fn main() {
         "the keystone must be scalar-mode (single output slot); off-pin, refusing to emit"
     );
     assert_eq!(
-        artifact.layout.result.width, 4,
+        artifact
+            .layout
+            .result
+            .expect("scalar keystone must state a single-slot result (Grid mode has none)")
+            .width,
+        4,
         "the u32 result must read back as 4 bytes; off-pin, refusing to emit"
     );
     eprintln!(
@@ -233,6 +238,12 @@ fn serialize_layout(layout: &SpirvLayout, wasm_len: &usize) -> String {
         })
         .collect();
 
+    // Scalar keystone: the layout states a single-slot result (Grid mode is the
+    // only mode where `result` is None, and this generator asserts Scalar above).
+    let result = layout
+        .result
+        .expect("scalar keystone must state a single-slot result (Grid mode has none)");
+
     let value = serde_json::json!({
         "kernel": KERNEL_NAME,
         "entry_point": layout.entry_point,
@@ -242,10 +253,10 @@ fn serialize_layout(layout: &SpirvLayout, wasm_len: &usize) -> String {
         "word_bytes": layout.word.width_bytes(),
         "bindings": bindings,
         "result": {
-            "group": layout.result.group,
-            "binding": layout.result.binding,
-            "offset": layout.result.offset,
-            "width": layout.result.width,
+            "group": result.group,
+            "binding": result.binding,
+            "offset": result.offset,
+            "width": result.width,
         },
         "wasm_export": KERNEL_NAME,
         "wasm_bytes": wasm_len,
@@ -282,6 +293,7 @@ fn mode_str(m: LayoutMode) -> &'static str {
     match m {
         LayoutMode::Scalar => "Scalar",
         LayoutMode::Batch => "Batch",
+        LayoutMode::Grid => "Grid",
     }
 }
 
