@@ -6,10 +6,11 @@
 // (sum-parity trick, no bitwise ops), depth-cued by z'.
 //
 // Grid convention (M1): the first two params ARE gid.xy, declared i32
-// (pixel indices < 2^15). Envelope: Add/Sub/Mul/Slt/Sar ONLY (the M2 set);
-// compares keep the variable LEFT and a literal RIGHT (M0 rule); every
-// shift amount is a literal (fork imm-only u32 Sar arm). Returns i32 to
-// avoid the wasm/SPIR-V Cast surface (output clamped to 0..255 anyway).
+// (pixel indices < 2^15). Envelope: Add/Sub/Mul/Sar (a subset of the M2 set;
+// the 0..255 clamp is branchless, so no Slt and no conditional at all -- the
+// fork's SPIR-V structurizer emits conditionals only inside a loop). Every
+// shift amount is a literal (fork imm-only u32 Sar arm). Returns i32 to avoid
+// the wasm/SPIR-V Cast surface (output clamped to 0..255 anyway).
 pub fn clifford_pixel_q12(px: i32, py: i32, rc: i32, r12: i32, r13: i32, r23: i32) -> i32 {
     // pixel -> slab point, Q12: view [-1.0, 1.0) at 512px (step 16), z0 = 0.5.
     let x: i32 = (px - 256) * 16
@@ -38,9 +39,20 @@ pub fn clifford_pixel_q12(px: i32, py: i32, rc: i32, r12: i32, r13: i32, r23: i3
     let cell: i32 = (sx >> 11) + (sy >> 11) + (sz >> 11)
     let par: i32 = cell - ((cell >> 1) * 2)
 
-    // two-tone + depth cue, clamped to 0..255 (Slt only).
-    let mut shade: i32 = par * 160 + 48 + (sz >> 7)
-    if shade < 0 { shade = 0 }
-    if shade < 256 { return shade }
-    255
+    // two-tone + depth cue, clamped to 0..255 BRANCHLESSLY (Add/Sub/Mul/Sar,
+    // literal shifts). The SPIR-V naga structurizer (fork pin 7b841cd)
+    // reconstructs a conditional ONLY inside a loop (the mandelbrot escape
+    // shape); a straight-line / top-level `if` has its branches and returns
+    // dropped. So the clamp is arithmetic: `n >> 31` is 0 for n >= 0 and -1 for
+    // n < 0 (Sar sign-extends the top bit), so `1 + (n >> 31)` is a 0/1 gate.
+    //   lo    = max(s, 0)    = s * (1 + (s >> 31))
+    //   shade = min(lo, 255) = lo - d * (1 + (d >> 31)),   d = lo - 255
+    // Value-identical to `if s<0 {0} else if s<256 {s} else {255}` = clamp(s,
+    // 0, 255); the independent oracle keeps the if-form, so the two agree by
+    // computation, not construction. Every intermediate is << 2^31 (no wrap).
+    let s: i32 = par * 160 + 48 + (sz >> 7)
+    let lo: i32 = s * (1 + (s >> 31))
+    let d: i32 = lo - 255
+    let shade: i32 = lo - d * (1 + (d >> 31))
+    shade
 }

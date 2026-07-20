@@ -1126,7 +1126,13 @@ fn grid_gradient_u32_wasm_leg() {
 /// derives `row_width = num_workgroups.x * wgx`, so a non-multiple frame would
 /// dispatch the wrong pixel count). Returns `Some(grid)` (the `width*height`
 /// words, row-major) when the GPU ran the shader, `None` only under skip.
-fn run_grid_u32_on_lavapipe(wgsl: &str, width: u32, height: u32, label: &str) -> Option<Vec<u32>> {
+fn run_grid_u32_on_lavapipe(
+    wgsl: &str,
+    width: u32,
+    height: u32,
+    params: &[u32],
+    label: &str,
+) -> Option<Vec<u32>> {
     assert!(
         width % 8 == 0 && height % 8 == 0,
         "grid frame {width}x{height} must be a multiple of the 8x8 workgroup size"
@@ -1202,12 +1208,23 @@ fn run_grid_u32_on_lavapipe(wgsl: &str, width: u32, height: u32, label: &str) ->
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    // Broadcast input buffer: grid-kernel args 2.. load from here (member idx-2,
+    // named p0..pN by the fork). M1/M2 kernels take no params (`params == &[]`)
+    // and never read it, so the 4-byte dummy floor keeps their unused binding
+    // valid, exactly as before. A param-carrying kernel (clifford: 4 rotor
+    // members, span 16) sizes the buffer to 4 * len and gets the words written
+    // before dispatch; COPY_DST is required for `queue.write_buffer`.
+    let input_bytes = std::cmp::max(4u64, 4 * params.len() as u64);
     let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("grid_input_unused"),
-        size: 4,
-        usage: wgpu::BufferUsages::STORAGE,
+        label: Some("grid_input"),
+        size: input_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    if !params.is_empty() {
+        let param_bytes: Vec<u8> = params.iter().flat_map(|p| p.to_le_bytes()).collect();
+        queue.write_buffer(&input_buf, 0, &param_bytes);
+    }
     let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("grid_staging"),
         size: out_bytes,
@@ -1381,7 +1398,7 @@ fn grid_gradient_u32_executes_on_lavapipe_browser_profile() {
 
     // --- The GPU leg: EXECUTE on lavapipe (browser profile) and compare every
     // pixel to BOTH the oracle and the wasmtime leg. ---
-    match run_grid_u32_on_lavapipe(wgsl, GRID_W, GRID_H, "grid_gradient_u32") {
+    match run_grid_u32_on_lavapipe(wgsl, GRID_W, GRID_H, &[], "grid_gradient_u32") {
         Some(grid) => {
             assert_eq!(
                 grid.len(),
@@ -1761,7 +1778,7 @@ fn mandelbrot_q12_executes_on_lavapipe_browser_profile() {
     // --- The GPU leg: EXECUTE the fractal on lavapipe (browser profile,
     // 512x512, dispatch (64,64,1)) and compare every pixel to BOTH the oracle
     // AND the wasmtime leg (tri-equal). ---
-    match run_grid_u32_on_lavapipe(wgsl, MANDEL_W, MANDEL_H, "mandel_pixel_q12") {
+    match run_grid_u32_on_lavapipe(wgsl, MANDEL_W, MANDEL_H, &[], "mandel_pixel_q12") {
         Some(grid) => {
             assert_eq!(
                 grid.len(),
@@ -2187,5 +2204,253 @@ fn clifford_rotor_q12_evm_spot_check() {
     eprintln!(
         "C1 EVM leg: Fe clifford_probe() (5 probe pixels of the rotor sandwich under e12_180) \
          executed under revm; base-1000 packing == the oracle packing {want}."
+    );
+}
+
+// ===========================================================================
+// C2 (clifford ladder rung 2): the lavapipe leg with GRID BROADCAST PARAMS.
+//
+// This is the FIRST fe-compiled kernel to go through the grid broadcast-param
+// path. The rotor components (rc, r12, r13, r23 = kernel args 2..5) are
+// delivered to the GPU via the grid Input struct (members p0..p3, span 16),
+// written to the input buffer before dispatch by the generalized
+// `run_grid_u32_on_lavapipe` (its new `params` arg). Args 0,1 (px, py) stay
+// grid builtins. Both prior grid kernels (grid_gradient, mandelbrot) are 2-arg
+// gid-only, so the four-member broadcast input struct is exercised end-to-end
+// from Fe source HERE for the first time.
+//
+// C2's gate: EXECUTE on lavapipe (browser profile, 512x512, dispatch (64,64,1))
+// for the pinned rotors and assert ALL 262,144 pixels tri-equal (lavapipe ==
+// the wasm leg == the oracle). The layout's input stride 16 is the static proof
+// of the four broadcast rotor members. Hard-fail-not-skip; MB2_ALLOW_GPU_SKIP
+// only, adapter printed.
+// ===========================================================================
+
+/// Run the Fe clifford wasm kernel (the 6-arg typed func) over the FULL 512x512
+/// grid for one pinned rotor, returning the per-pixel shade grid (row-major,
+/// u32). This is the wasm value in the tri-equal claim: `wasm == oracle` is
+/// proven exhaustively by `clifford_rotor_q12_wasm_leg`, and it is recomputed
+/// here so the three-way equality lives inside the one executing test.
+fn wasm_clifford_grid_all(bytes: &[u8], rc: i32, r12: i32, r13: i32, r23: i32) -> Vec<u32> {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32), i32>(&mut store, "clifford_pixel_q12")
+        .expect("`clifford_pixel_q12` export should exist as (i32 x6) -> i32");
+    let mut out = Vec::with_capacity((MANDEL_W * MANDEL_H) as usize);
+    for py in 0..MANDEL_H as i32 {
+        for px in 0..MANDEL_W as i32 {
+            let v = f
+                .call(&mut store, (px, py, rc, r12, r13, r23))
+                .expect("clifford_pixel_q12 should run") as u32;
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// C2 headline (the FIRST fe grid-broadcast execution): the Q12 rotor sandwich,
+/// compiled through the Grid driver seam with FOUR broadcast rotor params,
+/// EXECUTES on lavapipe at the browser profile, and every one of 262,144 pixels
+/// equals BOTH the independent oracle AND the wasmtime execution of the same Fe
+/// function (tri-equal) for each pinned GPU rotor. The rotor params reach the
+/// GPU via the Input struct (span 16, members p0..p3), written to the input
+/// buffer before dispatch by the generalized harness.
+///
+/// The name contains "lavapipe", so the nextest serial group filter
+/// (`test(lavapipe)`) catches it; the software Vulkan device is single-threaded.
+#[test]
+fn clifford_rotor_q12_executes_on_lavapipe_browser_profile() {
+    // --- Compile the rotor sandwich through the Grid driver seam. ---
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_rotor_q12_gpu.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(CLIFFORD_Q12_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("clifford Q12 should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_grid(&db, &package, [8, 8, 1])
+        .expect("clifford Q12 should compile Fe -> naga-validated SPIR-V in Grid mode");
+
+    // --- Layout asserts: the M1/M2 schema (Grid, u32 word, no single-slot
+    // result, 4-byte output stride) PLUS the input stride 16 that is the
+    // layout-level proof of the FOUR broadcast rotor members (the C2 crux:
+    // rc,r12,r13,r23 at member offsets 0,4,8,12). ---
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Grid,
+        "the grid driver seam must state LayoutMode::Grid"
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the Q12 rotor sandwich must lower to the u32 word (browser profile)"
+    );
+    assert_eq!(
+        artifact.layout.workgroup_size,
+        [8, 8, 1],
+        "the layout must record the [8,8,1] workgroup size the driver set"
+    );
+    assert!(
+        artifact.layout.result.is_none(),
+        "Grid mode has no single-slot result: the whole output array is the result"
+    );
+    let output_stride = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|b| b.role == sonatina_codegen::isa::spirv::Role::Output)
+        .expect("the grid layout must have an Output binding")
+        .stride;
+    assert_eq!(
+        output_stride, 4,
+        "the grid output stride is one u32 word per element (4 bytes)"
+    );
+    let input_stride = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|b| b.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("the grid layout must have an Input binding")
+        .stride;
+    assert_eq!(
+        input_stride, 16,
+        "the FOUR broadcast rotor members (rc,r12,r13,r23), 4 bytes each, span 16 bytes: \
+         the layout-level proof that the fe kernel's args 2..5 became the grid broadcast params"
+    );
+
+    // --- Browser-profile WGSL gate + the C2 honesty tokens: signed ops through
+    // the fork sign mapping (`bitcast<i32>`), the per-pixel gid + row-width
+    // derivation, and the multi-member broadcast load from the Input struct
+    // (`input.p0` .. `input.p3`, proving all four rotor members are read). ---
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the rotor-sandwich kernel");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("bitcast<i32>"),
+        "the sandwich WGSL must contain `bitcast<i32>` (the signed Sar/Slt really went through \
+         the fork's i32 sign mapping); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("global_invocation_id"),
+        "grid WGSL must bind global_invocation_id (the per-pixel gid); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("num_workgroups"),
+        "grid WGSL must read num_workgroups (row_width = num_workgroups.x * wgx); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("input.p0"),
+        "the sandwich WGSL must load the first broadcast rotor member `input.p0`; got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("input.p3"),
+        "the sandwich WGSL must load the FOURTH broadcast rotor member `input.p3` (all four \
+         rc,r12,r13,r23 members are read: the multi-member broadcast); got:\n{wgsl}"
+    );
+    eprintln!(
+        "  sandwich WGSL passed the browser profile and carries bitcast<i32> + \
+         global_invocation_id + num_workgroups + input.p0..input.p3 (4-member broadcast)."
+    );
+
+    // --- The wasm bytecode (rotor-independent: the rotor arrives as args), used
+    // to recompute the wasm value in the tri-equal claim per rotor. ---
+    let wasm_bytes = compile_clifford_q12_to_wasm();
+
+    // --- The GPU leg: for each pinned rotor, write (rc,r12,r13,r23) to the
+    // broadcast input buffer, EXECUTE on lavapipe (512x512), and compare every
+    // pixel to BOTH the oracle AND the wasmtime leg (tri-equal). At least
+    // identity + e12_180 + one tilted (spec 4.2.3), covering both the exact
+    // pure-e12 anchors and the 3D-tumbling tilted default. ---
+    const GPU_ROTORS: [(&str, i32, i32, i32, i32); 3] = [
+        ("identity", 4096, 0, 0, 0),
+        ("e12_180", 0, 4096, 0, 0),
+        ("tilted_default", 3712, 577, 1154, 1154),
+    ];
+    for (name, rc, r12, r13, r23) in GPU_ROTORS {
+        let wasm_grid = wasm_clifford_grid_all(&wasm_bytes, rc, r12, r13, r23);
+        // The broadcast params, in kernel-arg order: arg2=rc -> p0, arg3=r12 ->
+        // p1, arg4=r13 -> p2, arg5=r23 -> p3 (i32 two's complement in the u32
+        // word). The generalized harness writes these to the input buffer.
+        let params = [rc as u32, r12 as u32, r13 as u32, r23 as u32];
+        match run_grid_u32_on_lavapipe(wgsl, MANDEL_W, MANDEL_H, &params, "clifford_pixel_q12") {
+            Some(grid) => {
+                assert_eq!(
+                    grid.len(),
+                    (MANDEL_W * MANDEL_H) as usize,
+                    "grid readback must be 512*512 = 262144 words"
+                );
+                let mut distinct = std::collections::BTreeSet::new();
+                for y in 0..MANDEL_H {
+                    for x in 0..MANDEL_W {
+                        let idx = (y * MANDEL_W + x) as usize;
+                        let got = grid[idx];
+                        let oracle = clifford_oracle_q12(x as i32, y as i32, rc, r12, r13, r23) as u32;
+                        assert_eq!(
+                            got, oracle,
+                            "lavapipe clifford[{y}*512+{x}; {name}] = {got} must equal the oracle \
+                             shade {oracle}"
+                        );
+                        assert_eq!(
+                            got, wasm_grid[idx],
+                            "lavapipe clifford[{y}*512+{x}; {name}] = {got} must equal the wasmtime \
+                             leg for the same pixel = {}",
+                            wasm_grid[idx]
+                        );
+                        distinct.insert(got);
+                    }
+                }
+
+                // Recognizability, DERIVED from the executed GPU grid (not baked):
+                // a pure-e12 rotor (identity, 180) fixes the e3 slab height z', so
+                // the depth cue is constant -> a flat two-tone checker {64, 224}.
+                // Only the tilted rotor tumbles the slab in 3D, spreading z' and
+                // thus the shades. The exact two-tone values are the C1 anchors.
+                match name {
+                    "identity" | "e12_180" => assert!(
+                        distinct.iter().copied().eq([64u32, 224u32]),
+                        "{name}: pure-e12 rotor fixes z0 -> flat 2-tone checker {{64,224}} on the \
+                         GPU, got {distinct:?}"
+                    ),
+                    "tilted_default" => assert!(
+                        distinct.len() >= 8,
+                        "tilted_default: the 3D tumble's depth cue must spread the GPU shades (got \
+                         {} distinct)",
+                        distinct.len()
+                    ),
+                    _ => unreachable!("unexpected GPU rotor name {name}"),
+                }
+
+                eprintln!(
+                    "C2 [{name} = ({rc},{r12},{r13},{r23})]: Fe clifford_pixel_q12 EXECUTED on \
+                     lavapipe (browser profile, 512x512) with the rotor as 4 broadcast params; \
+                     ALL 262,144 pixels TRI-EQUAL (lavapipe == oracle == wasmtime); {} distinct \
+                     shades.",
+                    distinct.len()
+                );
+            }
+            None => {
+                eprintln!(
+                    "R-val only: clifford SPIR-V validated (browser profile) but NOT executed (GPU \
+                     skipped via MB2_ALLOW_GPU_SKIP). The 262,144-pixel tri-equal broadcast claim \
+                     is NOT earned on this run."
+                );
+                return;
+            }
+        }
+    }
+
+    eprintln!(
+        "C2: the FIRST fe-compiled grid-broadcast kernel EXECUTED on lavapipe. The rotor sandwich \
+         went through the four-member broadcast Input struct (span 16) end to end from Fe source; \
+         all three pinned GPU rotors are tri-equal at every one of 262,144 pixels. Grid broadcast \
+         params earn R-lava."
     );
 }
