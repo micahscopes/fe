@@ -4,6 +4,45 @@ The origin trace web demo is a developer-only trace-through viewer over compiler
 It is a derived view: compiler phases own origin keys and facts; the browser only renders
 their transitive closures across source, HIR, MIR, Sonatina, and bytecode.
 
+## Quick start
+
+All commands below are run from the repository root and were verified on the
+`origin-overhaul-phased` branch. The first `cargo run` builds the compiler
+(a debug build is fine and faster to compile than a release build).
+
+Serve the viewer directly from a Fe source file:
+
+```sh
+cargo run -p fe -- dev trace web-demo \
+  --source fib_demo.fe \
+  --serve \
+  --port 5179
+```
+
+Open `http://127.0.0.1:5179/`. The page renders source, HIR, MIR, Sonatina, and
+bytecode panels with salsa caching cards at the top (`query execs`, `memo
+reuse`, `render ms`). The first render is cold (high `query execs`, zero `memo
+reuse`); saving the watched file again, even with no textual change, live-reloads
+the page with `query execs` down to a handful and a large `memo reuse` count.
+That is the long-lived salsa database validating memoized values instead of
+re-executing.
+
+Produce a standalone, self-contained HTML file that a reviewer can open without
+a running server (source mode with `--out` mirrors the rendered page to disk):
+
+```sh
+cargo run -p fe -- dev trace web-demo \
+  --source fib_demo.fe \
+  --out /tmp/fe-origin-trace.html
+```
+
+Then open `/tmp/fe-origin-trace.html` in any browser (`xdg-open`, `open`, or
+just double-click). The file embeds the trace model and the `<fe-origin-trace>`
+web component, so it renders fully offline with no external assets.
+
+For the standardized on-chain-debugging serialization of the same source to
+bytecode attribution, see the [ethdebug example](#ethdebug-example) below.
+
 ## Incremental Source Mode
 
 Run the demo directly from a Fe source file:
@@ -50,6 +89,58 @@ cargo run -p fe -- dev trace web-demo \
 
 Offline mode is useful for sharing a standalone HTML artifact, but it cannot demonstrate
 salsa caching because it consumes already-serialized JSONL.
+
+## ethdebug example
+
+The ethdebug artifact is the standardized, on-chain-debugging serialization of
+the same source to bytecode attribution the viewer renders. Both are derived
+from one compiler trace bundle: the viewer paints the transitive closures in the
+browser, while ethdebug emits an instruction/source map keyed by bytecode
+program counter. The ethdebug emitter reads a validated trace JSONL bundle
+rather than a `.fe` file, so producing an artifact is two steps: emit the trace,
+then project it to ethdebug.
+
+Emit a compiler trace JSONL bundle for the example contract:
+
+```sh
+cargo run -p fe -- dev trace emit fib_demo.fe --out /tmp/trace.jsonl
+```
+
+Emit the ethdebug instruction/source artifact (plus an optional Fe
+origin/confidence sidecar) from that bundle:
+
+```sh
+cargo run -p fe -- dev debug emit \
+  --format ethdebug \
+  --from /tmp/trace.jsonl \
+  --out /tmp/fe-ethdebug.json \
+  --sidecar /tmp/fe-ethdebug.sidecar.json
+```
+
+The schema version is pinned; `--schema-version pinned` is the default and maps
+to `ethdebug/format/draft-2020-12+fe-instruction-source-v1`. The emit path
+validates the artifact before writing it, so a successful emit is already a
+well-formed artifact. The optional sidecar carries Fe-specific origin keys,
+classifications, and confidence per instruction, which are intentionally kept
+out of the standard ethdebug document.
+
+Validate the artifact (and the sidecar, if you produced one) independently:
+
+```sh
+cargo run -p fe -- dev debug validate \
+  --format ethdebug \
+  --input /tmp/fe-ethdebug.json \
+  --sidecar /tmp/fe-ethdebug.sidecar.json
+```
+
+The artifact is a single JSON object with `schema_version`, a `compilation`
+block (compiler identity and the deduplicated source list), and one or more
+`programs`. Each program lists instructions sorted by bytecode offset; a
+source-mapped instruction carries a `context.code` byte range into a source id
+from the `compilation.sources` list, along with its `fe_origin_key`,
+`confidence`, and `classification`. Instructions without a high-confidence
+source edge are emitted without a `context`, which is the same honest
+attribution gap the viewer labels rather than hiding.
 
 ## Closure Audit
 
