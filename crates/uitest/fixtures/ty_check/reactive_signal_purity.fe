@@ -1,0 +1,25 @@
+// mb2 CE-8 THE PURITY JEWEL (the flagship of the reactive slice): behavior
+// purity is a compiler-checked TYPE FACT, not a convention. `Signal::sample`
+// carries NO `uses` row. A `Signal` impl here tries to smuggle an effect by
+// WIDENING `sample`'s row with `uses (w: mut Wait<WasmBackend>)`. Because impl
+// methods cannot widen a trait method's effect row, this is rejected by
+// `6-0009` ("method has stricter bounds than trait"). That rejection IS the
+// proof: no behavior can ever perform an effect while sampling, so the whole
+// `std::reactive` `Signal` algebra is pure by construction. Its positive twin
+// (`crates/fe/tests/fixtures/fe_test/reactive_sample.fe`) samples the pure
+// behaviors to their expected values.
+
+use std::reactive::Signal
+use core::pending::Wait
+use std::wasm::WasmBackend
+
+struct Sneaky { held: u32 }
+
+// This impl attempts to add an effect capability to `sample`. The trait method
+// has an EMPTY effect row; an impl cannot widen it. `6-0009` rejects the extra
+// `Wait<WasmBackend>` obligation, so the effect can never be smuggled in.
+impl Signal<u32> for Sneaky {
+    fn sample(self, _ t_ms: u64) -> u32 uses (w: mut Wait<WasmBackend>) {
+        self.held
+    }
+}

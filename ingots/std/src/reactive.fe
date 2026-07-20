@@ -1,0 +1,109 @@
+//! Reactive programming in Fe (mb2 CE-8, the `std::reactive` layer).
+//!
+//! This is the reactive layer over the completion-cell rail (`core::pending`).
+//! It honors the denotational-FRP split that is its genuine influence
+//! (Elliott, Elm): a `Signal` is a PURE sample of time, an `Event` is a
+//! discrete occurrence, and ALL effects live in one imperative shell loop over
+//! the rail. This module holds the pure half: the `Signal` algebra and its
+//! leaves. The effectful shell (`Timer`/`recv`-driven, the tick loop) is
+//! CE-7/demo follow-on work and is deliberately NOT here.
+//!
+//! ## Purity is a type fact, not a convention (the flagship property)
+//!
+//! `Signal::sample` carries NO `uses` row: a signal is a pure function of time
+//! by construction. Because impl methods CANNOT WIDEN a trait method's effect
+//! row (`6-0009`, "method has stricter bounds than trait", measured), no
+//! `Signal` impl can add a `uses` clause to `sample`. Therefore NO behavior can
+//! smuggle an effect through the sampling interface: behavior purity is a
+//! compiler-checked TYPE FACT. The negative fixture
+//! `reactive_signal_purity.fe` pins this: a `sample` impl that tries to widen
+//! the row with `uses (w: mut Wait<WasmBackend>)` is rejected by `6-0009`.
+//!
+//! ## Layering (no new Functor)
+//!
+//! This layer sits ABOVE the shipped `core::conal::Functor` (the applied-form,
+//! element-changing container functor) and reuses it as an element-mapping
+//! LEAF; it invents no new Functor. Mapping a pure function over a signal's
+//! sampled element is exactly the `F = identity` case of the applicative
+//! combine below, and any element-level container mapping a leaf needs is
+//! `core::conal::Functor::map`. The reactive layer contributes the time axis;
+//! the element algebra is already shipped one floor down.
+//!
+//! ## Scope of this slice (rudimentary on purpose)
+//!
+//! v1 `T` is word-sized `Copy` values (the sampled-value grammar). There is no
+//! continuous-time interval reasoning, no push-pull optimization, and no
+//! dynamic-network GC: the network is static structs. `Event` reserves the seat
+//! for the discrete-occurrence type the CE-7 sources will complete (an
+//! occurrence is a broker-completed cell); it has no v1 provider. Those are the
+//! library's future, not this rung's.
+
+use core::Fn
+
+/// A Signal: denotationally `time -> T`, sampled. PURE BY CONSTRUCTION.
+///
+/// `sample` carries NO `uses` row, and since impl methods cannot widen a trait
+/// method's effect row (`6-0009`), no impl can add one. That makes behavior
+/// purity a type fact: a `Signal` can never perform an effect while sampling.
+/// The industry-converged name (SolidJS/Angular/Preact/Vue, the TC39 signals
+/// proposal) with honest FRP pedigree (Elm signals, Yampa SF); denotationally a
+/// signal is a value over time you can `sample`. Concept-named trait with a verb
+/// method, the `core::conal::Functor::map` pattern.
+///
+/// v1 `T` is a word-sized `Copy` value (the sampled-value grammar).
+pub trait Signal<T> {
+    /// Sample the signal at time `t_ms` (milliseconds). No `uses` row: sampling
+    /// is pure, checked pure, by construction.
+    fn sample(self, _ t_ms: u64) -> T
+}
+
+/// The constant signal: `sample(t) = value` for all `t`. The simplest leaf.
+pub struct Const { pub value: u32 }
+
+impl Signal<u32> for Const {
+    fn sample(self, _ t_ms: u64) -> u32 {
+        self.value
+    }
+}
+
+/// The piecewise-constant stepper: the behavior holding an event's last value,
+/// sampled as that held value regardless of time. The pull side of the
+/// classic push-pull split (a push-completed `Event` updates `held`; a pull
+/// `sample` reads it). In this pure slice `held` is a fixed field; the CE-7
+/// shell loop is what re-steps it on each occurrence.
+pub struct Stepped { pub held: u32 }
+
+impl Signal<u32> for Stepped {
+    fn sample(self, _ t_ms: u64) -> u32 {
+        self.held
+    }
+}
+
+/// The applicative combine, hand-defunctionalized: sample BOTH sub-signals at
+/// the same instant and apply `f` to the pair. `map` is the `F = identity`
+/// case; a `switch` v1 would be a `Stepped`-selected pair (rudimentary, R7a).
+///
+/// `f` is a plain `Fn`-typed field (`core::functional::Fn`), so the combinator
+/// is generic over any callable value; measured to type-check and execute on
+/// this substrate (CE-8), no effect-polymorphic-`Fn` horizon needed. Crucially,
+/// `f: F` is an `Fn`, and an `Fn` impl cannot carry a `uses` row (`6-0009`
+/// again), so the combine stays pure: `Combine2::sample` has no `uses` row and
+/// nothing it calls can smuggle one either.
+pub struct Combine2<A, B, F> { pub a: A, pub b: B, pub f: F }
+
+impl<A: Signal<u32>, B: Signal<u32>, F: Fn<(u32, u32), u32>> Signal<u32>
+    for Combine2<A, B, F>
+{
+    fn sample(self, _ t_ms: u64) -> u32 {
+        self.f.call((self.a.sample(t_ms), self.b.sample(t_ms)))
+    }
+}
+
+/// RESERVED discrete-occurrence type (CE-8 seat, CE-7 completes it). An `Event`
+/// is a discrete occurrence in time; on the rail an occurrence IS a
+/// broker-completed cell (`Timer`/`recv`, CE-7). There is no v1 realization and
+/// NO provider: this declaration only reserves the name in `std::reactive` so
+/// nothing else claims the seat, exactly as `Complete<B>` reserves the completer
+/// authority in `core::pending`. The push half of the push-pull split lands
+/// here when the CE-7 sources arrive; the pull half is `Stepped` above.
+pub struct Event {}

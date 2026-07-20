@@ -1,0 +1,10 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/reactive_signal_purity.fe
+---
+error[6-0009]: method has stricter bounds than trait
+   ┌─ reactive_signal_purity.fe:22:8
+   │
+22 │     fn sample(self, _ t_ms: u64) -> u32 uses (w: mut Wait<WasmBackend>) {
+   │        ^^^^^^ method has stricter bounds than the declared method in the trait: `w: Wait<WasmBackend>`

@@ -1,0 +1,50 @@
+// mb2 CE-8 (the POSITIVE half of the reactive slice): the pure `Signal`
+// behaviors compile and `sample` to the right values. `Const` samples its
+// constant, `Stepped` samples its held value regardless of time, and the
+// applicative `Combine2` samples both sub-signals at the same instant and
+// applies its `Fn`-typed combiner. Every `sample` here is pure by construction
+// (no `uses` row anywhere on the path); its negative twin is
+// `reactive_signal_purity.fe`, where an impl that tries to widen `sample`'s
+// effect row is rejected by `6-0009`.
+
+use std::reactive::{Signal, Const, Stepped, Combine2}
+use core::Fn
+
+// A concrete, pure combiner: summing the two sampled words. An `Fn` impl cannot
+// carry a `uses` row (`6-0009`), so the combiner is a checked-pure leaf.
+struct AddFn {}
+impl Fn<(u32, u32), u32> for AddFn {
+    fn call(self, _ v: own (u32, u32)) -> u32 {
+        v.0 + v.1
+    }
+}
+
+#[test]
+fn const_samples_its_value() {
+    let b = Const { value: 42 }
+    assert(b.sample(0) == 42)
+    // Constant in time: any instant samples the same value.
+    assert(b.sample(1000) == 42)
+}
+
+#[test]
+fn stepped_samples_held() {
+    let b = Stepped { held: 7 }
+    assert(b.sample(0) == 7)
+    assert(b.sample(999) == 7)
+}
+
+#[test]
+fn combine2_applies_f_to_both_samples() {
+    // (3) + (4) = 7, sampled at the same instant.
+    let net = Combine2 { a: Const { value: 3 }, b: Stepped { held: 4 }, f: AddFn {} }
+    assert(net.sample(0) == 7)
+}
+
+#[test]
+fn combine2_nests() {
+    // A two-level static network: (1 + 2) + 4 = 7.
+    let inner = Combine2 { a: Const { value: 1 }, b: Const { value: 2 }, f: AddFn {} }
+    let outer = Combine2 { a: inner, b: Stepped { held: 4 }, f: AddFn {} }
+    assert(outer.sample(0) == 7)
+}
