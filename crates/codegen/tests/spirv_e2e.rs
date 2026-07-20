@@ -1413,3 +1413,228 @@ fn grid_gradient_u32_executes_on_lavapipe_browser_profile() {
         }
     }
 }
+
+// ===========================================================================
+// M2 (mandelbrot ladder rung 2): the REAL Q12 fractal compute.
+//
+// The kernel (`mandelbrot_q12.fe`) is signed Q12 fixed point (1.0 = 4096) in
+// i32, an escape-time loop with an in-loop signed continue-compare (`mag <
+// 67108864`, Slt) and an arithmetic right shift (`>> 12`, Sar). Those two ops
+// are what fork push #2 (M2a) opened in both fork backends and what M2b's
+// `wasm_lower.rs` edit opens on the fe wasm path (sign-aware Lt->Slt and a new
+// RShift->Sar arm, keyed on the MIR operand class, not the signless sonatina
+// type).
+//
+// M2b's GPU-FREE gate (this section): the wasm leg proves the fractal
+// pixel-exact vs an INDEPENDENT oracle across the FULL 512x512 frame with no
+// GPU in the loop, and the EVM leg agrees at 5 probe pixels. The lavapipe leg
+// (all 262,144 pixels tri-equal) is M2c.
+// ===========================================================================
+
+/// The single SSOT fixture: `include_str!`-ed here (and, later, by the page
+/// generator) so the tested source and the shipped source are byte-identical by
+/// construction. Under `fixtures/spirv/` so the top-level `*.fe` dir-test glob
+/// does not mint an incidental EVM-IR snapshot.
+const MANDELBROT_Q12_SOURCE: &str = include_str!("fixtures/spirv/mandelbrot_q12.fe");
+
+/// The independent Q12 escape-time oracle, re-derived HERE from the kernel logic
+/// (never trusted from the spec), integer-identical to the fixture: `i32`
+/// arithmetic, arithmetic `>>` on i32, the same in-kernel constant literals, and
+/// the same continue-condition escape convention (`mag >= 4.0` in Q24 returns the
+/// iteration count; an exhausted loop returns MAX_ITER = 100).
+///
+/// The temp ordering is LOAD-BEARING: `nzi` (the new imaginary part) is computed
+/// from the OLD `zr`, BEFORE `zr` is reassigned. Reorder it and the two
+/// implementations diverge. The overflow proof (spec 2.2, re-checked: every
+/// intermediate over the fixed 512x512 view stays < 2^31) means this runs in a
+/// debug build with no i32 overflow panic.
+fn mandel_oracle_q12(px: i32, py: i32) -> u32 {
+    let c_re: i32 = -8192 + px * 24;
+    let c_im: i32 = -6144 + py * 24;
+    let mut zr: i32 = 0;
+    let mut zi: i32 = 0;
+    let mut i: u32 = 0;
+    while i < 100 {
+        let rr: i32 = zr * zr;
+        let ii: i32 = zi * zi;
+        let mag: i32 = rr + ii;
+        if mag < 67_108_864 {
+            let t: i32 = rr - ii;
+            let nzi: i32 = ((zr * 2) * zi) >> 12; // uses the OLD zr
+            zr = (t >> 12) + c_re;
+            zi = nzi + c_im;
+            i += 1;
+        } else {
+            return i;
+        }
+    }
+    i // loop exhausted: i == 100
+}
+
+/// Compile the Q12 mandelbrot fixture to wasm through `BackendKind::Wasm`.
+fn compile_mandelbrot_q12_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandelbrot_q12_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDELBROT_Q12_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("mandelbrot Q12 should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// M2b wasm leg (GPU-FREE, runs everywhere): compile the Q12 fractal kernel via
+/// `BackendKind::Wasm`, execute it under wasmtime over the FULL 512x512 grid, and
+/// assert every pixel equals the independent `mandel_oracle_q12`. This is the
+/// honest scalar-path proof that the signed Q12 fractal (Slt continue-compare +
+/// Sar shift, both newly opened on the fe wasm path) computes correctly WITHOUT
+/// any GPU. Fe `u32` returns as wasm `i32`; reinterpret via `as u32`.
+#[test]
+fn mandelbrot_q12_wasm_leg() {
+    let bytes = compile_mandelbrot_q12_to_wasm();
+    wasmparser::validate(&bytes).expect("Fe-emitted wasm should be valid");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "mandel_pixel_q12")
+        .expect("`mandel_pixel_q12` export should exist as (i32, i32) -> i32");
+
+    // The FULL 512x512 frame, row-major, every pixel == the oracle. The escape
+    // counts are collected into a set for the histogram recognizability check.
+    let mut distinct = std::collections::HashSet::new();
+    for py in 0..512i32 {
+        for px in 0..512i32 {
+            let got = f
+                .call(&mut store, (px, py))
+                .expect("mandel_pixel_q12(px, py) should run") as u32;
+            let want = mandel_oracle_q12(px, py);
+            assert_eq!(
+                got, want,
+                "wasm mandel_pixel_q12({px}, {py}) = {got} must equal the oracle = {want}"
+            );
+            distinct.insert(want);
+        }
+    }
+
+    // Recognizability, DERIVED in-test from the oracle (not a baked pixel table):
+    //   - (256, 256) maps to c = -0.5 + 0i, deep inside the main cardioid, so the
+    //     loop exhausts and returns MAX_ITER = 100 (an interior pixel);
+    //   - (0, 0) maps to c = -2.0 - 1.5i, |c| = 2.5 > 2, so it escapes on the very
+    //     first iteration and returns 1;
+    //   - the escape-time histogram over the frame has >= 10 distinct values (a
+    //     flat/degenerate image, e.g. all-interior or all-escape, could not).
+    assert_eq!(
+        mandel_oracle_q12(256, 256),
+        100,
+        "center (256,256) -> c=-0.5+0i is interior: the loop exhausts at MAX_ITER=100"
+    );
+    assert_eq!(
+        mandel_oracle_q12(0, 0),
+        1,
+        "corner (0,0) -> c=-2.0-1.5i (|c|=2.5>2) escapes on the first iteration"
+    );
+    assert!(
+        distinct.len() >= 10,
+        "the escape-time histogram must have >= 10 distinct values (got {})",
+        distinct.len()
+    );
+
+    eprintln!(
+        "M2b wasm leg: Fe mandel_pixel_q12 -> wasm executed under wasmtime; ALL 262,144 pixels \
+         (512x512) == the independent oracle; {} distinct escape counts (interior=100, \
+         fast-escape=1 confirmed).",
+        distinct.len()
+    );
+}
+
+/// The EVM leg's shim: a parameterless `mandel_probe()` free function that packs
+/// the Q12 kernel's value at 5 pixels (the 4 corners + the center) base-1000
+/// (each pixel is 0..=100, so 1000 is injective and the packing is exact), plus a
+/// trivial `run()` recv arm returning that packing as `u256`. Appended to the
+/// UNCHANGED `MANDELBROT_Q12_SOURCE`, so the kernel body is byte-identical to the
+/// wasm/SPIR-V legs (the EVM leg adds only the probe fn and the recv arm). The
+/// `use` after a fn item mirrors the keystone wrapper (Fe items are unordered).
+const MANDEL_Q12_EVM_WRAPPER: &str = "\
+pub fn mandel_probe() -> u256 {\n\
+\x20   let p0: u256 = mandel_pixel_q12(px: 0, py: 0) as u256\n\
+\x20   let p1: u256 = mandel_pixel_q12(px: 511, py: 0) as u256\n\
+\x20   let p2: u256 = mandel_pixel_q12(px: 0, py: 511) as u256\n\
+\x20   let p3: u256 = mandel_pixel_q12(px: 511, py: 511) as u256\n\
+\x20   let p4: u256 = mandel_pixel_q12(px: 256, py: 256) as u256\n\
+\x20   p0 + p1 * 1000 + p2 * 1000000 + p3 * 1000000000 + p4 * 1000000000000\n\
+}\n\
+\n\
+use std::abi::sol\n\
+\n\
+msg MandelMsg {\n\
+\x20   #[selector = sol(\"run()\")]\n\
+\x20   Run -> u256,\n\
+}\n\
+\n\
+pub contract MandelExec {\n\
+\x20   recv MandelMsg {\n\
+\x20       Run -> u256 {\n\
+\x20           mandel_probe()\n\
+\x20       }\n\
+\x20   }\n\
+}\n";
+
+/// M2b EVM leg: the SAME Fe kernel compiled to EVM bytecode (`BackendKind::
+/// Sonatina`) and executed under revm, agreeing with the oracle at 5 probe
+/// pixels. The signed Q12 ops (Slt/Sar) are native on the EVM path (the mature
+/// lowerer already keys compares/shifts on `is_signed_scalar`), so this puts all
+/// executed Fe backends on the record for signed Q12. The base-1000 packing is
+/// re-derived here from the independent oracle, never copied.
+#[test]
+fn mandelbrot_q12_evm_spot_check() {
+    use fe_contract_harness::{ExecutionOptions, FeContractHarness, bytes_to_u256};
+
+    // The 5 probe pixels, in the SAME order and base-1000 positions as the Fe
+    // `mandel_probe()` fn: p0..p4 = corners + center.
+    const PROBE_PIXELS: [(i32, i32); 5] =
+        [(0, 0), (511, 0), (0, 511), (511, 511), (256, 256)];
+    let mut want: u64 = 0;
+    let mut scale: u64 = 1;
+    for (px, py) in PROBE_PIXELS {
+        want += mandel_oracle_q12(px, py) as u64 * scale;
+        scale *= 1000;
+    }
+
+    let source = format!("{MANDELBROT_Q12_SOURCE}\n{MANDEL_Q12_EVM_WRAPPER}");
+    let harness = FeContractHarness::compile("MandelExec", &source)
+        .expect("mandelbrot probe EVM contract should compile");
+    let mut instance = harness
+        .deploy_with_init()
+        .expect("mandelbrot probe EVM contract should deploy under revm");
+    let result = instance
+        .call_function("run()", &[], ExecutionOptions::default())
+        .expect("run() should execute under revm");
+    let value = bytes_to_u256(&result.return_data).expect("run() should return one u256 word");
+
+    // The base-1000 packing of 5 pixels each <= 100 is < 2^64, so it lives in the
+    // low limb; the upper 192 bits must be zero.
+    assert!(
+        value.as_limbs()[1..].iter().all(|&limb| limb == 0),
+        "the base-1000 packing must fit in the low 64 bits (got upper limbs {:?})",
+        &value.as_limbs()[1..]
+    );
+    assert_eq!(
+        value.as_limbs()[0],
+        want,
+        "revm mandel_probe() base-1000 packing must equal the oracle packing = {want}"
+    );
+
+    eprintln!(
+        "M2b EVM leg: Fe mandel_probe() (5 probe pixels of the signed Q12 kernel) executed \
+         under revm; base-1000 packing == the oracle packing {want}."
+    );
+}

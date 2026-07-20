@@ -45,8 +45,8 @@ use sonatina_ir::{
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
     inst::{
-        arith::{Add, Mul, Sub},
-        cmp::{Eq as CmpEq, Lt},
+        arith::{Add, Mul, Sar, Sub},
+        cmp::{Eq as CmpEq, Lt, Slt},
         control_flow::{Br, Call, Jump, Return, Unreachable},
     },
     isa::{Isa, wasm32::Wasm32},
@@ -746,6 +746,22 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         })
     }
 
+    /// Signedness of a binary op's operands, from the MIR value class (the EVM
+    /// path's `lower_arith`/`lower_comp` precedent). Sonatina types are signless,
+    /// so this is the ONLY place the distinction exists on the wasm path; every
+    /// signedness-sensitive op must key on it, never on the sonatina type.
+    fn operand_signedness(&self, lhs: RLocalId, rhs: RLocalId) -> Result<bool, LowerError> {
+        self.body
+            .value_class(lhs)
+            .or_else(|| self.body.value_class(rhs))
+            .map(RuntimeClass::is_signed_scalar)
+            .ok_or_else(|| {
+                LowerError::Internal(
+                    "binary op with no classed operand (cannot determine signedness)".to_string(),
+                )
+            })
+    }
+
     fn lower_binary(
         &mut self,
         op: BinOp,
@@ -754,6 +770,10 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         dst: RLocalId,
     ) -> Result<ValueId, LowerError> {
         let is = self.inst_set();
+        // Keep the MIR operand ids for the signedness key (the value class lives on
+        // the RLocalId, not the sonatina ValueId, which is signless). The sonatina
+        // ValueIds shadow below for the instruction constructors.
+        let (lhs_local, rhs_local) = (lhs, rhs);
         let lhs = self.local_value(lhs)?;
         let rhs = self.local_value(rhs)?;
         match op {
@@ -767,21 +787,47 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     ArithBinOp::Add => self.fb.insert_inst(Add::new(is, lhs, rhs), ty),
                     ArithBinOp::Sub => self.fb.insert_inst(Sub::new(is, lhs, rhs), ty),
                     ArithBinOp::Mul => self.fb.insert_inst(Mul::new(is, lhs, rhs), ty),
+                    ArithBinOp::RShift => {
+                        // Signed `>>` is Sar (arithmetic); sonatina's constructor
+                        // order is (bits, value), the EVM path's convention
+                        // (lower_runtime.rs:4101-4109). Unsigned `>>` stays R2:
+                        // opening Shr here without a fork SPIR-V arm would create a
+                        // silent-skip path in the translator.
+                        if self.operand_signedness(lhs_local, rhs_local)? {
+                            self.fb.insert_inst(Sar::new(is, rhs, lhs), ty)
+                        } else {
+                            return Err(LowerError::Unsupported(
+                                "wasm target: unsigned `>>` is R2 (M2 opened only signed i32 \
+                                 `>>`/Sar; the unsigned/bitwise set lands with the M4 coloring \
+                                 sweep)"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                     other => {
                         return Err(LowerError::Unsupported(format!(
                             "wasm target (R1) arithmetic op `{other:?}` is not supported \
-                             (div/rem/pow/shifts/bitwise are R2)"
+                             (div/rem/pow/`<<`/bitwise/unsigned `>>` are R2)"
                         )));
                     }
                 })
             }
             BinOp::Comp(comp) => Ok(match comp {
-                CompBinOp::Lt => self.fb.insert_inst(Lt::new(is, lhs, rhs), Type::I1),
+                CompBinOp::Lt => {
+                    // Sign-aware (M2): i32 -> Slt, u32 -> Lt. Signedness comes from
+                    // the operand CLASS, not the sonatina type (signless).
+                    if self.operand_signedness(lhs_local, rhs_local)? {
+                        self.fb.insert_inst(Slt::new(is, lhs, rhs), Type::I1)
+                    } else {
+                        self.fb.insert_inst(Lt::new(is, lhs, rhs), Type::I1)
+                    }
+                }
                 CompBinOp::Eq => self.fb.insert_inst(CmpEq::new(is, lhs, rhs), Type::I1),
                 other => {
                     return Err(LowerError::Unsupported(format!(
                         "wasm target (R1) comparison `{other:?}` is not supported \
-                         (only `<` and `==`; the full compare matrix is R2)"
+                         (only `<` and `==`; LtEq/Gt/GtEq need an IsZero lowering the SPIR-V \
+                         translator does not map yet, so the full compare matrix is R2)"
                     )));
                 }
             }),
