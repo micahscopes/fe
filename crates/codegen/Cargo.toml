@@ -19,6 +19,15 @@ smallvec.workspace = true
 smallvec1.workspace = true
 tracing.workspace = true
 
+[features]
+# On by default so the standard build/test carries the Fe -> SPIR-V wire
+# (slice S1). Enables the naga SPIR-V backend in `sonatina-codegen`; the root
+# workspace pin also turns it on, so this composes additively. When the feature
+# is off (`--no-default-features`), the `BackendKind::Spirv` driver fails closed
+# with a clear `UnsupportedBackend` error rather than emitting wrong bytes.
+default = ["spirv-backend"]
+spirv-backend = ["sonatina-codegen/spirv-backend"]
+
 [dev-dependencies]
 dir-test.workspace = true
 test-utils.workspace = true

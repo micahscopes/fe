@@ -4566,6 +4566,9 @@ impl<'a, 'db> LowerBodyContext<'a, 'db> {
         );
         match err {
             LowerError::RuntimeLower(_) => err,
+            // A SPIR-V lowering error originates in the naga backend stage, not in
+            // runtime-body lowering, so it carries no rMIR-body context to attach.
+            LowerError::Spirv(_) => err,
             LowerError::Unsupported(message) => LowerError::Unsupported(format!(
                 "{}: {message}\n\nrMIR context:\n{}",
                 self.context, excerpt

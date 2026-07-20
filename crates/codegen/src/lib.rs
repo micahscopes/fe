@@ -6,12 +6,14 @@ mod sonatina;
 mod test_output;
 
 pub use backend::{
-    Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend, WasmBackend,
-    layout_for,
+    Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend, SpirvBackend,
+    WasmBackend, layout_for,
 };
 pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
 };
+#[cfg(feature = "spirv-backend")]
+pub use sonatina::compile_runtime_package_spirv;
 pub use sonatina::{
     LowerError, SonatinaContractBytecode, SonatinaTestOptions, emit_ingot_sonatina_bytecode,
     emit_ingot_sonatina_ir, emit_ingot_sonatina_ir_optimized, emit_module_sonatina_bytecode,

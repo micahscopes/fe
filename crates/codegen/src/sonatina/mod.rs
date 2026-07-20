@@ -1,6 +1,10 @@
 mod lower_runtime;
+#[cfg(feature = "spirv-backend")]
+mod spirv_lower;
 mod wasm_lower;
 
+#[cfg(feature = "spirv-backend")]
+pub use spirv_lower::compile_runtime_package_spirv;
 pub use wasm_lower::compile_runtime_package_wasm;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -34,6 +38,12 @@ pub enum LowerError {
     RuntimeLower(mir::LowerError),
     Unsupported(String),
     Internal(String),
+    /// The Sonatina SPIR-V backend (naga) rejected the module during
+    /// translation or validation, or the `spirv-backend` feature is off. Kept
+    /// distinct from `Internal` so a SPIR-V-specific failure (unsupported op,
+    /// naga validation) is honestly labelled rather than masquerading as an
+    /// internal compiler bug.
+    Spirv(String),
 }
 
 impl std::fmt::Display for LowerError {
@@ -42,6 +52,7 @@ impl std::fmt::Display for LowerError {
             LowerError::RuntimeLower(err) => write!(f, "{err}"),
             LowerError::Unsupported(message) => write!(f, "unsupported: {message}"),
             LowerError::Internal(message) => write!(f, "internal error: {message}"),
+            LowerError::Spirv(message) => write!(f, "spirv backend: {message}"),
         }
     }
 }

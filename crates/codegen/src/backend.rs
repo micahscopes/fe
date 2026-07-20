@@ -119,6 +119,12 @@ pub enum BackendKind {
     /// The wasm backend. Scaffold only: it fails closed until a wasm-capable
     /// Sonatina ISA is pinned (see [`WasmBackend`]).
     Wasm,
+    /// The SPIR-V backend (Sonatina IR -> naga -> validated SPIR-V). It reuses
+    /// the wasm path's Sonatina Module unchanged (SPIR-V shares the wasm scalar
+    /// model) and hands it to Sonatina's naga-backed `SpirvBackend`. Fails
+    /// closed with `UnsupportedBackend` when the `spirv-backend` feature is off
+    /// (see [`SpirvBackend`]).
+    Spirv,
 }
 
 impl BackendKind {
@@ -126,6 +132,7 @@ impl BackendKind {
         match self {
             BackendKind::Sonatina => "sonatina",
             BackendKind::Wasm => "wasm",
+            BackendKind::Spirv => "spirv",
         }
     }
 
@@ -133,6 +140,7 @@ impl BackendKind {
         match self {
             BackendKind::Sonatina => Box::new(SonatinaBackend),
             BackendKind::Wasm => Box::new(WasmBackend),
+            BackendKind::Spirv => Box::new(SpirvBackend),
         }
     }
 }
@@ -144,8 +152,9 @@ impl std::str::FromStr for BackendKind {
         match s.to_lowercase().as_str() {
             "sonatina" => Ok(BackendKind::Sonatina),
             "wasm" => Ok(BackendKind::Wasm),
+            "spirv" => Ok(BackendKind::Spirv),
             _ => Err(format!(
-                "unknown backend: {s} (expected 'sonatina' or 'wasm')"
+                "unknown backend: {s} (expected 'sonatina', 'wasm', or 'spirv')"
             )),
         }
     }
@@ -162,6 +171,8 @@ pub fn layout_for(kind: BackendKind) -> TargetDataLayout {
     match kind {
         BackendKind::Sonatina => crate::EVM_LAYOUT,
         BackendKind::Wasm => crate::WASM_LAYOUT,
+        // SPIR-V shares the wasm scalar model (it reuses the wasm-path Module).
+        BackendKind::Spirv => crate::WASM_LAYOUT,
     }
 }
 
@@ -238,6 +249,57 @@ impl Backend for WasmBackend {
                 ))
             })?;
         Ok(BackendOutput::Bytecode(artifact.bytes))
+    }
+}
+
+/// The SPIR-V backend. It reuses the wasm path's Sonatina `Module` (Wasm32 ISA)
+/// UNCHANGED and hands it to Sonatina's naga-backed `SpirvBackend`, which
+/// downcasts generically against each function's `inst_set()`. No lowering port:
+/// the Add/Mul/Return scalar Module the wasm path already emits is
+/// SPIR-V-consumable as-is. The emitted bytes are the little-endian SPIR-V
+/// words, already naga-validated inside `compile_module`.
+///
+/// This driver stays thin and truthful: it emits the target's canonical bytes
+/// (the `.spv` words). The WGSL side artifact the GPU exec test needs is NOT
+/// carried through `BackendOutput` (which is bytecode-only); the exec test
+/// reaches past this driver to the Sonatina `SpirvBackend` for it. When the
+/// `spirv-backend` feature is off, `compile` fails closed with
+/// `UnsupportedBackend` rather than emitting anything.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpirvBackend;
+
+impl Backend for SpirvBackend {
+    fn name(&self) -> &'static str {
+        "spirv"
+    }
+
+    #[cfg(feature = "spirv-backend")]
+    fn compile(
+        &self,
+        db: &DriverDataBase,
+        top_mod: TopLevelMod<'_>,
+        _layout: TargetDataLayout,
+        _opt_level: OptLevel,
+    ) -> Result<BackendOutput, BackendError> {
+        let package = mir::build_wasm_runtime_package(db, top_mod)?;
+        let artifact = crate::sonatina::compile_runtime_package_spirv(db, &package)?;
+        Ok(BackendOutput::Bytecode(artifact.as_bytes()))
+    }
+
+    #[cfg(not(feature = "spirv-backend"))]
+    fn compile(
+        &self,
+        _db: &DriverDataBase,
+        _top_mod: TopLevelMod<'_>,
+        _layout: TargetDataLayout,
+        _opt_level: OptLevel,
+    ) -> Result<BackendOutput, BackendError> {
+        Err(BackendError::UnsupportedBackend {
+            backend: "spirv",
+            reason: "built without the `spirv-backend` feature (the naga SPIR-V \
+                     backend is not compiled in)"
+                .to_string(),
+        })
     }
 }
 
