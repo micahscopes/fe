@@ -1,0 +1,20 @@
+// M1 (mandelbrot ladder rung 1): the first Fe GRID kernel - one invocation per
+// pixel, coordinates delivered as the first two args (Grid convention: the
+// driver declares grid mode; layout.json states it; see mb2-mandelbrot-plan.md
+// section 2). Straight-line, R1-clean: Add/Mul only, no compares, no branches
+// (wasm_lower.rs R1 lowers exactly Add/Sub/Mul + Lt/Eq; nothing else is
+// reached here).
+//
+// The value is a base-1024 packing of the coordinates: v = px + 1024 * py.
+//   - Injective for any dispatch width <= 1024, so every pixel differs.
+//   - Asymmetric: a transposed dispatch (py + 1024 * px) matches only on the
+//     diagonal; a flipped or mis-strided one matches almost nowhere.
+//   - The VALUE stride (1024) deliberately differs from the OUTPUT row stride
+//     (the dispatched width, 512 on the page / 64 in the e2e test), so an
+//     index-as-value or value-as-index confusion cannot silently pass.
+//   - 1024 = 2^10, so hosts decode exactly with `v & 1023` / `v >> 10`;
+//     max value at 512x512 is 511 + 1024*511 = 523,775, far below 2^31, so
+//     no overflow and no signedness edge on any backend.
+pub fn grid_gradient_u32(px: u32, py: u32) -> u32 {
+    px + py * 1024
+}

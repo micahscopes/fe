@@ -981,3 +981,435 @@ fn u32_keystone_executes_equal_browser_profile() {
         }
     }
 }
+
+// ===========================================================================
+// M1b - the first Fe GRID kernel (mandelbrot ladder rung 1).
+//
+// `grid_gradient_u32(px, py) = px + py * 1024` is an ordinary Fe function. Two
+// delivery mechanisms, one function: the wasm leg CALLS it per pixel with
+// explicit `(px, py)`; the SPIR-V grid leg dispatches it, gid.xy arriving as
+// args 0,1 (driver-declared Grid envelope, layout-stated, no in-band marker).
+// The honest headline is the same-Fe-function cross-backend per-pixel equality
+// below: every one of 4096 GPU pixels equals BOTH the in-test oracle
+// `x + 1024*y` AND the wasmtime execution of the very same Fe function.
+// ===========================================================================
+
+/// The single SSOT grid fixture: `include_str!`-ed here (and, later, by the page
+/// generator) so the tested source and the shipped source are byte-identical by
+/// construction. Under `fixtures/spirv/` so the top-level `*.fe` dir-test glob
+/// does not mint an incidental EVM-IR snapshot.
+const GRID_GRADIENT_SOURCE: &str = include_str!("fixtures/spirv/grid_gradient_u32.fe");
+
+/// The e2e dispatch frame: an 8x8 grid of 8x8 workgroups = 64x64 pixels. The
+/// value stride (1024) deliberately differs from this row stride (64), so an
+/// index-as-value or value-as-index confusion cannot silently pass.
+const GRID_W: u32 = 64;
+const GRID_H: u32 = 64;
+
+/// The oracle, re-derived in-test and NEVER trusted from the spec: the grid
+/// gradient packs the coordinates base-1024, `v = x + 1024 * y`. Injective for
+/// any width <= 1024, and asymmetric, so a transpose/flip/stride bug diverges.
+fn grid_gradient_oracle(x: u32, y: u32) -> u32 {
+    x + 1024 * y
+}
+
+/// Compile the grid gradient fixture to wasm through `BackendKind::Wasm`.
+fn compile_grid_gradient_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///grid_gradient_u32_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(GRID_GRADIENT_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("grid gradient should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// Execute the grid gradient wasm export over the whole `width x height` frame,
+/// row-major, under wasmtime. Fe `u32` lowers to wasm `i32`, so the export
+/// returns `i32`; reinterpret as `u32`. This is the cross-backend oracle the
+/// lavapipe grid is compared against pixel-for-pixel.
+fn wasm_grid_all(bytes: &[u8], width: u32, height: u32) -> Vec<u32> {
+    wasmparser::validate(bytes).expect("Fe-emitted wasm should be valid");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "grid_gradient_u32")
+        .expect("`grid_gradient_u32` export should exist as (i32, i32) -> i32");
+    let mut out = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let v = f
+                .call(&mut store, (x as i32, y as i32))
+                .expect("grid_gradient_u32(px, py) should run") as u32;
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// M1b wasm leg (GPU-FREE, runs everywhere): compile the grid kernel via
+/// `BackendKind::Wasm`, call it under wasmtime, and assert 16 spread sample
+/// pixels equal the in-test oracle `x + 1024*y`. This is the cross-backend
+/// anchor: it exercises the very Fe function the grid leg dispatches, so its
+/// green is a precondition for the honest same-function equality claim.
+#[test]
+fn grid_gradient_u32_wasm_leg() {
+    let bytes = compile_grid_gradient_to_wasm();
+    wasmparser::validate(&bytes).expect("Fe-emitted wasm should be valid");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "grid_gradient_u32")
+        .expect("`grid_gradient_u32` export should exist as (i32, i32) -> i32");
+
+    // 16 spread sample pixels on the 64x64 e2e frame: 4 corners, 4 edge
+    // midpoints, the center, both diagonals, and a few off-axis extras.
+    let samples: [(u32, u32); 16] = [
+        (0, 0),
+        (63, 0),
+        (0, 63),
+        (63, 63),
+        (31, 0),
+        (0, 31),
+        (63, 31),
+        (31, 63),
+        (32, 32),
+        (16, 16),
+        (48, 48),
+        (16, 47),
+        (47, 16),
+        (10, 50),
+        (50, 10),
+        (5, 58),
+    ];
+    for (x, y) in samples {
+        let got = f
+            .call(&mut store, (x as i32, y as i32))
+            .expect("grid_gradient_u32(px, py) should run") as u32;
+        let want = grid_gradient_oracle(x, y);
+        assert_eq!(
+            got, want,
+            "wasm grid_gradient_u32({x}, {y}) must equal the oracle x + 1024*y = {want}"
+        );
+    }
+    eprintln!(
+        "M1b wasm leg: Fe grid_gradient_u32 -> wasm executed under wasmtime; \
+         16 spread samples all == x + 1024*y."
+    );
+}
+
+/// Execute the grid kernel's WGSL on lavapipe (software Vulkan) via wgpu at the
+/// browser profile (NO required features). Grid deltas from the scalar B2
+/// harness: an 8x8 dispatch of 8x8 workgroups = 64x64, a `64*64*4` output
+/// buffer, a 4-byte dummy input, and full-grid staging/readback. ANTI-FUDGE
+/// (verbatim from B2): a missing adapter/device is a HARD FAILURE, never a
+/// silent skip; the only escape is `MB2_ALLOW_GPU_SKIP`.
+///
+/// Returns `Some(grid)` (the 4096-word grid, row-major) when the GPU ran the
+/// shader, `None` only under skip.
+fn run_grid_gradient_on_lavapipe(wgsl: &str) -> Option<Vec<u32>> {
+    let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
+    let out_bytes = u64::from(GRID_W * GRID_H * 4);
+
+    let instance = wgpu::Instance::default();
+    let adapter = match pollster::block_on(instance.request_adapter(
+        &wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            ..Default::default()
+        },
+    )) {
+        Ok(a) => a,
+        Err(e) => {
+            if allow_skip {
+                eprintln!(
+                    "  grid SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}"
+                );
+                return None;
+            }
+            panic!(
+                "grid SPIR-V leg: no GPU/Vulkan adapter available ({e:?}). The grid rung \
+                 requires lavapipe to EXECUTE; a missing device is a hard failure, not a skip. \
+                 Set VK_ICD_FILENAMES / LD_LIBRARY_PATH / WGPU_BACKEND=vulkan for lavapipe, or \
+                 MB2_ALLOW_GPU_SKIP to downgrade the rung on a genuinely GPU-less host."
+            );
+        }
+    };
+
+    // BROWSER PROFILE: NO required features (drop SHADER_INT64), exactly what a
+    // WebGPU browser offers. A real failure here means the grid kernel is NOT
+    // browser-viable, a STOP condition, not a skip.
+    let (device, queue) = match pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            ..Default::default()
+        },
+    )) {
+        Ok(dq) => dq,
+        Err(e) => {
+            if allow_skip {
+                eprintln!(
+                    "  grid SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): device request failed: {e:?}"
+                );
+                return None;
+            }
+            panic!(
+                "grid SPIR-V leg: browser-profile device request (NO required features) failed \
+                 ({e:?}). This is a hard failure, not a skip."
+            );
+        }
+    };
+
+    eprintln!(
+        "  grid SPIR-V leg GPU adapter (BROWSER PROFILE, no required features): {}",
+        adapter.get_info().name
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("grid_gradient_u32"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+
+    // Grid output: the full 64x64 u32 array (one element per pixel). Same
+    // two-binding shape as the scalar keystone (Output @binding(0), unused Input
+    // @binding(1)), the deltas being the output/staging sizes.
+    let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("grid_output"),
+        size: out_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("grid_input_unused"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("grid_staging"),
+        size: out_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("grid_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("grid_pl"),
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("grid_pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("grid_bg"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: input_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        // 8x8 workgroups of 8x8 invocations = the 64x64 grid. row_width =
+        // num_workgroups.x * wgx = 8 * 8 = 64, derived in the shader, never
+        // threaded as a param.
+        pass.dispatch_workgroups(8, 8, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, out_bytes);
+    queue.submit(Some(encoder.finish()));
+
+    let slice = staging_buf.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        tx.send(r).expect("map_async callback channel should be open");
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(std::time::Duration::from_secs(30)),
+    });
+    rx.recv()
+        .expect("map_async callback should fire")
+        .expect("staging buffer should map for read");
+    let data = slice.get_mapped_range();
+    let grid: Vec<u32> = data
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().expect("4 bytes per u32")))
+        .collect();
+    drop(data);
+    staging_buf.unmap();
+
+    Some(grid)
+}
+
+/// M1b headline: the Fe grid kernel, compiled through the driver-declared Grid
+/// seam, EXECUTES on lavapipe at the browser profile, and every one of 4096
+/// pixels equals BOTH the in-test oracle AND the wasmtime execution of the same
+/// Fe function. The same-Fe-function cross-backend per-pixel equality is the
+/// honest claim.
+#[test]
+fn grid_gradient_u32_executes_on_lavapipe_browser_profile() {
+    // --- Compile through the Grid driver seam and assert the stated layout. ---
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///grid_gradient_u32_gpu.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(GRID_GRADIENT_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("grid gradient should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_grid(&db, &package, [8, 8, 1])
+        .expect("grid gradient should compile Fe -> naga-validated SPIR-V in Grid mode");
+
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Grid,
+        "the grid driver seam must state LayoutMode::Grid"
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the grid kernel must lower to the u32 word (browser profile)"
+    );
+    assert_eq!(
+        artifact.layout.workgroup_size,
+        [8, 8, 1],
+        "the layout must record the [8,8,1] workgroup size the driver set"
+    );
+    assert!(
+        artifact.layout.result.is_none(),
+        "Grid mode has no single-slot result: the whole output array is the result"
+    );
+    let output_stride = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|b| b.role == sonatina_codegen::isa::spirv::Role::Output)
+        .expect("the grid layout must have an Output binding")
+        .stride;
+    assert_eq!(
+        output_stride, 4,
+        "the grid output stride is one u32 word per element (4 bytes)"
+    );
+
+    // --- Browser-profile WGSL gate + the grid-specific tokens. ---
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the grid kernel");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("global_invocation_id"),
+        "grid WGSL must bind global_invocation_id (the per-pixel gid); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("num_workgroups"),
+        "grid WGSL must read num_workgroups (row_width = num_workgroups.x * wgx); got:\n{wgsl}"
+    );
+    eprintln!(
+        "  grid WGSL passed the browser profile and carries global_invocation_id + num_workgroups."
+    );
+
+    // --- The cross-backend oracle: the same Fe function, executed under wasmtime
+    // over the whole 64x64 frame. ---
+    let wasm_bytes = compile_grid_gradient_to_wasm();
+    let wasm_grid = wasm_grid_all(&wasm_bytes, GRID_W, GRID_H);
+
+    // --- The GPU leg: EXECUTE on lavapipe (browser profile) and compare every
+    // pixel to BOTH the oracle and the wasmtime leg. ---
+    match run_grid_gradient_on_lavapipe(wgsl) {
+        Some(grid) => {
+            assert_eq!(
+                grid.len(),
+                (GRID_W * GRID_H) as usize,
+                "grid readback must be 64*64 = 4096 words"
+            );
+            for y in 0..GRID_H {
+                for x in 0..GRID_W {
+                    let i = (y * GRID_W + x) as usize;
+                    let got = grid[i];
+                    let oracle = grid_gradient_oracle(x, y);
+                    assert_eq!(
+                        got, oracle,
+                        "lavapipe grid[{y}*64+{x}] = {got} must equal the oracle x + 1024*y = \
+                         {oracle}"
+                    );
+                    assert_eq!(
+                        got, wasm_grid[i],
+                        "lavapipe grid[{y}*64+{x}] = {got} must equal the wasmtime leg for the \
+                         same (x, y) = {}",
+                        wasm_grid[i]
+                    );
+                }
+            }
+            eprintln!(
+                "grid: all 4096 pixels grid[y*64+x] == x + 1024*y (oracle) AND == the wasmtime \
+                 leg (same Fe function, two backends)."
+            );
+            eprintln!(
+                "M1b: Fe grid_gradient_u32 EXECUTED on lavapipe (browser profile); 4096 pixels \
+                 cross-backend-equal to wasmtime. Grid mode earns R-lava."
+            );
+        }
+        None => {
+            eprintln!(
+                "R-val only: grid SPIR-V validated (browser profile) but NOT executed (GPU \
+                 skipped via MB2_ALLOW_GPU_SKIP). The grid-execution claim is NOT earned on \
+                 this run."
+            );
+        }
+    }
+}

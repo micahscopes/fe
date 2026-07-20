@@ -4,7 +4,10 @@ mod spirv_lower;
 mod wasm_lower;
 
 #[cfg(feature = "spirv-backend")]
-pub use spirv_lower::{compile_runtime_package_spirv, compile_runtime_package_spirv_with_workgroup};
+pub use spirv_lower::{
+    compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
+    compile_runtime_package_spirv_with_workgroup,
+};
 pub use wasm_lower::compile_runtime_package_wasm;
 
 use std::collections::{BTreeMap, VecDeque};

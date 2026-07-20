@@ -85,3 +85,50 @@ pub fn compile_runtime_package_spirv_with_workgroup(
             )
         })
 }
+
+/// Lower a MIR runtime package to naga-validated SPIR-V in GRID mode: one
+/// invocation per pixel, kernel args 0,1 bound to `global_invocation_id.xy`,
+/// args 2.. loaded from the broadcast input struct, the return value stored at
+/// `output[gid.y * (num_workgroups.x * wgx) + gid.x]`. Grid is a driver-declared
+/// envelope fact (there is no content signal), the same ruling as workgroup
+/// size: the resulting `SpirvLayout` states it and the kernel-blind runner
+/// consumes it. Fail-closed in the translator: u32 word only, >= 2 args, no
+/// ObjAlloc, workgroup z == 1.
+///
+/// Body is identical to [`compile_runtime_package_spirv_with_workgroup`] plus
+/// `.with_grid()` on the `SpirvBackend` builder.
+pub fn compile_runtime_package_spirv_grid(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    workgroup_size: [u32; 3],
+) -> Result<SpirvArtifact, LowerError> {
+    // CONSULT (DispatchKind axis): the SPIR-V target realizes the `Kernel` kind.
+    // The entry point is invoked directly as a grid dispatch (`OpEntryPoint` /
+    // `@compute`) against a bound resource interface; its envelope is stated by
+    // the unit's `SpirvLayout` (the Kernel kind's interface statement), not an
+    // in-band selector, and there is no synthesized dispatch root. Naming what
+    // this lowering already does; a mismatch fires in debug, zero release effect.
+    debug_assert!(
+        {
+            let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Spirv);
+            matches!(kind, crate::dispatch::DispatchKind::Kernel) && kind.entries_invoked_directly()
+        },
+        "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
+    );
+    // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
+    let (module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+
+    SpirvBackend::new()
+        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
+        .with_grid()
+        .compile_module(&module)
+        .map_err(|errors| {
+            LowerError::Spirv(
+                errors
+                    .iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })
+}
