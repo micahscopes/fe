@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fe -> GPU keystone (poseidon_sigma_u32)</title>
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #161b22; --line: #2b333d; --fg: #e6edf3;
+      --muted: #8b949e; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --green: #2ea043; --amber: #bf8700; --red: #da3633;
+      --green-bg: #12241a; --amber-bg: #241d0e; --red-bg: #2a1414;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    main { max-width: 820px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+    .sub code { font-family: var(--mono); color: var(--fg); }
+
+    .banner {
+      border: 1px solid var(--line); border-left-width: 5px; border-radius: 8px;
+      padding: 16px 18px; margin-bottom: 22px; background: var(--panel);
+    }
+    .banner.green { border-left-color: var(--green); background: var(--green-bg); }
+    .banner.amber { border-left-color: var(--amber); background: var(--amber-bg); }
+    .banner.red   { border-left-color: var(--red);   background: var(--red-bg); }
+    .banner-top { display: flex; align-items: baseline; gap: 12px; }
+    #banner-state {
+      font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: .06em;
+      padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line);
+    }
+    .banner.green #banner-state { color: var(--green); border-color: var(--green); }
+    .banner.amber #banner-state { color: var(--amber); border-color: var(--amber); }
+    .banner.red   #banner-state { color: var(--red);   border-color: var(--red); }
+    #banner-headline { font-size: 17px; font-weight: 600; }
+    #banner-detail { color: var(--muted); margin-top: 8px; font-size: 14px; }
+
+    .rows { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+    .row {
+      display: grid; grid-template-columns: 220px 1fr; gap: 14px;
+      padding: 12px 16px; border-bottom: 1px solid var(--line); align-items: center;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row .label { color: var(--muted); font-size: 14px; }
+    .row .label small { display: block; color: #6a737d; font-size: 12px; }
+    .val {
+      font-family: var(--mono); font-size: 16px; white-space: pre-wrap; word-break: break-word;
+    }
+    .val.ok  { color: var(--green); }
+    .val.bad { color: var(--red); }
+
+    .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono);
+      margin: 4px 2px 26px; word-break: break-word; }
+    #adapter { margin: 0 2px 4px; }
+    #pin-note { margin: 0 2px 18px; }
+
+    details {
+      border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; background: var(--panel);
+    }
+    summary {
+      cursor: pointer; padding: 12px 16px; font-weight: 600; user-select: none;
+    }
+    summary::marker { color: var(--muted); }
+    pre {
+      margin: 0; padding: 0 16px 16px; overflow-x: auto;
+      font-family: var(--mono); font-size: 13px; color: var(--fg);
+    }
+    .foot { color: #6a737d; font-size: 12.5px; margin-top: 28px; line-height: 1.6; }
+    .foot code { font-family: var(--mono); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Fe -> GPU keystone</h1>
+  <p class="sub">
+    One Fe kernel, <code id="kernel-name">poseidon_sigma_u32</code>, compiled by the Fe
+    compiler to wasm and to SPIR-V-IR -> naga -> WGSL, both executed in THIS browser and
+    compared to the cross-backend pinned value. Nothing on this page is hand-written where
+    the compiler could produce it.
+  </p>
+
+  <div id="banner" class="banner amber">
+    <div class="banner-top">
+      <span id="banner-state">...</span>
+      <span id="banner-headline">Loading generated artifacts...</span>
+    </div>
+    <div id="banner-detail"></div>
+  </div>
+
+  <div class="rows">
+    <div class="row">
+      <div class="label">pinned reference
+        <small>revm / wasmtime / lavapipe</small></div>
+      <div id="row-ref" class="val">-</div>
+    </div>
+    <div class="row">
+      <div class="label">wasm-in-your-browser
+        <small>Fe -> wasm, run in V8</small></div>
+      <div id="row-wasm" class="val">-</div>
+    </div>
+    <div class="row">
+      <div class="label">GPU (WebGPU)
+        <small>Fe -> SPIR-V-IR -> WGSL</small></div>
+      <div id="row-gpu" class="val">-</div>
+    </div>
+  </div>
+  <div id="adapter" class="meta">adapter: -</div>
+  <div id="pin-note" class="meta"></div>
+
+  <div id="prov" class="meta"></div>
+
+  <details>
+    <summary>kernel.fe (the Fe source, from gen/)</summary>
+    <pre id="fe-src">loading...</pre>
+  </details>
+  <details>
+    <summary>kernel.wgsl (naga-emitted from the Fe SPIR-V IR, from gen/)</summary>
+    <pre id="wgsl-src">loading...</pre>
+  </details>
+
+  <div class="foot">
+    Provenance: these files were produced by <code>cargo run -p fe-codegen --example
+    gen_webgpu_demo</code>, which compiles the SSOT fixture through the real Fe drivers and
+    hard-fails if the wasm execution or the browser-profile WGSL gate is off-pin.<br />
+    GREEN is earned only when the live GPU readback equals wasm-in-browser equals the pinned
+    reference, with your adapter named. No WebGPU shows AMBER (wasm-only); a mismatch or shader
+    error shows RED.
+  </div>
+</main>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

@@ -33,11 +33,34 @@ pub fn compile_runtime_package_spirv(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<SpirvArtifact, LowerError> {
+    // The default workgroup size is `SpirvBackend`'s own (`[64, 1, 1]`). Callers
+    // that ship a scalar-mode kernel to a browser want `[1, 1, 1]` (a dispatch of
+    // (1,1,1) against a 64-wide workgroup is a benign same-value write race on
+    // lavapipe but must not reach Chrome); they use
+    // [`compile_runtime_package_spirv_with_workgroup`].
+    compile_runtime_package_spirv_with_workgroup(db, package, SpirvBackend::new().workgroup_size)
+}
+
+/// Lower a MIR runtime package to naga-validated SPIR-V at a caller-chosen
+/// workgroup size.
+///
+/// This is the fe-side driver seam ratified for the browser rung: a scalar-mode
+/// kernel is compiled at `[1, 1, 1]` so a single invocation writes the single
+/// output slot (no 64-way same-value write race), and the resulting
+/// `SpirvLayout.workgroup_size` records exactly what was set. Everything else is
+/// identical to [`compile_runtime_package_spirv`]; the word scalar and bindings
+/// are still content-derived by the SPIR-V translator, never threaded here.
+pub fn compile_runtime_package_spirv_with_workgroup(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    workgroup_size: [u32; 3],
+) -> Result<SpirvArtifact, LowerError> {
     // REUSE the wasm-path Module. The import side-table is irrelevant to SPIR-V
     // (compute shaders have no wasm-style imports), so it is discarded here.
     let (module, _import_modules) = compile_runtime_package_wasm(db, package)?;
 
     SpirvBackend::new()
+        .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
         .compile_module(&module)
         .map_err(|errors| {
             LowerError::Spirv(

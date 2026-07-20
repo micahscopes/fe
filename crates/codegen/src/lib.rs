@@ -13,7 +13,7 @@ pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
 };
 #[cfg(feature = "spirv-backend")]
-pub use sonatina::compile_runtime_package_spirv;
+pub use sonatina::{compile_runtime_package_spirv, compile_runtime_package_spirv_with_workgroup};
 pub use sonatina::{
     LowerError, SonatinaContractBytecode, SonatinaTestOptions, emit_ingot_sonatina_bytecode,
     emit_ingot_sonatina_ir, emit_ingot_sonatina_ir_optimized, emit_module_sonatina_bytecode,
