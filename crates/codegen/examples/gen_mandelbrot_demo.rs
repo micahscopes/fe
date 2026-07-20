@@ -1,12 +1,13 @@
-//! M1c page generator: compile the `grid_gradient_u32` GRID kernel through the
-//! REAL Fe drivers and emit the first-Fe-computed-IMAGE page inputs under
-//! `demos/webgpu-mandelbrot/gen/`.
+//! M2d page generator: compile the `mandel_pixel_q12` GRID kernel (the REAL Q12
+//! escape-time mandelbrot fractal) through the REAL Fe drivers and emit the
+//! page inputs under `demos/webgpu-mandelbrot/gen/`.
 //!
-//! One grid invocation per pixel, `v = px + 1024 * py`. Two delivery mechanisms,
-//! one Fe function: the SPIR-V leg dispatches it (gid.xy arriving as args 0,1,
-//! driver-declared Grid envelope, layout-stated); the wasm leg CALLS it per pixel
-//! with explicit `(px, py)`. Every artifact here is produced by the compiler,
-//! never hand-written:
+//! One grid invocation per pixel: signed Q12 fixed point (1.0 = 4096) in i32,
+//! MAX_ITER 100, the value is the escape COUNT (100 == interior). Two delivery
+//! mechanisms, one Fe function: the SPIR-V leg dispatches it (gid.xy arriving as
+//! args 0,1, driver-declared Grid envelope, layout-stated); the wasm leg CALLS it
+//! per pixel with explicit `(px, py)`. Every artifact here is produced by the
+//! compiler, never hand-written:
 //!
 //! | file             | produced by                                                   |
 //! |------------------|----------------------------------------------------------------|
@@ -14,20 +15,24 @@
 //! | `kernel.wgsl`    | the naga-emitted WGSL from the Grid SPIR-V artifact            |
 //! | `layout.json`    | the compiler-stated `SpirvLayout` (Grid schema, result absent)|
 //! | `kernel.wasm`    | the Fe -> wasm build (`BackendKind::Wasm`)                     |
-//! | `reference.json` | width/height/FNV-1a-32/samples from EXECUTING kernel.wasm here |
+//! | `reference.json` | width/height/max_iter/FNV-1a-32/samples from kernel.wasm here  |
 //!
 //! HARD-FAIL discipline (EVERY gate passes before a single file is written):
 //!   * browser-profile WGSL: no 64-bit scalar token, naga `wgsl-in` reparse, and
 //!     validation under `Capabilities::default()` (no SHADER_INT64); plus the
-//!     Grid shader must reference `global_invocation_id` and `num_workgroups`;
+//!     Grid shader must reference `global_invocation_id` and `num_workgroups`,
+//!     and (M2d honesty) contain `loop` (the structurizer really emitted the
+//!     escape loop) and `bitcast<i32>` (the signed Q12 ops went through the sign
+//!     mapping, not a logical-under-u32 fake);
 //!   * layout is Grid / word U32 / workgroup `[8, 8, 1]` / `result` None / the
 //!     output binding stride is 4 (bytes per element);
 //!   * the `kernel.wasm` export signature is EXACTLY `(i32, i32) -> i32` (parsed
 //!     with wasmparser) - two gid args, zero broadcast, proving `params: []`;
 //!   * reference execution: instantiate `kernel.wasm` under wasmtime, loop the
-//!     export over all 512x512 `(px, py)`, and assert EVERY value equals the
-//!     in-generator oracle `|x, y| x + 1024 * y` (re-derived here, never trusted
-//!     from any doc), then fold the grid into an FNV-1a-32.
+//!     export over all 512x512 `(px, py)`, and assert EVERY escape count equals
+//!     the in-generator oracle `mandel_oracle_q12` (re-derived here from the
+//!     kernel's arithmetic, never trusted from any doc), then fold the grid into
+//!     an FNV-1a-32.
 //! Any deviation panics before a single file is written.
 //!
 //! Run: `cargo run -p fe-codegen --example gen_mandelbrot_demo`
@@ -41,34 +46,66 @@ use fe_codegen::{BackendKind, OptLevel, compile_runtime_package_spirv_grid, layo
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvLayout, WordKind};
 use url::Url;
 
-/// The SSOT grid kernel source: the exact fixture the M1b e2e test `include_str!`s,
-/// so the tested source and the shipped source are byte-identical by construction.
-const KERNEL_SOURCE: &str = include_str!("../tests/fixtures/spirv/grid_gradient_u32.fe");
+/// The SSOT fractal kernel source: the exact fixture the M2 e2e tests
+/// `include_str!`, so the tested source and the shipped source are byte-identical
+/// by construction.
+const KERNEL_SOURCE: &str = include_str!("../tests/fixtures/spirv/mandelbrot_q12.fe");
 
 /// The kernel/export name (the Fe `pub fn`), used for the wasm export lookup and
 /// stated in `layout.json` so `wasm-runner.js` calls the right export.
-const KERNEL_NAME: &str = "grid_gradient_u32";
+const KERNEL_NAME: &str = "mandel_pixel_q12";
+
+/// The escape-time ceiling (the kernel's `while i < 100` literal and its
+/// exhausted-loop `i` return, which yields `i == 100` for interior pixels).
+const MAX_ITER: u32 = 100;
 
 /// The sonatina fork rev the fe workspace is pinned to (`Cargo.toml`), recorded
-/// in `layout.json` provenance so the page can show Fe -> these files.
-const SONATINA_REV: &str = "41541f6b2646dfdff23b8b4539691376b9137993";
+/// in `layout.json` provenance so the page can show Fe -> these files. This is
+/// the signed-ops push #2 rev (M2a); the fractal's Slt/Sar cannot compile on the
+/// pre-signed-ops fork, so honest provenance must name this one.
+const SONATINA_REV: &str = "7b841cd88be066fe8ace634d6b73e9a14bef781e";
 
 /// Grid dispatch: 8x8 workgroups tile the 2D frame. `row_width =
 /// num_workgroups.x * workgroup_size[0]` is the Grid mode CONTRACT shared by the
 /// translator and the runner; the page supplies W/H at dispatch time.
 const WORKGROUP: [u32; 3] = [8, 8, 1];
 
-/// The page's dispatch frame. Both are multiples of the workgroup dims (exact
-/// tiling, the v1 requirement). 511 + 1024*511 = 523_775 < 2^31: no overflow,
-/// no signedness edge on any backend.
+/// The page's dispatch frame (the fixed Q12 view baked into the kernel). Both are
+/// multiples of the workgroup dims (exact tiling, the v1 requirement) and match
+/// the kernel's `step 24 = 3.0*4096/512` over a 512-wide frame; the overflow
+/// proof (spec 2.2) bounds every intermediate < 2^31, so no signedness edge on
+/// any backend.
 const WIDTH: u32 = 512;
 const HEIGHT: u32 = 512;
 
-/// The oracle, re-derived HERE and NEVER trusted from any doc: the grid gradient
-/// packs the coordinates base-1024, `v = x + 1024 * y`. Injective for any width
-/// <= 1024 and asymmetric, so a transpose/flip/stride bug diverges.
-fn grid_gradient_oracle(x: u32, y: u32) -> u32 {
-    x + 1024 * y
+/// The Q12 escape-time oracle, re-derived HERE from the KERNEL's arithmetic and
+/// NEVER trusted from any doc: signed Q12 fixed point (1.0 = 4096) in i32, `>>`
+/// arithmetic on i32, MAX_ITER 100. The fixed view is baked as Q12 literals
+/// (512x512, re in [-2.0, 1.0), im in [-1.5, 1.5), step 24 = 3.0*4096/512).
+/// `nzi` is computed from the OLD `zr` BEFORE `zr` is reassigned; keep that
+/// ordering or the two implementations diverge. Returns the escape count
+/// (`== 100` means interior: never escaped `|z| < 2`, i.e. mag < 4.0 in Q24).
+fn mandel_oracle_q12(px: i32, py: i32) -> u32 {
+    let c_re: i32 = -8192 + px * 24;
+    let c_im: i32 = -6144 + py * 24;
+    let mut zr: i32 = 0;
+    let mut zi: i32 = 0;
+    let mut i: u32 = 0;
+    while i < MAX_ITER {
+        let rr = zr * zr;
+        let ii = zi * zi;
+        let mag = rr + ii;
+        if mag < 67_108_864 {
+            let t = rr - ii;
+            let nzi = ((zr * 2) * zi) >> 12;
+            zr = (t >> 12) + c_re;
+            zi = nzi + c_im;
+            i += 1;
+        } else {
+            return i;
+        }
+    }
+    i
 }
 
 fn main() {
@@ -84,11 +121,13 @@ fn main() {
     std::fs::create_dir_all(&gen_dir)
         .unwrap_or_else(|e| panic!("could not create {}: {e}", gen_dir.display()));
 
-    eprintln!("gen_mandelbrot_demo: compiling `{KERNEL_NAME}` (GRID) through the real Fe drivers");
+    eprintln!(
+        "gen_mandelbrot_demo: compiling `{KERNEL_NAME}` (GRID, Q12 fractal) through the real Fe drivers"
+    );
 
     // --- 1. Fe -> SPIR-V (naga), GRID mode at workgroup [8, 8, 1]. -----------
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///gen_grid_gradient_u32.fe").expect("gen URL should parse");
+    let url = Url::parse("file:///gen_mandel_pixel_q12.fe").expect("gen URL should parse");
     db.workspace()
         .touch(&mut db, url.clone(), Some(KERNEL_SOURCE.to_string()));
     let file = db.workspace().get(&db, &url).expect("gen file should load");
@@ -115,9 +154,20 @@ fn main() {
             "Grid WGSL must reference the `{tok}` builtin; off-shape, refusing to emit:\n{wgsl}"
         );
     }
+    // M2d honesty asserts (spec 5.2.3): the structurizer really emitted the escape
+    // loop, and the signed Q12 ops really went through the i32 sign mapping (not a
+    // silent logical-under-u32 fake). M0/M1's straight-line kernels had neither.
+    for tok in ["loop", "bitcast<i32>"] {
+        assert!(
+            wgsl.contains(tok),
+            "the fractal WGSL must contain `{tok}` (the honest escape-loop / signed-op \
+             evidence); off-shape, refusing to emit:\n{wgsl}"
+        );
+    }
     eprintln!(
         "  WGSL passed the browser profile: no 64-bit tokens, wgsl-in reparse OK, \
-         validated with Capabilities::default(); references global_invocation_id + num_workgroups"
+         validated with Capabilities::default(); references global_invocation_id + \
+         num_workgroups; contains `loop` + `bitcast<i32>` (honest escape loop + signed ops)"
     );
 
     // HARD GATE 2: Grid layout as the runner assumes (word, mode, workgroup,
@@ -177,19 +227,35 @@ fn main() {
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let got = grid[(y * WIDTH + x) as usize];
-            let want = grid_gradient_oracle(x, y);
+            let want = mandel_oracle_q12(x as i32, y as i32);
             if got != want {
                 panic!(
-                    "HARD FAIL: wasmtime grid_gradient_u32({x}, {y}) = {got}, oracle = {want}. \
+                    "HARD FAIL: wasmtime mandel_pixel_q12({x}, {y}) = {got}, oracle = {want}. \
                      Refusing to emit a stale/faked reference; the kernel or a backend is off-pin."
                 );
             }
         }
     }
     let hash = fnv1a32(&grid);
+    // Recognizability from the executed grid (not baked): the cardioid center
+    // (256, 256) -> c = (-0.5, 0) is interior (100), and (0, 0) -> |c| = 2.5
+    // escapes immediately (1). These are a fast diverge/interior sanity read on
+    // the shipped grid; the per-pixel oracle equality above is the real gate.
+    let center = grid[(256 * WIDTH + 256) as usize];
+    let corner = grid[0];
+    let distinct = {
+        let mut seen = [false; (MAX_ITER + 1) as usize];
+        for &v in &grid {
+            if (v as usize) < seen.len() {
+                seen[v as usize] = true;
+            }
+        }
+        seen.iter().filter(|&&b| b).count()
+    };
     eprintln!(
-        "  wasmtime-executed {WIDTH}x{HEIGHT} grid: all {} pixels == oracle x + 1024*y; \
-         FNV-1a-32 = {hash} (0x{hash:08x})",
+        "  wasmtime-executed {WIDTH}x{HEIGHT} grid: all {} escape counts == mandel_oracle_q12; \
+         center (256,256)={center} (interior=100), corner (0,0)={corner} (fast escape), \
+         {distinct} distinct iteration values; FNV-1a-32 = {hash} (0x{hash:08x})",
         WIDTH * HEIGHT
     );
 
@@ -209,6 +275,7 @@ fn main() {
         "kernel": KERNEL_NAME,
         "width": WIDTH,
         "height": HEIGHT,
+        "max_iter": MAX_ITER,
         "fnv1a32": hash,
         "samples": samples,
         "runtime": "wasmtime (Fe -> wasm), executed at generation time",
@@ -393,8 +460,8 @@ fn fnv1a32(grid: &[u32]) -> u32 {
 /// Serialize the compiler-stated Grid `SpirvLayout` to the `layout.json` the
 /// kernel-blind runner consumes. Grid schema deltas vs the scalar layout:
 /// `mode: "Grid"`, the `result` key is ABSENT (`layout.result` is None), and a
-/// `params` table (empty for M1's zero-broadcast gradient) names args 2.. of the
-/// Fe signature.
+/// `params` table (empty for the fractal's zero-broadcast fixed view) names
+/// args 2.. of the Fe signature.
 fn serialize_layout(layout: &SpirvLayout, wasm_len: &usize) -> String {
     let bindings: Vec<serde_json::Value> = layout
         .bindings
@@ -425,8 +492,8 @@ fn serialize_layout(layout: &SpirvLayout, wasm_len: &usize) -> String {
         "word_bytes": layout.word.width_bytes(),
         "bindings": bindings,
         // Grid mode: `result` key absent (the whole output array is the result).
-        // `params` = broadcast args 2..; the gradient has none, proven by the
-        // (i32, i32) -> i32 export-signature gate above.
+        // `params` = broadcast args 2..; the fixed-view fractal has none, proven
+        // by the (i32, i32) -> i32 export-signature gate above.
         "params": [],
         "wasm_export": KERNEL_NAME,
         "wasm_bytes": wasm_len,

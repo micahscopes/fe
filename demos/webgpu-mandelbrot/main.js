@@ -1,17 +1,18 @@
-// main.js - orchestration for the Fe -> GPU IMAGE page (mandelbrot ladder M1).
+// main.js - orchestration for the Fe -> GPU IMAGE page (mandelbrot ladder M2).
 //
 // This is the ONLY kernel-aware JS on the page. It holds exactly three things:
 //   1. the dispatch dims { width: 512, height: 512 };
-//   2. the M1 palette (decode the Fe-computed base-1024 packing, paint a ramp);
+//   2. the M2 escape-time palette (color the Fe-computed escape COUNTS; the
+//      coloring is JS, Fe coloring is the M4 rung);
 //   3. the verdict wiring (GPU grid vs wasm grid, per pixel, plus the hash).
 //
 // Everything shader-specific stays in the kernel-blind runners in
 // ../webgpu-keystone/ (imported relatively). The runners never learn what this
 // kernel computes; this file never learns how the pipeline is built.
 //
-//   GREEN  "Fe computed this IMAGE on your GPU": the live WebGPU grid equals the
-//          in-browser wasm grid PER PIXEL, and the GPU grid's FNV-1a-32 equals
-//          the compiled reference. Adapter named.
+//   GREEN  "your GPU computed every escape count": the live WebGPU grid equals
+//          the in-browser wasm grid PER PIXEL, and the GPU grid's FNV-1a-32
+//          equals the compiled reference. Adapter named.
 //   AMBER  no navigator.gpu / no adapter: paint the wasm grid, GPU claim NOT made.
 //   RED    a Tint shader error (verbatim) or ANY per-pixel mismatch (first shown
 //          as "(x, y): gpu=<v> wasm=<v>").
@@ -68,21 +69,29 @@ function fnv1a32(grid) {
   return h >>> 0;
 }
 
-// M1 palette: decode the Fe-computed base-1024 packing exactly (1024 = 2^10),
-// paint an X-ramp in red, Y-ramp in green. JS colors; Fe computed every value.
-// At 512px, `>> 1` maps 0..511 onto 0..255: black top-left, red right, green
-// down, yellow bottom-right. Any transpose/flip/stride bug is visible here AND
-// caught by the per-pixel compare.
+// M2 escape-time palette (JS coloring; Fe computed every escape COUNT, and Fe
+// coloring is the M4 rung). The grid holds Fe-computed escape counts 0..100:
+//   iter == 100  -> interior (never escaped |z| < 2): paint black;
+//   else         -> a monotone blue->yellow ramp, v = round(255 * sqrt(iter/100)):
+//                   fast-escaping outer pixels read blue, the high-iteration
+//                   boundary filaments read yellow.
+// The cardioid + period-2 bulb read as the black interior. Any transpose/flip/
+// stride bug is visible here AND caught by the per-pixel compare below.
 function paintGrid(ctx, grid, width, height) {
   const img = ctx.createImageData(width, height);
   for (let i = 0; i < width * height; i++) {
-    const v = grid[i];
-    const px = v & 1023;
-    const py = v >> 10;
+    const iter = grid[i];
     const o = i * 4;
-    img.data[o] = px >> 1;
-    img.data[o + 1] = py >> 1;
-    img.data[o + 2] = 64;
+    if (iter >= 100) {
+      img.data[o] = 0;
+      img.data[o + 1] = 0;
+      img.data[o + 2] = 0;
+    } else {
+      const v = Math.round(255 * Math.sqrt(iter / 100));
+      img.data[o] = v;
+      img.data[o + 1] = v;
+      img.data[o + 2] = 255 - v;
+    }
     img.data[o + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
@@ -184,8 +193,8 @@ async function main() {
     setRow("row-gpu", gpu.reason, "bad");
     setBanner(
       "amber",
-      "wasm-painted image, GPU claim NOT made",
-      `Fe -> wasm computed every pixel (FNV = reference), painted above. But this browser has no live WebGPU device (${gpu.reason}), so the "on your GPU" claim is honestly withheld. A WebGPU browser earns the green rung.`
+      "The Fe compiler compiled this mandelbrot; wasm computed every escape count; JS colored it",
+      `Fe -> wasm computed every escape count in this browser (FNV = reference), and JS colored them into the fractal above (Fe coloring is the M4 rung). But this browser has no live WebGPU device (${gpu.reason}), so the "your GPU computed every escape count" claim is honestly withheld. A WebGPU browser earns the green rung.`
     );
     return;
   }
@@ -224,8 +233,8 @@ async function main() {
   paintGrid(ctx, gpuGrid, WIDTH, HEIGHT);
   setBanner(
     "green",
-    "Fe computed this IMAGE on your GPU",
-    `One Fe kernel -> wasm (V8) and SPIR-V-IR -> WGSL (WebGPU on ${gpu.adapter}). All ${WIDTH * HEIGHT} pixels agree, and the GPU grid's FNV-1a-32 = ${gpuHash} = the compiled reference.`
+    "The Fe compiler compiled this mandelbrot; your GPU computed every escape count",
+    `One Fe kernel -> wasm (V8) and SPIR-V-IR -> WGSL (WebGPU on ${gpu.adapter}). All ${WIDTH * HEIGHT} escape counts agree per pixel, and the GPU grid's FNV-1a-32 = ${gpuHash} = the compiled reference. JS colored the counts (Fe coloring is the M4 rung).`
   );
 }
 
