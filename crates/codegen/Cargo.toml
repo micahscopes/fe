@@ -37,3 +37,13 @@ hir = { workspace = true, features = ["testutils"] }
 # wasm backend's own wasmtime test versions).
 wasmtime = "44.0.1"
 wasmparser = "0.248.0"
+# The SPIR-V keystone (slice S2) executes the Fe-emitted shader on a real GPU
+# runtime (lavapipe / software Vulkan) via wgpu, mirroring the Sonatina SPIR-V
+# backend's own `mandelbrot_snapshot_spirv_gpu` test (same wgpu/pollster pins).
+wgpu = { version = "29", features = ["vulkan-portability"] }
+pollster = "0.4.0"
+# The EVM leg of the S2 keystone executes the same Fe source's EVM bytecode
+# under revm. This is a dev-only (test-target) dependency, so the
+# codegen -> contract-harness -> codegen edge is a dev-dependency cycle, which
+# Cargo permits (the lib graph stays acyclic).
+fe-contract-harness = { path = "../contract-harness" }
