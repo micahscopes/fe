@@ -1505,3 +1505,347 @@ fn fe_host_timer_recv_external_completion_rail() {
         "the full walk should be sleep(begin,wait), recv(begin,wait), now"
     );
 }
+
+// ===========================================================================
+// CE-9: the Fe-idiomatic ZIO flagship (R7b), MEASURED on the wasm value model.
+//
+// R7b's flagship is a direct-style `quote_pipeline(pair) -> Result<StaleQuote, u64>
+// uses (sp, w, t)` with a three-provider `with`-frame "runtime" (ZLayer without the
+// DSL) and a `retry_task` combinator over reified tasks. It TYPE-CHECKS in full (the
+// R6 anti-coloring / typed-environment thesis holds: no `.await`, calls are plain
+// calls, `let` is bind, capabilities are one typed `uses` row, the runtime is a
+// lexical `with`-frame, the typed error is `Result` + `#[error]`). But EXECUTING it
+// on the wasm value model hits two walls the CE-9 rung and the section-7.4 de-risk
+// table did not foresee (7.4 checked STRUCTS field-by-field - `Stepped` covered,
+// `Combine2` flagged - but never the ENUM spine on which R7b is built):
+//
+//   1. THE ENUM WALL (fundamental, a seat decision). `Result<E, A>` is an enum;
+//      `wasm_lower` fails closed on `Layout::Enum` (`single_scalar_field` returns
+//      `None`, so `ty_for_class` errors) and `match`/switch terminators are R2. So a
+//      `Result`-returning function's SIGNATURE alone cannot lower - the typed-error
+//      arm of the flagship never reaches codegen. Enum lowering on wasm (a
+//      tagged-union value repr + `match`/switch + construct/extract) is a NEW
+//      R2-class codegen rung, well beyond CE-9's "worked example + small combinator"
+//      mandate and beyond the R2.0/R2.1 slivers. Ruling needed before it is built.
+//   2. THE CAPABILITY-BODY CONTROL-FLOW WALL (secondary). Even a SCALAR (no-Result)
+//      pipeline fails closed the moment an `if` enters a `uses` body: the provision
+//      environment is materialized as an aggregate local across the branch
+//      ("not a value-carried scalar"; address-taken/aggregate locals are R2). PURE
+//      bodies with the same control flow lower fine (the shipped `ntt8_coeff`
+//      while/if), and STRAIGHT-LINE capability bodies lower fine (below), so this is
+//      specific to control flow over a capability environment.
+//
+// WHAT DOES EXECUTE (pinned by `fe_ce9_three_capability_rail_executes` below): the
+// direct-style three-capability rail in its STRAIGHT-LINE, scalar form - three
+// distinct capabilities (`Spawn` + `Wait` + `Timer`), TWO import modules (`fe:worker`
+// + `fe:host`) in ONE wasm module, a THREE-provider HETEROGENEOUS `with`-frame
+// (`WorkerPool` + `HostTimer`) - forks/joins a task through the rail AND reads the
+// clock, end to end through a combined worker+clock fake runtime. That isolates both
+// walls to the enum and to capability-body control flow, NOT to the three-capability
+// `uses` row or the multi-provider `with`-frame themselves (those lower and run).
+// ===========================================================================
+
+/// The REAL R7b flagship source: `Result<StaleQuote, u64>` threaded through a
+/// direct-style body with the three-capability `uses (sp, w, t)` row, the
+/// three-provider `with`-frame runtime, and the `retry_task` combinator. Kept
+/// verbatim as the documented target; it TYPE-CHECKS (verified with `fe check`) and
+/// is pinned to FAIL CLOSED at the enum wall on wasm by the test below.
+const CE9_FLAGSHIP_SRC: &str = r#"
+use core::result::Result
+use core::pending::{Spawn, Wait, Timer, TaskId}
+use std::worker::WorkerPool
+use std::host::HostTimer
+use std::wasm::WasmBackend
+
+#[error]
+struct StaleQuote { pub age_ms: u64 }
+
+#[error]
+struct Exhausted { pub tries: u32 }
+
+fn precompute_weights(_ pair: u64) -> u64 { pair + 7 }
+fn combine(_ local: u64, _ raw: u64) -> u64 { local + raw }
+
+// ZIO[R, E, A] as a plain Fe function: R is the row, E the Err arm, A the Ok arm.
+// No wrapper type, no flatMap chains, no for-comprehension. Direct style throughout:
+// the fork is a plain call, the join is a plain call (no `.await`), `let` is bind.
+fn quote_pipeline(_ pair: u64) -> Result<StaleQuote, u64>
+    uses (sp: mut Spawn<WasmBackend>, w: mut Wait<WasmBackend>, t: mut Timer<WasmBackend>)
+{
+    let fetch = sp.spawn(TaskId::new(0), pair)   // fork the fiber
+    let started = t.now()                        // read the clock (colorless)
+    let local = precompute_weights(pair)         // pure: no row, checked (6-0009)
+    let raw = w.wait(fetch)                       // join: the one colored op
+    let age = t.now() - started
+    if age > 5000 {
+        return Result::Err(StaleQuote { age_ms: age })
+    }
+    Result::Ok(combine(local, raw))
+}
+
+// The "runtime" is a with-frame at the composition root: ZLayer without the DSL.
+pub fn main(_ pair: u64) -> u64 {
+    with (Spawn<WasmBackend> = WorkerPool {}, Wait<WasmBackend> = WorkerPool {},
+          Timer<WasmBackend> = HostTimer {}) {
+        quote_pipeline(pair).unwrap_or(default: 0)
+    }
+}
+
+// The retry combinator over REIFIED tasks (the honest partial recovery for "no
+// generic retry over arbitrary effects"): spawn+wait in a loop up to `tries`,
+// returning Ok on first success (a nonzero result) else Err(Exhausted).
+fn retry_task(_ task: TaskId, _ arg: u64, _ tries: u32) -> Result<Exhausted, u64>
+    uses (sp: mut Spawn<WasmBackend>, w: mut Wait<WasmBackend>)
+{
+    let mut i: u32 = 0
+    while i < tries {
+        let token = sp.spawn(task, arg)
+        let r = w.wait(token)
+        if 0 < r {
+            return Result::Ok(r)
+        }
+        i = i + 1
+    }
+    Result::Err(Exhausted { tries: tries })
+}
+
+pub fn retry_demo(_ arg: u64, _ tries: u32) -> u64 {
+    with (Spawn<WasmBackend> = WorkerPool {}, Wait<WasmBackend> = WorkerPool {}) {
+        retry_task(TaskId::new(0), arg, tries).unwrap_or(default: 0)
+    }
+}
+"#;
+
+/// A three-capability body with an `if` over a capability-derived value: pins the
+/// secondary capability-body control-flow wall (aggregate provision-env local).
+const CE9_CAP_CONTROL_FLOW_SRC: &str = r#"
+use core::pending::{Spawn, Wait, Timer, TaskId}
+use std::worker::WorkerPool
+use std::host::HostTimer
+use std::wasm::WasmBackend
+
+pub fn fe_task(_ entry: u32, _ arg: u64) -> u64 { arg + 100 }
+
+fn branchy(_ pair: u64) -> u64
+    uses (sp: mut Spawn<WasmBackend>, w: mut Wait<WasmBackend>, t: mut Timer<WasmBackend>)
+{
+    let fetch = sp.spawn(TaskId::new(0), pair)
+    let n = t.now()
+    let raw = w.wait(fetch)
+    if 5 < n { raw } else { raw + 1 }
+}
+
+pub fn run(_ pair: u64) -> u64 {
+    with (Spawn<WasmBackend> = WorkerPool {}, Wait<WasmBackend> = WorkerPool {},
+          Timer<WasmBackend> = HostTimer {}) {
+        branchy(pair)
+    }
+}
+"#;
+
+/// The STRAIGHT-LINE three-capability rail that DOES lower and execute: three
+/// distinct capabilities in one `uses` row, two import modules in one wasm module, a
+/// three-provider heterogeneous `with`-frame. `run(pair)` forks `fe_task(0, pair)`
+/// (`= pair + 100`), reads the clock, joins, and returns `clock + raw`.
+const CE9_THREE_CAP_RAIL_SRC: &str = r#"
+use core::pending::{Spawn, Wait, Timer, TaskId}
+use std::worker::WorkerPool
+use std::host::HostTimer
+use std::wasm::WasmBackend
+
+pub fn fe_task(_ entry: u32, _ arg: u64) -> u64 { arg + 100 }
+
+fn pipeline(_ pair: u64) -> u64
+    uses (sp: mut Spawn<WasmBackend>, w: mut Wait<WasmBackend>, t: mut Timer<WasmBackend>)
+{
+    let fetch = sp.spawn(TaskId::new(0), pair)   // fork the fiber (fe:worker)
+    let started = t.now()                        // read the clock (fe:host, colorless)
+    let raw = w.wait(fetch)                       // join: the one colored op (fe:worker)
+    started + raw                                 // combine (straight line)
+}
+
+pub fn run(_ pair: u64) -> u64 {
+    with (Spawn<WasmBackend> = WorkerPool {}, Wait<WasmBackend> = WorkerPool {},
+          Timer<WasmBackend> = HostTimer {}) {
+        pipeline(pair)
+    }
+}
+"#;
+
+/// A combined fake runtime: the `fe:worker` task pool (reusing `FakeTaskPool`'s
+/// slot/CAS/log discipline) PLUS the `fe:host` clock (`host_now` -> `BASE_CLOCK_MS`).
+/// This is the CE-5 `FakeTaskPool` and the CE-7 clock in ONE linker, servicing the
+/// two import modules a three-capability program pulls into one wasm module.
+fn instantiate_worker_and_clock(wasm: &[u8]) -> (wasmtime::Store<FakeTaskPool>, wasmtime::Instance) {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, FakeTaskPool::default());
+    let mut linker = wasmtime::Linker::new(&engine);
+
+    // fe:worker::task_begin - execute the exported `fe_task` synchronously in-instance.
+    linker
+        .func_wrap(
+            "fe:worker",
+            "task_begin",
+            |mut caller: wasmtime::Caller<'_, FakeTaskPool>,
+             entry: i32,
+             arg: i64|
+             -> Result<i32, wasmtime::Error> {
+                let fe_task = caller
+                    .get_export("fe_task")
+                    .and_then(wasmtime::Extern::into_func)
+                    .ok_or_else(|| wasmtime::Error::msg("the emitted wasm must export `fe_task`"))?
+                    .typed::<(i32, i64), i64>(&caller)?;
+                let result = fe_task.call(&mut caller, (entry, arg))?;
+                let dev = caller.data_mut();
+                dev.slots.push(TaskSlot { value: result as u64, consumed: false });
+                dev.log.push("task_begin");
+                Ok((dev.slots.len() - 1) as i32)
+            },
+        )
+        .expect("bind task_begin");
+
+    // fe:worker::wait - synchronous pool: already READY, a no-op beyond the log.
+    linker
+        .func_wrap(
+            "fe:worker",
+            "wait",
+            |mut caller: wasmtime::Caller<'_, FakeTaskPool>,
+             token: i32|
+             -> Result<(), wasmtime::Error> {
+                let dev = caller.data_mut();
+                if token < 0 || token as usize >= dev.slots.len() {
+                    return Err(wasmtime::Error::msg("wait: unknown pending token"));
+                }
+                dev.log.push("wait");
+                Ok(())
+            },
+        )
+        .expect("bind wait");
+
+    // fe:worker::task_result - deliver the u64 with the one-shot READY->CONSUMED CAS.
+    linker
+        .func_wrap(
+            "fe:worker",
+            "task_result",
+            |mut caller: wasmtime::Caller<'_, FakeTaskPool>,
+             token: i32|
+             -> Result<i64, wasmtime::Error> {
+                let dev = caller.data_mut();
+                let slot = dev
+                    .slots
+                    .get_mut(token as usize)
+                    .ok_or_else(|| wasmtime::Error::msg("task_result: unknown pending token"))?;
+                if slot.consumed {
+                    return Err(wasmtime::Error::msg("task_result trap: token already CONSUMED"));
+                }
+                slot.consumed = true;
+                let value = slot.value;
+                dev.log.push("task_result");
+                Ok(value as i64)
+            },
+        )
+        .expect("bind task_result");
+
+    // fe:host::host_now - the colorless clock read (the CE-7 broker's clock).
+    linker
+        .func_wrap(
+            "fe:host",
+            "host_now",
+            |mut caller: wasmtime::Caller<'_, FakeTaskPool>| -> Result<i64, wasmtime::Error> {
+                caller.data_mut().log.push("host_now");
+                Ok(BASE_CLOCK_MS as i64)
+            },
+        )
+        .expect("bind host_now");
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("wasmtime should instantiate with the fe:worker + fe:host imports satisfied");
+    (store, instance)
+}
+
+/// CE-9 THE STOP (pinned): the `Result`-typed R7b flagship FAILS CLOSED on wasm at
+/// the enum wall. `Result<E, A>` is an enum; a `Result`-returning signature cannot
+/// lower on the wasm value model (`single_scalar_field` rejects `Layout::Enum`). The
+/// flagship type-checks in full (the anti-coloring / typed-environment thesis holds);
+/// only its wasm EXECUTION is walled, on the typed-error arm.
+#[test]
+fn fe_ce9_result_flagship_fails_closed_at_enum_wall() {
+    let err = compile_to_wasm_err("wasm_ce9_flagship.fe", CE9_FLAGSHIP_SRC);
+    assert!(
+        err.contains("single-scalar-field") || err.contains("one-field scalar newtype"),
+        "the Result-typed flagship should fail closed at the wasm enum/aggregate wall \
+         (enums are R2 on the wasm value model), got: {err}"
+    );
+}
+
+/// CE-9 (secondary wall, pinned): control flow inside a capability (`uses`) body
+/// fails closed even in scalar form - the provision environment becomes an aggregate
+/// local across the branch. Straight-line capability bodies and pure branchy bodies
+/// both lower fine; this is specific to control flow over a capability environment.
+#[test]
+fn fe_ce9_capability_body_control_flow_fails_closed() {
+    let err = compile_to_wasm_err("wasm_ce9_cap_cf.fe", CE9_CAP_CONTROL_FLOW_SRC);
+    assert!(
+        err.contains("value-carried scalar") || err.contains("aggregate"),
+        "an `if` inside a capability body should fail closed at the aggregate \
+         provision-env local (R2), got: {err}"
+    );
+}
+
+/// CE-9 WHAT EXECUTES: the direct-style THREE-CAPABILITY rail runs end to end. Three
+/// distinct capabilities (`Spawn` + `Wait` + `Timer`) in one `uses` row, TWO import
+/// modules (`fe:worker` + `fe:host`) in ONE wasm module, a THREE-provider
+/// heterogeneous `with`-frame - fork/join a task through the rail AND read the clock,
+/// no monad, no coloring, no `.await`. This proves the capability plumbing of R7b's
+/// typed environment executes; only the enum arm and capability-body control flow are
+/// the walls.
+#[test]
+fn fe_ce9_three_capability_rail_executes() {
+    let wasm = compile_to_wasm("wasm_ce9_three_cap.fe", CE9_THREE_CAP_RAIL_SRC);
+
+    // Two import modules in one wasm module: the fork/join rail AND the clock.
+    let imports = func_imports(&wasm);
+    for expected in [
+        ("fe:worker", "task_begin"),
+        ("fe:worker", "wait"),
+        ("fe:worker", "task_result"),
+        ("fe:host", "host_now"),
+    ] {
+        assert!(
+            imports.contains(&(expected.0.to_string(), expected.1.to_string())),
+            "expected import {expected:?} in the emitted wasm, found {imports:?}"
+        );
+    }
+
+    let (mut store, instance) = instantiate_worker_and_clock(&wasm);
+    assert!(
+        instance.get_func(&mut store, "fe_task").is_some(),
+        "the emitted wasm must export the `fe_task` dispatch table"
+    );
+
+    let run = instance
+        .get_typed_func::<i64, i64>(&mut store, "run")
+        .expect("`run` export should exist");
+
+    // run(pair) = clock(BASE_CLOCK_MS) + fe_task(0, pair)(= pair + 100).
+    for pair in [5i64, 0, 42] {
+        let got = run
+            .call(&mut store, pair)
+            .expect("the three-capability rail should fork/join a task and read the clock");
+        assert_eq!(
+            got as u64,
+            BASE_CLOCK_MS + (pair as u64 + 100),
+            "run({pair}) should be clock + (pair + 100) through the three-capability rail"
+        );
+    }
+
+    // The op walk for one `run`, in source order: spawn (task_begin), the colorless
+    // clock read (host_now), then the fused join (wait, task_result). Three `run` calls.
+    assert_eq!(
+        &store.data().log[0..4],
+        &["task_begin", "host_now", "wait", "task_result"],
+        "one run should walk task_begin + host_now + (wait, task_result)"
+    );
+}
