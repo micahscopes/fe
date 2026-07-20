@@ -1,0 +1,15 @@
+# Serialize the lavapipe (software-Vulkan) execution tests. Each takes ~minutes
+# and they die when run many-concurrent (the lavapipe device is single-threaded
+# software rendering); running them in one shared max-threads=1 group keeps the
+# FULL CI command safe without hand-orchestration (mb2-mandelbrot-M2-spec.md
+# section 5.3).
+[test-groups]
+lavapipe = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# `test(lavapipe)` catches the grid + fractal execute tests by name;
+# `executes_equal` catches the two keystone execution tests whose names lack
+# "lavapipe" (keystone_executes_equal_on_evm_wasm_and_spirv,
+# u32_keystone_executes_equal_browser_profile).
+filter = 'test(lavapipe) | test(executes_equal)'
+test-group = 'lavapipe'

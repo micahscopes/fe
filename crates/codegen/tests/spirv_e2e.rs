@@ -1031,11 +1031,13 @@ fn compile_grid_gradient_to_wasm() -> Vec<u8> {
     output.into_bytecode().expect("wasm output should be bytecode")
 }
 
-/// Execute the grid gradient wasm export over the whole `width x height` frame,
-/// row-major, under wasmtime. Fe `u32` lowers to wasm `i32`, so the export
-/// returns `i32`; reinterpret as `u32`. This is the cross-backend oracle the
-/// lavapipe grid is compared against pixel-for-pixel.
-fn wasm_grid_all(bytes: &[u8], width: u32, height: u32) -> Vec<u32> {
+/// Execute a `(i32, i32) -> i32` grid wasm export over the whole
+/// `width x height` frame, row-major, under wasmtime. Fe `u32` lowers to wasm
+/// `i32`, so the export returns `i32`; reinterpret as `u32`. This is the
+/// cross-backend oracle the lavapipe grid is compared against pixel-for-pixel
+/// (M1 grid gradient with `grid_gradient_u32`; M2 fractal with
+/// `mandel_pixel_q12`).
+fn wasm_grid_all(bytes: &[u8], width: u32, height: u32, export: &str) -> Vec<u32> {
     wasmparser::validate(bytes).expect("Fe-emitted wasm should be valid");
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, bytes).expect("wasmtime should load the module");
@@ -1043,14 +1045,14 @@ fn wasm_grid_all(bytes: &[u8], width: u32, height: u32) -> Vec<u32> {
     let instance =
         wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
     let f = instance
-        .get_typed_func::<(i32, i32), i32>(&mut store, "grid_gradient_u32")
-        .expect("`grid_gradient_u32` export should exist as (i32, i32) -> i32");
+        .get_typed_func::<(i32, i32), i32>(&mut store, export)
+        .unwrap_or_else(|_| panic!("`{export}` export should exist as (i32, i32) -> i32"));
     let mut out = Vec::with_capacity((width * height) as usize);
     for y in 0..height {
         for x in 0..width {
             let v = f
                 .call(&mut store, (x as i32, y as i32))
-                .expect("grid_gradient_u32(px, py) should run") as u32;
+                .unwrap_or_else(|e| panic!("{export}(px, py) should run: {e:?}")) as u32;
             out.push(v);
         }
     }
@@ -1111,18 +1113,26 @@ fn grid_gradient_u32_wasm_leg() {
     );
 }
 
-/// Execute the grid kernel's WGSL on lavapipe (software Vulkan) via wgpu at the
-/// browser profile (NO required features). Grid deltas from the scalar B2
-/// harness: an 8x8 dispatch of 8x8 workgroups = 64x64, a `64*64*4` output
-/// buffer, a 4-byte dummy input, and full-grid staging/readback. ANTI-FUDGE
-/// (verbatim from B2): a missing adapter/device is a HARD FAILURE, never a
-/// silent skip; the only escape is `MB2_ALLOW_GPU_SKIP`.
+/// Execute a grid kernel's WGSL on lavapipe (software Vulkan) via wgpu at the
+/// browser profile (NO required features), over a `width x height` frame of 8x8
+/// workgroups. Generalized from the M1 grid-gradient harness so M2's 512x512
+/// fractal reuses EXACTLY the same execution path (only the frame size and the
+/// output buffer grow): the dispatch is `(width/8, height/8, 1)`, the output
+/// buffer `width*height*4` bytes, with a 4-byte dummy input and full-grid
+/// staging/readback. ANTI-FUDGE (verbatim from B2): a missing adapter/device is
+/// a HARD FAILURE, never a silent skip; the only escape is `MB2_ALLOW_GPU_SKIP`.
 ///
-/// Returns `Some(grid)` (the 4096-word grid, row-major) when the GPU ran the
-/// shader, `None` only under skip.
-fn run_grid_gradient_on_lavapipe(wgsl: &str) -> Option<Vec<u32>> {
+/// `width` and `height` must be multiples of the 8x8 workgroup size (the kernel
+/// derives `row_width = num_workgroups.x * wgx`, so a non-multiple frame would
+/// dispatch the wrong pixel count). Returns `Some(grid)` (the `width*height`
+/// words, row-major) when the GPU ran the shader, `None` only under skip.
+fn run_grid_u32_on_lavapipe(wgsl: &str, width: u32, height: u32, label: &str) -> Option<Vec<u32>> {
+    assert!(
+        width % 8 == 0 && height % 8 == 0,
+        "grid frame {width}x{height} must be a multiple of the 8x8 workgroup size"
+    );
     let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
-    let out_bytes = u64::from(GRID_W * GRID_H * 4);
+    let out_bytes = u64::from(width * height * 4);
 
     let instance = wgpu::Instance::default();
     let adapter = match pollster::block_on(instance.request_adapter(
@@ -1174,18 +1184,18 @@ fn run_grid_gradient_on_lavapipe(wgsl: &str) -> Option<Vec<u32>> {
     };
 
     eprintln!(
-        "  grid SPIR-V leg GPU adapter (BROWSER PROFILE, no required features): {}",
+        "  grid SPIR-V leg [{label}] GPU adapter (BROWSER PROFILE, no required features): {}",
         adapter.get_info().name
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("grid_gradient_u32"),
+        label: Some(label),
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
 
-    // Grid output: the full 64x64 u32 array (one element per pixel). Same
-    // two-binding shape as the scalar keystone (Output @binding(0), unused Input
-    // @binding(1)), the deltas being the output/staging sizes.
+    // Grid output: the full width x height u32 array (one element per pixel).
+    // Same two-binding shape as the scalar keystone (Output @binding(0), unused
+    // Input @binding(1)), the deltas being the output/staging sizes.
     let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("grid_output"),
         size: out_bytes,
@@ -1263,10 +1273,11 @@ fn run_grid_gradient_on_lavapipe(wgsl: &str) -> Option<Vec<u32>> {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        // 8x8 workgroups of 8x8 invocations = the 64x64 grid. row_width =
-        // num_workgroups.x * wgx = 8 * 8 = 64, derived in the shader, never
-        // threaded as a param.
-        pass.dispatch_workgroups(8, 8, 1);
+        // (width/8) x (height/8) workgroups of 8x8 invocations = the width x
+        // height grid. row_width = num_workgroups.x * wgx, derived in the
+        // shader, never threaded as a param (64x64 -> dispatch 8x8; 512x512 ->
+        // dispatch 64x64).
+        pass.dispatch_workgroups(width / 8, height / 8, 1);
     }
     encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, out_bytes);
     queue.submit(Some(encoder.finish()));
@@ -1366,11 +1377,11 @@ fn grid_gradient_u32_executes_on_lavapipe_browser_profile() {
     // --- The cross-backend oracle: the same Fe function, executed under wasmtime
     // over the whole 64x64 frame. ---
     let wasm_bytes = compile_grid_gradient_to_wasm();
-    let wasm_grid = wasm_grid_all(&wasm_bytes, GRID_W, GRID_H);
+    let wasm_grid = wasm_grid_all(&wasm_bytes, GRID_W, GRID_H, "grid_gradient_u32");
 
     // --- The GPU leg: EXECUTE on lavapipe (browser profile) and compare every
     // pixel to BOTH the oracle and the wasmtime leg. ---
-    match run_grid_gradient_on_lavapipe(wgsl) {
+    match run_grid_u32_on_lavapipe(wgsl, GRID_W, GRID_H, "grid_gradient_u32") {
         Some(grid) => {
             assert_eq!(
                 grid.len(),
@@ -1637,4 +1648,181 @@ fn mandelbrot_q12_evm_spot_check() {
         "M2b EVM leg: Fe mandel_probe() (5 probe pixels of the signed Q12 kernel) executed \
          under revm; base-1000 packing == the oracle packing {want}."
     );
+}
+
+// ===========================================================================
+// M2c (the lavapipe leg): the signed Q12 fractal EXECUTES on the GPU.
+// ===========================================================================
+
+/// The fixed M2 mandelbrot view (spec 2.1): a 512x512 frame. 512 is a multiple
+/// of the 8x8 workgroup, so the grid harness dispatches (512/8, 512/8) = (64,
+/// 64, 1) workgroups over 262,144 pixels.
+const MANDEL_W: u32 = 512;
+const MANDEL_H: u32 = 512;
+
+/// M2c headline (spec 5.2.3): the signed Q12 fractal, compiled through the Grid
+/// driver seam, EXECUTES on lavapipe at the browser profile, and every one of
+/// 262,144 pixels is TRI-EQUAL: the GPU escape count == the independent
+/// `mandel_oracle_q12` == the wasmtime execution of the SAME Fe function. That
+/// three-way per-pixel agreement over the whole frame is the honest
+/// cross-backend claim, and this is the FIRST EXECUTED u32 escape-time loop on
+/// lavapipe (M0 only validated; M1's executed grid kernel was straight-line).
+///
+/// Honesty deltas over M0 (the checks M0's validate-only test lacked): the WGSL
+/// must contain `loop` (the naga structurizer really emitted the escape loop,
+/// not a flattened body) and `bitcast<i32>` (the signed Slt/Sar really went
+/// through the fork's i32 sign mapping, not a logical-shift shortcut).
+/// Hard-fail-not-skip: a missing GPU is a hard failure; the only escape is
+/// `MB2_ALLOW_GPU_SKIP` (adapter printed on execute).
+#[test]
+fn mandelbrot_q12_executes_on_lavapipe_browser_profile() {
+    // --- Compile the Q12 fractal through the Grid driver seam. ---
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandelbrot_q12_gpu.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDELBROT_Q12_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("mandelbrot Q12 should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_grid(&db, &package, [8, 8, 1])
+        .expect("mandelbrot Q12 should compile Fe -> naga-validated SPIR-V in Grid mode");
+
+    // --- Layout asserts (same schema as M1: Grid, u32 word, no single-slot
+    // result, 4-byte output stride). ---
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Grid,
+        "the grid driver seam must state LayoutMode::Grid"
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the Q12 fractal must lower to the u32 word (browser profile)"
+    );
+    assert_eq!(
+        artifact.layout.workgroup_size,
+        [8, 8, 1],
+        "the layout must record the [8,8,1] workgroup size the driver set"
+    );
+    assert!(
+        artifact.layout.result.is_none(),
+        "Grid mode has no single-slot result: the whole output array is the result"
+    );
+    let output_stride = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|b| b.role == sonatina_codegen::isa::spirv::Role::Output)
+        .expect("the grid layout must have an Output binding")
+        .stride;
+    assert_eq!(
+        output_stride, 4,
+        "the grid output stride is one u32 word per element (4 bytes)"
+    );
+
+    // --- Browser-profile WGSL gate + the M2 honesty tokens. ---
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the fractal kernel");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("loop"),
+        "the fractal WGSL must contain a `loop` (the naga structurizer emitted the escape loop; \
+         the honesty check M0's validate-only test lacked); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("bitcast<i32>"),
+        "the fractal WGSL must contain `bitcast<i32>` (the signed Slt/Sar really went through the \
+         fork's i32 sign mapping, not a logical-shift shortcut); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("global_invocation_id"),
+        "grid WGSL must bind global_invocation_id (the per-pixel gid); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("num_workgroups"),
+        "grid WGSL must read num_workgroups (row_width = num_workgroups.x * wgx); got:\n{wgsl}"
+    );
+    eprintln!(
+        "  fractal WGSL passed the browser profile and carries loop + bitcast<i32> + \
+         global_invocation_id + num_workgroups."
+    );
+
+    // --- Cross-backend leg #2: the SAME Fe function under wasmtime over the
+    // whole 512x512 frame (the wasm value, one of the three in the tri-equal
+    // claim). oracle == wasm is proven exhaustively by `mandelbrot_q12_wasm_leg`;
+    // recomputed here so the tri-equal claim lives inside this one test. ---
+    let wasm_bytes = compile_mandelbrot_q12_to_wasm();
+    let wasm_grid = wasm_grid_all(&wasm_bytes, MANDEL_W, MANDEL_H, "mandel_pixel_q12");
+
+    // --- The GPU leg: EXECUTE the fractal on lavapipe (browser profile,
+    // 512x512, dispatch (64,64,1)) and compare every pixel to BOTH the oracle
+    // AND the wasmtime leg (tri-equal). ---
+    match run_grid_u32_on_lavapipe(wgsl, MANDEL_W, MANDEL_H, "mandel_pixel_q12") {
+        Some(grid) => {
+            assert_eq!(
+                grid.len(),
+                (MANDEL_W * MANDEL_H) as usize,
+                "grid readback must be 512*512 = 262144 words"
+            );
+            let mut distinct = std::collections::HashSet::new();
+            for y in 0..MANDEL_H {
+                for x in 0..MANDEL_W {
+                    let idx = (y * MANDEL_W + x) as usize;
+                    let got = grid[idx];
+                    let oracle = mandel_oracle_q12(x as i32, y as i32);
+                    assert_eq!(
+                        got, oracle,
+                        "lavapipe fractal[{y}*512+{x}] = {got} must equal the oracle escape count \
+                         {oracle}"
+                    );
+                    assert_eq!(
+                        got, wasm_grid[idx],
+                        "lavapipe fractal[{y}*512+{x}] = {got} must equal the wasmtime leg for the \
+                         same (x, y) = {}",
+                        wasm_grid[idx]
+                    );
+                    distinct.insert(got);
+                }
+            }
+
+            // Recognizability, DERIVED from the executed GPU grid (not baked):
+            // the interior center returns MAX_ITER, the fast-escape corner
+            // returns 1, and the escape histogram is non-degenerate. A transpose,
+            // an all-black, or an all-escape image could not pass all three.
+            assert_eq!(
+                grid[(256 * MANDEL_W + 256) as usize],
+                100,
+                "GPU center pixel (256,256) -> c=-0.5+0i is interior: MAX_ITER=100"
+            );
+            assert_eq!(
+                grid[0], 1,
+                "GPU corner pixel (0,0) -> c=-2.0-1.5i (|c|=2.5>2) escapes on the first iteration"
+            );
+            assert!(
+                distinct.len() >= 10,
+                "the GPU escape-time histogram must have >= 10 distinct values (got {})",
+                distinct.len()
+            );
+
+            eprintln!(
+                "M2c: Fe mandel_pixel_q12 EXECUTED on lavapipe (browser profile, 512x512); ALL \
+                 262,144 pixels TRI-EQUAL (lavapipe == oracle == wasmtime); {} distinct escape \
+                 counts (interior=100, fast-escape=1 confirmed on the GPU). The signed Q12 \
+                 fractal is cross-backend-honest on the GPU. Grid mode earns R-lava for the \
+                 fractal.",
+                distinct.len()
+            );
+        }
+        None => {
+            eprintln!(
+                "R-val only: fractal SPIR-V validated (browser profile) but NOT executed (GPU \
+                 skipped via MB2_ALLOW_GPU_SKIP). The 262,144-pixel tri-equal claim is NOT earned \
+                 on this run."
+            );
+        }
+    }
 }
