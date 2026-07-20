@@ -112,6 +112,27 @@ pub(crate) fn lower_synthetic_runtime_body<'db>(
     builder.finish()
 }
 
+/// Local mirror of the `Selector` arm of `fe_codegen::dispatch::DispatchKind`.
+///
+/// `fe-codegen` depends on `fe-mir`, so that crate's `DispatchKind` axis cannot
+/// be imported here without a dependency cycle. This restates the one fact the
+/// EVM synthetic-root site answers to: the EVM invocation boundary is the
+/// `Selector` kind, and `Selector` is exactly the kind whose entries are NOT
+/// invoked directly but reached through a synthesized dispatch root. `has_fallback`
+/// mirrors the runtime root's `DispatchDefault` (a `Call` default is the fallback
+/// recv arm; `RevertEmpty` has none), matching the axis payload even though the
+/// predicate does not depend on it. Keep in sync with `crates/codegen/src/dispatch.rs`.
+mod dispatch_axis {
+    /// Mirror of `DispatchKind::Selector { has_fallback }.needs_synthetic_root()`.
+    /// Always true: a `Selector` kind is by definition the one that needs a
+    /// synthesized dispatch root. The `has_fallback` payload is threaded through
+    /// to mirror the axis exactly; the predicate ignores it.
+    pub(super) const fn selector_needs_synthetic_root(has_fallback: bool) -> bool {
+        let _ = has_fallback;
+        true
+    }
+}
+
 struct SyntheticBodyBuilder<'db> {
     db: &'db dyn MirDb,
     instance: RuntimeInstance<'db>,
@@ -753,6 +774,19 @@ impl<'db> SyntheticBodyBuilder<'db> {
         dispatch: &[crate::runtime::DispatchArm<'db>],
         default: DispatchDefault<'db>,
     ) {
+        // CONSULT (DispatchKind axis, local mirror of codegen's `DispatchKind`):
+        // building this synthetic runtime root realizes the EVM `Selector` kind,
+        // whose defining property is that it needs a synthesized dispatch root
+        // (unlike `Export`/`Kernel`, whose entries are invoked directly).
+        // `has_fallback` mirrors `default`. Reaching this site must agree with
+        // the axis; a mismatch fires in debug, zero effect in release.
+        debug_assert!(
+            dispatch_axis::selector_needs_synthetic_root(matches!(
+                default,
+                DispatchDefault::Call { .. }
+            )),
+            "EVM synthetic runtime root built for a DispatchKind that does not need one"
+        );
         let zero = self.push_const_word(RBlockId::from_u32(0), 0);
         let four = self.push_const_word(RBlockId::from_u32(0), 4);
         let calldata_size = self.push_builtin_value(

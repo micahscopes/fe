@@ -1,4 +1,5 @@
 mod backend;
+pub mod dispatch;
 mod function_symbols;
 mod layout;
 mod runtime_package;
@@ -9,6 +10,7 @@ pub use backend::{
     Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend, SpirvBackend,
     WasmBackend, layout_for,
 };
+pub use dispatch::DispatchKind;
 pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
 };

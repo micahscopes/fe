@@ -55,6 +55,19 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     package: &RuntimePackage<'_>,
     workgroup_size: [u32; 3],
 ) -> Result<SpirvArtifact, LowerError> {
+    // CONSULT (DispatchKind axis): the SPIR-V target realizes the `Kernel` kind.
+    // The entry point is invoked directly as a grid dispatch (`OpEntryPoint` /
+    // `@compute`) against a bound resource interface; its envelope is stated by
+    // the unit's `SpirvLayout` (the Kernel kind's interface statement), not an
+    // in-band selector, and there is no synthesized dispatch root. Naming what
+    // this lowering already does; a mismatch fires in debug, zero release effect.
+    debug_assert!(
+        {
+            let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Spirv);
+            matches!(kind, crate::dispatch::DispatchKind::Kernel) && kind.entries_invoked_directly()
+        },
+        "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
+    );
     // REUSE the wasm-path Module. The import side-table is irrelevant to SPIR-V
     // (compute shaders have no wasm-style imports), so it is discarded here.
     let (module, _import_modules) = compile_runtime_package_wasm(db, package)?;

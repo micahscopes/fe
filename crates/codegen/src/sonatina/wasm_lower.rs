@@ -79,6 +79,18 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
+    // CONSULT (DispatchKind axis): the wasm target realizes the `Export` kind.
+    // Every entry (`main`, the `fe_task` task table, the degraded-mode
+    // `on_ready` continuation) is a named export the host invokes directly, with
+    // no in-band selector and no synthesized dispatch root. This names what this
+    // lowering already does; a mismatch fires in debug, zero effect in release.
+    debug_assert!(
+        {
+            let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Wasm);
+            matches!(kind, crate::dispatch::DispatchKind::Export) && kind.entries_invoked_directly()
+        },
+        "wasm lowering must realize the Export DispatchKind (entries invoked directly)"
+    );
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
     let mut lowerer = WasmModuleLowerer::new(db, builder, &isa, package);
