@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fe web sandbox (S1) — highlighted editor + the keystone</title>
+  <link rel="stylesheet" href="./vendor/fe-highlight.css" />
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #161b22; --line: #2b333d; --fg: #e6edf3;
+      --muted: #8b949e; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --green: #2ea043; --amber: #bf8700; --red: #da3633;
+      --green-bg: #12241a; --amber-bg: #241d0e; --red-bg: #2a1414;
+      --accent: #89b4fa;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg);
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    main { max-width: 900px; margin: 0 auto; padding: 28px 20px 64px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+    .sub code { font-family: var(--mono); color: var(--fg); }
+
+    .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+    select, button {
+      font: inherit; font-size: 14px; border-radius: 7px; border: 1px solid var(--line);
+      background: var(--panel); color: var(--fg); padding: 8px 12px;
+    }
+    button#run-btn { background: var(--accent); color: #0b1220; font-weight: 700; cursor: pointer; border-color: transparent; }
+    button#run-btn:hover { filter: brightness(1.08); }
+    .toolbar .spacer { flex: 1; }
+
+    .banner { border: 1px solid var(--line); border-left-width: 5px; border-radius: 8px;
+      padding: 14px 16px; margin-bottom: 18px; background: var(--panel); }
+    .banner.green { border-left-color: var(--green); background: var(--green-bg); }
+    .banner.amber { border-left-color: var(--amber); background: var(--amber-bg); }
+    .banner.red   { border-left-color: var(--red);   background: var(--red-bg); }
+    .banner-top { display: flex; align-items: baseline; gap: 12px; }
+    #banner-state { font-family: var(--mono); font-weight: 700; font-size: 12px; letter-spacing: .06em;
+      padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line); }
+    .banner.green #banner-state { color: var(--green); border-color: var(--green); }
+    .banner.amber #banner-state { color: var(--amber); border-color: var(--amber); }
+    .banner.red   #banner-state { color: var(--red);   border-color: var(--red); }
+    #banner-headline { font-size: 16px; font-weight: 600; }
+    #banner-detail { color: var(--muted); margin-top: 6px; font-size: 13.5px; }
+
+    .section-label { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+      color: var(--muted); margin: 4px 2px 8px; }
+
+    /* ---- editor ---- */
+    fe-editor { display: block; margin-bottom: 6px; }
+    .fe-ed-wrap { display: flex; background: var(--fe-code-bg); border: 1px solid var(--fe-code-border);
+      border-radius: 8px; height: 340px; overflow: hidden; }
+    .fe-ed-gutter { flex: 0 0 auto; min-width: 40px; padding: 12px 8px 12px 12px; text-align: right;
+      color: var(--fe-code-line-number); user-select: none; white-space: pre; overflow: hidden;
+      border-right: 1px solid var(--fe-code-border);
+      font-family: var(--fe-code-font, var(--mono)); font-size: 13px; line-height: 1.55; }
+    .fe-ed-scroll { position: relative; flex: 1; min-width: 0; }
+    .fe-ed-hl, .fe-ed-input {
+      margin: 0; padding: 12px 14px; border: 0;
+      font-family: var(--fe-code-font, var(--mono)); font-size: 13px; line-height: 1.55;
+      tab-size: 4; -moz-tab-size: 4; white-space: pre; }
+    .fe-ed-hl { position: absolute; inset: 0; overflow: auto; pointer-events: none; color: var(--fe-code-text); }
+    .fe-ed-hl code { font: inherit; color: inherit; }
+    .fe-ed-input { position: absolute; inset: 0; width: 100%; height: 100%; resize: none; outline: none;
+      background: transparent; color: transparent; caret-color: var(--fe-code-text); overflow: auto; }
+    .fe-ed-input::selection { background: rgba(137,180,250,0.30); }
+    .edit-note { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 0 2px 18px; }
+    .edit-note.edited { color: var(--amber); }
+
+    /* ---- tabs ---- */
+    .tabs { display: flex; gap: 4px; margin-bottom: 0; }
+    .tab { font: inherit; font-size: 12.5px; padding: 7px 12px; border: 1px solid var(--line);
+      border-bottom: 0; border-radius: 7px 7px 0 0; background: var(--panel); color: var(--muted); cursor: pointer; }
+    .tab.active { color: var(--fg); background: #0d1117; border-color: var(--line); }
+    .art-pane { border: 1px solid var(--line); border-radius: 0 8px 8px 8px; background: #0d1117;
+      max-height: 260px; overflow: auto; margin-bottom: 18px; }
+    .art-pane pre { margin: 0; padding: 12px 16px; font-family: var(--mono); font-size: 12.5px; color: var(--fg); white-space: pre; }
+
+    /* ---- run panels ---- */
+    .rows { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+    .row { display: grid; grid-template-columns: 210px 1fr; gap: 14px; padding: 11px 16px;
+      border-bottom: 1px solid var(--line); align-items: center; }
+    .row:last-child { border-bottom: 0; }
+    .row .label { color: var(--muted); font-size: 14px; }
+    .row .label small { display: block; color: #6a737d; font-size: 12px; }
+    .val { font-family: var(--mono); font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+    .val.ok { color: var(--green); } .val.bad { color: var(--red); }
+    .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono); margin: 4px 2px 8px; word-break: break-word; }
+    #grid-canvas { width: 384px; max-width: 100%; height: auto; image-rendering: pixelated;
+      border: 1px solid var(--line); border-radius: 8px; background: #000; display: block; margin: 8px 0 14px; }
+
+    .foot { color: #6a737d; font-size: 12.5px; margin-top: 26px; line-height: 1.65; border-top: 1px solid var(--line); padding-top: 16px; }
+    .foot code { font-family: var(--mono); color: var(--muted); }
+    .foot b { color: var(--fg); font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Fe web sandbox <span style="color:var(--muted);font-size:15px;">· slice S1</span></h1>
+  <p class="sub">
+    A live <b style="color:var(--fg)">tree-sitter</b>-highlighted Fe editor over the shipped run stage.
+    The Run button executes a <b style="color:var(--fg)">committed prebuilt kernel</b> (Fe → wasm in V8, Fe → WGSL on WebGPU)
+    through the same kernel-blind runners as <code>demos/webgpu-keystone</code>. Editing the source does not
+    recompile yet — the in-browser compiler is slice S3.
+  </p>
+
+  <div class="toolbar">
+    <label for="kernel-select" style="color:var(--muted);font-size:13px;">kernel</label>
+    <select id="kernel-select"></select>
+    <button id="run-btn">▶ Run prebuilt kernel</button>
+  </div>
+
+  <div id="banner" class="banner amber">
+    <div class="banner-top"><span id="banner-state">…</span><span id="banner-headline">Loading…</span></div>
+    <div id="banner-detail"></div>
+  </div>
+
+  <div class="section-label">Fe source (editable · real tree-sitter highlighting)</div>
+  <fe-editor id="editor"></fe-editor>
+  <div id="edit-note" class="edit-note"></div>
+
+  <div class="section-label">Compiler-produced artifacts (from gen/)</div>
+  <div class="tabs">
+    <button class="tab active" data-art="wgsl">kernel.wgsl</button>
+    <button class="tab" data-art="layout">layout.json</button>
+    <button class="tab" data-art="wasm">kernel.wasm</button>
+  </div>
+  <div id="art-wgsl-pane" class="art-pane"><pre id="art-wgsl">…</pre></div>
+  <div id="art-layout-pane" class="art-pane" hidden><pre id="art-layout">…</pre></div>
+  <div id="art-wasm-pane" class="art-pane" hidden><pre id="art-wasm">…</pre></div>
+
+  <div class="section-label">Run</div>
+
+  <section id="scalar-panel" hidden>
+    <div class="rows">
+      <div class="row"><div class="label">pinned reference<small>revm / wasmtime / lavapipe</small></div><div id="row-ref" class="val">-</div></div>
+      <div class="row"><div class="label">wasm-in-your-browser<small>Fe → wasm, run in V8</small></div><div id="row-wasm" class="val">-</div></div>
+      <div class="row"><div class="label">GPU (WebGPU)<small>Fe → SPIR-V-IR → WGSL</small></div><div id="row-gpu" class="val">-</div></div>
+    </div>
+    <div id="pin-note" class="meta"></div>
+  </section>
+
+  <section id="grid-panel" hidden>
+    <canvas id="grid-canvas" width="512" height="512"></canvas>
+    <div class="rows">
+      <div class="row"><div class="label">reference hash<small>FNV-1a-32 of the grid</small></div><div id="grow-ref" class="val">-</div></div>
+      <div class="row"><div class="label">wasm grid<small>Fe → wasm, per-pixel in V8</small></div><div id="grow-wasm" class="val">-</div></div>
+      <div class="row"><div class="label">GPU grid<small>Fe → WGSL, per-pixel</small></div><div id="grow-gpu" class="val">-</div></div>
+    </div>
+  </section>
+
+  <div id="adapter" class="meta">adapter: -</div>
+  <div id="prov" class="meta"></div>
+
+  <div class="foot">
+    <b>Honest S1 status.</b> Client-side now, zero server: the editor highlighting is <b>real tree-sitter</b>
+    (vendored <code>tree-sitter-fe.wasm</code> grammar + <code>highlights.scm</code> via web-tree-sitter, the same
+    trio the fe-web docs ship); the run stage executes committed <code>gen/</code> artifacts through the shipped
+    kernel-blind runners. <b>GREEN</b> is earned only when a live WebGPU readback equals wasm-in-browser equals the
+    cross-backend pin (Micah's GPU browser); no WebGPU shows honest <b>AMBER</b> (wasm leg still matches the pin).<br />
+    <b>Later slices.</b> The prebuilt artifacts were produced by <code>cargo run -p fe-codegen --example
+    gen_webgpu_demo</code> (native). Editing the Fe here and recompiling <i>in the page</i> is slice <b>S3</b> (the
+    fe-sandbox compiler wasm: the 20-site wasm32 port + a wasm-bindgen worker). Diagnostics/squiggles are S4;
+    the in-page language server (hover/completion) is S5.<br />
+    <b>Editor note.</b> The plan names CodeMirror 6; it was not vendorable in this offline sandbox (npm/esm/unpkg
+    are egress-blocked, no node to build the CM6 monorepo). This overlay editor drives the <i>same</i> real
+    tree-sitter highlight path, so highlighting is not downgraded; CM6 drops in later behind the same element.
+  </div>
+</main>
+
+<script src="./vendor/tree-sitter.js"></script>
+<script src="./vendor/fe-highlighter.js"></script>
+<script src="./fe-editor.js"></script>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
