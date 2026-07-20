@@ -1826,3 +1826,366 @@ fn mandelbrot_q12_executes_on_lavapipe_browser_profile() {
         }
     }
 }
+
+// ===========================================================================
+// C1 (clifford ladder rung 1): the Cl(3) ROTOR SANDWICH v' = R v ~R.
+//
+// The kernel (`clifford_rotor_q12.fe`) is signed Q12 (1.0 = 4096) in i32,
+// straight-line (no loop), and stays inside the EXACT M2 op envelope
+// (Add/Sub/Mul/Slt/Sar). The rotor R = rc + r12 e12 + r13 e13 + r23 e23
+// arrives as four ordinary function args (on the GPU leg they are broadcast
+// grid-input members; on this GPU-FREE leg they are just wasmtime typed-func
+// args). Each pixel maps to v = x e1 + y e2 + z0 e3 and is conjugated through
+// TWO geometric products, carrying the grade-3 trivector intermediate `tw`.
+//
+// C1's GPU-FREE gate (this section): the wasm leg proves the sandwich
+// pixel-exact vs an INDEPENDENT oracle across the FULL 512x512 frame for each
+// of four pinned rotors (identity + 180-deg e12 integer-EXACT at every pixel;
+// 90-deg e12 + a tilted default), with no GPU in the loop, and the EVM leg
+// agrees at 5 probe pixels under the 180-deg rotor. The lavapipe leg is C2.
+//
+// The blade algebra was re-derived here, not copied from the spec; the three
+// hand anchors below are integer identities proven in-test, not comments.
+// ===========================================================================
+
+/// The single SSOT fixture, `include_str!`-ed (later also by the page
+/// generator) so the tested source and the shipped source are byte-identical.
+const CLIFFORD_Q12_SOURCE: &str = include_str!("fixtures/spirv/clifford_rotor_q12.fe");
+
+/// The four pinned rotors (spec 2.3), each `(name, rc, r12, r13, r23)` in Q12
+/// two's complement. Re-derived / re-checked on the host:
+///   - identity  = (4096,0,0,0): v' == v EXACTLY at every pixel.
+///   - e12_180   = (0,4096,0,0) = e12: v' == (-x,-y,z0) EXACTLY; z' comes
+///                 ENTIRELY from the trivector path (t3 == 0, sz = r12*tw>>12).
+///   - e12_90    = (2896,2896,0,0), 2896 = round(4096*cos45): a quarter turn.
+///   - tilted    = (3712,577,1154,1154): theta/2=25deg (rc=round(4096*cos25)
+///                 =3712) about the unit bivector (1,2,2)/3 scaled by
+///                 sin25*4096=1731 -> (577,1154,1154). All three bivector
+///                 components nonzero; norm^2 = 16_775_305 ~ 4096^2 (near-unit,
+///                 ~0.01% deficit, host-quantized; the trig lives OUTSIDE the
+///                 equality claim, exactly like M2's baked view constants).
+const CLIFFORD_ROTORS: [(&str, i32, i32, i32, i32); 4] = [
+    ("identity", 4096, 0, 0, 0),
+    ("e12_180", 0, 4096, 0, 0),
+    ("e12_90", 2896, 2896, 0, 0),
+    ("tilted_default", 3712, 577, 1154, 1154),
+];
+
+/// The rotor-sandwich half of the independent oracle, re-derived from the
+/// Cl(3) blade products (NOT copied from the doc), integer-identical to the
+/// fixture: i32 arithmetic, arithmetic `>>` on i32, the SAME literals, the SAME
+/// `>> 12` placements. Returns the rotated point `v' = (sx, sy, sz)` in Q12.
+///
+/// The intermediate ordering is LOAD-BEARING: the second geometric product
+/// consumes the TRUNCATED `t1..tw`, so the two `>> 12` layers must sit exactly
+/// where the kernel places them. The trivector `tw` is grade-3 and feeds sx/sy/
+/// sz; the outgoing e123 coefficient cancels identically in exact algebra
+/// (c*tw - p*t3 + q*t2 - r*t1 == 0 over any commutative ring) so it is never
+/// computed. Overflow proof (re-checked per pinned rotor): every accumulator
+/// stays < 2^31, so this runs panic-free in a debug build.
+fn clifford_sandwich_q12(
+    px: i32,
+    py: i32,
+    rc: i32,
+    r12: i32,
+    r13: i32,
+    r23: i32,
+) -> (i32, i32, i32) {
+    let x: i32 = (px - 256) * 16;
+    let y: i32 = (py - 256) * 16;
+    let z: i32 = 2048;
+
+    // First product t = R v (grade 1 + grade 3), each accumulator >> 12.
+    let t1: i32 = (rc * x + r12 * y + r13 * z) >> 12;
+    let t2: i32 = (rc * y - r12 * x + r23 * z) >> 12;
+    let t3: i32 = (rc * z - r13 * x - r23 * y) >> 12;
+    let tw: i32 = (r12 * z - r13 * y + r23 * x) >> 12; // e123: load-bearing
+
+    // Second product v' = t ~R (reverse negates grade 2), grade-1 output.
+    let sx: i32 = (rc * t1 + r12 * t2 + r13 * t3 + r23 * tw) >> 12;
+    let sy: i32 = (rc * t2 - r12 * t1 - r13 * tw + r23 * t3) >> 12;
+    let sz: i32 = (rc * t3 + r12 * tw - r13 * t1 - r23 * t2) >> 12;
+    (sx, sy, sz)
+}
+
+/// The checker-sampling half of the oracle: 0.5-unit cells (`>> 11`), sum
+/// parity == XOR of the per-axis parities, `parity(n) = n - ((n>>1)*2)` (exact
+/// for negatives because Sar floors), two-tone + depth cue, clamped to 0..255
+/// with the two var-left Slt compares the kernel uses. Returns i32 (the kernel
+/// returns i32 to dodge the wasm Cast surface; the value is in 0..255).
+fn clifford_shade_q12(sx: i32, sy: i32, sz: i32) -> i32 {
+    let cell: i32 = (sx >> 11) + (sy >> 11) + (sz >> 11);
+    let par: i32 = cell - ((cell >> 1) * 2);
+    let mut shade: i32 = par * 160 + 48 + (sz >> 7);
+    if shade < 0 {
+        shade = 0;
+    }
+    if shade < 256 {
+        return shade;
+    }
+    255
+}
+
+/// The full independent Q12 clifford oracle: sandwich then sample. Mirrors
+/// `clifford_pixel_q12` op-for-op; the two are integer-identical by
+/// construction (that is the point of the twice-written discipline).
+fn clifford_oracle_q12(px: i32, py: i32, rc: i32, r12: i32, r13: i32, r23: i32) -> i32 {
+    let (sx, sy, sz) = clifford_sandwich_q12(px, py, rc, r12, r13, r23);
+    clifford_shade_q12(sx, sy, sz)
+}
+
+/// Compile the Q12 clifford fixture to wasm through `BackendKind::Wasm`.
+fn compile_clifford_q12_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_rotor_q12_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(CLIFFORD_Q12_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("clifford Q12 should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// C1 wasm leg (GPU-FREE, runs everywhere): compile the rotor-sandwich kernel
+/// via `BackendKind::Wasm`, execute it under wasmtime as a `(i32 x6) -> i32`
+/// typed func over the FULL 512x512 grid for EACH of the four pinned rotors,
+/// and assert every pixel equals the independent `clifford_oracle_q12`. This is
+/// the honest scalar-path proof that the Cl(3) sandwich (two geometric products
+/// through the M2 op envelope, broadcast params as plain args) computes
+/// correctly WITHOUT any GPU.
+#[test]
+fn clifford_rotor_q12_wasm_leg() {
+    let bytes = compile_clifford_q12_to_wasm();
+    wasmparser::validate(&bytes).expect("Fe-emitted clifford wasm should be valid");
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32), i32>(&mut store, "clifford_pixel_q12")
+        .expect("`clifford_pixel_q12` export should exist as (i32 x6) -> i32");
+
+    // --- Integer-EXACT hand anchors on the sandwich itself (spec 2.3),
+    // asserted over the FULL grid at the ORACLE level: the rotated point, not
+    // just the shade. wasm == oracle (proven below) then chains to wasm-exact.
+    for py in 0..512i32 {
+        for px in 0..512i32 {
+            let x = (px - 256) * 16;
+            let y = (py - 256) * 16;
+            // Identity R=(4096,0,0,0): v' == v EXACTLY.
+            assert_eq!(
+                clifford_sandwich_q12(px, py, 4096, 0, 0, 0),
+                (x, y, 2048),
+                "identity rotor must fix v=({x},{y},2048) exactly at ({px},{py})"
+            );
+            // 180-deg e12 R=(0,4096,0,0): v' == (-x,-y,z0) EXACTLY.
+            assert_eq!(
+                clifford_sandwich_q12(px, py, 0, 4096, 0, 0),
+                (-x, -y, 2048),
+                "e12_180 rotor must map v to (-x,-y,z0) exactly at ({px},{py})"
+            );
+        }
+    }
+    // The 180-deg z' is recovered ENTIRELY from the grade-3 trivector path:
+    // t3 == 0 while tw == z0 (nonzero), and sz = (r12 * tw) >> 12 == 2048. An
+    // integer identity, not a comment: prove the trivector is load-bearing.
+    {
+        let (px, py) = (300, 200);
+        let z = 2048i32;
+        let (rc, r12) = (0i32, 4096i32);
+        let t3 = (rc * z - 0 * ((px - 256) * 16) - 0 * ((py - 256) * 16)) >> 12;
+        let tw = (r12 * z - 0 * ((py - 256) * 16) + 0 * ((px - 256) * 16)) >> 12;
+        assert_eq!(t3, 0, "e12_180: the grade-1 t3 vanishes");
+        assert_eq!(tw, 2048, "e12_180: the grade-3 trivector tw == z0 (nonzero)");
+        let sz = (rc * t3 + r12 * tw) >> 12;
+        assert_eq!(sz, 2048, "e12_180: z' is reconstructed from the trivector alone");
+    }
+
+    // --- The FULL 512x512 frame, every pixel == the oracle, for each rotor.
+    for (name, rc, r12, r13, r23) in CLIFFORD_ROTORS {
+        let mut distinct = std::collections::BTreeSet::new();
+        let mut min_shade = i32::MAX;
+        let mut max_shade = i32::MIN;
+        for py in 0..512i32 {
+            for px in 0..512i32 {
+                let got = f
+                    .call(&mut store, (px, py, rc, r12, r13, r23))
+                    .expect("clifford_pixel_q12 should run");
+                let want = clifford_oracle_q12(px, py, rc, r12, r13, r23);
+                assert_eq!(
+                    got, want,
+                    "wasm clifford_pixel_q12({px},{py}; {name}) = {got} must equal oracle = {want}"
+                );
+                distinct.insert(want);
+                min_shade = min_shade.min(want);
+                max_shade = max_shade.max(want);
+            }
+        }
+        // Recognizability, DERIVED in-test (not a baked pixel table). Two facts:
+        //   (1) BOTH checker tone bands are populated for every rotor: a dark
+        //       cell shade well under the light base (48+160=208) and a light
+        //       cell shade at or above it. A flat/degenerate image cannot pass.
+        //   (2) The shade STRUCTURE distinguishes the rotor class, and it is a
+        //       geometric fact, not a baked table: a pure-e12 rotor (identity,
+        //       180, 90) rotates only in the e1-e2 plane, so the e3 slab height
+        //       z' is FIXED across the frame (t3, tw depend on z alone) -> the
+        //       depth cue `sz>>7` is constant -> a flat two-tone checker with
+        //       exactly two shades. Only the TILTED rotor (r13,r23 nonzero)
+        //       tumbles the slab in 3D, so z' varies and the depth cue spreads
+        //       the shades. The exact two-tone values are re-derived here:
+        //         par*160 + 48 + (sz>>7); identity/180 have sz=2048 (>>7 = 16)
+        //         -> {64, 224}; 90 has sz=2047 (>>7 = 15) -> {63, 223}.
+        assert!(
+            min_shade < 100 && max_shade >= 208,
+            "{name}: both checker tone bands must be populated (min={min_shade}, max={max_shade})"
+        );
+        match name {
+            "identity" | "e12_180" => assert!(
+                distinct.iter().copied().eq([64, 224]),
+                "{name}: pure-e12 rotor fixes z0 -> flat 2-tone checker {{64,224}}, got {distinct:?}"
+            ),
+            "e12_90" => assert!(
+                distinct.iter().copied().eq([63, 223]),
+                "e12_90: z fixed at sz=2047 -> flat 2-tone checker {{63,223}}, got {distinct:?}"
+            ),
+            "tilted_default" => assert!(
+                distinct.len() >= 8,
+                "tilted_default: the 3D tumble's depth cue must spread the shades (got {} distinct)",
+                distinct.len()
+            ),
+            _ => unreachable!("unexpected pinned rotor name {name}"),
+        }
+        eprintln!(
+            "C1 wasm leg [{name} = ({rc},{r12},{r13},{r23})]: ALL 262,144 pixels (512x512) == the \
+             independent oracle; {} distinct shades (bands {min_shade}..={max_shade}).",
+            distinct.len()
+        );
+    }
+
+    // --- 180 frame == identity frame point-reflected through the center
+    // (up to the step-16 slab offset), asserted via the ORACLE relation (not a
+    // hand-baked image): under e12_180, v' = (-x,-y,z0), and (-x,-y) is the
+    // slab point of pixel (512-px, 512-py) under identity. So the 180 shade at
+    // (px,py) equals the identity shade at the reflected pixel, at EVERY pixel.
+    for py in [0, 137, 256, 400, 511i32] {
+        for px in [0, 91, 256, 373, 511i32] {
+            let s180 = clifford_oracle_q12(px, py, 0, 4096, 0, 0);
+            let s_id_reflected = clifford_oracle_q12(512 - px, 512 - py, 4096, 0, 0, 0);
+            assert_eq!(
+                s180, s_id_reflected,
+                "e12_180 at ({px},{py}) must equal identity at the reflected ({}, {})",
+                512 - px,
+                512 - py
+            );
+        }
+    }
+
+    eprintln!(
+        "C1 wasm leg: Fe clifford_pixel_q12 -> wasm under wasmtime; ALL 4 pinned rotors \
+         pixel-exact vs the oracle over the full 512x512; identity + e12_180 integer-EXACT at \
+         every pixel (z' via the trivector), 180 == identity point-reflected."
+    );
+}
+
+/// The EVM leg's shim: a parameterless `clifford_probe()` free function that
+/// packs the kernel's shade at 5 pixels (the 4 corners + the center) under the
+/// 180-deg e12 rotor base-1000 (each shade is 0..=255, so 1000 is injective and
+/// the packing is exact), plus a trivial `run()` recv arm returning it as
+/// `u256`. Appended to the UNCHANGED `CLIFFORD_Q12_SOURCE`, so the kernel body
+/// is byte-identical to the wasm/SPIR-V legs; the EVM leg adds only the probe fn
+/// and the recv arm.
+///
+/// The kernel returns i32 (to dodge the wasm/SPIR-V Cast surface), and Fe
+/// rightly refuses `i32 as u256` as a non-provably-lossless sign change. Each
+/// clamped shade is 0..=255, so we take it into a u8 via `.downcast_unchecked()`
+/// (a checked-off narrowing sign change; the runtime EVM path lowers it, per
+/// `int_downcast.fe`) and then widen `u8 as u256` (the lossless unsigned widen
+/// the mandelbrot probe relied on). All of this is EVM-path-only.
+const CLIFFORD_Q12_EVM_WRAPPER: &str = "\
+use core::num::IntDowncast\n\
+\n\
+pub fn clifford_probe() -> u256 {\n\
+\x20   let s0: u8 = clifford_pixel_q12(px: 0, py: 0, rc: 0, r12: 4096, r13: 0, r23: 0).downcast_unchecked()\n\
+\x20   let s1: u8 = clifford_pixel_q12(px: 511, py: 0, rc: 0, r12: 4096, r13: 0, r23: 0).downcast_unchecked()\n\
+\x20   let s2: u8 = clifford_pixel_q12(px: 0, py: 511, rc: 0, r12: 4096, r13: 0, r23: 0).downcast_unchecked()\n\
+\x20   let s3: u8 = clifford_pixel_q12(px: 511, py: 511, rc: 0, r12: 4096, r13: 0, r23: 0).downcast_unchecked()\n\
+\x20   let s4: u8 = clifford_pixel_q12(px: 256, py: 256, rc: 0, r12: 4096, r13: 0, r23: 0).downcast_unchecked()\n\
+\x20   let p0: u256 = s0 as u256\n\
+\x20   let p1: u256 = s1 as u256\n\
+\x20   let p2: u256 = s2 as u256\n\
+\x20   let p3: u256 = s3 as u256\n\
+\x20   let p4: u256 = s4 as u256\n\
+\x20   p0 + p1 * 1000 + p2 * 1000000 + p3 * 1000000000 + p4 * 1000000000000\n\
+}\n\
+\n\
+use std::abi::sol\n\
+\n\
+msg CliffordMsg {\n\
+\x20   #[selector = sol(\"run()\")]\n\
+\x20   Run -> u256,\n\
+}\n\
+\n\
+pub contract CliffordExec {\n\
+\x20   recv CliffordMsg {\n\
+\x20       Run -> u256 {\n\
+\x20           clifford_probe()\n\
+\x20       }\n\
+\x20   }\n\
+}\n";
+
+/// C1 EVM leg: the SAME Fe kernel compiled to EVM bytecode (`BackendKind::
+/// Sonatina`) and executed under revm, agreeing with the oracle at 5 probe
+/// pixels under the 180-deg e12 rotor (the exact hand anchor). The signed Q12
+/// ops (Slt/Sar) are native on the EVM path, so this puts all executed Fe
+/// backends on the record for the rotor sandwich. The base-1000 packing is
+/// re-derived here from the independent oracle, never copied.
+#[test]
+fn clifford_rotor_q12_evm_spot_check() {
+    use fe_contract_harness::{ExecutionOptions, FeContractHarness, bytes_to_u256};
+
+    // The 5 probe pixels, in the SAME order and base-1000 positions as the Fe
+    // `clifford_probe()` fn: p0..p4 = corners + center, all under e12_180.
+    const PROBE_PIXELS: [(i32, i32); 5] = [(0, 0), (511, 0), (0, 511), (511, 511), (256, 256)];
+    let mut want: u64 = 0;
+    let mut scale: u64 = 1;
+    for (px, py) in PROBE_PIXELS {
+        want += clifford_oracle_q12(px, py, 0, 4096, 0, 0) as u64 * scale;
+        scale *= 1000;
+    }
+
+    let source = format!("{CLIFFORD_Q12_SOURCE}\n{CLIFFORD_Q12_EVM_WRAPPER}");
+    let harness = FeContractHarness::compile("CliffordExec", &source)
+        .expect("clifford probe EVM contract should compile");
+    let mut instance = harness
+        .deploy_with_init()
+        .expect("clifford probe EVM contract should deploy under revm");
+    let result = instance
+        .call_function("run()", &[], ExecutionOptions::default())
+        .expect("run() should execute under revm");
+    let value = bytes_to_u256(&result.return_data).expect("run() should return one u256 word");
+
+    // 5 shades each <= 255 packed base-1000 is < 2^64, so it lives in the low
+    // limb; the upper 192 bits must be zero.
+    assert!(
+        value.as_limbs()[1..].iter().all(|&limb| limb == 0),
+        "the base-1000 packing must fit in the low 64 bits (got upper limbs {:?})",
+        &value.as_limbs()[1..]
+    );
+    assert_eq!(
+        value.as_limbs()[0],
+        want,
+        "revm clifford_probe() base-1000 packing must equal the oracle packing = {want}"
+    );
+
+    eprintln!(
+        "C1 EVM leg: Fe clifford_probe() (5 probe pixels of the rotor sandwich under e12_180) \
+         executed under revm; base-1000 packing == the oracle packing {want}."
+    );
+}

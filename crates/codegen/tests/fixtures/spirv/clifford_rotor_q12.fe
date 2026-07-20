@@ -1,0 +1,46 @@
+// C1 (clifford ladder rung 1): the Cl(3) ROTOR SANDWICH v' = R v ~R per
+// pixel, signed Q12 (1.0 = 4096). The rotor R = rc + r12 e12 + r13 e13 +
+// r23 e23 arrives as four broadcast params (host-computed cos/sin of the
+// half angle; the kernel never sees trig). v = x e1 + y e2 + z0 e3 is the
+// pixel's slab point; the rotated point samples a 3D checker lattice
+// (sum-parity trick, no bitwise ops), depth-cued by z'.
+//
+// Grid convention (M1): the first two params ARE gid.xy, declared i32
+// (pixel indices < 2^15). Envelope: Add/Sub/Mul/Slt/Sar ONLY (the M2 set);
+// compares keep the variable LEFT and a literal RIGHT (M0 rule); every
+// shift amount is a literal (fork imm-only u32 Sar arm). Returns i32 to
+// avoid the wasm/SPIR-V Cast surface (output clamped to 0..255 anyway).
+pub fn clifford_pixel_q12(px: i32, py: i32, rc: i32, r12: i32, r13: i32, r23: i32) -> i32 {
+    // pixel -> slab point, Q12: view [-1.0, 1.0) at 512px (step 16), z0 = 0.5.
+    let x: i32 = (px - 256) * 16
+    let y: i32 = (py - 256) * 16
+    let z: i32 = 2048
+
+    // First geometric product t = R v: grade 1 + grade 3. Blade products
+    // (Euclidean Cl(3), derived; the acceptance anchors are the sign oracle):
+    //   e12 e1 = -e2   e12 e2 =  e1   e12 e3 =  e123
+    //   e13 e1 = -e3   e13 e2 = -e123 e13 e3 =  e1
+    //   e23 e1 =  e123 e23 e2 = -e3   e23 e3 =  e2
+    let t1: i32 = (rc * x + r12 * y + r13 * z) >> 12
+    let t2: i32 = (rc * y - r12 * x + r23 * z) >> 12
+    let t3: i32 = (rc * z - r13 * x - r23 * y) >> 12
+    let tw: i32 = (r12 * z - r13 * y + r23 * x) >> 12  // e123: LOAD-BEARING (2.3)
+
+    // Second product v' = t ~R (reverse negates grade 2). Grade-1 output;
+    // the outgoing e123 component is identically zero in exact algebra
+    // (hand-cancellation in the spec) and is not computed.
+    let sx: i32 = (rc * t1 + r12 * t2 + r13 * t3 + r23 * tw) >> 12
+    let sy: i32 = (rc * t2 - r12 * t1 - r13 * tw + r23 * t3) >> 12
+    let sz: i32 = (rc * t3 + r12 * tw - r13 * t1 - r23 * t2) >> 12
+
+    // 3D checker: 0.5-unit cells; sum parity == XOR of per-axis parities.
+    // parity(n) = n - ((n >> 1) * 2), exact for negatives (Sar floors).
+    let cell: i32 = (sx >> 11) + (sy >> 11) + (sz >> 11)
+    let par: i32 = cell - ((cell >> 1) * 2)
+
+    // two-tone + depth cue, clamped to 0..255 (Slt only).
+    let mut shade: i32 = par * 160 + 48 + (sz >> 7)
+    if shade < 0 { shade = 0 }
+    if shade < 256 { return shade }
+    255
+}
