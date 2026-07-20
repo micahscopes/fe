@@ -17,7 +17,7 @@ pub use layout::{
 #[cfg(feature = "spirv-backend")]
 pub use sonatina::{
     compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
-    compile_runtime_package_spirv_with_workgroup,
+    compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
 };
 pub use sonatina::{
     LowerError, SonatinaContractBytecode, SonatinaTestOptions, emit_ingot_sonatina_bytecode,

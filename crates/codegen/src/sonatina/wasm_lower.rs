@@ -45,7 +45,7 @@ use sonatina_ir::{
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
     inst::{
-        arith::{Add, Mul, Sar, Sub},
+        arith::{Add, Mul, Sar, Shr, Sub},
         cmp::{Eq as CmpEq, Lt, Slt},
         control_flow::{Br, Call, Jump, Return, Unreachable},
     },
@@ -788,20 +788,19 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     ArithBinOp::Sub => self.fb.insert_inst(Sub::new(is, lhs, rhs), ty),
                     ArithBinOp::Mul => self.fb.insert_inst(Mul::new(is, lhs, rhs), ty),
                     ArithBinOp::RShift => {
-                        // Signed `>>` is Sar (arithmetic); sonatina's constructor
-                        // order is (bits, value), the EVM path's convention
-                        // (lower_runtime.rs:4101-4109). Unsigned `>>` stays R2:
-                        // opening Shr here without a fork SPIR-V arm would create a
-                        // silent-skip path in the translator.
+                        // Sonatina's shift constructor order is (bits, value), the
+                        // EVM path's convention (lower_runtime.rs:4101-4109). Signed
+                        // `>>` is Sar (arithmetic); unsigned `>>` is Shr (logical).
+                        // Both arms are live now that fork push #3 opened the
+                        // matching u32 `Shr` arm in the SPIR-V emitter and the
+                        // type-keyed `Shr` (-> I32ShrU) in the sonatina wasm
+                        // translator, so neither is a silent-skip path; the u32
+                        // color-ramp shift (`(i * 655) >> 8`, the M4 coloring) flows
+                        // end to end on both backends.
                         if self.operand_signedness(lhs_local, rhs_local)? {
                             self.fb.insert_inst(Sar::new(is, rhs, lhs), ty)
                         } else {
-                            return Err(LowerError::Unsupported(
-                                "wasm target: unsigned `>>` is R2 (M2 opened only signed i32 \
-                                 `>>`/Sar; the unsigned/bitwise set lands with the M4 coloring \
-                                 sweep)"
-                                    .to_string(),
-                            ));
+                            self.fb.insert_inst(Shr::new(is, rhs, lhs), ty)
                         }
                     }
                     other => {

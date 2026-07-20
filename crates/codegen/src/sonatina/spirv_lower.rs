@@ -132,3 +132,56 @@ pub fn compile_runtime_package_spirv_grid(
             )
         })
 }
+
+/// Lower a MIR runtime package to naga-validated SPIR-V in RENDER mode: ONE
+/// SPIR-V module with TWO entry points. A fixed fullscreen-triangle `@vertex`
+/// stage synthesizes 3 vertices from `@builtin(vertex_index)` (no vertex buffer,
+/// no varyings), and a `@fragment` stage binds args 0,1 to `u32(position.xy)`
+/// (the render analog of Grid's `global_invocation_id.xy`), runs the SAME
+/// mode-blind body translation, and returns `unpack4x8unorm(result)` as an
+/// `@location(0) vec4<f32>` color written straight to the render target. There is
+/// NO output storage buffer (binding 0 absent); args 2.. still load from the
+/// broadcast input struct at `@group(0) @binding(1)`.
+///
+/// Render is a driver-declared envelope fact (there is no content signal), the
+/// same ruling as workgroup size and grid: the resulting `SpirvLayout` states it
+/// (`mode: Render`, `vertex_entry`, `fragment_entry`, `color_target_format`) and
+/// the kernel-blind runner consumes it. Render mode has no workgroup size (the
+/// layout records `[0, 0, 0]`). Fail-closed in the translator: u32 word only,
+/// >= 2 args, no ObjAlloc, mutually exclusive with grid/batch.
+///
+/// Body is identical to [`compile_runtime_package_spirv_grid`] plus `.with_render()`
+/// (and NO `.with_grid()`/workgroup size) on the `SpirvBackend` builder.
+pub fn compile_runtime_package_spirv_render(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+) -> Result<SpirvArtifact, LowerError> {
+    // CONSULT (DispatchKind axis): the SPIR-V target realizes the `Kernel` kind.
+    // In render mode the two entry points (`@vertex` + `@fragment`) are still
+    // invoked directly by the render pipeline against a bound resource interface;
+    // its envelope is stated by the unit's `SpirvLayout`, not an in-band selector,
+    // and there is no synthesized dispatch root. Naming what this lowering already
+    // does; a mismatch fires in debug, zero release effect.
+    debug_assert!(
+        {
+            let kind = crate::dispatch::DispatchKind::for_backend(crate::BackendKind::Spirv);
+            matches!(kind, crate::dispatch::DispatchKind::Kernel) && kind.entries_invoked_directly()
+        },
+        "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
+    );
+    // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
+    let (module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+
+    SpirvBackend::new()
+        .with_render()
+        .compile_module(&module)
+        .map_err(|errors| {
+            LowerError::Spirv(
+                errors
+                    .iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })
+}

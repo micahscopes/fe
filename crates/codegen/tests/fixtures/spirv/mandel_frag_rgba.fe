@@ -1,0 +1,46 @@
+// R1b/R2 (renderer-in-Fe): the escape-time mandelbrot AND its integer color map
+// as ONE render fragment. The escape-time body is BYTE-IDENTICAL to
+// mandel_pixel_q12 (signed Q12 fixed point, 1.0 = 4096; the same fixed 512x512
+// view, step 24, base -8192/-6144, threshold 4.0 in Q24 = 67108864, `>> 12`); the
+// only addition is the M4 color map, folded into the SAME loop.
+//
+// Render binding (spec section 4.1): the first two params ARE the pixel
+// coordinates (render mode binds them to `u32(position.xy)`, exactly as grid
+// binds `global_invocation_id.xy`; y=0 is the top row, so it is the SAME image as
+// the compute grid, no flip). The return value is a PACKED RGBA8 word, little
+// -endian byte order r,g,b,a (`r | g<<8 | b<<16 | a<<24`), which `unpack4x8unorm`
+// maps to the `vec4<f32>` color exactly and which equals the rgba8unorm texture's
+// byte stream on readback (byte-exact tri-equality).
+//
+// Structurizer discipline (spec 4.2): the color map CANNOT live after the loop or
+// in the escape block (the emitter resolves exit-block returns only when they are
+// phis or immediates). So `color` is a LOOP-CARRIED variable updated in the
+// accept branch (the emitter already carries zr/zi/i there; one more phi is
+// generic machinery), the escape returns the carried color (a phi), and the
+// interior returns an immediate. Everything is Add/Sub/Mul/Sar/Shr-immediate/Slt:
+// no `select`, no top-level `if`, structurizer untouched.
+pub fn mandel_frag_rgba(px: i32, py: i32) -> u32 {
+    let c_re: i32 = -8192 + px * 24
+    let c_im: i32 = -6144 + py * 24
+    let mut zr: i32 = 0
+    let mut zi: i32 = 0
+    let mut i: u32 = 0
+    let mut color: u32 = 4278190080
+    while i < 100 {
+        let rr: i32 = zr * zr
+        let ii: i32 = zi * zi
+        let mag: i32 = rr + ii
+        if mag < 67108864 {
+            let t: i32 = rr - ii
+            let nzi: i32 = ((zr * 2) * zi) >> 12
+            zr = (t >> 12) + c_re
+            zi = nzi + c_im
+            i = i + 1
+            let v: u32 = (i * 655) >> 8
+            color = v + v * 256 + (255 - v) * 65536 + 4278190080
+        } else {
+            return color
+        }
+    }
+    4278190080
+}

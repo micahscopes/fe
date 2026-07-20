@@ -2454,3 +2454,579 @@ fn clifford_rotor_q12_executes_on_lavapipe_browser_profile() {
          params earn R-lava."
     );
 }
+
+// ===========================================================================
+// R1b/R2 (renderer-in-Fe): the mandelbrot escape-time AND its color map as ONE
+// Fe FRAGMENT shader, compiled through the driver-declared Render seam into ONE
+// SPIR-V module with TWO entry points (a fixed fullscreen-triangle @vertex + a
+// @fragment that IS the fractal), and RENDERED byte-exact on lavapipe vs an
+// independent oracle AND the wasm leg (tri-equal for the RENDERED image).
+//
+// The escape-time body is BYTE-IDENTICAL to mandel_pixel_q12 (signed Q12, the
+// same fixed 512x512 view); the addition is the M4 integer color map folded into
+// the SAME loop as a loop-carried color phi (spec 4.2). The one new op is `Shr`
+// (logical `>>` on the u32 color ramp), opened fail-closed-then-u32 by fork
+// push #3 alongside the Render prologue/epilogue.
+// ===========================================================================
+
+/// The SSOT render fixture: `include_str!`-ed here so the tested source and the
+/// (later) shipped source are byte-identical by construction.
+const MANDEL_FRAG_RGBA_SOURCE: &str = include_str!("fixtures/spirv/mandel_frag_rgba.fe");
+
+/// The independent Q12 escape-time + color-map oracle, re-derived HERE from the
+/// kernel logic (never trusted from the spec), integer-identical to the fixture:
+/// the SAME i32 escape math as `mandel_oracle_q12` (arithmetic `>>` on i32, the
+/// same literals and escape convention), plus the integer ramp `v = (i*655) >> 8`
+/// (LOGICAL `>>` on u32, matching the Fe `Shr`) packed r=g=v, b=255-v, a=255. The
+/// return is the packed little-endian RGBA8 word `unpack4x8unorm` maps exactly to
+/// the rgba8unorm target's bytes.
+///
+/// `color` is initialized to the fixture's (dead) init value: the first loop
+/// iteration always enters the accept branch (zr=zi=0 => mag=0 < threshold), so
+/// the init never surfaces on an escape; matched here only for exactness.
+fn mandel_frag_oracle(px: i32, py: i32) -> u32 {
+    let c_re: i32 = -8192 + px * 24;
+    let c_im: i32 = -6144 + py * 24;
+    let mut zr: i32 = 0;
+    let mut zi: i32 = 0;
+    let mut i: u32 = 0;
+    let mut color: u32 = 4_278_190_080;
+    while i < 100 {
+        let rr: i32 = zr * zr;
+        let ii: i32 = zi * zi;
+        let mag: i32 = rr + ii;
+        if mag < 67_108_864 {
+            let t: i32 = rr - ii;
+            let nzi: i32 = ((zr * 2) * zi) >> 12; // arithmetic (i32), uses the OLD zr
+            zr = (t >> 12) + c_re;
+            zi = nzi + c_im;
+            i += 1;
+            let v: u32 = (i * 655) >> 8; // LOGICAL (u32): the color ramp Shr, 0..255
+            color = v + v * 256 + (255 - v) * 65536 + 4_278_190_080;
+        } else {
+            return color; // escape: the carried ramp color
+        }
+    }
+    4_278_190_080 // interior: opaque black
+}
+
+/// Compile the render fixture to wasm through `BackendKind::Wasm`. The fragment
+/// function is an ordinary `(i32, i32) -> i32` export on the wasm path (Fe `u32`
+/// lowers to wasm `i32`); calling it per pixel is the wasm leg of the tri-equal.
+fn compile_mandel_frag_rgba_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandel_frag_rgba_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDEL_FRAG_RGBA_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("mandel_frag_rgba should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// Count the `OpEntryPoint` (opcode 15) instructions in a raw SPIR-V word stream
+/// by walking the instruction headers past the 5-word module header. A Render
+/// module must carry exactly TWO (the @vertex + @fragment stages in ONE module).
+fn count_spirv_entry_points(words: &[u32]) -> usize {
+    let mut eps = 0usize;
+    let mut idx = 5usize; // skip the 5-word SPIR-V header
+    while idx < words.len() {
+        let opword = words[idx];
+        let wc = (opword >> 16) as usize;
+        if (opword & 0xffff) == 15 {
+            eps += 1;
+        }
+        if wc == 0 {
+            break;
+        }
+        idx += wc;
+    }
+    eps
+}
+
+/// R2 render harness: execute a Render-mode WGSL OFFSCREEN on lavapipe (browser
+/// profile, `Features::empty()`): a `w x h` rgba8unorm target
+/// (RENDER_ATTACHMENT | COPY_SRC), the fullscreen-triangle `draw(0..3)`, then
+/// `copy_texture_to_buffer` (256-aligned bytes_per_row) + readback. Returns the
+/// TIGHTLY-packed RGBA bytes (row padding stripped) when the GPU ran the shader.
+///
+/// ANTI-FUDGE (verbatim from the grid/keystone harnesses): a missing
+/// adapter/device is a HARD FAILURE, never a silent skip; the only escape is
+/// `MB2_ALLOW_GPU_SKIP`, which downgrades the rung honestly (returns `None`).
+/// Ported from the fork's executed render probe + the file's grid harness.
+fn run_render_rgba8_on_lavapipe(wgsl: &str, w: u32, h: u32, input: &[u8]) -> Option<Vec<u8>> {
+    let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
+
+    let instance = wgpu::Instance::default();
+    let adapter = match pollster::block_on(instance.request_adapter(
+        &wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            ..Default::default()
+        },
+    )) {
+        Ok(a) => a,
+        Err(e) => {
+            if allow_skip {
+                eprintln!(
+                    "  render SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}"
+                );
+                return None;
+            }
+            panic!(
+                "render SPIR-V leg: no GPU/Vulkan adapter available ({e:?}). The render rung \
+                 requires lavapipe to EXECUTE; a missing device is a hard failure, not a skip. \
+                 Set VK_ICD_FILENAMES / LD_LIBRARY_PATH / WGPU_BACKEND=vulkan for lavapipe, or \
+                 MB2_ALLOW_GPU_SKIP to downgrade the rung on a genuinely GPU-less host."
+            );
+        }
+    };
+
+    // BROWSER PROFILE: NO required features (drop SHADER_INT64), exactly what a
+    // WebGPU browser offers. A real failure here means the fragment is NOT
+    // browser-viable, a STOP condition, not a skip.
+    let (device, queue) = match pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            ..Default::default()
+        },
+    )) {
+        Ok(dq) => dq,
+        Err(e) => {
+            if allow_skip {
+                eprintln!(
+                    "  render SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): device request failed: {e:?}"
+                );
+                return None;
+            }
+            panic!(
+                "render SPIR-V leg: browser-profile device request (NO required features) failed \
+                 ({e:?}). This is a hard failure, not a skip."
+            );
+        }
+    };
+
+    eprintln!(
+        "  render SPIR-V leg GPU adapter (BROWSER PROFILE, no required features): {}",
+        adapter.get_info().name
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("mandel_frag_render"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+
+    // The broadcast input storage buffer at @group(0) @binding(1), FRAGMENT
+    // visibility. v1 fragments take no broadcast params (`input.is_empty()`), so
+    // the 4-byte dummy floor keeps the unused binding valid; a param-carrying
+    // fragment writes its words before the draw.
+    let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("render_input"),
+        size: input.len().max(4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    if !input.is_empty() {
+        queue.write_buffer(&input_buf, 0, input);
+    }
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("render_bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("render_pl"),
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("render_bg"),
+        layout: &bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 1,
+            resource: input_buf.as_entire_binding(),
+        }],
+    });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("fullscreen"),
+        layout: Some(&pl),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_fullscreen"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("render_target"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+
+    // 256-aligned bytes_per_row (COPY_BYTES_PER_ROW_ALIGNMENT). For 512x4 = 2048
+    // this is already aligned; assert to document the invariant.
+    let bytes_per_row = ((w * 4 + 255) / 256) * 256;
+    assert_eq!(
+        bytes_per_row % 256,
+        0,
+        "copy_texture_to_buffer bytes_per_row must be 256-aligned"
+    );
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("render_staging"),
+        size: u64::from(bytes_per_row * h),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("render_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        tx.send(r).expect("map_async callback channel should be open");
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(std::time::Duration::from_secs(30)),
+    });
+    rx.recv()
+        .expect("map_async callback should fire")
+        .expect("staging buffer should map for read");
+    let data = slice.get_mapped_range();
+    let row = (w * 4) as usize;
+    let mut out = Vec::with_capacity(row * h as usize);
+    for y in 0..h {
+        let off = (y * bytes_per_row) as usize;
+        out.extend_from_slice(&data[off..off + row]);
+    }
+    drop(data);
+    staging.unmap();
+
+    Some(out)
+}
+
+/// R1b (validation, GPU-FREE): the Fe fragment kernel compiles through the Render
+/// driver seam into ONE naga-validated SPIR-V module with TWO entry points
+/// (@vertex + @fragment), states its render ABI, and its browser-profile WGSL
+/// carries the render epilogue (`unpack4x8unorm`, `@location(0)`), the escape loop
+/// (`loop`), and the signed-i32 sign mapping (`bitcast<i32>`).
+#[test]
+fn mandel_frag_rgba_compiles_to_render_spirv() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandel_frag_rgba_render.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDEL_FRAG_RGBA_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("mandel_frag_rgba should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("mandel_frag_rgba should compile Fe -> naga-validated SPIR-V in Render mode");
+
+    // --- Render ABI (self-describing layout). ---
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render,
+        "the render driver seam must state LayoutMode::Render"
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the render fragment must lower to the u32 word (browser profile)"
+    );
+    assert!(
+        artifact.layout.result.is_none(),
+        "Render mode has no single-slot result: the color target is the result"
+    );
+    assert_eq!(
+        artifact.layout.workgroup_size,
+        [0, 0, 0],
+        "Render mode has no workgroup size"
+    );
+    assert_eq!(
+        artifact.layout.vertex_entry.as_deref(),
+        Some("vs_fullscreen"),
+        "Render mode states the @vertex entry name"
+    );
+    assert_eq!(
+        artifact.layout.fragment_entry.as_deref(),
+        Some("fs_main"),
+        "Render mode states the @fragment entry name"
+    );
+    assert_eq!(
+        artifact.layout.color_target_format.as_deref(),
+        Some("rgba8unorm"),
+        "Render mode states its color-target format"
+    );
+    assert!(
+        artifact
+            .layout
+            .bindings
+            .iter()
+            .all(|b| b.role != sonatina_codegen::isa::spirv::Role::Output),
+        "Render mode has no output storage binding (the color target is the output)"
+    );
+
+    // --- TWO entry points in ONE SPIR-V module. ---
+    assert_eq!(
+        count_spirv_entry_points(&artifact.words),
+        2,
+        "one Render SPIR-V module must carry BOTH entry points (@vertex + @fragment)"
+    );
+
+    // --- Browser-profile WGSL gate + the render/fractal honesty tokens. ---
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the render fragment");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("@vertex"),
+        "render WGSL must contain the @vertex stage; got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("@fragment"),
+        "render WGSL must contain the @fragment stage; got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("@location(0)"),
+        "the fragment must write @location(0); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("unpack4x8unorm"),
+        "the render epilogue must be unpack4x8unorm (packed u32 -> vec4<f32>); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("loop"),
+        "the fractal WGSL must contain a `loop` (the escape loop, not a flattened body); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("bitcast<i32>"),
+        "the fractal WGSL must contain `bitcast<i32>` (the signed Slt/Sar sign mapping); got:\n{wgsl}"
+    );
+    eprintln!(
+        "R1b: Fe mandel_frag_rgba compiled -> ONE Render SPIR-V module, 2 entry points \
+         (@vertex + @fragment), browser-profile WGSL with unpack4x8unorm + @location(0) + loop + \
+         bitcast<i32>. {} SPIR-V words.",
+        artifact.words.len()
+    );
+}
+
+/// The fixed R2 render view: a 512x512 frame (spec 5.1), the SAME view the M2
+/// compute grid uses (mandel_frag_rgba reuses mandel_pixel_q12's Q12 coordinate
+/// map), so the rendered image is the same fractal, now colored ON the GPU.
+const FRAG_W: u32 = 512;
+const FRAG_H: u32 = 512;
+
+/// R2 headline (spec 5.1): the Fe FRAGMENT shader RENDERS on lavapipe at the
+/// browser profile, and every one of 262,144 pixels x 4 bytes is TRI-EQUAL: the
+/// rendered rgba8unorm texture == the independent `mandel_frag_oracle` == the
+/// wasm execution of the SAME Fe function. That three-way per-byte agreement over
+/// the whole rendered frame earns "Fe emitted a working render pipeline" as a
+/// fact. Exact equality is legitimate: unorm8 round-trip is exact, the target is
+/// rgba8unorm (NOT srgb), and blending is off.
+///
+/// Hard-fail-not-skip: a missing GPU is a hard failure; the only escape is
+/// `MB2_ALLOW_GPU_SKIP` (adapter printed on execute). The name contains
+/// "lavapipe" so the nextest serial group filter (`test(lavapipe)`) catches it.
+#[test]
+fn mandel_frag_rgba_renders_on_lavapipe_browser_profile() {
+    // --- Compile the fragment through the Render driver seam. ---
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandel_frag_rgba_lavapipe.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDEL_FRAG_RGBA_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("mandel_frag_rgba should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("mandel_frag_rgba should compile Fe -> naga-validated SPIR-V in Render mode");
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render,
+        "the render driver seam must state LayoutMode::Render"
+    );
+    assert_eq!(
+        count_spirv_entry_points(&artifact.words),
+        2,
+        "one Render SPIR-V module must carry BOTH entry points"
+    );
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the render fragment");
+    assert_browser_profile_wgsl(wgsl);
+
+    // --- The wasm leg: the SAME Fe function under wasmtime over the whole frame,
+    // returning the packed RGBA8 color per pixel (Fe u32 -> wasm i32 -> u32). ---
+    let wasm_bytes = compile_mandel_frag_rgba_to_wasm();
+    let wasm_colors = wasm_grid_all(&wasm_bytes, FRAG_W, FRAG_H, "mandel_frag_rgba");
+
+    // --- The GPU leg: RENDER the fragment on lavapipe (browser profile, 512x512
+    // rgba8unorm offscreen target) and compare every pixel's 4 bytes to BOTH the
+    // oracle AND the wasm leg (tri-equal for the RENDERED image). ---
+    match run_render_rgba8_on_lavapipe(wgsl, FRAG_W, FRAG_H, &[]) {
+        Some(rgba) => {
+            assert_eq!(
+                rgba.len(),
+                (FRAG_W * FRAG_H * 4) as usize,
+                "render readback must be 512*512*4 = 1048576 bytes (tightly packed)"
+            );
+            let mut distinct = std::collections::HashSet::new();
+            for y in 0..FRAG_H {
+                for x in 0..FRAG_W {
+                    let idx = (y * FRAG_W + x) as usize;
+                    let px = &rgba[idx * 4..idx * 4 + 4];
+                    let oracle = mandel_frag_oracle(x as i32, y as i32);
+                    let oracle_bytes = oracle.to_le_bytes();
+                    let wasm_bytes_px = wasm_colors[idx].to_le_bytes();
+                    assert_eq!(
+                        px, &oracle_bytes,
+                        "lavapipe rendered pixel ({x},{y}) RGBA {px:?} must equal the oracle color \
+                         {oracle_bytes:?} (packed 0x{oracle:08X})"
+                    );
+                    assert_eq!(
+                        px, &wasm_bytes_px,
+                        "lavapipe rendered pixel ({x},{y}) RGBA {px:?} must equal the wasm leg color \
+                         {wasm_bytes_px:?} for the same (x,y)"
+                    );
+                    distinct.insert(oracle);
+                }
+            }
+
+            // Recognizability, DERIVED from the rendered image (not baked): the
+            // interior center is opaque BLACK, the fast-escape corner is a colored
+            // (non-black) band, and the color histogram is non-degenerate. An
+            // all-black, an all-one-color, or a transposed image could not pass.
+            let center = (256 * FRAG_W + 256) as usize;
+            assert_eq!(
+                &rgba[center * 4..center * 4 + 4],
+                &[0x00, 0x00, 0x00, 0xFF],
+                "GPU center pixel (256,256) -> c=-0.5+0i is interior: opaque black 0xFF000000"
+            );
+            assert_eq!(
+                mandel_frag_oracle(256, 256),
+                0xFF00_0000,
+                "the oracle agrees the interior center is opaque black"
+            );
+            // The corner (0,0) escapes fast (i=1); its color is the ramp at i=1,
+            // which is NOT black (b channel is bright). Confirm the rendered corner
+            // is non-black AND equals the oracle.
+            let corner_black = &rgba[0..4] == [0x00, 0x00, 0x00, 0xFF];
+            assert!(
+                !corner_black,
+                "GPU corner pixel (0,0) escapes fast and must be a COLORED band, not black; got {:?}",
+                &rgba[0..4]
+            );
+            assert!(
+                distinct.len() >= 10,
+                "the rendered color histogram must have >= 10 distinct colors (got {}); a \
+                 degenerate image could not",
+                distinct.len()
+            );
+
+            eprintln!(
+                "R2: Fe mandel_frag_rgba RENDERED on lavapipe (browser profile, 512x512 \
+                 rgba8unorm); ALL 262,144 pixels (x4 bytes) TRI-EQUAL (texture == oracle == wasm); \
+                 {} distinct colors; interior=black + fast-escape corner colored. The Fe compiler \
+                 compiled the fractal AND its coloring; the GPU rendered every pixel; JavaScript \
+                 painted nothing. Render mode earns R-lava.",
+                distinct.len()
+            );
+        }
+        None => {
+            eprintln!(
+                "R-val only: render SPIR-V validated (browser profile) but NOT executed (GPU \
+                 skipped via MB2_ALLOW_GPU_SKIP). The 262,144-pixel rendered tri-equal claim is \
+                 NOT earned on this run."
+            );
+        }
+    }
+}
