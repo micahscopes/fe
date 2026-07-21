@@ -1,0 +1,670 @@
+// mb2 G-L1: the recursive geometric product over RBin, VERIFIED AT COMPILE TIME.
+//
+// THE ARTIFACT. One structural definition of the Clifford geometric product,
+// written ONCE for the node combinator of the Fuchs-Thery recursive multivector,
+// is proven EQUAL to the independently CTFE-generated flat Cayley-table product,
+// at every probed signature, ENTIRELY AT COMPILE TIME (`static_assert`, no VM).
+// This is the first keystone-consuming, generated, structural artifact of the
+// generator-first pivot: the fold, the table, and the equality are all CTFE.
+//
+// THE REPRESENTATION (Fuchs-Thery, AACA 2014): a Cl(n) multivector is a PAIR of
+// Cl(n-1) multivectors, M = a + b*e_n (a = the e_n-free half, b = the e_n half),
+// so the TYPE is the depth-n binary tree `MvT<n>` computed by the `recursive type
+// fn` keystone. It is the value-level twin of the schedule shape `RBin<Pair, n>`
+// that `crates/hir/test_files/ty_check/clifford_blades.fe` names the blade tree;
+// the ty_check twin `clifford_gp_recursive.fe` ties the two trees to ONE depth N.
+// Leaf index i = blade bitset i (bit k = generator e_{k+1}); the MSB-first tree
+// path IS the blade encoding, so leaf i is the coefficient of blade i in the flat
+// Cayley convention, no permutation anywhere.
+//
+// THE PRODUCT is structural recursion, defined once for the node combinator:
+//   (a1 + b1 e_n)(a2 + b2 e_n)
+//     = (a1*a2 + eps * b1*hat(b2))  +  (a1*b2 + b1*hat(a2)) e_n
+// eps = e_n^2 comes from the signature PER LEVEL (`metric_code`: +1 / -1 / 0),
+// and hat() (grade involution) is itself a one-line structural sub-fold
+// (hat(a + b e_n) = hat(a) - hat(b) e_n). Four INDEPENDENT sub-products per level
+// (the parallel forks of the shape); the combine is the Comp phase. This is
+// GENERIC-N: the call tree's depth, width, and combine placement come from
+// monomorphizing `MvT<N>`, replacing `clifford_gp_exec.fe`'s hand-unrolled
+// gp0..gp3 per-level form. It RETIRES that fixture's A8 deferral ("generic-N gp
+// is not built"): generic-N gp is built here, at the term level, today.
+//
+// THE WEDGE is the SAME fold at the fully degenerate signature (0,0,n).
+//
+// THE VERIFICATION (three independent witnesses, all at COMPILE TIME):
+//   1. the recursive fold (structural recursion + involution) - the thing tested;
+//   2. the signature-parametric CTFE Cayley-table product (swap-parity + metric
+//      sign, the mb2-garamon-probe algorithm), a DIFFERENT algorithm, compared
+//      component-wise by `static_assert`, dense, at Cl(2) gp AND wedge, Cl(3),
+//      Cl(0,1) (complex), Cl(1,1) (non-uniform metric), degenerate PGA Cl(2,0,1),
+//      and conformal Cl(4,1) (32 comps, depth 5);
+//   3. a third, fully independent Python sort-based oracle: five pinned dense
+//      Cl(4,1) components plus I^2 = -1 (the sign a hand-written flat probe once
+//      got wrong and CTFE caught), asserted against the RECURSIVE fold.
+//
+// SUBSTRATE: the fold==table correctness is pinned by `static_assert`, evaluated
+// by the compiler's CTFE engine - NO EVM, NO revm, NO VM of any kind. Fe is a
+// real general language; the whole product and its proof are compile-time values.
+// This fixture carries NO `#[test]` deliberately: a `static_assert` that fails
+// makes compilation fail (proven: a wrong signature yields `error[8-0081]`), so
+// the compiler itself is the oracle. The runtime data-parallel realization (wasm
+// leg, then GPU stage kernels checked tri-equal against this same table at every
+// dimension and signature) is the L3 rung, staged later; no parallelism or GPU
+// claim is made here.
+//
+// Coefficient ring: Z / 2^256, two's-complement negatives (fixture convention).
+
+use core::ops::{WrappingAdd, WrappingSub, WrappingMul}
+
+// ---------------------------------------------------------------------------
+// The recursive multivector: Sc = Cl(0) (a scalar), Nd<A> = A + A*e_top.
+// MvT<N> is the depth-N pair tree, computed by the keystone `recursive type fn`
+// (the value-level twin of std::conal's RBin<T, N> schedule shape).
+// ---------------------------------------------------------------------------
+
+pub struct Sc {
+    pub s: u256,
+}
+pub struct Nd<A> {
+    pub a: A, // the e_n-free half
+    pub b: A, // the e_n half
+}
+
+impl Copy for Sc {}
+impl<A: Copy> Copy for Nd<A> {}
+
+recursive type fn MvT<const N: usize>() -> (*) {
+    match N {
+        0 => Sc
+        _ => Nd<MvT<{N - 1}>>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structural vocabulary: sign application, grade involution, addition.
+// Sign codes (the CTFE convention): 0 => +1, 1 => -1, 2 => 0. Every trait method
+// is `const fn` so the fold evaluates through generic bounds inside CTFE.
+// ---------------------------------------------------------------------------
+
+const fn rneg(_ v: u256) -> u256 {
+    (0 as u256).wrapping_sub(v)
+}
+
+trait ApSign {
+    const fn ap_sign(self, _ code: usize) -> Self
+}
+impl ApSign for Sc {
+    const fn ap_sign(self, _ code: usize) -> Self {
+        if code == 0 {
+            self
+        } else if code == 1 {
+            Sc { s: rneg(self.s) }
+        } else {
+            Sc { s: 0 }
+        }
+    }
+}
+impl<A: ApSign> ApSign for Nd<A> {
+    const fn ap_sign(self, _ code: usize) -> Self {
+        Nd { a: self.a.ap_sign(code), b: self.b.ap_sign(code) }
+    }
+}
+
+/// Grade involution hat(): flips odd grades. Structural: the e_n half gains one
+/// grade, so hat(a + b e_n) = hat(a) - hat(b) e_n; on scalars it is identity.
+trait Invol {
+    const fn invol(self) -> Self
+}
+impl Invol for Sc {
+    const fn invol(self) -> Self {
+        self
+    }
+}
+impl<A: Invol + ApSign> Invol for Nd<A> {
+    const fn invol(self) -> Self {
+        Nd { a: self.a.invol(), b: self.b.invol().ap_sign(1) }
+    }
+}
+
+trait GaAdd {
+    const fn gadd(self, _ o: Self) -> Self
+}
+impl GaAdd for Sc {
+    const fn gadd(self, _ o: Self) -> Self {
+        Sc { s: self.s.wrapping_add(o.s) }
+    }
+}
+impl<A: GaAdd> GaAdd for Nd<A> {
+    const fn gadd(self, _ o: Self) -> Self {
+        Nd { a: self.a.gadd(o.a), b: self.b.gadd(o.b) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The metric: eps = e_n^2 in Cl(p, q, r), for the 1-based top generator n.
+// (p, q, r) means e_1..e_p square +1, e_{p+1}..e_{p+q} square -1, rest 0.
+// ---------------------------------------------------------------------------
+
+const fn metric_code(_ n: usize, _ p: usize, _ q: usize) -> usize {
+    if n <= p {
+        0
+    } else if n <= p + q {
+        1
+    } else {
+        2
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE GEOMETRIC PRODUCT: one structural definition, every dimension, every
+// signature. n = the dimension at this level; the wedge is gp at (p,q) = (0,0).
+// ---------------------------------------------------------------------------
+
+trait Gp {
+    const fn gp(self, _ o: Self, _ n: usize, _ p: usize, _ q: usize) -> Self
+}
+impl Gp for Sc {
+    const fn gp(self, _ o: Self, _ n: usize, _ p: usize, _ q: usize) -> Self {
+        Sc { s: self.s.wrapping_mul(o.s) }
+    }
+}
+impl<A: Gp + Invol + GaAdd + ApSign + Copy> Gp for Nd<A> {
+    const fn gp(self, _ o: Self, _ n: usize, _ p: usize, _ q: usize) -> Self {
+        let eps = metric_code(n, p, q)
+        // the four INDEPENDENT sub-products (the parallel forks of this level)
+        let a1a2 = self.a.gp(o.a, n - 1, p, q)
+        let b1hb2 = self.b.gp(o.b.invol(), n - 1, p, q)
+        let a1b2 = self.a.gp(o.b, n - 1, p, q)
+        let b1ha2 = self.b.gp(o.a.invol(), n - 1, p, q)
+        // the combine: even half gets the metric-signed cross term
+        Nd { a: a1a2.gadd(b1hb2.ap_sign(eps)), b: a1b2.gadd(b1ha2) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Leaf access (MSB-first path = blade bitset): read and build dense trees.
+// ---------------------------------------------------------------------------
+
+trait GetLeaf {
+    const fn get_leaf(self, _ i: usize, _ size: usize) -> u256
+}
+impl GetLeaf for Sc {
+    const fn get_leaf(self, _ i: usize, _ size: usize) -> u256 {
+        self.s
+    }
+}
+impl<A: GetLeaf> GetLeaf for Nd<A> {
+    const fn get_leaf(self, _ i: usize, _ size: usize) -> u256 {
+        let half = size / 2
+        if i < half {
+            self.a.get_leaf(i, half)
+        } else {
+            self.b.get_leaf(i - half, half)
+        }
+    }
+}
+
+trait SetLeaf {
+    const fn set_leaf(self, _ i: usize, _ size: usize, _ v: u256) -> Self
+}
+impl SetLeaf for Sc {
+    const fn set_leaf(self, _ i: usize, _ size: usize, _ v: u256) -> Self {
+        Sc { s: v }
+    }
+}
+impl<A: SetLeaf + Copy> SetLeaf for Nd<A> {
+    const fn set_leaf(self, _ i: usize, _ size: usize, _ v: u256) -> Self {
+        let half = size / 2
+        if i < half {
+            Nd { a: self.a.set_leaf(i, half, v), b: self.b }
+        } else {
+            Nd { a: self.a, b: self.b.set_leaf(i - half, half, v) }
+        }
+    }
+}
+
+// zero trees per depth (mechanical const builders)
+const fn z0() -> MvT<0> {
+    Sc { s: 0 }
+}
+const fn z1() -> MvT<1> {
+    Nd { a: z0(), b: z0() }
+}
+const fn z2() -> MvT<2> {
+    Nd { a: z1(), b: z1() }
+}
+const fn z3() -> MvT<3> {
+    Nd { a: z2(), b: z2() }
+}
+const fn z5() -> MvT<5> {
+    let z4: MvT<4> = Nd { a: z3(), b: z3() }
+    Nd { a: z4, b: z4 }
+}
+
+// ---------------------------------------------------------------------------
+// THE INDEPENDENT ORACLE: the signature-parametric CTFE Cayley-table product
+// (swap-parity + metric-sign, from mb2-garamon-probe.fe). Different algorithm,
+// same algebra. Tables are per-size (the recursive representation above is the
+// dimension-generic one); every table entry is a compile-time value.
+// ---------------------------------------------------------------------------
+
+const fn swap_parity(_ a: usize, _ b: usize, _ dim: usize) -> usize {
+    let mut total: usize = 0
+    let mut k: usize = 0
+    while k < dim {
+        if (b >> k) & 1 == 1 {
+            let mut j: usize = k + 1
+            while j < dim {
+                total += (a >> j) & 1
+                j += 1
+            }
+        }
+        k += 1
+    }
+    total % 2
+}
+
+const fn gp_sign(_ a: usize, _ b: usize, _ p: usize, _ q: usize, _ r: usize) -> usize {
+    let mut neg = swap_parity(a, b, p + q + r)
+    let shared = a & b
+    let mut i: usize = 0
+    while i < p + q + r {
+        if (shared >> i) & 1 == 1 {
+            if i >= p + q {
+                return 2
+            }
+            if i >= p {
+                neg += 1
+            }
+        }
+        i += 1
+    }
+    neg % 2
+}
+
+const fn build_sign2(_ p: usize, _ q: usize, _ r: usize) -> [[usize; 2]; 2] {
+    let mut t: [[usize; 2]; 2] = [[0; 2]; 2]
+    let mut a: usize = 0
+    while a < 2 {
+        let mut b: usize = 0
+        while b < 2 {
+            t[a][b] = gp_sign(a, b, p, q, r)
+            b += 1
+        }
+        a += 1
+    }
+    t
+}
+
+const fn build_sign4(_ p: usize, _ q: usize, _ r: usize) -> [[usize; 4]; 4] {
+    let mut t: [[usize; 4]; 4] = [[0; 4]; 4]
+    let mut a: usize = 0
+    while a < 4 {
+        let mut b: usize = 0
+        while b < 4 {
+            t[a][b] = gp_sign(a, b, p, q, r)
+            b += 1
+        }
+        a += 1
+    }
+    t
+}
+
+const fn build_sign8(_ p: usize, _ q: usize, _ r: usize) -> [[usize; 8]; 8] {
+    let mut t: [[usize; 8]; 8] = [[0; 8]; 8]
+    let mut a: usize = 0
+    while a < 8 {
+        let mut b: usize = 0
+        while b < 8 {
+            t[a][b] = gp_sign(a, b, p, q, r)
+            b += 1
+        }
+        a += 1
+    }
+    t
+}
+
+const fn build_sign32(_ p: usize, _ q: usize, _ r: usize) -> [[usize; 32]; 32] {
+    let mut t: [[usize; 32]; 32] = [[0; 32]; 32]
+    let mut a: usize = 0
+    while a < 32 {
+        let mut b: usize = 0
+        while b < 32 {
+            t[a][b] = gp_sign(a, b, p, q, r)
+            b += 1
+        }
+        a += 1
+    }
+    t
+}
+
+// the signatures under test: Euclidean Cl(2)/Cl(3), the wedge = Cl(0,0,2),
+// complex Cl(0,1), non-uniform Lorentzian Cl(1,1), degenerate PGA Cl(2,0,1),
+// and conformal Cl(4,1) (Garamon's headline algebra)
+const SIGN2_CL01: [[usize; 2]; 2] = build_sign2(0, 1, 0)
+const SIGN4_CL2: [[usize; 4]; 4] = build_sign4(2, 0, 0)
+const SIGN4_WEDGE: [[usize; 4]; 4] = build_sign4(0, 0, 2)
+const SIGN4_CL11: [[usize; 4]; 4] = build_sign4(1, 1, 0)
+const SIGN8_CL3: [[usize; 8]; 8] = build_sign8(3, 0, 0)
+const SIGN8_PGA: [[usize; 8]; 8] = build_sign8(2, 0, 1)
+const SIGN32_CL41: [[usize; 32]; 32] = build_sign32(4, 1, 0)
+
+// CTFE teeth on the ORACLE itself (a wrong sign is a compile error)
+static_assert(SIGN8_CL3[3][5] == 1)     // e12 e13 = -e23
+static_assert(SIGN8_CL3[7][7] == 1)     // e123^2 = -1
+static_assert(SIGN4_WEDGE[1][1] == 2)   // e1 ^ e1 = 0
+static_assert(SIGN4_CL11[1][1] == 0)    // Cl(1,1): e1^2 = +1
+static_assert(SIGN4_CL11[2][2] == 1)    // Cl(1,1): e2^2 = -1
+static_assert(SIGN2_CL01[1][1] == 1)    // Cl(0,1): e1^2 = -1 (complex i)
+static_assert(SIGN8_PGA[4][4] == 2)     // Cl(2,0,1): e3^2 = 0
+static_assert(SIGN32_CL41[16][16] == 1) // Cl(4,1): e5^2 = -1
+
+const fn sgn_apply(_ code: usize, _ v: u256) -> u256 {
+    if code == 0 {
+        v
+    } else if code == 1 {
+        rneg(v)
+    } else {
+        0
+    }
+}
+
+const fn table_product2(_ x: [u256; 2], _ y: [u256; 2], _ signs: [[usize; 2]; 2]) -> [u256; 2] {
+    let mut out: [u256; 2] = [0; 2]
+    let mut i: usize = 0
+    while i < 2 {
+        let mut j: usize = 0
+        while j < 2 {
+            let k = i ^ j
+            out[k] = out[k].wrapping_add(sgn_apply(signs[i][j], x[i].wrapping_mul(y[j])))
+            j += 1
+        }
+        i += 1
+    }
+    out
+}
+
+const fn table_product4(_ x: [u256; 4], _ y: [u256; 4], _ signs: [[usize; 4]; 4]) -> [u256; 4] {
+    let mut out: [u256; 4] = [0; 4]
+    let mut i: usize = 0
+    while i < 4 {
+        let mut j: usize = 0
+        while j < 4 {
+            let k = i ^ j
+            out[k] = out[k].wrapping_add(sgn_apply(signs[i][j], x[i].wrapping_mul(y[j])))
+            j += 1
+        }
+        i += 1
+    }
+    out
+}
+
+const fn table_product8(_ x: [u256; 8], _ y: [u256; 8], _ signs: [[usize; 8]; 8]) -> [u256; 8] {
+    let mut out: [u256; 8] = [0; 8]
+    let mut i: usize = 0
+    while i < 8 {
+        let mut j: usize = 0
+        while j < 8 {
+            let k = i ^ j
+            out[k] = out[k].wrapping_add(sgn_apply(signs[i][j], x[i].wrapping_mul(y[j])))
+            j += 1
+        }
+        i += 1
+    }
+    out
+}
+
+const fn table_product32(_ x: [u256; 32], _ y: [u256; 32], _ signs: [[usize; 32]; 32]) -> [u256; 32] {
+    let mut out: [u256; 32] = [0; 32]
+    let mut i: usize = 0
+    while i < 32 {
+        let mut j: usize = 0
+        while j < 32 {
+            let k = i ^ j
+            out[k] = out[k].wrapping_add(sgn_apply(signs[i][j], x[i].wrapping_mul(y[j])))
+            j += 1
+        }
+        i += 1
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// THE PROOF. Each signature's RECURSIVE-fold output is computed ONCE as a const
+// array (`fold_dense*`), and the INDEPENDENT table product ONCE. `static_assert`
+// then pins fold == generated table (component-wise via `eq*`) AND pins
+// individual components to the shipped-fixture / third-party (Python sort-based)
+// oracle numbers. Every value here is a compile-time const; a mismatch is a
+// compile error. Ring: Z / 2^256; the dense inputs are the shipped oracles.
+// ---------------------------------------------------------------------------
+
+// dense-fold-to-array helpers: load both operands from leaf arrays, run the
+// recursive fold at the given signature, read all leaves back out.
+const fn fold_dense2(_ xs: [u256; 2], _ ys: [u256; 2], _ p: usize, _ q: usize) -> [u256; 2] {
+    let mut x = z1()
+    let mut y = z1()
+    let mut i: usize = 0
+    while i < 2 {
+        x = x.set_leaf(i, 2, xs[i])
+        y = y.set_leaf(i, 2, ys[i])
+        i += 1
+    }
+    let g = x.gp(y, 1, p, q)
+    let mut out: [u256; 2] = [0; 2]
+    i = 0
+    while i < 2 {
+        out[i] = g.get_leaf(i, 2)
+        i += 1
+    }
+    out
+}
+
+const fn fold_dense4(_ xs: [u256; 4], _ ys: [u256; 4], _ p: usize, _ q: usize) -> [u256; 4] {
+    let mut x = z2()
+    let mut y = z2()
+    let mut i: usize = 0
+    while i < 4 {
+        x = x.set_leaf(i, 4, xs[i])
+        y = y.set_leaf(i, 4, ys[i])
+        i += 1
+    }
+    let g = x.gp(y, 2, p, q)
+    let mut out: [u256; 4] = [0; 4]
+    i = 0
+    while i < 4 {
+        out[i] = g.get_leaf(i, 4)
+        i += 1
+    }
+    out
+}
+
+const fn fold_dense8(_ xs: [u256; 8], _ ys: [u256; 8], _ p: usize, _ q: usize) -> [u256; 8] {
+    let mut x = z3()
+    let mut y = z3()
+    let mut i: usize = 0
+    while i < 8 {
+        x = x.set_leaf(i, 8, xs[i])
+        y = y.set_leaf(i, 8, ys[i])
+        i += 1
+    }
+    let g = x.gp(y, 3, p, q)
+    let mut out: [u256; 8] = [0; 8]
+    i = 0
+    while i < 8 {
+        out[i] = g.get_leaf(i, 8)
+        i += 1
+    }
+    out
+}
+
+const fn fold_dense32(_ xs: [u256; 32], _ ys: [u256; 32], _ p: usize, _ q: usize) -> [u256; 32] {
+    let mut x = z5()
+    let mut y = z5()
+    let mut i: usize = 0
+    while i < 32 {
+        x = x.set_leaf(i, 32, xs[i])
+        y = y.set_leaf(i, 32, ys[i])
+        i += 1
+    }
+    let g = x.gp(y, 5, p, q)
+    let mut out: [u256; 32] = [0; 32]
+    i = 0
+    while i < 32 {
+        out[i] = g.get_leaf(i, 32)
+        i += 1
+    }
+    out
+}
+
+// component-wise array equality over the ring (no short-circuit needed)
+const fn eq2(_ a: [u256; 2], _ b: [u256; 2]) -> bool {
+    let mut ok = true
+    let mut i: usize = 0
+    while i < 2 {
+        if a[i] != b[i] {
+            ok = false
+        }
+        i += 1
+    }
+    ok
+}
+const fn eq4(_ a: [u256; 4], _ b: [u256; 4]) -> bool {
+    let mut ok = true
+    let mut i: usize = 0
+    while i < 4 {
+        if a[i] != b[i] {
+            ok = false
+        }
+        i += 1
+    }
+    ok
+}
+const fn eq8(_ a: [u256; 8], _ b: [u256; 8]) -> bool {
+    let mut ok = true
+    let mut i: usize = 0
+    while i < 8 {
+        if a[i] != b[i] {
+            ok = false
+        }
+        i += 1
+    }
+    ok
+}
+const fn eq32(_ a: [u256; 32], _ b: [u256; 32]) -> bool {
+    let mut ok = true
+    let mut i: usize = 0
+    while i < 32 {
+        if a[i] != b[i] {
+            ok = false
+        }
+        i += 1
+    }
+    ok
+}
+
+// dense operand oracles (shipped-fixture conventions)
+const XS2: [u256; 2] = [1, 2]
+const YS2: [u256; 2] = [3, 4]
+const XS4: [u256; 4] = [1, 2, 3, 4]
+const YS4: [u256; 4] = [5, 6, 7, 8]
+const XS8: [u256; 8] = [1, 2, 3, 4, 5, 6, 7, 8]
+const YS8: [u256; 8] = [9, 10, 11, 12, 13, 14, 15, 16]
+const V3: [u256; 8] = [0, 2, 3, 0, 4, 0, 0, 0]  // v = 2e1 + 3e2 + 4e3
+const PS3: [u256; 8] = [0, 0, 0, 0, 0, 0, 0, 1] // pseudoscalar e123
+
+const fn ramp32(_ base: usize, _ step: usize) -> [u256; 32] {
+    let mut a: [u256; 32] = [0; 32]
+    let mut i: usize = 0
+    while i < 32 {
+        a[i] = (base + step * i) as u256
+        i += 1
+    }
+    a
+}
+const fn onehot32(_ k: usize) -> [u256; 32] {
+    let mut a: [u256; 32] = [0; 32]
+    a[k] = 1
+    a
+}
+const XS32: [u256; 32] = ramp32(1, 1)
+const YS32: [u256; 32] = ramp32(3, 2)
+const E5V: [u256; 32] = onehot32(16)  // e5 = blade 16
+const I5V: [u256; 32] = onehot32(31)  // I = e12345 = blade 31
+
+// each RECURSIVE fold runs exactly ONCE (const-evaluated at compile time)
+const CL2_GP: [u256; 4] = fold_dense4(XS4, YS4, 2, 0)
+const CL2_WEDGE: [u256; 4] = fold_dense4(XS4, YS4, 0, 0)
+const CL11: [u256; 4] = fold_dense4(XS4, YS4, 1, 1)
+const CL3_GP: [u256; 8] = fold_dense8(XS8, YS8, 3, 0)
+const PGA: [u256; 8] = fold_dense8(XS8, YS8, 2, 0)
+const CL01: [u256; 2] = fold_dense2(XS2, YS2, 0, 1)
+const CL41: [u256; 32] = fold_dense32(XS32, YS32, 4, 1)
+const CL3_VSQ: [u256; 8] = fold_dense8(V3, V3, 3, 0)
+const CL3_PSQ: [u256; 8] = fold_dense8(PS3, PS3, 3, 0)
+const CL41_E5SQ: [u256; 32] = fold_dense32(E5V, E5V, 4, 1)
+const CL41_ISQ: [u256; 32] = fold_dense32(I5V, I5V, 4, 1)
+
+// each INDEPENDENT table product runs exactly ONCE
+const CL2_GP_T: [u256; 4] = table_product4(XS4, YS4, SIGN4_CL2)
+const CL2_WEDGE_T: [u256; 4] = table_product4(XS4, YS4, SIGN4_WEDGE)
+const CL11_T: [u256; 4] = table_product4(XS4, YS4, SIGN4_CL11)
+const CL3_GP_T: [u256; 8] = table_product8(XS8, YS8, SIGN8_CL3)
+const PGA_T: [u256; 8] = table_product8(XS8, YS8, SIGN8_PGA)
+const CL01_T: [u256; 2] = table_product2(XS2, YS2, SIGN2_CL01)
+const CL41_T: [u256; 32] = table_product32(XS32, YS32, SIGN32_CL41)
+
+// ---- THE HEADLINE: recursive fold == independently-generated Cayley table,
+// dense, EVERY component, at every probed signature, ALL at compile time (a
+// mismatch at any component of any signature is a compile error) ----
+static_assert(eq4(CL2_GP, CL2_GP_T))       // Cl(2)     Euclidean
+static_assert(eq4(CL2_WEDGE, CL2_WEDGE_T)) // Cl(2)     wedge (same fold, sig 0,0)
+static_assert(eq8(CL3_GP, CL3_GP_T))       // Cl(3)     Euclidean
+static_assert(eq2(CL01, CL01_T))           // Cl(0,1)   complex
+static_assert(eq4(CL11, CL11_T))           // Cl(1,1)   NON-UNIFORM metric
+static_assert(eq8(PGA, PGA_T))             // Cl(2,0,1) degenerate PGA
+static_assert(eq32(CL41, CL41_T))          // Cl(4,1)   conformal, 32 comps, depth 5
+
+// ---- PINNED ORACLE LEAVES: the recursive fold's components, pinned to the
+// shipped-fixture and third-party (Python sort-based) oracle numbers. Wrong-sign
+// tripwires by construction, independent of the table algorithm. ----
+
+// Cl(2) headline: 6 + 20e1 + 14e2 + 24e12
+static_assert(CL2_GP[0] == 6)
+static_assert(CL2_GP[1] == 20)
+static_assert(CL2_GP[2] == 14)
+static_assert(CL2_GP[3] == 24)
+// Cl(2) wedge: 5 + 16e1 + 22e2 + 24e12
+static_assert(CL2_WEDGE[0] == 5)
+static_assert(CL2_WEDGE[1] == 16)
+static_assert(CL2_WEDGE[2] == 22)
+static_assert(CL2_WEDGE[3] == 24)
+// Cl(3) dense: [-238, -188, 246, 232, -166, -116, 190, 192]
+static_assert(CL3_GP[0] == rneg(238))
+static_assert(CL3_GP[1] == rneg(188))
+static_assert(CL3_GP[2] == 246)
+static_assert(CL3_GP[3] == 232)
+static_assert(CL3_GP[4] == rneg(166))
+static_assert(CL3_GP[5] == rneg(116))
+static_assert(CL3_GP[6] == 190)
+static_assert(CL3_GP[7] == 192)
+// Cl(3) identities: v*v = |v|^2 = 29 (a pure scalar); e123^2 = -1
+static_assert(CL3_VSQ[0] == 29)
+static_assert(CL3_VSQ[1] == 0)
+static_assert(CL3_VSQ[7] == 0)
+static_assert(CL3_PSQ[0] == rneg(1))
+static_assert(CL3_PSQ[7] == 0)
+// Cl(0,1): (1 + 2i)(3 + 4i) = -5 + 10i
+static_assert(CL01[0] == rneg(5))
+static_assert(CL01[1] == 10)
+// Cl(4,1): e5^2 = -1 and I^2 = -1 (the sign a flat probe once got wrong by hand;
+// the RECURSIVE fold gets it, caught by CTFE)
+static_assert(CL41_E5SQ[0] == rneg(1))
+static_assert(CL41_E5SQ[16] == 0)
+static_assert(CL41_ISQ[0] == rneg(1))
+static_assert(CL41_ISQ[31] == 0)
+// Cl(4,1) THIRD, fully independent Python sort-based oracle: five dense comps
+static_assert(CL41[0] == 268)
+static_assert(CL41[1] == 540)
+static_assert(CL41[4] == rneg(2964))
+static_assert(CL41[17] == rneg(3220))
+static_assert(CL41[31] == 2244)

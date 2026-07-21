@@ -1,0 +1,200 @@
+---
+source: crates/hir/tests/ty_check.rs
+assertion_line: 46
+expression: res
+input_file: test_files/ty_check/clifford_gp_recursive.fe
+---
+note:
+   ┌─ clifford_gp_recursive.fe:47:24
+   │
+47 │ fn takes_mvt0(_ x: Sc) {}
+   │                        ^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:48:23
+   │
+48 │   fn mvt0_nf(x: MvT<0>) {
+   │ ╭───────────────────────^
+49 │ │     takes_mvt0(x)
+50 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:49:5
+   │
+49 │     takes_mvt0(x)
+   │     ^^^^^^^^^^ fn takes_mvt0
+
+note:
+   ┌─ clifford_gp_recursive.fe:49:5
+   │
+49 │     takes_mvt0(x)
+   │     ^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:49:16
+   │
+49 │     takes_mvt0(x)
+   │                ^ Sc
+
+note:
+   ┌─ clifford_gp_recursive.fe:54:32
+   │
+54 │ fn takes_mvt2(_ x: Nd<Nd<Sc>>) {}
+   │                                ^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:55:23
+   │
+55 │   fn mvt2_nf(x: MvT<2>) {
+   │ ╭───────────────────────^
+56 │ │     takes_mvt2(x)
+57 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:56:5
+   │
+56 │     takes_mvt2(x)
+   │     ^^^^^^^^^^ fn takes_mvt2
+
+note:
+   ┌─ clifford_gp_recursive.fe:56:5
+   │
+56 │     takes_mvt2(x)
+   │     ^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:56:16
+   │
+56 │     takes_mvt2(x)
+   │                ^ Nd<Nd<Sc>>
+
+note:
+   ┌─ clifford_gp_recursive.fe:61:36
+   │
+61 │ fn takes_mvt3(_ x: Nd<Nd<Nd<Sc>>>) {}
+   │                                    ^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:62:23
+   │
+62 │   fn mvt3_nf(x: MvT<3>) {
+   │ ╭───────────────────────^
+63 │ │     takes_mvt3(x)
+64 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:63:5
+   │
+63 │     takes_mvt3(x)
+   │     ^^^^^^^^^^ fn takes_mvt3
+
+note:
+   ┌─ clifford_gp_recursive.fe:63:5
+   │
+63 │     takes_mvt3(x)
+   │     ^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:63:16
+   │
+63 │     takes_mvt3(x)
+   │                ^ Nd<Nd<Nd<Sc>>>
+
+note:
+   ┌─ clifford_gp_recursive.fe:73:50
+   │
+73 │ fn takes_rbin2(_ x: Comp<Comp<Par, Pair>, Pair>) {}
+   │                                                  ^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:74:31
+   │
+74 │   fn rbin2_nf(x: RBin<Pair, 2>) {
+   │ ╭───────────────────────────────^
+75 │ │     takes_rbin2(x)
+76 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:75:5
+   │
+75 │     takes_rbin2(x)
+   │     ^^^^^^^^^^^ fn takes_rbin2
+
+note:
+   ┌─ clifford_gp_recursive.fe:75:5
+   │
+75 │     takes_rbin2(x)
+   │     ^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:75:17
+   │
+75 │     takes_rbin2(x)
+   │                 ^ Comp<Comp<Par, Pair>, Pair>
+
+note:
+   ┌─ clifford_gp_recursive.fe:81:76
+   │
+81 │ fn takes_cl3_buffer(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+   │                                                                            ^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:82:56
+   │
+82 │   fn cl3_buffer_nf(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+   │ ╭────────────────────────────────────────────────────────^
+83 │ │     takes_cl3_buffer(x)
+84 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:83:5
+   │
+83 │     takes_cl3_buffer(x)
+   │     ^^^^^^^^^^^^^^^^ fn takes_cl3_buffer
+
+note:
+   ┌─ clifford_gp_recursive.fe:83:5
+   │
+83 │     takes_cl3_buffer(x)
+   │     ^^^^^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ clifford_gp_recursive.fe:83:22
+   │
+83 │     takes_cl3_buffer(x)
+   │                      ^ StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>
+
+note:
+   ┌─ clifford_gp_recursive.fe:91:49
+   │
+91 │   fn mvt_sym<const N: usize>(x: MvT<N>) -> MvT<N> {
+   │ ╭─────────────────────────────────────────────────^
+92 │ │     x
+93 │ │ }
+   │ ╰─^ MvT<const N: usize>
+
+note:
+   ┌─ clifford_gp_recursive.fe:92:5
+   │
+92 │     x
+   │     ^ MvT<const N: usize>
+
+note:
+    ┌─ clifford_gp_recursive.fe:101:31
+    │
+101 │   ) -> B::Buffer<RBin<Pair, N>> {
+    │ ╭───────────────────────────────^
+102 │ │     x
+103 │ │ }
+    │ ╰─^ B::Buffer<RBin<Pair, const N: usize>>
+
+note:
+    ┌─ clifford_gp_recursive.fe:102:5
+    │
+102 │     x
+    │     ^ B::Buffer<RBin<Pair, const N: usize>>

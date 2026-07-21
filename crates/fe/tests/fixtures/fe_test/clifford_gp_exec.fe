@@ -18,8 +18,12 @@
 // even/odd half-buffers (O(1) slot arithmetic, no data movement), materializes the
 // two grade involutions into scratch, and combines. This fixed-n unrolled form is
 // EXACTLY the code an A8 SGK provider would generate at ground `N` (the "Garamon
-// generator as a compiler provider" future); generic-N gp is the honestly-deferred
-// A8 piece and is NOT built here.
+// generator as a compiler provider" future). The generic-N gp that A8 deferred is
+// now BUILT (G-L1): `clifford_gp_recursive_exec.fe` writes the product ONCE as a
+// structural fold over the `recursive type fn` multivector `MvT<N>`, uniform over
+// dimension AND signature, and proves it equal to the generated Cayley table at
+// compile time. This fixture keeps the per-level unrolled form as that fold's
+// byte-identical ground-`N` oracle.
 //
 // THE RING IS PARAMETERIZED BY A MASK `m` (one recursion, three uses):
 //   - `m = FULL` (2^256-1): the EVM-native `Z / 2^256` ring; `& FULL` is identity,

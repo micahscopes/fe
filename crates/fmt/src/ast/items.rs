@@ -1633,10 +1633,20 @@ impl ToDoc for ast::TypeAlias {
 
 impl ToDoc for ast::RecursiveTypeFn {
     fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
-        // `recursive type fn` does not have a specialized layout yet; render it
-        // like other not-yet-specialized item-like nodes (preserves the source
-        // token stream, including comments, without reformatting the body).
-        token_doc_item_like(ctx, self.syntax())
+        // `recursive type fn` does not have a specialized layout yet. The
+        // item-like token walker drops node children it does not recognize
+        // (the `(*)` kind return type and the type-fn `match` body) and the
+        // `fn` keyword, so it cannot round-trip this item. Until a real layout
+        // exists, emit the item verbatim from source (line-split so the pretty
+        // printer keeps the original indentation), which preserves the token
+        // stream and the body exactly.
+        let alloc = &ctx.alloc;
+        let verbatim = ctx.snippet_trimmed(self);
+        intersperse(
+            alloc,
+            verbatim.lines().map(|line| alloc.text(line.to_string())),
+            alloc.hardline(),
+        )
     }
 }
 

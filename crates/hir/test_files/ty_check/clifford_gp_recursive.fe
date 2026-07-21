@@ -1,0 +1,103 @@
+// mb2 G-L1 (ty_check twin): the VALUE tree of the recursive geometric product,
+// tied to the SCHEDULE tree at one depth const N.
+//
+// The executed fixture `crates/fe/tests/fixtures/fe_test/clifford_gp_recursive.fe`
+// (sic: `clifford_gp_recursive_exec.fe`) runs ONE structural geometric product as
+// a fold over `MvT<N>`, the value-level multivector, and proves it equal to the
+// generated Cayley table at compile time. `MvT<N>` is the value-level twin of the
+// SCHEDULE shape `RBin<Pair, N>` that `clifford_blades.fe` names the Fuchs-Thery
+// blade tree (`Mv(n)` is a perfect binary tree of depth n; one level per
+// generator). This fixture machine-checks that BOTH trees are the SAME inductive
+// object at the SAME depth N: the compiler computes each per-N normal form, and
+// the `takes_*` acceptors are the teeth (a zero-diagnostic call is definitional
+// equality at the boundary, so the projected + unfolded type reached exactly the
+// hand-written normal form).
+//
+// `new_stand_alone` seeds builtin `core` AND `std`, so this exercises the real
+// `std::conal::RBin` and the real `std::evm::EvmBackend` alongside the
+// fixture-local value tree. Every leg is zero-diagnostic.
+
+use core::backend::Backend
+use core::StorPtr
+use std::conal::{RBin, Par, Pair, Comp}
+use std::evm::EvmBackend
+
+// ---- the VALUE tree: Sc = Cl(0) scalar leaf, Nd<A> = A + A*e_top ----
+
+pub struct Sc {
+    pub s: u256,
+}
+pub struct Nd<A> {
+    pub a: A,
+    pub b: A,
+}
+
+// `MvT<N>` folds the SAME depth N as `RBin`: the value-level multivector of Cl(N),
+// a perfect binary pair tree of depth N (2^N leaves = 2^N blades).
+recursive type fn MvT<const N: usize>() -> (*) {
+    match N {
+        0 => Sc
+        _ => Nd<MvT<{N - 1}>>
+    }
+}
+
+// ---- 1. the compiler computes the Cl(n) VALUE tree, per N ----
+
+// Cl(0): the bare scalar. `MvT<0>` is definitionally `Sc`.
+fn takes_mvt0(_ x: Sc) {}
+fn mvt0_nf(x: MvT<0>) {
+    takes_mvt0(x)
+}
+
+// Cl(2), dim 4: `MvT<2>` is definitionally `Nd<Nd<Sc>>` (the depth-2 pair tree;
+// its four leaves are the blades 1, e1, e2, e12 in MSB-first path order).
+fn takes_mvt2(_ x: Nd<Nd<Sc>>) {}
+fn mvt2_nf(x: MvT<2>) {
+    takes_mvt2(x)
+}
+
+// Cl(3), dim 8 (the keystone depth): `MvT<3>` is definitionally `Nd<Nd<Nd<Sc>>>`
+// (the even subalgebra of Cl(3) is the quaternions).
+fn takes_mvt3(_ x: Nd<Nd<Nd<Sc>>>) {}
+fn mvt3_nf(x: MvT<3>) {
+    takes_mvt3(x)
+}
+
+// ---- 2. the two trees, ONE depth N: value tree twin of the schedule tree ----
+
+// The SCHEDULE tree at N=2: `RBin<Pair, 2>` is definitionally
+// `Comp<Comp<Par, Pair>, Pair>` (clifford_blades.fe's blade tree, the coefficient
+// container schedule). The SAME N=2 that produces the value tree `Nd<Nd<Sc>>`
+// above produces this schedule tree: one `Comp`/`Nd` level per generator. Two
+// faces of one inductive object.
+fn takes_rbin2(_ x: Comp<Comp<Par, Pair>, Pair>) {}
+fn rbin2_nf(x: RBin<Pair, 2>) {
+    takes_rbin2(x)
+}
+
+// The blade tree as an EVM coefficient container: `EvmBackend::Buffer<RBin<Pair, 3>>`
+// projects + unfolds confluently to `StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>`,
+// the depth-3 schedule twin of the value tree `MvT<3> = Nd<Nd<Nd<Sc>>>`.
+fn takes_cl3_buffer(_ x: StorPtr<Comp<Comp<Comp<Par, Pair>, Pair>, Pair>>) {}
+fn cl3_buffer_nf(x: EvmBackend::Buffer<RBin<Pair, 3>>) {
+    takes_cl3_buffer(x)
+}
+
+// ---- 3. symbolic legs: both trees flow opaquely under a symbolic depth N ----
+
+// Rigid struct, symbolic depth: `MvT<N>` stays opaque under symbolic `N` (no
+// spurious unfold); recorded NF is `MvT<const N: usize>`. The dimension-generic
+// value multivector, exactly what the recursive fold consumes.
+fn mvt_sym<const N: usize>(x: MvT<N>) -> MvT<N> {
+    x
+}
+
+// Symbolic backend AND symbolic depth: `B::Buffer<RBin<Pair, N>>` stays opaque
+// (the schedule stays opaque under the opaque projection). The backend-generic
+// coefficient container of a symbolic-dimension multivector, the schedule-side
+// companion of `mvt_sym`.
+fn cl_coeffs_sym<B: Backend, const N: usize>(
+    x: B::Buffer<RBin<Pair, N>>
+) -> B::Buffer<RBin<Pair, N>> {
+    x
+}
