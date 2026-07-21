@@ -1,0 +1,71 @@
+// I2 (interactive controls-in-Fe): the VIEW CONTROLLER, compiled ONLY to wasm.
+// Pure, stateless, oracle-checkable. JavaScript never does view arithmetic: it
+// forwards one event to update_view and relays the returned triple.
+//
+// The view is (center_re, center_im, scale_q), three i32 (spec section 2):
+// center_* in signed Q12 (1.0 = 4096) clamped to [-10240, 10240] (+-2.5);
+// scale_q the Q12.4 step/px clamped to [16, 384] (1..24 Q12-units/px, the ~24x
+// fixed-point ceiling). Those clamps ARE the fragment's no-overflow contract.
+//
+// The multi-return ruling (spec section 4): native wasm multi-value. The mb2 wasm
+// backend flattens a scalar-tuple return into N wasm results (R2.1), so
+// update_view returns (i32, i32, i32) and JS receives a plain 3-element array.
+// The result order IS the fragment's broadcast-param order (center_re, center_im,
+// scale_q).
+//
+// SHAPE NOTE (measured, not cosmetic): the mb2 wasm/SPIR-V R1 lowering keeps a
+// local value-carried only through ONE branch-merge, and its compare matrix maps
+// only `<` and `==`. So the pan/zoom logic is expressed as SINGLE-ASSIGNMENT `let`
+// bindings in update_view (zero branches, zero reassignments) that call
+// SINGLE-BRANCH helper functions for the min/max clamps and the zoom step. Every
+// `a > b` is written as the identical `b < a`. The computed function is exactly the
+// spec's update_view; only the surface avoids the R1 slot-promotion + Gt gaps.
+// (view_init's constant-tuple return and render_rgba's MemPtr fill hit distinct R1
+// gaps and land with the I3 page assembly, not here.)
+
+/// min(v, hi) via one branch (value-carried in R1).
+fn min_i(v: i32, hi: i32) -> i32 {
+    if hi < v { hi } else { v }
+}
+
+/// max(v, lo) via one branch (value-carried in R1).
+fn max_i(v: i32, lo: i32) -> i32 {
+    if v < lo { lo } else { v }
+}
+
+/// One wheel notch IN (dzoom < 0): scale *= 7/8, integer-only (`sq - (sq >> 3)`).
+/// dzoom >= 0 leaves the scale unchanged (the zoom-out leg is applied separately).
+fn zoom_in_if(scale_q: i32, dzoom: i32) -> i32 {
+    if dzoom < 0 { scale_q - (scale_q >> 3) } else { scale_q }
+}
+
+/// One wheel notch OUT (dzoom > 0): scale *= 9/8, integer-only (`sq + (sq >> 3)`).
+/// Applied to the zoom-in result; since at most one of the two legs fires (dzoom is
+/// < 0, > 0, or 0), the input equals the original scale_q whenever this leg fires.
+fn zoom_out_if(scale_q: i32, dzoom: i32) -> i32 {
+    if 0 < dzoom { scale_q + (scale_q >> 3) } else { scale_q }
+}
+
+pub fn update_view(center_re: i32, center_im: i32, scale_q: i32,
+                   dx: i32, dy: i32, dzoom: i32,
+                   mx: i32, my: i32) -> (i32, i32, i32) {
+    // pan: (dx, dy) = raw pointer movement in pixels; the image follows the
+    // pointer, so the center moves the other way, scaled by step/px.
+    let re0: i32 = center_re - ((dx * scale_q) >> 4)
+    let im0: i32 = center_im - ((dy * scale_q) >> 4)
+    // zoom: one notch = 1/8 of scale; dzoom < 0 zooms in, > 0 zooms out. Then
+    // clamp to [16, 384]. min_i to the ceiling first, then max_i to the floor
+    // (order-independent for a valid range).
+    let sq_z1: i32 = zoom_in_if(scale_q, dzoom)
+    let sq_z2: i32 = zoom_out_if(sq_z1, dzoom)
+    let sq_c: i32 = max_i(min_i(sq_z2, 384), 16)
+    // anchor the zoom at the cursor (mx, my): the complex point under the pointer
+    // stays put (exact up to the >>4 truncation, <= 1 Q12 unit). Uses the OLD
+    // scale_q minus the NEW (clamped) scale sq_c.
+    let re_a: i32 = re0 + (((mx - 256) * (scale_q - sq_c)) >> 4)
+    let im_a: i32 = im0 + (((my - 256) * (scale_q - sq_c)) >> 4)
+    // clamp the center to [-10240, 10240] (the fragment's no-overflow envelope).
+    let re_c: i32 = max_i(min_i(re_a, 10240), -10240)
+    let im_c: i32 = max_i(min_i(im_a, 10240), -10240)
+    (re_c, im_c, sq_c)
+}

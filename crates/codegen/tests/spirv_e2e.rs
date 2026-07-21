@@ -3030,3 +3030,684 @@ fn mandel_frag_rgba_renders_on_lavapipe_browser_profile() {
         }
     }
 }
+
+// ===========================================================================
+// I1 (interactive renderer-in-Fe): the VIEW-PARAMETERIZED fragment.
+//
+// `mandel_view_frag(px, py, center_re, center_im, scale_q) -> u32` is the R1
+// fragment with the fixed-view constants replaced by THREE broadcast view params.
+// Args 0,1 (px, py) stay the render position builtins; args 2..4 (the view) ride
+// the broadcast Input struct at @group(0) @binding(1) (members p0,p1,p2 at
+// offsets 0,4,8; span 12), exactly the path Clifford C2 proved on the grid, now
+// on the render path (sonatina `mod.rs` render arm loads args 2.. from the same
+// Input struct). The pixel->complex map is
+//     c_re = center_re + (((px - 256) * scale_q) >> 4)
+//     c_im = center_im + (((py - 256) * scale_q) >> 4)
+//
+// I1's gate: RENDER on lavapipe (browser profile, 512x512) at the pinned views
+// the spec names and assert ALL 262,144 pixels x 4 bytes TRI-EQUAL (texture ==
+// Rust oracle == wasm leg). The DEFAULT token (-2048, 0, 384) is the regression
+// anchor: it must reproduce R1's `mandel_frag_rgba` view BYTE-FOR-BYTE (asserted
+// against the R1 `mandel_frag_oracle`). Hard-fail-not-skip; MB2_ALLOW_GPU_SKIP
+// only, adapter printed.
+// ===========================================================================
+
+/// The SSOT I1 fixture: `include_str!`-ed so the tested and (later) shipped source
+/// are byte-identical by construction.
+const MANDEL_VIEW_FRAG_SOURCE: &str = include_str!("fixtures/spirv/mandel_view_frag.fe");
+
+/// The independent view-parameterized Q12 escape+color oracle, re-derived HERE
+/// from the kernel logic (never trusted from the spec), integer-identical to the
+/// fixture: the SAME i32 escape math as `mandel_frag_oracle` with the fixed-view
+/// constants replaced by the broadcast view (`center + (((p - 256) * scale_q) >>
+/// 4)`, arithmetic i32 `>>`), plus the same u32 color ramp. At the default token
+/// (-2048, 0, 384) this is provably identical to `mandel_frag_oracle` (384 = 24*16,
+/// the `>> 4` is exact because `(p-256)*384` is divisible by 16).
+fn mandel_view_frag_oracle(px: i32, py: i32, center_re: i32, center_im: i32, scale_q: i32) -> u32 {
+    let c_re: i32 = center_re + (((px - 256) * scale_q) >> 4);
+    let c_im: i32 = center_im + (((py - 256) * scale_q) >> 4);
+    let mut zr: i32 = 0;
+    let mut zi: i32 = 0;
+    let mut i: u32 = 0;
+    let mut color: u32 = 4_278_190_080;
+    while i < 100 {
+        let rr: i32 = zr * zr;
+        let ii: i32 = zi * zi;
+        let mag: i32 = rr + ii;
+        if mag < 67_108_864 {
+            let t: i32 = rr - ii;
+            let nzi: i32 = ((zr * 2) * zi) >> 12; // arithmetic (i32), uses OLD zr
+            zr = (t >> 12) + c_re;
+            zi = nzi + c_im;
+            i += 1;
+            let v: u32 = (i * 655) >> 8; // LOGICAL (u32): the color ramp Shr, 0..255
+            color = v + v * 256 + (255 - v) * 65536 + 4_278_190_080;
+        } else {
+            return color; // escape: the carried ramp color
+        }
+    }
+    4_278_190_080 // interior: opaque black
+}
+
+/// Compile the I1 fixture to wasm through `BackendKind::Wasm`. The view fragment
+/// is an ordinary `(i32, i32, i32, i32, i32) -> i32` export on the wasm path (Fe
+/// `u32` lowers to wasm `i32`); calling it per pixel is the wasm leg of the
+/// tri-equal.
+fn compile_mandel_view_frag_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandel_view_frag_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_FRAG_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("mandel_view_frag should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// Run the Fe view fragment (the 5-arg typed func) over the FULL 512x512 grid for
+/// one pinned view, returning the per-pixel packed RGBA8 grid (row-major, u32).
+/// This is the wasm value in the tri-equal claim, recomputed here so the three-way
+/// equality lives inside the one executing test (as C2's `wasm_clifford_grid_all`).
+fn wasm_view_frag_grid_all(bytes: &[u8], center_re: i32, center_im: i32, scale_q: i32) -> Vec<u32> {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32), i32>(&mut store, "mandel_view_frag")
+        .expect("`mandel_view_frag` export should exist as (i32 x5) -> i32");
+    let mut out = Vec::with_capacity((FRAG_W * FRAG_H) as usize);
+    for py in 0..FRAG_H as i32 {
+        for px in 0..FRAG_W as i32 {
+            let v = f
+                .call(&mut store, (px, py, center_re, center_im, scale_q))
+                .expect("mandel_view_frag should run") as u32;
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// The pinned views the spec (section 7) names, each `(name, center_re, center_im,
+/// scale_q, min_distinct)`. `min_distinct` is a DERIVED non-degeneracy floor
+/// (measured, not baked): the default and the two interior valleys show hundreds
+/// of colors; the clamp corner is a fast-escape near-uniform patch (2 colors),
+/// asserted `>= 2` so a fully-degenerate one-color image still fails.
+const VIEW_PINS: [(&str, i32, i32, i32, usize); 4] = [
+    ("default", -2048, 0, 384, 10),
+    ("seahorse", -3072, 410, 48, 10),
+    ("ceiling", 1126, 29, 16, 10),
+    ("clamp_corner", 10240, 10240, 384, 2),
+];
+
+/// I1 (validation, GPU-FREE): the view fragment compiles through the Render seam
+/// into ONE naga-validated SPIR-V module with TWO entry points, states its render
+/// ABI, and its browser-profile WGSL carries the render epilogue AND the
+/// three-member broadcast load (`input.p0`..`input.p2`, span 12) proving args 2..4
+/// became the broadcast view.
+#[test]
+fn mandel_view_frag_compiles_to_render_spirv() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandel_view_frag_render.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_FRAG_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("mandel_view_frag should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("mandel_view_frag should compile Fe -> naga-validated SPIR-V in Render mode");
+
+    // --- Render ABI + TWO entry points. ---
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render,
+        "the render driver seam must state LayoutMode::Render"
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the render fragment must lower to the u32 word (browser profile)"
+    );
+    assert!(
+        artifact.layout.result.is_none(),
+        "Render mode has no single-slot result: the color target is the result"
+    );
+    assert_eq!(
+        artifact.layout.vertex_entry.as_deref(),
+        Some("vs_fullscreen"),
+        "Render mode states the @vertex entry name"
+    );
+    assert_eq!(
+        artifact.layout.fragment_entry.as_deref(),
+        Some("fs_main"),
+        "Render mode states the @fragment entry name"
+    );
+    assert_eq!(
+        count_spirv_entry_points(&artifact.words),
+        2,
+        "one Render SPIR-V module must carry BOTH entry points (@vertex + @fragment)"
+    );
+
+    // --- The three-member broadcast view: Input binding stride 12 is the static
+    // proof that args 2,3,4 (center_re, center_im, scale_q) became broadcast
+    // members p0,p1,p2 at offsets 0,4,8. ---
+    let input_stride = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|b| b.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("the render layout must have an Input binding")
+        .stride;
+    assert_eq!(
+        input_stride, 12,
+        "the THREE broadcast view members (center_re, center_im, scale_q), 4 bytes each, span 12 \
+         bytes: the layout-level proof that the fragment's args 2..4 became the render broadcast view"
+    );
+
+    // --- Browser-profile WGSL gate + the render/fractal/broadcast honesty tokens. ---
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the render fragment");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("@vertex") && wgsl.contains("@fragment"),
+        "render WGSL must contain BOTH @vertex and @fragment stages; got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("@location(0)") && wgsl.contains("unpack4x8unorm"),
+        "the render epilogue must write @location(0) via unpack4x8unorm; got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("loop") && wgsl.contains("bitcast<i32>"),
+        "the fractal WGSL must contain the escape `loop` and `bitcast<i32>` (signed Slt/Sar); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("input.p0"),
+        "the fragment must load the first broadcast view member `input.p0` (center_re); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("input.p2"),
+        "the fragment must load the THIRD broadcast view member `input.p2` (scale_q); all three \
+         view members are read; got:\n{wgsl}"
+    );
+    eprintln!(
+        "I1-val: Fe mandel_view_frag compiled -> ONE Render SPIR-V module, 2 entry points, Input \
+         stride 12 (3 broadcast view members), WGSL with unpack4x8unorm + loop + bitcast<i32> + \
+         input.p0..input.p2. {} SPIR-V words.",
+        artifact.words.len()
+    );
+}
+
+/// I1 headline (spec section 7): the VIEW-PARAMETERIZED Fe fragment RENDERS on
+/// lavapipe at the browser profile, and at EACH pinned view every one of 262,144
+/// pixels x 4 bytes is TRI-EQUAL (texture == `mandel_view_frag_oracle` == the wasm
+/// execution of the same Fe function), with the view delivered as three broadcast
+/// words written to the Input buffer before the draw. The DEFAULT view (-2048, 0,
+/// 384) is additionally asserted BYTE-FOR-BYTE against R1's `mandel_frag_oracle`:
+/// the parameterized fragment reproduces R1's fixed view exactly.
+///
+/// Hard-fail-not-skip: a missing GPU is a hard failure; the only escape is
+/// `MB2_ALLOW_GPU_SKIP` (adapter printed on execute). The name contains "lavapipe"
+/// so the nextest serial group filter (`test(lavapipe)`) catches it.
+#[test]
+fn mandel_view_frag_renders_on_lavapipe_browser_profile() {
+    // --- Compile the view fragment through the Render driver seam. ---
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandel_view_frag_lavapipe.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_FRAG_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("mandel_view_frag should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("mandel_view_frag should compile Fe -> naga-validated SPIR-V in Render mode");
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render,
+        "the render driver seam must state LayoutMode::Render"
+    );
+    assert_eq!(
+        count_spirv_entry_points(&artifact.words),
+        2,
+        "one Render SPIR-V module must carry BOTH entry points"
+    );
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the render fragment");
+    assert_browser_profile_wgsl(wgsl);
+
+    // --- The DEFAULT-view regression anchor, at the ORACLE level: the
+    // parameterized oracle at (-2048, 0, 384) must be byte-identical to R1's fixed
+    // `mandel_frag_oracle` for EVERY pixel (independent of any GPU). This is the
+    // "the default token reproduces R1 byte-for-byte" invariant, checked before we
+    // ever touch the GPU. ---
+    for py in 0..FRAG_H {
+        for px in 0..FRAG_W {
+            assert_eq!(
+                mandel_view_frag_oracle(px as i32, py as i32, -2048, 0, 384),
+                mandel_frag_oracle(px as i32, py as i32),
+                "the view oracle at the default token (-2048,0,384) must equal R1's fixed-view \
+                 oracle at pixel ({px},{py}) (the byte-for-byte regression anchor)"
+            );
+        }
+    }
+    eprintln!(
+        "I1 anchor: mandel_view_frag_oracle(px,py,-2048,0,384) == R1 mandel_frag_oracle(px,py) for \
+         all 262,144 pixels (default view is byte-identical to R1's fixed view)."
+    );
+
+    // --- The wasm bytecode (view-independent: the view arrives as args 2..4). ---
+    let wasm_bytes = compile_mandel_view_frag_to_wasm();
+
+    // --- The GPU leg: for each pinned view, write (center_re, center_im, scale_q)
+    // to the render broadcast Input buffer, RENDER on lavapipe (512x512 rgba8unorm
+    // offscreen), and compare every pixel's 4 bytes to BOTH the oracle AND the wasm
+    // leg (tri-equal). The default view is additionally asserted against R1's oracle
+    // bytes (the byte-for-byte anchor, now on the RENDERED image). ---
+    for (name, center_re, center_im, scale_q, min_distinct) in VIEW_PINS {
+        let wasm_colors = wasm_view_frag_grid_all(&wasm_bytes, center_re, center_im, scale_q);
+        // The view words, in kernel-arg order: arg2=center_re -> p0, arg3=center_im
+        // -> p1, arg4=scale_q -> p2 (i32 two's complement in the u32 word). Written
+        // to the Input buffer before the draw, exactly how C2 passes signed params.
+        let params: [u32; 3] = [center_re as u32, center_im as u32, scale_q as u32];
+        let input_bytes: Vec<u8> = params.iter().flat_map(|p| p.to_le_bytes()).collect();
+        match run_render_rgba8_on_lavapipe(wgsl, FRAG_W, FRAG_H, &input_bytes) {
+            Some(rgba) => {
+                assert_eq!(
+                    rgba.len(),
+                    (FRAG_W * FRAG_H * 4) as usize,
+                    "render readback must be 512*512*4 = 1048576 bytes (tightly packed)"
+                );
+                let mut distinct = std::collections::HashSet::new();
+                for y in 0..FRAG_H {
+                    for x in 0..FRAG_W {
+                        let idx = (y * FRAG_W + x) as usize;
+                        let px = &rgba[idx * 4..idx * 4 + 4];
+                        let oracle = mandel_view_frag_oracle(x as i32, y as i32, center_re, center_im, scale_q);
+                        let oracle_bytes = oracle.to_le_bytes();
+                        let wasm_bytes_px = wasm_colors[idx].to_le_bytes();
+                        assert_eq!(
+                            px, &oracle_bytes,
+                            "lavapipe rendered pixel ({x},{y}) [view {name}] RGBA {px:?} must equal \
+                             the oracle color {oracle_bytes:?} (packed 0x{oracle:08X})"
+                        );
+                        assert_eq!(
+                            px, &wasm_bytes_px,
+                            "lavapipe rendered pixel ({x},{y}) [view {name}] RGBA {px:?} must equal \
+                             the wasm leg color {wasm_bytes_px:?} for the same (x,y)"
+                        );
+                        // The default-view BYTE-FOR-BYTE R1 anchor, on the RENDERED
+                        // image: the GPU bytes must equal R1's fixed-view oracle.
+                        if name == "default" {
+                            let r1_bytes = mandel_frag_oracle(x as i32, y as i32).to_le_bytes();
+                            assert_eq!(
+                                px, &r1_bytes,
+                                "DEFAULT view rendered pixel ({x},{y}) must be BYTE-IDENTICAL to R1's \
+                                 mandel_frag_oracle {r1_bytes:?}; the regression anchor"
+                            );
+                        }
+                        distinct.insert(oracle);
+                    }
+                }
+                assert!(
+                    distinct.len() >= min_distinct,
+                    "view {name}: rendered color histogram must have >= {min_distinct} distinct \
+                     colors (got {}); a degenerate/transposed image could not pass the per-(x,y) \
+                     tri-equal either",
+                    distinct.len()
+                );
+                eprintln!(
+                    "I1 [{name} = ({center_re},{center_im},{scale_q})]: Fe mandel_view_frag RENDERED \
+                     on lavapipe (browser profile, 512x512) with the view as 3 broadcast params; ALL \
+                     262,144 pixels TRI-EQUAL (texture == oracle == wasm); {} distinct colors.{}",
+                    distinct.len(),
+                    if name == "default" { " DEFAULT view is BYTE-IDENTICAL to R1." } else { "" }
+                );
+            }
+            None => {
+                eprintln!(
+                    "R-val only [{name}]: render SPIR-V validated but NOT executed (GPU skipped via \
+                     MB2_ALLOW_GPU_SKIP). The view-parameterized tri-equal claim is NOT earned."
+                );
+                return;
+            }
+        }
+    }
+
+    eprintln!(
+        "I1: the VIEW-PARAMETERIZED Fe fragment RENDERED on lavapipe at all {} pinned views; the \
+         view rode the 3-member broadcast Input struct (span 12); every pixel is tri-equal and the \
+         default token is byte-identical to R1. Interactive render params earn R-lava.",
+        VIEW_PINS.len()
+    );
+}
+
+// ===========================================================================
+// I2 (interactive controls-in-Fe): the Fe->wasm VIEW CONTROLLER.
+//
+// `update_view(center_re, center_im, scale_q, dx, dy, dzoom, mx, my) -> (i32,
+// i32, i32)` is a pure, stateless, oracle-checkable pan/zoom function compiled
+// ONLY to wasm (native MULTI-VALUE return, R2.1). It does pointer-drag pan
+// (center += screen-delta scaled to complex space, the image following the
+// pointer), cursor-anchored zoom (7/8 per notch in, 9/8 out), and the clamps
+// (|center| <= 10240, scale_q in [16, 384]) that ARE the fragment's no-overflow
+// contract. `view_init()` returns the default token (-2048, 0, 384).
+//
+// I2's gate (spec section 4): a deterministic gesture tape (seeded LCG, 10,000
+// mixed drag/wheel events) asserting the wasmtime triple equals an INDEPENDENT
+// Rust oracle at every step, PLUS directed cases for all four center clamps, both
+// scale clamps, the 26-notch descent, and the cursor-anchor property. No GPU.
+// ===========================================================================
+
+/// The SSOT I2 fixture: `include_str!`-ed so the tested and (later) shipped source
+/// are byte-identical.
+const MANDEL_VIEW_CTL_SOURCE: &str = include_str!("fixtures/spirv/mandel_view_ctl.fe");
+
+/// The default view token (spec section 2): center (-0.5, 0) in Q12, scale 384
+/// (= 24 Q12-units/px, the proven R1 fixed view). The gesture tape starts here.
+/// A `view_init()` export (a constant-tuple return) lands with the I3 page
+/// assembly: the R1 const-aggregate return is a distinct lowering gap, and the
+/// load-bearing control fn under I2 is `update_view`.
+const VIEW_INIT: (i32, i32, i32) = (-2048, 0, 384);
+
+/// The independent Rust twin of `update_view`, re-derived HERE from the pan/zoom
+/// semantics (never trusted from the spec), integer-identical to the fixture: the
+/// pan follows the pointer (center moves opposite, scaled by step/px), the zoom is
+/// 1/8-per-notch, the anchor correction uses the OLD scale minus the NEW clamped
+/// scale, and the clamps are applied last. All `>>` are arithmetic i32.
+fn update_view_oracle(
+    center_re: i32, center_im: i32, scale_q: i32,
+    dx: i32, dy: i32, dzoom: i32, mx: i32, my: i32,
+) -> (i32, i32, i32) {
+    let mut re: i32 = center_re - ((dx * scale_q) >> 4);
+    let mut im: i32 = center_im - ((dy * scale_q) >> 4);
+    let mut sq: i32 = scale_q;
+    if dzoom < 0 {
+        sq = scale_q - (scale_q >> 3);
+    }
+    if dzoom > 0 {
+        sq = scale_q + (scale_q >> 3);
+    }
+    if sq < 16 {
+        sq = 16;
+    }
+    if sq > 384 {
+        sq = 384;
+    }
+    re += ((mx - 256) * (scale_q - sq)) >> 4;
+    im += ((my - 256) * (scale_q - sq)) >> 4;
+    if re > 10240 {
+        re = 10240;
+    }
+    if re < -10240 {
+        re = -10240;
+    }
+    if im > 10240 {
+        im = 10240;
+    }
+    if im < -10240 {
+        im = -10240;
+    }
+    (re, im, sq)
+}
+
+/// Compile the I2 control fixture to wasm through `BackendKind::Wasm`.
+fn compile_mandel_view_ctl_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mandel_view_ctl_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MANDEL_VIEW_CTL_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("mandel_view_ctl should compile Fe -> wasm");
+    let bytes = output.into_bytecode().expect("wasm output should be bytecode");
+    wasmparser::validate(&bytes).expect("Fe-emitted control wasm should be valid");
+    bytes
+}
+
+/// The complex point (in Q12) under a screen cursor for a given view: the fragment's
+/// own `center + (((m - 256) * scale_q) >> 4)` map, re-used here to measure zoom
+/// anchoring (the cursor-anchor property).
+fn point_under_cursor(center: i32, scale_q: i32, m: i32) -> i32 {
+    center + (((m - 256) * scale_q) >> 4)
+}
+
+/// I2 headline (spec section 4): a deterministic 10,000-event gesture tape (seeded
+/// LCG, mixed pan+zoom+anchor) asserts the wasmtime `update_view` triple EQUALS the
+/// independent Rust oracle at EVERY step, feeding each reply forward as the next
+/// view (the exact broker round-trip). The tape's random walk visits all four
+/// center clamps and both scale clamps (asserted for coverage), so the clamp arms
+/// are exercised in-band. The 3-tuple reply crosses as a native wasm MULTI-VALUE
+/// result (R2.1).
+#[test]
+fn update_view_matches_oracle_over_gesture_tape() {
+    let wasm = compile_mandel_view_ctl_to_wasm();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+
+    let (ir, ii, isq) = VIEW_INIT;
+
+    // update_view: 8 flattened i32 args -> a 3-value wasm multi-value reply (R2.1).
+    let update_view = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32, i32), (i32, i32, i32)>(
+            &mut store,
+            "update_view",
+        )
+        .expect("`update_view` export should exist as (i32 x8) -> (i32, i32, i32)");
+
+    // Seeded LCG (Knuth MMIX constants); each step draws pan deltas (-64..63),
+    // dzoom in {-1,0,1}, and a cursor (0..511)^2. The reply feeds forward as the
+    // next view: exactly the broker's opaque-triple round-trip.
+    let mut s: u64 = 0x1234_5678_9abc_def0;
+    let (mut cr, mut ci, mut sq) = (ir, ii, isq);
+    let (mut hit_re_hi, mut hit_re_lo, mut hit_im_hi, mut hit_im_lo) = (0u32, 0u32, 0u32, 0u32);
+    let (mut hit_sq16, mut hit_sq384) = (0u32, 0u32);
+    let mut distinct_sq = std::collections::BTreeSet::new();
+    const STEPS: usize = 10_000;
+    for step in 0..STEPS {
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let r = s;
+        let dx = ((r >> 8) & 127) as i32 - 64;
+        let dy = ((r >> 16) & 127) as i32 - 64;
+        let dzoom = match (r >> 24) & 3 {
+            0 => -1,
+            1 => 1,
+            _ => 0,
+        };
+        let mx = ((r >> 32) & 511) as i32;
+        let my = ((r >> 42) & 511) as i32;
+
+        let got = update_view
+            .call(&mut store, (cr, ci, sq, dx, dy, dzoom, mx, my))
+            .expect("update_view should run");
+        let want = update_view_oracle(cr, ci, sq, dx, dy, dzoom, mx, my);
+        assert_eq!(
+            got, want,
+            "gesture-tape step {step}: wasm update_view({cr},{ci},{sq}; dx={dx},dy={dy},\
+             dz={dzoom},mx={mx},my={my}) = {got:?} must equal the Rust oracle {want:?}"
+        );
+
+        cr = got.0;
+        ci = got.1;
+        sq = got.2;
+        // Clamp-coverage bookkeeping (the walk must actually visit the boundaries).
+        if cr == 10240 {
+            hit_re_hi += 1;
+        }
+        if cr == -10240 {
+            hit_re_lo += 1;
+        }
+        if ci == 10240 {
+            hit_im_hi += 1;
+        }
+        if ci == -10240 {
+            hit_im_lo += 1;
+        }
+        if sq == 16 {
+            hit_sq16 += 1;
+        }
+        if sq == 384 {
+            hit_sq384 += 1;
+        }
+        distinct_sq.insert(sq);
+        // The controller's contract must hold at every reply: the clamps are the
+        // fragment's no-overflow envelope, so a single out-of-range triple is a bug.
+        assert!(
+            (-10240..=10240).contains(&cr) && (-10240..=10240).contains(&ci),
+            "step {step}: center ({cr},{ci}) escaped the |center| <= 10240 clamp"
+        );
+        assert!(
+            (16..=384).contains(&sq),
+            "step {step}: scale_q {sq} escaped the [16, 384] clamp"
+        );
+    }
+
+    // Coverage: the tape must have exercised EVERY clamp arm in-band (else the
+    // in-band clamp branches were never proven equal to the oracle under those
+    // conditions). All six are asserted > 0.
+    assert!(
+        hit_re_hi > 0 && hit_re_lo > 0 && hit_im_hi > 0 && hit_im_lo > 0,
+        "the gesture tape must visit all four center clamps (re_hi={hit_re_hi}, re_lo={hit_re_lo}, \
+         im_hi={hit_im_hi}, im_lo={hit_im_lo})"
+    );
+    assert!(
+        hit_sq16 > 0 && hit_sq384 > 0,
+        "the gesture tape must visit both scale clamps (sq==16: {hit_sq16}, sq==384: {hit_sq384})"
+    );
+    eprintln!(
+        "I2 tape: {STEPS} mixed pan/zoom/anchor events under wasmtime; the update_view triple \
+         equals the independent oracle at EVERY step. Clamp coverage: re_hi={hit_re_hi} \
+         re_lo={hit_re_lo} im_hi={hit_im_hi} im_lo={hit_im_lo} sq16={hit_sq16} sq384={hit_sq384}; \
+         {} distinct scale values.",
+        distinct_sq.len()
+    );
+}
+
+/// I2 directed cases (spec section 4): the named boundary/anchor scenarios, each
+/// asserting the wasm `update_view` reply equals the independent oracle AND the
+/// specific spec property (the clamp actually clamps; the 26-notch descent lands
+/// at the floor; the point under the cursor drifts <= 1 Q12 unit under an anchored
+/// zoom). GPU-free.
+#[test]
+fn update_view_directed_clamps_and_anchor() {
+    let wasm = compile_mandel_view_ctl_to_wasm();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let update_view = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32, i32), (i32, i32, i32)>(
+            &mut store,
+            "update_view",
+        )
+        .expect("`update_view` export should exist as (i32 x8) -> (i32, i32, i32)");
+
+    // A local helper: call the wasm fn, assert it equals the oracle, return the triple.
+    let mut call = |cr: i32, ci: i32, sq: i32, dx: i32, dy: i32, dz: i32, mx: i32, my: i32| {
+        let got = update_view
+            .call(&mut store, (cr, ci, sq, dx, dy, dz, mx, my))
+            .expect("update_view should run");
+        let want = update_view_oracle(cr, ci, sq, dx, dy, dz, mx, my);
+        assert_eq!(
+            got, want,
+            "update_view({cr},{ci},{sq}; dx={dx},dy={dy},dz={dz},mx={mx},my={my}) = {got:?} must \
+             equal the oracle {want:?}"
+        );
+        got
+    };
+
+    // --- (1) All four center clamps. A huge pan at the center cursor (mx=my=256,
+    // no anchor drift) drives the center past each boundary; the reply must be
+    // pinned exactly at +-10240. dx>0 pans re negative (image follows pointer), so
+    // to push re to +10240 use dx<0. ---
+    let (re_hi, _, _) = call(10000, 0, 384, -64, 0, 0, 256, 256);
+    assert_eq!(re_hi, 10240, "a large +re pan must clamp center_re to +10240");
+    let (re_lo, _, _) = call(-10000, 0, 384, 64, 0, 0, 256, 256);
+    assert_eq!(re_lo, -10240, "a large -re pan must clamp center_re to -10240");
+    let (_, im_hi, _) = call(0, 10000, 384, 0, -64, 0, 256, 256);
+    assert_eq!(im_hi, 10240, "a large +im pan must clamp center_im to +10240");
+    let (_, im_lo, _) = call(0, -10000, 384, 0, 64, 0, 256, 256);
+    assert_eq!(im_lo, -10240, "a large -im pan must clamp center_im to -10240");
+
+    // --- (2) Both scale clamps. Zoom out from 384 stays at 384 (ceiling); zoom in
+    // from 16 stays at 16 (floor). ---
+    let (_, _, sq_ceiling) = call(0, 0, 384, 0, 0, 1, 256, 256);
+    assert_eq!(sq_ceiling, 384, "zoom-out from the ceiling scale 384 must stay clamped at 384");
+    let (_, _, sq_floor) = call(0, 0, 16, 0, 0, -1, 256, 256);
+    assert_eq!(sq_floor, 16, "zoom-in from the floor scale 16 must stay clamped at 16");
+
+    // --- (3) The 26-notch descent (spec section 2): 26 zoom-in notches at the
+    // center cursor (no anchor drift) carry scale_q from 384 down to the floor 16.
+    // Each step is oracle-checked inside `call`; here we also pin the count. ---
+    let mut sq = 384;
+    let mut notches = 0;
+    while sq > 16 {
+        let (_, _, nsq) = call(0, 0, sq, 0, 0, -1, 256, 256);
+        assert!(nsq < sq || nsq == 16, "each zoom-in notch must decrease scale_q (or clamp to 16)");
+        sq = nsq;
+        notches += 1;
+        assert!(notches <= 40, "the descent must terminate at the floor well within 40 notches");
+    }
+    assert_eq!(sq, 16, "the notch descent must land exactly on the floor scale 16");
+    assert_eq!(
+        notches, 26,
+        "the 7/8-per-notch descent from 384 must reach the floor 16 in exactly 26 notches (spec 2)"
+    );
+
+    // --- (4) The cursor-anchor property (spec section 4): under an anchored zoom
+    // at a view away from the clamps, the complex point under the cursor drifts by
+    // <= 1 Q12 unit in each axis (exact up to the >>4 truncation). Use a mid view
+    // and an off-center cursor. ---
+    for &(cr0, ci0, sq0, mx, my) in &[
+        (0, 0, 128, 400, 100),
+        (1024, -512, 256, 40, 500),
+        (-3072, 410, 96, 300, 220),
+    ] {
+        // Point under the cursor BEFORE the zoom.
+        let p_re0 = point_under_cursor(cr0, sq0, mx);
+        let p_im0 = point_under_cursor(ci0, sq0, my);
+        // Anchored zoom in (dzoom < 0), no pan.
+        let (cr1, ci1, sq1) = call(cr0, ci0, sq0, 0, 0, -1, mx, my);
+        // Point under the SAME cursor AFTER.
+        let p_re1 = point_under_cursor(cr1, sq1, mx);
+        let p_im1 = point_under_cursor(ci1, sq1, my);
+        assert!(
+            (p_re1 - p_re0).abs() <= 1 && (p_im1 - p_im0).abs() <= 1,
+            "cursor-anchor: at view ({cr0},{ci0},{sq0}) cursor ({mx},{my}), the point under the \
+             cursor drifted ({},{}) Q12 units on an anchored zoom; must be <= 1 each",
+            (p_re1 - p_re0).abs(),
+            (p_im1 - p_im0).abs()
+        );
+    }
+
+    eprintln!(
+        "I2 directed: all four center clamps pin at +-10240; both scale clamps hold at 16/384; the \
+         26-notch descent lands exactly on the floor 16; the cursor-anchored zoom keeps the point \
+         under the cursor within 1 Q12 unit. wasm == oracle in every case."
+    );
+}

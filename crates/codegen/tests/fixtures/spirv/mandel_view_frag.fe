@@ -1,0 +1,54 @@
+// I1 (interactive renderer-in-Fe): the VIEW-PARAMETERIZED fragment. This is the
+// R1 fixture `mandel_frag_rgba` (byte-identical escape body + loop-carried color
+// map) with the fixed-view constants replaced by the three BROADCAST VIEW params.
+//
+// Render binding (spec section 3): args 0,1 are the pixel coords (render mode
+// binds them to `u32(position.xy)`, exactly as R1); args 2..4 are the broadcast
+// view arriving via the Input struct at `@group(0) @binding(1)` exactly as
+// Clifford C2's rotor params (i32 members p0,p1,p2 at offsets 0,4,8; span 12;
+// bitcast<i32> in-kernel). center_re, center_im are signed Q12 (1.0 = 4096);
+// scale_q is the Q12.4 step/px (sixteenths of a Q12 unit).
+//
+// Pixel -> complex (spec section 2, the exact arithmetic; y=0 top row as in the
+// compute grid, so the image is not flipped):
+//     c_re = center_re + (((px - 256) * scale_q) >> 4)
+//     c_im = center_im + (((py - 256) * scale_q) >> 4)
+// The caller (update_view) guarantees |center| <= 10240 and 16 <= scale_q <= 384,
+// which is the documented no-overflow envelope (max |c| = 16384 = 4.0 exactly;
+// the escape body's in-loop bounds are R1's, proven at mag < 2^26).
+//
+// REGRESSION ANCHOR: at the default token (-2048, 0, 384) this equals R1's fixed
+// view `(-8192 + px*24, -6144 + py*24)` for EVERY pixel exactly (384 = 24*16, the
+// >>4 is exact because (px-256)*384 is always divisible by 16), so I1's default
+// pin renders BYTE-IDENTICAL to R1b's image.
+//
+// Envelope, op by op: the two new lines add `Sub` (px-256), `Mul`, and a signed
+// `Sar` by immediate 4; the body is the proven R1 silhouette (one loop, inner if,
+// loop-carried color phi, `Shr` on the u32 ramp). 5 args = 2 coords + 3 broadcast
+// members. No structurizer change, no emitter change, no new fork push.
+pub fn mandel_view_frag(px: i32, py: i32, center_re: i32, center_im: i32,
+                        scale_q: i32) -> u32 {
+    let c_re: i32 = center_re + (((px - 256) * scale_q) >> 4)
+    let c_im: i32 = center_im + (((py - 256) * scale_q) >> 4)
+    let mut zr: i32 = 0
+    let mut zi: i32 = 0
+    let mut i: u32 = 0
+    let mut color: u32 = 4278190080
+    while i < 100 {
+        let rr: i32 = zr * zr
+        let ii: i32 = zi * zi
+        let mag: i32 = rr + ii
+        if mag < 67108864 {
+            let t: i32 = rr - ii
+            let nzi: i32 = ((zr * 2) * zi) >> 12
+            zr = (t >> 12) + c_re
+            zi = nzi + c_im
+            i = i + 1
+            let v: u32 = (i * 655) >> 8
+            color = v + v * 256 + (255 - v) * 65536 + 4278190080
+        } else {
+            return color
+        }
+    }
+    4278190080
+}
