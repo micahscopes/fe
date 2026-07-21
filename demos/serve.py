@@ -54,6 +54,7 @@ def main():
     generators = {
         "webgpu-keystone": "gen_webgpu_demo",
         "webgpu-mandelbrot": "gen_mandelbrot_demo",
+        "webgpu-mandelbrot-interactive": "gen_mandelbrot_interactive_demo",
     }
     for demo, example in generators.items():
         gen = os.path.join(ROOT, demo, "gen")
@@ -63,8 +64,9 @@ def main():
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((HOST, PORT), Handler) as httpd:
         print(f"Fe demos: serving {ROOT} on {HOST}:{PORT}")
-        print(f"  keystone:   http://localhost:{PORT}/webgpu-keystone/")
-        print(f"  mandelbrot: http://localhost:{PORT}/webgpu-mandelbrot/")
+        print(f"  keystone:    http://localhost:{PORT}/webgpu-keystone/")
+        print(f"  mandelbrot:  http://localhost:{PORT}/webgpu-mandelbrot/")
+        print(f"  interactive: http://localhost:{PORT}/webgpu-mandelbrot-interactive/")
         print("  (Ctrl-C to stop)")
         try:
             httpd.serve_forever()

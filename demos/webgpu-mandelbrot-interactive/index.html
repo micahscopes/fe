@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interactive Fe mandelbrot: Fe render + Fe controls</title>
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #161b22; --line: #2b333d; --fg: #e6edf3;
+      --muted: #8b949e; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --green: #2ea043; --amber: #bf8700; --red: #da3633;
+      --green-bg: #12241a; --amber-bg: #241d0e; --red-bg: #2a1414;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    main { max-width: 820px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+    .sub code { font-family: var(--mono); color: var(--fg); }
+
+    .banner {
+      border: 1px solid var(--line); border-left-width: 5px; border-radius: 8px;
+      padding: 16px 18px; margin-bottom: 22px; background: var(--panel);
+    }
+    .banner.green { border-left-color: var(--green); background: var(--green-bg); }
+    .banner.amber { border-left-color: var(--amber); background: var(--amber-bg); }
+    .banner.red   { border-left-color: var(--red);   background: var(--red-bg); }
+    .banner-top { display: flex; align-items: baseline; gap: 12px; }
+    #banner-state {
+      font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: .06em;
+      padding: 2px 8px; border-radius: 4px; border: 1px solid var(--line);
+    }
+    .banner.green #banner-state { color: var(--green); border-color: var(--green); }
+    .banner.amber #banner-state { color: var(--amber); border-color: var(--amber); }
+    .banner.red   #banner-state { color: var(--red);   border-color: var(--red); }
+    #banner-headline { font-size: 17px; font-weight: 600; }
+    #banner-detail { color: var(--muted); margin-top: 8px; font-size: 14px; }
+
+    .image-wrap {
+      border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+      margin-bottom: 10px; background: #000; display: flex; justify-content: center;
+    }
+    #view-canvas {
+      width: 100%; max-width: 512px; height: auto; image-rendering: pixelated;
+      display: block; touch-action: none; cursor: grab;
+    }
+    .controls-hint {
+      color: var(--muted); font-size: 13px; margin: 0 2px 8px; display: flex;
+      gap: 14px; flex-wrap: wrap; align-items: center;
+    }
+    .controls-hint b { color: var(--fg); font-weight: 600; }
+    .presets { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 16px; }
+    .presets button {
+      font: 13px var(--mono); color: var(--fg); background: var(--panel);
+      border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer;
+    }
+    .presets button:hover { border-color: var(--muted); }
+    #view-readout { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-left: auto; }
+
+    .rows { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
+    .row {
+      display: grid; grid-template-columns: 220px 1fr; gap: 14px;
+      padding: 12px 16px; border-bottom: 1px solid var(--line); align-items: center;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row .label { color: var(--muted); font-size: 14px; }
+    .row .label small { display: block; color: #6a737d; font-size: 12px; }
+    .val { font-family: var(--mono); font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+    .val.ok  { color: var(--green); }
+    .val.bad { color: var(--red); }
+
+    .meta { color: var(--muted); font-size: 12.5px; font-family: var(--mono);
+      margin: 4px 2px 26px; word-break: break-word; }
+    #adapter { margin: 8px 2px 4px; }
+
+    details {
+      border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; background: var(--panel);
+    }
+    summary { cursor: pointer; padding: 12px 16px; font-weight: 600; user-select: none; }
+    summary::marker { color: var(--muted); }
+    pre {
+      margin: 0; padding: 0 16px 16px; overflow-x: auto;
+      font-family: var(--mono); font-size: 13px; color: var(--fg);
+    }
+    .foot { color: #6a737d; font-size: 12.5px; margin-top: 28px; line-height: 1.6; }
+    .foot code { font-family: var(--mono); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Interactive Fe mandelbrot</h1>
+  <p class="sub">
+    The Fe compiler compiled <b>both</b> the fractal <em>and</em> the pan/zoom controls. The picture
+    is a Fe <code>@fragment</code> shader (Fe -> SPIR-V-IR -> WGSL) your GPU draws every pixel of; the
+    controls are the Fe fn <code>update_view</code> (Fe -> wasm) your browser runs. JavaScript only
+    forwards pointer/wheel events - it does no view math, no pixels, no palette.
+  </p>
+
+  <div id="banner" class="banner amber">
+    <div class="banner-top">
+      <span id="banner-state">...</span>
+      <span id="banner-headline">Loading generated artifacts...</span>
+    </div>
+    <div id="banner-detail"></div>
+  </div>
+
+  <div class="image-wrap">
+    <canvas id="view-canvas" width="512" height="512"></canvas>
+  </div>
+  <div class="controls-hint">
+    <span><b>Drag</b> to pan</span>
+    <span><b>Wheel</b> to zoom (cursor-anchored)</span>
+    <span id="view-readout">center_re=-2048  center_im=0  scale_q=384</span>
+  </div>
+  <div class="presets">
+    <button data-view="[-2048,0,384]">default</button>
+    <button data-view="[-3072,410,48]">seahorse valley</button>
+    <button data-view="[1126,29,16]">ceiling zoom</button>
+    <button data-view="[10240,10240,384]">clamp corner</button>
+  </div>
+
+  <div class="rows">
+    <div class="row">
+      <div class="label">Fe controls in V8
+        <small>update_view vs oracle, synthetic gestures</small></div>
+      <div id="row-ctl" class="val">-</div>
+    </div>
+    <div class="row">
+      <div class="label">render
+        <small>GPU render == Fe-wasm fragment / FNV</small></div>
+      <div id="row-render" class="val">-</div>
+    </div>
+  </div>
+  <div id="adapter" class="meta">adapter: -</div>
+  <div id="prov" class="meta"></div>
+
+  <details>
+    <summary>kernel.fe - the Fe render fragment (compiled to the WGSL @fragment stage)</summary>
+    <pre id="frag-src">loading...</pre>
+  </details>
+  <details>
+    <summary>ctl.fe - the Fe pan/zoom controls (compiled to ctl.wasm's update_view)</summary>
+    <pre id="ctl-src">loading...</pre>
+  </details>
+  <details>
+    <summary>frag.wgsl - the naga-emitted WGSL (@vertex vs_fullscreen + @fragment fs_main)</summary>
+    <pre id="wgsl-src">loading...</pre>
+  </details>
+
+  <div class="foot">
+    Provenance: these files were produced by <code>cargo run -p fe-codegen --example
+    gen_mandelbrot_interactive_demo</code>, which compiles the SSOT fragment through the Render seam
+    and the SSOT controls to wasm, and hard-fails unless the WGSL validates on the browser profile,
+    the wasm export signatures match, and every 512x512 pixel equals the in-generator oracle at the
+    pinned views.<br />
+    GREEN "your GPU drew every pixel" is earned only when the Fe render pipeline draws the canvas on a
+    live WebGPU device, the readback byte-equals the Fe-wasm fragment per pixel, and the default-view
+    FNV equals the compiled reference. No WebGPU shows AMBER (the Fe fragment still computes every
+    pixel in V8, the Fe controls still run in V8; the GPU claim is withheld). A shader error or a
+    per-pixel GPU/Fe mismatch shows RED. The browser consumes naga-emitted WGSL; the SPIR-V words are
+    the lavapipe-verified twin from the same validated module.
+  </div>
+</main>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

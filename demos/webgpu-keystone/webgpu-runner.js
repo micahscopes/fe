@@ -362,3 +362,215 @@ export async function runWebGPUGrid(wgslText, layout, { width, height, params = 
 
   return { ok: true, grid: new Uint32Array(copy), adapter: name };
 }
+
+// ===========================================================================
+// RENDER path (interactive mandelbrot I3). Still KERNEL-BLIND: every fact -
+// the vertex/fragment entry names, the color-target format, the Input binding
+// (group/binding/access/stride) and the view `params` (name + byte offset) -
+// is read from the Render-mode `layout.json` the Fe compiler emitted. This path
+// draws a fullscreen triangle whose fragment IS the Fe-compiled mandelbrot; the
+// three view words (center_re, center_im, scale_q) are written to the Input
+// buffer before each draw. Nothing here knows it is a mandelbrot.
+//
+// The scalar/grid device preamble is intentionally NOT refactored here (the
+// reuse contract keeps `runWebGPU`/`runWebGPUGrid` bit-for-bit); this path owns
+// its own preamble.
+// ===========================================================================
+
+// Build the render-mode bind-group layout / bind group / input buffer from
+// `layout.bindings` (the single Input storage buffer, FRAGMENT-visible). Shared
+// by the display and verify pipelines.
+function buildRenderBindings(device, layout) {
+  const inputBinding = layout.bindings.find((b) => b.role === "Input");
+  if (!inputBinding) throw new Error("render layout has no Input binding");
+  const bgl = device.createBindGroupLayout({
+    entries: [
+      {
+        binding: inputBinding.binding,
+        visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: inputBinding.access === "ReadWrite" ? "storage" : "read-only-storage" },
+      },
+    ],
+  });
+  const inputBuf = device.createBuffer({
+    size: align4(Math.max(WORD_STAGE_ALIGN, inputBinding.stride)),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bgl,
+    entries: [{ binding: inputBinding.binding, resource: { buffer: inputBuf } }],
+  });
+  return { bgl, inputBuf, bindGroup, inputBinding };
+}
+
+// initWebGPURender(wgslText, layout, canvas) - stand up the interactive render
+// pipeline ONCE. Returns a handle on success, or { ok:false, reason, messages? }
+// (fail-closed) when WebGPU is absent / the device is unavailable / the shader
+// fails to compile. AMBER is the caller's job (this returns ok:false, no draw).
+export async function initWebGPURender(wgslText, layout, canvas) {
+  if (layout.mode !== "Render") {
+    return { ok: false, reason: `initWebGPURender requires layout.mode === "Render"; got "${layout.mode}"` };
+  }
+  if (!("gpu" in navigator) || !navigator.gpu) {
+    return { ok: false, reason: "navigator.gpu is undefined (this browser exposes no WebGPU)" };
+  }
+
+  let adapter;
+  try {
+    adapter = await navigator.gpu.requestAdapter();
+  } catch (e) {
+    return { ok: false, reason: `requestAdapter() threw: ${e.message || e}` };
+  }
+  if (!adapter) {
+    return { ok: false, reason: "requestAdapter() returned null (no WebGPU adapter available)" };
+  }
+  const name = await adapterName(adapter);
+
+  let device;
+  try {
+    device = await adapter.requestDevice();
+  } catch (e) {
+    return { ok: false, reason: `requestDevice() failed: ${e.message || e}`, adapter: name };
+  }
+  let deviceError = null;
+  device.addEventListener?.("uncapturederror", (ev) => {
+    deviceError = ev.error?.message || String(ev.error);
+  });
+
+  const module = device.createShaderModule({ code: wgslText });
+  if (typeof module.getCompilationInfo === "function") {
+    const compInfo = await module.getCompilationInfo();
+    const errs = compInfo.messages.filter((m) => m.type === "error");
+    if (errs.length) {
+      return {
+        ok: false,
+        reason: "WGSL shader compile error (Tint)",
+        messages: errs.map((m) => `${m.lineNum}:${m.linePos} ${m.message}`),
+        adapter: name,
+      };
+    }
+  }
+
+  // Configure the canvas for the display pipeline (preferred format).
+  const ctx = canvas.getContext("webgpu");
+  if (!ctx) return { ok: false, reason: "canvas.getContext('webgpu') returned null", adapter: name };
+  const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format: canvasFormat, alphaMode: "opaque" });
+
+  const { bgl, inputBuf, bindGroup } = buildRenderBindings(device, layout);
+  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+
+  const makePipeline = (targetFormat) =>
+    device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: { module, entryPoint: layout.vertex_entry, buffers: [] },
+      fragment: { module, entryPoint: layout.fragment_entry, targets: [{ format: targetFormat }] },
+      primitive: { topology: "triangle-list" },
+    });
+
+  const displayPipeline = makePipeline(canvasFormat);
+  // The verify pipeline targets the compiler-stated offscreen format (rgba8unorm),
+  // so a readback can be byte-compared against the Fe-wasm oracle.
+  const verifyFormat = layout.color_target_format || "rgba8unorm";
+  const verifyPipeline = makePipeline(verifyFormat);
+
+  return {
+    ok: true,
+    adapter: name,
+    device,
+    queue: device.queue,
+    ctx,
+    canvasFormat,
+    verifyFormat,
+    displayPipeline,
+    verifyPipeline,
+    inputBuf,
+    bindGroup,
+    layout,
+    width: layout.width,
+    height: layout.height,
+    deviceError: () => deviceError,
+  };
+}
+
+// Write the view words into the Input buffer at the compiler-stated offsets, then
+// draw the fullscreen triangle to the canvas. `viewWords` is the update_view reply
+// triple, in `layout.params` order (center_re, center_im, scale_q). i32 two's-
+// complement bit patterns go straight into the u32 storage buffer via Int32Array.
+export function renderFrame(handle, viewWords) {
+  const { device, queue, ctx, displayPipeline, inputBuf, bindGroup, layout } = handle;
+  const params = layout.params || [];
+  for (let i = 0; i < params.length; i++) {
+    queue.writeBuffer(inputBuf, params[i].offset || 0, new Int32Array([viewWords[i] | 0]));
+  }
+  const view = ctx.getCurrentTexture().createView();
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [
+      { view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } },
+    ],
+  });
+  pass.setPipeline(displayPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(3, 1, 0, 0);
+  pass.end();
+  queue.submit([encoder.finish()]);
+}
+
+// verifyView(handle, viewWords) - render the SAME view to an offscreen rgba8unorm
+// target and read it back TIGHTLY packed (row padding stripped). The badge path
+// compares these bytes against the Fe-wasm fragment's output. Returns
+// { ok:true, rgba:Uint8Array } or { ok:false, reason }.
+export async function verifyView(handle, viewWords) {
+  const { device, queue, verifyPipeline, inputBuf, bindGroup, layout, width, height } = handle;
+  const w = width, h = height;
+  const params = layout.params || [];
+  for (let i = 0; i < params.length; i++) {
+    queue.writeBuffer(inputBuf, params[i].offset || 0, new Int32Array([viewWords[i] | 0]));
+  }
+
+  const tex = device.createTexture({
+    size: { width: w, height: h },
+    format: handle.verifyFormat || "rgba8unorm",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+  });
+  const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+  const staging = device.createBuffer({
+    size: bytesPerRow * h,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+  });
+
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [
+      {
+        view: tex.createView(),
+        loadOp: "clear",
+        storeOp: "store",
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      },
+    ],
+  });
+  pass.setPipeline(verifyPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(3, 1, 0, 0);
+  pass.end();
+  encoder.copyTextureToBuffer(
+    { texture: tex },
+    { buffer: staging, bytesPerRow, rowsPerImage: h },
+    { width: w, height: h }
+  );
+  queue.submit([encoder.finish()]);
+
+  try {
+    await staging.mapAsync(GPUMapMode.READ);
+  } catch (e) {
+    return { ok: false, reason: `verify readback map failed: ${e.message || e}` };
+  }
+  const data = new Uint8Array(staging.getMappedRange().slice(0));
+  staging.unmap();
+  const row = w * 4;
+  const out = new Uint8Array(row * h);
+  for (let y = 0; y < h; y++) out.set(data.subarray(y * bytesPerRow, y * bytesPerRow + row), y * row);
+  return { ok: true, rgba: out };
+}

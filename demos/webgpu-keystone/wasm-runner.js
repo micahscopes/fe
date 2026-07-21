@@ -53,3 +53,41 @@ export async function runWasmGrid(exportName, width, height) {
   }
   return grid;
 }
+
+// instantiateWasm(bytesOrUrl) - load a zero-import Fe wasm module, from a URL
+// string (fetch) or an ArrayBuffer/Uint8Array (the standalone inlines base64).
+// Returns the instance's exports.
+export async function instantiateWasm(bytesOrUrl) {
+  let bytes;
+  if (typeof bytesOrUrl === "string") {
+    const resp = await fetch(bytesOrUrl);
+    if (!resp.ok) throw new Error(`fetch ${bytesOrUrl} -> HTTP ${resp.status}`);
+    bytes = await resp.arrayBuffer();
+  } else {
+    bytes = bytesOrUrl;
+  }
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  return instance.exports;
+}
+
+// renderFragmentGrid(fragExports, exportName, view, width, height) - the AMBER
+// (no-WebGPU) render leg: call the Fe render FRAGMENT per pixel in V8, exactly the
+// same (px, py, center_re, center_im, scale_q) -> packed-RGBA function the GPU runs
+// as its fragment stage. Returns a Uint32Array(width*height) of packed RGBA words
+// (LE bytes = [R,G,B,A]); the fragment owns the palette, so JS colors NOTHING.
+// This is "your browser computed every pixel with Fe" without a GPU.
+export function renderFragmentGrid(fragExports, exportName, view, width, height) {
+  const f = fragExports[exportName];
+  if (typeof f !== "function") {
+    throw new Error(`wasm export \`${exportName}\` (from layout.json) not found`);
+  }
+  const [cr, ci, sq] = view;
+  const out = new Uint32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      out[row + x] = f(x, y, cr, ci, sq) >>> 0;
+    }
+  }
+  return out;
+}
