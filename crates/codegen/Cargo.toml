@@ -58,3 +58,8 @@ fe-contract-harness = { path = "../contract-harness" }
 # (plan ruling 1 item 5); the fe side does the serialization, here via the
 # `json!` macro reading the layout fields directly.
 serde_json = "1"
+# The MSM-0a / MSM-P field-multiply-mod-p gate needs an INDEPENDENT bigint oracle
+# (a*b*R^-1 mod p) to check the Fe field-mul against. num-bigint is already a
+# normal codegen dependency (already built), so re-declaring it here for the
+# integration-test target adds no build cost.
+num-bigint.workspace = true
