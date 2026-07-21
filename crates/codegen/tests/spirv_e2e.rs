@@ -3711,3 +3711,1169 @@ fn update_view_directed_clamps_and_anchor() {
          under the cursor within 1 Q12 unit. wasm == oracle in every case."
     );
 }
+
+// ===========================================================================
+// C3 (clifford ladder rung 3, renderer-in-Fe): the Cl(3) rotor sandwich as a
+// RENDER FRAGMENT, and its interactive ROTOR CONTROLLER.
+//
+// C3a: `clifford_frag_rgba` (the C1/C2 sandwich body VERBATIM, returning a packed
+// RGBA8 word instead of a bare shade) compiles through the Render seam and RENDERS
+// on lavapipe at the pinned rotors, tri-equal (texture == oracle == wasm leg). The
+// FOUR rotor components ride the render broadcast Input struct (members p0..p3,
+// span 16), exactly the four-member path C2 proved on the grid, now on the render
+// arm. C3b: `update_rotor` (the Fe->wasm rotor controller) matches its independent
+// Rust oracle over a gesture tape (native 4-value multi-return).
+// ===========================================================================
+
+/// The SSOT C3 fragment fixture: `include_str!`-ed here and (later) by the page
+/// generator, so tested and shipped source are byte-identical.
+const CLIFFORD_FRAG_RGBA_SOURCE: &str = include_str!("fixtures/spirv/clifford_frag_rgba.fe");
+/// The SSOT C3 control fixture (the pan/drag `update_rotor` fn).
+const CLIFFORD_CTL_SOURCE: &str = include_str!("fixtures/spirv/clifford_ctl.fe");
+
+/// The independent RGBA oracle for `clifford_frag_rgba`, re-derived HERE from the
+/// kernel logic: the C1 rotor sandwich + shade (reusing `clifford_sandwich_q12` and
+/// `clifford_shade_q12`, the twice-written oracle already proven integer-identical
+/// to the kernel), then the SAME pure-i32 packing the fragment uses (R=G=shade,
+/// B=255-shade, A=255; alpha folded in as `- 16777216`). The returned i32 word's
+/// bit pattern IS the little-endian RGBA8; `as u32` reinterprets it for the
+/// byte-wise comparison (to_le_bytes = [R,G,B,A]), no arithmetic change.
+fn clifford_frag_rgba_oracle(px: i32, py: i32, rc: i32, r12: i32, r13: i32, r23: i32) -> u32 {
+    let (sx, sy, sz) = clifford_sandwich_q12(px, py, rc, r12, r13, r23);
+    let shade = clifford_shade_q12(sx, sy, sz); // 0..255
+    let packed: i32 = shade + shade * 256 + (255 - shade) * 65536 - 16_777_216;
+    packed as u32
+}
+
+/// The pinned rotors the C3 render/wasm legs use, each `(name, rc, r12, r13, r23,
+/// min_distinct)`. A pure-e12 rotor (identity, e12_90) fixes the e3 slab height, so
+/// the depth cue is constant -> a flat two-tone checker -> exactly 2 packed colors;
+/// only the tilted rotor tumbles the slab in 3D and spreads the shades. The floors
+/// are DERIVED (not baked): >= 2 for the flat rotors (a one-color image still
+/// fails), >= 8 for the tilted 3D tumble.
+const CLIFFORD_RGBA_PINS: [(&str, i32, i32, i32, i32, usize); 4] = [
+    ("identity", 4096, 0, 0, 0, 2),
+    ("e12_90", 2896, 2896, 0, 0, 2),
+    ("tilted_default", 3712, 577, 1154, 1154, 8),
+    ("e12_180", 0, 4096, 0, 0, 2),
+];
+
+/// Compile the C3 fragment to wasm through `BackendKind::Wasm`. On the wasm path it
+/// is an ordinary `(i32 x6) -> i32` export (Fe `u32` lowers to wasm `i32`); calling
+/// it per pixel is the wasm leg of the tri-equal AND the browser AMBER leg.
+fn compile_clifford_frag_rgba_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_frag_rgba_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("clifford_frag_rgba should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// Run the C3 fragment (the 6-arg typed func) over the FULL 512x512 grid for one
+/// pinned rotor, returning the per-pixel packed RGBA8 grid (row-major, u32).
+fn wasm_clifford_frag_grid_all(bytes: &[u8], rc: i32, r12: i32, r13: i32, r23: i32) -> Vec<u32> {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32), i32>(&mut store, "clifford_frag_rgba")
+        .expect("`clifford_frag_rgba` export should exist as (i32 x6) -> i32");
+    let mut out = Vec::with_capacity((FRAG_W * FRAG_H) as usize);
+    for py in 0..FRAG_H as i32 {
+        for px in 0..FRAG_W as i32 {
+            let v = f
+                .call(&mut store, (px, py, rc, r12, r13, r23))
+                .expect("clifford_frag_rgba should run") as u32;
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// C3a wasm leg (GPU-FREE): compile `clifford_frag_rgba` via `BackendKind::Wasm`,
+/// execute under wasmtime over the FULL 512x512 grid for each pinned rotor, and
+/// assert every packed-RGBA word equals the independent oracle. Proves the
+/// signed-sandwich -> u32 color map (the `as u32` bridge + the branchless clamp +
+/// the RGBA packing) computes correctly WITHOUT any GPU. Identity/e12_90 are
+/// additionally pinned to exactly two packed colors (the flat two-tone checker).
+#[test]
+fn clifford_frag_rgba_wasm_leg() {
+    let bytes = compile_clifford_frag_rgba_to_wasm();
+    wasmparser::validate(&bytes).expect("Fe-emitted clifford frag wasm should be valid");
+
+    for (name, rc, r12, r13, r23, min_distinct) in CLIFFORD_RGBA_PINS {
+        let grid = wasm_clifford_frag_grid_all(&bytes, rc, r12, r13, r23);
+        let mut distinct = std::collections::HashSet::new();
+        for py in 0..FRAG_H {
+            for px in 0..FRAG_W {
+                let idx = (py * FRAG_W + px) as usize;
+                let got = grid[idx];
+                let want = clifford_frag_rgba_oracle(px as i32, py as i32, rc, r12, r13, r23);
+                assert_eq!(
+                    got, want,
+                    "wasm clifford_frag_rgba({px},{py}; {name}) = 0x{got:08X} must equal the oracle \
+                     0x{want:08X}"
+                );
+                // Alpha is fully opaque for every pixel (byte 3 == 0xFF).
+                assert_eq!(
+                    got >> 24,
+                    255,
+                    "pixel ({px},{py}; {name}) must be opaque (alpha 255); got 0x{got:08X}"
+                );
+                distinct.insert(got);
+            }
+        }
+        assert!(
+            distinct.len() >= min_distinct,
+            "{name}: the packed-RGBA image must have >= {min_distinct} distinct colors (got {})",
+            distinct.len()
+        );
+        match name {
+            "identity" | "e12_90" | "e12_180" => assert_eq!(
+                distinct.len(),
+                2,
+                "{name}: a pure-e12 rotor fixes the slab depth -> exactly 2 packed colors, got {}",
+                distinct.len()
+            ),
+            "tilted_default" => assert!(
+                distinct.len() >= 8,
+                "tilted_default: the 3D tumble's depth cue must spread the colors (got {})",
+                distinct.len()
+            ),
+            _ => unreachable!("unexpected pinned rotor {name}"),
+        }
+        eprintln!(
+            "C3a wasm leg [{name} = ({rc},{r12},{r13},{r23})]: ALL 262,144 packed-RGBA words == the \
+             independent oracle; {} distinct colors, all opaque.",
+            distinct.len()
+        );
+    }
+}
+
+/// C3a compile (GPU-FREE): the C3 fragment compiles through the Render seam into
+/// ONE naga-validated SPIR-V module with TWO entry points, states its render ABI,
+/// and its browser-profile WGSL carries the render epilogue AND the FOUR-member
+/// broadcast rotor load (`input.p0`..`input.p3`, span 16). Straight-line branchless
+/// (no `loop`, no structurizer conditional), signed sandwich (`bitcast<i32>`).
+#[test]
+fn clifford_frag_rgba_compiles_to_render_spirv() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_frag_rgba_render.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("clifford_frag_rgba should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("clifford_frag_rgba should compile Fe -> naga-validated SPIR-V in Render mode");
+
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render,
+        "the render driver seam must state LayoutMode::Render"
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the render fragment must lower to the u32 word (browser profile)"
+    );
+    assert!(
+        artifact.layout.result.is_none(),
+        "Render mode has no single-slot result: the color target is the result"
+    );
+    assert_eq!(
+        artifact.layout.vertex_entry.as_deref(),
+        Some("vs_fullscreen"),
+        "Render mode states the @vertex entry name"
+    );
+    assert_eq!(
+        artifact.layout.fragment_entry.as_deref(),
+        Some("fs_main"),
+        "Render mode states the @fragment entry name"
+    );
+    assert_eq!(
+        count_spirv_entry_points(&artifact.words),
+        2,
+        "one Render SPIR-V module must carry BOTH entry points (@vertex + @fragment)"
+    );
+
+    // The FOUR-member broadcast rotor: Input stride 16 is the static proof that args
+    // 2..5 (rc, r12, r13, r23) became broadcast members p0,p1,p2,p3 at 0,4,8,12.
+    let input_stride = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|b| b.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("the render layout must have an Input binding")
+        .stride;
+    assert_eq!(
+        input_stride, 16,
+        "the FOUR broadcast rotor members (rc, r12, r13, r23), 4 bytes each, span 16 bytes: the \
+         layout-level proof that the fragment's args 2..5 became the render broadcast rotor"
+    );
+
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the render fragment");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("@vertex") && wgsl.contains("@fragment"),
+        "render WGSL must contain BOTH @vertex and @fragment stages; got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("@location(0)") && wgsl.contains("unpack4x8unorm"),
+        "the render epilogue must write @location(0) via unpack4x8unorm; got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("bitcast<i32>"),
+        "the signed rotor sandwich must round-trip through bitcast<i32> (Sar/Slt on i32); got:\n{wgsl}"
+    );
+    assert!(
+        wgsl.contains("input.p0") && wgsl.contains("input.p3"),
+        "the fragment must load the FIRST and FOURTH broadcast rotor members (input.p0 = rc, \
+         input.p3 = r23); all four are read; got:\n{wgsl}"
+    );
+    eprintln!(
+        "C3a-val: Fe clifford_frag_rgba compiled -> ONE Render SPIR-V module, 2 entry points, Input \
+         stride 16 (4 broadcast rotor members), WGSL with unpack4x8unorm + bitcast<i32> + \
+         input.p0..input.p3. {} SPIR-V words.",
+        artifact.words.len()
+    );
+}
+
+/// C3a headline: the Cl(3) rotor sandwich RENDERS on lavapipe at the browser
+/// profile, and at EACH pinned rotor every one of 262,144 pixels x 4 bytes is
+/// TRI-EQUAL (texture == `clifford_frag_rgba_oracle` == the wasm execution), with
+/// the rotor delivered as four broadcast words written to the Input buffer before
+/// the draw. Hard-fail-not-skip; `MB2_ALLOW_GPU_SKIP` only, adapter printed. The
+/// name contains "lavapipe" so the nextest serial group filter catches it.
+#[test]
+fn clifford_frag_rgba_renders_on_lavapipe_browser_profile() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_frag_rgba_lavapipe.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(CLIFFORD_FRAG_RGBA_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("clifford_frag_rgba should build a wasm runtime package");
+
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("clifford_frag_rgba should compile Fe -> naga-validated SPIR-V in Render mode");
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render,
+        "the render driver seam must state LayoutMode::Render"
+    );
+    assert_eq!(
+        count_spirv_entry_points(&artifact.words),
+        2,
+        "one Render SPIR-V module must carry BOTH entry points"
+    );
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the render fragment");
+    assert_browser_profile_wgsl(wgsl);
+
+    let wasm_bytes = compile_clifford_frag_rgba_to_wasm();
+
+    for (name, rc, r12, r13, r23, min_distinct) in CLIFFORD_RGBA_PINS {
+        let wasm_colors = wasm_clifford_frag_grid_all(&wasm_bytes, rc, r12, r13, r23);
+        // The rotor words, in kernel-arg order: arg2=rc -> p0, arg3=r12 -> p1,
+        // arg4=r13 -> p2, arg5=r23 -> p3 (i32 two's complement in the u32 word).
+        let params: [u32; 4] = [rc as u32, r12 as u32, r13 as u32, r23 as u32];
+        let input_bytes: Vec<u8> = params.iter().flat_map(|p| p.to_le_bytes()).collect();
+        match run_render_rgba8_on_lavapipe(wgsl, FRAG_W, FRAG_H, &input_bytes) {
+            Some(rgba) => {
+                assert_eq!(
+                    rgba.len(),
+                    (FRAG_W * FRAG_H * 4) as usize,
+                    "render readback must be 512*512*4 = 1048576 bytes (tightly packed)"
+                );
+                let mut distinct = std::collections::HashSet::new();
+                for y in 0..FRAG_H {
+                    for x in 0..FRAG_W {
+                        let idx = (y * FRAG_W + x) as usize;
+                        let px = &rgba[idx * 4..idx * 4 + 4];
+                        let oracle = clifford_frag_rgba_oracle(x as i32, y as i32, rc, r12, r13, r23);
+                        let oracle_bytes = oracle.to_le_bytes();
+                        let wasm_bytes_px = wasm_colors[idx].to_le_bytes();
+                        assert_eq!(
+                            px, &oracle_bytes,
+                            "lavapipe rendered pixel ({x},{y}) [rotor {name}] RGBA {px:?} must equal \
+                             the oracle color {oracle_bytes:?} (packed 0x{oracle:08X})"
+                        );
+                        assert_eq!(
+                            px, &wasm_bytes_px,
+                            "lavapipe rendered pixel ({x},{y}) [rotor {name}] RGBA {px:?} must equal \
+                             the wasm leg color {wasm_bytes_px:?} for the same (x,y)"
+                        );
+                        distinct.insert(oracle);
+                    }
+                }
+                assert!(
+                    distinct.len() >= min_distinct,
+                    "rotor {name}: rendered color histogram must have >= {min_distinct} distinct \
+                     colors (got {}); a degenerate/transposed image could not pass the per-(x,y) \
+                     tri-equal either",
+                    distinct.len()
+                );
+                eprintln!(
+                    "C3a [{name} = ({rc},{r12},{r13},{r23})]: Fe clifford_frag_rgba RENDERED on \
+                     lavapipe (browser profile, 512x512) with the rotor as 4 broadcast params; ALL \
+                     262,144 pixels TRI-EQUAL (texture == oracle == wasm); {} distinct colors.",
+                    distinct.len()
+                );
+            }
+            None => {
+                eprintln!(
+                    "R-val only [{name}]: render SPIR-V validated but NOT executed (GPU skipped via \
+                     MB2_ALLOW_GPU_SKIP). The clifford render tri-equal claim is NOT earned."
+                );
+                return;
+            }
+        }
+    }
+
+    eprintln!(
+        "C3a: the Cl(3) rotor sandwich RENDERED on lavapipe at all {} pinned rotors; the rotor rode \
+         the 4-member broadcast Input struct (span 16); every pixel is tri-equal. Interactive render \
+         rotors earn R-lava.",
+        CLIFFORD_RGBA_PINS.len()
+    );
+}
+
+/// The initial rotor the page seeds (a gentle 3D tilt, so the opening image reads
+/// as a tumbled checker, not a flat grid). Emitted into `ctl.json` as data.
+const ROTOR_INIT: (i32, i32, i32, i32) = (3712, 577, 1154, 1154);
+
+/// The independent Rust twin of `update_rotor`, re-derived HERE from the rotor
+/// composition (never trusted from the fixture), integer-identical: the yaw rotor
+/// (e12 plane, driven by sign(dx)) then the pitch rotor (e13 plane, sign(dy)), each
+/// the Pythagorean small rotor (4095/128) composed by geometric product then `>>
+/// 12` (a no-drag axis uses cosine 4096 = exact identity), and the [-8192, 8192]
+/// component clamp. All `>>` are arithmetic i32 (Sar), matching Fe.
+fn update_rotor_oracle(
+    rc: i32, r12: i32, r13: i32, r23: i32, dx: i32, dy: i32,
+) -> (i32, i32, i32, i32) {
+    let is_neg = |d: i32| if d < 0 { 1 } else { 0 };
+    let is_pos = |d: i32| if d > 0 { 1 } else { 0 };
+    let dir_sin = |d: i32| (is_neg(d) - is_pos(d)) * 128;
+    let dir_cos = |d: i32| 4096 - (is_neg(d) + is_pos(d));
+    let clamp_comp = |c: i32| c.clamp(-8192, 8192);
+
+    let c0y = dir_cos(dx);
+    let sy0 = dir_sin(dx);
+    let rc1 = (c0y * rc - sy0 * r12) >> 12;
+    let r121 = (sy0 * rc + c0y * r12) >> 12;
+    let r131 = (c0y * r13 + sy0 * r23) >> 12;
+    let r231 = (c0y * r23 - sy0 * r13) >> 12;
+
+    let c0p = dir_cos(dy);
+    let sp0 = dir_sin(dy);
+    let rc2 = (c0p * rc1 - sp0 * r131) >> 12;
+    let r122 = (c0p * r121 - sp0 * r231) >> 12;
+    let r132 = (sp0 * rc1 + c0p * r131) >> 12;
+    let r232 = (c0p * r231 + sp0 * r121) >> 12;
+
+    (
+        clamp_comp(rc2),
+        clamp_comp(r122),
+        clamp_comp(r132),
+        clamp_comp(r232),
+    )
+}
+
+/// Integer squared magnitude of a rotor (fits in i64; each component <= 8192 so
+/// the sum <= 4 * 8192^2 = 268M).
+fn rotor_norm_sq(r: (i32, i32, i32, i32)) -> i64 {
+    (r.0 as i64).pow(2) + (r.1 as i64).pow(2) + (r.2 as i64).pow(2) + (r.3 as i64).pow(2)
+}
+
+/// Compile the C3 control fixture to wasm through `BackendKind::Wasm`.
+fn compile_clifford_ctl_to_wasm() -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_ctl_wasm.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(CLIFFORD_CTL_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("clifford_ctl should compile Fe -> wasm");
+    let bytes = output.into_bytecode().expect("wasm output should be bytecode");
+    wasmparser::validate(&bytes).expect("Fe-emitted control wasm should be valid");
+    bytes
+}
+
+/// C3b headline: a deterministic 10,000-event gesture tape (seeded LCG, mixed
+/// horizontal/vertical drag deltas) asserts the wasmtime `update_rotor` 4-tuple
+/// EQUALS the independent Rust oracle at EVERY step, feeding each reply forward as
+/// the next rotor (the exact broker round-trip). The 4-value reply crosses as a
+/// native wasm MULTI-VALUE result. Additionally: a no-drag event is the EXACT
+/// identity (no rotor drift), and the rotor magnitude stays bounded near unit.
+#[test]
+fn update_rotor_matches_oracle_over_gesture_tape() {
+    let wasm = compile_clifford_ctl_to_wasm();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+
+    // update_rotor: 6 flattened i32 args -> a 4-value wasm multi-value reply.
+    let update_rotor = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32), (i32, i32, i32, i32)>(
+            &mut store,
+            "update_rotor",
+        )
+        .expect("`update_rotor` export should exist as (i32 x6) -> (i32, i32, i32, i32)");
+
+    // --- No-drag event is the EXACT identity (the c0(0)=4096 fix): a pump firing
+    // on a zero-movement pointer event must NOT shrink or perturb the rotor. ---
+    for &r in &[
+        (4096, 0, 0, 0),
+        ROTOR_INIT,
+        (2896, 2896, 0, 0),
+        (1000, -2000, 3000, -500),
+    ] {
+        let got = update_rotor
+            .call(&mut store, (r.0, r.1, r.2, r.3, 0, 0))
+            .expect("update_rotor should run");
+        assert_eq!(
+            got, r,
+            "a no-drag event (dx=dy=0) must be the exact identity on rotor {r:?}; got {got:?}"
+        );
+        assert_eq!(got, update_rotor_oracle(r.0, r.1, r.2, r.3, 0, 0));
+    }
+
+    // --- The gesture tape: seeded LCG, feed replies forward. ---
+    let mut s: u64 = 0x0f1e_2d3c_4b5a_6978;
+    let (ir, i12, i13, i23) = ROTOR_INIT;
+    let (mut rc, mut r12, mut r13, mut r23) = (ir, i12, i13, i23);
+    let mut norm_min = i64::MAX;
+    let mut norm_max = i64::MIN;
+    let mut hit_clamp = 0u32;
+    const STEPS: usize = 10_000;
+    for step in 0..STEPS {
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let r = s;
+        // Drag deltas in -32..31 (pointer movementX/Y), often zero on one axis.
+        let dx = ((r >> 8) & 63) as i32 - 32;
+        let dy = ((r >> 20) & 63) as i32 - 32;
+
+        let got = update_rotor
+            .call(&mut store, (rc, r12, r13, r23, dx, dy))
+            .expect("update_rotor should run");
+        let want = update_rotor_oracle(rc, r12, r13, r23, dx, dy);
+        assert_eq!(
+            got, want,
+            "gesture-tape step {step}: wasm update_rotor({rc},{r12},{r13},{r23}; dx={dx},dy={dy}) = \
+             {got:?} must equal the Rust oracle {want:?}"
+        );
+
+        rc = got.0;
+        r12 = got.1;
+        r13 = got.2;
+        r23 = got.3;
+        // The component clamp is the contract: no component ever escapes [-8192, 8192].
+        for c in [rc, r12, r13, r23] {
+            assert!(
+                (-8192..=8192).contains(&c),
+                "step {step}: rotor component {c} escaped the [-8192, 8192] clamp"
+            );
+            if c == 8192 || c == -8192 {
+                hit_clamp += 1;
+            }
+        }
+        let n = rotor_norm_sq((rc, r12, r13, r23));
+        norm_min = norm_min.min(n);
+        norm_max = norm_max.max(n);
+    }
+
+    // The rotor stays a well-conditioned rotor: never collapses toward zero (a
+    // degenerate rotor would make the sandwich vanish) and never explodes. The
+    // Pythagorean small rotor + the c0(0)=4096 identity keep |R| near the Q12 unit
+    // (4096^2 = 16,777,216); the walk breathes but stays within a factor of ~4x in
+    // norm-squared (a factor ~2 in magnitude), well inside the clamp.
+    let unit_sq: i64 = 4096 * 4096;
+    assert!(
+        norm_min > unit_sq / 4,
+        "the rotor must never collapse (norm^2 min {norm_min} must stay > unit/4 = {})",
+        unit_sq / 4
+    );
+    assert!(
+        norm_max < unit_sq * 16,
+        "the rotor must never explode (norm^2 max {norm_max} must stay < 16*unit = {})",
+        unit_sq * 16
+    );
+    eprintln!(
+        "C3b tape: {STEPS} mixed drag events under wasmtime; the update_rotor 4-tuple equals the \
+         independent oracle at EVERY step (native 4-value multi-return). No-drag events are the \
+         exact identity; rotor norm^2 stayed in [{norm_min}, {norm_max}] (unit = {unit_sq}); clamp \
+         touched {hit_clamp} times."
+    );
+}
+
+/// C3b directed: a single yaw drag rotates the rotor in the e12 plane while keeping
+/// the scalar/bivector magnitude near unit, and a large accumulated same-direction
+/// drag is pinned by the component clamp (never overflows the sandwich envelope).
+#[test]
+fn update_rotor_directed_rotation_and_clamp() {
+    let wasm = compile_clifford_ctl_to_wasm();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let update_rotor = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32), (i32, i32, i32, i32)>(
+            &mut store,
+            "update_rotor",
+        )
+        .expect("`update_rotor` export should exist as (i32 x6) -> (i32, i32, i32, i32)");
+
+    let mut call = |rc: i32, r12: i32, r13: i32, r23: i32, dx: i32, dy: i32| {
+        let got = update_rotor
+            .call(&mut store, (rc, r12, r13, r23, dx, dy))
+            .expect("update_rotor should run");
+        let want = update_rotor_oracle(rc, r12, r13, r23, dx, dy);
+        assert_eq!(
+            got, want,
+            "update_rotor({rc},{r12},{r13},{r23}; dx={dx},dy={dy}) = {got:?} must equal the oracle \
+             {want:?}"
+        );
+        got
+    };
+
+    // --- (1) A single yaw drag from the identity rotor rotates in the e12 plane:
+    // r12 becomes nonzero, the scalar drops from 4096, and the magnitude stays
+    // within ~1% of the Q12 unit. dx < 0 spins one way, dx > 0 the other. ---
+    let unit_sq: i64 = 4096 * 4096;
+    let pos = call(4096, 0, 0, 0, 8, 0);
+    assert!(pos.1 < 0, "dx>0 must rotate the identity rotor to a NEGATIVE r12; got {pos:?}");
+    let neg = call(4096, 0, 0, 0, -8, 0);
+    assert!(neg.1 > 0, "dx<0 must rotate the identity rotor to a POSITIVE r12; got {neg:?}");
+    for r in [pos, neg] {
+        let n = rotor_norm_sq(r);
+        assert!(
+            (n - unit_sq).abs() < unit_sq / 50,
+            "a single yaw step must keep the rotor within ~2% of unit norm^2 ({unit_sq}); got {n}"
+        );
+        // The e13/e23 plane is untouched by a pure-yaw (dy=0) step.
+        assert_eq!((r.2, r.3), (0, 0), "a pure-yaw step must leave r13, r23 at zero; got {r:?}");
+    }
+
+    // --- (2) A pitch drag rotates in the e13 plane (r13 becomes nonzero). ---
+    let pitch = call(4096, 0, 0, 0, 0, 8);
+    assert!(pitch.2 < 0, "dy>0 must rotate the identity rotor to a NEGATIVE r13; got {pitch:?}");
+    assert_eq!((pitch.1, pitch.3), (0, 0), "a pure-pitch step must leave r12, r23 at zero; got {pitch:?}");
+
+    // --- (3) The component clamp holds: a long same-direction drag grows the rotor
+    // toward the clamp, and every component is pinned in [-8192, 8192] (the
+    // sandwich's no-overflow floor). Feed replies forward for many steps. ---
+    let (mut rc, mut r12, mut r13, mut r23) = (8000, 8000, 8000, 8000);
+    for _ in 0..64 {
+        let got = call(rc, r12, r13, r23, -20, -20);
+        rc = got.0;
+        r12 = got.1;
+        r13 = got.2;
+        r23 = got.3;
+        for c in [rc, r12, r13, r23] {
+            assert!(
+                (-8192..=8192).contains(&c),
+                "the component clamp must pin every component in [-8192, 8192]; got {c}"
+            );
+        }
+    }
+
+    eprintln!(
+        "C3b directed: a yaw drag rotates the identity rotor in the e12 plane (sign(dx) picks the \
+         direction) keeping |R| within ~2% of unit; a pitch drag rotates in e13; the component \
+         clamp pins a runaway drag inside [-8192, 8192]. wasm == oracle in every case."
+    );
+}
+
+// ===========================================================================
+// MSM-P / MSM-0a: the first crypto-on-GPU rung. A fully-unrolled, single-
+// function, BRANCHLESS field multiply-mod-p (BN254 scalar field Fr, the zk-SNARK
+// proving hot loop's inner kernel), 13-bit x 20 limbs in u32 words, ZERO new ops
+// (Add / Sub / Mul / Shr-by-literal only). The kernel computes the CIOS
+// Montgomery product a*b*R^-1 mod p; the INDEPENDENT gate oracle is num-bigint's
+// (a*b*R^-1 mod p) (p prime => R^-1 = R^(p-2) mod p by Fermat). Tri-equal:
+// lavapipe (SPIR-V) == wasmtime (wasm) == num-bigint oracle, at every operand
+// including carry-heavy p-1 and dense-limb cases.
+//
+// MSM-P (field_mul_probe.fe) is the lowering de-risk probe: the SAME idioms mod a
+// 51-bit prime, 4 limbs, ~192 statements. MSM-0a (field_mul_bn254_fr.fe) is the
+// real 254-bit BN254 Fr, 20 limbs, ~2880 statements. Both fixtures are GENERATED
+// (scratchpad/gen_field_mul.py) from one CIOS engine that is validated numeric-
+// ally against the bigint oracle before emission, so the Fe source and the
+// reference algorithm cannot drift.
+// ===========================================================================
+
+use num_bigint::BigUint;
+
+const FIELD_MUL_PROBE_SOURCE: &str = include_str!("fixtures/spirv/field_mul_probe.fe");
+const FIELD_MUL_BN254_FR_SOURCE: &str = include_str!("fixtures/spirv/field_mul_bn254_fr.fe");
+
+/// 13-bit limbs (base 2^13). Products of two limbs are 26-bit; a CIOS column
+/// step stays < 2^27, so all arithmetic fits u32 with no mul-hi and no u64.
+const MSM_LIMB_BITS: usize = 13;
+
+/// The MSM-P probe modulus: a 51-bit prime (R = 2^52 = B^4).
+fn probe_prime() -> BigUint {
+    BigUint::from(2_251_799_813_685_119u64)
+}
+
+/// BN254 (alt_bn128) scalar field order Fr, the 254-bit prime SNARK scalars live
+/// in (R = 2^260 = B^20). Parsed from decimal here, never trusted from a limb
+/// table, so the oracle is anchored to the canonical curve constant.
+fn bn254_fr_prime() -> BigUint {
+    BigUint::parse_bytes(
+        b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
+        10,
+    )
+    .expect("BN254 Fr decimal should parse")
+}
+
+/// Decompose a field element into `n` little-endian 13-bit limbs (u32 words).
+fn msm_to_limbs(x: &BigUint, n: usize) -> Vec<u32> {
+    let mask = BigUint::from(8191u32);
+    (0..n)
+        .map(|j| {
+            let limb = (x >> (MSM_LIMB_BITS * j)) & &mask;
+            limb.to_u32_digits().first().copied().unwrap_or(0)
+        })
+        .collect()
+}
+
+/// The INDEPENDENT bigint oracle: the CIOS Montgomery product a*b*R^-1 mod p,
+/// computed with num-bigint (which knows nothing of 13-bit limbs or CIOS), then
+/// decomposed into `n` limbs for a limb-for-limb match against the kernel. R^-1
+/// is R^(p-2) mod p (Fermat; both moduli are prime).
+fn mont_oracle_limbs(a: &BigUint, b: &BigUint, p: &BigUint, n: usize) -> Vec<u32> {
+    let r = BigUint::from(1u32) << (MSM_LIMB_BITS * n);
+    let rinv = r.modpow(&(p - BigUint::from(2u32)), p);
+    let mont = (((a * b) % p) * &rinv) % p;
+    msm_to_limbs(&mont, n)
+}
+
+/// The operand set: canonical edge cases (0, 1, 2, p-1, p-2, (p-1)/2), the
+/// carry-heavy dense-limb value (every 13-bit limb saturated, reduced mod p), the
+/// Montgomery anchors R and R^2 mod p, and deterministic pseudo-random elements
+/// (xorshift, no rand dependency). Every ordered pair (a, b) is a test product.
+fn msm_operands(p: &BigUint, n: usize) -> Vec<(String, BigUint)> {
+    let one = BigUint::from(1u32);
+    let two = BigUint::from(2u32);
+    let mut v: Vec<(String, BigUint)> = vec![
+        ("0".into(), BigUint::from(0u32)),
+        ("1".into(), one.clone()),
+        ("2".into(), two.clone()),
+        ("p-1".into(), p - &one),
+        ("p-2".into(), p - &two),
+        ("(p-1)/2".into(), (p - &one) / &two),
+    ];
+    let mut dense = BigUint::from(0u32);
+    for j in 0..n {
+        dense |= BigUint::from(8191u32) << (MSM_LIMB_BITS * j);
+    }
+    v.push(("dense".into(), &dense % p));
+    let r = BigUint::from(1u32) << (MSM_LIMB_BITS * n);
+    v.push(("R".into(), &r % p));
+    v.push(("R^2".into(), (&r * &r) % p));
+    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    for idx in 0..3 {
+        let mut x = BigUint::from(0u32);
+        for _ in 0..(MSM_LIMB_BITS * n / 64 + 1) {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            x = (x << 64) | BigUint::from(s);
+        }
+        v.push((format!("rand{idx}"), x % p));
+    }
+    v
+}
+
+/// Compile a Fe source to wasm bytecode through `BackendKind::Wasm`.
+fn compile_source_to_wasm(source: &str, tag: &str) -> Vec<u8> {
+    use fe_codegen::{BackendKind, OptLevel, layout_for};
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{tag}_wasm.fe")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let output = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("field-mul kernel should compile Fe -> wasm");
+    output.into_bytecode().expect("wasm output should be bytecode")
+}
+
+/// Execute the wasm field-mul over all `n` limb indices (arg0 = k = limb index)
+/// for a single (a, b), returning the `n` product limbs. The kernel takes
+/// `2 + 2n` args, past wasmtime's typed-tuple arity, so the untyped `Func::call`
+/// path is used.
+fn wasm_field_mul_limbs(
+    bytes: &[u8],
+    fn_name: &str,
+    a_limbs: &[u32],
+    b_limbs: &[u32],
+    n: usize,
+) -> Vec<u32> {
+    use wasmtime::{Engine, Instance, Module, Store, Val};
+    wasmparser::validate(bytes).expect("Fe-emitted wasm should be valid");
+    let engine = Engine::default();
+    let module = Module::new(&engine, bytes).expect("wasmtime should load the module");
+    let mut store = Store::new(&engine, ());
+    let instance =
+        Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_func(&mut store, fn_name)
+        .unwrap_or_else(|| panic!("`{fn_name}` export should exist"));
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut params: Vec<Val> = Vec::with_capacity(2 + 2 * n);
+        params.push(Val::I32(k as i32));
+        params.push(Val::I32(0));
+        for &l in a_limbs {
+            params.push(Val::I32(l as i32));
+        }
+        for &l in b_limbs {
+            params.push(Val::I32(l as i32));
+        }
+        let mut results = [Val::I32(0)];
+        f.call(&mut store, &params, &mut results)
+            .unwrap_or_else(|e| panic!("{fn_name}(k={k}, ...) should run: {e:?}"));
+        let limb = match results[0] {
+            Val::I32(v) => v as u32,
+            other => panic!("{fn_name} result must be i32, got {other:?}"),
+        };
+        out.push(limb);
+    }
+    out
+}
+
+/// Execute a grid field-mul kernel on lavapipe (software Vulkan) at the browser
+/// profile (NO required features), once per broadcast param-set, reusing ONE
+/// device + pipeline (the kernel WGSL compiles once; only the input buffer
+/// changes per operand pair). Returns one `width*height` grid per param-set.
+///
+/// ANTI-FUDGE (verbatim discipline from the grid harness): a missing adapter or
+/// device is a HARD FAILURE, never a silent skip; the only escape is
+/// `MB2_ALLOW_GPU_SKIP`, which downgrades the whole batch to `None`.
+fn run_grid_batches_on_lavapipe(
+    wgsl: &str,
+    width: u32,
+    height: u32,
+    param_sets: &[Vec<u32>],
+    label: &str,
+) -> Option<Vec<Vec<u32>>> {
+    assert!(
+        width % 8 == 0 && height % 8 == 0,
+        "grid frame {width}x{height} must be a multiple of the 8x8 workgroup size"
+    );
+    let allow_skip = std::env::var_os("MB2_ALLOW_GPU_SKIP").is_some();
+    let out_bytes = u64::from(width * height * 4);
+    let param_len = param_sets.first().map_or(0, |p| p.len());
+    let input_bytes = std::cmp::max(4u64, 4 * param_len as u64);
+
+    let instance = wgpu::Instance::default();
+    let adapter = match pollster::block_on(instance.request_adapter(
+        &wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            ..Default::default()
+        },
+    )) {
+        Ok(a) => a,
+        Err(e) => {
+            if allow_skip {
+                eprintln!("  {label} SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): no Vulkan adapter: {e:?}");
+                return None;
+            }
+            panic!(
+                "{label} SPIR-V leg: no GPU/Vulkan adapter available ({e:?}). This crypto rung \
+                 requires lavapipe to EXECUTE; a missing device is a hard failure, not a skip. Set \
+                 VK_ICD_FILENAMES / LD_LIBRARY_PATH / WGPU_BACKEND=vulkan for lavapipe, or \
+                 MB2_ALLOW_GPU_SKIP to downgrade on a genuinely GPU-less host."
+            );
+        }
+    };
+    let (device, queue) = match pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::empty(),
+            ..Default::default()
+        },
+    )) {
+        Ok(dq) => dq,
+        Err(e) => {
+            if allow_skip {
+                eprintln!("  {label} SPIR-V leg SKIPPED (MB2_ALLOW_GPU_SKIP): device request failed: {e:?}");
+                return None;
+            }
+            panic!(
+                "{label} SPIR-V leg: browser-profile device request (NO required features) failed \
+                 ({e:?}). This is a hard failure, not a skip."
+            );
+        }
+    };
+    eprintln!(
+        "  {label} SPIR-V leg GPU adapter (BROWSER PROFILE, no required features): {}",
+        adapter.get_info().name
+    );
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    let output_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("msm_output"),
+        size: out_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("msm_input"),
+        size: input_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("msm_staging"),
+        size: out_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("msm_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("msm_pl"),
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("msm_pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("msm_bg"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: output_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: input_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut grids = Vec::with_capacity(param_sets.len());
+    for params in param_sets {
+        if !params.is_empty() {
+            let bytes: Vec<u8> = params.iter().flat_map(|p| p.to_le_bytes()).collect();
+            queue.write_buffer(&input_buf, 0, &bytes);
+        }
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(width / 8, height / 8, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, out_bytes);
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).expect("map_async callback channel should be open");
+        });
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
+        });
+        rx.recv()
+            .expect("map_async callback should fire")
+            .expect("staging buffer should map for read");
+        let data = slice.get_mapped_range();
+        let grid: Vec<u32> = data
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().expect("4 bytes per u32")))
+            .collect();
+        drop(data);
+        staging_buf.unmap();
+        grids.push(grid);
+    }
+    Some(grids)
+}
+
+/// The GPU-FREE anchor: the Fe field-mul, compiled to wasm and executed under
+/// wasmtime, matches the independent num-bigint Montgomery oracle at every
+/// ordered operand pair (limb-for-limb). Precondition for the honest same-Fe-
+/// function cross-backend claim.
+fn field_mul_wasm_gate(source: &str, fn_name: &str, p: &BigUint, n: usize, label: &str) {
+    let bytes = compile_source_to_wasm(source, fn_name);
+    let ops = msm_operands(p, n);
+    let mut count = 0usize;
+    for (na, a) in &ops {
+        let al = msm_to_limbs(a, n);
+        for (nb, b) in &ops {
+            let bl = msm_to_limbs(b, n);
+            let got = wasm_field_mul_limbs(&bytes, fn_name, &al, &bl, n);
+            let want = mont_oracle_limbs(a, b, p, n);
+            assert_eq!(
+                got, want,
+                "{label} wasm {fn_name}({na} * {nb}) limbs must equal the bigint oracle \
+                 a*b*R^-1 mod p"
+            );
+            count += 1;
+        }
+    }
+    eprintln!(
+        "  {label} wasm leg: Fe {fn_name} -> wasm executed under wasmtime; all {count} operand \
+         products limb-equal to the num-bigint Montgomery oracle (incl p-1, dense-limb carries)."
+    );
+}
+
+/// The headline gate: the Fe field-mul EXECUTES on lavapipe (browser profile),
+/// tri-equal (lavapipe SPIR-V == wasmtime wasm == num-bigint oracle) at every
+/// ordered operand pair. Hard-fail-not-skip on a missing GPU.
+fn field_mul_lavapipe_gate(
+    source: &str,
+    fn_name: &str,
+    p: &BigUint,
+    n: usize,
+    grid_w: u32,
+    label: &str,
+) {
+    // --- Compile through the Grid driver seam. ---
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{fn_name}_gpu.fe")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let package = mir::build_wasm_runtime_package(&db, top_mod)
+        .expect("field-mul kernel should build a wasm runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_grid(&db, &package, [8, 8, 1])
+        .expect("field-mul kernel should compile Fe -> naga-validated SPIR-V in Grid mode");
+
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Grid,
+        "the grid driver seam must state LayoutMode::Grid"
+    );
+    assert_eq!(
+        artifact.layout.word,
+        sonatina_codegen::isa::spirv::WordKind::U32,
+        "the field-mul kernel must lower to the u32 word (browser profile)"
+    );
+    let input_stride = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|b| b.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("the grid layout must have an Input binding")
+        .stride;
+    assert_eq!(
+        input_stride as usize,
+        4 * 2 * n,
+        "the {} broadcast input limbs (a0..a{}, b0..b{}) span 4*2*n bytes: the layout-level proof \
+         that the two field elements ride the grid broadcast-param path",
+        2 * n,
+        n - 1,
+        n - 1,
+    );
+
+    // --- Browser-profile WGSL gate + broadcast-member tokens. ---
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("the naga backend should emit WGSL for the field-mul kernel");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.contains("global_invocation_id"),
+        "grid WGSL must bind global_invocation_id (the per-limb gid.x = k); got a {}-char module",
+        wgsl.len()
+    );
+    assert!(
+        wgsl.contains("input.p0") && wgsl.contains(&format!("input.p{}", 2 * n - 1)),
+        "the WGSL must load the first and last broadcast limb members (input.p0 .. input.p{})",
+        2 * n - 1
+    );
+    eprintln!(
+        "  {label} WGSL passed the browser profile ({} chars); carries global_invocation_id + \
+         input.p0..input.p{} ({}-member broadcast).",
+        wgsl.len(),
+        2 * n - 1,
+        2 * n
+    );
+
+    // --- The wasm leg (same Fe function), recomputed per pair. ---
+    let wasm_bytes = compile_source_to_wasm(source, fn_name);
+
+    // --- Build every ordered operand pair's broadcast param-set. ---
+    let ops = msm_operands(p, n);
+    let mut names: Vec<(String, String)> = Vec::new();
+    let mut param_sets: Vec<Vec<u32>> = Vec::new();
+    let mut oracles: Vec<Vec<u32>> = Vec::new();
+    let mut wasms: Vec<Vec<u32>> = Vec::new();
+    for (na, a) in &ops {
+        let al = msm_to_limbs(a, n);
+        for (nb, b) in &ops {
+            let bl = msm_to_limbs(b, n);
+            let mut params = Vec::with_capacity(2 * n);
+            params.extend_from_slice(&al);
+            params.extend_from_slice(&bl);
+            names.push((na.clone(), nb.clone()));
+            oracles.push(mont_oracle_limbs(a, b, p, n));
+            wasms.push(wasm_field_mul_limbs(&wasm_bytes, fn_name, &al, &bl, n));
+            param_sets.push(params);
+        }
+    }
+
+    // --- EXECUTE on lavapipe (one device+pipeline, one dispatch per pair) and
+    // assert every product limb is tri-equal. ---
+    match run_grid_batches_on_lavapipe(wgsl, grid_w, 8, &param_sets, label) {
+        Some(grids) => {
+            assert_eq!(grids.len(), param_sets.len(), "one grid per operand pair");
+            for (idx, grid) in grids.iter().enumerate() {
+                let (na, nb) = &names[idx];
+                for limb in 0..n {
+                    // Grid mode stores invocation k's return at output index k
+                    // (row 0). Limb k = grid[k].
+                    let got = grid[limb];
+                    assert_eq!(
+                        got, oracles[idx][limb],
+                        "{label}: lavapipe {fn_name}({na} * {nb}) limb {limb} = {got} must equal \
+                         the num-bigint oracle {}",
+                        oracles[idx][limb]
+                    );
+                    assert_eq!(
+                        got, wasms[idx][limb],
+                        "{label}: lavapipe {fn_name}({na} * {nb}) limb {limb} = {got} must equal \
+                         the wasmtime leg {} (same Fe function, two backends)",
+                        wasms[idx][limb]
+                    );
+                }
+            }
+            eprintln!(
+                "{label}: Fe {fn_name} EXECUTED on lavapipe (browser profile); all {} operand \
+                 products (incl p-1 x p-1 and dense-limb carries) TRI-EQUAL across {n} limbs \
+                 (lavapipe == wasmtime == num-bigint oracle). ZERO new ops.",
+                param_sets.len()
+            );
+        }
+        None => {
+            eprintln!(
+                "R-val only: {label} SPIR-V validated (browser profile) but NOT executed (GPU \
+                 skipped via MB2_ALLOW_GPU_SKIP). The tri-equal GPU claim is NOT earned this run."
+            );
+        }
+    }
+}
+
+/// MSM-P wasm leg (GPU-free de-risk): the 4-limb probe field-mul == the bigint
+/// oracle at every operand pair.
+#[test]
+fn field_mul_probe_wasm_leg() {
+    field_mul_wasm_gate(FIELD_MUL_PROBE_SOURCE, "field_mul_probe", &probe_prime(), 4, "MSM-P probe");
+}
+
+/// MSM-P headline: the 4-limb probe field-mul EXECUTES on lavapipe, tri-equal.
+/// De-risks the 13-bit-limb idiom on the GPU before the 20-limb BN254 kernel.
+#[test]
+fn field_mul_probe_executes_on_lavapipe_browser_profile() {
+    field_mul_lavapipe_gate(
+        FIELD_MUL_PROBE_SOURCE,
+        "field_mul_probe",
+        &probe_prime(),
+        4,
+        8, // 4 limbs, rounded up to the 8x8 workgroup floor
+        "MSM-P probe",
+    );
+}
+
+/// MSM-0a wasm leg (GPU-free): the full 254-bit BN254 Fr field-mul == the bigint
+/// oracle at every operand pair.
+#[test]
+fn field_mul_bn254_fr_wasm_leg() {
+    field_mul_wasm_gate(
+        FIELD_MUL_BN254_FR_SOURCE,
+        "field_mul_bn254_fr",
+        &bn254_fr_prime(),
+        20,
+        "MSM-0a BN254 Fr",
+    );
+}
+
+/// MSM-0a headline: the unrolled 254-bit BN254 Fr field-multiply-mod-p EXECUTES
+/// on lavapipe at the browser profile, tri-equal (lavapipe == wasmtime ==
+/// num-bigint oracle) at every operand pair including the carry-heavy p-1 x p-1
+/// and dense-limb cases. The first real crypto field arithmetic Fe compiles to
+/// the GPU, ZERO new ops.
+#[test]
+fn field_mul_bn254_fr_executes_on_lavapipe_browser_profile() {
+    field_mul_lavapipe_gate(
+        FIELD_MUL_BN254_FR_SOURCE,
+        "field_mul_bn254_fr",
+        &bn254_fr_prime(),
+        20,
+        24, // 20 limbs, rounded up to a multiple of the 8-wide workgroup
+        "MSM-0a BN254 Fr",
+    );
+}

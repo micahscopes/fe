@@ -1,0 +1,68 @@
+// C3 (clifford ladder rung 3, renderer-in-Fe): the Cl(3) ROTOR SANDWICH as a
+// RENDER FRAGMENT. The sandwich body is BYTE-IDENTICAL to `clifford_pixel_q12`
+// (the C1/C2 kernel): two geometric products v' = R v ~R in signed Q12
+// (1.0 = 4096), the trivector `tw` load-bearing, the 3D checker sampled by
+// sum-parity, branchless throughout. The ONLY change is the tail: instead of
+// returning a bare 0..255 shade, this maps the shade + depth to a PACKED RGBA8
+// word (little-endian bytes r,g,b,a) the Render seam draws through
+// `unpack4x8unorm`, exactly as `mandel_frag_rgba` does.
+//
+// Render binding (spec section 3, the C2 broadcast path on the render arm): args
+// 0,1 are the pixel coords (render mode binds them to `u32(position.xy)`); args
+// 2..5 are the FOUR broadcast rotor members rc,r12,r13,r23 arriving via the Input
+// struct at `@group(0) @binding(1)` (members p0..p3 at offsets 0,4,8,12; span 16;
+// bitcast<i32> in-kernel). This is EXACTLY the span-16 four-member broadcast C2
+// proved on the grid, now on the render arm. The caller (update_rotor) keeps the
+// rotor components in [-8192, 8192], well inside the sandwich's no-overflow
+// envelope (the C2 overflow proof holds for |rotor| <= 2 Q12 units).
+//
+// Envelope, op by op: the sandwich is the proven C1/C2 silhouette
+// (Add/Sub/Mul/Sar, literal shifts, no branch); the color tail adds the same
+// branchless 0..255 clamp trick (`n >> 31` sign gate) the shade already used, then
+// packs the RGBA8 word with pure i32 Add/Sub/Mul. Like the C1/C2 kernel, the
+// fragment RETURNS i32 to dodge the wasm/SPIR-V Cast surface: the returned i32's
+// bit pattern IS the little-endian RGBA8 word (bytes r,g,b,a). The alpha byte 0xFF
+// is folded in as `- 16777216` (0xFF000000 == -16777216 in two's complement), so
+// the result is exactly the u32 `r + g*256 + b*65536 + 255*16777216` bit-for-bit;
+// the render seam feeds that word straight to `unpack4x8unorm` (signedness is
+// irrelevant to the bytes), and the wasm/oracle legs read it back with `as u32`.
+// The channel mix is byte-identical to mandel_frag_rgba (r=g=shade, b=255-shade):
+// a teal->yellow ramp reading the checker's two tones + the depth cue folded into
+// `shade`. No cast, no branch, no structurizer change, no new fork push.
+pub fn clifford_frag_rgba(px: i32, py: i32, rc: i32, r12: i32, r13: i32, r23: i32) -> i32 {
+    // pixel -> slab point, Q12: view [-1.0, 1.0) at 512px (step 16), z0 = 0.5.
+    let x: i32 = (px - 256) * 16
+    let y: i32 = (py - 256) * 16
+    let z: i32 = 2048
+
+    // First geometric product t = R v: grade 1 + grade 3 (the trivector tw is
+    // load-bearing; e123 blade products per the C1 kernel derivation).
+    let t1: i32 = (rc * x + r12 * y + r13 * z) >> 12
+    let t2: i32 = (rc * y - r12 * x + r23 * z) >> 12
+    let t3: i32 = (rc * z - r13 * x - r23 * y) >> 12
+    let tw: i32 = (r12 * z - r13 * y + r23 * x) >> 12
+
+    // Second product v' = t ~R (reverse negates grade 2); grade-1 output.
+    let sx: i32 = (rc * t1 + r12 * t2 + r13 * t3 + r23 * tw) >> 12
+    let sy: i32 = (rc * t2 - r12 * t1 - r13 * tw + r23 * t3) >> 12
+    let sz: i32 = (rc * t3 + r12 * tw - r13 * t1 - r23 * t2) >> 12
+
+    // 3D checker: 0.5-unit cells; sum parity == XOR of per-axis parities.
+    // parity(n) = n - ((n >> 1) * 2), exact for negatives (Sar floors).
+    let cell: i32 = (sx >> 11) + (sy >> 11) + (sz >> 11)
+    let par: i32 = cell - ((cell >> 1) * 2)
+
+    // two-tone + depth cue, clamped to 0..255 BRANCHLESSLY (Add/Sub/Mul/Sar,
+    // literal shifts). `n >> 31` is 0 for n >= 0 and -1 for n < 0, so
+    // `1 + (n >> 31)` is a 0/1 gate: lo = max(s,0), shade = min(lo,255).
+    let s: i32 = par * 160 + 48 + (sz >> 7)
+    let lo: i32 = s * (1 + (s >> 31))
+    let d: i32 = lo - 255
+    let shade: i32 = lo - d * (1 + (d >> 31))
+
+    // Pack the RGBA8 word in pure i32 (R=G=shade, B=255-shade, A=255). The alpha
+    // byte 0xFF is `- 16777216` (0xFF000000 in two's complement), so the returned
+    // i32's bit pattern equals the u32 `shade + shade*256 + (255-shade)*65536 +
+    // 255*16777216` exactly; unpack4x8unorm reads bytes [R,G,B,A].
+    shade + shade * 256 + (255 - shade) * 65536 - 16777216
+}

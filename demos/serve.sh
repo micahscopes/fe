@@ -18,5 +18,9 @@ if [ ! -f "$here/webgpu-mandelbrot-interactive/gen/layout.json" ]; then
   echo "webgpu-mandelbrot-interactive/gen missing - generating from the Fe compiler first..."
   ( cd "$here/.." && cargo run -p fe-codegen --example gen_mandelbrot_interactive_demo )
 fi
+if [ ! -f "$here/webgpu-clifford-interactive/gen/layout.json" ]; then
+  echo "webgpu-clifford-interactive/gen missing - generating from the Fe compiler first..."
+  ( cd "$here/.." && cargo run -p fe-codegen --example gen_clifford_interactive_demo )
+fi
 
 exec python3 "$here/serve.py"

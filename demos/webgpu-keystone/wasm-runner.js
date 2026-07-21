@@ -81,12 +81,15 @@ export function renderFragmentGrid(fragExports, exportName, view, width, height)
   if (typeof f !== "function") {
     throw new Error(`wasm export \`${exportName}\` (from layout.json) not found`);
   }
-  const [cr, ci, sq] = view;
+  // Kernel-blind about param arity: spread the broadcast params (mandel's view
+  // triple, clifford's rotor quad, ...) after (x, y). A 3-array expands to the
+  // same f(x,y,cr,ci,sq) call the mandel page always made.
+  const params = view.map((n) => n | 0);
   const out = new Uint32Array(width * height);
   for (let y = 0; y < height; y++) {
     const row = y * width;
     for (let x = 0; x < width; x++) {
-      out[row + x] = f(x, y, cr, ci, sq) >>> 0;
+      out[row + x] = f(x, y, ...params) >>> 0;
     }
   }
   return out;

@@ -1,0 +1,88 @@
+// C3b (interactive controls-in-Fe): the ROTOR CONTROLLER, compiled ONLY to wasm.
+// Pure, stateless, oracle-checkable. JavaScript never does rotor arithmetic: it
+// forwards one pointer-drag event to update_rotor and relays the returned 4-tuple.
+//
+// APPROACH (rotor composition, the in-envelope path). The STATE is the rotor
+// itself, four i32 in signed Q12 (1.0 = 4096): R = rc + r12 e12 + r13 e13 +
+// r23 e23 (the even subalgebra of Cl(3), quaternion-like). A pointer drag applies
+// a small FIXED-angle rotor by GEOMETRIC PRODUCT: horizontal drag (dx) composes a
+// yaw rotor in the e12 plane, vertical drag (dy) composes a pitch rotor in the
+// e13 plane. A rotor product is just Mul/Add/Sub + a Sar, exactly the fragment's
+// envelope; no trig, no table, no sqrt.
+//
+// STAYING NORMALIZED (why 4095/128). The small rotor is the Pythagorean triple
+// (C0, S0, M) = (4095, 128, 4097): 4095^2 + 128^2 = 4097^2 EXACTLY. Composing then
+// `>> 12` (divide by 4096) keeps the rotor's Q12 magnitude within 4097/4096 =
+// +0.024% per rotated axis-event, so the rotor barely breathes over a drag
+// (bounded, not systematic); the [-8192, 8192] component clamp is the hard
+// no-overflow floor the fragment's sandwich relies on. When an axis has NO drag
+// (d == 0) its cosine is 4096 (not 4095), so a no-op event is the EXACT identity
+// (no shrink): c0(d) = 4096 - |sign(d)|.
+//
+// SHAPE NOTE (measured, same as update_view): the mb2 wasm R1 lowering carries a
+// local through ONE branch-merge and its compare matrix maps only `<`/`==`. So the
+// rotor math is SINGLE-ASSIGNMENT `let` bindings (zero reassignments) calling
+// SINGLE-BRANCH helpers for the sign gates and the clamps; every `a > b` is
+// written as `b < a`. The 4-value reply crosses as a native wasm MULTI-VALUE
+// result (the tuple flattens to 4 wasm results).
+
+/// 1 if d < 0, else 0 (single branch, value-carried in R1).
+fn is_neg(d: i32) -> i32 {
+    if d < 0 { 1 } else { 0 }
+}
+
+/// 1 if d > 0, else 0 (written `0 < d`, the R1 compare matrix has no `>`).
+fn is_pos(d: i32) -> i32 {
+    if 0 < d { 1 } else { 0 }
+}
+
+/// min(v, hi) via one branch.
+fn min_i(v: i32, hi: i32) -> i32 {
+    if hi < v { hi } else { v }
+}
+
+/// max(v, lo) via one branch.
+fn max_i(v: i32, lo: i32) -> i32 {
+    if v < lo { lo } else { v }
+}
+
+/// The small-rotor SINE for a drag delta: +128 if d < 0, -128 if d > 0, 0 if
+/// d == 0 (the sign picks the rotation direction; 0 leaves the axis unrotated).
+fn dir_sin(d: i32) -> i32 {
+    (is_neg(d) - is_pos(d)) * 128
+}
+
+/// The small-rotor COSINE for a drag delta: 4095 when the axis rotates (|d| > 0,
+/// the Pythagorean cosine), 4096 when it does not (exact identity under `>> 12`).
+fn dir_cos(d: i32) -> i32 {
+    4096 - (is_neg(d) + is_pos(d))
+}
+
+/// Clamp one rotor component to [-8192, 8192] (the sandwich's no-overflow floor).
+fn clamp_comp(c: i32) -> i32 {
+    max_i(min_i(c, 8192), -8192)
+}
+
+pub fn update_rotor(rc: i32, r12: i32, r13: i32, r23: i32,
+                    dx: i32, dy: i32) -> (i32, i32, i32, i32) {
+    // --- Yaw: compose smallYaw = c0y + sy0 e12 (LEFT) with R. Blade products
+    // e12 e12 = -1, e12 e13 = -e23, e12 e23 = e13 (Cl(3), the C1 derivation). ---
+    let c0y: i32 = dir_cos(dx)
+    let sy0: i32 = dir_sin(dx)
+    let rc1: i32  = (c0y * rc  - sy0 * r12) >> 12
+    let r121: i32 = (sy0 * rc  + c0y * r12) >> 12
+    let r131: i32 = (c0y * r13 + sy0 * r23) >> 12
+    let r231: i32 = (c0y * r23 - sy0 * r13) >> 12
+
+    // --- Pitch: compose smallPitch = c0p + sp0 e13 (LEFT) with the yawed rotor.
+    // Blade products e13 e12 = e23, e13 e13 = -1, e13 e23 = -e12. ---
+    let c0p: i32 = dir_cos(dy)
+    let sp0: i32 = dir_sin(dy)
+    let rc2: i32  = (c0p * rc1  - sp0 * r131) >> 12
+    let r122: i32 = (c0p * r121 - sp0 * r231) >> 12
+    let r132: i32 = (sp0 * rc1  + c0p * r131) >> 12
+    let r232: i32 = (c0p * r231 + sp0 * r121) >> 12
+
+    // --- Clamp each component to the fragment's no-overflow envelope. ---
+    (clamp_comp(rc2), clamp_comp(r122), clamp_comp(r132), clamp_comp(r232))
+}
