@@ -164,6 +164,15 @@ impl<'db> IntegerId<'db> {
     }
 }
 
+/// A parsed `f32` literal, stored as its IEEE-754 bit pattern so the interned
+/// value stays `Eq`/`Hash` (raw `f32` is neither). Reconstruct with
+/// `f32::from_bits(id.bits(db))`.
+#[salsa::interned]
+#[derive(Debug)]
+pub struct FloatId<'db> {
+    pub bits: u32,
+}
+
 #[salsa::interned]
 #[derive(Debug)]
 pub struct StringId<'db> {
@@ -186,6 +195,7 @@ impl<'db> StringId<'db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::From, salsa::Update)]
 pub enum LitKind<'db> {
     Int(IntegerId<'db>),
+    Float(FloatId<'db>),
     String(StringId<'db>),
     Bool(bool),
 }

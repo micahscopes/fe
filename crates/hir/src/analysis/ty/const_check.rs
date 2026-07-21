@@ -157,6 +157,7 @@ impl<'db> ConstFnChecker<'db, '_> {
         match expr_data {
             Expr::Lit(
                 crate::hir_def::LitKind::Int(_)
+                | crate::hir_def::LitKind::Float(_)
                 | crate::hir_def::LitKind::Bool(_)
                 | crate::hir_def::LitKind::String(_),
             )

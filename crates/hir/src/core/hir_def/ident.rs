@@ -46,4 +46,5 @@ define_keywords! {
     (i128, "i128"),
     (i256, "i256"),
     (isize, "isize"),
+    (f32, "f32"),
 }

@@ -966,6 +966,7 @@ fn format_scalar_class<'db>(db: &'db dyn MirDb, class: &ScalarClass<'db>) -> Str
         ScalarRepr::Int { bits, signed } => {
             format!("{}int{bits}", if signed { "" } else { "u" })
         }
+        ScalarRepr::Float { bits } => format!("f{bits}"),
         ScalarRepr::FixedBytes { len } => format!("bytes{len}"),
         ScalarRepr::Address { bits } => format!("address{bits}"),
     };
@@ -1045,6 +1046,7 @@ fn format_const_scalar(value: &ConstScalar) -> String {
             if *signed { "" } else { "u" },
             format_bytes(words)
         ),
+        ConstScalar::Float { bits } => format!("f32(0x{bits:08x})"),
         ConstScalar::FixedBytes(bytes) => format!("bytes(0x{})", format_bytes(bytes)),
         ConstScalar::Address { bits, bytes } => format!("address{bits}(0x{})", format_bytes(bytes)),
     }

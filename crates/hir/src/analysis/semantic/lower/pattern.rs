@@ -6,7 +6,7 @@ use crate::{
         HirAnalysisDb,
         semantic::{
             FieldIndex, SBlockId, SConst, SExpr, SOperand, SStmtKind, STerminatorKind, SValueId,
-            VariantIndex, bool_const, bytes_const, int_const,
+            VariantIndex, bool_const, bytes_const, float_const, int_const,
         },
         ty::{
             decision_tree::{
@@ -646,6 +646,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
             LitKind::Int(int_id) => {
                 int_const(self.db, ty, BigInt::from(int_id.data(self.db).clone()))
             }
+            LitKind::Float(f) => float_const(self.db, ty, f.bits(self.db)),
             LitKind::String(string_id) => {
                 let mut bytes = string_id.data(self.db).as_bytes().to_vec();
                 if let Some(capacity) = self.fixed_string_capacity_bytes(ty)

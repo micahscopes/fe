@@ -6,7 +6,9 @@ use crate::{
     hir_def::{
         Body, Enum, ExprId, GenericParamOwner, IdentId, IntegerId, ItemKind, PathId,
         TypeAlias as HirTypeAlias, TypeFnDef, VariantKind,
-        prim_ty::{IntTy as HirIntTy, PrimTy as HirPrimTy, UintTy as HirUintTy},
+        prim_ty::{
+            FloatTy as HirFloatTy, IntTy as HirIntTy, PrimTy as HirPrimTy, UintTy as HirUintTy,
+        },
         scope_graph::ScopeId,
     },
     span::DynLazySpan,
@@ -326,6 +328,10 @@ impl<'db> TyId<'db> {
 
     pub fn u256(db: &'db dyn HirAnalysisDb) -> Self {
         Self::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U256)))
+    }
+
+    pub fn f32(db: &'db dyn HirAnalysisDb) -> Self {
+        Self::new(db, TyData::TyBase(TyBase::Prim(PrimTy::F32)))
     }
 
     pub(super) fn array(db: &'db dyn HirAnalysisDb, elem: TyId<'db>) -> Self {
@@ -1912,6 +1918,7 @@ impl<'db> TyBase<'db> {
                 PrimTy::I128 => "i128",
                 PrimTy::I256 => "i256",
                 PrimTy::Isize => "isize",
+                PrimTy::F32 => "f32",
                 PrimTy::String => "String",
                 PrimTy::Array => "[]",
                 PrimTy::Tuple(_) => "()",
@@ -1988,6 +1995,10 @@ impl From<HirPrimTy> for TyBase<'_> {
                 HirUintTy::Usize => Self::Prim(PrimTy::Usize),
             },
 
+            HirPrimTy::Float(float_ty) => match float_ty {
+                HirFloatTy::F32 => Self::Prim(PrimTy::F32),
+            },
+
             HirPrimTy::String => Self::Prim(PrimTy::String),
         }
     }
@@ -2010,6 +2021,7 @@ pub enum PrimTy {
     I128,
     I256,
     Isize,
+    F32,
     String,
     Array,
     Tuple(usize),
@@ -2072,6 +2084,10 @@ impl PrimTy {
 
     pub fn is_bool(self) -> bool {
         matches!(self, Self::Bool)
+    }
+
+    pub fn is_float(self) -> bool {
+        matches!(self, Self::F32)
     }
 }
 

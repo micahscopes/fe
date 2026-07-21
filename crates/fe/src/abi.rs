@@ -699,6 +699,10 @@ fn semantic_ty_to_abi_desc(db: &DriverDataBase, ty: TyId<'_>) -> Result<AbiTypeD
             PrimTy::I64 => Ok(AbiTypeDesc::simple("int64")),
             PrimTy::I128 => Ok(AbiTypeDesc::simple("int128")),
             PrimTy::I256 | PrimTy::Isize => Ok(AbiTypeDesc::simple("int256")),
+            PrimTy::F32 => Err(format!(
+                "unsupported ABI type `{}` (f32 has no EVM ABI representation)",
+                ty.pretty_print(db)
+            )),
             PrimTy::String | PrimTy::Array | PrimTy::Tuple(_) => unreachable!(),
             PrimTy::Ptr | PrimTy::View | PrimTy::BorrowMut | PrimTy::BorrowRef => {
                 Err(format!("unsupported ABI type `{}`", ty.pretty_print(db)))

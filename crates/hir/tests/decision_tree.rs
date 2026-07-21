@@ -125,6 +125,7 @@ fn render_constructor<'db>(
         ConstructorKind::Literal(lit, _) => match lit {
             LitKind::Bool(b) => b.to_string(),
             LitKind::Int(int_id) => int_id.data(db).to_string(),
+            LitKind::Float(f) => f32::from_bits(f.bits(db)).to_string(),
             LitKind::String(string_id) => format!("\"{}\"", string_id.data(db)),
         },
     }

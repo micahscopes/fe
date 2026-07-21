@@ -345,6 +345,33 @@ extern {
     const fn __bitnot_u256(_: u256) -> u256
 }
 
+// Extern intrinsics for f32 (CTFE-verifiable float core; a distinct family from
+// the int words, so no shift/rem/bitwise, plus float-only math and conversions).
+extern {
+    const fn __add_f32(_: f32, _: f32) -> f32
+    const fn __sub_f32(_: f32, _: f32) -> f32
+    const fn __mul_f32(_: f32, _: f32) -> f32
+    const fn __div_f32(_: f32, _: f32) -> f32
+    const fn __neg_f32(_: f32) -> f32
+
+    const fn __sqrt_f32(_: f32) -> f32
+    const fn __rsqrt_f32(_: f32) -> f32
+    const fn __abs_f32(_: f32) -> f32
+    const fn __min_f32(_: f32, _: f32) -> f32
+    const fn __max_f32(_: f32, _: f32) -> f32
+    const fn __floor_f32(_: f32) -> f32
+
+    const fn __eq_f32(_: f32, _: f32) -> bool
+    const fn __ne_f32(_: f32, _: f32) -> bool
+    const fn __lt_f32(_: f32, _: f32) -> bool
+    const fn __le_f32(_: f32, _: f32) -> bool
+    const fn __gt_f32(_: f32, _: f32) -> bool
+    const fn __ge_f32(_: f32, _: f32) -> bool
+
+    const fn __f32_from_i32(_: i32) -> f32
+    const fn __i32_from_f32(_: f32) -> i32
+}
+
 // Extern intrinsics for isize
 extern {
     const fn __add_isize(_: isize, _: isize) -> isize
@@ -1849,3 +1876,43 @@ impl Eq for bool {
     const fn ne(self, _ other: bool) -> bool { __ne_bool(self, other) }
 }
 impl Default for bool { fn default() -> Self { false } }
+
+// f32 impls. Floats are a distinct family from the int words (no IntWord impl,
+// no shift/rem/bitwise); the arithmetic + comparison operators delegate to the
+// f32 externs, which the CTFE machine evaluates with Rust `f32` semantics.
+impl Neg for f32 {
+    const fn neg(own self) -> f32 {
+        __neg_f32(self)
+    }
+}
+impl Add for f32 {
+    const fn add(own self, _ other: own f32) -> f32 {
+        __add_f32(self, other)
+    }
+}
+impl Sub for f32 {
+    const fn sub(own self, _ other: own f32) -> f32 {
+        __sub_f32(self, other)
+    }
+}
+impl Mul for f32 {
+    const fn mul(own self, _ other: own f32) -> f32 {
+        __mul_f32(self, other)
+    }
+}
+impl Div for f32 {
+    const fn div(own self, _ other: own f32) -> f32 {
+        __div_f32(self, other)
+    }
+}
+impl Eq for f32 {
+    const fn eq(self, _ other: f32) -> bool { __eq_f32(self, other) }
+    const fn ne(self, _ other: f32) -> bool { __ne_f32(self, other) }
+}
+impl Ord for f32 {
+    const fn lt(self, _ other: f32) -> bool { __lt_f32(self, other) }
+    const fn le(self, _ other: f32) -> bool { __le_f32(self, other) }
+    const fn gt(self, _ other: f32) -> bool { __gt_f32(self, other) }
+    const fn ge(self, _ other: f32) -> bool { __ge_f32(self, other) }
+}
+impl Default for f32 { fn default() -> Self { 0.0 } }

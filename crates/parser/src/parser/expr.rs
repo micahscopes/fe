@@ -175,7 +175,11 @@ fn parse_expr_with_min_bp<S: TokenStream>(
             }
 
             if kind == SyntaxKind::Dot {
-                parser.parse_cp(FieldExprScope::default(), Some(checkpoint))
+                if is_tuple_index_float(parser) {
+                    Ok(parse_tuple_index_float(parser, checkpoint))
+                } else {
+                    parser.parse_cp(FieldExprScope::default(), Some(checkpoint))
+                }
             } else if is_assign(parser) {
                 parser.parse_cp(
                     AssignExprScope::new(allow_let_expr, condition_state.clone()),
@@ -622,6 +626,56 @@ impl super::Parse for FieldExprScope {
         parser.bump();
         Ok(())
     }
+}
+
+/// Returns `true` if the current token is `.` and the following non-trivia
+/// token is a `Float`, i.e. `expr.N.M` where the lexer greedily merged `N.M`
+/// into one `Float` token. `.` followed by a float is only ever a nested
+/// tuple index (a method access is `.ident`, a single tuple index is `.Int`),
+/// so this is unambiguous.
+fn is_tuple_index_float<S: TokenStream>(parser: &mut Parser<S>) -> bool {
+    let is_trivia = parser.set_newline_as_trivia(true);
+    let res = matches!(
+        parser.peek_n_non_trivia(2).as_slice(),
+        [SyntaxKind::Dot, SyntaxKind::Float]
+    );
+    parser.set_newline_as_trivia(is_trivia);
+    res
+}
+
+/// Parse `expr.N.M` where the lexer merged `N.M` into a single `Float` token.
+///
+/// The float is split back into the tuple-index pair `.N .M`, producing the
+/// same nested `FieldExpr(FieldExpr(expr, N), M)` CST that separate integer
+/// index tokens would build (`N` and `M` are re-emitted as `Int` leaves, the
+/// `.` inside the float is re-emitted as a `Dot` leaf), so HIR lowering is
+/// unchanged. The concatenation `N + "." + M` reconstructs the float text, so
+/// the green tree stays byte-faithful.
+///
+/// Precondition: [`is_tuple_index_float`] holds. Returns the base checkpoint to
+/// match `parse_cp`'s contract at the postfix-loop call site.
+fn parse_tuple_index_float<S: TokenStream>(
+    parser: &mut Parser<S>,
+    checkpoint: Checkpoint,
+) -> Checkpoint {
+    // Inner field `expr.N`: the real `.` plus the integer part. Use the scope
+    // machinery so leading trivia before `.` is attached exactly as the normal
+    // integer-index path (`parse_cp(FieldExprScope, ..)`) would.
+    let inner = parser.enter(FieldExprScope::default(), Some(checkpoint));
+    parser.bump_expected(SyntaxKind::Dot);
+    let (int_part, frac_part) = parser.take_float_index_parts();
+    parser.push_split_leaf(SyntaxKind::Int, &int_part);
+    parser.leave(inner);
+
+    // Outer field `<inner>.M`: synthesize the `.` that lived inside the float
+    // plus the fractional part. No stream reads happen here, so wrap directly
+    // rather than via `enter` (whose leading-trivia bump would otherwise pull a
+    // following trivia token inside the node, before the synthetic `.`).
+    parser.push_split_leaf(SyntaxKind::Dot, ".");
+    parser.push_split_leaf(SyntaxKind::Int, &frac_part);
+    parser.wrap_at(checkpoint, SyntaxKind::FieldExpr);
+
+    checkpoint
 }
 
 define_scope! { pub(super) LShiftScope, LShift }

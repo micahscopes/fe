@@ -1897,6 +1897,9 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Expr::Lit(LitKind::Int(_)) => {
                 Err(self.invalid_quote(expr, "integer literals are not supported in quote bodies"))
             }
+            Expr::Lit(LitKind::Float(_)) => {
+                Err(self.invalid_quote(expr, "float literals are not supported in quote bodies"))
+            }
             Expr::Bin(lhs, rhs, BinOp::Logical(LogicalBinOp::And)) => {
                 let (lhs, rhs) = (*lhs, *rhs);
                 let lhs = self.elab_template_expr(lhs, template, sig, binders)?;

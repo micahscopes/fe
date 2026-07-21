@@ -383,6 +383,8 @@ pub enum TermLowerError<'db> {
     UnsupportedUnOp(ExprId, UnOp),
     /// A string literal; strings are not part of the term language.
     StringLiteral(ExprId),
+    /// A float literal; `f32` values are not part of the term language.
+    FloatLiteral(ExprId),
     /// Path resolution failed (unresolved name, ambiguity, or invalid
     /// segment); name resolution reports the details.
     UnresolvedPath(ExprId, PathId<'db>),
@@ -433,6 +435,7 @@ pub fn lower_hir_to_term<'db>(
         Expr::Lit(LitKind::Int(value)) => Ok(TermId::new(db, TermNode::Int(*value))),
         Expr::Lit(LitKind::Bool(value)) => Ok(TermId::new(db, TermNode::Bool(*value))),
         Expr::Lit(LitKind::String(_)) => Err(TermLowerError::StringLiteral(expr)),
+        Expr::Lit(LitKind::Float(_)) => Err(TermLowerError::FloatLiteral(expr)),
 
         Expr::Bin(lhs, rhs, op) => lower_bin(db, body, expr, *lhs, *rhs, *op, assumptions),
 

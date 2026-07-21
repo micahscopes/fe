@@ -514,6 +514,7 @@ fn scalar_class_from_repr_ty<'db>(db: &'db dyn MirDb, ty: TyId<'db>) -> Option<S
                 bits: 256,
                 signed: true,
             },
+            PrimTy::F32 => ScalarRepr::Float { bits: 32 },
             PrimTy::String => ScalarRepr::FixedBytes {
                 // Fixed strings have at most 31 payload bytes, but casts and
                 // `to_word` operate on the full EVM word.

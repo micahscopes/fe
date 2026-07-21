@@ -1,0 +1,50 @@
+---
+source: crates/parser/tests/syntax_node.rs
+expression: node
+input_file: test_files/syntax_node/exprs/field_tuple_index_float.fe
+---
+Root@0..26
+  FieldExpr@0..5
+    FieldExpr@0..3
+      PathExpr@0..1
+        Path@0..1
+          PathSegment@0..1
+            Ident@0..1 "t"
+      Dot@1..2 "."
+      Int@2..3 "0"
+    Dot@3..4 "."
+    Int@4..5 "0"
+  Newline@5..6 "\n"
+  FieldExpr@6..21
+    FieldExpr@6..19
+      TupleExpr@6..17
+        LParen@6..7 "("
+        PathExpr@7..8
+          Path@7..8
+            PathSegment@7..8
+              Ident@7..8 "a"
+        Comma@8..9 ","
+        WhiteSpace@9..10 " "
+        TupleExpr@10..16
+          LParen@10..11 "("
+          PathExpr@11..12
+            Path@11..12
+              PathSegment@11..12
+                Ident@11..12 "b"
+          Comma@12..13 ","
+          WhiteSpace@13..14 " "
+          PathExpr@14..15
+            Path@14..15
+              PathSegment@14..15
+                Ident@14..15 "c"
+          RParen@15..16 ")"
+        RParen@16..17 ")"
+      Dot@17..18 "."
+      Int@18..19 "1"
+    Dot@19..20 "."
+    Int@20..21 "0"
+  Newline@21..22 "\n"
+  LitExpr@22..25
+    Lit@22..25
+      Float@22..25 "1.0"
+  Newline@25..26 "\n"

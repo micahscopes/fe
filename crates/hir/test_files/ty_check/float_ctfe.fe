@@ -1,0 +1,23 @@
+// CTFE-verifiable f32 core: every `static_assert` below is evaluated at
+// compile time by the HIR CTFE machine (pure const-eval, no VM / no fork).
+// All results are integer-valued f32, so they are bit-exact (ULP discipline
+// for non-integer values is a later step).
+//
+// The arithmetic and comparison operators resolve through the `f32` trait
+// impls in `core::num` (Add/Sub/Mul/Div/Neg/Eq/Ord). The `__*_f32` conversion
+// and sqrt intrinsics are declared inline here and dispatched by the CTFE
+// machine on their names, mirroring the `core::num` extern intrinsics.
+
+extern {
+    const fn __sqrt_f32(_: f32) -> f32
+    const fn __f32_from_i32(_: i32) -> f32
+    const fn __i32_from_f32(_: f32) -> i32
+}
+
+static_assert(2.0 + 3.0 == 5.0)
+static_assert(2.0 * 3.0 == 6.0)
+static_assert(10.0 / 2.0 == 5.0)
+static_assert(3.0 < 4.0)
+static_assert(__sqrt_f32(9.0) == 3.0)
+static_assert(__f32_from_i32(7) == 7.0)
+static_assert(__i32_from_f32(7.0) == 7)

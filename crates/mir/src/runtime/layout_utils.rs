@@ -313,7 +313,9 @@ fn memory_size_bytes_for_class<'db>(
 fn scalar_storage_size_bytes(repr: ScalarRepr) -> usize {
     match repr {
         ScalarRepr::Bool => 1,
-        ScalarRepr::Int { bits, .. } | ScalarRepr::Address { bits } => bits.div_ceil(8) as usize,
+        ScalarRepr::Int { bits, .. }
+        | ScalarRepr::Address { bits }
+        | ScalarRepr::Float { bits } => bits.div_ceil(8) as usize,
         ScalarRepr::FixedBytes { len } => len as usize,
     }
 }
@@ -350,6 +352,9 @@ fn serialize_const_scalar_with_size(
     let raw = match scalar {
         ConstScalar::Bool(flag) => vec![u8::from(flag)],
         ConstScalar::Int { words, .. } => words,
+        // Carry the f32 as its 4-byte IEEE-754 pattern, big-endian to match the
+        // right-aligned convention the integer/address serialization uses.
+        ConstScalar::Float { bits } => bits.to_be_bytes().to_vec(),
         ConstScalar::FixedBytes(bytes) => bytes,
         ConstScalar::Address { bytes, .. } => bytes,
     };
@@ -392,6 +397,9 @@ fn repr_coerced_scalar(repr: ScalarRepr, scalar: ConstScalar) -> Result<ConstSca
                 bytes,
             },
         ) if bits == scalar_bits => Ok(ConstScalar::Address { bits, bytes }),
+        (ScalarRepr::Float { .. }, ConstScalar::Float { bits }) => {
+            Ok(ConstScalar::Float { bits })
+        }
         (expected, actual) => Err(LowerError::Unsupported(format!(
             "const scalar `{actual:?}` does not match expected repr `{expected:?}`"
         ))),

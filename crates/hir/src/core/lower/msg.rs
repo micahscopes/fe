@@ -679,7 +679,7 @@ fn parse_selector_attr<'db>(
                                     let v = int_id.data(ctxt.db());
                                     (v > &u32_max).then_some(SelectorErrorKind::Overflow)
                                 }
-                                LitKind::String(_) | LitKind::Bool(_) => {
+                                LitKind::String(_) | LitKind::Bool(_) | LitKind::Float(_) => {
                                     Some(SelectorErrorKind::InvalidType)
                                 }
                             }

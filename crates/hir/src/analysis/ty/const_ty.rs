@@ -2036,6 +2036,14 @@ pub(crate) fn const_ty_from_sem_const<'db>(
                 let (_, bytes) = int.to_bytes_be();
                 EvaluatedConstTy::LitInt(IntegerId::new(db, BigUint::from_bytes_be(&bytes)))
             }
+            crate::analysis::semantic::SemConstScalar::Float { bits } => {
+                // `f32` is not (yet) usable as a type-level const value; no
+                // float `EvaluatedConstTy` exists. This path is unreachable for
+                // supported programs (floats never appear as const-generic
+                // arguments). Carry the bit pattern as an int placeholder so the
+                // match stays total without inventing a float const-ty variant.
+                EvaluatedConstTy::LitInt(IntegerId::new(db, BigUint::from(bits)))
+            }
             crate::analysis::semantic::SemConstScalar::Bytes(bytes) => {
                 EvaluatedConstTy::Bytes(bytes)
             }

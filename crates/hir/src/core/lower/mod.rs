@@ -13,7 +13,8 @@ use self::{item::lower_module_items, scope_builder::ScopeGraphBuilder};
 use crate::{
     HirDb, LowerHirDb,
     hir_def::{
-        AttrListId, ExprId, IdentId, IntegerId, ItemKind, LitKind, ModuleTree, Partial, StringId,
+        AttrListId, ExprId, FloatId, IdentId, IntegerId, ItemKind, LitKind, ModuleTree, Partial,
+        StringId,
         TopLevelMod, TrackedItemId, TrackedItemVariant, Use, Visibility, module_tree_impl,
         scope_graph::ScopeGraph,
         use_tree::{UsePathId, UsePathSegment},
@@ -466,6 +467,7 @@ impl<'db> LitKind<'db> {
     fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::Lit) -> Self {
         match ast.kind() {
             ast::LitKind::Int(int) => Self::Int(IntegerId::lower_ast(ctxt, int)),
+            ast::LitKind::Float(float) => Self::Float(FloatId::lower_ast(ctxt, float)),
             ast::LitKind::String(string) => {
                 let text = string.token().text();
                 Self::String(StringId::new(
@@ -479,6 +481,15 @@ impl<'db> LitKind<'db> {
                 _ => unreachable!(),
             },
         }
+    }
+}
+
+impl<'db> FloatId<'db> {
+    fn lower_ast(ctxt: &mut FileLowerCtxt<'db>, ast: ast::LitFloat) -> Self {
+        // The lexer guarantees a well-formed `<digits>.<digits>` token, so the
+        // f32 parse cannot fail. Store the IEEE-754 bit pattern.
+        let bits = ast.token().text().parse::<f32>().unwrap().to_bits();
+        Self::new(ctxt.db(), bits)
     }
 }
 

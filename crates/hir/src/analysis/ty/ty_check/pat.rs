@@ -255,7 +255,7 @@ impl<'db> TyChecker<'db> {
             | SemConstValue::Array { .. }
             | SemConstValue::Enum { .. }
             | SemConstValue::Scalar {
-                value: SemConstScalar::Bytes(_),
+                value: SemConstScalar::Bytes(_) | SemConstScalar::Float { .. },
                 ..
             } => None,
         }

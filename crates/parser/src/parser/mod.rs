@@ -611,6 +611,52 @@ impl<S: TokenStream> Parser<S> {
         }
     }
 
+    /// Emit a synthetic leaf token `(kind, text)`, advancing the text position
+    /// and marking the end of the previous token.
+    ///
+    /// This is the "split a lexer token into several grammar tokens" primitive:
+    /// it re-emits a piece of a token that logos merged but the grammar needs
+    /// to treat separately (e.g. a `Float` `N.M` that is really the tuple-index
+    /// pair `.N .M`). The caller MUST guarantee that the concatenation of the
+    /// emitted leaves reconstructs the consumed source text exactly, so the
+    /// rowan green tree stays byte-faithful.
+    fn push_split_leaf(&mut self, kind: SyntaxKind, text: &str) {
+        self.current_pos += rowan::TextSize::of(text);
+        if !self.is_dry_run() {
+            self.builder.token(kind.into(), text);
+        }
+        self.end_of_prev_token = self.current_pos;
+    }
+
+    /// Consume the current `Float` token from the stream, returning its integer
+    /// and fractional text parts split at the single `.`.
+    ///
+    /// Does not emit any leaves or advance the text position; the caller
+    /// re-emits the parts via [`push_split_leaf`] so the total advance matches
+    /// the consumed float exactly.
+    fn take_float_index_parts(&mut self) -> (String, String) {
+        self.bump_trivias();
+        let tok = match self.next_trivias.pop_front() {
+            Some(tok) => tok,
+            None => self.stream.next().unwrap(),
+        };
+        debug_assert_eq!(tok.syntax_kind(), SyntaxKind::Float);
+        let text = tok.text();
+        let dot = text.find('.').expect("`Float` token contains a `.`");
+        (text[..dot].to_string(), text[dot + 1..].to_string())
+    }
+
+    /// Retroactively wrap the branch since `checkpoint` in a node of `kind`,
+    /// without entering a parsing scope. Mirrors the node-building half of
+    /// [`leave`] for synthetic nodes assembled from split leaves (no parsing,
+    /// so no scope-stack or trivia handling is needed).
+    fn wrap_at(&mut self, checkpoint: Checkpoint, kind: SyntaxKind) {
+        if !self.is_dry_run() {
+            self.builder.start_node_at(checkpoint, kind.into());
+            self.builder.finish_node();
+        }
+    }
+
     fn bump_trivias(&mut self) {
         // Bump trivias.
         loop {

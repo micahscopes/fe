@@ -18,7 +18,7 @@ use crate::{
             FieldIndex, SConst, SExpr, SLocalId, SOperand, SPlace, SStmt, SStmtKind,
             STerminatorKind, SemConstId, SemConstScalar, SemConstValue, SemOrigin, SemanticBody,
             SemanticConstRef, VariantIndex, array_const, bool_const, bytes_const,
-            consts::demand_concrete_const_ty, enum_const, int_const, int_ty_shape,
+            consts::demand_concrete_const_ty, enum_const, float_const, int_const, int_ty_shape,
             normalize_int_to_shape, runtime_size_bytes, sem_const_eq, sem_const_from_ty,
             sem_const_ty, struct_const, tuple_const, unit_const,
         },
@@ -146,6 +146,7 @@ enum NumericExternIntrinsic {
     WrappingNeg,
     BitNot,
     BoolNot,
+    Float(FloatOp),
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +154,32 @@ enum SaturatingArithmetic {
     Add,
     Sub,
     Mul,
+}
+
+/// The `f32` CTFE intrinsics. All evaluate with Rust `f32` semantics; the
+/// fixture only exercises integer-valued (bit-exact) results, but the full
+/// op set is wired so the core `num.fe` impls resolve.
+#[derive(Clone, Copy)]
+enum FloatOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Neg,
+    Sqrt,
+    Rsqrt,
+    Abs,
+    Min,
+    Max,
+    Floor,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    FromI32,
+    ToI32,
 }
 
 // Const-item references are evaluated through these salsa queries (the
@@ -369,6 +396,11 @@ enum CtfeConstKind<'db> {
         ty: TyId<'db>,
         value: CtfeInt,
     },
+    Float {
+        ty: TyId<'db>,
+        /// IEEE-754 bit pattern of an `f32` value.
+        bits: u32,
+    },
     Bytes {
         ty: TyId<'db>,
         bytes: Rc<[u8]>,
@@ -419,6 +451,13 @@ impl<'db> CtfeConstValue<'db> {
                 ty,
                 value: CtfeInt::from_bigint(db, ty, value),
             },
+            deferred_origin: None,
+        }
+    }
+
+    fn float(ty: TyId<'db>, bits: u32) -> Self {
+        Self {
+            kind: CtfeConstKind::Float { ty, bits },
             deferred_origin: None,
         }
     }
@@ -501,6 +540,10 @@ impl<'db> CtfeConstValue<'db> {
             },
             SemConstValue::Scalar {
                 ty,
+                value: SemConstScalar::Float { bits },
+            } => CtfeConstKind::Float { ty, bits },
+            SemConstValue::Scalar {
+                ty,
                 value: SemConstScalar::Bytes(bytes),
             } => CtfeConstKind::Bytes {
                 ty,
@@ -532,6 +575,10 @@ impl<'db> CtfeConstValue<'db> {
                 ty,
                 value: CtfeInt::from_bigint(db, ty, value.clone()),
             },
+            SemConstValue::Scalar {
+                ty,
+                value: SemConstScalar::Float { bits },
+            } => CtfeConstKind::Float { ty, bits },
             SemConstValue::Scalar {
                 ty,
                 value: SemConstScalar::Bytes(bytes),
@@ -619,6 +666,7 @@ impl<'db> CtfeConstValue<'db> {
             CtfeConstKind::Unit => unit_const(db),
             CtfeConstKind::Bool(value) => bool_const(db, *value),
             CtfeConstKind::Int { ty, value } => int_const(db, *ty, value.to_bigint()),
+            CtfeConstKind::Float { ty, bits } => float_const(db, *ty, *bits),
             CtfeConstKind::Bytes { ty, bytes } => bytes_const(db, *ty, bytes.to_vec()),
             CtfeConstKind::Tuple { ty, elems } => tuple_const(
                 db,
@@ -670,6 +718,7 @@ impl<'db> CtfeConstValue<'db> {
             CtfeConstKind::Unit => TyId::unit(db),
             CtfeConstKind::Bool(_) => TyId::bool(db),
             CtfeConstKind::Int { ty, .. }
+            | CtfeConstKind::Float { ty, .. }
             | CtfeConstKind::Bytes { ty, .. }
             | CtfeConstKind::Tuple { ty, .. }
             | CtfeConstKind::Struct { ty, .. }
@@ -680,9 +729,10 @@ impl<'db> CtfeConstValue<'db> {
 
     fn is_scalar(&self, db: &'db dyn HirAnalysisDb) -> bool {
         match &self.kind {
-            CtfeConstKind::Bool(_) | CtfeConstKind::Int { .. } | CtfeConstKind::Bytes { .. } => {
-                true
-            }
+            CtfeConstKind::Bool(_)
+            | CtfeConstKind::Int { .. }
+            | CtfeConstKind::Float { .. }
+            | CtfeConstKind::Bytes { .. } => true,
             CtfeConstKind::Interned(value) => {
                 matches!(value.value(db), SemConstValue::Scalar { .. })
             }
@@ -706,6 +756,7 @@ impl<'db> CtfeConstValue<'db> {
             CtfeConstKind::Unit
             | CtfeConstKind::Bool(_)
             | CtfeConstKind::Int { .. }
+            | CtfeConstKind::Float { .. }
             | CtfeConstKind::Bytes { .. } => false,
         }
     }
@@ -862,6 +913,26 @@ fn numeric_extern_intrinsic(name: &str) -> Option<NumericExternIntrinsic> {
         "__bitxor_bool" => NumericExternIntrinsic::BoolBinary(ArithBinOp::BitXor),
         "__eq_bool" => NumericExternIntrinsic::Comparison(CompBinOp::Eq),
         "__ne_bool" => NumericExternIntrinsic::Comparison(CompBinOp::NotEq),
+
+        "__add_f32" => NumericExternIntrinsic::Float(FloatOp::Add),
+        "__sub_f32" => NumericExternIntrinsic::Float(FloatOp::Sub),
+        "__mul_f32" => NumericExternIntrinsic::Float(FloatOp::Mul),
+        "__div_f32" => NumericExternIntrinsic::Float(FloatOp::Div),
+        "__neg_f32" => NumericExternIntrinsic::Float(FloatOp::Neg),
+        "__sqrt_f32" => NumericExternIntrinsic::Float(FloatOp::Sqrt),
+        "__rsqrt_f32" => NumericExternIntrinsic::Float(FloatOp::Rsqrt),
+        "__abs_f32" => NumericExternIntrinsic::Float(FloatOp::Abs),
+        "__min_f32" => NumericExternIntrinsic::Float(FloatOp::Min),
+        "__max_f32" => NumericExternIntrinsic::Float(FloatOp::Max),
+        "__floor_f32" => NumericExternIntrinsic::Float(FloatOp::Floor),
+        "__eq_f32" => NumericExternIntrinsic::Float(FloatOp::Eq),
+        "__ne_f32" => NumericExternIntrinsic::Float(FloatOp::Ne),
+        "__lt_f32" => NumericExternIntrinsic::Float(FloatOp::Lt),
+        "__le_f32" => NumericExternIntrinsic::Float(FloatOp::Le),
+        "__gt_f32" => NumericExternIntrinsic::Float(FloatOp::Gt),
+        "__ge_f32" => NumericExternIntrinsic::Float(FloatOp::Ge),
+        "__f32_from_i32" => NumericExternIntrinsic::Float(FloatOp::FromI32),
+        "__i32_from_f32" => NumericExternIntrinsic::Float(FloatOp::ToI32),
         _ => {
             let suffix = |prefix| {
                 name.strip_prefix(prefix)
@@ -1831,6 +1902,119 @@ impl<'db> CtfeMachine<'db> {
                     origin,
                 )?))
             }
+            NumericExternIntrinsic::Float(op) => {
+                self.eval_float_intrinsic(frame_idx, op, result_ty, args, origin)
+            }
+        }
+    }
+
+    /// Evaluates an `f32` CTFE intrinsic with Rust `f32` semantics. Floats are
+    /// never type-level, so operands are read directly from concrete values.
+    fn eval_float_intrinsic(
+        &self,
+        frame_idx: usize,
+        op: FloatOp,
+        result_ty: TyId<'db>,
+        args: &[CtfeConstValue<'db>],
+        origin: SemOrigin<'db>,
+    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+        match op {
+            // f32 x f32 -> f32
+            FloatOp::Add
+            | FloatOp::Sub
+            | FloatOp::Mul
+            | FloatOp::Div
+            | FloatOp::Min
+            | FloatOp::Max => {
+                let (lhs, rhs) = expect_binary_args(args, origin)?;
+                let a = self.expect_f32(lhs, origin)?;
+                let b = self.expect_f32(rhs, origin)?;
+                let value = match op {
+                    FloatOp::Add => a + b,
+                    FloatOp::Sub => a - b,
+                    FloatOp::Mul => a * b,
+                    FloatOp::Div => a / b,
+                    FloatOp::Min => a.min(b),
+                    FloatOp::Max => a.max(b),
+                    _ => unreachable!(),
+                };
+                Ok(CtfeConstValue::float(result_ty, value.to_bits()))
+            }
+            // f32 -> f32
+            FloatOp::Neg | FloatOp::Sqrt | FloatOp::Rsqrt | FloatOp::Abs | FloatOp::Floor => {
+                let [value] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                let a = self.expect_f32(value, origin)?;
+                let value = match op {
+                    FloatOp::Neg => -a,
+                    FloatOp::Sqrt => a.sqrt(),
+                    FloatOp::Rsqrt => 1.0f32 / a.sqrt(),
+                    FloatOp::Abs => a.abs(),
+                    FloatOp::Floor => a.floor(),
+                    _ => unreachable!(),
+                };
+                Ok(CtfeConstValue::float(result_ty, value.to_bits()))
+            }
+            // f32 x f32 -> bool
+            FloatOp::Eq | FloatOp::Ne | FloatOp::Lt | FloatOp::Le | FloatOp::Gt | FloatOp::Ge => {
+                let (lhs, rhs) = expect_binary_args(args, origin)?;
+                let a = self.expect_f32(lhs, origin)?;
+                let b = self.expect_f32(rhs, origin)?;
+                let value = match op {
+                    FloatOp::Eq => a == b,
+                    FloatOp::Ne => a != b,
+                    FloatOp::Lt => a < b,
+                    FloatOp::Le => a <= b,
+                    FloatOp::Gt => a > b,
+                    FloatOp::Ge => a >= b,
+                    _ => unreachable!(),
+                };
+                Ok(CtfeConstValue::bool(value))
+            }
+            // i32 -> f32
+            FloatOp::FromI32 => {
+                let [value] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                let int = self.expect_int(frame_idx, value.clone(), origin)?;
+                let Some(as_f32) = int.to_f32() else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                Ok(CtfeConstValue::float(result_ty, as_f32.to_bits()))
+            }
+            // f32 -> i32
+            FloatOp::ToI32 => {
+                let [value] = args else {
+                    return Err(CtfeError::NotConstEvaluable { origin });
+                };
+                let a = self.expect_f32(value, origin)?;
+                Ok(CtfeConstValue::int(self.db, result_ty, BigInt::from(a as i32)))
+            }
+        }
+    }
+
+    fn expect_f32(
+        &self,
+        value: &CtfeConstValue<'db>,
+        origin: SemOrigin<'db>,
+    ) -> Result<f32, CtfeError<'db>> {
+        match &value.kind {
+            CtfeConstKind::Float { bits, .. } => Ok(f32::from_bits(*bits)),
+            CtfeConstKind::Interned(interned) => match interned.value(self.db) {
+                SemConstValue::Scalar {
+                    value: SemConstScalar::Float { bits },
+                    ..
+                } => Ok(f32::from_bits(bits)),
+                _ => Err(CtfeError::InvalidOperation {
+                    origin: value.error_origin(origin),
+                    message: "expected f32".into(),
+                }),
+            },
+            _ => Err(CtfeError::InvalidOperation {
+                origin: value.error_origin(origin),
+                message: "expected f32".into(),
+            }),
         }
     }
 
@@ -2508,6 +2692,20 @@ impl<'db> CtfeMachine<'db> {
         }
     }
 
+    fn is_float_like(&self, value: &CtfeConstValue<'db>) -> bool {
+        match &value.kind {
+            CtfeConstKind::Float { .. } => true,
+            CtfeConstKind::Interned(value) => matches!(
+                value.value(self.db),
+                SemConstValue::Scalar {
+                    value: SemConstScalar::Float { .. },
+                    ..
+                }
+            ),
+            _ => false,
+        }
+    }
+
     fn expect_int(
         &self,
         frame_idx: usize,
@@ -2744,6 +2942,26 @@ impl<'db> CtfeMachine<'db> {
                         }),
                     };
                 }
+                if self.is_float_like(&lhs) && self.is_float_like(&rhs) {
+                    let a = self.expect_f32(&lhs, origin)?;
+                    let b = self.expect_f32(&rhs, origin)?;
+                    let value = match arith {
+                        ArithBinOp::Add => a + b,
+                        ArithBinOp::Sub => a - b,
+                        ArithBinOp::Mul => a * b,
+                        ArithBinOp::Div => a / b,
+                        _ => {
+                            return Err(CtfeError::InvalidOperation {
+                                origin,
+                                message: "unsupported f32 arithmetic operator".into(),
+                            });
+                        }
+                    };
+                    return Ok(CtfeValue::Value(CtfeConstValue::float(
+                        result_ty,
+                        value.to_bits(),
+                    )));
+                }
                 let lhs = self.expect_int(frame_idx, lhs, origin)?;
                 let rhs = self.expect_int(frame_idx, rhs, origin)?;
                 let arithmetic_mode = self.frames[frame_idx]
@@ -2883,6 +3101,17 @@ impl<'db> CtfeMachine<'db> {
         } else if self.is_int_like(&lhs) && self.is_int_like(&rhs) {
             let lhs = self.expect_int(frame_idx, lhs, origin)?;
             let rhs = self.expect_int(frame_idx, rhs, origin)?;
+            match op {
+                CompBinOp::Eq => lhs == rhs,
+                CompBinOp::NotEq => lhs != rhs,
+                CompBinOp::Lt => lhs < rhs,
+                CompBinOp::LtEq => lhs <= rhs,
+                CompBinOp::Gt => lhs > rhs,
+                CompBinOp::GtEq => lhs >= rhs,
+            }
+        } else if self.is_float_like(&lhs) && self.is_float_like(&rhs) {
+            let lhs = self.expect_f32(&lhs, origin)?;
+            let rhs = self.expect_f32(&rhs, origin)?;
             match op {
                 CompBinOp::Eq => lhs == rhs,
                 CompBinOp::NotEq => lhs != rhs,
@@ -3418,6 +3647,9 @@ impl<'db> CtfeMachine<'db> {
         let value = self.expand_interned(value.clone());
         match &value.kind {
             CtfeConstKind::Bool(flag) => Ok(vec![u8::from(*flag)]),
+            // f32 has no CTFE byte-serialization in this scope (backend layout
+            // for floats is a later codegen step).
+            CtfeConstKind::Float { .. } => Err(CtfeError::NotConstEvaluable { origin }),
             CtfeConstKind::Int { ty, value } => {
                 let Some((bits, _)) = int_ty_shape(self.db, *ty) else {
                     return Err(CtfeError::NotConstEvaluable { origin });

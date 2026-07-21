@@ -13,7 +13,8 @@ use crate::{
             CallSiteId, FieldIndex, Mutability, SBlock, SBlockId, SConst, SExpr, SLocal, SLocalId,
             SOperand, SPlace, SStmt, SStmtKind, STerminator, STerminatorKind, SValueId,
             SemConstValue, SemOrigin, SemanticBody, SemanticCodeRegionTarget, SemanticLocalRole,
-            VariantIndex, bool_const, bytes_const, int_const, reify_runtime_const_for_ty,
+            VariantIndex, bool_const, bytes_const, float_const, int_const,
+            reify_runtime_const_for_ty,
             runtime_size_bytes, sem_const_from_ty, unit_const,
         },
         ty::{
@@ -654,6 +655,7 @@ impl<'a, 'db> SmirLowerCtxt<'a, 'db> {
         let ty = self.expr_ty(expr);
         let value = match lit {
             LitKind::Int(int_id) => int_const(self.db, ty, int_id.data(self.db).clone().into()),
+            LitKind::Float(f) => float_const(self.db, ty, f.bits(self.db)),
             LitKind::String(string_id) => {
                 let mut bytes = string_id.data(self.db).as_bytes().to_vec();
                 if let Some(capacity) = self.fixed_string_capacity_bytes(ty)

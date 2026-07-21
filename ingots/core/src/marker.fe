@@ -37,6 +37,8 @@ impl Copy for i128 {}
 impl Copy for i256 {}
 impl Copy for isize {}
 
+impl Copy for f32 {}
+
 impl<T0> Copy for (T0,)
     where T0: Copy
 {}

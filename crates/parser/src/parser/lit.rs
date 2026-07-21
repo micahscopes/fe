@@ -19,6 +19,10 @@ impl super::Parse for LitScope {
 pub fn is_lit(kind: SyntaxKind) -> bool {
     matches!(
         kind,
-        SyntaxKind::Int | SyntaxKind::TrueKw | SyntaxKind::FalseKw | SyntaxKind::String
+        SyntaxKind::Int
+            | SyntaxKind::Float
+            | SyntaxKind::TrueKw
+            | SyntaxKind::FalseKw
+            | SyntaxKind::String
     )
 }

@@ -80,12 +80,18 @@ pub(super) fn const_scalar_from_value<'db>(
                         signed,
                         words: encode_int_words(&value, bits, signed),
                     }),
+                    ScalarRepr::Float { .. } => None,
                     ScalarRepr::FixedBytes { .. } => None,
                     ScalarRepr::Address { bits } => Some(ConstScalar::Address {
                         bits,
                         bytes: encode_int_words(&value, bits, false),
                     }),
                 }
+            }
+            SemConstScalar::Float { bits } => {
+                let scalar = scalar_class_for_ty_in_env(db, env, ty)?;
+                matches!(scalar.repr, ScalarRepr::Float { .. })
+                    .then_some(ConstScalar::Float { bits })
             }
             SemConstScalar::Bytes(bytes) => {
                 scalar_class_for_ty_in_env(db, env, ty).and_then(|scalar| {
@@ -118,6 +124,7 @@ pub(super) fn const_scalar_from_value<'db>(
                             signed,
                             words: encode_int_words(&value, bits, signed),
                         }),
+                        ScalarRepr::Float { .. } => None,
                         ScalarRepr::FixedBytes { .. } => None,
                         ScalarRepr::Address { bits } => Some(ConstScalar::Address {
                             bits,
@@ -165,12 +172,15 @@ pub(super) fn const_scalar_for_class(
                 signed,
                 words: encode_int_words(value, bits, signed),
             }),
+            ScalarRepr::Float { .. } => None,
             ScalarRepr::FixedBytes { .. } => None,
             ScalarRepr::Address { bits } => Some(ConstScalar::Address {
                 bits,
                 bytes: encode_int_words(value, bits, false),
             }),
         },
+        SemConstScalar::Float { bits } => matches!(class.repr, ScalarRepr::Float { .. })
+            .then_some(ConstScalar::Float { bits: *bits }),
         SemConstScalar::Bytes(bytes) => matches!(class.repr, ScalarRepr::FixedBytes { .. })
             .then(|| ConstScalar::FixedBytes(bytes.clone())),
     }

@@ -193,6 +193,9 @@ impl<'db> PatternStore<'db> {
                 ConstructorKind::Literal(LitKind::String(_), _) => {
                     Some("string literal patterns are not supported in MIR lowering")
                 }
+                ConstructorKind::Literal(LitKind::Float(_), _) => {
+                    Some("float literal patterns are not supported in MIR lowering")
+                }
             },
             ValidatedPatKind::Or(pats) => pats
                 .iter()
@@ -280,6 +283,7 @@ pub fn ctor_variant_num<'db>(db: &'db dyn HirAnalysisDb, ctor: &ConstructorKind<
         ConstructorKind::Type(_) => 1,
         ConstructorKind::Literal(LitKind::Bool(_), _) => 2,
         ConstructorKind::Literal(LitKind::Int(_), _)
+        | ConstructorKind::Literal(LitKind::Float(_), _)
         | ConstructorKind::Literal(LitKind::String(_), _) => usize::MAX,
     }
 }

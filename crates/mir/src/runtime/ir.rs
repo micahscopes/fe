@@ -410,6 +410,11 @@ impl ScalarClass<'_> {
 pub enum ScalarRepr {
     Bool,
     Int { bits: u16, signed: bool },
+    /// An IEEE-754 floating-point scalar of the given width (`32` for `f32`).
+    /// Honest per-value float typing: no backend has a float `Type` until the
+    /// fork gains float insts (#4f), so every backend seam must reject this
+    /// explicitly rather than fold it into an integer word.
+    Float { bits: u16 },
     FixedBytes { len: u16 },
     Address { bits: u16 },
 }
@@ -581,6 +586,12 @@ pub enum ConstScalar {
         bits: u16,
         signed: bool,
         words: Vec<u8>,
+    },
+    /// An `f32` constant carried as its raw IEEE-754 bit pattern
+    /// (`f32::from_bits(bits)`). It survives to MIR unchanged; a backend that
+    /// cannot represent floats rejects it (there is no float `Type` until #4f).
+    Float {
+        bits: u32,
     },
     FixedBytes(Vec<u8>),
     Address {

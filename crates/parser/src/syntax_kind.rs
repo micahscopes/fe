@@ -23,6 +23,9 @@ pub enum SyntaxKind {
     #[regex("0[oO][0-7]+")]
     #[regex("0[xX][0-9a-fA-F]+")]
     Int,
+    /// `1.0`, `3.14` (minimal decimal float literal; f32 core)
+    #[regex(r"[0-9]+\.[0-9]+")]
+    Float,
     /// "MyString"
     #[regex(r#""([^"\\]|\\.)*""#)]
     String,
@@ -583,7 +586,11 @@ impl SyntaxKind {
     pub fn is_literal_leaf(self) -> bool {
         matches!(
             self,
-            SyntaxKind::Int | SyntaxKind::String | SyntaxKind::TrueKw | SyntaxKind::FalseKw
+            SyntaxKind::Int
+                | SyntaxKind::Float
+                | SyntaxKind::String
+                | SyntaxKind::TrueKw
+                | SyntaxKind::FalseKw
         )
     }
 
@@ -635,6 +642,7 @@ impl SyntaxKind {
             SyntaxKind::Newline => "newline",
             SyntaxKind::Ident => "identifier",
             SyntaxKind::Int => "integer",
+            SyntaxKind::Float => "float",
             SyntaxKind::String => "string literal",
             SyntaxKind::LParen => "`(`",
             SyntaxKind::RParen => "`)`",
@@ -875,6 +883,7 @@ impl SyntaxKind {
             SyntaxKind::Newline
                 | SyntaxKind::Ident
                 | SyntaxKind::Int
+                | SyntaxKind::Float
                 | SyntaxKind::String
                 | SyntaxKind::LParen
                 | SyntaxKind::RParen

@@ -13,6 +13,7 @@ impl Lit {
         let token = self.syntax().first_token().unwrap();
         match token.kind() {
             SK::Int => LitKind::Int(LitInt { token }),
+            SK::Float => LitKind::Float(LitFloat { token }),
             SK::TrueKw | SK::FalseKw => LitKind::Bool(LitBool { token }),
             SK::String => LitKind::String(LitString { token }),
             _ => unreachable!(),
@@ -25,6 +26,16 @@ pub struct LitInt {
     pub(super) token: SyntaxToken,
 }
 impl LitInt {
+    pub fn token(&self) -> &SyntaxToken {
+        &self.token
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LitFloat {
+    pub(super) token: SyntaxToken,
+}
+impl LitFloat {
     pub fn token(&self) -> &SyntaxToken {
         &self.token
     }
@@ -53,6 +64,7 @@ impl LitString {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, derive_more::From, derive_more::TryInto)]
 pub enum LitKind {
     Int(LitInt),
+    Float(LitFloat),
     Bool(LitBool),
     String(LitString),
 }

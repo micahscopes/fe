@@ -475,7 +475,7 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
     fn scalar_ty(&mut self, scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
         Ok(match scalar.role {
             mir::ScalarRole::EnumTag { enum_layout } => self.enum_tag_ty(enum_layout)?,
-            _ => scalar_ty(scalar),
+            _ => scalar_ty(scalar)?,
         })
     }
 
@@ -518,6 +518,12 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
                 signed,
                 words,
             } => Immediate::from_i256(bytes_to_i256(words, *signed), int_ty(*bits)),
+            ConstScalar::Float { .. } => {
+                return Err(LowerError::Unsupported(
+                    "f32 constants have no backend immediate yet; float instructions land on the fork in #4f"
+                        .to_string(),
+                ));
+            }
             ConstScalar::FixedBytes(bytes) => {
                 // The value carries only its own bytes (right-aligned), but
                 // the slot may be wider — `String<N>` slots are full words.
@@ -1168,7 +1174,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                     .value_class(*value)
                     .is_some_and(RuntimeClass::is_signed_scalar);
                 let value = self.local_value(*value)?;
-                self.cast_scalar_with_signedness(value, scalar_ty(to), signed)?
+                self.cast_scalar_with_signedness(value, scalar_ty(to)?, signed)?
             }
             RExpr::ConstRef { region, .. } => {
                 let gv = self.module.lower_const_region(*region)?;
@@ -1562,8 +1568,8 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
             } => {
                 let lhs = self.local_value(*lhs)?;
                 let rhs = self.local_value(*rhs)?;
-                let lhs = self.cast_scalar(lhs, scalar_ty(class))?;
-                let rhs = self.cast_scalar(rhs, scalar_ty(class))?;
+                let lhs = self.cast_scalar(lhs, scalar_ty(class)?)?;
+                let rhs = self.cast_scalar(rhs, scalar_ty(class)?)?;
                 let signed = class.is_signed_int();
                 match (op, signed) {
                     (SaturatingBinOp::Add, true) => self.fb.insert_saddsat(lhs, rhs),
@@ -1970,7 +1976,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
             }
             RuntimeIntrinsic::GenericSaturating { op, ty } => {
                 let prim = intrinsic_prim_from_ty(self.module.db, ty)?;
-                let op_ty = intrinsic_value_type(prim);
+                let op_ty = intrinsic_value_type(prim)?;
                 let signed = prim.is_signed_int();
                 let (lhs, rhs) = intrinsic_binary_args(self, args)?;
                 let lhs =
@@ -1999,7 +2005,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         prim: PrimTy,
         args: &[RLocalId],
     ) -> Result<ValueId, LowerError> {
-        let op_ty = intrinsic_value_type(prim);
+        let op_ty = intrinsic_value_type(prim)?;
         let signed = prim.is_signed_int();
         Ok(match op {
             NumericIntrinsicOp::Eq
@@ -3740,7 +3746,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         scalar: &ScalarClass<'db>,
     ) -> Result<ValueId, LowerError> {
         let word = self.load_word(addr, space)?;
-        self.cast_scalar(word, scalar_ty(scalar))
+        self.cast_scalar(word, scalar_ty(scalar)?)
     }
 
     fn store_to_ptr(
@@ -3753,7 +3759,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         let value = match class {
             RuntimeClass::Scalar(scalar) => self.cast_scalar_with_signedness(
                 src,
-                scalar_word_ty(scalar),
+                scalar_word_ty(scalar)?,
                 scalar.is_signed_int(),
             ),
             RuntimeClass::Ref {
@@ -4132,7 +4138,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
         rhs: RLocalId,
         class: &ScalarClass<'db>,
     ) -> Result<ValueId, LowerError> {
-        let ty = scalar_ty(class);
+        let ty = scalar_ty(class)?;
         let lhs = self.local_value(lhs)?;
         let rhs = self.local_value(rhs)?;
         let lhs = self.cast_scalar(lhs, ty)?;
@@ -4641,21 +4647,33 @@ pub(super) fn linkage_for_runtime(linkage: RuntimeLinkage) -> Linkage {
     }
 }
 
-pub(super) fn scalar_ty<'db>(scalar: &ScalarClass<'db>) -> Type {
-    match scalar.repr {
+pub(super) fn scalar_ty<'db>(scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
+    Ok(match scalar.repr {
         ScalarRepr::Bool => Type::I1,
         ScalarRepr::Int { bits, .. } => int_ty(bits),
+        // No backend has a float `Type` until the fork gains float insts (#4f);
+        // never fold an f32 into an integer word.
+        ScalarRepr::Float { .. } => {
+            return Err(LowerError::Unsupported(
+                "f32 has no Sonatina backend type yet; float instructions land on the fork in #4f"
+                    .to_string(),
+            ));
+        }
         ScalarRepr::FixedBytes { len } => fixed_bytes_ty(len),
         ScalarRepr::Address { .. } => Type::I256,
-    }
+    })
 }
 
-fn scalar_word_ty<'db>(scalar: &ScalarClass<'db>) -> Type {
+fn scalar_word_ty<'db>(scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
     match scalar.repr {
         ScalarRepr::Bool
         | ScalarRepr::Int { .. }
         | ScalarRepr::FixedBytes { .. }
-        | ScalarRepr::Address { .. } => Type::I256,
+        | ScalarRepr::Address { .. } => Ok(Type::I256),
+        ScalarRepr::Float { .. } => Err(LowerError::Unsupported(
+            "f32 has no EVM storage word yet; float instructions land on the fork in #4f"
+                .to_string(),
+        )),
     }
 }
 
@@ -4673,8 +4691,8 @@ fn intrinsic_prim_from_ty<'db>(
     Ok(*prim)
 }
 
-fn intrinsic_value_type(prim: PrimTy) -> Type {
-    match prim {
+fn intrinsic_value_type(prim: PrimTy) -> Result<Type, LowerError> {
+    Ok(match prim {
         PrimTy::Bool => Type::I1,
         PrimTy::U8 | PrimTy::I8 => Type::I8,
         PrimTy::U16 | PrimTy::I16 => Type::I16,
@@ -4682,6 +4700,12 @@ fn intrinsic_value_type(prim: PrimTy) -> Type {
         PrimTy::U64 | PrimTy::I64 => Type::I64,
         PrimTy::U128 | PrimTy::I128 => Type::I128,
         PrimTy::U256 | PrimTy::I256 | PrimTy::Usize | PrimTy::Isize => Type::I256,
+        PrimTy::F32 => {
+            return Err(LowerError::Unsupported(
+                "f32 intrinsics have no backend lowering yet; float instructions land on the fork in #4f"
+                    .to_string(),
+            ));
+        }
         PrimTy::String
         | PrimTy::Array
         | PrimTy::Tuple(_)
@@ -4689,7 +4713,7 @@ fn intrinsic_value_type(prim: PrimTy) -> Type {
         | PrimTy::View
         | PrimTy::BorrowMut
         | PrimTy::BorrowRef => Type::I256,
-    }
+    })
 }
 
 fn lower_intrinsic_operand(

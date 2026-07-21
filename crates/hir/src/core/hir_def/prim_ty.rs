@@ -8,6 +8,7 @@ pub enum PrimTy {
     Bool,
     Int(IntTy),
     Uint(UintTy),
+    Float(FloatTy),
     String,
 }
 
@@ -17,6 +18,7 @@ impl PrimTy {
             PrimTy::Bool => IdentId::make_bool(db),
             PrimTy::Int(ty) => ty.name(db),
             PrimTy::Uint(ty) => ty.name(db),
+            PrimTy::Float(ty) => ty.name(db),
             PrimTy::String => IdentId::new(db, "String".to_string()),
         }
     }
@@ -38,6 +40,7 @@ impl PrimTy {
             PrimTy::Uint(UintTy::U128),
             PrimTy::Uint(UintTy::U256),
             PrimTy::Uint(UintTy::Usize),
+            PrimTy::Float(FloatTy::F32),
             PrimTy::String,
         ]
     }
@@ -89,6 +92,19 @@ impl UintTy {
             UintTy::U128 => IdentId::make_u128(db),
             UintTy::U256 => IdentId::make_u256(db),
             UintTy::Usize => IdentId::make_usize(db),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FloatTy {
+    F32,
+}
+
+impl FloatTy {
+    pub fn name(self, db: &dyn HirDb) -> IdentId<'_> {
+        match self {
+            FloatTy::F32 => IdentId::make_f32(db),
         }
     }
 }

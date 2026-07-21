@@ -2618,6 +2618,9 @@ impl<'db> TyChecker<'db> {
         match lit {
             LitKind::Bool(_) => TyId::bool(self.db),
             LitKind::Int(_) => self.table.new_var(TyVarSort::Integral, &Kind::Star),
+            // f32 is currently the only float type, so a float literal takes a
+            // concrete `f32` type directly (no float inference var yet).
+            LitKind::Float(_) => TyId::f32(self.db),
             LitKind::String(s) => {
                 let len_bytes = s.len_bytes(self.db);
                 if len_bytes > MAX_INLINE_STRING_BYTES {

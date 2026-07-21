@@ -356,7 +356,9 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
 /// anything wider than i64 (and anything address-shaped), which fails closed
 /// per the ratified "u256-on-wasm is out of scope" decision.
 fn scalar_ty_r1<'db>(scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
-    let ty = scalar_ty(scalar);
+    // `scalar_ty` already rejects f32 (no backend float `Type` until #4f); the
+    // `?` propagates that named reject rather than letting a float slip through.
+    let ty = scalar_ty(scalar)?;
     match ty {
         Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 => Ok(ty),
         wide => Err(LowerError::Unsupported(format!(
@@ -967,6 +969,11 @@ fn immediate_for_const_scalar(
         ConstScalar::Int { words, signed, .. } => {
             Ok(Immediate::from_i256(bytes_to_i256(words, *signed), ty))
         }
+        ConstScalar::Float { .. } => Err(LowerError::Unsupported(
+            "wasm target: f32 constants have no backend immediate yet; float instructions \
+             land on the fork in #4f"
+                .to_string(),
+        )),
         other => Err(LowerError::Unsupported(format!(
             "wasm target (R1) constant `{other:?}` is not supported"
         ))),

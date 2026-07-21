@@ -161,6 +161,7 @@ impl<'db> LitKind<'db> {
     pub fn pretty_print(self, db: &dyn HirDb) -> String {
         match self {
             LitKind::Int(i) => i.data(db).to_string(),
+            LitKind::Float(f) => f32::from_bits(f.bits(db)).to_string(),
             LitKind::String(s) => format!("\"{}\"", s.data(db)),
             LitKind::Bool(b) => if b { "true" } else { "false" }.to_string(),
         }

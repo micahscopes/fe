@@ -2721,6 +2721,7 @@ fn scalar_repr_sort_key(repr: ScalarRepr) -> String {
     match repr {
         ScalarRepr::Bool => "bool".to_string(),
         ScalarRepr::Int { bits, signed } => format!("int:{bits}:{signed}"),
+        ScalarRepr::Float { bits } => format!("float:{bits}"),
         ScalarRepr::FixedBytes { len } => format!("bytes:{len}"),
         ScalarRepr::Address { bits } => format!("address:{bits}"),
     }

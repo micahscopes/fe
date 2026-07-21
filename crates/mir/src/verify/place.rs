@@ -278,6 +278,10 @@ pub(super) fn scalar_class_from_const(value: &ConstScalar) -> ScalarClass<'_> {
             },
             role: ScalarRole::Plain,
         },
+        ConstScalar::Float { .. } => ScalarClass {
+            repr: ScalarRepr::Float { bits: 32 },
+            role: ScalarRole::Plain,
+        },
         ConstScalar::Address { bits, .. } => ScalarClass {
             repr: ScalarRepr::Address { bits: *bits },
             role: ScalarRole::Plain,

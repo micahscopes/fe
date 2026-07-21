@@ -27,6 +27,7 @@ impl<'db> SemConstId<'db> {
             SemConstValue::Scalar { value, .. } => match value {
                 SemConstScalar::Bool(value) => value.to_string(),
                 SemConstScalar::Int { value } => value.to_string(),
+                SemConstScalar::Float { bits } => f32::from_bits(bits).to_string(),
                 SemConstScalar::Bytes(bytes) => {
                     let hex = bytes
                         .iter()
@@ -123,6 +124,9 @@ pub enum SemConstValue<'db> {
 pub enum SemConstScalar {
     Bool(bool),
     Int { value: BigInt },
+    /// An `f32` value stored as its IEEE-754 bit pattern (raw `f32` is not
+    /// `Eq`/`Hash`). Reconstruct with `f32::from_bits(bits)`.
+    Float { bits: u32 },
     Bytes(Vec<u8>),
 }
 
@@ -503,6 +507,7 @@ fn reify_runtime_const_impl<'db>(
             match value {
                 SemConstScalar::Bool(value) => bool_const(db, value),
                 SemConstScalar::Int { value } => int_const(db, ty, value.clone()),
+                SemConstScalar::Float { bits } => float_const(db, ty, bits),
                 SemConstScalar::Bytes(bytes) => bytes_const(db, ty, bytes.clone()),
             }
         }
@@ -639,6 +644,16 @@ pub fn int_const<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, value: BigInt) 
     )
 }
 
+pub fn float_const<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, bits: u32) -> SemConstId<'db> {
+    SemConstId::new(
+        db,
+        SemConstValue::Scalar {
+            ty,
+            value: SemConstScalar::Float { bits },
+        },
+    )
+}
+
 pub fn bytes_const<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
@@ -751,6 +766,7 @@ pub fn int_ty_shape<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<(u
         PrimTy::I128 => (128, true),
         PrimTy::I256 | PrimTy::Isize => (256, true),
         PrimTy::Bool
+        | PrimTy::F32
         | PrimTy::String
         | PrimTy::Array
         | PrimTy::Tuple(_)

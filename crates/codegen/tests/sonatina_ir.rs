@@ -199,6 +199,31 @@ pub fn main() -> u256
 }
 
 #[test]
+fn f32_value_rejects_on_evm_backend_naming_the_fork_float_rung() {
+    // An `f32` survives CTFE and MIR (its scalar repr is `ScalarRepr::Float`),
+    // but the sonatina fork has no float `Type` yet: every EVM seam must reject
+    // it by name (never fold it into an integer word). The real float insts land
+    // on the fork in rung 2 (#4f), which the message points at.
+    let err = with_top_mod_for_source(
+        "f32_value_rejects_on_evm_backend.fe",
+        r#"
+pub fn float_ret() -> f32 {
+    1.5
+}
+"#,
+        |db, top_mod| {
+            emit_module_sonatina_ir(db, top_mod)
+                .expect_err("f32 has no EVM backend lowering until the fork float rung (#4f)")
+        },
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("f32") && message.contains("#4f"),
+        "f32 EVM reject should name f32 and the fork float rung #4f:\n{message}"
+    );
+}
+
+#[test]
 fn explicit_storage_map_root_reports_ordinary_uses_error() {
     let err = with_top_mod_for_source(
         "explicit_storage_map_root_reports_ordinary_uses_error.fe",
