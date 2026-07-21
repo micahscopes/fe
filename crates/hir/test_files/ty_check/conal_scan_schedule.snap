@@ -1,0 +1,130 @@
+---
+source: crates/hir/tests/ty_check.rs
+expression: res
+input_file: test_files/ty_check/conal_scan_schedule.fe
+---
+note:
+   ┌─ conal_scan_schedule.fe:31:26
+   │
+31 │ fn takes_leaf(_ x: Leaf) {}
+   │                          ^^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:32:30
+   │
+32 │   fn vtree0_shape(x: VTree<0>) {
+   │ ╭──────────────────────────────^
+33 │ │     takes_leaf(x)
+34 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:33:5
+   │
+33 │     takes_leaf(x)
+   │     ^^^^^^^^^^ fn takes_leaf
+
+note:
+   ┌─ conal_scan_schedule.fe:33:5
+   │
+33 │     takes_leaf(x)
+   │     ^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:33:16
+   │
+33 │     takes_leaf(x)
+   │                ^ Leaf
+
+note:
+   ┌─ conal_scan_schedule.fe:37:40
+   │
+37 │ fn takes_vtree2(_ x: Node<Node<Leaf>>) {}
+   │                                        ^^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:38:30
+   │
+38 │   fn vtree2_shape(x: VTree<2>) {
+   │ ╭──────────────────────────────^
+39 │ │     takes_vtree2(x)
+40 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:39:5
+   │
+39 │     takes_vtree2(x)
+   │     ^^^^^^^^^^^^ fn takes_vtree2
+
+note:
+   ┌─ conal_scan_schedule.fe:39:5
+   │
+39 │     takes_vtree2(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:39:18
+   │
+39 │     takes_vtree2(x)
+   │                  ^ Node<Node<Leaf>>
+
+note:
+   ┌─ conal_scan_schedule.fe:45:46
+   │
+45 │ fn takes_vtree3(_ x: Node<Node<Node<Leaf>>>) {}
+   │                                              ^^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:46:30
+   │
+46 │   fn vtree3_shape(x: VTree<3>) {
+   │ ╭──────────────────────────────^
+47 │ │     takes_vtree3(x)
+48 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:47:5
+   │
+47 │     takes_vtree3(x)
+   │     ^^^^^^^^^^^^ fn takes_vtree3
+
+note:
+   ┌─ conal_scan_schedule.fe:47:5
+   │
+47 │     takes_vtree3(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:47:18
+   │
+47 │     takes_vtree3(x)
+   │                  ^ Node<Node<Node<Leaf>>>
+
+note:
+   ┌─ conal_scan_schedule.fe:54:48
+   │
+54 │   fn vtree3_is_node_of_vtree2(x: Node<VTree<2>>) {
+   │ ╭────────────────────────────────────────────────^
+55 │ │     takes_vtree3(x)
+56 │ │ }
+   │ ╰─^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:55:5
+   │
+55 │     takes_vtree3(x)
+   │     ^^^^^^^^^^^^ fn takes_vtree3
+
+note:
+   ┌─ conal_scan_schedule.fe:55:5
+   │
+55 │     takes_vtree3(x)
+   │     ^^^^^^^^^^^^^^^ ()
+
+note:
+   ┌─ conal_scan_schedule.fe:55:18
+   │
+55 │     takes_vtree3(x)
+   │                  ^ Node<Node<Node<Leaf>>>

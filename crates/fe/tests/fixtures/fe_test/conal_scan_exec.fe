@@ -1,0 +1,180 @@
+// mb2 Conal L0 (Conal ladder rung 0): a shape/tree TYPE drives the STRUCTURE of a
+// parallel-scan schedule, EXECUTED on EVM under revm. Promotes the honest-review
+// probe (/workspace/mb2-conal-honest-review.md section 4) to a committed runtime
+// fixture, replacing the DOCUMENTARY type<->schedule correspondence of the NTT
+// (ntt_par_exec.fe, hand-matched in comments) with a MECHANICAL one on the cheapest
+// leg.
+//
+// WHAT THIS PROVES:
+//   * VTree<N> is a `recursive type fn` computing a depth-N binary value tree. The
+//     keystone CTFE type->type solver normalizes VTree<3> to Node<Node<Node<Leaf>>>
+//     (8 leaves) and VTree<2> to Node<Node<Leaf>> (4 leaves) DEFINITIONALLY, before
+//     any term runs (the ty_check twin `conal_scan_schedule.fe` machine-checks those
+//     normal forms).
+//   * Scan / AddAll are written ONCE PER COMBINATOR (Leaf, Node<A>), Sklansky-style:
+//     scan the two halves independently (the Par leaves of a level), then add the
+//     left total across every right prefix (the Comp adjust phase). Monomorphization
+//     instantiates that generic recursion to the DEPTH dictated by the type, so the
+//     executed call tree (which halves, how deep, where the adjust folds) is
+//     COMPILER-DERIVED FROM THE SHAPE TYPE, not hand-written per size.
+//   * `scan_tree2` and `scan_tree3` share the EXACT SAME impls; only the type
+//     argument differs (VTree<2> vs VTree<3>), so the schedule STRUCTURE is
+//     type-driven, not hardcoded (proven at >= 2 sizes).
+//   * Executed under revm, the derived scan equals an INDEPENDENT in-fixture ORACLE:
+//     a flat left-to-right running-accumulator prefix sum (a different algorithm
+//     from the divide-and-conquer tree recursion) over the same input.
+//
+// HONEST SCOPE (per /workspace/mb2-conal-honest-review.md sections 4-5): this is
+// Link-1 (type -> shape normal form) plus type -> executed schedule STRUCTURE at the
+// term level on EVM, running SEQUENTIALLY. It is NOT GPU parallelism: the mono'd
+// scan is a single sequential call tree, and no shape drives any DISPATCH plan yet.
+// Parallel GPU realization is later ladder work (L3+); nothing here claims it.
+
+pub struct Leaf {
+    pub v: u256,
+}
+pub struct Node<A> {
+    pub l: A,
+    pub r: A,
+}
+
+// depth-indexed value tree, computed by the keystone type->type machinery:
+//   VTree<0> = Leaf ; VTree<N> = Node<VTree<N - 1>>
+recursive type fn VTree<const N: usize>() -> (*) {
+    match N {
+        0 => Leaf
+        _ => Node<VTree<{N - 1}>>
+    }
+}
+
+// structural "map (+d)" over a tree: the Comp adjust phase.
+trait AddAll {
+    fn add_all(self, _ d: u256) -> Self
+}
+impl AddAll for Leaf {
+    fn add_all(self, _ d: u256) -> Self {
+        Leaf { v: self.v + d }
+    }
+}
+impl<A: AddAll> AddAll for Node<A> {
+    fn add_all(self, _ d: u256) -> Self {
+        Node { l: self.l.add_all(d), r: self.r.add_all(d) }
+    }
+}
+
+// the Sklansky scan, written per combinator ONCE:
+// returns (tree of EXCLUSIVE prefixes, total).
+trait Scan {
+    fn scan(self) -> (Self, u256)
+}
+impl Scan for Leaf {
+    fn scan(self) -> (Self, u256) {
+        (Leaf { v: 0 }, self.v)
+    }
+}
+impl<A: Scan + AddAll> Scan for Node<A> {
+    fn scan(self) -> (Self, u256) {
+        // the two halves are INDEPENDENT (the Par leaves of this level)
+        let ls = self.l.scan()
+        let rs = self.r.scan()
+        // the adjust phase: the left total flows into every right prefix
+        (Node { l: ls.0, r: rs.0.add_all(ls.1) }, ls.1 + rs.1)
+    }
+}
+
+// leaf readback (structural fold to pick leaf i, MSB-first path).
+trait GetLeaf {
+    fn get_leaf(self, _ i: u256, _ size: u256) -> u256
+}
+impl GetLeaf for Leaf {
+    fn get_leaf(self, _ i: u256, _ size: u256) -> u256 {
+        self.v
+    }
+}
+impl<A: GetLeaf> GetLeaf for Node<A> {
+    fn get_leaf(self, _ i: u256, _ size: u256) -> u256 {
+        let half = size / 2
+        if i < half {
+            self.l.get_leaf(i, half)
+        } else {
+            self.r.get_leaf(i - half, half)
+        }
+    }
+}
+
+// THE POINT: each signature is a type-fn APPLICATION. `t.scan()` runs over whatever
+// VTree<N> normalizes to; the schedule structure of the executed code is derived by
+// the compiler from the shape, not hand-written per size. Two sizes, ONE set of
+// impls => the structure is type-driven.
+fn scan_tree2(_ t: VTree<2>) -> (VTree<2>, u256) {
+    t.scan()
+}
+fn scan_tree3(_ t: VTree<3>) -> (VTree<3>, u256) {
+    t.scan()
+}
+
+fn build4(_ a0: u256, _ a1: u256, _ a2: u256, _ a3: u256) -> VTree<2> {
+    Node {
+        l: Node { l: Leaf { v: a0 }, r: Leaf { v: a1 } },
+        r: Node { l: Leaf { v: a2 }, r: Leaf { v: a3 } },
+    }
+}
+
+fn build8(_ a0: u256, _ a1: u256, _ a2: u256, _ a3: u256,
+          _ a4: u256, _ a5: u256, _ a6: u256, _ a7: u256) -> VTree<3> {
+    Node {
+        l: Node {
+            l: Node { l: Leaf { v: a0 }, r: Leaf { v: a1 } },
+            r: Node { l: Leaf { v: a2 }, r: Leaf { v: a3 } },
+        },
+        r: Node {
+            l: Node { l: Leaf { v: a4 }, r: Leaf { v: a5 } },
+            r: Node { l: Leaf { v: a6 }, r: Leaf { v: a7 } },
+        },
+    }
+}
+
+// ---- size 8 (VTree<3>): type-driven scan == independent sequential oracle ----
+#[test]
+fn test_type_fn_scan8_matches_oracle() {
+    let input: [u256; 8] = [5, 15, 39, 77, 129, 195, 275, 369]
+    let t = build8(input[0], input[1], input[2], input[3],
+                   input[4], input[5], input[6], input[7])
+    // the schedule STRUCTURE here is the mono'd Sklansky recursion over VTree<3>.
+    let scanned = scan_tree3(t)
+    let total = scanned.1
+    let s = scanned.0
+
+    // INDEPENDENT ORACLE: a flat left-to-right running prefix sum (NOT the tree's
+    // divide-and-conquer recursion). Exclusive prefixes: [0,5,20,59,136,265,460,735].
+    let mut acc: u256 = 0
+    for i in 0..8 {
+        assert!(s.get_leaf(i as u256, 8) == acc)
+        acc += input[i]
+    }
+    // the returned total is the inclusive sum of every leaf (1104).
+    assert!(total == acc)
+    assert!(total == 1104)
+}
+
+// ---- size 4 (VTree<2>): SAME impls, different type => different-depth schedule ----
+// The >= 2 sizes proof: nothing about `scan`/`add_all` changed; only the type
+// argument (VTree<2> vs VTree<3>) did, and the compiler derived a SHALLOWER schedule
+// from it (VTree<2> = Node<Node<Leaf>>, depth 2, vs VTree<3> depth 3).
+#[test]
+fn test_type_fn_scan4_matches_oracle() {
+    let input: [u256; 4] = [3, 9, 27, 81]
+    let t = build4(input[0], input[1], input[2], input[3])
+    let scanned = scan_tree2(t)
+    let total = scanned.1
+    let s = scanned.0
+
+    // INDEPENDENT ORACLE: flat running prefix. Exclusive prefixes: [0,3,12,39].
+    let mut acc: u256 = 0
+    for i in 0..4 {
+        assert!(s.get_leaf(i as u256, 4) == acc)
+        acc += input[i]
+    }
+    assert!(total == acc)
+    assert!(total == 120)
+}

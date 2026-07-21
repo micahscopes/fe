@@ -1,0 +1,56 @@
+// mb2 Conal L0 (ty_check twin of conal_scan_exec.fe): the shape TYPE's normal form,
+// machine-checked. VTree<N> is a `recursive type fn` computing a depth-N binary
+// value tree; the keystone CTFE type->type solver unfolds it DEFINITIONALLY, so a
+// zero-diagnostic acceptor call is definitional equality at the boundary: the
+// unfolded type reached EXACTLY the hand-written Node-nest normal form. Two sizes
+// (VTree<2>, VTree<3>) prove the STRUCTURE is a function of the type parameter N,
+// not hardcoded per size. This is the type-level companion to the executed scan
+// (conal_scan_exec.fe): the SAME shape type, whose normal form is the schedule
+// structure that mono then drives into executed code.
+//
+// HONEST SCOPE (per /workspace/mb2-conal-honest-review.md sections 4-5): this leg is
+// Link-1 only (type -> shape normal form). Execution and the (sequential) schedule
+// structure live in the runtime twin. No GPU claim.
+
+pub struct Leaf {
+    pub v: u256,
+}
+pub struct Node<A> {
+    pub l: A,
+    pub r: A,
+}
+
+recursive type fn VTree<const N: usize>() -> (*) {
+    match N {
+        0 => Leaf
+        _ => Node<VTree<{N - 1}>>
+    }
+}
+
+// ---- base case: VTree<0> normalizes to Leaf ----
+fn takes_leaf(_ x: Leaf) {}
+fn vtree0_shape(x: VTree<0>) {
+    takes_leaf(x)
+}
+
+// ---- VTree<2> normalizes to Node<Node<Leaf>> (depth 2, 4 leaves) ----
+fn takes_vtree2(_ x: Node<Node<Leaf>>) {}
+fn vtree2_shape(x: VTree<2>) {
+    takes_vtree2(x)
+}
+
+// ---- VTree<3> normalizes to Node<Node<Node<Leaf>>> (depth 3, 8 leaves) ----
+// The SAME `recursive type fn`, one deeper N, one deeper Node: the structure is a
+// function of N (the >= 2 sizes proof, at the type level).
+fn takes_vtree3(_ x: Node<Node<Node<Leaf>>>) {}
+fn vtree3_shape(x: VTree<3>) {
+    takes_vtree3(x)
+}
+
+// ---- the recursion composes: VTree<3> = Node<VTree<2>> ----
+// One N drives a shape and its predecessor; `Node<VTree<2>>` unfolds to the same
+// depth-3 normal form as `VTree<3>`, so the executed scan's outer `Node<A>` step
+// (A = VTree<2>) is exactly the type's own recursion.
+fn vtree3_is_node_of_vtree2(x: Node<VTree<2>>) {
+    takes_vtree3(x)
+}
