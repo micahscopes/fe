@@ -1,0 +1,46 @@
+// Authored MvT<5> specialization boundary: two nested value-only helpers
+// exchange the top-level 16-leaf halves without expanding a dense product.
+
+extern {
+    fn __i32_from_f32(_: f32) -> i32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub struct ScF { pub s: f32 }
+pub struct NdF<A> { pub a: A, pub b: A }
+
+impl Copy for ScF {}
+impl<A: Copy> Copy for NdF<A> {}
+
+recursive type fn MvTF<const N: usize>() -> (*) {
+    match N {
+        0 => ScF
+        _ => NdF<MvTF<{N - 1}>>
+    }
+}
+
+#[inline(always)]
+fn swap_mvt5_halves(tree: MvTF<5>) -> MvTF<5> {
+    NdF { a: tree.b, b: tree.a }
+}
+
+#[inline(always)]
+fn nested_swap_mvt5(tree: MvTF<5>) -> MvTF<5> {
+    swap_mvt5_halves(tree)
+}
+
+pub fn mvt5_f32_nested_helper_render(px: i32, py: i32, c0: f32, c1: f32) -> u32 {
+    let p: MvTF<1> = NdF { a: ScF { s: c0 }, b: ScF { s: c1 } }
+    let n2: MvTF<2> = NdF { a: p, b: p }
+    let n3: MvTF<3> = NdF { a: n2, b: n2 }
+    let left: MvTF<4> = NdF { a: n3, b: n3 }
+    let right_seed: MvTF<1> = NdF { a: ScF { s: c1 }, b: ScF { s: c0 } }
+    let right2: MvTF<2> = NdF { a: right_seed, b: right_seed }
+    let right3: MvTF<3> = NdF { a: right2, b: right2 }
+    let right: MvTF<4> = NdF { a: right3, b: right3 }
+    let tree: MvTF<5> = NdF { a: left, b: right }
+    let swapped: MvTF<5> = nested_swap_mvt5(tree)
+    let r: i32 = __i32_from_f32(swapped.a.a.a.a.a.s) + px
+    let g: i32 = __i32_from_f32(swapped.b.a.a.a.a.s) + py
+    __bitcast(r + g * 256 + -65536)
+}

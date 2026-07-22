@@ -149,13 +149,16 @@ const INLINE_SPECIALIZATION_CACHE_LIMIT: usize = 256;
 /// every other call remains visible to the normal fail-closed lowering. Fresh
 /// locals exist only in this backend overlay, so `semantic_locals` remains the
 /// canonical source-level mapping and is deliberately not extended.
+struct PreparedInlineBodies<'db> {
+    bodies: FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+    #[cfg(test)]
+    residuals: FxHashMap<RuntimeInstance<'db>, (usize, usize)>,
+}
+
 fn prepare_inline_value_bodies<'db>(
     db: &'db DriverDataBase,
     package: &RuntimePackage<'db>,
-) -> (
-    FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
-    FxHashMap<RuntimeInstance<'db>, usize>,
-) {
+) -> PreparedInlineBodies<'db> {
     fn visit<'db>(
         db: &'db DriverDataBase,
         package: &RuntimePackage<'db>,
@@ -164,7 +167,8 @@ fn prepare_inline_value_bodies<'db>(
         visiting: &mut HashSet<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey)>,
         done: &mut FxHashMap<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey), RuntimeBody<'db>>,
         specialization_work: &mut usize,
-        pruned_structural_stmts: &mut FxHashMap<RuntimeInstance<'db>, usize>,
+        #[cfg(test)]
+        residual_stmt_counts: &mut FxHashMap<RuntimeInstance<'db>, (usize, usize)>,
     ) -> RuntimeBody<'db> {
         let cache_key = (instance, arg_shape);
         if let Some(body) = done.get(&cache_key) {
@@ -214,9 +218,10 @@ fn prepare_inline_value_bodies<'db>(
                     visiting,
                     done,
                     specialization_work,
-                    pruned_structural_stmts,
+                    #[cfg(test)]
+                    residual_stmt_counts,
                 );
-                let Some((mut replacement, pruned)) = inline_value_call(
+                let Some(replacement) = inline_value_call(
                     db,
                     package,
                     locals,
@@ -229,7 +234,13 @@ fn prepare_inline_value_bodies<'db>(
                     stmts.push(stmt);
                     continue;
                 };
-                *pruned_structural_stmts.entry(instance).or_default() += pruned;
+                #[cfg(test)]
+                {
+                    let counts = residual_stmt_counts.entry(instance).or_default();
+                    counts.0 += replacement.stmts.len() + replacement.pruned;
+                    counts.1 += replacement.stmts.len();
+                }
+                let mut replacement = replacement.stmts;
                 expanded += replacement.len();
                 for stmt in &replacement {
                     record_value_fact(stmt, &mut aggregate_facts, &mut scalar_constants);
@@ -249,7 +260,8 @@ fn prepare_inline_value_bodies<'db>(
     let mut done = FxHashMap::default();
     let mut roots = FxHashMap::default();
     let mut specialization_work = 0usize;
-    let mut pruned_structural_stmts = FxHashMap::default();
+    #[cfg(test)]
+    let mut residual_stmt_counts = FxHashMap::default();
     for function in package.functions(db) {
         let instance = function.instance(db);
         let params = instance.body(db).signature.params.len();
@@ -263,11 +275,16 @@ fn prepare_inline_value_bodies<'db>(
             &mut visiting,
             &mut done,
             &mut specialization_work,
-            &mut pruned_structural_stmts,
+            #[cfg(test)]
+            &mut residual_stmt_counts,
         );
         roots.insert(instance, body);
     }
-    (roots, pruned_structural_stmts)
+    PreparedInlineBodies {
+        bodies: roots,
+        #[cfg(test)]
+        residuals: residual_stmt_counts,
+    }
 }
 
 fn seed_parameter_facts<'db>(
@@ -428,7 +445,7 @@ fn inline_value_call<'db>(
     args: &[RLocalId],
     aggregate_facts: &mir::RuntimeAggregateFacts,
     budget: usize,
-) -> Option<(Vec<RStmt<'db>>, usize)> {
+) -> Option<InlineValueCall<'db>> {
     let function = package
         .functions(db)
         .into_iter()
@@ -523,14 +540,24 @@ fn inline_value_call<'db>(
         dst,
         expr: RExpr::Use(remap(ret)?),
     });
+    #[cfg(test)]
     let before_specialization = out.len();
     let out = mir::specialize_pure_inline_stmts(out, aggregate_facts, dst)?;
     if out.len() > budget {
         return None;
     }
-    let pruned = before_specialization.saturating_sub(out.len());
     caller_locals.extend(staged_locals);
-    Some((out, pruned))
+    Some(InlineValueCall {
+        #[cfg(test)]
+        pruned: before_specialization.saturating_sub(out.len()),
+        stmts: out,
+    })
+}
+
+struct InlineValueCall<'db> {
+    stmts: Vec<RStmt<'db>>,
+    #[cfg(test)]
+    pruned: usize,
 }
 
 fn remap_inline_expr<'db>(
@@ -610,7 +637,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         isa: &'a Wasm32,
         package: &'a RuntimePackage<'db>,
     ) -> Self {
-        let (prepared_bodies, _) = prepare_inline_value_bodies(db, package);
+        let prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         Self {
             db,
             builder,
@@ -1981,11 +2008,38 @@ mod tests {
             .find(|function| function.symbol(&db).contains("rebuild_mvt2"))
             .expect("authored rebuild_mvt2 helper should exist")
             .instance(&db);
-        let (_, pruned_by_caller) = prepare_inline_value_bodies(&db, &package);
-        let pruned = pruned_by_caller.get(&rebuild).copied().unwrap_or(0);
+        let prepared = prepare_inline_value_bodies(&db, &package);
+        let (before, after) = prepared.residuals.get(&rebuild).copied().unwrap_or((0, 0));
         assert!(
-            pruned > 0,
-            "shape-seeded recursive preparation pruned only {pruned} structural statements"
+            before > after,
+            "shape-seeded recursive preparation did not shrink rebuild_mvt2: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn authored_mvt5_specialization_measures_smaller_nested_residual() {
+        let source = include_str!("../../tests/fixtures/spirv/mvt5_f32_nested_helper_render.fe");
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///mvt5_specialization_residual.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let package = mir::build_wasm_runtime_package(&db, top_mod)
+            .expect("authored MvT5 package should lower to Runtime MIR");
+        let nested = package
+            .functions(&db)
+            .into_iter()
+            .find(|function| function.symbol(&db).contains("nested_swap_mvt5"))
+            .expect("authored nested_swap_mvt5 helper should exist")
+            .instance(&db);
+
+        let prepared = prepare_inline_value_bodies(&db, &package);
+        let (before, after) = prepared.residuals.get(&nested).copied().unwrap_or((0, 0));
+        assert_eq!(
+            (before, after),
+            (102, 8),
+            "authored nested MvT5 structural residual changed"
         );
     }
 
