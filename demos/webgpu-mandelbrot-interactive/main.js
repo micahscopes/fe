@@ -18,6 +18,7 @@ import { instantiateWasm, renderFragmentGrid } from "../webgpu-keystone/wasm-run
 import { initWebGPURender, renderFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
 import { createLivePump } from "./live-pump.js";
 import { createMandelbrotActorRuntime } from "./actor-runtime.js";
+import { createMandelbrotWorkerControl } from "./worker-control.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -90,15 +91,15 @@ function updateViewOracle(cr, ci, sq, dx, dy, dzoom, mx, my) {
 // clamp/zoom/anchor cases plus a seeded forward-fed random walk. Returns
 // { ok, steps, mismatch? }. This is the load-bearing "the Fe controls run in your
 // browser and match" gate.
-function verifyControlsInBrowser(updateView, initView) {
+async function verifyControlsInBrowser(updateView, initView) {
   const eq = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
-  const call = (v, dx, dy, dz, mx, my) => {
-    const got = updateView(v[0], v[1], v[2], dx, dy, dz, mx, my);
+  const call = async (v, dx, dy, dz, mx, my) => {
+    const got = await updateView(v[0], v[1], v[2], dx, dy, dz, mx, my);
     const want = updateViewOracle(v[0], v[1], v[2], dx, dy, dz, mx, my);
     if (!Array.isArray(got) || !eq(got, want)) {
-      return { got, want, input: [...v, dx, dy, dz, mx, my] };
+      return { mismatch: { got, want, input: [...v, dx, dy, dz, mx, my] } };
     }
-    return null;
+    return { got };
   };
   // Directed cases (mirror the Rust directed test): four center clamps, both scale
   // clamps, an anchored zoom.
@@ -113,9 +114,9 @@ function verifyControlsInBrowser(updateView, initView) {
   ];
   let steps = 0;
   for (const [v, dx, dy, dz, mx, my] of directed) {
-    const mm = call(v, dx, dy, dz, mx, my);
+    const checked = await call(v, dx, dy, dz, mx, my);
     steps++;
-    if (mm) return { ok: false, steps, mismatch: mm };
+    if (checked.mismatch) return { ok: false, steps, mismatch: checked.mismatch };
   }
   // A forward-fed random walk (deterministic; feeds each reply as the next view -
   // the exact broker round-trip). Uses a small LCG.
@@ -129,10 +130,10 @@ function verifyControlsInBrowser(updateView, initView) {
     const dz = ((r >>> 19) & 3) === 0 ? -1 : ((r >>> 19) & 3) === 1 ? 1 : 0;
     const mx = (r >>> 21) & 511;
     const my = (rnd() >>> 12) & 511;
-    const mm = call(v, dx, dy, dz, mx, my);
+    const checked = await call(v, dx, dy, dz, mx, my);
     steps++;
-    if (mm) return { ok: false, steps, mismatch: mm };
-    v = updateView(v[0], v[1], v[2], dx, dy, dz, mx, my);
+    if (checked.mismatch) return { ok: false, steps, mismatch: checked.mismatch };
+    v = checked.got;
   }
   return { ok: true, steps };
 }
@@ -188,22 +189,31 @@ async function main() {
     (A.layout.params || []).map((x) => x.name).join(", ") + `]  |  control ${A.ctl.control_export}`;
 
   // --- Instantiate the Fe wasm modules (zero imports). --------------------
-  let ctlExports, fragExports;
+  let fragExports, controlWorker;
+  let updateView;
   try {
-    ctlExports = await instantiateWasm(A.ctlWasm);
     fragExports = await instantiateWasm(A.fragWasm);
+    if (window.MANDEL_LIVE_ASSETS) {
+      const ctlExports = await instantiateWasm(A.ctlWasm);
+      updateView = (...args) => Promise.resolve(ctlExports[A.ctl.control_export](...args));
+    } else {
+      controlWorker = await createMandelbrotWorkerControl({
+        wasm: A.ctlWasm,
+        exportName: A.ctl.control_export,
+      });
+      updateView = (...args) => controlWorker.update(args);
+    }
   } catch (e) {
     setBanner("red", "Fe wasm failed to instantiate", e.message || String(e));
     return;
   }
-  const updateView = ctlExports[A.ctl.control_export];
   if (typeof updateView !== "function") {
     setBanner("red", "control export missing", `\`${A.ctl.control_export}\` not found in ctl.wasm`);
     return;
   }
 
   // --- GATE: the Fe controls run in THIS browser's V8 and match the oracle. -
-  const cv = verifyControlsInBrowser(updateView, A.ctl.view_init);
+  const cv = await verifyControlsInBrowser(updateView, A.ctl.view_init);
   if (!cv.ok) {
     setBanner("red", "Fe controls disagree with the oracle in V8", `after ${cv.steps} gestures: ${JSON.stringify(cv.mismatch)}`);
     $("row-ctl").textContent = "MISMATCH";
@@ -294,6 +304,11 @@ async function main() {
   });
   window.__mandelPump = pump; // scripted-drive handle (evaluate_script / tests).
   window.__updateViewOracle = updateViewOracle;
+  window.addEventListener("pagehide", () => {
+    pump.destroy();
+    actorRuntime.close("page hidden");
+    controlWorker?.close();
+  }, { once: true });
 
   // Preset buttons: set the view triple directly (still no view math in JS - these
   // are the pinned tokens the compiler referenced).

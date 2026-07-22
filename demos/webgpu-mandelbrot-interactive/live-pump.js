@@ -47,18 +47,50 @@ export function createLivePump({ canvas, updateView, ctlMeta, renderFn, onView }
   let rafPending = false;
 
   // The ONE call: marshal (fields + stored view) -> update_view -> new view.
-  function applyFields(fields, kind) {
+  let activeUpdate = false;
+  let pendingUpdate = null;
+  let stateEpoch = 0;
+  const runUpdate = async ({ fields, kind, epoch, resolve, reject }) => {
     const argv = args.map((name) => readArg(eventMap[name], fields, view, kind));
-    const reply = updateView(...argv);
-    if (!Array.isArray(reply) || reply.length !== 3) {
-      throw new Error(
-        `update_view must return a 3-value multi-value reply (native wasm); got ${JSON.stringify(reply)}`
-      );
+    try {
+      const reply = await updateView(...argv);
+      if (!Array.isArray(reply) || reply.length !== 3) {
+        throw new Error(
+          `update_view must return a 3-value multi-value reply (native wasm); got ${JSON.stringify(reply)}`
+        );
+      }
+      if (epoch !== stateEpoch) {
+        resolve({ dropped: true });
+        return;
+      }
+      view = [reply[0] | 0, reply[1] | 0, reply[2] | 0];
+      if (typeof onView === "function") onView(view);
+      scheduleDraw();
+      resolve(view.slice());
+    } catch (error) {
+      reject(error);
+    } finally {
+      activeUpdate = false;
+      const next = pendingUpdate;
+      pendingUpdate = null;
+      if (next) {
+        activeUpdate = true;
+        runUpdate(next);
+      }
     }
-    view = [reply[0] | 0, reply[1] | 0, reply[2] | 0];
-    if (typeof onView === "function") onView(view);
-    scheduleDraw();
-    return view;
+  };
+
+  function applyFields(fields, kind) {
+    return new Promise((resolve, reject) => {
+      const job = { fields, kind, epoch: stateEpoch, resolve, reject };
+      if (activeUpdate) {
+        if (pendingUpdate) pendingUpdate.resolve({ dropped: true });
+        pendingUpdate = job;
+        return;
+      }
+      activeUpdate = true;
+      runUpdate(job);
+    });
   }
 
   function scheduleDraw() {
@@ -85,7 +117,7 @@ export function createLivePump({ canvas, updateView, ctlMeta, renderFn, onView }
     applyFields(
       { movementX: ev.movementX, movementY: ev.movementY, offsetX: ev.offsetX, offsetY: ev.offsetY },
       "drag"
-    );
+    ).catch((error) => setTimeout(() => { throw error; }, 0));
   };
   const endDrag = (ev) => {
     dragging = false;
@@ -94,7 +126,8 @@ export function createLivePump({ canvas, updateView, ctlMeta, renderFn, onView }
   };
   const onWheel = (ev) => {
     ev.preventDefault();
-    applyFields({ deltaY: ev.deltaY, offsetX: ev.offsetX, offsetY: ev.offsetY }, "wheel");
+    applyFields({ deltaY: ev.deltaY, offsetX: ev.offsetX, offsetY: ev.offsetY }, "wheel")
+      .catch((error) => setTimeout(() => { throw error; }, 0));
   };
 
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -110,6 +143,9 @@ export function createLivePump({ canvas, updateView, ctlMeta, renderFn, onView }
   return {
     getView: () => view.slice(),
     setView: (triple) => {
+      stateEpoch += 1;
+      if (pendingUpdate) pendingUpdate.resolve({ dropped: true });
+      pendingUpdate = null;
       view = triple.slice(0, 3).map((n) => n | 0);
       if (typeof onView === "function") onView(view);
       scheduleDraw();
@@ -118,6 +154,9 @@ export function createLivePump({ canvas, updateView, ctlMeta, renderFn, onView }
     // bag through the SAME marshal+call+store path the DOM events use.
     applyFields,
     destroy: () => {
+      stateEpoch += 1;
+      if (pendingUpdate) pendingUpdate.resolve({ dropped: true });
+      pendingUpdate = null;
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", endDrag);
