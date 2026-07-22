@@ -361,6 +361,122 @@ fn recursive_mvt2_f32_helper_call_executes_on_wasm() {
     assert_eq!(got.to_le_bytes(), [46, 25, 55, 255]);
 }
 
+#[test]
+fn qcga3d_sparse_incidence_paths_compile_and_execute_on_wasm() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spirv");
+    let oracle = std::process::Command::new("python3")
+        .arg(fixture_dir.join("qcga3d_sparse_incidence_oracle.py"))
+        .status()
+        .expect("QCGA3D exact rational oracle should run");
+    assert!(oracle.success(), "QCGA3D exact rational oracle failed");
+
+    let source = include_str!("fixtures/spirv/qcga3d_sparse_incidence.fe");
+    let wasm = compile_to_wasm("qcga3d_sparse_incidence.fe", source);
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "sparse incidence fixture must have zero imports"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    type Inputs = (
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+    );
+    let expanded = instance
+        .get_typed_func::<Inputs, f32>(&mut store, "qcga3d_incidence_expanded")
+        .expect("expanded sparse incidence ABI");
+    let fused = instance
+        .get_typed_func::<Inputs, f32>(&mut store, "qcga3d_incidence_fused")
+        .expect("fused sparse incidence ABI");
+
+    let kats: [(Inputs, f32); 5] = [
+        (
+            (
+                3.0, 4.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0,
+            ),
+            0.0,
+        ),
+        (
+            (
+                0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0,
+            ),
+            -25.0,
+        ),
+        (
+            (
+                2.0, -1.0, 2.0, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, -2.0, 8.0, -6.0, 0.0,
+            ),
+            -6.0,
+        ),
+        (
+            (
+                2.0,
+                -1.0,
+                3.0,
+                5.0,
+                5.0,
+                2.0,
+                6.0,
+                -4.0,
+                2.0,
+                -3.0,
+                7.0,
+                1.0,
+                5.0 / 3.0,
+            ),
+            -22.0 / 3.0,
+        ),
+        (
+            (
+                1.0,
+                2.0,
+                -1.0,
+                2.0,
+                -1.0,
+                3.0,
+                1.0,
+                -2.0,
+                4.0,
+                5.0,
+                -3.0,
+                2.0,
+                1.0 / 7.0,
+            ),
+            -41.0 / 7.0,
+        ),
+    ];
+    for (index, (inputs, expected)) in kats.into_iter().enumerate() {
+        let expanded_value = expanded
+            .call(&mut store, inputs)
+            .expect("expanded incidence call");
+        let fused_value = fused
+            .call(&mut store, inputs)
+            .expect("fused incidence call");
+        assert!(
+            (expanded_value - expected).abs() <= 2.0e-5,
+            "expanded KAT {index}: {expanded_value} != {expected}"
+        );
+        assert!(
+            (fused_value - expected).abs() <= 2.0e-5,
+            "fused KAT {index}: {fused_value} != {expected}"
+        );
+        assert!(
+            (expanded_value - fused_value).abs() <= 2.0e-5,
+            "path mismatch for KAT {index}"
+        );
+    }
+}
+
 fn clifford_gp_cl11_oracle(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let mut out = [0.0; 4];
     for left in 0..4usize {

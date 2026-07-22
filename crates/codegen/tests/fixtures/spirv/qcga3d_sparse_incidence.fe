@@ -1,0 +1,67 @@
+// Bounded QCGA3D feasibility fixture: sparse grade-1 point/dual support only.
+// This is not a dense Cl(9,6) multivector, geometric product, or QCGA engine.
+
+pub struct PointSupport {
+    pub e1: f32, pub e2: f32, pub e3: f32,
+    pub eo1: f32, pub eo2: f32, pub eo3: f32,
+    pub ei1: f32, pub ei2: f32, pub ei3: f32,
+    pub ei4: f32, pub ei5: f32, pub ei6: f32,
+}
+
+pub struct DualQuadricSupport {
+    pub e1: f32, pub e2: f32, pub e3: f32,
+    pub eo1: f32, pub eo2: f32, pub eo3: f32,
+    pub eo4: f32, pub eo5: f32, pub eo6: f32,
+    pub ei1: f32, pub ei2: f32, pub ei3: f32,
+}
+
+pub struct QuadricCoefficients {
+    pub A: f32, pub B: f32, pub C: f32,
+    pub D: f32, pub E: f32, pub F: f32,
+    pub G: f32, pub H: f32, pub I: f32, pub J: f32,
+}
+
+impl Copy for PointSupport {}
+impl Copy for DualQuadricSupport {}
+impl Copy for QuadricCoefficients {}
+
+pub fn qcga3d_incidence_expanded(
+    x: f32, y: f32, z: f32,
+    A: f32, B: f32, C: f32, D: f32, E: f32,
+    F: f32, G: f32, H: f32, I: f32, J: f32,
+) -> f32 {
+    // Keep the first executable slice call-free. Aggregate-by-value helper
+    // boundaries are a separately named Wasm lowering step; these local typed
+    // supports still exercise recursive scalarization and field projection.
+    let q: QuadricCoefficients = QuadricCoefficients { A, B, C, D, E, F, G, H, I, J }
+    let point: PointSupport = PointSupport {
+        e1: x, e2: y, e3: z,
+        eo1: 1.0, eo2: 1.0, eo3: 1.0,
+        ei1: x * x * 0.5, ei2: y * y * 0.5, ei3: z * z * 0.5,
+        ei4: x * y, ei5: x * z, ei6: y * z,
+    }
+    let j_third: f32 = q.J / 3.0
+    let quadric: DualQuadricSupport = DualQuadricSupport {
+        e1: q.G, e2: q.H, e3: q.I,
+        eo1: -2.0 * q.A, eo2: -2.0 * q.B, eo3: -2.0 * q.C,
+        eo4: -q.D, eo5: -q.E, eo6: -q.F,
+        ei1: -j_third, ei2: -j_third, ei3: -j_third,
+    }
+    let euclidean: f32 = point.e1 * quadric.e1 + point.e2 * quadric.e2 + point.e3 * quadric.e3
+    let quadratic: f32 = point.ei1 * quadric.eo1 + point.ei2 * quadric.eo2 + point.ei3 * quadric.eo3
+    let cross: f32 = point.ei4 * quadric.eo4 + point.ei5 * quadric.eo5 + point.ei6 * quadric.eo6
+    let constant: f32 = point.eo1 * quadric.ei1 + point.eo2 * quadric.ei2 + point.eo3 * quadric.ei3
+    euclidean - quadratic - cross - constant
+}
+
+// Independently authored direct coefficient path; it does not call embed_point,
+// dual_quadric, or expanded_null_contraction.
+pub fn qcga3d_incidence_fused(
+    x: f32, y: f32, z: f32,
+    A: f32, B: f32, C: f32, D: f32, E: f32,
+    F: f32, G: f32, H: f32, I: f32, J: f32,
+) -> f32 {
+    A * x * x + B * y * y + C * z * z
+        + D * x * y + E * x * z + F * y * z
+        + G * x + H * y + I * z + J
+}
