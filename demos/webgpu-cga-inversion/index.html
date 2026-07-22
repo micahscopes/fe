@@ -3,12 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Fe two-sphere CGA inversion distance estimator</title>
+  <title>Fe interactive CGA cyclide inversion</title>
   <style>
     body { margin: 0; background: #0d1117; color: #e6edf3; font: 15px system-ui; }
     main { max-width: 760px; margin: auto; padding: 32px 20px; }
-    canvas { width: 100%; max-width: 512px; image-rendering: pixelated; background: #000;
+    .view-stack { position: relative; width: 100%; max-width: 512px; }
+    #view { display: block; width: 100%; image-rendering: pixelated; background: #000;
       touch-action: none; cursor: grab; }
+    #inversion-overlay { position: absolute; inset: 0; width: 100%; height: 100%;
+      pointer-events: none; }
     .banner { border-left: 5px solid #bf8700; padding: 14px; background: #161b22; margin: 18px 0; }
     .green { border-color: #2ea043; } .red { border-color: #da3633; }
     pre { overflow: auto; padding: 12px; background: #161b22; font-size: 12px; }
@@ -16,18 +19,25 @@
     .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0 18px; }
     .controls button { color: #e6edf3; background: #161b22; border: 1px solid #30363d;
       border-radius: 5px; padding: 6px 10px; cursor: pointer; }
-    #camera-values { font: 13px ui-monospace, monospace; }
+    #camera-values, #pointer-values, #inversion-values { font: 13px ui-monospace, monospace; }
   </style>
 </head>
 <body><main>
-  <h1>Fe two-sphere CGA inversion distance estimator</h1>
-  <p class="muted">A scalarized fixed Cl(4,1) inversion, compiled from Fe through Sonatina Render to browser WebGPU.</p>
+  <h1>Fe interactive CGA cyclide inversion</h1>
+  <p class="muted">Move the pointer to drag a unit inversion sphere through an offset torus. The Fe distance estimator is compiled through Sonatina to browser Wasm and WebGPU.</p>
   <div id="banner" class="banner"><b id="state">AMBER</b> <span id="detail">loading compiler artifacts...</span></div>
-  <canvas id="view" width="128" height="128"></canvas>
+  <div class="view-stack">
+    <canvas id="view" width="128" height="128"></canvas>
+    <canvas id="inversion-overlay" width="128" height="128" aria-hidden="true"></canvas>
+  </div>
   <div class="controls">
-    <span class="muted"><b>Drag</b> to pan. <b>Wheel</b> to zoom around the pointer.</span>
+    <span class="muted"><b>Move</b> to place the inversion center. <b>Drag</b> to pan. <b>Wheel</b> to zoom.</span>
+    <button id="focus-inversion" type="button">Focus inversion</button>
+    <button id="freeze-inversion" type="button">Freeze inversion</button>
     <button id="reset-camera" type="button">Reset camera</button>
     <span id="camera-values">cam_x=0.00000 cam_y=0.00000 zoom=0.012500</span>
+    <span id="pointer-values">pointer_world=—</span>
+    <span id="inversion-values">inv_center=(0.50000, 0.00000)</span>
   </div>
   <p id="meta" class="muted"></p>
   <pre id="acceptance-json" hidden>{"state":"pending"}</pre>
