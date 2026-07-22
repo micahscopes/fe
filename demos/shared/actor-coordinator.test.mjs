@@ -107,4 +107,50 @@ assert.equal(renderResults.at(-1).payload.value, "render second");
 assert.equal(verifyResults.at(-1).generation, generation3);
 assert.equal(renderResults.at(-1).generation, generation3);
 
+const rejectionSettlements = [];
+const rejecting = createActorCoordinator({
+  render: () => null,
+  verify: () => Promise.reject(new Error("device lost")),
+  onVerificationSettled: (result, status) => rejectionSettlements.push({ result, status }),
+});
+const rejectionGeneration = rejecting.nextGeneration();
+const rejectedRequest = rejecting.enqueueVerification({ initial: true }, rejectionGeneration);
+await tick();
+assert.equal(rejectionSettlements.length, 1);
+assert.equal(rejectionSettlements[0].result.payload.ok, false);
+assert.match(rejectionSettlements[0].result.payload.error, /device lost/);
+assert.equal(rejectionSettlements[0].status.request.requestId, rejectedRequest.requestId);
+assert.equal(rejectionSettlements[0].status.request.payload.initial, true);
+
+const throwingRuns = [];
+const callbackErrors = [];
+const throwing = createActorCoordinator({
+  render: () => null,
+  verify(request) {
+    const job = deferred();
+    throwingRuns.push({ request, job });
+    return job.promise;
+  },
+  onVerificationSettled: () => { throw new Error("settled callback failed"); },
+  onVerificationResult: () => { throw new Error("publish callback failed"); },
+  onCallbackError: (error, context) => callbackErrors.push([context.callback, error.message]),
+});
+const throwingGeneration = throwing.nextGeneration();
+throwing.enqueueVerification({ view: 1 }, throwingGeneration);
+await tick();
+throwing.enqueueVerification({ view: 2 }, throwingGeneration);
+const throwingLatest = throwing.enqueueVerification({ view: 3 }, throwingGeneration);
+throwingRuns[0].job.resolve("superseded result");
+await tick();
+assert.equal(throwingRuns.length, 2);
+assert.equal(throwingRuns[1].request.requestId, throwingLatest.requestId);
+throwingRuns[1].job.resolve("latest result");
+await tick();
+assert.deepEqual(callbackErrors, [
+  ["settled", "settled callback failed"],
+  ["settled", "settled callback failed"],
+  ["publish", "publish callback failed"],
+]);
+assert.deepEqual(throwing.state().verify, { active: null, pending: null });
+
 console.log("shared actor coordinator delay/reorder/coalescing: ok");

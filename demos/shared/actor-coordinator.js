@@ -12,6 +12,7 @@ function nonNegativeInteger(value, name) {
 }
 
 function cloneSafe(value, path = "payload", seen = new Set()) {
+  if (value === undefined) return;
   if (value === null || ["string", "boolean", "number", "bigint"].includes(typeof value)) {
     return;
   }
@@ -71,6 +72,9 @@ export function createActorCoordinator({
   verify,
   onRenderResult = () => {},
   onVerificationResult = () => {},
+  onRenderSettled = () => {},
+  onVerificationSettled = () => {},
+  onCallbackError = () => {},
 }) {
   if (typeof render !== "function" || typeof verify !== "function") {
     throw new TypeError("render and verify handlers are required");
@@ -79,8 +83,10 @@ export function createActorCoordinator({
   let generation = 0;
   let nextRequestId = 1;
   const lanes = {
-    render: { active: null, pending: null, latestRequestId: null, run: render, publish: onRenderResult },
-    verify: { active: null, pending: null, latestRequestId: null, run: verify, publish: onVerificationResult },
+    render: { active: null, pending: null, latestRequestId: null, run: render,
+      publish: onRenderResult, settled: onRenderSettled },
+    verify: { active: null, pending: null, latestRequestId: null, run: verify,
+      publish: onVerificationResult, settled: onVerificationSettled },
   };
 
   const finish = (laneName, request, outcome) => {
@@ -88,18 +94,29 @@ export function createActorCoordinator({
     if (lane.active?.requestId !== request.requestId) return;
     lane.active = null;
     const fresh = request.generation === generation && request.requestId === lane.latestRequestId;
-    if (fresh) {
-      const payload = outcome.ok
-        ? { ok: true, value: outcome.value }
-        : { ok: false, error: String(outcome.error) };
-      lane.publish(actorEnvelope({
-        type: "result", lane: laneName, generation: request.generation,
-        requestId: request.requestId, payload,
-      }));
-    }
+    const payload = outcome.ok
+      ? { ok: true, value: outcome.value }
+      : { ok: false, error: String(outcome.error) };
+    const result = actorEnvelope({
+      type: "result", lane: laneName, generation: request.generation,
+      requestId: request.requestId, payload,
+    });
     const pending = lane.pending;
     lane.pending = null;
     if (pending) start(laneName, pending);
+    const callSafely = (callback, callbackName, ...args) => {
+      try {
+        callback(...args);
+      } catch (error) {
+        try {
+          onCallbackError(error, { callback: callbackName, lane: laneName, request, result });
+        } catch {
+          // Error reporting is also outside the coordinator's scheduling core.
+        }
+      }
+    };
+    callSafely(lane.settled, "settled", result, { fresh, request });
+    if (fresh) callSafely(lane.publish, "publish", result);
   };
 
   const start = (laneName, request) => {
