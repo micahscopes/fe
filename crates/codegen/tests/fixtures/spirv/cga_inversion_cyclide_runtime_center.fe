@@ -60,7 +60,25 @@ pub fn cga_inversion_cyclide_runtime_center(
         if distance < 0.0022 {
             // Bucket adjacent hit iterations so permitted f32 contraction/sqrt
             // variance across browser GPU implementations cannot flicker color.
-            let shade: i32 = 38 + (i / 4) * 12
+            let shade: i32 = if i < 8 {
+                38
+            } else if i < 16 {
+                62
+            } else if i < 24 {
+                86
+            } else if i < 32 {
+                110
+            } else if i < 40 {
+                134
+            } else if i < 48 {
+                158
+            } else if i < 56 {
+                182
+            } else if i < 64 {
+                206
+            } else {
+                230
+            }
             let upper: bool = qy > 0.0
             if upper {
                 let upper_color: i32 = shade + 88 * 256 + (255 - shade) * 65536 + -16777216

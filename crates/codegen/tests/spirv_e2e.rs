@@ -2491,6 +2491,8 @@ const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_rende
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
 const CGA_INVERSION_DE_RENDER_SOURCE: &str =
     include_str!("fixtures/spirv/cga_inversion_de_render.fe");
+const CGA_INVERSION_CYCLIDE_RUNTIME_CENTER_SOURCE: &str =
+    include_str!("fixtures/spirv/cga_inversion_cyclide_runtime_center.fe");
 
 const CONDITIONAL_F32_SELECT_SOURCE: &str =
     include_str!("fixtures/spirv/conditional_f32_select.fe");
@@ -3691,6 +3693,194 @@ fn cga_inversion_de_render_executes_on_lavapipe_against_f32_oracle() {
     assert!(
         distinct.len() >= 8,
         "step shading must expose a non-degenerate 3D surface ({} colors)",
+        distinct.len(),
+    );
+}
+
+/// Independent scalar oracle for the runtime-center cyclide study. Preserve
+/// the Fe source's f32 operation order exactly and avoid `mul_add` so this is
+/// an execution oracle rather than a higher-precision geometry restatement.
+fn cga_inversion_cyclide_runtime_center_oracle(
+    px: i32,
+    py: i32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+    inv_cx: f32,
+    inv_cy: f32,
+) -> (u32, u8) {
+    let fx = px as f32;
+    let fy = py as f32;
+    let sx = (fx - 64.0) * zoom;
+    let sy = (fy - 64.0) * zoom;
+    let rz = 1.8_f32;
+    let inv_len = 1.0 / (sx * sx + sy * sy + rz * rz).sqrt();
+    let rdx = sx * inv_len;
+    let rdy = sy * inv_len;
+    let rdz = rz * inv_len;
+
+    let mut t = 0.0_f32;
+    let mut i = 0_i32;
+    while i < 72 {
+        let x = cam_x + rdx * t;
+        let y = cam_y + rdy * t;
+        let z = -4.0 + rdz * t;
+        let vx = x - inv_cx;
+        let vy = y - inv_cy;
+        let rho2 = vx * vx + vy * vy + z * z;
+        let safe_rho2 = if rho2 < 0.0004 { 0.0004 } else { rho2 };
+        let qx = inv_cx + vx / safe_rho2;
+        let qy = inv_cy + vy / safe_rho2;
+        let qz = z / safe_rho2;
+        let tx = qx + 0.62;
+        let ty = qy - 0.08;
+        let ring_radius = (tx * tx + ty * ty).sqrt() - 0.58;
+        let base = (ring_radius * ring_radius + qz * qz).sqrt() - 0.17;
+        let distance = base * safe_rho2;
+        t = t + distance * 0.18;
+        if distance < 0.0022 {
+            let shade = if i < 8 {
+                38
+            } else if i < 16 {
+                62
+            } else if i < 24 {
+                86
+            } else if i < 32 {
+                110
+            } else if i < 40 {
+                134
+            } else if i < 48 {
+                158
+            } else if i < 56 {
+                182
+            } else if i < 64 {
+                206
+            } else {
+                230
+            };
+            if qy > 0.0 {
+                return (
+                    (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32)
+                        as u32,
+                    1,
+                );
+            }
+            return (
+                (56 + shade * 256 + 224 * 65_536 - 16_777_216_i32) as u32,
+                2,
+            );
+        }
+        i += 1;
+    }
+    ((7 + 11 * 256 + 25 * 65_536 - 16_777_216_i32) as u32, 0)
+}
+
+#[test]
+fn cga_inversion_cyclide_runtime_center_executes_full_frame_on_lavapipe() {
+    const W: u32 = 128;
+    const H: u32 = 128;
+    const VALUES: [f32; 5] = [0.0, 0.0, 0.0125, 0.5, 0.0];
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///cga_inversion_cyclide_runtime_center.fe")
+        .expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CGA_INVERSION_CYCLIDE_RUNTIME_CENTER_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("runtime-center cyclide should build a wasm runtime package");
+    assert!(
+        package
+            .functions(&db)
+            .iter()
+            .all(|function| function.linkage(&db) != mir::RuntimeLinkage::External),
+        "all f32 helpers must lower intrinsically rather than remain host imports",
+    );
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("runtime-center cyclide should lower to naga-validated Render SPIR-V");
+
+    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Render);
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("five runtime controls require a broadcast Input binding");
+    assert_eq!((input.group, input.binding), (0, 1));
+    assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
+    assert_eq!((input.span, input.stride), (20, 20));
+    assert_eq!(input.members.len(), 5);
+    for (member, arg_index) in input.members.iter().zip(2..=6) {
+        assert_eq!(member.arg_index, arg_index);
+        assert_eq!(member.offset, (arg_index - 2) * 4);
+        assert_eq!(member.width, 4);
+        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+    }
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    for (builtin, arg_index) in artifact.layout.builtin_inputs.iter().zip(0..=1) {
+        assert_eq!(builtin.arg_index, arg_index);
+        assert_eq!(builtin.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::I32);
+    }
+
+    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(wgsl.contains("loop"), "cyclide study must retain its raymarch loop");
+    assert!(wgsl.contains("sqrt("), "cyclide study must use native f32 sqrt");
+    let mut input_bytes = vec![0_u8; input.span as usize];
+    for member in &input.members {
+        let start = member.offset as usize;
+        input_bytes[start..start + 4].copy_from_slice(
+            &VALUES[(member.arg_index - 2) as usize].to_bits().to_le_bytes(),
+        );
+    }
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("runtime-center cyclide acceptance requires lavapipe execution");
+    assert_eq!(rgba.len(), (W * H * 4) as usize);
+
+    let mut expected = Vec::with_capacity(rgba.len());
+    let mut material_counts = [0_usize; 3];
+    let mut distinct = std::collections::HashSet::new();
+    for y in 0..H {
+        for x in 0..W {
+            let (pixel, material) = cga_inversion_cyclide_runtime_center_oracle(
+                x as i32,
+                y as i32,
+                VALUES[0],
+                VALUES[1],
+                VALUES[2],
+                VALUES[3],
+                VALUES[4],
+            );
+            let bytes = pixel.to_le_bytes();
+            expected.extend_from_slice(&bytes);
+            material_counts[material as usize] += 1;
+            distinct.insert(bytes);
+        }
+    }
+    if let Some(pixel) = rgba
+        .chunks_exact(4)
+        .zip(expected.chunks_exact(4))
+        .position(|(actual, oracle)| actual != oracle)
+    {
+        let x = pixel as u32 % W;
+        let y = pixel as u32 / W;
+        let offset = pixel * 4;
+        panic!(
+            "runtime-center cyclide first divergent pixel ({x},{y}): GPU={:?}, oracle={:?}",
+            &rgba[offset..offset + 4],
+            &expected[offset..offset + 4],
+        );
+    }
+    assert!(material_counts[0] > 0, "cyclide image must contain background");
+    assert!(material_counts[1] > 0, "cyclide image must contain upper material");
+    assert!(material_counts[2] > 0, "cyclide image must contain lower material");
+    assert!(
+        distinct.len() >= 8,
+        "step shading must expose a non-degenerate cyclide surface ({} colors)",
         distinct.len(),
     );
 }
