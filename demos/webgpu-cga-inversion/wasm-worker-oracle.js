@@ -1,16 +1,23 @@
 import { actorEnvelope } from "../shared/actor-coordinator.js";
 import { actorField, actorResultSchema, createActorEndpoint, exactObject } from "../shared/actor-endpoint.js";
 import { createMessagePortActorTransport } from "../shared/message-port-actor.js";
+import { createMainThreadGpuBroker } from "../shared/gpu-actor.js";
 
-export async function createCgaWasmWorkerOracle({ wasm, exportName, width, height }) {
+export async function createCgaWasmWorkerOracle({ wasm, exportName, width, height, gpuRender, gpuVerify }) {
   let epoch = 0;
   let requestId = 0;
   let worker;
   let endpoint;
   let transport;
+  let gpuBroker;
   const start = async () => {
     worker = new Worker(new URL("./wasm-oracle-worker.js", import.meta.url), { type: "module" });
     const channel = new MessageChannel();
+    const gpuChannel = new MessageChannel();
+    gpuBroker = createMainThreadGpuBroker(gpuChannel.port1, {
+      render: gpuRender, verify: gpuVerify, valueCount: 5,
+      rgbaBytes: width * height * 4, initialEpoch: epoch,
+    });
     transport = createMessagePortActorTransport(channel.port1);
     endpoint = createActorEndpoint({
       transport,
@@ -18,7 +25,8 @@ export async function createCgaWasmWorkerOracle({ wasm, exportName, width, heigh
       requestSchema: { render: (payload) => exactObject(payload,
         { values: actorField.float32Array(5) }) ,
         verify: (payload) => exactObject(payload, { values: actorField.float32Array(5) }) },
-      resultSchema: { render: actorResultSchema(actorField.uint8Array(width * height * 4)),
+      resultSchema: { render: actorResultSchema((value) => exactObject(value,
+          { submitted: actorField.boolean })),
         verify: actorResultSchema(actorField.uint8Array(width * height * 4)) },
     });
     const ready = new Promise((resolve, reject) => {
@@ -33,7 +41,8 @@ export async function createCgaWasmWorkerOracle({ wasm, exportName, width, heigh
       worker.addEventListener("error", reject, { once: true });
     });
     worker.addEventListener("error", (event) => transport.fail(event.message || "Wasm worker error"));
-    worker.postMessage({ type: "init", port: channel.port2, wasm, exportName, width, height }, [channel.port2]);
+    worker.postMessage({ type: "init", port: channel.port2, gpuPort: gpuChannel.port2,
+      wasm, exportName, width, height, actorEpoch: epoch }, [channel.port2, gpuChannel.port2]);
     await ready;
   };
   await start();
@@ -47,15 +56,25 @@ export async function createCgaWasmWorkerOracle({ wasm, exportName, width, heigh
       if (!result.payload.ok) throw new Error(result.payload.error);
       return result.payload.value;
     },
+    async renderGpu(values, generation = 0) {
+      requestId += 1;
+      const result = await endpoint.request(actorEnvelope({
+        type: "request", lane: "render", actorEpoch: epoch, generation, requestId,
+        payload: { values: new Float32Array(values) },
+      }));
+      if (!result.payload.ok) throw new Error(result.payload.error);
+      return result.payload.value;
+    },
     async restart() {
       endpoint.close("restarting Wasm worker");
       worker.terminate();
+      gpuBroker.close();
       epoch += 1;
       requestId = 0;
       await start();
       return epoch;
     },
-    close() { endpoint.close(); worker.terminate(); },
+    close() { endpoint.close(); gpuBroker.close(); worker.terminate(); },
     epoch: () => epoch,
   };
 }

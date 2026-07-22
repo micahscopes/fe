@@ -1,4 +1,4 @@
-import { initWebGPURender, renderFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
+import { initWebGPURender, renderFrame, submitOffscreenFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
 import { DEFAULT_CAMERA, createTrailingCoalescer, normalizeCamera, panCamera, zoomCamera } from "./camera-controls.js";
 import { createPerformanceMeter } from "./performance-meter.js";
 import { createCgaActorLifecycle } from "./actor-lifecycle.js";
@@ -16,6 +16,16 @@ const DEFAULT_INVERSION = Object.freeze({ x: 0.5, y: 0, radius: 1 });
 const LOGICAL_SIZE = 128;
 const performanceMeter = createPerformanceMeter();
 window.__cgaPerformance = performanceMeter.state;
+const presentationEvidence = {
+  verificationOff,
+  fetchedAssets: [],
+  wasmWorkerCreated: false,
+  wasmOracleRenderCount: 0,
+  gpuActorRenderCount: 0,
+  gpuReadbackCount: 0,
+  interactionCount: 0,
+};
+window.__cgaPresentationEvidence = presentationEvidence;
 
 function banner(kind, detail) {
   $("banner").className = `banner ${kind}`;
@@ -26,6 +36,7 @@ function banner(kind, detail) {
 }
 
 async function fetchOk(url, kind) {
+  presentationEvidence.fetchedAssets.push(url);
   const response = await fetch(url);
   if (!response.ok) throw new Error(`fetch ${url} -> HTTP ${response.status}`);
   if (kind === "json") return response.json();
@@ -187,20 +198,35 @@ async function main() {
   const renderLayout = { ...layout, params: layout.params };
 
   let wasmOracle;
+  let gpu;
   if (!verificationOff) {
     try {
       wasmOracle = await createCgaWasmWorkerOracle({
         wasm, exportName: layout.frag_wasm_export,
         width: reference.width, height: reference.height,
+        gpuRender: (values) => {
+          presentationEvidence.gpuActorRenderCount += 1;
+          if (presentation === "offscreen") submitOffscreenFrame(gpu, values);
+          else renderFrame(gpu, values);
+          return { submitted: true };
+        },
+        gpuVerify: async (values) => {
+          const readback = await verifyView(gpu, values);
+          if (!readback.ok) throw new Error(readback.reason);
+          return readback.rgba;
+        },
       });
+      presentationEvidence.wasmWorkerCreated = true;
     } catch (error) {
       banner("red", `browser Wasm worker oracle failed: ${error.message || error}`);
       return { state: "red", presentation, reason: String(error) };
     }
+    window.addEventListener("pagehide", () => wasmOracle?.close(), { once: true });
   }
   const defaultValues = viewValues(normalizeCamera(DEFAULT_CAMERA), DEFAULT_INVERSION);
   let defaultWasmHash;
   if (!verificationOff) try {
+    presentationEvidence.wasmOracleRenderCount += 1;
     const defaultWasmRgba = await wasmOracle.render(defaultValues, 0);
     defaultWasmHash = fnv1a32(defaultWasmRgba);
     if (defaultWasmHash !== (reference.fnv1a32 >>> 0)) {
@@ -228,7 +254,7 @@ async function main() {
   };
   resizeDisplayCanvas();
   const gpuInitStart = performanceMeter.start();
-  const gpu = await initWebGPURender(
+  gpu = await initWebGPURender(
     wgsl,
     renderLayout,
     presentation === "offscreen" ? null : $("view"),
@@ -248,8 +274,10 @@ async function main() {
   ) => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const values = viewValues(camera, inversion);
+    presentationEvidence.wasmOracleRenderCount += 1;
     const wasmRgba = await wasmOracle.render(values, generation);
     const wasmHash = fnv1a32(wasmRgba);
+    presentationEvidence.gpuReadbackCount += 1;
     const readback = await verifyView(gpu, values);
     if (!readback.ok) {
       return { state: "red", presentation, generation, wasmHash, reason: readback.reason };
@@ -288,6 +316,7 @@ async function main() {
         reason: `default view differs from reference ${reference.fnv1a32 >>> 0}` };
     }
     return { state: "green", presentation, generation, wasmHash, gpuHash, adapter: gpu.adapter, initial,
+      gpuActorRenderCount: presentationEvidence.gpuActorRenderCount,
       camera: values.slice(0, 3), inversion: values.slice(3) };
   };
 
@@ -316,16 +345,17 @@ async function main() {
   let firstFrame = true;
   const lifecycle = createCgaActorLifecycle({
     mode: verificationOff ? "off" : (continuousVerification ? "continuous" : "manual"),
-    render: ({ payload }) => new Promise((resolve) => {
-      if (presentation !== "canvas") {
-        resolve(null);
-        return;
-      }
-      requestAnimationFrame((rafTime) => {
+    render: ({ payload, generation }) => new Promise((resolve, reject) => {
+      requestAnimationFrame(async (rafTime) => {
         const submitStart = performanceMeter.start();
-        renderFrame(gpu, viewValues(
-          payload.camera, payload.inversion, payload.width, payload.height,
-        ));
+        try {
+          const values = viewValues(payload.camera, payload.inversion, payload.width, payload.height);
+          if (wasmOracle) await wasmOracle.renderGpu(values, generation);
+          else renderFrame(gpu, values);
+        } catch (error) {
+          reject(error);
+          return;
+        }
         if (firstFrame) {
           performanceMeter.finish("firstFrameSubmitMs", submitStart);
           firstFrame = false;
@@ -399,6 +429,7 @@ async function main() {
     }).observe(canvas.parentElement);
   }
   const settle = (nextCamera) => {
+    presentationEvidence.interactionCount += 1;
     camera = normalizeCamera(nextCamera);
     showCamera(camera);
     lifecycle.interact(renderPayload());
@@ -426,6 +457,7 @@ async function main() {
       $("pointer-values").textContent =
         `pointer_world=(${world.x.toFixed(5)}, ${world.y.toFixed(5)})`;
       if (!drag && !inversionFrozen) {
+        presentationEvidence.interactionCount += 1;
         inversion = { ...inversion, x: Math.fround(world.x), y: Math.fround(world.y) };
         $("inversion-values").textContent =
           `inv_center=(${inversion.x.toFixed(5)}, ${inversion.y.toFixed(5)})`;

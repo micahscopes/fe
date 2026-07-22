@@ -128,3 +128,10 @@ any `wasmHash` or `gpuHash`; a passing off-mode smoke is reported as an
 unverified presentation result, never as green acceptance. Query parameters are
 combined with `CGA_SMOKE_PRESENTATION=offscreen|canvas` without replacing one
 another.
+
+`CGA_SMOKE_VERIFY=off` is also the deterministic zero-readback performance
+smoke. It defaults to canvas presentation, drives 16 pointer moves plus one
+wheel interaction through CDP, and requires bounded rAF/submit-CPU samples. Its
+structured evidence rejects any Wasm/reference fetch, oracle Worker creation,
+oracle render, or GPU readback. It reports observed FPS but deliberately applies
+no hardware-independent FPS threshold.

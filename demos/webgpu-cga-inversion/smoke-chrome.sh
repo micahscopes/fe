@@ -57,7 +57,9 @@ case "$debug_port" in *[!0-9]*|'') echo "CGA_CDP_PORT must be numeric" >&2; exit
 
 (cd "$demos" && HOST=127.0.0.1 PORT="$port" python3 serve.py) >"$tmp/server.log" 2>&1 &
 server_pid=$!
-presentation="${CGA_SMOKE_PRESENTATION:-offscreen}"
+default_presentation="offscreen"
+if [ "${CGA_SMOKE_VERIFY:-default}" = "off" ]; then default_presentation="canvas"; fi
+presentation="${CGA_SMOKE_PRESENTATION:-$default_presentation}"
 case "$presentation" in
   offscreen) query="acceptance=offscreen" ;;
   canvas) query="" ;;
@@ -112,12 +114,18 @@ fi
 chrome_pid=$!
 
 set +e
-python3 "$here/cdp_acceptance.py" \
-  --debug-port "$debug_port" \
-  --url "$url" \
-  --presentation "$presentation" \
-  --expected-state "$expected_state" \
-  --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"
+if [ "$verify_mode" = "off" ]; then
+  python3 "$here/cdp_presentation.py" \
+    --debug-port "$debug_port" --url "$url" \
+    --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"
+else
+  python3 "$here/cdp_acceptance.py" \
+    --debug-port "$debug_port" \
+    --url "$url" \
+    --presentation "$presentation" \
+    --expected-state "$expected_state" \
+    --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"
+fi
 acceptance_status=$?
 set -e
 if [ "$acceptance_status" -ne 0 ]; then

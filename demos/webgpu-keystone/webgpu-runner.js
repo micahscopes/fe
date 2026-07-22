@@ -567,6 +567,32 @@ export function renderFrame(handle, viewWords) {
   queue.submit([encoder.finish()]);
 }
 
+// Submit one offscreen frame without allocating a staging buffer or reading it
+// back. This is the presentation-equivalent path for headless actor acceptance.
+export function submitOffscreenFrame(handle, viewWords) {
+  const { device, queue, verifyPipeline, inputBuf, bindGroup, layout, width, height } = handle;
+  const params = layout.params || [];
+  writeTypedParams(queue, inputBuf, params, viewWords);
+  const texture = device.createTexture({
+    size: { width, height },
+    format: handle.verifyFormat || "rgba8unorm",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [{
+      view: texture.createView(), loadOp: "clear", storeOp: "store",
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+    }],
+  });
+  pass.setPipeline(verifyPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(3, 1, 0, 0);
+  pass.end();
+  queue.submit([encoder.finish()]);
+  texture.destroy();
+}
+
 // verifyView(handle, viewWords) - render the SAME view to an offscreen rgba8unorm
 // target and read it back TIGHTLY packed (row padding stripped). The badge path
 // compares these bytes against the Fe-wasm fragment's output. Returns
