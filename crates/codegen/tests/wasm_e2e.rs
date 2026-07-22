@@ -361,6 +361,56 @@ fn recursive_mvt2_f32_helper_call_executes_on_wasm() {
     assert_eq!(got.to_le_bytes(), [46, 25, 55, 255]);
 }
 
+fn clifford_gp_cl11_oracle(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let mut out = [0.0; 4];
+    for left in 0..4usize {
+        for right in 0..4usize {
+            let mut swaps = 0u32;
+            for bit in 0..2usize {
+                if (right >> bit) & 1 == 1 {
+                    swaps += ((left >> (bit + 1)).count_ones()) as u32;
+                }
+            }
+            let metric_neg = ((left & right) >> 1) & 1;
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            out[left ^ right] += sign * a[left] * b[right];
+        }
+    }
+    out
+}
+
+#[test]
+fn recursive_cl11_gp_f32_coefficients_execute_on_wasm() {
+    let source = include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt2.fe");
+    let wasm = compile_to_wasm("clifford_gp_recursive_f32_mvt2.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let gp = instance
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32, f32, f32, f32), i32>(
+            &mut store,
+            "clifford_gp_cl11_mvt2_render",
+        )
+        .expect("Cl(1,1) scalar GP Render export");
+    let cases = [
+        ([1.0, 0.0, 0.0, 0.0], [3.0, -2.0, 5.0, 7.0]),
+        ([0.0, 1.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]),
+        ([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]),
+        ([0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]),
+        ([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
+        ([1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]),
+        ([-2.0, 3.0, 1.0, -4.0], [4.0, -2.0, 1.0, 5.0]),
+    ];
+    for (a, b) in cases {
+        let mut got = [0.0; 4];
+        for (index, (px, py)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+            let word = gp
+                .call(&mut store, (px, py, a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]))
+                .expect("recursive Cl(1,1) GP coefficient execution");
+            got[index] = word as f32;
+        }
+        assert_eq!(got, clifford_gp_cl11_oracle(a, b));
+    }
+}
+
 #[test]
 fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

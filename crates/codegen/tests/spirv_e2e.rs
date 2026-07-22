@@ -2480,6 +2480,8 @@ const F32_RENDER_PROBE_SOURCE: &str = include_str!("fixtures/spirv/f32_render_pr
 const MVT2_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt2_f32_render.fe");
 const MVT2_F32_HELPER_RENDER_SOURCE: &str =
     include_str!("fixtures/spirv/mvt2_f32_helper_render.fe");
+const CLIFFORD_GP_RECURSIVE_F32_MVT2_SOURCE: &str =
+    include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt2.fe");
 const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
 
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
@@ -3067,6 +3069,73 @@ fn recursive_mvt2_f32_helper_call_executes_on_lavapipe() {
         for x in 0..W {
             let offset = ((y * W + x) * 4) as usize;
             assert_eq!(&rgba[offset..offset + 4], &[44 + x as u8, 22 + y as u8, 55, 255]);
+        }
+    }
+}
+
+fn clifford_gp_cl11_f32_oracle(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let mut out = [0.0; 4];
+    for left in 0..4usize {
+        for right in 0..4usize {
+            let mut swaps = 0u32;
+            for bit in 0..2usize {
+                if (right >> bit) & 1 == 1 {
+                    swaps += (left >> (bit + 1)).count_ones();
+                }
+            }
+            let metric_neg = ((left & right) >> 1) & 1;
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            out[left ^ right] += sign * a[left] * b[right];
+        }
+    }
+    out
+}
+
+#[test]
+fn recursive_cl11_gp_f32_render_executes_on_lavapipe() {
+    const W: u32 = 2;
+    const H: u32 = 2;
+    const A: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+    const B: [f32; 4] = [5.0, 6.0, 7.0, 8.0];
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_gp_recursive_f32_mvt2.fe")
+        .expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CLIFFORD_GP_RECURSIVE_F32_MVT2_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("recursive Cl(1,1) GP should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("recursive Cl(1,1) GP helpers should inline before Render lowering");
+    let input = artifact.layout.bindings.iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("eight GP coefficients require an Input binding");
+    assert_eq!((input.span, input.stride, input.members.len()), (32, 32, 8));
+    for (member, arg_index) in input.members.iter().zip(2..=9) {
+        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
+        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+    }
+    let coeffs = [A, B].concat();
+    let mut input_bytes = vec![0u8; input.span as usize];
+    for member in &input.members {
+        let value = coeffs[(member.arg_index - 2) as usize];
+        input_bytes[member.offset as usize..member.offset as usize + 4]
+            .copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("recursive Cl(1,1) GP requires GPU execution");
+    let expected = clifford_gp_cl11_f32_oracle(A, B);
+    for y in 0..H {
+        for x in 0..W {
+            let offset = ((y * W + x) * 4) as usize;
+            let index = (x + 2 * y) as usize;
+            let word = (expected[index] as i32 as u32).to_le_bytes();
+            assert_eq!(&rgba[offset..offset + 4], &word);
         }
     }
 }

@@ -247,6 +247,12 @@ fn inline_value_call<'db>(
                         | RExpr::Unary { .. }
                         | RExpr::Binary { .. }
                         | RExpr::Cast { .. }
+                        | RExpr::Builtin(
+                            RuntimeBuiltin::IntrinsicArith { .. }
+                                | RuntimeBuiltin::F32FromI32 { .. }
+                                | RuntimeBuiltin::I32FromF32 { .. }
+                                | RuntimeBuiltin::F32Sqrt { .. }
+                        )
                         | RExpr::AggregateMake { .. }
                         | RExpr::AggregateExtract { .. }
                 )
@@ -327,6 +333,31 @@ fn remap_inline_expr<'db>(
             value: map(*value)?,
             to: to.clone(),
         },
+        RExpr::Builtin(builtin) => RExpr::Builtin(match builtin {
+            RuntimeBuiltin::IntrinsicArith {
+                op,
+                checked,
+                lhs,
+                rhs,
+                class,
+            } => RuntimeBuiltin::IntrinsicArith {
+                op: *op,
+                checked: *checked,
+                lhs: map(*lhs)?,
+                rhs: map(*rhs)?,
+                class: class.clone(),
+            },
+            RuntimeBuiltin::F32FromI32 { value } => {
+                RuntimeBuiltin::F32FromI32 { value: map(*value)? }
+            }
+            RuntimeBuiltin::I32FromF32 { value } => {
+                RuntimeBuiltin::I32FromF32 { value: map(*value)? }
+            }
+            RuntimeBuiltin::F32Sqrt { value } => {
+                RuntimeBuiltin::F32Sqrt { value: map(*value)? }
+            }
+            _ => return None,
+        }),
         RExpr::AggregateMake { layout, fields } => RExpr::AggregateMake {
             layout: *layout,
             fields: fields
@@ -375,6 +406,23 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         self.builder.build()
     }
 
+    /// SPIR-V derives its kernel ABI from the first declared function. Runtime
+    /// package planning is call-graph ordered, so private helpers can otherwise
+    /// precede the object section entry. Keep actual section entries first while
+    /// preserving package order within the entry and non-entry partitions.
+    fn functions_in_declaration_order(&self) -> Vec<RuntimeFunction<'db>> {
+        let entries = self
+            .package
+            .root_objects(self.db)
+            .into_iter()
+            .flat_map(|object| object.sections(self.db))
+            .map(|section| section.entry.instance(self.db))
+            .collect::<HashSet<_>>();
+        let mut functions = self.package.functions(self.db);
+        functions.sort_by_key(|function| !entries.contains(&function.instance(self.db)));
+        functions
+    }
+
     /// The symbol -> wasm-import-module side table for external declarations
     /// (R3.3). Each non-builtin `extern` whose block carries
     /// `#[wasm_import(module = "...")]` maps its Sonatina symbol (which becomes
@@ -384,7 +432,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     /// import name the backend reads.
     fn import_modules(&self) -> HashMap<String, String> {
         let mut modules = HashMap::new();
-        for function in self.package.functions(self.db) {
+        for function in self.functions_in_declaration_order() {
             if function.linkage(self.db) != RuntimeLinkage::External {
                 continue;
             }
@@ -426,7 +474,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         // it once. Each instance maps to the shared import `FuncRef`; bodyless imports
         // never lower a body (`lower_bodies` skips block-empty functions).
         let mut import_refs: FxHashMap<(String, String), FuncRef> = FxHashMap::default();
-        for function in self.package.functions(self.db) {
+        for function in self.functions_in_declaration_order() {
             let instance = function.instance(self.db);
             if let Some(name) = mir::wasm_import_name(self.db, instance) {
                 let module =
@@ -1060,15 +1108,15 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 }
                 Ok(())
             }
-            RExpr::Call { .. } => Err(LowerError::Unsupported(
-                "wasm target (R2.1): a call returning a scalar-tuple aggregate needs a \
+            RExpr::Call { callee, .. } => Err(LowerError::Unsupported(format!(
+                "wasm target (R2.1): call to `{}` ({callee:?}) returning a scalar-tuple aggregate needs a \
                  MULTI-RESULT wasm call, which the value model does not lower (the WAFFLE \
                  Call path binds a single result). Scalar-tuple params and returns lower at \
                  function boundaries, but receiving a tuple FROM a call is R2/fork-level: \
-                 return the joined scalar, or export the tuple-returning function so the \
-                 host consumes its multi-value return."
-                    .to_string(),
-            )),
+                 return the joined scalar, or mark an eligible pure helper #[inline(always)] so \
+                 the prepared body removes the call before lowering.",
+                self.module.function_symbol(*callee),
+            ))),
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R2.1): scalar-tuple destination assigned from `{other:?}` is \
                  not supported (only recursive scalar-tree make/copy/extract lower; \

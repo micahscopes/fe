@@ -1,0 +1,61 @@
+// Runtime Cl(1,1) geometric product over the recursive MvT<2> value shape.
+// Leaf order is [1, e1, e2, e12], identical to blade-bitset order.
+
+extern {
+    fn __i32_from_f32(_: f32) -> i32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub struct ScF { pub s: f32 }
+pub struct NdF<A> { pub a: A, pub b: A }
+impl Copy for ScF {}
+impl<A: Copy> Copy for NdF<A> {}
+recursive type fn MvTF<const N: usize>() -> (*) {
+    match N { 0 => ScF _ => NdF<MvTF<{N - 1}>> }
+}
+
+pub fn clifford_gp_cl11_mvt2_render(
+    px: i32, py: i32,
+    a0: f32, a1: f32, a2: f32, a3: f32,
+    b0: f32, b1: f32, b2: f32, b3: f32,
+) -> u32 {
+    let a: MvTF<2> = NdF { a: NdF { a: ScF { s: a0 }, b: ScF { s: a1 } }, b: NdF { a: ScF { s: a2 }, b: ScF { s: a3 } } }
+    let b: MvTF<2> = NdF { a: NdF { a: ScF { s: b0 }, b: ScF { s: b1 } }, b: NdF { a: ScF { s: b2 }, b: ScF { s: b3 } } }
+    let r: NdF<NdF<ScF>> = gp2_cl11(a, b)
+    let k = px + 2 * py
+    let coefficient = if k < 2 {
+        if k < 1 { r.a.a.s } else { r.a.b.s }
+    } else {
+        if k < 3 { r.b.a.s } else { r.b.b.s }
+    }
+    __bitcast(__i32_from_f32(coefficient))
+}
+
+#[inline(always)]
+fn invol1(x: NdF<ScF>) -> NdF<ScF> {
+    NdF { a: x.a, b: ScF { s: -x.b.s } }
+}
+#[inline(always)]
+fn neg1(x: NdF<ScF>) -> NdF<ScF> {
+    NdF { a: ScF { s: -x.a.s }, b: ScF { s: -x.b.s } }
+}
+#[inline(always)]
+fn add1(x: NdF<ScF>, y: NdF<ScF>) -> NdF<ScF> {
+    NdF { a: ScF { s: x.a.s + y.a.s }, b: ScF { s: x.b.s + y.b.s } }
+}
+#[inline(always)]
+fn gp1_pos(x: NdF<ScF>, y: NdF<ScF>) -> NdF<ScF> {
+    let aa: f32 = x.a.s * y.a.s
+    let bhb: f32 = x.b.s * y.b.s
+    let ab: f32 = x.a.s * y.b.s
+    let bha: f32 = x.b.s * y.a.s
+    NdF { a: ScF { s: aa + bhb }, b: ScF { s: ab + bha } }
+}
+#[inline(always)]
+fn gp2_cl11(x: NdF<NdF<ScF>>, y: NdF<NdF<ScF>>) -> NdF<NdF<ScF>> {
+    let aa = gp1_pos(x.a, y.a)
+    let bhb = gp1_pos(x.b, invol1(y.b))
+    let ab = gp1_pos(x.a, y.b)
+    let bha = gp1_pos(x.b, invol1(y.a))
+    NdF { a: add1(aa, neg1(bhb)), b: add1(ab, bha) }
+}
