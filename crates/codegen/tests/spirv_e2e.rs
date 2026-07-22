@@ -6169,3 +6169,40 @@ fn field_mul_bn254_fr_executes_on_lavapipe_browser_profile() {
         "MSM-0a BN254 Fr",
     );
 }
+
+/// Regression for the QCGA renderer's stable quadratic-root diamond: its
+/// value-producing nested conditionals must structurize for Render SPIR-V and
+/// execute byte-identically to the same Fe export compiled to Wasm.
+#[test]
+#[ignore = "requires unpublished Sonatina dcd96e5f and a Vulkan adapter"]
+fn qcga3d_rotated_quadric_render_executes_wasm_equal_on_lavapipe() {
+    const W: u32 = 128;
+    const H: u32 = 128;
+    const SOURCE: &str = include_str!("fixtures/spirv/qcga3d_rotated_quadric_render.fe");
+    const EXPORT: &str = "qcga3d_rotated_quadric_render";
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///qcga3d_rotated_quadric_render.fe")
+        .expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("call-free QCGA renderer should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("QCGA root-selection conditionals must structurize for Render SPIR-V");
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    let wgsl = artifact
+        .wgsl
+        .as_ref()
+        .expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    let wasm = compile_source_to_wasm(SOURCE, "qcga3d_rotated_quadric_render_wasm");
+    let expected = wasm_grid_all(&wasm, W, H, EXPORT);
+    let actual = run_render_rgba8_on_lavapipe(wgsl, W, H, &[])
+        .expect("QCGA regression requires browser-profile lavapipe execution");
+    assert_eq!(actual.len(), expected.len() * 4);
+    for (pixel, expected) in actual.chunks_exact(4).zip(expected) {
+        assert_eq!(pixel, expected.to_le_bytes());
+    }
+}
