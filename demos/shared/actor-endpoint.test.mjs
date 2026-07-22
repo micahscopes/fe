@@ -21,6 +21,8 @@ const resultSchema = {
   render: actorResultSchema(actorField.string),
   verify: actorResultSchema(actorField.string),
 };
+requestSchema["compile.tile"] = (payload) => exactObject(payload, { label: actorField.string });
+resultSchema["compile.tile"] = actorResultSchema(actorField.string);
 const request = (lane, epoch, generation, requestId, payload) => actorEnvelope({
   type: "request", lane, actorEpoch: epoch, generation, requestId, payload,
 });
@@ -32,6 +34,14 @@ const transport = {
   reset() {},
 };
 const endpoint = createActorEndpoint({ transport, requestSchema, resultSchema });
+const arbitraryLane = endpoint.request(request("compile.tile", 0, 0, 100, { label: "tile" }));
+delayed.at(-1).deliver(actorEnvelope({ type: "result", lane: "compile.tile", actorEpoch: 0,
+  generation: 0, requestId: 100, payload: { ok: true, value: "compiled" } }));
+assert.equal((await arbitraryLane).payload.value, "compiled");
+assert.throws(() => endpoint.request(request("manifest.unknown", 0, 0, 101, {})),
+  /no request schema for actor lane manifest.unknown/);
+assert.throws(() => endpoint.request(request("constructor", 0, 0, 102, {})),
+  /no request schema for actor lane constructor/);
 const first = endpoint.request(request("verify", 0, 1, 1, { label: "first" }));
 const second = endpoint.request(request("verify", 0, 1, 2, { label: "second" }));
 assert.equal(endpoint.pendingCount(), 2);

@@ -3,6 +3,7 @@ import {
   ACTOR_PROTOCOL_VERSION,
   actorEnvelope,
   createActorCoordinator,
+  validateActorLaneName,
   validateActorEnvelope,
 } from "./actor-coordinator.js";
 
@@ -19,6 +20,11 @@ const sample = actorEnvelope({
 });
 assert.equal(sample.version, ACTOR_PROTOCOL_VERSION);
 assert.deepEqual(validateActorEnvelope(structuredClone(sample)), sample);
+assert.equal(validateActorLaneName("compile.tile-2"), "compile.tile-2");
+for (const lane of ["", "Render", "2render", "render/now", "render..now", "render_", "a".repeat(65)]) {
+  assert.throws(() => actorEnvelope({ type: "request", lane, generation: 0,
+    requestId: 1 }), /invalid actor lane name/);
+}
 assert.throws(() => actorEnvelope({
   type: "request", lane: "render", generation: 0, requestId: 1, payload: { bad() {} },
 }), /structured-clone-safe/);

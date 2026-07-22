@@ -3,7 +3,16 @@
 
 export const ACTOR_PROTOCOL_VERSION = 2;
 
-const LANES = new Set(["render", "verify"]);
+// Protocol lanes are compiler-addressable identifiers, not a closed rendering
+// enum. Policy layers (such as createActorCoordinator below) may expose a fixed
+// subset. Keep the wire grammar ASCII, bounded, and safe as an object key.
+const ACTOR_LANE_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+export function validateActorLaneName(lane) {
+  if (typeof lane !== "string" || lane.length > 64 || !ACTOR_LANE_PATTERN.test(lane)) {
+    throw new TypeError("invalid actor lane name");
+  }
+  return lane;
+}
 
 function nonNegativeInteger(value, name) {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -37,7 +46,7 @@ function cloneSafe(value, path = "payload", seen = new Set()) {
 
 export function actorEnvelope({ type, lane, actorEpoch = 0, generation, requestId, payload = null }) {
   if (type !== "request" && type !== "result") throw new TypeError("invalid envelope type");
-  if (!LANES.has(lane)) throw new TypeError("invalid actor lane");
+  validateActorLaneName(lane);
   nonNegativeInteger(actorEpoch, "actorEpoch");
   nonNegativeInteger(generation, "generation");
   nonNegativeInteger(requestId, "requestId");

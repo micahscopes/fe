@@ -15,7 +15,9 @@ export class ActorEndpointResetError extends Error {
 }
 
 function validatePayload(schema, envelope, direction) {
-  const validator = schema?.[envelope.lane];
+  const validator = schema && Object.hasOwn(schema, envelope.lane)
+    ? schema[envelope.lane]
+    : undefined;
   if (typeof validator !== "function") {
     throw new TypeError(`no ${direction} schema for actor lane ${envelope.lane}`);
   }
