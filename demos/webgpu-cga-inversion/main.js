@@ -240,11 +240,33 @@ async function main() {
       return { state: "red", presentation, generation, wasmHash, reason: readback.reason };
     }
     const gpuHash = fnv1a32(readback.rgba);
-    const equal = readback.rgba.length === wasmRgba.length
-      && !readback.rgba.some((byte, index) => byte !== wasmRgba[index]);
+    const mismatches = [];
+    let mismatchCount = 0;
+    if (readback.rgba.length === wasmRgba.length) {
+      for (let offset = 0; offset < wasmRgba.length; offset += 4) {
+        const wasmPixel = wasmRgba.slice(offset, offset + 4);
+        const gpuPixel = readback.rgba.slice(offset, offset + 4);
+        if (wasmPixel.some((byte, channel) => byte !== gpuPixel[channel])) {
+          mismatchCount += 1;
+          if (mismatches.length < 16) {
+            const pixel = offset / 4;
+            mismatches.push({
+              x: pixel % reference.width,
+              y: Math.floor(pixel / reference.width),
+              wasm: Array.from(wasmPixel),
+              gpu: Array.from(gpuPixel),
+            });
+          }
+        }
+      }
+    } else {
+      mismatchCount = Math.max(readback.rgba.length, wasmRgba.length) / 4;
+    }
+    const equal = mismatchCount === 0 && readback.rgba.length === wasmRgba.length;
     if (!equal || gpuHash !== wasmHash) {
       return { state: "red", presentation, generation, wasmHash, gpuHash,
-        reason: "GPU/browser-Wasm byte mismatch" };
+        mismatchCount, mismatches,
+        reason: `GPU/browser-Wasm byte mismatch at ${mismatchCount} pixels` };
     }
     if (requireReference && wasmHash !== (reference.fnv1a32 >>> 0)) {
       return { state: "red", presentation, generation, wasmHash, gpuHash,
