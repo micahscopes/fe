@@ -411,6 +411,90 @@ fn recursive_cl11_gp_f32_coefficients_execute_on_wasm() {
     }
 }
 
+fn clifford_gp_cl41_oracle(a: [f32; 32], b: [f32; 32]) -> [f32; 32] {
+    let mut out = [0.0; 32];
+    for left in 0..32usize {
+        for right in 0..32usize {
+            let mut swaps = 0u32;
+            for bit in 0..5usize {
+                if (right >> bit) & 1 == 1 {
+                    swaps += (left >> (bit + 1)).count_ones();
+                }
+            }
+            let metric_neg = ((left & right) >> 4) & 1;
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            out[left ^ right] += sign * a[left] * b[right];
+        }
+    }
+    out
+}
+
+#[test]
+fn generated_recursive_cl41_gp_f32_coefficients_execute_on_wasm() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_clifford_gp_f32_mvt5.py"))
+        .arg("--check")
+        .status()
+        .expect("Cl(4,1) GP fixture generator should run");
+    assert!(status.success(), "generated Cl(4,1) GP fixture is stale");
+    let source = include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt5.fe");
+    let wasm = compile_to_wasm("clifford_gp_recursive_f32_mvt5.fe", source);
+    assert!(func_imports(&wasm).is_empty(), "recursive GP must not retain imports");
+    let (mut store, instance) = instantiate(&wasm);
+    let gp = instance
+        .get_func(&mut store, "clifford_gp_cl41_mvt5_render")
+        .expect("Cl(4,1) GP Render export");
+    let mut cases = Vec::new();
+    let mut dense_a = [0.0; 32];
+    let mut dense_b = [0.0; 32];
+    for i in 0..32 {
+        dense_a[i] = (i + 1) as f32;
+        dense_b[i] = (2 * i + 3) as f32;
+    }
+    let dense_expected = clifford_gp_cl41_oracle(dense_a, dense_b);
+    assert_eq!(
+        [dense_expected[0], dense_expected[1], dense_expected[4], dense_expected[17], dense_expected[31]],
+        [268.0, 540.0, -2964.0, -3220.0, 2244.0],
+        "dense Cl(4,1) oracle must retain the independent pinned components",
+    );
+    cases.push((dense_a, dense_b));
+    for blade in [1usize, 2, 4, 8, 16, 31] {
+        let mut a = [0.0; 32];
+        let mut b = [0.0; 32];
+        a[blade] = 1.0;
+        b[blade] = 1.0;
+        cases.push((a, b));
+    }
+    for (left, right) in [(1usize, 16usize), (16, 1)] {
+        let mut a = [0.0; 32];
+        let mut b = [0.0; 32];
+        a[left] = 1.0;
+        b[right] = 1.0;
+        cases.push((a, b));
+    }
+    for (a, b) in cases {
+        let expected = clifford_gp_cl41_oracle(a, b);
+        let mut got = [0.0; 32];
+        for index in 0..32 {
+            let mut args = vec![
+                wasmtime::Val::I32((index % 8) as i32),
+                wasmtime::Val::I32((index / 8) as i32),
+            ];
+            args.extend(a.into_iter().chain(b).map(|value| wasmtime::Val::F32(value.to_bits())));
+            let mut results = [wasmtime::Val::I32(0)];
+            gp.call(&mut store, &args, &mut results)
+                .expect("recursive Cl(4,1) GP coefficient execution");
+            let wasmtime::Val::I32(word) = results[0] else {
+                panic!("Cl(4,1) GP Render result must be i32")
+            };
+            got[index] = word as f32;
+        }
+        assert_eq!(got, expected);
+    }
+}
+
 #[test]
 fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

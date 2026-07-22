@@ -136,7 +136,10 @@ impl FlatShape {
     }
 }
 
-const INLINE_VALUE_STMT_BUDGET: usize = 4096;
+// The accepted fixed-signature Cl(4,1) MvT<5> product expands to 29,118 MIR
+// statements (including structural extracts/rebuilds). Keep a hard per-body
+// cap at the next power of two so accidental helper explosions still fail shut.
+const INLINE_VALUE_STMT_BUDGET: usize = 32_768;
 
 /// Prepare the body view shared by direct Wasm lowering and Render's Wasm to
 /// SPIR-V translation. This intentionally handles only value-only leaf helpers;

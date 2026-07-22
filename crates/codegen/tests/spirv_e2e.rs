@@ -2482,6 +2482,8 @@ const MVT2_F32_HELPER_RENDER_SOURCE: &str =
     include_str!("fixtures/spirv/mvt2_f32_helper_render.fe");
 const CLIFFORD_GP_RECURSIVE_F32_MVT2_SOURCE: &str =
     include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt2.fe");
+const CLIFFORD_GP_RECURSIVE_F32_MVT5_SOURCE: &str =
+    include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt5.fe");
 const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
 
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
@@ -3137,6 +3139,82 @@ fn recursive_cl11_gp_f32_render_executes_on_lavapipe() {
             let word = (expected[index] as i32 as u32).to_le_bytes();
             assert_eq!(&rgba[offset..offset + 4], &word);
         }
+    }
+}
+
+fn clifford_gp_cl41_f32_oracle(a: [f32; 32], b: [f32; 32]) -> [f32; 32] {
+    let mut out = [0.0; 32];
+    for left in 0..32usize {
+        for right in 0..32usize {
+            let mut swaps = 0u32;
+            for bit in 0..5usize {
+                if (right >> bit) & 1 == 1 {
+                    swaps += (left >> (bit + 1)).count_ones();
+                }
+            }
+            let metric_neg = ((left & right) >> 4) & 1;
+            let sign = if (swaps + metric_neg as u32) & 1 == 0 { 1.0 } else { -1.0 };
+            out[left ^ right] += sign * a[left] * b[right];
+        }
+    }
+    out
+}
+
+#[test]
+fn generated_recursive_cl41_gp_f32_render_executes_on_lavapipe() {
+    const W: u32 = 8;
+    const H: u32 = 4;
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_clifford_gp_f32_mvt5.py"))
+        .arg("--check")
+        .status()
+        .expect("Cl(4,1) GP fixture generator should run");
+    assert!(status.success(), "generated Cl(4,1) GP fixture is stale");
+    let mut a = [0.0; 32];
+    let mut b = [0.0; 32];
+    for i in 0..32 {
+        a[i] = (i + 1) as f32;
+        b[i] = (2 * i + 3) as f32;
+    }
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///clifford_gp_recursive_f32_mvt5.fe")
+        .expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CLIFFORD_GP_RECURSIVE_F32_MVT5_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("recursive Cl(4,1) GP should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("generated recursive Cl(4,1) GP should inline before Render lowering");
+    let input = artifact.layout.bindings.iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("64 GP coefficients require an Input binding");
+    assert_eq!((input.span, input.stride, input.members.len()), (256, 256, 64));
+    for (member, arg_index) in input.members.iter().zip(2..=65) {
+        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
+        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+    }
+    let coeffs = [a, b].concat();
+    let mut input_bytes = vec![0u8; input.span as usize];
+    for member in &input.members {
+        let value = coeffs[(member.arg_index - 2) as usize];
+        input_bytes[member.offset as usize..member.offset as usize + 4]
+            .copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("generated recursive Cl(4,1) GP requires GPU execution");
+    let expected = clifford_gp_cl41_f32_oracle(a, b);
+    for index in 0..32usize {
+        let offset = index * 4;
+        let word = (expected[index] as i32 as u32).to_le_bytes();
+        assert_eq!(&rgba[offset..offset + 4], &word, "coefficient {index}");
     }
 }
 
