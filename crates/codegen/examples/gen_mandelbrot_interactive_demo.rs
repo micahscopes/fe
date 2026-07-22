@@ -119,6 +119,24 @@ fn mandel_view_frag_oracle(px: i32, py: i32, center_re: i32, center_im: i32, sca
     4_278_190_080
 }
 
+fn control_actor_manifest(arg_count: usize, result_count: usize) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "fe-demo-actor",
+        "version": 2,
+        "lanes": {
+            "render": {
+                "request": {
+                    "kind": "record",
+                    "fields": {
+                        "args": { "kind": "i32-array", "length": arg_count }
+                    }
+                },
+                "result": { "kind": "i32-array", "length": result_count }
+            }
+        }
+    })
+}
+
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest
@@ -359,6 +377,9 @@ fn main() {
 
     // --- 6. Serialize + write (only after every gate passed). ---------------
     let layout_json = serialize_render_layout(&artifact.layout, params, frag_wasm.len());
+    // The browser protocol is generated from the compiled Wasm ABI that was
+    // checked above, rather than repeating its arity in application JS.
+    let actor = control_actor_manifest(ctl_sig.0.len(), ctl_sig.1.len());
     let ctl_json = serde_json::to_string_pretty(&serde_json::json!({
         "module": "ctl.wasm",
         "control_export": CTL_NAME,
@@ -371,6 +392,7 @@ fn main() {
         "view_arg_count": 3,
         "view_init": [VIEW_INIT.0, VIEW_INIT.1, VIEW_INIT.2],
         "event_map": event_map,
+        "actor": actor,
         "wasm_bytes": ctl_wasm.len(),
         "provenance": provenance("cargo run -p fe-codegen --example gen_mandelbrot_interactive_demo"),
     }))
@@ -688,4 +710,31 @@ fn fe_head_rev() -> String {
 fn write_file(path: &std::path::Path, bytes: &[u8]) {
     std::fs::write(path, bytes)
         .unwrap_or_else(|e| panic!("could not write {}: {e}", path.display()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::control_actor_manifest;
+
+    #[test]
+    fn fe_control_signature_emits_exact_actor_protocol_schema() {
+        assert_eq!(
+            control_actor_manifest(8, 3),
+            serde_json::json!({
+                "protocol": "fe-demo-actor",
+                "version": 2,
+                "lanes": {
+                    "render": {
+                        "request": {
+                            "kind": "record",
+                            "fields": {
+                                "args": { "kind": "i32-array", "length": 8 }
+                            }
+                        },
+                        "result": { "kind": "i32-array", "length": 3 }
+                    }
+                }
+            })
+        );
+    }
 }

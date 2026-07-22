@@ -210,6 +210,7 @@ async function main() {
       controlWorker = await createMandelbrotWorkerControl({
         wasm: A.ctlWasm,
         exportName: A.ctl.control_export,
+        actorManifest: A.ctl.actor,
       });
       updateView = (...args) => controlWorker.update(args);
       window.__mandelAcceptance = {
