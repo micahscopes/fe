@@ -168,6 +168,34 @@ recursive type fn Schedule<const N: usize>() -> (*) {
 
 static_assert(survivor_count() == 32)
 
+// Force the complete ground schedule to normalize, then count its actual Add
+// spine.  The payload assertions below establish the contents independently;
+// this witness establishes that `Schedule<32>` itself materializes all and
+// only those 32 nodes.
+type SpecializedSandwich = Schedule<32>
+
+struct NatZ {}
+struct NatS<N> {}
+recursive type fn Nat<const N: usize>() -> (*) {
+    match N {
+        0 => NatZ
+        _ => NatS<Nat<{N - 1}>>
+    }
+}
+
+trait PlanLength { type Out }
+impl PlanLength for Zero { type Out = NatZ }
+impl<TermNode, Tail: PlanLength> PlanLength for Add<TermNode, Tail> {
+    type Out = NatS<<Tail as PlanLength>::Out>
+}
+
+fn takes_32_terms(_ length: Nat<32>) {}
+fn ground_schedule_materializes_32_terms(
+    length: <SpecializedSandwich as PlanLength>::Out,
+) {
+    takes_32_terms(length)
+}
+
 // Injective packing over these bounded fields.  Together these assertions are
 // an exact, element-by-element oracle for the complete canonical schedule;
 // unlike whole nested-type equality, they do not trigger pathological solver
@@ -182,38 +210,59 @@ const fn term_code(_ k: usize) -> usize {
     )
 }
 
-static_assert(survivor_key(0) == 0 && term_code(survivor_key(0)) == 2561)
-static_assert(survivor_key(1) == 1 && term_code(survivor_key(1)) == 8322)
-static_assert(survivor_key(2) == 2 && term_code(survivor_key(2)) == 8968)
-static_assert(survivor_key(3) == 3 && term_code(survivor_key(3)) == 9616)
-static_assert(survivor_key(4) == 4 && term_code(survivor_key(4)) == 5921)
-static_assert(survivor_key(5) == 7 && term_code(survivor_key(5)) == 6721)
-static_assert(survivor_key(6) == 9 && term_code(survivor_key(6)) == 4961)
-static_assert(survivor_key(7) == 10 && term_code(survivor_key(7)) == 5154)
-static_assert(survivor_key(8) == 11 && term_code(survivor_key(8)) == 8353)
-static_assert(survivor_key(9) == 14 && term_code(survivor_key(9)) == 3394)
-static_assert(survivor_key(10) == 15 && term_code(survivor_key(10)) == 9160)
-static_assert(survivor_key(11) == 16 && term_code(survivor_key(11)) == 9808)
-static_assert(survivor_key(12) == 17 && term_code(survivor_key(12)) == 6754)
-static_assert(survivor_key(13) == 19 && term_code(survivor_key(13)) == 4994)
-static_assert(survivor_key(14) == 20 && term_code(survivor_key(14)) == 5188)
-static_assert(survivor_key(15) == 24 && term_code(survivor_key(15)) == 5988)
-static_assert(survivor_key(16) == 27 && term_code(survivor_key(16)) == 6788)
-static_assert(survivor_key(17) == 29 && term_code(survivor_key(17)) == 5028)
-static_assert(survivor_key(18) == 30 && term_code(survivor_key(18)) == 5224)
-static_assert(survivor_key(19) == 32 && term_code(survivor_key(19)) == 9057)
-static_assert(survivor_key(20) == 34 && term_code(survivor_key(20)) == 6024)
-static_assert(survivor_key(21) == 35 && term_code(survivor_key(21)) == 9218)
-static_assert(survivor_key(22) == 37 && term_code(survivor_key(22)) == 4264)
-static_assert(survivor_key(23) == 38 && term_code(survivor_key(23)) == 10032)
-static_assert(survivor_key(24) == 39 && term_code(survivor_key(24)) == 5064)
-static_assert(survivor_key(25) == 40 && term_code(survivor_key(25)) == 5264)
-static_assert(survivor_key(26) == 43 && term_code(survivor_key(26)) == 12289)
-static_assert(survivor_key(27) == 44 && term_code(survivor_key(27)) == 6064)
-static_assert(survivor_key(28) == 46 && term_code(survivor_key(28)) == 12450)
-static_assert(survivor_key(29) == 47 && term_code(survivor_key(29)) == 6864)
-static_assert(survivor_key(30) == 48 && term_code(survivor_key(30)) == 12616)
-static_assert(survivor_key(31) == 49 && term_code(survivor_key(31)) == 7664)
+const fn expected_term_code(_ index: usize) -> usize {
+    match index {
+        0 => 2561
+        1 => 8322
+        2 => 8968
+        3 => 9616
+        4 => 5921
+        5 => 6721
+        6 => 4961
+        7 => 5154
+        8 => 8353
+        9 => 3394
+        10 => 9160
+        11 => 9808
+        12 => 6754
+        13 => 4994
+        14 => 5188
+        15 => 5988
+        16 => 6788
+        17 => 5028
+        18 => 5224
+        19 => 9057
+        20 => 6024
+        21 => 9218
+        22 => 4264
+        23 => 10032
+        24 => 5064
+        25 => 5264
+        26 => 12289
+        27 => 6064
+        28 => 12450
+        29 => 6864
+        30 => 12616
+        _ => 7664
+    }
+}
+
+const fn schedule_is_exact() -> bool {
+    let mut candidate: usize = 0
+    let mut survivor: usize = 0
+    while candidate < 50 {
+        if coefficient_tag(candidate) != 0 {
+            if survivor >= 32 || term_code(candidate) != expected_term_code(survivor) {
+                return false
+            }
+            survivor = survivor + 1
+        }
+        candidate = candidate + 1
+    }
+    survivor == 32
+}
+
+static_assert(schedule_is_exact())
 
 fn takes_first(_ term: Term<1, 0, 0, 0, 1>) {}
 fn takes_middle(_ term: Term<4, 2, 1, 1, 2>) {}
