@@ -1,0 +1,44 @@
+// Recursive-value/f32 cross-backend prerequisite: MvT<2> is a four-leaf tree.
+// This proves transport of the value shape; it is not yet the runtime CGA product.
+
+extern {
+    fn __i32_from_f32(_: f32) -> i32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub struct ScF { pub s: f32 }
+pub struct NdF<A> { pub a: A, pub b: A }
+
+impl Copy for ScF {}
+impl<A: Copy> Copy for NdF<A> {}
+
+recursive type fn MvTF<const N: usize>() -> (*) {
+    match N {
+        0 => ScF
+        _ => NdF<MvTF<{N - 1}>>
+    }
+}
+
+pub fn mvt2_f32_render(
+    px: i32,
+    py: i32,
+    c0: f32,
+    c1: f32,
+    c2: f32,
+    c3: f32,
+) -> u32 {
+    let left: MvTF<1> = NdF { a: ScF { s: c0 }, b: ScF { s: c1 } }
+    let right: MvTF<1> = NdF { a: ScF { s: c2 }, b: ScF { s: c3 } }
+    let tree: MvTF<2> = NdF { a: left, b: right }
+    let projected_left: f32 = tree.a.a.s
+    let projected_right: f32 = tree.b.a.s
+    let copied: MvTF<2> = tree
+    let rebuilt: MvTF<2> = NdF {
+        a: NdF { a: ScF { s: projected_left }, b: copied.a.b },
+        b: NdF { a: ScF { s: projected_right }, b: copied.b.b },
+    }
+    let r: i32 = __i32_from_f32(rebuilt.a.a.s) + px
+    let g: i32 = __i32_from_f32(rebuilt.a.b.s) + py
+    let b: i32 = __i32_from_f32(rebuilt.b.a.s + 2.0 * rebuilt.b.b.s)
+    __bitcast(r + g * 256 + b * 65536 + -16777216)
+}

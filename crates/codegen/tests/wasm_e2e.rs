@@ -327,6 +327,24 @@ fn recursive_mvt2_construct_copy_project_return_executes_on_wasm() {
 }
 
 #[test]
+fn recursive_mvt2_f32_render_executes_on_wasm() {
+    let source = include_str!("fixtures/spirv/mvt2_f32_render.fe");
+    let wasm = compile_to_wasm("wasm_mvt2_f32_render.fe", source);
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "f32 conversion and bitcast helpers must lower intrinsically"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let render = instance
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32), i32>(&mut store, "mvt2_f32_render")
+        .expect("call-free MvT<2> f32 render export");
+    let got = render
+        .call(&mut store, (2, 3, 11.0, 22.0, 33.0, 44.0))
+        .expect("MvT<2> f32 wasm execution") as u32;
+    assert_eq!(got.to_le_bytes(), [13, 25, 121, 255]);
+}
+
+#[test]
 fn conditional_f32_selection_feeds_loop_carry_and_both_exits_on_wasm() {
     let source = include_str!("fixtures/spirv/conditional_f32_loop_carry.fe");
     let wasm = compile_to_wasm("wasm_conditional_f32_loop_carry.fe", source);
