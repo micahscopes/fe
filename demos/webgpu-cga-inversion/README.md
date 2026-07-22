@@ -1,4 +1,4 @@
-# Fe CGA inversion browser gate
+# Fe two-sphere CGA inversion browser gate
 
 This page consumes the compiler-produced D1 Render bundle in `gen/`:
 
@@ -8,7 +8,9 @@ This page consumes the compiler-produced D1 Render bundle in `gen/`:
 - `reference.json`, containing `width`, `height`, and the pinned RGBA FNV-1a hash.
 - `frag.wasm`, the same Fe fragment compiled for the browser-wasm oracle.
 
-The browser writes `(cam_x, cam_y, zoom) = (0.0, 0.0, 0.0125)` as f32 values at
+The fragment computes the hard union of two spheres in inverted space and
+raymarches their conformal inverse with distinct material palettes. The browser
+writes `(cam_x, cam_y, zoom) = (0.0, 0.0, 0.0125)` as f32 values at
 the compiler-stated member offsets. A browser-wasm execution of the full frame
 must first match the compiled reference. Green then requires a live WebGPU render
 and readback that byte-equals that browser-wasm

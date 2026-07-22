@@ -259,11 +259,34 @@ pub fn select_f32(flag: bool, when_true: f32, when_false: f32) -> f32 {
 "#;
     let wasm = compile_to_wasm("wasm_conditional_f32_result.fe", source);
     let (mut store, instance) = instantiate(&wasm);
+
     let select = instance
         .get_typed_func::<(i32, f32, f32), f32>(&mut store, "select_f32")
         .expect("select_f32 export should preserve its typed f32 result");
     assert_eq!(select.call(&mut store, (1, 1.25, -3.5)).unwrap(), 1.25);
     assert_eq!(select.call(&mut store, (0, 1.25, -3.5)).unwrap(), -3.5);
+}
+
+#[test]
+fn aggregate_conditional_slot_projection_fails_closed_on_wasm() {
+    let source = r#"
+struct Pair {
+    left: u64,
+    right: u64,
+}
+
+pub fn select_left(flag: bool, when_true: own Pair, when_false: own Pair) -> u64 {
+    let selected: Pair = if flag { when_true } else { when_false }
+    selected.left
+}
+"#;
+    let error = compile_to_wasm_err("wasm_aggregate_conditional_slot.fe", source);
+    assert!(
+        error.contains("aggregate")
+            || error.contains("unsupported place")
+            || error.contains("R2"),
+        "aggregate/projection slots must remain outside the whole-scalar slot boundary: {error}",
+    );
 }
 
 #[test]

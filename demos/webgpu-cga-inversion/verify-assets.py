@@ -38,6 +38,21 @@ assert [(item["arg_index"], item["scalar"], item["source"]) for item in layout["
 ]
 assert reference["width"] == 128 and reference["height"] == 128
 assert isinstance(reference["fnv1a32"], int)
+for field in ["sky_pixels", "hit_pixels", "material_a_pixels", "material_b_pixels"]:
+    assert isinstance(reference.get(field), int) and reference[field] >= 0, (
+        f"reference {field} must be a non-negative integer"
+    )
+assert reference["material_a_pixels"] > 0, "reference must contain material A pixels"
+assert reference["material_b_pixels"] > 0, "reference must contain material B pixels"
+assert reference["material_a_pixels"] + reference["material_b_pixels"] == reference["hit_pixels"], (
+    "material pixel counts must sum to hit_pixels"
+)
+assert reference["sky_pixels"] + reference["hit_pixels"] == reference["width"] * reference["height"], (
+    "sky_pixels + hit_pixels must cover the full reference frame"
+)
+kernel = (GEN / "kernel.fe").read_text()
+for token in ["distance_a", "distance_b", "a_is_closer"]:
+    assert token in kernel, f"generated kernel lacks two-sphere semantic token {token!r}"
 wgsl = (GEN / "frag.wgsl").read_text()
 assert "@fragment" in wgsl and "loop" in wgsl and "sqrt(" in wgsl
 print("D1 browser artifact schema preflight: ok (not execution acceptance)")

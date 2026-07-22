@@ -54,6 +54,32 @@ function validateTypedLayout(layout) {
   return input;
 }
 
+function validateReference(reference) {
+  if (reference.width !== 128 || reference.height !== 128) {
+    throw new Error("D1 reference must be exactly 128x128");
+  }
+  const counts = [
+    "sky_pixels",
+    "hit_pixels",
+    "material_a_pixels",
+    "material_b_pixels",
+  ];
+  for (const field of counts) {
+    if (!Number.isInteger(reference[field]) || reference[field] < 0) {
+      throw new Error(`D1 reference ${field} must be a non-negative integer`);
+    }
+  }
+  if (reference.material_a_pixels === 0 || reference.material_b_pixels === 0) {
+    throw new Error("D1 reference must contain positive pixel counts for both materials");
+  }
+  if (reference.material_a_pixels + reference.material_b_pixels !== reference.hit_pixels) {
+    throw new Error("D1 reference material pixel counts must sum to hit_pixels");
+  }
+  if (reference.sky_pixels + reference.hit_pixels !== reference.width * reference.height) {
+    throw new Error("D1 reference sky_pixels + hit_pixels must cover the full frame");
+  }
+}
+
 async function main() {
   let layout, reference, source, wgsl, wasm;
   try {
@@ -65,9 +91,7 @@ async function main() {
       fetchOk("./gen/frag.wasm", "bytes"),
     ]);
     validateTypedLayout(layout);
-    if (reference.width !== 128 || reference.height !== 128) {
-      throw new Error("D1 reference must be exactly 128x128");
-    }
+    validateReference(reference);
   } catch (error) {
     banner("red", `artifact contract failed: ${error.message || error}`);
     return { state: "red", reason: String(error) };
@@ -121,7 +145,7 @@ async function main() {
     banner("red", `GPU/browser-wasm mismatch: GPU ${hash}, wasm ${wasmHash}`);
     return { state: "red", wasmHash, gpuHash: hash };
   }
-  banner("green", `live WebGPU render matches compiled 128x128 reference (FNV-1a ${hash}) on ${gpu.adapter}`);
+  banner("green", `live two-sphere WebGPU render matches compiled 128x128 reference (FNV-1a ${hash}) on ${gpu.adapter}`);
   return { state: "green", wasmHash, gpuHash: hash, adapter: gpu.adapter };
 }
 

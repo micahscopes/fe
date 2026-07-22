@@ -1,4 +1,4 @@
-//! Package the committed D1 CGA inversion Render fixture for a browser page.
+//! Package the committed two-sphere D1 CGA inversion Render fixture for a browser page.
 //!
 //! Every compiler, ABI, wasm, and full-frame oracle gate runs before `gen/` is
 //! created or any artifact is written.
@@ -132,31 +132,33 @@ fn main() {
     );
 
     let frame = run_wasm_frame(&wasm);
-    let sky = [8, 12, 24, 255];
     let mut sky_count = 0usize;
-    let mut hit_count = 0usize;
+    let mut material_a_count = 0usize;
+    let mut material_b_count = 0usize;
     let mut distinct = HashSet::new();
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let got = frame[(y * WIDTH + x) as usize];
-            let expected = oracle(x as i32, y as i32, CAM_X, CAM_Y, ZOOM);
+            let (expected, material) = oracle(x as i32, y as i32, CAM_X, CAM_Y, ZOOM);
             assert_eq!(got, expected, "wasmtime/oracle mismatch at ({x},{y})");
             distinct.insert(got);
-            if got.to_le_bytes() == sky {
-                sky_count += 1;
-            } else {
-                hit_count += 1;
+            match material {
+                0 => sky_count += 1,
+                1 => material_a_count += 1,
+                2 => material_b_count += 1,
+                other => panic!("unexpected oracle material {other}"),
             }
         }
     }
     assert!(
-        sky_count > 0 && hit_count > 0,
-        "D1 frame must contain sky and surface hits"
+        sky_count > 0 && material_a_count > 0 && material_b_count > 0,
+        "D1 frame must contain sky and both inverted spheres"
     );
     assert!(
         distinct.len() >= 8,
         "D1 frame must expose at least eight colors"
     );
+    let hit_count = material_a_count + material_b_count;
     let hash = fnv1a32(&frame);
 
     let provenance = provenance();
@@ -197,6 +199,7 @@ fn main() {
         "fragment": FRAG_NAME, "width": WIDTH, "height": HEIGHT,
         "view": [CAM_X, CAM_Y, ZOOM], "view_types": ["F32", "F32", "F32"],
         "fnv1a32": hash, "sky_pixels": sky_count, "hit_pixels": hit_count,
+        "material_a_pixels": material_a_count, "material_b_pixels": material_b_count,
         "distinct_colors": distinct.len(),
         "runtime": "wasmtime executing Fe-compiled wasm; every pixel checked against independent Rust f32 oracle",
         "provenance": provenance,
@@ -211,7 +214,7 @@ fn main() {
     write(&gen_dir.join("layout.json"), layout_json.as_bytes());
     write(&gen_dir.join("reference.json"), reference_json.as_bytes());
     eprintln!(
-        "gen_cga_inversion_demo: wrote 5 gated artifacts to {}; frame FNV-1a-32={hash} (0x{hash:08x}), sky={sky_count}, hits={hit_count}, colors={}",
+        "gen_cga_inversion_demo: wrote 5 gated artifacts to {}; frame FNV-1a-32={hash} (0x{hash:08x}), sky={sky_count}, A={material_a_count}, B={material_b_count}, colors={}",
         gen_dir.display(),
         distinct.len()
     );
@@ -330,7 +333,7 @@ fn run_wasm_frame(bytes: &[u8]) -> Vec<u32> {
     frame
 }
 
-fn oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> u32 {
+fn oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> (u32, u8) {
     let sx = (px as f32 - 64.0) * zoom;
     let sy = (py as f32 - 64.0) * zoom;
     let rz = 1.8_f32;
@@ -344,16 +347,32 @@ fn oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> u32 {
         let rho2 = vx * vx + y * y + z * z;
         let (qx, qy, qz) = (0.5 + vx / rho2, y / rho2, z / rho2);
         let ax = qx + 0.65;
-        let base = (ax * ax + qy * qy + qz * qz).sqrt() - 0.45;
+        let ay = qy + 0.30;
+        let distance_a = (ax * ax + ay * ay + qz * qz).sqrt() - 0.27;
+        let bx = qx + 0.65;
+        let by = qy - 0.30;
+        let distance_b = (bx * bx + by * by + qz * qz).sqrt() - 0.27;
+        let a_is_closer = distance_a < distance_b;
+        let base = if a_is_closer { distance_a } else { distance_b };
         let distance = base * rho2;
         t = t + distance * 0.2;
         if distance < 0.0025 {
             let shade = 32 + i * 3;
-            return (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32) as u32;
+            if a_is_closer {
+                return (
+                    (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32)
+                        as u32,
+                    1,
+                );
+            }
+            return (
+                (224 + (shade + 16) * 256 + shade * 65_536 - 16_777_216_i32) as u32,
+                2,
+            );
         }
         i += 1;
     }
-    (8 + 12 * 256 + 24 * 65_536 - 16_777_216_i32) as u32
+    ((8 + 12 * 256 + 24 * 65_536 - 16_777_216_i32) as u32, 0)
 }
 
 fn fnv1a32(frame: &[u32]) -> u32 {
@@ -468,6 +487,14 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
             .as_u64()
             .is_some_and(|count| count > 0)
     );
+    let material_a = reference["material_a_pixels"]
+        .as_u64()
+        .expect("material A pixel count");
+    let material_b = reference["material_b_pixels"]
+        .as_u64()
+        .expect("material B pixel count");
+    assert!(material_a > 0 && material_b > 0);
+    assert_eq!(reference["hit_pixels"].as_u64(), Some(material_a + material_b));
     assert!(
         reference["distinct_colors"]
             .as_u64()

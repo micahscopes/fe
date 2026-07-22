@@ -20,14 +20,18 @@
 //! It reuses Sonatina's `FunctionBuilder` SSA-variable machinery (declare/def/
 //! use + `seal_all`) exactly as the EVM lowerer does, so loop-carried values
 //! (`sum_to`'s accumulator) get their phis inserted automatically. MIR runtime
-//! locals in this subset are value-carried (`RuntimeLocalRoot::None`); any
-//! address-taken (`Slot`) local is out of R1 scope and fails closed. Place reads
-//! are fail-closed R2, with ONE admitted sliver (R2.0, control-effects ladder
+//! locals in this subset are normally value-carried (`RuntimeLocalRoot::None`).
+//! One closed Slot shape is also admitted: a primitive scalar stored to and
+//! loaded from the whole Slot is promoted to an SSA variable. Slot projections,
+//! aggregates, addressing, and aliasing operations remain out of scope and fail
+//! closed. Other place reads are fail-closed R2, with ONE admitted sliver (R2.0,
+//! control-effects ladder
 //! section 7): a Ref-rooted place whose carrier is a memory-space provider ref,
 //! at the empty path or `[Field(0)]` on a single-scalar-field newtype, lowers as
 //! the identity on the transport word (`use_var`); it is what lets an own-mode
-//! word-carried token (`Wait::wait<T>(_ pending: own Pending<T>)`) consume. Stores,
-//! addresses, offsets, and object materializations remain R2 and fail closed.
+//! word-carried token (`Wait::wait<T>(_ pending: own Pending<T>)`) consume. Apart
+//! from whole primitive scalar Slot stores, stores, addresses, offsets, and
+//! object materializations remain R2 and fail closed.
 
 use std::collections::HashMap;
 
@@ -403,20 +407,31 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         let prologue_block = fb.append_block();
         let block_map = body.blocks.iter().map(|_| fb.append_block()).collect();
 
-        // Declare one SSA variable per value-carried local. Address-taken
-        // (`Slot`) locals are R2; their reads/writes fail closed if reached. R2.1:
-        // a scalar-tuple local gets ONE variable per element word (`tuple_vars`);
-        // every other value-carried local keeps its single `ty_for_class` variable
-        // (and a multi-field aggregate that is NOT a scalar tuple still fails
-        // closed there, unchanged).
+        // Declare one SSA variable per value-carried local. A primitive scalar
+        // Slot used only through whole-slot loads/stores is promoted to the same
+        // SSA representation; projected/aggregate/addressed Slot operations stay
+        // fail-closed. R2.1: a scalar-tuple local gets ONE variable per element
+        // word (`tuple_vars`); every other value-carried local keeps its single
+        // `ty_for_class` variable (and a multi-field aggregate that is NOT a
+        // scalar tuple still fails closed there, unchanged).
         let mut vars = FxHashMap::default();
         let mut tuple_vars: FxHashMap<RLocalId, Vec<Variable>> = FxHashMap::default();
         for (idx, local) in body.locals.iter().enumerate() {
-            if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
-                continue;
-            }
             if let RuntimeCarrier::Value(class) = &local.carrier {
                 let local_id = RLocalId::from_u32(idx as u32);
+                if matches!(local.root, RuntimeLocalRoot::Slot(_)) {
+                    // Conditional-value and multi-exit joins can materialize a
+                    // primitive scalar through a MIR Slot even when every
+                    // reached operation is a direct load/store of the whole
+                    // scalar. Promote exactly that closed shape to an SSA var;
+                    // projected/aggregate slots and aliasing operations remain
+                    // fail-closed in expression/statement lowering.
+                    if matches!(class, RuntimeClass::Scalar(_)) {
+                        let ty = module.ty_for_class(class)?;
+                        vars.insert(local_id, fb.declare_var(ty));
+                    }
+                    continue;
+                }
                 if let Some(elem_tys) = module.scalar_tuple_element_tys(class) {
                     let elem_vars =
                         elem_tys.iter().map(|ty| fb.declare_var(*ty)).collect::<Vec<_>>();
@@ -540,6 +555,22 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     )),
                     other => other,
                 })?;
+                self.fb.def_var(var, value);
+                Ok(())
+            }
+            RStmt::Store { dst, src }
+                if matches!((&dst.root, &*dst.path), (PlaceRoot::Slot(_), [])) =>
+            {
+                let PlaceRoot::Slot(local) = &dst.root else { unreachable!() };
+                let local = *local;
+                if !matches!(
+                    self.body.value_class(local),
+                    Some(RuntimeClass::Scalar(_))
+                ) {
+                    return Err(unsupported_place(dst));
+                }
+                let value = self.local_value(*src)?;
+                let var = self.var_for(local)?;
                 self.fb.def_var(var, value);
                 Ok(())
             }
@@ -681,6 +712,15 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     /// other paths, multi-field pointees, and all real linear memory) stays
     /// fail-closed as R2. See the ladder doc section 7.2 for the exact boundary.
     fn lower_place_read(&mut self, place: &RuntimePlace<'db>) -> Result<ValueId, LowerError> {
+        if let (PlaceRoot::Slot(local), []) = (&place.root, &*place.path) {
+            if matches!(
+                self.body.value_class(*local),
+                Some(RuntimeClass::Scalar(_))
+            ) {
+                return self.local_value(*local);
+            }
+            return Err(unsupported_place(place));
+        }
         let PlaceRoot::Ref(v) = &place.root else {
             return Err(unsupported_place(place));
         };

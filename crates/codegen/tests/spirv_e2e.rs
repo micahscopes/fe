@@ -3032,7 +3032,13 @@ fn f32_render_probe_executes_on_lavapipe_against_independent_oracle() {
 /// Independent scalar oracle for D1. Keep the operation grouping identical to
 /// the Fe source and avoid `mul_add`: this models the actual f32 program, not a
 /// higher-precision restatement of its geometry.
-fn cga_inversion_de_oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> u32 {
+fn cga_inversion_de_oracle(
+    px: i32,
+    py: i32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+) -> (u32, u8) {
     let fx = px as f32;
     let fy = py as f32;
     let sx = (fx - 64.0) * zoom;
@@ -3042,7 +3048,6 @@ fn cga_inversion_de_oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) 
     let rdx = sx * inv_len;
     let rdy = sy * inv_len;
     let rdz = rz * inv_len;
-    let sky = (8 + 12 * 256 + 24 * 65_536 - 16_777_216_i32) as u32;
 
     let mut t = 0.0_f32;
     let mut i = 0_i32;
@@ -3058,23 +3063,38 @@ fn cga_inversion_de_oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) 
         let qy = y / rho2;
         let qz = z / rho2;
         let ax = qx + 0.65;
-        let base = (ax * ax + qy * qy + qz * qz).sqrt() - 0.45;
+        let ay = qy + 0.30;
+        let distance_a = (ax * ax + ay * ay + qz * qz).sqrt() - 0.27;
+        let bx = qx + 0.65;
+        let by = qy - 0.30;
+        let distance_b = (bx * bx + by * by + qz * qz).sqrt() - 0.27;
+        let a_is_closer = distance_a < distance_b;
+        let base = if a_is_closer { distance_a } else { distance_b };
         let distance = base * rho2;
         t = t + distance * 0.2;
         if distance < 0.0025 {
             let shade = 32 + i * 3;
-            return (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32)
-                as u32;
+            if a_is_closer {
+                return (
+                    (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32)
+                        as u32,
+                    1,
+                );
+            }
+            return (
+                (224 + (shade + 16) * 256 + shade * 65_536 - 16_777_216_i32) as u32,
+                2,
+            );
         }
         i += 1;
     }
-    sky
+    ((8 + 12 * 256 + 24 * 65_536 - 16_777_216_i32) as u32, 0)
 }
 
-/// D1: render a fixed, fold-derived Cl(4,1) inversion on lavapipe. This is the
-/// scalar partial evaluation of the generated product (D2 will execute the
-/// recursive product at runtime), and every pixel must equal an independent
-/// Rust-f32 oracle byte-for-byte on the pinned software Vulkan implementation.
+/// D1: render a two-sphere union through a fixed, fold-derived Cl(4,1)
+/// inversion on lavapipe. This is the scalar partial evaluation of the
+/// generated product (D2 will execute the recursive product at runtime), and
+/// every pixel must equal an independent Rust-f32 oracle byte-for-byte.
 #[test]
 fn cga_inversion_de_render_executes_on_lavapipe_against_f32_oracle() {
     const W: u32 = 128;
@@ -3161,36 +3181,38 @@ fn cga_inversion_de_render_executes_on_lavapipe_against_f32_oracle() {
         .expect("D1 requires browser-profile lavapipe execution");
     assert_eq!(rgba.len(), (W * H * 4) as usize);
 
-    let sky = [8, 12, 24, 255];
     let mut sky_count = 0_usize;
-    let mut hit_count = 0_usize;
+    let mut material_a_count = 0_usize;
+    let mut material_b_count = 0_usize;
     let mut distinct = std::collections::HashSet::new();
     for y in 0..H {
         for x in 0..W {
             let offset = ((y * W + x) * 4) as usize;
             let actual = &rgba[offset..offset + 4];
-            let expected = cga_inversion_de_oracle(
+            let (expected, material) = cga_inversion_de_oracle(
                 x as i32,
                 y as i32,
                 CAM_X,
                 CAM_Y,
                 ZOOM,
-            )
-            .to_le_bytes();
+            );
+            let expected = expected.to_le_bytes();
             assert_eq!(
                 actual, &expected,
                 "D1 conformal-inversion pixel ({x},{y}) differs from the Rust-f32 oracle",
             );
             distinct.insert(expected);
-            if expected == sky {
-                sky_count += 1;
-            } else {
-                hit_count += 1;
+            match material {
+                0 => sky_count += 1,
+                1 => material_a_count += 1,
+                2 => material_b_count += 1,
+                other => panic!("unexpected oracle material {other}"),
             }
         }
     }
     assert!(sky_count > 0, "D1 image must contain background");
-    assert!(hit_count > 0, "D1 image must contain the inverted sphere");
+    assert!(material_a_count > 0, "D1 image must contain inverted sphere A");
+    assert!(material_b_count > 0, "D1 image must contain inverted sphere B");
     assert!(
         distinct.len() >= 8,
         "step shading must expose a non-degenerate 3D surface ({} colors)",
