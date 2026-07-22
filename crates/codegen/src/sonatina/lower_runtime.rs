@@ -473,6 +473,12 @@ impl<'db, 'a> ModuleLowerer<'db, 'a> {
     }
 
     fn scalar_ty(&mut self, scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
+        if matches!(scalar.repr, ScalarRepr::Float { .. }) {
+            return Err(LowerError::Unsupported(
+                "f32 has no EVM value type; EVM float lowering remains unsupported after the Sonatina f32 carrier rung (#4f)"
+                    .to_string(),
+            ));
+        }
         Ok(match scalar.role {
             mir::ScalarRole::EnumTag { enum_layout } => self.enum_tag_ty(enum_layout)?,
             _ => scalar_ty(scalar)?,
@@ -727,6 +733,7 @@ const INTRINSIC_SUFFIX_TYPES: &[(&str, PrimTy)] = &[
     ("_i256", PrimTy::I256),
     ("_isize", PrimTy::Isize),
     ("_bool", PrimTy::Bool),
+    ("_f32", PrimTy::F32),
 ];
 
 fn runtime_intrinsic<'db>(
@@ -4651,11 +4658,12 @@ pub(super) fn scalar_ty<'db>(scalar: &ScalarClass<'db>) -> Result<Type, LowerErr
     Ok(match scalar.repr {
         ScalarRepr::Bool => Type::I1,
         ScalarRepr::Int { bits, .. } => int_ty(bits),
-        // No backend has a float `Type` until the fork gains float insts (#4f);
-        // never fold an f32 into an integer word.
+        // This mapping is also used directly throughout the EVM lowerer. Keep
+        // floats rejected here; the wasm/SPIR-V path admits its f32 carrier in
+        // `scalar_ty_r1` without weakening any EVM call site.
         ScalarRepr::Float { .. } => {
             return Err(LowerError::Unsupported(
-                "f32 has no Sonatina backend type yet; float instructions land on the fork in #4f"
+                "f32 has no EVM backend type; wasm/SPIR-V f32 uses its target-specific carrier (#4f)"
                     .to_string(),
             ));
         }

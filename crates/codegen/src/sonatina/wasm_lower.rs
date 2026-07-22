@@ -38,6 +38,7 @@ use mir::{
     RBlockId, RExpr, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin,
     RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage,
     RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
+    ScalarRepr,
 };
 use rustc_hash::FxHashMap;
 use sonatina_ir::{
@@ -352,17 +353,23 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     }
 }
 
-/// R1 scalar type mapping: reuses the EVM path's `scalar_ty` but rejects
-/// anything wider than i64 (and anything address-shaped), which fails closed
-/// per the ratified "u256-on-wasm is out of scope" decision.
+/// R1 scalar type mapping: reuses the target-neutral scalar carrier mapping but
+/// rejects anything wider than i64 (and anything address-shaped), which fails
+/// closed per the ratified "u256-on-wasm is out of scope" decision.
 fn scalar_ty_r1<'db>(scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
-    // `scalar_ty` already rejects f32 (no backend float `Type` until #4f); the
-    // `?` propagates that named reject rather than letting a float slip through.
-    let ty = scalar_ty(scalar)?;
+    let ty = match scalar.repr {
+        ScalarRepr::Float { bits: 32 } => Type::F32,
+        ScalarRepr::Float { bits } => {
+            return Err(LowerError::Unsupported(format!(
+                "wasm target carries f32 only; unsupported f{bits} scalar"
+            )));
+        }
+        _ => scalar_ty(scalar)?,
+    };
     match ty {
-        Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 => Ok(ty),
+        Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::F32 => Ok(ty),
         wide => Err(LowerError::Unsupported(format!(
-            "wasm target (R1) scalar envelope is bool / u8..u64 / i8..i64; \
+            "wasm target (R1) scalar envelope is bool / u8..u64 / i8..i64 / f32; \
              `{wide:?}` (u128/u256/address) is out of scope"
         ))),
     }
@@ -731,6 +738,12 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         rhs: RLocalId,
         class: &ScalarClass<'db>,
     ) -> Result<ValueId, LowerError> {
+        if matches!(class.repr, ScalarRepr::Float { .. }) {
+            return Err(LowerError::Unsupported(
+                "wasm target: f32 arithmetic intrinsic lowering is not part of the f32 carrier slice"
+                    .to_string(),
+            ));
+        }
         let is = self.inst_set();
         let ty = scalar_ty_r1(class)?;
         let lhs = self.local_value(lhs)?;
@@ -771,6 +784,20 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         rhs: RLocalId,
         dst: RLocalId,
     ) -> Result<ValueId, LowerError> {
+        if [lhs, rhs].into_iter().any(|local| {
+            matches!(
+                self.body.value_class(local),
+                Some(RuntimeClass::Scalar(ScalarClass {
+                    repr: ScalarRepr::Float { .. },
+                    ..
+                }))
+            )
+        }) {
+            return Err(LowerError::Unsupported(
+                "wasm target: f32 binary arithmetic/comparison lowering is not part of the f32 carrier slice"
+                    .to_string(),
+            ));
+        }
         let is = self.inst_set();
         // Keep the MIR operand ids for the signedness key (the value class lives on
         // the RLocalId, not the sonatina ValueId, which is signless). The sonatina
@@ -843,6 +870,33 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         callee: RuntimeInstance<'db>,
         args: &[RLocalId],
     ) -> Result<ValueId, LowerError> {
+        if let Some(name) = callee
+            .key(self.module.db)
+            .semantic(self.module.db)
+            .and_then(|semantic| match semantic.key(self.module.db).owner(self.module.db) {
+                hir::analysis::ty::ty_check::BodyOwner::Func(func) => func
+                    .name(self.module.db)
+                    .to_opt()
+                    .map(|name| name.data(self.module.db).to_string()),
+                _ => None,
+            })
+        {
+            if matches!(
+                name.as_str(),
+                "__sqrt_f32"
+                    | "__rsqrt_f32"
+                    | "__abs_f32"
+                    | "__min_f32"
+                    | "__max_f32"
+                    | "__floor_f32"
+                    | "__f32_from_i32"
+                    | "__i32_from_f32"
+            ) {
+                return Err(LowerError::Unsupported(format!(
+                    "wasm target: f32 intrinsic `{name}` needs dedicated Sonatina lowering and must not become an external call"
+                )));
+            }
+        }
         let is = self.inst_set();
         let callee_ref = *self.module.func_map.get(&callee).ok_or_else(|| {
             LowerError::Internal("wasm call target was not declared".to_string())
@@ -969,13 +1023,44 @@ fn immediate_for_const_scalar(
         ConstScalar::Int { words, signed, .. } => {
             Ok(Immediate::from_i256(bytes_to_i256(words, *signed), ty))
         }
-        ConstScalar::Float { .. } => Err(LowerError::Unsupported(
-            "wasm target: f32 constants have no backend immediate yet; float instructions \
-             land on the fork in #4f"
-                .to_string(),
-        )),
+        ConstScalar::Float { bits } if ty == Type::F32 => Ok(Immediate::F32(*bits)),
+        ConstScalar::Float { .. } => Err(LowerError::Internal(format!(
+            "wasm target: f32 constant was assigned non-f32 Sonatina type `{ty:?}`"
+        ))),
         other => Err(LowerError::Unsupported(format!(
             "wasm target (R1) constant `{other:?}` is not supported"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mir::ScalarRole;
+
+    #[test]
+    fn f32_carrier_type_and_immediate_preserve_exact_bits() {
+        let class = ScalarClass {
+            repr: ScalarRepr::Float { bits: 32 },
+            role: ScalarRole::Plain,
+        };
+        assert_eq!(scalar_ty_r1(&class).unwrap(), Type::F32);
+
+        for bits in [0x8000_0000, 0x7fc0_1234] {
+            assert_eq!(
+                immediate_for_const_scalar(&ConstScalar::Float { bits }, Type::F32).unwrap(),
+                Immediate::F32(bits),
+            );
+        }
+    }
+
+    #[test]
+    fn non_f32_float_width_fails_closed() {
+        let class = ScalarClass {
+            repr: ScalarRepr::Float { bits: 64 },
+            role: ScalarRole::Plain,
+        };
+        let error = scalar_ty_r1(&class).unwrap_err().to_string();
+        assert!(error.contains("f64") && error.contains("f32"), "{error}");
     }
 }

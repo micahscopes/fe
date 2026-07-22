@@ -5350,7 +5350,7 @@ fn intrinsic_numeric_name_parts(name: &str) -> Option<(&str, &str)> {
     let op = name.strip_prefix("__")?;
     [
         "_u8", "_u16", "_u32", "_u64", "_u128", "_u256", "_usize", "_i8", "_i16", "_i32", "_i64",
-        "_i128", "_i256", "_isize", "_bool",
+        "_i128", "_i256", "_isize", "_bool", "_f32",
     ]
     .iter()
     .find_map(|suffix| op.strip_suffix(suffix).map(|prefix| (prefix, *suffix)))
