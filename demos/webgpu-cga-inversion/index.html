@@ -35,11 +35,13 @@
     <button id="focus-inversion" type="button">Focus inversion</button>
     <button id="freeze-inversion" type="button">Freeze inversion</button>
     <button id="reset-camera" type="button">Reset camera</button>
+    <button id="verify-view" type="button">Verify current view</button>
     <span id="camera-values">cam_x=0.00000 cam_y=0.00000 zoom=0.012500</span>
     <span id="pointer-values">pointer_world=—</span>
     <span id="inversion-values">inv_center=(0.50000, 0.00000)</span>
   </div>
   <p id="meta" class="muted"></p>
+  <p class="muted">The initial frame is verified automatically. Interaction uses the persistent WebGPU pipeline without readback; use Verify current view or <code>?verify=continuous</code> for repeated Wasm/GPU checks.</p>
   <pre id="acceptance-json" hidden>{"state":"pending"}</pre>
   <details><summary>Fe source</summary><pre id="source"></pre></details>
   <details><summary>WGSL</summary><pre id="wgsl"></pre></details>

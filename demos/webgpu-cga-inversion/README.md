@@ -1,4 +1,4 @@
-# Fe two-sphere CGA inversion browser gate
+# Fe interactive CGA inversion browser gate
 
 This page consumes the compiler-produced D1 Render bundle in `gen/`:
 
@@ -8,26 +8,39 @@ This page consumes the compiler-produced D1 Render bundle in `gen/`:
 - `reference.json`, containing `width`, `height`, and the pinned RGBA FNV-1a hash.
 - `frag.wasm`, the same Fe fragment compiled for the browser-wasm oracle.
 
-The fragment computes the hard union of two spheres in inverted space and
-raymarches their conformal inverse with distinct material palettes. The browser
-writes `(cam_x, cam_y, zoom) = (0.0, 0.0, 0.0125)` as f32 values at
-the compiler-stated member offsets. A browser-wasm execution of the full frame
+The fragment raymarches the conformal inverse of an offset torus, producing a
+cyclide-like surface. The browser writes
+`(cam_x, cam_y, zoom, inv_cx, inv_cy) = (0.0, 0.0, 0.0125, 0.5, 0.0)` as five
+f32 values at the compiler-stated member offsets. A browser-wasm execution of the full frame
 must first match the compiled reference. Green then requires a live WebGPU render
 and readback that byte-equals that browser-wasm
 frame. A missing WebGPU adapter after a green wasm oracle is amber, never green.
 Automation can await `window.__cgaAcceptance.promise` and inspect its deterministic
 `state`, `wasmHash`, and optional `gpuHash`/`adapter` fields.
 
-The default canvas page is interactive: drag to pan, wheel to zoom around the
-pointer, and use Reset camera to restore the compiled reference view. Interaction
-events are coalesced; after each settled camera change the canvas is redrawn and
-the full 128x128 browser-Wasm frame is recomputed and compared byte-for-byte with
-a fresh offscreen WebGPU readback. A generation token prevents an older async
-verification from publishing over a newer camera state.
-Camera interaction math is JavaScript, not Fe: values are rejected if non-finite,
-quantized to an immutable f32 triple for each generation, and zoom is clamped to
-`0.0025..=0.05`. Canvas draws are animation-frame coalesced; expensive full-frame
-verifications are trailing-debounced and serialized.
+The default canvas page is interactive: move the pointer to move the inversion
+circle, click to freeze or unfreeze it, drag to pan, wheel to zoom around the
+pointer, and use Focus inversion or Reset to restore a useful view. The initial
+default frame still completes the full browser-Wasm/reference/WebGPU acceptance
+gate. After that, interaction is presentation-first: animation-frame-coalesced
+draws reuse the persistent WebGPU pipeline and update only the typed input
+buffer. They do not recompute a full Wasm frame or perform GPU readback.
+
+Use **Verify current view** for an explicit fresh Wasm/GPU byte comparison. Add
+`?verify=continuous` to retain trailing-coalesced verification after interaction
+(for example `webgpu-cga-inversion/?verify=continuous`). A generation token
+prevents an older asynchronous verification from publishing over a newer one.
+Interaction math is JavaScript, not Fe: values are rejected if non-finite,
+quantized to an immutable five-f32 parameter block for each generation, and zoom is clamped to
+`0.0025..=0.05`. Explicit or continuous full-frame verifications are
+trailing-debounced and serialized.
+
+The displayed canvas is responsive and uses device-pixel ratio up to 2, capped
+at 768 pixels per side. Deterministic acceptance remains a separate 128x128
+offscreen render. This bundle is the scalarized D1 baseline: it uses the exact
+unit-sphere conformal inversion formula in Fe. The recursive typed `MvTF<5>` CGA
+sandwich is tracked and tested separately until it passes the same whole-frame
+Wasm and WebGPU gates; do not describe this visual bundle as D2 yet.
 
 Generation currently depends on a clean checkout of the unpublished Sonatina
 commit `ed43625bb5680aeab993371e28a8c8e5c7c16f96`. Set `SONATINA_DIR` explicitly

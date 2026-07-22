@@ -3,10 +3,12 @@ import { instantiateWasm, renderFragmentGrid } from "../webgpu-keystone/wasm-run
 import { DEFAULT_CAMERA, createTrailingCoalescer, normalizeCamera, panCamera, zoomCamera } from "./camera-controls.js";
 
 const $ = (id) => document.getElementById(id);
-const acceptanceMode = new URLSearchParams(window.location.search).get("acceptance");
+const query = new URLSearchParams(window.location.search);
+const acceptanceMode = query.get("acceptance");
 const presentation = acceptanceMode === null || acceptanceMode === ""
   ? "canvas"
   : acceptanceMode;
+const continuousVerification = query.get("verify") === "continuous";
 const DEFAULT_INVERSION = Object.freeze({ x: 0.5, y: 0, radius: 1 });
 const LOGICAL_SIZE = 128;
 
@@ -225,7 +227,9 @@ async function main() {
   }
 
   let latestGeneration = 0;
-  const verifyCamera = async (camera, inversion, generation, requireReference = false) => {
+  const verifyCamera = async (
+    camera, inversion, generation, requireReference = false, cancelWhenStale = true,
+  ) => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const values = viewValues(camera, inversion);
     const words = renderFragmentGrid(
@@ -233,9 +237,9 @@ async function main() {
     );
     const wasmRgba = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
     const wasmHash = fnv1a32(wasmRgba);
-    if (generation !== latestGeneration) return null;
+    if (cancelWhenStale && generation !== latestGeneration) return null;
     const readback = await verifyView(gpu, values);
-    if (generation !== latestGeneration) return null;
+    if (cancelWhenStale && generation !== latestGeneration) return null;
     if (!readback.ok) {
       return { state: "red", presentation, generation, wasmHash, reason: readback.reason };
     }
@@ -291,8 +295,20 @@ async function main() {
   let inversionFrozen = false;
   showCamera(camera);
   drawInversionOverlay(camera, inversion);
+
+  // The deterministic acceptance gate runs once before interaction begins.
+  // Presentation then reuses the live pipeline and only updates its uniform
+  // buffer unless the user explicitly requests continuous verification.
+  const initialGeneration = ++latestGeneration;
+  if (presentation === "canvas") {
+    renderFrame(gpu, viewValues(camera, inversion, canvas.width, canvas.height));
+    drawInversionOverlay(camera, inversion);
+  }
+  let verificationRunning = true;
+  let initialAccepted = false;
+  const initialPromise = verifyCamera(camera, inversion, initialGeneration, true, false);
+
   let queuedVerification = null;
-  let verificationRunning = false;
   const drainVerifications = async () => {
     if (verificationRunning) return;
     verificationRunning = true;
@@ -312,6 +328,12 @@ async function main() {
     queuedVerification = job;
     drainVerifications();
   });
+  const requestVerification = (generation = ++latestGeneration) => {
+    coalescer.submit({ camera, inversion: { ...inversion }, generation });
+    banner("amber", "verifying current view with browser Wasm and WebGPU readback...");
+    publishAcceptance({ state: "pending", presentation, generation,
+      camera: viewValues(camera, inversion).slice(0, 3), inversion: [inversion.x, inversion.y] });
+  };
   let drawPending = false;
   let drawCamera = camera;
   const requestDraw = (nextCamera) => {
@@ -334,10 +356,14 @@ async function main() {
     showCamera(camera);
     if (presentation === "canvas") requestDraw(camera);
     latestGeneration += 1;
-    coalescer.submit({ camera, inversion: { ...inversion }, generation: latestGeneration });
-    banner("amber", "camera changed; checking browser-Wasm against WebGPU readback...");
-    publishAcceptance({ state: "pending", presentation, generation: latestGeneration,
-      camera: viewValues(camera, inversion).slice(0, 3), inversion: [inversion.x, inversion.y] });
+    if (continuousVerification) {
+      requestVerification(latestGeneration);
+    } else {
+      const acceptance = initialAccepted
+        ? "initial acceptance passed; current view not reverified"
+        : "initial acceptance still running";
+      banner("amber", `live WebGPU presentation on ${gpu.adapter}; ${acceptance}`);
+    }
   };
 
   if (presentation === "canvas") {
@@ -357,7 +383,7 @@ async function main() {
           `inv_center=(${inversion.x.toFixed(5)}, ${inversion.y.toFixed(5)})`;
         requestDraw(camera);
         latestGeneration += 1;
-        coalescer.submit({ camera, inversion: { ...inversion }, generation: latestGeneration });
+        if (continuousVerification) requestVerification(latestGeneration);
       }
       if (!drag) return;
       const scaleX = LOGICAL_SIZE / canvas.clientWidth;
@@ -398,20 +424,37 @@ async function main() {
       $("inversion-values").textContent = "inv_center=(0.50000, 0.00000)";
       settle(DEFAULT_CAMERA);
     });
+    $("verify-view").addEventListener("click", () => requestVerification());
+    if (continuousVerification) {
+      $("verify-view").textContent = "Verify now (continuous on)";
+    }
     window.__cgaCamera = { get: () => ({ ...camera }), reset: () => settle(DEFAULT_CAMERA) };
   }
-
-  const initialGeneration = ++latestGeneration;
-  if (presentation === "canvas") {
-    renderFrame(gpu, viewValues(camera, inversion, canvas.width, canvas.height));
-    drawInversionOverlay(camera, inversion);
-  }
-  verificationRunning = true;
-  const initial = await verifyCamera(camera, inversion, initialGeneration, true);
+  const initial = await initialPromise;
   verificationRunning = false;
-  if (initial) finishVerification(initial);
+  initialAccepted = initial?.state === "green";
+  let completionResult = initial;
+  if (initial) {
+    if (initial.generation === latestGeneration) {
+      finishVerification(initial);
+    } else {
+      // The default-frame acceptance is still useful structured evidence, but
+      // must not overwrite status for a newer interactive generation.
+      window.__cgaInitialAcceptance = { ...initial, initial: true };
+      completionResult = null;
+      if (!initialAccepted) {
+        banner("red", `initial acceptance failed: ${initial.reason}`);
+        publishAcceptance({ ...initial, initial: true, currentViewVerified: false });
+      } else if (!queuedVerification) {
+        publishAcceptance({ state: "green", presentation, generation: latestGeneration,
+          initialAccepted: true, currentViewVerified: false, adapter: gpu.adapter,
+          initialWasmHash: initial.wasmHash, initialGpuHash: initial.gpuHash });
+        banner("green", `live WebGPU presentation on ${gpu.adapter}; initial acceptance passed, current view not reverified`);
+      }
+    }
+  }
   drainVerifications();
-  return initial;
+  return completionResult;
 }
 
 window.__cgaAcceptance = { state: "pending", presentation };
