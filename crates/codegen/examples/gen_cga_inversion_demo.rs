@@ -503,16 +503,36 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
 }
 
 fn provenance() -> serde_json::Value {
+    const EXPECTED_SONATINA: &str = "ed43625bb5680aeab993371e28a8c8e5c7c16f96";
     let sonatina_path = std::env::var("SONATINA_DIR")
         .expect("SONATINA_DIR must identify the reviewed local Sonatina checkout");
+    let fe_rev = std::env::var("FE_CGA_SOURCE_REV")
+        .expect("use demos/webgpu-cga-inversion/generate.sh to capture clean Fe provenance");
+    let current_fe_rev = git_rev(env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(fe_rev, current_fe_rev, "Fe HEAD changed after generator preflight");
+    assert_only_cargo_lock_changed(env!("CARGO_MANIFEST_DIR"));
+    let fe_untracked_present = match std::env::var("FE_CGA_SOURCE_UNTRACKED_PRESENT").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => panic!("invalid FE_CGA_SOURCE_UNTRACKED_PRESENT generator preflight value"),
+    };
+    let sonatina_rev = git_rev(&sonatina_path);
+    assert_eq!(
+        sonatina_rev, EXPECTED_SONATINA,
+        "Sonatina HEAD changed or is not the reviewed D1 revision"
+    );
+    assert!(
+        git_status(&sonatina_path, "--untracked-files=normal").is_empty(),
+        "Sonatina checkout changed after generator preflight"
+    );
     serde_json::json!({
         "source": "Fe compiler branch mb2",
-        "fe_rev": git_rev(env!("CARGO_MANIFEST_DIR")),
-        "fe_tracked_dirty": git_tracked_dirty(env!("CARGO_MANIFEST_DIR")),
-        "fe_untracked_present": git_untracked_present(env!("CARGO_MANIFEST_DIR")),
+        "fe_rev": fe_rev,
+        "fe_tracked_dirty": false,
+        "fe_untracked_present": fe_untracked_present,
         "sonatina_source": "local-path unpublished checkout",
         "sonatina_path": sonatina_path,
-        "sonatina_rev": git_rev(&sonatina_path),
+        "sonatina_rev": sonatina_rev,
         "sonatina_tracked_dirty": git_tracked_dirty(&sonatina_path),
         "sonatina_untracked_present": git_untracked_present(&sonatina_path),
         "generator": "cargo with four local-path Sonatina patches run -p fe-codegen --example gen_cga_inversion_demo",
@@ -559,6 +579,16 @@ fn git_untracked_present(path: &str) -> bool {
     git_status(path, "--untracked-files=normal")
         .lines()
         .any(|line| line.starts_with("?? "))
+}
+
+fn assert_only_cargo_lock_changed(path: &str) {
+    for line in git_status(path, "--untracked-files=no").lines() {
+        let changed_path = line.get(3..).unwrap_or("");
+        assert_eq!(
+            changed_path, "Cargo.lock",
+            "tracked Fe source changed after generator preflight: {line}"
+        );
+    }
 }
 
 fn write(path: &std::path::Path, bytes: &[u8]) {

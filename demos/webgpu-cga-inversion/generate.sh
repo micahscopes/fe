@@ -25,6 +25,18 @@ if [ -n "$(git -C "$SONATINA_DIR" status --porcelain)" ]; then
   exit 2
 fi
 
+fe_revision="$(git -C "$repo" rev-parse HEAD)"
+if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
+  echo "D1 generation requires a Fe checkout with no tracked modifications" >&2
+  exit 2
+fi
+fe_status="$(git -C "$repo" status --porcelain --untracked-files=normal)"
+if grep -q '^?? ' <<<"$fe_status"; then
+  fe_untracked_present=1
+else
+  fe_untracked_present=0
+fi
+
 lock_backup="$(mktemp "${TMPDIR:-/tmp}/fe-cga-Cargo.lock.XXXXXX")"
 cp "$repo/Cargo.lock" "$lock_backup"
 restore_lock() {
@@ -33,7 +45,10 @@ restore_lock() {
 }
 trap restore_lock EXIT
 
-( cd "$repo" && cargo \
+( cd "$repo" && \
+  FE_CGA_SOURCE_REV="$fe_revision" \
+  FE_CGA_SOURCE_UNTRACKED_PRESENT="$fe_untracked_present" \
+  cargo \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-ir.path=\"$SONATINA_DIR/crates/ir\"" \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-triple.path=\"$SONATINA_DIR/crates/triple\"" \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-codegen.path=\"$SONATINA_DIR/crates/codegen\"" \
