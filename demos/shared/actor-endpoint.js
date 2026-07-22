@@ -78,6 +78,13 @@ export const actorField = Object.freeze({
       }
     };
   },
+  uint8Array(length) {
+    return (value, name) => {
+      if (!(value instanceof Uint8Array) || value.length !== length) {
+        throw new TypeError(`${name} must be Uint8Array(${length})`);
+      }
+    };
+  },
 });
 
 /** A transport with the same callback boundary a future MessagePort adapter uses. */

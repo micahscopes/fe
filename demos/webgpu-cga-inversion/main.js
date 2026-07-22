@@ -1,8 +1,8 @@
 import { initWebGPURender, renderFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
-import { instantiateWasm, renderFragmentGrid } from "../webgpu-keystone/wasm-runner.js";
 import { DEFAULT_CAMERA, createTrailingCoalescer, normalizeCamera, panCamera, zoomCamera } from "./camera-controls.js";
 import { createPerformanceMeter } from "./performance-meter.js";
 import { createCgaActorLifecycle } from "./actor-lifecycle.js";
+import { createCgaWasmWorkerOracle } from "./wasm-worker-oracle.js";
 
 const $ = (id) => document.getElementById(id);
 const query = new URLSearchParams(window.location.search);
@@ -186,24 +186,22 @@ async function main() {
   validateTypedLayout(layout);
   const renderLayout = { ...layout, params: layout.params };
 
-  let fragExports;
+  let wasmOracle;
   if (!verificationOff) {
     try {
-      fragExports = await instantiateWasm(wasm);
+      wasmOracle = await createCgaWasmWorkerOracle({
+        wasm, exportName: layout.frag_wasm_export,
+        width: reference.width, height: reference.height,
+      });
     } catch (error) {
-      banner("red", `browser wasm oracle failed: ${error.message || error}`);
+      banner("red", `browser Wasm worker oracle failed: ${error.message || error}`);
       return { state: "red", presentation, reason: String(error) };
     }
   }
   const defaultValues = viewValues(normalizeCamera(DEFAULT_CAMERA), DEFAULT_INVERSION);
   let defaultWasmHash;
   if (!verificationOff) try {
-    const defaultWords = renderFragmentGrid(
-      fragExports, layout.frag_wasm_export, defaultValues, reference.width, reference.height,
-    );
-    const defaultWasmRgba = new Uint8Array(
-      defaultWords.buffer, defaultWords.byteOffset, defaultWords.byteLength,
-    );
+    const defaultWasmRgba = await wasmOracle.render(defaultValues, 0);
     defaultWasmHash = fnv1a32(defaultWasmRgba);
     if (defaultWasmHash !== (reference.fnv1a32 >>> 0)) {
       banner("red", `browser Wasm/reference mismatch: ${defaultWasmHash} != ${reference.fnv1a32 >>> 0}`);
@@ -250,10 +248,7 @@ async function main() {
   ) => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const values = viewValues(camera, inversion);
-    const words = renderFragmentGrid(
-      fragExports, layout.frag_wasm_export, values, reference.width, reference.height,
-    );
-    const wasmRgba = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
+    const wasmRgba = await wasmOracle.render(values, generation);
     const wasmHash = fnv1a32(wasmRgba);
     const readback = await verifyView(gpu, values);
     if (!readback.ok) {
