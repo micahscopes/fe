@@ -3684,7 +3684,15 @@ impl<'db> TypedBody<'db> {
         self.result_ty
     }
 
-    pub(crate) fn has_smir_lowering_blocker(&self, db: &'db dyn HirAnalysisDb) -> bool {
+    /// Returns whether this typed body is incomplete in a way that makes
+    /// semantic MIR lowering unsafe.
+    ///
+    /// Callers must check this before asking semantic-instance queries to
+    /// lower a body that already has type-checking diagnostics.  In
+    /// particular, a call-like expression is not lowerable without its
+    /// selected semantic operation even when inference happened to assign the
+    /// expression a non-invalid result type.
+    pub fn has_smir_lowering_blocker(&self, db: &'db dyn HirAnalysisDb) -> bool {
         let Some(body) = self.body else {
             return false;
         };
@@ -3721,9 +3729,7 @@ impl<'db> TypedBody<'db> {
                     && self.expr_code_region_ref(db, expr).is_none()
                     && self.value_path_ref(expr).is_none()
             }
-            Expr::Call(..) | Expr::MethodCall(..) => {
-                expr_ty.has_invalid(db) && self.semantic_expr_lowering(expr).is_none()
-            }
+            Expr::Call(..) | Expr::MethodCall(..) => self.semantic_expr_lowering(expr).is_none(),
             Expr::Assert(_) => expr_ty.has_invalid(db),
             Expr::RecordInit(..) => {
                 expr_ty.has_invalid(db) && self.record_init_lowering(expr).is_none()

@@ -289,8 +289,8 @@ pub fn select_left(flag: bool, when_true: own Pair, when_false: own Pair) -> u64
 
 /// D2 stage 1: `MvT<1> = Nd<Sc>` constructs a recursive two-leaf tree, projects
 /// through it, copies it as a value, rebuilds it, and returns both distinct leaves
-/// through wasm multi-value. Nested tuple flattening, aggregate slots, and tuple
-/// call results remain outside this stage.
+/// through Wasm multi-value, including across the private `make_mvt1` call.
+/// Place-backed aggregate slots remain outside this stage.
 #[test]
 fn recursive_mvt1_construct_copy_project_return_executes_on_wasm() {
     let source = include_str!("fixtures/wasm_mvt1_runtime_probe.fe");
@@ -759,6 +759,39 @@ fn conformal_point_cl41(x: f32, y: f32, z: f32) -> [f32; 32] {
     point[8] = (radius2 - 1.0) * 0.5;
     point[16] = (radius2 + 1.0) * 0.5;
     point
+}
+
+#[test]
+fn authored_generic_mvt5_cga_sandwich_executes_full_coefficient_frame_on_wasm() {
+    let source = include_str!("fixtures/spirv/cga_sandwich_authored_generic_mvt5.fe");
+    let wasm = compile_to_wasm("cga_sandwich_authored_generic_mvt5.fe", source);
+    assert!(func_imports(&wasm).is_empty(), "authored generic sandwich must have zero imports");
+    let (mut store, instance) = instantiate(&wasm);
+    let sandwich = instance
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32), i32>(
+            &mut store, "cga_sandwich_authored_generic_mvt5",
+        )
+        .expect("authored generic MvT<5> sandwich ABI");
+    for (x, y, z, cx, cy) in [
+        (2.5, 0.25, 0.0, 0.5, 0.25),
+        (0.5, 2.25, 0.0, 0.5, 0.25),
+    ] {
+        let mut sphere = [0.0; 32];
+        let center2 = cx * cx + cy * cy;
+        sphere[1] = cx;
+        sphere[2] = cy;
+        sphere[8] = center2 * 0.5 - 1.0;
+        sphere[16] = center2 * 0.5;
+        let expected = clifford_gp_cl41_oracle(
+            clifford_gp_cl41_oracle(sphere, conformal_point_cl41(x, y, z)), sphere,
+        );
+        for (index, coefficient) in expected.into_iter().enumerate() {
+            let got = sandwich.call(
+                &mut store, ((index % 8) as i32, (index / 8) as i32, x, y, z, cx, cy),
+            ).expect("authored generic CGA coefficient");
+            assert_eq!(got, (coefficient * 256.0) as i32, "coefficient {index}");
+        }
+    }
 }
 
 #[test]

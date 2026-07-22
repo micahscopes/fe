@@ -213,6 +213,7 @@ impl<'db> RuntimeGraphBuilder<'db> {
             }
 
             if let Some(semantic) = instance.key(self.db).semantic(self.db) {
+                ensure_semantic_instance_is_smir_lowerable(self.db, semantic)?;
                 check_reachable_runtime_trait_calls_resolvable(
                     self.db,
                     semantic.key(self.db),
@@ -621,6 +622,7 @@ fn wasm_candidates_reachable_as_callee<'db>(
         }
     }
     while let Some(semantic) = stack.pop() {
+        ensure_semantic_instance_is_smir_lowerable(db, semantic)?;
         for callee in semantic.callees(db) {
             let callee_key = callee.key;
             let BodyOwner::Func(callee_func) = callee_key.owner(db) else {
@@ -639,6 +641,20 @@ fn wasm_candidates_reachable_as_callee<'db>(
         }
     }
     Ok(reachable_as_callee)
+}
+
+fn ensure_semantic_instance_is_smir_lowerable<'db>(
+    db: &'db dyn MirDb,
+    semantic: SemanticInstance<'db>,
+) -> Result<(), LowerError> {
+    let key = semantic.key(db);
+    if key.typed_body(db).has_smir_lowering_blocker(db) {
+        return Err(LowerError::Unsupported(format!(
+            "cannot lower {:?} to semantic MIR because type checking left unresolved or invalid body operations",
+            key.owner(db),
+        )));
+    }
+    Ok(())
 }
 
 /// The wasm sibling of [`runtime_root_candidate`] (interop doc 9.2/9.3). Unlike
@@ -3040,6 +3056,145 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn malformed_nested_generic_call_reports_label_diagnostic_without_panicking() {
+        let mut db = DriverDataBase::default();
+        let file_url = Url::parse("file:///invalid_generic_call.fe").unwrap();
+        let file = db.workspace().touch(
+            &mut db,
+            file_url,
+            Some(
+                r#"
+struct Leaf { value: u32 }
+struct Node<A> { left: A, right: A }
+impl Copy for Leaf {}
+impl<A: Copy> Copy for Node<A> {}
+
+trait SetLeaf { fn set_leaf(self, index: u32, value: u32) -> Self }
+impl SetLeaf for Leaf {
+    fn set_leaf(self, index: u32, value: u32) -> Self { Leaf { value: value } }
+}
+impl<A: SetLeaf + Copy> SetLeaf for Node<A> {
+    fn set_leaf(self, index: u32, value: u32) -> Self {
+        Node {
+            left: self.left.set_leaf(wrong: index, value: value),
+            right: self.right,
+        }
+    }
+}
+
+pub fn run(value: u32) -> Node<Leaf> {
+    let leaf = Leaf { value: 0 }
+    Node { left: leaf, right: leaf }.set_leaf(index: 0, value: value)
+}
+"#
+                .to_string(),
+            ),
+        );
+
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(
+            diagnostics.contains("argument label mismatch")
+                && diagnostics.contains("expected `index` label, but `wrong` given"),
+            "expected an ordinary argument-label diagnostic:\n{diagnostics}"
+        );
+
+        // Labels do not affect the runtime ABI, so this call still has complete
+        // semantic lowering metadata.  Direct package construction may lower
+        // it safely; the compiler driver rejects it using the diagnostic above.
+        build_wasm_runtime_package(&db, top_mod)
+            .expect("diagnosed label mismatch must not make semantic lowering panic");
+    }
+
+    #[test]
+    fn wasm_package_rejects_unresolved_nested_generic_method_before_smir_lowering() {
+        let mut db = DriverDataBase::default();
+        let file_url = Url::parse("file:///unresolved_nested_generic_method.fe").unwrap();
+        let file = db.workspace().touch(
+            &mut db,
+            file_url,
+            Some(
+                r#"
+struct Leaf { value: u32 }
+struct Node<A> { left: A, right: A }
+impl Copy for Leaf {}
+impl<A: Copy> Copy for Node<A> {}
+
+impl<A: Copy> Node<A> {
+    fn malformed(self, value: u32) -> Self {
+        Node {
+            left: self.left.missing(value: value),
+            right: self.right,
+        }
+    }
+}
+
+pub fn run(value: u32) -> Node<Leaf> {
+    let leaf = Leaf { value: 0 }
+    Node { left: leaf, right: leaf }.malformed(value: value)
+}
+"#
+                .to_string(),
+            ),
+        );
+
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(
+            !diagnostics.is_empty(),
+            "unresolved nested method must produce a type-checking diagnostic"
+        );
+        let err = build_wasm_runtime_package(&db, top_mod)
+            .expect_err("missing method metadata must block semantic MIR lowering");
+        let message = err.to_string();
+        assert!(
+            message.contains("cannot lower")
+                && message.contains("type checking left unresolved or invalid body operations"),
+            "unexpected fail-closed error: {message}"
+        );
+    }
+
+    #[test]
+    fn wasm_package_lowers_valid_nested_generic_method_calls() {
+        let mut db = DriverDataBase::default();
+        let file_url = Url::parse("file:///valid_nested_generic_call.fe").unwrap();
+        let file = db.workspace().touch(
+            &mut db,
+            file_url,
+            Some(
+                r#"
+struct Leaf { value: u32 }
+struct Node<A> { left: A, right: A }
+impl Copy for Leaf {}
+impl<A: Copy> Copy for Node<A> {}
+
+trait SetLeaf { fn set_leaf(self, index: u32, value: u32) -> Self }
+impl SetLeaf for Leaf {
+    fn set_leaf(self, index: u32, value: u32) -> Self { Leaf { value: value } }
+}
+impl<A: SetLeaf + Copy> SetLeaf for Node<A> {
+    fn set_leaf(self, index: u32, value: u32) -> Self {
+        Node {
+            left: self.left.set_leaf(index: index, value: value),
+            right: self.right,
+        }
+    }
+}
+
+pub fn run(value: u32) -> Node<Leaf> {
+    let leaf = Leaf { value: 0 }
+    Node { left: leaf, right: leaf }.set_leaf(index: 0, value: value)
+}
+"#
+                .to_string(),
+            ),
+        );
+
+        build_wasm_runtime_package(&db, db.top_mod(file))
+            .expect("valid nested generic method calls must lower to a Wasm runtime package");
+    }
+
     fn recv_wrapper_plan<'db>(
         db: &'db DriverDataBase,
         top_mod: TopLevelMod<'db>,
@@ -3321,5 +3476,3 @@ pub contract NoInitBox {}
         );
     }
 }
-
-

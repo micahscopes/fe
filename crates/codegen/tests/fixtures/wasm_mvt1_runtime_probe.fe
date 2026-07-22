@@ -25,9 +25,13 @@ recursive type fn MvT<const N: usize>() -> (*) {
     }
 }
 
-pub fn mvt1_runtime_probe(left: u32, right: u32) -> MvT<1> {
+fn make_mvt1(left: u32, right: u32) -> MvT<1> {
     let tree: MvT<1> = Nd { a: Sc { s: left }, b: Sc { s: right } }
     let projected: u32 = tree.a.s
     let copied: MvT<1> = tree
     Nd { a: Sc { s: projected }, b: copied.b }
+}
+
+pub fn mvt1_runtime_probe(left: u32, right: u32) -> MvT<1> {
+    make_mvt1(left, right)
 }

@@ -1150,13 +1150,22 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             *self.module.func_map.get(&callee).ok_or_else(|| {
                 LowerError::Internal("wasm call target was not declared".to_string())
             })?;
-        let mut arg_vals = Vec::with_capacity(args.len());
-        for arg in args {
-            arg_vals.push(self.local_value(*arg)?);
-        }
+        let arg_vals = self.call_arg_values(args)?;
         self.fb
             .insert_inst_no_result(Call::new(is, callee_ref, arg_vals.into_iter().collect()));
         Ok(())
+    }
+
+    /// Flatten value-carried struct-tree arguments in the same DFS field order
+    /// used by `lower_signature` and the function prologue. Scalar arguments
+    /// remain one wasm value. Arrays, enums, and place-backed aggregates never
+    /// acquire tuple variables and therefore continue to fail closed here.
+    fn call_arg_values(&mut self, args: &[RLocalId]) -> Result<Vec<ValueId>, LowerError> {
+        let mut values = Vec::new();
+        for arg in args {
+            values.extend(self.local_flat_values(*arg)?);
+        }
+        Ok(values)
     }
 
     fn local_flat_shape(&self, local: RLocalId) -> Result<FlatShape, LowerError> {
@@ -1183,10 +1192,9 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     /// scalar struct tree. The tree is a set of per-leaf SSA variables in DFS
     /// declaration order. Producing forms are shape-compatible `AggregateMake`,
     /// `Use`, and `AggregateExtract`. All sources are snapshotted before any
-    /// destination definition. Receiving a tuple FROM a call would need a wasm
-    /// MULTI-RESULT call, which
-    /// the WAFFLE Call path does not lower (it binds a single result), so that
-    /// stays fail-closed. Everything else fails closed too.
+    /// destination definition. Calls returning the same recursively flattened
+    /// shape become Wasm multi-value calls and bind leaf-for-leaf. Everything
+    /// else fails closed.
     fn lower_tuple_assign(&mut self, dst: RLocalId, expr: &RExpr<'db>) -> Result<(), LowerError> {
         match expr {
             RExpr::AggregateMake { fields, .. } => {
@@ -1355,15 +1363,67 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 }
                 Ok(())
             }
-            RExpr::Call { callee, .. } => Err(LowerError::Unsupported(format!(
-                "wasm target (R2.1): call to `{}` ({callee:?}) returning a scalar-tuple aggregate needs a \
-                 MULTI-RESULT wasm call, which the value model does not lower (the WAFFLE \
-                 Call path binds a single result). Scalar-tuple params and returns lower at \
-                 function boundaries, but receiving a tuple FROM a call is R2/fork-level: \
-                 return the joined scalar, or mark an eligible pure helper #[inline(always)] so \
-                 the prepared body removes the call before lowering.",
-                self.module.function_symbol(*callee),
-            ))),
+            RExpr::Call { callee, args } => {
+                let callee_body = callee.body(self.module.db);
+                let callee_class = callee_body
+                    .signature
+                    .ret
+                    .as_ref()
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "wasm target: unit-returning call to `{}` cannot initialize an aggregate",
+                            self.module.function_symbol(*callee),
+                        ))
+                    })?;
+                let dst_class = self.body.value_class(dst).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "aggregate call destination {dst:?} has no runtime class"
+                    ))
+                })?;
+                if !callee_class.shares_runtime_rep_with(self.module.db, dst_class) {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: call to `{}` returns an aggregate representation incompatible with its destination",
+                        self.module.function_symbol(*callee),
+                    )));
+                }
+                let callee_shape = self.module.flat_shape(callee_class).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target: call to `{}` returns an aggregate that cannot be recursively flattened",
+                        self.module.function_symbol(*callee),
+                    ))
+                })?;
+                let dst_shape = self.local_flat_shape(dst)?;
+                if callee_shape != dst_shape {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: call to `{}` returns shape {callee_shape:?}, but destination has shape {dst_shape:?}",
+                        self.module.function_symbol(*callee),
+                    )));
+                }
+                let callee_ref = *self.module.func_map.get(callee).ok_or_else(|| {
+                    LowerError::Internal("wasm call target was not declared".to_string())
+                })?;
+                let arg_vals = self.call_arg_values(args)?;
+                let results = self
+                    .fb
+                    .insert_call_results(callee_ref, arg_vals.into_iter().collect());
+                let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "aggregate call destination {dst:?} has no flattened variables"
+                    ))
+                })?;
+                if results.len() != dst_vars.len() {
+                    return Err(LowerError::Internal(format!(
+                        "call to `{}` produced {} wasm results for {} destination leaves",
+                        self.module.function_symbol(*callee),
+                        results.len(),
+                        dst_vars.len(),
+                    )));
+                }
+                for (var, value) in dst_vars.into_iter().zip(results) {
+                    self.fb.def_var(var, value);
+                }
+                Ok(())
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R2.1): scalar-tuple destination assigned from `{other:?}` is \
                  not supported (only recursive scalar-tree make/copy/extract lower; \
@@ -1832,10 +1892,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 ));
             }
         };
-        let mut arg_vals = Vec::with_capacity(args.len());
-        for arg in args {
-            arg_vals.push(self.local_value(*arg)?);
-        }
+        let arg_vals = self.call_arg_values(args)?;
         Ok(self.fb.insert_inst(
             Call::new(is, callee_ref, arg_vals.into_iter().collect()),
             ret_ty,

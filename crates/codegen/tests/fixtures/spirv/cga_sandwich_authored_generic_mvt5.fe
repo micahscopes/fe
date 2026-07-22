@@ -1,0 +1,141 @@
+// Authored runtime specialization of the G-L1 recursive geometric product.
+// No Cayley/support formula is generated: generic traits recurse over MvTF<5>.
+
+extern {
+    fn __i32_from_f32(_: f32) -> i32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub struct ScF { pub s: f32 }
+pub struct NdF<A> { pub a: A, pub b: A }
+impl Copy for ScF {}
+impl<A: Copy> Copy for NdF<A> {}
+
+recursive type fn MvTF<const N: usize>() -> (*) {
+    match N {
+        0 => ScF
+        _ => NdF<MvTF<{N - 1}>>
+    }
+}
+
+trait ApSign { const fn ap_sign(self, code: i32) -> Self }
+impl ApSign for ScF {
+    #[inline(always)]
+    const fn ap_sign(self, code: i32) -> Self {
+        ScF { s: if code == 0 { self.s } else { -self.s } }
+    }
+}
+impl<A: ApSign> ApSign for NdF<A> {
+    #[inline(always)]
+    const fn ap_sign(self, code: i32) -> Self {
+        NdF { a: self.a.ap_sign(code: code), b: self.b.ap_sign(code: code) }
+    }
+}
+
+trait Invol { const fn invol(self) -> Self }
+impl Invol for ScF {
+    #[inline(always)]
+    const fn invol(self) -> Self { self }
+}
+impl<A: Invol + ApSign> Invol for NdF<A> {
+    #[inline(always)]
+    const fn invol(self) -> Self {
+        NdF { a: self.a.invol(), b: self.b.invol().ap_sign(code: 1) }
+    }
+}
+
+trait GaAdd { const fn gadd(self, other: Self) -> Self }
+impl GaAdd for ScF {
+    #[inline(always)]
+    const fn gadd(self, other: Self) -> Self { ScF { s: self.s + other.s } }
+}
+impl<A: GaAdd> GaAdd for NdF<A> {
+    #[inline(always)]
+    const fn gadd(self, other: Self) -> Self {
+        NdF { a: self.a.gadd(other: other.a), b: self.b.gadd(other: other.b) }
+    }
+}
+
+trait Gp { const fn gp(self, other: Self, n: i32) -> Self }
+impl Gp for ScF {
+    #[inline(always)]
+    const fn gp(self, other: Self, n: i32) -> Self { ScF { s: self.s * other.s } }
+}
+impl<A: Gp + Invol + GaAdd + ApSign + Copy> Gp for NdF<A> {
+    #[inline(always)]
+    const fn gp(self, other: Self, n: i32) -> Self {
+        let aa = self.a.gp(other: other.a, n: n - 1)
+        let bhb = self.b.gp(other: other.b.invol(), n: n - 1)
+        let ab = self.a.gp(other: other.b, n: n - 1)
+        let bha = self.b.gp(other: other.a.invol(), n: n - 1)
+        // Cl(4,1): only the fifth/top generator has negative square.
+        let metric: i32 = if n == 5 { 1 } else { 0 }
+        NdF { a: aa.gadd(other: bhb.ap_sign(code: metric)), b: ab.gadd(other: bha) }
+    }
+}
+
+trait SetLeaf { const fn set_leaf(self, index: i32, size: i32, value: f32) -> Self }
+impl SetLeaf for ScF {
+    #[inline(always)]
+    const fn set_leaf(self, index: i32, size: i32, value: f32) -> Self {
+        ScF { s: value }
+    }
+}
+impl<A: SetLeaf + Copy> SetLeaf for NdF<A> {
+    #[inline(always)]
+    const fn set_leaf(self, index: i32, size: i32, value: f32) -> Self {
+        let half: i32 = size >> 1
+        if index < half {
+            NdF { a: self.a.set_leaf(index: index, size: half, value: value), b: self.b }
+        } else {
+            NdF { a: self.a, b: self.b.set_leaf(index: index - half, size: half, value: value) }
+        }
+    }
+}
+
+trait GetLeaf { const fn get_leaf(self, index: i32, size: i32) -> f32 }
+impl GetLeaf for ScF {
+    #[inline(always)]
+    const fn get_leaf(self, index: i32, size: i32) -> f32 { self.s }
+}
+impl<A: GetLeaf> GetLeaf for NdF<A> {
+    #[inline(always)]
+    const fn get_leaf(self, index: i32, size: i32) -> f32 {
+        let half: i32 = size >> 1
+        if index < half { self.a.get_leaf(index: index, size: half) }
+        else { self.b.get_leaf(index: index - half, size: half) }
+    }
+}
+
+#[inline(always)]
+fn zero_mvt5(_ zero: f32) -> MvTF<5> {
+    let z0: MvTF<0> = ScF { s: zero }
+    let z1: MvTF<1> = NdF { a: z0, b: z0 }
+    let z2: MvTF<2> = NdF { a: z1, b: z1 }
+    let z3: MvTF<3> = NdF { a: z2, b: z2 }
+    let z4: MvTF<4> = NdF { a: z3, b: z3 }
+    NdF { a: z4, b: z4 }
+}
+
+pub fn cga_sandwich_authored_generic_mvt5(
+    px: i32, py: i32, x: f32, y: f32, z: f32, cx: f32, cy: f32
+) -> u32 {
+    let zero: f32 = x - x
+    let radius2: f32 = x * x + y * y + z * z
+    let center2: f32 = cx * cx + cy * cy
+    let point0: MvTF<5> = zero_mvt5(zero)
+    let point1: MvTF<5> = point0.set_leaf(index: 1, size: 32, value: x)
+    let point2: MvTF<5> = point1.set_leaf(index: 2, size: 32, value: y)
+    let point3: MvTF<5> = point2.set_leaf(index: 4, size: 32, value: z)
+    let point4: MvTF<5> = point3.set_leaf(index: 8, size: 32, value: (radius2 - 1.0) * 0.5)
+    let point: MvTF<5> = point4.set_leaf(index: 16, size: 32, value: (radius2 + 1.0) * 0.5)
+    let sphere0: MvTF<5> = zero_mvt5(zero)
+    let sphere1: MvTF<5> = sphere0.set_leaf(index: 1, size: 32, value: cx)
+    let sphere2: MvTF<5> = sphere1.set_leaf(index: 2, size: 32, value: cy)
+    let sphere3: MvTF<5> = sphere2.set_leaf(index: 8, size: 32, value: center2 * 0.5 - 1.0)
+    let sphere: MvTF<5> = sphere3.set_leaf(index: 16, size: 32, value: center2 * 0.5)
+    let first: MvTF<5> = sphere.gp(other: point, n: 5)
+    let sandwich: MvTF<5> = first.gp(other: sphere, n: 5)
+    let coefficient: f32 = sandwich.get_leaf(index: px + py * 8, size: 32)
+    __bitcast(__i32_from_f32(coefficient * 256.0))
+}

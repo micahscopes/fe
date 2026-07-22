@@ -10,6 +10,64 @@ use fe_hir::hir_def::{Expr, ItemKind, Partial};
 use fe_hir::test_db::HirAnalysisTestDb;
 
 #[test]
+fn generic_bound_nested_method_call_keeps_valid_type_and_callable() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("generic_bound_nested_method_call.fe"),
+        r#"
+struct Leaf { value: u32 }
+struct Node<A> { left: A, right: A }
+impl Copy for Leaf {}
+impl<A: Copy> Copy for Node<A> {}
+
+trait SetLeaf { fn set_leaf(self, _ index: u32, _ value: u32) -> Self }
+impl SetLeaf for Leaf {
+    fn set_leaf(self, _ index: u32, _ value: u32) -> Self { Leaf { value: value } }
+}
+impl<A: SetLeaf + Copy> SetLeaf for Node<A> {
+    fn set_leaf(self, _ index: u32, _ value: u32) -> Self {
+        if index == 0 {
+            Node { left: self.left.set_leaf(index, value), right: self.right }
+        } else {
+            Node { left: self.left, right: self.right.set_leaf(index, value) }
+        }
+    }
+}
+fn run(value: u32) -> Node<Leaf> {
+    let leaf = Leaf { value: 0 }
+    Node { left: leaf, right: leaf }.set_leaf(index: 0, value: value)
+}
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+
+    for item in top_mod.all_impl_traits(&db) {
+        for method in item.methods(&db) {
+            let typed = &check_func_body(&db, method).1;
+            if let Some(body) = typed.body() {
+                for (expr, data) in body.exprs(&db).iter() {
+                    if matches!(data, Partial::Present(Expr::MethodCall(..))) {
+                        assert!(typed.semantic_expr_lowering(expr).is_some());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn authored_generic_cga_fixture_typechecks_before_runtime_lowering() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        Utf8PathBuf::from("cga_sandwich_authored_generic_mvt5.fe"),
+        include_str!("../../codegen/tests/fixtures/spirv/cga_sandwich_authored_generic_mvt5.fe"),
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn resolve_trait_method_instance_uses_inherited_default_body() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
