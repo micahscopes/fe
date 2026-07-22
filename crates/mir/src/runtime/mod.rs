@@ -6,6 +6,7 @@ pub(crate) mod package;
 pub mod pretty;
 pub(crate) mod root_effects;
 pub mod stable_key;
+pub mod transform;
 pub(crate) mod synthetic;
 
 pub use ir::*;
@@ -19,3 +20,4 @@ pub use pretty::{
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,
     format_runtime_verify_failure,
 };
+pub use transform::{RuntimeAggregateFacts, specialize_pure_inline_stmts};

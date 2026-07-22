@@ -170,12 +170,14 @@ fn prepare_inline_value_bodies<'db>(
         let (locals, blocks) = (&mut body.locals, &mut body.blocks);
         for block in blocks {
             let mut stmts = Vec::with_capacity(block.stmts.len());
+            let mut aggregate_facts = mir::RuntimeAggregateFacts::default();
             for stmt in std::mem::take(&mut block.stmts) {
                 let RStmt::Assign {
                     dst,
                     expr: RExpr::Call { callee, args },
                 } = &stmt
                 else {
+                    record_aggregate_fact(&stmt, &mut aggregate_facts);
                     stmts.push(stmt);
                     continue;
                 };
@@ -187,12 +189,16 @@ fn prepare_inline_value_bodies<'db>(
                     *dst,
                     &callee_body,
                     args,
+                    &aggregate_facts,
                     INLINE_VALUE_STMT_BUDGET.saturating_sub(expanded),
                 ) else {
                     stmts.push(stmt);
                     continue;
                 };
                 expanded += replacement.len();
+                for stmt in &replacement {
+                    record_aggregate_fact(stmt, &mut aggregate_facts);
+                }
                 stmts.append(&mut replacement);
             }
             block.stmts = stmts;
@@ -210,6 +216,26 @@ fn prepare_inline_value_bodies<'db>(
     done
 }
 
+fn record_aggregate_fact(
+    stmt: &RStmt<'_>,
+    facts: &mut mir::RuntimeAggregateFacts,
+) {
+    let RStmt::Assign { dst, expr } = stmt else {
+        return;
+    };
+    match expr {
+        RExpr::AggregateMake { fields, .. } => {
+            facts.insert(*dst, fields.clone());
+        }
+        RExpr::Use(src) => {
+            if let Some(fields) = facts.get(src).cloned() {
+                facts.insert(*dst, fields);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn inline_value_call<'db>(
     db: &'db DriverDataBase,
     package: &RuntimePackage<'db>,
@@ -217,6 +243,7 @@ fn inline_value_call<'db>(
     dst: RLocalId,
     callee_body: &RuntimeBody<'db>,
     args: &[RLocalId],
+    aggregate_facts: &mir::RuntimeAggregateFacts,
     budget: usize,
 ) -> Option<Vec<RStmt<'db>>> {
     let function = package
@@ -229,7 +256,6 @@ fn inline_value_call<'db>(
     ) || function.inline_hint(db) != RuntimeInlineHint::Always
         || callee_body.blocks.len() != 1
         || callee_body.signature.params.len() != args.len()
-        || callee_body.blocks[0].stmts.len() + 1 > budget
         || !callee_body.provider_bindings.is_empty()
         || callee_body.locals.iter().any(|local| {
             !matches!(local.carrier, RuntimeCarrier::Value(_))
@@ -314,6 +340,10 @@ fn inline_value_call<'db>(
         dst,
         expr: RExpr::Use(remap(ret)?),
     });
+    let out = mir::specialize_pure_inline_stmts(out, aggregate_facts, dst)?;
+    if out.len() > budget {
+        return None;
+    }
     caller_locals.extend(staged_locals);
     Some(out)
 }
