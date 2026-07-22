@@ -603,9 +603,10 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
 
     /// R2.1: lower an assignment whose destination is a flattened scalar tuple.
     /// The tuple is a set of per-element SSA variables, so it is DEFINED element
-    /// by element. The one producing form that lowers is `AggregateMake` (build
-    /// the tuple from its element locals, e.g. `(w.wait(p1), w.wait(p2))`);
-    /// receiving a tuple FROM a call would need a wasm MULTI-RESULT call, which
+    /// by element. Producing forms are `AggregateMake` and an element-type-exact
+    /// `Use` copy from another shallow scalar tuple. Copies snapshot every
+    /// source SSA value before defining any destination. Receiving a tuple FROM
+    /// a call would need a wasm MULTI-RESULT call, which
     /// the WAFFLE Call path does not lower (it binds a single result), so that
     /// stays fail-closed. Everything else fails closed too.
     fn lower_tuple_assign(&mut self, dst: RLocalId, expr: &RExpr<'db>) -> Result<(), LowerError> {
@@ -628,6 +629,72 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 }
                 Ok(())
             }
+            RExpr::Use(src) => {
+                let dst_class = self
+                    .body
+                    .value_class(dst)
+                    .ok_or_else(|| {
+                        LowerError::Internal(format!(
+                            "R2.1 tuple dst {dst:?} has no scalar-tuple type"
+                        ))
+                    })?;
+                let src_class = self
+                    .body
+                    .value_class(*src)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "wasm target (R2.1): scalar-tuple copy source {src:?} is not a \
+                             shallow scalar tuple"
+                        ))
+                    })?;
+                if !src_class.shares_runtime_rep_with(self.module.db, dst_class) {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target (R2.1): scalar-tuple copy {src:?}->{dst:?} has incompatible \
+                         runtime representations"
+                    )));
+                }
+                let dst_types = self.module.scalar_tuple_element_tys(dst_class).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "R2.1 tuple dst {dst:?} has no scalar-tuple element types"
+                    ))
+                })?;
+                let src_types = self.module.scalar_tuple_element_tys(src_class).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target (R2.1): scalar-tuple copy source {src:?} is not a \
+                         shallow scalar tuple"
+                    ))
+                })?;
+                if src_types != dst_types {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target (R2.1): scalar-tuple copy {src:?}->{dst:?} has mismatched \
+                         flattened element types {src_types:?} != {dst_types:?}"
+                    )));
+                }
+                let src_vars = self.tuple_vars.get(src).cloned().ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target (R2.1): scalar-tuple copy source {src:?} has no flattened \
+                         SSA variables"
+                    ))
+                })?;
+                let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
+                })?;
+                if src_vars.len() != dst_vars.len() {
+                    return Err(LowerError::Internal(format!(
+                        "R2.1 scalar-tuple copy has {} source vars but {} destination vars",
+                        src_vars.len(),
+                        dst_vars.len()
+                    )));
+                }
+                let values: Vec<ValueId> = src_vars
+                    .iter()
+                    .map(|var| self.fb.use_var(*var))
+                    .collect();
+                for (dst_var, value) in dst_vars.into_iter().zip(values) {
+                    self.fb.def_var(dst_var, value);
+                }
+                Ok(())
+            }
             RExpr::Call { .. } => Err(LowerError::Unsupported(
                 "wasm target (R2.1): a call returning a scalar-tuple aggregate needs a \
                  MULTI-RESULT wasm call, which the value model does not lower (the WAFFLE \
@@ -639,8 +706,8 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             )),
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R2.1): scalar-tuple destination assigned from `{other:?}` is \
-                 not supported (only `aggregate_make` of a scalar tuple lowers; tuple copies \
-                 and tuple call results are R2)"
+                 not supported (only `aggregate_make` and element-type-exact shallow tuple copies \
+                 lower; tuple call results are R2)"
             ))),
         }
     }

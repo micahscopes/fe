@@ -1,0 +1,33 @@
+// D2 boundary probe: the smallest runtime instance of the same recursive
+// Fuchs-Thery value tree used by clifford_gp_recursive_exec.fe.
+//
+// MvT<1> = Nd<Sc>: two u32 leaves. Construction, projection, and the exported
+// two-word return are all within wasm's scalar-tuple model. The intervening
+// value copy is deliberately load-bearing: this stage verifies that the wasm
+// lowerer preserves both leaves when copying a shallow aggregate value.
+
+pub struct Sc {
+    pub s: u32,
+}
+
+pub struct Nd<A> {
+    pub a: A,
+    pub b: A,
+}
+
+impl Copy for Sc {}
+impl<A: Copy> Copy for Nd<A> {}
+
+recursive type fn MvT<const N: usize>() -> (*) {
+    match N {
+        0 => Sc
+        _ => Nd<MvT<{N - 1}>>
+    }
+}
+
+pub fn mvt1_runtime_probe(left: u32, right: u32) -> MvT<1> {
+    let tree: MvT<1> = Nd { a: Sc { s: left }, b: Sc { s: right } }
+    let projected: u32 = tree.a.s
+    let copied: MvT<1> = tree
+    Nd { a: Sc { s: projected }, b: copied.b }
+}

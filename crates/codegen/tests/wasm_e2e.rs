@@ -289,6 +289,25 @@ pub fn select_left(flag: bool, when_true: own Pair, when_false: own Pair) -> u64
     );
 }
 
+/// D2 stage 1: `MvT<1> = Nd<Sc>` constructs a recursive two-leaf tree, projects
+/// through it, copies it as a value, rebuilds it, and returns both distinct leaves
+/// through wasm multi-value. Nested tuple flattening, aggregate slots, and tuple
+/// call results remain outside this stage.
+#[test]
+fn recursive_mvt1_construct_copy_project_return_executes_on_wasm() {
+    let source = include_str!("fixtures/wasm_mvt1_runtime_probe.fe");
+    let wasm = compile_to_wasm("wasm_mvt1_runtime_probe.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<(i32, i32), (i32, i32)>(&mut store, "mvt1_runtime_probe")
+        .expect("MvT<1> export should have two scalar params and a flattened two-result return");
+    assert_eq!(
+        probe.call(&mut store, (17, 29)).expect("MvT<1> probe call"),
+        (17, 29),
+        "projection/copy/rebuild must preserve both distinct leaves",
+    );
+}
+
 #[test]
 fn conditional_f32_selection_feeds_loop_carry_and_both_exits_on_wasm() {
     let source = include_str!("fixtures/spirv/conditional_f32_loop_carry.fe");
