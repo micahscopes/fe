@@ -582,6 +582,65 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
 }
 
 #[test]
+fn generated_support_cl41_cga_sandwich_executes_on_wasm() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_cga_sandwich_support_cl41.py"))
+        .arg("--check")
+        .status()
+        .expect("support-specialized CGA fixture generator should run");
+    assert!(status.success(), "support-specialized CGA fixture is stale");
+
+    let source = include_str!("fixtures/spirv/cga_sandwich_support_cl41.fe");
+    let wasm = compile_to_wasm("cga_sandwich_support_cl41.fe", source);
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "support-specialized sandwich must not retain imports"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let sandwich = instance
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32), i32>(
+            &mut store,
+            "cga_sandwich_support_cl41",
+        )
+        .expect("support sandwich ABI must be exactly (i32,i32,f32,f32,f32,f32,f32)->i32");
+
+    // Both cases use a nonzero-y dyadic center. Their exact binary inputs keep
+    // the independent flat-Cl(4,1) oracle and generated operation tree directly
+    // comparable, including the raw homogeneous weight.
+    let cases = [
+        (2.5, 0.25, 0.0, 0.5, 0.25),
+        (0.5, 2.25, 0.0, 0.5, 0.25),
+    ];
+    for (x, y, z, cx, cy) in cases {
+        let mut sphere = [0.0; 32];
+        let center2 = cx * cx + cy * cy;
+        sphere[1] = cx;
+        sphere[2] = cy;
+        sphere[8] = center2 * 0.5 - 1.0;
+        sphere[16] = center2 * 0.5;
+        let first = clifford_gp_cl41_oracle(sphere, conformal_point_cl41(x, y, z));
+        let expected = clifford_gp_cl41_oracle(first, sphere);
+        let weight = expected[16] - expected[8];
+        let outputs = [expected[1] / weight, expected[2] / weight, expected[4] / weight, weight];
+
+        for (index, expected_value) in outputs.into_iter().enumerate() {
+            let px = (index % 2) as i32;
+            let py = (index / 2) as i32;
+            let got = sandwich
+                .call(&mut store, (px, py, x, y, z, cx, cy))
+                .expect("support-specialized CGA sandwich execution");
+            assert_eq!(
+                got as u32,
+                (expected_value * 256.0) as i32 as u32,
+                "output {index} for p=({x},{y},{z}), c=({cx},{cy},0)"
+            );
+        }
+    }
+}
+
+#[test]
 fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/spirv");

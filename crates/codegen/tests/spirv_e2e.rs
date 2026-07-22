@@ -2486,6 +2486,8 @@ const CLIFFORD_GP_RECURSIVE_F32_MVT5_SOURCE: &str =
     include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt5.fe");
 const CGA_SANDWICH_RECURSIVE_F32_MVT5_SOURCE: &str =
     include_str!("fixtures/spirv/cga_sandwich_recursive_f32_mvt5.fe");
+const CGA_SANDWICH_SUPPORT_CL41_SOURCE: &str =
+    include_str!("fixtures/spirv/cga_sandwich_support_cl41.fe");
 const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
 
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
@@ -3344,6 +3346,94 @@ fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
 }
 
 #[test]
+fn generated_support_cl41_cga_sandwich_executes_on_lavapipe() {
+    const W: u32 = 2;
+    const H: u32 = 2;
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_cga_sandwich_support_cl41.py"))
+        .arg("--check")
+        .status()
+        .expect("support-specialized CGA fixture generator should run");
+    assert!(status.success(), "support-specialized CGA fixture is stale");
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///cga_sandwich_support_cl41.fe").expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CGA_SANDWICH_SUPPORT_CL41_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("support-specialized CGA sandwich should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("support-specialized CGA sandwich should compile as Render SPIR-V");
+
+    let input = artifact.layout.bindings.iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("five f32 sandwich parameters require an Input binding");
+    assert_eq!((input.group, input.binding), (0, 1));
+    assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
+    assert_eq!((input.span, input.stride, input.members.len()), (20, 20, 5));
+    for (member, arg_index) in input.members.iter().zip(2..=6) {
+        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
+        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+    }
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    assert_eq!(artifact.layout.builtin_inputs[0].arg_index, 0);
+    assert_eq!(
+        artifact.layout.builtin_inputs[0].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionX,
+    );
+    assert_eq!(artifact.layout.builtin_inputs[1].arg_index, 1);
+    assert_eq!(
+        artifact.layout.builtin_inputs[1].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionY,
+    );
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+
+    let cases = [
+        (2.5, 0.25, 0.0, 0.5, 0.25),
+        (0.5, 2.25, 0.0, 0.5, 0.25),
+    ];
+    for (x, y, z, cx, cy) in cases {
+        let params = [x, y, z, cx, cy];
+        let mut input_bytes = vec![0u8; input.span as usize];
+        for member in &input.members {
+            let value: f32 = params[(member.arg_index - 2) as usize];
+            input_bytes[member.offset as usize..member.offset as usize + 4]
+                .copy_from_slice(&value.to_bits().to_le_bytes());
+        }
+
+        let mut sphere = [0.0; 32];
+        let center2 = cx * cx + cy * cy;
+        sphere[1] = cx;
+        sphere[2] = cy;
+        sphere[8] = center2 * 0.5 - 1.0;
+        sphere[16] = center2 * 0.5;
+        let first = clifford_gp_cl41_f32_oracle(sphere, conformal_point_cl41_f32(x, y, z));
+        let expected = clifford_gp_cl41_f32_oracle(first, sphere);
+        let weight = expected[16] - expected[8];
+        let outputs = [expected[1] / weight, expected[2] / weight, expected[4] / weight, weight];
+
+        let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+            .expect("support-specialized recursive CGA sandwich requires GPU execution");
+        for (index, expected_value) in outputs.into_iter().enumerate() {
+            let offset = index * 4;
+            assert_eq!(
+                &rgba[offset..offset + 4],
+                &((expected_value * 256.0) as i32 as u32).to_le_bytes(),
+                "output {index} for p=({x},{y},{z}), c=({cx},{cy},0)"
+            );
+        }
+    }
+}
+
+#[test]
 fn recursive_mvt2_f32_render_executes_on_lavapipe() {
     const W: u32 = 2;
     const H: u32 = 2;
@@ -3739,25 +3829,7 @@ fn cga_inversion_cyclide_runtime_center_oracle(
         let distance = base * safe_rho2;
         t = t + distance * 0.18;
         if distance < 0.0022 {
-            let shade = if i < 8 {
-                38
-            } else if i < 16 {
-                62
-            } else if i < 24 {
-                86
-            } else if i < 32 {
-                110
-            } else if i < 40 {
-                134
-            } else if i < 48 {
-                158
-            } else if i < 56 {
-                182
-            } else if i < 64 {
-                206
-            } else {
-                230
-            };
+            let shade = 38 + 24 * (i >> 3);
             if qy > 0.0 {
                 return (
                     (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32)

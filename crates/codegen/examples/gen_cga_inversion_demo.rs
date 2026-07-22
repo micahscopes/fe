@@ -382,25 +382,7 @@ fn oracle(
         let distance = base * safe_rho2;
         t = t + distance * 0.18;
         if distance < 0.0022 {
-            let shade = if i < 8 {
-                38
-            } else if i < 16 {
-                62
-            } else if i < 24 {
-                86
-            } else if i < 32 {
-                110
-            } else if i < 40 {
-                134
-            } else if i < 48 {
-                158
-            } else if i < 56 {
-                182
-            } else if i < 64 {
-                206
-            } else {
-                230
-            };
+            let shade = 38 + 24 * (i >> 3);
             if qy > 0.0 {
                 return (
                     (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32) as u32,
