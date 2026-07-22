@@ -8,6 +8,7 @@ const acceptanceMode = query.get("acceptance");
 const presentation = acceptanceMode === null || acceptanceMode === ""
   ? "canvas"
   : acceptanceMode;
+const verificationOff = query.get("verify") === "off";
 const continuousVerification = query.get("verify") === "continuous";
 const DEFAULT_INVERSION = Object.freeze({ x: 0.5, y: 0, radius: 1 });
 const LOGICAL_SIZE = 128;
@@ -154,15 +155,19 @@ async function main() {
   }
   let layout, reference, source, wgsl, wasm;
   try {
-    [layout, reference, source, wgsl, wasm] = await Promise.all([
+    [layout, source, wgsl] = await Promise.all([
       fetchOk("./gen/layout.json", "json"),
-      fetchOk("./gen/reference.json", "json"),
       fetchOk("./gen/kernel.fe", "text"),
       fetchOk("./gen/frag.wgsl", "text"),
-      fetchOk("./gen/frag.wasm", "bytes"),
     ]);
+    if (!verificationOff) {
+      [reference, wasm] = await Promise.all([
+        fetchOk("./gen/reference.json", "json"),
+        fetchOk("./gen/frag.wasm", "bytes"),
+      ]);
+    }
     validateTypedLayout(layout);
-    validateReference(reference);
+    if (!verificationOff) validateReference(reference);
   } catch (error) {
     banner("red", `artifact contract failed: ${error.message || error}`);
     return { state: "red", presentation, reason: String(error) };
@@ -176,15 +181,17 @@ async function main() {
   const renderLayout = { ...layout, params: layout.params };
 
   let fragExports;
-  try {
-    fragExports = await instantiateWasm(wasm);
-  } catch (error) {
-    banner("red", `browser wasm oracle failed: ${error.message || error}`);
-    return { state: "red", presentation, reason: String(error) };
+  if (!verificationOff) {
+    try {
+      fragExports = await instantiateWasm(wasm);
+    } catch (error) {
+      banner("red", `browser wasm oracle failed: ${error.message || error}`);
+      return { state: "red", presentation, reason: String(error) };
+    }
   }
   const defaultValues = viewValues(normalizeCamera(DEFAULT_CAMERA), DEFAULT_INVERSION);
   let defaultWasmHash;
-  try {
+  if (!verificationOff) try {
     const defaultWords = renderFragmentGrid(
       fragExports, layout.frag_wasm_export, defaultValues, reference.width, reference.height,
     );
@@ -222,8 +229,12 @@ async function main() {
     presentation === "offscreen" ? null : $("view"),
   );
   if (!gpu.ok) {
-    banner("amber", `browser Wasm matches the packaged frame; no live WebGPU render: ${gpu.reason}`);
-    return { state: "amber", presentation, wasmHash: defaultWasmHash, reason: gpu.reason };
+    const detail = verificationOff
+      ? `fast showcase unavailable: ${gpu.reason}`
+      : `browser Wasm matches the packaged frame; no live WebGPU render: ${gpu.reason}`;
+    banner("amber", detail);
+    return { state: "amber", presentation, verified: false,
+      wasmHash: defaultWasmHash, reason: gpu.reason };
   }
 
   let latestGeneration = 0;
@@ -304,9 +315,11 @@ async function main() {
     renderFrame(gpu, viewValues(camera, inversion, canvas.width, canvas.height));
     drawInversionOverlay(camera, inversion);
   }
-  let verificationRunning = true;
+  let verificationRunning = !verificationOff;
   let initialAccepted = false;
-  const initialPromise = verifyCamera(camera, inversion, initialGeneration, true, false);
+  const initialPromise = verificationOff
+    ? Promise.resolve(null)
+    : verifyCamera(camera, inversion, initialGeneration, true, false);
 
   let queuedVerification = null;
   const drainVerifications = async () => {
@@ -356,7 +369,9 @@ async function main() {
     showCamera(camera);
     if (presentation === "canvas") requestDraw(camera);
     latestGeneration += 1;
-    if (continuousVerification) {
+    if (verificationOff) {
+      banner("presentation", `fast WebGPU showcase on ${gpu.adapter}; verification is off`);
+    } else if (continuousVerification) {
       requestVerification(latestGeneration);
     } else {
       const acceptance = initialAccepted
@@ -383,7 +398,7 @@ async function main() {
           `inv_center=(${inversion.x.toFixed(5)}, ${inversion.y.toFixed(5)})`;
         requestDraw(camera);
         latestGeneration += 1;
-        if (continuousVerification) requestVerification(latestGeneration);
+        if (continuousVerification && !verificationOff) requestVerification(latestGeneration);
       }
       if (!drag) return;
       const scaleX = LOGICAL_SIZE / canvas.clientWidth;
@@ -424,14 +439,26 @@ async function main() {
       $("inversion-values").textContent = "inv_center=(0.50000, 0.00000)";
       settle(DEFAULT_CAMERA);
     });
-    $("verify-view").addEventListener("click", () => requestVerification());
-    if (continuousVerification) {
+    if (verificationOff) {
+      $("verify-view").hidden = true;
+    } else {
+      $("verify-view").addEventListener("click", () => requestVerification());
+    }
+    if (continuousVerification && !verificationOff) {
       $("verify-view").textContent = "Verify now (continuous on)";
     }
     window.__cgaCamera = { get: () => ({ ...camera }), reset: () => settle(DEFAULT_CAMERA) };
   }
   const initial = await initialPromise;
   verificationRunning = false;
+  if (verificationOff) {
+    const result = { state: "presentation", presentation, verified: false,
+      adapter: gpu.adapter, camera: viewValues(camera, inversion).slice(0, 3),
+      inversion: [inversion.x, inversion.y] };
+    banner("presentation", `fast WebGPU showcase on ${gpu.adapter}; verification is off`);
+    publishAcceptance(result);
+    return result;
+  }
   initialAccepted = initial?.state === "green";
   let completionResult = initial;
   if (initial) {

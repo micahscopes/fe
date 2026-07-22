@@ -35,6 +35,14 @@ quantized to an immutable five-f32 parameter block for each generation, and zoom
 `0.0025..=0.05`. Explicit or continuous full-frame verifications are
 trailing-debounced and serialized.
 
+For the lowest-latency visual-only path, open
+[`?verify=off`](./?verify=off). This mode does not fetch or instantiate
+`frag.wasm`, does not compute the startup full-frame oracle, and never performs
+GPU readback. It loads and initializes only the compiler metadata, WGSL, source,
+and persistent canvas pipeline used for presentation. The Verify button is
+hidden and structured status is `{"state":"presentation","verified":false}`;
+this mode is deliberately not acceptance evidence and never reports green.
+
 The displayed canvas is responsive and uses device-pixel ratio up to 2, capped
 at 768 pixels per side. Deterministic acceptance remains a separate 128x128
 offscreen render. This bundle is the scalarized D1 baseline: it uses the exact
