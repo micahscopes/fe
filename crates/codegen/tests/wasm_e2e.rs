@@ -640,6 +640,96 @@ fn generated_support_cl41_cga_sandwich_executes_on_wasm() {
     }
 }
 
+fn cga_recursive_support_scalar_oracle(
+    px: i32,
+    py: i32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+    inv_cx: f32,
+    inv_cy: f32,
+) -> u32 {
+    let sx = (px as f32 - 64.0) * zoom;
+    let sy = (py as f32 - 64.0) * zoom;
+    let rz = 1.8_f32;
+    let inv_len = 1.0 / (sx * sx + sy * sy + rz * rz).sqrt();
+    let (rdx, rdy, rdz) = (sx * inv_len, sy * inv_len, rz * inv_len);
+    let mut t = 0.0_f32;
+    let mut i = 0_i32;
+    while i < 72 {
+        let x = cam_x + rdx * t;
+        let y = cam_y + rdy * t;
+        let z = -4.0 + rdz * t;
+        let vx = x - inv_cx;
+        let vy = y - inv_cy;
+        let rho2 = vx * vx + vy * vy + z * z;
+        let safe_rho2 = if rho2 < 0.0004 { 0.0004 } else { rho2 };
+        let qx = inv_cx + vx / safe_rho2;
+        let qy = inv_cy + vy / safe_rho2;
+        let qz = z / safe_rho2;
+        let tx = qx + 0.62;
+        let ty = qy - 0.08;
+        let ring_radius = (tx * tx + ty * ty).sqrt() - 0.58;
+        let base = (ring_radius * ring_radius + qz * qz).sqrt() - 0.17;
+        let distance = base * safe_rho2;
+        t += distance * 0.18;
+        if distance < 0.0022 {
+            let shade = 38 + 24 * (i >> 3);
+            if qy > 0.0 {
+                return (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32)
+                    as u32;
+            }
+            return (56 + shade * 256 + 224 * 65_536 - 16_777_216_i32) as u32;
+        }
+        i += 1;
+    }
+    (7 + 11 * 256 + 25 * 65_536 - 16_777_216_i32) as u32
+}
+
+#[test]
+fn generated_recursive_support_cyclide_executes_full_frame_on_wasm() {
+    const W: i32 = 128;
+    const H: i32 = 128;
+    const VALUES: [f32; 5] = [0.0, 0.0, 0.0125, 0.5, 0.0];
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_cga_inversion_cyclide_recursive_support.py"))
+        .arg("--check")
+        .status()
+        .expect("recursive-support cyclide generator should run");
+    assert!(status.success(), "recursive-support cyclide fixture is stale");
+
+    let source = include_str!("fixtures/spirv/cga_inversion_cyclide_recursive_support.fe");
+    let started = std::time::Instant::now();
+    let wasm = compile_to_wasm("cga_inversion_cyclide_recursive_support.fe", source);
+    eprintln!(
+        "recursive-support cyclide Wasm: {} bytes compiled in {:?}",
+        wasm.len(),
+        started.elapsed()
+    );
+    assert!(func_imports(&wasm).is_empty(), "recursive-support cyclide must have zero imports");
+    let (mut store, instance) = instantiate(&wasm);
+    let render = instance
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32), i32>(
+            &mut store,
+            "cga_inversion_cyclide_recursive_support",
+        )
+        .expect("recursive-support ABI must be exactly two i32 builtins plus five f32 values");
+    for py in 0..H {
+        for px in 0..W {
+            let got = render.call(
+                &mut store,
+                (px, py, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4]),
+            ).expect("recursive-support cyclide Wasm pixel") as u32;
+            let expected = cga_recursive_support_scalar_oracle(
+                px, py, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4],
+            );
+            assert_eq!(got, expected, "recursive-support Wasm pixel ({px},{py})");
+        }
+    }
+}
+
 #[test]
 fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

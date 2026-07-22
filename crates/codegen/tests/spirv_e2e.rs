@@ -2495,6 +2495,8 @@ const CGA_INVERSION_DE_RENDER_SOURCE: &str =
     include_str!("fixtures/spirv/cga_inversion_de_render.fe");
 const CGA_INVERSION_CYCLIDE_RUNTIME_CENTER_SOURCE: &str =
     include_str!("fixtures/spirv/cga_inversion_cyclide_runtime_center.fe");
+const CGA_INVERSION_CYCLIDE_RECURSIVE_SUPPORT_SOURCE: &str =
+    include_str!("fixtures/spirv/cga_inversion_cyclide_recursive_support.fe");
 
 const CONDITIONAL_F32_SELECT_SOURCE: &str =
     include_str!("fixtures/spirv/conditional_f32_select.fe");
@@ -3955,6 +3957,101 @@ fn cga_inversion_cyclide_runtime_center_executes_full_frame_on_lavapipe() {
         "step shading must expose a non-degenerate cyclide surface ({} colors)",
         distinct.len(),
     );
+}
+
+#[test]
+fn cga_inversion_cyclide_recursive_support_executes_full_frame_on_lavapipe() {
+    const W: u32 = 128;
+    const H: u32 = 128;
+    const VALUES: [f32; 5] = [0.0, 0.0, 0.0125, 0.5, 0.0];
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_cga_inversion_cyclide_recursive_support.py"))
+        .arg("--check")
+        .status()
+        .expect("recursive-support cyclide generator should run");
+    assert!(status.success(), "recursive-support cyclide fixture is stale");
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///cga_inversion_cyclide_recursive_support.fe")
+        .expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CGA_INVERSION_CYCLIDE_RECURSIVE_SUPPORT_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("recursive-support cyclide should build a runtime package");
+    assert!(
+        package.functions(&db).iter().all(|function| {
+            function.linkage(&db) != mir::RuntimeLinkage::External
+        }),
+        "recursive-support cyclide must lower all helpers intrinsically or inline them",
+    );
+    let started = std::time::Instant::now();
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("recursive-support cyclide should compile as Render SPIR-V");
+    eprintln!(
+        "recursive-support cyclide SPIR-V: {} words compiled in {:?}",
+        artifact.words.len(),
+        started.elapsed()
+    );
+
+    assert_eq!(artifact.layout.mode, sonatina_codegen::isa::spirv::LayoutMode::Render);
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    let input = artifact.layout.bindings.iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("five runtime controls require a broadcast Input binding");
+    assert_eq!((input.group, input.binding), (0, 1));
+    assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
+    assert_eq!((input.span, input.stride, input.members.len()), (20, 20, 5));
+    for (member, arg_index) in input.members.iter().zip(2..=6) {
+        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
+        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+    }
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    for (builtin, arg_index) in artifact.layout.builtin_inputs.iter().zip(0..=1) {
+        assert_eq!(builtin.arg_index, arg_index);
+        assert_eq!(builtin.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::I32);
+    }
+
+    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(wgsl.contains("loop"), "recursive-support DE must retain its raymarch loop");
+    assert!(wgsl.contains("sqrt("), "recursive-support DE must retain native f32 sqrt");
+    // Helper names disappear after the required backend-overlay inline. The
+    // unusually multiplication-rich loop body is durable emitted evidence that
+    // the recurrence-derived typed sandwich, rather than scalar D1, survived.
+    assert!(
+        wgsl.matches(" * ").count() >= 40,
+        "recursive-support WGSL must retain the expanded typed sandwich arithmetic"
+    );
+
+    let mut input_bytes = vec![0_u8; input.span as usize];
+    for member in &input.members {
+        let start = member.offset as usize;
+        input_bytes[start..start + 4].copy_from_slice(
+            &VALUES[(member.arg_index - 2) as usize].to_bits().to_le_bytes(),
+        );
+    }
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("recursive-support cyclide acceptance requires lavapipe execution");
+    assert_eq!(rgba.len(), (W * H * 4) as usize);
+    for y in 0..H {
+        for x in 0..W {
+            let offset = ((y * W + x) * 4) as usize;
+            let expected = cga_inversion_cyclide_runtime_center_oracle(
+                x as i32, y as i32, VALUES[0], VALUES[1], VALUES[2], VALUES[3], VALUES[4],
+            ).0.to_le_bytes();
+            assert_eq!(
+                &rgba[offset..offset + 4],
+                &expected,
+                "recursive-support GPU pixel ({x},{y})"
+            );
+        }
+    }
 }
 
 /// R1b (validation, GPU-FREE): the Fe fragment kernel compiles through the Render
