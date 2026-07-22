@@ -22,7 +22,7 @@ assert.deepEqual(validateActorEnvelope(structuredClone(sample)), sample);
 assert.throws(() => actorEnvelope({
   type: "request", lane: "render", generation: 0, requestId: 1, payload: { bad() {} },
 }), /structured-clone-safe/);
-assert.throws(() => validateActorEnvelope({ ...sample, version: 999 }), /unsupported/);
+assert.throws(() => validateActorEnvelope({ ...sample, version: 1 }), /unsupported/);
 
 const renderRuns = [];
 const verifyRuns = [];

@@ -1,7 +1,7 @@
 // Environment-neutral phase-0 actor protocol for demo work scheduling.
 // It deliberately owns no timers, animation frames, workers, or DOM state.
 
-export const ACTOR_PROTOCOL_VERSION = 1;
+export const ACTOR_PROTOCOL_VERSION = 2;
 
 const LANES = new Set(["render", "verify"]);
 
@@ -35,9 +35,10 @@ function cloneSafe(value, path = "payload", seen = new Set()) {
   seen.delete(value);
 }
 
-export function actorEnvelope({ type, lane, generation, requestId, payload = null }) {
+export function actorEnvelope({ type, lane, actorEpoch = 0, generation, requestId, payload = null }) {
   if (type !== "request" && type !== "result") throw new TypeError("invalid envelope type");
   if (!LANES.has(lane)) throw new TypeError("invalid actor lane");
+  nonNegativeInteger(actorEpoch, "actorEpoch");
   nonNegativeInteger(generation, "generation");
   nonNegativeInteger(requestId, "requestId");
   cloneSafe(payload);
@@ -46,6 +47,7 @@ export function actorEnvelope({ type, lane, generation, requestId, payload = nul
     version: ACTOR_PROTOCOL_VERSION,
     type,
     lane,
+    actorEpoch,
     generation,
     requestId,
     payload,
@@ -55,6 +57,12 @@ export function actorEnvelope({ type, lane, generation, requestId, payload = nul
 export function validateActorEnvelope(envelope) {
   if (!envelope || envelope.protocol !== "fe-demo-actor") throw new TypeError("invalid actor protocol");
   if (envelope.version !== ACTOR_PROTOCOL_VERSION) throw new TypeError("unsupported actor protocol version");
+  const expectedKeys = [
+    "actorEpoch", "generation", "lane", "payload", "protocol", "requestId", "type", "version",
+  ];
+  if (Object.keys(envelope).sort().join("\0") !== expectedKeys.join("\0")) {
+    throw new TypeError("actor envelope has unexpected or missing fields");
+  }
   actorEnvelope(envelope);
   return envelope;
 }
@@ -98,7 +106,7 @@ export function createActorCoordinator({
       ? { ok: true, value: outcome.value }
       : { ok: false, error: String(outcome.error) };
     const result = actorEnvelope({
-      type: "result", lane: laneName, generation: request.generation,
+      type: "result", lane: laneName, actorEpoch: request.actorEpoch, generation: request.generation,
       requestId: request.requestId, payload,
     });
     const pending = lane.pending;
