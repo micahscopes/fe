@@ -84,7 +84,10 @@ export function renderFragmentGrid(fragExports, exportName, view, width, height)
   // Kernel-blind about param arity: spread the broadcast params (mandel's view
   // triple, clifford's rotor quad, ...) after (x, y). A 3-array expands to the
   // same f(x,y,cr,ci,sq) call the mandel page always made.
-  const params = view.map((n) => n | 0);
+  // Preserve JS Numbers. WebAssembly performs the declared parameter coercion:
+  // integer exports receive i32, while f32 exports retain their fractional
+  // values. Pre-coercing with `| 0` silently destroyed typed f32 broadcasts.
+  const params = [...view];
   const out = new Uint32Array(width * height);
   for (let y = 0; y < height; y++) {
     const row = y * width;

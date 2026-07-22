@@ -313,7 +313,11 @@ export async function runWebGPUGrid(wgslText, layout, { width, height, params = 
       };
     }
     const buf = buffers.get(`${inputBinding.group}:${inputBinding.binding}`);
-    device.queue.writeBuffer(buf, p.offset || 0, new Uint32Array([params[p.name] >>> 0]));
+    const offset = p.offset ?? 0;
+    if (!Number.isInteger(offset) || offset < 0 || offset % 4 !== 0) {
+      return { ok: false, reason: `param ${p.name} has invalid aligned offset ${offset}`, adapter: name };
+    }
+    device.queue.writeBuffer(buf, offset, encodedScalar(params[p.name], p));
   }
 
   // --- Bind groups, pipeline, 2D dispatch. ---------------------------------
@@ -497,12 +501,34 @@ export async function initWebGPURender(wgslText, layout, canvas) {
 // draw the fullscreen triangle to the canvas. `viewWords` is the update_view reply
 // triple, in `layout.params` order (center_re, center_im, scale_q). i32 two's-
 // complement bit patterns go straight into the u32 storage buffer via Int32Array.
+function encodedScalar(value, param) {
+  const scalar = param.scalar || "I32";
+  if (param.width !== undefined && param.width !== 4) {
+    throw new Error(`unsupported ${scalar} parameter width ${param.width}`);
+  }
+  if (scalar === "F32") return new Float32Array([Number(value)]);
+  if (scalar === "U32") return new Uint32Array([Number(value) >>> 0]);
+  if (scalar === "I32") return new Int32Array([Number(value) | 0]);
+  throw new Error(`unsupported shader parameter scalar ${scalar}`);
+}
+
+function writeTypedParams(queue, inputBuf, params, values) {
+  if (params.length !== values.length) {
+    throw new Error(`layout names ${params.length} parameters but caller supplied ${values.length}`);
+  }
+  for (let i = 0; i < params.length; i++) {
+    const offset = params[i].offset ?? 0;
+    if (!Number.isInteger(offset) || offset < 0 || offset % 4 !== 0) {
+      throw new Error(`shader parameter offset must be a non-negative aligned integer; got ${offset}`);
+    }
+    queue.writeBuffer(inputBuf, offset, encodedScalar(values[i], params[i]));
+  }
+}
+
 export function renderFrame(handle, viewWords) {
   const { device, queue, ctx, displayPipeline, inputBuf, bindGroup, layout } = handle;
   const params = layout.params || [];
-  for (let i = 0; i < params.length; i++) {
-    queue.writeBuffer(inputBuf, params[i].offset || 0, new Int32Array([viewWords[i] | 0]));
-  }
+  writeTypedParams(queue, inputBuf, params, viewWords);
   const view = ctx.getCurrentTexture().createView();
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginRenderPass({
@@ -525,9 +551,7 @@ export async function verifyView(handle, viewWords) {
   const { device, queue, verifyPipeline, inputBuf, bindGroup, layout, width, height } = handle;
   const w = width, h = height;
   const params = layout.params || [];
-  for (let i = 0; i < params.length; i++) {
-    queue.writeBuffer(inputBuf, params[i].offset || 0, new Int32Array([viewWords[i] | 0]));
-  }
+  writeTypedParams(queue, inputBuf, params, viewWords);
 
   const tex = device.createTexture({
     size: { width: w, height: h },

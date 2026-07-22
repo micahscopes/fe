@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Fe CGA inversion distance estimator</title>
+  <style>
+    body { margin: 0; background: #0d1117; color: #e6edf3; font: 15px system-ui; }
+    main { max-width: 760px; margin: auto; padding: 32px 20px; }
+    canvas { width: 100%; max-width: 512px; image-rendering: pixelated; background: #000; }
+    .banner { border-left: 5px solid #bf8700; padding: 14px; background: #161b22; margin: 18px 0; }
+    .green { border-color: #2ea043; } .red { border-color: #da3633; }
+    pre { overflow: auto; padding: 12px; background: #161b22; font-size: 12px; }
+    .muted { color: #8b949e; }
+  </style>
+</head>
+<body><main>
+  <h1>Fe CGA inversion distance estimator</h1>
+  <p class="muted">A scalarized fixed Cl(4,1) inversion, compiled from Fe through Sonatina Render to browser WebGPU.</p>
+  <div id="banner" class="banner"><b id="state">AMBER</b> <span id="detail">loading compiler artifacts...</span></div>
+  <canvas id="view" width="128" height="128"></canvas>
+  <p id="meta" class="muted"></p>
+  <details><summary>Fe source</summary><pre id="source"></pre></details>
+  <details><summary>WGSL</summary><pre id="wgsl"></pre></details>
+</main><script type="module" src="./main.js"></script></body>
+</html>

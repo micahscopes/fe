@@ -55,6 +55,7 @@ def main():
         "webgpu-keystone": "gen_webgpu_demo",
         "webgpu-mandelbrot": "gen_mandelbrot_demo",
         "webgpu-mandelbrot-interactive": "gen_mandelbrot_interactive_demo",
+        "webgpu-cga-inversion": "gen_cga_inversion_demo",
     }
     for demo, example in generators.items():
         gen = os.path.join(ROOT, demo, "gen")
@@ -67,6 +68,7 @@ def main():
         print(f"  keystone:    http://localhost:{PORT}/webgpu-keystone/")
         print(f"  mandelbrot:  http://localhost:{PORT}/webgpu-mandelbrot/")
         print(f"  interactive: http://localhost:{PORT}/webgpu-mandelbrot-interactive/")
+        print(f"  CGA inversion: http://localhost:{PORT}/webgpu-cga-inversion/")
         print("  (Ctrl-C to stop)")
         try:
             httpd.serve_forever()
