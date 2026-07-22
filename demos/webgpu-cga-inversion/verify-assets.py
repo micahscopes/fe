@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPU-free schema preflight for generated D1 browser artifacts.
+"""GPU-free schema preflight for generated typed-CGA browser artifacts.
 
 This does not execute wasm or WebGPU and therefore does not earn acceptance.
 """
@@ -13,7 +13,7 @@ GEN = HERE / "gen"
 required = ["layout.json", "reference.json", "kernel.fe", "frag.wgsl", "frag.wasm"]
 missing = [name for name in required if not (GEN / name).is_file()]
 if missing:
-    raise SystemExit(f"missing generated D1 artifacts: {', '.join(missing)}")
+    raise SystemExit(f"missing generated CGA artifacts: {', '.join(missing)}")
 
 layout = json.loads((GEN / "layout.json").read_text())
 reference = json.loads((GEN / "reference.json").read_text())
@@ -53,10 +53,17 @@ assert reference["sky_pixels"] + reference["hit_pixels"] == reference["width"] *
 )
 assert reference["shape"] == "inverted_offset_torus_cyclide"
 assert reference["inversion_center_runtime"] is True
-assert reference["algebra"] == "scalarized unit-sphere inversion, not recursive D2"
+assert reference["algebra"] == "typed support-specialized recursive Cl(4,1) S*P*S"
 kernel = (GEN / "kernel.fe").read_text()
-for token in ["inv_cx", "inv_cy", "ring_radius", "safe_rho2"]:
+for token in [
+    "recursive type fn MvTF",
+    "sandwich_support_cl41",
+    "let sandwich: MvTF<5>",
+    "raw_16 - raw_8",
+    "safe_weight",
+    "ring_radius",
+]:
     assert token in kernel, f"generated kernel lacks runtime-center cyclide token {token!r}"
 wgsl = (GEN / "frag.wgsl").read_text()
 assert "@fragment" in wgsl and "loop" in wgsl and "sqrt(" in wgsl
-print("D1 browser artifact schema preflight: ok (not execution acceptance)")
+print("typed-CGA browser artifact schema preflight: ok (not execution acceptance)")

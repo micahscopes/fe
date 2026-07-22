@@ -211,7 +211,7 @@ fn main() {
         "view": [CAM_X, CAM_Y, ZOOM], "inversion_center": [INV_CX, INV_CY],
         "parameter_types": ["F32", "F32", "F32", "F32", "F32"],
         "shape": "inverted_offset_torus_cyclide",
-        "algebra": "scalarized unit-sphere inversion, not recursive D2",
+        "algebra": "typed support-specialized recursive Cl(4,1) S*P*S",
         "inversion_center_runtime": true,
         "fnv1a32": hash, "sky_pixels": sky_count, "hit_pixels": hit_count,
         "upper_pixels": upper_count, "lower_pixels": lower_count,
@@ -516,7 +516,7 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
     assert_eq!(reference["shape"], "inverted_offset_torus_cyclide");
     assert_eq!(
         reference["algebra"],
-        "scalarized unit-sphere inversion, not recursive D2"
+        "typed support-specialized recursive Cl(4,1) S*P*S"
     );
     assert_eq!(reference["inversion_center_runtime"], true);
     assert!(
