@@ -1,4 +1,4 @@
-//! Package the committed two-sphere D1 CGA inversion Render fixture for a browser page.
+//! Package the scalarized D1 runtime-center cyclide Render fixture for a browser page.
 //!
 //! Every compiler, ABI, wasm, and full-frame oracle gate runs before `gen/` is
 //! created or any artifact is written.
@@ -17,13 +17,16 @@ use sonatina_codegen::isa::spirv::{
 };
 use url::Url;
 
-const SOURCE: &str = include_str!("../tests/fixtures/spirv/cga_inversion_de_render.fe");
-const FRAG_NAME: &str = "cga_inversion_de_render";
+const SOURCE: &str =
+    include_str!("../tests/fixtures/spirv/cga_inversion_cyclide_runtime_center.fe");
+const FRAG_NAME: &str = "cga_inversion_cyclide_runtime_center";
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 128;
 const CAM_X: f32 = 0.0;
 const CAM_Y: f32 = 0.0;
 const ZOOM: f32 = 0.0125;
+const INV_CX: f32 = 0.5;
+const INV_CY: f32 = 0.0;
 
 fn main() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -34,7 +37,7 @@ fn main() {
     let gen_dir = repo_root.join("demos/webgpu-cga-inversion/gen");
 
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///gen_cga_inversion_de_render.fe").unwrap();
+    let url = Url::parse("file:///gen_cga_inversion_cyclide_runtime_center.fe").unwrap();
     db.workspace()
         .touch(&mut db, url.clone(), Some(SOURCE.to_string()));
     let file = db
@@ -77,14 +80,14 @@ fn main() {
     assert_eq!((input.group, input.binding), (0, 1));
     assert_eq!(input.access, Access::Read);
     assert_eq!(
-        input.span, 12,
+        input.span, 20,
         "member span and allocation stride are separate ABI facts"
     );
     assert_eq!(
-        input.stride, 12,
-        "D1 tightly packs three f32 broadcast values"
+        input.stride, 20,
+        "D1 tightly packs five f32 broadcast values"
     );
-    assert_eq!(input.members.len(), 3);
+    assert_eq!(input.members.len(), 5);
     assert_eq!(layout.builtin_inputs.len(), 2);
     assert_eq!(layout.builtin_inputs[0].arg_index, 0);
     assert_eq!(layout.builtin_inputs[0].scalar, SpirvScalarKind::I32);
@@ -98,7 +101,7 @@ fn main() {
         layout.builtin_inputs[1].source,
         SpirvBuiltinSource::FragmentPositionY
     );
-    let param_names = ["cam_x", "cam_y", "zoom"];
+    let param_names = ["cam_x", "cam_y", "zoom", "inv_cx", "inv_cy"];
     let mut params = Vec::new();
     for (index, (member, name)) in input.members.iter().zip(param_names).enumerate() {
         assert_eq!(member.arg_index, index as u32 + 2);
@@ -124,41 +127,49 @@ fn main() {
                 WasmTy::I32,
                 WasmTy::F32,
                 WasmTy::F32,
+                WasmTy::F32,
+                WasmTy::F32,
                 WasmTy::F32
             ],
             vec![WasmTy::I32]
         ),
-        "D1 wasm export must be exactly (i32,i32,f32,f32,f32)->i32"
+        "D1 wasm export must be exactly (i32,i32,f32,f32,f32,f32,f32)->i32"
     );
 
     let frame = run_wasm_frame(&wasm);
     let mut sky_count = 0usize;
-    let mut material_a_count = 0usize;
-    let mut material_b_count = 0usize;
+    let mut upper_count = 0usize;
+    let mut lower_count = 0usize;
     let mut distinct = HashSet::new();
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let got = frame[(y * WIDTH + x) as usize];
-            let (expected, material) = oracle(x as i32, y as i32, CAM_X, CAM_Y, ZOOM);
+            let (expected, material) =
+                oracle(x as i32, y as i32, CAM_X, CAM_Y, ZOOM, INV_CX, INV_CY);
             assert_eq!(got, expected, "wasmtime/oracle mismatch at ({x},{y})");
             distinct.insert(got);
             match material {
                 0 => sky_count += 1,
-                1 => material_a_count += 1,
-                2 => material_b_count += 1,
+                1 => upper_count += 1,
+                2 => lower_count += 1,
                 other => panic!("unexpected oracle material {other}"),
             }
         }
     }
     assert!(
-        sky_count > 0 && material_a_count > 0 && material_b_count > 0,
-        "D1 frame must contain sky and both inverted spheres"
+        sky_count > 0 && upper_count > 0 && lower_count > 0,
+        "D1 cyclide frame must contain sky and both palette halves"
     );
     assert!(
         distinct.len() >= 8,
         "D1 frame must expose at least eight colors"
     );
-    let hit_count = material_a_count + material_b_count;
+    let hit_count = upper_count + lower_count;
+    assert_eq!(
+        sky_count + hit_count,
+        (WIDTH * HEIGHT) as usize,
+        "D1 classification must cover the complete 128x128 frame"
+    );
     let hash = fnv1a32(&frame);
 
     let provenance = provenance();
@@ -197,9 +208,13 @@ fn main() {
     .unwrap();
     let reference_json = serde_json::to_string_pretty(&serde_json::json!({
         "fragment": FRAG_NAME, "width": WIDTH, "height": HEIGHT,
-        "view": [CAM_X, CAM_Y, ZOOM], "view_types": ["F32", "F32", "F32"],
+        "view": [CAM_X, CAM_Y, ZOOM], "inversion_center": [INV_CX, INV_CY],
+        "parameter_types": ["F32", "F32", "F32", "F32", "F32"],
+        "shape": "inverted_offset_torus_cyclide",
+        "algebra": "scalarized unit-sphere inversion, not recursive D2",
+        "inversion_center_runtime": true,
         "fnv1a32": hash, "sky_pixels": sky_count, "hit_pixels": hit_count,
-        "material_a_pixels": material_a_count, "material_b_pixels": material_b_count,
+        "upper_pixels": upper_count, "lower_pixels": lower_count,
         "distinct_colors": distinct.len(),
         "runtime": "wasmtime executing Fe-compiled wasm; every pixel checked against independent Rust f32 oracle",
         "provenance": provenance,
@@ -214,7 +229,7 @@ fn main() {
     write(&gen_dir.join("layout.json"), layout_json.as_bytes());
     write(&gen_dir.join("reference.json"), reference_json.as_bytes());
     eprintln!(
-        "gen_cga_inversion_demo: wrote 5 gated artifacts to {}; frame FNV-1a-32={hash} (0x{hash:08x}), sky={sky_count}, A={material_a_count}, B={material_b_count}, colors={}",
+        "gen_cga_inversion_demo: wrote 5 gated artifacts to {}; frame FNV-1a-32={hash} (0x{hash:08x}), sky={sky_count}, upper={upper_count}, lower={lower_count}, colors={}",
         gen_dir.display(),
         distinct.len()
     );
@@ -319,13 +334,13 @@ fn run_wasm_frame(bytes: &[u8]) -> Vec<u32> {
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("zero-import instance");
     let f = instance
-        .get_typed_func::<(i32, i32, f32, f32, f32), i32>(&mut store, FRAG_NAME)
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32), i32>(&mut store, FRAG_NAME)
         .expect("exact typed D1 export");
     let mut frame = Vec::with_capacity((WIDTH * HEIGHT) as usize);
     for y in 0..HEIGHT as i32 {
         for x in 0..WIDTH as i32 {
             frame.push(
-                f.call(&mut store, (x, y, CAM_X, CAM_Y, ZOOM))
+                f.call(&mut store, (x, y, CAM_X, CAM_Y, ZOOM, INV_CX, INV_CY))
                     .expect("D1 wasm pixel") as u32,
             );
         }
@@ -333,7 +348,15 @@ fn run_wasm_frame(bytes: &[u8]) -> Vec<u32> {
     frame
 }
 
-fn oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> (u32, u8) {
+fn oracle(
+    px: i32,
+    py: i32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+    inv_cx: f32,
+    inv_cy: f32,
+) -> (u32, u8) {
     let sx = (px as f32 - 64.0) * zoom;
     let sy = (py as f32 - 64.0) * zoom;
     let rz = 1.8_f32;
@@ -341,38 +364,36 @@ fn oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> (u32, u8) {
     let (rdx, rdy, rdz) = (sx * inv_len, sy * inv_len, rz * inv_len);
     let mut t = 0.0_f32;
     let mut i = 0_i32;
-    while i < 64 {
+    while i < 72 {
         let (x, y, z) = (cam_x + rdx * t, cam_y + rdy * t, -4.0 + rdz * t);
-        let vx = x - 0.5;
-        let rho2 = vx * vx + y * y + z * z;
-        let (qx, qy, qz) = (0.5 + vx / rho2, y / rho2, z / rho2);
-        let ax = qx + 0.65;
-        let ay = qy + 0.30;
-        let distance_a = (ax * ax + ay * ay + qz * qz).sqrt() - 0.27;
-        let bx = qx + 0.65;
-        let by = qy - 0.30;
-        let distance_b = (bx * bx + by * by + qz * qz).sqrt() - 0.27;
-        let a_is_closer = distance_a < distance_b;
-        let base = if a_is_closer { distance_a } else { distance_b };
-        let distance = base * rho2;
-        t = t + distance * 0.2;
-        if distance < 0.0025 {
-            let shade = 32 + i * 3;
-            if a_is_closer {
+        let vx = x - inv_cx;
+        let vy = y - inv_cy;
+        let rho2 = vx * vx + vy * vy + z * z;
+        let safe_rho2 = if rho2 < 0.0004 { 0.0004 } else { rho2 };
+        let (qx, qy, qz) = (
+            inv_cx + vx / safe_rho2,
+            inv_cy + vy / safe_rho2,
+            z / safe_rho2,
+        );
+        let tx = qx + 0.62;
+        let ty = qy - 0.08;
+        let ring_radius = (tx * tx + ty * ty).sqrt() - 0.58;
+        let base = (ring_radius * ring_radius + qz * qz).sqrt() - 0.17;
+        let distance = base * safe_rho2;
+        t = t + distance * 0.18;
+        if distance < 0.0022 {
+            let shade = 38 + i * 3;
+            if qy > 0.0 {
                 return (
-                    (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32)
-                        as u32,
+                    (shade + 88 * 256 + (255 - shade) * 65_536 - 16_777_216_i32) as u32,
                     1,
                 );
             }
-            return (
-                (224 + (shade + 16) * 256 + shade * 65_536 - 16_777_216_i32) as u32,
-                2,
-            );
+            return ((56 + shade * 256 + 224 * 65_536 - 16_777_216_i32) as u32, 2);
         }
         i += 1;
     }
-    ((8 + 12 * 256 + 24 * 65_536 - 16_777_216_i32) as u32, 0)
+    ((7 + 11 * 256 + 25 * 65_536 - 16_777_216_i32) as u32, 0)
 }
 
 fn fnv1a32(frame: &[u32]) -> u32 {
@@ -439,16 +460,18 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
     assert_eq!(input["group"], 0);
     assert_eq!(input["binding"], 1);
     assert_eq!(input["access"], "Read");
-    assert_eq!(input["span"], 12);
-    assert_eq!(input["stride"], 12);
+    assert_eq!(input["span"], 20);
+    assert_eq!(input["stride"], 20);
 
     let params = layout["params"].as_array().expect("typed params array");
-    assert_eq!(params.len(), 3);
-    for (param, (name, arg_index, offset)) in
-        params
-            .iter()
-            .zip([("cam_x", 2, 0), ("cam_y", 3, 4), ("zoom", 4, 8)])
-    {
+    assert_eq!(params.len(), 5);
+    for (param, (name, arg_index, offset)) in params.iter().zip([
+        ("cam_x", 2, 0),
+        ("cam_y", 3, 4),
+        ("zoom", 4, 8),
+        ("inv_cx", 5, 12),
+        ("inv_cy", 6, 16),
+    ]) {
         assert_eq!(param["name"], name);
         assert_eq!(param["arg_index"], arg_index);
         assert_eq!(param["offset"], offset);
@@ -474,9 +497,20 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
     assert_eq!(reference["width"], WIDTH);
     assert_eq!(reference["height"], HEIGHT);
     assert_eq!(
-        reference["view_types"],
-        serde_json::json!(["F32", "F32", "F32"])
+        reference["parameter_types"],
+        serde_json::json!(["F32", "F32", "F32", "F32", "F32"])
     );
+    assert_eq!(reference["view"], serde_json::json!([CAM_X, CAM_Y, ZOOM]));
+    assert_eq!(
+        reference["inversion_center"],
+        serde_json::json!([INV_CX, INV_CY])
+    );
+    assert_eq!(reference["shape"], "inverted_offset_torus_cyclide");
+    assert_eq!(
+        reference["algebra"],
+        "scalarized unit-sphere inversion, not recursive D2"
+    );
+    assert_eq!(reference["inversion_center_runtime"], true);
     assert!(
         reference["sky_pixels"]
             .as_u64()
@@ -487,14 +521,18 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
             .as_u64()
             .is_some_and(|count| count > 0)
     );
-    let material_a = reference["material_a_pixels"]
+    let upper = reference["upper_pixels"]
         .as_u64()
-        .expect("material A pixel count");
-    let material_b = reference["material_b_pixels"]
+        .expect("upper palette pixel count");
+    let lower = reference["lower_pixels"]
         .as_u64()
-        .expect("material B pixel count");
-    assert!(material_a > 0 && material_b > 0);
-    assert_eq!(reference["hit_pixels"].as_u64(), Some(material_a + material_b));
+        .expect("lower palette pixel count");
+    assert!(upper > 0 && lower > 0);
+    assert_eq!(reference["hit_pixels"].as_u64(), Some(upper + lower));
+    assert_eq!(
+        reference["sky_pixels"].as_u64(),
+        Some((WIDTH * HEIGHT) as u64 - upper - lower)
+    );
     assert!(
         reference["distinct_colors"]
             .as_u64()
@@ -509,7 +547,10 @@ fn provenance() -> serde_json::Value {
     let fe_rev = std::env::var("FE_CGA_SOURCE_REV")
         .expect("use demos/webgpu-cga-inversion/generate.sh to capture clean Fe provenance");
     let current_fe_rev = git_rev(env!("CARGO_MANIFEST_DIR"));
-    assert_eq!(fe_rev, current_fe_rev, "Fe HEAD changed after generator preflight");
+    assert_eq!(
+        fe_rev, current_fe_rev,
+        "Fe HEAD changed after generator preflight"
+    );
     assert_only_cargo_lock_changed(env!("CARGO_MANIFEST_DIR"));
     let fe_untracked_present = match std::env::var("FE_CGA_SOURCE_UNTRACKED_PRESENT").as_deref() {
         Ok("0") => false,
