@@ -58,7 +58,9 @@ pub fn cga_inversion_cyclide_runtime_center(
         // Conservative stepping handles the strong curvature near the neck.
         t = t + distance * 0.18
         if distance < 0.0022 {
-            let shade: i32 = 38 + i * 3
+            // Bucket adjacent hit iterations so permitted f32 contraction/sqrt
+            // variance across browser GPU implementations cannot flicker color.
+            let shade: i32 = 38 + (i / 4) * 12
             let upper: bool = qy > 0.0
             if upper {
                 let upper_color: i32 = shade + 88 * 256 + (255 - shade) * 65536 + -16777216
