@@ -73,6 +73,27 @@ pub struct TypeNormalizer<'db> {
     projection_steps: usize,
 }
 
+/// Finishes const payloads exposed by a completed type-fn reduction without
+/// re-entering type-fn or projection normalization. Each node is visited once;
+/// only const leaves can change.
+fn normalize_staged_const_payloads<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+) -> TyId<'db> {
+    struct PayloadNormalizer;
+    impl<'db> TyFolder<'db> for PayloadNormalizer {
+        fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
+            let folded = ty.super_fold_with(db, self);
+            if matches!(folded.data(db), TyData::ConstTy(_)) {
+                normalize_const_tys_for_comparison(db, folded)
+            } else {
+                folded
+            }
+        }
+    }
+    ty.fold_with(db, &mut PayloadNormalizer)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct AssumptionUnifyInput<T> {
     pub(crate) lhs_self: T,
@@ -224,7 +245,14 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                 // does not survive body checking. Symbolic subjects stay opaque.
                 let folded = ty.super_fold_with(db, self);
                 if super::type_fn::type_fn_app_subject_is_ground(self.db, folded) {
-                    super::type_fn::normalize_type_fn_app(self.db, folded)
+                    // Unfolding can expose staged const payloads whose
+                    // parameters only became ground during the reduction.
+                    // Run only the ordinary ground-const pass on the resulting
+                    // normal form. Do not re-enter type-fn/projection folding.
+                    normalize_staged_const_payloads(
+                        self.db,
+                        super::type_fn::normalize_type_fn_app(self.db, folded),
+                    )
                 } else {
                     folded
                 }

@@ -21,7 +21,7 @@ use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution::{NameDomain, resolve_ident_to_bucket};
 use crate::analysis::ty::const_expr::ConstExpr;
 use crate::analysis::ty::const_ty::{ConstTyData, ConstTyId, EvaluatedConstTy};
-use crate::analysis::ty::diagnostics::{TyLowerDiag, TypeFnWfError};
+use crate::analysis::ty::diagnostics::{TyDiagCollection, TyLowerDiag, TypeFnWfError};
 use crate::analysis::ty::fold::{TyFoldable, TyFolder};
 use crate::analysis::ty::trait_resolution::PredicateListId;
 use crate::analysis::ty::ty_def::{
@@ -29,6 +29,7 @@ use crate::analysis::ty::ty_def::{
     kind_mentions_constraint, type_fn_sig,
 };
 use crate::analysis::ty::ty_lower::{lower_hir_ty, lower_kind};
+use crate::analysis::ty::ty_error::emit_invalid_ty_error;
 use crate::core::hir_def::scope_graph::ScopeId;
 use crate::core::hir_def::{
     ArithBinOp, BinOp, Body, ConstGenericArgValue, Expr, GenericArg, GenericParam, IdentId,
@@ -75,6 +76,10 @@ pub struct TypeFnWfData<'db> {
     pub subject_idx: usize,
     /// The distilled arms, in source order.
     pub arms: Vec<TypeFnArmData<'db>>,
+    /// Exact anonymous-const bodies admitted by the staged payload grammar.
+    /// Lowering consults this syntax-only witness rather than inferring intent
+    /// from the enclosing scope.
+    pub staged_payloads: Vec<Body<'db>>,
 }
 
 /// Result of the `recursive type fn` well-formedness check.
@@ -90,8 +95,56 @@ pub struct TypeFnWfResult<'db> {
 /// Runs the definition-site well-formedness check for a `recursive type fn`
 /// (spec slice S1.4). Memoized: the distilled output is stable HIR-derived data.
 #[salsa::tracked(return_ref)]
+pub(crate) fn type_fn_syntax_wf<'db>(
+    db: &'db dyn HirAnalysisDb,
+    def: TypeFnDef<'db>,
+) -> TypeFnWfResult<'db> {
+    Checker::new(db, def).run_syntax()
+}
+
+#[salsa::tracked(return_ref)]
 pub fn type_fn_wf<'db>(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> TypeFnWfResult<'db> {
-    Checker::new(db, def).run()
+    let syntax = type_fn_syntax_wf(db, def);
+    let mut result = syntax.clone();
+    let Some(data) = result.data.as_ref() else {
+        return result;
+    };
+
+    let assumptions = PredicateListId::empty_list(db);
+    let scope = def.scope();
+    let mut has_invalid_arm = false;
+    for (arm_idx, arm) in data.arms.iter().enumerate() {
+        let lowered = lower_hir_ty(db, arm.rhs_ty, scope, assumptions);
+        let span: crate::span::DynLazySpan<'db> =
+            def.span().body().match_().arms().arm(arm_idx).ty().into();
+        if let Some((_, expected, given)) = find_unsaturated_type_fn(db, lowered) {
+            result.diags.push(TyLowerDiag::TypeFnNotSaturated {
+                span: span.clone(),
+                expected,
+                given,
+            });
+        }
+        if lowered.has_invalid(db) {
+            has_invalid_arm = true;
+            if let Some(TyDiagCollection::Ty(diag)) =
+                emit_invalid_ty_error(db, lowered, span)
+            {
+                result.diags.push(diag);
+            }
+            continue;
+        }
+        let heads = collect_type_fn_heads(db, lowered);
+        if heads.iter().any(|d| *d != def) || heads.len() != arm.self_calls.len() {
+            result.diags.push(TyLowerDiag::TypeFnIllFormed {
+                primary: span,
+                error: TypeFnWfError::ForeignTypeFnRefInArm,
+            });
+        }
+    }
+    if has_invalid_arm || !result.diags.is_empty() {
+        result.data = None;
+    }
+    result
 }
 
 /// How an arm-RHS type path classifies for the self-call / no-chaining rules.
@@ -120,6 +173,7 @@ struct Checker<'db> {
     /// "at least one self-call" rule (spec sec 1.1 rule 5) is about presence, so
     /// an ill-formed self-call still satisfies it (and reports its own error).
     saw_self_call: bool,
+    staged_payloads: Vec<Body<'db>>,
 }
 
 impl<'db> Checker<'db> {
@@ -131,6 +185,7 @@ impl<'db> Checker<'db> {
             subject_name: None,
             type_param_names: vec![],
             saw_self_call: false,
+            staged_payloads: vec![],
         }
     }
 
@@ -149,8 +204,7 @@ impl<'db> Checker<'db> {
             .into()
     }
 
-    fn run(mut self) -> TypeFnWfResult<'db> {
-        let db = self.db;
+    fn run_syntax(mut self) -> TypeFnWfResult<'db> {
         let def = self.def;
 
         let subject_idx = self.check_subject_param();
@@ -165,55 +219,11 @@ impl<'db> Checker<'db> {
                 def,
                 subject_idx: subject_idx.unwrap(),
                 arms,
+                staged_payloads: self.staged_payloads.clone(),
             })
         } else {
             None
         };
-
-        // Only when everything above is well-formed do we lower the arm RHS
-        // types; this exercises the S1.3 saturation walk on the definition
-        // itself (catching an unsaturated self- or nested occurrence) and is
-        // safe because the whitelisted subjects have already been validated
-        // syntactically, so no body block reaches the const evaluator.
-        if let Some(ref data) = data {
-            let assumptions = PredicateListId::empty_list(db);
-            let scope = def.scope();
-            for (arm_idx, arm) in data.arms.iter().enumerate() {
-                let lowered = lower_hir_ty(db, arm.rhs_ty, scope, assumptions);
-                if let Some((_, expected, given)) = find_unsaturated_type_fn(db, lowered) {
-                    self.diags.push(TyLowerDiag::TypeFnNotSaturated {
-                        span: self.arm_ty_span(arm_idx),
-                        expected,
-                        given,
-                    });
-                }
-
-                // Hole 2 (Fable steering finding 2): every `TyBase::TypeFn` head
-                // in the lowered RHS must be THIS def, and the number of
-                // self-referential heads must equal the syntactic self-call
-                // count. This closes qualified-path / alias / foreign routes that
-                // bypass the single-segment `classify_path` self-detection and
-                // could otherwise form a `normalize(F) -> normalize(G) ->
-                // normalize(F)` salsa cycle before normalization ever runs.
-                // The cross-check reads type-fn HEADS off the lowered spine; a
-                // kind error in the RHS collapses a spine into `Invalid` and
-                // would drop a head, so only run it on a valid lowering (a
-                // kind-ill-typed RHS is reported at its use sites already).
-                if !lowered.has_invalid(db) {
-                    let heads = collect_type_fn_heads(db, lowered);
-                    if heads.iter().any(|d| *d != def) || heads.len() != arm.self_calls.len() {
-                        self.diags.push(TyLowerDiag::TypeFnIllFormed {
-                            primary: self.arm_ty_span(arm_idx),
-                            error: TypeFnWfError::ForeignTypeFnRefInArm,
-                        });
-                    }
-                }
-            }
-        }
-
-        // If lowering surfaced a residual saturation error, the definition is no
-        // longer well-formed: withhold the distilled data.
-        let data = if self.diags.is_empty() { data } else { None };
 
         TypeFnWfResult {
             data,
@@ -516,10 +526,79 @@ impl<'db> Checker<'db> {
                     _ => false,
                 }
             }
+            Some(Expr::Call(callee, args)) => {
+                let approved = self.is_staged_payload_const_fn(body, callee)
+                    && args.iter().all(|arg| {
+                        self.is_staged_payload_arg(body, arg.expr, subject, l)
+                    });
+                if approved {
+                    self.staged_payloads.push(body);
+                }
+                approved
+            }
             _ => false,
         };
         if !ok {
             self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmConstArg);
+        }
+    }
+
+    /// Whether `callee` names an ordinary `const fn` that may be staged in a
+    /// result payload.  Resolution is deliberately early and syntactic: this
+    /// check does not lower or execute the call.
+    fn is_staged_payload_const_fn(
+        &self,
+        body: Body<'db>,
+        callee: crate::core::hir_def::ExprId,
+    ) -> bool {
+        let Some(Expr::Path(Partial::Present(path))) =
+            body.exprs(self.db)[callee].clone().to_opt()
+        else {
+            return false;
+        };
+        let bucket = resolve_ident_to_bucket(self.db, path, self.def.scope());
+        let Some(scope) = bucket
+            .pick(NameDomain::VALUE)
+            .as_ref()
+            .ok()
+            .and_then(|res| res.scope())
+        else {
+            return false;
+        };
+        matches!(scope, ScopeId::Item(ItemKind::Func(func)) if func.is_const(self.db))
+    }
+
+    /// The intentionally small argument language for a staged payload call:
+    /// literals, the bare recursion subject, or one directly checked subject
+    /// step.  Nested calls and composed arithmetic remain rejected.
+    fn is_staged_payload_arg(
+        &self,
+        body: Body<'db>,
+        expr: crate::core::hir_def::ExprId,
+        subject: IdentId<'db>,
+        l: &BigUint,
+    ) -> bool {
+        match body.exprs(self.db)[expr].clone().to_opt() {
+            Some(Expr::Lit(LitKind::Int(_))) => true,
+            Some(Expr::Path(Partial::Present(path))) => path.as_ident(self.db) == Some(subject),
+            Some(Expr::Bin(lhs, rhs, BinOp::Arith(op)))
+                if expr_is_ident(self.db, body, lhs, subject) =>
+            {
+                let Some(k) = expr_int_lit(self.db, body, rhs) else {
+                    return false;
+                };
+                match op {
+                    ArithBinOp::Sub => {
+                        *k.data(self.db) >= BigUint::from(1u32) && l >= k.data(self.db)
+                    }
+                    ArithBinOp::Div => {
+                        *k.data(self.db) >= BigUint::from(2u32)
+                            && *l >= BigUint::from(1u32)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 
@@ -1347,11 +1426,57 @@ impl<'db> TyFolder<'db> for Unfolder<'db, '_> {
                 ConstTyData::TyParam(p, _) if p.idx == self.subject_idx => {
                     self.subst_args[self.subject_idx]
                 }
-                ConstTyData::Abstract(..) => self.result_subject_const(*cid).unwrap_or(ty),
+                ConstTyData::Abstract(..) => self
+                    .result_subject_const(*cid)
+                    // A WF-approved payload call may already have been
+                    // lowered to an abstract const-expression graph.  Fold its
+                    // captured const parameters structurally; normal
+                    // TypeNormalizer remains responsible for evaluating the
+                    // resulting ground graph.
+                    .unwrap_or_else(|| ty.super_fold_with(db, self)),
                 ConstTyData::UnEvaluated { body, .. } => match body_root_expr(db, *body) {
                     Some(Expr::Path(Partial::Present(_))) => self.subst_args[self.subject_idx],
                     Some(Expr::Lit(LitKind::Int(m))) => {
                         make_subject_ty(db, m.data(db).clone(), cid.ty(db))
+                    }
+                    // A WF-approved payload call stays unevaluated here.  Its
+                    // captured generic arguments are substituted by the normal
+                    // structural folder; ordinary TypeNormalizer evaluates it
+                    // later, once those arguments are ground.
+                    Some(Expr::Call(..)) => {
+                        let ConstTyData::UnEvaluated {
+                            body,
+                            ty: payload_ty,
+                            const_def,
+                            generic_args,
+                            preserve_unevaluated: _,
+                        } = cid.data(db)
+                        else {
+                            unreachable!()
+                        };
+                        let generic_args = generic_args
+                            .iter()
+                            .copied()
+                            .map(|arg| arg.fold_with(db, self))
+                            .collect();
+                        TyId::const_ty(
+                            db,
+                            ConstTyId::new(
+                                db,
+                                ConstTyData::UnEvaluated {
+                                    body: *body,
+                                    ty: *payload_ty,
+                                    const_def: *const_def,
+                                    generic_args,
+                                    // The type-fn body was initially lowered in
+                                    // metadata-only mode to prevent premature
+                                    // evaluation.  Ground substitution is now
+                                    // complete, so hand the staged payload back
+                                    // to ordinary normalization.
+                                    preserve_unevaluated: false,
+                                },
+                            ),
+                        )
                     }
                     _ => ty,
                 },
@@ -1563,23 +1688,174 @@ recursive type fn Bad<const N: usize>() -> (*) {
         );
     }
 
-    /// Hole 1: even the bare subject inside a self-call is fine, but a helper-ish
-    /// call `{f(N)}` as a plain const arg is rejected.
     #[test]
-    fn rejects_helper_call_const_arg() {
-        assert_bad(
-            r#"
-struct Wrapper<F, const K: usize> {}
+    fn accepts_staged_const_fn_payload_and_materializes_exact_schedule() {
+        let src = r#"
+struct Zero {}
+struct Term<const I: usize> {}
+struct Add<L, R> {}
 
+const fn helper(_ i: usize) -> usize { i * 3 + 1 }
+const fn payload(_ i: usize) -> usize {
+    let mut cursor: usize = 0
+    let mut result: usize = 0
+    while cursor < 4 {
+        if cursor == i { result = helper(cursor) }
+        cursor = cursor + 1
+    }
+    result
+}
+
+recursive type fn Schedule<T, const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{payload(N - 1)}>, Schedule<T, {N - 1}>>
+    }
+}
+
+struct Probe {
+    value: Schedule<u8, 4>
+}
+
+fn takes(_ x: Add<Term<10>, Add<Term<7>, Add<Term<4>, Add<Term<1>, Zero>>>>) {}
+fn exact(x: Schedule<u8, 4>) { takes(x) }
+fn takes_term10(_ x: Term<10>) {}
+fn concrete_payload(x: Term<{payload(3)}>) { takes_term10(x) }
+"#;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("staged_payload.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+        let schedule = find_tf(&db, top_mod, "Schedule");
+        assert!(type_fn_wf(&db, schedule).data.is_some());
+        db.assert_no_diags(top_mod);
+    }
+
+    #[test]
+    fn existing_subject_steps_remain_exact_in_result_payloads() {
+        let src = r#"
+struct Zero {}
+struct Term<const I: usize> {}
+struct Add<L, R> {}
+const fn staged(_ i: usize) -> usize { i + 10 }
+recursive type fn Steps<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<7>, Add<Term<N>, Add<Term<{N - 1}>, Add<Term<{N / 2}>, Add<Term<{staged(N - 1)}>, Steps<{N - 1}>>>>>>
+    }
+}
+fn takes(_ x: Add<Term<7>, Add<Term<1>, Add<Term<0>, Add<Term<0>, Add<Term<10>, Zero>>>>>) {}
+fn exact(x: Steps<1>) { takes(x) }
+"#;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("result_steps.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+    }
+
+    #[test]
+    fn direct_staged_schedule_8_has_exact_cardinality_and_boundary_payloads() {
+        let expected = (1usize..=8).fold("Zero".to_string(), |tail, payload| {
+            format!("Add<Term<{payload}>, {tail}>")
+        });
+        assert!(expected.starts_with("Add<Term<8>"));
+        assert!(expected.contains("Add<Term<1>, Zero>"));
+        assert_eq!(expected.matches("Add<Term<").count(), 8);
+
+        let src = format!(
+            r#"
+struct Zero {{}}
+struct Term<const I: usize> {{}}
+struct Add<L, R> {{}}
+const fn payload(_ i: usize) -> usize {{ i + 1 }}
+recursive type fn Schedule<const N: usize>() -> (*) {{
+    match N {{
+        0 => Zero
+        _ => Add<Term<{{payload(N - 1)}}>, Schedule<{{N - 1}}>>
+    }}
+}}
+fn takes(_ x: {expected}) {{}}
+fn exact(x: Schedule<8>) {{ takes(x) }}
+"#
+        );
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("direct_schedule_8.fe"), &src);
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+    }
+
+    #[test]
+    fn staged_payload_preserves_const_type_errors() {
+        let src = r#"
+struct Zero {}
+struct Term<const I: usize> {}
+struct Add<L, R> {}
+const fn wrong(_ i: usize) -> bool { true }
 recursive type fn Bad<const N: usize>() -> (*) {
     match N {
-        0 => u8
-        _ => Wrapper<Bad<{N - 1}>, {N - 1}>
+        0 => Zero
+        _ => Add<Term<{wrong(N - 1)}>, Bad<{N - 1}>>
+    }
+}
+fn force(_ x: Bad<2>) {}
+"#;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("wrong_payload_type.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+        let bad = find_tf(&db, top_mod, "Bad");
+        let wf = type_fn_wf(&db, bad);
+        assert!(
+            wf.data.is_none(),
+            "an invalid lowered arm must withhold normalized WF data: {:?}",
+            wf.diags
+        );
+
+        assert!(
+            wf.diags
+                .iter()
+                .any(|diag| matches!(diag, TyLowerDiag::ConstTyMismatch { .. })),
+            "expected the staged payload's ordinary const-type mismatch diagnostic; WF={:?}",
+            wf.diags
+        );
+    }
+
+    #[test]
+    fn rejects_non_const_staged_payload_call() {
+        assert_bad(
+            r#"
+struct Zero {}
+struct Term<const I: usize> {}
+struct Add<L, R> {}
+fn payload(_ i: usize) -> usize { i }
+recursive type fn Bad<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{payload(N - 1)}>, Bad<{N - 1}>>
     }
 }
 "#,
             |e| matches!(e, TypeFnWfError::DisallowedArmConstArg),
         );
+    }
+
+    #[test]
+    fn rejects_nested_or_composed_staged_payload_args() {
+        for expr in ["payload(payload(N))", "payload(N + 1)", "payload(N - 1 + 1)"] {
+            let src = format!(
+                r#"
+struct Zero {{}}
+struct Term<const I: usize> {{}}
+struct Add<L, R> {{}}
+const fn payload(_ i: usize) -> usize {{ i }}
+recursive type fn Bad<const N: usize>() -> (*) {{
+    match N {{
+        0 => Zero
+        _ => Add<Term<{{{expr}}}>, Bad<{{N - 1}}>>
+    }}
+}}
+"#
+            );
+            assert_bad(&src, |e| matches!(e, TypeFnWfError::DisallowedArmConstArg));
+        }
     }
 
     /// Hole 2 (Fable steering finding 2): a foreign type-fn reference reached via

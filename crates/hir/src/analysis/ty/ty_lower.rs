@@ -244,7 +244,31 @@ fn lower_opt_const_body<'db>(
         return ConstTyId::invalid(db, InvalidCause::ParseError);
     };
     let Some(path) = const_body_simple_path(db, body) else {
-        return ConstTyId::from_body(db, body, None, None);
+        let staged_identity_args = body
+            .scope()
+            .parent_item(db)
+            .and_then(|item| match item {
+                crate::hir_def::ItemKind::TypeFn(def) => Some(def),
+                _ => None,
+            })
+            .and_then(|def| {
+                super::type_fn::type_fn_syntax_wf(db, def)
+                    .data
+                    .as_ref()
+                    .filter(|data| data.staged_payloads.contains(&body))
+                    .map(|_| collect_generic_params(db, def.into()).params(db).to_vec())
+            });
+        return match staged_identity_args {
+            Some(generic_args) => ConstTyId::from_body_with_generic_args_and_preservation(
+                db,
+                body,
+                None,
+                None,
+                generic_args,
+                true,
+            ),
+            None => ConstTyId::from_body(db, body, None, None),
+        };
     };
 
     let assumptions = with_enclosing_trait_self_predicate(db, scope, assumptions);

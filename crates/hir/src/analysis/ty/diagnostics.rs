@@ -403,11 +403,10 @@ pub enum TypeFnWfError<'db> {
     WhereNotTypeParamBound,
     /// A return kind (`-> (KIND)`) is required (the parser makes it optional).
     MissingReturnKind,
-    /// An arm-RHS `const` generic argument on a non-self-call path is neither an
-    /// integer literal nor the bare subject `N`. Anything richer (e.g.
-    /// `{helper(N)}`) would, after substitution, force an `UnEvaluated` const
-    /// through the CTFE machine, reopening the type-fn -> CTFE edge with no
-    /// termination cover (Fable steering finding 1a). Restricted at WF.
+    /// An arm-RHS `const` generic argument on a non-self-call path is outside
+    /// the staged payload grammar: a literal, bare `N`, checked `N-k`/`N/k`, or
+    /// a direct const-fn call over only those forms. Richer expressions could
+    /// reopen an unchecked type-fn -> CTFE edge. Restricted at WF.
     DisallowedArmConstArg,
     /// The lowered arm RHS contains a `TyBase::TypeFn` head that is not the
     /// defining type fn, or a self-referential head count that does not match the
@@ -486,8 +485,8 @@ impl<'db> TypeFnWfError<'db> {
                 "a `recursive type fn` must declare a return kind (`-> (*)`)".into()
             }
             Self::DisallowedArmConstArg => {
-                "a `const` argument in a `recursive type fn` arm must be an integer literal or the \
-                 bare subject"
+                "a `const` argument in a `recursive type fn` arm is outside the staged payload \
+                 grammar"
                     .into()
             }
             Self::ForeignTypeFnRefInArm => {
@@ -583,9 +582,9 @@ impl<'db> TypeFnWfError<'db> {
                 "add a return kind, e.g. `-> (*)` for a plain type".to_string(),
             ],
             Self::DisallowedArmConstArg => vec![
-                "only an integer literal or the bare subject `N` may appear here; a computed \
-                 const expression would need to run through compile-time evaluation with no \
-                 termination guarantee"
+                "use an integer literal, bare `N`, checked `N - k` / `N / k`, or one direct \
+                 `const fn` call whose arguments use only those forms; nested calls and composed \
+                 arithmetic remain rejected"
                     .to_string(),
             ],
             Self::ForeignTypeFnRefInArm => vec![
