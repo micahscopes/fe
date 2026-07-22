@@ -6,8 +6,8 @@ pub(crate) mod package;
 pub mod pretty;
 pub(crate) mod root_effects;
 pub mod stable_key;
-pub mod transform;
 pub(crate) mod synthetic;
+pub mod transform;
 
 pub use ir::*;
 pub use layout_utils::*;
@@ -20,4 +20,7 @@ pub use pretty::{
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,
     format_runtime_verify_failure,
 };
-pub use transform::{RuntimeAggregateFacts, specialize_pure_inline_stmts};
+pub use transform::{
+    RuntimeAggregateFacts, RuntimeArgFact, RuntimeArgShapeKey, RuntimeScalarConstFacts,
+    runtime_arg_shape_key, specialize_pure_inline_stmts,
+};

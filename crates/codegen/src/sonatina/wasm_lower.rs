@@ -142,6 +142,7 @@ impl FlatShape {
 // injected-expansion cap at the next power of two so larger helper explosions
 // fail shut. Original caller statements are deliberately not charged here.
 const INLINE_VALUE_STMT_BUDGET: usize = 65_536;
+const INLINE_SPECIALIZATION_CACHE_LIMIT: usize = 256;
 
 /// Prepare the body view shared by direct Wasm lowering and Render's Wasm to
 /// SPIR-V translation. This intentionally handles only value-only leaf helpers;
@@ -156,14 +157,27 @@ fn prepare_inline_value_bodies<'db>(
         db: &'db DriverDataBase,
         package: &RuntimePackage<'db>,
         instance: RuntimeInstance<'db>,
-        visiting: &mut HashSet<RuntimeInstance<'db>>,
-        done: &mut FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+        arg_shape: mir::RuntimeArgShapeKey,
+        visiting: &mut HashSet<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey)>,
+        done: &mut FxHashMap<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey), RuntimeBody<'db>>,
+        specialization_work: &mut usize,
     ) -> RuntimeBody<'db> {
-        if let Some(body) = done.get(&instance) {
+        let cache_key = (instance, arg_shape);
+        if let Some(body) = done.get(&cache_key) {
             return body.clone();
         }
+        // The shape key is currently admission scaffolding: it does not yet seed
+        // callee parameters. Once the bounded amount of shape-specific work is
+        // exhausted, fail closed to the unspecialized body instead of repeatedly
+        // traversing distinct shapes that cannot affect the result yet.
+        if cache_key.1.has_known_facts() {
+            if *specialization_work >= INLINE_SPECIALIZATION_CACHE_LIMIT {
+                return instance.body(db);
+            }
+            *specialization_work += 1;
+        }
         let mut body = instance.body(db);
-        if !visiting.insert(instance) {
+        if !visiting.insert(cache_key.clone()) {
             return body;
         }
         let mut expanded = 0usize;
@@ -171,17 +185,28 @@ fn prepare_inline_value_bodies<'db>(
         for block in blocks {
             let mut stmts = Vec::with_capacity(block.stmts.len());
             let mut aggregate_facts = mir::RuntimeAggregateFacts::default();
+            let mut scalar_constants = mir::RuntimeScalarConstFacts::default();
             for stmt in std::mem::take(&mut block.stmts) {
                 let RStmt::Assign {
                     dst,
                     expr: RExpr::Call { callee, args },
                 } = &stmt
                 else {
-                    record_aggregate_fact(&stmt, &mut aggregate_facts);
+                    record_value_fact(&stmt, &mut aggregate_facts, &mut scalar_constants);
                     stmts.push(stmt);
                     continue;
                 };
-                let callee_body = visit(db, package, *callee, visiting, done);
+                let callee_shape =
+                    mir::runtime_arg_shape_key(args, &aggregate_facts, &scalar_constants);
+                let callee_body = visit(
+                    db,
+                    package,
+                    *callee,
+                    callee_shape,
+                    visiting,
+                    done,
+                    specialization_work,
+                );
                 let Some(mut replacement) = inline_value_call(
                     db,
                     package,
@@ -197,39 +222,63 @@ fn prepare_inline_value_bodies<'db>(
                 };
                 expanded += replacement.len();
                 for stmt in &replacement {
-                    record_aggregate_fact(stmt, &mut aggregate_facts);
+                    record_value_fact(stmt, &mut aggregate_facts, &mut scalar_constants);
                 }
                 stmts.append(&mut replacement);
             }
             block.stmts = stmts;
         }
-        visiting.remove(&instance);
-        done.insert(instance, body.clone());
+        visiting.remove(&cache_key);
+        if done.len() < INLINE_SPECIALIZATION_CACHE_LIMIT {
+            done.insert(cache_key, body.clone());
+        }
         body
     }
 
     let mut visiting = HashSet::new();
     let mut done = FxHashMap::default();
+    let mut roots = FxHashMap::default();
+    let mut specialization_work = 0usize;
     for function in package.functions(db) {
-        visit(db, package, function.instance(db), &mut visiting, &mut done);
+        let instance = function.instance(db);
+        let params = instance.body(db).signature.params.len();
+        let shape =
+            mir::RuntimeArgShapeKey(vec![mir::RuntimeArgFact::Unknown; params].into_boxed_slice());
+        let body = visit(
+            db,
+            package,
+            instance,
+            shape,
+            &mut visiting,
+            &mut done,
+            &mut specialization_work,
+        );
+        roots.insert(instance, body);
     }
-    done
+    roots
 }
 
-fn record_aggregate_fact(
+fn record_value_fact(
     stmt: &RStmt<'_>,
-    facts: &mut mir::RuntimeAggregateFacts,
+    aggregates: &mut mir::RuntimeAggregateFacts,
+    constants: &mut mir::RuntimeScalarConstFacts,
 ) {
     let RStmt::Assign { dst, expr } = stmt else {
         return;
     };
     match expr {
         RExpr::AggregateMake { fields, .. } => {
-            facts.insert(*dst, fields.clone());
+            aggregates.insert(*dst, fields.clone());
+        }
+        RExpr::ConstScalar(value) => {
+            constants.insert(*dst, value.clone());
         }
         RExpr::Use(src) => {
-            if let Some(fields) = facts.get(src).cloned() {
-                facts.insert(*dst, fields);
+            if let Some(fields) = aggregates.get(src).cloned() {
+                aggregates.insert(*dst, fields);
+            }
+            if let Some(value) = constants.get(src).cloned() {
+                constants.insert(*dst, value);
             }
         }
         _ => {}
