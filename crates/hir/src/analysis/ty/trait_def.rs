@@ -43,7 +43,11 @@ pub(crate) fn ingot_trait_env<'db>(db: &'db dyn HirAnalysisDb, ingot: Ingot<'db>
 /// projections) often only become unifiable after normalization, and unification
 /// rejects unresolved associated types. The solver normalizes before unifying
 /// candidates, so any filtering here must be an over-approximation.
-#[salsa::tracked(return_ref)]
+#[salsa::tracked(
+    return_ref,
+    cycle_fn = impls_for_trait_def_cycle_recover,
+    cycle_initial = impls_for_trait_def_cycle_initial
+)]
 pub(crate) fn impls_for_trait_def<'db>(
     db: &'db dyn HirAnalysisDb,
     ingot: Ingot<'db>,
@@ -57,6 +61,24 @@ pub(crate) fn impls_for_trait_def<'db>(
     }
 
     out
+}
+
+fn impls_for_trait_def_cycle_initial<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _ingot: Ingot<'db>,
+    _trait_def: Trait<'db>,
+) -> Vec<Binder<ImplementorId<'db>>> {
+    Vec::new()
+}
+
+fn impls_for_trait_def_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &Vec<Binder<ImplementorId<'db>>>,
+    _count: u32,
+    _ingot: Ingot<'db>,
+    _trait_def: Trait<'db>,
+) -> salsa::CycleRecoveryAction<Vec<Binder<ImplementorId<'db>>>> {
+    salsa::CycleRecoveryAction::Iterate
 }
 
 /// Returns all implementors for the given trait inst, searching across a

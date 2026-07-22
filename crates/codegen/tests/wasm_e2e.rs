@@ -307,6 +307,68 @@ fn recursive_mvt1_construct_copy_project_return_executes_on_wasm() {
 }
 
 #[test]
+fn generic_associated_const_type_converges_during_wasm_root_lowering() {
+    // Checking the extern argument constructs the Copy impl environment.
+    // Collecting Emit lowers its associated type and evaluates select(I),
+    // whose body also consults that environment.  This is a legitimate
+    // additive query cycle and must converge to the complete impl set.
+    let source = r#"
+const fn select(_ i: usize) -> usize { i + 1 }
+extern { fn ext(_: f32) -> i32 }
+struct Term<const I: usize> { value: i32 }
+struct Choice<const I: usize> {}
+trait Emit {
+    type Out
+    fn emit() -> i32
+}
+impl<const I: usize> Emit for Choice<I> {
+    type Out = Term<{select(I)}>
+    fn emit() -> i32 { 3 }
+}
+fn takes_term3(_ term: Term<3>) {}
+fn projection_is_term3(term: <Choice<2> as Emit>::Out) { takes_term3(term) }
+pub fn entry(value: f32) -> i32 {
+    let _ = ext(value)
+    <Choice<2> as Emit>::emit()
+}
+"#;
+    let wasm = compile_to_wasm("generic_associated_const_type.fe", source);
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker.func_wrap("fe", "ext", |_value: f32| 0i32).unwrap();
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let entry = instance
+        .get_typed_func::<f32, i32>(&mut store, "entry")
+        .unwrap();
+    assert_eq!(entry.call(&mut store, 0.0).unwrap(), 3);
+}
+
+#[test]
+fn generic_associated_const_cycle_recovery_does_not_invent_missing_impls() {
+    let source = r#"
+const fn select(_ i: usize) -> usize { i + 1 }
+extern { fn ext(_: f32) -> i32 }
+struct Term<const I: usize> {}
+struct Choice<const I: usize> {}
+trait Emit { type Out }
+impl<const I: usize> Emit for Choice<I> { type Out = Term<{select(I)}> }
+struct Missing {}
+trait Needed { fn value() -> i32 }
+pub fn entry(value: f32) -> i32 {
+    let _ = ext(value)
+    <Missing as Needed>::value()
+}
+"#;
+    let error = compile_to_wasm_err("generic_associated_const_missing_impl.fe", source);
+    assert!(
+        error.contains("trait") || error.contains("impl") || error.contains("Needed"),
+        "missing implementation must remain a normal compiler error: {error}",
+    );
+}
+
+#[test]
 fn recursive_mvt2_construct_copy_project_return_executes_on_wasm() {
     let source = include_str!("fixtures/wasm_mvt2_runtime_probe.fe");
     let wasm = compile_to_wasm("wasm_mvt2_runtime_probe.fe", source);
