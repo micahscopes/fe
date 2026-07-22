@@ -1,0 +1,14 @@
+// Focused f32 phi/result-slot probe: both branch values must survive the
+// structured conditional as f32 before the selected value is converted.
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub fn conditional_f32_select(px: i32, py: i32, low: f32, high: f32) -> u32 {
+    let x: f32 = __f32_from_i32(px)
+    let selected: f32 = if x < 4.0 { low } else { high }
+    let shade: i32 = __i32_from_f32(selected)
+    __bitcast(shade + shade * 256 + shade * 65536 + -16777216)
+}

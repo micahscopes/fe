@@ -251,6 +251,22 @@ pub fn ge(a: f32, b: f32) -> bool { a >= b }
 }
 
 #[test]
+fn conditional_f32_value_materializes_into_wasm_result_slot() {
+    let source = r#"
+pub fn select_f32(flag: bool, when_true: f32, when_false: f32) -> f32 {
+    if flag { when_true } else { when_false }
+}
+"#;
+    let wasm = compile_to_wasm("wasm_conditional_f32_result.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let select = instance
+        .get_typed_func::<(i32, f32, f32), f32>(&mut store, "select_f32")
+        .expect("select_f32 export should preserve its typed f32 result");
+    assert_eq!(select.call(&mut store, (1, 1.25, -3.5)).unwrap(), 1.25);
+    assert_eq!(select.call(&mut store, (0, 1.25, -3.5)).unwrap(), -3.5);
+}
+
+#[test]
 fn unsupported_f32_helpers_fail_closed_by_name() {
     for (name, params, args) in [
         ("__rsqrt_f32", "_: f32", "value"),

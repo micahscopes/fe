@@ -2482,6 +2482,58 @@ const F32_RENDER_PROBE_SOURCE: &str = include_str!("fixtures/spirv/f32_render_pr
 const CGA_INVERSION_DE_RENDER_SOURCE: &str =
     include_str!("fixtures/spirv/cga_inversion_de_render.fe");
 
+const CONDITIONAL_F32_SELECT_SOURCE: &str =
+    include_str!("fixtures/spirv/conditional_f32_select.fe");
+
+#[test]
+fn conditional_f32_select_materializes_typed_spirv_result_slot() {
+    const W: u32 = 8;
+    const H: u32 = 1;
+    const LOW: f32 = 25.0;
+    const HIGH: f32 = 75.0;
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///conditional_f32_select.fe").expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CONDITIONAL_F32_SELECT_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("conditional f32 selector should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("conditional f32 selector should materialize a typed SPIR-V result slot");
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("low/high require a broadcast Input binding");
+    assert_eq!((input.span, input.stride), (8, 8));
+    assert!(input
+        .members
+        .iter()
+        .all(|member| member.scalar == sonatina_codegen::isa::spirv::SpirvScalarKind::F32));
+
+    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    let mut input_bytes = Vec::with_capacity(8);
+    input_bytes.extend_from_slice(&LOW.to_bits().to_le_bytes());
+    input_bytes.extend_from_slice(&HIGH.to_bits().to_le_bytes());
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("conditional f32 result-slot probe requires browser-profile execution");
+    for x in 0..W {
+        let shade = if x < 4 { LOW as u8 } else { HIGH as u8 };
+        let offset = (x * 4) as usize;
+        assert_eq!(
+            &rgba[offset..offset + 4],
+            &[shade, shade, shade, 255],
+            "selected f32 branch value was not preserved at x={x}"
+        );
+    }
+}
+
 /// The independent Q12 escape-time + color-map oracle, re-derived HERE from the
 /// kernel logic (never trusted from the spec), integer-identical to the fixture:
 /// the SAME i32 escape math as `mandel_oracle_q12` (arithmetic `>>` on i32, the
