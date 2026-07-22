@@ -1,0 +1,149 @@
+// First bounded QCGA3D visual kernel: one fixed rotated general quadric.
+// The hit is accepted through the paper-null sparse point/Q* contraction.
+// This is not a dense Cl(9,6) multivector or a general QCGA engine.
+
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    fn __sqrt_f32(_: f32) -> f32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub struct PointSupport {
+    pub e1: f32, pub e2: f32, pub e3: f32,
+    pub eo1: f32, pub eo2: f32, pub eo3: f32,
+    pub ei1: f32, pub ei2: f32, pub ei3: f32,
+    pub ei4: f32, pub ei5: f32, pub ei6: f32,
+}
+
+pub struct DualQuadricSupport {
+    pub e1: f32, pub e2: f32, pub e3: f32,
+    pub eo1: f32, pub eo2: f32, pub eo3: f32,
+    pub eo4: f32, pub eo5: f32, pub eo6: f32,
+    pub ei1: f32, pub ei2: f32, pub ei3: f32,
+}
+
+impl Copy for PointSupport {}
+impl Copy for DualQuadricSupport {}
+
+#[inline(always)]
+fn field(x: f32, y: f32, z: f32) -> f32 {
+    let square: f32 = 0.85 * x * x + 1.25 * y * y + 0.65 * z * z
+    let cross: f32 = 0.55 * x * y - 0.40 * x * z + 0.30 * y * z
+    let linear: f32 = -0.16 * x + 0.1375 * y - 0.04 * z
+    square + cross + linear - 0.979125
+}
+
+#[inline(always)]
+fn packed(r: f32, g: f32, b: f32) -> u32 {
+    let ri: i32 = __i32_from_f32(r)
+    let gi: i32 = __i32_from_f32(g)
+    let bi: i32 = __i32_from_f32(b)
+    __bitcast(ri + gi * 256 + bi * 65536 + -16777216)
+}
+
+pub fn qcga3d_rotated_quadric_render(px: i32, py: i32) -> u32 {
+    let fx: f32 = __f32_from_i32(px)
+    let fy: f32 = __f32_from_i32(py)
+    let sx: f32 = (fx - 63.5) * 0.018
+    let sy: f32 = (fy - 63.5) * -0.018
+    let inv_len: f32 = 1.0 / __sqrt_f32(sx * sx + sy * sy + 3.24)
+    let dx: f32 = sx * inv_len
+    let dy: f32 = sy * inv_len
+    let dz: f32 = 1.8 * inv_len
+
+    let ox: f32 = 0.0
+    let oy: f32 = 0.0
+    let oz: f32 = -4.0
+    let f0: f32 = field(x: ox, y: oy, z: oz)
+    let fp: f32 = field(x: ox + dx, y: oy + dy, z: oz + dz)
+    let fm: f32 = field(x: ox - dx, y: oy - dy, z: oz - dz)
+    let alpha: f32 = (fp + fm) * 0.5 - f0
+    let beta: f32 = (fp - fm) * 0.5
+    let abs_alpha: f32 = if alpha < 0.0 { -alpha } else { alpha }
+    let abs_beta: f32 = if beta < 0.0 { -beta } else { beta }
+
+    let mut t: f32 = -1.0
+    if abs_alpha < 0.000001 {
+        // Stable degeneracy policy: linear ray, or constant/contained => no
+        // isolated visible root. The fixed ellipsoid does not take this path,
+        // but the policy is part of the kernel rather than an assumption.
+        if abs_beta >= 0.000001 {
+            let linear_t: f32 = -f0 / beta
+            if linear_t >= 0.0 { t = linear_t }
+        }
+    } else {
+        let discriminant: f32 = beta * beta - 4.0 * alpha * f0
+        if discriminant >= 0.0 {
+            let root: f32 = __sqrt_f32(discriminant)
+            let signed_root: f32 = if beta < 0.0 { -root } else { root }
+            let qroot: f32 = -0.5 * (beta + signed_root)
+            let abs_qroot: f32 = if qroot < 0.0 { -qroot } else { qroot }
+            if abs_qroot >= 0.000001 {
+                let t0: f32 = qroot / alpha
+                let t1: f32 = f0 / qroot
+                if t0 >= 0.0 {
+                    t = t0
+                    if t1 >= 0.0 && t1 < t0 { t = t1 }
+                } else {
+                    if t1 >= 0.0 { t = t1 }
+                }
+            } else {
+                let fallback: f32 = -beta / (2.0 * alpha)
+                if fallback >= 0.0 { t = fallback }
+            }
+        }
+    }
+
+    if t >= 0.0 {
+        let x: f32 = ox + dx * t
+        let y: f32 = oy + dy * t
+        let z: f32 = oz + dz * t
+        // Keep the typed sparse objects, but construct and contract them in
+        // this export. Aggregate-valued helper calls are outside the current
+        // Wasm boundary even when scalar helpers inline.
+        let p: PointSupport = PointSupport {
+            e1: x, e2: y, e3: z,
+            eo1: 1.0, eo2: 1.0, eo3: 1.0,
+            ei1: x * x * 0.5, ei2: y * y * 0.5, ei3: z * z * 0.5,
+            ei4: x * y, ei5: x * z, ei6: y * z,
+        }
+        // F = .85x² + 1.25y² + .65z² + .55xy - .40xz + .30yz
+        //     - .16x + .1375y - .04z - .979125.
+        let j_third: f32 = -0.979125 / 3.0
+        let q: DualQuadricSupport = DualQuadricSupport {
+            e1: -0.16, e2: 0.1375, e3: -0.04,
+            eo1: -1.70, eo2: -2.50, eo3: -1.30,
+            eo4: -0.55, eo5: 0.40, eo6: -0.30,
+            ei1: -j_third, ei2: -j_third, ei3: -j_third,
+        }
+        let euclidean: f32 = p.e1 * q.e1 + p.e2 * q.e2 + p.e3 * q.e3
+        let quadratic: f32 = p.ei1 * q.eo1 + p.ei2 * q.eo2 + p.ei3 * q.eo3
+        let cross: f32 = p.ei4 * q.eo4 + p.ei5 * q.eo5 + p.ei6 * q.eo6
+        let constant: f32 = p.eo1 * q.ei1 + p.eo2 * q.ei2 + p.eo3 * q.ei3
+        let residual: f32 = euclidean - quadratic - cross - constant
+        let abs_residual: f32 = if residual < 0.0 { -residual } else { residual }
+        if abs_residual < 0.0002 {
+            let nx: f32 = 1.70 * x + 0.55 * y - 0.40 * z - 0.16
+            let ny: f32 = 2.50 * y + 0.55 * x + 0.30 * z + 0.1375
+            let nz: f32 = 1.30 * z - 0.40 * x + 0.30 * y - 0.04
+            let n_inv: f32 = 1.0 / __sqrt_f32(nx * nx + ny * ny + nz * nz)
+            let nnx: f32 = nx * n_inv
+            let nny: f32 = ny * n_inv
+            let nnz: f32 = nz * n_inv
+            let diffuse_raw: f32 = nnx * -0.45 + nny * 0.70 + nnz * -0.55
+            let diffuse: f32 = if diffuse_raw < 0.0 { 0.0 } else { diffuse_raw }
+            let rim_raw: f32 = 1.0 - (-(nnx * dx + nny * dy + nnz * dz))
+            let rim: f32 = if rim_raw < 0.0 { 0.0 } else { rim_raw }
+            let shade: f32 = 0.18 + diffuse * 0.72
+            return packed(
+                r: 24.0 + 78.0 * shade + 65.0 * rim,
+                g: 28.0 + 178.0 * shade + 34.0 * rim,
+                b: 52.0 + 196.0 * shade + 55.0 * rim,
+            )
+        }
+    }
+
+    let horizon: f32 = (fy + 0.5) / 128.0
+    packed(r: 8.0 + 10.0 * horizon, g: 11.0 + 15.0 * horizon, b: 25.0 + 28.0 * horizon)
+}

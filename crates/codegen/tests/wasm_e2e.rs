@@ -477,6 +477,131 @@ fn qcga3d_sparse_incidence_paths_compile_and_execute_on_wasm() {
     }
 }
 
+fn qcga3d_quadric_field_oracle(x: f32, y: f32, z: f32) -> f32 {
+    let square = 0.85_f32 * x * x + 1.25_f32 * y * y + 0.65_f32 * z * z;
+    let cross = 0.55_f32 * x * y - 0.40_f32 * x * z + 0.30_f32 * y * z;
+    let linear = -0.16_f32 * x + 0.1375_f32 * y - 0.04_f32 * z;
+    square + cross + linear - 0.979125_f32
+}
+
+fn qcga3d_pack_oracle(r: f32, g: f32, b: f32) -> u32 {
+    (r as i32 + (g as i32) * 256 + (b as i32) * 65_536 - 16_777_216_i32) as u32
+}
+
+/// Independent CPU f32 rendering oracle for the fixed sparse-QCGA kernel.
+/// It uses the implicit coefficient form directly; unlike the Fe hit gate it
+/// never constructs PointSupport or DualQuadricSupport.
+fn qcga3d_rotated_quadric_oracle(px: i32, py: i32) -> u32 {
+    let fx = px as f32;
+    let fy = py as f32;
+    let sx = (fx - 63.5) * 0.018;
+    let sy = (fy - 63.5) * -0.018;
+    let inv_len = 1.0 / (sx * sx + sy * sy + 3.24_f32).sqrt();
+    let (dx, dy, dz) = (sx * inv_len, sy * inv_len, 1.8 * inv_len);
+    let (ox, oy, oz) = (0.0_f32, 0.0_f32, -4.0_f32);
+    let f0 = qcga3d_quadric_field_oracle(ox, oy, oz);
+    let fp = qcga3d_quadric_field_oracle(ox + dx, oy + dy, oz + dz);
+    let fm = qcga3d_quadric_field_oracle(ox - dx, oy - dy, oz - dz);
+    let alpha = (fp + fm) * 0.5 - f0;
+    let beta = (fp - fm) * 0.5;
+    let mut t = -1.0_f32;
+    if alpha.abs() < 0.000001 {
+        if beta.abs() >= 0.000001 {
+            let linear_t = -f0 / beta;
+            if linear_t >= 0.0 {
+                t = linear_t;
+            }
+        }
+    } else {
+        let discriminant = beta * beta - 4.0 * alpha * f0;
+        if discriminant >= 0.0 {
+            let root = discriminant.sqrt();
+            let signed_root = if beta < 0.0 { -root } else { root };
+            let qroot = -0.5 * (beta + signed_root);
+            if qroot.abs() >= 0.000001 {
+                let (t0, t1) = (qroot / alpha, f0 / qroot);
+                if t0 >= 0.0 {
+                    t = t0;
+                    if t1 >= 0.0 && t1 < t0 {
+                        t = t1;
+                    }
+                } else if t1 >= 0.0 {
+                    t = t1;
+                }
+            } else {
+                let fallback = -beta / (2.0 * alpha);
+                if fallback >= 0.0 {
+                    t = fallback;
+                }
+            }
+        }
+    }
+    if t >= 0.0 {
+        let (x, y, z) = (ox + dx * t, oy + dy * t, oz + dz * t);
+        // The CPU acceptance is direct coefficient evaluation, independently
+        // equal to the Fe paper-null contraction by the committed exact gate.
+        if qcga3d_quadric_field_oracle(x, y, z).abs() < 0.0002 {
+            let nx = 1.70 * x + 0.55 * y - 0.40 * z - 0.16;
+            let ny = 2.50 * y + 0.55 * x + 0.30 * z + 0.1375;
+            let nz = 1.30 * z - 0.40 * x + 0.30 * y - 0.04;
+            let n_inv = 1.0 / (nx * nx + ny * ny + nz * nz).sqrt();
+            let (nnx, nny, nnz) = (nx * n_inv, ny * n_inv, nz * n_inv);
+            let diffuse = (nnx * -0.45 + nny * 0.70 + nnz * -0.55).max(0.0);
+            let rim = (1.0 - (-(nnx * dx + nny * dy + nnz * dz))).max(0.0);
+            let shade = 0.18 + diffuse * 0.72;
+            return qcga3d_pack_oracle(
+                24.0 + 78.0 * shade + 65.0 * rim,
+                28.0 + 178.0 * shade + 34.0 * rim,
+                52.0 + 196.0 * shade + 55.0 * rim,
+            );
+        }
+    }
+    let horizon = (fy + 0.5) / 128.0;
+    qcga3d_pack_oracle(
+        8.0 + 10.0 * horizon,
+        11.0 + 15.0 * horizon,
+        25.0 + 28.0 * horizon,
+    )
+}
+
+#[test]
+fn qcga3d_rotated_quadric_renders_whole_frame_on_wasm() {
+    const W: i32 = 128;
+    const H: i32 = 128;
+    let source = include_str!("fixtures/spirv/qcga3d_rotated_quadric_render.fe");
+    let wasm = compile_to_wasm("qcga3d_rotated_quadric_render.fe", source);
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "QCGA render must have zero imports"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let render = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "qcga3d_rotated_quadric_render")
+        .expect("QCGA render ABI must be (i32, i32) -> i32");
+    let mut foreground = 0usize;
+    let mut colors = std::collections::BTreeSet::new();
+    for py in 0..H {
+        for px in 0..W {
+            let got = render.call(&mut store, (px, py)).expect("QCGA Wasm pixel") as u32;
+            let expected = qcga3d_rotated_quadric_oracle(px, py);
+            assert_eq!(got, expected, "QCGA Wasm pixel ({px},{py})");
+            let background = qcga3d_rotated_quadric_oracle(0, py);
+            if got != background {
+                foreground += 1;
+                colors.insert(got);
+            }
+        }
+    }
+    assert!(
+        foreground > 1_800,
+        "quadric must occupy a material part of the frame"
+    );
+    assert!(
+        colors.len() > 64,
+        "lighting must produce a visible color range"
+    );
+}
+
 fn clifford_gp_cl11_oracle(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     let mut out = [0.0; 4];
     for left in 0..4usize {
