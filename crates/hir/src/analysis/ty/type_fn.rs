@@ -460,7 +460,7 @@ impl<'db> Checker<'db> {
                                     self.walk_arm_ty(arm_idx, ty, l, calls);
                                 }
                             }
-                            GenericArg::Const(c) => self.check_arm_const_arg(arm_idx, c),
+                            GenericArg::Const(c) => self.check_arm_const_arg(arm_idx, c, l),
                         }
                     }
                 }
@@ -478,11 +478,15 @@ impl<'db> Checker<'db> {
 
     /// Restricts an arm-RHS `const` generic argument that appears on a
     /// non-self-call path (spec sec 1.5; Fable steering finding 1a). Only an
-    /// integer literal or the bare subject `N` is allowed. Anything richer would
-    /// lower to a `ConstTyData::UnEvaluated` whose later forcing re-enters the
-    /// CTFE machine (`evaluate_const_ty`'s `NotIntExpr` fall-through), reopening
-    /// the type-fn -> CTFE edge with no termination cover.
-    fn check_arm_const_arg(&mut self, arm_idx: usize, arg: &crate::core::hir_def::ConstGenericArg<'db>) {
+    /// integer literal, the bare subject `N`, or the same directly-distillable
+    /// `N - k` / `N / k` grammar used by self-calls is allowed. The latter is
+    /// substituted directly by [`Unfolder`] and never enters CTFE.
+    fn check_arm_const_arg(
+        &mut self,
+        arm_idx: usize,
+        arg: &crate::core::hir_def::ConstGenericArg<'db>,
+        l: &BigUint,
+    ) {
         let db = self.db;
         let subject = match self.subject_name {
             Some(s) => s,
@@ -495,6 +499,23 @@ impl<'db> Checker<'db> {
         let ok = match body_root_expr(db, body) {
             Some(Expr::Lit(LitKind::Int(_))) => true,
             Some(Expr::Path(Partial::Present(p))) => p.as_ident(db) == Some(subject),
+            Some(Expr::Bin(lhs, rhs, BinOp::Arith(op)))
+                if expr_is_ident(db, body, lhs, subject) =>
+            {
+                let Some(k) = expr_int_lit(db, body, rhs) else {
+                    self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmConstArg);
+                    return;
+                };
+                match op {
+                    ArithBinOp::Sub => {
+                        *k.data(db) >= BigUint::from(1u32) && l >= k.data(db)
+                    }
+                    ArithBinOp::Div => {
+                        *k.data(db) >= BigUint::from(2u32) && *l >= BigUint::from(1u32)
+                    }
+                    _ => false,
+                }
+            }
             _ => false,
         };
         if !ok {
@@ -1215,6 +1236,37 @@ struct Unfolder<'db, 'a> {
 }
 
 impl<'db> Unfolder<'db, '_> {
+    /// Evaluates a whitelisted subject arithmetic expression when it appears
+    /// as an ordinary const-generic child of the result, rather than as the
+    /// subject of a recursive self-call.
+    fn result_subject_const(&self, cid: ConstTyId<'db>) -> Option<TyId<'db>> {
+        let ConstTyData::Abstract(expr, _) = cid.data(self.db) else {
+            return None;
+        };
+        let ConstExpr::ArithBinOp { op, lhs, rhs } = expr.data(self.db) else {
+            return None;
+        };
+        let TyData::ConstTy(lhs_id) = lhs.data(self.db) else {
+            return None;
+        };
+        let ConstTyData::TyParam(param, _) = lhs_id.data(self.db) else {
+            return None;
+        };
+        if param.idx != self.subject_idx {
+            return None;
+        }
+        let k = self.const_lit(*rhs)?;
+        let value = match op {
+            ArithBinOp::Sub => {
+                debug_assert!(self.subject >= k, "WF guarantees no underflow");
+                &self.subject - &k
+            }
+            ArithBinOp::Div => &self.subject / &k,
+            _ => return None,
+        };
+        Some(make_subject_ty(self.db, value, self.subject_ty))
+    }
+
     /// The smaller ground subject a self-call steps to, or `None` if the subject
     /// arg is not a recognized (WF-validated) form. The subject arithmetic is a
     /// direct `BigUint` op read off the lowered const expression; the CTFE
@@ -1295,6 +1347,7 @@ impl<'db> TyFolder<'db> for Unfolder<'db, '_> {
                 ConstTyData::TyParam(p, _) if p.idx == self.subject_idx => {
                     self.subst_args[self.subject_idx]
                 }
+                ConstTyData::Abstract(..) => self.result_subject_const(*cid).unwrap_or(ty),
                 ConstTyData::UnEvaluated { body, .. } => match body_root_expr(db, *body) {
                     Some(Expr::Path(Partial::Present(_))) => self.subst_args[self.subject_idx],
                     Some(Expr::Lit(LitKind::Int(m))) => {
@@ -1659,6 +1712,16 @@ recursive type fn Bush<const N: usize>() -> (*) {
         _ => Comp<Bush<{N - 1}>, Bush<{N - 1}>>
     }
 }
+
+struct End {}
+struct Tag<const I: usize> {}
+struct Cons<H, T> {}
+recursive type fn Tagged<const N: usize>() -> (*) {
+    match N {
+        0 => End
+        _ => Cons<Tag<{N - 1}>, Tagged<{N - 1}>>
+    }
+}
 "#;
 
     /// Lowers the single field type of a no-generic-param probe struct. Because
@@ -1708,6 +1771,12 @@ recursive type fn Bush<const N: usize>() -> (*) {
             probe_field_pretty(&src, "Probe"),
             "Comp<Pair, Comp<Pair, Par>>"
         );
+    }
+
+    #[test]
+    fn substitutes_subject_arithmetic_in_non_recursive_const_child() {
+        let src = format!("{NORM_FIXTURES}\nstruct Probe {{ p: Tagged<1> }}\n");
+        assert_eq!(probe_field_pretty(&src, "Probe"), "Cons<Tag<0>, End>");
     }
 
     /// Extracts the HIR path of a struct's single-field type, for feeding into
