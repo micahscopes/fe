@@ -127,12 +127,17 @@ async function main() {
 
 window.__cgaAcceptance = { state: "pending" };
 document.documentElement.dataset.status = "pending";
-window.__cgaAcceptance.promise = main().then((result) => {
+function publishAcceptance(result) {
   Object.assign(window.__cgaAcceptance, result);
+  document.documentElement.dataset.status = result.state;
+  const node = document.getElementById("acceptance-json");
+  if (node) node.textContent = JSON.stringify(result);
   return result;
+}
+window.__cgaAcceptance.promise = main().then((result) => {
+  return publishAcceptance(result);
 }).catch((error) => {
   const result = { state: "red", reason: String(error) };
-  Object.assign(window.__cgaAcceptance, result);
   banner("red", result.reason);
-  return result;
+  return publishAcceptance(result);
 });

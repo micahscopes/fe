@@ -30,3 +30,15 @@ python3 demos/webgpu-cga-inversion/verify-assets.py
 
 Serve the repository's `demos/` directory with `demos/serve.py`, then open
 `webgpu-cga-inversion/`. Do not open the multi-file page directly with `file://`.
+
+For the deterministic real-browser smoke gate:
+
+```sh
+CHROME_BIN=/path/to/google-chrome demos/webgpu-cga-inversion/smoke-chrome.sh
+```
+
+The harness chooses a free localhost port, cleans up its server/profile, enables
+headless WebGPU explicitly, and fails unless both the dumped DOM `data-status`
+and structured acceptance state are `green`. If Chrome is unavailable it exits
+69 and prints `UNAVAILABLE`; that is not a passing browser result. Platforms
+using Metal or D3D may override `CHROME_WEBGPU_FLAGS`.

@@ -314,10 +314,10 @@ export async function runWebGPUGrid(wgslText, layout, { width, height, params = 
     }
     const buf = buffers.get(`${inputBinding.group}:${inputBinding.binding}`);
     const offset = p.offset ?? 0;
-    if (!Number.isInteger(offset) || offset < 0 || offset % 4 !== 0) {
+    if (!isShaderParamOffset(offset)) {
       return { ok: false, reason: `param ${p.name} has invalid aligned offset ${offset}`, adapter: name };
     }
-    device.queue.writeBuffer(buf, offset, encodedScalar(params[p.name], p));
+    device.queue.writeBuffer(buf, offset, encodeShaderScalar(params[p.name], p));
   }
 
   // --- Bind groups, pipeline, 2D dispatch. ---------------------------------
@@ -498,11 +498,10 @@ export async function initWebGPURender(wgslText, layout, canvas) {
 }
 
 // Write the view words into the Input buffer at the compiler-stated offsets, then
-// draw the fullscreen triangle to the canvas. `viewWords` is the update_view reply
-// triple, in `layout.params` order (center_re, center_im, scale_q). i32 two's-
-// complement bit patterns go straight into the u32 storage buffer via Int32Array.
-function encodedScalar(value, param) {
-  const scalar = param.scalar || "I32";
+// Encode one layout parameter for queue.writeBuffer. Scalar metadata selects the
+// exact 32-bit representation; older layouts without it retain the I32 default.
+export function encodeShaderScalar(value, param) {
+  const scalar = param.scalar ?? "I32";
   if (param.width !== undefined && param.width !== 4) {
     throw new Error(`unsupported ${scalar} parameter width ${param.width}`);
   }
@@ -512,16 +511,24 @@ function encodedScalar(value, param) {
   throw new Error(`unsupported shader parameter scalar ${scalar}`);
 }
 
-function writeTypedParams(queue, inputBuf, params, values) {
+export function isShaderParamOffset(offset) {
+  return Number.isInteger(offset) && offset >= 0 && offset % 4 === 0;
+}
+
+export function validateShaderParamArity(params, values) {
   if (params.length !== values.length) {
     throw new Error(`layout names ${params.length} parameters but caller supplied ${values.length}`);
   }
+}
+
+function writeTypedParams(queue, inputBuf, params, values) {
+  validateShaderParamArity(params, values);
   for (let i = 0; i < params.length; i++) {
     const offset = params[i].offset ?? 0;
-    if (!Number.isInteger(offset) || offset < 0 || offset % 4 !== 0) {
+    if (!isShaderParamOffset(offset)) {
       throw new Error(`shader parameter offset must be a non-negative aligned integer; got ${offset}`);
     }
-    queue.writeBuffer(inputBuf, offset, encodedScalar(values[i], params[i]));
+    queue.writeBuffer(inputBuf, offset, encodeShaderScalar(values[i], params[i]));
   }
 }
 
