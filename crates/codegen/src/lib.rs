@@ -1,3 +1,4 @@
+pub mod actor_manifest;
 mod backend;
 pub mod dispatch;
 mod function_symbols;
@@ -6,6 +7,10 @@ mod runtime_package;
 mod sonatina;
 mod test_output;
 
+pub use actor_manifest::{
+    ACTOR_PROTOCOL, ACTOR_PROTOCOL_VERSION, ActorLaneSpec, ActorManifestError, ActorRecordField,
+    ActorScalar, actor_manifest_from_wasm_exports,
+};
 pub use backend::{
     Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend, SpirvBackend,
     WasmBackend, layout_for,

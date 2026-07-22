@@ -18,6 +18,8 @@ sonatina-verifier.workspace = true
 smallvec.workspace = true
 smallvec1.workspace = true
 tracing.workspace = true
+wasmparser = "0.248.0"
+serde_json = "1"
 
 [features]
 # On by default so the standard build/test carries the Fe -> SPIR-V wire
@@ -36,7 +38,6 @@ hir = { workspace = true, features = ["testutils"] }
 # Execution harness for the Fe -> wasm acceptance test (mirrors the Sonatina
 # wasm backend's own wasmtime test versions).
 wasmtime = "44.0.1"
-wasmparser = "0.248.0"
 # The SPIR-V keystone (slice S2) executes the Fe-emitted shader on a real GPU
 # runtime (lavapipe / software Vulkan) via wgpu, mirroring the Sonatina SPIR-V
 # backend's own `mandelbrot_snapshot_spirv_gpu` test (same wgpu/pollster pins).
@@ -57,7 +58,6 @@ fe-contract-harness = { path = "../contract-harness" }
 # compiler-stated `SpirvLayout` to `layout.json`. The fork carries no serde dep
 # (plan ruling 1 item 5); the fe side does the serialization, here via the
 # `json!` macro reading the layout fields directly.
-serde_json = "1"
 # The MSM-0a / MSM-P field-multiply-mod-p gate needs an INDEPENDENT bigint oracle
 # (a*b*R^-1 mod p) to check the Fe field-mul against. num-bigint is already a
 # normal codegen dependency (already built), so re-declaring it here for the

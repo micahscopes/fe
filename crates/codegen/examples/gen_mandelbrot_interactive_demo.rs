@@ -49,7 +49,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, compile_runtime_package_spirv_render, layout_for};
+use fe_codegen::{
+    ActorLaneSpec, ActorRecordField, ActorScalar, BackendKind, OptLevel,
+    actor_manifest_from_wasm_exports, compile_runtime_package_spirv_render, layout_for,
+};
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvLayout, WordKind};
 use url::Url;
 
@@ -117,24 +120,6 @@ fn mandel_view_frag_oracle(px: i32, py: i32, center_re: i32, center_im: i32, sca
         }
     }
     4_278_190_080
-}
-
-fn control_actor_manifest(arg_count: usize, result_count: usize) -> serde_json::Value {
-    serde_json::json!({
-        "protocol": "fe-demo-actor",
-        "version": 2,
-        "lanes": {
-            "render": {
-                "request": {
-                    "kind": "record",
-                    "fields": {
-                        "args": { "kind": "i32-array", "length": arg_count }
-                    }
-                },
-                "result": { "kind": "i32-array", "length": result_count }
-            }
-        }
-    })
 }
 
 fn main() {
@@ -379,7 +364,21 @@ fn main() {
     let layout_json = serialize_render_layout(&artifact.layout, params, frag_wasm.len());
     // The browser protocol is generated from the compiled Wasm ABI that was
     // checked above, rather than repeating its arity in application JS.
-    let actor = control_actor_manifest(ctl_sig.0.len(), ctl_sig.1.len());
+    let actor_fields = [ActorRecordField {
+        name: "args",
+        scalar: ActorScalar::I32,
+        length: ctl_sig.0.len(),
+    }];
+    let actor = actor_manifest_from_wasm_exports(
+        &ctl_wasm,
+        &[ActorLaneSpec {
+            lane: "render",
+            export: CTL_NAME,
+            request: &actor_fields,
+            result: ActorScalar::I32,
+        }],
+    )
+    .expect("checked Fe control export must produce actor metadata");
     let ctl_json = serde_json::to_string_pretty(&serde_json::json!({
         "module": "ctl.wasm",
         "control_export": CTL_NAME,
@@ -710,31 +709,4 @@ fn fe_head_rev() -> String {
 fn write_file(path: &std::path::Path, bytes: &[u8]) {
     std::fs::write(path, bytes)
         .unwrap_or_else(|e| panic!("could not write {}: {e}", path.display()));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::control_actor_manifest;
-
-    #[test]
-    fn fe_control_signature_emits_exact_actor_protocol_schema() {
-        assert_eq!(
-            control_actor_manifest(8, 3),
-            serde_json::json!({
-                "protocol": "fe-demo-actor",
-                "version": 2,
-                "lanes": {
-                    "render": {
-                        "request": {
-                            "kind": "record",
-                            "fields": {
-                                "args": { "kind": "i32-array", "length": 8 }
-                            }
-                        },
-                        "result": { "kind": "i32-array", "length": 3 }
-                    }
-                }
-            })
-        );
-    }
 }
