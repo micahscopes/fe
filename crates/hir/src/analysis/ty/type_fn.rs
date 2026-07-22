@@ -20,7 +20,9 @@ use num_bigint::BigUint;
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution::{NameDomain, resolve_ident_to_bucket};
 use crate::analysis::ty::const_expr::ConstExpr;
-use crate::analysis::ty::const_ty::{ConstTyData, ConstTyId, EvaluatedConstTy};
+use crate::analysis::ty::const_ty::{
+    ConstTyData, ConstTyId, EvaluatedConstTy, evaluate_type_level_int_const_expr,
+};
 use crate::analysis::ty::diagnostics::{TyLowerDiag, TypeFnWfError};
 use crate::analysis::ty::fold::{TyFoldable, TyFolder};
 use crate::analysis::ty::trait_resolution::PredicateListId;
@@ -1347,7 +1349,26 @@ impl<'db> TyFolder<'db> for Unfolder<'db, '_> {
                 ConstTyData::TyParam(p, _) if p.idx == self.subject_idx => {
                     self.subst_args[self.subject_idx]
                 }
-                ConstTyData::Abstract(..) => self.result_subject_const(*cid).unwrap_or(ty),
+                ConstTyData::Abstract(..) => {
+                    // Substitute every ground type-fn argument through the
+                    // expression before asking the bounded integer evaluator
+                    // to normalize it.  This matters for non-subject params in
+                    // results such as `{Start + N / 2}`: both `Start` and `N`
+                    // are ground here, but the old subject-only shortcut left
+                    // the expression abstract.  Recursive self-call subjects
+                    // remain intercepted above and retain their stricter
+                    // syntactic termination discipline.
+                    let folded = ty.super_fold_with(db, self);
+                    let TyData::ConstTy(folded_cid) = folded.data(db) else {
+                        return folded;
+                    };
+                    let ConstTyData::Abstract(expr, expected_ty) = folded_cid.data(db) else {
+                        return folded;
+                    };
+                    evaluate_type_level_int_const_expr(db, *expr, *expected_ty)
+                        .map(|evaluated| TyId::const_ty(db, evaluated))
+                        .unwrap_or_else(|| self.result_subject_const(*cid).unwrap_or(folded))
+                }
                 ConstTyData::UnEvaluated { body, .. } => match body_root_expr(db, *body) {
                     Some(Expr::Path(Partial::Present(_))) => self.subst_args[self.subject_idx],
                     Some(Expr::Lit(LitKind::Int(m))) => {
