@@ -81,6 +81,15 @@ SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/serve.sh
 ```
 
 Set `FORCE_CGA_REGEN=1` on that command to replace an existing bundle.
+Both `serve.sh` and `smoke-chrome.sh` now run the same fail-closed bundle
+preflight: all five generated files must exist and pass `verify-assets.py`.
+When any file is missing they generate once if `SONATINA_DIR` is set, otherwise
+they list every missing artifact and print the pinned-local-Sonatina remedy.
+Consequently this is also the one-command generate + browser acceptance path:
+
+```sh
+SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/smoke-chrome.sh
+```
 
 After generating the bundle, run the fast schema preflight (this does not earn
 execution acceptance):

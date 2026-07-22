@@ -29,7 +29,7 @@ if [ -z "$chrome" ] || [ ! -x "$chrome" ]; then
   exit 69
 fi
 
-python3 "$here/verify-assets.py"
+"$here/ensure-assets.sh"
 
 port="${CGA_SMOKE_PORT:-}"
 if [ -z "$port" ]; then
