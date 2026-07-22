@@ -18,6 +18,17 @@ frame. A missing WebGPU adapter after a green wasm oracle is amber, never green.
 Automation can await `window.__cgaAcceptance.promise` and inspect its deterministic
 `state`, `wasmHash`, and optional `gpuHash`/`adapter` fields.
 
+The default canvas page is interactive: drag to pan, wheel to zoom around the
+pointer, and use Reset camera to restore the compiled reference view. Interaction
+events are coalesced; after each settled camera change the canvas is redrawn and
+the full 128x128 browser-Wasm frame is recomputed and compared byte-for-byte with
+a fresh offscreen WebGPU readback. A generation token prevents an older async
+verification from publishing over a newer camera state.
+Camera interaction math is JavaScript, not Fe: values are rejected if non-finite,
+quantized to an immutable f32 triple for each generation, and zoom is clamped to
+`0.0025..=0.05`. Canvas draws are animation-frame coalesced; expensive full-frame
+verifications are trailing-debounced and serialized.
+
 Generation currently depends on a clean checkout of the unpublished Sonatina
 commit `ed43625bb5680aeab993371e28a8c8e5c7c16f96`. Set `SONATINA_DIR` explicitly
 and generate only this bundle with:

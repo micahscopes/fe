@@ -1,7 +1,7 @@
 import { initWebGPURender, renderFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
 import { instantiateWasm, renderFragmentGrid } from "../webgpu-keystone/wasm-runner.js";
+import { DEFAULT_CAMERA, createTrailingCoalescer, normalizeCamera, panCamera, zoomCamera } from "./camera-controls.js";
 
-const CAMERA = new Map([[2, 0.0], [3, 0.0], [4, 0.0125]]);
 const $ = (id) => document.getElementById(id);
 const acceptanceMode = new URLSearchParams(window.location.search).get("acceptance");
 const presentation = acceptanceMode === null || acceptanceMode === ""
@@ -28,6 +28,15 @@ function fnv1a32(bytes) {
   let hash = 0x811c9dc5;
   for (const byte of bytes) hash = Math.imul((hash ^ byte) >>> 0, 0x01000193) >>> 0;
   return hash >>> 0;
+}
+
+function cameraValues(camera) {
+  return Object.freeze([Math.fround(camera.x), Math.fround(camera.y), Math.fround(camera.zoom)]);
+}
+
+function showCamera(camera) {
+  $("camera-values").textContent =
+    `cam_x=${camera.x.toFixed(5)}  cam_y=${camera.y.toFixed(5)}  zoom=${camera.zoom.toFixed(6)}`;
 }
 
 function validateTypedLayout(layout) {
@@ -111,28 +120,34 @@ async function main() {
 
   validateTypedLayout(layout);
   const params = layout.params;
-  const values = params.map((param) => CAMERA.get(param.arg_index));
   const renderLayout = { ...layout, params };
 
-  let wasmRgba;
+  let fragExports;
   try {
-    const exports = await instantiateWasm(wasm);
-    const words = renderFragmentGrid(
-      exports,
-      layout.frag_wasm_export,
-      values,
-      reference.width,
-      reference.height,
-    );
-    wasmRgba = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
+    fragExports = await instantiateWasm(wasm);
   } catch (error) {
     banner("red", `browser wasm oracle failed: ${error.message || error}`);
     return { state: "red", presentation, reason: String(error) };
   }
-  const wasmHash = fnv1a32(wasmRgba);
-  if (wasmHash !== (reference.fnv1a32 >>> 0)) {
-    banner("red", `browser wasm/reference mismatch: ${wasmHash} != ${reference.fnv1a32 >>> 0}`);
-    return { state: "red", presentation, wasmHash };
+
+  const defaultValues = cameraValues(normalizeCamera(DEFAULT_CAMERA));
+  let defaultWasmHash;
+  try {
+    const defaultWords = renderFragmentGrid(
+      fragExports, layout.frag_wasm_export, defaultValues, reference.width, reference.height,
+    );
+    const defaultWasmRgba = new Uint8Array(
+      defaultWords.buffer, defaultWords.byteOffset, defaultWords.byteLength,
+    );
+    defaultWasmHash = fnv1a32(defaultWasmRgba);
+    if (defaultWasmHash !== (reference.fnv1a32 >>> 0)) {
+      banner("red", `browser Wasm/reference mismatch: ${defaultWasmHash} != ${reference.fnv1a32 >>> 0}`);
+      return { state: "red", presentation, wasmHash: defaultWasmHash,
+        reason: "default browser-Wasm frame differs from packaged reference" };
+    }
+  } catch (error) {
+    banner("red", `browser Wasm oracle failed: ${error.message || error}`);
+    return { state: "red", presentation, reason: String(error) };
   }
 
   const gpu = await initWebGPURender(
@@ -141,24 +156,138 @@ async function main() {
     presentation === "offscreen" ? null : $("view"),
   );
   if (!gpu.ok) {
-    banner("amber", `browser wasm matches the compiled full frame; no live WebGPU render: ${gpu.reason}`);
-    return { state: "amber", presentation, wasmHash, reason: gpu.reason };
+    banner("amber", `browser Wasm matches the packaged frame; no live WebGPU render: ${gpu.reason}`);
+    return { state: "amber", presentation, wasmHash: defaultWasmHash, reason: gpu.reason };
   }
 
-  if (presentation === "canvas") renderFrame(gpu, values);
-  const readback = await verifyView(gpu, values);
-  if (!readback.ok) {
-    banner("red", `GPU readback failed: ${readback.reason}`);
-    return { state: "red", presentation, wasmHash, reason: readback.reason };
+  let latestGeneration = 0;
+  const verifyCamera = async (camera, generation, requireReference = false) => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const values = cameraValues(camera);
+    const words = renderFragmentGrid(
+      fragExports, layout.frag_wasm_export, values, reference.width, reference.height,
+    );
+    const wasmRgba = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
+    const wasmHash = fnv1a32(wasmRgba);
+    if (generation !== latestGeneration) return null;
+    const readback = await verifyView(gpu, values);
+    if (generation !== latestGeneration) return null;
+    if (!readback.ok) {
+      return { state: "red", presentation, generation, wasmHash, reason: readback.reason };
+    }
+    const gpuHash = fnv1a32(readback.rgba);
+    const equal = readback.rgba.length === wasmRgba.length
+      && !readback.rgba.some((byte, index) => byte !== wasmRgba[index]);
+    if (!equal || gpuHash !== wasmHash) {
+      return { state: "red", presentation, generation, wasmHash, gpuHash,
+        reason: "GPU/browser-Wasm byte mismatch" };
+    }
+    if (requireReference && wasmHash !== (reference.fnv1a32 >>> 0)) {
+      return { state: "red", presentation, generation, wasmHash, gpuHash,
+        reason: `default view differs from reference ${reference.fnv1a32 >>> 0}` };
+    }
+    return { state: "green", presentation, generation, wasmHash, gpuHash, adapter: gpu.adapter,
+      camera: values };
+  };
+
+  const finishVerification = (result) => {
+    if (!result || result.generation !== latestGeneration) return;
+    if (result.state === "green") {
+      banner("green", `current camera: WebGPU readback exactly matches browser Wasm (FNV-1a ${result.gpuHash}) on ${gpu.adapter}`);
+    } else {
+      banner("red", result.reason);
+    }
+    publishAcceptance(result);
+  };
+
+  let camera = normalizeCamera(DEFAULT_CAMERA);
+  showCamera(camera);
+  const canvas = $("view");
+  let queuedVerification = null;
+  let verificationRunning = false;
+  const drainVerifications = async () => {
+    if (verificationRunning) return;
+    verificationRunning = true;
+    while (queuedVerification) {
+      const job = queuedVerification;
+      queuedVerification = null;
+      try {
+        finishVerification(await verifyCamera(job.camera, job.generation));
+      } catch (error) {
+        finishVerification({ state: "red", presentation, generation: job.generation,
+          reason: String(error) });
+      }
+    }
+    verificationRunning = false;
+  };
+  const coalescer = createTrailingCoalescer((job) => {
+    queuedVerification = job;
+    drainVerifications();
+  });
+  let drawPending = false;
+  let drawCamera = camera;
+  const requestDraw = (nextCamera) => {
+    drawCamera = nextCamera;
+    if (drawPending) return;
+    drawPending = true;
+    requestAnimationFrame(() => {
+      drawPending = false;
+      renderFrame(gpu, cameraValues(drawCamera));
+    });
+  };
+  const settle = (nextCamera) => {
+    camera = normalizeCamera(nextCamera);
+    showCamera(camera);
+    if (presentation === "canvas") requestDraw(camera);
+    latestGeneration += 1;
+    coalescer.submit({ camera, generation: latestGeneration });
+    banner("amber", "camera changed; checking browser-Wasm against WebGPU readback...");
+    publishAcceptance({ state: "pending", presentation, generation: latestGeneration,
+      camera: cameraValues(camera) });
+  };
+
+  if (presentation === "canvas") {
+    let drag = null;
+    canvas.addEventListener("pointerdown", (event) => {
+      if (!event.isPrimary || event.button !== 0) return;
+      drag = { x: event.clientX, y: event.clientY };
+      canvas.setPointerCapture(event.pointerId);
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      const scaleX = canvas.width / canvas.clientWidth;
+      const scaleY = canvas.height / canvas.clientHeight;
+      const next = panCamera(camera, (event.clientX - drag.x) * scaleX,
+        (event.clientY - drag.y) * scaleY);
+      drag = { x: event.clientX, y: event.clientY };
+      settle(next);
+    });
+    const endDrag = (event) => {
+      if (drag) canvas.releasePointerCapture?.(event.pointerId);
+      drag = null;
+    };
+    canvas.addEventListener("pointerup", endDrag);
+    canvas.addEventListener("pointercancel", endDrag);
+    canvas.addEventListener("lostpointercapture", () => { drag = null; });
+    canvas.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const px = (event.clientX - rect.left) * canvas.width / rect.width;
+      const py = (event.clientY - rect.top) * canvas.height / rect.height;
+      settle(zoomCamera(camera, event.deltaY, px, py, canvas.width, canvas.height));
+    }, { passive: false });
+    $("reset-camera").addEventListener("click", () => settle(DEFAULT_CAMERA));
+    window.__cgaCamera = { get: () => ({ ...camera }), reset: () => settle(DEFAULT_CAMERA) };
   }
-  const hash = fnv1a32(readback.rgba);
-  if (hash !== wasmHash || readback.rgba.length !== wasmRgba.length
-      || readback.rgba.some((byte, index) => byte !== wasmRgba[index])) {
-    banner("red", `GPU/browser-wasm mismatch: GPU ${hash}, wasm ${wasmHash}`);
-    return { state: "red", presentation, wasmHash, gpuHash: hash };
-  }
-  banner("green", `live two-sphere WebGPU ${presentation} readback matches compiled 128x128 reference (FNV-1a ${hash}) on ${gpu.adapter}`);
-  return { state: "green", presentation, wasmHash, gpuHash: hash, adapter: gpu.adapter };
+
+  const initialGeneration = ++latestGeneration;
+  if (presentation === "canvas") renderFrame(gpu, cameraValues(camera));
+  verificationRunning = true;
+  const initial = await verifyCamera(camera, initialGeneration, true);
+  verificationRunning = false;
+  if (initial) finishVerification(initial);
+  drainVerifications();
+  return initial;
 }
 
 window.__cgaAcceptance = { state: "pending", presentation };
@@ -171,7 +300,7 @@ function publishAcceptance(result) {
   return result;
 }
 window.__cgaAcceptance.promise = main().then((result) => {
-  return publishAcceptance(result);
+  return result ? publishAcceptance(result) : window.__cgaAcceptance;
 }).catch((error) => {
   const result = { state: "red", presentation, reason: String(error) };
   banner("red", result.reason);

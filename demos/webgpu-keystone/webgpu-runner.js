@@ -613,10 +613,14 @@ export async function verifyView(handle, viewWords) {
   try {
     await staging.mapAsync(GPUMapMode.READ);
   } catch (e) {
+    staging.destroy();
+    tex.destroy();
     return { ok: false, reason: `verify readback map failed: ${e.message || e}` };
   }
   const data = new Uint8Array(staging.getMappedRange().slice(0));
   staging.unmap();
+  staging.destroy();
+  tex.destroy();
   const asynchronousError = handle.deviceError?.() || handle.deviceLost?.();
   if (asynchronousError) {
     return { ok: false, reason: `WebGPU device error after readback: ${asynchronousError}` };
