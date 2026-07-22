@@ -1,6 +1,7 @@
 import { initWebGPURender, renderFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
 import { instantiateWasm, renderFragmentGrid } from "../webgpu-keystone/wasm-runner.js";
 import { DEFAULT_CAMERA, createTrailingCoalescer, normalizeCamera, panCamera, zoomCamera } from "./camera-controls.js";
+import { createPerformanceMeter } from "./performance-meter.js";
 
 const $ = (id) => document.getElementById(id);
 const query = new URLSearchParams(window.location.search);
@@ -12,6 +13,8 @@ const verificationOff = query.get("verify") === "off";
 const continuousVerification = query.get("verify") === "continuous";
 const DEFAULT_INVERSION = Object.freeze({ x: 0.5, y: 0, radius: 1 });
 const LOGICAL_SIZE = 128;
+const performanceMeter = createPerformanceMeter();
+window.__cgaPerformance = performanceMeter.state;
 
 function banner(kind, detail) {
   $("banner").className = `banner ${kind}`;
@@ -154,6 +157,7 @@ async function main() {
     return { state: "red", presentation, reason: "acceptance must be canvas or offscreen" };
   }
   let layout, reference, source, wgsl, wasm;
+  const artifactFetchStart = performanceMeter.start();
   try {
     [layout, source, wgsl] = await Promise.all([
       fetchOk("./gen/layout.json", "json"),
@@ -168,6 +172,7 @@ async function main() {
     }
     validateTypedLayout(layout);
     if (!verificationOff) validateReference(reference);
+    performanceMeter.finish("artifactFetchMs", artifactFetchStart);
   } catch (error) {
     banner("red", `artifact contract failed: ${error.message || error}`);
     return { state: "red", presentation, reason: String(error) };
@@ -223,11 +228,13 @@ async function main() {
     return true;
   };
   resizeDisplayCanvas();
+  const gpuInitStart = performanceMeter.start();
   const gpu = await initWebGPURender(
     wgsl,
     renderLayout,
     presentation === "offscreen" ? null : $("view"),
   );
+  performanceMeter.finish("gpuInitMs", gpuInitStart);
   if (!gpu.ok) {
     const detail = verificationOff
       ? `fast showcase unavailable: ${gpu.reason}`
@@ -312,11 +319,14 @@ async function main() {
   // buffer unless the user explicitly requests continuous verification.
   const initialGeneration = ++latestGeneration;
   if (presentation === "canvas") {
+    const submitStart = performanceMeter.start();
     renderFrame(gpu, viewValues(camera, inversion, canvas.width, canvas.height));
+    performanceMeter.finish("firstFrameSubmitMs", submitStart);
     drawInversionOverlay(camera, inversion);
   }
   let verificationRunning = !verificationOff;
   let initialAccepted = false;
+  const acceptanceStart = verificationOff ? null : performanceMeter.start();
   const initialPromise = verificationOff
     ? Promise.resolve(null)
     : verifyCamera(camera, inversion, initialGeneration, true, false);
@@ -349,13 +359,28 @@ async function main() {
   };
   let drawPending = false;
   let drawCamera = camera;
+  let lastPerformanceUiUpdate = -Infinity;
+  const updatePerformanceUi = (rafTime) => {
+    if (rafTime - lastPerformanceUiUpdate < 250) return;
+    lastPerformanceUiUpdate = rafTime;
+    const frames = performanceMeter.state.frames;
+    const fps = frames.fps === null ? "--" : frames.fps.toFixed(1);
+    const submit = frames.averageSubmitCpuMs === null
+      ? "--"
+      : frames.averageSubmitCpuMs.toFixed(2);
+    $("performance-stat").textContent = `rAF ${fps} fps | submit CPU ${submit} ms`;
+  };
   const requestDraw = (nextCamera) => {
     drawCamera = nextCamera;
     if (drawPending) return;
     drawPending = true;
-    requestAnimationFrame(() => {
+    requestAnimationFrame((rafTime) => {
       drawPending = false;
+      const submitStart = performanceMeter.start();
       renderFrame(gpu, viewValues(drawCamera, inversion, canvas.width, canvas.height));
+      const submitCpuMs = performanceMeter.elapsed(submitStart);
+      performanceMeter.recordFrame(rafTime, submitCpuMs);
+      updatePerformanceUi(rafTime);
       drawInversionOverlay(drawCamera, inversion);
     });
   };
@@ -450,6 +475,9 @@ async function main() {
     window.__cgaCamera = { get: () => ({ ...camera }), reset: () => settle(DEFAULT_CAMERA) };
   }
   const initial = await initialPromise;
+  if (acceptanceStart !== null) {
+    performanceMeter.finish("initialAcceptanceMs", acceptanceStart);
+  }
   verificationRunning = false;
   if (verificationOff) {
     const result = { state: "presentation", presentation, verified: false,

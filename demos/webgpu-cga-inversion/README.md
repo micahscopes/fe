@@ -43,6 +43,15 @@ and persistent canvas pipeline used for presentation. The Verify button is
 hidden and structured status is `{"state":"presentation","verified":false}`;
 this mode is deliberately not acceptance evidence and never reports green.
 
+Low-overhead CPU-side instrumentation is available as
+`window.__cgaPerformance`. It records artifact-fetch, GPU-initialization,
+first-frame submission, and (when enabled) initial-acceptance durations, plus a
+rolling window of rAF cadence and `renderFrame` submission CPU time. The compact
+UI stat is rate-limited to four text updates per second. These are host timings,
+not GPU execution timestamps. Instrumentation never inserts a queue wait,
+readback, or GPU synchronization; in `verify=off` it preserves the no-readback
+contract.
+
 The displayed canvas is responsive and uses device-pixel ratio up to 2, capped
 at 768 pixels per side. Deterministic acceptance remains a separate 128x128
 offscreen render. The shipped fragment constructs recursive `MvTF<5>` point and
