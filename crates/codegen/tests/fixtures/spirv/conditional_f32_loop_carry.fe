@@ -1,0 +1,24 @@
+// Composed f32 control-flow probe: a conditional f32 selection feeds a
+// loop-carried f32 accumulator, with both an early return and a normal exit.
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub fn conditional_f32_loop_carry(px: i32, py: i32, low: f32, high: f32) -> u32 {
+    let x: f32 = __f32_from_i32(px)
+    let mut total: f32 = 0.0
+    let mut i: i32 = 0
+    while i < 4 {
+        let selected: f32 = if x < 4.0 { low } else { high }
+        total = total + selected
+        if total > 100.0 {
+            let early: i32 = __i32_from_f32(total)
+            return __bitcast(early + early * 256 + early * 65536 + -16777216)
+        }
+        i = i + 1
+    }
+    let normal: i32 = __i32_from_f32(total)
+    __bitcast(normal + normal * 256 + normal * 65536 + -16777216)
+}

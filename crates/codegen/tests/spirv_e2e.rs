@@ -2485,6 +2485,9 @@ const CGA_INVERSION_DE_RENDER_SOURCE: &str =
 const CONDITIONAL_F32_SELECT_SOURCE: &str =
     include_str!("fixtures/spirv/conditional_f32_select.fe");
 
+const CONDITIONAL_F32_LOOP_CARRY_SOURCE: &str =
+    include_str!("fixtures/spirv/conditional_f32_loop_carry.fe");
+
 #[test]
 fn conditional_f32_select_materializes_typed_spirv_result_slot() {
     const W: u32 = 8;
@@ -2530,6 +2533,59 @@ fn conditional_f32_select_materializes_typed_spirv_result_slot() {
             &rgba[offset..offset + 4],
             &[shade, shade, shade, 255],
             "selected f32 branch value was not preserved at x={x}"
+        );
+    }
+}
+
+#[test]
+fn conditional_f32_selection_feeds_loop_carry_and_both_render_exits() {
+    const W: u32 = 8;
+    const H: u32 = 1;
+    const LOW: f32 = 10.0;
+    const HIGH: f32 = 60.0;
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///conditional_f32_loop_carry.fe").expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CONDITIONAL_F32_LOOP_CARRY_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("composed f32 control flow should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("conditional f32 selection and loop carry should lower to Render SPIR-V");
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("low/high require a broadcast Input binding");
+    assert_eq!((input.span, input.stride), (8, 8));
+    assert_eq!(input.members.len(), 2);
+    assert!(input
+        .members
+        .iter()
+        .all(|member| member.scalar == sonatina_codegen::isa::spirv::SpirvScalarKind::F32));
+
+    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(wgsl.contains("loop"), "the f32 accumulator must remain loop-carried");
+    let mut input_bytes = Vec::with_capacity(8);
+    input_bytes.extend_from_slice(&LOW.to_bits().to_le_bytes());
+    input_bytes.extend_from_slice(&HIGH.to_bits().to_le_bytes());
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("composed f32 control-flow probe requires browser-profile execution");
+    for x in 0..W {
+        // x<4 takes low=10 four times and reaches the normal exit (40).
+        // x>=4 takes high=60 twice and reaches the early exit (120).
+        let shade = if x < 4 { 40 } else { 120 };
+        let offset = (x * 4) as usize;
+        assert_eq!(
+            &rgba[offset..offset + 4],
+            &[shade, shade, shade, 255],
+            "conditional f32 loop-carry result differs at x={x}"
         );
     }
 }

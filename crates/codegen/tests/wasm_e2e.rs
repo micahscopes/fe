@@ -267,6 +267,20 @@ pub fn select_f32(flag: bool, when_true: f32, when_false: f32) -> f32 {
 }
 
 #[test]
+fn conditional_f32_selection_feeds_loop_carry_and_both_exits_on_wasm() {
+    let source = include_str!("fixtures/spirv/conditional_f32_loop_carry.fe");
+    let wasm = compile_to_wasm("wasm_conditional_f32_loop_carry.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let run = instance
+        .get_typed_func::<(i32, i32, f32, f32), i32>(&mut store, "conditional_f32_loop_carry")
+        .expect("conditional_f32_loop_carry export");
+    let normal = run.call(&mut store, (0, 0, 10.0, 60.0)).unwrap() as u32;
+    let early = run.call(&mut store, (7, 0, 10.0, 60.0)).unwrap() as u32;
+    assert_eq!(normal.to_le_bytes(), [40, 40, 40, 255]);
+    assert_eq!(early.to_le_bytes(), [120, 120, 120, 255]);
+}
+
+#[test]
 fn unsupported_f32_helpers_fail_closed_by_name() {
     for (name, params, args) in [
         ("__rsqrt_f32", "_: f32", "value"),
