@@ -40,7 +40,7 @@ use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
 use mir::{
     AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem, PlaceRoot,
     RBlockId, RExpr, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin,
-    RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage,
+    RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint, RuntimeInstance, RuntimeLinkage,
     RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass, ScalarRepr,
 };
 use rustc_hash::FxHashMap;
@@ -136,11 +136,218 @@ impl FlatShape {
     }
 }
 
+const INLINE_VALUE_STMT_BUDGET: usize = 4096;
+
+/// Prepare the body view shared by direct Wasm lowering and Render's Wasm to
+/// SPIR-V translation. This intentionally handles only value-only leaf helpers;
+/// every other call remains visible to the normal fail-closed lowering. Fresh
+/// locals exist only in this backend overlay, so `semantic_locals` remains the
+/// canonical source-level mapping and is deliberately not extended.
+fn prepare_inline_value_bodies<'db>(
+    db: &'db DriverDataBase,
+    package: &RuntimePackage<'db>,
+) -> FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>> {
+    fn visit<'db>(
+        db: &'db DriverDataBase,
+        package: &RuntimePackage<'db>,
+        instance: RuntimeInstance<'db>,
+        visiting: &mut HashSet<RuntimeInstance<'db>>,
+        done: &mut FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+    ) -> RuntimeBody<'db> {
+        if let Some(body) = done.get(&instance) {
+            return body.clone();
+        }
+        let mut body = instance.body(db);
+        if !visiting.insert(instance) {
+            return body;
+        }
+        let mut expanded = 0usize;
+        let (locals, blocks) = (&mut body.locals, &mut body.blocks);
+        for block in blocks {
+            let mut stmts = Vec::with_capacity(block.stmts.len());
+            for stmt in std::mem::take(&mut block.stmts) {
+                let RStmt::Assign {
+                    dst,
+                    expr: RExpr::Call { callee, args },
+                } = &stmt
+                else {
+                    stmts.push(stmt);
+                    continue;
+                };
+                let callee_body = visit(db, package, *callee, visiting, done);
+                let Some(mut replacement) = inline_value_call(
+                    db,
+                    package,
+                    locals,
+                    *dst,
+                    &callee_body,
+                    args,
+                    INLINE_VALUE_STMT_BUDGET.saturating_sub(expanded),
+                ) else {
+                    stmts.push(stmt);
+                    continue;
+                };
+                expanded += replacement.len();
+                stmts.append(&mut replacement);
+            }
+            block.stmts = stmts;
+        }
+        visiting.remove(&instance);
+        done.insert(instance, body.clone());
+        body
+    }
+
+    let mut visiting = HashSet::new();
+    let mut done = FxHashMap::default();
+    for function in package.functions(db) {
+        visit(db, package, function.instance(db), &mut visiting, &mut done);
+    }
+    done
+}
+
+fn inline_value_call<'db>(
+    db: &'db DriverDataBase,
+    package: &RuntimePackage<'db>,
+    caller_locals: &mut Vec<mir::RLocal<'db>>,
+    dst: RLocalId,
+    callee_body: &RuntimeBody<'db>,
+    args: &[RLocalId],
+    budget: usize,
+) -> Option<Vec<RStmt<'db>>> {
+    let function = package
+        .functions(db)
+        .into_iter()
+        .find(|function| function.instance(db) == callee_body.owner)?;
+    if !matches!(
+        function.linkage(db),
+        RuntimeLinkage::Private | RuntimeLinkage::Internal
+    ) || function.inline_hint(db) != RuntimeInlineHint::Always
+        || callee_body.blocks.len() != 1
+        || callee_body.signature.params.len() != args.len()
+        || callee_body.blocks[0].stmts.len() + 1 > budget
+        || !callee_body.provider_bindings.is_empty()
+        || callee_body.locals.iter().any(|local| {
+            !matches!(local.carrier, RuntimeCarrier::Value(_))
+                || !matches!(local.root, RuntimeLocalRoot::None)
+        })
+    {
+        return None;
+    }
+    let RTerminator::Return(Some(ret)) = callee_body.blocks[0].terminator else {
+        return None;
+    };
+    if callee_body.blocks[0].stmts.iter().any(|stmt| {
+        !matches!(
+            stmt,
+            RStmt::Assign { expr, .. }
+                if matches!(
+                    expr,
+                    RExpr::Use(_)
+                        | RExpr::ConstScalar(_)
+                        | RExpr::Unary { .. }
+                        | RExpr::Binary { .. }
+                        | RExpr::Cast { .. }
+                        | RExpr::AggregateMake { .. }
+                        | RExpr::AggregateExtract { .. }
+                )
+        )
+    }) {
+        return None;
+    }
+    let ret_class = callee_body.signature.ret.as_ref()?;
+    let local = |id: RLocalId| {
+        caller_locals
+            .iter()
+            .enumerate()
+            .find(|(index, _)| RLocalId::from_u32(*index as u32) == id)
+            .map(|(_, local)| local)
+    };
+    let dst_class = local(dst)?.carrier.value_class()?;
+    if !matches!(ret_class, RuntimeClass::AggregateValue { .. })
+        || !ret_class.shares_runtime_rep_with(db, dst_class)
+    {
+        return None;
+    }
+    let mut map = FxHashMap::default();
+    for (param, arg) in callee_body.signature.params.iter().zip(args) {
+        let arg_class = local(*arg)?.carrier.value_class()?;
+        if !param.class.shares_runtime_rep_with(db, arg_class) {
+            return None;
+        }
+        map.insert(param.local, *arg);
+    }
+    let base_len = caller_locals.len();
+    let mut staged_locals = Vec::new();
+    for (idx, local) in callee_body.locals.iter().enumerate() {
+        let old = RLocalId::from_u32(idx as u32);
+        if map.contains_key(&old) {
+            continue;
+        }
+        let fresh = RLocalId::from_u32((base_len + staged_locals.len()) as u32);
+        staged_locals.push(local.clone());
+        map.insert(old, fresh);
+    }
+    let remap = |id: RLocalId| map.get(&id).copied();
+    let mut out = Vec::with_capacity(callee_body.blocks[0].stmts.len() + 1);
+    for stmt in &callee_body.blocks[0].stmts {
+        let RStmt::Assign { dst, expr } = stmt else {
+            return None;
+        };
+        let expr = remap_inline_expr(expr, &remap)?;
+        out.push(RStmt::Assign {
+            dst: remap(*dst)?,
+            expr,
+        });
+    }
+    out.push(RStmt::Assign {
+        dst,
+        expr: RExpr::Use(remap(ret)?),
+    });
+    caller_locals.extend(staged_locals);
+    Some(out)
+}
+
+fn remap_inline_expr<'db>(
+    expr: &RExpr<'db>,
+    map: &impl Fn(RLocalId) -> Option<RLocalId>,
+) -> Option<RExpr<'db>> {
+    Some(match expr {
+        RExpr::Use(value) => RExpr::Use(map(*value)?),
+        RExpr::ConstScalar(value) => RExpr::ConstScalar(value.clone()),
+        RExpr::Unary { op, value } => RExpr::Unary {
+            op: *op,
+            value: map(*value)?,
+        },
+        RExpr::Binary { op, lhs, rhs } => RExpr::Binary {
+            op: *op,
+            lhs: map(*lhs)?,
+            rhs: map(*rhs)?,
+        },
+        RExpr::Cast { value, to } => RExpr::Cast {
+            value: map(*value)?,
+            to: to.clone(),
+        },
+        RExpr::AggregateMake { layout, fields } => RExpr::AggregateMake {
+            layout: *layout,
+            fields: fields
+                .iter()
+                .map(|field| map(*field))
+                .collect::<Option<_>>()?,
+        },
+        RExpr::AggregateExtract { value, index } => RExpr::AggregateExtract {
+            value: map(*value)?,
+            index: *index,
+        },
+        _ => return None,
+    })
+}
+
 struct WasmModuleLowerer<'db, 'a> {
     db: &'db DriverDataBase,
     builder: ModuleBuilder,
     isa: &'a Wasm32,
     package: &'a RuntimePackage<'db>,
+    prepared_bodies: FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
     func_symbols: FxHashMap<RuntimeInstance<'db>, String>,
     func_map: FxHashMap<RuntimeInstance<'db>, FuncRef>,
 }
@@ -152,11 +359,13 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         isa: &'a Wasm32,
         package: &'a RuntimePackage<'db>,
     ) -> Self {
+        let prepared_bodies = prepare_inline_value_bodies(db, package);
         Self {
             db,
             builder,
             isa,
             package,
+            prepared_bodies,
             func_symbols: assign_sonatina_function_symbols(db, package),
             func_map: FxHashMap::default(),
         }
@@ -277,7 +486,11 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     fn lower_bodies(&mut self) -> Result<(), LowerError> {
         for function in self.package.functions(self.db) {
             let instance = function.instance(self.db);
-            let body = instance.body(self.db);
+            let body = self
+                .prepared_bodies
+                .get(&instance)
+                .cloned()
+                .unwrap_or_else(|| instance.body(self.db));
             if body.blocks.is_empty() {
                 continue;
             }

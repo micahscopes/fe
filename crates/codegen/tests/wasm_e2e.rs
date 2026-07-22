@@ -345,6 +345,23 @@ fn recursive_mvt2_f32_render_executes_on_wasm() {
 }
 
 #[test]
+fn recursive_mvt2_f32_helper_call_executes_on_wasm() {
+    let source = include_str!("fixtures/spirv/mvt2_f32_helper_render.fe");
+    let wasm = compile_to_wasm("wasm_mvt2_f32_helper_render.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let render = instance
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32), i32>(
+            &mut store,
+            "mvt2_f32_helper_render",
+        )
+        .expect("inlined recursive aggregate helper export");
+    let got = render
+        .call(&mut store, (2, 3, 11.0, 22.0, 33.0, 44.0))
+        .expect("inlined MvT<2> helper execution") as u32;
+    assert_eq!(got.to_le_bytes(), [46, 25, 55, 255]);
+}
+
+#[test]
 fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/spirv");

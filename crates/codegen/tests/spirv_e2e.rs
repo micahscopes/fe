@@ -2478,6 +2478,8 @@ const MANDEL_FRAG_RGBA_SOURCE: &str = include_str!("fixtures/spirv/mandel_frag_r
 /// final f32 -> i32 -> packed-u32 color path in one small kernel.
 const F32_RENDER_PROBE_SOURCE: &str = include_str!("fixtures/spirv/f32_render_probe.fe");
 const MVT2_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt2_f32_render.fe");
+const MVT2_F32_HELPER_RENDER_SOURCE: &str =
+    include_str!("fixtures/spirv/mvt2_f32_helper_render.fe");
 const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
 
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
@@ -3027,6 +3029,44 @@ fn f32_render_probe_executes_on_lavapipe_against_independent_oracle() {
                 &expected,
                 "f32 Render pixel ({x},{y}) must match the independent Rust oracle"
             );
+        }
+    }
+}
+
+#[test]
+fn recursive_mvt2_f32_helper_call_executes_on_lavapipe() {
+    const W: u32 = 2;
+    const H: u32 = 2;
+    const COEFFS: [f32; 4] = [11.0, 22.0, 33.0, 44.0];
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mvt2_f32_helper_render.fe").expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MVT2_F32_HELPER_RENDER_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("recursive aggregate helper should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("straight-line recursive aggregate helper should inline before Render lowering");
+    let input = artifact.layout.bindings.iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("four f32 coefficients require an Input binding");
+    let mut input_bytes = vec![0u8; input.span as usize];
+    for member in &input.members {
+        let value = COEFFS[(member.arg_index - 2) as usize];
+        input_bytes[member.offset as usize..member.offset as usize + 4]
+            .copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("inlined MvT<2> helper requires GPU execution");
+    for y in 0..H {
+        for x in 0..W {
+            let offset = ((y * W + x) * 4) as usize;
+            assert_eq!(&rgba[offset..offset + 4], &[44 + x as u8, 22 + y as u8, 55, 255]);
         }
     }
 }
