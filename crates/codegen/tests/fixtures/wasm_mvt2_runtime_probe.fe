@@ -1,0 +1,27 @@
+// D2 stage 2: four runtime leaves in the recursive Fuchs-Thery value tree.
+
+pub struct Sc { pub s: u32 }
+pub struct Nd<A> { pub a: A, pub b: A }
+
+impl Copy for Sc {}
+impl<A: Copy> Copy for Nd<A> {}
+
+recursive type fn MvT<const N: usize>() -> (*) {
+    match N {
+        0 => Sc
+        _ => Nd<MvT<{N - 1}>>
+    }
+}
+
+pub fn mvt2_runtime_probe(c0: u32, c1: u32, c2: u32, c3: u32) -> MvT<2> {
+    let left: MvT<1> = Nd { a: Sc { s: c0 }, b: Sc { s: c1 } }
+    let right: MvT<1> = Nd { a: Sc { s: c2 }, b: Sc { s: c3 } }
+    let tree: MvT<2> = Nd { a: left, b: right }
+    let projected_left: u32 = tree.a.a.s
+    let projected_right: u32 = tree.b.a.s
+    let copied: MvT<2> = tree
+    Nd {
+        a: Nd { a: Sc { s: projected_left }, b: copied.a.b },
+        b: Nd { a: Sc { s: projected_right }, b: copied.b.b },
+    }
+}

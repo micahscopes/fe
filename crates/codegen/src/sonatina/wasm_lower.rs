@@ -33,7 +33,7 @@
 //! from whole primitive scalar Slot stores, stores, addresses, offsets, and
 //! object materializations remain R2 and fail closed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use driver::DriverDataBase;
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
@@ -41,8 +41,7 @@ use mir::{
     AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem, PlaceRoot,
     RBlockId, RExpr, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin,
     RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInstance, RuntimeLinkage,
-    RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
-    ScalarRepr,
+    RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass, ScalarRepr,
 };
 use rustc_hash::FxHashMap;
 use sonatina_ir::{
@@ -104,6 +103,37 @@ pub fn compile_runtime_package_wasm(
     lowerer.lower_bodies()?;
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FlatShape {
+    Leaf(Type),
+    Struct(Vec<FlatShape>),
+}
+
+impl FlatShape {
+    fn leaf_count(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 1,
+            Self::Struct(fields) => fields.iter().map(Self::leaf_count).sum(),
+        }
+    }
+
+    fn leaf_types(&self, out: &mut Vec<Type>) {
+        match self {
+            Self::Leaf(ty) => out.push(*ty),
+            Self::Struct(fields) => fields.iter().for_each(|field| field.leaf_types(out)),
+        }
+    }
+
+    fn field_range(&self, index: usize) -> Option<(usize, usize, &FlatShape)> {
+        let Self::Struct(fields) = self else {
+            return None;
+        };
+        let field = fields.get(index)?;
+        let start = fields[..index].iter().map(Self::leaf_count).sum();
+        Some((start, start + field.leaf_count(), field))
+    }
 }
 
 struct WasmModuleLowerer<'db, 'a> {
@@ -324,37 +354,55 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         }
     }
 
-    /// R2.1 (control-effects ladder section 7.4): the per-element Sonatina types
-    /// of a SCALAR-TUPLE aggregate, or `None` if `class` is not one. A scalar
-    /// tuple is a struct with TWO OR MORE fields where EVERY field is itself a
-    /// single wasm scalar word (each field lowers through `ty_for_class`: a plain
-    /// scalar, a `MemPtr`, or a single-scalar-field newtype such as `Pending<T>`).
+    fn flat_shape(&self, class: &RuntimeClass<'db>) -> Option<FlatShape> {
+        self.flat_shape_visit(class, &mut HashSet::new())
+    }
+
+    fn flat_shape_visit(
+        &self,
+        class: &RuntimeClass<'db>,
+        active: &mut HashSet<LayoutId<'db>>,
+    ) -> Option<FlatShape> {
+        match class {
+            RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar).ok().map(FlatShape::Leaf),
+            RuntimeClass::AggregateValue { layout } => {
+                if !active.insert(*layout) {
+                    return None;
+                }
+                let Layout::Struct(struct_layout) = layout.data(self.db) else {
+                    return None;
+                };
+                let fields = struct_layout
+                    .fields
+                    .iter()
+                    .map(|field| self.flat_shape_visit(field, active))
+                    .collect::<Option<Vec<_>>>()?;
+                active.remove(layout);
+                (!fields.is_empty()).then_some(FlatShape::Struct(fields))
+            }
+            // Preserve the previously admitted immediate one-word transport
+            // leaves through the existing admissibility SSOT. This accepts only
+            // memory RawAddr / memory Provider Ref; object, const, and non-memory
+            // refs still fail here.
+            transport @ (RuntimeClass::RawAddr { .. } | RuntimeClass::Ref { .. }) => {
+                self.ty_for_class(transport).ok().map(FlatShape::Leaf)
+            }
+        }
+    }
+
+    /// The recursively flattened scalar leaves of a struct tree, or `None` for
+    /// scalars, one-word newtypes, arrays/enums, refs, and unsupported leaves.
     /// This is the INTERFACE-level generalization of the single-scalar-field
     /// newtype scalarization to N fields: a `(Pending<B,T1>, Pending<B,T2>)`
     /// own-tuple param flattens into N wasm params, and a `(u64, u64)` return
     /// flattens into N wasm results, with one SSA variable per element. It is NOT
     /// a place/memory model: no element is ever addressed, offset, or stored.
     ///
-    /// A ONE-field struct is deliberately excluded (it stays on the
-    /// `single_scalar_field` newtype path, which maps it to its one word). Any
-    /// field that is not a single scalar word (a nested aggregate, an array, an
-    /// enum, a wide scalar) makes the whole tuple fail closed (`None`): those need
-    /// the R2 memory model.
     fn scalar_tuple_element_tys(&self, class: &RuntimeClass<'db>) -> Option<Vec<Type>> {
-        let RuntimeClass::AggregateValue { layout } = class else {
-            return None;
-        };
-        let Layout::Struct(struct_layout) = layout.data(self.db) else {
-            return None;
-        };
-        if struct_layout.fields.len() < 2 {
-            return None;
-        }
-        struct_layout
-            .fields
-            .iter()
-            .map(|field| self.ty_for_class(field).ok())
-            .collect()
+        let shape = self.flat_shape(class)?;
+        let mut leaves = Vec::new();
+        shape.leaf_types(&mut leaves);
+        (leaves.len() >= 2).then_some(leaves)
     }
 }
 
@@ -433,8 +481,10 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     continue;
                 }
                 if let Some(elem_tys) = module.scalar_tuple_element_tys(class) {
-                    let elem_vars =
-                        elem_tys.iter().map(|ty| fb.declare_var(*ty)).collect::<Vec<_>>();
+                    let elem_vars = elem_tys
+                        .iter()
+                        .map(|ty| fb.declare_var(*ty))
+                        .collect::<Vec<_>>();
                     tuple_vars.insert(local_id, elem_vars);
                 } else {
                     let ty = module.ty_for_class(class)?;
@@ -561,12 +611,11 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             RStmt::Store { dst, src }
                 if matches!((&dst.root, &*dst.path), (PlaceRoot::Slot(_), [])) =>
             {
-                let PlaceRoot::Slot(local) = &dst.root else { unreachable!() };
+                let PlaceRoot::Slot(local) = &dst.root else {
+                    unreachable!()
+                };
                 let local = *local;
-                if !matches!(
-                    self.body.value_class(local),
-                    Some(RuntimeClass::Scalar(_))
-                ) {
+                if !matches!(self.body.value_class(local), Some(RuntimeClass::Scalar(_))) {
                     return Err(unsupported_place(dst));
                 }
                 let value = self.local_value(*src)?;
@@ -589,9 +638,10 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         args: &[RLocalId],
     ) -> Result<(), LowerError> {
         let is = self.inst_set();
-        let callee_ref = *self.module.func_map.get(&callee).ok_or_else(|| {
-            LowerError::Internal("wasm call target was not declared".to_string())
-        })?;
+        let callee_ref =
+            *self.module.func_map.get(&callee).ok_or_else(|| {
+                LowerError::Internal("wasm call target was not declared".to_string())
+            })?;
         let mut arg_vals = Vec::with_capacity(args.len());
         for arg in args {
             arg_vals.push(self.local_value(*arg)?);
@@ -601,12 +651,32 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         Ok(())
     }
 
-    /// R2.1: lower an assignment whose destination is a flattened scalar tuple.
-    /// The tuple is a set of per-element SSA variables, so it is DEFINED element
-    /// by element. Producing forms are `AggregateMake` and an element-type-exact
-    /// `Use` copy from another shallow scalar tuple. Copies snapshot every
-    /// source SSA value before defining any destination. Receiving a tuple FROM
-    /// a call would need a wasm MULTI-RESULT call, which
+    fn local_flat_shape(&self, local: RLocalId) -> Result<FlatShape, LowerError> {
+        let class = self.body.value_class(local).ok_or_else(|| {
+            LowerError::Internal(format!("flattened local {local:?} has no runtime class"))
+        })?;
+        self.module.flat_shape(class).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "wasm target (R2.2): `{class:?}` is not a recursive struct tree of wasm scalars"
+            ))
+        })
+    }
+
+    /// Snapshot a local's leaves in DFS declaration order before callers write
+    /// any destination variables.
+    fn local_flat_values(&mut self, local: RLocalId) -> Result<Vec<ValueId>, LowerError> {
+        if let Some(vars) = self.tuple_vars.get(&local).cloned() {
+            return Ok(vars.iter().map(|var| self.fb.use_var(*var)).collect());
+        }
+        Ok(vec![self.local_value(local)?])
+    }
+
+    /// R2.2: lower an assignment whose destination is a recursively flattened
+    /// scalar struct tree. The tree is a set of per-leaf SSA variables in DFS
+    /// declaration order. Producing forms are shape-compatible `AggregateMake`,
+    /// `Use`, and `AggregateExtract`. All sources are snapshotted before any
+    /// destination definition. Receiving a tuple FROM a call would need a wasm
+    /// MULTI-RESULT call, which
     /// the WAFFLE Call path does not lower (it binds a single result), so that
     /// stays fail-closed. Everything else fails closed too.
     fn lower_tuple_assign(&mut self, dst: RLocalId, expr: &RExpr<'db>) -> Result<(), LowerError> {
@@ -615,81 +685,163 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 let elem_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
                 })?;
-                if fields.len() != elem_vars.len() {
+                let dst_shape = self.local_flat_shape(dst)?;
+                let FlatShape::Struct(expected_fields) = dst_shape else {
                     return Err(LowerError::Internal(format!(
-                        "R2.1 scalar-tuple make has {} fields but the destination has {} \
-                         element words",
+                        "R2.1 flattened destination {dst:?} is not a struct"
+                    )));
+                };
+                let dst_class = self.body.value_class(dst).ok_or_else(|| {
+                    LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no runtime class"))
+                })?;
+                let RuntimeClass::AggregateValue { layout } = dst_class else {
+                    return Err(LowerError::Internal(format!(
+                        "R2.1 flattened destination {dst:?} is not an aggregate"
+                    )));
+                };
+                let Layout::Struct(dst_layout) = layout.data(self.module.db) else {
+                    return Err(LowerError::Unsupported(
+                        "wasm target (R2.2): arrays/enums cannot be flattened".to_string(),
+                    ));
+                };
+                let expected_classes = dst_layout.fields.to_vec();
+                if fields.len() != expected_fields.len() || fields.len() != expected_classes.len() {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target (R2.1): aggregate make has {} fields but recursive \
+                         destination shape expects {}",
                         fields.len(),
+                        expected_fields.len()
+                    )));
+                }
+                let mut values = Vec::new();
+                for ((field, expected_shape), expected_class) in fields
+                    .iter()
+                    .zip(expected_fields)
+                    .zip(expected_classes.iter())
+                {
+                    let actual_class = self.body.value_class(*field).ok_or_else(|| {
+                        LowerError::Internal(format!("aggregate field {field:?} has no class"))
+                    })?;
+                    if !actual_class.shares_runtime_rep_with(self.module.db, expected_class) {
+                        return Err(LowerError::Unsupported(format!(
+                            "wasm target (R2.2): aggregate field {field:?} has an incompatible \
+                             recursive runtime representation"
+                        )));
+                    }
+                    let actual_shape = self.local_flat_shape(*field)?;
+                    if actual_shape != expected_shape {
+                        return Err(LowerError::Unsupported(format!(
+                            "wasm target (R2.1): aggregate field {field:?} shape \
+                             {actual_shape:?} does not match {expected_shape:?}"
+                        )));
+                    }
+                    values.extend(self.local_flat_values(*field)?);
+                }
+                if values.len() != elem_vars.len() {
+                    return Err(LowerError::Internal(format!(
+                        "R2.1 aggregate make produced {} leaves for {} destination vars",
+                        values.len(),
                         elem_vars.len()
                     )));
                 }
-                for (field, elem_var) in fields.iter().zip(elem_vars) {
-                    let value = self.local_value(*field)?;
+                for (elem_var, value) in elem_vars.into_iter().zip(values) {
                     self.fb.def_var(elem_var, value);
                 }
                 Ok(())
             }
             RExpr::Use(src) => {
-                let dst_class = self
-                    .body
-                    .value_class(dst)
-                    .ok_or_else(|| {
-                        LowerError::Internal(format!(
-                            "R2.1 tuple dst {dst:?} has no scalar-tuple type"
-                        ))
-                    })?;
-                let src_class = self
-                    .body
-                    .value_class(*src)
-                    .ok_or_else(|| {
-                        LowerError::Unsupported(format!(
-                            "wasm target (R2.1): scalar-tuple copy source {src:?} is not a \
+                let dst_class = self.body.value_class(dst).ok_or_else(|| {
+                    LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no scalar-tuple type"))
+                })?;
+                let src_class = self.body.value_class(*src).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target (R2.1): scalar-tuple copy source {src:?} is not a \
                              shallow scalar tuple"
-                        ))
-                    })?;
+                    ))
+                })?;
                 if !src_class.shares_runtime_rep_with(self.module.db, dst_class) {
                     return Err(LowerError::Unsupported(format!(
                         "wasm target (R2.1): scalar-tuple copy {src:?}->{dst:?} has incompatible \
                          runtime representations"
                     )));
                 }
-                let dst_types = self.module.scalar_tuple_element_tys(dst_class).ok_or_else(|| {
-                    LowerError::Internal(format!(
-                        "R2.1 tuple dst {dst:?} has no scalar-tuple element types"
-                    ))
-                })?;
-                let src_types = self.module.scalar_tuple_element_tys(src_class).ok_or_else(|| {
-                    LowerError::Unsupported(format!(
-                        "wasm target (R2.1): scalar-tuple copy source {src:?} is not a \
-                         shallow scalar tuple"
-                    ))
-                })?;
-                if src_types != dst_types {
+                let dst_shape = self.local_flat_shape(dst)?;
+                let src_shape = self.local_flat_shape(*src)?;
+                if src_shape != dst_shape {
                     return Err(LowerError::Unsupported(format!(
-                        "wasm target (R2.1): scalar-tuple copy {src:?}->{dst:?} has mismatched \
-                         flattened element types {src_types:?} != {dst_types:?}"
+                        "wasm target (R2.1): scalar-tree copy {src:?}->{dst:?} has mismatched \
+                         recursive shapes {src_shape:?} != {dst_shape:?}"
                     )));
                 }
-                let src_vars = self.tuple_vars.get(src).cloned().ok_or_else(|| {
-                    LowerError::Unsupported(format!(
-                        "wasm target (R2.1): scalar-tuple copy source {src:?} has no flattened \
-                         SSA variables"
-                    ))
-                })?;
                 let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
                 })?;
-                if src_vars.len() != dst_vars.len() {
+                let values = self.local_flat_values(*src)?;
+                if values.len() != dst_vars.len() {
                     return Err(LowerError::Internal(format!(
-                        "R2.1 scalar-tuple copy has {} source vars but {} destination vars",
-                        src_vars.len(),
+                        "R2.1 scalar-tree copy has {} source values but {} destination vars",
+                        values.len(),
                         dst_vars.len()
                     )));
                 }
-                let values: Vec<ValueId> = src_vars
-                    .iter()
-                    .map(|var| self.fb.use_var(*var))
-                    .collect();
+                for (dst_var, value) in dst_vars.into_iter().zip(values) {
+                    self.fb.def_var(dst_var, value);
+                }
+                Ok(())
+            }
+            RExpr::AggregateExtract { value, index } => {
+                let source_class = self.body.value_class(*value).ok_or_else(|| {
+                    LowerError::Internal(format!("aggregate source {value:?} has no class"))
+                })?;
+                let RuntimeClass::AggregateValue { layout } = source_class else {
+                    return Err(LowerError::Unsupported(
+                        "wasm target (R2.2): aggregate extract source is not a struct".to_string(),
+                    ));
+                };
+                let Layout::Struct(source_layout) = layout.data(self.module.db) else {
+                    return Err(LowerError::Unsupported(
+                        "wasm target (R2.2): arrays/enums cannot be projected".to_string(),
+                    ));
+                };
+                let field_class = source_layout
+                    .fields
+                    .get(*index as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "wasm target (R2.2): aggregate extract index {index} is out of bounds"
+                        ))
+                    })?;
+                let dst_class = self.body.value_class(dst).ok_or_else(|| {
+                    LowerError::Internal(format!("aggregate destination {dst:?} has no class"))
+                })?;
+                if !field_class.shares_runtime_rep_with(self.module.db, dst_class) {
+                    return Err(LowerError::Unsupported(
+                        "wasm target (R2.2): aggregate projection destination has an \
+                         incompatible recursive runtime representation"
+                            .to_string(),
+                    ));
+                }
+                let source_shape = self.local_flat_shape(*value)?;
+                let Some((start, end, field_shape)) = source_shape.field_range(*index as usize)
+                else {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target (R2.1): aggregate extract index {index} is outside \
+                         recursive source shape {source_shape:?}"
+                    )));
+                };
+                let dst_shape = self.local_flat_shape(dst)?;
+                if &dst_shape != field_shape {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target (R2.1): aggregate extract field shape {field_shape:?} \
+                         does not match destination shape {dst_shape:?}"
+                    )));
+                }
+                let source_values = self.local_flat_values(*value)?;
+                let values = source_values[start..end].to_vec();
+                let dst_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
+                    LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
+                })?;
                 for (dst_var, value) in dst_vars.into_iter().zip(values) {
                     self.fb.def_var(dst_var, value);
                 }
@@ -706,8 +858,8 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             )),
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R2.1): scalar-tuple destination assigned from `{other:?}` is \
-                 not supported (only `aggregate_make` and element-type-exact shallow tuple copies \
-                 lower; tuple call results are R2)"
+                 not supported (only recursive scalar-tree make/copy/extract lower; \
+                 aggregate slots and tuple call results remain unsupported)"
             ))),
         }
     }
@@ -739,19 +891,57 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             // that field's value; `AggregateExtract` at index 0 yields the
             // aggregate's value (which IS the field's word). This is what executes
             // the `u32` newtypes (`Pending<T>` / `KernelId` / `WebGpuRef`).
-            RExpr::AggregateMake { layout, fields } => self.lower_scalar_newtype_make(*layout, fields),
+            RExpr::AggregateMake { layout, fields } => {
+                self.lower_scalar_newtype_make(*layout, fields)
+            }
             RExpr::AggregateExtract { value, index } => {
-                // R2.1: extracting element `index` of a flattened scalar tuple is
-                // a read of that element's SSA variable (the tuple destructuring
-                // `let (p1, p2) = pair`). Otherwise it is the single-scalar-field
-                // newtype identity.
-                if let Some(elem_var) = self
-                    .tuple_vars
-                    .get(value)
-                    .and_then(|elem_vars| elem_vars.get(*index as usize))
-                    .copied()
-                {
-                    return Ok(self.fb.use_var(elem_var));
+                if self.tuple_vars.contains_key(value) {
+                    let source_class = self.body.value_class(*value).ok_or_else(|| {
+                        LowerError::Internal(format!("aggregate source {value:?} has no class"))
+                    })?;
+                    let RuntimeClass::AggregateValue { layout } = source_class else {
+                        return Err(LowerError::Unsupported(
+                            "wasm target (R2.2): scalar extract source is not a struct".to_string(),
+                        ));
+                    };
+                    let Layout::Struct(source_layout) = layout.data(self.module.db) else {
+                        return Err(LowerError::Unsupported(
+                            "wasm target (R2.2): arrays/enums cannot be projected".to_string(),
+                        ));
+                    };
+                    let field_class = source_layout
+                        .fields
+                        .get(*index as usize)
+                        .cloned()
+                        .ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "wasm target (R2.2): scalar extract index {index} is out of bounds"
+                            ))
+                        })?;
+                    let dst_class = self.body.value_class(dst).ok_or_else(|| {
+                        LowerError::Internal(format!("scalar destination {dst:?} has no class"))
+                    })?;
+                    if !field_class.shares_runtime_rep_with(self.module.db, dst_class) {
+                        return Err(LowerError::Unsupported(
+                            "wasm target (R2.2): scalar projection destination has an \
+                             incompatible runtime representation"
+                                .to_string(),
+                        ));
+                    }
+                    let source_shape = self.local_flat_shape(*value)?;
+                    let Some((start, end, _)) = source_shape.field_range(*index as usize) else {
+                        return Err(LowerError::Unsupported(format!(
+                            "wasm target (R2.2): scalar aggregate extract index {index} is \
+                             outside recursive source shape {source_shape:?}"
+                        )));
+                    };
+                    if end - start != 1 {
+                        return Err(LowerError::Internal(format!(
+                            "scalar destination requested aggregate field with {} leaves",
+                            end - start
+                        )));
+                    }
+                    return Ok(self.local_flat_values(*value)?[start]);
                 }
                 self.lower_scalar_newtype_extract(*value, *index)
             }
@@ -780,10 +970,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     /// fail-closed as R2. See the ladder doc section 7.2 for the exact boundary.
     fn lower_place_read(&mut self, place: &RuntimePlace<'db>) -> Result<ValueId, LowerError> {
         if let (PlaceRoot::Slot(local), []) = (&place.root, &*place.path) {
-            if matches!(
-                self.body.value_class(*local),
-                Some(RuntimeClass::Scalar(_))
-            ) {
+            if matches!(self.body.value_class(*local), Some(RuntimeClass::Scalar(_))) {
                 return self.local_value(*local);
             }
             return Err(unsupported_place(place));
@@ -1095,13 +1282,15 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         if let Some(name) = callee
             .key(self.module.db)
             .semantic(self.module.db)
-            .and_then(|semantic| match semantic.key(self.module.db).owner(self.module.db) {
-                hir::analysis::ty::ty_check::BodyOwner::Func(func) => func
-                    .name(self.module.db)
-                    .to_opt()
-                    .map(|name| name.data(self.module.db).to_string()),
-                _ => None,
-            })
+            .and_then(
+                |semantic| match semantic.key(self.module.db).owner(self.module.db) {
+                    hir::analysis::ty::ty_check::BodyOwner::Func(func) => func
+                        .name(self.module.db)
+                        .to_opt()
+                        .map(|name| name.data(self.module.db).to_string()),
+                    _ => None,
+                },
+            )
         {
             if matches!(
                 name.as_str(),
@@ -1120,9 +1309,10 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             }
         }
         let is = self.inst_set();
-        let callee_ref = *self.module.func_map.get(&callee).ok_or_else(|| {
-            LowerError::Internal("wasm call target was not declared".to_string())
-        })?;
+        let callee_ref =
+            *self.module.func_map.get(&callee).ok_or_else(|| {
+                LowerError::Internal("wasm call target was not declared".to_string())
+            })?;
         let ret_class = callee.body(self.module.db).signature.ret.clone();
         let ret_ty = match ret_class {
             Some(class) => self.module.ty_for_class(&class)?,
@@ -1138,9 +1328,10 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         for arg in args {
             arg_vals.push(self.local_value(*arg)?);
         }
-        Ok(self
-            .fb
-            .insert_inst(Call::new(is, callee_ref, arg_vals.into_iter().collect()), ret_ty))
+        Ok(self.fb.insert_inst(
+            Call::new(is, callee_ref, arg_vals.into_iter().collect()),
+            ret_ty,
+        ))
     }
 
     fn lower_terminator(&mut self, terminator: &RTerminator<'db>) -> Result<(), LowerError> {
@@ -1156,8 +1347,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     self.fb.insert_return_values(&values);
                 } else {
                     let value = self.local_value(*value)?;
-                    self.fb
-                        .insert_inst_no_result(Return::new_single(is, value));
+                    self.fb.insert_inst_no_result(Return::new_single(is, value));
                 }
             }
             // A unit return and a `Stop` (the synthetic main-root exit) both
@@ -1208,11 +1398,9 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     }
 
     fn local_ty(&self, local: RLocalId) -> Result<Type, LowerError> {
-        let class = self
-            .body
-            .value_class(local)
-            .cloned()
-            .ok_or_else(|| LowerError::Internal(format!("local {local:?} carries no value class")))?;
+        let class = self.body.value_class(local).cloned().ok_or_else(|| {
+            LowerError::Internal(format!("local {local:?} carries no value class"))
+        })?;
         self.module.ty_for_class(&class)
     }
 
@@ -1271,10 +1459,7 @@ fn unsupported_place(place: &RuntimePlace<'_>) -> LowerError {
     ))
 }
 
-fn immediate_for_const_scalar(
-    constant: &ConstScalar,
-    ty: Type,
-) -> Result<Immediate, LowerError> {
+fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immediate, LowerError> {
     match constant {
         ConstScalar::Bool(value) => Ok(Immediate::from(*value)),
         ConstScalar::Int { words, signed, .. } => {

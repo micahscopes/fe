@@ -282,9 +282,7 @@ pub fn select_left(flag: bool, when_true: own Pair, when_false: own Pair) -> u64
 "#;
     let error = compile_to_wasm_err("wasm_aggregate_conditional_slot.fe", source);
     assert!(
-        error.contains("aggregate")
-            || error.contains("unsupported place")
-            || error.contains("R2"),
+        error.contains("aggregate") || error.contains("unsupported place") || error.contains("R2"),
         "aggregate/projection slots must remain outside the whole-scalar slot boundary: {error}",
     );
 }
@@ -305,6 +303,26 @@ fn recursive_mvt1_construct_copy_project_return_executes_on_wasm() {
         probe.call(&mut store, (17, 29)).expect("MvT<1> probe call"),
         (17, 29),
         "projection/copy/rebuild must preserve both distinct leaves",
+    );
+}
+
+#[test]
+fn recursive_mvt2_construct_copy_project_return_executes_on_wasm() {
+    let source = include_str!("fixtures/wasm_mvt2_runtime_probe.fe");
+    let wasm = compile_to_wasm("wasm_mvt2_runtime_probe.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<(i32, i32, i32, i32), (i32, i32, i32, i32)>(
+            &mut store,
+            "mvt2_runtime_probe",
+        )
+        .expect("MvT<2> export should take four scalar params and flatten to four results");
+    assert_eq!(
+        probe
+            .call(&mut store, (11, 22, 33, 44))
+            .expect("MvT<2> probe call"),
+        (11, 22, 33, 44),
+        "DFS construction/projection/copy/rebuild must preserve all four leaves",
     );
 }
 
@@ -717,7 +735,9 @@ fn instantiate_fake_device(wasm: &[u8]) -> (wasmtime::Store<FakeDevice>, wasmtim
         .func_wrap(
             "fe:async",
             "wait",
-            |mut caller: wasmtime::Caller<'_, FakeDevice>, token: i32| -> Result<(), wasmtime::Error> {
+            |mut caller: wasmtime::Caller<'_, FakeDevice>,
+             token: i32|
+             -> Result<(), wasmtime::Error> {
                 let memory = caller
                     .get_export("memory")
                     .and_then(wasmtime::Extern::into_memory)
@@ -870,8 +890,7 @@ fn fe_webgpu_ntt8_on_ready_continuation() {
         .read(&store, OUTPUT_ADDR as usize, &mut before)
         .expect("reading the output region should succeed");
     assert_eq!(
-        before,
-        [0u8; 32],
+        before, [0u8; 32],
         "readback_begin must NOT touch memory: the output region stays unchanged \
          until the continuation completes"
     );
@@ -1385,8 +1404,12 @@ fn fe_worker_await2_shaped_two_token_join_equals_oracle() {
     let mint = instance
         .get_typed_func::<i64, i32>(&mut store, "mint")
         .expect("`mint` export should exist");
-    let t0 = mint.call(&mut store, 0).expect("mint(0) should spawn a task token");
-    let t1 = mint.call(&mut store, 1).expect("mint(1) should spawn a task token");
+    let t0 = mint
+        .call(&mut store, 0)
+        .expect("mint(0) should spawn a task token");
+    let t1 = mint
+        .call(&mut store, 1)
+        .expect("mint(1) should spawn a task token");
 
     // Join both tokens through the await2-shaped own-tuple join. The `(Pending,
     // Pending)` param arrives as two wasm params (R2.1); the `(u64, u64)` return is
@@ -1883,7 +1906,9 @@ pub fn run(_ pair: u64) -> u64 {
 /// slot/CAS/log discipline) PLUS the `fe:host` clock (`host_now` -> `BASE_CLOCK_MS`).
 /// This is the CE-5 `FakeTaskPool` and the CE-7 clock in ONE linker, servicing the
 /// two import modules a three-capability program pulls into one wasm module.
-fn instantiate_worker_and_clock(wasm: &[u8]) -> (wasmtime::Store<FakeTaskPool>, wasmtime::Instance) {
+fn instantiate_worker_and_clock(
+    wasm: &[u8],
+) -> (wasmtime::Store<FakeTaskPool>, wasmtime::Instance) {
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, wasm).expect("wasmtime should load the module");
     let mut store = wasmtime::Store::new(&engine, FakeTaskPool::default());
@@ -1905,7 +1930,10 @@ fn instantiate_worker_and_clock(wasm: &[u8]) -> (wasmtime::Store<FakeTaskPool>, 
                     .typed::<(i32, i64), i64>(&caller)?;
                 let result = fe_task.call(&mut caller, (entry, arg))?;
                 let dev = caller.data_mut();
-                dev.slots.push(TaskSlot { value: result as u64, consumed: false });
+                dev.slots.push(TaskSlot {
+                    value: result as u64,
+                    consumed: false,
+                });
                 dev.log.push("task_begin");
                 Ok((dev.slots.len() - 1) as i32)
             },
@@ -1944,7 +1972,9 @@ fn instantiate_worker_and_clock(wasm: &[u8]) -> (wasmtime::Store<FakeTaskPool>, 
                     .get_mut(token as usize)
                     .ok_or_else(|| wasmtime::Error::msg("task_result: unknown pending token"))?;
                 if slot.consumed {
-                    return Err(wasmtime::Error::msg("task_result trap: token already CONSUMED"));
+                    return Err(wasmtime::Error::msg(
+                        "task_result trap: token already CONSUMED",
+                    ));
                 }
                 slot.consumed = true;
                 let value = slot.value;
