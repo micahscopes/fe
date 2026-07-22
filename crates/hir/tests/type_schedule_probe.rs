@@ -170,6 +170,37 @@ fn projection_is_computed_normal_form(x: <Slots<4> as Lower<Zero>>::Out) {
 }
 
 #[test]
+fn ground_numeric_tag_normalizes_through_nested_const_fn() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "type_schedule_nested_const_choice_probe.fe".into(),
+        r#"
+struct Zero {}
+struct One {}
+struct Slot<const I: usize> {}
+struct Choice<const Tag: usize> {}
+const fn inner(_ a: usize, _ b: usize) -> usize { (a ^ b) & 1 }
+const fn outer(_ i: usize) -> usize {
+    let x = i / 2
+    let y = i % 2
+    inner(x, y)
+}
+trait Emit { type Out }
+impl Emit for Choice<0> { type Out = Zero }
+impl Emit for Choice<1> { type Out = One }
+trait Lower { type Out }
+impl<const I: usize> Lower for Slot<I> where Choice<{outer(I)}>: Emit {
+    type Out = <Choice<{outer(I)}> as Emit>::Out
+}
+fn takes_one(_ x: One) {}
+fn projection_is_one(x: <Slot<2> as Lower>::Out) { takes_one(x) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn provider_emit_assoc_ty_materializes_schedule_projection() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

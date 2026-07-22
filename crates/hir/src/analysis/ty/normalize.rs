@@ -13,6 +13,7 @@ use rustc_hash::FxHashMap;
 use super::{
     canonical::Canonical,
     canonical::Canonicalized,
+    const_ty::normalize_const_tys_for_comparison,
     fold::{TyFoldable, TyFolder},
     trait_def::{TraitInstId, impls_for_ty_with_constraints},
     trait_resolution::{PredicateListId, ProvisionEnv},
@@ -135,6 +136,15 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                     return self.fold_ty(db, lowered);
                 }
                 ty
+            }
+            TyData::ConstTy(_) => {
+                // Substitution can turn a symbolic abstract const tree into a
+                // fully-ground one (for example `((I / 2) ^ (I % 2)) & 1`
+                // after `I := 2`). Fold its children first, then reuse the
+                // existing integer const evaluator to collapse the ground
+                // tree. Symbolic trees remain unchanged.
+                let folded = ty.super_fold_with(db, self);
+                normalize_const_tys_for_comparison(self.db, folded)
             }
             TyData::AssocTy(assoc_ty) => {
                 // Guard G1 (bare arm): a bare GAT head `B::Buffer` (decl carries
