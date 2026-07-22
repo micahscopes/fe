@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Poll a Chrome page's structured D1 acceptance over CDP, stdlib only."""
+"""Poll a Chrome page's structured typed-CGA result over CDP, stdlib only."""
 
 import argparse
 import base64
@@ -58,12 +58,18 @@ def parse_frame_bytes(data):
     return first & 0x0F, payload, offset + length
 
 
-def acceptance_passes(value, expected_presentation):
-    return (
-        isinstance(value, dict)
-        and value.get("state") == "green"
-        and value.get("presentation") == expected_presentation
-    )
+def acceptance_passes(value, expected_presentation, expected_state="green"):
+    if not isinstance(value, dict):
+        return False
+    if value.get("state") != expected_state or value.get("presentation") != expected_presentation:
+        return False
+    if expected_state == "presentation":
+        return (
+            value.get("verified") is False
+            and "wasmHash" not in value
+            and "gpuHash" not in value
+        )
+    return True
 
 
 class WebSocket:
@@ -127,10 +133,10 @@ def find_page(debug_port, page_url, deadline):
         except Exception:
             pass
         time.sleep(0.1)
-    raise TimeoutError(f"Chrome did not expose the D1 page over CDP: {page_url}")
+    raise TimeoutError(f"Chrome did not expose the typed-CGA page over CDP: {page_url}")
 
 
-def poll_acceptance(debug_port, page_url, expected_presentation, timeout):
+def poll_acceptance(debug_port, page_url, expected_presentation, expected_state, timeout):
     deadline = time.monotonic() + timeout
     ws = WebSocket(find_page(debug_port, page_url, deadline), max(1, timeout))
     command_id = 0
@@ -153,12 +159,12 @@ def poll_acceptance(debug_port, page_url, expected_presentation, timeout):
                 value = json.loads(raw) if isinstance(raw, str) else None
                 if isinstance(value, dict) and value.get("state") != "pending":
                     print(json.dumps(value, sort_keys=True))
-                    return acceptance_passes(value, expected_presentation)
+                    return acceptance_passes(value, expected_presentation, expected_state)
                 break
             time.sleep(0.1)
     finally:
         ws.close()
-    raise TimeoutError("D1 browser acceptance remained pending until the deadline")
+    raise TimeoutError("typed-CGA browser result remained pending until the deadline")
 
 
 def main():
@@ -166,14 +172,19 @@ def main():
     parser.add_argument("--debug-port", type=int, required=True)
     parser.add_argument("--url", required=True)
     parser.add_argument("--presentation", choices=["offscreen", "canvas"], required=True)
+    parser.add_argument("--expected-state", choices=["green", "presentation"], default="green")
     parser.add_argument("--timeout", type=float, default=90)
     args = parser.parse_args()
     try:
-        passed = poll_acceptance(args.debug_port, args.url, args.presentation, args.timeout)
+        passed = poll_acceptance(
+            args.debug_port, args.url, args.presentation, args.expected_state, args.timeout
+        )
     except Exception as error:
         raise SystemExit(f"CDP acceptance failed: {error}")
     if not passed:
-        raise SystemExit("CDP acceptance was not green in the expected presentation mode")
+        raise SystemExit(
+            f"CDP result was not {args.expected_state!r} in the expected presentation mode"
+        )
 
 
 if __name__ == "__main__":

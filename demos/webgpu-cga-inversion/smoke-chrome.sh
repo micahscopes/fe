@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Real-browser D1 smoke gate. Exit 0 means GREEN; exit 69 means no browser.
+# Real-browser typed-CGA smoke. Exit 0 means the selected contract passed;
+# exit 69 means no browser. `verify=off` is presentation, never green acceptance.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,11 +59,24 @@ case "$debug_port" in *[!0-9]*|'') echo "CGA_CDP_PORT must be numeric" >&2; exit
 server_pid=$!
 presentation="${CGA_SMOKE_PRESENTATION:-offscreen}"
 case "$presentation" in
-  offscreen) query="?acceptance=offscreen" ;;
+  offscreen) query="acceptance=offscreen" ;;
   canvas) query="" ;;
   *) echo "CGA_SMOKE_PRESENTATION must be 'offscreen' or 'canvas'" >&2; exit 2 ;;
 esac
-url="http://127.0.0.1:$port/webgpu-cga-inversion/$query"
+verify_mode="${CGA_SMOKE_VERIFY:-default}"
+case "$verify_mode" in
+  default) expected_state="green" ;;
+  off)
+    expected_state="presentation"
+    query="${query:+$query&}verify=off"
+    ;;
+  continuous)
+    expected_state="green"
+    query="${query:+$query&}verify=continuous"
+    ;;
+  *) echo "CGA_SMOKE_VERIFY must be 'default', 'off', or 'continuous'" >&2; exit 2 ;;
+esac
+url="http://127.0.0.1:$port/webgpu-cga-inversion/${query:+?$query}"
 python3 - "$url" "$server_pid" <<'PY'
 import os, sys, time, urllib.request
 url, pid = sys.argv[1], int(sys.argv[2])
@@ -102,11 +116,12 @@ python3 "$here/cdp_acceptance.py" \
   --debug-port "$debug_port" \
   --url "$url" \
   --presentation "$presentation" \
+  --expected-state "$expected_state" \
   --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"
 acceptance_status=$?
 set -e
 if [ "$acceptance_status" -ne 0 ]; then
-  echo "FAIL: browser acceptance did not become GREEN." >&2
+  echo "FAIL: browser did not satisfy typed-CGA mode '$verify_mode' (expected state '$expected_state')." >&2
   tail -80 "$tmp/chrome.log" >&2 || true
   tail -40 "$tmp/server.log" >&2 || true
   exit 1
@@ -116,4 +131,8 @@ kill "$chrome_pid" 2>/dev/null || true
 wait "$chrome_pid" 2>/dev/null || true
 chrome_pid=""
 
-echo "PASS: real Chrome/WebGPU D1 $presentation acceptance is GREEN."
+if [ "$expected_state" = "green" ]; then
+  echo "PASS: real Chrome/WebGPU typed-CGA $presentation acceptance is GREEN ($verify_mode verification)."
+else
+  echo "PASS: real Chrome/WebGPU typed-CGA $presentation showcase is PRESENTATION/UNVERIFIED (verification off)."
+fi

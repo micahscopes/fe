@@ -1,5 +1,9 @@
 import json
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cdp_acceptance import acceptance_passes, encode_client_frame, parse_frame_bytes
 
@@ -22,6 +26,14 @@ class CdpAcceptanceTests(unittest.TestCase):
         self.assertTrue(acceptance_passes({"state": "green", "presentation": "offscreen"}, "offscreen"))
         self.assertFalse(acceptance_passes({"state": "pending", "presentation": "offscreen"}, "offscreen"))
         self.assertFalse(acceptance_passes({"state": "green", "presentation": "canvas"}, "offscreen"))
+
+    def test_unverified_presentation_contract_forbids_acceptance_hashes(self):
+        value = {"state": "presentation", "presentation": "offscreen", "verified": False}
+        self.assertTrue(acceptance_passes(value, "offscreen", "presentation"))
+        self.assertFalse(acceptance_passes({**value, "verified": True}, "offscreen", "presentation"))
+        self.assertFalse(acceptance_passes({**value, "wasmHash": 1}, "offscreen", "presentation"))
+        self.assertFalse(acceptance_passes({**value, "gpuHash": 1}, "offscreen", "presentation"))
+        self.assertFalse(acceptance_passes({**value, "state": "green"}, "offscreen", "presentation"))
 
 
 if __name__ == "__main__":

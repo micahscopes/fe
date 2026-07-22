@@ -101,3 +101,12 @@ it exits 69 and prints `UNAVAILABLE`; that is not a passing browser result.
 Platforms using Metal or D3D may override `CHROME_WEBGPU_FLAGS`.
 The harness polls that structured state through Chrome's DevTools Protocol and
 terminates Chrome itself; it does not rely on `--dump-dom` completing.
+
+Select the verification contract with `CGA_SMOKE_VERIFY=default|off|continuous`.
+`default` preserves the one-shot green acceptance above. `continuous` adds
+`?verify=continuous` and still requires green. `off` adds `?verify=off`, requires
+the explicit structured state `presentation` with `verified:false`, and rejects
+any `wasmHash` or `gpuHash`; a passing off-mode smoke is reported as an
+unverified presentation result, never as green acceptance. Query parameters are
+combined with `CGA_SMOKE_PRESENTATION=offscreen|canvas` without replacing one
+another.
