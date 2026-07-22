@@ -58,7 +58,14 @@ CHROME_BIN=/path/to/google-chrome demos/webgpu-cga-inversion/smoke-chrome.sh
 ```
 
 The harness chooses a free localhost port, cleans up its server/profile, enables
-headless WebGPU explicitly, and fails unless both the dumped DOM `data-status`
-and structured acceptance state are `green`. If Chrome is unavailable it exits
-69 and prints `UNAVAILABLE`; that is not a passing browser result. Platforms
-using Metal or D3D may override `CHROME_WEBGPU_FLAGS`.
+headless WebGPU explicitly, and defaults to `?acceptance=offscreen`. Green proves
+that a real browser executed both the Fe Wasm oracle and WebGPU offscreen render,
+read the GPU texture back, and found every byte equal. It does not prove canvas
+presentation. Canvas display remains a separate manual check; set
+`CGA_SMOKE_PRESENTATION=canvas` only when the headless platform genuinely
+supports presentation. The harness requires the structured acceptance JSON to
+report the selected `presentation` as well as `green`. If Chrome is unavailable
+it exits 69 and prints `UNAVAILABLE`; that is not a passing browser result.
+Platforms using Metal or D3D may override `CHROME_WEBGPU_FLAGS`.
+The harness polls that structured state through Chrome's DevTools Protocol and
+terminates Chrome itself; it does not rely on `--dump-dom` completing.

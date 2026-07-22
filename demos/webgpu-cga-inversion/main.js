@@ -3,6 +3,10 @@ import { instantiateWasm, renderFragmentGrid } from "../webgpu-keystone/wasm-run
 
 const CAMERA = new Map([[2, 0.0], [3, 0.0], [4, 0.0125]]);
 const $ = (id) => document.getElementById(id);
+const acceptanceMode = new URLSearchParams(window.location.search).get("acceptance");
+const presentation = acceptanceMode === null || acceptanceMode === ""
+  ? "canvas"
+  : acceptanceMode;
 
 function banner(kind, detail) {
   $("banner").className = `banner ${kind}`;
@@ -81,6 +85,10 @@ function validateReference(reference) {
 }
 
 async function main() {
+  if (presentation !== "canvas" && presentation !== "offscreen") {
+    banner("red", `invalid acceptance presentation: ${presentation}`);
+    return { state: "red", presentation, reason: "acceptance must be canvas or offscreen" };
+  }
   let layout, reference, source, wgsl, wasm;
   try {
     [layout, reference, source, wgsl, wasm] = await Promise.all([
@@ -94,7 +102,7 @@ async function main() {
     validateReference(reference);
   } catch (error) {
     banner("red", `artifact contract failed: ${error.message || error}`);
-    return { state: "red", reason: String(error) };
+    return { state: "red", presentation, reason: String(error) };
   }
 
   $("source").textContent = source;
@@ -119,37 +127,41 @@ async function main() {
     wasmRgba = new Uint8Array(words.buffer, words.byteOffset, words.byteLength);
   } catch (error) {
     banner("red", `browser wasm oracle failed: ${error.message || error}`);
-    return { state: "red", reason: String(error) };
+    return { state: "red", presentation, reason: String(error) };
   }
   const wasmHash = fnv1a32(wasmRgba);
   if (wasmHash !== (reference.fnv1a32 >>> 0)) {
     banner("red", `browser wasm/reference mismatch: ${wasmHash} != ${reference.fnv1a32 >>> 0}`);
-    return { state: "red", wasmHash };
+    return { state: "red", presentation, wasmHash };
   }
 
-  const gpu = await initWebGPURender(wgsl, renderLayout, $("view"));
+  const gpu = await initWebGPURender(
+    wgsl,
+    renderLayout,
+    presentation === "offscreen" ? null : $("view"),
+  );
   if (!gpu.ok) {
     banner("amber", `browser wasm matches the compiled full frame; no live WebGPU render: ${gpu.reason}`);
-    return { state: "amber", wasmHash, reason: gpu.reason };
+    return { state: "amber", presentation, wasmHash, reason: gpu.reason };
   }
 
-  renderFrame(gpu, values);
+  if (presentation === "canvas") renderFrame(gpu, values);
   const readback = await verifyView(gpu, values);
   if (!readback.ok) {
     banner("red", `GPU readback failed: ${readback.reason}`);
-    return { state: "red", wasmHash, reason: readback.reason };
+    return { state: "red", presentation, wasmHash, reason: readback.reason };
   }
   const hash = fnv1a32(readback.rgba);
   if (hash !== wasmHash || readback.rgba.length !== wasmRgba.length
       || readback.rgba.some((byte, index) => byte !== wasmRgba[index])) {
     banner("red", `GPU/browser-wasm mismatch: GPU ${hash}, wasm ${wasmHash}`);
-    return { state: "red", wasmHash, gpuHash: hash };
+    return { state: "red", presentation, wasmHash, gpuHash: hash };
   }
-  banner("green", `live two-sphere WebGPU render matches compiled 128x128 reference (FNV-1a ${hash}) on ${gpu.adapter}`);
-  return { state: "green", wasmHash, gpuHash: hash, adapter: gpu.adapter };
+  banner("green", `live two-sphere WebGPU ${presentation} readback matches compiled 128x128 reference (FNV-1a ${hash}) on ${gpu.adapter}`);
+  return { state: "green", presentation, wasmHash, gpuHash: hash, adapter: gpu.adapter };
 }
 
-window.__cgaAcceptance = { state: "pending" };
+window.__cgaAcceptance = { state: "pending", presentation };
 document.documentElement.dataset.status = "pending";
 function publishAcceptance(result) {
   Object.assign(window.__cgaAcceptance, result);
@@ -161,7 +173,7 @@ function publishAcceptance(result) {
 window.__cgaAcceptance.promise = main().then((result) => {
   return publishAcceptance(result);
 }).catch((error) => {
-  const result = { state: "red", reason: String(error) };
+  const result = { state: "red", presentation, reason: String(error) };
   banner("red", result.reason);
   return publishAcceptance(result);
 });

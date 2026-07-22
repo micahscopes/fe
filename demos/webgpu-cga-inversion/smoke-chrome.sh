@@ -42,9 +42,27 @@ PY
 fi
 case "$port" in *[!0-9]*|'') echo "CGA_SMOKE_PORT must be numeric" >&2; exit 2;; esac
 
+debug_port="${CGA_CDP_PORT:-}"
+if [ -z "$debug_port" ]; then
+  debug_port="$(python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)"
+fi
+case "$debug_port" in *[!0-9]*|'') echo "CGA_CDP_PORT must be numeric" >&2; exit 2;; esac
+
 (cd "$demos" && HOST=127.0.0.1 PORT="$port" python3 serve.py) >"$tmp/server.log" 2>&1 &
 server_pid=$!
-url="http://127.0.0.1:$port/webgpu-cga-inversion/"
+presentation="${CGA_SMOKE_PRESENTATION:-offscreen}"
+case "$presentation" in
+  offscreen) query="?acceptance=offscreen" ;;
+  canvas) query="" ;;
+  *) echo "CGA_SMOKE_PRESENTATION must be 'offscreen' or 'canvas'" >&2; exit 2 ;;
+esac
+url="http://127.0.0.1:$port/webgpu-cga-inversion/$query"
 python3 - "$url" "$server_pid" <<'PY'
 import os, sys, time, urllib.request
 url, pid = sys.argv[1], int(sys.argv[2])
@@ -73,54 +91,29 @@ fi
   --no-first-run \
   --no-default-browser-check \
   --user-data-dir="$tmp/profile" \
-  --virtual-time-budget="${CGA_VIRTUAL_TIME_MS:-60000}" \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port="$debug_port" \
   "${webgpu_flags[@]}" "${extra_flags[@]}" \
-  --dump-dom "$url" >"$tmp/dom.html" 2>"$tmp/chrome.log" &
+  "$url" >"$tmp/chrome.out" 2>"$tmp/chrome.log" &
 chrome_pid=$!
 
-deadline=$((SECONDS + ${CGA_CHROME_TIMEOUT_SECONDS:-90}))
-while kill -0 "$chrome_pid" 2>/dev/null; do
-  if (( SECONDS >= deadline )); then
-    kill "$chrome_pid" 2>/dev/null || true
-    wait "$chrome_pid" 2>/dev/null || true
-    chrome_pid=""
-    echo "FAIL: Chrome exceeded the smoke timeout." >&2
-    tail -80 "$tmp/chrome.log" >&2 || true
-    exit 1
-  fi
-  sleep .25
-done
 set +e
-wait "$chrome_pid"
-chrome_status=$?
+python3 "$here/cdp_acceptance.py" \
+  --debug-port "$debug_port" \
+  --url "$url" \
+  --presentation "$presentation" \
+  --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"
+acceptance_status=$?
 set -e
+if [ "$acceptance_status" -ne 0 ]; then
+  echo "FAIL: browser acceptance did not become GREEN." >&2
+  tail -80 "$tmp/chrome.log" >&2 || true
+  tail -40 "$tmp/server.log" >&2 || true
+  exit 1
+fi
+
+kill "$chrome_pid" 2>/dev/null || true
+wait "$chrome_pid" 2>/dev/null || true
 chrome_pid=""
-if [ "$chrome_status" -ne 0 ]; then
-  echo "FAIL: Chrome exited with status $chrome_status." >&2
-  tail -80 "$tmp/chrome.log" >&2 || true
-  tail -40 "$tmp/server.log" >&2 || true
-  exit 1
-fi
 
-if ! python3 - "$tmp/dom.html" <<'PY'
-import html, json, re, sys
-dom = open(sys.argv[1], encoding="utf-8").read()
-status_match = re.search(r'<html[^>]*\bdata-status="([^"]+)"', dom, re.I)
-accept_match = re.search(r'<pre[^>]*\bid="acceptance-json"[^>]*>(.*?)</pre>', dom, re.I | re.S)
-detail_match = re.search(r'<span[^>]*\bid="detail"[^>]*>(.*?)</span>', dom, re.I | re.S)
-status = html.unescape(status_match.group(1)) if status_match else "missing"
-raw = html.unescape(accept_match.group(1).strip()) if accept_match else ""
-detail = re.sub(r"<[^>]+>", "", html.unescape(detail_match.group(1))).strip() if detail_match else ""
-try: acceptance = json.loads(raw)
-except Exception: acceptance = {"state": "unparseable", "raw": raw}
-print(json.dumps({"data_status": status, "acceptance": acceptance, "detail": detail}, sort_keys=True))
-if status != "green" or acceptance.get("state") != "green": raise SystemExit(1)
-PY
-then
-  echo "FAIL: browser acceptance was not GREEN." >&2
-  tail -80 "$tmp/chrome.log" >&2 || true
-  tail -40 "$tmp/server.log" >&2 || true
-  exit 1
-fi
-
-echo "PASS: real Chrome/WebGPU D1 acceptance is GREEN."
+echo "PASS: real Chrome/WebGPU D1 $presentation acceptance is GREEN."

@@ -407,8 +407,9 @@ function buildRenderBindings(device, layout) {
   return { bgl, inputBuf, bindGroup, inputBinding };
 }
 
-// initWebGPURender(wgslText, layout, canvas) - stand up the interactive render
-// pipeline ONCE. Returns a handle on success, or { ok:false, reason, messages? }
+// initWebGPURender(wgslText, layout, canvas) - stand up the render pipeline
+// ONCE. Pass `null` for a readback-only offscreen handle. Returns a handle on
+// success, or { ok:false, reason, messages? }
 // (fail-closed) when WebGPU is absent / the device is unavailable / the shader
 // fails to compile. AMBER is the caller's job (this returns ok:false, no draw).
 export async function initWebGPURender(wgslText, layout, canvas) {
@@ -437,8 +438,12 @@ export async function initWebGPURender(wgslText, layout, canvas) {
     return { ok: false, reason: `requestDevice() failed: ${e.message || e}`, adapter: name };
   }
   let deviceError = null;
+  let deviceLost = null;
   device.addEventListener?.("uncapturederror", (ev) => {
     deviceError = ev.error?.message || String(ev.error);
+  });
+  device.lost?.then((info) => {
+    deviceLost = info?.message || info?.reason || "WebGPU device lost";
   });
 
   const module = device.createShaderModule({ code: wgslText });
@@ -455,12 +460,6 @@ export async function initWebGPURender(wgslText, layout, canvas) {
     }
   }
 
-  // Configure the canvas for the display pipeline (preferred format).
-  const ctx = canvas.getContext("webgpu");
-  if (!ctx) return { ok: false, reason: "canvas.getContext('webgpu') returned null", adapter: name };
-  const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
-  ctx.configure({ device, format: canvasFormat, alphaMode: "opaque" });
-
   const { bgl, inputBuf, bindGroup } = buildRenderBindings(device, layout);
   const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
 
@@ -472,11 +471,24 @@ export async function initWebGPURender(wgslText, layout, canvas) {
       primitive: { topology: "triangle-list" },
     });
 
-  const displayPipeline = makePipeline(canvasFormat);
   // The verify pipeline targets the compiler-stated offscreen format (rgba8unorm),
   // so a readback can be byte-compared against the Fe-wasm oracle.
   const verifyFormat = layout.color_target_format || "rgba8unorm";
   const verifyPipeline = makePipeline(verifyFormat);
+
+  let ctx = null;
+  let canvasFormat = null;
+  let displayPipeline = null;
+  if (canvas !== null) {
+    if (!canvas || typeof canvas.getContext !== "function") {
+      return { ok: false, reason: "canvas must be an HTML canvas or null for offscreen mode", adapter: name };
+    }
+    ctx = canvas.getContext("webgpu");
+    if (!ctx) return { ok: false, reason: "canvas.getContext('webgpu') returned null", adapter: name };
+    canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+    ctx.configure({ device, format: canvasFormat, alphaMode: "opaque" });
+    displayPipeline = makePipeline(canvasFormat);
+  }
 
   return {
     ok: true,
@@ -493,7 +505,9 @@ export async function initWebGPURender(wgslText, layout, canvas) {
     layout,
     width: layout.width,
     height: layout.height,
+    presentation: canvas === null ? "offscreen" : "canvas",
     deviceError: () => deviceError,
+    deviceLost: () => deviceLost,
   };
 }
 
@@ -534,6 +548,9 @@ function writeTypedParams(queue, inputBuf, params, values) {
 
 export function renderFrame(handle, viewWords) {
   const { device, queue, ctx, displayPipeline, inputBuf, bindGroup, layout } = handle;
+  if (!ctx || !displayPipeline) {
+    throw new Error("renderFrame requires a canvas-backed render handle; this handle is offscreen-only");
+  }
   const params = layout.params || [];
   writeTypedParams(queue, inputBuf, params, viewWords);
   const view = ctx.getCurrentTexture().createView();
@@ -600,6 +617,10 @@ export async function verifyView(handle, viewWords) {
   }
   const data = new Uint8Array(staging.getMappedRange().slice(0));
   staging.unmap();
+  const asynchronousError = handle.deviceError?.() || handle.deviceLost?.();
+  if (asynchronousError) {
+    return { ok: false, reason: `WebGPU device error after readback: ${asynchronousError}` };
+  }
   const row = w * 4;
   const out = new Uint8Array(row * h);
   for (let y = 0; y < h; y++) out.set(data.subarray(y * bytesPerRow, y * bytesPerRow + row), y * row);

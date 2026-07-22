@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   encodeShaderScalar,
   isShaderParamOffset,
+  renderFrame,
   validateShaderParamArity,
 } from "./webgpu-runner.js";
 
@@ -36,5 +37,9 @@ assert.throws(
 );
 assert.throws(() => encodeShaderScalar(1, { scalar: "F32", width: 8 }), /width 8/);
 assert.throws(() => encodeShaderScalar(1, { scalar: "I1", width: 4 }), /unsupported.*I1/);
+assert.throws(
+  () => renderFrame({ ctx: null, displayPipeline: null }, []),
+  /canvas-backed render handle.*offscreen-only/,
+);
 
 console.log("typed shader parameter transport: ok");
