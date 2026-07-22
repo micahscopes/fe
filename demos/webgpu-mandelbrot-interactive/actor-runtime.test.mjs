@@ -10,14 +10,14 @@ const runtime = createMandelbrotActorRuntime({
   },
   verify(view) {
     verifications.push(view);
-    return { gpuHash: 123, referenceHash: 123 };
+    return { gpuHash: 123, wasmHash: 123, referenceHash: 123 };
   },
 });
 
 assert.deepEqual(await runtime.render([1, -2, 384]), { submitted: true });
 assert.deepEqual(renders, [[1, -2, 384]]);
 assert.deepEqual(await runtime.verify(new Int32Array([3, 4, 128])), {
-  gpuHash: 123, referenceHash: 123,
+  gpuHash: 123, wasmHash: 123, referenceHash: 123,
 });
 assert.deepEqual(verifications, [[3, 4, 128]]);
 assert.throws(() => MANDELBROT_ACTOR_SCHEMAS.request.render({
@@ -47,7 +47,7 @@ const burst = createMandelbrotActorRuntime({
     burstRuns.push({ view, job });
     return job.promise;
   },
-  verify: () => ({ gpuHash: 1, referenceHash: 1 }),
+  verify: () => ({ gpuHash: 1, wasmHash: 1, referenceHash: 1 }),
 });
 const burstPromises = [
   burst.render([1, 0, 384]),

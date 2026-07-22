@@ -9,6 +9,7 @@ const renderValue = (value) => exactObject(value, {
 }, "render result");
 const verifyValue = (value) => exactObject(value, {
   gpuHash: actorField.finiteNumber,
+  wasmHash: actorField.finiteNumber,
   referenceHash: actorField.finiteNumber,
 }, "verification result");
 

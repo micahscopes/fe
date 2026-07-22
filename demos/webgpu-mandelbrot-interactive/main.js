@@ -21,6 +21,9 @@ import { createMandelbrotActorRuntime } from "./actor-runtime.js";
 import { createMandelbrotWorkerControl } from "./worker-control.js";
 
 const $ = (id) => document.getElementById(id);
+const acceptanceOffscreen = new URLSearchParams(window.location.search).get("acceptance") === "offscreen";
+const acceptancePresentation = acceptanceOffscreen ? "offscreen" : "canvas";
+window.__mandelAcceptance = { state: "pending", worker: false, presentation: acceptancePresentation };
 
 // ---- asset loading: fetched from ./gen/ (served page) or inlined (standalone).
 function b64ToBytes(b64) {
@@ -158,6 +161,13 @@ function setBanner(state, headline, detail) {
   $("banner-state").textContent = state.toUpperCase();
   $("banner-headline").textContent = headline;
   $("banner-detail").textContent = detail || "";
+  if (state === "red") {
+    window.__mandelAcceptance = {
+      ...window.__mandelAcceptance,
+      state: "red",
+      error: detail || headline,
+    };
+  }
 }
 function short(rev) {
   if (!rev || rev === "unknown") return rev || "unknown";
@@ -202,6 +212,9 @@ async function main() {
         exportName: A.ctl.control_export,
       });
       updateView = (...args) => controlWorker.update(args);
+      window.__mandelAcceptance = {
+        state: "pending", worker: true, presentation: acceptancePresentation,
+      };
     }
   } catch (e) {
     setBanner("red", "Fe wasm failed to instantiate", e.message || String(e));
@@ -227,7 +240,7 @@ async function main() {
   const HEIGHT = A.layout.height || 512;
 
   // --- Try the live GPU render pipeline. ----------------------------------
-  const gpu = await initWebGPURender(A.wgsl, A.layout, canvas);
+  const gpu = await initWebGPURender(A.wgsl, A.layout, acceptanceOffscreen ? null : canvas);
 
   // AMBER blit closure: the Fe fragment computes every pixel in V8; JS only moves
   // the Fe-computed RGBA bytes to the canvas (no palette, no view math).
@@ -245,7 +258,9 @@ async function main() {
   if (gpu.ok) {
     $("adapter").textContent = `adapter: ${gpu.adapter}`;
     canvas.style.display = "block";
-    renderDirect = (view) => renderFrame(gpu, view);
+    renderDirect = acceptanceOffscreen
+      ? () => ({ submitted: false, offscreen: true })
+      : (view) => renderFrame(gpu, view);
     badgeMode = "green-pending";
   } else {
     $("adapter").textContent = gpu.adapter ? `adapter: ${gpu.adapter}` : "adapter: none (no WebGPU)";
@@ -280,7 +295,7 @@ async function main() {
     if (gpuHash !== referenceHash) {
       throw new Error(`GPU default-view FNV ${gpuHash} != reference ${referenceHash} on ${gpu.adapter}`);
     }
-    return { gpuHash, referenceHash };
+    return { gpuHash, wasmHash: fnv1a32(feGrid), referenceHash };
   };
   const actorRuntime = createMandelbrotActorRuntime({
     render(view) {
@@ -337,6 +352,15 @@ async function main() {
         `Drag to pan, wheel to zoom - the Fe controls drive it. But this browser exposes no live WebGPU ` +
         `(${gpu.reason}), so the "your GPU drew every pixel" claim is honestly withheld. A WebGPU browser earns the green rung.`
     );
+    window.__mandelAcceptance = {
+      state: "amber",
+      worker: Boolean(controlWorker),
+      presentation: acceptancePresentation,
+      controlsSteps: cv.steps,
+      verified: false,
+      wasmHash: h,
+      referenceHash: defaultRef?.fnv1a32 >>> 0,
+    };
     return;
   }
 
@@ -352,6 +376,7 @@ async function main() {
     return;
   }
   const gpuHash = verification.gpuHash;
+  const wasmHash = verification.wasmHash;
   const hashOk = gpuHash === verification.referenceHash;
   $("row-render").textContent = `live GPU render == Fe-wasm fragment per pixel; default-view FNV ${gpuHash}` + (defaultRef ? (hashOk ? " == reference" : ` != reference ${defaultRef.fnv1a32 >>> 0}`) : "");
   $("row-render").className = hashOk ? "val ok" : "val bad";
@@ -367,6 +392,19 @@ async function main() {
       `The Fe update_view runs the pan/zoom in V8 (matched the oracle across ${cv.steps} gestures). ` +
       `Drag to pan, wheel to zoom: JS only forwards events; every pixel and all view math are Fe.`
   );
+  window.__mandelAcceptance = {
+    state: "green",
+    worker: Boolean(controlWorker),
+    presentation: acceptancePresentation,
+    controlsSteps: cv.steps,
+    verified: true,
+    gpuHash,
+    wasmHash,
+    referenceHash: verification.referenceHash,
+    adapter: gpu.adapter,
+  };
 }
 
-main();
+main().catch((error) => {
+  setBanner("red", "Mandelbrot startup failed", error?.stack || String(error));
+});
