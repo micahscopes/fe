@@ -1,4 +1,4 @@
-//! Package the scalarized D1 runtime-center cyclide Render fixture for a browser page.
+//! Package the typed recursive runtime-center cyclide Render fixture for a browser page.
 //!
 //! Every compiler, ABI, wasm, and full-frame oracle gate runs before `gen/` is
 //! created or any artifact is written.
@@ -18,8 +18,8 @@ use sonatina_codegen::isa::spirv::{
 use url::Url;
 
 const SOURCE: &str =
-    include_str!("../tests/fixtures/spirv/cga_inversion_cyclide_runtime_center.fe");
-const FRAG_NAME: &str = "cga_inversion_cyclide_runtime_center";
+    include_str!("../tests/fixtures/spirv/cga_inversion_cyclide_recursive_support.fe");
+const FRAG_NAME: &str = "cga_inversion_cyclide_recursive_support";
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 128;
 const CAM_X: f32 = 0.0;
@@ -37,7 +37,7 @@ fn main() {
     let gen_dir = repo_root.join("demos/webgpu-cga-inversion/gen");
 
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///gen_cga_inversion_cyclide_runtime_center.fe").unwrap();
+    let url = Url::parse("file:///gen_cga_inversion_cyclide_recursive_support.fe").unwrap();
     db.workspace()
         .touch(&mut db, url.clone(), Some(SOURCE.to_string()));
     let file = db

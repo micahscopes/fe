@@ -1,6 +1,6 @@
 # Fe interactive CGA inversion browser gate
 
-This page consumes the compiler-produced D1 Render bundle in `gen/`:
+This page consumes the compiler-produced typed CGA Render bundle in `gen/`:
 
 - `kernel.fe`, the exact Fe source;
 - `frag.wgsl`, naga-emitted vertex and fragment WGSL;
@@ -45,10 +45,10 @@ this mode is deliberately not acceptance evidence and never reports green.
 
 The displayed canvas is responsive and uses device-pixel ratio up to 2, capped
 at 768 pixels per side. Deterministic acceptance remains a separate 128x128
-offscreen render. This bundle is the scalarized D1 baseline: it uses the exact
-unit-sphere conformal inversion formula in Fe. The recursive typed `MvTF<5>` CGA
-sandwich is tracked and tested separately until it passes the same whole-frame
-Wasm and WebGPU gates; do not describe this visual bundle as D2 yet.
+offscreen render. The shipped fragment constructs recursive `MvTF<5>` point and
+sphere values inside the distance-estimator loop, executes a support-specialized
+typed `S*P*S` helper, and normalizes its conformal-vector result in Fe. The older
+scalarized D1 fixture remains an independent full-frame regression baseline.
 
 Generation currently depends on a clean checkout of the unpublished Sonatina
 commit `ed43625bb5680aeab993371e28a8c8e5c7c16f96`. Set `SONATINA_DIR` explicitly
