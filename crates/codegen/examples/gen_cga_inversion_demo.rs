@@ -500,7 +500,15 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
         reference["parameter_types"],
         serde_json::json!(["F32", "F32", "F32", "F32", "F32"])
     );
-    assert_eq!(reference["view"], serde_json::json!([CAM_X, CAM_Y, ZOOM]));
+    let view = reference["view"].as_array().expect("reference view array");
+    assert_eq!(view.len(), 3);
+    for (actual, expected) in view.iter().zip([CAM_X, CAM_Y, ZOOM]) {
+        let actual = actual.as_f64().expect("reference view scalar");
+        assert!(
+            (actual - f64::from(expected)).abs() <= f64::EPSILON,
+            "serialized view scalar {actual} differs from f32 source {expected}"
+        );
+    }
     assert_eq!(
         reference["inversion_center"],
         serde_json::json!([INV_CX, INV_CY])
