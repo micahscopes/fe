@@ -18,10 +18,28 @@ frame. A missing WebGPU adapter after a green wasm oracle is amber, never green.
 Automation can await `window.__cgaAcceptance.promise` and inspect its deterministic
 `state`, `wasmHash`, and optional `gpuHash`/`adapter` fields.
 
-Generation currently depends on the unpublished local Sonatina fork. Set
-`SONATINA_DIR` to that checkout and run `FORCE_CGA_REGEN=1 demos/serve.sh` to
-force a fresh bundle after compiler changes. The local Cargo patches may update
-`Cargo.lock`; restore the pinned lockfile before committing.
+Generation currently depends on a clean checkout of the unpublished Sonatina
+commit `ed43625bb5680aeab993371e28a8c8e5c7c16f96`. Set `SONATINA_DIR` explicitly
+and generate only this bundle with:
+
+```sh
+SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/generate.sh
+```
+
+The script rejects another or dirty Sonatina checkout, applies all four local
+Cargo patches, and restores the Fe checkout's `Cargo.lock` byte-for-byte when it
+exits. Generated files remain ignored and must not be hand-edited or committed.
+Artifact provenance fails closed if either Git revision cannot be read and
+reports tracked modifications separately from the presence of untracked files;
+it is source-state evidence, not a claim that the wider build environment is
+hermetic. Avoid concurrent Cargo commands while generation owns the lockfile.
+To generate when needed and immediately serve the common demos root, run:
+
+```sh
+SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/serve.sh
+```
+
+Set `FORCE_CGA_REGEN=1` on that command to replace an existing bundle.
 
 After generating the bundle, run the fast schema preflight (this does not earn
 execution acceptance):

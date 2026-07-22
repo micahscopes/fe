@@ -61,7 +61,11 @@ def main():
         gen = os.path.join(ROOT, demo, "gen")
         if not os.path.isdir(gen) or not os.path.exists(os.path.join(gen, "layout.json")):
             print(f"WARNING: {demo}/gen is missing or incomplete.")
-            print(f"  Run first: cargo run -p fe-codegen --example {example}")
+            if demo == "webgpu-cga-inversion":
+                print("  Run first: SONATINA_DIR=/path/to/sonatina "
+                      "demos/webgpu-cga-inversion/generate.sh")
+            else:
+                print(f"  Run first: cargo run -p fe-codegen --example {example}")
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((HOST, PORT), Handler) as httpd:
         print(f"Fe demos: serving {ROOT} on {HOST}:{PORT}")

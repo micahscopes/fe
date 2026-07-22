@@ -503,39 +503,62 @@ fn validate_serialized_schema(layout_json: &str, reference_json: &str) {
 }
 
 fn provenance() -> serde_json::Value {
-    let sonatina_path =
-        std::env::var("SONATINA_DIR").unwrap_or_else(|_| "/workspace/sonatina".into());
+    let sonatina_path = std::env::var("SONATINA_DIR")
+        .expect("SONATINA_DIR must identify the reviewed local Sonatina checkout");
     serde_json::json!({
         "source": "Fe compiler branch mb2",
         "fe_rev": git_rev(env!("CARGO_MANIFEST_DIR")),
-        "fe_dirty": git_dirty(env!("CARGO_MANIFEST_DIR")),
+        "fe_tracked_dirty": git_tracked_dirty(env!("CARGO_MANIFEST_DIR")),
+        "fe_untracked_present": git_untracked_present(env!("CARGO_MANIFEST_DIR")),
         "sonatina_source": "local-path unpublished checkout",
         "sonatina_path": sonatina_path,
         "sonatina_rev": git_rev(&sonatina_path),
-        "sonatina_dirty": git_dirty(&sonatina_path),
+        "sonatina_tracked_dirty": git_tracked_dirty(&sonatina_path),
+        "sonatina_untracked_present": git_untracked_present(&sonatina_path),
         "generator": "cargo with four local-path Sonatina patches run -p fe-codegen --example gen_cga_inversion_demo",
         "generated_unix_secs": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
     })
 }
 
 fn git_rev(path: &str) -> String {
-    std::process::Command::new("git")
+    let output = std::process::Command::new("git")
         .args(["-C", path, "rev-parse", "HEAD"])
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".into())
+        .unwrap_or_else(|error| panic!("failed to run git for provenance at {path}: {error}"));
+    assert!(
+        output.status.success(),
+        "git rev-parse failed for provenance at {path}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let revision = String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| panic!("non-UTF-8 git revision at {path}: {error}"));
+    let revision = revision.trim().to_string();
+    assert!(!revision.is_empty(), "empty git revision at {path}");
+    revision
 }
 
-fn git_dirty(path: &str) -> bool {
-    std::process::Command::new("git")
-        .args(["-C", path, "status", "--porcelain"])
+fn git_status(path: &str, untracked: &str) -> String {
+    let output = std::process::Command::new("git")
+        .args(["-C", path, "status", "--porcelain", untracked])
         .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some_and(|o| !o.stdout.is_empty())
+        .unwrap_or_else(|error| panic!("failed to run git status at {path}: {error}"));
+    assert!(
+        output.status.success(),
+        "git status failed for provenance at {path}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| panic!("non-UTF-8 git status at {path}: {error}"))
+}
+
+fn git_tracked_dirty(path: &str) -> bool {
+    !git_status(path, "--untracked-files=no").is_empty()
+}
+
+fn git_untracked_present(path: &str) -> bool {
+    git_status(path, "--untracked-files=normal")
+        .lines()
+        .any(|line| line.starts_with("?? "))
 }
 
 fn write(path: &std::path::Path, bytes: &[u8]) {
