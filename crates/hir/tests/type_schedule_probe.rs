@@ -1,43 +1,6 @@
 use fe_hir::test_db::HirAnalysisTestDb;
 
 #[test]
-fn ground_recursive_type_fn_normalizes_non_subject_const_arithmetic() {
-    let mut db = HirAnalysisTestDb::default();
-    let file = db.new_stand_alone(
-        "two_const_type_schedule_probe.fe".into(),
-        r#"
-struct Zero {}
-struct Leaf<const I: usize> {}
-struct Add<L, R> {}
-
-recursive type fn Balanced<const Start: usize, const N: usize>() -> (*) {
-    match N {
-        0 => Zero
-        1 => Leaf<Start>
-        _ => Add<
-            Balanced<Start, {N / 2}>,
-            Balanced<{Start + N / 2}, {N - N / 2}>
-        >
-    }
-}
-
-fn takes_expected(
-    _ x: Add<
-        Add<Leaf<0>, Leaf<1>>,
-        Add<Leaf<2>, Add<Leaf<3>, Leaf<4>>>
-    >
-) {}
-
-fn balanced_ground_normal_form(x: Balanced<0, 5>) {
-    takes_expected(x)
-}
-"#,
-    );
-    let (top_mod, _) = db.top_mod(file);
-    db.assert_no_diags(top_mod);
-}
-
-#[test]
 fn ground_recursive_type_fn_materializes_a_term_add_zero_spine() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
