@@ -152,7 +152,10 @@ const INLINE_SPECIALIZATION_CACHE_LIMIT: usize = 256;
 fn prepare_inline_value_bodies<'db>(
     db: &'db DriverDataBase,
     package: &RuntimePackage<'db>,
-) -> FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>> {
+) -> (
+    FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
+    FxHashMap<RuntimeInstance<'db>, usize>,
+) {
     fn visit<'db>(
         db: &'db DriverDataBase,
         package: &RuntimePackage<'db>,
@@ -161,15 +164,15 @@ fn prepare_inline_value_bodies<'db>(
         visiting: &mut HashSet<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey)>,
         done: &mut FxHashMap<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey), RuntimeBody<'db>>,
         specialization_work: &mut usize,
+        pruned_structural_stmts: &mut FxHashMap<RuntimeInstance<'db>, usize>,
     ) -> RuntimeBody<'db> {
         let cache_key = (instance, arg_shape);
         if let Some(body) = done.get(&cache_key) {
             return body.clone();
         }
-        // The shape key is currently admission scaffolding: it does not yet seed
-        // callee parameters. Once the bounded amount of shape-specific work is
-        // exhausted, fail closed to the unspecialized body instead of repeatedly
-        // traversing distinct shapes that cannot affect the result yet.
+        // Once the bounded amount of shape-specific work is exhausted, fail
+        // closed to the unspecialized body instead of repeatedly traversing new
+        // shapes.
         if cache_key.1.has_known_facts() {
             if *specialization_work >= INLINE_SPECIALIZATION_CACHE_LIMIT {
                 return instance.body(db);
@@ -180,12 +183,17 @@ fn prepare_inline_value_bodies<'db>(
         if !visiting.insert(cache_key.clone()) {
             return body;
         }
-        let mut expanded = 0usize;
+        let (seed_aggregates, seed_constants, seed_stmts) =
+            seed_parameter_facts(db, &mut body, &cache_key.1);
+        let mut expanded = seed_stmts.len();
+        if let Some(block) = body.blocks.first_mut() {
+            block.stmts.splice(0..0, seed_stmts);
+        }
         let (locals, blocks) = (&mut body.locals, &mut body.blocks);
         for block in blocks {
             let mut stmts = Vec::with_capacity(block.stmts.len());
-            let mut aggregate_facts = mir::RuntimeAggregateFacts::default();
-            let mut scalar_constants = mir::RuntimeScalarConstFacts::default();
+            let mut aggregate_facts = seed_aggregates.clone();
+            let mut scalar_constants = seed_constants.clone();
             for stmt in std::mem::take(&mut block.stmts) {
                 let RStmt::Assign {
                     dst,
@@ -206,8 +214,9 @@ fn prepare_inline_value_bodies<'db>(
                     visiting,
                     done,
                     specialization_work,
+                    pruned_structural_stmts,
                 );
-                let Some(mut replacement) = inline_value_call(
+                let Some((mut replacement, pruned)) = inline_value_call(
                     db,
                     package,
                     locals,
@@ -220,6 +229,7 @@ fn prepare_inline_value_bodies<'db>(
                     stmts.push(stmt);
                     continue;
                 };
+                *pruned_structural_stmts.entry(instance).or_default() += pruned;
                 expanded += replacement.len();
                 for stmt in &replacement {
                     record_value_fact(stmt, &mut aggregate_facts, &mut scalar_constants);
@@ -239,6 +249,7 @@ fn prepare_inline_value_bodies<'db>(
     let mut done = FxHashMap::default();
     let mut roots = FxHashMap::default();
     let mut specialization_work = 0usize;
+    let mut pruned_structural_stmts = FxHashMap::default();
     for function in package.functions(db) {
         let instance = function.instance(db);
         let params = instance.body(db).signature.params.len();
@@ -252,10 +263,133 @@ fn prepare_inline_value_bodies<'db>(
             &mut visiting,
             &mut done,
             &mut specialization_work,
+            &mut pruned_structural_stmts,
         );
         roots.insert(instance, body);
     }
-    roots
+    (roots, pruned_structural_stmts)
+}
+
+fn seed_parameter_facts<'db>(
+    db: &'db DriverDataBase,
+    body: &mut RuntimeBody<'db>,
+    shape: &mir::RuntimeArgShapeKey,
+) -> (
+    mir::RuntimeAggregateFacts,
+    mir::RuntimeScalarConstFacts,
+    Vec<RStmt<'db>>,
+) {
+    fn seed<'db>(
+        db: &'db DriverDataBase,
+        body: &mut RuntimeBody<'db>,
+        local: RLocalId,
+        class: &RuntimeClass<'db>,
+        fact: &mir::RuntimeArgFact,
+        aggregates: &mut mir::RuntimeAggregateFacts,
+        constants: &mut mir::RuntimeScalarConstFacts,
+        stmts: &mut Vec<RStmt<'db>>,
+        budget: usize,
+    ) -> Option<()> {
+        match fact {
+            mir::RuntimeArgFact::Unknown => Some(()),
+            mir::RuntimeArgFact::ScalarConst(value) => {
+                if !matches!(class, RuntimeClass::Scalar(_)) {
+                    return None;
+                }
+                constants.insert(local, value.clone());
+                Some(())
+            }
+            mir::RuntimeArgFact::Aggregate(field_facts) => {
+                let RuntimeClass::AggregateValue { layout } = class else {
+                    return None;
+                };
+                let field_classes: Box<[RuntimeClass<'db>]> = match layout.data(db) {
+                    Layout::Struct(layout) => layout.fields,
+                    Layout::Array(layout) => {
+                        vec![layout.elem; layout.len as usize].into_boxed_slice()
+                    }
+                    Layout::Enum(_) => return None,
+                };
+                if field_classes.len() != field_facts.len() {
+                    return None;
+                }
+                let template = body
+                    .locals
+                    .iter()
+                    .enumerate()
+                    .find(|(index, _)| RLocalId::from_u32(*index as u32) == local)?
+                    .1
+                    .clone();
+                let mut fields = Vec::with_capacity(field_facts.len());
+                for (index, (field_class, field_fact)) in
+                    field_classes.iter().zip(field_facts).enumerate()
+                {
+                    if stmts.len() >= budget {
+                        return None;
+                    }
+                    let field = RLocalId::from_u32(body.locals.len() as u32);
+                    body.locals.push(mir::RLocal {
+                        semantic_ty: template.semantic_ty,
+                        carrier: RuntimeCarrier::Value(field_class.clone()),
+                        root: RuntimeLocalRoot::None,
+                    });
+                    fields.push(field);
+                    stmts.push(RStmt::Assign {
+                        dst: field,
+                        expr: RExpr::AggregateExtract {
+                            value: local,
+                            index: index as u32,
+                        },
+                    });
+                    seed(
+                        db,
+                        body,
+                        field,
+                        field_class,
+                        field_fact,
+                        aggregates,
+                        constants,
+                        stmts,
+                        budget,
+                    )?;
+                }
+                aggregates.insert(local, fields.into_boxed_slice());
+                Some(())
+            }
+        }
+    }
+
+    let mut aggregates = mir::RuntimeAggregateFacts::default();
+    let mut constants = mir::RuntimeScalarConstFacts::default();
+    let mut stmts = Vec::new();
+    if body.blocks.len() != 1 || body.signature.params.len() != shape.0.len() {
+        return (aggregates, constants, stmts);
+    }
+    let params = body.signature.params.clone();
+    let original_locals = body.locals.len();
+    for (param, fact) in params.iter().zip(shape.0.iter()) {
+        if seed(
+            db,
+            body,
+            param.local,
+            &param.class,
+            fact,
+            &mut aggregates,
+            &mut constants,
+            &mut stmts,
+            INLINE_VALUE_STMT_BUDGET,
+        )
+        .is_none()
+        {
+            body.locals.truncate(original_locals);
+            return (
+                mir::RuntimeAggregateFacts::default(),
+                mir::RuntimeScalarConstFacts::default(),
+                Vec::new(),
+            );
+        }
+    }
+    (aggregates, constants, stmts)
 }
 
 fn record_value_fact(
@@ -294,7 +428,7 @@ fn inline_value_call<'db>(
     args: &[RLocalId],
     aggregate_facts: &mir::RuntimeAggregateFacts,
     budget: usize,
-) -> Option<Vec<RStmt<'db>>> {
+) -> Option<(Vec<RStmt<'db>>, usize)> {
     let function = package
         .functions(db)
         .into_iter()
@@ -389,12 +523,14 @@ fn inline_value_call<'db>(
         dst,
         expr: RExpr::Use(remap(ret)?),
     });
+    let before_specialization = out.len();
     let out = mir::specialize_pure_inline_stmts(out, aggregate_facts, dst)?;
     if out.len() > budget {
         return None;
     }
+    let pruned = before_specialization.saturating_sub(out.len());
     caller_locals.extend(staged_locals);
-    Some(out)
+    Some((out, pruned))
 }
 
 fn remap_inline_expr<'db>(
@@ -474,7 +610,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         isa: &'a Wasm32,
         package: &'a RuntimePackage<'db>,
     ) -> Self {
-        let prepared_bodies = prepare_inline_value_bodies(db, package);
+        let (prepared_bodies, _) = prepare_inline_value_bodies(db, package);
         Self {
             db,
             builder,
@@ -1823,7 +1959,35 @@ fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immedi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::InputDb;
     use mir::ScalarRole;
+    use url::Url;
+
+    #[test]
+    fn authored_mvt2_specialization_prunes_structural_residuals() {
+        let source = include_str!("../../tests/fixtures/spirv/mvt2_f32_helper_render.fe");
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///mvt2_specialization_residual.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let package = mir::build_wasm_runtime_package(&db, top_mod)
+            .expect("authored MvT2 package should lower to Runtime MIR");
+
+        let rebuild = package
+            .functions(&db)
+            .into_iter()
+            .find(|function| function.symbol(&db).contains("rebuild_mvt2"))
+            .expect("authored rebuild_mvt2 helper should exist")
+            .instance(&db);
+        let (_, pruned_by_caller) = prepare_inline_value_bodies(&db, &package);
+        let pruned = pruned_by_caller.get(&rebuild).copied().unwrap_or(0);
+        assert!(
+            pruned > 0,
+            "shape-seeded recursive preparation pruned only {pruned} structural statements"
+        );
+    }
 
     #[test]
     fn f32_carrier_type_and_immediate_preserve_exact_bits() {

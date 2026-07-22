@@ -20,11 +20,16 @@ recursive type fn MvTF<const N: usize>() -> (*) {
 }
 
 #[inline(always)]
-fn rebuild_mvt2(tree: MvTF<2>) -> MvTF<2> {
+fn permute_mvt2(tree: MvTF<2>) -> MvTF<2> {
     NdF {
         a: NdF { a: tree.b.b, b: tree.a.b },
         b: NdF { a: tree.b.a, b: tree.a.a },
     }
+}
+
+#[inline(always)]
+fn rebuild_mvt2(tree: MvTF<2>) -> MvTF<2> {
+    permute_mvt2(tree)
 }
 
 pub fn mvt2_f32_helper_render(
