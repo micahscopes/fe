@@ -1240,6 +1240,18 @@ pub enum RuntimeBuiltin<'db> {
         rhs: RValueId,
         class: ScalarClass<'db>,
     },
+    /// Convert a signed i32 value to f32 using numeric conversion semantics.
+    F32FromI32 {
+        value: RValueId,
+    },
+    /// Convert f32 to signed i32 using the language intrinsic's truncation semantics.
+    I32FromF32 {
+        value: RValueId,
+    },
+    /// IEEE-754 square root on an f32 value.
+    F32Sqrt {
+        value: RValueId,
+    },
     Address,
     Caller,
     Origin,
@@ -1390,7 +1402,10 @@ impl<'db> RuntimeBuiltin<'db> {
             | RuntimeBuiltin::Byte { .. }
             | RuntimeBuiltin::SignExtend { .. }
             | RuntimeBuiltin::IntrinsicArith { .. }
-            | RuntimeBuiltin::Saturating { .. } => PortableCompute,
+            | RuntimeBuiltin::Saturating { .. }
+            | RuntimeBuiltin::F32FromI32 { .. }
+            | RuntimeBuiltin::I32FromF32 { .. }
+            | RuntimeBuiltin::F32Sqrt { .. } => PortableCompute,
 
             // Persistent storage.
             RuntimeBuiltin::Sload { .. } | RuntimeBuiltin::Sstore { .. } => EvmHost,

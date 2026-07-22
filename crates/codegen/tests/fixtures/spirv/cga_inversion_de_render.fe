@@ -1,0 +1,62 @@
+// D1: fixed-versor conformal inversion distance-estimator render.
+//
+// This is deliberately the scalar partial evaluation of the generated Cl(4,1)
+// product, not the runtime recursive product (that is D2). In the null basis
+// e0=(e5-e4)/2, einf=e4+e5, the inversion sphere c=(0.5,0,0), r=1 has
+// S=C-0.5*r*r*einf = 0.5*e1 - 0.875*e4 + 0.125*e5 and S*S=1.
+// Normalizing S*P*S gives q=c+(p-c)/rho2. Since inversion's local scale is
+// 1/rho2, a target-space SDF becomes the source-space DE `sdf(q)*rho2`.
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __sqrt_f32(_: f32) -> f32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+static_assert(0.25 + 0.765625 - 0.015625 == 1.0)
+
+pub fn cga_inversion_de_render(px: i32, py: i32, cam_x: f32,
+                               cam_y: f32, zoom: f32) -> u32 {
+    let fx: f32 = __f32_from_i32(px)
+    let fy: f32 = __f32_from_i32(py)
+    let sx: f32 = (fx - 64.0) * zoom
+    let sy: f32 = (fy - 64.0) * zoom
+    let rz: f32 = 1.8
+    let inv_len: f32 = 1.0 / __sqrt_f32(sx * sx + sy * sy + rz * rz)
+    let rdx: f32 = sx * inv_len
+    let rdy: f32 = sy * inv_len
+    let rdz: f32 = rz * inv_len
+
+    let mut t: f32 = 0.0
+    let mut i: i32 = 0
+    while i < 64 {
+        let x: f32 = cam_x + rdx * t
+        let y: f32 = cam_y + rdy * t
+        let z: f32 = -4.0 + rdz * t
+
+        let vx: f32 = x - 0.5
+        let rho2: f32 = vx * vx + y * y + z * z
+
+        // Scalarized, normalized S*P*S for the fixed Cl(4,1) sphere versor.
+        // The fixed camera grid does not sample the inversion point rho2=0.
+        let qx: f32 = 0.5 + vx / rho2
+        let qy: f32 = y / rho2
+        let qz: f32 = z / rho2
+
+        // Sphere in inverted space. The source-space surface is its conformal
+        // inverse under the fixed versor above.
+        let ax: f32 = qx + 0.65
+        let base: f32 = __sqrt_f32(ax * ax + qy * qy + qz * qz) - 0.45
+        let distance: f32 = base * rho2
+
+        // The inversion-scaled estimate is local; 0.2 keeps the finite-step
+        // march conservative across its strong curvature.
+        t = t + distance * 0.2
+        if distance < 0.0025 {
+            let shade: i32 = 32 + i * 3
+            return __bitcast(shade + (255 - shade) * 256 + 224 * 65536 + -16777216)
+        }
+        i = i + 1
+    }
+    let sky: i32 = 8 + 12 * 256 + 24 * 65536 + -16777216
+    __bitcast(sky)
+}

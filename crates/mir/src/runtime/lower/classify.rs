@@ -2454,6 +2454,13 @@ pub(super) enum GenericNumericIntrinsicKind {
     CheckedNeg,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum F32IntrinsicKind {
+    FromI32,
+    ToI32,
+    Sqrt,
+}
+
 fn runtime_callee_assumptions<'db>(
     db: &'db dyn MirDb,
     caller_key: SemanticInstanceKey<'db>,
@@ -2769,10 +2776,24 @@ fn extern_builtin_return_class<'db>(
 }
 
 fn is_runtime_intrinsic_name(name: &str) -> bool {
-    if matches!(name, "alloc") || generic_numeric_intrinsic_kind(name).is_some() {
+    if matches!(name, "alloc")
+        || generic_numeric_intrinsic_kind(name).is_some()
+        || f32_intrinsic_kind(name).is_some()
+    {
         return true;
     }
     intrinsic_numeric_name_parts(name).is_some()
+}
+
+pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
+    Some(match name {
+        "__f32_from_i32" => F32IntrinsicKind::FromI32,
+        "__i32_from_f32" => F32IntrinsicKind::ToI32,
+        "__sqrt_f32" => F32IntrinsicKind::Sqrt,
+        // rsqrt/abs/min/max/floor intentionally remain unrecognized externs
+        // until they each have an explicit runtime and backend lowering.
+        _ => return None,
+    })
 }
 
 pub(super) fn generic_numeric_intrinsic_kind(name: &str) -> Option<GenericNumericIntrinsicKind> {
@@ -3001,6 +3022,23 @@ mod tests {
         package::runtime_instance_for_semantic,
         package::runtime_instance_for_semantic_with_visible_param_overrides,
     };
+
+    #[test]
+    fn f32_intrinsic_recognition_is_explicit_supported_set() {
+        assert_eq!(f32_intrinsic_kind("__f32_from_i32"), Some(F32IntrinsicKind::FromI32));
+        assert_eq!(f32_intrinsic_kind("__i32_from_f32"), Some(F32IntrinsicKind::ToI32));
+        assert_eq!(f32_intrinsic_kind("__sqrt_f32"), Some(F32IntrinsicKind::Sqrt));
+
+        for unsupported in [
+            "__rsqrt_f32",
+            "__abs_f32",
+            "__min_f32",
+            "__max_f32",
+            "__floor_f32",
+        ] {
+            assert_eq!(f32_intrinsic_kind(unsupported), None, "{unsupported}");
+        }
+    }
 
     fn call_input_plan_for_test<'db>(
         db: &'db DriverDataBase,

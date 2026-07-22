@@ -2473,6 +2473,15 @@ fn clifford_rotor_q12_executes_on_lavapipe_browser_profile() {
 /// (later) shipped source are byte-identical by construction.
 const MANDEL_FRAG_RGBA_SOURCE: &str = include_str!("fixtures/spirv/mandel_frag_rgba.fe");
 
+/// Focused f32 Render regression: coordinate conversion, three broadcast f32s,
+/// float arithmetic/comparison, a loop-carried float, early return, and the
+/// final f32 -> i32 -> packed-u32 color path in one small kernel.
+const F32_RENDER_PROBE_SOURCE: &str = include_str!("fixtures/spirv/f32_render_probe.fe");
+
+/// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
+const CGA_INVERSION_DE_RENDER_SOURCE: &str =
+    include_str!("fixtures/spirv/cga_inversion_de_render.fe");
+
 /// The independent Q12 escape-time + color-map oracle, re-derived HERE from the
 /// kernel logic (never trusted from the spec), integer-identical to the fixture:
 /// the SAME i32 escape math as `mandel_oracle_q12` (arithmetic `>>` on i32, the
@@ -2787,6 +2796,298 @@ fn run_render_rgba8_on_lavapipe(wgsl: &str, w: u32, h: u32, input: &[u8]) -> Opt
     staging.unmap();
 
     Some(out)
+}
+
+/// Independent Rust model of `f32_render_probe.fe`. All pinned values are small
+/// exact integers or halves, keeping the expected conversion and RGBA bytes
+/// deterministic while still executing native f32 operations.
+fn f32_render_probe_oracle(px: i32, py: i32, gain: f32, bias: f32, cutoff: f32) -> u32 {
+    let mut value = ((px as f32) + (py as f32)) * gain + bias;
+    for _ in 0..3 {
+        value = value * 0.5 + bias;
+        if value > cutoff {
+            let hot = value as i32;
+            return (hot + hot * 256 + 16_711_680 - 16_777_216) as u32;
+        }
+    }
+    let cool = value as i32;
+    (cool + 65_280 + cool * 65_536 - 16_777_216) as u32
+}
+
+#[test]
+fn f32_render_probe_executes_on_lavapipe_against_independent_oracle() {
+    const W: u32 = 8;
+    const H: u32 = 8;
+    const GAIN: f32 = 4.0;
+    const BIAS: f32 = 8.0;
+    const CUTOFF: f32 = 30.0;
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///f32_render_probe.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(F32_RENDER_PROBE_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("the f32 Render probe should compile from Fe source");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("the f32 probe should lower to validated Render SPIR-V");
+
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render
+    );
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("three f32 broadcast arguments require an Input binding");
+    assert_eq!((input.group, input.binding), (0, 1));
+    assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
+    assert_eq!(input.stride, 12, "three packed f32 broadcasts occupy 12 bytes");
+    assert_eq!(input.span, 12, "the broadcast struct occupies exactly 12 bytes");
+    assert_eq!(input.members.len(), 3);
+    for (member, arg_index) in input.members.iter().zip(2..=4) {
+        assert_eq!(member.arg_index, arg_index);
+        assert_eq!(member.offset, (arg_index - 2) * 4);
+        assert_eq!(member.width, 4);
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32,
+        );
+    }
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    assert_eq!(artifact.layout.builtin_inputs[0].arg_index, 0);
+    assert_eq!(
+        artifact.layout.builtin_inputs[0].scalar,
+        sonatina_codegen::isa::spirv::SpirvScalarKind::I32,
+    );
+    assert_eq!(
+        artifact.layout.builtin_inputs[0].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionX,
+    );
+    assert_eq!(artifact.layout.builtin_inputs[1].arg_index, 1);
+    assert_eq!(
+        artifact.layout.builtin_inputs[1].scalar,
+        sonatina_codegen::isa::spirv::SpirvScalarKind::I32,
+    );
+    assert_eq!(
+        artifact.layout.builtin_inputs[1].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionY,
+    );
+
+    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(wgsl.contains("loop"), "loop-carried f32 must survive into WGSL");
+
+    let values = [GAIN, BIAS, CUTOFF];
+    let mut input_bytes = vec![0u8; input.span as usize];
+    for member in &input.members {
+        let value = values[(member.arg_index - 2) as usize];
+        let start = member.offset as usize;
+        let end = start + member.width as usize;
+        input_bytes[start..end].copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+    assert_eq!(
+        f32_render_probe_oracle(7, 7, GAIN, BIAS, CUTOFF).to_le_bytes(),
+        [40, 40, 255, 255],
+        "the probe must exercise its first-iteration early return",
+    );
+    assert_eq!(
+        f32_render_probe_oracle(0, 0, GAIN, BIAS, CUTOFF).to_le_bytes(),
+        [15, 255, 15, 255],
+        "the probe must also exercise normal exit after all three iterations",
+    );
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("the focused f32 Render regression requires GPU execution");
+    for y in 0..H {
+        for x in 0..W {
+            let offset = ((y * W + x) * 4) as usize;
+            let expected = f32_render_probe_oracle(
+                x as i32,
+                y as i32,
+                GAIN,
+                BIAS,
+                CUTOFF,
+            )
+            .to_le_bytes();
+            assert_eq!(
+                &rgba[offset..offset + 4],
+                &expected,
+                "f32 Render pixel ({x},{y}) must match the independent Rust oracle"
+            );
+        }
+    }
+}
+
+/// Independent scalar oracle for D1. Keep the operation grouping identical to
+/// the Fe source and avoid `mul_add`: this models the actual f32 program, not a
+/// higher-precision restatement of its geometry.
+fn cga_inversion_de_oracle(px: i32, py: i32, cam_x: f32, cam_y: f32, zoom: f32) -> u32 {
+    let fx = px as f32;
+    let fy = py as f32;
+    let sx = (fx - 64.0) * zoom;
+    let sy = (fy - 64.0) * zoom;
+    let rz = 1.8_f32;
+    let inv_len = 1.0 / (sx * sx + sy * sy + rz * rz).sqrt();
+    let rdx = sx * inv_len;
+    let rdy = sy * inv_len;
+    let rdz = rz * inv_len;
+    let sky = (8 + 12 * 256 + 24 * 65_536 - 16_777_216_i32) as u32;
+
+    let mut t = 0.0_f32;
+    let mut i = 0_i32;
+    while i < 64 {
+        let x = cam_x + rdx * t;
+        let y = cam_y + rdy * t;
+        let z = -4.0 + rdz * t;
+        let vx = x - 0.5;
+        let rho2 = vx * vx + y * y + z * z;
+
+        // The normalized fixed-versor sandwich S*P*S, scalarized after CTFE.
+        let qx = 0.5 + vx / rho2;
+        let qy = y / rho2;
+        let qz = z / rho2;
+        let ax = qx + 0.65;
+        let base = (ax * ax + qy * qy + qz * qz).sqrt() - 0.45;
+        let distance = base * rho2;
+        t = t + distance * 0.2;
+        if distance < 0.0025 {
+            let shade = 32 + i * 3;
+            return (shade + (255 - shade) * 256 + 224 * 65_536 - 16_777_216_i32)
+                as u32;
+        }
+        i += 1;
+    }
+    sky
+}
+
+/// D1: render a fixed, fold-derived Cl(4,1) inversion on lavapipe. This is the
+/// scalar partial evaluation of the generated product (D2 will execute the
+/// recursive product at runtime), and every pixel must equal an independent
+/// Rust-f32 oracle byte-for-byte on the pinned software Vulkan implementation.
+#[test]
+fn cga_inversion_de_render_executes_on_lavapipe_against_f32_oracle() {
+    const W: u32 = 128;
+    const H: u32 = 128;
+    const CAM_X: f32 = 0.0;
+    const CAM_Y: f32 = 0.0;
+    const ZOOM: f32 = 0.0125;
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///cga_inversion_de_render.fe").expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CGA_INVERSION_DE_RENDER_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("D1 fixed-versor source should build a wasm runtime package");
+    assert!(
+        package
+            .functions(&db)
+            .iter()
+            .all(|function| function.linkage(&db) != mir::RuntimeLinkage::External),
+        "all f32 helpers must become typed MIR/Sonatina operations, never host imports",
+    );
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("D1 should lower to naga-validated Render SPIR-V");
+
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render,
+    );
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("D1's camera arguments require a broadcast Input binding");
+    assert_eq!((input.group, input.binding), (0, 1));
+    assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
+    assert_eq!((input.span, input.stride), (12, 12));
+    assert_eq!(input.members.len(), 3);
+    for (member, arg_index) in input.members.iter().zip(2..=4) {
+        assert_eq!(member.arg_index, arg_index);
+        assert_eq!(member.offset, (arg_index - 2) * 4);
+        assert_eq!(member.width, 4);
+        assert_eq!(
+            member.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::F32,
+        );
+    }
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    for (builtin, arg_index) in artifact.layout.builtin_inputs.iter().zip(0..=1) {
+        assert_eq!(builtin.arg_index, arg_index);
+        assert_eq!(
+            builtin.scalar,
+            sonatina_codegen::isa::spirv::SpirvScalarKind::I32,
+        );
+    }
+
+    let wgsl = artifact.wgsl.as_ref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(wgsl.contains("loop"), "D1 must retain its raymarch loop");
+    assert!(wgsl.contains("sqrt("), "D1 must use native f32 sqrt");
+    for forbidden in ["__f32_from_i32", "__sqrt_f32", "__i32_from_f32"] {
+        assert!(
+            !wgsl.contains(forbidden),
+            "f32 helper `{forbidden}` escaped into WGSL instead of lowering intrinsically",
+        );
+    }
+
+    let values = [CAM_X, CAM_Y, ZOOM];
+    let mut input_bytes = vec![0_u8; input.span as usize];
+    for member in &input.members {
+        let start = member.offset as usize;
+        input_bytes[start..start + 4].copy_from_slice(
+            &values[(member.arg_index - 2) as usize]
+                .to_bits()
+                .to_le_bytes(),
+        );
+    }
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("D1 requires browser-profile lavapipe execution");
+    assert_eq!(rgba.len(), (W * H * 4) as usize);
+
+    let sky = [8, 12, 24, 255];
+    let mut sky_count = 0_usize;
+    let mut hit_count = 0_usize;
+    let mut distinct = std::collections::HashSet::new();
+    for y in 0..H {
+        for x in 0..W {
+            let offset = ((y * W + x) * 4) as usize;
+            let actual = &rgba[offset..offset + 4];
+            let expected = cga_inversion_de_oracle(
+                x as i32,
+                y as i32,
+                CAM_X,
+                CAM_Y,
+                ZOOM,
+            )
+            .to_le_bytes();
+            assert_eq!(
+                actual, &expected,
+                "D1 conformal-inversion pixel ({x},{y}) differs from the Rust-f32 oracle",
+            );
+            distinct.insert(expected);
+            if expected == sky {
+                sky_count += 1;
+            } else {
+                hit_count += 1;
+            }
+        }
+    }
+    assert!(sky_count > 0, "D1 image must contain background");
+    assert!(hit_count > 0, "D1 image must contain the inverted sphere");
+    assert!(
+        distinct.len() >= 8,
+        "step shading must expose a non-degenerate 3D surface ({} colors)",
+        distinct.len(),
+    );
 }
 
 /// R1b (validation, GPU-FREE): the Fe fragment kernel compiles through the Render

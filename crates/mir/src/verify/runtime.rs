@@ -680,8 +680,15 @@ fn verify_builtin<'db>(
             Ok(Some(RuntimeClass::Scalar(word_scalar_class())))
         }
         RuntimeBuiltin::IntrinsicArith {
-            lhs, rhs, class, ..
+            lhs,
+            rhs,
+            class,
+            checked,
+            ..
         } => {
+            if *checked && matches!(class.repr, ScalarRepr::Float { .. }) {
+                return Err(VerifyError::InvalidExprClass(*lhs));
+            }
             let expected = RuntimeClass::Scalar(class.clone());
             if runtime_value_class(body, *lhs)? != &expected
                 || runtime_value_class(body, *rhs)? != &expected
@@ -700,6 +707,18 @@ fn verify_builtin<'db>(
                 return Err(VerifyError::InvalidExprClass(*lhs));
             }
             Ok(Some(expected))
+        }
+        RuntimeBuiltin::F32FromI32 { value } => {
+            verify_scalar_repr(body, *value, ScalarRepr::Int { bits: 32, signed: true })?;
+            Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
+        }
+        RuntimeBuiltin::I32FromF32 { value } => {
+            verify_scalar_repr(body, *value, ScalarRepr::Float { bits: 32 })?;
+            Ok(Some(RuntimeClass::Scalar(i32_scalar_class())))
+        }
+        RuntimeBuiltin::F32Sqrt { value } => {
+            verify_scalar_repr(body, *value, ScalarRepr::Float { bits: 32 })?;
+            Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
         }
         RuntimeBuiltin::BlockHash { block } => {
             verify_word_value(body, *block)?;
@@ -1028,5 +1047,95 @@ fn word_scalar_class<'db>() -> ScalarClass<'db> {
             signed: false,
         },
         role: ScalarRole::Plain,
+    }
+}
+
+fn i32_scalar_class<'db>() -> ScalarClass<'db> {
+    ScalarClass {
+        repr: ScalarRepr::Int {
+            bits: 32,
+            signed: true,
+        },
+        role: ScalarRole::Plain,
+    }
+}
+
+fn f32_scalar_class<'db>() -> ScalarClass<'db> {
+    ScalarClass {
+        repr: ScalarRepr::Float { bits: 32 },
+        role: ScalarRole::Plain,
+    }
+}
+
+fn verify_scalar_repr<'db>(
+    body: &RuntimeBody<'db>,
+    value: crate::runtime::RValueId,
+    repr: ScalarRepr,
+) -> Result<(), VerifyError<'db>> {
+    let RuntimeClass::Scalar(actual) = runtime_value_class(body, value)? else {
+        return Err(VerifyError::InvalidExprClass(value));
+    };
+    if actual.repr != repr {
+        return Err(VerifyError::InvalidExprClass(value));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use common::InputDb;
+    use driver::DriverDataBase;
+    use url::Url;
+
+    use crate::{
+        build_wasm_runtime_package,
+        runtime::{RExpr, RStmt, RuntimeBuiltin},
+        verify::{VerifyError, verify_runtime_body},
+    };
+
+    #[test]
+    fn checked_f32_intrinsic_arithmetic_is_rejected() {
+        let source =
+            "pub fn checked_float_probe(a: f32, b: f32) -> f32 { a + b }\n";
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///verify_checked_f32.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).expect("file should load");
+        let package = build_wasm_runtime_package(&db, db.top_mod(file))
+            .expect("f32 add should build a runtime package");
+        let function = package
+            .functions(&db)
+            .iter()
+            .copied()
+            .find(|function| function.symbol(&db).contains("checked_float_probe"))
+            .expect("missing checked_float_probe runtime function");
+        let mut body = function.instance(&db).body(&db).clone();
+
+        let lhs = body
+            .blocks
+            .iter_mut()
+            .flat_map(|block| &mut block.stmts)
+            .find_map(|stmt| match stmt {
+                RStmt::Assign {
+                    expr:
+                        RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
+                            checked, lhs, ..
+                        }),
+                    ..
+                } => {
+                    assert!(!*checked, "ordinary f32 operators must start unchecked");
+                    *checked = true;
+                    Some(*lhs)
+                }
+                _ => None,
+            })
+            .expect("missing f32 IntrinsicArith builtin");
+
+        let program: &dyn crate::db::MirDb = &db;
+        assert_eq!(
+            verify_runtime_body(&db, &program, &body),
+            Err(VerifyError::InvalidExprClass(lhs)),
+        );
     }
 }

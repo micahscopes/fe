@@ -1567,6 +1567,14 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                 rhs,
                 class,
             } => self.lower_intrinsic_arith_builtin(*op, *checked, *lhs, *rhs, class)?,
+            RuntimeBuiltin::F32FromI32 { .. }
+            | RuntimeBuiltin::I32FromF32 { .. }
+            | RuntimeBuiltin::F32Sqrt { .. } => {
+                return Err(LowerError::Unsupported(
+                    "f32 conversion and sqrt builtins are not supported by the EVM backend"
+                        .to_string(),
+                ));
+            }
             RuntimeBuiltin::Saturating {
                 op,
                 lhs,

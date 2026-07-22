@@ -140,6 +140,141 @@ fn fe_add_runs_on_wasm_and_matches_evm_twin() {
     assert_eq!(main.call(&mut store, ()).unwrap(), 5, "main() should be 5");
 }
 
+#[test]
+fn fe_f32_arithmetic_comparisons_and_neg_run_on_wasm() {
+    let source = r#"
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    fn __sqrt_f32(_: f32) -> f32
+}
+pub fn arith(a: f32, b: f32) -> f32 { -(((a + b) * (a - b)) / b) }
+pub fn sqrt_round(value: i32) -> i32 {
+    __i32_from_f32(__sqrt_f32(__f32_from_i32(value)))
+}
+pub fn eq(a: f32, b: f32) -> bool { a == b }
+pub fn ne(a: f32, b: f32) -> bool { a != b }
+pub fn lt(a: f32, b: f32) -> bool { a < b }
+pub fn le(a: f32, b: f32) -> bool { a <= b }
+pub fn gt(a: f32, b: f32) -> bool { a > b }
+pub fn ge(a: f32, b: f32) -> bool { a >= b }
+"#;
+    let wasm = compile_to_wasm("wasm_f32_ops.fe", source);
+    assert!(
+        func_imports(&wasm)
+            .iter()
+            .all(|(_, name)| !name.ends_with("_f32")),
+        "f32 language intrinsics must lower to Sonatina ops, not wasm host imports"
+    );
+
+    let operators = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(|payload| match payload.expect("valid wasm") {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .expect("operator reader")
+                    .into_iter()
+                    .map(|op| format!("{:?}", op.expect("valid operator")))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    for opcode in [
+        "F32Add",
+        "F32Sub",
+        "F32Mul",
+        "F32Div",
+        "F32Neg",
+        "F32Sqrt",
+        "F32ConvertI32S",
+        "I32TruncSatF32S",
+        "F32Eq",
+        "F32Lt",
+        "F32Le",
+    ] {
+        assert!(
+            operators.contains(opcode),
+            "generated wasm lacks {opcode}:\n{operators}"
+        );
+    }
+
+    let (mut store, instance) = instantiate(&wasm);
+    let arith = instance
+        .get_typed_func::<(f32, f32), f32>(&mut store, "arith")
+        .expect("arith export");
+    assert_eq!(arith.call(&mut store, (5.0, 2.0)).unwrap(), -10.5);
+    let sqrt_round = instance
+        .get_typed_func::<i32, i32>(&mut store, "sqrt_round")
+        .expect("sqrt_round export");
+    assert_eq!(sqrt_round.call(&mut store, 81).unwrap(), 9);
+
+    let nan = f32::from_bits(0x7fc0_1234);
+    for (name, expected) in [
+        ("eq", 0),
+        ("ne", 1),
+        ("lt", 0),
+        ("le", 0),
+        ("gt", 0),
+        ("ge", 0),
+    ] {
+        let compare = instance
+            .get_typed_func::<(f32, f32), i32>(&mut store, name)
+            .unwrap_or_else(|error| panic!("{name} export: {error}"));
+        assert_eq!(
+            compare.call(&mut store, (nan, 1.0)).unwrap(),
+            expected,
+            "{name}(NaN, 1)"
+        );
+    }
+    let gt = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "gt")
+        .unwrap();
+    let ge = instance
+        .get_typed_func::<(f32, f32), i32>(&mut store, "ge")
+        .unwrap();
+    assert_eq!(gt.call(&mut store, (2.0, 1.0)).unwrap(), 1);
+    assert_eq!(ge.call(&mut store, (2.0, 2.0)).unwrap(), 1);
+
+    for (name, expected) in [("eq", 1), ("lt", 0), ("le", 1)] {
+        let compare = instance
+            .get_typed_func::<(f32, f32), i32>(&mut store, name)
+            .unwrap_or_else(|error| panic!("{name} export: {error}"));
+        assert_eq!(
+            compare.call(&mut store, (0.0, -0.0)).unwrap(),
+            expected,
+            "{name}(+0, -0)"
+        );
+    }
+}
+
+#[test]
+fn unsupported_f32_helpers_fail_closed_by_name() {
+    for (name, params, args) in [
+        ("__rsqrt_f32", "_: f32", "value"),
+        ("__abs_f32", "_: f32", "value"),
+        ("__min_f32", "_: f32, _: f32", "value, value"),
+        ("__max_f32", "_: f32, _: f32", "value, value"),
+        ("__floor_f32", "_: f32", "value"),
+    ] {
+        let source = format!(
+            "extern {{ fn {name}({params}) -> f32 }}\npub fn probe(value: f32) -> f32 {{ {name}({args}) }}\n"
+        );
+        let error = compile_to_wasm_err(&format!("reject_{name}.fe"), &source);
+        assert!(
+            error.contains(name),
+            "unsupported helper error must name `{name}`: {error}"
+        );
+        assert!(
+            error.contains("dedicated Sonatina lowering")
+                && error.contains("must not become an external call"),
+            "unsupported helper `{name}` must fail closed before import emission: {error}"
+        );
+    }
+}
+
 /// `sum_to(n) = 0 + 1 + ... + (n-1)`: a loop with a loop-carried accumulator and
 /// counter (phis inserted by Sonatina's SSA-variable machinery), compiled
 /// Fe -> wasm and executed under wasmtime.

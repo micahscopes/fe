@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 
 use driver::DriverDataBase;
-use hir::hir_def::{ArithBinOp, BinOp, CompBinOp};
+use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
 use mir::{
     AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem, PlaceRoot,
     RBlockId, RExpr, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin,
@@ -46,8 +46,9 @@ use sonatina_ir::{
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
     inst::{
-        arith::{Add, Mul, Sar, Shr, Sub},
-        cmp::{Eq as CmpEq, Lt, Slt},
+        arith::{Add, Fadd, Fdiv, Fmul, Fneg, Fsqrt, Fsub, Mul, Sar, Shr, Sub},
+        cast::{F32ToI32, I32ToF32},
+        cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
         control_flow::{Br, Call, Jump, Return, Unreachable},
     },
     isa::{Isa, wasm32::Wasm32},
@@ -470,12 +471,24 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         self.fb.insert_inst_no_result(Jump::new(is, entry));
 
         let blocks = self.body.blocks.clone();
+        let reachable = compute_reachable_blocks(&self.body);
         for (idx, block) in blocks.iter().enumerate() {
             self.fb.switch_to_block(self.block_map[idx]);
+            if !reachable[idx] {
+                self.fb.insert_inst_no_result(Unreachable::new(is));
+                continue;
+            }
             for stmt in &block.stmts {
                 self.lower_stmt(stmt)?;
             }
-            self.lower_terminator(&block.terminator)?;
+            self.lower_terminator(&block.terminator)
+                .map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while lowering block {idx} terminator {:?}",
+                        block.terminator
+                    )),
+                    other => other,
+                })?;
         }
 
         self.fb.seal_all();
@@ -497,14 +510,36 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 {
                     return self.lower_call_stmt(*callee, args);
                 }
+                // MIR can preserve the value of a statement-position block in
+                // an erased unit sink. A pure `Use` has no effect to emit; its
+                // value is intentionally discarded. Keep every effectful or
+                // otherwise unsupported erased expression fail-closed.
+                if self.body.value_class(*dst).is_none() {
+                    return match expr {
+                        RExpr::Use(_) => Ok(()),
+                        other => Err(LowerError::Unsupported(format!(
+                            "wasm target: erased destination {dst:?} cannot discard effectful or unsupported expression `{other:?}`"
+                        ))),
+                    };
+                }
                 // R2.1: a scalar-tuple destination is produced element-wise (one
                 // SSA def per element word), not as a single value, so it takes a
                 // dedicated arm rather than the single-`ValueId` `lower_expr` path.
                 if self.tuple_vars.contains_key(dst) {
                     return self.lower_tuple_assign(*dst, expr);
                 }
-                let value = self.lower_expr(expr, *dst)?;
-                let var = self.var_for(*dst)?;
+                let value = self.lower_expr(expr, *dst).map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; while lowering assignment destination {dst:?}, expression {expr:?}"
+                    )),
+                    other => other,
+                })?;
+                let var = self.var_for(*dst).map_err(|error| match error {
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message}; assignment destination {dst:?}, expression {expr:?}"
+                    )),
+                    other => other,
+                })?;
                 self.fb.def_var(var, value);
                 Ok(())
             }
@@ -588,6 +623,17 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 Ok(self.fb.make_imm_value(imm))
             }
             RExpr::Binary { op, lhs, rhs } => self.lower_binary(*op, *lhs, *rhs, dst),
+            RExpr::Unary { op, value } => self.lower_unary(*op, *value),
+            RExpr::Cast { value, to } => {
+                let source_ty = self.local_ty(*value)?;
+                let target_ty = scalar_ty_r1(to)?;
+                if source_ty != target_ty {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: non-identity scalar cast `{source_ty:?}` -> `{target_ty:?}` must lower through a dedicated numeric builtin"
+                    )));
+                }
+                self.local_value(*value)
+            }
             RExpr::Call { callee, args } => self.lower_call(*callee, args),
             RExpr::Builtin(builtin) => self.lower_builtin(builtin),
             // R3.4b step 2: single-scalar-field newtype construction/projection is
@@ -722,8 +768,27 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     fn lower_builtin(&mut self, builtin: &RuntimeBuiltin<'db>) -> Result<ValueId, LowerError> {
         match builtin {
             RuntimeBuiltin::IntrinsicArith {
-                op, lhs, rhs, class, ..
+                op,
+                lhs,
+                rhs,
+                class,
+                ..
             } => self.lower_intrinsic_arith(*op, *lhs, *rhs, class),
+            RuntimeBuiltin::F32FromI32 { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(I32ToF32::new(is, value), Type::F32))
+            }
+            RuntimeBuiltin::I32FromF32 { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(F32ToI32::new(is, value), Type::I32))
+            }
+            RuntimeBuiltin::F32Sqrt { value } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                Ok(self.fb.insert_inst(Fsqrt::new(is, value), Type::F32))
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) builtin `{other:?}` is not supported \
                  (memory/EVM-host/addmod/saturating builtins are R2)"
@@ -739,10 +804,20 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         class: &ScalarClass<'db>,
     ) -> Result<ValueId, LowerError> {
         if matches!(class.repr, ScalarRepr::Float { .. }) {
-            return Err(LowerError::Unsupported(
-                "wasm target: f32 arithmetic intrinsic lowering is not part of the f32 carrier slice"
-                    .to_string(),
-            ));
+            let is = self.inst_set();
+            let lhs = self.local_value(lhs)?;
+            let rhs = self.local_value(rhs)?;
+            return Ok(match op {
+                IntrinsicArithBinOp::Add => self.fb.insert_inst(Fadd::new(is, lhs, rhs), Type::F32),
+                IntrinsicArithBinOp::Sub => self.fb.insert_inst(Fsub::new(is, lhs, rhs), Type::F32),
+                IntrinsicArithBinOp::Mul => self.fb.insert_inst(Fmul::new(is, lhs, rhs), Type::F32),
+                IntrinsicArithBinOp::Div => self.fb.insert_inst(Fdiv::new(is, lhs, rhs), Type::F32),
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: f32 intrinsic arithmetic `{other:?}` is not supported"
+                    )));
+                }
+            });
         }
         let is = self.inst_set();
         let ty = scalar_ty_r1(class)?;
@@ -784,7 +859,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         rhs: RLocalId,
         dst: RLocalId,
     ) -> Result<ValueId, LowerError> {
-        if [lhs, rhs].into_iter().any(|local| {
+        let float_operands = [lhs, rhs].into_iter().any(|local| {
             matches!(
                 self.body.value_class(local),
                 Some(RuntimeClass::Scalar(ScalarClass {
@@ -792,12 +867,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     ..
                 }))
             )
-        }) {
-            return Err(LowerError::Unsupported(
-                "wasm target: f32 binary arithmetic/comparison lowering is not part of the f32 carrier slice"
-                    .to_string(),
-            ));
-        }
+        });
         let is = self.inst_set();
         // Keep the MIR operand ids for the signedness key (the value class lives on
         // the RLocalId, not the sonatina ValueId, which is signless). The sonatina
@@ -805,6 +875,28 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         let (lhs_local, rhs_local) = (lhs, rhs);
         let lhs = self.local_value(lhs)?;
         let rhs = self.local_value(rhs)?;
+        if float_operands {
+            let BinOp::Comp(comp) = op else {
+                return Err(LowerError::Unsupported(format!(
+                    "wasm target: f32 binary op `{op:?}` is not supported; arithmetic must lower through IntrinsicArith"
+                )));
+            };
+            return Ok(match comp {
+                CompBinOp::Eq => self.fb.insert_inst(Feq::new(is, lhs, rhs), Type::I1),
+                CompBinOp::NotEq => {
+                    let equal = self.fb.insert_inst(Feq::new(is, lhs, rhs), Type::I1);
+                    let false_value = self.fb.make_imm_value(Immediate::from(false));
+                    self.fb
+                        .insert_inst(CmpEq::new(is, equal, false_value), Type::I1)
+                }
+                CompBinOp::Lt => self.fb.insert_inst(Flt::new(is, lhs, rhs), Type::I1),
+                CompBinOp::LtEq => self.fb.insert_inst(Fle::new(is, lhs, rhs), Type::I1),
+                // Reversing operands preserves unordered/NaN behavior: both Flt
+                // and Fle remain false if either operand is NaN.
+                CompBinOp::Gt => self.fb.insert_inst(Flt::new(is, rhs, lhs), Type::I1),
+                CompBinOp::GtEq => self.fb.insert_inst(Fle::new(is, rhs, lhs), Type::I1),
+            });
+        }
         match op {
             // R1 emits plain (unchecked) arithmetic. Fe's checked-overflow
             // semantics lower to an EVM revert on the EVM path; the wasm
@@ -863,6 +955,29 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 "wasm target (R1) binary op `{other:?}` is not supported"
             ))),
         }
+    }
+
+    fn lower_unary(&mut self, op: UnOp, value: RLocalId) -> Result<ValueId, LowerError> {
+        let is_float = matches!(
+            self.body.value_class(value),
+            Some(RuntimeClass::Scalar(ScalarClass {
+                repr: ScalarRepr::Float { .. },
+                ..
+            }))
+        );
+        if is_float {
+            let is = self.inst_set();
+            let value = self.local_value(value)?;
+            return match op {
+                UnOp::Minus => Ok(self.fb.insert_inst(Fneg::new(is, value), Type::F32)),
+                other => Err(LowerError::Unsupported(format!(
+                    "wasm target: f32 unary op `{other:?}` is not supported"
+                ))),
+            };
+        }
+        Err(LowerError::Unsupported(format!(
+            "wasm target (R1) unary op `{op:?}` is not supported"
+        )))
     }
 
     fn lower_call(
@@ -1000,6 +1115,41 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             .copied()
             .ok_or_else(|| LowerError::Internal(format!("unknown runtime block {block:?}")))
     }
+}
+
+fn compute_reachable_blocks(body: &RuntimeBody<'_>) -> Vec<bool> {
+    let mut reachable = vec![false; body.blocks.len()];
+    let mut worklist = vec![0_usize];
+    while let Some(idx) = worklist.pop() {
+        if std::mem::replace(&mut reachable[idx], true) {
+            continue;
+        }
+        match &body.blocks[idx].terminator {
+            RTerminator::Goto(block) => worklist.push(block.as_u32() as usize),
+            RTerminator::Branch {
+                then_bb, else_bb, ..
+            } => {
+                worklist.push(then_bb.as_u32() as usize);
+                worklist.push(else_bb.as_u32() as usize);
+            }
+            RTerminator::SwitchScalar { cases, default, .. } => {
+                worklist.extend(cases.iter().map(|(_, block)| block.as_u32() as usize));
+                worklist.push(default.as_u32() as usize);
+            }
+            RTerminator::MatchEnumTag { cases, default, .. } => {
+                worklist.extend(cases.iter().map(|(_, block)| block.as_u32() as usize));
+                worklist.extend(default.iter().map(|block| block.as_u32() as usize));
+            }
+            RTerminator::TerminalCall { .. }
+            | RTerminator::ReturnData { .. }
+            | RTerminator::Revert { .. }
+            | RTerminator::SelfDestruct { .. }
+            | RTerminator::Trap
+            | RTerminator::Return(_)
+            | RTerminator::Stop => {}
+        }
+    }
+    reachable
 }
 
 /// R2.0 fail-closed error for a place read outside the admitted transport-word

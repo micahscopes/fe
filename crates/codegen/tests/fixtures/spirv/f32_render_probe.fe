@@ -1,0 +1,25 @@
+// Minimal f32 Render regression. The first two arguments are fragment-position
+// builtins; the remaining three are broadcast through the Render input buffer.
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub fn f32_render_probe(px: i32, py: i32, gain: f32, bias: f32,
+                        cutoff: f32) -> u32 {
+    let x: f32 = __f32_from_i32(px)
+    let y: f32 = __f32_from_i32(py)
+    let mut value: f32 = (x + y) * gain + bias
+    let mut i: i32 = 0
+    while i < 3 {
+        value = value * 0.5 + bias
+        if value > cutoff {
+            let hot: i32 = __i32_from_f32(value)
+            return __bitcast(hot + hot * 256 + 16711680 + -16777216)
+        }
+        i = i + 1
+    }
+    let cool: i32 = __i32_from_f32(value)
+    __bitcast(cool + 65280 + cool * 65536 + -16777216)
+}

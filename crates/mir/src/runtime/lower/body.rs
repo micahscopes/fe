@@ -55,9 +55,10 @@ use super::{
     boundary::{BoundarySiteAllocator, RuntimeValueUsePlan, boundary_spec_for_ty_in_env},
     call_input::{CompiledCallInputPlan, compile_call_input_plan_for_semantic},
     classify::{
-        BodyEnv, BodyStaticFacts, ContractMetadataBuiltin, GenericNumericIntrinsicKind,
-        InferClassCache, RuntimeBodyCx, contract_metadata_builtin, generic_numeric_intrinsic_kind,
-        nonself_backing_value_place, resolve_runtime_call_key, semantic_return_ty,
+        BodyEnv, BodyStaticFacts, ContractMetadataBuiltin, F32IntrinsicKind,
+        GenericNumericIntrinsicKind, InferClassCache, RuntimeBodyCx, contract_metadata_builtin,
+        f32_intrinsic_kind, generic_numeric_intrinsic_kind, nonself_backing_value_place,
+        resolve_runtime_call_key, semantic_return_ty,
         snapshot_source_place,
     },
     consts::{
@@ -2708,6 +2709,10 @@ impl<'db> RmirEmitter<'db> {
         rhs: RLocalId,
         class: &ScalarClass<'db>,
     ) -> RExpr<'db> {
+        // IEEE-754 arithmetic has no checked-overflow variant. Source-level
+        // checked mode remains meaningful for integers, but must not leak into
+        // the typed float builtin carried to backend lowering and verification.
+        let checked = checked && !matches!(class.repr, ScalarRepr::Float { .. });
         RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntrinsicArith {
             op,
             checked,
@@ -2769,6 +2774,9 @@ impl<'db> RmirEmitter<'db> {
         class: &ScalarClass<'db>,
     ) -> Option<RExpr<'db>> {
         Some(match op {
+            UnOp::Minus if matches!(class.repr, ScalarRepr::Float { .. }) => {
+                RExpr::Unary { op, value }
+            }
             UnOp::Minus if checked => {
                 let zero = self.alloc_zero_scalar(bb, semantic_ty, class);
                 self.lower_intrinsic_arith_expr(IntrinsicArithBinOp::Sub, true, zero, value, class)
@@ -3038,6 +3046,9 @@ impl<'db> RmirEmitter<'db> {
             );
             return Some(ret);
         }
+        if let Some(ret) = self.lower_f32_intrinsic_call(bb, semantic, args) {
+            return Some(ret);
+        }
         if let Some(ret) = self.lower_numeric_intrinsic_call(bb, semantic, args) {
             return Some(ret);
         }
@@ -3206,6 +3217,54 @@ impl<'db> RmirEmitter<'db> {
             _ => self.lower_numeric_intrinsic_expr(name.as_str(), &args, &scalar)?,
         };
         self.push_stmt(bb, RStmt::Assign { dst: ret, expr });
+        Some(ret)
+    }
+
+    fn lower_f32_intrinsic_call(
+        &mut self,
+        bb: RBlockId,
+        semantic: SemanticInstance<'db>,
+        args: &[NOperand],
+    ) -> Option<RLocalId> {
+        let BodyOwner::Func(func) = semantic.key(self.db).owner(self.db) else {
+            return None;
+        };
+        if func.body(self.db).is_some() {
+            return None;
+        }
+        let kind = f32_intrinsic_kind(func.name(self.db).to_opt()?.data(self.db).as_str())?;
+        let mut boundary_sites = BoundarySiteAllocator::default();
+        let input_plan = compile_call_input_plan_for_semantic(
+            self.db,
+            &self.semantic_body,
+            semantic,
+            self.env,
+            &[],
+            &mut boundary_sites,
+        );
+        let (args, _) = self.lower_visible_call_args(bb, args, &input_plan);
+        let [value] = args.as_slice() else {
+            return None;
+        };
+        let ret_ty = semantic_return_ty(self.db, semantic);
+        let ret_class = self.top_level_class_for_ty(ret_ty, AddressSpaceKind::Memory)?;
+        let ret = self.alloc_runtime_temp(ret_ty, RuntimeCarrier::Value(ret_class));
+        let builtin = match kind {
+            F32IntrinsicKind::FromI32 => crate::runtime::RuntimeBuiltin::F32FromI32 {
+                value: *value,
+            },
+            F32IntrinsicKind::ToI32 => crate::runtime::RuntimeBuiltin::I32FromF32 {
+                value: *value,
+            },
+            F32IntrinsicKind::Sqrt => crate::runtime::RuntimeBuiltin::F32Sqrt { value: *value },
+        };
+        self.push_stmt(
+            bb,
+            RStmt::Assign {
+                dst: ret,
+                expr: RExpr::Builtin(builtin),
+            },
+        );
         Some(ret)
     }
 
@@ -5362,7 +5421,179 @@ mod tests {
     use driver::DriverDataBase;
     use url::Url;
 
-    use crate::build_test_runtime_package;
+    use crate::{
+        build_test_runtime_package, build_wasm_runtime_package,
+        runtime::{
+            IntrinsicArithBinOp, RExpr, RStmt, RuntimeBuiltin, RuntimeClass, ScalarRepr,
+        },
+    };
+
+    #[test]
+    fn f32_arithmetic_is_unchecked_and_minus_stays_unary_in_checked_mode() {
+        let source = r#"
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+}
+
+pub fn f32_arithmetic(x: i32, y: i32) -> f32 {
+    let lhs: f32 = __f32_from_i32(x)
+    let rhs: f32 = __f32_from_i32(y)
+    let added: f32 = lhs + rhs
+    let subtracted: f32 = added - rhs
+    let multiplied: f32 = subtracted * rhs
+    let divided: f32 = multiplied / rhs
+    -divided
+}
+
+pub fn checked_i32_add(x: i32, y: i32) -> i32 {
+    x + y
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///mir_f32_arithmetic.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).expect("file should load");
+        let package = build_wasm_runtime_package(&db, db.top_mod(file))
+            .expect("f32 arithmetic should lower without checked-integer machinery");
+        let function = package
+            .functions(&db)
+            .iter()
+            .copied()
+            .find(|function| function.symbol(&db).contains("f32_arithmetic"))
+            .expect("missing f32_arithmetic runtime function");
+        let body = function.instance(&db).body(&db);
+
+        let arithmetic: Vec<_> = body
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .filter_map(|stmt| match stmt {
+                RStmt::Assign {
+                    expr:
+                        RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
+                            op,
+                            checked,
+                            class,
+                            ..
+                        }),
+                    ..
+                } if matches!(class.repr, ScalarRepr::Float { bits: 32 }) => {
+                    Some((*op, *checked))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            arithmetic,
+            vec![
+                (IntrinsicArithBinOp::Add, false),
+                (IntrinsicArithBinOp::Sub, false),
+                (IntrinsicArithBinOp::Mul, false),
+                (IntrinsicArithBinOp::Div, false),
+            ],
+            "ordinary f32 arithmetic must not carry integer checked-overflow semantics"
+        );
+
+        let unary = body
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .find_map(|stmt| match stmt {
+                RStmt::Assign {
+                    dst,
+                    expr:
+                        RExpr::Unary {
+                            op: hir::hir_def::UnOp::Minus,
+                            value,
+                        },
+                } => Some((*dst, *value)),
+                _ => None,
+            })
+            .expect("f32_arithmetic should contain an f32 unary-minus expression");
+
+        for local in [unary.0, unary.1] {
+            assert!(matches!(
+                body.value_class(local),
+                Some(RuntimeClass::Scalar(class))
+                    if matches!(class.repr, ScalarRepr::Float { bits: 32 })
+            ));
+        }
+
+        let integer_function = package
+            .functions(&db)
+            .iter()
+            .copied()
+            .find(|function| function.symbol(&db).contains("checked_i32_add"))
+            .expect("missing checked_i32_add runtime function");
+        let integer_body = integer_function.instance(&db).body(&db);
+        assert!(integer_body.blocks.iter().flat_map(|block| &block.stmts).any(
+            |stmt| matches!(
+                stmt,
+                RStmt::Assign {
+                    expr: RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
+                        op: IntrinsicArithBinOp::Add,
+                        checked: true,
+                        class,
+                        ..
+                    }),
+                    ..
+                } if matches!(class.repr, ScalarRepr::Int { bits: 32, signed: true })
+            )
+        ));
+    }
+
+    #[test]
+    fn dedicated_f32_helpers_lower_to_typed_runtime_builtins() {
+        let source = r#"
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    fn __sqrt_f32(_: f32) -> f32
+}
+
+pub fn f32_helpers(x: i32) -> i32 {
+    let f: f32 = __f32_from_i32(x)
+    let root: f32 = __sqrt_f32(f)
+    __i32_from_f32(root)
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///mir_f32_helpers.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).expect("file should load");
+        let package = build_wasm_runtime_package(&db, db.top_mod(file))
+            .expect("dedicated f32 helpers should lower into the wasm runtime package");
+        let function = package
+            .functions(&db)
+            .iter()
+            .copied()
+            .find(|function| function.symbol(&db).contains("f32_helpers"))
+            .expect("missing f32_helpers runtime function");
+        let body = function.instance(&db).body(&db);
+        let builtins: Vec<_> = body
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .filter_map(|stmt| match stmt {
+                RStmt::Assign {
+                    expr: RExpr::Builtin(builtin),
+                    ..
+                } => Some(builtin),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            builtins.len(),
+            3,
+            "expected exactly the conversion, sqrt, and conversion builtins"
+        );
+        assert!(matches!(builtins[0], RuntimeBuiltin::F32FromI32 { .. }));
+        assert!(matches!(builtins[1], RuntimeBuiltin::F32Sqrt { .. }));
+        assert!(matches!(builtins[2], RuntimeBuiltin::I32FromF32 { .. }));
+    }
 
     #[test]
     fn poseidon_mock_range_consts_with_zst_fields_lower_into_runtime_package() {

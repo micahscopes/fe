@@ -751,6 +751,13 @@ fn format_builtin<'db>(db: &'db dyn MirDb, builtin: &RuntimeBuiltin<'db>) -> Str
             format_local_id(*lhs),
             format_local_id(*rhs)
         ),
+        RuntimeBuiltin::F32FromI32 { value } => {
+            format!("f32_from_i32 {}", format_local_id(*value))
+        }
+        RuntimeBuiltin::I32FromF32 { value } => {
+            format!("i32_from_f32 {}", format_local_id(*value))
+        }
+        RuntimeBuiltin::F32Sqrt { value } => format!("sqrt_f32 {}", format_local_id(*value)),
         RuntimeBuiltin::Address => "address".to_string(),
         RuntimeBuiltin::Caller => "caller".to_string(),
         RuntimeBuiltin::Origin => "origin".to_string(),
