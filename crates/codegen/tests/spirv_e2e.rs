@@ -2478,6 +2478,7 @@ const MANDEL_FRAG_RGBA_SOURCE: &str = include_str!("fixtures/spirv/mandel_frag_r
 /// final f32 -> i32 -> packed-u32 color path in one small kernel.
 const F32_RENDER_PROBE_SOURCE: &str = include_str!("fixtures/spirv/f32_render_probe.fe");
 const MVT2_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt2_f32_render.fe");
+const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
 
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
 const CGA_INVERSION_DE_RENDER_SOURCE: &str =
@@ -3100,6 +3101,94 @@ fn recursive_mvt2_f32_render_executes_on_lavapipe() {
                 &rgba[offset..offset + 4],
                 &[11 + x as u8, 22 + y as u8, 121, 255],
                 "nested f32 tree pixel ({x},{y}) must preserve all four leaves",
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_recursive_mvt5_f32_render_executes_on_lavapipe() {
+    const W: u32 = 8;
+    const H: u32 = 4;
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mvt5_f32_render.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MVT5_F32_RENDER_SOURCE.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("call-free depth-5 f32 tree should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("call-free depth-5 f32 tree should compile as Render SPIR-V");
+    assert_eq!(
+        artifact.layout.mode,
+        sonatina_codegen::isa::spirv::LayoutMode::Render
+    );
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    assert_eq!(
+        artifact
+            .layout
+            .bindings
+            .iter()
+            .filter(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+            .count(),
+        1,
+        "the 32 broadcasts must use exactly one Input binding",
+    );
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("32 f32 leaves require an Input binding");
+    assert_eq!((input.group, input.binding), (0, 1));
+    assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
+    assert_eq!((input.span, input.stride, input.members.len()), (128, 128, 32));
+    for (member, arg_index) in input.members.iter().zip(2..=33) {
+        assert_eq!(member.arg_index, arg_index);
+        assert_eq!(member.offset, (arg_index - 2) * 4);
+        assert_eq!(member.width, 4);
+        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+    }
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    assert_eq!(artifact.layout.builtin_inputs[0].arg_index, 0);
+    assert_eq!(
+        artifact.layout.builtin_inputs[0].scalar,
+        sonatina_codegen::isa::spirv::SpirvScalarKind::I32,
+    );
+    assert_eq!(
+        artifact.layout.builtin_inputs[0].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionX,
+    );
+    assert_eq!(artifact.layout.builtin_inputs[1].arg_index, 1);
+    assert_eq!(
+        artifact.layout.builtin_inputs[1].scalar,
+        sonatina_codegen::isa::spirv::SpirvScalarKind::I32,
+    );
+    assert_eq!(
+        artifact.layout.builtin_inputs[1].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionY,
+    );
+    let mut input_bytes = vec![0u8; input.span as usize];
+    for member in &input.members {
+        let leaf = (member.arg_index - 2) as i32;
+        let value = (3 * leaf + 2) as f32;
+        input_bytes[member.offset as usize..member.offset as usize + 4]
+            .copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("MvT<5> f32 Render regression requires GPU execution");
+    for y in 0..H {
+        for x in 0..W {
+            let offset = ((y * W + x) * 4) as usize;
+            let i = (x + 8 * y) as i32;
+            let expected = ((2 * i + 1) * (3 * i + 2) + (1000 + i)) as u32;
+            assert_eq!(
+                &rgba[offset..offset + 4],
+                &expected.to_le_bytes(),
+                "depth-5 transformed DFS leaf {i} at pixel ({x},{y})",
             );
         }
     }

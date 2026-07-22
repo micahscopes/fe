@@ -345,6 +345,40 @@ fn recursive_mvt2_f32_render_executes_on_wasm() {
 }
 
 #[test]
+fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_mvt5_f32_render.py"))
+        .arg("--check")
+        .status()
+        .expect("python3 must run the MvT<5> fixture freshness check");
+    assert!(status.success(), "generated MvT<5> fixture is stale");
+
+    let source = include_str!("fixtures/spirv/mvt5_f32_render.fe");
+    let wasm = compile_to_wasm("wasm_mvt5_f32_render.fe", source);
+    assert!(func_imports(&wasm).is_empty());
+    let (mut store, instance) = instantiate(&wasm);
+    let render = instance
+        .get_func(&mut store, "mvt5_f32_render")
+        .expect("call-free MvT<5> scalar render export");
+    for i in 0..32i32 {
+        let mut args = vec![wasmtime::Val::I32(i % 8), wasmtime::Val::I32(i / 8)];
+        args.extend((0..32).map(|leaf| {
+            let value = (3 * leaf + 2) as f32;
+            wasmtime::Val::F32(value.to_bits())
+        }));
+        let mut results = [wasmtime::Val::I32(0)];
+        render
+            .call(&mut store, &args, &mut results)
+            .expect("MvT<5> wasm execution");
+        let got = results[0].i32().expect("u32 result") as u32;
+        let expected = ((2 * i + 1) * (3 * i + 2) + (1000 + i)) as u32;
+        assert_eq!(got, expected, "DFS leaf {i} must retain its position");
+    }
+}
+
+#[test]
 fn conditional_f32_selection_feeds_loop_carry_and_both_exits_on_wasm() {
     let source = include_str!("fixtures/spirv/conditional_f32_loop_carry.fe");
     let wasm = compile_to_wasm("wasm_conditional_f32_loop_carry.fe", source);
