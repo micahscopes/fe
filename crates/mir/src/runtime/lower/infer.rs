@@ -729,7 +729,7 @@ fn local_lowers_as_unrooted_read_value<'db>(
     scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
     assumptions: PredicateListId<'db>,
 ) -> Option<RuntimeCarrier<'db>> {
-    let candidate = unrooted_read_value_candidate_carrier(db, local, carrier)?;
+    let candidate = unrooted_read_value_candidate_carrier(db, local, carrier, scope, assumptions)?;
     if !local_lowers_as_direct_read_value(db, local, &candidate, scope, assumptions) {
         return None;
     }
@@ -744,6 +744,8 @@ fn unrooted_read_value_candidate_carrier<'db>(
     db: &'db dyn MirDb,
     local: &NSLocal<'db>,
     carrier: &RuntimeCarrier<'db>,
+    scope: Option<hir::hir_def::scope_graph::ScopeId<'db>>,
+    assumptions: PredicateListId<'db>,
 ) -> Option<RuntimeCarrier<'db>> {
     let class = carrier.value_class().cloned()?;
     if matches!(
@@ -755,13 +757,18 @@ fn unrooted_read_value_candidate_carrier<'db>(
     if !matches!(local.facts.interface, SemanticLocalKind::DirectValue) {
         return None;
     }
-    let RuntimeClass::Ref {
-        kind: RefKind::Object,
-        ..
-    } = class
-    else {
-        return None;
-    };
+    match &class {
+        RuntimeClass::Ref {
+            kind: RefKind::Object,
+            ..
+        } => {}
+        RuntimeClass::Ref {
+            kind: RefKind::Const,
+            view: RefView::Whole,
+            ..
+        } if scope.is_some_and(|scope| ty_is_copy(db, scope, local.ty, assumptions)) => {}
+        _ => return None,
+    }
     let aggregate = class.aggregate_value_class()?;
     (!aggregate.contains_transport(db)).then_some(RuntimeCarrier::Value(aggregate))
 }
@@ -1407,11 +1414,152 @@ fn push_runtime_provider_binding<'db>(
 
 #[cfg(test)]
 mod tests {
+    use common::InputDb;
     use driver::DriverDataBase;
-    use hir::analysis::ty::ty_def::TyId;
+    use hir::{
+        analysis::{
+            semantic::{
+                SemanticInstance, borrowck::normalize_semantic_body,
+                get_or_build_semantic_instance, root_semantic_instance_key,
+            },
+            ty::{ty_check::BodyOwner, ty_def::TyId},
+        },
+        hir_def::TopLevelMod,
+    };
+    use url::Url;
 
     use super::*;
-    use crate::runtime::{ScalarClass, ScalarRepr, ScalarRole};
+    use crate::runtime::{
+        ScalarClass, ScalarRepr, ScalarRole,
+        lower::{classify::BodyStaticFacts, interface::runtime_param_locals},
+        package::runtime_instance_for_semantic,
+    };
+
+    fn semantic_instance_for_named_func<'db>(
+        db: &'db DriverDataBase,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> SemanticInstance<'db> {
+        let func = top_mod
+            .all_funcs(db)
+            .iter()
+            .copied()
+            .find(|func| {
+                func.name(db)
+                    .to_opt()
+                    .is_some_and(|func_name| func_name.data(db) == name)
+            })
+            .unwrap_or_else(|| panic!("missing function `{name}`"));
+        let key = root_semantic_instance_key(db, BodyOwner::Func(func))
+            .unwrap_or_else(|err| panic!("failed to root `{name}`: {err:?}"));
+        get_or_build_semantic_instance(db, key)
+    }
+
+    fn inferred_local_state<'db>(
+        db: &'db mut DriverDataBase,
+        source: &str,
+        name: &str,
+    ) -> InferenceResult<'db> {
+        let url = Url::parse("file:///copy_const_ref_inference.fe").unwrap();
+        db.workspace()
+            .touch(db, url.clone(), Some(source.to_string()));
+        let file = db
+            .workspace()
+            .get(db, &url)
+            .expect("test source should load");
+        let semantic = semantic_instance_for_named_func(db, db.top_mod(file), name);
+        let normalized = normalize_semantic_body(db, semantic)
+            .unwrap_or_else(|err| panic!("failed to normalize `{name}`: {err:?}"));
+        let facts = BodyStaticFacts::new(db, &normalized);
+        let env = BodyEnv::new(db, &normalized, &facts);
+        let instance = runtime_instance_for_semantic(db, semantic);
+        let params = instance.key(db).params(db);
+        LocalStateInferer::new(env, params, &runtime_param_locals(db, semantic, params)).run()
+    }
+
+    fn whole_const_aggregate_ref(class: &RuntimeClass<'_>) -> bool {
+        matches!(
+            class,
+            RuntimeClass::Ref {
+                pointee,
+                kind: RefKind::Const,
+                view: RefView::Whole,
+            } if matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
+        )
+    }
+
+    #[test]
+    fn copy_aggregate_projection_reads_infer_unrooted_values() {
+        let mut db = DriverDataBase::default();
+        let inferred = inferred_local_state(
+            &mut db,
+            r#"
+pub struct Leaf { pub value: u32 }
+pub struct Pair { pub a: Leaf, pub b: Leaf }
+impl Copy for Leaf {}
+impl Copy for Pair {}
+
+pub fn probe(pair: Pair) -> u32 {
+    let left = pair.a
+    let again = pair.a
+    left.value + again.value
+}
+"#,
+            "probe",
+        );
+
+        assert!(
+            inferred.carriers.iter().all(|carrier| !matches!(
+                carrier,
+                RuntimeCarrier::Value(class) if whole_const_aggregate_ref(class)
+            )),
+            "Copy aggregate projection reads should be value-carried: {:#?}",
+            inferred.carriers,
+        );
+        assert!(
+            inferred.carriers.iter().any(|carrier| matches!(
+                carrier,
+                RuntimeCarrier::Value(RuntimeClass::AggregateValue { .. })
+            )),
+            "Copy aggregate reads must include an unrooted aggregate value: {:#?}",
+            inferred.carriers,
+        );
+    }
+
+    #[test]
+    fn non_copy_aggregate_projection_reads_retain_reference_transport() {
+        let mut db = DriverDataBase::default();
+        let inferred = inferred_local_state(
+            &mut db,
+            r#"
+pub struct Leaf { pub value: u32 }
+pub struct Pair { pub a: Leaf, pub b: Leaf }
+
+pub fn probe(pair: Pair) -> u32 {
+    pair.a.value + pair.a.value
+}
+"#,
+            "probe",
+        );
+
+        assert!(
+            inferred.carriers.iter().any(|carrier| matches!(
+                carrier,
+                RuntimeCarrier::Value(RuntimeClass::Ref { pointee, .. })
+                    if matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. })
+            )),
+            "non-Copy aggregate reads must retain reference transport: {:#?}",
+            inferred.carriers,
+        );
+        assert!(
+            inferred.carriers.iter().all(|carrier| !matches!(
+                carrier,
+                RuntimeCarrier::Value(RuntimeClass::AggregateValue { .. })
+            )),
+            "non-Copy aggregate reads must not be reclassified as values: {:#?}",
+            inferred.carriers,
+        );
+    }
 
     fn test_enum_layout<'db>(
         db: &'db dyn MirDb,

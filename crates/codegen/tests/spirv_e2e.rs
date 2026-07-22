@@ -2484,6 +2484,8 @@ const CLIFFORD_GP_RECURSIVE_F32_MVT2_SOURCE: &str =
     include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt2.fe");
 const CLIFFORD_GP_RECURSIVE_F32_MVT5_SOURCE: &str =
     include_str!("fixtures/spirv/clifford_gp_recursive_f32_mvt5.fe");
+const CGA_SANDWICH_RECURSIVE_F32_MVT5_SOURCE: &str =
+    include_str!("fixtures/spirv/cga_sandwich_recursive_f32_mvt5.fe");
 const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
 
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
@@ -3160,6 +3162,17 @@ fn clifford_gp_cl41_f32_oracle(a: [f32; 32], b: [f32; 32]) -> [f32; 32] {
     out
 }
 
+fn conformal_point_cl41_f32(x: f32, y: f32, z: f32) -> [f32; 32] {
+    let mut point = [0.0; 32];
+    let radius2 = x * x + y * y + z * z;
+    point[1] = x;
+    point[2] = y;
+    point[4] = z;
+    point[8] = (radius2 - 1.0) * 0.5;
+    point[16] = (radius2 + 1.0) * 0.5;
+    point
+}
+
 #[test]
 fn generated_recursive_cl41_gp_f32_render_executes_on_lavapipe() {
     const W: u32 = 8;
@@ -3215,6 +3228,116 @@ fn generated_recursive_cl41_gp_f32_render_executes_on_lavapipe() {
         let offset = index * 4;
         let word = (expected[index] as i32 as u32).to_le_bytes();
         assert_eq!(&rgba[offset..offset + 4], &word, "coefficient {index}");
+    }
+}
+
+#[test]
+fn generated_recursive_cl41_cga_sandwich_executes_on_lavapipe() {
+    const W: u32 = 8;
+    const H: u32 = 4;
+    const X: f32 = 2.5;
+    const Y: f32 = 0.0;
+    const Z: f32 = 0.0;
+    const S1: f32 = 0.5;
+    const S8: f32 = -0.875;
+    const S16: f32 = 0.125;
+
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_cga_sandwich_f32_mvt5.py"))
+        .arg("--check")
+        .status()
+        .expect("CGA sandwich fixture generator should run");
+    assert!(status.success(), "generated CGA sandwich fixture is stale");
+
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///cga_sandwich_recursive_f32_mvt5.fe")
+        .expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(CGA_SANDWICH_RECURSIVE_F32_MVT5_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("recursive CGA sandwich should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("recursive CGA sandwich should compile as Render SPIR-V");
+
+    let input = artifact.layout.bindings.iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("six sandwich parameters require an Input binding");
+    assert_eq!((input.group, input.binding), (0, 1));
+    assert_eq!(input.access, sonatina_codegen::isa::spirv::Access::Read);
+    assert_eq!((input.span, input.stride, input.members.len()), (24, 24, 6));
+    for (member, arg_index) in input.members.iter().zip(2..=7) {
+        assert_eq!((member.arg_index, member.offset, member.width), (arg_index, (arg_index - 2) * 4, 4));
+        assert_eq!(member.scalar, sonatina_codegen::isa::spirv::SpirvScalarKind::F32);
+    }
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    assert_eq!(artifact.layout.builtin_inputs[0].arg_index, 0);
+    assert_eq!(
+        artifact.layout.builtin_inputs[0].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionX,
+    );
+    assert_eq!(artifact.layout.builtin_inputs[1].arg_index, 1);
+    assert_eq!(
+        artifact.layout.builtin_inputs[1].source,
+        sonatina_codegen::isa::spirv::SpirvBuiltinSource::FragmentPositionY,
+    );
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+
+    let params = [X, Y, Z, S1, S8, S16];
+    let mut input_bytes = vec![0u8; input.span as usize];
+    for member in &input.members {
+        let value = params[(member.arg_index - 2) as usize];
+        input_bytes[member.offset as usize..member.offset as usize + 4]
+            .copy_from_slice(&value.to_bits().to_le_bytes());
+    }
+
+    let mut sphere = [0.0; 32];
+    sphere[1] = S1;
+    sphere[8] = S8;
+    sphere[16] = S16;
+    let first = clifford_gp_cl41_f32_oracle(sphere, conformal_point_cl41_f32(X, Y, Z));
+    let expected = clifford_gp_cl41_f32_oracle(first, sphere);
+    for (index, coefficient) in expected.iter().copied().enumerate() {
+        let scaled = coefficient * 256.0;
+        assert!(scaled.is_finite(), "coefficient {index} must be finite");
+        assert_eq!(scaled.fract(), 0.0, "coefficient {index} must be exactly observable");
+        assert_eq!(
+            (scaled as i32) as f32,
+            scaled,
+            "coefficient {index} must fit the fixture's i32 observation"
+        );
+    }
+    let weight = expected[16] - expected[8];
+    assert_ne!(weight, 0.0);
+    assert_eq!(
+        (
+            expected[1] / weight,
+            expected[2] / weight,
+            expected[4] / weight,
+        ),
+        (1.0, 0.0, 0.0),
+    );
+
+    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    let rgba = run_render_rgba8_on_lavapipe(wgsl, W, H, &input_bytes)
+        .expect("recursive CGA sandwich requires GPU execution");
+    for index in 0..32usize {
+        let offset = index * 4;
+        let word = ((expected[index] * 256.0) as i32 as u32).to_le_bytes();
+        assert_eq!(
+            &rgba[offset..offset + 4],
+            &word,
+            "sandwich coefficient {index}",
+        );
+        if ![1, 2, 4, 8, 16].contains(&index) {
+            assert_eq!(word, [0; 4], "off-vector blade {index}");
+        }
     }
 }
 

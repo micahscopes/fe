@@ -495,6 +495,92 @@ fn generated_recursive_cl41_gp_f32_coefficients_execute_on_wasm() {
     }
 }
 
+fn conformal_point_cl41(x: f32, y: f32, z: f32) -> [f32; 32] {
+    let mut point = [0.0; 32];
+    let radius2 = x * x + y * y + z * z;
+    point[1] = x;
+    point[2] = y;
+    point[4] = z;
+    point[8] = (radius2 - 1.0) * 0.5;
+    point[16] = (radius2 + 1.0) * 0.5;
+    point
+}
+
+#[test]
+fn generated_recursive_cl41_cga_sandwich_executes_on_wasm() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/spirv");
+    let status = std::process::Command::new("python3")
+        .arg(fixture_dir.join("gen_cga_sandwich_f32_mvt5.py"))
+        .arg("--check")
+        .status()
+        .expect("CGA sandwich fixture generator should run");
+    assert!(status.success(), "generated CGA sandwich fixture is stale");
+    let source = include_str!("fixtures/spirv/cga_sandwich_recursive_f32_mvt5.fe");
+    let wasm = compile_to_wasm("cga_sandwich_recursive_f32_mvt5.fe", source);
+    assert!(func_imports(&wasm).is_empty(), "recursive sandwich must not retain imports");
+    let (mut store, instance) = instantiate(&wasm);
+    let sandwich = instance
+        .get_func(&mut store, "cga_sandwich_cl41_mvt5_render")
+        .expect("recursive CGA sandwich Render export");
+    let cases = [
+        ((2.5, 0.0, 0.0), (0.5, -0.875, 0.125), (1.0, 0.0, 0.0)),
+        ((0.5, 2.0, 0.0), (0.5, -0.875, 0.125), (0.5, 0.5, 0.0)),
+        ((1.5, 1.0, 0.0), (0.5, -0.875, 0.125), (1.0, 0.5, 0.0)),
+        ((2.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.5, 0.0, 0.0)),
+    ];
+    for ((x, y, z), (s1, s8, s16), expected_q) in cases {
+        let mut sphere = [0.0; 32];
+        sphere[1] = s1;
+        sphere[8] = s8;
+        sphere[16] = s16;
+        let first = clifford_gp_cl41_oracle(sphere, conformal_point_cl41(x, y, z));
+        let expected = clifford_gp_cl41_oracle(first, sphere);
+        for (index, coefficient) in expected.iter().copied().enumerate() {
+            let scaled = coefficient * 256.0;
+            assert!(scaled.is_finite(), "coefficient {index} must be finite");
+            assert_eq!(scaled.fract(), 0.0, "coefficient {index} must be exactly observable");
+            assert_eq!(
+                (scaled as i32) as f32,
+                scaled,
+                "coefficient {index} must fit the fixture's i32 observation"
+            );
+        }
+        let mut got_words = [0i32; 32];
+        for index in 0..32 {
+            let args = [
+                wasmtime::Val::I32((index % 8) as i32),
+                wasmtime::Val::I32((index / 8) as i32),
+                wasmtime::Val::F32(x.to_bits()),
+                wasmtime::Val::F32(y.to_bits()),
+                wasmtime::Val::F32(z.to_bits()),
+                wasmtime::Val::F32(s1.to_bits()),
+                wasmtime::Val::F32(s8.to_bits()),
+                wasmtime::Val::F32(s16.to_bits()),
+            ];
+            let mut results = [wasmtime::Val::I32(0)];
+            sandwich.call(&mut store, &args, &mut results)
+                .expect("recursive CGA sandwich coefficient execution");
+            let wasmtime::Val::I32(word) = results[0] else {
+                panic!("CGA sandwich Render result must be i32")
+            };
+            got_words[index] = word;
+            assert_eq!(word, (expected[index] * 256.0) as i32, "coefficient {index}");
+        }
+        for index in 0..32 {
+            if ![1, 2, 4, 8, 16].contains(&index) {
+                assert_eq!(got_words[index], 0, "off-vector blade {index}");
+            }
+        }
+        let weight = expected[16] - expected[8];
+        assert_ne!(weight, 0.0, "normalization case must be finite");
+        assert_eq!(
+            (expected[1] / weight, expected[2] / weight, expected[4] / weight),
+            expected_q,
+        );
+    }
+}
+
 #[test]
 fn generated_recursive_mvt5_f32_render_is_current_and_executes_on_wasm() {
     let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
