@@ -2038,7 +2038,7 @@ mod tests {
         let (before, after) = prepared.residuals.get(&nested).copied().unwrap_or((0, 0));
         assert_eq!(
             (before, after),
-            (102, 8),
+            (102, 6),
             "authored nested MvT5 structural residual changed"
         );
     }

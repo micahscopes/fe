@@ -2489,6 +2489,33 @@ const CGA_SANDWICH_RECURSIVE_F32_MVT5_SOURCE: &str =
 const CGA_SANDWICH_SUPPORT_CL41_SOURCE: &str =
     include_str!("fixtures/spirv/cga_sandwich_support_cl41.fe");
 const MVT5_F32_RENDER_SOURCE: &str = include_str!("fixtures/spirv/mvt5_f32_render.fe");
+const MVT5_F32_NESTED_HELPER_SOURCE: &str =
+    include_str!("fixtures/spirv/mvt5_f32_nested_helper_render.fe");
+
+#[test]
+fn authored_nested_mvt5_helper_emits_bounded_browser_wgsl() {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///mvt5_f32_nested_helper_render.fe")
+        .expect("test URL should parse");
+    db.workspace().touch(
+        &mut db,
+        url.clone(),
+        Some(MVT5_F32_NESTED_HELPER_SOURCE.to_string()),
+    );
+    let file = db.workspace().get(&db, &url).expect("fixture should load");
+    let package = mir::build_wasm_runtime_package(&db, db.top_mod(file))
+        .expect("authored nested MvT5 helper should build a runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("authored nested MvT5 helper should compile as Render SPIR-V");
+    let wgsl = artifact.wgsl.as_deref().expect("Render compilation emits WGSL");
+    assert_browser_profile_wgsl(wgsl);
+    assert!(
+        wgsl.len() <= 800 && wgsl.lines().count() <= 20,
+        "authored nested MvT5 WGSL grew to {} bytes / {} lines",
+        wgsl.len(),
+        wgsl.lines().count(),
+    );
+}
 
 /// D1's fixed-versor, scalarized Cl(4,1) inversion distance-estimator.
 const CGA_INVERSION_DE_RENDER_SOURCE: &str =

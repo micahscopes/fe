@@ -80,18 +80,22 @@ pub fn specialize_pure_inline_stmts<'db>(
 ) -> Option<Vec<RStmt<'db>>> {
     let mut aggregates = external.clone();
     let mut aliases = FxHashMap::default();
+    let mut projections = FxHashMap::default();
     let mut rewritten = Vec::with_capacity(stmts.len());
 
     for stmt in stmts {
         let RStmt::Assign { dst, mut expr } = stmt else {
             return None;
         };
+        rewrite_alias_inputs(&mut expr, &aliases)?;
         if let RExpr::AggregateExtract { value, index } = expr {
-            let value = resolve_alias(value, &aliases);
             if let Some(fields) = aggregates.get(&value) {
                 expr = RExpr::Use(*fields.get(index as usize)?);
+            } else if let Some(previous) = projections.get(&(value, index)).copied() {
+                expr = RExpr::Use(previous);
             } else {
                 expr = RExpr::AggregateExtract { value, index };
+                projections.insert((value, index), dst);
             }
         }
         match &expr {
@@ -146,6 +150,37 @@ fn resolve_alias(mut value: RLocalId, aliases: &FxHashMap<RLocalId, RLocalId>) -
         value = next;
     }
     value
+}
+
+fn rewrite_alias_inputs(
+    expr: &mut RExpr<'_>,
+    aliases: &FxHashMap<RLocalId, RLocalId>,
+) -> Option<()> {
+    let resolve = |value: &mut RLocalId| *value = resolve_alias(*value, aliases);
+    match expr {
+        RExpr::Use(value) | RExpr::Unary { value, .. } | RExpr::Cast { value, .. } => {
+            resolve(value)
+        }
+        RExpr::Binary { lhs, rhs, .. } => {
+            resolve(lhs);
+            resolve(rhs);
+        }
+        RExpr::Builtin(builtin) => match builtin {
+            RuntimeBuiltin::IntrinsicArith { lhs, rhs, .. } => {
+                resolve(lhs);
+                resolve(rhs);
+            }
+            RuntimeBuiltin::F32FromI32 { value }
+            | RuntimeBuiltin::I32FromF32 { value }
+            | RuntimeBuiltin::F32Sqrt { value } => resolve(value),
+            _ => return None,
+        },
+        RExpr::AggregateMake { fields, .. } => fields.iter_mut().for_each(resolve),
+        RExpr::AggregateExtract { value, .. } => resolve(value),
+        RExpr::ConstScalar(_) => {}
+        _ => return None,
+    }
+    Some(())
 }
 
 fn is_pure_inline_expr(expr: &RExpr<'_>) -> bool {
@@ -236,9 +271,10 @@ mod tests {
             },
         ];
         let got = specialize_pure_inline_stmts(stmts, &facts, id(7)).unwrap();
-        assert_eq!(got.len(), 2);
-        assert!(matches!(got[0], RStmt::Assign { expr: RExpr::Use(v), .. } if v == id(4)));
-        assert!(matches!(got[1], RStmt::Assign { expr: RExpr::Use(v), .. } if v == id(6)));
+        assert_eq!(got.len(), 1);
+        assert!(
+            matches!(got[0], RStmt::Assign { dst, expr: RExpr::Use(v) } if dst == id(7) && v == id(4))
+        );
     }
 
     #[test]
@@ -252,6 +288,35 @@ mod tests {
         }];
         assert!(
             specialize_pure_inline_stmts(stmts, &RuntimeAggregateFacts::default(), id(0)).is_none()
+        );
+    }
+
+    #[test]
+    fn reuses_identical_unknown_aggregate_projection() {
+        let stmts = vec![
+            RStmt::Assign {
+                dst: id(1),
+                expr: RExpr::AggregateExtract {
+                    value: id(0),
+                    index: 3,
+                },
+            },
+            RStmt::Assign {
+                dst: id(2),
+                expr: RExpr::AggregateExtract {
+                    value: id(0),
+                    index: 3,
+                },
+            },
+        ];
+        let got = specialize_pure_inline_stmts(stmts, &RuntimeAggregateFacts::default(), id(2))
+            .expect("pure duplicate projections should specialize");
+        assert_eq!(got.len(), 2);
+        assert!(
+            matches!(got[0], RStmt::Assign { dst, expr: RExpr::AggregateExtract { .. } } if dst == id(1))
+        );
+        assert!(
+            matches!(got[1], RStmt::Assign { dst, expr: RExpr::Use(value) } if dst == id(2) && value == id(1))
         );
     }
 
