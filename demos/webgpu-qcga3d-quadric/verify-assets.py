@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+import json
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+gen = here / "gen"
+required = ["kernel.fe", "frag.wgsl", "frag.wasm", "layout.json", "reference.json"]
+missing = [name for name in required if not (gen / name).is_file()]
+assert not missing, f"missing QCGA assets: {missing}"
+layout = json.loads((gen / "layout.json").read_text())
+reference = json.loads((gen / "reference.json").read_text())
+assert layout["mode"] == "Render"
+assert layout["width"] == layout["height"] == 128
+assert layout["vertex_entry"] == "vs_fullscreen"
+assert layout["fragment_entry"] == "fs_main"
+assert layout["color_target_format"] == "rgba8unorm"
+assert layout["builtin_inputs"] == 2
+assert layout["frag_wasm_export"] == "qcga3d_rotated_quadric_render"
+assert reference["width"] * reference["height"] == 16384
+assert isinstance(reference["fnv1a32"], int)
+assert reference["distinct_colors"] > 8
+assert reference["provenance"] == layout["provenance"]
+assert layout["provenance"]["sonatina_rev"].startswith("dcd96e5f")
+kernel = (gen / "kernel.fe").read_text()
+assert "struct PointSupport" in kernel and "struct DualQuadricSupport" in kernel
+wgsl = (gen / "frag.wgsl").read_text()
+assert "@vertex" in wgsl and "@fragment" in wgsl and "sqrt(" in wgsl
+assert not any(token in wgsl for token in ("i64", "u64"))
+assert (gen / "frag.wasm").read_bytes()[:4] == b"\0asm"
+print(f"QCGA assets verified: fnv1a32={reference['fnv1a32']} colors={reference['distinct_colors']}")
