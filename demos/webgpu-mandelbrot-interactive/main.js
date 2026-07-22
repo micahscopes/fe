@@ -17,6 +17,7 @@
 import { instantiateWasm, renderFragmentGrid } from "../webgpu-keystone/wasm-runner.js";
 import { initWebGPURender, renderFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
 import { createLivePump } from "./live-pump.js";
+import { createMandelbrotActorRuntime } from "./actor-runtime.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -228,13 +229,13 @@ async function main() {
     return grid;
   };
 
-  let renderFn;
+  let renderDirect;
   let badgeMode;
 
   if (gpu.ok) {
     $("adapter").textContent = `adapter: ${gpu.adapter}`;
     canvas.style.display = "block";
-    renderFn = (view) => renderFrame(gpu, view);
+    renderDirect = (view) => renderFrame(gpu, view);
     badgeMode = "green-pending";
   } else {
     $("adapter").textContent = gpu.adapter ? `adapter: ${gpu.adapter}` : "adapter: none (no WebGPU)";
@@ -243,17 +244,50 @@ async function main() {
       setBanner("red", "WGSL shader failed to compile", `${gpu.reason}\n${gpu.messages.join("\n")}`);
       return;
     }
-    renderFn = (view) => amberBlit(view);
+    renderDirect = (view) => amberBlit(view);
     badgeMode = "amber";
   }
 
-  // --- The demo-blind pump: events -> Fe update_view -> renderFn. ----------
+  const refByName = Object.fromEntries((A.reference.views || []).map((r) => [r.name, r]));
+  const defaultRef = refByName["default"];
+  const verifyInitialView = async (view) => {
+    const vr = await verifyView(gpu, view);
+    if (!vr.ok) throw new Error(`GPU verify readback failed: ${vr.reason}`);
+    const gpuGrid = new Uint32Array(vr.rgba.buffer, vr.rgba.byteOffset, WIDTH * HEIGHT);
+    const feGrid = renderFragmentGrid(
+      fragExports, A.layout.frag_wasm_export, view, WIDTH, HEIGHT,
+    );
+    for (let i = 0; i < feGrid.length; i++) {
+      if ((gpuGrid[i] >>> 0) !== (feGrid[i] >>> 0)) {
+        const mismatch = { x: i % WIDTH, y: Math.floor(i / WIDTH),
+          gpu: gpuGrid[i] >>> 0, fe: feGrid[i] >>> 0 };
+        throw new Error(`GPU / Fe-wasm per-pixel mismatch at (${mismatch.x}, ${mismatch.y}): ` +
+          `gpu=0x${mismatch.gpu.toString(16)} fe=0x${mismatch.fe.toString(16)} on ${gpu.adapter}`);
+      }
+    }
+    const gpuHash = fnv1a32(gpuGrid);
+    const referenceHash = defaultRef ? defaultRef.fnv1a32 >>> 0 : gpuHash;
+    if (gpuHash !== referenceHash) {
+      throw new Error(`GPU default-view FNV ${gpuHash} != reference ${referenceHash} on ${gpu.adapter}`);
+    }
+    return { gpuHash, referenceHash };
+  };
+  const actorRuntime = createMandelbrotActorRuntime({
+    render(view) {
+      renderDirect(view);
+      return { submitted: true };
+    },
+    verify: verifyInitialView,
+    onError: (error) => setBanner("red", "Mandelbrot actor transport failed", String(error)),
+  });
+
+  // --- The demo-blind pump: events -> Fe update_view -> actor render. -------
   const readout = $("view-readout");
   const pump = createLivePump({
     canvas,
     updateView,
     ctlMeta: A.ctl,
-    renderFn,
+    renderFn: (view) => actorRuntime.render(view),
     onView: (v) => {
       readout.textContent = `center_re=${v[0]}  center_im=${v[1]}  scale_q=${v[2]}`;
     },
@@ -269,9 +303,6 @@ async function main() {
 
   // --- Badge resolution. --------------------------------------------------
   // Reference FNV for the default (initial) view, from the compiled reference.
-  const refByName = Object.fromEntries((A.reference.views || []).map((r) => [r.name, r]));
-  const defaultRef = refByName["default"];
-
   if (badgeMode === "amber") {
     // Prove the amber picture is the Fe-computed reference: render the default view
     // in V8 and match its FNV to the compiled reference.
@@ -297,27 +328,16 @@ async function main() {
   // GREEN path: verify the live GPU render byte-equals the Fe-wasm fragment at the
   // current view, then confirm the pinned-view FNVs.
   const initView = pump.getView();
-  renderFrame(gpu, initView); // ensure a draw landed on the canvas.
-  const vr = await verifyView(gpu, initView);
-  if (!vr.ok) {
-    setBanner("red", "GPU verify readback failed", vr.reason);
+  await actorRuntime.render(initView); // ensure a draw landed on the canvas.
+  let verification;
+  try {
+    verification = await actorRuntime.verify(initView);
+  } catch (error) {
+    setBanner("red", "GPU verification failed", String(error));
     return;
   }
-  const gpuGrid = new Uint32Array(vr.rgba.buffer, vr.rgba.byteOffset, WIDTH * HEIGHT);
-  const feGrid = renderFragmentGrid(fragExports, A.layout.frag_wasm_export, initView, WIDTH, HEIGHT);
-  let mismatch = null;
-  for (let i = 0; i < feGrid.length; i++) {
-    if ((gpuGrid[i] >>> 0) !== (feGrid[i] >>> 0)) {
-      mismatch = { x: i % WIDTH, y: Math.floor(i / WIDTH), gpu: gpuGrid[i] >>> 0, fe: feGrid[i] >>> 0 };
-      break;
-    }
-  }
-  if (mismatch) {
-    setBanner("red", "GPU / Fe-wasm per-pixel mismatch", `(${mismatch.x}, ${mismatch.y}): gpu=0x${mismatch.gpu.toString(16)} fe=0x${mismatch.fe.toString(16)} on ${gpu.adapter}`);
-    return;
-  }
-  const gpuHash = fnv1a32(gpuGrid);
-  const hashOk = defaultRef ? gpuHash === (defaultRef.fnv1a32 >>> 0) : true;
+  const gpuHash = verification.gpuHash;
+  const hashOk = gpuHash === verification.referenceHash;
   $("row-render").textContent = `live GPU render == Fe-wasm fragment per pixel; default-view FNV ${gpuHash}` + (defaultRef ? (hashOk ? " == reference" : ` != reference ${defaultRef.fnv1a32 >>> 0}`) : "");
   $("row-render").className = hashOk ? "val ok" : "val bad";
   if (!hashOk) {

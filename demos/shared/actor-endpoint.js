@@ -71,6 +71,13 @@ export const actorField = Object.freeze({
       }
     };
   },
+  int32Array(length) {
+    return (value, name) => {
+      if (!(value instanceof Int32Array) || value.length !== length) {
+        throw new TypeError(`${name} must be Int32Array(${length})`);
+      }
+    };
+  },
 });
 
 /** A transport with the same callback boundary a future MessagePort adapter uses. */

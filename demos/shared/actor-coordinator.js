@@ -97,6 +97,32 @@ export function createActorCoordinator({
       publish: onVerificationResult, settled: onVerificationSettled },
   };
 
+  const callSafely = (callback, callbackName, laneName, request, result, ...args) => {
+    try {
+      callback(result, ...args);
+    } catch (error) {
+      try {
+        onCallbackError(error, { callback: callbackName, lane: laneName, request, result });
+      } catch {
+        // Error reporting is also outside the coordinator's scheduling core.
+      }
+    }
+  };
+
+  const dropPending = (laneName, reason) => {
+    const lane = lanes[laneName];
+    const request = lane.pending;
+    lane.pending = null;
+    if (!request) return;
+    const result = actorEnvelope({
+      type: "result", lane: laneName, actorEpoch: request.actorEpoch,
+      generation: request.generation, requestId: request.requestId,
+      payload: { ok: false, dropped: true, error: reason },
+    });
+    callSafely(lane.settled, "settled", laneName, request, result,
+      { fresh: false, dropped: true, reason, request });
+  };
+
   const finish = (laneName, request, outcome) => {
     const lane = lanes[laneName];
     if (lane.active?.requestId !== request.requestId) return;
@@ -112,19 +138,8 @@ export function createActorCoordinator({
     const pending = lane.pending;
     lane.pending = null;
     if (pending) start(laneName, pending);
-    const callSafely = (callback, callbackName, ...args) => {
-      try {
-        callback(...args);
-      } catch (error) {
-        try {
-          onCallbackError(error, { callback: callbackName, lane: laneName, request, result });
-        } catch {
-          // Error reporting is also outside the coordinator's scheduling core.
-        }
-      }
-    };
-    callSafely(lane.settled, "settled", result, { fresh, request });
-    if (fresh) callSafely(lane.publish, "publish", result);
+    callSafely(lane.settled, "settled", laneName, request, result, { fresh, request });
+    if (fresh) callSafely(lane.publish, "publish", laneName, request, result);
   };
 
   const start = (laneName, request) => {
@@ -150,7 +165,10 @@ export function createActorCoordinator({
     });
     const lane = lanes[laneName];
     lane.latestRequestId = request.requestId;
-    if (lane.active) lane.pending = request;
+    if (lane.active) {
+      dropPending(laneName, "superseded by a newer request");
+      lane.pending = request;
+    }
     else start(laneName, request);
     return request;
   };
@@ -163,8 +181,8 @@ export function createActorCoordinator({
       generation += 1;
       // Active work may be impossible to cancel, but queued work from an older
       // generation must never start after the generation boundary.
-      lanes.render.pending = null;
-      lanes.verify.pending = null;
+      dropPending("render", "superseded by a newer generation");
+      dropPending("verify", "superseded by a newer generation");
       return generation;
     },
     generation: () => generation,

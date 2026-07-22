@@ -28,6 +28,7 @@ const renderRuns = [];
 const verifyRuns = [];
 const renderResults = [];
 const verifyResults = [];
+const renderSettlements = [];
 const coordinator = createActorCoordinator({
   render(request) {
     const job = deferred();
@@ -41,6 +42,7 @@ const coordinator = createActorCoordinator({
   },
   onRenderResult: (result) => renderResults.push(result),
   onVerificationResult: (result) => verifyResults.push(result),
+  onRenderSettled: (result, status) => renderSettlements.push({ result, status }),
 });
 
 // Latest-wins is bounded: one active render and exactly the newest pending one.
@@ -48,6 +50,9 @@ const generation1 = coordinator.nextGeneration();
 const render1 = coordinator.enqueueRender({ frame: 1 }, generation1);
 coordinator.enqueueRender({ frame: 2 }, generation1);
 const render3 = coordinator.enqueueRender({ frame: 3 }, generation1);
+assert.equal(renderSettlements.length, 1);
+assert.equal(renderSettlements[0].result.payload.dropped, true);
+assert.equal(renderSettlements[0].status.request.payload.frame, 2);
 await tick();
 assert.equal(renderRuns.length, 1);
 assert.deepEqual(coordinator.state().render, { active: render1.requestId, pending: render3.requestId });
@@ -147,6 +152,7 @@ assert.equal(throwingRuns[1].request.requestId, throwingLatest.requestId);
 throwingRuns[1].job.resolve("latest result");
 await tick();
 assert.deepEqual(callbackErrors, [
+  ["settled", "settled callback failed"],
   ["settled", "settled callback failed"],
   ["settled", "settled callback failed"],
   ["publish", "publish callback failed"],

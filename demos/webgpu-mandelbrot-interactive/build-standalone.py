@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(HERE, "gen")
 DEMOS = os.path.dirname(HERE)
 KEYSTONE = os.path.join(DEMOS, "webgpu-keystone")
+SHARED = os.path.join(DEMOS, "shared")
 
 
 def read(path):
@@ -76,12 +77,16 @@ def main():
     )
 
     # Fold the ES-module page JS into one classic script, in dependency order:
-    # the kernel-blind runners, the demo-blind pump, then main (which calls main()).
+    # shared actor protocol/endpoint, kernel-blind runners, the Mandelbrot actor
+    # adapter, demo-blind pump, then main (which calls main()).
     page_js = "\n".join(
         strip_module_seams(read(p))
         for p in [
+            os.path.join(SHARED, "actor-coordinator.js"),
+            os.path.join(SHARED, "actor-endpoint.js"),
             os.path.join(KEYSTONE, "wasm-runner.js"),
             os.path.join(KEYSTONE, "webgpu-runner.js"),
+            os.path.join(HERE, "actor-runtime.js"),
             os.path.join(HERE, "live-pump.js"),
             os.path.join(HERE, "main.js"),
         ]
