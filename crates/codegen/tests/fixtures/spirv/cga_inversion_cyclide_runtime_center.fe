@@ -61,11 +61,14 @@ pub fn cga_inversion_cyclide_runtime_center(
             let shade: i32 = 38 + i * 3
             let upper: bool = qy > 0.0
             if upper {
-                return __bitcast(shade + 88 * 256 + (255 - shade) * 65536 + -16777216)
+                let upper_color: i32 = shade + 88 * 256 + (255 - shade) * 65536 + -16777216
+                return __bitcast(upper_color)
             }
-            return __bitcast(56 + shade * 256 + 224 * 65536 + -16777216)
+            let lower_color: i32 = 56 + shade * 256 + 224 * 65536 + -16777216
+            return __bitcast(lower_color)
         }
         i = i + 1
     }
-    __bitcast(7 + 11 * 256 + 25 * 65536 + -16777216)
+    let sky_color: i32 = 7 + 11 * 256 + 25 * 65536 + -16777216
+    __bitcast(sky_color)
 }
