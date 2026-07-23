@@ -3,8 +3,7 @@ use driver::DriverDataBase;
 use fe_codegen::{compile_runtime_package_wasm_with_options, WasmCompileOptions};
 use url::Url;
 
-const SUPPORT: &str = include_str!("fixtures/support_bladeset_api.fe");
-const VALUE_API: &str = include_str!("fixtures/sparse_multivector_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("fixtures/sparse_clifford_api.fe");
 const CGA: &str = include_str!("fixtures/sparse_cga_value.fe");
 const WIDE_VALUE_PROBE: &str = r#"
 fn takes_sparse_index7(_ value: SparseIndex<7>) {}
@@ -76,7 +75,7 @@ fn with_top_mod<T>(
 
 #[test]
 fn support_driven_sparse_cga_values_and_absent_accessor_execute_in_wasm() {
-    let source = format!("{SUPPORT}\n{VALUE_API}\n{CGA}");
+    let source = format!("{SPARSE_CLIFFORD_API}\n{CGA}");
     let wasm = with_top_mod(source, "file:///sparse_cga_value.fe", |db, top_mod| {
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(db);
         assert!(
@@ -109,7 +108,7 @@ fn support_driven_sparse_cga_values_and_absent_accessor_execute_in_wasm() {
 #[test]
 fn present_only_access_rejects_an_absent_blade() {
     let source = format!(
-        "{SUPPORT}\n{VALUE_API}\n{CGA}\n\
+        "{SPARSE_CLIFFORD_API}\n{CGA}\n\
          pub fn rejected(value: CgaInversionSphere) -> f32 {{\n\
              <CgaSphereLookup<4, 4> as \
                  SparsePresentCoefficient<CgaInversionSphere>>::read_present(\
@@ -135,10 +134,10 @@ fn present_only_access_rejects_an_absent_blade() {
 #[test]
 fn recursive_rank_and_support_sized_storage_execute_beyond_five_lanes() {
     assert!(
-        !VALUE_API.contains("SparseFound<"),
+        !SPARSE_CLIFFORD_API.contains("SparseFound<"),
         "the reusable API must not retain bounded rank-specific accessors"
     );
-    let source = format!("{VALUE_API}\n{WIDE_VALUE_PROBE}");
+    let source = format!("{SPARSE_CLIFFORD_API}\n{WIDE_VALUE_PROBE}");
     let wasm = with_top_mod(source, "file:///sparse_wide_value.fe", |db, top_mod| {
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(db);
         assert!(

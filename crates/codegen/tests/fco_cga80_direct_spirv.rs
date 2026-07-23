@@ -5,8 +5,7 @@ use driver::DriverDataBase;
 use url::Url;
 
 fn source() -> String {
-    let support_api = include_str!("fixtures/support_bladeset_api.fe");
-    let plan_api = include_str!("fixtures/sparse_plan_api.fe");
+    let sparse_clifford_api = include_str!("fixtures/sparse_clifford_api.fe");
     let base = include_str!("fixtures/fco_cga80_direct_lanes.fe");
     let (prefix, rest) = base
         .split_once("// BEGIN_PUBLIC_ORACLES")
@@ -15,8 +14,7 @@ fn source() -> String {
         .split_once("// END_PUBLIC_ORACLES")
         .expect("public-oracle end marker");
     format!(
-        r#"{support_api}
-{plan_api}
+        r#"{sparse_clifford_api}
 {prefix}{suffix}
 extern {{
     fn __i32_from_f32(_: f32) -> i32

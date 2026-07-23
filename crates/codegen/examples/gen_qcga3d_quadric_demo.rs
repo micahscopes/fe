@@ -13,7 +13,7 @@ use url::Url;
 
 const PLANNER_SOURCE: &str =
     include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
-const PLAN_API: &str = include_str!("../tests/fixtures/sparse_plan_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("../tests/fixtures/sparse_clifford_api.fe");
 const RENDER_SOURCE: &str =
     include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_render_body.fe");
 const EXPORT: &str = "qcga3d_sparse_planned_render";
@@ -161,7 +161,7 @@ fn main() {
     let repo = manifest.parent().unwrap().parent().unwrap();
     let out = repo.join("demos/webgpu-qcga3d-quadric/gen");
 
-    let source = format!("{PLAN_API}\n{PLANNER_SOURCE}\n{RENDER_SOURCE}");
+    let source = format!("{SPARSE_CLIFFORD_API}\n{PLANNER_SOURCE}\n{RENDER_SOURCE}");
     let mut raw_db = DriverDataBase::default();
     let raw_url = Url::parse("file:///qcga3d_sparse_planned_render.fe").unwrap();
     raw_db
@@ -292,7 +292,7 @@ fn main() {
     let fe_rev = git(repo.to_str().unwrap(), &["rev-parse", "HEAD"]);
     let provenance = serde_json::json!({
         "fixture": [
-            "crates/codegen/tests/fixtures/sparse_plan_api.fe",
+            "crates/codegen/tests/fixtures/sparse_clifford_api.fe",
             "crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe",
             "crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_render_body.fe",
         ],
@@ -300,7 +300,7 @@ fn main() {
         "sonatina_rev": actual_sonatina,
         "generator": "gen_qcga3d_quadric_demo",
         "source_fnv1a32": fnv1a32_bytes(source.as_bytes()),
-        "plan_fnv1a32": fnv1a32_bytes(PLAN_API.as_bytes()),
+        "sparse_clifford_api_fnv1a32": fnv1a32_bytes(SPARSE_CLIFFORD_API.as_bytes()),
         "actor_source_fnv1a32": fnv1a32_bytes(ACTOR_SOURCE.as_bytes()),
     });
     let layout = serde_json::to_string_pretty(&serde_json::json!({

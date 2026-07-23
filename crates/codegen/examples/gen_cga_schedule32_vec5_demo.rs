@@ -23,8 +23,7 @@ use sonatina_codegen::isa::spirv::{
 use url::Url;
 
 const CANONICAL: &str = include_str!("../tests/fixtures/fco_cga80_direct_lanes.fe");
-const SUPPORT_API: &str = include_str!("../tests/fixtures/support_bladeset_api.fe");
-const PLAN_API: &str = include_str!("../tests/fixtures/sparse_plan_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("../tests/fixtures/sparse_clifford_api.fe");
 const BODY: &str = include_str!("../tests/fixtures/spirv/fco_cga80_direct_de_body.fe");
 const NAME: &str = "cga_schedule32_vec5_de_render";
 const WIDTH: u32 = 128;
@@ -140,7 +139,7 @@ fn composed_source() -> String {
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
-    let source = format!("{SUPPORT_API}\n{PLAN_API}\n{prefix}{suffix}\n{BODY}");
+    let source = format!("{SPARSE_CLIFFORD_API}\n{prefix}{suffix}\n{BODY}");
     assert!(source.contains("type Schedule32 = Schedule<32>"));
     assert!(source.contains("const fn survivor_triple"));
     assert!(source.contains("struct CanonicalCgaProvider"));
@@ -993,12 +992,10 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "sonatina_dirty": !sonatina_status.is_empty(),
         "sonatina_status_fnv1a32": fnv1a32(sonatina_status.as_bytes()),
         "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
-        "support_fixture": "crates/codegen/tests/fixtures/support_bladeset_api.fe",
-        "plan_fixture": "crates/codegen/tests/fixtures/sparse_plan_api.fe",
+        "sparse_clifford_fixture": "crates/codegen/tests/fixtures/sparse_clifford_api.fe",
         "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
         "canonical_fnv1a32": fnv1a32(CANONICAL.as_bytes()),
-        "support_fnv1a32": fnv1a32(SUPPORT_API.as_bytes()),
-        "plan_fnv1a32": fnv1a32(PLAN_API.as_bytes()),
+        "sparse_clifford_api_fnv1a32": fnv1a32(SPARSE_CLIFFORD_API.as_bytes()),
         "body_fnv1a32": fnv1a32(BODY.as_bytes()),
         "composed_source_fnv1a32": fnv1a32(source.as_bytes()),
         "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits one shared five-lane sandwich aggregate from the same helpers",

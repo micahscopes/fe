@@ -5,12 +5,11 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use url::Url;
 
-const SUPPORT_API: &str = include_str!("fixtures/support_bladeset_api.fe");
-const PLAN_API: &str = include_str!("fixtures/sparse_plan_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("fixtures/sparse_clifford_api.fe");
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
 
 fn canonical_source() -> String {
-    format!("{SUPPORT_API}\n{PLAN_API}\n{CANONICAL}")
+    format!("{SPARSE_CLIFFORD_API}\n{CANONICAL}")
 }
 
 fn compile_to_wasm(source: &str) -> Vec<u8> {

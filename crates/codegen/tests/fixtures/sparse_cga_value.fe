@@ -1,4 +1,4 @@
-// Semantic Cl(4,1) values built on sparse_multivector_api.fe.
+// Semantic Cl(4,1) values built on the sparse_clifford_api.fe prelude.
 //
 // Basis blade masks 1,2,4,8,16 are grade-one vectors. Conformal points use all
 // five. The inversion sphere used by the flagship demo has zero e3 and stores
