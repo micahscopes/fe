@@ -101,6 +101,20 @@ workspace-local temporary/target directories, generation lock, inherited
 `RUSTC_WRAPPER` removal, and byte-for-byte `Cargo.lock` restoration. A wrong or
 dirty `SONATINA_DIR` fails closed.
 
+`fe web serve` also exposes a deliberately explicit live-reload client. Add
+this one line to the static application's HTML when browser reload after a
+successful Fe rebuild is wanted:
+
+```html
+<script type="module" src="/.fe/live-reload.js"></script>
+```
+
+There is no HTML injection or project convention behind it. The client polls
+the compiler-owned `/.fe/generation` endpoint and reloads only after an atomic
+successful bundle publication. A diagnostic-producing edit leaves both the
+last good bundle and browser page running. `--no-watch` keeps serving the
+one-shot generation, so the same HTML remains valid in fixed-server mode.
+
 Canonical lanes remain explicit and inspectable rather than name-inferred:
 
 ```sh

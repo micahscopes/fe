@@ -405,7 +405,7 @@ pub enum WebAction {
         #[arg(long)]
         out: Utf8PathBuf,
     },
-    /// Compile, watch, and serve a browser bundle with WebGPU isolation headers.
+    /// Compile, watch, and serve a browser bundle with isolation and opt-in live reload.
     #[cfg(feature = "web-server")]
     Serve {
         #[command(flatten)]

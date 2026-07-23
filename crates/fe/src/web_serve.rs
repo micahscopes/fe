@@ -7,13 +7,14 @@ use std::{
 };
 
 use axum::{
-    Router, middleware,
+    Router,
     body::Body,
     extract::{Request, State},
     http::{
         HeaderValue, StatusCode,
         header::{CACHE_CONTROL, CONTENT_TYPE},
     },
+    middleware,
     response::Response,
     routing::get,
 };
@@ -27,6 +28,23 @@ use crate::web::{self, CompileRequest};
 const COOP: &str = "cross-origin-opener-policy";
 const COEP: &str = "cross-origin-embedder-policy";
 const CORP: &str = "cross-origin-resource-policy";
+const LIVE_RELOAD_GENERATION_PATH: &str = "/.fe/generation";
+const LIVE_RELOAD_SCRIPT_PATH: &str = "/.fe/live-reload.js";
+const LIVE_RELOAD_SCRIPT: &str = r#"let generation;
+async function poll() {
+    try {
+        const response = await fetch("/.fe/generation", { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const next = await response.text();
+        if (generation !== undefined && next !== generation) location.reload();
+        generation = next;
+    } catch {
+        // A rebuild or server restart can briefly make the endpoint unavailable.
+    }
+    setTimeout(poll, 250);
+}
+poll();
+"#;
 
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
@@ -112,9 +130,11 @@ fn validate_mount(mount: &str) -> Result<(), String> {
         || mount.contains('\\')
         || mount.contains('%')
         || mount.split('/').any(|part| part == "." || part == "..")
+        || mount == "/.fe"
+        || mount.starts_with("/.fe/")
     {
         return Err(
-            "`--mount` must be an absolute, non-root URL path without a trailing slash".to_owned(),
+            "`--mount` must be an absolute, non-root URL path outside reserved `/.fe` without a trailing slash".to_owned(),
         );
     }
     Ok(())
@@ -134,7 +154,22 @@ fn router(root: PathBuf, mount: &str, snapshot: Arc<RwLock<Arc<BundleSnapshot>>>
 
 async fn handle_request(State(state): State<AppState>, request: Request) -> Response {
     let path = request.uri().path();
-    if let Some(relative) = path
+    if path == LIVE_RELOAD_GENERATION_PATH {
+        let generation = state
+            .snapshot
+            .read()
+            .expect("bundle snapshot poisoned")
+            .generation;
+        bytes_response(
+            Arc::from(format!("{generation}\n").into_bytes()),
+            "text/plain; charset=utf-8",
+        )
+    } else if path == LIVE_RELOAD_SCRIPT_PATH {
+        bytes_response(
+            Arc::from(LIVE_RELOAD_SCRIPT.as_bytes()),
+            "text/javascript; charset=utf-8",
+        )
+    } else if let Some(relative) = path
         .strip_prefix(state.mount.as_ref())
         .and_then(|suffix| suffix.strip_prefix('/'))
     {
@@ -348,7 +383,15 @@ mod tests {
     #[test]
     fn mount_and_relative_paths_are_strict() {
         assert!(validate_mount("/gen").is_ok());
-        for mount in ["/", "gen", "/gen/", "/../gen", "/%2e%2e/gen"] {
+        for mount in [
+            "/",
+            "gen",
+            "/gen/",
+            "/../gen",
+            "/%2e%2e/gen",
+            "/.fe",
+            "/.fe/generated",
+        ] {
             assert!(validate_mount(mount).is_err(), "{mount}");
         }
         assert!(safe_relative_path("nested/file.js").is_some());
@@ -448,6 +491,15 @@ mod tests {
         assert!(static_response.contains("content-type: text/html; charset=utf-8"));
         assert!(static_response.ends_with("<h1>Fe</h1>"));
 
+        let reload_script = request(address, LIVE_RELOAD_SCRIPT_PATH).await;
+        assert!(reload_script.starts_with("HTTP/1.0 200 OK"));
+        assert!(reload_script.contains("content-type: text/javascript; charset=utf-8"));
+        assert!(reload_script.contains("fetch(\"/.fe/generation\""));
+
+        let first_generation = request(address, LIVE_RELOAD_GENERATION_PATH).await;
+        assert!(first_generation.contains("content-type: text/plain; charset=utf-8"));
+        assert!(first_generation.ends_with("1\n"));
+
         let first = request(address, "/gen/manifest.json").await;
         assert!(first.contains("content-type: application/json; charset=utf-8"));
         assert!(first.contains("cross-origin-opener-policy: same-origin"));
@@ -463,6 +515,8 @@ mod tests {
         let second = request(address, "/gen/manifest.json").await;
         assert!(second.ends_with("{\"v\":2}"));
         assert!(!second.contains("{\"v\":1}"));
+        let second_generation = request(address, LIVE_RELOAD_GENERATION_PATH).await;
+        assert!(second_generation.ends_with("2\n"));
 
         let missing = request(address, "/gen/%2e%2e/Cargo.toml").await;
         assert!(missing.starts_with("HTTP/1.0 404 Not Found"));
