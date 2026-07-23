@@ -51,7 +51,7 @@ class PresentationPredicateTests(unittest.TestCase):
                 value["evidence"][field] = bad
                 self.assertFalse(presentation_passes(value))
         value = passing_value()
-        value["evidence"]["fetchedAssets"].append("./gen/actor-canonical.wasm")
+        value["evidence"]["fetchedAssets"].append("./gen/actor/module.wasm")
         self.assertFalse(presentation_passes(value))
 
     def test_rejects_missing_samples_or_unbounded_submit_cpu(self):

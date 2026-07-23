@@ -1,12 +1,13 @@
 {
-  "actor_interface": "actor-interface.js",
+  "actor_bundle": "actor/manifest.json",
+  "actor_interface": "actor/interface.js",
   "actor_lanes": [
     "render",
     "verify",
     "oracle",
     "oracle_pixel"
   ],
-  "actor_wasm": "actor-canonical.wasm",
+  "actor_wasm": "actor/module.wasm",
   "bindings": [
     {
       "access": "Read",

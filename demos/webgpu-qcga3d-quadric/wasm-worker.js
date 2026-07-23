@@ -1,10 +1,10 @@
 import { instantiateWasm } from "../webgpu-keystone/wasm-runner.js";
-import { attachMessagePortActorHost } from "../shared/message-port-actor.js";
+import { attachMessagePortActorHost } from "./gen/runtime/message-port-actor.js";
 import {
   createTypedGpuActorClient,
   selectActorSchemas,
-} from "../shared/gpu-actor.js";
-import { createExactLaneRouter } from "../shared/actor-router.js";
+} from "./gen/runtime/gpu-actor.js";
+import { createExactLaneRouter } from "./gen/runtime/actor-router.js";
 import {
   compiledCanonicalInterface,
   compileActorAdapter,

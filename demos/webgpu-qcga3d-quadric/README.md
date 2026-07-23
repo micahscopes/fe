@@ -1,7 +1,7 @@
 # Sparse typed QCGA3D browser showcase
 
 This demo presents the compiler-generated 128x128 rotated-quadric kernel through
-the shared Worker, MessagePort, and main-thread WebGPU actor runtime. It is the
+the compiler-packaged Worker, MessagePort, and main-thread WebGPU actor runtime. It is the
 second-application proof for the compiler-owned canonical browser interface.
 The generated `actor-interface.js` derives all four lane schemas from nominal Fe
 records:
@@ -26,7 +26,7 @@ Generate the five ignored assets from the reviewed local Sonatina commit and
 serve the common demos root:
 
 ```sh
-SONATINA_DIR=/workspace/sonatina demos/serve.sh qcga
+demos/serve.sh qcga
 trunk serve --config demos/Trunk.toml
 ```
 

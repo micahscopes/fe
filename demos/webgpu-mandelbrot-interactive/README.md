@@ -4,10 +4,14 @@ The generated canonical interface contains three nominal Fe lanes:
 `update_view_message`, `render`, and `verify`. The hosted page uses a real module
 Worker for the Fe control lane. Render and verify are explicitly placed as host
 effects on the main-thread WebGPU owner; their request/result validators come
-from the same generated `ctl-interface.js`, rather than a demo-owned JavaScript
+from the generated `actor/interface.js`, rather than a demo-owned JavaScript
 schema. `ctl.json` contains only application event mapping and artifact names—it
 does not restate the actor schema.
 
+The intact `actor/` directory is a compiler-materialized WebBundle v4. Its
+manifest fingerprints the canonical Wasm, interface adapters, and the versioned
+`fe-browser-actor-runtime`; browser imports resolve those packaged modules
+directly rather than copying protocol code from `demos/shared`.
 The same canonical module-worker binding used by the CGA flagship owns wire
 request IDs and epochs here. Its in-flight bound, readiness timeout, serialized
 restart, generated owned-byte transfer policy, and stable error codes are
@@ -29,8 +33,7 @@ without weakening the hosted Worker claim.
 Regenerate all ignored assets before serving or running Worker tests:
 
 ```sh
-SONATINA_DIR=/path/to/sonatina \
-  demos/serve.sh mandelbrot-interactive
+demos/serve.sh mandelbrot-interactive
 bun demos/webgpu-mandelbrot-interactive/worker-control.test.mjs
 ```
 

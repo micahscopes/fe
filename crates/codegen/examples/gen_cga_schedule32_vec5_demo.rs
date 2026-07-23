@@ -410,15 +410,6 @@ fn main() {
         wgsl,
         "adding canonical actor lanes must not change the browser render WGSL"
     );
-    let actor_interface_js = actor_bundle
-        .interface_js
-        .as_ref()
-        .expect("required Schedule32 actor interface.js");
-    let actor_interface_d_ts = actor_bundle
-        .interface_d_ts
-        .as_ref()
-        .expect("required Schedule32 actor interface.d.ts");
-
     let bindings: Vec<_> = layout
         .bindings
         .iter()
@@ -478,8 +469,9 @@ fn main() {
         "fragment_entry": layout.fragment_entry, "color_target_format": layout.color_target_format,
         "bindings": bindings, "builtin_inputs": builtins, "params": params,
         "frag_wasm_export": NAME, "frag_wasm_bytes": wasm.len(),
-        "actor_wasm": "actor-canonical.wasm",
-        "actor_interface": "actor-interface.js",
+        "actor_bundle": "actor/manifest.json",
+        "actor_wasm": "actor/module.wasm",
+        "actor_interface": "actor/interface.js",
         "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE],
         "width": WIDTH, "height": HEIGHT, "provenance": provenance.clone(),
     }))
@@ -513,21 +505,12 @@ fn main() {
     write(&out.join("kernel.fe"), source.as_bytes());
     write(&out.join("frag.wgsl"), wgsl.as_bytes());
     write(&out.join("frag.wasm"), &wasm);
-    write(&out.join("actor-canonical.wasm"), &actor_bundle.wasm);
-    write(
-        &out.join("actor-interface.js"),
-        actor_interface_js.as_bytes(),
-    );
-    write(
-        &out.join("actor-interface.d.ts"),
-        actor_interface_d_ts.as_bytes(),
-    );
-    write(
-        &out.join("actor-manifest.json"),
-        &actor_bundle
-            .manifest_json()
-            .expect("Schedule32 canonical manifest serializes"),
-    );
+    for file in actor_bundle
+        .materialized_files()
+        .expect("Schedule32 actor WebBundle materializes")
+    {
+        write(&out.join("actor").join(file.path()), file.bytes());
+    }
     write(&out.join("actor-source.fe"), actor_source.as_bytes());
     write(&out.join("layout.json"), layout_json.as_bytes());
     write(&out.join("reference.json"), reference_json.as_bytes());
@@ -989,5 +972,8 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
 }
 
 fn write(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("{}: {e}", parent.display()));
+    }
     std::fs::write(path, bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 }

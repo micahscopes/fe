@@ -20,7 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GEN = os.path.join(HERE, "gen")
 DEMOS = os.path.dirname(HERE)
 KEYSTONE = os.path.join(DEMOS, "webgpu-keystone")
-SHARED = os.path.join(DEMOS, "shared")
+ACTOR_RUNTIME = os.path.join(GEN, "actor", "runtime")
 
 
 def read(path):
@@ -81,13 +81,13 @@ def main():
     page_js = "\n".join(
         strip_module_seams(read(p))
         for p in [
-            os.path.join(SHARED, "actor-coordinator.js"),
-            os.path.join(SHARED, "actor-endpoint.js"),
-            os.path.join(SHARED, "message-port-actor.js"),
-            os.path.join(SHARED, "gpu-actor.js"),
+            os.path.join(ACTOR_RUNTIME, "actor-coordinator.js"),
+            os.path.join(ACTOR_RUNTIME, "actor-endpoint.js"),
+            os.path.join(ACTOR_RUNTIME, "message-port-actor.js"),
+            os.path.join(ACTOR_RUNTIME, "gpu-actor.js"),
             os.path.join(KEYSTONE, "wasm-runner.js"),
             os.path.join(KEYSTONE, "webgpu-runner.js"),
-            os.path.join(GEN, "ctl-interface.js"),
+            os.path.join(GEN, "actor", "interface.js"),
             os.path.join(HERE, "actor-runtime.js"),
             os.path.join(HERE, "live-pump.js"),
             os.path.join(HERE, "main.js"),

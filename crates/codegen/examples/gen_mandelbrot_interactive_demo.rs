@@ -305,15 +305,6 @@ fn main() {
         assert!(lane.intent.capabilities[0].mutable);
         assert!(lane.export.is_none());
     }
-    let ctl_interface_js = canonical_bundle
-        .interface_js
-        .as_ref()
-        .expect("required canonical bundle must generate interface.js");
-    let ctl_interface_d_ts = canonical_bundle
-        .interface_d_ts
-        .as_ref()
-        .expect("required canonical bundle must generate interface.d.ts");
-
     // --- 4. Derive the interfaces from the ACTUAL sources (not hardcoded). ---
     // The broadcast param names are the fragment's args 2..4 (parsed from source);
     // the control arg names are update_view's 8 params (parsed from source). The
@@ -425,8 +416,9 @@ fn main() {
     let layout_json = serialize_render_layout(&artifact.layout, params, frag_wasm.len());
     let ctl_json = serde_json::to_string_pretty(&serde_json::json!({
         "module": "ctl.wasm",
-        "canonical_module": "ctl-canonical.wasm",
-        "canonical_interface": "ctl-interface.js",
+        "canonical_bundle": "actor/manifest.json",
+        "canonical_module": "actor/module.wasm",
+        "canonical_interface": "actor/interface.js",
         "canonical_lane": CTL_MESSAGE_NAME,
         "control_export": CTL_NAME,
         "args": ctl_args,
@@ -458,22 +450,19 @@ fn main() {
     write_file(&gen_dir.join("layout.json"), layout_json.as_bytes());
     write_file(&gen_dir.join("frag.wasm"), &frag_wasm);
     write_file(&gen_dir.join("ctl.wasm"), &ctl_wasm);
-    write_file(&gen_dir.join("ctl-canonical.wasm"), &canonical_bundle.wasm);
-    write_file(
-        &gen_dir.join("ctl-interface.js"),
-        ctl_interface_js.as_bytes(),
-    );
-    write_file(
-        &gen_dir.join("ctl-interface.d.ts"),
-        ctl_interface_d_ts.as_bytes(),
-    );
+    for file in canonical_bundle
+        .materialized_files()
+        .expect("Mandelbrot actor WebBundle materializes")
+    {
+        write_file(&gen_dir.join("actor").join(file.path()), file.bytes());
+    }
     write_file(&gen_dir.join("ctl.json"), ctl_json.as_bytes());
     write_file(&gen_dir.join("reference.json"), reference_json.as_bytes());
 
     eprintln!(
-        "gen_mandelbrot_interactive_demo: wrote 11 files to {}\n  \
-         kernel.fe  ctl.fe  frag.wgsl  layout.json  frag.wasm  ctl.wasm  ctl-canonical.wasm  \
-         ctl-interface.js  ctl-interface.d.ts  ctl.json  reference.json",
+        "gen_mandelbrot_interactive_demo: wrote application files and canonical actor/ WebBundle to {}\n  \
+         kernel.fe  ctl.fe  frag.wgsl  layout.json  frag.wasm  ctl.wasm  \
+         actor/  ctl.json  reference.json",
         gen_dir.display()
     );
     eprintln!(
@@ -774,6 +763,10 @@ fn fe_head_rev() -> String {
 }
 
 fn write_file(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("could not create {}: {e}", parent.display()));
+    }
     std::fs::write(path, bytes)
         .unwrap_or_else(|e| panic!("could not write {}: {e}", path.display()));
 }

@@ -1,6 +1,6 @@
 import { instantiateWasm } from "../webgpu-keystone/wasm-runner.js";
-import { attachMessagePortActorHost } from "../shared/message-port-actor.js";
-import { createActorAdapter } from "./gen/ctl-interface.js";
+import { attachMessagePortActorHost } from "./gen/actor/runtime/message-port-actor.js";
+import { createActorAdapter } from "./gen/actor/interface.js";
 
 self.addEventListener("message", async (event) => {
   if (event.data?.type !== "init") return;

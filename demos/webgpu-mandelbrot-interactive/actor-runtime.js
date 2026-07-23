@@ -1,9 +1,9 @@
-import { createActorCoordinator } from "../shared/actor-coordinator.js";
+import { createActorCoordinator } from "./gen/actor/runtime/actor-coordinator.js";
 import {
   createCanonicalMainThreadGpuChannel,
   selectCanonicalMainThreadGpuSchemas,
-} from "../shared/gpu-actor.js";
-import { compileActorAdapter } from "./gen/ctl-interface.js";
+} from "./gen/actor/runtime/gpu-actor.js";
+import { compileActorAdapter } from "./gen/actor/interface.js";
 
 const compiledSchemas = compileActorAdapter();
 const gpuSchemas = selectCanonicalMainThreadGpuSchemas(compiledSchemas);

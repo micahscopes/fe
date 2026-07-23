@@ -241,7 +241,7 @@ async function main() {
     if (!verificationOff) {
       [reference, wasm] = await Promise.all([
         fetchOk(artifactBundle.asset("reference.json"), "json"),
-        fetchOk(artifactBundle.asset("actor-canonical.wasm"), "bytes"),
+        fetchOk(artifactBundle.asset("actor/module.wasm"), "bytes"),
       ]);
     }
     validateTypedLayout(layout);

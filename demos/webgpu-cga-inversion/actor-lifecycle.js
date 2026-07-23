@@ -1,4 +1,4 @@
-import { createActorCoordinator } from "../shared/actor-coordinator.js";
+import { createActorCoordinator } from "./gen-schedule32/actor/runtime/actor-coordinator.js";
 
 const MODES = new Set(["manual", "continuous", "off"]);
 

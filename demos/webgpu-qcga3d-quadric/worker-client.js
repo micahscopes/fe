@@ -1,9 +1,9 @@
-import { actorEnvelope } from "../shared/actor-coordinator.js";
-import { createModuleWorkerActor } from "../shared/module-worker-actor.js";
+import { actorEnvelope } from "./gen/runtime/actor-coordinator.js";
+import { createModuleWorkerActor } from "./gen/runtime/module-worker-actor.js";
 import {
   createTypedMainThreadGpuBroker,
   selectActorSchemas,
-} from "../shared/gpu-actor.js";
+} from "./gen/runtime/gpu-actor.js";
 
 export async function createQcgaActor({
   wasm,

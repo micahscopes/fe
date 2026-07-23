@@ -32,7 +32,9 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 3;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 4;
+pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
+pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 1;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
@@ -40,6 +42,32 @@ const MANIFEST_FILE: &str = "manifest.json";
 const INTERFACE_JS_FILE: &str = "interface.js";
 const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
+const WEB_ACTOR_RUNTIME: &[(&str, &str)] = &[
+    (
+        "runtime/actor-coordinator.js",
+        include_str!("../assets/browser-runtime/actor-coordinator.js"),
+    ),
+    (
+        "runtime/actor-endpoint.js",
+        include_str!("../assets/browser-runtime/actor-endpoint.js"),
+    ),
+    (
+        "runtime/actor-router.js",
+        include_str!("../assets/browser-runtime/actor-router.js"),
+    ),
+    (
+        "runtime/gpu-actor.js",
+        include_str!("../assets/browser-runtime/gpu-actor.js"),
+    ),
+    (
+        "runtime/message-port-actor.js",
+        include_str!("../assets/browser-runtime/message-port-actor.js"),
+    ),
+    (
+        "runtime/module-worker-actor.js",
+        include_str!("../assets/browser-runtime/module-worker-actor.js"),
+    ),
+];
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +192,13 @@ pub struct WebGeneratedArtifact {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebBrowserRuntimeManifest {
+    pub protocol: String,
+    pub protocol_version: u32,
+    pub artifacts: Vec<WebGeneratedArtifact>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebBindingAccess {
@@ -257,6 +292,11 @@ pub struct WebBundleManifest {
     pub provenance: WebProvenance,
     pub canonical_interface: Option<CanonicalInterfaceManifest>,
     pub canonical_status: WebCanonicalStatus,
+    /// Present exactly when a canonical browser interface is embedded. These
+    /// compiler-owned modules implement its Worker/MessagePort and WebGPU
+    /// actor transport; applications provide effect handlers, not wire glue.
+    #[serde(default)]
+    pub browser_runtime: Option<WebBrowserRuntimeManifest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,9 +410,8 @@ impl WebBundle {
                 "canonical bundle requires at least one executable Wasm lane".to_owned(),
             ));
         }
-        let wasm_package =
-            mir::build_wasm_runtime_package_for_entries(db, top_mod, &wasm_entries)
-                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+        let wasm_package = mir::build_wasm_runtime_package_for_entries(db, top_mod, &wasm_entries)
+            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
         let wasm_options = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
@@ -399,6 +438,7 @@ impl WebBundle {
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
         let (interface_js, interface_d_ts, canonical_adapters) =
             generated_canonical_adapters(canonical_interface.as_ref())?;
+        let browser_runtime = generated_browser_runtime(canonical_interface.is_some());
 
         let gpu_package =
             mir::build_wasm_runtime_package_for_entry(db, top_mod, &options.source_entry)
@@ -410,7 +450,7 @@ impl WebBundle {
             }
         }
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-        let wgsl = artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?;
+        let wgsl = normalize_generated_text(&artifact.wgsl.ok_or(WebBundleError::MissingWgsl)?);
         validate_browser_wgsl(&wgsl)?;
         let layout = WebLayout::from_spirv(&artifact.layout)?;
 
@@ -429,6 +469,7 @@ impl WebBundle {
             provenance: options.provenance,
             canonical_interface,
             canonical_status,
+            browser_runtime,
         };
         Ok(Self {
             wasm,
@@ -450,7 +491,14 @@ impl WebBundle {
     /// manifest. Both disk publication and browser servers consume this API so
     /// generated adapters cannot silently diverge between the two paths.
     pub fn materialized_files(&self) -> Result<Vec<WebBundleFile>, WebBundleError> {
-        let mut files = Vec::with_capacity(3 + self.manifest.artifacts.canonical_adapters.len());
+        let runtime_artifact_count = self
+            .manifest
+            .browser_runtime
+            .as_ref()
+            .map_or(0, |runtime| runtime.artifacts.len());
+        let mut files = Vec::with_capacity(
+            3 + self.manifest.artifacts.canonical_adapters.len() + runtime_artifact_count,
+        );
         let mut paths = std::collections::BTreeSet::new();
         let mut push = |path: &str, bytes: Arc<[u8]>| -> Result<(), WebBundleError> {
             validate_materialized_path(path)?;
@@ -524,8 +572,61 @@ impl WebBundle {
             }
             push(&artifact.path, bytes)?;
         }
+        if let Some(runtime) = &self.manifest.browser_runtime {
+            if runtime.protocol != WEB_ACTOR_RUNTIME_PROTOCOL
+                || runtime.protocol_version != WEB_ACTOR_RUNTIME_VERSION
+            {
+                return Err(WebBundleError::Materialization(
+                    "browser actor runtime protocol metadata is unsupported".to_owned(),
+                ));
+            }
+            for artifact in &runtime.artifacts {
+                let source = WEB_ACTOR_RUNTIME
+                    .iter()
+                    .find_map(|(path, source)| (*path == artifact.path).then_some(*source))
+                    .ok_or_else(|| {
+                        WebBundleError::Materialization(format!(
+                            "manifest declares unsupported browser runtime artifact `{}`",
+                            artifact.path
+                        ))
+                    })?;
+                if source.len() as u64 != artifact.bytes
+                    || hex::encode(Sha256::digest(source.as_bytes())) != artifact.sha256
+                {
+                    return Err(WebBundleError::Materialization(format!(
+                        "browser runtime artifact `{}` does not match its manifest metadata",
+                        artifact.path
+                    )));
+                }
+                push(&artifact.path, Arc::from(source.as_bytes()))?;
+            }
+        }
         push(MANIFEST_FILE, Arc::from(self.manifest_json()?))?;
         Ok(files)
+    }
+
+    /// Return the compiler-owned browser actor modules for generators that
+    /// embed a `WebBundle` inside a larger application-specific artifact set.
+    /// The returned paths remain bundle-relative (`runtime/*.js`) and have
+    /// already passed the same manifest/hash checks as atomic publication.
+    pub fn browser_runtime_files(&self) -> Result<Vec<WebBundleFile>, WebBundleError> {
+        let runtime_paths = self
+            .manifest
+            .browser_runtime
+            .as_ref()
+            .map(|runtime| {
+                runtime
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.path.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        Ok(self
+            .materialized_files()?
+            .into_iter()
+            .filter(|file| runtime_paths.contains(file.path()))
+            .collect())
     }
 
     /// Publish a complete new bundle directory with one filesystem rename.
@@ -617,6 +718,21 @@ fn generated_canonical_adapters(
         artifact(INTERFACE_D_TS_FILE, &interface_d_ts),
     ];
     Ok((Some(interface_js), Some(interface_d_ts), artifacts))
+}
+
+fn generated_browser_runtime(enabled: bool) -> Option<WebBrowserRuntimeManifest> {
+    enabled.then(|| WebBrowserRuntimeManifest {
+        protocol: WEB_ACTOR_RUNTIME_PROTOCOL.to_owned(),
+        protocol_version: WEB_ACTOR_RUNTIME_VERSION,
+        artifacts: WEB_ACTOR_RUNTIME
+            .iter()
+            .map(|(path, source)| WebGeneratedArtifact {
+                path: (*path).to_owned(),
+                bytes: source.len() as u64,
+                sha256: hex::encode(Sha256::digest(source.as_bytes())),
+            })
+            .collect(),
+    })
 }
 
 fn canonical_type_name(name: &str) -> String {
@@ -868,6 +984,18 @@ fn validate_browser_wgsl(wgsl: &str) -> Result<(), WebBundleError> {
     Ok(())
 }
 
+fn normalize_generated_text(source: &str) -> String {
+    let mut normalized = source
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if source.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
+}
+
 fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), WebBundleError> {
     let mut file = fs::File::create(path)?;
     file.write_all(bytes)?;
@@ -1008,6 +1136,22 @@ pub fn shade(x: u32, y: u32) -> u32 {
         WebBundle::compile(&db, db.top_mod(file), options).unwrap()
     }
 
+    fn compile_canonical_bundle() -> WebBundle {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///web_bundle_canonical_runtime.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(CANONICAL_SOURCE.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        WebBundle::compile(
+            &db,
+            db.top_mod(file),
+            WebBuildOptions::render("shade", None)
+                .with_canonical_entries(["verify", "update"])
+                .with_canonical_policy(WebCanonicalPolicy::Required),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn render_bundle_is_valid_typed_and_deterministic() {
         let first = compile(WebBundleMode::Render);
@@ -1023,6 +1167,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
         );
         assert!(first.manifest.canonical_interface.is_none());
         assert!(first.manifest.artifacts.canonical_adapters.is_empty());
+        assert!(first.manifest.browser_runtime.is_none());
         assert!(first.interface_js.is_none());
         assert!(first.interface_d_ts.is_none());
         let exports = wasm_exports(&first.wasm);
@@ -1030,22 +1175,28 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(!exports.iter().any(|name| name == "fe_cabi_reset"));
         assert!(first.manifest.layout.vertex_entry.is_some());
         assert!(first.manifest.layout.fragment_entry.is_some());
+        assert!(
+            first.wgsl.lines().all(|line| line == line.trim_end()),
+            "materialized WebBundle text must not contain trailing whitespace"
+        );
         let decoded: WebBundleManifest =
             serde_json::from_slice(&first.manifest_json().unwrap()).unwrap();
         assert_eq!(decoded, first.manifest);
 
-        // V3 adds generated adapter metadata. A compiler tool may still inspect
-        // a V2 manifest, but the retained version makes the compatibility
-        // boundary explicit and the absent assets do not materialize.
+        // V3 adds generated adapter metadata and V4 adds the compiler-owned
+        // browser actor runtime. A compiler tool may still inspect a V2
+        // manifest, but the retained version keeps that boundary explicit.
         let mut legacy = serde_json::to_value(&first.manifest).unwrap();
         legacy["protocol_version"] = serde_json::json!(2);
         legacy["artifacts"]
             .as_object_mut()
             .unwrap()
             .remove("canonical_adapters");
+        legacy.as_object_mut().unwrap().remove("browser_runtime");
         let legacy: WebBundleManifest = serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy.protocol_version, 2);
         assert!(legacy.artifacts.canonical_adapters.is_empty());
+        assert!(legacy.browser_runtime.is_none());
     }
 
     #[test]
@@ -1196,6 +1347,25 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 .collect::<Vec<_>>(),
             [INTERFACE_JS_FILE, INTERFACE_D_TS_FILE]
         );
+        let runtime = required
+            .manifest
+            .browser_runtime
+            .as_ref()
+            .expect("canonical WebBundle packages its browser actor runtime");
+        assert_eq!(runtime.protocol, WEB_ACTOR_RUNTIME_PROTOCOL);
+        assert_eq!(runtime.protocol_version, WEB_ACTOR_RUNTIME_VERSION);
+        assert_eq!(runtime.artifacts.len(), WEB_ACTOR_RUNTIME.len());
+        assert_eq!(
+            runtime
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>(),
+            WEB_ACTOR_RUNTIME
+                .iter()
+                .map(|(path, _)| *path)
+                .collect::<Vec<_>>()
+        );
         for (artifact, content) in required
             .manifest
             .artifacts
@@ -1217,6 +1387,12 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 WGSL_FILE,
                 INTERFACE_JS_FILE,
                 INTERFACE_D_TS_FILE,
+                "runtime/actor-coordinator.js",
+                "runtime/actor-endpoint.js",
+                "runtime/actor-router.js",
+                "runtime/gpu-actor.js",
+                "runtime/message-port-actor.js",
+                "runtime/module-worker-actor.js",
                 MANIFEST_FILE,
             ]
         );
@@ -1228,6 +1404,16 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 .bytes(),
             interface_js.as_bytes()
         );
+        for (path, source) in WEB_ACTOR_RUNTIME {
+            assert_eq!(
+                materialized
+                    .iter()
+                    .find(|file| file.path() == *path)
+                    .unwrap()
+                    .bytes(),
+                source.as_bytes()
+            );
+        }
         let destination = std::env::temp_dir().join(format!(
             "fe-canonical-adapter-test-{}-{}",
             std::process::id(),
@@ -1430,5 +1616,28 @@ pub fn shade(x: u32, y: u32) -> u32 {
         bundle.manifest.artifacts.wasm_bytes += 1;
         let error = bundle.materialized_files().unwrap_err().to_string();
         assert!(error.contains("manifest byte length"), "{error}");
+
+        let canonical = compile_canonical_bundle();
+        let mut bundle = canonical.clone();
+        bundle
+            .manifest
+            .browser_runtime
+            .as_mut()
+            .unwrap()
+            .protocol_version += 1;
+        let error = bundle.materialized_files().unwrap_err().to_string();
+        assert!(error.contains("runtime protocol metadata"), "{error}");
+
+        let mut bundle = canonical.clone();
+        bundle.manifest.browser_runtime.as_mut().unwrap().artifacts[0].sha256 =
+            "00".repeat(32);
+        let error = bundle.materialized_files().unwrap_err().to_string();
+        assert!(error.contains("does not match its manifest metadata"), "{error}");
+
+        let mut bundle = canonical;
+        bundle.manifest.browser_runtime.as_mut().unwrap().artifacts[0].path =
+            "runtime/unknown.js".to_owned();
+        let error = bundle.materialized_files().unwrap_err().to_string();
+        assert!(error.contains("unsupported browser runtime artifact"), "{error}");
     }
 }

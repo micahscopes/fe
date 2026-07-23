@@ -5,9 +5,9 @@ import {
   compiledCanonicalInterface,
   compileActorAdapter,
   createInterfaceCaller,
-} from "./gen-schedule32/actor-interface.js";
-import { createExactLaneRouter } from "../shared/actor-router.js";
-import { selectCanonicalMainThreadGpuSchemas } from "../shared/gpu-actor.js";
+} from "./gen-schedule32/actor/interface.js";
+import { createExactLaneRouter } from "./gen-schedule32/actor/runtime/actor-router.js";
+import { selectCanonicalMainThreadGpuSchemas } from "./gen-schedule32/actor/runtime/gpu-actor.js";
 
 assert.equal(canonicalInterfaceManifest.version, 2);
 assert.deepEqual(Object.keys(compiledCanonicalInterface.lanes), [
@@ -57,7 +57,7 @@ assert.equal(router.ownerOf("oracle"), "worker_host");
 assert.equal(router.ownerOf("oracle_pixel"), "wasm");
 
 const actorBytes = await readFile(new URL(
-  "./gen-schedule32/actor-canonical.wasm",
+  "./gen-schedule32/actor/module.wasm",
   import.meta.url,
 ));
 const fragBytes = await readFile(new URL("./gen-schedule32/frag.wasm", import.meta.url));

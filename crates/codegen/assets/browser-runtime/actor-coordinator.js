@@ -52,7 +52,7 @@ export function actorEnvelope({ type, lane, actorEpoch = 0, generation, requestI
   nonNegativeInteger(requestId, "requestId");
   cloneSafe(payload);
   return {
-    protocol: "fe-demo-actor",
+    protocol: "fe-browser-actor",
     version: ACTOR_PROTOCOL_VERSION,
     type,
     lane,
@@ -64,7 +64,7 @@ export function actorEnvelope({ type, lane, actorEpoch = 0, generation, requestI
 }
 
 export function validateActorEnvelope(envelope) {
-  if (!envelope || envelope.protocol !== "fe-demo-actor") throw new TypeError("invalid actor protocol");
+  if (!envelope || envelope.protocol !== "fe-browser-actor") throw new TypeError("invalid actor protocol");
   if (envelope.version !== ACTOR_PROTOCOL_VERSION) throw new TypeError("unsupported actor protocol version");
   const expectedKeys = [
     "actorEpoch", "generation", "lane", "payload", "protocol", "requestId", "type", "version",

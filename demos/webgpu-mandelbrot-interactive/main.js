@@ -62,7 +62,7 @@ async function loadAssets() {
     fetchText("./gen/frag.wgsl"),
     fetch("./gen/frag.wasm").then((r) => r.arrayBuffer()),
     fetch("./gen/ctl.wasm").then((r) => r.arrayBuffer()),
-    fetch("./gen/ctl-canonical.wasm").then((r) => r.arrayBuffer()),
+    fetch("./gen/actor/module.wasm").then((r) => r.arrayBuffer()),
   ]);
   return {
     layout, ctl, reference, fragFe, ctlFe, wgsl,

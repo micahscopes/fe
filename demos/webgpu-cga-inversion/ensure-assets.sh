@@ -6,7 +6,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bundle="${CGA_BUNDLE_DIR:-$here/gen}"
 required=(kernel.fe frag.wgsl layout.json reference.json frag.wasm)
 if [ "${CGA_BUNDLE:-}" = schedule32 ] || [ "$(basename "$bundle")" = gen-schedule32 ]; then
-  required+=(actor-canonical.wasm actor-interface.js actor-interface.d.ts actor-manifest.json actor-source.fe)
+  required+=(actor/module.wasm actor/shader.wgsl actor/manifest.json
+    actor/interface.js actor/interface.d.ts actor/runtime/actor-coordinator.js
+    actor/runtime/actor-endpoint.js actor/runtime/actor-router.js
+    actor/runtime/gpu-actor.js actor/runtime/message-port-actor.js
+    actor/runtime/module-worker-actor.js actor-source.fe)
 fi
 missing=()
 for asset in "${required[@]}"; do

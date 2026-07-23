@@ -1,15 +1,15 @@
 import { instantiateWasm } from "../webgpu-keystone/wasm-runner.js";
-import { attachMessagePortActorHost } from "../shared/message-port-actor.js";
+import { attachMessagePortActorHost } from "./gen-schedule32/actor/runtime/message-port-actor.js";
 import {
   createCanonicalMainThreadGpuClient,
-} from "../shared/gpu-actor.js";
-import { createCanonicalIntentRouter } from "../shared/actor-router.js";
+} from "./gen-schedule32/actor/runtime/gpu-actor.js";
+import { createCanonicalIntentRouter } from "./gen-schedule32/actor/runtime/actor-router.js";
 import {
   compileActorAdapter,
   createActorAdapter,
   createHostEffectAdapter,
   createInterfaceCaller,
-} from "./gen-schedule32/actor-interface.js";
+} from "./gen-schedule32/actor/interface.js";
 
 const WIDTH = 128;
 const HEIGHT = 128;

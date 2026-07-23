@@ -6,6 +6,7 @@ This does not execute wasm or WebGPU and therefore does not earn acceptance.
 
 import json
 import os
+import hashlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -80,4 +81,38 @@ for token in tokens:
     assert token in kernel, f"generated kernel lacks runtime-center cyclide token {token!r}"
 wgsl = (GEN / "frag.wgsl").read_text()
 assert "@fragment" in wgsl and "loop" in wgsl and "sqrt(" in wgsl
+if algebra.startswith("canonical CTFE-derived Schedule<32>;"):
+    actor_manifest = json.loads((GEN / "actor/manifest.json").read_text())
+    assert actor_manifest["protocol"] == "fe-web-bundle"
+    assert actor_manifest["protocol_version"] == 4
+    runtime = actor_manifest["browser_runtime"]
+    assert runtime["protocol"] == "fe-browser-actor-runtime"
+    assert runtime["protocol_version"] == 1
+    declared = [
+        actor_manifest["artifacts"]["wasm"],
+        actor_manifest["artifacts"]["wgsl"],
+        *[artifact["path"] for artifact in actor_manifest["artifacts"]["canonical_adapters"]],
+        *[artifact["path"] for artifact in runtime["artifacts"]],
+    ]
+    assert len(declared) == len(set(declared))
+    metadata = {
+        artifact["path"]: artifact
+        for artifact in [
+            *actor_manifest["artifacts"]["canonical_adapters"],
+            *runtime["artifacts"],
+        ]
+    }
+    for name in declared:
+        path = GEN / "actor" / name
+        assert path.is_file(), f"actor WebBundle is missing declared artifact {name}"
+        if name in metadata:
+            payload = path.read_bytes()
+            assert len(payload) == metadata[name]["bytes"]
+            assert hashlib.sha256(payload).hexdigest() == metadata[name]["sha256"]
+    assert (GEN / "actor" / actor_manifest["artifacts"]["wasm"]).stat().st_size == (
+        actor_manifest["artifacts"]["wasm_bytes"]
+    )
+    assert (GEN / "actor" / actor_manifest["artifacts"]["wgsl"]).stat().st_size == (
+        actor_manifest["artifacts"]["wgsl_bytes"]
+    )
 print("typed-CGA browser artifact schema preflight: ok (not execution acceptance)")

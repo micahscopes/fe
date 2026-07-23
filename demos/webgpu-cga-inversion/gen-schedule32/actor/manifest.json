@@ -1,22 +1,22 @@
 {
   "protocol": "fe-web-bundle",
-  "protocol_version": 3,
+  "protocol_version": 4,
   "source_entry": "cga_schedule32_vec5_de_render",
   "artifacts": {
     "wasm": "module.wasm",
     "wasm_bytes": 46806,
     "wgsl": "shader.wgsl",
-    "wgsl_bytes": 6284,
+    "wgsl_bytes": 6281,
     "canonical_adapters": [
       {
         "path": "interface.js",
-        "bytes": 29688,
-        "sha256": "3ca4a5fcc90dbb1e66fe5c4c7de3d0da100a91da3694ec6332ebcc90bfefe7e9"
+        "bytes": 30090,
+        "sha256": "1135d38ac993dd1099c64c5378864cb5ddf6c332cf0d4e95dbb22f995e7dd10a"
       },
       {
         "path": "interface.d.ts",
-        "bytes": 2996,
-        "sha256": "9c03ccf895c04de87e024fa998c8cf964b5c9ae83694f587ef2f24eee69cd88f"
+        "bytes": 3073,
+        "sha256": "f0b50f56b77aa3daa7c284d7508b80ea1e497a51de38165f16d0d06286bd4b64"
       }
     ]
   },
@@ -457,5 +457,41 @@
     "policy": "required",
     "embedded": true,
     "omission_reason": null
+  },
+  "browser_runtime": {
+    "protocol": "fe-browser-actor-runtime",
+    "protocol_version": 1,
+    "artifacts": [
+      {
+        "path": "runtime/actor-coordinator.js",
+        "bytes": 7947,
+        "sha256": "ce595d59862f804207f7887d7ee882cb98c73b746ec613694d61967b9f8bff22"
+      },
+      {
+        "path": "runtime/actor-endpoint.js",
+        "bytes": 8542,
+        "sha256": "f1b0806175ee7a0da31edcea685be9ec6ae22b2caac0a83b081acf8305e7919c"
+      },
+      {
+        "path": "runtime/actor-router.js",
+        "bytes": 6520,
+        "sha256": "87f3c69f34c4630499148acbbd4986773c0bd11abd4148e526af8f5f34a7c93d"
+      },
+      {
+        "path": "runtime/gpu-actor.js",
+        "bytes": 10670,
+        "sha256": "98695279c68ce67b4bc649976c9aeb6e7654a7071279e30bca81971ebb859c9e"
+      },
+      {
+        "path": "runtime/message-port-actor.js",
+        "bytes": 5028,
+        "sha256": "9a8fec9851e58da7dc92e6d1ebc7235dbb3dbde2d507618f0edae864552db1b8"
+      },
+      {
+        "path": "runtime/module-worker-actor.js",
+        "bytes": 6267,
+        "sha256": "3b3eb3f7fd040ac6f176ead0012a7a4a94742e88dedeab859f1ee92b9a963cf1"
+      }
+    ]
   }
 }

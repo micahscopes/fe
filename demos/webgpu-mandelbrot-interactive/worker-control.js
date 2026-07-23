@@ -1,5 +1,5 @@
-import { createCanonicalModuleWorkerActor } from "../shared/module-worker-actor.js";
-import { compileActorAdapter } from "./gen/ctl-interface.js";
+import { createCanonicalModuleWorkerActor } from "./gen/actor/runtime/module-worker-actor.js";
+import { compileActorAdapter } from "./gen/actor/interface.js";
 
 export async function createMandelbrotWorkerControl({
   wasm, lane, argNames, resultOrder,

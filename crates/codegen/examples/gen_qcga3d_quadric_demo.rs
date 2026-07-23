@@ -220,6 +220,12 @@ fn main() {
         &out.join("actor-interface.d.ts"),
         actor_interface_d_ts.as_bytes(),
     );
+    for file in canonical_bundle
+        .browser_runtime_files()
+        .expect("QCGA browser actor runtime materializes")
+    {
+        write(&out.join(file.path()), file.bytes());
+    }
     write(
         &out.join("actor-manifest.json"),
         &canonical_bundle
@@ -296,5 +302,8 @@ fn git(path: &str, args: &[&str]) -> String {
 }
 
 fn write(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap_or_else(|e| panic!("{}: {e}", parent.display()));
+    }
     std::fs::write(path, bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 }

@@ -1,7 +1,7 @@
-import { createCanonicalModuleWorkerActor } from "../shared/module-worker-actor.js";
+import { createCanonicalModuleWorkerActor } from "./gen-schedule32/actor/runtime/module-worker-actor.js";
 import {
   createCanonicalMainThreadGpuBroker,
-} from "../shared/gpu-actor.js";
+} from "./gen-schedule32/actor/runtime/gpu-actor.js";
 
 const requestPayload = (values, generation) => ({
   generation,
@@ -18,7 +18,7 @@ export async function createCgaWasmWorkerOracle({
   gpuVerify,
 }) {
   const { compileActorAdapter } =
-    await import("./gen-schedule32/actor-interface.js");
+    await import("./gen-schedule32/actor/interface.js");
   const adapter = compileActorAdapter();
   const actor = await createCanonicalModuleWorkerActor({
     workerUrl: new URL("./wasm-oracle-worker.js", import.meta.url),

@@ -41,8 +41,9 @@ pub use sonatina::{
 pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expected_revert};
 #[cfg(feature = "spirv-backend")]
 pub use web_bundle::{
-    WEB_BUNDLE_PROTOCOL, WEB_BUNDLE_PROTOCOL_VERSION, WebArtifactManifest, WebBinding,
-    WebBindingAccess, WebBindingMember, WebBindingRole, WebBuildOptions, WebBuiltinInput,
+    WEB_ACTOR_RUNTIME_PROTOCOL, WEB_ACTOR_RUNTIME_VERSION, WEB_BUNDLE_PROTOCOL,
+    WEB_BUNDLE_PROTOCOL_VERSION, WebArtifactManifest, WebBinding, WebBindingAccess,
+    WebBindingMember, WebBindingRole, WebBrowserRuntimeManifest, WebBuildOptions, WebBuiltinInput,
     WebBuiltinSource, WebBundle, WebBundleError, WebBundleFile, WebBundleManifest, WebBundleMode,
     WebCanonicalPolicy, WebCanonicalStatus, WebGeneratedArtifact, WebLayout, WebProvenance,
     WebResult, WebScalarKind,

@@ -121,6 +121,11 @@ while the application supplies only the visible `render` and `verify` device
 handlers. Inside the Worker, the same generated intent partitions lanes between
 the Wasm adapter, worker-local oracle effect, and main-thread GPU client; the
 application supplies those three concrete dispatchers but no lane lists.
+The complete canonical actor is emitted as an intact `actor/` WebBundle v4:
+its manifest paths name the exact Wasm, shader, interfaces, and runtime modules
+loaded by the browser. The runtime manifest pins
+`fe-browser-actor-runtime` version 1 and SHA-256 metadata for every packaged
+module; no demo-owned copy is an implicit protocol dependency.
 
 Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the later browser
 runtime commit `b2601adc`. The latter is reconstructed reproducibly from the

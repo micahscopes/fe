@@ -37,7 +37,7 @@ class TrunkDemoTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             for relative in [
                 "index.html",
-                "shared/gpu-actor.js",
+                "webgpu-cga-inversion/gen-schedule32/actor/runtime/gpu-actor.js",
                 "webgpu-cga-inversion/index.html",
                 "webgpu-cga-inversion/gen-schedule32/frag.wasm",
                 "webgpu-cga-inversion/gen-schedule32/frag.wgsl",

@@ -54,9 +54,9 @@ class EnsureAssetsTests(unittest.TestCase):
                 (bundle / asset).touch()
             result = self.run_script(bundle, CGA_BUNDLE="schedule32", SONATINA_DIR="")
             self.assertEqual(result.returncode, 2)
-            self.assertIn("actor-canonical.wasm", result.stderr)
-            self.assertIn("actor-interface.js", result.stderr)
-            self.assertIn("actor-manifest.json", result.stderr)
+            self.assertIn("actor/module.wasm", result.stderr)
+            self.assertIn("actor/interface.js", result.stderr)
+            self.assertIn("actor/manifest.json", result.stderr)
 
     def test_missing_bundle_can_be_generated_then_verified_in_one_command(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

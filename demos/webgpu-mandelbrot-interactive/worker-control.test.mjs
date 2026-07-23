@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createMandelbrotWorkerControl } from "./worker-control.js";
 
 const wasm = new Uint8Array(await readFile(
-  new URL("./gen/ctl-canonical.wasm", import.meta.url),
+  new URL("./gen/actor/module.wasm", import.meta.url),
 ));
 const argNames = [
   "center_re", "center_im", "scale_q", "dx", "dy", "dzoom", "mx", "my",
