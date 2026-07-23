@@ -1,0 +1,151 @@
+// Sparse conformal constructor spike.
+//
+// `Cell` and its nesting are representation details. Both the ordinary facade
+// and the FCO-derived model expose only semantic Point/Sphere constructors and
+// associated representations.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+struct Nil {}
+struct Cell<T> { head: f32, tail: T }
+
+recursive type fn Storage<const N: usize>() -> (*) {
+    match N {
+        0 => Nil
+        _ => Cell<Storage<{N - 1}>>
+    }
+}
+
+// Current FCO workaround: publish a ground alias. Asking emit_assoc_ty to
+// normalize Storage<5> while collecting this derived impl creates a type_fn_wf
+// query cycle (recorded in the spike report).
+type PointStorage = Cell<Cell<Cell<Cell<Cell<Nil>>>>>
+type SphereStorage = Cell<Cell<Cell<Cell<Nil>>>>
+
+fn make_point(_ x: f32, _ y: f32, _ z: f32) -> PointStorage {
+    let radius2 = x * x + y * y + z * z
+    Cell {
+        head: x,
+        tail: Cell {
+            head: y,
+            tail: Cell {
+                head: z,
+                tail: Cell {
+                    head: (radius2 - 1.0) * 0.5,
+                    tail: Cell {
+                        head: (radius2 + 1.0) * 0.5,
+                        tail: Nil {},
+                    },
+                },
+            },
+        },
+    }
+}
+
+fn make_sphere(_ cx: f32, _ cy: f32) -> SphereStorage {
+    let center2 = cx * cx + cy * cy
+    Cell {
+        head: cx,
+        tail: Cell {
+            head: cy,
+            tail: Cell {
+                head: center2 * 0.5 - 1.0,
+                tail: Cell { head: center2 * 0.5, tail: Nil {} },
+            },
+        },
+    }
+}
+
+struct ConformalConstructors {}
+impl ConformalConstructors {
+    fn point(x: f32, y: f32, z: f32) -> PointStorage {
+        make_point(x, y, z)
+    }
+
+    fn sphere(cx: f32, cy: f32) -> SphereStorage {
+        make_sphere(cx, cy)
+    }
+}
+
+trait ConformalModel {
+    type PointRepr
+    type SphereRepr
+
+    fn point(_ x: f32, _ y: f32, _ z: f32) -> Self::PointRepr
+    fn sphere(_ cx: f32, _ cy: f32) -> Self::SphereRepr
+}
+
+// Baseline: ordinary Fe is already enough to hide the sparse representation.
+struct DirectCl41 {}
+
+impl ConformalModel for DirectCl41 {
+    type PointRepr = PointStorage
+    type SphereRepr = SphereStorage
+
+    fn point(_ x: f32, _ y: f32, _ z: f32) -> PointStorage {
+        make_point(x, y, z)
+    }
+
+    fn sphere(_ cx: f32, _ cy: f32) -> SphereStorage {
+        make_sphere(cx, cy)
+    }
+}
+
+// FCO alternative: a provider publishes the same associated representation
+// and semantic methods. It deliberately calls the private constructors rather
+// than claiming reflection can infer conformal coordinate semantics.
+struct ConformalProvider {}
+
+impl Derive<ConformalModel> for ConformalProvider {
+    const fn derive<T>(
+        ev: own Evidence<ConformalModel<T>>,
+    ) -> Evidence<ConformalModel<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<ConformalModel<T>>,
+        )
+    {
+        builder.emit_assoc_ty("PointRepr", builder.ty<PointStorage>())
+        builder.emit_assoc_ty("SphereRepr", builder.ty<SphereStorage>())
+        let point = builder.static_call(
+            builder.ty<ConformalConstructors>(),
+            "point",
+            builder.arg_ref("x"),
+            builder.arg_ref("y"),
+            builder.arg_ref("z"),
+        )
+        builder.emit_method("point", point)
+        let sphere = builder.static_call(
+            builder.ty<ConformalConstructors>(),
+            "sphere",
+            builder.arg_ref("cx"),
+            builder.arg_ref("cy"),
+        )
+        builder.emit_method("sphere", sphere)
+        builder.finish()
+        ev
+    }
+}
+
+struct DerivedCl41 {}
+derive ConformalModel for DerivedCl41 using ConformalProvider
+
+fn point_checksum(_ point: PointStorage) -> f32 {
+    point.tail.tail.tail.tail.head
+}
+
+fn sphere_checksum(_ sphere: SphereStorage) -> f32 {
+    sphere.tail.tail.tail.head
+}
+
+pub fn direct_sparse_conformal_constructor() -> f32 {
+    let point = <DirectCl41 as ConformalModel>::point(1.0, 2.0, 3.0)
+    let sphere = <DirectCl41 as ConformalModel>::sphere(2.0, 4.0)
+    point_checksum(point) + sphere_checksum(sphere)
+}
+
+pub fn derived_sparse_conformal_constructor() -> f32 {
+    let point = <DerivedCl41 as ConformalModel>::point(1.0, 2.0, 3.0)
+    let sphere = <DerivedCl41 as ConformalModel>::sphere(2.0, 4.0)
+    point_checksum(point) + sphere_checksum(sphere)
+}
