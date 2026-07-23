@@ -47,6 +47,10 @@ self.addEventListener("message", async ({ data }) => {
     );
     port.postMessage({ type: "ready" });
   } catch (error) {
-    port.postMessage({ type: "init-error", error: String(error) });
+    // Keep the wire protocol stable and non-leaky. The owning realm gets the
+    // detailed diagnostic in its developer console; the actor boundary carries
+    // only the canonical failure code accepted by ModuleWorkerActor.
+    console.error("QCGA module worker initialization failed", error);
+    port.postMessage({ type: "init-error", error: "FE_ACTOR_WORKER_INIT" });
   }
 });

@@ -3,6 +3,21 @@ import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { createQcgaActor } from "./worker-client.js";
 
+const workerSource = await readFile(
+  new URL("./wasm-worker.js", import.meta.url),
+  "utf8",
+);
+assert.match(
+  workerSource,
+  /postMessage\(\{ type: "init-error", error: "FE_ACTOR_WORKER_INIT" \}\)/,
+  "the Worker readiness boundary must use the canonical non-leaky init failure",
+);
+assert.doesNotMatch(
+  workerSource,
+  /postMessage\(\{ type: "init-error", error: String\(error\) \}\)/,
+  "arbitrary Worker error strings must not become malformed protocol messages",
+);
+
 const wasm = new Uint8Array(await readFile(
   new URL("./gen/actor-canonical.wasm", import.meta.url),
 ));
