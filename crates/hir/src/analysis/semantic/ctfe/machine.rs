@@ -1838,6 +1838,9 @@ impl<'db> CtfeMachine<'db> {
             "__as_bytes" => self.eval_intrinsic_as_bytes(result_ty, args, origin),
             "__keccak256" => self.eval_intrinsic_keccak(result_ty, args, origin),
             "__bitcast" => self.eval_intrinsic_bitcast(result_ty, args, origin),
+            "__int_truncate" => {
+                self.eval_intrinsic_int_truncate(frame_idx, result_ty, args, origin)
+            }
             name => self.eval_numeric_extern_intrinsic(frame_idx, name, result_ty, args, origin),
         }
     }
@@ -2378,6 +2381,24 @@ impl<'db> CtfeMachine<'db> {
             _ => return Err(CtfeError::NotConstEvaluable { origin }),
         };
         Ok(CtfeConstValue::int(self.db, result_ty, value))
+    }
+
+    fn eval_intrinsic_int_truncate(
+        &self,
+        frame_idx: usize,
+        result_ty: TyId<'db>,
+        args: &[CtfeConstValue<'db>],
+        origin: SemOrigin<'db>,
+    ) -> Result<CtfeConstValue<'db>, CtfeError<'db>> {
+        let [value] = args else {
+            return Err(CtfeError::NotConstEvaluable { origin });
+        };
+        let Some((bits, _)) = int_ty_shape(self.db, result_ty) else {
+            return Err(CtfeError::NotConstEvaluable { origin });
+        };
+        let value = self.expect_int(frame_idx, value.clone(), origin)?;
+        let word = u256_from_bigint(&normalize_int_to_shape(value, bits, false));
+        Ok(CtfeConstValue::int_word(self.db, result_ty, word))
     }
 
     fn eval_intrinsic_size_of(
@@ -3907,6 +3928,31 @@ mod memo_tests {
             Ok(value) => format!("Ok({:?})", value.value(db)),
             Err(err) => error(err),
         }
+    }
+
+    #[test]
+    fn generic_integer_truncation_evaluates_during_ctfe() {
+        let (db, owner) = fixture(
+            r#"
+use core::num::IntDowncast
+
+const fn root() -> u8 {
+    let value: usize = 257
+    value.downcast_truncate()
+}
+"#,
+        );
+        let result = run(db, owner, CtfeConfig::default(), false)
+            .result
+            .expect("integer truncation must remain CTFE-evaluable");
+        let SemConstValue::Scalar {
+            value: SemConstScalar::Int { value },
+            ..
+        } = result.value(db)
+        else {
+            panic!("expected integer CTFE result")
+        };
+        assert_eq!(value, BigInt::one());
     }
 
     #[test]
