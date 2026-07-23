@@ -514,7 +514,9 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
             || func.modifiers(self.db).is_extern
             || !func.generic_params(self.db).data(self.db).is_empty()
             || !func.effects(self.db).data(self.db).is_empty()
-            || self.call_stack.len() == CALL_LIMIT
+            // The public helper itself is the first frame; this evaluator's
+            // stack records only nested calls.
+            || self.call_stack.len() + 1 >= CALL_LIMIT
             || self.call_stack.contains(&func)
         {
             return Err(BaseConstEvalError::Unsupported);
@@ -570,5 +572,128 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
         self.top_mod = old_top_mod;
         self.body = old_body;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BaseConstEvaluator, BaseConstValue, BaseUIntKind, eval_base_const_func};
+    use crate::{
+        core::{
+            hir_def::{Func, IntegerId, ItemKind},
+            lower::{base_scope_graph_impl, map_file_to_mod},
+        },
+        test_db::TestDb,
+    };
+
+    fn find_func<'db>(
+        db: &'db TestDb,
+        top_mod: crate::hir_def::TopLevelMod<'db>,
+        name: &str,
+    ) -> Func<'db> {
+        base_scope_graph_impl(db, top_mod)
+            .child_items(top_mod.scope())
+            .find_map(|item| match item {
+                ItemKind::Func(func)
+                    if func
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(db) == name) =>
+                {
+                    Some(func)
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn uint<'db>(db: &'db TestDb, value: usize, kind: BaseUIntKind) -> BaseConstValue<'db> {
+        BaseConstValue::UInt {
+            value: IntegerId::from_usize(db, value),
+            kind,
+        }
+    }
+
+    #[test]
+    fn callee_cannot_capture_caller_local() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(
+            "const fn callee() -> usize { x }\n\
+             const fn caller(_ x: usize) -> usize { callee() }\n",
+        );
+        let top_mod = map_file_to_mod(&db, file);
+        let caller = find_func(&db, top_mod, "caller");
+        assert!(
+            eval_base_const_func(&db, caller, vec![uint(&db, 7, BaseUIntKind::Usize)]).is_err()
+        );
+    }
+
+    #[test]
+    fn returned_u32_is_width_checked() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file("const fn overflow() -> u32 { 4294967296 }\n");
+        let top_mod = map_file_to_mod(&db, file);
+        let func = find_func(&db, top_mod, "overflow");
+        assert!(eval_base_const_func(&db, func, vec![]).is_err());
+    }
+
+    #[test]
+    fn evaluator_state_restores_after_return_mismatch() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(
+            "const fn bad() -> u32 { 4294967296 }\n\
+             const fn good() -> usize { 7 }\n",
+        );
+        let top_mod = map_file_to_mod(&db, file);
+        let bad = find_func(&db, top_mod, "bad");
+        let good = find_func(&db, top_mod, "good");
+        let mut evaluator = BaseConstEvaluator {
+            db: &db,
+            top_mod,
+            inherited_consts: &[],
+            body: None,
+            scopes: vec![Vec::new()],
+            steps: 0,
+            call_stack: Vec::new(),
+        };
+        assert!(evaluator.call(bad, vec![]).is_err());
+        assert_eq!(
+            evaluator.call(good, vec![]),
+            Ok(uint(&db, 7, BaseUIntKind::Usize))
+        );
+        assert!(evaluator.call_stack.is_empty());
+        assert_eq!(evaluator.scopes, vec![Vec::new()]);
+        assert_eq!(evaluator.top_mod, top_mod);
+        assert!(evaluator.body.is_none());
+    }
+
+    #[test]
+    fn unsigned_shift_boundaries_match_word_ctfe() {
+        let mut db = TestDb::default();
+        let source = "const fn u32_shift(_ n: u32) -> u32 { 2147483648 >> n }\n\
+                      const fn usize_shift(_ n: usize) -> usize { 1 << n }\n";
+        let file = db.standalone_file(source);
+        let top_mod = map_file_to_mod(&db, file);
+        let u32_shift = find_func(&db, top_mod, "u32_shift");
+        let usize_shift = find_func(&db, top_mod, "usize_shift");
+        assert_eq!(
+            eval_base_const_func(&db, u32_shift, vec![uint(&db, 31, BaseUIntKind::U32)]),
+            Ok(uint(&db, 1, BaseUIntKind::U32))
+        );
+        assert_eq!(
+            eval_base_const_func(&db, u32_shift, vec![uint(&db, 32, BaseUIntKind::U32)]),
+            Ok(uint(&db, 0, BaseUIntKind::U32))
+        );
+        let shifted_255 =
+            eval_base_const_func(&db, usize_shift, vec![uint(&db, 255, BaseUIntKind::Usize)])
+                .unwrap();
+        let BaseConstValue::UInt { value, .. } = shifted_255 else {
+            unreachable!()
+        };
+        assert_eq!(value.data(&db).bits(), 256);
+        assert_eq!(
+            eval_base_const_func(&db, usize_shift, vec![uint(&db, 256, BaseUIntKind::Usize)]),
+            Ok(uint(&db, 0, BaseUIntKind::Usize))
+        );
     }
 }

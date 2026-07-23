@@ -1390,7 +1390,11 @@ mod tests {
         core_providers, goal_matches_provider, is_core_derivable, resolve_base_item,
         resolve_trait_def,
     };
-    use crate::{hir_def::PathId, lower::map_file_to_mod, test_db::TestDb};
+    use crate::{
+        hir_def::{ItemKind, PathId},
+        lower::map_file_to_mod,
+        test_db::TestDb,
+    };
 
     #[test]
     fn base_item_resolver_handles_grouped_and_renamed_direct_imports() {
@@ -1423,6 +1427,15 @@ mod tests {
         let file = db.standalone_file("use core::ops::Eq;\nuse core::cmp::Eq;\n");
         let top_mod = map_file_to_mod(&db, file);
         assert!(resolve_base_item(&db, top_mod, PathId::from_str(&db, "Eq")).is_none());
+    }
+
+    #[test]
+    fn base_item_resolver_direct_local_shadows_import() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file("use core::ops::Eq;\nstruct Eq {}\n");
+        let top_mod = map_file_to_mod(&db, file);
+        let resolved = resolve_base_item(&db, top_mod, PathId::from_str(&db, "Eq")).unwrap();
+        assert!(matches!(resolved, ItemKind::Struct(_)));
     }
 
     /// The selection SSOT — [`resolve_trait_def`] — keys on the resolved

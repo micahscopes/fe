@@ -650,7 +650,8 @@ const fn canonical(_ x: usize) -> usize {
     let slot = (x / 4) % 5
     let blade = 1 << (slot + 1)
     let mixed = ((blade >> 1) & 7) ^ 3
-    mixed * 2 + (10 - mixed)
+    let wrapped = (1 << 256) | 3
+    mixed * 2 + (10 - mixed) + (wrapped - 3)
 }
 trait Compute { fn run(self) -> bool }
 struct Provider {}
@@ -703,12 +704,10 @@ fn provider_const_helper_arithmetic_edges_fail_closed() {
         ("underflow", "0 - 1"),
         ("division_by_zero", "1 / 0"),
         ("remainder_by_zero", "1 % 0"),
-        ("invalid_shift", "1 << 256"),
         (
             "overflow",
             "115792089237316195423570985008687907853269984665640564039457584007913129639935 + 1",
         ),
-        ("unsupported_bit_or", "1 | 2"),
     ] {
         let source = arithmetic_helper_source(expr);
         assert_provider_helper_rejected(&format!("provider_const_helper_{name}.fe"), &source);
