@@ -1,5 +1,5 @@
 {
-  "algebra": "canonical Fe helpers shared by a forced typed Schedule<32> witness and a bounded 80-candidate FCO provider that emits five direct lanes",
+  "algebra": "canonical Fe helpers shared by a forced typed Schedule<32> witness and a bounded 80-candidate FCO provider that emits five direct lanes with the canonical four-bucket balanced reduction",
   "artifact_separation": {
     "actor_wasm": "canonical WebBundle package; owns actor exports and arena",
     "frag_wasm": "entry-rooted kernel package; render export only; zero imports; no generated helper or actor exports"
@@ -263,7 +263,7 @@
     ]
   ],
   "distinct_colors": 11,
-  "fnv1a32": 921407292,
+  "fnv1a32": 3470936828,
   "fragment": "cga_schedule32_vec5_de_render",
   "height": 128,
   "hit_pixels": 3512,
@@ -274,14 +274,13 @@
   "inversion_center_runtime": true,
   "lower_pixels": 1585,
   "oracle_agreement": {
-    "exact_mismatches": 1,
-    "exact_pixels": 16383,
-    "max_abs_shade_bucket_delta": 1,
+    "exact_mismatches": 0,
+    "exact_pixels": 16384,
+    "max_abs_shade_bucket_delta": 0,
     "pixels": 16384,
-    "policy": "exact topology/material/palette and sky; hit shade may differ by at most one 24-level bucket under f32 reassociation",
+    "policy": "bit-exact 16384/16384 pixels against the independent Rust f32 oracle",
     "shade_bucket_delta_histogram": {
-      "-1": 1,
-      "0": 3511
+      "0": 3512
     }
   },
   "parameter_types": [
@@ -296,12 +295,12 @@
     "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
     "body_fnv1a32": 907246819,
     "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
-    "canonical_fnv1a32": 2663090092,
-    "composed_source_fnv1a32": 566961383,
+    "canonical_fnv1a32": 3731080488,
+    "composed_source_fnv1a32": 2429641275,
     "fe_dirty": true,
-    "fe_rev": "75cf337e066db3cc6f63e0068736941aa643f0d1",
-    "fe_status_fnv1a32": 2335517577,
-    "generated_unix_secs": 1784818200,
+    "fe_rev": "db157aac17fdabb617b31542afa263ca72480a88",
+    "fe_status_fnv1a32": 1849643891,
+    "generated_unix_secs": 1784819804,
     "sonatina_dirty": false,
     "sonatina_path": "/workspace/sonatina-eq-clean",
     "sonatina_rev": "ac266c210cad7872fc98380a73b4ca363877bc1f",
@@ -309,7 +308,7 @@
     "source": "canonical Fe helpers shared by forced typed Schedule<32> and bounded provider-emitted five-lane DE body"
   },
   "runtime": "wasmtime executing composed Fe Wasm; every pixel semantically checked against independent Rust f32 oracle",
-  "runtime_tuple_order": "canonical candidate scan order with lane-local accumulation",
+  "runtime_tuple_order": "canonical candidate scan order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
   "schedule_tuple_fields": [
     "left_blade",
     "point_blade",
