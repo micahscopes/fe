@@ -22,7 +22,16 @@ assert layout["vertex_entry"] == "vs_fullscreen"
 assert layout["fragment_entry"] == "fs_main"
 assert layout["color_target_format"] == "rgba8unorm"
 assert layout["builtin_inputs"] == 2
-assert layout["frag_wasm_export"] == "qcga3d_rotated_quadric_render"
+assert layout["frag_wasm_export"] == "qcga3d_sparse_planned_render"
+expected_params = [
+    "origin_x", "origin_y", "origin_z", "projection_norm_squared", "pixel_scale",
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+]
+assert [param["name"] for param in layout["params"]] == expected_params
+assert [param["arg_index"] for param in layout["params"]] == list(range(2, 17))
+assert [param["offset"] for param in layout["params"]] == list(range(0, 60, 4))
+assert all(param["width"] == 4 and param["scalar"] == "F32"
+           for param in layout["params"])
 assert layout["actor_wasm"] == "actor-canonical.wasm"
 assert layout["actor_interface"] == "actor-interface.js"
 assert layout["actor_lanes"] == ["render", "verify", "oracle"]
@@ -31,6 +40,13 @@ assert isinstance(reference["fnv1a32"], int)
 assert reference["distinct_colors"] > 8
 assert reference["provenance"] == layout["provenance"]
 assert layout["provenance"]["sonatina_rev"] == "ac266c210cad7872fc98380a73b4ca363877bc1f"
+kernel = (gen / "kernel.fe").read_text()
+wgsl = (gen / "frag.wgsl").read_text()
+assert "struct IncidencePlan" in kernel
+assert "impl QcgaIncidenceProvider" in kernel
+assert "qcga3d_sparse_planned_render" in kernel
+assert "loop {" not in wgsl
+assert "32768" not in wgsl
 kernel = (gen / "kernel.fe").read_text()
 assert "struct PointSupport" in kernel and "struct DualQuadricSupport" in kernel
 wgsl = (gen / "frag.wgsl").read_text()

@@ -35,6 +35,18 @@ const reference = JSON.parse(await readFile(
   new URL("./gen/reference.json", import.meta.url),
   "utf8",
 ));
+const layout = JSON.parse(await readFile(
+  new URL("./gen/layout.json", import.meta.url),
+  "utf8",
+));
+const defaults = {
+  origin_x: 0, origin_y: 0, origin_z: -4,
+  projection_norm_squared: 3.24, pixel_scale: 0.018,
+  a: 0.85, b: 1.25, c: 0.65, d: 0.55, e: -0.40,
+  f: 0.30, g: -0.16, h: 0.1375, i: -0.04, j: -0.979125,
+};
+const frame = (generation) => ({ ...defaults, generation });
+const expectedValues = layout.params.map(({ name }) => defaults[name]);
 const gpuBytes = new Uint8Array(128 * 128 * 4);
 gpuBytes.fill(19);
 let renderGeneration = null;
@@ -43,11 +55,14 @@ const actor = await createQcgaActor({
   wasm,
   width: 128,
   height: 128,
-  gpuRender: (_values, request) => {
+  params: layout.params,
+  gpuRender: (values, request) => {
+    assert.deepEqual(values, expectedValues);
     renderGeneration = request.generation;
     return { submitted: true };
   },
-  gpuVerify: (_values, request) => {
+  gpuVerify: (values, request) => {
+    assert.deepEqual(values, expectedValues);
     verifyGeneration = request.generation;
     return gpuBytes.slice();
   },
@@ -63,23 +78,23 @@ const fnv1a32 = (bytes) => {
 
 try {
   assert.equal(actor.epoch(), 0);
-  assert.deepEqual(await actor.render(3), { submitted: true });
+  assert.deepEqual(await actor.render(frame(3)), { submitted: true });
   assert.equal(renderGeneration, 3);
-  assert.deepEqual(await actor.gpu(4), gpuBytes);
+  assert.deepEqual(await actor.gpu(frame(4)), gpuBytes);
   assert.equal(verifyGeneration, 4);
 
   const started = performance.now();
-  const oracle = await actor.wasm(5);
+  const oracle = await actor.wasm(frame(5));
   const oracleMs = performance.now() - started;
   assert.equal(oracle.byteLength, 128 * 128 * 4);
   assert.equal(fnv1a32(oracle), reference.fnv1a32 >>> 0);
 
-  const interrupted = actor.wasm(6);
+  const interrupted = actor.wasm(frame(6));
   const restarted = actor.restart();
   await assert.rejects(interrupted, /restarting module worker/);
   assert.equal(await restarted, 1);
   assert.equal(actor.epoch(), 1);
-  assert.deepEqual(await actor.render(7), { submitted: true });
+  assert.deepEqual(await actor.render(frame(7)), { submitted: true });
   assert.equal(renderGeneration, 7);
   console.log(`QCGA generated canonical host/Wasm actors: ok (oracle ${oracleMs.toFixed(1)} ms)`);
 } finally {

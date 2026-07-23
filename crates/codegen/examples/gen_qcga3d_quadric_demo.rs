@@ -5,14 +5,17 @@ use std::{collections::HashSet, path::PathBuf, process::Command};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    BackendKind, OptLevel, WebBuildOptions, WebBundle, WebCanonicalPolicy,
-    compile_runtime_package_spirv_render, layout_for,
+    WasmCompileOptions, WebBuildOptions, WebBundle, WebCanonicalPolicy,
+    compile_runtime_package_spirv_render, compile_runtime_package_wasm_with_options,
 };
-use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role};
+use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvScalarKind};
 use url::Url;
 
-const SOURCE: &str = include_str!("../tests/fixtures/spirv/qcga3d_rotated_quadric_render.fe");
-const EXPORT: &str = "qcga3d_rotated_quadric_render";
+const PLANNER_SOURCE: &str =
+    include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
+const RENDER_SOURCE: &str =
+    include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_render_body.fe");
+const EXPORT: &str = "qcga3d_sparse_planned_render";
 const RENDER_LANE: &str = "render";
 const VERIFY_LANE: &str = "verify";
 const ORACLE_LANE: &str = "oracle";
@@ -25,25 +28,32 @@ use core::effect_ref::alloc_bytes
 use core::num::IntDowncast
 use std::webgpu::{Dispatch, WebGpuBackend}
 
-struct RenderRequest {
+struct FrameRequest {
     generation: u32,
+    origin_x: f32,
+    origin_y: f32,
+    origin_z: f32,
+    projection_norm_squared: f32,
+    pixel_scale: f32,
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+    g: f32,
+    h: f32,
+    i: f32,
+    j: f32,
 }
 
 struct RenderResponse {
     submitted: bool,
 }
 
-struct VerifyRequest {
-    generation: u32,
-}
-
-struct OracleRequest {
-    generation: u32,
-}
-
 // Nominal host-effect lane. The browser runtime deliberately dispatches this
 // schema to its WebGPU actor; this Fe body is never presented as GPU execution.
-pub fn render(_request: own RenderRequest) -> RenderResponse
+pub fn render(_request: own FrameRequest) -> RenderResponse
     uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
 {
     RenderResponse { submitted: false }
@@ -51,7 +61,7 @@ pub fn render(_request: own RenderRequest) -> RenderResponse
 
 // Nominal host-effect lane for explicit GPU readback. The generated schema is
 // authoritative, while the browser runtime supplies the actual WebGPU handler.
-pub fn verify(_request: own VerifyRequest) -> BrowserBytes
+pub fn verify(_request: own FrameRequest) -> BrowserBytes
     uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
 {
     BrowserBytes { ptr: 0, len: 0 }
@@ -62,7 +72,28 @@ fn append_byte(value: u32) {
     byte.write(value.downcast_truncate())
 }
 
-fn append_frame_tail(first_rgba: u32) {
+fn render_pixel(
+    px: i32, py: i32,
+    origin_x: f32, origin_y: f32, origin_z: f32,
+    projection_norm_squared: f32, pixel_scale: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> u32 {
+    qcga3d_sparse_planned_render(
+        px: px, py: py,
+        origin_x: origin_x, origin_y: origin_y, origin_z: origin_z,
+        projection_norm_squared: projection_norm_squared, pixel_scale: pixel_scale,
+        a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h, i: i, j: j,
+    )
+}
+
+fn append_frame_tail(
+    first_rgba: u32,
+    origin_x: f32, origin_y: f32, origin_z: f32,
+    projection_norm_squared: f32, pixel_scale: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) {
     append_byte(value: first_rgba >> 8)
     append_byte(value: first_rgba >> 16)
     append_byte(value: first_rgba >> 24)
@@ -71,7 +102,14 @@ fn append_frame_tail(first_rgba: u32) {
     let mut x: i32 = 1
     while y < 128 {
         while x < 128 {
-            let rgba = qcga3d_rotated_quadric_render(px: x, py: y)
+            let rgba = render_pixel(
+                px: x, py: y,
+                origin_x: origin_x, origin_y: origin_y, origin_z: origin_z,
+                projection_norm_squared: projection_norm_squared,
+                pixel_scale: pixel_scale,
+                a: a, b: b, c: c, d: d, e: e,
+                f: f, g: g, h: h, i: i, j: j,
+            )
             append_byte(value: rgba)
             append_byte(value: rgba >> 8)
             append_byte(value: rgba >> 16)
@@ -86,11 +124,25 @@ fn append_frame_tail(first_rgba: u32) {
 // Genuine one-call Fe/Wasm full-frame lane. Each allocation is byte-aligned and
 // consecutive in the canonical arena; the wrapper copies this borrowed region
 // into its owned response before the browser resets the arena.
-pub fn oracle(_request: own OracleRequest) -> AllocatedBrowserBytes {
-    let first_rgba = qcga3d_rotated_quadric_render(px: 0, py: 0)
+pub fn oracle(request: own FrameRequest) -> AllocatedBrowserBytes {
+    let first_rgba = render_pixel(
+        px: 0, py: 0,
+        origin_x: request.origin_x, origin_y: request.origin_y, origin_z: request.origin_z,
+        projection_norm_squared: request.projection_norm_squared,
+        pixel_scale: request.pixel_scale,
+        a: request.a, b: request.b, c: request.c, d: request.d, e: request.e,
+        f: request.f, g: request.g, h: request.h, i: request.i, j: request.j,
+    )
     let first = alloc_bytes(1)
     first.write(first_rgba.downcast_truncate())
-    append_frame_tail(first_rgba: first_rgba)
+    append_frame_tail(
+        first_rgba: first_rgba,
+        origin_x: request.origin_x, origin_y: request.origin_y, origin_z: request.origin_z,
+        projection_norm_squared: request.projection_norm_squared,
+        pixel_scale: request.pixel_scale,
+        a: request.a, b: request.b, c: request.c, d: request.d, e: request.e,
+        f: request.f, g: request.g, h: request.h, i: request.i, j: request.j,
+    )
     AllocatedBrowserBytes { ptr: first, len: 65536 }
 }
 "#;
@@ -108,11 +160,12 @@ fn main() {
     let repo = manifest.parent().unwrap().parent().unwrap();
     let out = repo.join("demos/webgpu-qcga3d-quadric/gen");
 
+    let source = format!("{PLANNER_SOURCE}\n{RENDER_SOURCE}");
     let mut raw_db = DriverDataBase::default();
-    let raw_url = Url::parse("file:///qcga3d_rotated_quadric_render.fe").unwrap();
+    let raw_url = Url::parse("file:///qcga3d_sparse_planned_render.fe").unwrap();
     raw_db
         .workspace()
-        .touch(&mut raw_db, raw_url.clone(), Some(SOURCE.to_owned()));
+        .touch(&mut raw_db, raw_url.clone(), Some(source.clone()));
     let raw_file = raw_db
         .workspace()
         .get(&raw_db, &raw_url)
@@ -133,17 +186,10 @@ fn main() {
     assert_eq!(artifact.layout.mode, LayoutMode::Render);
     assert_eq!(artifact.layout.builtin_inputs.len(), 2);
 
-    let wasm = BackendKind::Wasm
-        .create()
-        .compile(
-            &raw_db,
-            raw_top,
-            layout_for(BackendKind::Wasm),
-            OptLevel::O0,
-        )
-        .expect("QCGA Wasm compilation")
-        .into_bytecode()
-        .expect("Wasm bytecode");
+    let wasm =
+        compile_runtime_package_wasm_with_options(&raw_db, &package, WasmCompileOptions::default())
+            .expect("entry-rooted QCGA Wasm compilation")
+            .bytes;
     wasmparser::validate(&wasm).expect("valid Wasm");
     assert_zero_imports(&wasm);
     let frame = run_frame(&wasm);
@@ -151,7 +197,7 @@ fn main() {
     let distinct = frame.iter().copied().collect::<HashSet<_>>().len();
     assert!(distinct > 8, "QCGA reference must not be a flat frame");
 
-    let combined_source = format!("{SOURCE}\n{ACTOR_SOURCE}");
+    let combined_source = format!("{source}\n{ACTOR_SOURCE}");
     let mut canonical_db = DriverDataBase::default();
     let canonical_url = Url::parse("file:///qcga3d_actor.fe").unwrap();
     canonical_db.workspace().touch(
@@ -199,13 +245,59 @@ fn main() {
         "role": match b.role { Role::Input => "Input", Role::Output => "Output" },
         "span": b.span, "stride": b.stride,
     })).collect::<Vec<_>>();
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == Role::Input)
+        .expect("typed QCGA input buffer");
+    assert_eq!(
+        (input.span, input.stride, input.members.len()),
+        (60, 60, 15)
+    );
+    let param_names = [
+        "origin_x",
+        "origin_y",
+        "origin_z",
+        "projection_norm_squared",
+        "pixel_scale",
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        "g",
+        "h",
+        "i",
+        "j",
+    ];
+    let params = input
+        .members
+        .iter()
+        .zip(param_names)
+        .enumerate()
+        .map(|(index, (member, name))| {
+            assert_eq!(member.arg_index, index as u32 + 2);
+            assert_eq!(member.offset, index as u32 * 4);
+            assert_eq!(member.width, 4);
+            assert_eq!(member.scalar, SpirvScalarKind::F32);
+            serde_json::json!({
+                "name": name, "arg_index": member.arg_index, "offset": member.offset,
+                "width": member.width, "scalar": "F32",
+            })
+        })
+        .collect::<Vec<_>>();
     let fe_rev = git(repo.to_str().unwrap(), &["rev-parse", "HEAD"]);
     let provenance = serde_json::json!({
-        "fixture": "crates/codegen/tests/fixtures/spirv/qcga3d_rotated_quadric_render.fe",
+        "fixture": [
+            "crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe",
+            "crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_render_body.fe",
+        ],
         "fe_rev": fe_rev,
         "sonatina_rev": actual_sonatina,
         "generator": "gen_qcga3d_quadric_demo",
-        "source_fnv1a32": fnv1a32_bytes(SOURCE.as_bytes()),
+        "source_fnv1a32": fnv1a32_bytes(source.as_bytes()),
         "actor_source_fnv1a32": fnv1a32_bytes(ACTOR_SOURCE.as_bytes()),
     });
     let layout = serde_json::to_string_pretty(&serde_json::json!({
@@ -213,7 +305,7 @@ fn main() {
         "vertex_entry": artifact.layout.vertex_entry,
         "fragment_entry": artifact.layout.fragment_entry,
         "color_target_format": artifact.layout.color_target_format,
-        "width": WIDTH, "height": HEIGHT, "bindings": bindings,
+        "width": WIDTH, "height": HEIGHT, "bindings": bindings, "params": params,
         "builtin_inputs": artifact.layout.builtin_inputs.len(),
         "frag_wasm_export": EXPORT,
         "actor_wasm": "actor-canonical.wasm",
@@ -231,7 +323,7 @@ fn main() {
     .unwrap();
 
     std::fs::create_dir_all(&out).unwrap();
-    write(&out.join("kernel.fe"), SOURCE.as_bytes());
+    write(&out.join("kernel.fe"), source.as_bytes());
     write(&out.join("frag.wgsl"), wgsl.as_bytes());
     write(&out.join("frag.wasm"), &wasm);
     write(&out.join("actor-canonical.wasm"), &canonical_bundle.wasm);
@@ -269,13 +361,42 @@ fn run_frame(bytes: &[u8]) -> Vec<u32> {
     let module = wasmtime::Module::new(&engine, bytes).unwrap();
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    type Inputs = (
+        i32,
+        i32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+    );
     let render = instance
-        .get_typed_func::<(i32, i32), i32>(&mut store, EXPORT)
+        .get_typed_func::<Inputs, i32>(&mut store, EXPORT)
         .unwrap();
     let mut frame = Vec::with_capacity((WIDTH * HEIGHT) as usize);
     for y in 0..HEIGHT as i32 {
         for x in 0..WIDTH as i32 {
-            frame.push(render.call(&mut store, (x, y)).unwrap() as u32);
+            frame.push(
+                render
+                    .call(
+                        &mut store,
+                        (
+                            x, y, 0.0, 0.0, -4.0, 3.24, 0.018, 0.85, 1.25, 0.65, 0.55, -0.40, 0.30,
+                            -0.16, 0.1375, -0.04, -0.979125,
+                        ),
+                    )
+                    .unwrap() as u32,
+            );
         }
     }
     frame

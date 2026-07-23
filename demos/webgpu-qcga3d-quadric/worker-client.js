@@ -9,6 +9,7 @@ export async function createQcgaActor({
   wasm,
   width,
   height,
+  params,
   gpuRender,
   gpuVerify,
 }) {
@@ -25,8 +26,10 @@ export async function createQcgaActor({
       const channel = new MessageChannel();
       const broker = createTypedMainThreadGpuBroker(channel.port1, {
         handlers: {
-          render: (_payload, request) => gpuRender([], request),
-          verify: (_payload, request) => gpuVerify([], request),
+          render: (_payload, request) =>
+            gpuRender(params.map(({ name }) => request[name]), request),
+          verify: (_payload, request) =>
+            gpuVerify(params.map(({ name }) => request[name]), request),
         },
         ...gpuSchemas,
         initialEpoch: epoch,
@@ -38,22 +41,23 @@ export async function createQcgaActor({
       };
     },
   });
-  const request = async (lane, generation = 0) => {
+  const request = async (lane, payload) => {
+    const generation = payload.generation;
     const result = await actor.request(actorEnvelope({
       type: "request",
       lane,
       actorEpoch: actor.epoch(),
       generation,
       requestId: ++requestId,
-      payload: { generation },
+      payload,
     }));
     if (!result.payload.ok) throw new Error(result.payload.error);
     return result.payload.value;
   };
   return {
-    render: (generation = 0) => request("render", generation),
-    gpu: (generation = 0) => request("verify", generation),
-    wasm: (generation = 0) => request("oracle", generation),
+    render: (payload) => request("render", payload),
+    gpu: (payload) => request("verify", payload),
+    wasm: (payload) => request("oracle", payload),
     async restart() {
       requestId = 0;
       return actor.restart();

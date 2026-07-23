@@ -21,16 +21,16 @@ The generic adapter derives the unique placement shared by the supplied
 Worker-side proxy does not restate that placement, and mixed-placement handler
 sets fail closed.
 
-The canvas scales responsively; the pixel-edge toggle and loupe inspect the
-actual fixed kernel output. There are no pretend algebra controls because this
-first sparse QCGA kernel has no runtime quadric or camera parameters.
+The visible kernel is the sparse planner-backed renderer documented in
+`docs/mb2/QCGA_SPARSE_PLANNER.md`: Fe CTFE derives a recursive 12-term plan
+from two sparse 12-entry support lists, and one FCO provider publishes the
+aggregate contraction used at each hit. Camera and canonical quadric
+coefficients are typed runtime fields shared by the generated actor request,
+entry-rooted Wasm oracle, and WebGPU input layout.
 
-The next planner-backed kernel is proven but not promoted into this browser
-bundle yet. See `docs/mb2/QCGA_SPARSE_PLANNER.md`: Fe CTFE derives a recursive
-12-term plan from two sparse 12-entry support lists, an FCO provider publishes
-the aggregate contraction, and parameterized Wasm/WGSL preserves this frame
-bit-for-bit. Until the actor request and UI are regenerated, this page remains
-the fixed runtime-reuse showcase and must not be presented as general QCGA.
+The canvas scales responsively; the pixel-edge toggle and loupe inspect the
+actual output. This is a deliberately bounded rotated-quadric subalgebra
+showcase, not a claim of general QCGA or arbitrary multivector storage.
 
 Generate the five ignored assets from the reviewed local Sonatina commit and
 serve the common demos root:
