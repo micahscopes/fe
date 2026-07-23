@@ -31,10 +31,10 @@ use crate::{
         ty_def::MAX_INLINE_STRING_BYTES,
     },
     hir_def::{
-        BinOp, Body, CompBinOp, Cond, CondId, Expr, ExprId, Func, GenericArg, GenericArgListId,
-        IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp, MatchArm, Partial, Pat, PatId, PathId,
-        PathKind, QuoteBody, Stmt, StmtId, StringId, Trait, TraitRefId, TypeId, TypeKind,
-        scope_graph::ScopeId,
+        BinOp, Body, CompBinOp, Cond, CondId, ConstGenericArgValue, Expr, ExprId, Func, GenericArg,
+        GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp, MatchArm, Partial,
+        Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId, StringId, Trait, TraitRefId, TypeId,
+        TypeKind, scope_graph::ScopeId,
     },
     span::HirOrigin,
 };
@@ -44,6 +44,10 @@ const STEP_BUDGET: usize = 100_000;
 /// Maximum number of builder commands (and generated expression nodes) for
 /// one provider run.
 const COMMAND_BUDGET: usize = 10_000;
+/// Ground-type inspection is deliberately shallow and bounded. Recursive
+/// traversal remains subject to `STEP_BUDGET`; this cap prevents one unusually
+/// wide nominal application from allocating an unbounded provider sequence.
+const GROUND_TYPE_ARG_BUDGET: usize = 256;
 
 // === FROZEN command surface (TD5.0) ====================================
 //
@@ -324,6 +328,14 @@ pub(super) enum GenExpr<'db> {
         scrutinee: GenExprId,
         arms: Vec<(GenPatId, GenExprId)>,
     },
+    /// A hygienic expression block. Slots are executor-allocated identities,
+    /// not source identifiers, so quote locals cannot capture destination
+    /// parameters, arm binders, or locals introduced by another splice.
+    Block {
+        lets: Vec<(usize, GenExprId)>,
+        tail: GenExprId,
+    },
+    LocalRef(usize),
     /// A reference to the binder introduced for `field` by a
     /// [`GenPat::Variant`] pattern with the same `prefix`.
     VariantBinder {
@@ -584,6 +596,8 @@ enum Value<'db> {
     Variant(VariantHandle),
     /// A type witness (e.g. the result of `field.ty()`).
     Ty(TypeId<'db>),
+    /// One exact, source-level generic argument of a ground nominal type.
+    GroundArg(GroundArg<'db>),
     /// A generated type (e.g. the result of `str_ty` / `tuple_ty`).
     GenTy(GenTyId),
     /// A generated expression.
@@ -610,6 +624,16 @@ enum Value<'db> {
     /// other sequence value; the executor no longer special-cases the iterable
     /// *expression*.
     Seq(Vec<Value<'db>>),
+}
+
+/// Domain-neutral view of a nominal type argument. It intentionally contains
+/// only forms whose identity is exact at expansion time: a present type or a
+/// literal natural const. Holes, associated bindings, and computed const
+/// bodies do not produce this handle (inspection fails closed).
+#[derive(Debug, Clone, Copy)]
+enum GroundArg<'db> {
+    Ty(TypeId<'db>),
+    Const(IntegerId<'db>),
 }
 
 /// A typed read-only compile-time handle over the derive target's reflection
@@ -964,6 +988,8 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     finished: bool,
 
     steps: usize,
+    quote_local_scopes: Vec<Vec<(IdentId<'db>, usize)>>,
+    next_quote_local: usize,
     /// Lazily resolved syntax root of the provider's file, for error spans.
     root: Option<parser::SyntaxNode>,
     fallback_range: TextRange,
@@ -1010,6 +1036,8 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             emitted_assocs: Vec::new(),
             finished: false,
             steps: 0,
+            quote_local_scopes: Vec::new(),
+            next_quote_local: 0,
             root: None,
             fallback_range,
         };
@@ -1595,29 +1623,57 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         let Partial::Present(Expr::Block(stmts)) = block.data(self.db, self.body) else {
             return Err(self.invalid_quote(template.origin, "malformed quote body"));
         };
-        let root = match stmts.as_slice() {
-            [stmt] => match stmt.data(self.db, self.body) {
-                Partial::Present(Stmt::Expr(root)) => *root,
-                _ => {
-                    return Err(self.invalid_quote(
-                        template.origin,
-                        "quote bodies must be a single expression",
-                    ));
-                }
-            },
-            [] => {
+        let (let_stmts, root_stmt) = match stmts.split_last() {
+            Some((root, lets)) => (lets, root),
+            None => {
                 return Err(self.invalid_quote(
                     template.origin,
                     "the quote is empty; an empty quote only splices in match-arm position",
                 ));
             }
-            _ => {
-                return Err(
-                    self.invalid_quote(template.origin, "quote bodies must be a single expression")
-                );
-            }
         };
-        self.elab_template_expr(root, template, sig, binders)
+        let Partial::Present(Stmt::Expr(root)) = root_stmt.data(self.db, self.body) else {
+            return Err(
+                self.invalid_quote(template.origin, "quote blocks must end with an expression")
+            );
+        };
+        self.quote_local_scopes.push(Vec::new());
+        let result = (|| {
+            let mut lets = Vec::with_capacity(let_stmts.len());
+            for stmt in let_stmts {
+                let Partial::Present(Stmt::Let(pat, None, Some(init))) =
+                    stmt.data(self.db, self.body)
+                else {
+                    return Err(self.invalid_quote(
+                        template.origin,
+                        "quote blocks support only untyped initialized `let name = expr` \
+                         statements before the final expression",
+                    ));
+                };
+                let Some(name) = self.simple_pat_binding(*pat) else {
+                    return Err(self.invalid_quote(
+                        template.origin,
+                        "quote-local `let` patterns must be single identifiers",
+                    ));
+                };
+                let init = self.elab_template_expr(*init, template, sig, binders)?;
+                let slot = self.next_quote_local;
+                self.next_quote_local += 1;
+                self.quote_local_scopes
+                    .last_mut()
+                    .expect("quote-local scope exists")
+                    .push((name, slot));
+                lets.push((slot, init));
+            }
+            let tail = self.elab_template_expr(*root, template, sig, binders)?;
+            if lets.is_empty() {
+                Ok(tail)
+            } else {
+                Ok(self.push_gen(GenExpr::Block { lets, tail }))
+            }
+        })();
+        self.quote_local_scopes.pop();
+        result
     }
 
     /// Elaborates a [`QuoteBody::Method`] quote into the canonical method
@@ -1951,7 +2007,17 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Expr::QuoteHole(_) => {
                 let value = self.quote_hole_value(expr, template)?;
                 match value {
-                    Value::Quote(inner) => self.elaborate_quote(inner, sig, binders),
+                    Value::Quote(inner) => {
+                        let generated = self.elaborate_quote(inner, sig, binders)?;
+                        if matches!(self.exprs[generated.0], GenExpr::Block { .. }) {
+                            return Err(self.invalid_quote(
+                                expr,
+                                "a quote containing local `let` bindings can only be used as \
+                                 the whole emitted method body, not nested in an expression",
+                            ));
+                        }
+                        Ok(generated)
+                    }
                     Value::Bool(value) => Ok(self.push_gen(GenExpr::Bool(value))),
                     Value::Str(value) => {
                         self.check_inline_capacity(expr, value)?;
@@ -2174,6 +2240,15 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
         sig: SigId,
         binders: &[BinderGroup<'db>],
     ) -> Result<GenExprId, ExecError> {
+        if let Some(slot) = self
+            .quote_local_scopes
+            .iter()
+            .rev()
+            .flat_map(|scope| scope.iter().rev())
+            .find_map(|(bound, slot)| (*bound == name).then_some(*slot))
+        {
+            return Ok(self.push_gen(GenExpr::LocalRef(slot)));
+        }
         let sig_data = &self.sigs[sig.0];
         let method_name = sig_data.name;
         let takes_self = sig_data.takes_self;
@@ -2386,6 +2461,42 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 }
                 Err(self.unsupported_expr(expr))
             }
+            Value::Ty(ty) => {
+                if !args.is_empty() {
+                    return Err(self.unsupported_expr(expr));
+                }
+                match method_name.as_str() {
+                    "constructor" => self
+                        .ground_nominal_parts(ty)
+                        .map(|(constructor, _)| Value::Ty(constructor))
+                        .ok_or_else(|| self.unsupported_expr(expr)),
+                    "generic_args" => self
+                        .ground_nominal_parts(ty)
+                        .map(|(_, args)| {
+                            Value::Seq(args.into_iter().map(Value::GroundArg).collect())
+                        })
+                        .ok_or_else(|| self.unsupported_expr(expr)),
+                    "preorder_types" => self
+                        .ground_type_preorder(ty)
+                        .map(|types| Value::Seq(types.into_iter().map(Value::Ty).collect()))
+                        .ok_or_else(|| self.unsupported_expr(expr)),
+                    _ => Err(self.unsupported_expr(expr)),
+                }
+            }
+            Value::GroundArg(arg) => {
+                if !args.is_empty() {
+                    return Err(self.unsupported_expr(expr));
+                }
+                match (method_name.as_str(), arg) {
+                    ("is_type", GroundArg::Ty(_)) => Ok(Value::Bool(true)),
+                    ("is_type", GroundArg::Const(_)) => Ok(Value::Bool(false)),
+                    ("is_const", GroundArg::Ty(_)) => Ok(Value::Bool(false)),
+                    ("is_const", GroundArg::Const(_)) => Ok(Value::Bool(true)),
+                    ("ty", GroundArg::Ty(ty)) => Ok(Value::Ty(ty)),
+                    ("const_value", GroundArg::Const(value)) => Ok(Value::Int(value)),
+                    _ => Err(self.unsupported_expr(expr)),
+                }
+            }
             // A compile-time sequence (a reflection iterable like
             // `reflect.variants()`) answers `.len()` with its element count as
             // a `Value::Int`, the integer source for steering's pure
@@ -2399,6 +2510,80 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             },
             _ => Err(self.unsupported_expr(expr)),
         }
+    }
+
+    /// Splits a source-level ground nominal application into its exact
+    /// constructor witness and ordered generic arguments.
+    ///
+    /// This is intentionally syntactic identity, matching `builder.same_ty`:
+    /// it neither resolves aliases nor evaluates arbitrary const expressions.
+    /// Every path segment must be an identifier, namespace segments may not
+    /// carry arguments, and every final-segment argument must be a present type
+    /// or a literal natural const. Any other shape returns `None`.
+    fn ground_nominal_parts(&self, ty: TypeId<'db>) -> Option<(TypeId<'db>, Vec<GroundArg<'db>>)> {
+        let TypeKind::Path(Partial::Present(path)) = ty.data(self.db) else {
+            return None;
+        };
+        for idx in 0..path.segment_index(self.db) {
+            let segment = path.segment(self.db, idx)?;
+            let PathKind::Ident { generic_args, .. } = segment.kind(self.db) else {
+                return None;
+            };
+            if !generic_args.is_empty(self.db) {
+                return None;
+            }
+        }
+        let PathKind::Ident { generic_args, .. } = path.kind(self.db) else {
+            return None;
+        };
+        let raw_args = generic_args.data(self.db);
+        if raw_args.len() > GROUND_TYPE_ARG_BUDGET {
+            return None;
+        }
+        let mut args = Vec::with_capacity(raw_args.len());
+        for arg in raw_args {
+            args.push(match arg {
+                GenericArg::Type(arg) => GroundArg::Ty(arg.ty.to_opt()?),
+                GenericArg::Const(arg) => {
+                    let ConstGenericArgValue::Expr(Partial::Present(body)) = arg.value else {
+                        return None;
+                    };
+                    let Partial::Present(Expr::Lit(LitKind::Int(value))) =
+                        body.expr(self.db).data(self.db, body)
+                    else {
+                        return None;
+                    };
+                    GroundArg::Const(*value)
+                }
+                GenericArg::AssocType(_) => return None,
+            });
+        }
+        let constructor = TypeId::new(
+            self.db,
+            TypeKind::Path(Partial::Present(path.strip_generic_args(self.db))),
+        );
+        Some((constructor, args))
+    }
+
+    /// Bounded preorder traversal of type-valued edges in a ground nominal
+    /// tree. It gives ordinary provider `for` loops finite recursive reach
+    /// without admitting executor recursion or `while`.
+    fn ground_type_preorder(&self, root: TypeId<'db>) -> Option<Vec<TypeId<'db>>> {
+        let mut pending = vec![root];
+        let mut out = Vec::new();
+        while let Some(ty) = pending.pop() {
+            if out.len() == GROUND_TYPE_ARG_BUDGET {
+                return None;
+            }
+            let (_, args) = self.ground_nominal_parts(ty)?;
+            out.push(ty);
+            for arg in args.into_iter().rev() {
+                if let GroundArg::Ty(child) = arg {
+                    pending.push(child);
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Builds the ordinary sequence value produced by a `reflect.*` iterable
@@ -3378,6 +3563,7 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Int(_) => "compile-time integer",
         Value::Field(_) => "`Field` handle",
         Value::Variant(_) => "`Variant` handle",
+        Value::GroundArg(_) => "ground generic argument",
         Value::Ty(_) | Value::GenTy(_) => "type value",
         Value::Expr(_) => "generated expression",
         Value::Pat(_) => "generated pattern",

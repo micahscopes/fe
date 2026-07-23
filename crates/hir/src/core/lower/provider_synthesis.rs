@@ -481,6 +481,16 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                     .collect();
                 body.match_expr(scrutinee, arms)
             }
+            GenExpr::Block { lets, tail } => {
+                for (slot, init) in lets {
+                    let init = self.replay_expr(body, *init);
+                    let name = local_slot_ident(db, *slot);
+                    let pat = body.bind_pat(name);
+                    body.emit_stmt(crate::hir_def::Stmt::Let(pat, None, Some(init)));
+                }
+                self.replay_expr(body, *tail)
+            }
+            GenExpr::LocalRef(slot) => body.ident_expr(local_slot_ident(db, *slot)),
             GenExpr::VariantBinder {
                 variant,
                 field,
@@ -665,4 +675,8 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
         };
         IdentId::new(db, format!("{}_{}", prefix.data(db), suffix))
     }
+}
+
+fn local_slot_ident<'db>(db: &'db dyn HirDb, slot: usize) -> IdentId<'db> {
+    IdentId::new(db, format!("__fco_quote_local_{slot}"))
 }

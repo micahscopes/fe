@@ -1,0 +1,64 @@
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Mark {
+    type Out
+}
+
+struct Leaf {}
+struct Node<T, const N: usize> {}
+struct Yes {}
+struct No {}
+struct Inspector {}
+
+impl Derive<Mark> for Inspector {
+    const fn derive<T>(ev: own Evidence<Mark<T>>) -> Evidence<Mark<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Mark<T>>,
+        )
+    {
+        let answer = builder.ty<No>()
+        for field in reflect.fields() {
+            let ty = field.ty()
+            if builder.same_ty(ty.constructor(), builder.ty<Node>()) {
+                let saw_type = false
+                let saw_three = false
+                let saw_leaf_preorder = false
+                for arg in ty.generic_args() {
+                    if arg.is_type() {
+                        if builder.same_ty(arg.ty(), builder.ty<Leaf>()) {
+                            saw_type = true
+                        }
+                    }
+                    if arg.is_const() {
+                        if arg.const_value() == 3 {
+                            saw_three = true
+                        }
+                    }
+                }
+                for nested in ty.preorder_types() {
+                    if builder.same_ty(nested.constructor(), builder.ty<Leaf>()) {
+                        saw_leaf_preorder = true
+                    }
+                }
+                if saw_type && saw_three && saw_leaf_preorder {
+                    answer = builder.ty<Yes>()
+                }
+            }
+        }
+        builder.emit_assoc_ty("Out", answer)
+        builder.finish()
+        ev
+    }
+}
+
+struct Target {
+    item: Node<Leaf, 3>
+}
+
+derive Mark for Target using Inspector
+
+fn takes_yes(_ value: Yes) {}
+fn proof(value: <Target as Mark>::Out) {
+    takes_yes(value)
+}
