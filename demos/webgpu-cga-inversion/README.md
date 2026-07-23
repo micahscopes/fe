@@ -118,9 +118,11 @@ exception text. GPU lane routing remains explicit so device ownership is
 inspectable rather than hidden in framework configuration: Fe effect
 requirements select the main-thread WebGPU lanes and generated validators,
 while the application supplies only the visible `render` and `verify` device
-handlers. Inside the Worker, the same generated intent partitions lanes between
-the Wasm adapter, worker-local oracle effect, and main-thread GPU client; the
-application supplies those three concrete dispatchers but no lane lists.
+handlers. Inside the Worker, the same generated intent partitions the lanes
+between the genuine Wasm oracle and the main-thread GPU client. A single
+`oracle` request executes the complete 128x128 Schedule32 frame in Wasm and
+returns Fe-allocated owned bytes; there is no JavaScript per-pixel loop. The
+application supplies the two concrete dispatchers but no lane lists.
 The complete canonical actor is emitted as an intact `actor/` WebBundle v4:
 its manifest paths name the exact Wasm, shader, interfaces, and runtime modules
 loaded by the browser. The runtime manifest pins

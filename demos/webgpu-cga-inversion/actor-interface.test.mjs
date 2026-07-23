@@ -11,7 +11,7 @@ import { selectCanonicalMainThreadGpuSchemas } from "./gen-schedule32/actor/runt
 
 assert.equal(canonicalInterfaceManifest.version, 2);
 assert.deepEqual(Object.keys(compiledCanonicalInterface.lanes), [
-  "render", "verify", "oracle", "oracle_pixel",
+  "render", "verify", "oracle",
 ]);
 assert.deepEqual(
   Object.fromEntries(Object.entries(compiledCanonicalInterface.lanes).map(
@@ -20,8 +20,7 @@ assert.deepEqual(
   {
     render: ["host_effect", "main_thread"],
     verify: ["host_effect", "main_thread"],
-    oracle: ["host_effect", "worker"],
-    oracle_pixel: ["wasm", "any"],
+    oracle: ["wasm", "any"],
   },
 );
 
@@ -49,42 +48,27 @@ assert.throws(
 
 const router = createExactLaneRouter(compiledCanonicalInterface.lanes, {
   gpu_main_thread: { lanes: ["render", "verify"], dispatch: () => null },
-  worker_host: { lanes: ["oracle"], dispatch: () => null },
-  wasm: { lanes: ["oracle_pixel"], dispatch: () => null },
+  wasm: { lanes: ["oracle"], dispatch: () => null },
 });
 assert.equal(router.ownerOf("render"), "gpu_main_thread");
-assert.equal(router.ownerOf("oracle"), "worker_host");
-assert.equal(router.ownerOf("oracle_pixel"), "wasm");
+assert.equal(router.ownerOf("oracle"), "wasm");
 
 const actorBytes = await readFile(new URL(
   "./gen-schedule32/actor/module.wasm",
   import.meta.url,
 ));
-const fragBytes = await readFile(new URL("./gen-schedule32/frag.wasm", import.meta.url));
-const [{ instance: actor }, { instance: frag }] = await Promise.all([
-  WebAssembly.instantiate(actorBytes),
-  WebAssembly.instantiate(fragBytes),
-]);
+const reference = JSON.parse(await readFile(
+  new URL("./gen-schedule32/reference.json", import.meta.url),
+  "utf8",
+));
+const { instance: actor } = await WebAssembly.instantiate(actorBytes);
 const caller = createInterfaceCaller(actor.exports);
-const pixel = {
-  x: 64,
-  y: 64,
-  cam_x: frame.cam_x,
-  cam_y: frame.cam_y,
-  zoom: frame.zoom,
-  inv_cx: frame.inv_cx,
-  inv_cy: frame.inv_cy,
-};
-const canonical = await caller.call("oracle_pixel", pixel);
-const raw = frag.exports.cga_schedule32_vec5_de_render(
-  pixel.x,
-  pixel.y,
-  pixel.cam_x,
-  pixel.cam_y,
-  pixel.zoom,
-  pixel.inv_cx,
-  pixel.inv_cy,
-);
-assert.equal(canonical.rgba >>> 0, raw >>> 0);
+const canonical = await caller.call("oracle", frame);
+assert.equal(canonical.byteLength, 128 * 128 * 4);
+let hash = 0x811c9dc5;
+for (const byte of canonical) {
+  hash = Math.imul((hash ^ byte) >>> 0, 0x01000193) >>> 0;
+}
+assert.equal(hash >>> 0, reference.fnv1a32 >>> 0);
 
-console.log("Schedule32 generated actor interface and Wasm oracle pixel: ok");
+console.log("Schedule32 generated actor interface and one-call Wasm frame: ok");

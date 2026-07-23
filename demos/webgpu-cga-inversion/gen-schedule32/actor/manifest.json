@@ -4,19 +4,19 @@
   "source_entry": "cga_schedule32_vec5_de_render",
   "artifacts": {
     "wasm": "module.wasm",
-    "wasm_bytes": 46806,
+    "wasm_bytes": 47319,
     "wgsl": "shader.wgsl",
     "wgsl_bytes": 6281,
     "canonical_adapters": [
       {
         "path": "interface.js",
-        "bytes": 30090,
-        "sha256": "1135d38ac993dd1099c64c5378864cb5ddf6c332cf0d4e95dbb22f995e7dd10a"
+        "bytes": 29288,
+        "sha256": "0651b5cb3ec35b3f10b258223bb5551c7382072151c6724447f1252dd89a9764"
       },
       {
         "path": "interface.d.ts",
-        "bytes": 3073,
-        "sha256": "f0b50f56b77aa3daa7c284d7508b80ea1e497a51de38165f16d0d06286bd4b64"
+        "bytes": 2562,
+        "sha256": "b2eb1964c8c9e35af95bb8f3f2223ea3a159db119c22be2a78ca562408099e9c"
       }
     ]
   },
@@ -281,7 +281,7 @@
       },
       {
         "name": "oracle",
-        "export": null,
+        "export": "fe_cabi_oracle",
         "request": {
           "size": 24,
           "align": 4,
@@ -349,101 +349,6 @@
           "kind": "bytes",
           "pointer_offset": 0,
           "length_offset": 4
-        },
-        "intent": {
-          "execution": "host_effect",
-          "placement": "worker",
-          "capabilities": []
-        }
-      },
-      {
-        "name": "oracle_pixel",
-        "export": "fe_cabi_oracle_pixel",
-        "request": {
-          "size": 28,
-          "align": 4,
-          "kind": "record",
-          "fields": [
-            {
-              "name": "x",
-              "offset": 0,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "i32"
-              }
-            },
-            {
-              "name": "y",
-              "offset": 4,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "i32"
-              }
-            },
-            {
-              "name": "cam_x",
-              "offset": 8,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "f32"
-              }
-            },
-            {
-              "name": "cam_y",
-              "offset": 12,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "f32"
-              }
-            },
-            {
-              "name": "zoom",
-              "offset": 16,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "f32"
-              }
-            },
-            {
-              "name": "inv_cx",
-              "offset": 20,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "f32"
-              }
-            },
-            {
-              "name": "inv_cy",
-              "offset": 24,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "f32"
-              }
-            }
-          ]
-        },
-        "response": {
-          "size": 4,
-          "align": 4,
-          "kind": "record",
-          "fields": [
-            {
-              "name": "rgba",
-              "offset": 0,
-              "layout": {
-                "size": 4,
-                "align": 4,
-                "kind": "u32"
-              }
-            }
-          ]
         },
         "intent": {
           "execution": "wasm",

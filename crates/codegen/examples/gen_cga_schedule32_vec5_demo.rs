@@ -35,9 +35,10 @@ const INV_CY: f32 = 0.0;
 const RENDER_LANE: &str = "render";
 const VERIFY_LANE: &str = "verify";
 const ORACLE_LANE: &str = "oracle";
-const ORACLE_PIXEL_LANE: &str = "oracle_pixel";
 const ACTOR_SOURCE: &str = r#"
-use core::{BrowserBytes, HostEffect, MainThread, Worker}
+use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
+use core::effect_ref::alloc_bytes
+use core::num::IntDowncast
 use std::webgpu::{Dispatch, WebGpuBackend}
 
 struct FrameRequest {
@@ -53,20 +54,6 @@ struct Submitted {
     submitted: bool,
 }
 
-struct OraclePixelRequest {
-    x: i32,
-    y: i32,
-    cam_x: f32,
-    cam_y: f32,
-    zoom: f32,
-    inv_cx: f32,
-    inv_cy: f32,
-}
-
-struct OraclePixelResponse {
-    rgba: u32,
-}
-
 pub fn render(_request: own FrameRequest) -> Submitted
     uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
 {
@@ -79,24 +66,68 @@ pub fn verify(_request: own FrameRequest) -> BrowserBytes
     BrowserBytes { ptr: 0, len: 0 }
 }
 
-pub fn oracle(_request: own FrameRequest) -> BrowserBytes
-    uses (HostEffect, Worker)
-{
-    BrowserBytes { ptr: 0, len: 0 }
+fn append_byte(value: u32) {
+    let byte = alloc_bytes(1)
+    byte.write(value.downcast_truncate())
 }
 
-pub fn oracle_pixel(request: own OraclePixelRequest) -> OraclePixelResponse {
-    OraclePixelResponse {
-        rgba: cga_schedule32_vec5_de_render(
-            px: request.x,
-            py: request.y,
-            cam_x: request.cam_x,
-            cam_y: request.cam_y,
-            zoom: request.zoom,
-            inv_cx: request.inv_cx,
-            inv_cy: request.inv_cy,
-        ),
+fn append_frame_tail(
+    first_rgba: u32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+    inv_cx: f32,
+    inv_cy: f32,
+) {
+    append_byte(value: first_rgba >> 8)
+    append_byte(value: first_rgba >> 16)
+    append_byte(value: first_rgba >> 24)
+
+    let mut y: i32 = 0
+    let mut x: i32 = 1
+    while y < 128 {
+        while x < 128 {
+            let rgba = cga_schedule32_vec5_de_render(
+                px: x,
+                py: y,
+                cam_x: cam_x,
+                cam_y: cam_y,
+                zoom: zoom,
+                inv_cx: inv_cx,
+                inv_cy: inv_cy,
+            )
+            append_byte(value: rgba)
+            append_byte(value: rgba >> 8)
+            append_byte(value: rgba >> 16)
+            append_byte(value: rgba >> 24)
+            x = x + 1
+        }
+        y = y + 1
+        x = 0
     }
+}
+
+pub fn oracle(request: own FrameRequest) -> AllocatedBrowserBytes {
+    let first_rgba = cga_schedule32_vec5_de_render(
+        px: 0,
+        py: 0,
+        cam_x: request.cam_x,
+        cam_y: request.cam_y,
+        zoom: request.zoom,
+        inv_cx: request.inv_cx,
+        inv_cy: request.inv_cy,
+    )
+    let first = alloc_bytes(1)
+    first.write(first_rgba.downcast_truncate())
+    append_frame_tail(
+        first_rgba: first_rgba,
+        cam_x: request.cam_x,
+        cam_y: request.cam_y,
+        zoom: request.zoom,
+        inv_cx: request.inv_cx,
+        inv_cy: request.inv_cy,
+    )
+    AllocatedBrowserBytes { ptr: first, len: 65536 }
 }
 "#;
 
@@ -189,7 +220,7 @@ fn main() {
         "Schedule32 canonical actor source has diagnostics:\n{actor_diagnostics}"
     );
     let actor_declarations =
-        [RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE].map(|lane| {
+        [RENDER_LANE, VERIFY_LANE, ORACLE_LANE].map(|lane| {
             canonical_lane_decl_from_entry(&actor_db, actor_top, lane, lane)
                 .unwrap_or_else(|error| panic!("derive Schedule32 `{lane}` lane: {error}"))
         });
@@ -206,20 +237,10 @@ fn main() {
         );
         assert!(declaration.intent.capabilities[0].mutable);
     }
-    assert_eq!(
-        actor_declarations[2].intent.execution,
-        CanonicalExecution::HostEffect
-    );
-    assert_eq!(
-        actor_declarations[2].intent.placement,
-        CanonicalPlacement::Worker
-    );
+    assert_eq!(actor_declarations[2].intent.execution, CanonicalExecution::Wasm);
+    assert_eq!(actor_declarations[2].intent.placement, CanonicalPlacement::Any);
     assert!(actor_declarations[2].intent.capabilities.is_empty());
-    assert_eq!(
-        actor_declarations[3].intent.execution,
-        CanonicalExecution::Wasm
-    );
-    assert!(actor_declarations[3].export.is_some());
+    assert!(actor_declarations[2].export.is_some());
     CanonicalInterfaceManifest::build(actor_declarations.to_vec())
         .expect("Schedule32 compiler-derived canonical manifest");
     if std::env::var_os("FE_CGA_SCHEDULE32_HIR_ONLY").is_some() {
@@ -401,7 +422,7 @@ fn main() {
         &actor_db,
         actor_top,
         WebBuildOptions::render(NAME, Some("cga_schedule32_actor.fe".to_owned()))
-            .with_canonical_entries([RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE])
+            .with_canonical_entries([RENDER_LANE, VERIFY_LANE, ORACLE_LANE])
             .with_canonical_policy(WebCanonicalPolicy::Required),
     )
     .expect("Schedule32 canonical actor WebBundle");
@@ -472,7 +493,7 @@ fn main() {
         "actor_bundle": "actor/manifest.json",
         "actor_wasm": "actor/module.wasm",
         "actor_interface": "actor/interface.js",
-        "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE],
+        "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE],
         "width": WIDTH, "height": HEIGHT, "provenance": provenance.clone(),
     }))
     .unwrap();

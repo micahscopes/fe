@@ -4,8 +4,7 @@
   "actor_lanes": [
     "render",
     "verify",
-    "oracle",
-    "oracle_pixel"
+    "oracle"
   ],
   "actor_wasm": "actor/module.wasm",
   "bindings": [
@@ -84,12 +83,12 @@
     "canonical_fnv1a32": 2590505657,
     "composed_source_fnv1a32": 3914491914,
     "fe_dirty": true,
-    "fe_rev": "212e7c88f515c94400575de5b64911ac60b60715",
-    "fe_status_fnv1a32": 2335517577,
-    "generated_unix_secs": 1784798040,
+    "fe_rev": "df38a7c6e334f1ee4471da979e18386cd5e4294b",
+    "fe_status_fnv1a32": 2799770702,
+    "generated_unix_secs": 1784814189,
     "sonatina_dirty": false,
     "sonatina_path": "/workspace/sonatina-eq-clean",
-    "sonatina_rev": "b2601adc8b80b085aae98f9132a035fdfecec5c3",
+    "sonatina_rev": "547519d46f9b6191881943fefb7cddd1880e77cf",
     "sonatina_status_fnv1a32": 2166136261,
     "source": "canonical Fe CTFE Schedule<32> composed with isolated Vec5 DE body"
   },
