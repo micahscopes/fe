@@ -17,6 +17,25 @@ ordinary constructors. `DirectCl41` implements that façade normally;
 `DerivedCl41` receives the same associated representations and methods from an
 FCO provider. The Wasm test executes both paths and compares their checksums.
 
+The flagship direct-lane renderer now applies the same lesson without retaining
+the recursive `Cell` representation at runtime. `ConformalPoint` and
+`ConformalSphere` records expose only their statically known compact supports;
+their field-labelled literals own coefficient ordering at the construction
+site. The five provider-derived lanes are collected immediately into one
+`ConformalVector`, so the rest of the distance estimator consumes a semantic
+vector rather than five unrelated scalar locals.
+
+This façade is deliberately syntax-free and non-magical. The bounded FCO
+provider still derives the five direct arithmetic lanes from the canonical
+80-candidate support scan. The records only prevent callers from ordering raw
+coefficients incorrectly. They deliberately use literals rather than helper
+functions: Fe's current Wasm O0 path does not erase `#[inline(always)]` facade
+calls. `fco_cga_sparse_facade` pins the resulting browser WGSL to the
+pre-façade arithmetic signature (79 multiplications, 82 additions, 13
+subtractions, 4 divisions, 3 square roots, and only the vertex/fragment entry
+functions), and separately pins the Wasm module to its original six defined
+functions.
+
 This is useful, but it is not automatic conformal-algebra derivation. The
 provider emits calls to the handwritten semantic constructors. Reflection can
 enumerate fields and variants; it cannot discover that the last two point
@@ -100,3 +119,9 @@ cargo test -p fe-codegen --test schedule32_strategy_measure -- \
 
 Both experiments are fixed at small finite sizes (`Storage<5>`, `Storage<4>`,
 and `Schedule<32>`); neither test performs an unbounded search.
+
+The flagship sparse façade and its backend-shape gate are reproduced with:
+
+```sh
+cargo test -p fe-codegen --test fco_cga_sparse_facade
+```

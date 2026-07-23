@@ -4,6 +4,35 @@ extern {
     const fn __bitcast<From, To>(_: From) -> To
 }
 
+// Semantic sparse Cl(4,1) values. Their fields are exactly the compact support
+// consumed by the specialized S*P*S kernel; callers do not construct or order
+// raw coefficient tuples.
+struct ConformalSphere {
+    e1: f32,
+    e2: f32,
+    e8: f32,
+    e16: f32,
+}
+impl Copy for ConformalSphere {}
+
+struct ConformalPoint {
+    e1: f32,
+    e2: f32,
+    e4: f32,
+    e8: f32,
+    e16: f32,
+}
+impl Copy for ConformalPoint {}
+
+struct ConformalVector {
+    e1: f32,
+    e2: f32,
+    e4: f32,
+    e8: f32,
+    e16: f32,
+}
+impl Copy for ConformalVector {}
+
 pub fn cga_schedule32_vec5_de_render(
     px: i32,
     py: i32,
@@ -23,8 +52,12 @@ pub fn cga_schedule32_vec5_de_render(
     let rdy: f32 = sy * inv_len
     let rdz: f32 = rz * inv_len
     let center2: f32 = inv_cx * inv_cx + inv_cy * inv_cy
-    let s8: f32 = center2 * 0.5 - 1.0
-    let s16: f32 = center2 * 0.5
+    let sphere: ConformalSphere = ConformalSphere {
+        e1: inv_cx,
+        e2: inv_cy,
+        e8: center2 * 0.5 - 1.0,
+        e16: center2 * 0.5,
+    }
 
     let mut t: f32 = 0.0
     let mut i: i32 = 0
@@ -33,33 +66,45 @@ pub fn cga_schedule32_vec5_de_render(
         let y: f32 = cam_y + rdy * t
         let z: f32 = -4.0 + rdz * t
         let radius2: f32 = x * x + y * y + z * z
-        let p8: f32 = (radius2 - 1.0) * 0.5
-        let p16: f32 = (radius2 + 1.0) * 0.5
+        let point: ConformalPoint = ConformalPoint {
+            e1: x,
+            e2: y,
+            e4: z,
+            e8: (radius2 - 1.0) * 0.5,
+            e16: (radius2 + 1.0) * 0.5,
+        }
 
         // All five lanes are provider-emitted straight-line arithmetic derived
         // from the same canonical 80-candidate Fe helpers as Schedule32.
-        let e1: f32 = <CanonicalCga as Sandwich>::e1(
-            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
-        )
-        let e2: f32 = <CanonicalCga as Sandwich>::e2(
-            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
-        )
-        let e4: f32 = <CanonicalCga as Sandwich>::e4(
-            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
-        )
-        let e8: f32 = <CanonicalCga as Sandwich>::e8(
-            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
-        )
-        let e16: f32 = <CanonicalCga as Sandwich>::e16(
-            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
-        )
+        let image: ConformalVector = ConformalVector {
+            e1: <CanonicalCga as Sandwich>::e1(
+                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
+                point.e1, point.e2, point.e4, point.e8, point.e16,
+            ),
+            e2: <CanonicalCga as Sandwich>::e2(
+                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
+                point.e1, point.e2, point.e4, point.e8, point.e16,
+            ),
+            e4: <CanonicalCga as Sandwich>::e4(
+                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
+                point.e1, point.e2, point.e4, point.e8, point.e16,
+            ),
+            e8: <CanonicalCga as Sandwich>::e8(
+                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
+                point.e1, point.e2, point.e4, point.e8, point.e16,
+            ),
+            e16: <CanonicalCga as Sandwich>::e16(
+                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
+                point.e1, point.e2, point.e4, point.e8, point.e16,
+            ),
+        }
 
-        let weight: f32 = e16 - e8
+        let weight: f32 = image.e16 - image.e8
         let safe_weight: f32 = if weight > -0.0004 { -0.0004 } else { weight }
         let weight_adjust: f32 = safe_weight - weight
-        let qx: f32 = (e1 + weight_adjust * inv_cx) / safe_weight
-        let qy: f32 = (e2 + weight_adjust * inv_cy) / safe_weight
-        let qz: f32 = e4 / safe_weight
+        let qx: f32 = (image.e1 + weight_adjust * inv_cx) / safe_weight
+        let qy: f32 = (image.e2 + weight_adjust * inv_cy) / safe_weight
+        let qz: f32 = image.e4 / safe_weight
 
         let tx: f32 = qx + 0.62
         let ty: f32 = qy - 0.08
