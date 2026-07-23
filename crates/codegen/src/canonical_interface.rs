@@ -288,7 +288,8 @@ fn validate_name(name: &str, kind: &str) -> Result<(), CanonicalInterfaceError> 
         && name.len() <= 64
         && name.is_ascii()
         && name.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_lowercase() || byte == b'_' || (index > 0 && byte.is_ascii_digit())
+            byte.is_ascii_lowercase()
+                || (index > 0 && (byte == b'_' || byte.is_ascii_digit()))
         });
     if !valid {
         return Err(error(format!(
@@ -405,6 +406,10 @@ mod tests {
         );
         assert!(
             CanonicalInterfaceManifest::build(vec![lane("Bad", "ok", CanonicalType::U32),])
+                .is_err()
+        );
+        assert!(
+            CanonicalInterfaceManifest::build(vec![lane("_hidden", "ok", CanonicalType::U32),])
                 .is_err()
         );
         assert!(
