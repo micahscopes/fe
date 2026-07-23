@@ -1,15 +1,12 @@
 import { instantiateWasm } from "../webgpu-keystone/wasm-runner.js";
 import { attachMessagePortActorHost } from "./gen/runtime/message-port-actor.js";
 import {
-  createTypedGpuActorClient,
-  selectActorSchemas,
+  createCanonicalMainThreadGpuClient,
 } from "./gen/runtime/gpu-actor.js";
-import { createExactLaneRouter } from "./gen/runtime/actor-router.js";
+import { createCanonicalIntentRouter } from "./gen/runtime/actor-router.js";
 import {
-  compiledCanonicalInterface,
   compileActorAdapter,
   createActorAdapter,
-  createHostEffectAdapter,
 } from "./gen/actor-interface.js";
 
 self.addEventListener("message", async ({ data }) => {
@@ -17,35 +14,25 @@ self.addEventListener("message", async ({ data }) => {
   const { port, gpuPort, wasm, actorEpoch } = data;
   try {
     const exports = await instantiateWasm(wasm);
-    const wasmActor = createActorAdapter(exports);
-    const schemas = compileActorAdapter();
-    const gpu = createTypedGpuActorClient(gpuPort, {
-      ...selectActorSchemas(schemas, ["render", "verify"]),
+    const wasmActor = createActorAdapter(exports, { placement: "worker" });
+    const adapter = compileActorAdapter();
+    const gpu = createCanonicalMainThreadGpuClient(gpuPort, {
+      adapter,
       initialEpoch: actorEpoch,
     });
-    const hostEffects = createHostEffectAdapter({
-      render: (request, { signal } = {}) =>
-        gpu.request("render", request, request.generation, { signal }),
-      verify: (request, { signal } = {}) =>
-        gpu.request("verify", request, request.generation, { signal }),
-    });
-    // Placement is explicit application policy, while the complete lane set is
-    // compiler-derived. Initialization fails if a newly generated Fe lane is
-    // unowned or multiply owned; runtime dispatch has no fallback actor.
-    const router = createExactLaneRouter(compiledCanonicalInterface.lanes, {
-      host: {
-        lanes: ["render", "verify"],
-        dispatch: (request, context) => hostEffects.dispatch(request, context),
-      },
-      wasm: {
-        lanes: ["oracle"],
-        dispatch: (request, context) => wasmActor.dispatch(request, context),
-      },
+    const router = createCanonicalIntentRouter(adapter, {
+      main_thread_host: (request, { signal } = {}) => gpu.request(
+        request.lane,
+        request.payload,
+        request.generation,
+        { signal },
+      ),
+      wasm: (request, context) => wasmActor.dispatch(request, context),
     });
     attachMessagePortActorHost(
       port,
       router.dispatch,
-      { transferResult: schemas.transferResult },
+      { transferResult: adapter.transferResult },
     );
     port.postMessage({ type: "ready" });
   } catch (error) {

@@ -17,15 +17,45 @@ assert.doesNotMatch(
   /postMessage\(\{ type: "init-error", error: String\(error\) \}\)/,
   "arbitrary Worker error strings must not become malformed protocol messages",
 );
-assert.match(
-  workerSource,
-  /createHostEffectAdapter\(\{[\s\S]*render:[\s\S]*verify:/,
-  "the Worker proxy must supply the exact generated host-effect lane set",
-);
 assert.doesNotMatch(
   workerSource,
   /placement: "main_thread"/,
   "the Worker proxy must not restate Fe-declared placement",
+);
+assert.match(
+  workerSource,
+  /createCanonicalIntentRouter\(adapter,/,
+  "Worker routing must be partitioned from compiler-derived lane intents",
+);
+assert.match(
+  workerSource,
+  /createCanonicalMainThreadGpuClient\(gpuPort,/,
+  "Worker GPU schemas must be selected from compiler-derived lane intents",
+);
+assert.doesNotMatch(
+  workerSource,
+  /createExactLaneRouter|selectActorSchemas|lanes:\s*\[/,
+  "the Worker must not restate the compiler-owned lane set",
+);
+
+const clientSource = await readFile(
+  new URL("./worker-client.js", import.meta.url),
+  "utf8",
+);
+assert.match(
+  clientSource,
+  /createCanonicalModuleWorkerActor\(\{/,
+  "the client must delegate request IDs, epochs, restarts, and failures to the canonical runtime",
+);
+assert.match(
+  clientSource,
+  /createCanonicalMainThreadGpuBroker\(channel\.port1,/,
+  "the main-thread broker must derive its GPU lane schemas from compiler intent",
+);
+assert.doesNotMatch(
+  clientSource,
+  /actorEnvelope|createModuleWorkerActor|selectActorSchemas|requestId/,
+  "the application client must not duplicate canonical actor protocol machinery",
 );
 
 const wasm = new Uint8Array(await readFile(
