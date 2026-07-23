@@ -1193,6 +1193,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         ) -> Result<(), LowerError> {
             use crate::CanonicalShape;
             let ty = match &layout.shape {
+                CanonicalShape::Bool => Some(Type::I1),
                 CanonicalShape::U8 => Some(Type::I8),
                 CanonicalShape::I32 | CanonicalShape::U32 => Some(Type::I32),
                 CanonicalShape::I64 | CanonicalShape::U64 => Some(Type::I64),
@@ -1231,15 +1232,6 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                     leaves.push((length_offset, Type::I32));
                     descriptors.push((pointer_offset, length_offset));
                     None
-                }
-                unsupported => {
-                    return Err(LowerError::Unsupported(format!(
-                        "canonical wrapper `{}` shape is not supported",
-                        match unsupported {
-                            CanonicalShape::Bool => "bool",
-                            _ => "unknown",
-                        }
-                    )));
                 }
             };
             if let Some(ty) = ty {

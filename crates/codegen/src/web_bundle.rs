@@ -819,14 +819,14 @@ pub fn shade(x: u32, y: u32) -> u32 {
 struct Request { value: u32 }
 struct Response { value: u32 }
 struct VerifyRequest { sample: i32 }
-struct VerifyResponse { accepted: i32 }
+struct VerifyResponse { accepted: bool }
 
 pub fn update(request: Request) -> Response {
     Response { value: request.value + 1 }
 }
 
 pub fn verify(request: VerifyRequest) -> VerifyResponse {
-    VerifyResponse { accepted: request.sample }
+    VerifyResponse { accepted: request.sample == 7 }
 }
 
 pub fn shade(x: u32, y: u32) -> u32 {
@@ -1017,6 +1017,32 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let exports = wasm_exports(&required.wasm);
         assert!(exports.iter().any(|name| name == "fe_cabi_verify"));
         assert!(exports.iter().any(|name| name == "fe_cabi_update"));
+        let module = wasmtime::Module::new(&engine, &required.wasm).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let alloc = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+            .unwrap();
+        let reset = instance
+            .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
+            .unwrap();
+        let verify = instance
+            .get_typed_func::<i32, i32>(&mut store, "fe_cabi_verify")
+            .unwrap();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        for (sample, expected) in [(7_i32, 1_u8), (8_i32, 0_u8)] {
+            reset.call(&mut store, ()).unwrap();
+            let request = alloc.call(&mut store, (4, 4)).unwrap();
+            memory
+                .write(&mut store, request as usize, &sample.to_le_bytes())
+                .unwrap();
+            let response = verify.call(&mut store, request).unwrap();
+            let mut accepted = [0_u8; 1];
+            memory
+                .read(&store, response as usize, &mut accepted)
+                .unwrap();
+            assert_eq!(accepted[0], expected, "canonical bool response");
+        }
         assert_eq!(
             required
                 .manifest
