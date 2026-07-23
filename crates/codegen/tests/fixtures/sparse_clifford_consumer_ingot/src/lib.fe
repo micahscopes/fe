@@ -15,8 +15,13 @@ const KEEP4: u32 = 0
 const KEEP5: u32 = 0
 const KEEP6: u32 = 0
 const KEEP7: u32 = 0
+const CANDIDATES: usize = 40 * 2
+const SURVIVORS: usize = 16 * 2
 type Plan32 =
-    SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>
+    SparsePlan<
+        KEEP0, KEEP1, KEEP2, KEEP3, KEEP4, KEEP5, KEEP6, KEEP7,
+        CANDIDATES, SURVIVORS,
+    >
 
 fn takes_nat32(_ value: Nat<32>) {}
 fn imported_plan_has_thirty_two_terms(value: <Plan32 as PlanLength>::Out) {

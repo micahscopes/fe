@@ -16,7 +16,7 @@ const PLANNER_SOURCE: &str =
     include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const APP_IMPORTS: &str = r#"use sparse_clifford::{
-    Nat, PlanLength, SparsePlan, plan_mask_candidate, plan_mask_cardinality,
+    Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
 }
 "#;
 const RENDER_SOURCE: &str =

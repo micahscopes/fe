@@ -56,6 +56,11 @@ assert layout["kernel_source"] == "kernel.fe (dependency-backed; not standalone)
 assert layout["provenance"]["kernel_source_self_contained"] is False
 assert "type IncidencePlan12" in kernel
 assert "impl Derive<PlannedIncidence> for QcgaIncidenceProvider" in kernel
+assert "builder.ty<IncidencePlan12>().normalized_preorder_types()" in kernel
+assert "for candidate in 0..144" not in kernel
+assert "INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, INCIDENCE_KEEP3" in kernel
+assert "INCIDENCE_KEEP4, INCIDENCE_KEEP5, INCIDENCE_KEEP6, INCIDENCE_KEEP7" in kernel
+assert "CANDIDATES," in kernel
 assert "qcga3d_sparse_planned_render" in kernel
 assert "loop {" not in wgsl
 assert "32768" not in wgsl

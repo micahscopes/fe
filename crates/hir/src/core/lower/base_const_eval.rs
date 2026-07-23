@@ -11,7 +11,7 @@ use crate::{
     HirDb,
     core::{
         hir_def::{
-            ArithBinOp, BinOp, Body, CompBinOp, Cond, CondId, Expr, ExprId, Func, IdentId,
+            ArithBinOp, BinOp, Body, CompBinOp, Cond, CondId, Const, Expr, ExprId, Func, IdentId,
             IntegerId, ItemKind, LitKind, LogicalBinOp, Partial, Pat, Stmt, StmtId, TopLevelMod,
             UnOp,
         },
@@ -69,6 +69,7 @@ pub(super) fn eval_base_const_body<'db>(
         scopes: vec![bindings],
         steps: 0,
         call_stack: Vec::new(),
+        const_stack: Vec::new(),
     }
     .eval_body(body, expected)
 }
@@ -122,6 +123,25 @@ pub(super) fn eval_base_const_func<'db>(
     } else {
         Err(BaseConstEvalError::Unsupported)
     }
+}
+
+pub(super) fn eval_base_uint_const_item_as<'db>(
+    db: &'db dyn HirDb,
+    const_: Const<'db>,
+    expected: BaseUIntKind,
+) -> Result<BaseConstValue<'db>, BaseConstEvalError> {
+    let mut evaluator = BaseConstEvaluator {
+        db,
+        top_mod: const_.top_mod(db),
+        inherited_consts: &[],
+        body: None,
+        scopes: vec![Vec::new()],
+        steps: 0,
+        call_stack: Vec::new(),
+        const_stack: Vec::new(),
+    };
+    let value = evaluator.const_item(const_, Some(expected))?;
+    coerce_uint(db, value, expected, false)
 }
 
 pub(super) fn raw_uint_kind(
@@ -225,6 +245,7 @@ struct BaseConstEvaluator<'a, 'db> {
     scopes: Vec<Vec<(IdentId<'db>, BaseConstValue<'db>)>>,
     steps: usize,
     call_stack: Vec<Func<'db>>,
+    const_stack: Vec<Const<'db>>,
 }
 
 impl<'db> BaseConstEvaluator<'_, 'db> {
@@ -418,7 +439,16 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
                 let name = path
                     .as_ident(self.db)
                     .ok_or(BaseConstEvalError::Unsupported)?;
-                self.lookup(name).ok_or(BaseConstEvalError::Unsupported)
+                if let Some(value) = self.lookup(name) {
+                    Ok(value)
+                } else {
+                    let ItemKind::Const(const_) = resolve_base_item(self.db, self.top_mod, path)
+                        .ok_or(BaseConstEvalError::Unsupported)?
+                    else {
+                        return Err(BaseConstEvalError::Unsupported);
+                    };
+                    self.const_item(const_, expected)
+                }
             }
             Expr::Bin(lhs, rhs, BinOp::Comp(op)) => {
                 let (lhs, kind) = self.uint(lhs, expected)?;
@@ -516,7 +546,7 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
             || !func.effects(self.db).data(self.db).is_empty()
             // The public helper itself is the first frame; this evaluator's
             // stack records only nested calls.
-            || self.call_stack.len() + 1 >= CALL_LIMIT
+            || self.call_stack.len() + self.const_stack.len() + 1 >= CALL_LIMIT
             || self.call_stack.contains(&func)
         {
             return Err(BaseConstEvalError::Unsupported);
@@ -573,14 +603,60 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
         self.body = old_body;
         result
     }
+
+    fn const_item(
+        &mut self,
+        const_: Const<'db>,
+        expected: Option<BaseUIntKind>,
+    ) -> Result<BaseConstValue<'db>, BaseConstEvalError> {
+        if self.call_stack.len() + self.const_stack.len() + 1 >= CALL_LIMIT
+            || self.const_stack.contains(&const_)
+        {
+            return Err(BaseConstEvalError::Unsupported);
+        }
+        let body = const_
+            .body(self.db)
+            .to_opt()
+            .ok_or(BaseConstEvalError::Unsupported)?;
+        let declared = const_.type_ref(self.db).to_opt();
+        let declared_uint = raw_uint_kind(self.db, declared);
+        let declared_bool = raw_is_bool(self.db, declared);
+        if declared_uint.is_none() && !declared_bool {
+            return Err(BaseConstEvalError::Unsupported);
+        }
+        let old_body = self.body.replace(body);
+        let old_top_mod = std::mem::replace(&mut self.top_mod, const_.top_mod(self.db));
+        let old_scopes = std::mem::replace(&mut self.scopes, vec![Vec::new()]);
+        self.const_stack.push(const_);
+        let result = (|| match self.eval_expr(body.expr(self.db), declared_uint.or(expected))? {
+            Flow::Next(Some(value)) | Flow::Return(value) => {
+                if let Some(kind) = declared_uint.or(expected) {
+                    coerce_uint(self.db, value, kind, false)
+                } else if declared_bool && matches!(value, BaseConstValue::Bool(_)) {
+                    Ok(value)
+                } else {
+                    Err(BaseConstEvalError::Unsupported)
+                }
+            }
+            Flow::Next(None) => Err(BaseConstEvalError::Unsupported),
+        })();
+        self.scopes = old_scopes;
+        self.const_stack.pop();
+        self.top_mod = old_top_mod;
+        self.body = old_body;
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseConstEvaluator, BaseConstValue, BaseUIntKind, eval_base_const_func};
+    use super::{
+        BaseConstEvaluator, BaseConstValue, BaseUIntKind, eval_base_const_func,
+        eval_base_uint_const_item_as,
+    };
     use crate::{
         core::{
-            hir_def::{Func, IntegerId, ItemKind},
+            hir_def::{Const, Func, IntegerId, ItemKind},
             lower::{base_scope_graph_impl, map_file_to_mod},
         },
         test_db::TestDb,
@@ -601,6 +677,27 @@ mod tests {
                         .is_some_and(|ident| ident.data(db) == name) =>
                 {
                     Some(func)
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn find_const<'db>(
+        db: &'db TestDb,
+        top_mod: crate::hir_def::TopLevelMod<'db>,
+        name: &str,
+    ) -> Const<'db> {
+        base_scope_graph_impl(db, top_mod)
+            .child_items(top_mod.scope())
+            .find_map(|item| match item {
+                ItemKind::Const(const_)
+                    if const_
+                        .name(db)
+                        .to_opt()
+                        .is_some_and(|ident| ident.data(db) == name) =>
+                {
+                    Some(const_)
                 }
                 _ => None,
             })
@@ -638,6 +735,70 @@ mod tests {
     }
 
     #[test]
+    fn named_const_items_chain_and_preserve_contextual_width() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(
+            "const LEFT: usize = 12\n\
+             const RIGHT: usize = LEFT\n\
+             const CANDIDATES: usize = LEFT * RIGHT\n",
+        );
+        let top_mod = map_file_to_mod(&db, file);
+        let candidates = find_const(&db, top_mod, "CANDIDATES");
+        assert_eq!(
+            eval_base_uint_const_item_as(&db, candidates, BaseUIntKind::Usize),
+            Ok(uint(&db, 144, BaseUIntKind::Usize))
+        );
+        assert_eq!(
+            eval_base_uint_const_item_as(&db, candidates, BaseUIntKind::U32),
+            Ok(uint(&db, 144, BaseUIntKind::U32))
+        );
+    }
+
+    #[test]
+    fn named_const_items_reject_direct_and_mutual_cycles() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(
+            "const DIRECT: usize = DIRECT\n\
+             const FIRST: usize = SECOND\n\
+             const SECOND: usize = FIRST\n",
+        );
+        let top_mod = map_file_to_mod(&db, file);
+        for name in ["DIRECT", "FIRST"] {
+            assert!(
+                eval_base_uint_const_item_as(
+                    &db,
+                    find_const(&db, top_mod, name),
+                    BaseUIntKind::Usize,
+                )
+                .is_err(),
+                "{name} cycle must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn named_const_items_reject_kind_mismatch_and_contextual_overflow() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(
+            "const FLAG: bool = true\n\
+             const TOO_WIDE: usize = 4294967296\n",
+        );
+        let top_mod = map_file_to_mod(&db, file);
+        assert!(
+            eval_base_uint_const_item_as(&db, find_const(&db, top_mod, "FLAG"), BaseUIntKind::U32,)
+                .is_err()
+        );
+        assert!(
+            eval_base_uint_const_item_as(
+                &db,
+                find_const(&db, top_mod, "TOO_WIDE"),
+                BaseUIntKind::U32,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn evaluator_state_restores_after_return_mismatch() {
         let mut db = TestDb::default();
         let file = db.standalone_file(
@@ -655,6 +816,7 @@ mod tests {
             scopes: vec![Vec::new()],
             steps: 0,
             call_stack: Vec::new(),
+            const_stack: Vec::new(),
         };
         assert!(evaluator.call(bad, vec![]).is_err());
         assert_eq!(

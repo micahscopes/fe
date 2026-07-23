@@ -1,5 +1,5 @@
 use sparse_clifford::{
-    Nat, PlanLength, SparsePlan, plan_mask_candidate, plan_mask_cardinality,
+    Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
 }
 
 // Bounded Fe-native sparse planner for the grade-1 QCGA point/dual-quadric
@@ -99,11 +99,13 @@ static_assert(INCIDENCE_KEEP3 == 65544)
 static_assert(INCIDENCE_KEEP4 == 262176)
 static_assert(INCIDENCE_KEEP5 == 1048704)
 
-// Literal type arguments avoid the current semantic-MIR const-value-path
-// lowering edge; the assertions above tie them to the computed incidence mask.
+// The exact imported ground plan consumes the named CTFE-derived mask and
+// candidate-count constants directly; normalized provider reflection unfolds
+// only its twelve retained Term nodes.
 type IncidencePlan12 =
     SparsePlan<
-        8193, 2097156, 8389632, 65544, 262176, 1048704, 0, 0,
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, INCIDENCE_KEEP3,
+        INCIDENCE_KEEP4, INCIDENCE_KEEP5, INCIDENCE_KEEP6, INCIDENCE_KEEP7,
         CANDIDATES,
         12,
     >
@@ -203,57 +205,69 @@ impl Derive<PlannedIncidence> for QcgaIncidenceProvider {
         let sum1 = zero
         let sum2 = zero
         let survivor = 0
-        for candidate in 0..144 {
-            // The provider interpreter cannot branch inside an ordinary const
-            // helper. Keep the same slot semantics visible here while the
-            // typed plan consumes `contraction_sign` above.
-            let left_slot = candidate / 12
-            let right_slot = candidate % 12
-            let sign = 0
-            if left_slot == right_slot {
-                if left_slot < 3 { sign = 1 }
-            }
-            if left_slot >= 3 {
-                if left_slot < 6 {
-                    if right_slot == left_slot + 6 { sign = 2 }
+        // Interpret the exact normalized imported SparsePlan rather than
+        // rescanning its 144-candidate source universe. Each Term carries the
+        // canonical candidate identity selected by the shared CTFE planner.
+        for nested in builder.ty<IncidencePlan12>().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                let candidate: usize = 144
+                for arg in nested.generic_args() {
+                    if arg.is_const() { candidate = arg.const_value() }
                 }
-            }
-            if left_slot >= 6 {
-                if right_slot + 3 == left_slot { sign = 2 }
-            }
-            if sign != 0 {
-                let left = p0
-                if left_slot == 1 { left = p1 }
-                if left_slot == 2 { left = p2 }
-                if left_slot == 3 { left = p3 }
-                if left_slot == 4 { left = p4 }
-                if left_slot == 5 { left = p5 }
-                if left_slot == 6 { left = p6 }
-                if left_slot == 7 { left = p7 }
-                if left_slot == 8 { left = p8 }
-                if left_slot == 9 { left = p9 }
-                if left_slot == 10 { left = p10 }
-                if left_slot == 11 { left = p11 }
 
-                let right = q0
-                if right_slot == 1 { right = q1 }
-                if right_slot == 2 { right = q2 }
-                if right_slot == 3 { right = q3 }
-                if right_slot == 4 { right = q4 }
-                if right_slot == 5 { right = q5 }
-                if right_slot == 6 { right = q6 }
-                if right_slot == 7 { right = q7 }
-                if right_slot == 8 { right = q8 }
-                if right_slot == 9 { right = q9 }
-                if right_slot == 10 { right = q10 }
-                if right_slot == 11 { right = q11 }
+                // Keep the QCGA metric semantics explicit at the provider
+                // boundary. The plan guarantees that this branch is reached
+                // exactly twelve times, in ascending candidate order.
+                if candidate < 144 {
+                    let left_slot = candidate / 12
+                    let right_slot = candidate % 12
+                    let sign = 0
+                    if left_slot == right_slot {
+                        if left_slot < 3 { sign = 1 }
+                    }
+                    if left_slot >= 3 {
+                        if left_slot < 6 {
+                            if right_slot == left_slot + 6 { sign = 2 }
+                        }
+                    }
+                    if left_slot >= 6 {
+                        if right_slot + 3 == left_slot { sign = 2 }
+                    }
+                    if sign != 0 {
+                        let left = p0
+                        if left_slot == 1 { left = p1 }
+                        if left_slot == 2 { left = p2 }
+                        if left_slot == 3 { left = p3 }
+                        if left_slot == 4 { left = p4 }
+                        if left_slot == 5 { left = p5 }
+                        if left_slot == 6 { left = p6 }
+                        if left_slot == 7 { left = p7 }
+                        if left_slot == 8 { left = p8 }
+                        if left_slot == 9 { left = p9 }
+                        if left_slot == 10 { left = p10 }
+                        if left_slot == 11 { left = p11 }
 
-                let term = builder.mul(left, right)
-                if sign == 2 { term = builder.neg(term) }
-                if survivor < 4 { sum0 = builder.add(sum0, term) }
-                else if survivor < 8 { sum1 = builder.add(sum1, term) }
-                else { sum2 = builder.add(sum2, term) }
-                survivor = survivor + 1
+                        let right = q0
+                        if right_slot == 1 { right = q1 }
+                        if right_slot == 2 { right = q2 }
+                        if right_slot == 3 { right = q3 }
+                        if right_slot == 4 { right = q4 }
+                        if right_slot == 5 { right = q5 }
+                        if right_slot == 6 { right = q6 }
+                        if right_slot == 7 { right = q7 }
+                        if right_slot == 8 { right = q8 }
+                        if right_slot == 9 { right = q9 }
+                        if right_slot == 10 { right = q10 }
+                        if right_slot == 11 { right = q11 }
+
+                        let term = builder.mul(left, right)
+                        if sign == 2 { term = builder.neg(term) }
+                        if survivor < 4 { sum0 = builder.add(sum0, term) }
+                        else if survivor < 8 { sum1 = builder.add(sum1, term) }
+                        else { sum2 = builder.add(sum2, term) }
+                        survivor = survivor + 1
+                    }
+                }
             }
         }
         let result = builder.add(builder.add(sum0, sum1), sum2)

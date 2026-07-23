@@ -18,6 +18,7 @@ use crate::{
         lower::{
             base_const_eval::{
                 BaseConstEvalError, BaseConstValue, BaseUIntKind, eval_base_const_body,
+                eval_base_uint_const_item_as,
             },
             provider::resolve_base_item,
         },
@@ -255,15 +256,27 @@ impl<'db> Evaluator<'db> {
                 // argument (`SparsePlan<Keep0, ...>`). Resolve that exact bare
                 // identifier from the caller's const environment rather than
                 // requiring source-level `{Keep0}` noise.
-                (GenericParam::Const(_), GenericArg::Type(arg)) => {
+                (GenericParam::Const(param), GenericArg::Type(arg)) => {
+                    let kind = super::base_const_eval::raw_uint_kind(self.db, param.ty.to_opt())
+                        .ok_or(GroundTypePlanError::Unsupported)?;
                     let ty = arg.ty.to_opt().ok_or(GroundTypePlanError::Unsupported)?;
                     let TypeKind::Path(Partial::Present(path)) = ty.data(self.db) else {
                         return Err(GroundTypePlanError::Unsupported);
                     };
-                    let forwarded = path
+                    let forwarded = if let Some(forwarded) = path
                         .as_ident(self.db)
                         .and_then(|forwarded| parent_env.and_then(|env| env.const_arg(forwarded)))
-                        .ok_or(GroundTypePlanError::Unsupported)?;
+                    {
+                        forwarded
+                    } else {
+                        let ItemKind::Const(const_) =
+                            resolve_base_item(self.db, call_top_mod, *path)
+                                .ok_or(GroundTypePlanError::Unsupported)?
+                        else {
+                            return Err(GroundTypePlanError::Unsupported);
+                        };
+                        eval_base_uint_const_item_as(self.db, const_, kind)?
+                    };
                     env.const_args.push((name, forwarded));
                 }
                 _ => {
