@@ -24,8 +24,10 @@ self.addEventListener("message", async ({ data }) => {
       initialEpoch: actorEpoch,
     });
     const hostEffects = createHostEffectAdapter({
-      render: (request) => gpu.request("render", request, request.generation),
-      verify: (request) => gpu.request("verify", request, request.generation),
+      render: (request, { signal } = {}) =>
+        gpu.request("render", request, request.generation, { signal }),
+      verify: (request, { signal } = {}) =>
+        gpu.request("verify", request, request.generation, { signal }),
     });
     // Placement is explicit application policy, while the complete lane set is
     // compiler-derived. Initialization fails if a newly generated Fe lane is
@@ -33,11 +35,11 @@ self.addEventListener("message", async ({ data }) => {
     const router = createExactLaneRouter(compiledCanonicalInterface.lanes, {
       host: {
         lanes: ["render", "verify"],
-        dispatch: hostEffects.dispatch,
+        dispatch: (request, context) => hostEffects.dispatch(request, context),
       },
       wasm: {
         lanes: ["oracle"],
-        dispatch: wasmActor.dispatch,
+        dispatch: (request, context) => wasmActor.dispatch(request, context),
       },
     });
     attachMessagePortActorHost(

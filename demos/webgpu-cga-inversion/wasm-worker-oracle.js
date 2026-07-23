@@ -42,14 +42,22 @@ export async function createCgaWasmWorkerOracle({
       };
     },
   });
-  const request = async (lane, values, generation = 0) => {
-    return actor.request(lane, requestPayload(values, generation), generation);
+  const request = async (lane, values, generation = 0, options) => {
+    return actor.request(
+      lane,
+      requestPayload(values, generation),
+      generation,
+      options,
+    );
   };
   return {
-    render: (values, generation = 0) => request("oracle", values, generation),
-    renderGpu: (values, generation = 0) => request("render", values, generation),
+    render: (values, generation = 0, options) =>
+      request("oracle", values, generation, options),
+    renderGpu: (values, generation = 0, options) =>
+      request("render", values, generation, options),
     restart: actor.restart,
     close: actor.close,
     epoch: actor.epoch,
+    pendingCount: actor.pendingCount,
   };
 }

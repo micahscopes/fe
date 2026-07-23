@@ -379,8 +379,8 @@
       },
       {
         "path": "runtime/actor-router.js",
-        "bytes": 6520,
-        "sha256": "87f3c69f34c4630499148acbbd4986773c0bd11abd4148e526af8f5f34a7c93d"
+        "bytes": 6538,
+        "sha256": "4176e1cbd03eee9f212154546068b6e140035c1f7d0fd64d483bad25ecafe91d"
       },
       {
         "path": "runtime/gpu-actor.js",

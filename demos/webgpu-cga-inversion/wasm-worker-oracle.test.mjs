@@ -37,8 +37,10 @@ const fnv1a32 = (bytes) => {
 
 try {
   assert.equal(actor.epoch(), 0);
+  assert.equal(actor.pendingCount(), 0);
   assert.deepEqual(await actor.renderGpu(values, 3), { submitted: true });
   assert.equal(renderGeneration, 3);
+  assert.equal(actor.pendingCount(), 0);
 
   const started = performance.now();
   const oracle = await actor.render(values, 4);
@@ -51,6 +53,13 @@ try {
   assert.equal(actor.epoch(), 1);
   assert.deepEqual(await actor.renderGpu(values, 5), { submitted: true });
   assert.equal(renderGeneration, 5);
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(
+    actor.render(values, 6, { signal: cancelled.signal }),
+    (error) => error.code === "FE_ACTOR_ABORTED",
+  );
+  assert.equal(actor.pendingCount(), 0);
   console.log(
     `Schedule32 generated Worker/Wasm actor: ok (oracle ${oracleMs.toFixed(1)} ms)`,
   );

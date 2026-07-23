@@ -21,12 +21,13 @@ self.addEventListener("message", async ({ data }) => {
       initialEpoch: actorEpoch,
     });
     const router = createCanonicalIntentRouter(schemas, {
-      main_thread_host: (request) => gpu.request(
+      main_thread_host: (request, { signal } = {}) => gpu.request(
           request.lane,
           request.payload,
           request.generation,
+          { signal },
         ),
-      wasm: wasmActor.dispatch,
+      wasm: (request, context) => wasmActor.dispatch(request, context),
     });
     attachMessagePortActorHost(port, router.dispatch, {
       transferResult: schemas.transferResult,

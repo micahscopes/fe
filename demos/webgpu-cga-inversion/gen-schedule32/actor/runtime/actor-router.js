@@ -102,7 +102,7 @@ export function createExactLaneRouter(compiledLanes, ownership) {
       }
       return owners[lane];
     },
-    dispatch(request) {
+    dispatch(request, context) {
       const lane = request?.lane;
       if (typeof lane !== "string" || !Object.hasOwn(routes, lane)) {
         throw new ActorLaneRoutingError(
@@ -110,7 +110,7 @@ export function createExactLaneRouter(compiledLanes, ownership) {
           `unknown canonical actor lane ${String(lane)}`,
         );
       }
-      return routes[lane](request);
+      return routes[lane](request, context);
     },
   });
 }

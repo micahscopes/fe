@@ -15,24 +15,29 @@ const calls = [];
 const router = createExactLaneRouter(compiledLanes, {
   wasm: {
     lanes: ["oracle_pixel"],
-    dispatch(request) {
-      calls.push(["wasm", request]);
+    dispatch(request, context) {
+      calls.push(["wasm", request, context]);
       return "wasm-result";
     },
   },
   webgpu: {
     lanes: ["render", "verify", "oracle"],
-    dispatch(request) {
-      calls.push(["webgpu", request]);
+    dispatch(request, context) {
+      calls.push(["webgpu", request, context]);
       return "host-result";
     },
   },
 });
 const render = Object.freeze({ lane: "render", payload: Object.freeze({ generation: 1 }) });
 const pixel = Object.freeze({ lane: "oracle_pixel", payload: Object.freeze({ x: 2, y: 3 }) });
-assert.equal(router.dispatch(render), "host-result");
-assert.equal(router.dispatch(pixel), "wasm-result");
-assert.deepEqual(calls, [["webgpu", render], ["wasm", pixel]]);
+const renderContext = Object.freeze({ signal: new AbortController().signal });
+const pixelContext = Object.freeze({ signal: new AbortController().signal });
+assert.equal(router.dispatch(render, renderContext), "host-result");
+assert.equal(router.dispatch(pixel, pixelContext), "wasm-result");
+assert.deepEqual(calls, [
+  ["webgpu", render, renderContext],
+  ["wasm", pixel, pixelContext],
+]);
 assert.deepEqual(router.lanes, ["oracle", "oracle_pixel", "render", "verify"]);
 assert.equal(router.ownerOf("verify"), "webgpu");
 assert.equal(router.ownerOf("oracle_pixel"), "wasm");
@@ -98,17 +103,24 @@ const canonicalAdapter = Object.freeze({
 });
 const intentCalls = [];
 const intentRouter = createCanonicalIntentRouter(canonicalAdapter, {
-  main_thread_host(request) { intentCalls.push(["main", request.lane]); },
-  worker_host(request) { intentCalls.push(["worker", request.lane]); },
-  wasm(request) { intentCalls.push(["wasm", request.lane]); },
+  main_thread_host(request, context) {
+    intentCalls.push(["main", request.lane, context]);
+  },
+  worker_host(request, context) {
+    intentCalls.push(["worker", request.lane, context]);
+  },
+  wasm(request, context) {
+    intentCalls.push(["wasm", request.lane, context]);
+  },
 });
-intentRouter.dispatch({ lane: "render" });
-intentRouter.dispatch({ lane: "oracle" });
-intentRouter.dispatch({ lane: "oracle_pixel" });
+const intentContext = Object.freeze({ signal: new AbortController().signal });
+intentRouter.dispatch({ lane: "render" }, intentContext);
+intentRouter.dispatch({ lane: "oracle" }, intentContext);
+intentRouter.dispatch({ lane: "oracle_pixel" }, intentContext);
 assert.deepEqual(intentCalls, [
-  ["main", "render"],
-  ["worker", "oracle"],
-  ["wasm", "oracle_pixel"],
+  ["main", "render", intentContext],
+  ["worker", "oracle", intentContext],
+  ["wasm", "oracle_pixel", intentContext],
 ]);
 assert.equal(intentRouter.ownerOf("verify"), "main_thread_host");
 assert.throws(

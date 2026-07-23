@@ -6,6 +6,7 @@ import {
   createMessagePortActorTransport,
   transferOwnedTypedArray,
 } from "./message-port-actor.js";
+import { createExactLaneRouter } from "./actor-router.js";
 
 const channel = new MessageChannel();
 const detach = attachMessagePortActorHost(channel.port2, ({ payload }) => payload.value * 2);
@@ -137,12 +138,18 @@ const abortChannel = new MessageChannel();
 let hostAbortSignal;
 let settleAbortedHost;
 const abortedHostWork = new Promise((resolve) => { settleAbortedHost = resolve; });
+const abortRouter = createExactLaneRouter({ verify: {} }, {
+  worker: {
+    lanes: ["verify"],
+    dispatch(_request, { signal }) {
+      hostAbortSignal = signal;
+      return abortedHostWork;
+    },
+  },
+});
 const detachAbort = attachMessagePortActorHost(
   abortChannel.port2,
-  (_request, { signal }) => {
-    hostAbortSignal = signal;
-    return abortedHostWork;
-  },
+  abortRouter.dispatch,
   { maxInFlight: 1 },
 );
 const abortEndpoint = createActorEndpoint({
