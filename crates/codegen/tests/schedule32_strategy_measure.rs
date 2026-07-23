@@ -262,6 +262,7 @@ fn compare_schedule32_tree_compact_fco_and_actual_dag() {
 
 fn canonical_fco_cga_de() -> String {
     let support_api = include_str!("fixtures/support_bladeset_api.fe");
+    let plan_api = include_str!("fixtures/sparse_plan_api.fe");
     let base = include_str!("fixtures/fco_cga80_direct_lanes.fe");
     let (prefix, rest) = base
         .split_once("// BEGIN_PUBLIC_ORACLES")
@@ -270,7 +271,7 @@ fn canonical_fco_cga_de() -> String {
         .split_once("// END_PUBLIC_ORACLES")
         .expect("public-oracle end marker");
     format!(
-        "{support_api}\n{prefix}{suffix}\n{}",
+        "{support_api}\n{plan_api}\n{prefix}{suffix}\n{}",
         include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe")
     )
 }

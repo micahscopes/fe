@@ -74,9 +74,6 @@ const fn survivor_candidate(_ target: usize) -> usize {
 
 static_assert(survivor_count() == 12)
 
-struct Zero {}
-struct Term<const Candidate: usize> {}
-struct Add<L, R> {}
 recursive type fn IncidencePlan<const N: usize>() -> (*) {
     match N {
         0 => Zero
@@ -97,19 +94,6 @@ static_assert(survivor_candidate(9) == 114)
 static_assert(survivor_candidate(10) == 127)
 static_assert(survivor_candidate(11) == 140)
 
-struct NatZ {}
-struct NatS<N> {}
-recursive type fn Nat<const N: usize>() -> (*) {
-    match N {
-        0 => NatZ
-        _ => NatS<Nat<{N - 1}>>
-    }
-}
-trait PlanLength { type Out }
-impl PlanLength for Zero { type Out = NatZ }
-impl<const I: usize, Tail: PlanLength> PlanLength for Add<Term<I>, Tail> {
-    type Out = NatS<<Tail as PlanLength>::Out>
-}
 fn takes_nat12(_ value: Nat<12>) {}
 fn planned_support_has_twelve_terms(value: <IncidencePlan12 as PlanLength>::Out) {
     takes_nat12(value)

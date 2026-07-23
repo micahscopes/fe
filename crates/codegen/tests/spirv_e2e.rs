@@ -6210,7 +6210,8 @@ fn qcga3d_rotated_quadric_render_executes_wasm_equal_on_lavapipe() {
 #[test]
 fn qcga3d_sparse_planned_render_emits_browser_profile_wgsl() {
     let source = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        include_str!("fixtures/sparse_plan_api.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_render_body.fe"),
     );

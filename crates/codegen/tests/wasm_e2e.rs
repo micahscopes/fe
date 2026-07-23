@@ -632,11 +632,15 @@ fn qcga3d_sparse_incidence_paths_compile_and_execute_on_wasm() {
 
 #[test]
 fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
-    let source = include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
+    let source = format!(
+        "{}\n{}",
+        include_str!("fixtures/sparse_plan_api.fe"),
+        include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
+    );
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///qcga3d_sparse_planned_incidence.fe").unwrap();
     db.workspace()
-        .touch(&mut db, url.clone(), Some(source.to_owned()));
+        .touch(&mut db, url.clone(), Some(source));
     let file = db.workspace().get(&db, &url).expect("planner fixture");
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
@@ -734,7 +738,8 @@ fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
 #[test]
 fn qcga3d_sparse_planned_render_preserves_current_frame_on_wasm() {
     let source = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        include_str!("fixtures/sparse_plan_api.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_render_body.fe"),
     );

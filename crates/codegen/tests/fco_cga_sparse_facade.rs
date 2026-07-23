@@ -8,6 +8,7 @@ use url::Url;
 
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
 const SUPPORT_API: &str = include_str!("fixtures/support_bladeset_api.fe");
+const PLAN_API: &str = include_str!("fixtures/sparse_plan_api.fe");
 const BODY: &str = include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe");
 const ENTRY: &str = "cga_schedule32_vec5_de_render";
 
@@ -18,7 +19,7 @@ fn composed_source() -> String {
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
-    format!("{SUPPORT_API}\n{prefix}{suffix}\n{BODY}")
+    format!("{SUPPORT_API}\n{PLAN_API}\n{prefix}{suffix}\n{BODY}")
 }
 
 #[test]
