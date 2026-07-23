@@ -1,9 +1,9 @@
 // Package-like sparse Clifford prelude.
 //
-// This is one ordinary-Fe source unit because Fe does not yet provide a
-// fixture-level module/import mechanism. Consumers prepend it to a
-// domain-specific planner or kernel. It deliberately owns only reusable
-// representation and access semantics:
+// This is a real Fe ingot with a public API. The current browser generators
+// also prepend this canonical source to their self-contained published
+// `kernel.fe` artifact; ordinary Fe applications can instead import the ingot.
+// It deliberately owns only reusable representation and access semantics:
 //   - fixed-capacity BladeSet support algebra for diagonal metrics;
 //   - Zero/Term/Add sparse operator plans and their length witness;
 //   - support-sized scalar storage with default-zero and present-only access.
@@ -15,8 +15,8 @@
 //
 // Five basis vectors / 32 blades fit an explicit portable u32. Operations fail
 // closed above that bound. This is composed into domain fixtures by the Rust
-// harness because Fe does not yet have a fixture-level module/import mechanism.
-struct BladeSet { bits: u32, dimension: u32 }
+// single-file harness as well as through the ingot API.
+pub struct BladeSet { pub bits: u32, pub dimension: u32 }
 impl Copy for BladeSet {}
 
 const fn support_dimension_valid(_ dimension: u32) -> bool {
@@ -127,21 +127,21 @@ const fn support_cardinality(_ support: BladeSet) -> u32 {
 // CTFE candidate enumeration and constructs a ground
 // Add<Term<Candidate>, ... Zero> tree.
 
-struct Zero {}
-struct Term<const Candidate: usize> {}
-struct Add<L, R> {}
+pub struct Zero {}
+pub struct Term<const Candidate: usize> {}
+pub struct Add<L, R> {}
 
-struct NatZ {}
-struct NatS<N> {}
+pub struct NatZ {}
+pub struct NatS<N> {}
 
-recursive type fn Nat<const N: usize>() -> (*) {
+pub recursive type fn Nat<const N: usize>() -> (*) {
     match N {
         0 => NatZ
         _ => NatS<Nat<{N - 1}>>
     }
 }
 
-trait PlanLength { type Out }
+pub trait PlanLength { type Out }
 
 impl PlanLength for Zero {
     type Out = NatZ
@@ -153,18 +153,109 @@ impl<const Candidate: usize, Tail: PlanLength> PlanLength
     type Out = NatS<<Tail as PlanLength>::Out>
 }
 
+// Bounded candidate-set planner. A domain encodes its surviving candidate
+// identities in eight 24-bit browser-profile u32 words, while this shared layer owns
+// cardinality, canonical ascending selection, and materialization of the
+// ground plan type. The 192-candidate ceiling is explicit; this is not an
+// unbounded sparse operator compiler.
+
+const fn plan_mask_contains(
+    _ keep0: u32, _ keep1: u32, _ keep2: u32, _ keep3: u32,
+    _ keep4: u32, _ keep5: u32, _ keep6: u32, _ keep7: u32,
+    _ candidate: usize,
+) -> bool {
+    if candidate < 24 {
+        ((keep0 >> candidate.downcast_truncate()) & 1) == 1
+    } else if candidate < 48 {
+        ((keep1 >> (candidate - 24).downcast_truncate()) & 1) == 1
+    } else if candidate < 72 {
+        ((keep2 >> (candidate - 48).downcast_truncate()) & 1) == 1
+    } else if candidate < 96 {
+        ((keep3 >> (candidate - 72).downcast_truncate()) & 1) == 1
+    } else if candidate < 120 {
+        ((keep4 >> (candidate - 96).downcast_truncate()) & 1) == 1
+    } else if candidate < 144 {
+        ((keep5 >> (candidate - 120).downcast_truncate()) & 1) == 1
+    } else if candidate < 168 {
+        ((keep6 >> (candidate - 144).downcast_truncate()) & 1) == 1
+    } else if candidate < 192 {
+        ((keep7 >> (candidate - 168).downcast_truncate()) & 1) == 1
+    } else {
+        false
+    }
+}
+
+const fn plan_mask_cardinality(
+    _ keep0: u32, _ keep1: u32, _ keep2: u32, _ keep3: u32,
+    _ keep4: u32, _ keep5: u32, _ keep6: u32, _ keep7: u32,
+    _ candidate_count: usize,
+) -> usize {
+    let mut candidate: usize = 0
+    let mut count: usize = 0
+    while candidate < candidate_count && candidate < 192 {
+        if plan_mask_contains(
+            keep0, keep1, keep2, keep3, keep4, keep5, keep6, keep7, candidate,
+        ) {
+            count = count + 1
+        }
+        candidate = candidate + 1
+    }
+    count
+}
+
+const fn plan_mask_candidate(
+    _ keep0: u32, _ keep1: u32, _ keep2: u32, _ keep3: u32,
+    _ keep4: u32, _ keep5: u32, _ keep6: u32, _ keep7: u32,
+    _ candidate_count: usize,
+    _ target: usize,
+) -> usize {
+    let mut candidate: usize = 0
+    let mut seen: usize = 0
+    while candidate < candidate_count && candidate < 192 {
+        if plan_mask_contains(
+            keep0, keep1, keep2, keep3, keep4, keep5, keep6, keep7, candidate,
+        ) {
+            if seen == target { return candidate }
+            seen = seen + 1
+        }
+        candidate = candidate + 1
+    }
+    candidate_count
+}
+
+pub recursive type fn SparsePlan<
+    const Keep0: u32, const Keep1: u32, const Keep2: u32, const Keep3: u32,
+    const Keep4: u32, const Keep5: u32, const Keep6: u32, const Keep7: u32,
+    const CandidateCount: usize,
+    const N: usize,
+>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<{plan_mask_candidate(
+                Keep0, Keep1, Keep2, Keep3, Keep4, Keep5, Keep6, Keep7,
+                CandidateCount, N - 1,
+            )}>,
+            SparsePlan<
+                Keep0, Keep1, Keep2, Keep3, Keep4, Keep5, Keep6, Keep7,
+                CandidateCount, {N - 1},
+            >,
+        >
+    }
+}
+
 // Sparse runtime values selected from the 32 blades of Cl(p,q), p+q <= 5.
 // Runtime storage contains exactly popcount(Support) scalars. A recursive
 // rank-to-Here/Next type covers the whole bounded support. Missing coefficient
 // reads specialize to zero; `sparse_present_coefficient` has no missing-blade
 // implementation and therefore rejects absent access during type checking.
 
-struct SparseNil {}
-struct SparseCell<T> { head: f32, tail: T }
+pub struct SparseNil {}
+pub struct SparseCell<T> { pub head: f32, pub tail: T }
 impl Copy for SparseNil {}
 impl<T: Copy> Copy for SparseCell<T> {}
 
-recursive type fn SparseStorage<const N: usize>() -> (*) {
+pub recursive type fn SparseStorage<const N: usize>() -> (*) {
     match N {
         0 => SparseNil
         _ => SparseCell<SparseStorage<{N - 1}>>
@@ -189,19 +280,19 @@ const fn sparse_present(_ support: usize, _ blade: usize) -> usize {
     }
 }
 
-struct SparseMissing {}
-struct SparseHere {}
-struct SparseNext<I> {}
-struct SparseSelect<const Present: usize, const Rank: usize> {}
+pub struct SparseMissing {}
+pub struct SparseHere {}
+pub struct SparseNext<I> {}
+pub struct SparseSelect<const Present: usize, const Rank: usize> {}
 
-recursive type fn SparseIndex<const Rank: usize>() -> (*) {
+pub recursive type fn SparseIndex<const Rank: usize>() -> (*) {
     match Rank {
         0 => SparseHere
         _ => SparseNext<SparseIndex<{Rank - 1}>>
     }
 }
 
-trait SparseSelectOut { type Out }
+pub trait SparseSelectOut { type Out }
 impl<const Rank: usize> SparseSelectOut for SparseSelect<0, Rank> {
     type Out = SparseMissing
 }
@@ -209,7 +300,7 @@ impl<const Rank: usize> SparseSelectOut for SparseSelect<1, Rank> {
     type Out = SparseIndex<Rank>
 }
 
-trait SparseCoefficient<S> { fn read(value: S) -> f32 }
+pub trait SparseCoefficient<S> { fn read(value: S) -> f32 }
 impl SparseCoefficient<SparseNil> for SparseMissing {
     fn read(value: SparseNil) -> f32 { 0.0 }
 }
@@ -228,7 +319,7 @@ impl<I, T> SparseCoefficient<SparseCell<T>> for SparseNext<I>
 }
 
 // Deliberately lacks a SparseMissing implementation.
-trait SparsePresentCoefficient<S> { fn read_present(value: S) -> f32 }
+pub trait SparsePresentCoefficient<S> { fn read_present(value: S) -> f32 }
 impl<T> SparsePresentCoefficient<SparseCell<T>> for SparseHere {
     fn read_present(value: SparseCell<T>) -> f32 { value.head }
 }
@@ -240,12 +331,12 @@ impl<I, T> SparsePresentCoefficient<SparseCell<T>> for SparseNext<I>
     }
 }
 
-fn sparse_coefficient<I: SparseCoefficient<S>, S>(value: S) -> f32
+pub fn sparse_coefficient<I: SparseCoefficient<S>, S>(value: S) -> f32
 {
     <I as SparseCoefficient<S>>::read(value: value)
 }
 
-fn sparse_present_coefficient<I: SparsePresentCoefficient<S>, S>(value: S) -> f32
+pub fn sparse_present_coefficient<I: SparsePresentCoefficient<S>, S>(value: S) -> f32
 {
     <I as SparsePresentCoefficient<S>>::read_present(value: value)
 }
@@ -361,41 +452,55 @@ const fn keep_tag(_ triple: usize) -> usize {
     supported_output_tag(triple) * coefficient_keep_tag(triple)
 }
 
-const fn survivor_count() -> usize {
-    let mut triple: usize = 0
-    let mut count: usize = 0
-    while triple < 80 {
-        if keep_tag(triple) != 0 { count = count + 1 }
-        triple = triple + 1
-    }
-    count
-}
-
-const fn survivor_triple(_ target: usize) -> usize {
-    let mut triple: usize = 0
-    let mut seen: usize = 0
-    while triple < 80 {
+const fn schedule_keep_word(_ first: usize, _ last: usize) -> u32 {
+    let mut triple: usize = first
+    let mut keep_bits: u32 = 0
+    while triple < last {
         if keep_tag(triple) != 0 {
-            if seen == target { return triple }
-            seen = seen + 1
+            keep_bits = keep_bits | ((1 as u32) << (triple - first).downcast_truncate())
         }
         triple = triple + 1
     }
-    80
+    keep_bits
+}
+
+const SCHEDULE_KEEP0: u32 = schedule_keep_word(0, 24)
+const SCHEDULE_KEEP1: u32 = schedule_keep_word(24, 48)
+const SCHEDULE_KEEP2: u32 = schedule_keep_word(48, 72)
+const SCHEDULE_KEEP3: u32 = schedule_keep_word(72, 80)
+const SCHEDULE_KEEP4: u32 = 0
+const SCHEDULE_KEEP5: u32 = 0
+const SCHEDULE_KEEP6: u32 = 0
+const SCHEDULE_KEEP7: u32 = 0
+
+const fn survivor_count() -> usize {
+    plan_mask_cardinality(
+        SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2,
+        SCHEDULE_KEEP3, SCHEDULE_KEEP4, SCHEDULE_KEEP5,
+        SCHEDULE_KEEP6, SCHEDULE_KEEP7, 80,
+    )
+}
+
+const fn survivor_triple(_ target: usize) -> usize {
+    plan_mask_candidate(
+        SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2,
+        SCHEDULE_KEEP3, SCHEDULE_KEEP4, SCHEDULE_KEEP5,
+        SCHEDULE_KEEP6, SCHEDULE_KEEP7, 80, target,
+    )
 }
 
 static_assert(survivor_count() == 32)
+static_assert(SCHEDULE_KEEP0 == 2707775)
+static_assert(SCHEDULE_KEEP1 == 4498990)
+static_assert(SCHEDULE_KEEP2 == 8948932)
+static_assert(SCHEDULE_KEEP3 == 136)
 
-// The inspectable typed witness uses the shared sparse-plan vocabulary and
-// stores the canonical source-triple identity in exact survivor order. There
-// is no generated or hand-authored survivor table.
-recursive type fn Schedule<const N: usize>() -> (*) {
-    match N {
-        0 => Zero
-        _ => Add<Term<{survivor_triple(N - 1)}>, Schedule<{N - 1}>>
-    }
-}
-type Schedule32 = Schedule<32>
+// The inspectable typed witness stores the canonical source-triple identity in
+// exact survivor order. The literals keep today's semantic-MIR lowering from
+// seeing a const-value path in a type argument; the assertions above prove
+// that they are exactly the masks computed from the source semantics.
+type Schedule32 =
+    SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>
 
 // BEGIN_FORCE_SCHEDULE32
 fn takes_nat32(_ value: Nat<32>) {}
