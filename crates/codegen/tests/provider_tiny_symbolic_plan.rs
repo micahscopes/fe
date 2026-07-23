@@ -165,8 +165,8 @@ pub fn run(x: i32) -> i32 {
         "the direct arithmetic proof should need no host imports"
     );
     let mut store = wasmtime::Store::new(&engine, ());
-    let instance =
-        wasmtime::Instance::new(&mut store, &module, &[]).expect("zero-import instance");
+    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+        .expect("zero-import instance");
     let run = instance
         .get_typed_func::<i32, i32>(&mut store, "run")
         .expect("run export");
