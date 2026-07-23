@@ -56,6 +56,13 @@ pub enum WebMode {
     Grid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum WebCanonicalPolicy {
+    Disabled,
+    Optional,
+    Required,
+}
+
 fn cli_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION
@@ -412,6 +419,9 @@ pub enum WebAction {
         /// Stable source identity recorded in the bundle manifest.
         #[arg(long)]
         source_id: Option<String>,
+        /// Canonical browser ABI policy. No adapter is generated implicitly.
+        #[arg(long, value_enum, default_value = "disabled")]
+        canonical: WebCanonicalPolicy,
     },
 }
 
@@ -503,6 +513,7 @@ pub fn run(opts: &Options) {
                 workgroup_y,
                 workgroup_z,
                 source_id,
+                canonical,
             } => {
                 if let Err(err) = web::build(
                     path,
@@ -511,6 +522,7 @@ pub fn run(opts: &Options) {
                     out,
                     [*workgroup_x, *workgroup_y, *workgroup_z],
                     source_id.clone(),
+                    *canonical,
                 ) {
                     eprintln!("Error: {err}");
                     std::process::exit(1);
@@ -1224,6 +1236,7 @@ mod web_cli_tests {
                     workgroup_x,
                     workgroup_y,
                     workgroup_z,
+                    canonical,
                     ..
                 },
         } = options.command
@@ -1232,6 +1245,7 @@ mod web_cli_tests {
         };
         assert_eq!(entry, "shade");
         assert_eq!(mode, WebMode::Grid);
+        assert_eq!(canonical, WebCanonicalPolicy::Disabled);
         assert_eq!(
             [workgroup_x, workgroup_y, workgroup_z],
             [Some(8), Some(4), Some(1)]
@@ -1251,6 +1265,35 @@ mod web_cli_tests {
             .is_err(),
             "web builds must never infer an entry"
         );
+
+        for (value, expected) in [
+            ("disabled", WebCanonicalPolicy::Disabled),
+            ("optional", WebCanonicalPolicy::Optional),
+            ("required", WebCanonicalPolicy::Required),
+        ] {
+            let options = Options::try_parse_from([
+                "fe",
+                "web",
+                "build",
+                "kernel.fe",
+                "--entry",
+                "shade",
+                "--mode",
+                "render",
+                "--out",
+                "bundle",
+                "--canonical",
+                value,
+            ])
+            .unwrap();
+            let Command::Web {
+                action: WebAction::Build { canonical, .. },
+            } = options.command
+            else {
+                panic!("expected web build");
+            };
+            assert_eq!(canonical, expected);
+        }
     }
 }
 

@@ -8,7 +8,7 @@ use driver::{
 use hir::hir_def::HirIngot;
 use url::Url;
 
-use crate::WebMode;
+use crate::{WebCanonicalPolicy, WebMode};
 
 pub fn build(
     path: &Utf8PathBuf,
@@ -17,6 +17,7 @@ pub fn build(
     out: &Utf8PathBuf,
     workgroup: [Option<u32>; 3],
     source_id: Option<String>,
+    canonical: WebCanonicalPolicy,
 ) -> Result<(), String> {
     if entry.is_empty() {
         return Err("`--entry` must not be empty".to_string());
@@ -84,7 +85,12 @@ pub fn build(
     let options = match mode {
         WebMode::Render => WebBuildOptions::render(entry, source_id),
         WebMode::Grid => WebBuildOptions::grid(entry, workgroup.unwrap(), source_id),
-    };
+    }
+    .with_canonical_policy(match canonical {
+        WebCanonicalPolicy::Disabled => codegen::WebCanonicalPolicy::Disabled,
+        WebCanonicalPolicy::Optional => codegen::WebCanonicalPolicy::Optional,
+        WebCanonicalPolicy::Required => codegen::WebCanonicalPolicy::Required,
+    });
     let bundle = WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())?;
     bundle
         .write_atomic(out.as_std_path())
@@ -106,6 +112,7 @@ mod tests {
             &"out".into(),
             [Some(8), None, Some(1)],
             None,
+            WebCanonicalPolicy::Disabled,
         )
         .unwrap_err();
         assert!(missing.contains("requires non-zero"), "{missing}");
@@ -117,8 +124,47 @@ mod tests {
             &"out".into(),
             [Some(8), Some(4), Some(1)],
             None,
+            WebCanonicalPolicy::Disabled,
         )
         .unwrap_err();
         assert!(render.contains("only valid"), "{render}");
+    }
+
+    #[test]
+    fn required_canonical_policy_fails_honestly_without_emitted_abi() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("canonical.fe");
+        std::fs::write(
+            &source,
+            r#"
+struct Request { value: u32 }
+struct Response { value: u32 }
+pub fn update(request: Request) -> Response {
+    Response { value: request.value }
+}
+"#,
+        )
+        .unwrap();
+        let source = Utf8PathBuf::from_path_buf(source).unwrap();
+        let out = Utf8PathBuf::from_path_buf(temp.path().join("bundle")).unwrap();
+        let error = build(
+            &source,
+            "update",
+            WebMode::Render,
+            &out,
+            [None, None, None],
+            None,
+            WebCanonicalPolicy::Required,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("required canonical interface is unavailable"),
+            "{error}"
+        );
+        assert!(
+            error.contains("emitted canonical ABI verification failed"),
+            "{error}"
+        );
+        assert!(!out.exists(), "failed build must not publish a bundle");
     }
 }
