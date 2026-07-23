@@ -5,6 +5,13 @@ import {
   compileCanonicalInterfaceManifest,
   createCanonicalInterfaceCaller,
 } from "./canonical-interface.js";
+import * as compilerOwnedCodec from "../../crates/codegen/assets/canonical-interface.js";
+
+assert.equal(
+  compilerOwnedCodec.compileCanonicalInterfaceManifest,
+  compileCanonicalInterfaceManifest,
+  "demo compatibility module must re-export the compiler-owned codec",
+);
 
 const scalar = (kind, size, align) => ({ kind, size, align });
 const descriptor = (kind) => ({

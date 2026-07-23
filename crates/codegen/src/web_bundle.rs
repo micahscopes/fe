@@ -15,6 +15,7 @@ use std::{
 use driver::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sonatina_codegen::isa::spirv::{
     Access, LayoutMode, Role, SpirvBuiltinSource, SpirvLayout, SpirvScalarKind, WordKind,
 };
@@ -28,11 +29,14 @@ use crate::{
 };
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 2;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 3;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
 const MANIFEST_FILE: &str = "manifest.json";
+const INTERFACE_JS_FILE: &str = "interface.js";
+const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
+const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +130,18 @@ pub struct WebArtifactManifest {
     pub wasm_bytes: u64,
     pub wgsl: String,
     pub wgsl_bytes: u64,
+    /// Added in web-bundle protocol v3. The serde default keeps compiler tools
+    /// able to inspect v2 manifests structurally; consumers must still branch
+    /// on `protocol_version` and must not infer generated adapters for v2.
+    #[serde(default)]
+    pub canonical_adapters: Vec<WebGeneratedArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebGeneratedArtifact {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +251,8 @@ pub struct WebBundle {
     pub wasm: Vec<u8>,
     pub wgsl: String,
     pub manifest: WebBundleManifest,
+    pub interface_js: Option<String>,
+    pub interface_d_ts: Option<String>,
 }
 
 impl WebBundle {
@@ -311,6 +329,8 @@ impl WebBundle {
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
         let canonical_interface =
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
+        let (interface_js, interface_d_ts, canonical_adapters) =
+            generated_canonical_adapters(canonical_interface.as_ref())?;
 
         let gpu_package =
             mir::build_wasm_runtime_package_for_entry(db, top_mod, &options.source_entry)
@@ -335,6 +355,7 @@ impl WebBundle {
                 wasm_bytes: wasm.len() as u64,
                 wgsl: WGSL_FILE.to_string(),
                 wgsl_bytes: wgsl.len() as u64,
+                canonical_adapters,
             },
             layout,
             provenance: options.provenance,
@@ -345,6 +366,8 @@ impl WebBundle {
             wasm,
             wgsl,
             manifest,
+            interface_js,
+            interface_d_ts,
         })
     }
 
@@ -380,6 +403,15 @@ impl WebBundle {
             fs::create_dir(&staging)?;
             write_synced(&staging.join(WASM_FILE), &self.wasm)?;
             write_synced(&staging.join(WGSL_FILE), self.wgsl.as_bytes())?;
+            if let Some(interface_js) = &self.interface_js {
+                write_synced(&staging.join(INTERFACE_JS_FILE), interface_js.as_bytes())?;
+            }
+            if let Some(interface_d_ts) = &self.interface_d_ts {
+                write_synced(
+                    &staging.join(INTERFACE_D_TS_FILE),
+                    interface_d_ts.as_bytes(),
+                )?;
+            }
             write_synced(&staging.join(MANIFEST_FILE), &self.manifest_json()?)?;
             fs::rename(&staging, destination)?;
             Ok(())
@@ -389,6 +421,106 @@ impl WebBundle {
         }
         result
     }
+}
+
+fn generated_canonical_adapters(
+    interface: Option<&CanonicalInterfaceManifest>,
+) -> Result<(Option<String>, Option<String>, Vec<WebGeneratedArtifact>), WebBundleError> {
+    let Some(interface) = interface else {
+        return Ok((None, None, Vec::new()));
+    };
+    let manifest_json = serde_json::to_string(interface)
+        .map_err(|error| WebBundleError::Manifest(error.to_string()))?;
+    let interface_js = format!(
+        "{CANONICAL_INTERFACE_JS}\n\
+         export const canonicalInterfaceManifest = Object.freeze({manifest_json});\n\
+         export const compiledCanonicalInterface = \
+         compileCanonicalInterfaceManifest(canonicalInterfaceManifest);\n\
+         export function createInterfaceCaller(exports) {{\n  \
+         return createCanonicalInterfaceCaller(compiledCanonicalInterface, exports);\n}}\n"
+    );
+    let interface_d_ts = canonical_interface_declarations(interface);
+    let artifact = |path: &str, content: &str| WebGeneratedArtifact {
+        path: path.to_owned(),
+        bytes: content.len() as u64,
+        sha256: hex::encode(Sha256::digest(content.as_bytes())),
+    };
+    let artifacts = vec![
+        artifact(INTERFACE_JS_FILE, &interface_js),
+        artifact(INTERFACE_D_TS_FILE, &interface_d_ts),
+    ];
+    Ok((Some(interface_js), Some(interface_d_ts), artifacts))
+}
+
+fn canonical_interface_declarations(interface: &CanonicalInterfaceManifest) -> String {
+    fn pascal(name: &str) -> String {
+        name.split('_')
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect()
+    }
+
+    fn ty(layout: &crate::CanonicalLayout, indent: usize) -> String {
+        match &layout.shape {
+            crate::CanonicalShape::Bool => "boolean".to_owned(),
+            crate::CanonicalShape::U8
+            | crate::CanonicalShape::I32
+            | crate::CanonicalShape::U32
+            | crate::CanonicalShape::F32 => "number".to_owned(),
+            crate::CanonicalShape::I64 | crate::CanonicalShape::U64 => "bigint".to_owned(),
+            crate::CanonicalShape::Bytes { .. } => "Uint8Array".to_owned(),
+            crate::CanonicalShape::String { .. } => "string".to_owned(),
+            crate::CanonicalShape::Record { fields } => {
+                let padding = " ".repeat(indent);
+                let field_padding = " ".repeat(indent + 2);
+                let fields = fields
+                    .iter()
+                    .map(|field| {
+                        format!(
+                            "{field_padding}{}: {};",
+                            field.name,
+                            ty(&field.layout, indent + 2)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{{\n{fields}\n{padding}}}")
+            }
+        }
+    }
+
+    let mut output = String::from(
+        "export declare const canonicalInterfaceManifest: Readonly<object>;\n\
+         export declare const compiledCanonicalInterface: Readonly<object>;\n\n",
+    );
+    for lane in &interface.lanes {
+        let name = pascal(&lane.name);
+        output.push_str(&format!(
+            "export type {name}Request = {};\n\
+             export type {name}Response = {};\n\n",
+            ty(&lane.request, 0),
+            ty(&lane.response, 0),
+        ));
+    }
+    output.push_str("export interface CanonicalInterfaceCaller {\n");
+    for lane in &interface.lanes {
+        let name = pascal(&lane.name);
+        output.push_str(&format!(
+            "  call(lane: {:?}, value: {name}Request): Promise<{name}Response>;\n",
+            lane.name
+        ));
+    }
+    output.push_str(
+        "}\n\nexport declare function createInterfaceCaller(\n  \
+         exports: WebAssembly.Exports,\n): CanonicalInterfaceCaller;\n",
+    );
+    output
 }
 
 fn verify_canonical_candidate(
@@ -663,6 +795,9 @@ pub fn shade(x: u32, y: u32) -> u32 {
             WebCanonicalPolicy::Disabled
         );
         assert!(first.manifest.canonical_interface.is_none());
+        assert!(first.manifest.artifacts.canonical_adapters.is_empty());
+        assert!(first.interface_js.is_none());
+        assert!(first.interface_d_ts.is_none());
         let exports = wasm_exports(&first.wasm);
         assert!(!exports.iter().any(|name| name == "fe_cabi_alloc"));
         assert!(!exports.iter().any(|name| name == "fe_cabi_reset"));
@@ -671,6 +806,19 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let decoded: WebBundleManifest =
             serde_json::from_slice(&first.manifest_json().unwrap()).unwrap();
         assert_eq!(decoded, first.manifest);
+
+        // V3 adds generated adapter metadata. A compiler tool may still inspect
+        // a V2 manifest, but the retained version makes the compatibility
+        // boundary explicit and the absent assets do not materialize.
+        let mut legacy = serde_json::to_value(&first.manifest).unwrap();
+        legacy["protocol_version"] = serde_json::json!(2);
+        legacy["artifacts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("canonical_adapters");
+        let legacy: WebBundleManifest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.protocol_version, 2);
+        assert!(legacy.artifacts.canonical_adapters.is_empty());
     }
 
     #[test]
@@ -742,6 +890,47 @@ pub fn shade(x: u32, y: u32) -> u32 {
         .unwrap();
         assert!(required.manifest.canonical_interface.is_some());
         assert!(required.manifest.canonical_status.embedded);
+        let interface_js = required.interface_js.as_ref().unwrap();
+        let interface_d_ts = required.interface_d_ts.as_ref().unwrap();
+        assert!(interface_js.contains("createInterfaceCaller"));
+        assert!(interface_js.contains("canonicalInterfaceManifest"));
+        assert!(interface_d_ts.contains("export type UpdateRequest"));
+        assert!(interface_d_ts.contains("export type UpdateResponse"));
+        assert_eq!(
+            required
+                .manifest
+                .artifacts
+                .canonical_adapters
+                .iter()
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>(),
+            [INTERFACE_JS_FILE, INTERFACE_D_TS_FILE]
+        );
+        for (artifact, content) in required
+            .manifest
+            .artifacts
+            .canonical_adapters
+            .iter()
+            .zip([interface_js.as_bytes(), interface_d_ts.as_bytes()])
+        {
+            assert_eq!(artifact.bytes, content.len() as u64);
+            assert_eq!(artifact.sha256, hex::encode(Sha256::digest(content)));
+        }
+        let destination = std::env::temp_dir().join(format!(
+            "fe-canonical-adapter-test-{}-{}",
+            std::process::id(),
+            NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        required.write_atomic(&destination).unwrap();
+        assert_eq!(
+            fs::read(destination.join(INTERFACE_JS_FILE)).unwrap(),
+            interface_js.as_bytes()
+        );
+        assert_eq!(
+            fs::read(destination.join(INTERFACE_D_TS_FILE)).unwrap(),
+            interface_d_ts.as_bytes()
+        );
+        fs::remove_dir_all(destination).unwrap();
     }
 
     #[test]
@@ -778,6 +967,10 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 .unwrap()
                 .contains("missing exported memory")
         );
+        let (js, declarations, artifacts) = generated_canonical_adapters(None).unwrap();
+        assert!(js.is_none());
+        assert!(declarations.is_none());
+        assert!(artifacts.is_empty());
 
         let mut required = WebCanonicalStatus {
             policy: WebCanonicalPolicy::Required,
