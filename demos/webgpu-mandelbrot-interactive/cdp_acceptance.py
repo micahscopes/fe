@@ -15,6 +15,7 @@ _SHARED = importlib.util.module_from_spec(_SHARED_SPEC)
 _SHARED_SPEC.loader.exec_module(_SHARED)
 WebSocket = _SHARED.WebSocket
 find_page = _SHARED.find_page
+command = _SHARED.command
 
 
 def acceptance_passes(value):
@@ -38,24 +39,18 @@ def poll_acceptance(debug_port, page_url, timeout):
     try:
         while time.monotonic() < deadline:
             command_id += 1
-            ws.send_json({
-                "id": command_id,
-                "method": "Runtime.evaluate",
-                "params": {
+            result = command(
+                ws, command_id, "Runtime.evaluate", {
                     "expression": "JSON.stringify(window.__mandelAcceptance || null)",
                     "returnByValue": True,
                 },
-            })
-            while time.monotonic() < deadline:
-                response = ws.recv_json()
-                if response.get("id") != command_id:
-                    continue
-                raw = response.get("result", {}).get("result", {}).get("value", "null")
-                value = json.loads(raw) if isinstance(raw, str) else None
-                if isinstance(value, dict) and value.get("state") != "pending":
-                    print(json.dumps(value, sort_keys=True))
-                    return acceptance_passes(value)
-                break
+                deadline,
+            )
+            raw = result.get("result", {}).get("value", "null")
+            value = json.loads(raw) if isinstance(raw, str) else None
+            if isinstance(value, dict) and value.get("state") != "pending":
+                print(json.dumps(value, sort_keys=True))
+                return acceptance_passes(value)
             time.sleep(0.1)
     finally:
         ws.close()

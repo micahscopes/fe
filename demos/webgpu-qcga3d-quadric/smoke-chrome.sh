@@ -23,8 +23,10 @@ cleanup(){ kill "${chrome_pid:-}" "${server_pid:-}" 2>/dev/null || true; wait "$
 python3 -m http.server "$port" --bind 127.0.0.1 --directory "$root" >"$tmp/http.log" 2>&1 & server_pid=$!
 query="acceptance=offscreen"; [ "$mode" = off ] && query="verify=off"
 url="http://127.0.0.1:$port/webgpu-qcga3d-quadric/?$query"
-"$chrome" --headless=new --no-sandbox --disable-dev-shm-usage --enable-unsafe-webgpu \
-  --use-angle=swiftshader --enable-features=Vulkan,UseSkiaRenderer --remote-debugging-port="$debug" \
+default_flags="--enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=swiftshader --disable-vulkan-surface"
+read -r -a webgpu_flags <<<"${CHROME_WEBGPU_FLAGS:-$default_flags}" || true
+"$chrome" --headless=new --no-sandbox --disable-dev-shm-usage \
+  "${webgpu_flags[@]}" --remote-debugging-port="$debug" \
   --user-data-dir="$tmp/profile" "$url" >"$tmp/chrome.out" 2>"$tmp/chrome.log" & chrome_pid=$!
 python3 "$here/cdp_acceptance.py" --debug-port "$debug" --url "$url" --mode "$mode" --timeout 90
 echo "PASS: Chrome SwiftShader QCGA mode=$mode"

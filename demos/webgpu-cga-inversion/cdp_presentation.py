@@ -6,7 +6,7 @@ import json
 import math
 import time
 
-from cdp_acceptance import WebSocket, find_page
+from cdp_acceptance import WebSocket, command, find_page
 
 
 def presentation_passes(value):
@@ -60,17 +60,6 @@ def presentation_passes(value):
     cadence = interaction.get("cadenceHz")
     return (isinstance(cadence, (int, float))
             and math.isfinite(cadence) and cadence >= 0)
-
-
-def command(ws, command_id, method, params, deadline):
-    ws.send_json({"id": command_id, "method": method, "params": params})
-    while time.monotonic() < deadline:
-        response = ws.recv_json()
-        if response.get("id") == command_id:
-            if "error" in response:
-                raise RuntimeError(response["error"])
-            return response.get("result", {})
-    raise TimeoutError(f"CDP command {method} timed out")
 
 
 def run_measurement(debug_port, page_url, timeout):

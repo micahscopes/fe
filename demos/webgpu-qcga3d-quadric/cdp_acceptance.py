@@ -16,13 +16,10 @@ def main():
     ws=base.WebSocket(base.find_page(a.debug_port,a.url,deadline),max(1,a.timeout));i=0
     try:
         while time.monotonic()<deadline:
-            i+=1;ws.send_json({"id":i,"method":"Runtime.evaluate","params":{"expression":"JSON.stringify(window.__qcgaAcceptance || null)","returnByValue":True}})
-            while time.monotonic()<deadline:
-                r=ws.recv_json()
-                if r.get("id")!=i:continue
-                raw=r.get("result",{}).get("result",{}).get("value","null");v=json.loads(raw)
-                if isinstance(v,dict) and v.get("state")!="pending": print(json.dumps(v,sort_keys=True));raise SystemExit(0 if valid(v,a.mode) else 1)
-                break
+            i+=1
+            r=base.command(ws,i,"Runtime.evaluate",{"expression":"JSON.stringify(window.__qcgaAcceptance || null)","returnByValue":True},deadline)
+            raw=r.get("result",{}).get("value","null");v=json.loads(raw)
+            if isinstance(v,dict) and v.get("state")!="pending": print(json.dumps(v,sort_keys=True));raise SystemExit(0 if valid(v,a.mode) else 1)
             time.sleep(.1)
     finally: ws.close()
     raise SystemExit("QCGA acceptance remained pending")

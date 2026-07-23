@@ -1,11 +1,24 @@
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from cdp_acceptance import acceptance_passes, encode_client_frame, parse_frame_bytes
+from cdp_acceptance import acceptance_passes, command, encode_client_frame, parse_frame_bytes
+
+
+class FakeWebSocket:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.sent = []
+
+    def send_json(self, value):
+        self.sent.append(value)
+
+    def recv_json(self):
+        return next(self.responses)
 
 
 class CdpAcceptanceTests(unittest.TestCase):
@@ -34,6 +47,30 @@ class CdpAcceptanceTests(unittest.TestCase):
         self.assertFalse(acceptance_passes({**value, "wasmHash": 1}, "offscreen", "presentation"))
         self.assertFalse(acceptance_passes({**value, "gpuHash": 1}, "offscreen", "presentation"))
         self.assertFalse(acceptance_passes({**value, "state": "green"}, "offscreen", "presentation"))
+
+    def test_runtime_evaluate_retries_missing_default_context(self):
+        ws = FakeWebSocket([
+            {"id": 7, "error": {"code": -32000,
+                                "message": "Cannot find default execution context"}},
+            {"id": 7, "result": {"result": {"value": "ready"}}},
+        ])
+        result = command(
+            ws, 7, "Runtime.evaluate", {"expression": "1"},
+            time.monotonic() + 2,
+        )
+        self.assertEqual(result, {"result": {"value": "ready"}})
+        self.assertEqual(len(ws.sent), 2)
+
+    def test_nontransient_cdp_error_fails_without_retry(self):
+        ws = FakeWebSocket([
+            {"id": 8, "error": {"code": -32000, "message": "evaluation failed"}},
+        ])
+        with self.assertRaisesRegex(RuntimeError, "evaluation failed"):
+            command(
+                ws, 8, "Runtime.evaluate", {"expression": "1"},
+                time.monotonic() + 2,
+            )
+        self.assertEqual(len(ws.sent), 1)
 
 
 if __name__ == "__main__":

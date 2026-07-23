@@ -136,6 +136,25 @@ def find_page(debug_port, page_url, deadline):
     raise TimeoutError(f"Chrome did not expose the typed-CGA page over CDP: {page_url}")
 
 
+def command(ws, command_id, method, params, deadline):
+    """Run one CDP command, retrying the page-creation context race."""
+    while time.monotonic() < deadline:
+        ws.send_json({"id": command_id, "method": method, "params": params})
+        while time.monotonic() < deadline:
+            response = ws.recv_json()
+            if response.get("id") != command_id:
+                continue
+            error = response.get("error")
+            if error is not None:
+                message = error.get("message", "") if isinstance(error, dict) else str(error)
+                if method == "Runtime.evaluate" and "default execution context" in message:
+                    time.sleep(0.1)
+                    break
+                raise RuntimeError(error)
+            return response.get("result", {})
+    raise TimeoutError(f"CDP command {method} timed out")
+
+
 def poll_acceptance(debug_port, page_url, expected_presentation, expected_state, timeout):
     deadline = time.monotonic() + timeout
     ws = WebSocket(find_page(debug_port, page_url, deadline), max(1, timeout))
@@ -143,24 +162,18 @@ def poll_acceptance(debug_port, page_url, expected_presentation, expected_state,
     try:
         while time.monotonic() < deadline:
             command_id += 1
-            ws.send_json({
-                "id": command_id,
-                "method": "Runtime.evaluate",
-                "params": {
+            result = command(
+                ws, command_id, "Runtime.evaluate", {
                     "expression": "JSON.stringify(window.__cgaAcceptance || null)",
                     "returnByValue": True,
                 },
-            })
-            while time.monotonic() < deadline:
-                response = ws.recv_json()
-                if response.get("id") != command_id:
-                    continue
-                raw = response.get("result", {}).get("result", {}).get("value", "null")
-                value = json.loads(raw) if isinstance(raw, str) else None
-                if isinstance(value, dict) and value.get("state") != "pending":
-                    print(json.dumps(value, sort_keys=True))
-                    return acceptance_passes(value, expected_presentation, expected_state)
-                break
+                deadline,
+            )
+            raw = result.get("result", {}).get("value", "null")
+            value = json.loads(raw) if isinstance(raw, str) else None
+            if isinstance(value, dict) and value.get("state") != "pending":
+                print(json.dumps(value, sort_keys=True))
+                return acceptance_passes(value, expected_presentation, expected_state)
             time.sleep(0.1)
     finally:
         ws.close()

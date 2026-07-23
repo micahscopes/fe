@@ -32,7 +32,20 @@ if [ -z "$chrome" ] || [ ! -x "$chrome" ]; then
   exit 69
 fi
 
-"$here/ensure-assets.sh"
+requested_bundle="${CGA_SMOKE_BUNDLE:-}"
+case "$requested_bundle" in
+  ""|schedule32)
+    CGA_BUNDLE=schedule32 \
+      CGA_BUNDLE_DIR="$here/gen-schedule32" \
+      "$here/ensure-assets.sh"
+    ;;
+  d1|legacy)
+    CGA_BUNDLE=default \
+      CGA_BUNDLE_DIR="$here/gen" \
+      "$here/ensure-assets.sh"
+    ;;
+  *) echo "CGA_SMOKE_BUNDLE must be 'd1', 'legacy', or 'schedule32'" >&2; exit 2 ;;
+esac
 
 port="${CGA_SMOKE_PORT:-}"
 if [ -z "$port" ]; then
@@ -85,11 +98,10 @@ esac
 append_query() {
   query="${query:+$query&}$1=$2"
 }
-bundle="${CGA_SMOKE_BUNDLE:-}"
+bundle="$requested_bundle"
 case "$bundle" in
   "") ;;
   d1|legacy|schedule32) append_query bundle "$bundle" ;;
-  *) echo "CGA_SMOKE_BUNDLE must be 'd1', 'legacy', or 'schedule32'" >&2; exit 2 ;;
 esac
 benchmark="${CGA_SMOKE_BENCHMARK:-}"
 case "$benchmark" in
