@@ -1,0 +1,473 @@
+From f0cffb739182f894ecfa1d8dc1d7deebadcc925c Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Wed, 22 Jul 2026 12:07:33 +0200
+Subject: [PATCH 15/25] feat(spirv): carry values across loop exits
+
+---
+ crates/codegen/src/isa/spirv/mod.rs   |  41 +++++-
+ crates/codegen/src/structurize.rs     | 135 ++++++++++++++++--
+ crates/codegen/tests/spirv_backend.rs | 189 ++++++++++++++++++++++++++
+ 3 files changed, 353 insertions(+), 12 deletions(-)
+
+diff --git a/crates/codegen/src/isa/spirv/mod.rs b/crates/codegen/src/isa/spirv/mod.rs
+index 7c22b5d8..27aff149 100644
+--- a/crates/codegen/src/isa/spirv/mod.rs
++++ b/crates/codegen/src/isa/spirv/mod.rs
+@@ -774,6 +774,9 @@ fn emit_naga_regions(
+                 func.body.extend_block(target);
+                 region_idx += 1;
+             }
++            crate::structurize::Region::LoopExit { from, target } => return Err(format!(
++                "spirv: loop exit edge {from:?}->{target:?} appeared outside its loop"
++            )),
+         }
+     }
+     Ok(())
+@@ -821,6 +824,7 @@ fn region_blocks(regions: &[crate::structurize::Region], out: &mut std::collecti
+                 out.insert(*header);
+                 region_blocks(body, out);
+             }
++            crate::structurize::Region::LoopExit { .. } => {}
+         }
+     }
+ }
+@@ -952,7 +956,8 @@ fn arm_outcome(
+         }
+         crate::structurize::Region::IfThenElse { merge: Some(_), .. } => ArmOutcome::AlreadyAtMerge,
+         crate::structurize::Region::IfThenElse { merge: None, .. }
+-        | crate::structurize::Region::Loop { .. } => ArmOutcome::Terminal,
++        | crate::structurize::Region::Loop { .. }
++        | crate::structurize::Region::LoopExit { .. } => ArmOutcome::Terminal,
+     }
+ }
+ 
+@@ -983,6 +988,9 @@ fn emit_non_loop_regions(
+             crate::structurize::Region::Loop { .. } => return Err(
+                 "spirv structurize: loop nested inside conditional is not supported yet".to_string()
+             ),
++            crate::structurize::Region::LoopExit { from, target } => return Err(format!(
++                "spirv: loop exit edge {from:?}->{target:?} appeared outside its loop"
++            )),
+         }
+     }
+     Ok(())
+@@ -1075,6 +1083,37 @@ fn emit_regions_in_loop(
+                 target.push(naga::Statement::If { condition, accept, reject }, naga::Span::UNDEFINED);
+             }
+             crate::structurize::Region::Loop { .. } => return Err("spirv: nested loop emission is not implemented yet".to_string()),
++            crate::structurize::Region::LoopExit { from, target: exit } => {
++                ensure_phi_locals(
++                    function, inst_set, *exit, word_type, f32_type, bool_type, func, phi_locals,
++                );
++                emit_exact_phi_edge(
++                    function, inst_set, word, *from, *exit, func, target, value_map, phi_locals,
++                )?;
++                if let Some(ret) = find_block_return_value(*exit, function, inst_set) {
++                    emit_phi_loads_for_block(
++                        function, inst_set, *exit, func, target, value_map, phi_locals,
++                    );
++                    emit_block_to_target(
++                        function, inst_set, word, *exit, func, target, value_map, phi_locals,
++                        result_expr,
++                    );
++                    let value = resolve_naga_value(
++                        ret, function, word, value_map, phi_locals, func,
++                    )
++                    .ok_or_else(|| format!("spirv: unresolved loop exit return in {exit:?}"))?;
++                    let pointer = func.expressions.append(
++                        naga::Expression::LocalVariable(return_local),
++                        naga::Span::UNDEFINED,
++                    );
++                    target.push(
++                        naga::Statement::Store { pointer, value },
++                        naga::Span::UNDEFINED,
++                    );
++                }
++                target.push(naga::Statement::Break, naga::Span::UNDEFINED);
++                return Ok(RegionOutcome::Terminal);
++            }
+         }
+     }
+     outcome.ok_or_else(|| "spirv: empty region sequence has no control outcome".to_string())
+diff --git a/crates/codegen/src/structurize.rs b/crates/codegen/src/structurize.rs
+index 9710083f..df63ae1e 100644
+--- a/crates/codegen/src/structurize.rs
++++ b/crates/codegen/src/structurize.rs
+@@ -33,6 +33,11 @@ pub enum Region {
+     /// block itself (phis, exit condition, exit branch) is referenced by
+     /// `header` and consumed by the emitter's loop preamble.
+     Loop { header: BlockId, body: Vec<Region> },
++    /// An edge from a loop body to that loop's canonical fallthrough block.
++    /// The source block remains a separate `Block` region when it contains
++    /// instructions; this marker preserves the exact predecessor needed for
++    /// exit-phi transport before the structured backend emits `break`.
++    LoopExit { from: BlockId, target: BlockId },
+     /// An if-then-else with a condition (header) block, then-regions,
+     /// else-regions, and the join (merge) block, if any. The merge block itself
+     /// stays a SIBLING in the enclosing `Vec<Region>`; the arm vectors contain
+@@ -207,7 +212,16 @@ impl Structurer<'_> {
+             match self.term(b) {
+                 Term::Jump(t) => {
+                     regions.push(Region::Block(b));
+-                    cur = Some(t);
++                    if let Some(lp) = cur_loop
++                        && !self.in_loop(t, lp)
++                        && (self.is_canonical_loop_exit(lp, t) || !self.returns(t))
++                    {
++                        self.validate_loop_exit_target(lp, b, t)?;
++                        regions.push(Region::LoopExit { from: b, target: t });
++                        cur = None;
++                    } else {
++                        cur = Some(t);
++                    }
+                 }
+                 Term::Return => {
+                     regions.push(Region::Block(b));
+@@ -215,16 +229,12 @@ impl Structurer<'_> {
+                 }
+                 Term::Br(nz, z) => {
+                     let merge = self.find_merge(b, cur_loop)?;
+-                    let then_branch = if Some(nz) == merge {
+-                        Vec::new()
+-                    } else {
+-                        self.build_seq(nz, merge, cur_loop, active, consumed)?
+-                    };
+-                    let else_branch = if Some(z) == merge {
+-                        Vec::new()
+-                    } else {
+-                        self.build_seq(z, merge, cur_loop, active, consumed)?
+-                    };
++                    let then_branch = self.build_branch(
++                        b, nz, merge, cur_loop, active, consumed,
++                    )?;
++                    let else_branch = self.build_branch(
++                        b, z, merge, cur_loop, active, consumed,
++                    )?;
+                     regions.push(Region::IfThenElse {
+                         header: b,
+                         then_branch,
+@@ -247,6 +257,66 @@ impl Structurer<'_> {
+         Ok(regions)
+     }
+ 
++    fn build_branch(
++        &self,
++        from: BlockId,
++        target: BlockId,
++        merge: Option<BlockId>,
++        cur_loop: Option<Loop>,
++        active: &mut HashSet<BlockId>,
++        consumed: &mut HashSet<BlockId>,
++    ) -> Result<Vec<Region>, String> {
++        if Some(target) == merge {
++            return Ok(Vec::new());
++        }
++        if let Some(lp) = cur_loop
++            && !self.in_loop(target, lp)
++            && (self.is_canonical_loop_exit(lp, target) || !self.returns(target))
++        {
++            if !self.is_canonical_loop_exit(lp, target)
++                && let Term::Jump(exit) = self.term(target)
++                && self.is_canonical_loop_exit(lp, exit)
++            {
++                if !consumed.insert(target) {
++                    return Err(format!(
++                        "spirv structurize: cyclic or multiply consumed block {target:?}"
++                    ));
++                }
++                return Ok(vec![
++                    Region::Block(target),
++                    Region::LoopExit { from: target, target: exit },
++                ]);
++            }
++            self.validate_loop_exit_target(lp, from, target)?;
++            return Ok(vec![Region::LoopExit { from, target }]);
++        }
++        self.build_seq(target, merge, cur_loop, active, consumed)
++    }
++
++    fn is_canonical_loop_exit(&self, lp: Loop, target: BlockId) -> bool {
++        let header = self.loop_tree.loop_header(lp);
++        self.loop_direct_exit(header, lp) == Some(target)
++    }
++
++    fn validate_loop_exit_target(
++        &self,
++        lp: Loop,
++        from: BlockId,
++        target: BlockId,
++    ) -> Result<(), String> {
++        let header = self.loop_tree.loop_header(lp);
++        let canonical = self.loop_direct_exit(header, lp).ok_or_else(|| {
++            format!("spirv structurize: loop {header:?} has no canonical header exit")
++        })?;
++        if target != canonical {
++            return Err(format!(
++                "spirv structurize: loop body edge {from:?}->{target:?} targets a \
++                 noncanonical exit; expected the header exit {canonical:?}"
++            ));
++        }
++        Ok(())
++    }
++
+     /// Structure a loop's body: the region sequence entered at the header's
+     /// in-loop successor, stopping at the header (backedge) and at loop exits.
+     fn build_loop_body(
+@@ -713,4 +783,47 @@ mod tests {
+             "expected a named fail-closed structurizer error, got: {err}"
+         );
+     }
++
++    #[test]
++    fn noncanonical_loop_exit_target_fails_closed_by_name() {
++        let (mb, is) = native_builder();
++        let sig = Signature::new_unit("two_loop_exits", Linkage::Public, &[]);
++        let fr = mb.declare_function(sig).unwrap();
++        let mut fb = mb.func_builder::<InstInserter>(fr);
++        let entry = fb.append_block();
++        let header = fb.append_block();
++        let body = fb.append_block();
++        let latch = fb.append_block();
++        let canonical_exit = fb.append_block();
++        let other_exit = fb.append_block();
++        let terminal = fb.append_block();
++
++        fb.switch_to_block(entry);
++        let cond = fb.make_imm_value(true);
++        fb.insert_inst_no_result(Jump::new(is, header));
++        fb.switch_to_block(header);
++        fb.insert_inst_no_result(Br::new(is, cond, body, canonical_exit));
++        fb.switch_to_block(body);
++        fb.insert_inst_no_result(Br::new(is, cond, other_exit, latch));
++        fb.switch_to_block(latch);
++        fb.insert_inst_no_result(Jump::new(is, header));
++        fb.switch_to_block(canonical_exit);
++        fb.insert_inst_no_result(Return::new_unit(is));
++        fb.switch_to_block(other_exit);
++        fb.insert_inst_no_result(Jump::new(is, terminal));
++        fb.switch_to_block(terminal);
++        fb.insert_inst_no_result(Return::new_unit(is));
++        fb.seal_all();
++        fb.finish();
++
++        let module = mb.build();
++        let result = module
++            .func_store
++            .view(fr, |func| structurize_function(func));
++        let error = result.expect_err("a second non-return loop exit must fail closed");
++        assert!(
++            error.contains("noncanonical exit") && error.contains("expected the header exit"),
++            "expected a named noncanonical-exit error, got: {error}"
++        );
++    }
+ }
+diff --git a/crates/codegen/tests/spirv_backend.rs b/crates/codegen/tests/spirv_backend.rs
+index 87438b43..71859e4d 100644
+--- a/crates/codegen/tests/spirv_backend.rs
++++ b/crates/codegen/tests/spirv_backend.rs
+@@ -983,6 +983,154 @@ fn build_grid_loop_exit_phi_module() -> sonatina_ir::Module {
+     mb.build()
+ }
+ 
++/// One shared loop exit receives distinct f32 state from two body `break`
++/// edges and the normal header exit. Grid x selects the path: 0 -> 11,
++/// 1 -> 22, and every other column runs one iteration and exits with 33.
++fn build_grid_multi_exit_f32_phi_module() -> sonatina_ir::Module {
++    let isa = Native::new(TargetTriple::new(
++        if cfg!(target_arch = "x86_64") { Architecture::X86_64 } else { Architecture::Aarch64 },
++        Vendor::Unknown, OperatingSystem::Native,
++    ));
++    let is = isa.inst_set();
++    let mb = native_module_builder();
++    let sig = Signature::new_single(
++        "grid_multi_exit_f32_phi", Linkage::Public, &[Type::I32, Type::I32], Type::I32,
++    );
++    let fr = mb.declare_function(sig).unwrap();
++    let mut fb = mb.func_builder::<InstInserter>(fr);
++    let entry = fb.append_block();
++    let header = fb.append_block();
++    let first_test = fb.append_block();
++    let second_test = fb.append_block();
++    let latch = fb.append_block();
++    let exit = fb.append_block();
++    let sibling = fb.append_block();
++
++    fb.switch_to_block(entry);
++    let x = fb.args()[0];
++    let zero = fb.make_imm_value(0i32);
++    let initial = fb.make_imm_value(Immediate::F32(3.0f32.to_bits()));
++    fb.insert_inst_no_result(control_flow::Jump::new(is, header));
++
++    fb.switch_to_block(header);
++    let i = fb.insert_inst(control_flow::Phi::new(is, vec![(zero, entry)]), Type::I32);
++    let value = fb.insert_inst(control_flow::Phi::new(is, vec![(initial, entry)]), Type::F32);
++    let one = fb.make_imm_value(1i32);
++    let keep_going = fb.insert_inst(cmp::Lt::new(is, i, one), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, keep_going, first_test, exit));
++
++    fb.switch_to_block(first_test);
++    let eleven = fb.make_imm_value(Immediate::F32(11.0f32.to_bits()));
++    let is_first = fb.insert_inst(cmp::Lt::new(is, x, one), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, is_first, exit, second_test));
++
++    fb.switch_to_block(second_test);
++    let twenty_two = fb.make_imm_value(Immediate::F32(22.0f32.to_bits()));
++    let two = fb.make_imm_value(2i32);
++    let is_second = fb.insert_inst(cmp::Lt::new(is, x, two), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, is_second, exit, latch));
++
++    fb.switch_to_block(latch);
++    let next_i = fb.insert_inst(arith::Add::new(is, i, one), Type::I32);
++    let thirty = fb.make_imm_value(Immediate::F32(30.0f32.to_bits()));
++    let next_value = fb.insert_inst(arith::Fadd::new(is, value, thirty), Type::F32);
++    fb.append_phi_arg(i, next_i, latch);
++    fb.append_phi_arg(value, next_value, latch);
++    fb.insert_inst_no_result(control_flow::Jump::new(is, header));
++
++    fb.switch_to_block(exit);
++    let exit_value = fb.insert_inst(
++        control_flow::Phi::new(
++            is,
++            vec![(value, header), (eleven, first_test), (twenty_two, second_test)],
++        ),
++        Type::F32,
++    );
++    fb.insert_inst_no_result(control_flow::Jump::new(is, sibling));
++
++    fb.switch_to_block(sibling);
++    let output = fb.insert_inst(cast::F32ToI32::new(is, exit_value), Type::I32);
++    fb.insert_inst_no_result(control_flow::Return::new_single(is, output));
++    fb.seal_all();
++    fb.finish();
++    mb.build()
++}
++
++/// A directly-returning canonical exit phi is fed by the normal header edge,
++/// a conditional body edge, and an unconditional jump block outside the loop
++/// SCC. This pins both body-exit forms without relying on a following sibling.
++fn build_grid_direct_return_multi_exit_f32_phi_module() -> sonatina_ir::Module {
++    let isa = Native::new(TargetTriple::new(
++        if cfg!(target_arch = "x86_64") { Architecture::X86_64 } else { Architecture::Aarch64 },
++        Vendor::Unknown, OperatingSystem::Native,
++    ));
++    let is = isa.inst_set();
++    let mb = native_module_builder();
++    let sig = Signature::new_single(
++        "grid_direct_return_multi_exit_f32_phi", Linkage::Public,
++        &[Type::I32, Type::I32], Type::I32,
++    );
++    let fr = mb.declare_function(sig).unwrap();
++    let mut fb = mb.func_builder::<InstInserter>(fr);
++    let entry = fb.append_block();
++    let header = fb.append_block();
++    let first_test = fb.append_block();
++    let second_test = fb.append_block();
++    let jump_exit = fb.append_block();
++    let latch = fb.append_block();
++    let exit = fb.append_block();
++
++    fb.switch_to_block(entry);
++    let x = fb.args()[0];
++    let zero = fb.make_imm_value(0i32);
++    let initial = fb.make_imm_value(Immediate::F32(3.0f32.to_bits()));
++    fb.insert_inst_no_result(control_flow::Jump::new(is, header));
++
++    fb.switch_to_block(header);
++    let i = fb.insert_inst(control_flow::Phi::new(is, vec![(zero, entry)]), Type::I32);
++    let value = fb.insert_inst(control_flow::Phi::new(is, vec![(initial, entry)]), Type::F32);
++    let keep_going = fb.insert_inst(cmp::Lt::new(is, i, x), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, keep_going, first_test, exit));
++
++    fb.switch_to_block(first_test);
++    let direct_value = fb.make_imm_value(Immediate::F32(41.0f32.to_bits()));
++    let two = fb.make_imm_value(2i32);
++    let takes_direct_exit = fb.insert_inst(cmp::Lt::new(is, x, two), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, takes_direct_exit, exit, second_test));
++
++    fb.switch_to_block(second_test);
++    let three = fb.make_imm_value(3i32);
++    let takes_jump_exit = fb.insert_inst(cmp::Lt::new(is, x, three), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, takes_jump_exit, jump_exit, latch));
++
++    fb.switch_to_block(jump_exit);
++    let jump_value = fb.make_imm_value(Immediate::F32(52.0f32.to_bits()));
++    fb.insert_inst_no_result(control_flow::Jump::new(is, exit));
++
++    fb.switch_to_block(latch);
++    let one = fb.make_imm_value(1i32);
++    let next_i = fb.insert_inst(arith::Add::new(is, i, one), Type::I32);
++    let ten = fb.make_imm_value(Immediate::F32(10.0f32.to_bits()));
++    let next_value = fb.insert_inst(arith::Fadd::new(is, value, ten), Type::F32);
++    fb.append_phi_arg(i, next_i, latch);
++    fb.append_phi_arg(value, next_value, latch);
++    fb.insert_inst_no_result(control_flow::Jump::new(is, header));
++
++    fb.switch_to_block(exit);
++    let exit_value = fb.insert_inst(
++        control_flow::Phi::new(
++            is,
++            vec![(value, header), (direct_value, first_test), (jump_value, jump_exit)],
++        ),
++        Type::F32,
++    );
++    let output = fb.insert_inst(cast::F32ToI32::new(is, exit_value), Type::I32);
++    fb.insert_inst_no_result(control_flow::Return::new_single(is, output));
++    fb.seal_all();
++    fb.finish();
++    mb.build()
++}
++
+ /// A 3-arg grid kernel with one broadcast param: `f(px, py, p) -> px + py*1024 + p`.
+ /// arg2 is the broadcast input struct member p0; the load-bearing M3 shape.
+ fn build_grid_broadcast_module() -> sonatina_ir::Module {
+@@ -1443,6 +1591,47 @@ fn grid_loop_exit_phi_executes_on_lavapipe() {
+     }
+ }
+ 
++#[test]
++fn grid_multi_exit_f32_phi_executes_on_lavapipe() {
++    let module = build_grid_multi_exit_f32_phi_module();
++    let artifact = SpirvBackend::new()
++        .with_grid()
++        .with_workgroup_size(8, 8, 1)
++        .compile_module(&module)
++        .expect("all loop exits should carry their exact f32 phi input");
++    let wgsl = artifact.wgsl.as_deref().expect("WGSL");
++    let output = run_grid_u32(wgsl, 8, 8, 8, 8, &[]);
++    for y in 0..8u32 {
++        for x in 0..8u32 {
++            let expected = match x { 0 => 11, 1 => 22, _ => 33 };
++            assert_eq!(output[(y * 8 + x) as usize], expected, "multi-exit phi at ({x}, {y})");
++        }
++    }
++}
++
++#[test]
++fn grid_direct_return_multi_exit_f32_phi_executes_on_lavapipe() {
++    let module = build_grid_direct_return_multi_exit_f32_phi_module();
++    let artifact = SpirvBackend::new()
++        .with_grid()
++        .with_workgroup_size(8, 8, 1)
++        .compile_module(&module)
++        .expect("direct-return loop exit phi should preserve every exact edge");
++    let wgsl = artifact.wgsl.as_deref().expect("WGSL");
++    let output = run_grid_u32(wgsl, 8, 8, 8, 8, &[]);
++    for y in 0..8u32 {
++        for x in 0..8u32 {
++            let expected = match x {
++                0 => 3,
++                1 => 41,
++                2 => 52,
++                _ => 3 + 10 * x,
++            };
++            assert_eq!(output[(y * 8 + x) as usize], expected, "direct-return exit at ({x}, {y})");
++        }
++    }
++}
++
+ /// A grid kernel with one broadcast param executes with p0 = 7 written to the
+ /// input buffer; every pixel equals x + 1024*y + 7.
+ #[test]
+-- 
+2.53.0
+

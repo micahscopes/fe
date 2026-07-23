@@ -1,0 +1,127 @@
+From 98a424e60476fba4783ddc01d35d850553ec0e89 Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Thu, 23 Jul 2026 03:36:42 +0200
+Subject: [PATCH 21/25] feat(spirv): lower scalar shift left
+
+---
+ crates/codegen/src/isa/spirv/mod.rs   | 41 +++++++++++++++++++++++++++
+ crates/codegen/tests/spirv_backend.rs | 37 ++++++++++++++++++++++++
+ 2 files changed, 78 insertions(+)
+
+diff --git a/crates/codegen/src/isa/spirv/mod.rs b/crates/codegen/src/isa/spirv/mod.rs
+index edf44d05..bd4210e3 100644
+--- a/crates/codegen/src/isa/spirv/mod.rs
++++ b/crates/codegen/src/isa/spirv/mod.rs
+@@ -530,6 +530,32 @@ fn emit_single_inst(
+             }
+             return true;
+         }
++    } else if let Some(shl) = <&sonatina_ir::inst::arith::Shl as InstDowncast>::downcast(inst_set, inst_data) {
++        // Shift-left is sign-agnostic. As with the existing Shr path, materialize
++        // the immediate amount as WGSL u32 while preserving the runtime value's
++        // carrier bits exactly.
++        if let Some(result) = function.dfg.inst_result(inst_id) {
++            let val = resolve_naga_value(*shl.value(), function, word, value_map, phi_locals, func).unwrap();
++            let shift_amount = if let Some(imm) = function.dfg.value_imm(*shl.bits()) {
++                match imm {
++                    sonatina_ir::Immediate::I64(v) => v as u32,
++                    sonatina_ir::Immediate::I32(v) => v as u32,
++                    sonatina_ir::Immediate::I8(v) => v as u32,
++                    _ => 0,
++                }
++            } else { 0 };
++            let bits_u32 = func.expressions.append(
++                naga::Expression::Literal(naga::Literal::U32(shift_amount)),
++                naga::Span::UNDEFINED,
++            );
++            let h = func.expressions.append(
++                naga::Expression::Binary { op: naga::BinaryOperator::ShiftLeft, left: val, right: bits_u32 },
++                naga::Span::UNDEFINED,
++            );
++            target.push(naga::Statement::Emit(naga::Range::new_from_bounds(h, h)), naga::Span::UNDEFINED);
++            value_map.insert(result, h);
++            return true;
++        }
+     } else if let Some(shr) = <&sonatina_ir::inst::arith::Shr as InstDowncast>::downcast(inst_set, inst_data) {
+         // Logical (unsigned) shift right. Fe lowers unsigned `>>` to `Shr`. Under
+         // the u32 word this is the EASY case: WGSL `>>` on a `u32` IS a logical
+@@ -1709,6 +1735,7 @@ fn spirv_instruction_is_lowered(
+         || <&arith::Fdiv as InstDowncast>::downcast(is, inst).is_some()
+         || <&arith::Fsqrt as InstDowncast>::downcast(is, inst).is_some()
+         || <&arith::Sar as InstDowncast>::downcast(is, inst).is_some()
++        || <&arith::Shl as InstDowncast>::downcast(is, inst).is_some()
+         || <&arith::Shr as InstDowncast>::downcast(is, inst).is_some()
+         || <&cmp::Lt as InstDowncast>::downcast(is, inst).is_some()
+         || <&cmp::Eq as InstDowncast>::downcast(is, inst).is_some()
+@@ -1942,6 +1969,20 @@ fn translate_to_naga(
+                                 );
+                             }
+                         }
++                        if let Some(shl) =
++                            <&sonatina_ir::inst::arith::Shl as sonatina_ir::InstDowncast>::downcast(
++                                is, inst_data,
++                            )
++                        {
++                            if f.dfg.value_imm(*shl.bits()).is_none() {
++                                return Err(
++                                    "spirv u32: shl with a non-immediate shift amount is \
++                                     unsupported (the u32 shift-left materializes the \
++                                     amount as a WGSL u32 literal). Fail closed."
++                                        .to_string(),
++                                );
++                            }
++                        }
+                     }
+                     // `Shr` (logical/unsigned shift) is only lowered for the u32
+                     // browser word, where WGSL `>>` on a `u32` IS the logical shift.
+diff --git a/crates/codegen/tests/spirv_backend.rs b/crates/codegen/tests/spirv_backend.rs
+index a2659e42..1652d8c7 100644
+--- a/crates/codegen/tests/spirv_backend.rs
++++ b/crates/codegen/tests/spirv_backend.rs
+@@ -2847,6 +2847,43 @@ fn render_wgsl_shape() {
+ /// The new op arm: a u32 kernel `shr_probe(a) = a >> 4` emits a DIRECT logical
+ /// `>>` on the u32 (no bitcast dance, unlike Sar) and validates browser-profile.
+ /// A non-immediate u32 shift amount and an i64 `Shr` both fail closed.
++#[test]
++fn spirv_u32_shl_shape() {
++    let isa = native_isa();
++    let is = isa.inst_set();
++    let mb = native_module_builder();
++    let sig = Signature::new_single("shl_probe", Linkage::Public, &[Type::I32], Type::I32);
++    let fr = mb.declare_function(sig).unwrap();
++    let mut fb = mb.func_builder::<InstInserter>(fr);
++    let entry = fb.append_block();
++    fb.switch_to_block(entry);
++    let runtime_value = fb.args()[0];
++    let four = fb.make_imm_value(4i32);
++    let shifted = fb.insert_inst(arith::Shl::new(is, four, runtime_value), Type::I32);
++    fb.insert_inst_no_result(control_flow::Return::new_single(is, shifted));
++    fb.seal_all();
++    fb.finish();
++
++    let art = SpirvBackend::new()
++        .with_workgroup_size(1, 1, 1)
++        .compile_module(&mb.build())
++        .expect("u32 Shl kernel must compile");
++    assert_eq!(art.layout.word, WordKind::U32, "i32 return -> u32 word");
++    let wgsl = art.wgsl.as_ref().expect("WGSL");
++    assert!(wgsl.contains("<<"), "shift-left must remain a genuine WGSL `<<`:\n{wgsl}");
++    for tok in ["i64", "u64", "bitcast<i32>"] {
++        assert!(!wgsl.contains(tok), "browser Shl needs no `{tok}`:\n{wgsl}");
++    }
++    let reparsed = naga::front::wgsl::parse_str(wgsl)
++        .expect("naga wgsl-in must reparse runtime-value Shl WGSL");
++    naga::valid::Validator::new(
++        naga::valid::ValidationFlags::all(),
++        naga::valid::Capabilities::default(),
++    )
++    .validate(&reparsed)
++    .expect("browser-profile validation must accept scalar Shl");
++}
++
+ #[test]
+ fn spirv_u32_shr_shape() {
+     let isa = native_isa();
+-- 
+2.53.0
+

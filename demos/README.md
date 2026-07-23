@@ -24,17 +24,23 @@ assets—especially the default Schedule32 CGA bundle—without `SONATINA_DIR`.
 
 ```sh
 demos/serve.sh                 # validate tracked Schedule32 CGA
-demos/serve.sh keystone
-demos/serve.sh mandelbrot-interactive
 demos/serve.sh cga
-SONATINA_DIR=/path/to/sonatina demos/serve.sh cga-d1
-SONATINA_DIR=/path/to/sonatina demos/serve.sh qcga
+SONATINA_DIR=/path/to/sonatina \
+  demos/serve.sh mandelbrot-interactive
+SONATINA_DIR=/path/to/sonatina \
+  demos/serve.sh qcga
 ```
 
 `cga` means Schedule32; `cga-schedule32` is a compatibility alias. Legacy D1
 requires the explicit `cga-d1` selector. `FORCE_DEMO_REGEN=1` requests
-regeneration. An unpublished Sonatina checkout is needed only when the selected
-specialized bundle is missing or forced to regenerate.
+regeneration. The reviewed browser-backend Sonatina commit is not fetchable
+from its remote by SHA. The tracked 25-patch overlay reconstructs it exactly
+from Fe's fetchable `150d327e` dependency in an isolated temporary checkout;
+the source checkout named by `SONATINA_DIR` is never modified. The same wrapper
+is invoked internally by `demos/serve.sh`; users do not need another build
+command. It is temporary infrastructure until `b2601adc` (or its replacement)
+is reachable from the Sonatina remote. A clean checkout already at
+`b2601adc` takes the direct path.
 
 The specialized generators remain authoritative because they produce
 independent oracle/reference data, legacy layout contracts, control modules, or

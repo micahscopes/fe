@@ -1,0 +1,783 @@
+From 60bf9f2f27ac365ad4ee409d940235a2861d3e09 Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Tue, 21 Jul 2026 18:35:57 +0200
+Subject: [PATCH 06/25] feat(ir): add verified f32 operations
+
+---
+ crates/codegen/src/analysis/demanded_bits.rs  |   4 +-
+ crates/codegen/src/analysis/known_bits.rs     |   6 +-
+ crates/codegen/src/optim/gvn.rs               |  15 ++-
+ crates/codegen/src/optim/sccp_simplify.rs     |   9 +-
+ crates/codegen/src/optim/simplify_expr.rs     |  15 ++-
+ crates/interpreter/tests/test.rs              | 104 +++++++++++++++++
+ crates/ir/src/inst/arith.rs                   |  40 +++++++
+ crates/ir/src/inst/cmp.rs                     |  21 ++++
+ crates/ir/src/inst/equiv.rs                   |   9 ++
+ crates/ir/src/inst/inst_set.rs                |   9 ++
+ crates/ir/src/inst/native/inst_set.rs         |   9 ++
+ crates/ir/src/interpret/arith.rs              |  54 +++++++++
+ crates/ir/src/interpret/cmp.rs                |  28 +++++
+ crates/ir/src/interpret/mod.rs                |   9 ++
+ crates/parser/src/inst/arith.rs               |   6 +
+ crates/parser/src/inst/cmp.rs                 |   4 +
+ crates/parser/src/sonatina.pest               |   2 +-
+ .../verify/function/type_rules/dispatch.rs    | 107 ++++++++++++++++++
+ crates/verifier/tests/verifier.rs             |  46 ++++++++
+ 19 files changed, 490 insertions(+), 7 deletions(-)
+
+diff --git a/crates/codegen/src/analysis/demanded_bits.rs b/crates/codegen/src/analysis/demanded_bits.rs
+index 7d366bfa..5c285ef7 100644
+--- a/crates/codegen/src/analysis/demanded_bits.rs
++++ b/crates/codegen/src/analysis/demanded_bits.rs
+@@ -135,7 +135,9 @@ impl<'a> DemandedBitsQuery<'a> {
+             UnaryInstKind::IsZero
+             | UnaryInstKind::Neg
+             | UnaryInstKind::Snego
+-            | UnaryInstKind::EvmClz => {
++            | UnaryInstKind::EvmClz
++            | UnaryInstKind::Fneg
++            | UnaryInstKind::Fsqrt => {
+                 self.add_demand(*arg, type_mask_or_zero(self.func, *arg), worklist, queued);
+             }
+         }
+diff --git a/crates/codegen/src/analysis/known_bits.rs b/crates/codegen/src/analysis/known_bits.rs
+index 4edac4e7..e560834d 100644
+--- a/crates/codegen/src/analysis/known_bits.rs
++++ b/crates/codegen/src/analysis/known_bits.rs
+@@ -347,7 +347,11 @@ impl KnownBitsQuery {
+ 
+                 KnownBits::normalized(ty, arg_known.known_one, arg_known.known_zero)
+             }
+-            UnaryInstKind::Neg | UnaryInstKind::Snego | UnaryInstKind::EvmClz => {
++            UnaryInstKind::Neg
++            | UnaryInstKind::Snego
++            | UnaryInstKind::EvmClz
++            | UnaryInstKind::Fneg
++            | UnaryInstKind::Fsqrt => {
+                 KnownBits::unknown(ty)
+             }
+         }
+diff --git a/crates/codegen/src/optim/gvn.rs b/crates/codegen/src/optim/gvn.rs
+index 850b6625..163f0ef1 100644
+--- a/crates/codegen/src/optim/gvn.rs
++++ b/crates/codegen/src/optim/gvn.rs
+@@ -134,7 +134,12 @@ fn make_gvn_unary_key(
+             is.has_is_zero()?;
+             Some(cmp::IsZero::new(is, arg).owned_key(&[result_ty]))
+         }
+-        UnaryInstKind::Neg | UnaryInstKind::Not | UnaryInstKind::Snego | UnaryInstKind::EvmClz => {
++        UnaryInstKind::Neg
++        | UnaryInstKind::Not
++        | UnaryInstKind::Snego
++        | UnaryInstKind::EvmClz
++        | UnaryInstKind::Fneg
++        | UnaryInstKind::Fsqrt => {
+             None
+         }
+     }
+@@ -1051,11 +1056,19 @@ impl GvnSolver {
+                 UnaryInstKind::Not => !arg,
+                 UnaryInstKind::IsZero => fold_result_imm(arg.is_zero().into(), result_ty)?,
+                 UnaryInstKind::EvmClz => fold_evm_clz(arg)?,
++                UnaryInstKind::Fneg | UnaryInstKind::Fsqrt => return None,
+             }
+         } else if let InstClassKind::Binary(kind) = insn_expr.kind() {
+             let (lhs, rhs) = insn_expr.binary_args()?;
+             let result_ty = *insn_expr.result_tys().get(result_idx)?;
+             match kind {
++                BinaryInstKind::Fadd
++                | BinaryInstKind::Fsub
++                | BinaryInstKind::Fmul
++                | BinaryInstKind::Fdiv
++                | BinaryInstKind::Feq
++                | BinaryInstKind::Flt
++                | BinaryInstKind::Fle => return None,
+                 BinaryInstKind::Add => {
+                     let (lhs, rhs) = word_binary_imms(func, lhs, rhs, result_ty)?;
+                     fold_result_imm(lhs + rhs, result_ty)?
+diff --git a/crates/codegen/src/optim/sccp_simplify.rs b/crates/codegen/src/optim/sccp_simplify.rs
+index ad91215c..73d2d938 100644
+--- a/crates/codegen/src/optim/sccp_simplify.rs
++++ b/crates/codegen/src/optim/sccp_simplify.rs
+@@ -833,7 +833,14 @@ pub(super) fn simplify_inst(
+                 | BinaryInstKind::EvmUsubsat
+                 | BinaryInstKind::EvmSsubsat
+                 | BinaryInstKind::EvmUmulsat
+-                | BinaryInstKind::EvmSmulsat => SimplifyAction::NoChange,
++                | BinaryInstKind::EvmSmulsat
++                | BinaryInstKind::Fadd
++                | BinaryInstKind::Fsub
++                | BinaryInstKind::Fmul
++                | BinaryInstKind::Fdiv
++                | BinaryInstKind::Feq
++                | BinaryInstKind::Flt
++                | BinaryInstKind::Fle => SimplifyAction::NoChange,
+                 BinaryInstKind::EvmSignExtend => {
+                     let simplified = from_expr_simplify_result(simplify_binary_with_facts(
+                         func, kind, *lhs, *rhs, &facts,
+diff --git a/crates/codegen/src/optim/simplify_expr.rs b/crates/codegen/src/optim/simplify_expr.rs
+index 2616c62c..7e5822a0 100644
+--- a/crates/codegen/src/optim/simplify_expr.rs
++++ b/crates/codegen/src/optim/simplify_expr.rs
+@@ -370,7 +370,11 @@ pub(crate) fn simplify_unary_with_same_inner(
+         UnaryInstKind::Not | UnaryInstKind::Neg => same_inner_arg(arg, kind)
+             .map(SimplifyExprResult::Copy)
+             .unwrap_or(SimplifyExprResult::NoChange),
+-        UnaryInstKind::Snego | UnaryInstKind::IsZero | UnaryInstKind::EvmClz => {
++        UnaryInstKind::Snego
++        | UnaryInstKind::IsZero
++        | UnaryInstKind::EvmClz
++        | UnaryInstKind::Fneg
++        | UnaryInstKind::Fsqrt => {
+             SimplifyExprResult::NoChange
+         }
+     }
+@@ -616,7 +620,14 @@ pub(crate) fn simplify_binary_with_facts(
+         | BinaryInstKind::EvmUmulsat
+         | BinaryInstKind::EvmSmulsat
+         | BinaryInstKind::EvmExp
+-        | BinaryInstKind::EvmByte => {}
++        | BinaryInstKind::EvmByte
++        | BinaryInstKind::Fadd
++        | BinaryInstKind::Fsub
++        | BinaryInstKind::Fmul
++        | BinaryInstKind::Fdiv
++        | BinaryInstKind::Feq
++        | BinaryInstKind::Flt
++        | BinaryInstKind::Fle => {}
+     }
+ 
+     SimplifyExprResult::NoChange
+diff --git a/crates/interpreter/tests/test.rs b/crates/interpreter/tests/test.rs
+index 6a5ce97b..a1cb50c8 100644
+--- a/crates/interpreter/tests/test.rs
++++ b/crates/interpreter/tests/test.rs
+@@ -209,3 +209,107 @@ func public %pair() -> (i8, i1) {
+     let mut machine = Machine::new(parsed.module);
+     let _ = machine.run(pair, vec![]);
+ }
++
++#[test]
++fn interpreter_executes_f32_arithmetic_from_raw_bits() {
++    let source = r#"
++target = "wasm32-unknown-native"
++
++func public %float_ops(v0.f32, v1.f32) -> (f32, f32, f32, f32, f32, f32) {
++    block0:
++        v2.f32 = fneg v0;
++        v3.f32 = fadd v0 v1;
++        v4.f32 = fsub v0 v1;
++        v5.f32 = fmul v0 v1;
++        v6.f32 = fdiv v0 v1;
++        v7.f32 = fsqrt v0;
++        return (v2, v3, v4, v5, v6, v7);
++}
++"#;
++    let parsed = sonatina_parser::parse_module(source).expect("module should parse");
++    let float_ops = parsed
++        .module
++        .ctx
++        .declared_funcs
++        .iter()
++        .find_map(|entry| (entry.value().name() == "float_ops").then(|| *entry.key()))
++        .expect("float_ops should be declared");
++    let mut machine = Machine::new(parsed.module);
++
++    assert_eq!(
++        machine
++            .run_results(
++                float_ops,
++                vec![
++                    EvalValue::Imm(Immediate::F32(0x4110_0000)),
++                    EvalValue::Imm(Immediate::F32(0x4040_0000)),
++                ]
++            )
++            .as_slice(),
++        &[
++            EvalValue::Imm(Immediate::F32(0xc110_0000)),
++            EvalValue::Imm(Immediate::F32(0x4140_0000)),
++            EvalValue::Imm(Immediate::F32(0x40c0_0000)),
++            EvalValue::Imm(Immediate::F32(0x41d8_0000)),
++            EvalValue::Imm(Immediate::F32(0x4040_0000)),
++            EvalValue::Imm(Immediate::F32(0x4040_0000)),
++        ]
++    );
++}
++
++#[test]
++fn interpreter_executes_ordered_f32_comparisons() {
++    let source = r#"
++target = "wasm32-unknown-native"
++
++func public %float_cmp(v0.f32, v1.f32) -> (i1, i1, i1) {
++    block0:
++        v2.i1 = feq v0 v1;
++        v3.i1 = flt v0 v1;
++        v4.i1 = fle v0 v1;
++        return (v2, v3, v4);
++}
++"#;
++    let parsed = sonatina_parser::parse_module(source).expect("module should parse");
++    let float_cmp = parsed
++        .module
++        .ctx
++        .declared_funcs
++        .iter()
++        .find_map(|entry| (entry.value().name() == "float_cmp").then(|| *entry.key()))
++        .expect("float_cmp should be declared");
++    let mut machine = Machine::new(parsed.module);
++
++    assert_eq!(
++        machine
++            .run_results(
++                float_cmp,
++                vec![
++                    EvalValue::Imm(Immediate::F32(0x4040_0000)),
++                    EvalValue::Imm(Immediate::F32(0x4110_0000)),
++                ]
++            )
++            .as_slice(),
++        &[
++            EvalValue::Imm(Immediate::I1(false)),
++            EvalValue::Imm(Immediate::I1(true)),
++            EvalValue::Imm(Immediate::I1(true)),
++        ]
++    );
++    assert_eq!(
++        machine
++            .run_results(
++                float_cmp,
++                vec![
++                    EvalValue::Imm(Immediate::F32(0x7fc0_0000)),
++                    EvalValue::Imm(Immediate::F32(0x7fc0_0000)),
++                ]
++            )
++            .as_slice(),
++        &[
++            EvalValue::Imm(Immediate::I1(false)),
++            EvalValue::Imm(Immediate::I1(false)),
++            EvalValue::Imm(Immediate::I1(false)),
++        ]
++    );
++}
+diff --git a/crates/ir/src/inst/arith.rs b/crates/ir/src/inst/arith.rs
+index 26f60470..127222b7 100644
+--- a/crates/ir/src/inst/arith.rs
++++ b/crates/ir/src/inst/arith.rs
+@@ -8,6 +8,46 @@ pub struct Neg {
+     arg: ValueId,
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(unary(Fneg)))]
++pub struct Fneg {
++    arg: ValueId,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(binary(Fadd)))]
++pub struct Fadd {
++    lhs: ValueId,
++    rhs: ValueId,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(binary(Fsub)))]
++pub struct Fsub {
++    lhs: ValueId,
++    rhs: ValueId,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(binary(Fmul)))]
++pub struct Fmul {
++    lhs: ValueId,
++    rhs: ValueId,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(binary(Fdiv)))]
++pub struct Fdiv {
++    lhs: ValueId,
++    rhs: ValueId,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(unary(Fsqrt)))]
++pub struct Fsqrt {
++    arg: ValueId,
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
+ #[inst(kind(binary(Add)))]
+ pub struct Add {
+diff --git a/crates/ir/src/inst/cmp.rs b/crates/ir/src/inst/cmp.rs
+index 58567892..e54a4337 100644
+--- a/crates/ir/src/inst/cmp.rs
++++ b/crates/ir/src/inst/cmp.rs
+@@ -2,6 +2,27 @@ use macros::Inst;
+ 
+ use crate::ValueId;
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(binary(Feq)))]
++pub struct Feq {
++    lhs: ValueId,
++    rhs: ValueId,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(binary(Flt)))]
++pub struct Flt {
++    lhs: ValueId,
++    rhs: ValueId,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
++#[inst(kind(binary(Fle)))]
++pub struct Fle {
++    lhs: ValueId,
++    rhs: ValueId,
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Inst)]
+ #[inst(kind(binary(Lt)))]
+ pub struct Lt {
+diff --git a/crates/ir/src/inst/equiv.rs b/crates/ir/src/inst/equiv.rs
+index 4eb6840d..1e85993d 100644
+--- a/crates/ir/src/inst/equiv.rs
++++ b/crates/ir/src/inst/equiv.rs
+@@ -17,6 +17,8 @@ use super::{
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+ pub enum UnaryInstKind {
+     Neg,
++    Fneg,
++    Fsqrt,
+     Snego,
+     Not,
+     IsZero,
+@@ -26,6 +28,13 @@ pub enum UnaryInstKind {
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+ pub enum BinaryInstKind {
+     Add,
++    Fadd,
++    Fsub,
++    Fmul,
++    Fdiv,
++    Feq,
++    Flt,
++    Fle,
+     Uaddo,
+     Uaddsat,
+     Saddo,
+diff --git a/crates/ir/src/inst/inst_set.rs b/crates/ir/src/inst/inst_set.rs
+index 8839ce27..65d43d16 100644
+--- a/crates/ir/src/inst/inst_set.rs
++++ b/crates/ir/src/inst/inst_set.rs
+@@ -16,6 +16,12 @@ define_inst_set_base! {
+     /// We should fix this in the future of course.
+     trait InstSetBase {
+         arith::Neg,
++        arith::Fneg,
++        arith::Fadd,
++        arith::Fsub,
++        arith::Fmul,
++        arith::Fdiv,
++        arith::Fsqrt,
+         arith::Add,
+         arith::Uaddo,
+         arith::Uaddsat,
+@@ -40,6 +46,9 @@ define_inst_set_base! {
+         arith::Shr,
+         arith::Sar,
+         cmp::Lt,
++        cmp::Feq,
++        cmp::Flt,
++        cmp::Fle,
+         cmp::Gt,
+         cmp::Slt,
+         cmp::Sgt,
+diff --git a/crates/ir/src/inst/native/inst_set.rs b/crates/ir/src/inst/native/inst_set.rs
+index 63eb4e07..9b3685eb 100644
+--- a/crates/ir/src/inst/native/inst_set.rs
++++ b/crates/ir/src/inst/native/inst_set.rs
+@@ -5,6 +5,12 @@ use crate::inst::*;
+ #[inst_set(InstKind = "NativeInstKind")]
+ pub struct NativeInstSet(
+     arith::Neg,
++    arith::Fneg,
++    arith::Fadd,
++    arith::Fsub,
++    arith::Fmul,
++    arith::Fdiv,
++    arith::Fsqrt,
+     arith::Add,
+     arith::Uaddo,
+     arith::Uaddsat,
+@@ -35,6 +41,9 @@ pub struct NativeInstSet(
+     cast::IntToPtr,
+     cast::PtrToInt,
+     cmp::Lt,
++    cmp::Feq,
++    cmp::Flt,
++    cmp::Fle,
+     cmp::Gt,
+     cmp::Slt,
+     cmp::Sgt,
+diff --git a/crates/ir/src/interpret/arith.rs b/crates/ir/src/interpret/arith.rs
+index 53c48c86..2592d3ce 100644
+--- a/crates/ir/src/interpret/arith.rs
++++ b/crates/ir/src/interpret/arith.rs
+@@ -1,6 +1,60 @@
+ use super::{Action, EvalValue, Interpret, State, single_result};
+ use crate::inst::arith::*;
+ 
++fn unary_f32(value: EvalValue, op: impl FnOnce(f32) -> f32) -> EvalValue {
++    match value {
++        EvalValue::Imm(crate::Immediate::F32(bits)) => {
++            EvalValue::Imm(crate::Immediate::F32(op(f32::from_bits(bits)).to_bits()))
++        }
++        _ => EvalValue::Undef,
++    }
++}
++
++fn binary_f32(lhs: EvalValue, rhs: EvalValue, op: impl FnOnce(f32, f32) -> f32) -> EvalValue {
++    match (lhs, rhs) {
++        (EvalValue::Imm(crate::Immediate::F32(lhs)), EvalValue::Imm(crate::Immediate::F32(rhs))) => {
++            EvalValue::Imm(crate::Immediate::F32(
++                op(f32::from_bits(lhs), f32::from_bits(rhs)).to_bits(),
++            ))
++        }
++        _ => EvalValue::Undef,
++    }
++}
++
++impl Interpret for Fneg {
++    fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
++        state.set_action(Action::Continue);
++        single_result(unary_f32(state.lookup_val(*self.arg()), |value| -value))
++    }
++}
++
++macro_rules! impl_binary_f32 {
++    ($inst:ty, $op:expr) => {
++        impl Interpret for $inst {
++            fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
++                state.set_action(Action::Continue);
++                single_result(binary_f32(
++                    state.lookup_val(*self.lhs()),
++                    state.lookup_val(*self.rhs()),
++                    $op,
++                ))
++            }
++        }
++    };
++}
++
++impl_binary_f32!(Fadd, |lhs, rhs| lhs + rhs);
++impl_binary_f32!(Fsub, |lhs, rhs| lhs - rhs);
++impl_binary_f32!(Fmul, |lhs, rhs| lhs * rhs);
++impl_binary_f32!(Fdiv, |lhs, rhs| lhs / rhs);
++
++impl Interpret for Fsqrt {
++    fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
++        state.set_action(Action::Continue);
++        single_result(unary_f32(state.lookup_val(*self.arg()), f32::sqrt))
++    }
++}
++
+ impl Interpret for Neg {
+     fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
+         state.set_action(Action::Continue);
+diff --git a/crates/ir/src/interpret/cmp.rs b/crates/ir/src/interpret/cmp.rs
+index ea289bfc..165846b6 100644
+--- a/crates/ir/src/interpret/cmp.rs
++++ b/crates/ir/src/interpret/cmp.rs
+@@ -1,6 +1,34 @@
+ use super::{Action, EvalValue, Interpret, State, single_result};
+ use crate::{Immediate, inst::cmp::*};
+ 
++fn compare_f32(lhs: EvalValue, rhs: EvalValue, op: impl FnOnce(f32, f32) -> bool) -> EvalValue {
++    match (lhs, rhs) {
++        (EvalValue::Imm(Immediate::F32(lhs)), EvalValue::Imm(Immediate::F32(rhs))) => {
++            EvalValue::Imm(Immediate::I1(op(f32::from_bits(lhs), f32::from_bits(rhs))))
++        }
++        _ => EvalValue::Undef,
++    }
++}
++
++macro_rules! impl_compare_f32 {
++    ($inst:ty, $op:expr) => {
++        impl Interpret for $inst {
++            fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
++                state.set_action(Action::Continue);
++                single_result(compare_f32(
++                    state.lookup_val(*self.lhs()),
++                    state.lookup_val(*self.rhs()),
++                    $op,
++                ))
++            }
++        }
++    };
++}
++
++impl_compare_f32!(Feq, |lhs, rhs| lhs == rhs);
++impl_compare_f32!(Flt, |lhs, rhs| lhs < rhs);
++impl_compare_f32!(Fle, |lhs, rhs| lhs <= rhs);
++
+ impl Interpret for Lt {
+     fn interpret(&self, state: &mut dyn State) -> super::EvalResults {
+         let lhs = state.lookup_val(*self.lhs());
+diff --git a/crates/ir/src/interpret/mod.rs b/crates/ir/src/interpret/mod.rs
+index 4efc318e..d828d285 100644
+--- a/crates/ir/src/interpret/mod.rs
++++ b/crates/ir/src/interpret/mod.rs
+@@ -31,6 +31,12 @@ pub trait Interpret {
+     // `type Members = All`
+     type Members = (
+         inst::arith::Neg,
++        inst::arith::Fneg,
++        inst::arith::Fadd,
++        inst::arith::Fsub,
++        inst::arith::Fmul,
++        inst::arith::Fdiv,
++        inst::arith::Fsqrt,
+         inst::arith::Add,
+         inst::arith::Uaddo,
+         inst::arith::Uaddsat,
+@@ -65,6 +71,9 @@ pub trait Interpret {
+         inst::cast::PtrToInt,
+         inst::cast::Bitcast,
+         inst::cmp::Lt,
++        inst::cmp::Feq,
++        inst::cmp::Flt,
++        inst::cmp::Fle,
+         inst::cmp::Gt,
+         inst::cmp::Slt,
+         inst::cmp::Sgt,
+diff --git a/crates/parser/src/inst/arith.rs b/crates/parser/src/inst/arith.rs
+index 45b279da..a07942d6 100644
+--- a/crates/parser/src/inst/arith.rs
++++ b/crates/parser/src/inst/arith.rs
+@@ -1,6 +1,12 @@
+ use ir::inst::arith::*;
+ 
+ super::impl_inst_build! {Neg, (arg: ValueId)}
++super::impl_inst_build! {Fneg, (arg: ValueId)}
++super::impl_inst_build! {Fadd, (lhs: ValueId, rhs: ValueId)}
++super::impl_inst_build! {Fsub, (lhs: ValueId, rhs: ValueId)}
++super::impl_inst_build! {Fmul, (lhs: ValueId, rhs: ValueId)}
++super::impl_inst_build! {Fdiv, (lhs: ValueId, rhs: ValueId)}
++super::impl_inst_build! {Fsqrt, (arg: ValueId)}
+ super::impl_inst_build! {Add, (lhs: ValueId, rhs: ValueId)}
+ super::impl_inst_build! {Uaddo, (lhs: ValueId, rhs: ValueId)}
+ super::impl_inst_build! {Uaddsat, (lhs: ValueId, rhs: ValueId)}
+diff --git a/crates/parser/src/inst/cmp.rs b/crates/parser/src/inst/cmp.rs
+index 70b62d81..bcbb4863 100644
+--- a/crates/parser/src/inst/cmp.rs
++++ b/crates/parser/src/inst/cmp.rs
+@@ -1,5 +1,9 @@
+ use ir::inst::cmp::*;
+ 
++super::impl_inst_build! {Feq, (lhs: ValueId, rhs: ValueId)}
++super::impl_inst_build! {Flt, (lhs: ValueId, rhs: ValueId)}
++super::impl_inst_build! {Fle, (lhs: ValueId, rhs: ValueId)}
++
+ super::impl_inst_build! {Lt, (lhs: ValueId, rhs: ValueId)}
+ super::impl_inst_build! {Gt, (lhs: ValueId, rhs: ValueId)}
+ super::impl_inst_build! {Slt, (lhs: ValueId, rhs: ValueId)}
+diff --git a/crates/parser/src/sonatina.pest b/crates/parser/src/sonatina.pest
+index cee599f6..e080db14 100644
+--- a/crates/parser/src/sonatina.pest
++++ b/crates/parser/src/sonatina.pest
+@@ -17,7 +17,7 @@ ident_start_char = { ASCII_ALPHA | "_" }
+ ident_body_char  = { ASCII_ALPHANUMERIC | "_" }
+ 
+ target_specifier = _{ "target" ~ "=" ~ "\"" ~ target_triple ~ "\"" }
+-target_triple    = @{ ASCII_ALPHA* ~ "-" ~ ASCII_ALPHA* ~ "-" ~ ASCII_ALPHA* }
++target_triple    = @{ (ASCII_ALPHANUMERIC | "_")* ~ "-" ~ ASCII_ALPHA* ~ "-" ~ ASCII_ALPHA* }
+ 
+ declaration              = _{ function_declaration | struct_declaration | enum_declaration | gv_declaration }
+ function_declaration     =  { "declare" ~ inline_hint? ~ linkage ~ function_identifier ~ function_param_type_list ~ function_ret_type? ~ ";" }
+diff --git a/crates/verifier/src/verify/function/type_rules/dispatch.rs b/crates/verifier/src/verify/function/type_rules/dispatch.rs
+index 1a6e8ad9..2b86f1f7 100644
+--- a/crates/verifier/src/verify/function/type_rules/dispatch.rs
++++ b/crates/verifier/src/verify/function/type_rules/dispatch.rs
+@@ -45,6 +45,113 @@ impl_unary_integral_same_rule!(
+     logic::Not => "not",
+ );
+ 
++fn verify_unary_f32(
++    verifier: &mut FunctionVerifier<'_>,
++    inst_id: InstId,
++    arg: ValueId,
++    opname: &str,
++) {
++    let location = verifier.inst_location(inst_id);
++    let Some(arg_ty) = verifier.value_ty(arg) else {
++        return;
++    };
++    if arg_ty != Type::F32 {
++        verifier.emit(
++            Diagnostic::error(
++                DiagnosticCode::InstOperandTypeMismatch,
++                format!("{opname} operand must be f32"),
++                location.clone(),
++            )
++            .with_note(format!("found operand type {arg_ty:?}")),
++        );
++    }
++    verifier.expect_result_ty(inst_id, Type::F32, location);
++}
++
++fn verify_binary_f32(
++    verifier: &mut FunctionVerifier<'_>,
++    inst_id: InstId,
++    lhs: ValueId,
++    rhs: ValueId,
++    result_ty: Type,
++    opname: &str,
++) {
++    let location = verifier.inst_location(inst_id);
++    let (Some(lhs_ty), Some(rhs_ty)) = (verifier.value_ty(lhs), verifier.value_ty(rhs)) else {
++        return;
++    };
++    if lhs_ty != Type::F32 || rhs_ty != Type::F32 {
++        verifier.emit(
++            Diagnostic::error(
++                DiagnosticCode::InstOperandTypeMismatch,
++                format!("{opname} operands must be f32"),
++                location.clone(),
++            )
++            .with_note(format!("lhs {lhs_ty:?}, rhs {rhs_ty:?}")),
++        );
++    }
++    verifier.expect_result_ty(inst_id, result_ty, location);
++}
++
++impl VerifyInst for arith::Fneg {
++    fn verify_inst(&self, verifier: &mut FunctionVerifier<'_>, inst_id: InstId) {
++        verify_unary_f32(verifier, inst_id, *self.arg(), "fneg");
++    }
++}
++
++impl VerifyInst for arith::Fsqrt {
++    fn verify_inst(&self, verifier: &mut FunctionVerifier<'_>, inst_id: InstId) {
++        verify_unary_f32(verifier, inst_id, *self.arg(), "fsqrt");
++    }
++}
++
++macro_rules! impl_binary_f32_rule {
++    ($($ty:ty => $opname:literal),+ $(,)?) => {
++        $(
++            impl VerifyInst for $ty {
++                fn verify_inst(&self, verifier: &mut FunctionVerifier<'_>, inst_id: InstId) {
++                    verify_binary_f32(
++                        verifier,
++                        inst_id,
++                        *self.lhs(),
++                        *self.rhs(),
++                        Type::F32,
++                        $opname,
++                    );
++                }
++            }
++        )+
++    };
++}
++
++impl_binary_f32_rule!(
++    arith::Fadd => "fadd",
++    arith::Fsub => "fsub",
++    arith::Fmul => "fmul",
++    arith::Fdiv => "fdiv",
++);
++
++macro_rules! impl_compare_f32_rule {
++    ($($ty:ty => $opname:literal),+ $(,)?) => {
++        $(
++            impl VerifyInst for $ty {
++                fn verify_inst(&self, verifier: &mut FunctionVerifier<'_>, inst_id: InstId) {
++                    verify_binary_f32(
++                        verifier,
++                        inst_id,
++                        *self.lhs(),
++                        *self.rhs(),
++                        Type::I1,
++                        $opname,
++                    );
++                }
++            }
++        )+
++    };
++}
++
++impl_compare_f32_rule!(cmp::Feq => "feq", cmp::Flt => "flt", cmp::Fle => "fle");
++
+ macro_rules! impl_binary_integral_same_rule {
+     ($($ty:ty => $opname:literal),+ $(,)?) => {
+         $(
+diff --git a/crates/verifier/tests/verifier.rs b/crates/verifier/tests/verifier.rs
+index a0c0d744..52402b5d 100644
+--- a/crates/verifier/tests/verifier.rs
++++ b/crates/verifier/tests/verifier.rs
+@@ -83,6 +83,7 @@ func public %caller() -> unit {
+         v0.i32 = call %callee 1.i32;
+         return;
+ }
++
+ "#;
+ 
+     let cfg = VerifierConfig::for_level(VerificationLevel::Standard);
+@@ -2287,3 +2288,48 @@ func public %bad_evm_return_result() -> unit {
+ 
+     assert!(has_code(&report, "IR0601"), "expected IR0601, got {report}");
+ }
++
++#[test]
++fn f32_instructions_verify_with_native_types() {
++    let src = r#"
++target = "wasm32-unknown-native"
++
++func public %float_ops(v0.f32, v1.f32) -> (f32, i1) {
++    block0:
++        v2.f32 = fadd v0 v1;
++        v3.f32 = fsqrt v2;
++        v4.i1 = fle v3 v2;
++        return (v3, v4);
++}
++"#;
++    let parsed = parse_module(src).expect("module should parse");
++    let cfg = VerifierConfig::for_level(VerificationLevel::Standard);
++    let report = verify_module(&parsed.module, &cfg);
++    assert!(report.is_ok(), "expected valid float IR, got {report}");
++}
++
++#[test]
++fn f32_instruction_type_mismatches_are_reported() {
++    let src = r#"
++target = "wasm32-unknown-native"
++
++func public %bad_float_ops(v0.i32, v1.f32) -> i32 {
++    block0:
++        v2.i32 = fadd v0 v1;
++        v3.f32 = fneg v0;
++        v4.f32 = feq v1 v1;
++        return v2;
++}
++"#;
++    let parsed = parse_module(src).expect("module should parse");
++    let cfg = VerifierConfig::for_level(VerificationLevel::Standard);
++    let report = verify_module(&parsed.module, &cfg);
++    assert!(
++        has_code(&report, "IR0600"),
++        "expected operand mismatch, got {report}"
++    );
++    assert!(
++        has_code(&report, "IR0601"),
++        "expected result mismatch, got {report}"
++    );
++}
+-- 
+2.53.0
+

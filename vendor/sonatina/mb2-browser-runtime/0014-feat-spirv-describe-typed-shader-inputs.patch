@@ -1,0 +1,318 @@
+From 52452c363aa23c2e77bf80929655d1f6899a39a5 Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Wed, 22 Jul 2026 10:03:27 +0200
+Subject: [PATCH 14/25] feat(spirv): describe typed shader inputs
+
+---
+ crates/codegen/src/isa/spirv/mod.rs   | 95 ++++++++++++++++++++++++---
+ crates/codegen/tests/spirv_backend.rs | 77 +++++++++++++++++++++-
+ 2 files changed, 162 insertions(+), 10 deletions(-)
+
+diff --git a/crates/codegen/src/isa/spirv/mod.rs b/crates/codegen/src/isa/spirv/mod.rs
+index f9051952..7c22b5d8 100644
+--- a/crates/codegen/src/isa/spirv/mod.rs
++++ b/crates/codegen/src/isa/spirv/mod.rs
+@@ -80,6 +80,47 @@ pub enum Role {
+     Input,
+ }
+ 
++/// Logical Sonatina scalar type of one ABI value. This describes the source
++/// argument, not necessarily the shader expression's physical type: for
++/// example Grid coordinates are logically `I32` while
++/// `global_invocation_id` is physically `u32`, and Render coordinates are
++/// logically `I32` after conversion from physical fragment-position `f32`.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum SpirvScalarKind {
++    I1,
++    I32,
++    U32,
++    I64,
++    F32,
++}
++
++/// One source-language argument materialized in a storage-buffer member.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SpirvBindingMember {
++    pub arg_index: u32,
++    pub offset: u32,
++    pub width: u32,
++    pub scalar: SpirvScalarKind,
++}
++
++/// Physical shader builtin supplying a logical source-language argument without
++/// buffer storage. [`SpirvBuiltinInput::scalar`] records the logical type after
++/// the backend's builtin conversion.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum SpirvBuiltinSource {
++    GlobalInvocationIdX,
++    GlobalInvocationIdY,
++    FragmentPositionX,
++    FragmentPositionY,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct SpirvBuiltinInput {
++    pub arg_index: u32,
++    pub source: SpirvBuiltinSource,
++    pub scalar: SpirvScalarKind,
++}
++
+ /// One storage-buffer binding, as the compiler actually emitted it.
+ #[derive(Debug, Clone)]
+ pub struct SpirvBinding {
+@@ -88,9 +129,16 @@ pub struct SpirvBinding {
+     pub name: String,
+     pub access: Access,
+     pub role: Role,
+-    /// Element stride: word width for the output, per-invocation input span for
+-    /// the input buffer.
++    /// Byte distance between consecutive binding elements. For the current
++    /// structs this equals `span`; keeping it distinct makes array layout
++    /// explicit if tail padding or a larger array stride is introduced later.
+     pub stride: u32,
++    /// Bytes occupied by one emitted binding element, including internal and
++    /// tail padding but excluding any gap before the next array element.
++    pub span: u32,
++    /// Typed source arguments stored in this binding. Empty for outputs and
++    /// padding-only inputs.
++    pub members: Vec<SpirvBindingMember>,
+ }
+ 
+ /// Where the scalar result lands for readback.
+@@ -113,6 +161,8 @@ pub struct SpirvLayout {
+     pub workgroup_size: [u32; 3],
+     pub word: WordKind,
+     pub bindings: Vec<SpirvBinding>,
++    /// Source arguments supplied by shader builtins rather than bindings.
++    pub builtin_inputs: Vec<SpirvBuiltinInput>,
+     /// Where the scalar result lands for readback (`Some` for Scalar and Batch
+     /// modes). `None` in Grid and Render modes: the whole output array (Grid) or
+     /// the color target (Render) is the result, so there is no single readback slot.
+@@ -1581,15 +1631,17 @@ fn translate_to_naga(
+         let broadcast = param_count - 2;
+         let effective_params = broadcast.max(1);
+         let mut input_members = Vec::with_capacity(effective_params);
++        let mut layout_input_members = Vec::with_capacity(broadcast);
+         let mut input_span = 0;
+         let mut input_align = 1;
+         for (i, ty) in sig.args().iter().skip(2).copied().enumerate() {
+-            let (naga_ty, width) = match ty {
+-                sonatina_ir::Type::I32 => (word_type, 4),
+-                sonatina_ir::Type::F32 => (f32_type, 4),
++            let (naga_ty, width, scalar) = match ty {
++                sonatina_ir::Type::I32 => (word_type, 4, SpirvScalarKind::I32),
++                sonatina_ir::Type::F32 => (f32_type, 4, SpirvScalarKind::F32),
+                 _ => return Err(format!("spirv render: broadcast arg {} has unsupported storage type {ty:?}", i + 2)),
+             };
+             input_members.push(naga::StructMember { name: Some(format!("p{i}")), ty: naga_ty, binding: None, offset: input_span });
++            layout_input_members.push(SpirvBindingMember { arg_index: (i + 2) as u32, offset: input_span, width, scalar });
+             input_span += width;
+             input_align = input_align.max(width);
+         }
+@@ -1867,7 +1919,13 @@ fn translate_to_naga(
+                 access: Access::Read,
+                 role: Role::Input,
+                 stride: input_span,
++                span: input_span,
++                members: layout_input_members,
+             }],
++            builtin_inputs: vec![
++                SpirvBuiltinInput { arg_index: 0, source: SpirvBuiltinSource::FragmentPositionX, scalar: SpirvScalarKind::I32 },
++                SpirvBuiltinInput { arg_index: 1, source: SpirvBuiltinSource::FragmentPositionY, scalar: SpirvScalarKind::I32 },
++            ],
+             result: None,
+             vertex_entry: Some("vs_fullscreen".to_string()),
+             fragment_entry: Some("fs_main".to_string()),
+@@ -1915,17 +1973,24 @@ fn translate_to_naga(
+     let broadcast = if grid { param_count - 2 } else { param_count };
+     let effective_params = broadcast.max(1);
+     let mut input_members = Vec::with_capacity(effective_params);
++    let mut layout_input_members = Vec::with_capacity(broadcast);
+     let mut input_span = 0;
+     let mut input_align = 1;
+     for (i, ty) in sig.args().iter().skip(if grid { 2 } else { 0 }).copied().enumerate() {
+-        let (naga_ty, width) = match ty {
+-            sonatina_ir::Type::I32 => (word_type, 4),
+-            sonatina_ir::Type::I64 if word == WordKind::I64 => (word_type, 8),
+-            sonatina_ir::Type::F32 => (f32_type, 4),
++        let (naga_ty, width, scalar) = match ty {
++            sonatina_ir::Type::I32 => (word_type, 4, SpirvScalarKind::I32),
++            sonatina_ir::Type::I64 if word == WordKind::I64 => (word_type, 8, SpirvScalarKind::I64),
++            sonatina_ir::Type::F32 => (f32_type, 4, SpirvScalarKind::F32),
+             _ => return Err(format!("spirv: input arg {i} has unsupported storage type {ty:?}")),
+         };
+         input_span = (input_span + width - 1) & !(width - 1);
+         input_members.push(naga::StructMember { name: Some(format!("p{i}")), ty: naga_ty, binding: None, offset: input_span });
++        layout_input_members.push(SpirvBindingMember {
++            arg_index: (i + if grid { 2 } else { 0 }) as u32,
++            offset: input_span,
++            width,
++            scalar,
++        });
+         input_span += width;
+         input_align = input_align.max(width);
+     }
+@@ -2373,6 +2438,8 @@ fn translate_to_naga(
+                 access: Access::ReadWrite,
+                 role: Role::Output,
+                 stride: word_width,
++                span: word_width,
++                members: Vec::new(),
+             },
+             SpirvBinding {
+                 group: 0,
+@@ -2381,8 +2448,18 @@ fn translate_to_naga(
+                 access: Access::Read,
+                 role: Role::Input,
+                 stride: input_span,
++                span: input_span,
++                members: layout_input_members,
+             },
+         ],
++        builtin_inputs: if grid {
++            vec![
++                SpirvBuiltinInput { arg_index: 0, source: SpirvBuiltinSource::GlobalInvocationIdX, scalar: SpirvScalarKind::I32 },
++                SpirvBuiltinInput { arg_index: 1, source: SpirvBuiltinSource::GlobalInvocationIdY, scalar: SpirvScalarKind::I32 },
++            ]
++        } else {
++            Vec::new()
++        },
+         // Grid mode has no single readback slot: the whole output array is the
+         // result, written per pixel.
+         result: if grid {
+diff --git a/crates/codegen/tests/spirv_backend.rs b/crates/codegen/tests/spirv_backend.rs
+index 1bab0106..87438b43 100644
+--- a/crates/codegen/tests/spirv_backend.rs
++++ b/crates/codegen/tests/spirv_backend.rs
+@@ -1,5 +1,8 @@
+ use sonatina_codegen::Backend;
+-use sonatina_codegen::isa::spirv::{LayoutMode, Role, SpirvBackend, WordKind};
++use sonatina_codegen::isa::spirv::{
++    LayoutMode, Role, SpirvBackend, SpirvBuiltinInput, SpirvBuiltinSource, SpirvLayout,
++    SpirvBindingMember, SpirvScalarKind, WordKind,
++};
+ use sonatina_ir::{
+     Immediate, Linkage, Signature, Type,
+     builder::ModuleBuilder,
+@@ -22,6 +25,37 @@ fn native_module_builder() -> ModuleBuilder {
+     ModuleBuilder::new(ctx)
+ }
+ 
++fn assert_layout_metadata_invariants(layout: &SpirvLayout, arg_count: usize) {
++    let mut seen = vec![false; arg_count];
++    for builtin in &layout.builtin_inputs {
++        let slot = seen.get_mut(builtin.arg_index as usize).expect("builtin arg index in range");
++        assert!(!*slot, "argument {} described twice", builtin.arg_index);
++        *slot = true;
++    }
++    for binding in &layout.bindings {
++        assert!(binding.stride >= binding.span, "stride must cover span");
++        let mut end = 0;
++        for member in &binding.members {
++            assert!(member.width > 0 && member.offset % member.width == 0, "member must be naturally aligned");
++            assert!(member.offset >= end, "members must be ordered and non-overlapping");
++            end = member.offset + member.width;
++            assert!(end <= binding.span, "member must fit binding span");
++            let slot = seen.get_mut(member.arg_index as usize).expect("member arg index in range");
++            assert!(!*slot, "argument {} described twice", member.arg_index);
++            *slot = true;
++        }
++        if binding.role == Role::Output {
++            assert!(binding.members.is_empty());
++            assert_eq!(binding.span, layout.word.width_bytes());
++            assert_eq!(binding.stride, layout.word.width_bytes());
++        }
++    }
++    assert!(seen.into_iter().all(|covered| covered), "every source argument needs exactly one ABI source");
++    if matches!(layout.mode, LayoutMode::Scalar | LayoutMode::Batch) {
++        assert!(layout.builtin_inputs.is_empty());
++    }
++}
++
+ #[test]
+ fn spirv_constant_return_valid() {
+     let isa = Native::new(TargetTriple::new(
+@@ -1198,6 +1232,7 @@ fn grid_wgsl_shape() {
+         .expect("grid gradient must compile");
+ 
+     let layout = &art.layout;
++    assert_layout_metadata_invariants(layout, 2);
+     assert_eq!(layout.mode, LayoutMode::Grid, "grid mode");
+     assert_eq!(layout.word, WordKind::U32, "u32 word");
+     assert!(layout.result.is_none(), "grid states no single-slot result");
+@@ -1206,6 +1241,7 @@ fn grid_wgsl_shape() {
+     let in_b = layout.bindings.iter().find(|b| b.role == Role::Input).expect("input binding");
+     assert_eq!(out_b.stride, 4, "output stride = per-element word width");
+     assert_eq!(in_b.stride, 4, "input stride = broadcast span (one dummy member)");
++    assert!(in_b.members.is_empty(), "padding-only input must not invent a source member");
+ 
+     let wgsl = art.wgsl.as_ref().expect("WGSL side artifact");
+     for tok in ["global_invocation_id", "num_workgroups", "array<u32>"] {
+@@ -1225,6 +1261,25 @@ fn grid_wgsl_shape() {
+     eprintln!("grid_wgsl_shape OK: {} words", art.words.len());
+ }
+ 
++#[test]
++fn scalar_i64_and_batch_layout_metadata_invariants() {
++    let scalar = SpirvBackend::new().compile_module(&build_grid_i64_module())
++        .expect("homogeneous i64 scalar module should compile");
++    assert_layout_metadata_invariants(&scalar.layout, 2);
++    let input = scalar.layout.bindings.iter().find(|b| b.role == Role::Input).unwrap();
++    assert_eq!(input.members.iter().map(|m| (m.offset, m.width, m.scalar)).collect::<Vec<_>>(), vec![
++        (0, 8, SpirvScalarKind::I64),
++        (8, 8, SpirvScalarKind::I64),
++    ]);
++    assert_eq!((input.span, input.stride), (16, 16));
++
++    let batch = SpirvBackend::new().compile_module(&build_grid_objalloc_module())
++        .expect("batch module should compile");
++    assert_eq!(batch.layout.mode, LayoutMode::Batch);
++    assert_layout_metadata_invariants(&batch.layout, 2);
++    assert!(batch.layout.builtin_inputs.is_empty());
++}
++
+ /// The headline: a grid kernel EXECUTES on lavapipe and every pixel equals the
+ /// CPU oracle x + 1024*y.
+ #[test]
+@@ -2446,9 +2501,19 @@ func public %mixed(v0.i32, v1.i32, v2.f32, v3.f32) -> i32 {
+     let module = sonatina_parser::parse_module(source).expect("mixed grid should parse").module;
+     let artifact = SpirvBackend::new().with_grid().with_workgroup_size(2, 2, 1)
+         .compile_module(&module).expect("mixed grid should compile");
++    assert_layout_metadata_invariants(&artifact.layout, 4);
+     let wgsl = artifact.wgsl.as_deref().expect("WGSL should be emitted");
+     let input = artifact.layout.bindings.iter().find(|binding| matches!(binding.role, Role::Input)).unwrap();
+     assert_eq!(input.stride, 8, "two f32 broadcasts must occupy offsets 0 and 4");
++    assert_eq!(input.span, 8);
++    assert_eq!(input.members, vec![
++        SpirvBindingMember { arg_index: 2, offset: 0, width: 4, scalar: SpirvScalarKind::F32 },
++        SpirvBindingMember { arg_index: 3, offset: 4, width: 4, scalar: SpirvScalarKind::F32 },
++    ]);
++    assert_eq!(artifact.layout.builtin_inputs, vec![
++        SpirvBuiltinInput { arg_index: 0, source: SpirvBuiltinSource::GlobalInvocationIdX, scalar: SpirvScalarKind::I32 },
++        SpirvBuiltinInput { arg_index: 1, source: SpirvBuiltinSource::GlobalInvocationIdY, scalar: SpirvScalarKind::I32 },
++    ]);
+     assert!(wgsl.contains("p0_: f32") && wgsl.contains("p1_: f32"), "WGSL must reflect f32 broadcast members: {wgsl}");
+     let reparsed = naga::front::wgsl::parse_str(wgsl).expect("mixed WGSL should reparse");
+     naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+@@ -2472,8 +2537,18 @@ func public %render_broadcast(v0.i32, v1.i32, v2.f32, v3.f32) -> i32 {
+     let module = sonatina_parser::parse_module(source).expect("render broadcasts should parse").module;
+     let artifact = SpirvBackend::new().with_render().compile_module(&module)
+         .expect("render broadcasts should compile");
++    assert_layout_metadata_invariants(&artifact.layout, 4);
+     let input = artifact.layout.bindings.iter().find(|binding| matches!(binding.role, Role::Input)).unwrap();
+     assert_eq!(input.stride, 8);
++    assert_eq!(input.span, 8);
++    assert_eq!(input.members, vec![
++        SpirvBindingMember { arg_index: 2, offset: 0, width: 4, scalar: SpirvScalarKind::F32 },
++        SpirvBindingMember { arg_index: 3, offset: 4, width: 4, scalar: SpirvScalarKind::F32 },
++    ]);
++    assert_eq!(artifact.layout.builtin_inputs, vec![
++        SpirvBuiltinInput { arg_index: 0, source: SpirvBuiltinSource::FragmentPositionX, scalar: SpirvScalarKind::I32 },
++        SpirvBuiltinInput { arg_index: 1, source: SpirvBuiltinSource::FragmentPositionY, scalar: SpirvScalarKind::I32 },
++    ]);
+     let wgsl = artifact.wgsl.as_deref().expect("WGSL should be emitted");
+     assert!(wgsl.contains("p0_: f32") && wgsl.contains("p1_: f32"));
+     let reparsed = naga::front::wgsl::parse_str(wgsl).expect("render WGSL should reparse");
+-- 
+2.53.0
+

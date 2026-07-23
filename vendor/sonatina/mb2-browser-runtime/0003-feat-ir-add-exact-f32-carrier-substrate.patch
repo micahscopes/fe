@@ -1,0 +1,794 @@
+From 2191cd0da549e9b8f994dfbdda2ca9dcac9b2155 Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Tue, 21 Jul 2026 18:23:58 +0200
+Subject: [PATCH 03/25] feat(ir): add exact f32 carrier substrate
+
+---
+ crates/codegen/src/isa/evm/emit/stack.rs      |  1 +
+ crates/codegen/src/isa/evm/high_alias.rs      |  1 +
+ crates/codegen/src/isa/evm/immediate.rs       |  3 +
+ .../codegen/src/isa/evm/machine/lazy_frame.rs |  1 +
+ crates/codegen/src/isa/evm/machine/lower.rs   |  3 +-
+ crates/codegen/src/isa/evm/provenance.rs      |  9 +-
+ crates/codegen/src/isa/evm/scratch_plan.rs    |  1 +
+ crates/codegen/src/isa/evm/verify.rs          |  2 +-
+ crates/codegen/src/optim/simplify_expr.rs     |  4 +-
+ .../codegen/src/stackalloc/stackify/trace.rs  |  1 +
+ crates/codegen/src/transform/evm/legalize.rs  |  3 +-
+ .../codegen/src/transform/evm/scalar_words.rs |  4 +-
+ crates/ir/src/interpret/data.rs               |  1 +
+ crates/ir/src/interpret/evm/mod.rs            |  2 +-
+ crates/ir/src/isa/evm.rs                      |  1 +
+ crates/ir/src/isa/native.rs                   |  2 +
+ crates/ir/src/isa/wasm32.rs                   |  2 +
+ crates/ir/src/types.rs                        |  6 ++
+ crates/ir/src/value.rs                        | 25 +++++-
+ crates/parser/src/ast.rs                      | 51 +++++++++++-
+ crates/parser/src/lib.rs                      |  1 +
+ crates/parser/src/sonatina.pest               |  2 +-
+ .../syntax/module/f32_bits.ast.snap           | 83 +++++++++++++++++++
+ .../test_files/syntax/module/f32_bits.ir.snap | 11 +++
+ .../test_files/syntax/module/f32_bits.snap    | 40 +++++++++
+ .../test_files/syntax/module/f32_bits.sntn    |  6 ++
+ crates/parser/tests/f32_roundtrip.rs          | 38 +++++++++
+ 27 files changed, 289 insertions(+), 15 deletions(-)
+ create mode 100644 crates/parser/test_files/syntax/module/f32_bits.ast.snap
+ create mode 100644 crates/parser/test_files/syntax/module/f32_bits.ir.snap
+ create mode 100644 crates/parser/test_files/syntax/module/f32_bits.snap
+ create mode 100644 crates/parser/test_files/syntax/module/f32_bits.sntn
+ create mode 100644 crates/parser/tests/f32_roundtrip.rs
+
+diff --git a/crates/codegen/src/isa/evm/emit/stack.rs b/crates/codegen/src/isa/evm/emit/stack.rs
+index c3d927ac..4f151b04 100644
+--- a/crates/codegen/src/isa/evm/emit/stack.rs
++++ b/crates/codegen/src/isa/evm/emit/stack.rs
+@@ -568,6 +568,7 @@ pub(crate) fn scalar_bit_width(ty: Type, module: &sonatina_ir::module::ModuleCtx
+         Type::I8 => 8,
+         Type::I16 => 16,
+         Type::I32 => 32,
++        Type::F32 => return None,
+         Type::I64 => 64,
+         Type::I128 => 128,
+         Type::I256 => 256,
+diff --git a/crates/codegen/src/isa/evm/high_alias.rs b/crates/codegen/src/isa/evm/high_alias.rs
+index ef4bc234..9b4f8ee9 100644
+--- a/crates/codegen/src/isa/evm/high_alias.rs
++++ b/crates/codegen/src/isa/evm/high_alias.rs
+@@ -37,6 +37,7 @@ fn scalar_bit_width(ty: Type, module: &ModuleCtx) -> Option<u16> {
+         Type::I8 => 8,
+         Type::I16 => 16,
+         Type::I32 => 32,
++        Type::F32 => return None,
+         Type::I64 => 64,
+         Type::I128 => 128,
+         Type::I256 => 256,
+diff --git a/crates/codegen/src/isa/evm/immediate.rs b/crates/codegen/src/isa/evm/immediate.rs
+index 46062d2f..9e504789 100644
+--- a/crates/codegen/src/isa/evm/immediate.rs
++++ b/crates/codegen/src/isa/evm/immediate.rs
+@@ -160,6 +160,9 @@ fn immediate_bytes(imm: Immediate) -> SmallVec<[u8; 8]> {
+         Immediate::I8(v) => SmallVec::from_slice(&v.to_be_bytes()),
+         Immediate::I16(v) => shrink_bytes(&v.to_be_bytes()),
+         Immediate::I32(v) => shrink_bytes(&v.to_be_bytes()),
++        Immediate::F32(_) => {
++            unreachable!("f32 immediates are not representable by the EVM backend")
++        }
+         Immediate::I64(v) => shrink_bytes(&v.to_be_bytes()),
+         Immediate::I128(v) => shrink_bytes(&v.to_be_bytes()),
+         Immediate::I256(v) => shrink_bytes(&v.to_u256().to_big_endian()),
+diff --git a/crates/codegen/src/isa/evm/machine/lazy_frame.rs b/crates/codegen/src/isa/evm/machine/lazy_frame.rs
+index 0c053304..fbe3618e 100644
+--- a/crates/codegen/src/isa/evm/machine/lazy_frame.rs
++++ b/crates/codegen/src/isa/evm/machine/lazy_frame.rs
+@@ -1030,6 +1030,7 @@ fn scalar_bit_width(ty: Type, module: &sonatina_ir::module::ModuleCtx) -> Option
+         Type::I8 => 8,
+         Type::I16 => 16,
+         Type::I32 => 32,
++        Type::F32 => return None,
+         Type::I64 => 64,
+         Type::I128 => 128,
+         Type::I256 => 256,
+diff --git a/crates/codegen/src/isa/evm/machine/lower.rs b/crates/codegen/src/isa/evm/machine/lower.rs
+index c89366fd..4a09e7f7 100644
+--- a/crates/codegen/src/isa/evm/machine/lower.rs
++++ b/crates/codegen/src/isa/evm/machine/lower.rs
+@@ -113,6 +113,7 @@ fn machine_type(module: &ModuleCtx, ty: Type) -> Result<Type, String> {
+         Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::I128 | Type::EnumTag(_) => {
+             Ok(Type::I256)
+         }
++        Type::F32 => Err("f32 is unsupported by the EVM machine backend".to_string()),
+         Type::Compound(_) => Err(format!("unsupported machine type {ty:?}")),
+     }
+ }
+@@ -1145,7 +1146,7 @@ fn scalar_bits(ty: Type) -> Option<u16> {
+         Type::I64 => Some(64),
+         Type::I128 => Some(128),
+         Type::I256 | Type::EnumTag(_) => Some(256),
+-        Type::Unit | Type::Compound(_) => None,
++        Type::F32 | Type::Unit | Type::Compound(_) => None,
+     }
+ }
+ 
+diff --git a/crates/codegen/src/isa/evm/provenance.rs b/crates/codegen/src/isa/evm/provenance.rs
+index 2c40d862..903632db 100644
+--- a/crates/codegen/src/isa/evm/provenance.rs
++++ b/crates/codegen/src/isa/evm/provenance.rs
+@@ -305,7 +305,14 @@ fn type_can_carry_pointer_provenance_inner(
+ ) -> bool {
+     match ty {
+         Type::I256 => true,
+-        Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::I128 | Type::Unit => false,
++        Type::I1
++        | Type::I8
++        | Type::I16
++        | Type::I32
++        | Type::F32
++        | Type::I64
++        | Type::I128
++        | Type::Unit => false,
+         Type::EnumTag(_) => false,
+         Type::Compound(compound) => {
+             if !seen.insert(compound) {
+diff --git a/crates/codegen/src/isa/evm/scratch_plan.rs b/crates/codegen/src/isa/evm/scratch_plan.rs
+index ae5e4fcf..9efafea4 100644
+--- a/crates/codegen/src/isa/evm/scratch_plan.rs
++++ b/crates/codegen/src/isa/evm/scratch_plan.rs
+@@ -108,6 +108,7 @@ fn imm_lt_u32(imm: Immediate, bound: u32) -> bool {
+         Immediate::I8(val) => val >= 0 && (val as u32) < bound,
+         Immediate::I16(val) => val >= 0 && (val as u32) < bound,
+         Immediate::I32(val) => val >= 0 && (val as u32) < bound,
++        Immediate::F32(_) => false,
+         Immediate::I64(val) => val >= 0 && (val as u64) < bound as u64,
+         Immediate::I128(val) => val >= 0 && (val as u128) < bound as u128,
+         Immediate::I256(val) => !val.is_negative() && val.to_u256() < U256::from(bound),
+diff --git a/crates/codegen/src/isa/evm/verify.rs b/crates/codegen/src/isa/evm/verify.rs
+index ba29e6c0..257c69ee 100644
+--- a/crates/codegen/src/isa/evm/verify.rs
++++ b/crates/codegen/src/isa/evm/verify.rs
+@@ -244,7 +244,7 @@ pub(crate) fn validate_supported_lowering_ir(
+ fn type_is_legalized_evm(ctx: &ModuleCtx, ty: Type, seen: &mut FxHashSet<CompoundTypeRef>) -> bool {
+     match ty {
+         Type::I1 | Type::I256 | Type::Unit => true,
+-        Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::I128 => false,
++        Type::I8 | Type::I16 | Type::I32 | Type::F32 | Type::I64 | Type::I128 => false,
+         Type::EnumTag(_) => false,
+         Type::Compound(compound) => {
+             if !seen.insert(compound) {
+diff --git a/crates/codegen/src/optim/simplify_expr.rs b/crates/codegen/src/optim/simplify_expr.rs
+index 7979744c..2616c62c 100644
+--- a/crates/codegen/src/optim/simplify_expr.rs
++++ b/crates/codegen/src/optim/simplify_expr.rs
+@@ -58,7 +58,7 @@ pub(crate) fn integral_bit_width(ty: Type) -> Option<usize> {
+         Type::I64 => Some(64),
+         Type::I128 => Some(128),
+         Type::I256 => Some(256),
+-        Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
++        Type::F32 | Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
+     }
+ }
+ 
+@@ -70,7 +70,7 @@ fn integral_byte_width(ty: Type) -> Option<usize> {
+         Type::I64 => Some(8),
+         Type::I128 => Some(16),
+         Type::I256 => Some(32),
+-        Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
++        Type::F32 | Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
+     }
+ }
+ 
+diff --git a/crates/codegen/src/stackalloc/stackify/trace.rs b/crates/codegen/src/stackalloc/stackify/trace.rs
+index fdb6e2e1..853f15f6 100644
+--- a/crates/codegen/src/stackalloc/stackify/trace.rs
++++ b/crates/codegen/src/stackalloc/stackify/trace.rs
+@@ -447,6 +447,7 @@ fn fmt_immediate(imm: sonatina_ir::Immediate) -> String {
+         I8(v) => format!("{v}"),
+         I16(v) => format!("{v}"),
+         I32(v) => format!("{v}"),
++        F32(bits) => format!("0x{bits:08x}"),
+         I64(v) => format!("{v}"),
+         I128(v) => format!("{v}"),
+         I256(v) => format!("{v}"),
+diff --git a/crates/codegen/src/transform/evm/legalize.rs b/crates/codegen/src/transform/evm/legalize.rs
+index 8f6a672e..a05d6b35 100644
+--- a/crates/codegen/src/transform/evm/legalize.rs
++++ b/crates/codegen/src/transform/evm/legalize.rs
+@@ -55,6 +55,7 @@ impl TypeLegalizer {
+             Type::I1 => Type::I1,
+             Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::I128 => Type::I256,
+             Type::I256 | Type::Unit => ty,
++            Type::F32 => panic!("f32 is unsupported by EVM type legalization"),
+             Type::EnumTag(_) => {
+                 panic!("enum tags must be lowered before EVM type legalization");
+             }
+@@ -144,7 +145,7 @@ fn scalar_width_for_type(ctx: &ModuleCtx, ty: Type) -> Option<ScalarWidth> {
+         Type::I256 => Some(ScalarWidth::Full256),
+         Type::EnumTag(_) => None,
+         Type::Compound(_) if ty.is_pointer(ctx) => Some(ScalarWidth::Full256),
+-        Type::Compound(_) | Type::Unit => None,
++        Type::F32 | Type::Compound(_) | Type::Unit => None,
+     }
+ }
+ 
+diff --git a/crates/codegen/src/transform/evm/scalar_words.rs b/crates/codegen/src/transform/evm/scalar_words.rs
+index 39bb496b..32abe7e7 100644
+--- a/crates/codegen/src/transform/evm/scalar_words.rs
++++ b/crates/codegen/src/transform/evm/scalar_words.rs
+@@ -5,7 +5,7 @@ pub(super) fn evm_scalar_word_bits(imm: Immediate) -> Option<U256> {
+         Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::I128 | Type::I256 => {
+             Some(imm.zext(Type::I256).as_i256().to_u256())
+         }
+-        Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
++        Type::F32 | Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
+     }
+ }
+ 
+@@ -19,7 +19,7 @@ pub(super) fn legalize_evm_scalar_immediate(imm: Immediate) -> Option<Immediate>
+         Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::I128 | Type::I256 => Some(
+             Immediate::from_i256(I256::from_u256(evm_scalar_word_bits(imm)?), Type::I256),
+         ),
+-        Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
++        Type::F32 | Type::EnumTag(_) | Type::Compound(_) | Type::Unit => None,
+     }
+ }
+ 
+diff --git a/crates/ir/src/interpret/data.rs b/crates/ir/src/interpret/data.rs
+index 962ecaa4..39ca9bef 100644
+--- a/crates/ir/src/interpret/data.rs
++++ b/crates/ir/src/interpret/data.rs
+@@ -47,6 +47,7 @@ impl Interpret for Gep {
+                 | Type::I16
+                 | Type::I8
+                 | Type::I32
++                | Type::F32
+                 | Type::I64
+                 | Type::I128
+                 | Type::I256
+diff --git a/crates/ir/src/interpret/evm/mod.rs b/crates/ir/src/interpret/evm/mod.rs
+index 736a2389..ab623078 100644
+--- a/crates/ir/src/interpret/evm/mod.rs
++++ b/crates/ir/src/interpret/evm/mod.rs
+@@ -13,7 +13,7 @@ fn bits_for_ty(ty: Type) -> u32 {
+         Type::I128 => 128,
+         Type::I256 => 256,
+         Type::EnumTag(_) => unreachable!(),
+-        Type::Compound(_) | Type::Unit => unreachable!(),
++        Type::F32 | Type::Compound(_) | Type::Unit => unreachable!(),
+     }
+ }
+ 
+diff --git a/crates/ir/src/isa/evm.rs b/crates/ir/src/isa/evm.rs
+index 14d677dd..26801f5c 100644
+--- a/crates/ir/src/isa/evm.rs
++++ b/crates/ir/src/isa/evm.rs
+@@ -154,6 +154,7 @@ impl TypeLayout for EvmTypeLayout {
+             // EVM memory is word-addressed by the MLOAD/MSTORE family. For now we model all
+             // scalar/pointer values as occupying one full 32-byte slot.
+             Type::I1 | Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::I128 | Type::I256 => 32,
++            Type::F32 => return Err(TypeLayoutError::UnrepresentableType(ty)),
+             Type::EnumTag(_) => return Err(TypeLayoutError::UnrepresentableType(ty)),
+ 
+             Type::Compound(cmpd) => {
+diff --git a/crates/ir/src/isa/native.rs b/crates/ir/src/isa/native.rs
+index e3f76638..770463a3 100644
+--- a/crates/ir/src/isa/native.rs
++++ b/crates/ir/src/isa/native.rs
+@@ -85,6 +85,7 @@ impl TypeLayout for NativeTypeLayout {
+             Type::I8 => 1,
+             Type::I16 => 2,
+             Type::I32 => 4,
++            Type::F32 => 4,
+             Type::I64 => 8,
+             Type::I128 => 16,
+             Type::I256 => 32,
+@@ -125,6 +126,7 @@ impl TypeLayout for NativeTypeLayout {
+             Type::I1 | Type::I8 => 1,
+             Type::I16 => 2,
+             Type::I32 => 4,
++            Type::F32 => 4,
+             Type::I64 => 8,
+             Type::I128 => 16,
+             Type::I256 => 32,
+diff --git a/crates/ir/src/isa/wasm32.rs b/crates/ir/src/isa/wasm32.rs
+index c4966e6d..65172395 100644
+--- a/crates/ir/src/isa/wasm32.rs
++++ b/crates/ir/src/isa/wasm32.rs
+@@ -92,6 +92,7 @@ impl TypeLayout for Wasm32TypeLayout {
+             Type::I8 => 1,
+             Type::I16 => 2,
+             Type::I32 => 4,
++            Type::F32 => 4,
+             Type::I64 => 8,
+             Type::I128 => 16,
+             Type::I256 => 32,
+@@ -133,6 +134,7 @@ impl TypeLayout for Wasm32TypeLayout {
+             Type::I1 | Type::I8 => 1,
+             Type::I16 => 2,
+             Type::I32 => 4,
++            Type::F32 => 4,
+             Type::I64 => 8,
+             Type::I128 => 16,
+             Type::I256 => 32,
+diff --git a/crates/ir/src/types.rs b/crates/ir/src/types.rs
+index 94449c7b..e2d4eb31 100644
+--- a/crates/ir/src/types.rs
++++ b/crates/ir/src/types.rs
+@@ -316,6 +316,7 @@ pub enum Type {
+     I8,
+     I16,
+     I32,
++    F32,
+     I64,
+     I128,
+     I256,
+@@ -333,6 +334,10 @@ impl Type {
+         )
+     }
+ 
++    pub fn is_float(self) -> bool {
++        matches!(self, Self::F32)
++    }
++
+     pub fn is_compound(self) -> bool {
+         matches!(self, Type::Compound(_))
+     }
+@@ -421,6 +426,7 @@ where
+             Type::I8 => write!(w, "i8"),
+             Type::I16 => write!(w, "i16"),
+             Type::I32 => write!(w, "i32"),
++            Type::F32 => write!(w, "f32"),
+             Type::I64 => write!(w, "i64"),
+             Type::I128 => write!(w, "i128"),
+             Type::I256 => write!(w, "i256"),
+diff --git a/crates/ir/src/value.rs b/crates/ir/src/value.rs
+index 7b94363c..1d29f0d0 100644
+--- a/crates/ir/src/value.rs
++++ b/crates/ir/src/value.rs
+@@ -88,6 +88,9 @@ pub enum Immediate {
+     I8(i8),
+     I16(i16),
+     I32(i32),
++    /// An IEEE-754 binary32 value, stored as raw bits for exact Eq/Hash and
++    /// textual roundtrips, including NaN payloads and signed zero.
++    F32(u32),
+     I64(i64),
+     I128(i128),
+     I256(I256),
+@@ -104,6 +107,7 @@ impl Immediate {
+             Self::I8(..) => Type::I8,
+             Self::I16(..) => Type::I16,
+             Self::I32(..) => Type::I32,
++            Self::F32(..) => Type::F32,
+             Self::I64(..) => Type::I64,
+             Self::I128(..) => Type::I128,
+             Self::I256(..) => Type::I256,
+@@ -171,6 +175,7 @@ impl Immediate {
+             Self::I8(val) => (val as u8).into(),
+             Self::I16(val) => (val as u16).into(),
+             Self::I32(val) => (val as u32).into(),
++            Self::F32(_) => unreachable!("f32 immediates do not support integer extension"),
+             Self::I64(val) => (val as u64).into(),
+             Self::I128(val) => (val as u128).into(),
+             Self::I256(val) => val,
+@@ -406,7 +411,7 @@ impl Immediate {
+             Type::I64 => Self::I64(i64::MIN),
+             Type::I128 => Self::I128(i128::MIN),
+             Type::I256 => Self::from_i256(I256::from(U256::one() << 255), Type::I256),
+-            Type::EnumTag(_) | Type::Compound(_) | Type::Unit => unreachable!(),
++            Type::F32 | Type::EnumTag(_) | Type::Compound(_) | Type::Unit => unreachable!(),
+         }
+     }
+ 
+@@ -421,7 +426,7 @@ impl Immediate {
+             Type::I256 => {
+                 Self::from_i256(I256::from((U256::one() << 255) - U256::one()), Type::I256)
+             }
+-            Type::EnumTag(_) | Type::Compound(_) | Type::Unit => unreachable!(),
++            Type::F32 | Type::EnumTag(_) | Type::Compound(_) | Type::Unit => unreachable!(),
+         }
+     }
+ 
+@@ -459,6 +464,7 @@ impl Immediate {
+             Self::I8(val) => val.into(),
+             Self::I16(val) => val.into(),
+             Self::I32(val) => val.into(),
++            Self::F32(_) => unreachable!("f32 immediates are not integers"),
+             Self::I64(val) => val.into(),
+             Self::I128(val) => val.into(),
+             Self::I256(val) => val,
+@@ -486,6 +492,7 @@ impl Immediate {
+             Type::I8 => Self::I8(val.trunc_to_i8()),
+             Type::I16 => Self::I16(val.trunc_to_i16()),
+             Type::I32 => Self::I32(val.trunc_to_i32()),
++            Type::F32 => unreachable!("cannot construct f32 bits from an integer"),
+             Type::I64 => Self::I64(val.trunc_to_i64()),
+             Type::I128 => Self::I128(val.trunc_to_i128()),
+             Type::I256 => Self::I256(val),
+@@ -542,6 +549,7 @@ impl Immediate {
+             Type::I8 => 8,
+             Type::I16 => 16,
+             Type::I32 => 32,
++            Type::F32 => unreachable!("f32 immediates do not support integer bit operations"),
+             Type::I64 => 64,
+             Type::I128 => 128,
+             Type::I256 | Type::EnumTag(_) => 256,
+@@ -710,6 +718,7 @@ where
+             Self::I8(v) => write!(w, "{v}"),
+             Self::I16(v) => write!(w, "{v}"),
+             Self::I32(v) => write!(w, "{v}"),
++            Self::F32(bits) => write!(w, "0x{bits:08x}"),
+             Self::I64(v) => write!(w, "{v}"),
+             Self::I128(v) => write!(w, "{v}"),
+             Self::I256(v) => write!(w, "{v}"),
+@@ -731,6 +740,7 @@ impl fmt::Display for Immediate {
+             Self::I8(v) => write!(f, "{v}"),
+             Self::I16(v) => write!(f, "{v}"),
+             Self::I32(v) => write!(f, "{v}"),
++            Self::F32(bits) => write!(f, "0x{bits:08x}"),
+             Self::I64(v) => write!(f, "{v}"),
+             Self::I128(v) => write!(f, "{v}"),
+             Self::I256(v) => write!(f, "{v}"),
+@@ -766,6 +776,17 @@ imm_from_primary!(I256, I256, Immediate::I256);
+ mod tests {
+     use super::Immediate;
+ 
++    #[test]
++    fn f32_immediate_preserves_exact_bits_and_type() {
++        let negative_zero = Immediate::F32(0x8000_0000);
++        let nan_payload = Immediate::F32(0x7fc0_1234);
++
++        assert_eq!(negative_zero.ty(), crate::Type::F32);
++        assert_eq!(negative_zero.to_string(), "0x80000000");
++        assert_eq!(nan_payload.to_string(), "0x7fc01234");
++        assert_ne!(negative_zero, Immediate::F32(0));
++    }
++
+     #[test]
+     fn lshr_is_width_aware_for_negative_immediates() {
+         assert_eq!(Immediate::I8(-8) >> Immediate::I8(1), Immediate::I8(124));
+diff --git a/crates/parser/src/ast.rs b/crates/parser/src/ast.rs
+index 6a1fff27..61158a42 100644
+--- a/crates/parser/src/ast.rs
++++ b/crates/parser/src/ast.rs
+@@ -716,7 +716,10 @@ impl FromSyntax<Error> for Type {
+     fn from_syntax(node: &mut Node<Error>) -> Self {
+         node.descend();
+         let kind = match node.rule {
+-            Rule::primitive_type => TypeKind::Int(IntType::from_str(node.txt).unwrap()),
++            Rule::primitive_type => match IntType::from_str(node.txt) {
++                Ok(ty) => TypeKind::Int(ty),
++                Err(()) => TypeKind::Float(FloatType::from_str(node.txt).unwrap()),
++            },
+             Rule::ptr_type => TypeKind::Ptr(Box::new(node.single(Rule::type_name))),
+             Rule::objref_type => TypeKind::ObjRef(Box::new(node.single(Rule::type_name))),
+             Rule::constref_type => TypeKind::ConstRef(Box::new(node.single(Rule::type_name))),
+@@ -751,6 +754,7 @@ impl FromSyntax<Error> for Type {
+ #[derive(Debug)]
+ pub enum TypeKind {
+     Int(IntType),
++    Float(FloatType),
+     Ptr(Box<Type>),
+     ObjRef(Box<Type>),
+     ConstRef(Box<Type>),
+@@ -773,6 +777,11 @@ pub enum IntType {
+     I256,
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++pub enum FloatType {
++    F32,
++}
++
+ impl From<IntType> for ir::Type {
+     fn from(value: IntType) -> Self {
+         match value {
+@@ -787,6 +796,14 @@ impl From<IntType> for ir::Type {
+     }
+ }
+ 
++impl From<FloatType> for ir::Type {
++    fn from(value: FloatType) -> Self {
++        match value {
++            FloatType::F32 => ir::Type::F32,
++        }
++    }
++}
++
+ #[derive(Dbg)]
+ pub struct ValueName {
+     pub string: SmolStr,
+@@ -867,8 +884,11 @@ impl FromSyntax<Error> for Value {
+         let kind = match node.rule {
+             Rule::value_name => ValueKind::Named(ValueName::from_syntax(node)),
+             Rule::imm_number => {
+-                let ty = if let Some(ty) = node.parse_str_opt::<IntType>(Rule::primitive_type) {
+-                    TypeKind::Int(ty)
++                let ty = if let Some(primitive) = node.get_opt(Rule::primitive_type) {
++                    match primitive.as_str().parse::<IntType>() {
++                        Ok(ty) => TypeKind::Int(ty),
++                        Err(()) => TypeKind::Float(primitive.as_str().parse().unwrap()),
++                    }
+                 } else if let Some(enum_ty) = node.get_opt(Rule::enumtag_type) {
+                     let mut enum_ty = Node::new(enum_ty);
+                     TypeKind::EnumTag(enum_ty.single(Rule::struct_identifier))
+@@ -887,6 +907,10 @@ impl FromSyntax<Error> for Value {
+                 let mut txt = node.txt;
+                 match node.rule {
+                     Rule::decimal => match ty {
++                        TypeKind::Float(_) => {
++                            node.error(Error::NumberOutOfBounds(node.span));
++                            ValueKind::Error
++                        }
+                         TypeKind::Int(IntType::I1) => imm_or_err(
+                             node,
+                             || {
+@@ -934,6 +958,16 @@ impl FromSyntax<Error> for Value {
+                     },
+ 
+                     Rule::hex => match ty {
++                        TypeKind::Float(FloatType::F32) => {
++                            let Some(bytes) = hex_bytes::<4>(txt) else {
++                                node.error(Error::NumberOutOfBounds(node.span));
++                                return Value {
++                                    kind: ValueKind::Error,
++                                    span: node.span,
++                                };
++                            };
++                            ValueKind::Immediate(Immediate::F32(u32::from_be_bytes(bytes)))
++                        }
+                         TypeKind::Int(IntType::I1) => {
+                             node.error(Error::NumberOutOfBounds(node.span));
+                             ValueKind::Error
+@@ -1009,6 +1043,17 @@ impl FromStr for IntType {
+     }
+ }
+ 
++impl FromStr for FloatType {
++    type Err = ();
++
++    fn from_str(s: &str) -> Result<Self, Self::Err> {
++        match s {
++            "f32" => Ok(Self::F32),
++            _ => Err(()),
++        }
++    }
++}
++
+ fn imm_or_err<F, R>(node: &mut Node<Error>, f: F, default: R) -> R
+ where
+     F: FnOnce() -> Option<Immediate>,
+diff --git a/crates/parser/src/lib.rs b/crates/parser/src/lib.rs
+index 2e70cbfd..3df4be8b 100644
+--- a/crates/parser/src/lib.rs
++++ b/crates/parser/src/lib.rs
+@@ -467,6 +467,7 @@ impl BuildCtx {
+     fn type_(&mut self, mb: &ModuleBuilder, t: &ast::Type) -> ir::Type {
+         match &t.kind {
+             ast::TypeKind::Int(i) => (*i).into(),
++            ast::TypeKind::Float(f) => (*f).into(),
+             ast::TypeKind::Ptr(t) => {
+                 let t = self.type_(mb, t);
+                 mb.ptr_type(t)
+diff --git a/crates/parser/src/sonatina.pest b/crates/parser/src/sonatina.pest
+index 6edac180..cee599f6 100644
+--- a/crates/parser/src/sonatina.pest
++++ b/crates/parser/src/sonatina.pest
+@@ -66,7 +66,7 @@ block_number =  { ASCII_DIGIT+ }
+ value_name   = ${ "v" ~ ASCII_DIGIT+ }
+ 
+ type_name          =  { primitive_type | ptr_type | objref_type | constref_type | enumtag_type | array_type | unit_type | struct_identifier | function_type }
+-primitive_type     =  { "i8" | "i16" | "i32" | "i64" | "i128" | "i256" | "i1" }
++primitive_type     =  { "i8" | "i16" | "i32" | "i64" | "i128" | "i256" | "i1" | "f32" }
+ ptr_type           = ${ "*" ~ type_name }
+ objref_type        = ${ "objref" ~ "<" ~ type_name ~ ">" }
+ constref_type      = ${ "constref" ~ "<" ~ type_name ~ ">" }
+diff --git a/crates/parser/test_files/syntax/module/f32_bits.ast.snap b/crates/parser/test_files/syntax/module/f32_bits.ast.snap
+new file mode 100644
+index 00000000..a02ea947
+--- /dev/null
++++ b/crates/parser/test_files/syntax/module/f32_bits.ast.snap
+@@ -0,0 +1,83 @@
++---
++source: crates/parser/tests/syntax.rs
++assertion_line: 35
++input_file: test_files/syntax/module/f32_bits.sntn
++---
++Module {
++    target: Some(
++        TargetTriple {
++            architecture: Evm,
++            vendor: Ethereum,
++            operating_system: Evm(
++                London,
++            ),
++        },
++    ),
++    declared_functions: [],
++    declared_gvs: [],
++    struct_types: [],
++    enum_types: [],
++    functions: [
++        Func {
++            signature: FuncSignature {
++                linkage: Public,
++                inline_hint: Auto,
++                name: FunctionName {
++                    name: "f32_bits",
++                    ..
++                },
++                params: [],
++                ret_types: [
++                    Type {
++                        kind: Float(
++                            F32,
++                        ),
++                        ..
++                    },
++                ],
++            },
++            blocks: [
++                Block {
++                    id: BlockId {
++                        id: Some(
++                            0,
++                        ),
++                        ..
++                    },
++                    stmts: [
++                        Stmt {
++                            kind: Inst(
++                                Inst {
++                                    name: InstName {
++                                        name: "return",
++                                        ..
++                                    },
++                                    args: [
++                                        InstArg {
++                                            kind: Value(
++                                                Value {
++                                                    kind: Immediate(
++                                                        F32(
++                                                            2147483648,
++                                                        ),
++                                                    ),
++                                                    ..
++                                                },
++                                            ),
++                                            ..
++                                        },
++                                    ],
++                                    ..
++                                },
++                            ),
++                            ..
++                        },
++                    ],
++                },
++            ],
++            comments: [],
++        },
++    ],
++    objects: [],
++    comments: [],
++}
+diff --git a/crates/parser/test_files/syntax/module/f32_bits.ir.snap b/crates/parser/test_files/syntax/module/f32_bits.ir.snap
+new file mode 100644
+index 00000000..53ae1796
+--- /dev/null
++++ b/crates/parser/test_files/syntax/module/f32_bits.ir.snap
+@@ -0,0 +1,11 @@
++---
++source: crates/parser/tests/syntax.rs
++assertion_line: 46
++input_file: test_files/syntax/module/f32_bits.sntn
++---
++target = "evm-ethereum-london"
++
++func public %f32_bits() -> f32 {
++    block0:
++        return 0x80000000.f32;
++}
+diff --git a/crates/parser/test_files/syntax/module/f32_bits.snap b/crates/parser/test_files/syntax/module/f32_bits.snap
+new file mode 100644
+index 00000000..12b5c0ac
+--- /dev/null
++++ b/crates/parser/test_files/syntax/module/f32_bits.snap
+@@ -0,0 +1,40 @@
++---
++source: crates/parser/tests/syntax.rs
++assertion_line: 62
++input_file: test_files/syntax/module/f32_bits.sntn
++---
++module "target = "evm-ethereum-london"
++
++func public %f32_bits() -> f32 {
++block0:
++    return 0x80000000.f32;
++}
++"
++  target_triple "evm-ethereum-london"
++  function "func public %f32_bits() -> f32 {
++  block0:
++      return 0x80000000.f32;
++  }"
++    function_signature "func public %f32_bits() -> f32"
++      linkage "public"
++      function_identifier "%f32_bits"
++        function_name "f32_bits"
++      function_params "()"
++      function_ret_type "-> f32"
++        type_name "f32"
++          primitive_type "f32"
++    block "block0:
++        return 0x80000000.f32;"
++      block_ident "block0"
++        block_number "0"
++      stmt "return 0x80000000.f32;"
++        inst_stmt "return 0x80000000.f32"
++          inst "return 0x80000000.f32"
++            inst_name "return"
++              inst_identifier "return"
++            inst_arg "0x80000000.f32"
++              value "0x80000000.f32"
++                imm_number "0x80000000.f32"
++                  hex "0x80000000"
++                  primitive_type "f32"
++  EOI ""
+diff --git a/crates/parser/test_files/syntax/module/f32_bits.sntn b/crates/parser/test_files/syntax/module/f32_bits.sntn
+new file mode 100644
+index 00000000..0f9af3de
+--- /dev/null
++++ b/crates/parser/test_files/syntax/module/f32_bits.sntn
+@@ -0,0 +1,6 @@
++target = "evm-ethereum-london"
++
++func public %f32_bits() -> f32 {
++block0:
++    return 0x80000000.f32;
++}
+diff --git a/crates/parser/tests/f32_roundtrip.rs b/crates/parser/tests/f32_roundtrip.rs
+new file mode 100644
+index 00000000..6536da67
+--- /dev/null
++++ b/crates/parser/tests/f32_roundtrip.rs
+@@ -0,0 +1,38 @@
++use ir::ir_writer::ModuleWriter;
++use sonatina_parser::parse_module;
++
++const SOURCE: &str = r#"target = "evm-ethereum-london"
++
++func public %negative_zero() -> f32 {
++block0:
++    return 0x80000000.f32;
++}
++
++func public %nan_payload() -> f32 {
++block0:
++    return 0x7fc01234.f32;
++}
++"#;
++
++#[test]
++fn f32_bits_parse_print_reparse_exactly() {
++    let parsed = parse_module(SOURCE).expect("raw f32 bit literals should parse");
++    let printed = ModuleWriter::with_debug_provider(&parsed.module, &parsed.debug).dump_string();
++
++    assert!(
++        printed.contains("0x80000000.f32"),
++        "signed zero bits changed:\n{printed}"
++    );
++    assert!(
++        printed.contains("0x7fc01234.f32"),
++        "NaN payload bits changed:\n{printed}"
++    );
++
++    let reparsed = parse_module(&printed).expect("printed f32 bit literals should reparse");
++    let reprinted =
++        ModuleWriter::with_debug_provider(&reparsed.module, &reparsed.debug).dump_string();
++    assert_eq!(
++        reprinted, printed,
++        "f32 textual IR must be an exact fixed point"
++    );
++}
+-- 
+2.53.0
+

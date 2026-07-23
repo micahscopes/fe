@@ -1,0 +1,110 @@
+From 5de104ed1c69048085fc0f47eb33cbefc1e83771 Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Wed, 22 Jul 2026 08:55:24 +0200
+Subject: [PATCH 11/25] fix(spirv): reject unsupported instructions before
+ lowering
+
+---
+ crates/codegen/src/isa/spirv/mod.rs   | 28 ++++++++++++++++++
+ crates/codegen/tests/spirv_backend.rs | 42 +++++++++++++++++++++++++++
+ 2 files changed, 70 insertions(+)
+
+diff --git a/crates/codegen/src/isa/spirv/mod.rs b/crates/codegen/src/isa/spirv/mod.rs
+index 0477b62f..a76a7a1d 100644
+--- a/crates/codegen/src/isa/spirv/mod.rs
++++ b/crates/codegen/src/isa/spirv/mod.rs
+@@ -1265,6 +1265,28 @@ fn unsupported_signed_op_under_u32(
+     None
+ }
+ 
++#[cfg(feature = "spirv-backend")]
++fn spirv_instruction_is_lowered(
++    is: &dyn sonatina_ir::InstSetBase,
++    inst: &dyn sonatina_ir::Inst,
++) -> bool {
++    use sonatina_ir::{InstDowncast, inst::{arith, cmp, control_flow, data}};
++
++    inst.is_terminator()
++        || <&control_flow::Phi as InstDowncast>::downcast(is, inst).is_some()
++        || <&arith::Add as InstDowncast>::downcast(is, inst).is_some()
++        || <&arith::Sub as InstDowncast>::downcast(is, inst).is_some()
++        || <&arith::Mul as InstDowncast>::downcast(is, inst).is_some()
++        || <&arith::Sar as InstDowncast>::downcast(is, inst).is_some()
++        || <&arith::Shr as InstDowncast>::downcast(is, inst).is_some()
++        || <&cmp::Lt as InstDowncast>::downcast(is, inst).is_some()
++        || <&cmp::Slt as InstDowncast>::downcast(is, inst).is_some()
++        || <&data::ObjAlloc as InstDowncast>::downcast(is, inst).is_some()
++        || <&data::ObjStore as InstDowncast>::downcast(is, inst).is_some()
++        || <&data::ObjLoad as InstDowncast>::downcast(is, inst).is_some()
++        || <&data::ObjIndex as InstDowncast>::downcast(is, inst).is_some()
++}
++
+ #[cfg(feature = "spirv-backend")]
+ fn translate_to_naga(
+     module: &Module,
+@@ -1351,6 +1373,12 @@ fn translate_to_naga(
+             for bid in f.layout.iter_block() {
+                 for iid in f.layout.iter_inst(bid) {
+                     let inst_data = f.dfg.inst(iid);
++                    if !spirv_instruction_is_lowered(is, inst_data) {
++                        return Err(format!(
++                            "spirv: instruction `{}` is unsupported by the SPIR-V translator",
++                            inst_data.as_text()
++                        ));
++                    }
+                     if <&sonatina_ir::inst::data::ObjAlloc as sonatina_ir::InstDowncast>::downcast(
+                         is, inst_data,
+                     )
+diff --git a/crates/codegen/tests/spirv_backend.rs b/crates/codegen/tests/spirv_backend.rs
+index 3845b3ae..12a3ff9f 100644
+--- a/crates/codegen/tests/spirv_backend.rs
++++ b/crates/codegen/tests/spirv_backend.rs
+@@ -2073,3 +2073,45 @@ fn render_mandelbrot_executes_on_lavapipe() {
+         w * h, distinct.len()
+     );
+ }
++
++#[test]
++fn unsupported_instruction_fails_closed_in_all_spirv_modes() {
++    let source = r#"
++target = "wasm32-unknown-native"
++func public %unsupported(v0.i32, v1.i32, v2.i32) -> i32 {
++    block0:
++        v3.i32 = neg v2;
++        return v3;
++}
++"#;
++    let module = sonatina_parser::parse_module(source)
++        .expect("unsupported-op module should parse")
++        .module;
++    for (mode, backend) in [
++        ("scalar", SpirvBackend::new()),
++        ("grid", SpirvBackend::new().with_grid()),
++        ("render", SpirvBackend::new().with_render()),
++    ] {
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            backend.compile_module(&module)
++        }));
++        let compile = result.unwrap_or_else(|_| panic!("{mode} unsupported op must not panic"));
++        let errors = match compile {
++            Err(errors) => errors,
++            Ok(_) => panic!("{mode} unsupported op must fail"),
++        };
++        let rendered = errors
++            .iter()
++            .map(ToString::to_string)
++            .collect::<Vec<_>>()
++            .join("\n");
++        assert!(
++            rendered.contains("`neg`"),
++            "{mode} error must name neg: {rendered}"
++        );
++        assert!(
++            rendered.contains("unsupported"),
++            "{mode} error must explain failure: {rendered}"
++        );
++    }
++}
+-- 
+2.53.0
+

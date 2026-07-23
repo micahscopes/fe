@@ -16,6 +16,20 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
+# Browser-profile generators share the exact b2601adc Sonatina backend. When a
+# caller provides any checkout containing Fe's fetchable base, reconstruct the
+# reviewed commit internally; cga-d1 deliberately retains its older ed43625b
+# pin. The overlay re-enters this script with its clean b260 checkout.
+if [ "$demo" != cga-d1 ] && [ -n "${SONATINA_DIR:-}" ] \
+    && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ]; then
+  expected_browser_sonatina="b2601adc8b80b085aae98f9132a035fdfecec5c3"
+  actual_browser_sonatina="$(git -C "$SONATINA_DIR" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$actual_browser_sonatina" != "$expected_browser_sonatina" ] \
+      || [ -n "$(git -C "$SONATINA_DIR" status --porcelain 2>/dev/null || true)" ]; then
+    exec "$here/with-sonatina-overlay.sh" "$0" "$demo"
+  fi
+fi
+
 generate_example() {
   local key="$1"
   local example="$2"
@@ -26,8 +40,30 @@ generate_example() {
   echo "generating $key..."
   if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
     "$FE_DEMO_GENERATE_CMD" "$key"
+  elif [ -n "${SONATINA_DIR:-}" ]; then
+    (
+      lock_backup="$(mktemp "${TMPDIR:-/tmp}/fe-demo-Cargo.lock.XXXXXX")"
+      cp "$repo/Cargo.lock" "$lock_backup"
+      restore_lock() {
+        cp "$lock_backup" "$repo/Cargo.lock"
+        rm -f -- "$lock_backup"
+      }
+      trap restore_lock EXIT
+      cd "$repo"
+      cargo \
+      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-ir.path=\"$SONATINA_DIR/crates/ir\"" \
+      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-triple.path=\"$SONATINA_DIR/crates/triple\"" \
+      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-codegen.path=\"$SONATINA_DIR/crates/codegen\"" \
+      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-verifier.path=\"$SONATINA_DIR/crates/verifier\"" \
+      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-macros.path=\"$SONATINA_DIR/crates/macros\"" \
+      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-parser.path=\"$SONATINA_DIR/crates/parser\"" \
+      run -p fe-codegen --example "$example"
+    )
   else
-    (cd "$repo" && cargo run -p fe-codegen --example "$example")
+    echo "$key generation requires the reviewed Sonatina browser backend." >&2
+    echo "Run with:" >&2
+    echo "  SONATINA_DIR=/path/to/sonatina demos/with-sonatina-overlay.sh demos/serve.sh $key" >&2
+    exit 2
   fi
 }
 

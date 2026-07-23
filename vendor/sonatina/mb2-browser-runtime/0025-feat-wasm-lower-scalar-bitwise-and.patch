@@ -1,0 +1,97 @@
+From b2601adc8b80b085aae98f9132a035fdfecec5c3 Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Thu, 23 Jul 2026 07:08:22 +0200
+Subject: [PATCH 25/25] feat(wasm): lower scalar bitwise and
+
+---
+ crates/codegen/src/isa/wasm/translate.rs | 11 ++++++
+ crates/codegen/tests/wasm_backend.rs     | 44 +++++++++++++++++++++++-
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/crates/codegen/src/isa/wasm/translate.rs b/crates/codegen/src/isa/wasm/translate.rs
+index 310e0f31..e8dd2910 100644
+--- a/crates/codegen/src/isa/wasm/translate.rs
++++ b/crates/codegen/src/isa/wasm/translate.rs
+@@ -490,6 +490,17 @@ fn translate_function(
+                             value_map.insert(result, wval);
+                         }
+                     }
++                    // Bitwise and
++                    else if let Some(and) = <&sonatina_ir::inst::logic::And as InstDowncast>::downcast(inst_set, inst_data) {
++                        if let Some(result) = function.dfg.inst_result(inst_id) {
++                            let lhs = resolve_value(function, *and.lhs(), &value_map, &mut body, wb).ok_or("unresolved and lhs")?;
++                            let rhs = resolve_value(function, *and.rhs(), &value_map, &mut body, wb).ok_or("unresolved and rhs")?;
++                            let ty = result_waffle_type(function, result);
++                            let op = if ty == WType::I32 { Operator::I32And } else { Operator::I64And };
++                            let wval = body.add_op(wb, op, &[lhs, rhs], &[ty]);
++                            value_map.insert(result, wval);
++                        }
++                    }
+                     else if let Some(fneg) = <&sonatina_ir::inst::arith::Fneg as InstDowncast>::downcast(inst_set, inst_data) {
+                         if let Some(result) = function.dfg.inst_result(inst_id) {
+                             let arg = resolve_value(function, *fneg.arg(), &value_map, &mut body, wb)
+diff --git a/crates/codegen/tests/wasm_backend.rs b/crates/codegen/tests/wasm_backend.rs
+index 2c400ece..f6ea8868 100644
+--- a/crates/codegen/tests/wasm_backend.rs
++++ b/crates/codegen/tests/wasm_backend.rs
+@@ -4,7 +4,7 @@ use sonatina_ir::{
+     Linkage, Signature, Type,
+     builder::ModuleBuilder,
+     func_cursor::InstInserter,
+-    inst::{arith, cmp, control_flow, data},
++    inst::{arith, cmp, control_flow, data, logic},
+     isa::{Isa, native::Native, wasm32::Wasm32},
+     module::ModuleCtx,
+ };
+@@ -24,6 +24,48 @@ fn wasm32_module_builder() -> ModuleBuilder {
+     ModuleBuilder::new(ctx)
+ }
+ 
++#[test]
++fn wasm_bitwise_and_i32_i64_execute() {
++    let isa = Wasm32::new(wasm32_triple());
++    let is = isa.inst_set();
++    let mb = wasm32_module_builder();
++    for (name, ty) in [("and_i32", Type::I32), ("and_i64", Type::I64)] {
++        let func = mb
++            .declare_function(Signature::new_single(
++                name,
++                Linkage::Public,
++                &[ty, ty],
++                ty,
++            ))
++            .unwrap();
++        let mut fb = mb.func_builder::<InstInserter>(func);
++        let entry = fb.append_block();
++        fb.switch_to_block(entry);
++        let value = fb.insert_inst(logic::And::new(is, fb.args()[0], fb.args()[1]), ty);
++        fb.insert_return(value);
++        fb.seal_all();
++        fb.finish();
++    }
++    let artifact = WasmBackend::new().compile_module(&mb.build()).unwrap();
++    let engine = wasmtime::Engine::default();
++    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
++    let mut store = wasmtime::Store::new(&engine, ());
++    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
++    let and_i32 = instance
++        .get_typed_func::<(i32, i32), i32>(&mut store, "and_i32")
++        .unwrap();
++    let and_i64 = instance
++        .get_typed_func::<(i64, i64), i64>(&mut store, "and_i64")
++        .unwrap();
++    assert_eq!(and_i32.call(&mut store, (0x5a, 0x3c)).unwrap(), 0x18);
++    assert_eq!(
++        and_i64
++            .call(&mut store, (0x55aa_ffff_0000_1234, 0x0f0f_00ff_ffff_ffff))
++            .unwrap(),
++        0x050a_00ff_0000_1234
++    );
++}
++
+ fn dynamic_alloc_module() -> sonatina_ir::Module {
+     let isa = Wasm32::new(wasm32_triple());
+     let is = isa.inst_set();
+-- 
+2.53.0
+

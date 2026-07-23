@@ -1,0 +1,222 @@
+From 2e7bb1aae560a464d325301db99def472db5675a Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Thu, 23 Jul 2026 06:22:34 +0200
+Subject: [PATCH 23/25] feat(wasm): lower typed scalar memory operations
+
+---
+ crates/codegen/src/isa/wasm/translate.rs | 67 +++++++++++++++---
+ crates/codegen/tests/wasm_backend.rs     | 87 +++++++++++++++++++++++-
+ crates/ir/src/inst/native/inst_set.rs    |  1 +
+ 3 files changed, 144 insertions(+), 11 deletions(-)
+
+diff --git a/crates/codegen/src/isa/wasm/translate.rs b/crates/codegen/src/isa/wasm/translate.rs
+index d23e99de..0b92a862 100644
+--- a/crates/codegen/src/isa/wasm/translate.rs
++++ b/crates/codegen/src/isa/wasm/translate.rs
+@@ -29,6 +29,23 @@ fn sonatina_to_waffle_type(ty: Type) -> Option<WType> {
+     }
+ }
+ 
++fn scalar_memory_arg(memory: waffle::Memory, ty: Type) -> Result<waffle::MemoryArg, String> {
++    // WebAssembly encodes alignment as log2(bytes). These are natural
++    // alignments, but unaligned runtime addresses remain legal in Wasm.
++    let align = match ty {
++        Type::I1 | Type::I8 => 0,
++        Type::I16 => 1,
++        Type::I32 | Type::F32 => 2,
++        Type::I64 => 3,
++        _ => return Err(format!("unsupported wasm scalar memory type `{ty:?}`")),
++    };
++    Ok(waffle::MemoryArg {
++        align,
++        offset: 0,
++        memory,
++    })
++}
++
+ pub(super) fn translate_module(
+     module: &Module,
+     import_modules: &HashMap<String, String>,
+@@ -712,22 +729,52 @@ fn translate_function(
+                             value_map.insert(result, zero);
+                         }
+                     }
+-                    // Mstore — store to local (just map the value)
++                    // Mstore — typed scalar store to linear memory.
+                     else if let Some(mstore) = <&sonatina_ir::inst::data::Mstore as InstDowncast>::downcast(inst_set, inst_data) {
+-                        let val = resolve_value(function, *mstore.value(), &value_map, &mut body, wb);
+-                        let addr = resolve_value(function, *mstore.addr(), &value_map, &mut body, wb);
+-                        // In WASM, mstore updates the "local" that addr represents
+-                        // For now, just track the value
+-                    }
+-                    // Mload — load from local
++                        let value = resolve_value(function, *mstore.value(), &value_map, &mut body, wb)
++                            .ok_or("unresolved mstore value")?;
++                        let addr = resolve_value(function, *mstore.addr(), &value_map, &mut body, wb)
++                            .ok_or("unresolved mstore address")?;
++                        let memarg = scalar_memory_arg(memory, *mstore.ty())?;
++                        let op = match mstore.ty() {
++                            Type::I1 | Type::I8 => Operator::I32Store8 { memory: memarg },
++                            Type::I16 => Operator::I32Store16 { memory: memarg },
++                            Type::I32 => Operator::I32Store { memory: memarg },
++                            Type::I64 => Operator::I64Store { memory: memarg },
++                            Type::F32 => Operator::F32Store { memory: memarg },
++                            ty => return Err(format!("unsupported wasm mstore type `{ty:?}`")),
++                        };
++                        body.add_op(wb, op, &[addr, value], &[]);
++                    }
++                    // Mload — typed scalar load from linear memory. Narrow
++                    // integer values are zero-extended into Wasm's i32 carrier.
+                     else if let Some(mload) = <&sonatina_ir::inst::data::Mload as InstDowncast>::downcast(inst_set, inst_data) {
+                         if let Some(result) = function.dfg.inst_result(inst_id) {
+                             let addr = resolve_value(function, *mload.addr(), &value_map, &mut body, wb);
+-                            if let Some(v) = addr {
+-                                value_map.insert(result, v);
+-                            }
++                            let addr = addr.ok_or("unresolved mload address")?;
++                            let memarg = scalar_memory_arg(memory, *mload.ty())?;
++                            let (op, result_ty) = match mload.ty() {
++                                Type::I1 | Type::I8 => (Operator::I32Load8U { memory: memarg }, WType::I32),
++                                Type::I16 => (Operator::I32Load16U { memory: memarg }, WType::I32),
++                                Type::I32 => (Operator::I32Load { memory: memarg }, WType::I32),
++                                Type::I64 => (Operator::I64Load { memory: memarg }, WType::I64),
++                                Type::F32 => (Operator::F32Load { memory: memarg }, WType::F32),
++                                ty => return Err(format!("unsupported wasm mload type `{ty:?}`")),
++                            };
++                            let loaded = body.add_op(wb, op, &[addr], &[result_ty]);
++                            value_map.insert(result, loaded);
+                         }
+                     }
++                    // Memzero has the exact WebAssembly memory.fill semantics:
++                    // write `len` zero bytes beginning at `dest`.
++                    else if let Some(memzero) = <&sonatina_ir::inst::data::Memzero as InstDowncast>::downcast(inst_set, inst_data) {
++                        let dest = resolve_value(function, *memzero.dest(), &value_map, &mut body, wb)
++                            .ok_or("unresolved memzero destination")?;
++                        let len = resolve_value(function, *memzero.len(), &value_map, &mut body, wb)
++                            .ok_or("unresolved memzero length")?;
++                        let zero = body.add_op(wb, Operator::I32Const { value: 0 }, &[], &[WType::I32]);
++                        body.add_op(wb, Operator::MemoryFill { mem: memory }, &[dest, zero, len], &[]);
++                    }
+                     // ExtractValue — load at field offset from base address
+                     else if let Some(extract) = <&sonatina_ir::inst::data::ExtractValue as InstDowncast>::downcast(inst_set, inst_data) {
+                         if let Some(result) = function.dfg.inst_result(inst_id) {
+diff --git a/crates/codegen/tests/wasm_backend.rs b/crates/codegen/tests/wasm_backend.rs
+index 4f7d2b96..bd2ce350 100644
+--- a/crates/codegen/tests/wasm_backend.rs
++++ b/crates/codegen/tests/wasm_backend.rs
+@@ -4,7 +4,7 @@ use sonatina_ir::{
+     Linkage, Signature, Type,
+     builder::ModuleBuilder,
+     func_cursor::InstInserter,
+-    inst::{arith, cmp, control_flow},
++    inst::{arith, cmp, control_flow, data},
+     isa::{Isa, native::Native, wasm32::Wasm32},
+     module::ModuleCtx,
+ };
+@@ -75,6 +75,91 @@ fn canonical_arena_is_opt_in_checked_growable_and_resettable() {
+     assert!(alloc.call(&mut store, (20_000_000, 1)).is_err());
+ }
+ 
++#[test]
++fn wasm_scalar_memory_ops_and_memzero_are_byte_exact() {
++    let isa = Wasm32::new(wasm32_triple());
++    let is = isa.inst_set();
++    let mb = wasm32_module_builder();
++
++    for (name, ty) in [
++        ("mem_i1", Type::I1),
++        ("mem_i8", Type::I8),
++        ("mem_i16", Type::I16),
++        ("mem_i32", Type::I32),
++        ("mem_i64", Type::I64),
++        ("mem_f32", Type::F32),
++    ] {
++        let func = mb
++            .declare_function(Signature::new_single(
++                name,
++                Linkage::Public,
++                &[Type::I32, ty],
++                ty,
++            ))
++            .unwrap();
++        let mut fb = mb.func_builder::<InstInserter>(func);
++        let entry = fb.append_block();
++        fb.switch_to_block(entry);
++        let addr = fb.args()[0];
++        let value = fb.args()[1];
++        fb.insert_inst_no_result(data::Mstore::new(is, addr, value, ty));
++        let loaded = fb.insert_inst(data::Mload::new(is, addr, ty), ty);
++        fb.insert_inst_no_result(control_flow::Return::new_single(is, loaded));
++        fb.seal_all();
++        fb.finish();
++    }
++
++    let zero_func = mb
++        .declare_function(Signature::new_unit(
++            "memzero",
++            Linkage::Public,
++            &[Type::I32, Type::I32],
++        ))
++        .unwrap();
++    let mut fb = mb.func_builder::<InstInserter>(zero_func);
++    let entry = fb.append_block();
++    fb.switch_to_block(entry);
++    fb.insert_inst_no_result(data::Memzero::new(is, fb.args()[0], fb.args()[1]));
++    fb.insert_inst_no_result(control_flow::Return::new(is, Default::default()));
++    fb.seal_all();
++    fb.finish();
++
++    let artifact = WasmBackend::new().compile_module(&mb.build()).unwrap();
++    wasmparser::validate(&artifact.bytes).unwrap();
++    let engine = wasmtime::Engine::default();
++    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
++    let mut store = wasmtime::Store::new(&engine, ());
++    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
++    let memory = instance.get_memory(&mut store, "memory").unwrap();
++
++    let i1 = instance.get_typed_func::<(i32, i32), i32>(&mut store, "mem_i1").unwrap();
++    let i8 = instance.get_typed_func::<(i32, i32), i32>(&mut store, "mem_i8").unwrap();
++    let i16 = instance.get_typed_func::<(i32, i32), i32>(&mut store, "mem_i16").unwrap();
++    let i32f = instance.get_typed_func::<(i32, i32), i32>(&mut store, "mem_i32").unwrap();
++    let i64f = instance.get_typed_func::<(i32, i64), i64>(&mut store, "mem_i64").unwrap();
++    let f32f = instance.get_typed_func::<(i32, f32), f32>(&mut store, "mem_f32").unwrap();
++
++    assert_eq!(i1.call(&mut store, (17, 1)).unwrap(), 1);
++    assert_eq!(i8.call(&mut store, (18, 0xab)).unwrap(), 0xab);
++    assert_eq!(i16.call(&mut store, (19, 0xcdef)).unwrap(), 0xcdef);
++    assert_eq!(i32f.call(&mut store, (21, 0x78563412)).unwrap(), 0x78563412);
++    assert_eq!(
++        i64f.call(&mut store, (25, 0x0807060504030201)).unwrap(),
++        0x0807060504030201
++    );
++    assert_eq!(f32f.call(&mut store, (33, -13.25)).unwrap(), -13.25);
++    let bytes = memory.data(&store);
++    assert_eq!(&bytes[17..21], &[1, 0xab, 0xef, 0xcd]);
++    assert_eq!(&bytes[21..25], &0x78563412_i32.to_le_bytes());
++    assert_eq!(&bytes[25..33], &0x0807060504030201_i64.to_le_bytes());
++    assert_eq!(&bytes[33..37], &(-13.25_f32).to_le_bytes());
++
++    memory.write(&mut store, 40, &[0xaa; 12]).unwrap();
++    let memzero = instance.get_typed_func::<(i32, i32), ()>(&mut store, "memzero").unwrap();
++    memzero.call(&mut store, (43, 5)).unwrap();
++    assert_eq!(&memory.data(&store)[40..52], &[0xaa, 0xaa, 0xaa, 0, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa, 0xaa]);
++}
++
+ /// The minted `Wasm32` ISA drives the same WAFFLE backend end to end:
+ /// build `add(a,b)=a+b` under the Wasm32 target, compile, execute under
+ /// wasmtime. This is the ISA the Fe wasm lowering targets.
+diff --git a/crates/ir/src/inst/native/inst_set.rs b/crates/ir/src/inst/native/inst_set.rs
+index 0e410078..8d21002c 100644
+--- a/crates/ir/src/inst/native/inst_set.rs
++++ b/crates/ir/src/inst/native/inst_set.rs
+@@ -67,6 +67,7 @@ pub struct NativeInstSet(
+     control_flow::Unreachable,
+     data::Mload,
+     data::Mstore,
++    data::Memzero,
+     data::Gep,
+     data::GetFunctionPtr,
+     data::SymAddr,
+-- 
+2.53.0
+

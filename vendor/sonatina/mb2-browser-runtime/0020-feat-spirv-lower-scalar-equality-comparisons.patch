@@ -1,0 +1,136 @@
+From 92e22cbb6fcb0fa20bb0136093509b9b50ecc95a Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Thu, 23 Jul 2026 03:27:09 +0200
+Subject: [PATCH 20/25] feat(spirv): lower scalar equality comparisons
+
+---
+ crates/codegen/src/isa/spirv/mod.rs   | 22 +++++++++
+ crates/codegen/tests/spirv_backend.rs | 65 +++++++++++++++++++++++++++
+ 2 files changed, 87 insertions(+)
+
+diff --git a/crates/codegen/src/isa/spirv/mod.rs b/crates/codegen/src/isa/spirv/mod.rs
+index df3caf17..edf44d05 100644
+--- a/crates/codegen/src/isa/spirv/mod.rs
++++ b/crates/codegen/src/isa/spirv/mod.rs
+@@ -571,6 +571,26 @@ fn emit_single_inst(
+             value_map.insert(result, h);
+             return true;
+         }
++    } else if let Some((lhs_id, rhs_id, naga_op)) =
++        <&sonatina_ir::inst::cmp::Eq as InstDowncast>::downcast(inst_set, inst_data)
++            .map(|i| (*i.lhs(), *i.rhs(), naga::BinaryOperator::Equal))
++            .or_else(|| <&sonatina_ir::inst::cmp::Ne as InstDowncast>::downcast(inst_set, inst_data)
++                .map(|i| (*i.lhs(), *i.rhs(), naga::BinaryOperator::NotEqual)))
++    {
++        // Equality is sign-agnostic: the u32 browser word preserves the exact
++        // bit pattern of Sonatina's signless i32 carrier, so no signed cast or
++        // numeric substitution is needed.
++        if let Some(result) = function.dfg.inst_result(inst_id) {
++            let lhs = resolve_naga_value(lhs_id, function, word, value_map, phi_locals, func).unwrap();
++            let rhs = resolve_naga_value(rhs_id, function, word, value_map, phi_locals, func).unwrap();
++            let h = func.expressions.append(
++                naga::Expression::Binary { op: naga_op, left: lhs, right: rhs },
++                naga::Span::UNDEFINED,
++            );
++            target.push(naga::Statement::Emit(naga::Range::new_from_bounds(h, h)), naga::Span::UNDEFINED);
++            value_map.insert(result, h);
++            return true;
++        }
+     } else if let Some(slt) = <&sonatina_ir::inst::cmp::Slt as InstDowncast>::downcast(inst_set, inst_data) {
+         // Signed less-than. Under the u32 word the operands carry signed values in
+         // two's complement, so bitcast BOTH to i32 (`convert: None` = reinterpret)
+@@ -1691,6 +1711,8 @@ fn spirv_instruction_is_lowered(
+         || <&arith::Sar as InstDowncast>::downcast(is, inst).is_some()
+         || <&arith::Shr as InstDowncast>::downcast(is, inst).is_some()
+         || <&cmp::Lt as InstDowncast>::downcast(is, inst).is_some()
++        || <&cmp::Eq as InstDowncast>::downcast(is, inst).is_some()
++        || <&cmp::Ne as InstDowncast>::downcast(is, inst).is_some()
+         || <&cmp::Slt as InstDowncast>::downcast(is, inst).is_some()
+         || <&cmp::Feq as InstDowncast>::downcast(is, inst).is_some()
+         || <&cmp::Flt as InstDowncast>::downcast(is, inst).is_some()
+diff --git a/crates/codegen/tests/spirv_backend.rs b/crates/codegen/tests/spirv_backend.rs
+index 31566193..a2659e42 100644
+--- a/crates/codegen/tests/spirv_backend.rs
++++ b/crates/codegen/tests/spirv_backend.rs
+@@ -2077,6 +2077,46 @@ fn build_u32_slt_count() -> sonatina_ir::Module {
+     mb.build()
+ }
+ 
++/// A browser-word grid kernel containing both of Sonatina's signless integer
++/// equality operations. Runtime coordinate operands ensure both comparisons
++/// survive into Naga and the emitted WGSL/SPIR-V.
++fn build_u32_eq_ne_probe() -> sonatina_ir::Module {
++    let isa = Native::new(TargetTriple::new(
++        if cfg!(target_arch = "x86_64") { Architecture::X86_64 } else { Architecture::Aarch64 },
++        Vendor::Unknown, OperatingSystem::Native,
++    ));
++    let is = isa.inst_set();
++    let mb = native_module_builder();
++    let sig = Signature::new_single("eq_ne_probe", Linkage::Public, &[Type::I32, Type::I32], Type::I32);
++    let fr = mb.declare_function(sig).unwrap();
++    let mut fb = mb.func_builder::<InstInserter>(fr);
++    let lhs = fb.args()[0];
++    let rhs = fb.args()[1];
++    let entry = fb.append_block();
++    let equal = fb.append_block();
++    let unequal = fb.append_block();
++    let ne_true = fb.append_block();
++    let impossible = fb.append_block();
++    fb.switch_to_block(entry);
++    let is_equal = fb.insert_inst(cmp::Eq::new(is, lhs, rhs), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, is_equal, equal, unequal));
++    fb.switch_to_block(equal);
++    let eleven = fb.make_imm_value(11i32);
++    fb.insert_inst_no_result(control_flow::Return::new_single(is, eleven));
++    fb.switch_to_block(unequal);
++    let is_unequal = fb.insert_inst(cmp::Ne::new(is, lhs, rhs), Type::I1);
++    fb.insert_inst_no_result(control_flow::Br::new(is, is_unequal, ne_true, impossible));
++    fb.switch_to_block(ne_true);
++    let twenty_two = fb.make_imm_value(22i32);
++    fb.insert_inst_no_result(control_flow::Return::new_single(is, twenty_two));
++    fb.switch_to_block(impossible);
++    let thirty_three = fb.make_imm_value(33i32);
++    fb.insert_inst_no_result(control_flow::Return::new_single(is, thirty_three));
++    fb.seal_all();
++    fb.finish();
++    mb.build()
++}
++
+ /// A scalar u32 kernel `sar_probe(a) = a >> 12` with an IMMEDIATE shift amount.
+ fn build_u32_sar_probe() -> sonatina_ir::Module {
+     let isa = Native::new(TargetTriple::new(
+@@ -2263,6 +2303,31 @@ fn spirv_u32_slt_shape() {
+     eprintln!("spirv_u32_slt_shape OK: {} words", art.words.len());
+ }
+ 
++#[test]
++fn spirv_u32_eq_ne_shape() {
++    let module = build_u32_eq_ne_probe();
++    let art = SpirvBackend::new()
++        .with_grid()
++        .with_workgroup_size(1, 1, 1)
++        .compile_module(&module)
++        .expect("scalar Eq/Ne kernel must compile");
++    assert_eq!(art.layout.word, WordKind::U32, "i32 return -> u32 word");
++    let wgsl = art.wgsl.as_ref().expect("WGSL");
++    assert!(wgsl.contains("=="), "Eq must emit genuine WGSL equality:\n{wgsl}");
++    assert!(wgsl.contains("!="), "Ne must emit genuine WGSL inequality:\n{wgsl}");
++    for tok in ["i64", "u64"] {
++        assert!(!wgsl.contains(tok), "browser profile: no `{tok}`:\n{wgsl}");
++    }
++    let reparsed = naga::front::wgsl::parse_str(wgsl)
++        .expect("naga wgsl-in must reparse Eq/Ne WGSL");
++    naga::valid::Validator::new(
++        naga::valid::ValidationFlags::all(),
++        naga::valid::Capabilities::default(),
++    )
++    .validate(&reparsed)
++    .expect("browser-profile validation must accept scalar Eq/Ne");
++}
++
+ /// Test 3.3.2: the u32 `Sar` arm emits bitcast-i32 / shift / bitcast-u32 and
+ /// validates; a non-immediate shift amount fails closed with the named error.
+ #[test]
+-- 
+2.53.0
+

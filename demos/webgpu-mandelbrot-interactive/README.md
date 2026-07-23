@@ -25,7 +25,8 @@ without weakening the hosted Worker claim.
 Regenerate all ignored assets before serving or running Worker tests:
 
 ```sh
-cargo run -p fe-codegen --example gen_mandelbrot_interactive_demo
+SONATINA_DIR=/path/to/sonatina \
+  demos/serve.sh mandelbrot-interactive
 bun demos/webgpu-mandelbrot-interactive/worker-control.test.mjs
 ```
 

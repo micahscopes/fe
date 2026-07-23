@@ -1,0 +1,204 @@
+From c299cb878402201ff892ed4d8359a3f10428e86b Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Thu, 23 Jul 2026 06:39:22 +0200
+Subject: [PATCH 24/25] feat(wasm): route dynamic allocation through arena
+
+---
+ crates/codegen/src/isa/wasm/translate.rs | 56 +++++++++++++++++--
+ crates/codegen/tests/wasm_backend.rs     | 71 ++++++++++++++++++++++++
+ 2 files changed, 122 insertions(+), 5 deletions(-)
+
+diff --git a/crates/codegen/src/isa/wasm/translate.rs b/crates/codegen/src/isa/wasm/translate.rs
+index 0b92a862..310e0f31 100644
+--- a/crates/codegen/src/isa/wasm/translate.rs
++++ b/crates/codegen/src/isa/wasm/translate.rs
+@@ -148,9 +148,8 @@ pub(super) fn translate_module(
+     }
+ 
+     // Imported functions must occupy the lowest Wasm function indexes.
+-    if canonical_arena {
+-        synthesize_canonical_arena(&mut wmod, memory, &mut func_names);
+-    }
++    let canonical_alloc = canonical_arena
++        .then(|| synthesize_canonical_arena(&mut wmod, memory, &mut func_names));
+ 
+     // Pass 1: declare every translatable defined function up front (placeholder
+     // bodies), recording the Sonatina `FuncRef` -> WAFFLE `Func` mapping. Doing
+@@ -204,7 +203,15 @@ pub(super) fn translate_module(
+ 
+     // Pass 2: translate each body, now that every callee has a WAFFLE `Func`.
+     for (func_ref, wfunc, wsig, name) in pending {
+-        let body = translate_function(module, func_ref, &wmod, wsig, memory, &func_map)?;
++        let body = translate_function(
++            module,
++            func_ref,
++            &wmod,
++            wsig,
++            memory,
++            &func_map,
++            canonical_alloc,
++        )?;
+         wmod.funcs[wfunc] = FuncDecl::Body(wsig, name, body);
+     }
+ 
+@@ -215,7 +222,7 @@ fn synthesize_canonical_arena(
+     module: &mut WaffleModule<'static>,
+     memory: waffle::Memory,
+     func_names: &mut Vec<String>,
+-) {
++) -> Func {
+     const HEAP_BASE: u32 = 1024;
+     const PAGE_SHIFT: u32 = 16;
+     const PAGE_MASK: u32 = (1 << PAGE_SHIFT) - 1;
+@@ -324,6 +331,7 @@ fn synthesize_canonical_arena(
+         kind: ExportKind::Func(reset_func),
+     });
+     func_names.push("fe_cabi_reset".to_string());
++    alloc
+ }
+ 
+ fn translate_function(
+@@ -333,6 +341,7 @@ fn translate_function(
+     wsig: waffle::Signature,
+     memory: waffle::Memory,
+     func_map: &HashMap<FuncRef, Func>,
++    canonical_alloc: Option<Func>,
+ ) -> Result<FunctionBody, String> {
+     let mut body = FunctionBody::new(wmod, wsig);
+     // Stack pointer for bump allocation in linear memory (starts at 1024 to leave space)
+@@ -722,6 +731,43 @@ fn translate_function(
+                             value_map.insert(result, addr);
+                         }
+                     }
++                    // MemAllocDynamic has one operand, byte size, and no
++                    // alignment operand in Sonatina IR. Its portable contract
++                    // therefore cannot promise more than byte alignment. Route
++                    // it through the opt-in canonical arena with align=1 so it
++                    // shares growth, overflow checks, and the one cursor.
++                    else if let Some(alloc) = <&sonatina_ir::inst::data::MemAllocDynamic as InstDowncast>::downcast(inst_set, inst_data) {
++                        let canonical_alloc = canonical_alloc.ok_or(
++                            "wasm translation: mem.alloc_dynamic requires the opt-in canonical arena",
++                        )?;
++                        let size_ty = function.dfg.value_ty(*alloc.size());
++                        if sonatina_to_waffle_type(size_ty) != Some(WType::I32) {
++                            return Err(format!(
++                                "wasm translation: mem.alloc_dynamic size `{size_ty:?}` is not representable by the canonical wasm32 allocator"
++                            ));
++                        }
++                        let size = resolve_value(function, *alloc.size(), &value_map, &mut body, wb)
++                            .ok_or("unresolved mem.alloc_dynamic size")?;
++                        let align = body.add_op(
++                            wb,
++                            Operator::I32Const { value: 1 },
++                            &[],
++                            &[WType::I32],
++                        );
++                        let result = function
++                            .dfg
++                            .inst_result(inst_id)
++                            .ok_or("mem.alloc_dynamic has no pointer result")?;
++                        let address = body.add_op(
++                            wb,
++                            Operator::Call {
++                                function_index: canonical_alloc,
++                            },
++                            &[size, align],
++                            &[WType::I32],
++                        );
++                        value_map.insert(result, address);
++                    }
+                     // Alloca — allocate a local
+                     else if <&sonatina_ir::inst::data::Alloca as InstDowncast>::downcast(inst_set, inst_data).is_some() {
+                         if let Some(result) = function.dfg.inst_result(inst_id) {
+diff --git a/crates/codegen/tests/wasm_backend.rs b/crates/codegen/tests/wasm_backend.rs
+index bd2ce350..2c400ece 100644
+--- a/crates/codegen/tests/wasm_backend.rs
++++ b/crates/codegen/tests/wasm_backend.rs
+@@ -24,6 +24,28 @@ fn wasm32_module_builder() -> ModuleBuilder {
+     ModuleBuilder::new(ctx)
+ }
+ 
++fn dynamic_alloc_module() -> sonatina_ir::Module {
++    let isa = Wasm32::new(wasm32_triple());
++    let is = isa.inst_set();
++    let mb = wasm32_module_builder();
++    let ptr_i8 = mb.ptr_type(Type::I8);
++    let func = mb
++        .declare_function(Signature::new_unit(
++            "dynamic_alloc",
++            Linkage::Public,
++            &[Type::I32],
++        ))
++        .unwrap();
++    let mut fb = mb.func_builder::<InstInserter>(func);
++    let entry = fb.append_block();
++    fb.switch_to_block(entry);
++    fb.insert_inst(data::MemAllocDynamic::new(is, fb.args()[0]), ptr_i8);
++    fb.insert_inst_no_result(control_flow::Return::new(is, Default::default()));
++    fb.seal_all();
++    fb.finish();
++    mb.build()
++}
++
+ #[test]
+ fn canonical_arena_is_opt_in_checked_growable_and_resettable() {
+     let engine = wasmtime::Engine::default();
+@@ -75,6 +97,55 @@ fn canonical_arena_is_opt_in_checked_growable_and_resettable() {
+     assert!(alloc.call(&mut store, (20_000_000, 1)).is_err());
+ }
+ 
++#[test]
++fn mem_alloc_dynamic_uses_the_opt_in_canonical_arena() {
++    let error = match WasmBackend::new().compile_module(&dynamic_alloc_module()) {
++        Ok(_) => panic!("mem.alloc_dynamic compiled without the canonical arena"),
++        Err(error) => error,
++    };
++    assert!(
++        error
++            .iter()
++            .any(|error| error
++                .to_string()
++                .contains("mem.alloc_dynamic requires the opt-in canonical arena")),
++        "{error:?}"
++    );
++
++    let artifact = WasmBackend::new()
++        .with_canonical_arena()
++        .compile_module(&dynamic_alloc_module())
++        .unwrap();
++    wasmparser::validate(&artifact.bytes).unwrap();
++    let engine = wasmtime::Engine::default();
++    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
++    let mut store = wasmtime::Store::new(&engine, ());
++    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
++    let memory = instance.get_memory(&mut store, "memory").unwrap();
++    let alloc = instance
++        .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
++        .unwrap();
++    let reset = instance
++        .get_typed_func::<(), ()>(&mut store, "fe_cabi_reset")
++        .unwrap();
++    let dynamic = instance
++        .get_typed_func::<i32, ()>(&mut store, "dynamic_alloc")
++        .unwrap();
++
++    // mem.alloc_dynamic has no alignment operand, so its specified bridge is
++    // byte alignment (align=1). The surrounding canonical allocations prove
++    // that it advances the same cursor and does not overlap either neighbor.
++    assert_eq!(alloc.call(&mut store, (3, 1)).unwrap(), 1024);
++    dynamic.call(&mut store, 5).unwrap();
++    assert_eq!(alloc.call(&mut store, (1, 8)).unwrap(), 1032);
++
++    reset.call(&mut store, ()).unwrap();
++    let pages_before = memory.size(&store);
++    dynamic.call(&mut store, 200_000).unwrap();
++    assert!(memory.size(&store) > pages_before);
++    assert_eq!(alloc.call(&mut store, (1, 16)).unwrap(), 201_024);
++}
++
+ #[test]
+ fn wasm_scalar_memory_ops_and_memzero_are_byte_exact() {
+     let isa = Wasm32::new(wasm32_triple());
+-- 
+2.53.0
+

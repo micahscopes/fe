@@ -117,9 +117,10 @@ serializes restart, and exposes stable error codes without forwarding Worker
 exception text. GPU lane routing remains explicit so device ownership is
 inspectable rather than hidden in framework configuration.
 
-Generation currently depends on a clean checkout of the unpublished Sonatina
-commit `ed43625bb5680aeab993371e28a8c8e5c7c16f96`. Set `SONATINA_DIR` explicitly
-and generate only this bundle with:
+Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the later browser
+runtime commit `b2601adc`. The latter is reconstructed reproducibly from the
+tracked patch series without modifying the checkout supplied as
+`SONATINA_DIR`. Generate D1 directly from its clean reviewed checkout with:
 
 ```sh
 SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/generate.sh
@@ -128,13 +129,13 @@ SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/generate.sh
 Generate the staged CTFE-derived Schedule32 bundle instead with:
 
 ```sh
-CGA_BUNDLE=schedule32 SONATINA_DIR=/path/to/sonatina \
-  demos/webgpu-cga-inversion/generate.sh
+SONATINA_DIR=/path/to/sonatina CGA_BUNDLE=schedule32 \
+  demos/serve.sh cga
 ```
 
 Each bundle pins the Sonatina revision it was reviewed against. The script
-rejects another or dirty Sonatina checkout, applies all four local
-Cargo patches, and restores the Fe checkout's `Cargo.lock` byte-for-byte when it
+rejects another or dirty prepared Sonatina checkout, applies Cargo path
+overrides for all required Sonatina crates, and restores the Fe checkout's `Cargo.lock` byte-for-byte when it
 exits. Generated files remain ignored and must not be hand-edited or committed.
 Artifact provenance fails closed if either Git revision cannot be read and
 reports tracked modifications separately from the presence of untracked files;
