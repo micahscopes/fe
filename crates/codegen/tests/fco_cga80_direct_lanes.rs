@@ -209,8 +209,10 @@ fn canonical_helpers_publish_schedule32_and_emit_exact_five_lanes() {
     );
     let shape = wasm_shape(&wasm);
     assert_eq!(
-        shape.3, 64,
-        "the 32 canonical products must lower to exactly two f32 multiplies each"
+        shape.3,
+        5 * 64,
+        "each of the five independent O0 oracle exports must materialize the same \
+         32 canonical products with exactly two f32 multiplies each"
     );
     assert_eq!(
         shape.5, 0,
