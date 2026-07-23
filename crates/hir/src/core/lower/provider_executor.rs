@@ -32,9 +32,9 @@ use crate::{
     },
     hir_def::{
         ArithBinOp, BinOp, Body, CompBinOp, Cond, CondId, ConstGenericArgValue, Expr, ExprId, Func,
-        GenericArg, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp, MatchArm,
-        Partial, Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId, StringId, Trait, TraitRefId,
-        TypeId, TypeKind, scope_graph::ScopeId,
+        GenericArg, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp,
+        MatchArm, Partial, Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId, StringId, Trait,
+        TraitRefId, TypeId, TypeKind, scope_graph::ScopeId,
     },
     span::HirOrigin,
 };
@@ -48,6 +48,9 @@ const COMMAND_BUDGET: usize = 10_000;
 /// traversal remains subject to `STEP_BUDGET`; this cap prevents one unusually
 /// wide nominal application from allocating an unbounded provider sequence.
 const GROUND_TYPE_ARG_BUDGET: usize = 256;
+/// Ordinary const helpers are a convenience for sharing pure steering
+/// semantics with type-level CTFE, not an unbounded second evaluator.
+const CONST_HELPER_CALL_DEPTH_BUDGET: usize = 32;
 
 // === FROZEN command surface (TD5.0) ====================================
 //
@@ -993,6 +996,9 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     /// Lazily resolved syntax root of the provider's file, for error spans.
     root: Option<parser::SyntaxNode>,
     fallback_range: TextRange,
+    /// Active ordinary const helpers. Re-entry is rejected (rather than
+    /// interpreted recursively), and nesting has an independent hard cap.
+    helper_call_stack: Vec<Func<'db>>,
 }
 
 impl<'a, 'db> ProviderExecutor<'a, 'db> {
@@ -1040,6 +1046,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             next_quote_local: 0,
             root: None,
             fallback_range,
+            helper_call_stack: Vec::new(),
         };
 
         let root_expr = executor.body.expr(db);
@@ -1348,6 +1355,10 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Expr::MethodCall(receiver, method, generic_args, args) => {
                 self.eval_method_call(expr, *receiver, *method, *generic_args, args.clone())
             }
+            Expr::Call(callee, args) => {
+                let (callee, args) = (*callee, args.clone());
+                self.eval_const_helper_call(expr, callee, &args)
+            }
             Expr::Un(inner, crate::hir_def::UnOp::Not) => match self.eval_expr(*inner)? {
                 Value::Bool(value) => Ok(Value::Bool(!value)),
                 _ => Err(self.unsupported_expr(expr)),
@@ -1380,6 +1391,125 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 "`${...}` splice holes are only meaningful inside a `quote` body",
             )),
             _ => Err(self.unsupported_expr(expr)),
+        }
+    }
+
+    /// Evaluates a bare, base-graph ordinary `const fn` as provider steering.
+    ///
+    /// This deliberately does not enter semantic analysis: provider expansion
+    /// precedes the merged scope graph. Only same-module bare functions are
+    /// visible, and unsupported syntax fails closed through the ordinary
+    /// provider diagnostic.
+    fn eval_const_helper_call(
+        &mut self,
+        at: ExprId,
+        callee: ExprId,
+        args: &[crate::hir_def::expr::CallArg<'db>],
+    ) -> Result<Value<'db>, ExecError> {
+        let Some(name) = self.simple_expr_path_ident(callee) else {
+            return Err(self.unsupported_expr(at));
+        };
+        let base = base_scope_graph_impl(self.db, self.provider_top_mod);
+        let Some(func) =
+            base.child_items(self.provider_top_mod.scope())
+                .find_map(|item| match item {
+                    ItemKind::Func(func) if func.name(self.db).to_opt() == Some(name) => Some(func),
+                    _ => None,
+                })
+        else {
+            return Err(self.unsupported_expr(at));
+        };
+
+        if !func.is_const(self.db)
+            || func.modifiers(self.db).is_extern
+            || !func.generic_params(self.db).data(self.db).is_empty()
+            || !func.effects(self.db).data(self.db).is_empty()
+            || self.helper_call_stack.contains(&func)
+            || self.helper_call_stack.len() >= CONST_HELPER_CALL_DEPTH_BUDGET
+        {
+            return Err(self.unsupported_expr(at));
+        }
+        let Some(body) = func.body(self.db) else {
+            return Err(self.unsupported_expr(at));
+        };
+        let Some(params) = func.params_list(self.db).to_opt() else {
+            return Err(self.unsupported_expr(at));
+        };
+        let params = params.data(self.db);
+        if params.len() != args.len() || args.iter().any(|arg| arg.label.is_some()) {
+            return Err(self.unsupported_expr(at));
+        }
+
+        let mut bindings = Vec::with_capacity(params.len());
+        for (param, arg) in params.iter().zip(args) {
+            let Some(param_name) = param.name() else {
+                return Err(self.unsupported_expr(at));
+            };
+            bindings.push((param_name, self.eval_expr(arg.expr)?));
+        }
+
+        let old_body = std::mem::replace(&mut self.body, body);
+        let old_root = self.root.take();
+        self.helper_call_stack.push(func);
+        self.scopes.push(bindings);
+        let result = self.eval_const_helper_value(body.expr(self.db));
+        self.scopes.pop();
+        self.helper_call_stack.pop();
+        self.body = old_body;
+        self.root = old_root;
+        result
+    }
+
+    /// Value-returning subset for ordinary helper bodies. Provider top-level
+    /// execution remains effect-oriented; helpers require an explicit tail
+    /// value (or `return value`) and admit only hygienic `let` bindings.
+    fn eval_const_helper_value(&mut self, expr: ExprId) -> Result<Value<'db>, ExecError> {
+        let range = self.expr_range(expr);
+        self.tick(range)?;
+        let Partial::Present(data) = expr.data(self.db, self.body) else {
+            return Err(self.unsupported_expr(expr));
+        };
+        match data {
+            Expr::Block(stmts) => {
+                let stmts = stmts.clone();
+                self.scopes.push(Vec::new());
+                let result = (|| {
+                    let Some((&last, prefix)) = stmts.split_last() else {
+                        return Err(self.unsupported_expr(expr));
+                    };
+                    for &stmt in prefix {
+                        let Partial::Present(Stmt::Let(pat, _ty, Some(init))) =
+                            stmt.data(self.db, self.body)
+                        else {
+                            return Err(self.unsupported_stmt(stmt));
+                        };
+                        let Some(name) = self.simple_pat_binding(*pat) else {
+                            return Err(self.unsupported_stmt(stmt));
+                        };
+                        let value = self.eval_expr(*init)?;
+                        self.bind(name, value);
+                    }
+                    match last.data(self.db, self.body) {
+                        Partial::Present(Stmt::Expr(value))
+                        | Partial::Present(Stmt::Return(Some(value))) => {
+                            self.eval_const_helper_value(*value)
+                        }
+                        _ => Err(self.unsupported_stmt(last)),
+                    }
+                })();
+                self.scopes.pop();
+                result
+            }
+            Expr::If(cond, then_expr, else_expr) => {
+                if self.eval_cond(*cond)? {
+                    self.eval_const_helper_value(*then_expr)
+                } else if let Some(else_expr) = else_expr {
+                    self.eval_const_helper_value(*else_expr)
+                } else {
+                    Err(self.unsupported_expr(expr))
+                }
+            }
+            _ => self.eval_expr(expr),
         }
     }
 
