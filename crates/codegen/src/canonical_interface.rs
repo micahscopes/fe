@@ -1,11 +1,21 @@
 //! Pure metadata and wasm32 layout model for Fe browser interfaces.
 //!
-//! This module deliberately does not inspect semantic types, emit Wasm memory,
-//! or allocate storage. Those later stages feed validated declarations into
-//! [`CanonicalInterfaceManifest::build`] and consume the resulting layouts.
+//! This module derives declarations from semantic Fe record types and computes
+//! their deterministic wasm32 layout. It deliberately does not emit Wasm
+//! memory or allocate storage.
 
 use std::{collections::BTreeSet, fmt};
 
+use hir::{
+    analysis::{
+        HirAnalysisDb,
+        ty::{
+            adt_def::AdtRef,
+            ty_def::{PrimTy, TyBase, TyData, TyId},
+        },
+    },
+    hir_def::{FieldParent, TopLevelMod},
+};
 use serde::{Deserialize, Serialize};
 
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
@@ -187,6 +197,129 @@ impl CanonicalInterfaceManifest {
     }
 }
 
+/// Derive one canonical lane from the exact selected public Fe entry.
+///
+/// This semantic operation does not claim that the current Wasm lowering has
+/// emitted the canonical pointer ABI. Bundle integration must additionally
+/// verify `(i32) -> i32`, memory, allocator, and reset exports before embedding
+/// the resulting declaration.
+pub fn canonical_lane_decl_from_entry<'db>(
+    db: &'db dyn HirAnalysisDb,
+    top_mod: TopLevelMod<'db>,
+    entry_name: &str,
+    lane_name: &str,
+) -> Result<CanonicalLaneDecl, CanonicalInterfaceError> {
+    let mut matches = top_mod
+        .all_funcs(db)
+        .iter()
+        .copied()
+        .filter(|func| func.top_mod(db) == top_mod)
+        .filter(|func| {
+            func.name(db)
+                .to_opt()
+                .is_some_and(|name| name.data(db) == entry_name)
+        });
+    let func = matches.next().ok_or_else(|| {
+        error(format!(
+            "canonical entry `{entry_name}` was not found in the selected module"
+        ))
+    })?;
+    if matches.next().is_some() {
+        return Err(error(format!(
+            "canonical entry `{entry_name}` is ambiguous in the selected module"
+        )));
+    }
+    if !func.vis(db).is_pub() || func.is_extern(db) || func.is_associated_func(db) {
+        return Err(error(format!(
+            "canonical entry `{entry_name}` must be a public non-associated Fe function"
+        )));
+    }
+    let args = func.arg_tys(db);
+    let [request] = args.as_slice() else {
+        return Err(error(format!(
+            "canonical entry `{entry_name}` must take exactly one semantic request record; found {} parameters",
+            args.len()
+        )));
+    };
+    let request = canonical_type_from_semantic(db, *request.skip_binder(), "request")?;
+    let response = canonical_type_from_semantic(db, func.return_ty(db), "response")?;
+    if !matches!(request, CanonicalType::Record(_)) || !matches!(response, CanonicalType::Record(_))
+    {
+        return Err(error(format!(
+            "canonical entry `{entry_name}` request and response must both be nominal record types"
+        )));
+    }
+    Ok(CanonicalLaneDecl {
+        name: lane_name.to_owned(),
+        export: entry_name.to_owned(),
+        request,
+        response,
+    })
+}
+
+/// Map a closed semantic Fe type to milestone-1 canonical metadata.
+///
+/// Bytes and strings intentionally have no semantic spelling yet. Primitive
+/// `String` and name-based ADT guesses are rejected until explicit nominal
+/// browser descriptor types are introduced.
+pub fn canonical_type_from_semantic<'db>(
+    db: &'db dyn HirAnalysisDb,
+    ty: TyId<'db>,
+    path: &str,
+) -> Result<CanonicalType, CanonicalInterfaceError> {
+    // Ordinary by-value record parameters are represented semantically as
+    // read-only views. The canonical declaration describes the underlying
+    // message record, not Fe's local access capability.
+    let ty = ty.as_view(db).unwrap_or(ty);
+    if let TyData::TyBase(TyBase::Prim(primitive)) = ty.base_ty(db).data(db) {
+        return match primitive {
+            PrimTy::Bool => Ok(CanonicalType::Bool),
+            PrimTy::U8 => Ok(CanonicalType::U8),
+            PrimTy::I32 => Ok(CanonicalType::I32),
+            PrimTy::U32 => Ok(CanonicalType::U32),
+            PrimTy::I64 => Ok(CanonicalType::I64),
+            PrimTy::U64 => Ok(CanonicalType::U64),
+            PrimTy::F32 => Ok(CanonicalType::F32),
+            PrimTy::String => Err(error(format!(
+                "{path}: canonical strings require an explicit nominal BrowserString mapping, which is deferred"
+            ))),
+            other => Err(error(format!(
+                "{path}: unsupported canonical primitive `{other:?}`"
+            ))),
+        };
+    }
+    let Some(adt) = ty.adt_def(db) else {
+        return Err(error(format!(
+            "{path}: unsupported or unresolved canonical semantic type"
+        )));
+    };
+    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
+        return Err(error(format!(
+            "{path}: canonical enums and non-record ADTs are not supported"
+        )));
+    };
+    let field_types = ty.field_types(db);
+    let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
+    if field_views.len() != field_types.len() {
+        return Err(error(format!(
+            "{path}: semantic record field metadata is inconsistent"
+        )));
+    }
+    let mut fields = Vec::with_capacity(field_views.len());
+    for (field, field_ty) in field_views.into_iter().zip(field_types) {
+        let name = field
+            .name(db)
+            .map(|name| name.data(db).to_string())
+            .ok_or_else(|| error(format!("{path}: tuple-like record fields are unsupported")))?;
+        let field_path = format!("{path}.{name}");
+        fields.push(CanonicalField::new(
+            name,
+            canonical_type_from_semantic(db, field_ty, &field_path)?,
+        ));
+    }
+    Ok(CanonicalType::Record(fields))
+}
+
 fn layout_type(
     ty: &CanonicalType,
     depth: usize,
@@ -288,8 +421,7 @@ fn validate_name(name: &str, kind: &str) -> Result<(), CanonicalInterfaceError> 
         && name.len() <= 64
         && name.is_ascii()
         && name.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_lowercase()
-                || (index > 0 && (byte == b'_' || byte.is_ascii_digit()))
+            byte.is_ascii_lowercase() || (index > 0 && (byte == b'_' || byte.is_ascii_digit()))
         });
     if !valid {
         return Err(error(format!(
@@ -321,6 +453,9 @@ fn error(message: impl Into<String>) -> CanonicalInterfaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::InputDb;
+    use driver::DriverDataBase;
+    use url::Url;
 
     fn record(fields: Vec<CanonicalField>) -> CanonicalType {
         CanonicalType::Record(fields)
@@ -474,5 +609,86 @@ mod tests {
                 (size, align)
             );
         }
+    }
+
+    fn semantic_lane(source: &str, entry: &str) -> Result<CanonicalLaneDecl, String> {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///canonical_semantic.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+        canonical_lane_decl_from_entry(&db, top_mod, entry, "update")
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn derives_nested_records_from_selected_entry_without_field_restatement() {
+        let declaration = semantic_lane(
+            r#"
+struct Position { x: f32, y: f32 }
+struct Request { tag: u8, sequence: u64, position: Position, enabled: bool }
+struct Response { accepted: bool, code: i32 }
+pub fn update(request: Request) -> Response {
+    Response { accepted: request.enabled, code: 7 }
+}
+"#,
+            "update",
+        )
+        .unwrap();
+        let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+        let lane = &manifest.lanes[0];
+        assert_eq!((lane.request.size, lane.request.align), (32, 8));
+        let CanonicalShape::Record { fields } = &lane.request.shape else {
+            panic!("request record")
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.offset))
+                .collect::<Vec<_>>(),
+            [
+                ("tag", 0),
+                ("sequence", 8),
+                ("position", 16),
+                ("enabled", 24)
+            ]
+        );
+        assert_eq!((lane.response.size, lane.response.align), (8, 4));
+    }
+
+    #[test]
+    fn semantic_derivation_fails_closed_for_strings_wide_scalars_and_non_records() {
+        let string_error = semantic_lane(
+            "struct Request { text: String<5> }\nstruct Response { ok: bool }\n\
+             pub fn update(request: Request) -> Response { Response { ok: true } }\n",
+            "update",
+        )
+        .unwrap_err();
+        assert!(
+            string_error.contains("explicit nominal BrowserString mapping"),
+            "{string_error}"
+        );
+
+        let wide_error = semantic_lane(
+            "struct Request { value: u16 }\nstruct Response { ok: bool }\n\
+             pub fn update(request: Request) -> Response { Response { ok: true } }\n",
+            "update",
+        )
+        .unwrap_err();
+        assert!(
+            wide_error.contains("unsupported canonical primitive `U16`"),
+            "{wide_error}"
+        );
+
+        let scalar_error =
+            semantic_lane("pub fn update(request: u32) -> u32 { request }\n", "update")
+                .unwrap_err();
+        assert!(
+            scalar_error.contains("must both be nominal record types"),
+            "{scalar_error}"
+        );
     }
 }

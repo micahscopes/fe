@@ -22,6 +22,7 @@ pub use canonical_interface::{
     CANONICAL_INTERFACE_PROTOCOL, CANONICAL_INTERFACE_VERSION, CanonicalAbi, CanonicalEndianness,
     CanonicalField, CanonicalFieldLayout, CanonicalInterfaceError, CanonicalInterfaceManifest,
     CanonicalLane, CanonicalLaneDecl, CanonicalLayout, CanonicalShape, CanonicalType,
+    canonical_lane_decl_from_entry, canonical_type_from_semantic,
 };
 pub use dispatch::DispatchKind;
 pub use layout::{
