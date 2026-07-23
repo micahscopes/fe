@@ -33,6 +33,7 @@ class QcgaAcceptanceTests(unittest.TestCase):
             "state": "presentation",
             "presentation": "canvas",
             "verified": False,
+            "interactive": True,
             "counters": {
                 "fetches": ["gen/layout.json", "gen/frag.wgsl", "gen/kernel.fe"],
                 "workerCreates": 0,

@@ -31,6 +31,12 @@ entry-rooted Wasm oracle, and WebGPU input layout.
 The canvas scales responsively; the pixel-edge toggle and loupe inspect the
 actual output. This is a deliberately bounded rotated-quadric subalgebra
 showcase, not a claim of general QCGA or arbitrary multivector storage.
+Camera depth, pixel scale, two diagonal weights, and the `x*y` cross term are
+live controls over the same compiler-described 15-field input buffer. Input
+events coalesce to one direct WebGPU submission per animation frame. They do
+not invoke the Wasm actor or read back the GPU; moving a control explicitly
+invalidates the displayed verification until the canonical view is reloaded
+and verified again.
 
 Generate the five ignored assets from the reviewed local Sonatina commit and
 serve the common demos root:
