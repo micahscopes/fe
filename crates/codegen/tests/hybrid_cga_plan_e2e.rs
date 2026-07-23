@@ -5,7 +5,7 @@ use url::Url;
 
 fn compile_to_wasm(source: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///wasm_cga_semantic_plan_hybrid.fe").unwrap();
+    let url = Url::parse("file:///cga_schedule_ctfe_specialized_render.fe").unwrap();
     db.workspace()
         .touch(&mut db, url.clone(), Some(source.to_string()));
     let file = db.workspace().get(&db, &url).unwrap();
@@ -57,7 +57,7 @@ fn raw_80_oracle(sphere: [f32; 4], point: [f32; 5]) -> [f32; 32] {
 
 #[test]
 fn typed_schedule_interpretation_matches_raw_80_oracle() {
-    let source = include_str!("fixtures/wasm_cga_semantic_plan_hybrid.fe");
+    let source = include_str!("fixtures/spirv/cga_schedule_ctfe_specialized_render.fe");
     let wasm = compile_to_wasm(source);
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &wasm).unwrap();
