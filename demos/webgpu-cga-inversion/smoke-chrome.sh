@@ -121,6 +121,12 @@ case "$timing" in
   gpu) append_query timing "$timing" ;;
   *) echo "CGA_SMOKE_TIMING must be 'gpu'" >&2; exit 2 ;;
 esac
+lifecycle="${CGA_SMOKE_LIFECYCLE:-}"
+case "$lifecycle" in
+  "") ;;
+  1) append_query smoke lifecycle ;;
+  *) echo "CGA_SMOKE_LIFECYCLE must be '1' or empty" >&2; exit 2 ;;
+esac
 if [ "$benchmark" = "continuous" ] \
     && { [ "$verify_mode" != "off" ] || [ "$presentation" != "canvas" ]; }; then
   echo "CGA_SMOKE_BENCHMARK=continuous requires CGA_SMOKE_VERIFY=off and canvas presentation" >&2
@@ -128,6 +134,14 @@ if [ "$benchmark" = "continuous" ] \
 fi
 if [ "$timing" = "gpu" ] && [ "$benchmark" != "continuous" ]; then
   echo "CGA_SMOKE_TIMING=gpu requires CGA_SMOKE_BENCHMARK=continuous" >&2
+  exit 2
+fi
+if [ "$lifecycle" = 1 ] \
+    && { [ "$verify_mode" != "default" ] \
+      || [ -n "$benchmark" ] \
+      || [ -n "$timing" ] \
+      || { [ -n "$requested_bundle" ] && [ "$requested_bundle" != "schedule32" ]; }; }; then
+  echo "CGA_SMOKE_LIFECYCLE=1 requires verified Schedule32 mode without a benchmark" >&2
   exit 2
 fi
 url="http://127.0.0.1:$port/webgpu-cga-inversion/${query:+?$query}"
@@ -166,7 +180,11 @@ fi
 chrome_pid=$!
 
 set +e
-if [ "$benchmark" = "continuous" ]; then
+if [ "$lifecycle" = 1 ]; then
+  python3 "$here/cdp_lifecycle.py" \
+    --debug-port "$debug_port" --url "$url" \
+    --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"
+elif [ "$benchmark" = "continuous" ]; then
   python3 "$here/cdp_continuous_benchmark.py" \
     --debug-port "$debug_port" --url "$url" \
     --timing "${timing:-submit}" \
@@ -197,7 +215,11 @@ wait "$chrome_pid" 2>/dev/null || true
 chrome_pid=""
 
 if [ "$expected_state" = "green" ]; then
-  echo "PASS: real Chrome/WebGPU typed-CGA $presentation acceptance is GREEN ($verify_mode verification)."
+  if [ "$lifecycle" = 1 ]; then
+    echo "PASS: real Chrome/WebGPU typed-CGA generated actor lifecycle is GREEN."
+  else
+    echo "PASS: real Chrome/WebGPU typed-CGA $presentation acceptance is GREEN ($verify_mode verification)."
+  fi
 else
   echo "PASS: real Chrome/WebGPU typed-CGA $presentation showcase is PRESENTATION/UNVERIFIED (verification off)."
 fi

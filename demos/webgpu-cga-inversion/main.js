@@ -40,6 +40,7 @@ const presentation = acceptanceMode === null || acceptanceMode === ""
 const verificationOff = query.get("verify") === "off";
 const continuousVerification = query.get("verify") === "continuous";
 const continuousBenchmark = query.get("benchmark") === "continuous";
+const lifecycleSmoke = query.get("smoke") === "lifecycle";
 const resolutionQuery = query.get("resolution");
 const timingQuery = query.get("timing");
 const qualityQuery = query.get("quality");
@@ -57,6 +58,28 @@ const presentationEvidence = {
   gpuReadbackCount: 0,
   gpuTimestampReadbackCount: 0,
   interactionCount: 0,
+  ...(lifecycleSmoke ? {
+    lifecycle: {
+      renderRequested: 0,
+      renderSettled: 0,
+      renderDropped: 0,
+      renderPublished: 0,
+      staleRenderPublished: 0,
+      actorAborted: 0,
+      actorBackpressureErrors: 0,
+      maxLifecycleRenderActive: 0,
+      maxLifecycleRenderPending: 0,
+      maxWorkerPending: 0,
+      workerRestartCount: 0,
+      workerEpoch: 0,
+      gpuSubmittedCount: 0,
+      gpuCompletedCount: 0,
+      lastSubmittedGeneration: null,
+      lastCompletedGeneration: null,
+      lastPublishedGeneration: null,
+      verificationRequestedCount: 0,
+    },
+  } : {}),
 };
 window.__cgaPresentationEvidence = presentationEvidence;
 
@@ -229,6 +252,14 @@ async function main() {
     banner("red", reason);
     return { state: "red", presentation, reason };
   }
+  if (lifecycleSmoke
+      && (verificationOff || continuousVerification || continuousBenchmark
+        || artifactBundle.name !== "schedule32")) {
+    const reason =
+      "lifecycle smoke requires verified Schedule32 mode without a benchmark";
+    banner("red", reason);
+    return { state: "red", presentation, reason };
+  }
   if (continuousBenchmark && fixedResolution === null) fixedResolution = LOGICAL_SIZE;
   let layout, reference, source, wgsl, wasm;
   const artifactFetchStart = performanceMeter.start();
@@ -265,13 +296,25 @@ async function main() {
     try {
       wasmOracle = await createCgaWasmWorkerOracle({
         wasm,
-        gpuRender: (payload) => {
+        gpuRender: (payload, request) => {
           const values = [
             payload.cam_x, payload.cam_y, payload.zoom, payload.inv_cx, payload.inv_cy,
           ];
           presentationEvidence.gpuActorRenderCount += 1;
           if (presentation === "offscreen") submitOffscreenFrame(gpu, values);
           else renderFrame(gpu, values);
+          if (lifecycleSmoke) {
+            const evidence = presentationEvidence.lifecycle;
+            evidence.gpuSubmittedCount += 1;
+            evidence.lastSubmittedGeneration = request.generation;
+            const submittedCount = evidence.gpuSubmittedCount;
+            gpu.queue.onSubmittedWorkDone().then(() => {
+              if (submittedCount >= evidence.gpuCompletedCount) {
+                evidence.gpuCompletedCount = submittedCount;
+                evidence.lastCompletedGeneration = request.generation;
+              }
+            });
+          }
           return { submitted: true };
         },
         gpuVerify: async (payload) => {
@@ -449,6 +492,21 @@ async function main() {
       ),
       initial: payload.initial,
     }),
+    onRenderResult: (envelope) => {
+      if (!lifecycleSmoke) return;
+      const evidence = presentationEvidence.lifecycle;
+      evidence.renderPublished += 1;
+      evidence.lastPublishedGeneration = envelope.generation;
+      if (envelope.generation !== lifecycle.generation()) {
+        evidence.staleRenderPublished += 1;
+      }
+    },
+    onRenderSettled: (_envelope, settlement) => {
+      if (!lifecycleSmoke) return;
+      const evidence = presentationEvidence.lifecycle;
+      evidence.renderSettled += 1;
+      if (settlement.dropped) evidence.renderDropped += 1;
+    },
     onVerificationResult: (envelope) => {
       if (envelope.payload.value?.initial) return;
       finishVerification(envelope.payload.ok
@@ -474,9 +532,37 @@ async function main() {
   const coalescer = createTrailingCoalescer((job) => {
     lifecycle.enqueueVerification(job.payload, job.generation);
   });
+  const captureLifecycleBounds = () => {
+    if (!lifecycleSmoke) return;
+    const evidence = presentationEvidence.lifecycle;
+    const state = lifecycle.state().render;
+    evidence.maxLifecycleRenderActive = Math.max(
+      evidence.maxLifecycleRenderActive,
+      state.active === null ? 0 : 1,
+    );
+    evidence.maxLifecycleRenderPending = Math.max(
+      evidence.maxLifecycleRenderPending,
+      state.pending === null ? 0 : 1,
+    );
+    evidence.maxWorkerPending = Math.max(
+      evidence.maxWorkerPending,
+      wasmOracle?.pendingCount() ?? 0,
+    );
+    evidence.workerEpoch = wasmOracle?.epoch() ?? 0;
+  };
+  const recordRenderRequest = (request) => {
+    if (lifecycleSmoke && request) {
+      presentationEvidence.lifecycle.renderRequested += 1;
+      captureLifecycleBounds();
+    }
+    return request;
+  };
   const requestVerification = (useCurrentGeneration = false) => {
     const generation = useCurrentGeneration ? lifecycle.generation() : lifecycle.advance();
     coalescer.submit({ payload: verificationPayload(), generation });
+    if (lifecycleSmoke) {
+      presentationEvidence.lifecycle.verificationRequestedCount += 1;
+    }
     banner("amber", "verifying current view with browser Wasm and WebGPU readback...");
     publishAcceptance({ state: "pending", presentation, generation,
       camera: viewValues(camera, inversion).slice(0, 3), inversion: [inversion.x, inversion.y] });
@@ -493,12 +579,15 @@ async function main() {
     $("performance-stat").textContent =
       `interaction cadence ${cadence} Hz | submit CPU ${submit} ms`;
   };
-  const requestDraw = () => lifecycle.enqueueRender(renderPayload());
+  const requestDraw = () => recordRenderRequest(
+    lifecycle.enqueueRender(renderPayload()),
+  );
 
   // The deterministic acceptance gate runs once before interaction begins.
   // Presentation then reuses the live pipeline and only updates its uniform
   // buffer unless the user explicitly requests continuous verification.
-  lifecycle.begin(renderPayload(), verificationPayload(true));
+  const initialLifecycle = lifecycle.begin(renderPayload(), verificationPayload(true));
+  recordRenderRequest(initialLifecycle.render);
   if (presentation === "canvas") {
     new ResizeObserver(() => {
       if (resizeDisplayCanvas()) requestDraw();
@@ -508,7 +597,7 @@ async function main() {
     presentationEvidence.interactionCount += 1;
     camera = normalizeCamera(nextCamera);
     showCamera(camera);
-    lifecycle.interact(renderPayload());
+    recordRenderRequest(lifecycle.interact(renderPayload()).render);
     if (verificationOff) {
       banner("presentation", `fast WebGPU showcase on ${gpu.adapter}; verification is off`);
     } else if (continuousVerification) {
@@ -521,7 +610,7 @@ async function main() {
     }
   };
 
-  if (presentation === "canvas") {
+  if (presentation === "canvas" || lifecycleSmoke) {
     let drag = null;
     canvas.addEventListener("pointerdown", (event) => {
       if (!event.isPrimary || event.button !== 0) return;
@@ -537,7 +626,7 @@ async function main() {
         inversion = { ...inversion, x: Math.fround(world.x), y: Math.fround(world.y) };
         $("inversion-values").textContent =
           `inv_center=(${inversion.x.toFixed(5)}, ${inversion.y.toFixed(5)})`;
-        lifecycle.interact(renderPayload());
+        recordRenderRequest(lifecycle.interact(renderPayload()).render);
         if (continuousVerification && !verificationOff) requestVerification(true);
       }
       if (!drag) return;
@@ -588,6 +677,89 @@ async function main() {
       $("verify-view").textContent = "Verify now (continuous on)";
     }
     window.__cgaCamera = { get: () => ({ ...camera }), reset: () => settle(DEFAULT_CAMERA) };
+  }
+  if (lifecycleSmoke) {
+    const waitForIdle = async (timeoutMs = 10_000) => {
+      const deadline = performance.now() + timeoutMs;
+      while (performance.now() < deadline) {
+        captureLifecycleBounds();
+        const state = lifecycle.state();
+        if (state.render.active === null && state.render.pending === null
+            && wasmOracle.pendingCount() === 0) {
+          return state;
+        }
+        await new Promise(requestAnimationFrame);
+      }
+      throw new Error("lifecycle smoke actor chain did not become idle");
+    };
+    const snapshot = () => ({
+      generation: lifecycle.generation(),
+      coordinator: lifecycle.state(),
+      workerEpoch: wasmOracle.epoch(),
+      workerPending: wasmOracle.pendingCount(),
+      readbacks: presentationEvidence.gpuReadbackCount,
+      timestampReadbacks: presentationEvidence.gpuTimestampReadbackCount,
+      interactionCount: presentationEvidence.interactionCount,
+      evidence: { ...presentationEvidence.lifecycle },
+    });
+    const cancelOracle = async () => {
+      const controller = new AbortController();
+      const pending = wasmOracle.render(
+        viewValues(camera, inversion),
+        lifecycle.generation(),
+        { signal: controller.signal },
+      );
+      await Promise.resolve();
+      captureLifecycleBounds();
+      controller.abort();
+      try {
+        await pending;
+        throw new Error("cancelled oracle request unexpectedly completed");
+      } catch (error) {
+        if (error?.code !== "FE_ACTOR_ABORTED") throw error;
+        presentationEvidence.lifecycle.actorAborted += 1;
+      }
+      await waitForIdle();
+      return snapshot();
+    };
+    const restartWorker = async () => {
+      await waitForIdle();
+      const before = wasmOracle.epoch();
+      const after = await wasmOracle.restart();
+      if (after !== before + 1) {
+        throw new Error(`worker epoch did not advance exactly once: ${before} -> ${after}`);
+      }
+      presentationEvidence.lifecycle.workerRestartCount += 1;
+      presentationEvidence.lifecycle.workerEpoch = after;
+      recordRenderRequest(lifecycle.interact(renderPayload()).render);
+      await waitForIdle();
+      return snapshot();
+    };
+    const awaitGpuCompletion = async () => {
+      await gpu.queue.onSubmittedWorkDone();
+      await Promise.resolve();
+      return snapshot();
+    };
+    const verifyCurrentExplicitly = async () => {
+      presentationEvidence.lifecycle.verificationRequestedCount += 1;
+      const result = await verifyCamera(
+        camera,
+        inversion,
+        lifecycle.generation(),
+        false,
+        false,
+      );
+      finishVerification(result);
+      return { result, snapshot: snapshot() };
+    };
+    window.__cgaLifecycleSmoke = Object.freeze({
+      snapshot,
+      waitForIdle,
+      cancelOracle,
+      restartWorker,
+      awaitGpuCompletion,
+      verifyCurrentExplicitly,
+    });
   }
   const initialResult = await initialPromise;
   if (acceptanceStart !== null) {

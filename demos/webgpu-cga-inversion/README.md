@@ -221,6 +221,23 @@ Platforms using Metal or D3D may override `CHROME_WEBGPU_FLAGS`.
 The harness polls that structured state through Chrome's DevTools Protocol and
 terminates Chrome itself; it does not rely on `--dump-dom` completing.
 
+Use `CGA_SMOKE_LIFECYCLE=1` for the generated-actor lifecycle gate. It requires
+verified Schedule32 mode, synchronously drives 48 pointer updates to pressure
+the one-active/one-pending render mailbox, explicitly aborts one Worker request,
+restarts the Worker once, and proves the newest generation recovers through the
+Worker → MessagePort → main-thread WebGPU route. It rejects a stale published
+generation, more than one pending lifecycle render, more than eight Worker
+requests, a hidden framebuffer/timestamp readback, or a final Wasm/WebGPU
+mismatch. On headless systems without a working swapchain, keep the default
+offscreen presentation: pointer events still exercise the real DOM control and
+actor path, while WebGPU submits to the persistent offscreen texture.
+
+The lifecycle result reports submitted-frame cadence only. It separately waits
+for `GPUQueue.onSubmittedWorkDone()` as a completion checkpoint, without mapping
+a buffer, and leaves `gpuCompletionMeasured:false` and
+`completedFrameCadenceHz:null`. Only the final explicitly named verification may
+increment the framebuffer-readback counter after the startup baseline.
+
 Select the verification contract with `CGA_SMOKE_VERIFY=default|off|continuous`.
 `default` preserves the one-shot green acceptance above. `continuous` adds
 `?verify=continuous` and still requires green. `off` adds `?verify=off`, requires
