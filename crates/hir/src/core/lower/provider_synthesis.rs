@@ -93,9 +93,9 @@ pub(super) fn synthesize_provider_impl<'db>(
                         let ty = replay.materialize_ty(builder, *ty);
                         let value_expr = *value;
                         let value_body = builder.anonymous_expr_body(|body| {
-                                replay.shared_exprs.borrow_mut().clear();
-                                replay.reserved_names.borrow_mut().clear();
-                                replay.replay_expr(body, value_expr)
+                            replay.shared_exprs.borrow_mut().clear();
+                            replay.reserved_names.borrow_mut().clear();
+                            replay.replay_expr(body, value_expr)
                         });
                         consts.push(AssocConstDef {
                             attributes: builder.empty_attrs(),
