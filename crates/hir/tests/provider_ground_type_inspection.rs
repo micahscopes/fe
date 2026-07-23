@@ -56,6 +56,130 @@ fn use_it(value: Target) -> i32 {
 }
 
 #[test]
+fn provider_natural_range_and_integer_codegen_share_the_quote_dag() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_range_integer_codegen.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn run(self, _ value: i32) -> i32 }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        let total = builder.int(0)
+        for i in 0..3 {
+            total = builder.add(total, builder.int(i))
+        }
+        let product = builder.mul(total, builder.int(4))
+        let result = builder.sub(product, builder.neg(builder.int(2)))
+        builder.emit_method("run", result)
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn provider_quote_integer_operators_preserve_hygienic_locals() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_quote_integer_codegen.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn run(self, _ value: i32) -> i32 }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        builder.emit_method(quote {
+            fn run(self, _ value: i32) -> i32 {
+                let shared = value * 3
+                shared - -2
+            }
+        })
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn provider_natural_range_hard_cap_fails_closed() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_range_cap.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn run(self) -> bool }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        for i in 0..4097 {}
+        builder.emit_method(quote { fn run(self) -> bool { true } })
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("exceeded its compile-time execution budget"),
+        "range cap must fail closed through the provider budget diagnostic:\n{rendered}"
+    );
+}
+
+#[test]
+fn provider_codegen_type_mismatches_fail_in_ordinary_type_checking() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_integer_codegen_type_mismatch.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn run(self) -> bool }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        builder.emit_method("run", builder.int(7))
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        !rendered.is_empty(),
+        "generated integer body must not bypass ordinary return-type checking"
+    );
+}
+
+#[test]
 fn method_quote_local_let_rejects_typed_binding_fail_closed() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

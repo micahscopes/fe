@@ -49,6 +49,10 @@ const COMMAND_BUDGET: usize = 10_000;
 /// traversal remains subject to `STEP_BUDGET`; this cap prevents one unusually
 /// wide nominal application from allocating an unbounded provider sequence.
 const GROUND_TYPE_ARG_BUDGET: usize = 256;
+/// Provider-authored natural ranges are deliberately finite. This is an
+/// allocation cap, independent of the shared execution step budget charged
+/// once for every materialized element and every loop-body evaluation.
+const NAT_RANGE_BUDGET: usize = 4_096;
 /// Ordinary const helpers are a convenience for sharing pure steering
 /// semantics with type-level CTFE, not an unbounded second evaluator.
 const CONST_HELPER_CALL_DEPTH_BUDGET: usize = 32;
@@ -86,9 +90,13 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     "emit_assoc_ty",
     // B-build: generated expressions
     "bool",
+    "int",
     "and",
     "or",
     "add",
+    "sub",
+    "mul",
+    "neg",
     "eq",
     "lt",
     "gt",
@@ -170,8 +178,10 @@ const _: () = {
     // (45 → 43). DEVX-A: the four signature-dance ops (`method`/`with_self`/
     // `with_arg`/`returns`) were dropped — the emitted method's signature is now
     // inferred from the goal trait's declaration at `emit_method(name, body)`
-    // (43 → 39).
-    assert!(RECOGNIZED_BUILDER_OPS.len() == 39);
+    // (43 → 39). Domain-neutral generated integer literal, subtraction,
+    // multiplication, and negation builders then extend the audited codegen
+    // subset (39 → 43).
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 43);
     // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
     // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
     // the `fields`/`variants` iterables (now ordinary method calls returning a
@@ -254,6 +264,9 @@ pub(super) struct ExecError {
 #[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
 pub(super) enum GenExpr<'db> {
     Bool(bool),
+    /// An unsigned integer literal. Signed values are represented explicitly
+    /// as `Neg(Int(..))`, preserving the source IR's operator structure.
+    Int(IntegerId<'db>),
     /// `lhs && rhs`
     And(GenExprId, GenExprId),
     /// `lhs || rhs`
@@ -261,6 +274,12 @@ pub(super) enum GenExpr<'db> {
     /// `lhs + rhs` (integer addition; used by layout-fact providers folding
     /// per-field size consts, e.g. ABI `HEAD_WORDS`).
     Add(GenExprId, GenExprId),
+    /// `lhs - rhs`
+    Sub(GenExprId, GenExprId),
+    /// `lhs * rhs`
+    Mul(GenExprId, GenExprId),
+    /// `-value`
+    Neg(GenExprId),
     /// The generated method's `self` value.
     SelfRef,
     /// A reference to a generated method parameter by name.
@@ -1352,6 +1371,32 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let rhs = self.int_value(*rhs)?;
                 let lhs = lhs.data(self.db);
                 let rhs = rhs.data(self.db);
+                if matches!(op, ArithBinOp::Range) {
+                    let Some(start) = lhs.to_usize() else {
+                        return Err(self.unsupported_expr(expr));
+                    };
+                    let Some(end) = rhs.to_usize() else {
+                        return Err(self.unsupported_expr(expr));
+                    };
+                    let Some(len) = end.checked_sub(start) else {
+                        return Err(self.unsupported_expr(expr));
+                    };
+                    if len > NAT_RANGE_BUDGET {
+                        return Err(ExecError {
+                            kind: ProviderFailureKind::BudgetExceeded,
+                            range,
+                        });
+                    }
+                    let mut items = Vec::with_capacity(len);
+                    for value in start..end {
+                        // Range materialization and loop execution share the
+                        // same provider step budget; the hard range cap only
+                        // bounds the eager sequence allocation.
+                        self.tick(range)?;
+                        items.push(Value::Int(IntegerId::from_usize(self.db, value)));
+                    }
+                    return Ok(Value::Seq(items));
+                }
                 let value = match op {
                     ArithBinOp::Add => lhs + rhs,
                     ArithBinOp::Sub => lhs
@@ -1386,8 +1431,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     }
                     ArithBinOp::BitAnd => lhs & rhs,
                     ArithBinOp::BitXor => lhs ^ rhs,
-                    ArithBinOp::Pow | ArithBinOp::BitOr | ArithBinOp::Range => {
+                    ArithBinOp::Pow | ArithBinOp::BitOr => {
                         return Err(self.unsupported_expr(expr));
+                    }
+                    ArithBinOp::Range => {
+                        unreachable!("provider natural ranges return before scalar arithmetic")
                     }
                 };
                 // Provider integers model the unannotated/`usize` CTFE shape:
@@ -2133,9 +2181,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 self.check_inline_capacity(expr, value)?;
                 Ok(self.push_gen(GenExpr::StrLit(value)))
             }
-            Expr::Lit(LitKind::Int(_)) => {
-                Err(self.invalid_quote(expr, "integer literals are not supported in quote bodies"))
-            }
+            Expr::Lit(LitKind::Int(value)) => Ok(self.push_gen(GenExpr::Int(*value))),
             Expr::Lit(LitKind::Float(_)) => {
                 Err(self.invalid_quote(expr, "float literals are not supported in quote bodies"))
             }
@@ -2157,6 +2203,18 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
                 Ok(self.push_gen(GenExpr::Add(lhs, rhs)))
             }
+            Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Sub)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
+                Ok(self.push_gen(GenExpr::Sub(lhs, rhs)))
+            }
+            Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Mul)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
+                Ok(self.push_gen(GenExpr::Mul(lhs, rhs)))
+            }
             Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)) => {
                 let (lhs, rhs) = (*lhs, *rhs);
                 let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
@@ -2177,9 +2235,13 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             Expr::Bin(..) => Err(self.invalid_quote(
                 expr,
-                "this operator is not supported in quote bodies (quotes support `+`, `&&`, `||`, \
-                 `==`, `<`, `>`, and method calls)",
+                "this operator is not supported in quote bodies (quotes support integer `+`, `-`, \
+                 `*`, unary `-`, `&&`, `||`, `==`, `<`, `>`, and method calls)",
             )),
+            Expr::Un(inner, crate::hir_def::UnOp::Minus) => {
+                let inner = self.elab_template_expr(*inner, template, sig, binders)?;
+                Ok(self.push_gen(GenExpr::Neg(inner)))
+            }
             Expr::Path(_) => {
                 if let Some(name) = self.simple_expr_path_ident(expr) {
                     return self.elab_template_name(expr, name, template, sig, binders);
@@ -2208,6 +2270,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         Ok(generated)
                     }
                     Value::Bool(value) => Ok(self.push_gen(GenExpr::Bool(value))),
+                    Value::Int(value) => Ok(self.push_gen(GenExpr::Int(value))),
                     Value::Str(value) => {
                         self.check_inline_capacity(expr, value)?;
                         Ok(self.push_gen(GenExpr::StrLit(value)))
@@ -2221,7 +2284,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     other => {
                         let detail = format!(
                             "a {} cannot fill an expression hole; expression holes accept \
-                             quote values and compile-time bool/string values",
+                             quote values and compile-time bool/integer/string values",
                             value_kind_name(&other),
                         );
                         Err(self.invalid_quote(expr, &detail))
@@ -3042,6 +3105,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 };
                 Ok(self.push_expr(GenExpr::Bool(value)))
             }
+            ("int", [arg]) => {
+                let Value::Int(value) = self.eval_expr(arg.expr)? else {
+                    return Err(self.unsupported_expr(arg.expr));
+                };
+                Ok(self.push_expr(GenExpr::Int(value)))
+            }
             ("and", [lhs, rhs]) => {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
                 let rhs = self.gen_expr_arg(rhs.expr)?;
@@ -3051,6 +3120,20 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
                 let rhs = self.gen_expr_arg(rhs.expr)?;
                 Ok(self.push_expr(GenExpr::Add(lhs, rhs)))
+            }
+            ("sub", [lhs, rhs]) => {
+                let lhs = self.gen_expr_arg(lhs.expr)?;
+                let rhs = self.gen_expr_arg(rhs.expr)?;
+                Ok(self.push_expr(GenExpr::Sub(lhs, rhs)))
+            }
+            ("mul", [lhs, rhs]) => {
+                let lhs = self.gen_expr_arg(lhs.expr)?;
+                let rhs = self.gen_expr_arg(rhs.expr)?;
+                Ok(self.push_expr(GenExpr::Mul(lhs, rhs)))
+            }
+            ("neg", [value]) => {
+                let value = self.gen_expr_arg(value.expr)?;
+                Ok(self.push_expr(GenExpr::Neg(value)))
             }
             ("or", [lhs, rhs]) => {
                 let lhs = self.gen_expr_arg(lhs.expr)?;
@@ -3852,14 +3935,15 @@ mod freeze_guard {
         // Pin the count too, so a same-size swap is still flagged for review.
         assert_eq!(
             RECOGNIZED_BUILDER_OPS.len(),
-            39,
+            43,
             "FREEZE (TD5.0): the builder command surface changed size; update the count \
              and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
              (TD5c moved `same_ty`/`same_field` — mis-shelved `builder.*`-spelled identity \
              reads — off the bespoke executor onto the typed `ReflectionCompare` table, 45 → 43. \
              DEVX-A dropped the four signature-dance ops `method`/`with_self`/`with_arg`/`returns` \
              — the emitted method's signature is inferred from the goal trait's declaration at \
-             `emit_method(name, body)`, 43 → 39.)"
+             `emit_method(name, body)`, 43 → 39. Domain-neutral integer literals and \
+             subtract/multiply/negate construction add four audited operations, 39 → 43.)"
         );
     }
 

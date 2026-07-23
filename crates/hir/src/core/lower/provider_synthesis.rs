@@ -313,6 +313,7 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
         let db = body.db();
         match &self.output.bodies.exprs[expr.0] {
             GenExpr::Bool(value) => body.bool_lit_expr(*value),
+            GenExpr::Int(value) => body.push_expr(Expr::Lit(LitKind::Int(*value))),
             GenExpr::And(lhs, rhs) => {
                 let lhs = self.replay_expr(body, *lhs);
                 let rhs = self.replay_expr(body, *rhs);
@@ -327,6 +328,20 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let lhs = self.replay_expr(body, *lhs);
                 let rhs = self.replay_expr(body, *rhs);
                 body.push_expr(Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Add)))
+            }
+            GenExpr::Sub(lhs, rhs) => {
+                let lhs = self.replay_expr(body, *lhs);
+                let rhs = self.replay_expr(body, *rhs);
+                body.push_expr(Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Sub)))
+            }
+            GenExpr::Mul(lhs, rhs) => {
+                let lhs = self.replay_expr(body, *lhs);
+                let rhs = self.replay_expr(body, *rhs);
+                body.push_expr(Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Mul)))
+            }
+            GenExpr::Neg(value) => {
+                let value = self.replay_expr(body, *value);
+                body.push_expr(Expr::Un(value, crate::hir_def::UnOp::Minus))
             }
             GenExpr::SelfRef => body.path_expr(PathId::from_ident(db, IdentId::make_self(db))),
             GenExpr::ArgRef(name) => body.ident_expr(*name),
