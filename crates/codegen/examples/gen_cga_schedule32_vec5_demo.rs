@@ -17,10 +17,10 @@ use fe_codegen::{
     canonical_lane_decl_from_entry, compile_runtime_package_spirv_render,
     compile_runtime_package_wasm_with_options,
 };
+use hir::hir_def::HirIngot;
 use sonatina_codegen::isa::spirv::{
     Access, LayoutMode, Role, SpirvBuiltinSource, SpirvScalarKind, WordKind,
 };
-use hir::hir_def::HirIngot;
 use url::Url;
 
 const CANONICAL: &str = include_str!("../tests/fixtures/fco_cga80_direct_lanes.fe");
@@ -38,7 +38,7 @@ const RENDER_LANE: &str = "render";
 const VERIFY_LANE: &str = "verify";
 const ORACLE_LANE: &str = "oracle";
 const APP_IMPORTS: &str = r#"use sparse_clifford::{
-    BladeSet, Nat, PlanLength, SparsePlan, blade_set, plan_mask_candidate,
+    BladeSet, Nat, PlanLength, SparsePlan, Term, blade_set, plan_mask_candidate,
     plan_mask_cardinality, support_gp, support_grade,
 }
 "#;
@@ -146,14 +146,12 @@ fn app_source() -> String {
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
     let source = format!("{APP_IMPORTS}\n{prefix}{suffix}\n{BODY}");
-    assert!(source.contains(
-        "SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",
-    ));
+    assert!(source.contains("SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",));
     assert!(source.contains("const fn survivor_triple"));
     assert!(source.contains("struct CanonicalCgaProvider"));
     assert!(
-        CANONICAL.contains("for triple in 0..80"),
-        "the provider must scan the complete semantic candidate universe",
+        CANONICAL.contains("builder.ty<Schedule32>().normalized_preorder_types()"),
+        "the provider must consume the normalized typed Schedule32 plan",
     );
     assert!(
         CANONICAL.matches("builder.emit_method(").count() == 1
@@ -514,7 +512,7 @@ fn main() {
         "view": [CAM_X, CAM_Y, ZOOM], "inversion_center": [INV_CX, INV_CY],
         "parameter_types": ["F32", "F32", "F32", "F32", "F32"],
         "shape": "inverted_offset_torus_cyclide",
-        "algebra": "canonical Fe helpers shared by a forced typed Schedule<32> witness and a bounded 80-candidate FCO provider that emits five direct lanes with the canonical four-bucket balanced reduction",
+        "algebra": "canonical Fe helpers produce an inspectable typed Schedule<32> whose normalized Term payloads directly drive the FCO provider's five lanes and canonical four-bucket balanced reduction",
         "inversion_center_runtime": true, "fnv1a32": frame_hash,
         "sky_pixels": sky, "hit_pixels": upper + lower,
         "upper_pixels": upper, "lower_pixels": lower, "distinct_colors": distinct.len(),
@@ -533,7 +531,7 @@ fn main() {
         },
         "schedule_tuple_fields": ["left_blade", "point_blade", "right_blade", "output_blade", "magnitude", "negative"],
         "canonical_survivor_tuples": schedule_json,
-        "runtime_tuple_order": "canonical candidate scan order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
+        "runtime_tuple_order": "canonical normalized Schedule32 Term order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
         "provenance": provenance,
     })).unwrap();
 
@@ -1015,18 +1013,16 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         git_output(repo, &["rev-parse", "HEAD"]),
         "Fe HEAD changed after generator preflight",
     );
-    let fe_tracked_status =
-        git_output(repo, &["status", "--porcelain", "--untracked-files=no"]);
+    let fe_tracked_status = git_output(repo, &["status", "--porcelain", "--untracked-files=no"]);
     assert!(
         fe_tracked_status.is_empty() || fe_tracked_status == "M Cargo.lock",
         "Fe checkout changed after generator preflight: {fe_tracked_status:?}",
     );
-    let fe_untracked_present =
-        match std::env::var("FE_CGA_SOURCE_UNTRACKED_PRESENT").as_deref() {
-            Ok("0") => false,
-            Ok("1") => true,
-            _ => panic!("invalid FE_CGA_SOURCE_UNTRACKED_PRESENT generator preflight value"),
-        };
+    let fe_untracked_present = match std::env::var("FE_CGA_SOURCE_UNTRACKED_PRESENT").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => panic!("invalid FE_CGA_SOURCE_UNTRACKED_PRESENT generator preflight value"),
+    };
     let sonatina_rev = git_output(&sonatina, &["rev-parse", "HEAD"]);
     let sonatina_status = git_output(
         &sonatina,

@@ -9,6 +9,11 @@ const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
 
 fn canonical_source() -> String {
+    assert!(
+        CANONICAL.contains("builder.ty<Schedule32>().normalized_preorder_types()")
+            && !CANONICAL.contains("for triple in 0..80"),
+        "the FCO provider must consume the typed plan rather than rescan raw80",
+    );
     let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
     format!("{sparse_api}\n{CANONICAL}")
 }
