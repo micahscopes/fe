@@ -141,7 +141,7 @@ fn composed_source() -> String {
         .expect("canonical public-oracle end marker");
     let source = format!("{SPARSE_CLIFFORD_API}\n{prefix}{suffix}\n{BODY}");
     assert!(source.contains(
-        "type Schedule32 = SparsePlan<SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2, 80, 32>",
+        "SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",
     ));
     assert!(source.contains("const fn survivor_triple"));
     assert!(source.contains("struct CanonicalCgaProvider"));
