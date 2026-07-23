@@ -75,7 +75,8 @@ fn with_top_mod<T>(
 
 #[test]
 fn support_driven_sparse_cga_values_and_absent_accessor_execute_in_wasm() {
-    let source = format!("{SPARSE_CLIFFORD_API}\n{CGA}");
+    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
+    let source = format!("{sparse_api}\n{CGA}");
     let wasm = with_top_mod(source, "file:///sparse_cga_value.fe", |db, top_mod| {
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(db);
         assert!(
@@ -107,8 +108,9 @@ fn support_driven_sparse_cga_values_and_absent_accessor_execute_in_wasm() {
 
 #[test]
 fn present_only_access_rejects_an_absent_blade() {
+    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
     let source = format!(
-        "{SPARSE_CLIFFORD_API}\n{CGA}\n\
+        "{sparse_api}\n{CGA}\n\
          pub fn rejected(value: CgaInversionSphere) -> f32 {{\n\
              <CgaSphereLookup<4, 4> as \
                  SparsePresentCoefficient<CgaInversionSphere>>::read_present(\
@@ -137,7 +139,8 @@ fn recursive_rank_and_support_sized_storage_execute_beyond_five_lanes() {
         !SPARSE_CLIFFORD_API.contains("SparseFound<"),
         "the reusable API must not retain bounded rank-specific accessors"
     );
-    let source = format!("{SPARSE_CLIFFORD_API}\n{WIDE_VALUE_PROBE}");
+    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
+    let source = format!("{sparse_api}\n{WIDE_VALUE_PROBE}");
     let wasm = with_top_mod(source, "file:///sparse_wide_value.fe", |db, top_mod| {
         let diagnostics = db.run_on_top_mod(top_mod).format_diags(db);
         assert!(

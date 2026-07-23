@@ -261,7 +261,9 @@ fn compare_schedule32_tree_compact_fco_and_actual_dag() {
 }
 
 fn canonical_fco_cga_de() -> String {
-    let sparse_clifford_api = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
+    let sparse_clifford_api = fe_codegen::standalone_ctfe_ingot_source(include_str!(
+        "../../../ingots/sparse_clifford/src/lib.fe"
+    ));
     let base = include_str!("fixtures/fco_cga80_direct_lanes.fe");
     let (prefix, rest) = base
         .split_once("// BEGIN_PUBLIC_ORACLES")

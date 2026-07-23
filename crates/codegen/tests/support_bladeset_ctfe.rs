@@ -46,7 +46,8 @@ fn grade_oracle(bits: u32, dimension: u32, grade: u32) -> u32 {
 #[test]
 fn reusable_bladeset_ctfe_matches_independent_support_oracles() {
     let mut db = DriverDataBase::default();
-    let source = format!("{API}\n{PROBES}");
+    let api = fe_codegen::standalone_ctfe_ingot_source(API);
+    let source = format!("{api}\n{PROBES}");
     let url = Url::parse("file:///support_bladeset_ctfe.fe").unwrap();
     db.workspace().touch(&mut db, url.clone(), Some(source));
     let file = db.workspace().get(&db, &url).unwrap();

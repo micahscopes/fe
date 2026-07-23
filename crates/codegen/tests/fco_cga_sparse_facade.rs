@@ -18,7 +18,8 @@ fn composed_source() -> String {
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
-    format!("{SPARSE_CLIFFORD_API}\n{prefix}{suffix}\n{BODY}")
+    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
+    format!("{sparse_api}\n{prefix}{suffix}\n{BODY}")
 }
 
 #[test]

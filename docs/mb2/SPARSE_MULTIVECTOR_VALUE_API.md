@@ -46,12 +46,12 @@ ingots. Domain support wrappers
 remain useful to bind a particular support and blade at a readable API
 boundary, but rank depth and computed storage aliases are no longer compiler
 limits: recursive `SparseIndex<7>` and `SparseStorage<8>` both execute. The
-runtime-facing ingot boundary is deliberately type-oriented: callable CTFE
-implementation helpers stay private. When this source is prepended to a root
-module, a public const function is also a runtime export candidate, while its
-compile-time-only bitwise/`usize` body is outside the Wasm R1 runtime envelope.
-Public recursive type functions preserve the reusable contract without
-leaking those helper bodies into the browser package.
+true ingot dependency keeps its callable CTFE helpers public without rooting
+them as runtime exports. The current standalone browser publication path
+explicitly removes `pub` only from const helpers while composing the ingot
+source into the app's root module; otherwise source composition would erase
+the module boundary and expose compile-time-only bitwise/`usize` bodies to the
+Wasm R1 runtime package. This is publication plumbing, not an API restriction.
 parser explicitly consumes a continuation newline after a
 type-alias `=`, so formatting that ground alias over multiple lines no longer
 silently leaves its RHS invalid during later trait selection.

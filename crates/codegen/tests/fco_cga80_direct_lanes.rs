@@ -9,7 +9,8 @@ const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
 
 fn canonical_source() -> String {
-    format!("{SPARSE_CLIFFORD_API}\n{CANONICAL}")
+    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
+    format!("{sparse_api}\n{CANONICAL}")
 }
 
 fn compile_to_wasm(source: &str) -> Vec<u8> {

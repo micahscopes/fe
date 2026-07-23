@@ -12,6 +12,58 @@ fn ground_type_inspection_exposes_constructor_and_ordered_args() {
 }
 
 #[test]
+fn ground_type_inspection_keeps_recursive_type_fn_alias_opaque() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_ground_type_fn_alias_limit.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Inspect { type Out }
+struct Zero {}
+struct Term<const Candidate: usize> {}
+struct Add<L, R> {}
+struct Yes {}
+struct No {}
+
+recursive type fn Plan<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{N - 1}>, Plan<{N - 1}>>
+    }
+}
+type GroundPlan = Plan<3>
+
+struct Target {}
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        let out = builder.ty<No>()
+        // Current ground-type inspection is deliberately source-syntactic:
+        // it sees the GroundPlan alias, not its normalized Add/Term tree.
+        for nested in builder.ty<GroundPlan>().preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                out = builder.ty<Yes>()
+            }
+        }
+        builder.emit_assoc_ty("Out", out)
+        builder.finish()
+        ev
+    }
+}
+
+derive Inspect for Target using Inspector
+fn takes_no(_ value: No) {}
+fn proves_current_boundary(value: <Target as Inspect>::Out) { takes_no(value) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn method_quote_supports_hygienic_local_let_block() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

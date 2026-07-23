@@ -161,7 +161,8 @@ fn main() {
     let repo = manifest.parent().unwrap().parent().unwrap();
     let out = repo.join("demos/webgpu-qcga3d-quadric/gen");
 
-    let source = format!("{SPARSE_CLIFFORD_API}\n{PLANNER_SOURCE}\n{RENDER_SOURCE}");
+    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
+    let source = format!("{sparse_api}\n{PLANNER_SOURCE}\n{RENDER_SOURCE}");
     let mut raw_db = DriverDataBase::default();
     let raw_url = Url::parse("file:///qcga3d_sparse_planned_render.fe").unwrap();
     raw_db

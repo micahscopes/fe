@@ -723,6 +723,23 @@ and shared-DAG staging are measured and trustworthy.
 - `docs/mb2/SCHEDULE_STRATEGY_COMPARISON.md`
 - `demos/webgpu-cga-inversion/gen-schedule32/actor-source.fe`
 
+## Remaining FCO plan-interpretation boundary
+
+FCO can inspect constructor and literal generic arguments of a source-level
+ground nominal type with `preorder_types()`. It cannot currently interpret the
+normalized result of a recursive type-function alias: a focused provider gate
+proves `builder.ty<GroundPlan>().preorder_types()` sees the alias itself and no
+underlying `Term<Candidate>` nodes.
+
+Bridging this is not a small executor tweak. Providers run in lowering over
+syntax `TypeId`, strictly upstream of the semantic `TyId` normalization query.
+A normalized staged type-reflection handle therefore needs an explicit
+phase-safe compiler design. Until then Schedule32 and QCGA consume the same
+scalar CTFE candidate semantics, but their FCO emitters must scan the bounded
+candidate universe rather than interpret the recursive plan tree directly.
+Their domain-specific sign, magnitude, operand projection, output routing and
+reduction topology remain honest application policy.
+
 ## External design references
 
 - Symbolics.jl separates symbolic IR from target-specific function generation

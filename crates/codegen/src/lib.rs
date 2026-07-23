@@ -39,6 +39,16 @@ pub use sonatina::{
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
 };
 pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expected_revert};
+
+/// Embeds a CTFE-oriented ingot as a standalone root-module source artifact.
+///
+/// A true dependency ingot may expose public const helpers without making
+/// them runtime exports. Source composition loses that module boundary, so
+/// standalone publication removes only callable const-helper visibility while
+/// preserving public types, type functions, and runtime functions.
+pub fn standalone_ctfe_ingot_source(source: &str) -> String {
+    source.replace("pub const fn ", "const fn ")
+}
 #[cfg(feature = "spirv-backend")]
 pub use web_bundle::{
     WEB_ACTOR_RUNTIME_PROTOCOL, WEB_ACTOR_RUNTIME_VERSION, WEB_BUNDLE_PROTOCOL,

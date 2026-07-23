@@ -6209,9 +6209,12 @@ fn qcga3d_rotated_quadric_render_executes_wasm_equal_on_lavapipe() {
 
 #[test]
 fn qcga3d_sparse_planned_render_emits_browser_profile_wgsl() {
+    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(include_str!(
+        "../../../ingots/sparse_clifford/src/lib.fe"
+    ));
     let source = format!(
         "{}\n{}\n{}",
-        include_str!("../../../ingots/sparse_clifford/src/lib.fe"),
+        sparse_api,
         include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_render_body.fe"),
     );
