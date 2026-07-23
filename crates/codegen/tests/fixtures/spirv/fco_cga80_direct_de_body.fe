@@ -7,32 +7,6 @@ extern {
 // Semantic sparse Cl(4,1) values. Their fields are exactly the compact support
 // consumed by the specialized S*P*S kernel; callers do not construct or order
 // raw coefficient tuples.
-struct ConformalSphere {
-    e1: f32,
-    e2: f32,
-    e8: f32,
-    e16: f32,
-}
-impl Copy for ConformalSphere {}
-
-struct ConformalPoint {
-    e1: f32,
-    e2: f32,
-    e4: f32,
-    e8: f32,
-    e16: f32,
-}
-impl Copy for ConformalPoint {}
-
-struct ConformalVector {
-    e1: f32,
-    e2: f32,
-    e4: f32,
-    e8: f32,
-    e16: f32,
-}
-impl Copy for ConformalVector {}
-
 pub fn cga_schedule32_vec5_de_render(
     px: i32,
     py: i32,
@@ -55,6 +29,7 @@ pub fn cga_schedule32_vec5_de_render(
     let sphere: ConformalSphere = ConformalSphere {
         e1: inv_cx,
         e2: inv_cy,
+        e4: 0.0,
         e8: center2 * 0.5 - 1.0,
         e16: center2 * 0.5,
     }
@@ -76,28 +51,8 @@ pub fn cga_schedule32_vec5_de_render(
 
         // All five lanes are provider-emitted straight-line arithmetic derived
         // from the same canonical 80-candidate Fe helpers as Schedule32.
-        let image: ConformalVector = ConformalVector {
-            e1: <CanonicalCga as Sandwich>::e1(
-                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
-                point.e1, point.e2, point.e4, point.e8, point.e16,
-            ),
-            e2: <CanonicalCga as Sandwich>::e2(
-                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
-                point.e1, point.e2, point.e4, point.e8, point.e16,
-            ),
-            e4: <CanonicalCga as Sandwich>::e4(
-                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
-                point.e1, point.e2, point.e4, point.e8, point.e16,
-            ),
-            e8: <CanonicalCga as Sandwich>::e8(
-                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
-                point.e1, point.e2, point.e4, point.e8, point.e16,
-            ),
-            e16: <CanonicalCga as Sandwich>::e16(
-                sphere.e1, sphere.e2, sphere.e8, sphere.e16,
-                point.e1, point.e2, point.e4, point.e8, point.e16,
-            ),
-        }
+        let image: ConformalVector =
+            <ConformalVector as Sandwich>::sandwich(sphere, point)
 
         let weight: f32 = image.e16 - image.e8
         let safe_weight: f32 = if weight > -0.0004 { -0.0004 } else { weight }

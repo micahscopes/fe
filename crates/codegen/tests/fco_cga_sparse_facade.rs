@@ -22,15 +22,15 @@ fn composed_source() -> String {
 
 #[test]
 fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
-    assert!(BODY.contains("struct ConformalPoint {"));
-    assert!(BODY.contains("struct ConformalSphere {"));
-    assert!(BODY.contains("struct ConformalVector {"));
+    assert!(CANONICAL.contains("type ConformalPoint = ConformalVector"));
+    assert!(CANONICAL.contains("type ConformalSphere = ConformalVector"));
+    assert!(CANONICAL.contains("struct ConformalVector {"));
     assert!(BODY.contains("let point: ConformalPoint = ConformalPoint {"));
     assert!(BODY.contains("let sphere: ConformalSphere = ConformalSphere {"));
     assert_eq!(
-        BODY.matches("<CanonicalCga as Sandwich>::").count(),
-        5,
-        "the compact semantic records should feed the five specialized lanes",
+        BODY.matches("<ConformalVector as Sandwich>::sandwich").count(),
+        1,
+        "the compact semantic records should feed one specialized aggregate method",
     );
     assert!(
         !BODY.contains("#[inline(always)]"),
@@ -78,6 +78,12 @@ fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
         compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
             .expect("sparse facade should compile through the browser Wasm backend");
     wasmparser::validate(&wasm.bytes).expect("facade Wasm must validate");
+    eprintln!("single-sandwich Wasm bytes: {}", wasm.bytes.len());
+    assert!(
+        wasm.bytes.len() <= 1456,
+        "aggregate facade exceeded the 1456-byte baseline: {} bytes",
+        wasm.bytes.len(),
+    );
     let defined_functions = wasmparser::Parser::new(0)
         .parse_all(&wasm.bytes)
         .filter_map(|payload| match payload.expect("valid Wasm payload") {
@@ -85,8 +91,8 @@ fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
             _ => None,
         })
         .sum::<u32>();
-    assert_eq!(
-        defined_functions, 6,
-        "the three semantic record literals must not introduce Wasm helper functions",
+    assert!(
+        defined_functions <= 6,
+        "the aggregate semantic facade introduced Wasm helper functions: {defined_functions}",
     );
 }

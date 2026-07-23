@@ -146,27 +146,22 @@ fn schedule_has_exactly_32_terms(value: <Schedule32 as PlanLength>::Out) {
 // END_FORCE_SCHEDULE32
 
 // BEGIN_PROVIDER_EMITTER
+// One reflected five-lane storage record lets the current provider API project
+// inputs and materialize the result without runtime accessors.  The semantic
+// names remain visible at the call boundary as aliases.
+struct ConformalVector {
+    e1: f32,
+    e2: f32,
+    e4: f32,
+    e8: f32,
+    e16: f32,
+}
+impl Copy for ConformalVector {}
+type ConformalSphere = ConformalVector
+type ConformalPoint = ConformalVector
+
 trait Sandwich {
-    fn e1(
-        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
-        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
-    ) -> f32
-    fn e2(
-        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
-        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
-    ) -> f32
-    fn e4(
-        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
-        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
-    ) -> f32
-    fn e8(
-        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
-        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
-    ) -> f32
-    fn e16(
-        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
-        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
-    ) -> f32
+    fn sandwich(_ sphere: ConformalSphere, _ point: ConformalPoint) -> ConformalVector
 }
 
 struct CanonicalCgaProvider {}
@@ -175,7 +170,30 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
         uses (reflect: Reflect<T>, builder: mut ImplBuilder<Sandwich<T>>)
     {
         // A typed f32 zero without a float-literal codegen primitive.
-        let s1 = builder.arg_ref("s1")
+        let sphere = builder.arg_ref("sphere")
+        let point_arg = builder.arg_ref("point")
+        let s1 = sphere
+        let s2 = sphere
+        let s8 = sphere
+        let s16 = sphere
+        let p1 = point_arg
+        let p2 = point_arg
+        let p4 = point_arg
+        let p8 = point_arg
+        let p16 = point_arg
+        let field_index = 0
+        for field in reflect.fields() {
+            if field_index == 0 { s1 = builder.field_get(sphere, field) }
+            if field_index == 1 { s2 = builder.field_get(sphere, field) }
+            if field_index == 3 { s8 = builder.field_get(sphere, field) }
+            if field_index == 4 { s16 = builder.field_get(sphere, field) }
+            if field_index == 0 { p1 = builder.field_get(point_arg, field) }
+            if field_index == 1 { p2 = builder.field_get(point_arg, field) }
+            if field_index == 2 { p4 = builder.field_get(point_arg, field) }
+            if field_index == 3 { p8 = builder.field_get(point_arg, field) }
+            if field_index == 4 { p16 = builder.field_get(point_arg, field) }
+            field_index = field_index + 1
+        }
         let zero = builder.sub(s1, s1)
         let lane1_0 = zero
         let lane1_1 = zero
@@ -204,21 +222,21 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
         // bounded; no survivor list is supplied.
         for triple in 0..80 {
             if keep_tag(triple) != 0 {
-                let left = builder.arg_ref("s1")
-                if raw_left_slot(triple) == 1 { left = builder.arg_ref("s2") }
-                if raw_left_slot(triple) == 2 { left = builder.arg_ref("s8") }
-                if raw_left_slot(triple) == 3 { left = builder.arg_ref("s16") }
+                let left = s1
+                if raw_left_slot(triple) == 1 { left = s2 }
+                if raw_left_slot(triple) == 2 { left = s8 }
+                if raw_left_slot(triple) == 3 { left = s16 }
 
-                let point = builder.arg_ref("p1")
-                if raw_point_slot(triple) == 1 { point = builder.arg_ref("p2") }
-                if raw_point_slot(triple) == 2 { point = builder.arg_ref("p4") }
-                if raw_point_slot(triple) == 3 { point = builder.arg_ref("p8") }
-                if raw_point_slot(triple) == 4 { point = builder.arg_ref("p16") }
+                let point = p1
+                if raw_point_slot(triple) == 1 { point = p2 }
+                if raw_point_slot(triple) == 2 { point = p4 }
+                if raw_point_slot(triple) == 3 { point = p8 }
+                if raw_point_slot(triple) == 4 { point = p16 }
 
-                let right = builder.arg_ref("s1")
-                if raw_right_slot(triple) == 1 { right = builder.arg_ref("s2") }
-                if raw_right_slot(triple) == 2 { right = builder.arg_ref("s8") }
-                if raw_right_slot(triple) == 3 { right = builder.arg_ref("s16") }
+                let right = s1
+                if raw_right_slot(triple) == 1 { right = s2 }
+                if raw_right_slot(triple) == 2 { right = s8 }
+                if raw_right_slot(triple) == 3 { right = s16 }
 
                 let product = builder.share(builder.mul(builder.mul(left, point), right))
                 let term = product
@@ -265,49 +283,74 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
             }
         }
 
-        builder.emit_method("e1", builder.add(builder.add(lane1_3, lane1_2), builder.add(lane1_1, lane1_0)))
-        builder.emit_method("e2", builder.add(builder.add(lane2_3, lane2_2), builder.add(lane2_1, lane2_0)))
-        builder.emit_method("e4", builder.add(builder.add(lane4_3, lane4_2), builder.add(lane4_1, lane4_0)))
-        builder.emit_method("e8", builder.add(builder.add(lane8_3, lane8_2), builder.add(lane8_1, lane8_0)))
-        builder.emit_method("e16", builder.add(builder.add(lane16_3, lane16_2), builder.add(lane16_1, lane16_0)))
+        let out1 = builder.add(builder.add(lane1_3, lane1_2), builder.add(lane1_1, lane1_0))
+        let out2 = builder.add(builder.add(lane2_3, lane2_2), builder.add(lane2_1, lane2_0))
+        let out4 = builder.add(builder.add(lane4_3, lane4_2), builder.add(lane4_1, lane4_0))
+        let out8 = builder.add(builder.add(lane8_3, lane8_2), builder.add(lane8_1, lane8_0))
+        let out16 = builder.add(builder.add(lane16_3, lane16_2), builder.add(lane16_1, lane16_0))
+        let image = builder.struct_init()
+        let field_index = 0
+        for field in reflect.fields() {
+            if field_index == 0 { image = builder.with_field(image, field, out1) }
+            if field_index == 1 { image = builder.with_field(image, field, out2) }
+            if field_index == 2 { image = builder.with_field(image, field, out4) }
+            if field_index == 3 { image = builder.with_field(image, field, out8) }
+            if field_index == 4 { image = builder.with_field(image, field, out16) }
+            field_index = field_index + 1
+        }
+        builder.emit_method("sandwich", image)
         builder.finish()
         ev
     }
 }
 
-struct CanonicalCga {}
-derive Sandwich for CanonicalCga using CanonicalCgaProvider
+derive Sandwich for ConformalVector using CanonicalCgaProvider
 
 // BEGIN_PUBLIC_ORACLES
 pub fn cga_fco_e1(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> f32 {
-    <CanonicalCga as Sandwich>::e1(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+    <ConformalVector as Sandwich>::sandwich(
+        ConformalVector { e1: s1, e2: s2, e4: 0.0, e8: s8, e16: s16 },
+        ConformalVector { e1: p1, e2: p2, e4: p4, e8: p8, e16: p16 },
+    ).e1
 }
 pub fn cga_fco_e2(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> f32 {
-    <CanonicalCga as Sandwich>::e2(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+    <ConformalVector as Sandwich>::sandwich(
+        ConformalVector { e1: s1, e2: s2, e4: 0.0, e8: s8, e16: s16 },
+        ConformalVector { e1: p1, e2: p2, e4: p4, e8: p8, e16: p16 },
+    ).e2
 }
 pub fn cga_fco_e4(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> f32 {
-    <CanonicalCga as Sandwich>::e4(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+    <ConformalVector as Sandwich>::sandwich(
+        ConformalVector { e1: s1, e2: s2, e4: 0.0, e8: s8, e16: s16 },
+        ConformalVector { e1: p1, e2: p2, e4: p4, e8: p8, e16: p16 },
+    ).e4
 }
 pub fn cga_fco_e8(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> f32 {
-    <CanonicalCga as Sandwich>::e8(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+    <ConformalVector as Sandwich>::sandwich(
+        ConformalVector { e1: s1, e2: s2, e4: 0.0, e8: s8, e16: s16 },
+        ConformalVector { e1: p1, e2: p2, e4: p4, e8: p8, e16: p16 },
+    ).e8
 }
 pub fn cga_fco_e16(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> f32 {
-    <CanonicalCga as Sandwich>::e16(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+    <ConformalVector as Sandwich>::sandwich(
+        ConformalVector { e1: s1, e2: s2, e4: 0.0, e8: s8, e16: s16 },
+        ConformalVector { e1: p1, e2: p2, e4: p4, e8: p8, e16: p16 },
+    ).e16
 }
 // END_PROVIDER_EMITTER
 

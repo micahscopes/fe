@@ -24,12 +24,11 @@ pub fn cga_fco_direct_render(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> u32 {{
-    let lanes =
-        <CanonicalCga as Sandwich>::e1(s1, s2, s8, s16, p1, p2, p4, p8, p16)
-        + <CanonicalCga as Sandwich>::e2(s1, s2, s8, s16, p1, p2, p4, p8, p16)
-        + <CanonicalCga as Sandwich>::e4(s1, s2, s8, s16, p1, p2, p4, p8, p16)
-        + <CanonicalCga as Sandwich>::e8(s1, s2, s8, s16, p1, p2, p4, p8, p16)
-        + <CanonicalCga as Sandwich>::e16(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+    let image = <ConformalVector as Sandwich>::sandwich(
+        ConformalVector {{ e1: s1, e2: s2, e4: 0.0, e8: s8, e16: s16 }},
+        ConformalVector {{ e1: p1, e2: p2, e4: p4, e8: p8, e16: p16 }},
+    )
+    let lanes = image.e1 + image.e2 + image.e4 + image.e8 + image.e16
     let dither = __i32_from_f32(lanes * 8.0) + px - py
     __bitcast(dither + 255 * 256 + 64 * 65536 + -16777216)
 }}
