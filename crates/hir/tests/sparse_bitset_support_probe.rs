@@ -108,6 +108,22 @@ fn ground_entry_through_generic(value: SparseMv<146>) -> i32 {
 }
 "#;
 
+const NEGATIVE_GROUND_BRIDGE: &str = r#"
+trait PresentCoefficient {}
+impl PresentCoefficient for Found<0> {}
+impl PresentCoefficient for Found<1> {}
+impl PresentCoefficient for Found<2> {}
+impl PresentCoefficient for Found<3> {}
+
+fn require_present<const Blade: usize>()
+    where FindA<Blade>: PresentCoefficient
+{}
+
+fn absent_ground_call_must_fail() {
+    require_present<3>()
+}
+"#;
+
 #[test]
 fn bitset_support_ground_queries_normalize_for_two_masks() {
     let mut db = HirAnalysisTestDb::default();
@@ -131,8 +147,7 @@ fn cl41_32_blade_grade_pruning_has_exact_ground_support_and_ranks() {
 }
 
 #[test]
-#[ignore = "current HIR solver stack-overflows on symbolic FindA bound before ground call-site discharge"]
-fn generic_sparse_mv_bridge_ground_call_repro() {
+fn generic_sparse_mv_bridge_discharges_after_ground_call_substitution() {
     let mut db = HirAnalysisTestDb::default();
     let source = format!("{SOURCE}\n{GENERIC_BRIDGE}");
     let file = db.new_stand_alone("sparse_bitset_generic_bridge.fe".into(), &source);
@@ -144,4 +159,18 @@ fn generic_sparse_mv_bridge_ground_call_repro() {
             format_diagnostics(&db, &diagnostics)
         );
     }
+}
+
+#[test]
+fn generic_sparse_bridge_does_not_accept_unsatisfied_ground_bound() {
+    let mut db = HirAnalysisTestDb::default();
+    let source = format!("{SOURCE}\n{NEGATIVE_GROUND_BRIDGE}");
+    let file = db.new_stand_alone("sparse_bitset_negative_ground_bridge.fe".into(), &source);
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("trait bound is not satisfied")
+            && rendered.contains("PresentCoefficient"),
+        "an absent ground blade must not satisfy a present-only bound:\n{rendered}"
+    );
 }

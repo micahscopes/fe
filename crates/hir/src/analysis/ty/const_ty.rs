@@ -1025,7 +1025,20 @@ pub fn canonicalize_ty_for_mode<'db>(
 
         if finalize_self && !matches!(mode, ConstCanonMode::Stored) {
             ty = complete_default_const_args_for_identity(db, ty, env.assumptions);
-            ty = normalize_ty(db, ty, env.scope, env.assumptions);
+            // `TypeNormalizer` owns ConstTy normalization and calls back into
+            // this identity canonicalizer for consts carrying a display
+            // environment. Re-entering `normalize_ty` on that same ConstTy
+            // creates a no-progress mutual recursion:
+            //
+            // normalize_ty -> normalize_const_tys_for_comparison
+            //   -> canonicalize_ty_for_mode -> normalize_ty -> ...
+            //
+            // The const branch above has already canonicalized the ConstTy and
+            // all of its payload types. Only non-const outer types need the
+            // ordinary associated-type/type-fn normalization pass here.
+            if !matches!(ty.data(db), TyData::ConstTy(_)) {
+                ty = normalize_ty(db, ty, env.scope, env.assumptions);
+            }
         }
 
         ty
