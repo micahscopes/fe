@@ -1,9 +1,13 @@
 import { instantiateWasm } from "../webgpu-keystone/wasm-runner.js";
 import { attachMessagePortActorHost } from "../shared/message-port-actor.js";
-import { createGpuActorClient } from "../shared/gpu-actor.js";
+import {
+  createTypedGpuActorClient,
+  selectActorSchemas,
+} from "../shared/gpu-actor.js";
 import { createExactLaneRouter } from "../shared/actor-router.js";
 import {
   compiledCanonicalInterface,
+  compileActorAdapter,
   createActorAdapter,
   createHostEffectAdapter,
   createInterfaceCaller,
@@ -19,14 +23,13 @@ self.addEventListener("message", async ({ data }) => {
     const exports = await instantiateWasm(wasm);
     const wasmCaller = createInterfaceCaller(exports);
     const wasmActor = createActorAdapter(exports);
-    const gpu = createGpuActorClient(gpuPort, {
-      valueCount: 0,
-      rgbaBytes: WIDTH * HEIGHT * 4,
+    const gpu = createTypedGpuActorClient(gpuPort, {
+      ...selectActorSchemas(compileActorAdapter(), ["render", "verify"]),
       initialEpoch: actorEpoch,
     });
     const hostEffects = createHostEffectAdapter({
-      render: ({ generation }) => gpu.render([], generation),
-      verify: ({ generation }) => gpu.verify([], generation),
+      render: (request) => gpu.request("render", request, request.generation),
+      verify: (request) => gpu.request("verify", request, request.generation),
       oracle: async () => {
         const frame = new Uint8Array(WIDTH * HEIGHT * 4);
         const words = new DataView(frame.buffer);

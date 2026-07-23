@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { createGpuActorClient, createMainThreadGpuBroker } from "./gpu-actor.js";
+import {
+  createGpuActorClient,
+  createMainThreadGpuBroker,
+  createTypedGpuActorClient,
+  createTypedMainThreadGpuBroker,
+} from "./gpu-actor.js";
+import { actorField, actorResultSchema, exactObject } from "./actor-endpoint.js";
 
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve }; };
@@ -29,4 +35,96 @@ assert.deepEqual(await client.verify([0, 0, 0, 0, 0], 2), new Uint8Array([1, 2, 
 await assert.rejects(client.render([4, 0, 0, 0, 0], 1), /stale GPU generation/);
 client.close();
 broker.close();
+
+const generatedSchemas = Object.freeze({
+  requestSchema: Object.freeze({
+    draw: (payload) => exactObject(payload, { value: actorField.finiteNumber }),
+    effect: (payload) => exactObject(payload, { value: actorField.finiteNumber }),
+    malformed: (payload) => exactObject(payload, { value: actorField.finiteNumber }),
+  }),
+  resultSchema: Object.freeze({
+    draw: actorResultSchema((value) =>
+      exactObject(value, { doubled: actorField.finiteNumber })),
+    effect: actorResultSchema((value) =>
+      exactObject(value, { doubled: actorField.finiteNumber })),
+    malformed: actorResultSchema((value) =>
+      exactObject(value, { doubled: actorField.finiteNumber })),
+  }),
+});
+const typedChannel = new MessageChannel();
+const typedRuns = [];
+const typedBroker = createTypedMainThreadGpuBroker(typedChannel.port1, {
+  handlers: {
+    draw(payload) {
+      const job = deferred();
+      typedRuns.push({ payload, job });
+      return job.promise;
+    },
+    effect: () => {
+      throw new Error("secret GPU device and host details");
+    },
+    malformed: () => ({ wrong: true }),
+  },
+  ...generatedSchemas,
+});
+const typedClient = createTypedGpuActorClient(typedChannel.port2, generatedSchemas);
+const first = typedClient.request("draw", { value: 1 }, 4);
+const superseded = typedClient.request("draw", { value: 2 }, 4);
+const supersededRejected = assert.rejects(superseded, /superseded/);
+const latest = typedClient.request("draw", { value: 3 }, 4);
+await tick();
+assert.deepEqual(typedBroker.state(), {
+  draw: { active: 1, pending: 3 },
+  effect: { active: null, pending: null },
+  malformed: { active: null, pending: null },
+});
+await supersededRejected;
+typedRuns[0].job.resolve({ doubled: 2 });
+assert.deepEqual(await first, { doubled: 2 });
+await tick();
+assert.deepEqual(typedRuns[1].payload, { value: 3 });
+typedRuns[1].job.resolve({ doubled: 6 });
+assert.deepEqual(await latest, { doubled: 6 });
+await assert.rejects(typedClient.request("effect", { value: 1 }, 4), (error) => {
+  assert.equal(error.message, "FE_ACTOR_GPU_EFFECT");
+  assert.doesNotMatch(error.message, /secret|device|host/);
+  return true;
+});
+await assert.rejects(typedClient.request("malformed", { value: 1 }, 4), (error) => {
+  assert.equal(error.message, "FE_ACTOR_INVALID_GPU_RESULT");
+  assert.doesNotMatch(error.message, /wrong|doubled|object/);
+  return true;
+});
+await assert.rejects(
+  typedClient.request("unknown", { value: 1 }, 4),
+  /no request schema for actor lane unknown/,
+);
+
+const interrupted = typedClient.request("draw", { value: 4 }, 5);
+const pendingAtRestart = typedClient.request("draw", { value: 5 }, 5);
+await tick();
+assert.equal(typedBroker.restart(1), 1);
+await assert.rejects(pendingAtRestart, /GPU actor restarted/);
+assert.equal(typedClient.restart(), 1);
+await assert.rejects(interrupted, /GPU actor client restarted/);
+typedRuns.at(-1).job.resolve({ doubled: 8 });
+await tick();
+assert.equal(typedClient.pendingCount(), 0);
+
+assert.throws(
+  () => createTypedMainThreadGpuBroker(new MessageChannel().port1, {
+    handlers: { draw() {} },
+    ...generatedSchemas,
+  }),
+  /must exactly cover actor lanes/,
+);
+assert.throws(
+  () => createTypedGpuActorClient(new MessageChannel().port1, {
+    requestSchema: generatedSchemas.requestSchema,
+    resultSchema: { draw: generatedSchemas.resultSchema.draw },
+  }),
+  /must exactly cover actor lanes/,
+);
+typedClient.close();
+typedBroker.close();
 console.log("shared GPU actor bounded lanes, typed replies, and stale generations: ok");

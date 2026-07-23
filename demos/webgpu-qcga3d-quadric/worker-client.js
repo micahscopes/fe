@@ -1,6 +1,9 @@
 import { actorEnvelope } from "../shared/actor-coordinator.js";
 import { createModuleWorkerActor } from "../shared/module-worker-actor.js";
-import { createMainThreadGpuBroker } from "../shared/gpu-actor.js";
+import {
+  createTypedMainThreadGpuBroker,
+  selectActorSchemas,
+} from "../shared/gpu-actor.js";
 
 export async function createQcgaActor({
   wasm,
@@ -12,6 +15,7 @@ export async function createQcgaActor({
   let requestId = 0;
   const { compileActorAdapter } = await import("./gen/actor-interface.js");
   const schemas = compileActorAdapter();
+  const gpuSchemas = selectActorSchemas(schemas, ["render", "verify"]);
   const actor = await createModuleWorkerActor({
     workerUrl: new URL("./wasm-worker.js", import.meta.url),
     init: { wasm },
@@ -19,11 +23,12 @@ export async function createQcgaActor({
     resultSchema: schemas.resultSchema,
     createAuxiliaryPorts(epoch) {
       const channel = new MessageChannel();
-      const broker = createMainThreadGpuBroker(channel.port1, {
-        render: gpuRender,
-        verify: gpuVerify,
-        valueCount: 0,
-        rgbaBytes: width * height * 4,
+      const broker = createTypedMainThreadGpuBroker(channel.port1, {
+        handlers: {
+          render: (_payload, request) => gpuRender([], request),
+          verify: (_payload, request) => gpuVerify([], request),
+        },
+        ...gpuSchemas,
         initialEpoch: epoch,
       });
       return {
