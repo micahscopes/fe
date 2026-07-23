@@ -16,9 +16,9 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32>
 
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    var phi_164_: f32;
+    var phi_166_: f32;
     var phi_41_: u32;
-    var edge_0_2_phi_164_: f32;
+    var edge_0_2_phi_166_: f32;
     var edge_0_2_phi_41_: u32;
     var loop_result: u32;
     var loop_did_return: bool = false;
@@ -26,7 +26,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var phi_92_: f32;
     var edge_5_7_phi_92_: f32;
     var edge_3_7_phi_92_: f32;
-    var edge_10_2_phi_164_: f32;
+    var edge_10_2_phi_166_: f32;
     var edge_10_2_phi_41_: u32;
 
     let _e7 = input.p0_;
@@ -39,14 +39,14 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let _e33 = (1f / sqrt((((_e22 * _e22) + (_e25 * _e25)) + 3.2399998f)));
     let _e42 = (((_e13 * _e13) + (_e15 * _e15)) * 0.5f);
     let _e44 = (_e42 - 1f);
-    edge_0_2_phi_164_ = 0f;
+    edge_0_2_phi_166_ = 0f;
     edge_0_2_phi_41_ = 0u;
-    let _e50 = edge_0_2_phi_164_;
+    let _e50 = edge_0_2_phi_166_;
     let _e52 = edge_0_2_phi_41_;
-    phi_164_ = _e50;
+    phi_166_ = _e50;
     phi_41_ = _e52;
     loop {
-        let _e57 = phi_164_;
+        let _e57 = phi_166_;
         let _e59 = phi_41_;
         let _e63 = (bitcast<i32>(_e59) < bitcast<i32>(72u));
         if _e63 {
@@ -109,11 +109,11 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
                     break;
                 }
             } else {
-                edge_10_2_phi_164_ = (_e57 + (_e252 * 0.18f));
+                edge_10_2_phi_166_ = (_e57 + (_e252 * 0.18f));
                 edge_10_2_phi_41_ = (_e59 + 1u);
-                let _e296 = edge_10_2_phi_164_;
+                let _e296 = edge_10_2_phi_166_;
                 let _e298 = edge_10_2_phi_41_;
-                phi_164_ = _e296;
+                phi_166_ = _e296;
                 phi_41_ = _e298;
                 continue;
             }
