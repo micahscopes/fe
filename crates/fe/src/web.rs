@@ -10,20 +10,40 @@ use url::Url;
 
 use crate::{WebCanonicalPolicy, WebMode};
 
-pub fn build(
-    path: &Utf8PathBuf,
-    entry: &str,
-    mode: WebMode,
-    out: &Utf8PathBuf,
-    workgroup: [Option<u32>; 3],
-    source_id: Option<String>,
-    canonical: WebCanonicalPolicy,
-    canonical_entries: &[String],
-) -> Result<(), String> {
+#[derive(Debug, Clone)]
+pub struct CompileRequest {
+    pub path: Utf8PathBuf,
+    pub entry: String,
+    pub mode: WebMode,
+    pub workgroup: [Option<u32>; 3],
+    pub source_id: Option<String>,
+    pub canonical: WebCanonicalPolicy,
+    pub canonical_entries: Vec<String>,
+}
+
+pub fn build(request: &CompileRequest, out: &Utf8PathBuf) -> Result<(), String> {
+    let bundle = compile(request)?;
+    bundle
+        .write_atomic(out.as_std_path())
+        .map_err(|error| error.to_string())?;
+    println!("wrote web bundle: {out}");
+    Ok(())
+}
+
+pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
+    let CompileRequest {
+        path,
+        entry,
+        mode,
+        workgroup,
+        source_id,
+        canonical,
+        canonical_entries,
+    } = request;
     if entry.is_empty() {
         return Err("`--entry` must not be empty".to_string());
     }
-    match (canonical, canonical_entries.is_empty()) {
+    match (*canonical, canonical_entries.is_empty()) {
         (WebCanonicalPolicy::Disabled, false) => {
             return Err(
                 "`--canonical-entry` is only valid with `--canonical optional|required`"
@@ -41,7 +61,7 @@ pub fn build(
         }
         _ => {}
     }
-    let workgroup = match (mode, workgroup) {
+    let workgroup = match (*mode, *workgroup) {
         (WebMode::Render, [None, None, None]) => None,
         (WebMode::Render, _) => {
             return Err("workgroup flags are only valid with `--mode grid`".to_string());
@@ -102,8 +122,8 @@ pub fn build(
         ));
     }
     let mut options = match mode {
-        WebMode::Render => WebBuildOptions::render(entry, source_id),
-        WebMode::Grid => WebBuildOptions::grid(entry, workgroup.unwrap(), source_id),
+        WebMode::Render => WebBuildOptions::render(entry, source_id.clone()),
+        WebMode::Grid => WebBuildOptions::grid(entry, workgroup.unwrap(), source_id.clone()),
     }
     .with_canonical_policy(match canonical {
         WebCanonicalPolicy::Disabled => codegen::WebCanonicalPolicy::Disabled,
@@ -111,42 +131,61 @@ pub fn build(
         WebCanonicalPolicy::Required => codegen::WebCanonicalPolicy::Required,
     });
     options = options.with_canonical_entries(canonical_entries.iter().cloned());
-    let bundle = WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())?;
-    bundle
-        .write_atomic(out.as_std_path())
-        .map_err(|error| error.to_string())?;
-    println!("wrote web bundle: {out}");
-    Ok(())
+    WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn request(
+        path: &str,
+        entry: &str,
+        mode: WebMode,
+        workgroup: [Option<u32>; 3],
+        canonical: WebCanonicalPolicy,
+        canonical_entries: &[&str],
+    ) -> CompileRequest {
+        CompileRequest {
+            path: path.into(),
+            entry: entry.to_owned(),
+            mode,
+            workgroup,
+            source_id: None,
+            canonical,
+            canonical_entries: canonical_entries
+                .iter()
+                .map(|entry| (*entry).to_owned())
+                .collect(),
+        }
+    }
+
     #[test]
     fn mode_requires_explicit_consistent_workgroup() {
         let missing = build(
-            &"missing.fe".into(),
-            "shade",
-            WebMode::Grid,
+            &request(
+                "missing.fe",
+                "shade",
+                WebMode::Grid,
+                [Some(8), None, Some(1)],
+                WebCanonicalPolicy::Disabled,
+                &[],
+            ),
             &"out".into(),
-            [Some(8), None, Some(1)],
-            None,
-            WebCanonicalPolicy::Disabled,
-            &[],
         )
         .unwrap_err();
         assert!(missing.contains("requires non-zero"), "{missing}");
 
         let render = build(
-            &"missing.fe".into(),
-            "shade",
-            WebMode::Render,
+            &request(
+                "missing.fe",
+                "shade",
+                WebMode::Render,
+                [Some(8), Some(4), Some(1)],
+                WebCanonicalPolicy::Disabled,
+                &[],
+            ),
             &"out".into(),
-            [Some(8), Some(4), Some(1)],
-            None,
-            WebCanonicalPolicy::Disabled,
-            &[],
         )
         .unwrap_err();
         assert!(render.contains("only valid"), "{render}");
@@ -155,27 +194,29 @@ mod tests {
     #[test]
     fn canonical_entry_policy_combinations_fail_before_io() {
         let missing = build(
-            &"missing.fe".into(),
-            "shade",
-            WebMode::Render,
+            &request(
+                "missing.fe",
+                "shade",
+                WebMode::Render,
+                [None, None, None],
+                WebCanonicalPolicy::Required,
+                &[],
+            ),
             &"out".into(),
-            [None, None, None],
-            None,
-            WebCanonicalPolicy::Required,
-            &[],
         )
         .unwrap_err();
         assert!(missing.contains("is required"), "{missing}");
 
         let disabled = build(
-            &"missing.fe".into(),
-            "shade",
-            WebMode::Render,
+            &request(
+                "missing.fe",
+                "shade",
+                WebMode::Render,
+                [None, None, None],
+                WebCanonicalPolicy::Disabled,
+                &["update"],
+            ),
             &"out".into(),
-            [None, None, None],
-            None,
-            WebCanonicalPolicy::Disabled,
-            &["update".to_owned()],
         )
         .unwrap_err();
         assert!(disabled.contains("only valid"), "{disabled}");
@@ -206,21 +247,20 @@ pub fn shade(x: u32, y: u32) -> u32 {
         .unwrap();
         let source = Utf8PathBuf::from_path_buf(source).unwrap();
         let out = Utf8PathBuf::from_path_buf(temp.path().join("bundle")).unwrap();
-        build(
-            &source,
-            "shade",
-            WebMode::Render,
-            &out,
-            [None, None, None],
-            None,
-            WebCanonicalPolicy::Required,
-            &[
+        let request = CompileRequest {
+            path: source,
+            entry: "shade".to_owned(),
+            mode: WebMode::Render,
+            workgroup: [None, None, None],
+            source_id: None,
+            canonical: WebCanonicalPolicy::Required,
+            canonical_entries: vec![
                 "verify".to_owned(),
                 "update".to_owned(),
                 "verify".to_owned(),
             ],
-        )
-        .unwrap();
+        };
+        build(&request, &out).unwrap();
         assert!(out.join("module.wasm").exists());
         assert!(out.join("shader.wgsl").exists());
         let manifest = std::fs::read_to_string(out.join("manifest.json")).unwrap();

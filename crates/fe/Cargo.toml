@@ -4,8 +4,9 @@ version = "26.2.0"
 edition.workspace = true
 
 [features]
-default = ["doc-server", "lsp"]
+default = ["doc-server", "web-server", "lsp"]
 doc-server = ["dep:tokio", "dep:axum"]
+web-server = ["dep:tokio", "dep:axum"]
 lsp = ["dep:language-server", "dep:tokio"]
 
 [dependencies]
@@ -47,7 +48,7 @@ crossbeam-channel.workspace = true
 scip = "0.6.1"
 protobuf = "=3.7.2"
 language-server = { workspace = true, optional = true }
-tokio = { version = "1.43.0", default-features = false, features = ["rt-multi-thread", "net", "macros"], optional = true }
+tokio = { version = "1.43.0", default-features = false, features = ["rt-multi-thread", "net", "macros", "fs", "time", "io-util"], optional = true }
 axum = { version = "0.8", optional = true }
 
 [dev-dependencies]

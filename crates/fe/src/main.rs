@@ -12,6 +12,8 @@ mod test;
 #[cfg(not(target_arch = "wasm32"))]
 mod tree;
 mod web;
+#[cfg(feature = "web-server")]
+mod web_serve;
 mod workspace_ingot;
 
 use std::fs;
@@ -397,37 +399,81 @@ pub enum Command {
 pub enum WebAction {
     /// Compile one source entry to a Wasm + WebGPU bundle.
     Build {
-        /// Path to a standalone `.fe` file or ingot directory.
-        path: Utf8PathBuf,
-        /// Exact public top-level Fe function to compile.
-        #[arg(long)]
-        entry: String,
-        #[arg(long, value_enum)]
-        mode: WebMode,
+        #[command(flatten)]
+        compile: WebCompileArgs,
         /// New output directory; existing destinations are rejected.
         #[arg(long)]
         out: Utf8PathBuf,
-        /// Grid workgroup X dimension (required for grid mode).
-        #[arg(long)]
-        workgroup_x: Option<u32>,
-        /// Grid workgroup Y dimension (required for grid mode).
-        #[arg(long)]
-        workgroup_y: Option<u32>,
-        /// Grid workgroup Z dimension (required for grid mode).
-        #[arg(long)]
-        workgroup_z: Option<u32>,
-        /// Stable source identity recorded in the bundle manifest.
-        #[arg(long)]
-        source_id: Option<String>,
-        /// Canonical browser ABI policy. No adapter is generated implicitly.
-        #[arg(long, value_enum, default_value = "disabled")]
-        canonical: WebCanonicalPolicy,
-        /// Public Fe message-lane entry used by the canonical browser ABI.
-        /// Repeat for multiple lanes. At least one is required when
-        /// `--canonical` is optional or required.
-        #[arg(long)]
-        canonical_entry: Vec<String>,
     },
+    /// Compile, watch, and serve a browser bundle with WebGPU isolation headers.
+    #[cfg(feature = "web-server")]
+    Serve {
+        #[command(flatten)]
+        compile: WebCompileArgs,
+        /// Static application root served at `/`.
+        #[arg(long)]
+        root: Utf8PathBuf,
+        /// URL prefix at which generated bundle files are served.
+        #[arg(long, default_value = "/gen")]
+        mount: String,
+        /// Interface on which to listen.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port on which to listen. Pass 0 to select a free port.
+        #[arg(long, default_value_t = 8788)]
+        port: u16,
+        /// Source polling and rebuild debounce interval.
+        #[arg(long, default_value_t = 250)]
+        poll_ms: u64,
+        /// Compile once without watching source files.
+        #[arg(long)]
+        no_watch: bool,
+    },
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WebCompileArgs {
+    /// Path to a standalone `.fe` file or ingot directory.
+    path: Utf8PathBuf,
+    /// Exact public top-level Fe function to compile.
+    #[arg(long)]
+    entry: String,
+    #[arg(long, value_enum)]
+    mode: WebMode,
+    /// Grid workgroup X dimension (required for grid mode).
+    #[arg(long)]
+    workgroup_x: Option<u32>,
+    /// Grid workgroup Y dimension (required for grid mode).
+    #[arg(long)]
+    workgroup_y: Option<u32>,
+    /// Grid workgroup Z dimension (required for grid mode).
+    #[arg(long)]
+    workgroup_z: Option<u32>,
+    /// Stable source identity recorded in the bundle manifest.
+    #[arg(long)]
+    source_id: Option<String>,
+    /// Canonical browser ABI policy. No adapter is generated implicitly.
+    #[arg(long, value_enum, default_value = "disabled")]
+    canonical: WebCanonicalPolicy,
+    /// Public Fe message-lane entry used by the canonical browser ABI.
+    /// Repeat for multiple lanes. At least one is required when
+    /// `--canonical` is optional or required.
+    #[arg(long)]
+    canonical_entry: Vec<String>,
+}
+
+impl WebCompileArgs {
+    fn request(&self) -> web::CompileRequest {
+        web::CompileRequest {
+            path: self.path.clone(),
+            entry: self.entry.clone(),
+            mode: self.mode,
+            workgroup: [self.workgroup_x, self.workgroup_y, self.workgroup_z],
+            source_id: self.source_id.clone(),
+            canonical: self.canonical,
+            canonical_entries: self.canonical_entry.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -509,29 +555,37 @@ pub fn run(opts: &Options) {
 
     match &opts.command {
         Command::Web { action } => match action {
-            WebAction::Build {
-                path,
-                entry,
-                mode,
-                out,
-                workgroup_x,
-                workgroup_y,
-                workgroup_z,
-                source_id,
-                canonical,
-                canonical_entry,
-            } => {
-                if let Err(err) = web::build(
-                    path,
-                    entry,
-                    *mode,
-                    out,
-                    [*workgroup_x, *workgroup_y, *workgroup_z],
-                    source_id.clone(),
-                    *canonical,
-                    canonical_entry,
-                ) {
+            WebAction::Build { compile, out } => {
+                if let Err(err) = web::build(&compile.request(), out) {
                     eprintln!("Error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(feature = "web-server")]
+            WebAction::Serve {
+                compile,
+                root,
+                mount,
+                host,
+                port,
+                poll_ms,
+                no_watch,
+            } => {
+                let config = web_serve::ServeConfig {
+                    compile: compile.request(),
+                    root: root.clone(),
+                    mount: mount.clone(),
+                    host: host.clone(),
+                    port: *port,
+                    poll_interval: std::time::Duration::from_millis(*poll_ms),
+                    watch: !*no_watch,
+                };
+                let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+                    eprintln!("Error: failed to create web server runtime: {error}");
+                    std::process::exit(1);
+                });
+                if let Err(error) = runtime.block_on(web_serve::serve(config)) {
+                    eprintln!("Error: {error}");
                     std::process::exit(1);
                 }
             }
@@ -1238,13 +1292,17 @@ mod web_cli_tests {
         let Command::Web {
             action:
                 WebAction::Build {
-                    entry,
-                    mode,
-                    workgroup_x,
-                    workgroup_y,
-                    workgroup_z,
-                    canonical,
-                    canonical_entry,
+                    compile:
+                        WebCompileArgs {
+                            entry,
+                            mode,
+                            workgroup_x,
+                            workgroup_y,
+                            workgroup_z,
+                            canonical,
+                            canonical_entry,
+                            ..
+                        },
                     ..
                 },
         } = options.command
@@ -1301,8 +1359,12 @@ mod web_cli_tests {
             let Command::Web {
                 action:
                     WebAction::Build {
-                        canonical,
-                        canonical_entry,
+                        compile:
+                            WebCompileArgs {
+                                canonical,
+                                canonical_entry,
+                                ..
+                            },
                         ..
                     },
             } = options.command
@@ -1340,14 +1402,69 @@ mod web_cli_tests {
         ])
         .unwrap();
         let Command::Web {
-            action: WebAction::Build {
-                canonical_entry, ..
-            },
+            action:
+                WebAction::Build {
+                    compile:
+                        WebCompileArgs {
+                            canonical_entry, ..
+                        },
+                    ..
+                },
         } = options.command
         else {
             panic!("expected web build");
         };
         assert_eq!(canonical_entry, ["render_message", "verify_message"]);
+    }
+
+    #[cfg(feature = "web-server")]
+    #[test]
+    fn web_serve_cli_reuses_compile_args_and_keeps_server_scope_explicit() {
+        let options = Options::try_parse_from([
+            "fe",
+            "web",
+            "serve",
+            "kernel.fe",
+            "--entry",
+            "shade",
+            "--mode",
+            "render",
+            "--root",
+            "demo",
+            "--mount",
+            "/generated",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "0",
+            "--poll-ms",
+            "40",
+            "--no-watch",
+        ])
+        .unwrap();
+        let Command::Web {
+            action:
+                WebAction::Serve {
+                    compile,
+                    root,
+                    mount,
+                    host,
+                    port,
+                    poll_ms,
+                    no_watch,
+                },
+        } = options.command
+        else {
+            panic!("expected web serve");
+        };
+        assert_eq!(compile.path, Utf8PathBuf::from("kernel.fe"));
+        assert_eq!(compile.entry, "shade");
+        assert_eq!(root, Utf8PathBuf::from("demo"));
+        assert_eq!(mount, "/generated");
+        assert_eq!(host, "0.0.0.0");
+        assert_eq!(port, 0);
+        assert_eq!(poll_ms, 40);
+        assert!(no_watch);
     }
 }
 
