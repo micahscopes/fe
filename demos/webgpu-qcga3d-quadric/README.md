@@ -21,7 +21,13 @@ The generic adapter derives the unique placement shared by the supplied
 Worker-side proxy does not restate that placement, and mixed-placement handler
 sets fail closed.
 
-The visible kernel is the sparse planner-backed renderer documented in
+The visible kernel is a real Fe application ingot depending on the public
+`ingots/sparse_clifford` package, rather than a generator-flattened source
+concatenation. The generated `app/fe.toml` and `app/src/lib.fe` publish that
+reproducible package boundary; `kernel.fe` is an inspectable dependency-backed
+kernel excerpt and is intentionally not standalone.
+
+The sparse planner-backed renderer is documented in
 `docs/mb2/QCGA_SPARSE_PLANNER.md`: Fe CTFE derives a recursive 12-term plan
 from two sparse 12-entry support lists, and one FCO provider publishes the
 aggregate contraction used at each hit. Camera and canonical quadric

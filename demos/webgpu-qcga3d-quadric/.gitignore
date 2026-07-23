@@ -1,2 +1,8 @@
-gen/
+gen/*
+!gen/app/
+gen/app/*
+!gen/app/fe.toml
+!gen/app/src/
+gen/app/src/*
+!gen/app/src/lib.fe
 __pycache__/

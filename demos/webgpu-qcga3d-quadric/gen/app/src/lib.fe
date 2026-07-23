@@ -1,0 +1,580 @@
+use sparse_clifford::{
+    Nat, PlanLength, SparsePlan, plan_mask_candidate, plan_mask_cardinality,
+}
+
+// Bounded Fe-native sparse planner for the grade-1 QCGA point/dual-quadric
+// contraction used by the rotated-quadric demo.
+//
+// This intentionally represents two 12-blade support lists, not a dense
+// 2^15-entry Cl(9,6) multivector. It plans exactly this null-vector
+// contraction; it is not a general QCGA product engine.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+const POINT_TERMS: usize = 12
+const QUADRIC_TERMS: usize = 12
+const CANDIDATES: usize = POINT_TERMS * QUADRIC_TERMS
+
+// Slots in the paper-null basis:
+// e1,e2,e3, eo1..eo6, ei1..ei6.
+const fn point_blade(_ slot: usize) -> usize {
+    if slot < 6 { slot } else { slot + 3 }
+}
+
+const fn quadric_blade(_ slot: usize) -> usize {
+    slot
+}
+
+const fn candidate_left(_ candidate: usize) -> usize {
+    candidate / 12
+}
+
+const fn candidate_right(_ candidate: usize) -> usize {
+    candidate % 12
+}
+
+// +1 for equal Euclidean blades, -1 for eo_k/ei_k and ei_k/eo_k, 0
+// otherwise. Encoding: 0=annihilated, 1=positive, 2=negative.
+const fn contraction_sign(_ candidate: usize) -> usize {
+    let left = point_blade(candidate_left(candidate))
+    let right = quadric_blade(candidate_right(candidate))
+    let mut sign: usize = 0
+    if left == right {
+        if left < 3 { sign = 1 }
+    }
+    if left >= 3 {
+        if left < 9 {
+            if right == left + 6 { sign = 2 }
+        }
+    }
+    if left >= 9 {
+        if right + 6 == left { sign = 2 }
+    }
+    sign
+}
+
+const fn incidence_keep_word(_ first: usize, _ last: usize) -> u32 {
+    let mut candidate: usize = first
+    let mut keep_bits: u32 = 0
+    while candidate < last {
+        if contraction_sign(candidate) != 0 {
+            keep_bits =
+                keep_bits | ((1 as u32) << (candidate - first).downcast_truncate())
+        }
+        candidate = candidate + 1
+    }
+    keep_bits
+}
+
+const INCIDENCE_KEEP0: u32 = incidence_keep_word(0, 24)
+const INCIDENCE_KEEP1: u32 = incidence_keep_word(24, 48)
+const INCIDENCE_KEEP2: u32 = incidence_keep_word(48, 72)
+const INCIDENCE_KEEP3: u32 = incidence_keep_word(72, 96)
+const INCIDENCE_KEEP4: u32 = incidence_keep_word(96, 120)
+const INCIDENCE_KEEP5: u32 = incidence_keep_word(120, 144)
+const INCIDENCE_KEEP6: u32 = 0
+const INCIDENCE_KEEP7: u32 = 0
+
+const fn survivor_count() -> usize {
+    plan_mask_cardinality(
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
+        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
+        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES,
+    )
+}
+
+const fn survivor_candidate(_ target: usize) -> usize {
+    plan_mask_candidate(
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
+        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
+        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES, target,
+    )
+}
+
+static_assert(survivor_count() == 12)
+static_assert(INCIDENCE_KEEP0 == 8193)
+static_assert(INCIDENCE_KEEP1 == 2097156)
+static_assert(INCIDENCE_KEEP2 == 8389632)
+static_assert(INCIDENCE_KEEP3 == 65544)
+static_assert(INCIDENCE_KEEP4 == 262176)
+static_assert(INCIDENCE_KEEP5 == 1048704)
+
+// Literal type arguments avoid the current semantic-MIR const-value-path
+// lowering edge; the assertions above tie them to the computed incidence mask.
+type IncidencePlan12 =
+    SparsePlan<
+        8193, 2097156, 8389632, 65544, 262176, 1048704, 0, 0,
+        CANDIDATES,
+        12,
+    >
+static_assert(survivor_candidate(0) == 0)
+static_assert(survivor_candidate(1) == 13)
+static_assert(survivor_candidate(2) == 26)
+static_assert(survivor_candidate(3) == 45)
+static_assert(survivor_candidate(4) == 58)
+static_assert(survivor_candidate(5) == 71)
+static_assert(survivor_candidate(6) == 75)
+static_assert(survivor_candidate(7) == 88)
+static_assert(survivor_candidate(8) == 101)
+static_assert(survivor_candidate(9) == 114)
+static_assert(survivor_candidate(10) == 127)
+static_assert(survivor_candidate(11) == 140)
+
+fn takes_nat12(_ value: Nat<12>) {}
+fn planned_support_has_twelve_terms(value: <IncidencePlan12 as PlanLength>::Out) {
+    takes_nat12(value)
+}
+
+// Flat reflected carrier: the first twelve fields are the point support list,
+// the second twelve are the dual-quadric support list. The provider selects
+// fields exclusively from the CTFE support functions above.
+struct SparseIncidenceOperands {
+    p0: f32, p1: f32, p2: f32, p3: f32, p4: f32, p5: f32,
+    p6: f32, p7: f32, p8: f32, p9: f32, p10: f32, p11: f32,
+    q0: f32, q1: f32, q2: f32, q3: f32, q4: f32, q5: f32,
+    q6: f32, q7: f32, q8: f32, q9: f32, q10: f32, q11: f32,
+}
+impl Copy for SparseIncidenceOperands {}
+
+trait PlannedIncidence {
+    fn incidence(_ operands: SparseIncidenceOperands) -> f32
+}
+
+struct QcgaIncidenceProvider {}
+impl Derive<PlannedIncidence> for QcgaIncidenceProvider {
+    const fn derive<T>(ev: own Evidence<PlannedIncidence<T>>) -> Evidence<PlannedIncidence<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<PlannedIncidence<T>>)
+    {
+        let operands = builder.arg_ref("operands")
+        let p0 = operands
+        let p1 = operands
+        let p2 = operands
+        let p3 = operands
+        let p4 = operands
+        let p5 = operands
+        let p6 = operands
+        let p7 = operands
+        let p8 = operands
+        let p9 = operands
+        let p10 = operands
+        let p11 = operands
+        let q0 = operands
+        let q1 = operands
+        let q2 = operands
+        let q3 = operands
+        let q4 = operands
+        let q5 = operands
+        let q6 = operands
+        let q7 = operands
+        let q8 = operands
+        let q9 = operands
+        let q10 = operands
+        let q11 = operands
+        let field_index = 0
+        for field in reflect.fields() {
+            if field_index == 0 { p0 = builder.field_get(operands, field) }
+            if field_index == 1 { p1 = builder.field_get(operands, field) }
+            if field_index == 2 { p2 = builder.field_get(operands, field) }
+            if field_index == 3 { p3 = builder.field_get(operands, field) }
+            if field_index == 4 { p4 = builder.field_get(operands, field) }
+            if field_index == 5 { p5 = builder.field_get(operands, field) }
+            if field_index == 6 { p6 = builder.field_get(operands, field) }
+            if field_index == 7 { p7 = builder.field_get(operands, field) }
+            if field_index == 8 { p8 = builder.field_get(operands, field) }
+            if field_index == 9 { p9 = builder.field_get(operands, field) }
+            if field_index == 10 { p10 = builder.field_get(operands, field) }
+            if field_index == 11 { p11 = builder.field_get(operands, field) }
+            if field_index == 12 { q0 = builder.field_get(operands, field) }
+            if field_index == 13 { q1 = builder.field_get(operands, field) }
+            if field_index == 14 { q2 = builder.field_get(operands, field) }
+            if field_index == 15 { q3 = builder.field_get(operands, field) }
+            if field_index == 16 { q4 = builder.field_get(operands, field) }
+            if field_index == 17 { q5 = builder.field_get(operands, field) }
+            if field_index == 18 { q6 = builder.field_get(operands, field) }
+            if field_index == 19 { q7 = builder.field_get(operands, field) }
+            if field_index == 20 { q8 = builder.field_get(operands, field) }
+            if field_index == 21 { q9 = builder.field_get(operands, field) }
+            if field_index == 22 { q10 = builder.field_get(operands, field) }
+            if field_index == 23 { q11 = builder.field_get(operands, field) }
+            field_index = field_index + 1
+        }
+        let zero = builder.sub(p0, p0)
+        let sum0 = zero
+        let sum1 = zero
+        let sum2 = zero
+        let survivor = 0
+        for candidate in 0..144 {
+            // The provider interpreter cannot branch inside an ordinary const
+            // helper. Keep the same slot semantics visible here while the
+            // typed plan consumes `contraction_sign` above.
+            let left_slot = candidate / 12
+            let right_slot = candidate % 12
+            let sign = 0
+            if left_slot == right_slot {
+                if left_slot < 3 { sign = 1 }
+            }
+            if left_slot >= 3 {
+                if left_slot < 6 {
+                    if right_slot == left_slot + 6 { sign = 2 }
+                }
+            }
+            if left_slot >= 6 {
+                if right_slot + 3 == left_slot { sign = 2 }
+            }
+            if sign != 0 {
+                let left = p0
+                if left_slot == 1 { left = p1 }
+                if left_slot == 2 { left = p2 }
+                if left_slot == 3 { left = p3 }
+                if left_slot == 4 { left = p4 }
+                if left_slot == 5 { left = p5 }
+                if left_slot == 6 { left = p6 }
+                if left_slot == 7 { left = p7 }
+                if left_slot == 8 { left = p8 }
+                if left_slot == 9 { left = p9 }
+                if left_slot == 10 { left = p10 }
+                if left_slot == 11 { left = p11 }
+
+                let right = q0
+                if right_slot == 1 { right = q1 }
+                if right_slot == 2 { right = q2 }
+                if right_slot == 3 { right = q3 }
+                if right_slot == 4 { right = q4 }
+                if right_slot == 5 { right = q5 }
+                if right_slot == 6 { right = q6 }
+                if right_slot == 7 { right = q7 }
+                if right_slot == 8 { right = q8 }
+                if right_slot == 9 { right = q9 }
+                if right_slot == 10 { right = q10 }
+                if right_slot == 11 { right = q11 }
+
+                let term = builder.mul(left, right)
+                if sign == 2 { term = builder.neg(term) }
+                if survivor < 4 { sum0 = builder.add(sum0, term) }
+                else if survivor < 8 { sum1 = builder.add(sum1, term) }
+                else { sum2 = builder.add(sum2, term) }
+                survivor = survivor + 1
+            }
+        }
+        let result = builder.add(builder.add(sum0, sum1), sum2)
+        builder.emit_method("incidence", result)
+        builder.finish()
+        ev
+    }
+}
+
+derive PlannedIncidence for SparseIncidenceOperands using QcgaIncidenceProvider
+
+pub fn qcga3d_incidence_planned(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    let half: f32 = 0.5
+    let j_third: f32 = j / 3.0
+    let negative_j_third: f32 = 0.0 - j_third
+    <SparseIncidenceOperands as PlannedIncidence>::incidence(SparseIncidenceOperands {
+        p0: x, p1: y, p2: z,
+        p3: 1.0, p4: 1.0, p5: 1.0,
+        p6: x * x * half, p7: y * y * half, p8: z * z * half,
+        p9: x * y, p10: x * z, p11: y * z,
+        q0: g, q1: h, q2: i,
+        q3: -2.0 * a, q4: -2.0 * b, q5: -2.0 * c,
+        q6: -d, q7: -e, q8: -f,
+        q9: negative_j_third, q10: negative_j_third, q11: negative_j_third,
+    })
+}
+
+// Independently authored raw 12-term null contraction in canonical candidate
+// order. It shares no support-list, candidate, schedule, reflection, or
+// provider machinery with the planned path.
+pub fn qcga3d_incidence_raw(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    let zero: f32 = x - x
+    let j_third: f32 = j / 3.0
+    let sum0: f32 = zero + x * g + y * h + z * i + j_third
+    let sum1: f32 = zero + j_third + j_third + x * x * a + y * y * b
+    let sum2: f32 = zero + z * z * c + x * y * d + x * z * e + y * z * f
+    (sum0 + sum1) + sum2
+}
+
+// Algebraically fused polynomial oracle. IEEE association intentionally
+// differs from the canonical sparse-candidate order above.
+pub fn qcga3d_incidence_polynomial(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    a * x * x + b * y * y + c * z * z
+        + d * x * y + e * x * z + f * y * z
+        + g * x + h * y + i * z + j
+}
+
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    fn __sqrt_f32(_: f32) -> f32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+struct CameraInputs {
+    origin_x: f32,
+    origin_y: f32,
+    origin_z: f32,
+    projection_norm_squared: f32,
+    pixel_scale: f32,
+}
+
+struct QuadricInputs {
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+}
+
+impl Copy for CameraInputs {}
+impl Copy for QuadricInputs {}
+
+// Keep the established fused ray/root association as an independent path.
+// The typed CTFE/FCO sparse contraction is exercised separately at the hit.
+#[inline(always)]
+fn fused_field(
+    x: f32, y: f32, z: f32,
+    q: QuadricInputs,
+) -> f32 {
+    let square: f32 = q.a * x * x + q.b * y * y + q.c * z * z
+    let cross: f32 = q.d * x * y + q.e * x * z + q.f * y * z
+    let linear: f32 = q.g * x + q.h * y + q.i * z
+    square + cross + linear + q.j
+}
+
+pub fn qcga3d_sparse_planned_render(
+    px: i32, py: i32,
+    origin_x: f32, origin_y: f32, origin_z: f32,
+    projection_norm_squared: f32, pixel_scale: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> u32 {
+    let camera = CameraInputs {
+        origin_x, origin_y, origin_z, projection_norm_squared, pixel_scale,
+    }
+    let quadric = QuadricInputs { a, b, c, d, e, f, g, h, i, j }
+    let fx: f32 = __f32_from_i32(px)
+    let fy: f32 = __f32_from_i32(py)
+    let sx: f32 = (fx - 63.5) * camera.pixel_scale
+    let sy: f32 = (fy - 63.5) * -camera.pixel_scale
+    let focal_z: f32 = __sqrt_f32(camera.projection_norm_squared)
+    let inv_len: f32 = 1.0 / __sqrt_f32(
+        sx * sx + sy * sy + camera.projection_norm_squared,
+    )
+    let dx: f32 = sx * inv_len
+    let dy: f32 = sy * inv_len
+    let dz: f32 = focal_z * inv_len
+
+    let ox: f32 = camera.origin_x
+    let oy: f32 = camera.origin_y
+    let oz: f32 = camera.origin_z
+    let f0: f32 = fused_field(x: ox, y: oy, z: oz, q: quadric)
+    let fp: f32 = fused_field(x: ox + dx, y: oy + dy, z: oz + dz, q: quadric)
+    let fm: f32 = fused_field(x: ox - dx, y: oy - dy, z: oz - dz, q: quadric)
+    let alpha: f32 = (fp + fm) * 0.5 - f0
+    let beta: f32 = (fp - fm) * 0.5
+    let abs_alpha: f32 = if alpha < 0.0 { -alpha } else { alpha }
+    let abs_beta: f32 = if beta < 0.0 { -beta } else { beta }
+
+    let t: f32 = if abs_alpha < 0.000001 {
+        if abs_beta >= 0.000001 {
+            let linear_t: f32 = -f0 / beta
+            if linear_t >= 0.0 { linear_t } else { -1.0 }
+        } else { -1.0 }
+    } else {
+        let discriminant: f32 = beta * beta - 4.0 * alpha * f0
+        if discriminant >= 0.0 {
+            let root: f32 = __sqrt_f32(discriminant)
+            let signed_root: f32 = if beta < 0.0 { -root } else { root }
+            let qroot: f32 = -0.5 * (beta + signed_root)
+            let abs_qroot: f32 = if qroot < 0.0 { -qroot } else { qroot }
+            if abs_qroot >= 0.000001 {
+                let t0: f32 = qroot / alpha
+                let t1: f32 = f0 / qroot
+                if t0 >= 0.0 {
+                    if t1 >= 0.0 && t1 < t0 { t1 } else { t0 }
+                } else {
+                    if t1 >= 0.0 { t1 } else { -1.0 }
+                }
+            } else {
+                let fallback: f32 = -beta / (2.0 * alpha)
+                if fallback >= 0.0 { fallback } else { -1.0 }
+            }
+        } else { -1.0 }
+    }
+
+    let horizon: f32 = (fy + 0.5) / 128.0
+    let background_ri: i32 = __i32_from_f32(8.0 + 10.0 * horizon)
+    let background_gi: i32 = __i32_from_f32(11.0 + 15.0 * horizon)
+    let background_bi: i32 = __i32_from_f32(25.0 + 28.0 * horizon)
+    let background: u32 = __bitcast(
+        background_ri + background_gi * 256 + background_bi * 65536 + -16777216,
+    )
+
+    if t >= 0.0 {
+        let x: f32 = ox + dx * t
+        let y: f32 = oy + dy * t
+        let z: f32 = oz + dz * t
+        let residual = qcga3d_incidence_planned(
+            x: x, y: y, z: z,
+            a: quadric.a, b: quadric.b, c: quadric.c, d: quadric.d, e: quadric.e,
+            f: quadric.f, g: quadric.g, h: quadric.h, i: quadric.i, j: quadric.j,
+        )
+        let abs_residual: f32 = if residual < 0.0 { -residual } else { residual }
+        if abs_residual < 0.0002 {
+            let twice_a: f32 = quadric.a + quadric.a
+            let twice_b: f32 = quadric.b + quadric.b
+            let twice_c: f32 = quadric.c + quadric.c
+            let nx: f32 = twice_a * x + quadric.d * y
+                + quadric.e * z + quadric.g
+            let ny: f32 = twice_b * y + quadric.d * x
+                + quadric.f * z + quadric.h
+            let nz: f32 = twice_c * z + quadric.e * x
+                + quadric.f * y + quadric.i
+            let n_inv: f32 = 1.0 / __sqrt_f32(nx * nx + ny * ny + nz * nz)
+            let nnx: f32 = nx * n_inv
+            let nny: f32 = ny * n_inv
+            let nnz: f32 = nz * n_inv
+            let diffuse_raw: f32 = nnx * -0.45 + nny * 0.70 + nnz * -0.55
+            let diffuse: f32 = if diffuse_raw < 0.0 { 0.0 } else { diffuse_raw }
+            let rim_raw: f32 = 1.0 - (-(nnx * dx + nny * dy + nnz * dz))
+            let rim: f32 = if rim_raw < 0.0 { 0.0 } else { rim_raw }
+            let shade: f32 = 0.18 + diffuse * 0.72
+            let ri: i32 = __i32_from_f32(24.0 + 78.0 * shade + 65.0 * rim)
+            let gi: i32 = __i32_from_f32(28.0 + 178.0 * shade + 34.0 * rim)
+            let bi: i32 = __i32_from_f32(52.0 + 196.0 * shade + 55.0 * rim)
+            __bitcast(ri + gi * 256 + bi * 65536 + -16777216)
+        } else { background }
+    } else { background }
+}
+
+
+use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
+use core::effect_ref::alloc_bytes
+use core::num::IntDowncast
+use std::webgpu::{Dispatch, WebGpuBackend}
+
+struct FrameRequest {
+    generation: u32,
+    origin_x: f32,
+    origin_y: f32,
+    origin_z: f32,
+    projection_norm_squared: f32,
+    pixel_scale: f32,
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+    g: f32,
+    h: f32,
+    i: f32,
+    j: f32,
+}
+
+struct RenderResponse {
+    submitted: bool,
+}
+
+// Nominal host-effect lane. The browser runtime deliberately dispatches this
+// schema to its WebGPU actor; this Fe body is never presented as GPU execution.
+pub fn render(_request: own FrameRequest) -> RenderResponse
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
+    RenderResponse { submitted: false }
+}
+
+// Nominal host-effect lane for explicit GPU readback. The generated schema is
+// authoritative, while the browser runtime supplies the actual WebGPU handler.
+pub fn verify(_request: own FrameRequest) -> BrowserBytes
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
+    BrowserBytes { ptr: 0, len: 0 }
+}
+
+fn append_byte(value: u32) {
+    let byte = alloc_bytes(1)
+    byte.write(value.downcast_truncate())
+}
+
+fn render_pixel(
+    px: i32, py: i32,
+    origin_x: f32, origin_y: f32, origin_z: f32,
+    projection_norm_squared: f32, pixel_scale: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> u32 {
+    qcga3d_sparse_planned_render(
+        px: px, py: py,
+        origin_x: origin_x, origin_y: origin_y, origin_z: origin_z,
+        projection_norm_squared: projection_norm_squared, pixel_scale: pixel_scale,
+        a: a, b: b, c: c, d: d, e: e, f: f, g: g, h: h, i: i, j: j,
+    )
+}
+
+fn append_frame_tail(
+    first_rgba: u32,
+    origin_x: f32, origin_y: f32, origin_z: f32,
+    projection_norm_squared: f32, pixel_scale: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) {
+    append_byte(value: first_rgba >> 8)
+    append_byte(value: first_rgba >> 16)
+    append_byte(value: first_rgba >> 24)
+
+    let mut y: i32 = 0
+    let mut x: i32 = 1
+    while y < 128 {
+        while x < 128 {
+            let rgba = render_pixel(
+                px: x, py: y,
+                origin_x: origin_x, origin_y: origin_y, origin_z: origin_z,
+                projection_norm_squared: projection_norm_squared,
+                pixel_scale: pixel_scale,
+                a: a, b: b, c: c, d: d, e: e,
+                f: f, g: g, h: h, i: i, j: j,
+            )
+            append_byte(value: rgba)
+            append_byte(value: rgba >> 8)
+            append_byte(value: rgba >> 16)
+            append_byte(value: rgba >> 24)
+            x = x + 1
+        }
+        y = y + 1
+        x = 0
+    }
+}
+
+// Genuine one-call Fe/Wasm full-frame lane. Each allocation is byte-aligned and
+// consecutive in the canonical arena; the wrapper copies this borrowed region
+// into its owned response before the browser resets the arena.
+pub fn oracle(request: own FrameRequest) -> AllocatedBrowserBytes {
+    let first_rgba = render_pixel(
+        px: 0, py: 0,
+        origin_x: request.origin_x, origin_y: request.origin_y, origin_z: request.origin_z,
+        projection_norm_squared: request.projection_norm_squared,
+        pixel_scale: request.pixel_scale,
+        a: request.a, b: request.b, c: request.c, d: request.d, e: request.e,
+        f: request.f, g: request.g, h: request.h, i: request.i, j: request.j,
+    )
+    let first = alloc_bytes(1)
+    first.write(first_rgba.downcast_truncate())
+    append_frame_tail(
+        first_rgba: first_rgba,
+        origin_x: request.origin_x, origin_y: request.origin_y, origin_z: request.origin_z,
+        projection_norm_squared: request.projection_norm_squared,
+        pixel_scale: request.pixel_scale,
+        a: request.a, b: request.b, c: request.c, d: request.d, e: request.e,
+        f: request.f, g: request.g, h: request.h, i: request.i, j: request.j,
+    )
+    AllocatedBrowserBytes { ptr: first, len: 65536 }
+}

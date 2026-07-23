@@ -1,0 +1,6 @@
+[ingot]
+name = "qcga3d_quadric_app"
+version = "0.1.0"
+
+[dependencies]
+sparse_clifford = { path = "../../../../ingots/sparse_clifford" }

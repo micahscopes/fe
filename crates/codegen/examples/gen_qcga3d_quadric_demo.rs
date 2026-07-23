@@ -8,12 +8,17 @@ use fe_codegen::{
     WasmCompileOptions, WebBuildOptions, WebBundle, WebCanonicalPolicy,
     compile_runtime_package_spirv_render, compile_runtime_package_wasm_with_options,
 };
+use hir::hir_def::HirIngot;
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvScalarKind};
 use url::Url;
 
 const PLANNER_SOURCE: &str =
     include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
+const APP_IMPORTS: &str = r#"use sparse_clifford::{
+    Nat, PlanLength, SparsePlan, plan_mask_candidate, plan_mask_cardinality,
+}
+"#;
 const RENDER_SOURCE: &str =
     include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_render_body.fe");
 const EXPORT: &str = "qcga3d_sparse_planned_render";
@@ -161,27 +166,49 @@ fn main() {
     let repo = manifest.parent().unwrap().parent().unwrap();
     let out = repo.join("demos/webgpu-qcga3d-quadric/gen");
 
-    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
-    let source = format!("{sparse_api}\n{PLANNER_SOURCE}\n{RENDER_SOURCE}");
-    let mut raw_db = DriverDataBase::default();
-    let raw_url = Url::parse("file:///qcga3d_sparse_planned_render.fe").unwrap();
-    raw_db
+    let source = format!("{APP_IMPORTS}\n{PLANNER_SOURCE}\n{RENDER_SOURCE}");
+    let combined_source = format!("{source}\n{ACTOR_SOURCE}");
+    let temp_root = repo.join("output/demo-tmp");
+    std::fs::create_dir_all(&temp_root).expect("QCGA temporary ingot root");
+    let app_dir = tempfile::Builder::new()
+        .prefix("fe-qcga3d-app-")
+        .tempdir_in(&temp_root)
+        .expect("temporary QCGA application ingot");
+    let app_src = app_dir.path().join("src");
+    std::fs::create_dir_all(&app_src).expect("temporary QCGA src directory");
+    std::fs::write(
+        app_dir.path().join("fe.toml"),
+        "[ingot]\nname = \"qcga3d_quadric_app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nsparse_clifford = { path = \"../../../ingots/sparse_clifford\" }\n",
+    )
+    .expect("temporary QCGA fe.toml");
+    std::fs::write(app_src.join("lib.fe"), &combined_source)
+        .expect("temporary QCGA application source");
+    let mut db = DriverDataBase::default();
+    let app_url = Url::from_directory_path(app_dir.path()).expect("temporary QCGA app URL");
+    assert!(
+        !driver::init_ingot(&mut db, &app_url),
+        "QCGA application ingot initialization diagnostics"
+    );
+    let app_ingot = db
         .workspace()
-        .touch(&mut raw_db, raw_url.clone(), Some(source.clone()));
-    let raw_file = raw_db
-        .workspace()
-        .get(&raw_db, &raw_url)
-        .expect("fixture loads");
-    let raw_top = raw_db.top_mod(raw_file);
-    let package = mir::build_wasm_runtime_package_for_entry(&raw_db, raw_top, EXPORT)
-        .expect("runtime package");
+        .containing_ingot(&db, app_url)
+        .expect("QCGA application ingot");
+    let top_mod = app_ingot.root_mod(&db);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "QCGA canonical actor application has diagnostics:\n{diagnostics}"
+    );
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, EXPORT).expect("runtime package");
     assert!(
         package
-            .functions(&raw_db)
+            .functions(&db)
             .iter()
-            .all(|f| f.linkage(&raw_db) != mir::RuntimeLinkage::External)
+            .all(|f| f.linkage(&db) != mir::RuntimeLinkage::External)
     );
-    let artifact = compile_runtime_package_spirv_render(&raw_db, &package)
+    let artifact = compile_runtime_package_spirv_render(&db, &package)
         .expect("QCGA Render SPIR-V/WGSL compilation");
     let wgsl = artifact.wgsl.as_deref().expect("WGSL side artifact");
     assert_browser_wgsl(wgsl);
@@ -189,7 +216,7 @@ fn main() {
     assert_eq!(artifact.layout.builtin_inputs.len(), 2);
 
     let wasm =
-        compile_runtime_package_wasm_with_options(&raw_db, &package, WasmCompileOptions::default())
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
             .expect("entry-rooted QCGA Wasm compilation")
             .bytes;
     wasmparser::validate(&wasm).expect("valid Wasm");
@@ -199,29 +226,9 @@ fn main() {
     let distinct = frame.iter().copied().collect::<HashSet<_>>().len();
     assert!(distinct > 8, "QCGA reference must not be a flat frame");
 
-    let combined_source = format!("{source}\n{ACTOR_SOURCE}");
-    let mut canonical_db = DriverDataBase::default();
-    let canonical_url = Url::parse("file:///qcga3d_actor.fe").unwrap();
-    canonical_db.workspace().touch(
-        &mut canonical_db,
-        canonical_url.clone(),
-        Some(combined_source.clone()),
-    );
-    let canonical_file = canonical_db
-        .workspace()
-        .get(&canonical_db, &canonical_url)
-        .expect("canonical QCGA source loads");
-    let canonical_top = canonical_db.top_mod(canonical_file);
-    let diagnostics = canonical_db
-        .run_on_top_mod(canonical_top)
-        .format_diags(&canonical_db);
-    assert!(
-        diagnostics.is_empty(),
-        "QCGA canonical actor source has diagnostics:\n{diagnostics}"
-    );
     let canonical_bundle = WebBundle::compile(
-        &canonical_db,
-        canonical_top,
+        &db,
+        top_mod,
         WebBuildOptions::render(EXPORT, Some("qcga3d_actor.fe".to_owned()))
             .with_canonical_entries([RENDER_LANE, VERIFY_LANE, ORACLE_LANE])
             .with_canonical_policy(WebCanonicalPolicy::Required),
@@ -292,6 +299,7 @@ fn main() {
         .collect::<Vec<_>>();
     let fe_rev = git(repo.to_str().unwrap(), &["rev-parse", "HEAD"]);
     let provenance = serde_json::json!({
+        "source": "QCGA application ingot depending on the public sparse_clifford ingot",
         "fixture": [
             "ingots/sparse_clifford/src/lib.fe",
             "crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe",
@@ -300,6 +308,10 @@ fn main() {
         "fe_rev": fe_rev,
         "sonatina_rev": actual_sonatina,
         "generator": "gen_qcga3d_quadric_demo",
+        "published_app_manifest": "demos/webgpu-qcga3d-quadric/gen/app/fe.toml",
+        "published_app_source": "demos/webgpu-qcga3d-quadric/gen/app/src/lib.fe",
+        "published_dependency_path": "../../../../ingots/sparse_clifford",
+        "kernel_source_self_contained": false,
         "source_fnv1a32": fnv1a32_bytes(source.as_bytes()),
         "sparse_clifford_api_fnv1a32": fnv1a32_bytes(SPARSE_CLIFFORD_API.as_bytes()),
         "actor_source_fnv1a32": fnv1a32_bytes(ACTOR_SOURCE.as_bytes()),
@@ -315,6 +327,10 @@ fn main() {
         "actor_wasm": "actor-canonical.wasm",
         "actor_interface": "actor-interface.js",
         "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE],
+        "source_model": "application ingot with sparse_clifford path dependency",
+        "application_manifest": "app/fe.toml",
+        "application_source": "app/src/lib.fe",
+        "kernel_source": "kernel.fe (dependency-backed; not standalone)",
         "provenance": provenance,
     }))
     .unwrap();
@@ -328,6 +344,12 @@ fn main() {
 
     std::fs::create_dir_all(&out).unwrap();
     write(&out.join("kernel.fe"), source.as_bytes());
+    write(
+        &out.join("app/fe.toml"),
+        b"[ingot]\nname = \"qcga3d_quadric_app\"\nversion = \"0.1.0\"\n\n\
+[dependencies]\nsparse_clifford = { path = \"../../../../ingots/sparse_clifford\" }\n",
+    );
+    write(&out.join("app/src/lib.fe"), combined_source.as_bytes());
     write(&out.join("frag.wgsl"), wgsl.as_bytes());
     write(&out.join("frag.wasm"), &wasm);
     write(&out.join("actor-canonical.wasm"), &canonical_bundle.wasm);

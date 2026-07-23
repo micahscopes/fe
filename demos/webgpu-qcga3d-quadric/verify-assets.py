@@ -9,6 +9,7 @@ sys.path.insert(0, str(here.parent / "shared"))
 from browser_runtime_preflight import validate_browser_runtime
 required = [
     "kernel.fe", "frag.wgsl", "frag.wasm", "layout.json", "reference.json",
+    "app/fe.toml", "app/src/lib.fe",
     "actor-source.fe", "actor-canonical.wasm", "actor-interface.js",
     "actor-interface.d.ts", "actor-manifest.json",
 ]
@@ -41,8 +42,18 @@ assert reference["distinct_colors"] > 8
 assert reference["provenance"] == layout["provenance"]
 assert layout["provenance"]["sonatina_rev"] == "ac266c210cad7872fc98380a73b4ca363877bc1f"
 kernel = (gen / "kernel.fe").read_text()
+app_manifest = (gen / "app/fe.toml").read_text()
+app_source = (gen / "app/src/lib.fe").read_text()
 wgsl = (gen / "frag.wgsl").read_text()
-assert "pub recursive type fn SparsePlan" in kernel
+assert "pub recursive type fn SparsePlan" not in kernel
+assert kernel.startswith("use sparse_clifford::{")
+assert 'sparse_clifford = { path = "../../../../ingots/sparse_clifford" }' in app_manifest
+assert app_source.startswith("use sparse_clifford::{")
+assert layout["source_model"] == "application ingot with sparse_clifford path dependency"
+assert layout["application_manifest"] == "app/fe.toml"
+assert layout["application_source"] == "app/src/lib.fe"
+assert layout["kernel_source"] == "kernel.fe (dependency-backed; not standalone)"
+assert layout["provenance"]["kernel_source_self_contained"] is False
 assert "type IncidencePlan12" in kernel
 assert "impl Derive<PlannedIncidence> for QcgaIncidenceProvider" in kernel
 assert "qcga3d_sparse_planned_render" in kernel
