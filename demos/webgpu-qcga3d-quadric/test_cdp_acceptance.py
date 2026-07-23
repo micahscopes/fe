@@ -15,9 +15,10 @@ class QcgaAcceptanceTests(unittest.TestCase):
             "pixels": 16384,
             "wasmHash": 2368784280,
             "gpuHash": 2368784280,
+            "oracleMs": 85.3,
             "counters": {
                 "fetches": ["gen/layout.json", "gen/frag.wgsl", "gen/kernel.fe",
-                            "gen/reference.json", "gen/frag.wasm"],
+                            "gen/reference.json", "gen/actor-canonical.wasm"],
                 "workerCreates": 1,
                 "readbacks": 1,
             },

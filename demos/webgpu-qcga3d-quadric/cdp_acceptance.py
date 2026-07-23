@@ -9,7 +9,7 @@ def valid(value,mode):
     c=value.get("counters",{})
     if mode=="off":
         return value.get("state")=="presentation" and value.get("verified") is False and c=={"fetches":["gen/layout.json","gen/frag.wgsl","gen/kernel.fe"],"workerCreates":0,"readbacks":0} and "wasmHash" not in value and "gpuHash" not in value
-    return value.get("state")=="green" and value.get("verified") is True and value.get("pixels")==16384 and value.get("wasmHash")==value.get("gpuHash")==2368784280 and c.get("workerCreates")==1 and c.get("readbacks")==1 and "gen/frag.wasm" in c.get("fetches",[])
+    return value.get("state")=="green" and value.get("verified") is True and value.get("pixels")==16384 and value.get("wasmHash")==value.get("gpuHash")==2368784280 and isinstance(value.get("oracleMs"),(int,float)) and value["oracleMs"]>=0 and c.get("workerCreates")==1 and c.get("readbacks")==1 and "gen/actor-canonical.wasm" in c.get("fetches",[])
 
 def main():
     p=argparse.ArgumentParser();p.add_argument("--debug-port",type=int,required=True);p.add_argument("--url",required=True);p.add_argument("--mode",choices=["verify","off"],required=True);p.add_argument("--timeout",type=float,default=90);a=p.parse_args();deadline=time.monotonic()+a.timeout
