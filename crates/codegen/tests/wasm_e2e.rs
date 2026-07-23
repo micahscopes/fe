@@ -1741,6 +1741,52 @@ pub fn roundtrip_f32(_ ptr: MemPtr<f32>, value: f32) -> f32 {
     assert_eq!(&bytes[32..36], &(-13.25_f32).to_le_bytes());
 }
 
+#[test]
+fn mem_ptr_ordinary_read_write_wrappers_do_not_recurse_on_wasm() {
+    let source = r#"
+use core::MemPtr
+
+pub fn ordinary_roundtrip(_ ptr: MemPtr<u32>, value: u32) -> u32 {
+    ptr.write(value)
+    ptr.read()
+}
+"#;
+    let wasm = compile_to_wasm("wasm_mem_ptr_ordinary_wrappers.fe", source);
+    let mut function_index = func_imports(&wasm).len() as u32;
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.expect("valid wasm") {
+            for operator in body.get_operators_reader().unwrap() {
+                if let wasmparser::Operator::Call {
+                    function_index: callee,
+                } = operator.unwrap()
+                {
+                    assert_ne!(
+                        callee, function_index,
+                        "MemPtr wrapper call graph must not contain a direct self edge"
+                    );
+                }
+            }
+            function_index += 1;
+        }
+    }
+    let (mut store, instance) = instantiate(&wasm);
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("MemPtr wrapper access requires exported linear memory");
+    let roundtrip = instance
+        .get_typed_func::<(i32, i32), i32>(&mut store, "ordinary_roundtrip")
+        .expect("ordinary_roundtrip export");
+
+    assert_eq!(
+        roundtrip.call(&mut store, (19, 0x78563412)).unwrap(),
+        0x78563412
+    );
+    assert_eq!(
+        &memory.data(&store)[19..23],
+        &0x78563412_u32.to_le_bytes()
+    );
+}
+
 /// R3.4b twin: the `on_ready` continuation lane. `main_begin` composes WITHOUT
 /// `Wait` (create..readback_begin) and returns the `Pending<()>`; the output region
 /// is UNCHANGED until the host drives `on_ready(token)`, which completes the copy
