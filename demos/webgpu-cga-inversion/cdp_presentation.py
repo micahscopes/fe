@@ -33,7 +33,7 @@ def presentation_passes(value):
         return False
     fetched = evidence.get("fetchedAssets")
     if not isinstance(fetched, list) or any(
-        asset.endswith(("frag.wasm", "reference.json")) for asset in fetched
+        asset.endswith(".wasm") or asset.endswith("reference.json") for asset in fetched
     ):
         return False
     if list(performance) != [

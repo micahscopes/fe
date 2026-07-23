@@ -46,6 +46,18 @@ class EnsureAssetsTests(unittest.TestCase):
             self.assertIn("frag.wasm", result.stderr)
             self.assertIn("pinned local Sonatina", result.stderr)
 
+    def test_schedule32_bundle_requires_generated_actor_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bundle = Path(raw) / "gen-schedule32"
+            bundle.mkdir()
+            for asset in ASSETS:
+                (bundle / asset).touch()
+            result = self.run_script(bundle, CGA_BUNDLE="schedule32", SONATINA_DIR="")
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("actor-canonical.wasm", result.stderr)
+            self.assertIn("actor-interface.js", result.stderr)
+            self.assertIn("actor-manifest.json", result.stderr)
+
     def test_missing_bundle_can_be_generated_then_verified_in_one_command(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

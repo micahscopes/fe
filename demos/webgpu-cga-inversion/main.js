@@ -184,7 +184,7 @@ async function main() {
     if (!verificationOff) {
       [reference, wasm] = await Promise.all([
         fetchOk(artifactBundle.asset("reference.json"), "json"),
-        fetchOk(artifactBundle.asset("frag.wasm"), "bytes"),
+        fetchOk(artifactBundle.asset("actor-canonical.wasm"), "bytes"),
       ]);
     }
     validateTypedLayout(layout);
@@ -207,15 +207,20 @@ async function main() {
   if (!verificationOff) {
     try {
       wasmOracle = await createCgaWasmWorkerOracle({
-        wasm, exportName: layout.frag_wasm_export,
-        width: reference.width, height: reference.height,
-        gpuRender: (values) => {
+        wasm,
+        gpuRender: (payload) => {
+          const values = [
+            payload.cam_x, payload.cam_y, payload.zoom, payload.inv_cx, payload.inv_cy,
+          ];
           presentationEvidence.gpuActorRenderCount += 1;
           if (presentation === "offscreen") submitOffscreenFrame(gpu, values);
           else renderFrame(gpu, values);
           return { submitted: true };
         },
-        gpuVerify: async (values) => {
+        gpuVerify: async (payload) => {
+          const values = [
+            payload.cam_x, payload.cam_y, payload.zoom, payload.inv_cx, payload.inv_cy,
+          ];
           const readback = await verifyView(gpu, values);
           if (!readback.ok) throw new Error(readback.reason);
           return readback.rgba;

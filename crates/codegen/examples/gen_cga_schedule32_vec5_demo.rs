@@ -11,7 +11,11 @@ use std::{
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, compile_runtime_package_spirv_render, layout_for};
+use fe_codegen::{
+    BackendKind, CanonicalCapability, CanonicalExecution, CanonicalInterfaceManifest,
+    CanonicalPlacement, OptLevel, WebBuildOptions, WebBundle, WebCanonicalPolicy,
+    canonical_lane_decl_from_entry, compile_runtime_package_spirv_render, layout_for,
+};
 use sonatina_codegen::isa::spirv::{
     Access, LayoutMode, Role, SpirvBuiltinSource, SpirvScalarKind, WordKind,
 };
@@ -28,6 +32,73 @@ const CAM_Y: f32 = 0.0;
 const ZOOM: f32 = 0.0125;
 const INV_CX: f32 = 0.5;
 const INV_CY: f32 = 0.0;
+const RENDER_LANE: &str = "render";
+const VERIFY_LANE: &str = "verify";
+const ORACLE_LANE: &str = "oracle";
+const ORACLE_PIXEL_LANE: &str = "oracle_pixel";
+const ACTOR_SOURCE: &str = r#"
+use core::{BrowserBytes, HostEffect, MainThread, Worker}
+use std::webgpu::{Dispatch, WebGpuBackend}
+
+struct FrameRequest {
+    generation: u32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+    inv_cx: f32,
+    inv_cy: f32,
+}
+
+struct Submitted {
+    submitted: bool,
+}
+
+struct OraclePixelRequest {
+    x: i32,
+    y: i32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+    inv_cx: f32,
+    inv_cy: f32,
+}
+
+struct OraclePixelResponse {
+    rgba: u32,
+}
+
+pub fn render(_request: own FrameRequest) -> Submitted
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
+    Submitted { submitted: false }
+}
+
+pub fn verify(_request: own FrameRequest) -> BrowserBytes
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
+    BrowserBytes { ptr: 0, len: 0 }
+}
+
+pub fn oracle(_request: own FrameRequest) -> BrowserBytes
+    uses (HostEffect, Worker)
+{
+    BrowserBytes { ptr: 0, len: 0 }
+}
+
+pub fn oracle_pixel(request: own OraclePixelRequest) -> OraclePixelResponse {
+    OraclePixelResponse {
+        rgba: cga_schedule32_vec5_de_render(
+            px: request.x,
+            py: request.y,
+            cam_x: request.cam_x,
+            cam_y: request.cam_y,
+            zoom: request.zoom,
+            inv_cx: request.inv_cx,
+            inv_cy: request.inv_cy,
+        ),
+    }
+}
+"#;
 
 fn composed_source() -> String {
     let (prefix, _) = CANONICAL
@@ -50,7 +121,11 @@ fn composed_source() -> String {
         BODY.find(&format!("<ScheduleChunk{chunk}<8> as Eval5>::eval5"))
             .expect("concrete chunk root")
     });
-    assert!(chunk_root_positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(
+        chunk_root_positions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    );
     let chunk_term_order = [24usize, 16, 8, 0]
         .into_iter()
         .flat_map(|offset| (offset..offset + 8).rev())
@@ -97,8 +172,61 @@ fn main() {
         diagnostics.is_empty(),
         "Schedule32 Vec5 composed source has HIR diagnostics:\n{diagnostics}"
     );
+    let actor_source = format!("{source}\n{ACTOR_SOURCE}");
+    let mut actor_db = DriverDataBase::default();
+    let actor_url = Url::parse("file:///cga_schedule32_actor.fe").unwrap();
+    actor_db
+        .workspace()
+        .touch(&mut actor_db, actor_url.clone(), Some(actor_source.clone()));
+    let actor_file = actor_db
+        .workspace()
+        .get(&actor_db, &actor_url)
+        .expect("Schedule32 actor source");
+    let actor_top = actor_db.top_mod(actor_file);
+    let actor_diagnostics = actor_db.run_on_top_mod(actor_top).format_diags(&actor_db);
+    assert!(
+        actor_diagnostics.is_empty(),
+        "Schedule32 canonical actor source has diagnostics:\n{actor_diagnostics}"
+    );
+    let actor_declarations =
+        [RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE].map(|lane| {
+            canonical_lane_decl_from_entry(&actor_db, actor_top, lane, lane)
+                .unwrap_or_else(|error| panic!("derive Schedule32 `{lane}` lane: {error}"))
+        });
+    for declaration in &actor_declarations[..2] {
+        assert_eq!(declaration.intent.execution, CanonicalExecution::HostEffect);
+        assert_eq!(
+            declaration.intent.placement,
+            CanonicalPlacement::MainThread
+        );
+        assert_eq!(declaration.intent.capabilities.len(), 1);
+        assert_eq!(
+            declaration.intent.capabilities[0].capability,
+            CanonicalCapability::WebgpuDispatch
+        );
+        assert!(declaration.intent.capabilities[0].mutable);
+    }
+    assert_eq!(
+        actor_declarations[2].intent.execution,
+        CanonicalExecution::HostEffect
+    );
+    assert_eq!(
+        actor_declarations[2].intent.placement,
+        CanonicalPlacement::Worker
+    );
+    assert!(actor_declarations[2].intent.capabilities.is_empty());
+    assert_eq!(
+        actor_declarations[3].intent.execution,
+        CanonicalExecution::Wasm
+    );
+    assert!(actor_declarations[3].export.is_some());
+    CanonicalInterfaceManifest::build(actor_declarations.to_vec())
+        .expect("Schedule32 compiler-derived canonical manifest");
     if std::env::var_os("FE_CGA_SCHEDULE32_HIR_ONLY").is_some() {
-        eprintln!("Schedule32 Vec5 composed source: HIR clean (backend intentionally skipped)");
+        eprintln!(
+            "Schedule32 Vec5 render and canonical actor source: HIR clean \
+             (backend intentionally skipped)"
+        );
         return;
     }
     let package_started = std::time::Instant::now();
@@ -269,6 +397,28 @@ fn main() {
     assert_eq!(sky + upper + lower, (WIDTH * HEIGHT) as usize);
     let frame_hash = fnv1a32_words(&frame);
 
+    let actor_bundle = WebBundle::compile(
+        &actor_db,
+        actor_top,
+        WebBuildOptions::render(NAME, Some("cga_schedule32_actor.fe".to_owned()))
+            .with_canonical_entries([RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE])
+            .with_canonical_policy(WebCanonicalPolicy::Required),
+    )
+    .expect("Schedule32 canonical actor WebBundle");
+    assert_eq!(
+        normalize_text(&actor_bundle.wgsl),
+        wgsl,
+        "adding canonical actor lanes must not change the browser render WGSL"
+    );
+    let actor_interface_js = actor_bundle
+        .interface_js
+        .as_ref()
+        .expect("required Schedule32 actor interface.js");
+    let actor_interface_d_ts = actor_bundle
+        .interface_d_ts
+        .as_ref()
+        .expect("required Schedule32 actor interface.d.ts");
+
     let bindings: Vec<_> = layout
         .bindings
         .iter()
@@ -328,6 +478,9 @@ fn main() {
         "fragment_entry": layout.fragment_entry, "color_target_format": layout.color_target_format,
         "bindings": bindings, "builtin_inputs": builtins, "params": params,
         "frag_wasm_export": NAME, "frag_wasm_bytes": wasm.len(),
+        "actor_wasm": "actor-canonical.wasm",
+        "actor_interface": "actor-interface.js",
+        "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE],
         "width": WIDTH, "height": HEIGHT, "provenance": provenance.clone(),
     }))
     .unwrap();
@@ -360,6 +513,22 @@ fn main() {
     write(&out.join("kernel.fe"), source.as_bytes());
     write(&out.join("frag.wgsl"), wgsl.as_bytes());
     write(&out.join("frag.wasm"), &wasm);
+    write(&out.join("actor-canonical.wasm"), &actor_bundle.wasm);
+    write(
+        &out.join("actor-interface.js"),
+        actor_interface_js.as_bytes(),
+    );
+    write(
+        &out.join("actor-interface.d.ts"),
+        actor_interface_d_ts.as_bytes(),
+    );
+    write(
+        &out.join("actor-manifest.json"),
+        &actor_bundle
+            .manifest_json()
+            .expect("Schedule32 canonical manifest serializes"),
+    );
+    write(&out.join("actor-source.fe"), actor_source.as_bytes());
     write(&out.join("layout.json"), layout_json.as_bytes());
     write(&out.join("reference.json"), reference_json.as_bytes());
     eprintln!(
@@ -733,8 +902,7 @@ fn independently_derived_schedule() -> Vec<ScheduleTuple> {
                 right,
                 output: left ^ point ^ right,
                 magnitude: 2 - usize::from(triple / 20 == triple % 4),
-                negative: gp_negative_rust(left, point)
-                    ^ gp_negative_rust(left ^ point, right),
+                negative: gp_negative_rust(left, point) ^ gp_negative_rust(left ^ point, right),
             }
         })
         .collect()
@@ -761,10 +929,8 @@ fn keep_tag_rust(triple: usize) -> usize {
     let left = sphere_blade_rust(left_slot);
     let point = 1usize << ((triple / 4) % 5);
     let right = sphere_blade_rust(right_slot);
-    let forward =
-        gp_negative_rust(left, point) ^ gp_negative_rust(left ^ point, right);
-    let reverse =
-        gp_negative_rust(right, point) ^ gp_negative_rust(right ^ point, left);
+    let forward = gp_negative_rust(left, point) ^ gp_negative_rust(left ^ point, right);
+    let reverse = gp_negative_rust(right, point) ^ gp_negative_rust(right ^ point, left);
     usize::from(forward == reverse)
 }
 

@@ -5,6 +5,9 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bundle="${CGA_BUNDLE_DIR:-$here/gen}"
 required=(kernel.fe frag.wgsl layout.json reference.json frag.wasm)
+if [ "${CGA_BUNDLE:-}" = schedule32 ] || [ "$(basename "$bundle")" = gen-schedule32 ]; then
+  required+=(actor-canonical.wasm actor-interface.js actor-interface.d.ts actor-manifest.json actor-source.fe)
+fi
 missing=()
 for asset in "${required[@]}"; do
   if [ ! -f "$bundle/$asset" ]; then missing+=("$asset"); fi
