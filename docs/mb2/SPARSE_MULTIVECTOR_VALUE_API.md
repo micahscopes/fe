@@ -52,6 +52,12 @@ explicitly removes `pub` only from const helpers while composing the ingot
 source into the app's root module; otherwise source composition would erase
 the module boundary and expose compile-time-only bitwise/`usize` bodies to the
 Wasm R1 runtime package. This is publication plumbing, not an API restriction.
+Schedule32 is the first flagship exception to that legacy publication path:
+its generator initializes a real temporary application ingot with a
+`sparse_clifford` dependency, and publishes the app manifest and source next
+to the dependency-backed (explicitly non-standalone) `kernel.fe`. A regression
+builds the app's complete public-root package and proves dependency-public CTFE
+helpers do not become application runtime roots.
 parser explicitly consumes a continuation newline after a
 type-alias `=`, so formatting that ground alias over multiple lines no longer
 silently leaves its RHS invalid during later trait selection.

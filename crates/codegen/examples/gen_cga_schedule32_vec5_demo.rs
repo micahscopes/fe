@@ -20,6 +20,7 @@ use fe_codegen::{
 use sonatina_codegen::isa::spirv::{
     Access, LayoutMode, Role, SpirvBuiltinSource, SpirvScalarKind, WordKind,
 };
+use hir::hir_def::HirIngot;
 use url::Url;
 
 const CANONICAL: &str = include_str!("../tests/fixtures/fco_cga80_direct_lanes.fe");
@@ -36,6 +37,11 @@ const INV_CY: f32 = 0.0;
 const RENDER_LANE: &str = "render";
 const VERIFY_LANE: &str = "verify";
 const ORACLE_LANE: &str = "oracle";
+const APP_IMPORTS: &str = r#"use sparse_clifford::{
+    BladeSet, Nat, PlanLength, SparsePlan, blade_set, plan_mask_candidate,
+    plan_mask_cardinality, support_gp, support_grade,
+}
+"#;
 const ACTOR_SOURCE: &str = r#"
 use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
 use core::effect_ref::alloc_bytes
@@ -132,15 +138,14 @@ pub fn oracle(request: own FrameRequest) -> AllocatedBrowserBytes {
 }
 "#;
 
-fn composed_source() -> String {
+fn app_source() -> String {
     let (prefix, rest) = CANONICAL
         .split_once("// BEGIN_PUBLIC_ORACLES")
         .expect("canonical public-oracle begin marker");
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
-    let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
-    let source = format!("{sparse_api}\n{prefix}{suffix}\n{BODY}");
+    let source = format!("{APP_IMPORTS}\n{prefix}{suffix}\n{BODY}");
     assert!(source.contains(
         "SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",
     ));
@@ -173,21 +178,41 @@ fn main() {
         .and_then(|p| p.parent())
         .expect("repo root");
     let out = repo.join("demos/webgpu-cga-inversion/gen-schedule32");
-    let source = composed_source();
+    let source = app_source();
 
     // Analyze one module containing both the canonical kernel and actor lanes.
     // The kernel package remains rooted at `NAME`, so actor-only functions are
     // unreachable from its Wasm/SPIR-V artifacts.
     let actor_source = format!("{source}\n{ACTOR_SOURCE}");
+    let temp_root = repo.join("output/demo-tmp");
+    std::fs::create_dir_all(&temp_root).expect("Schedule32 temporary ingot root");
+    let app_dir = tempfile::Builder::new()
+        .prefix("fe-schedule32-app-")
+        .tempdir_in(&temp_root)
+        .expect("temporary Schedule32 application ingot");
+    let app_src = app_dir.path().join("src");
+    std::fs::create_dir_all(&app_src).expect("temporary Schedule32 src directory");
+    std::fs::write(
+        app_dir.path().join("fe.toml"),
+        format!(
+            "[ingot]\nname = \"cga_schedule32_app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nsparse_clifford = {{ path = \"../../../ingots/sparse_clifford\" }}\n",
+        ),
+    )
+    .expect("temporary Schedule32 fe.toml");
+    std::fs::write(app_src.join("lib.fe"), &actor_source)
+        .expect("temporary Schedule32 application source");
     let mut db = DriverDataBase::default();
-    let actor_url = Url::parse("file:///cga_schedule32_actor.fe").unwrap();
-    db.workspace()
-        .touch(&mut db, actor_url.clone(), Some(actor_source.clone()));
-    let actor_file = db
+    let app_url = Url::from_directory_path(app_dir.path()).expect("temporary app URL");
+    assert!(
+        !driver::init_ingot(&mut db, &app_url),
+        "Schedule32 application ingot initialization diagnostics"
+    );
+    let app_ingot = db
         .workspace()
-        .get(&db, &actor_url)
-        .expect("Schedule32 actor source");
-    let top_mod = db.top_mod(actor_file);
+        .containing_ingot(&db, app_url)
+        .expect("Schedule32 application ingot");
+    let top_mod = app_ingot.root_mod(&db);
     let actor_diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
     assert!(
         actor_diagnostics.is_empty(),
@@ -219,6 +244,19 @@ fn main() {
     assert!(actor_declarations[2].export.is_some());
     CanonicalInterfaceManifest::build(actor_declarations.to_vec())
         .expect("Schedule32 compiler-derived canonical manifest");
+    let all_app_roots =
+        mir::build_wasm_runtime_package(&db, top_mod).expect("Schedule32 app runtime package");
+    assert!(
+        all_app_roots.functions(&db).iter().all(|function| {
+            let symbol = function.symbol(&db);
+            !symbol.contains("support_")
+                && !symbol.contains("blade_set")
+                && !symbol.contains("plan_mask_")
+                && !symbol.contains("sparse_rank")
+                && !symbol.contains("sparse_present")
+        }),
+        "public CTFE helpers from the sparse_clifford dependency must not become app runtime roots",
+    );
     if std::env::var_os("FE_CGA_SCHEDULE32_HIR_ONLY").is_some() {
         eprintln!(
             "Schedule32 Vec5 render and canonical actor source: HIR clean \
@@ -462,6 +500,10 @@ fn main() {
         "actor_wasm": "actor/module.wasm",
         "actor_interface": "actor/interface.js",
         "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE],
+        "source_model": "application ingot with sparse_clifford path dependency",
+        "application_manifest": "app/fe.toml",
+        "application_source": "app/src/lib.fe",
+        "kernel_source": "kernel.fe (dependency-backed; not standalone)",
         "kernel_wasm_scope": "entry-rooted fragment only; zero imports; no generated helper or actor exports",
         "actor_wasm_scope": "separate canonical WebBundle owning actor exports and arena",
         "width": WIDTH, "height": HEIGHT, "provenance": provenance.clone(),
@@ -484,7 +526,7 @@ fn main() {
             "shade_bucket_delta_histogram": shade_deltas,
             "max_abs_shade_bucket_delta": max_abs_shade_delta,
         },
-        "runtime": "wasmtime executing composed Fe Wasm; every pixel semantically checked against independent Rust f32 oracle",
+        "runtime": "wasmtime executing dependency-backed Fe application-ingot Wasm; every pixel semantically checked against independent Rust f32 oracle",
         "artifact_separation": {
             "frag_wasm": "entry-rooted kernel package; render export only; zero imports; no generated helper or actor exports",
             "actor_wasm": "canonical WebBundle package; owns actor exports and arena",
@@ -498,6 +540,12 @@ fn main() {
     // Nothing is written before compilation and all structural/ABI gates pass.
     std::fs::create_dir_all(&out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
     write(&out.join("kernel.fe"), source.as_bytes());
+    write(
+        &out.join("app/fe.toml"),
+        b"[ingot]\nname = \"cga_schedule32_app\"\nversion = \"0.1.0\"\n\n\
+[dependencies]\nsparse_clifford = { path = \"../../../../ingots/sparse_clifford\" }\n",
+    );
+    write(&out.join("app/src/lib.fe"), actor_source.as_bytes());
     write(&out.join("frag.wgsl"), wgsl.as_bytes());
     write(&out.join("frag.wasm"), &wasm);
     for file in actor_bundle
@@ -985,7 +1033,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         &["status", "--porcelain", "--untracked-files=normal"],
     );
     serde_json::json!({
-        "source": "canonical Fe helpers shared by forced typed Schedule<32> and bounded provider-emitted aggregate sandwich DE body",
+        "source": "Schedule32 application ingot depending on the public sparse_clifford ingot",
         "fe_rev": fe_rev,
         "fe_dirty": false,
         "fe_untracked_present": fe_untracked_present,
@@ -996,11 +1044,15 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "sonatina_status_fnv1a32": fnv1a32(sonatina_status.as_bytes()),
         "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
         "sparse_clifford_fixture": "ingots/sparse_clifford/src/lib.fe",
+        "published_app_manifest": "demos/webgpu-cga-inversion/gen-schedule32/app/fe.toml",
+        "published_app_source": "demos/webgpu-cga-inversion/gen-schedule32/app/src/lib.fe",
+        "published_dependency_path": "../../../../ingots/sparse_clifford",
+        "kernel_source_self_contained": false,
         "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
         "canonical_fnv1a32": fnv1a32(CANONICAL.as_bytes()),
         "sparse_clifford_api_fnv1a32": fnv1a32(SPARSE_CLIFFORD_API.as_bytes()),
         "body_fnv1a32": fnv1a32(BODY.as_bytes()),
-        "composed_source_fnv1a32": fnv1a32(source.as_bytes()),
+        "application_kernel_source_fnv1a32": fnv1a32(source.as_bytes()),
         "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits one shared five-lane sandwich aggregate from the same helpers",
         "generated_unix_secs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
     })

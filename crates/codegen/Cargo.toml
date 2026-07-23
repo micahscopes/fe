@@ -10,6 +10,7 @@ hir.workspace = true
 common.workspace = true
 hex = "0.4"
 num-bigint.workspace = true
+tempfile = "3.23"
 rustc-hash.workspace = true
 sonatina-ir.workspace = true
 sonatina-triple.workspace = true
