@@ -1,0 +1,81 @@
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __sqrt_f32(_: f32) -> f32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+pub fn cga_fco_direct_de_render(
+    px: i32,
+    py: i32,
+    cam_x: f32,
+    cam_y: f32,
+    zoom: f32,
+    inv_cx: f32,
+    inv_cy: f32,
+) -> u32 {
+    let fx: f32 = __f32_from_i32(px)
+    let fy: f32 = __f32_from_i32(py)
+    let sx: f32 = (fx - 64.0) * zoom
+    let sy: f32 = (fy - 64.0) * zoom
+    let rz: f32 = 1.8
+    let inv_len: f32 = 1.0 / __sqrt_f32(sx * sx + sy * sy + rz * rz)
+    let rdx: f32 = sx * inv_len
+    let rdy: f32 = sy * inv_len
+    let rdz: f32 = rz * inv_len
+    let center2: f32 = inv_cx * inv_cx + inv_cy * inv_cy
+    let s8: f32 = center2 * 0.5 - 1.0
+    let s16: f32 = center2 * 0.5
+
+    let mut t: f32 = 0.0
+    let mut i: i32 = 0
+    while i < 72 {
+        let x: f32 = cam_x + rdx * t
+        let y: f32 = cam_y + rdy * t
+        let z: f32 = -4.0 + rdz * t
+        let radius2: f32 = x * x + y * y + z * z
+        let p8: f32 = (radius2 - 1.0) * 0.5
+        let p16: f32 = (radius2 + 1.0) * 0.5
+
+        // All five lanes are provider-emitted straight-line arithmetic derived
+        // from the same canonical 80-candidate Fe helpers as Schedule32.
+        let e1: f32 = <CanonicalCga as Sandwich>::e1(
+            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
+        )
+        let e2: f32 = <CanonicalCga as Sandwich>::e2(
+            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
+        )
+        let e4: f32 = <CanonicalCga as Sandwich>::e4(
+            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
+        )
+        let e8: f32 = <CanonicalCga as Sandwich>::e8(
+            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
+        )
+        let e16: f32 = <CanonicalCga as Sandwich>::e16(
+            inv_cx, inv_cy, s8, s16, x, y, z, p8, p16,
+        )
+
+        let weight: f32 = e16 - e8
+        let safe_weight: f32 = if weight > -0.0004 { -0.0004 } else { weight }
+        let weight_adjust: f32 = safe_weight - weight
+        let qx: f32 = (e1 + weight_adjust * inv_cx) / safe_weight
+        let qy: f32 = (e2 + weight_adjust * inv_cy) / safe_weight
+        let qz: f32 = e4 / safe_weight
+
+        let tx: f32 = qx + 0.62
+        let ty: f32 = qy - 0.08
+        let ring_radius: f32 = __sqrt_f32(tx * tx + ty * ty) - 0.58
+        let base: f32 = __sqrt_f32(ring_radius * ring_radius + qz * qz) - 0.17
+        let distance: f32 = base * -safe_weight
+        t = t + distance * 0.18
+        if distance < 0.0022 {
+            let shade: i32 = 38 + 24 * (i >> 3)
+            if qy > 0.0 {
+                return __bitcast(shade + 88 * 256 + (255 - shade) * 65536 + -16777216)
+            }
+            return __bitcast(56 + shade * 256 + 224 * 65536 + -16777216)
+        }
+        i = i + 1
+    }
+    let sky: i32 = 7 + 11 * 256 + 25 * 65536 + -16777216
+    __bitcast(sky)
+}
