@@ -5,10 +5,11 @@ This does not execute wasm or WebGPU and therefore does not earn acceptance.
 """
 
 import json
+import os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-GEN = HERE / "gen"
+GEN = Path(os.environ.get("CGA_BUNDLE_DIR", HERE / "gen"))
 
 required = ["layout.json", "reference.json", "kernel.fe", "frag.wgsl", "frag.wasm"]
 missing = [name for name in required if not (GEN / name).is_file()]
@@ -53,16 +54,29 @@ assert reference["sky_pixels"] + reference["hit_pixels"] == reference["width"] *
 )
 assert reference["shape"] == "inverted_offset_torus_cyclide"
 assert reference["inversion_center_runtime"] is True
-assert reference["algebra"] == "typed support-specialized recursive Cl(4,1) S*P*S"
 kernel = (GEN / "kernel.fe").read_text()
-for token in [
-    "recursive type fn MvTF",
-    "sandwich_support_cl41",
-    "let sandwich: MvTF<5>",
-    "raw_16 - raw_8",
-    "safe_weight",
-    "ring_radius",
-]:
+algebra = reference["algebra"]
+if algebra == "typed support-specialized recursive Cl(4,1) S*P*S":
+    tokens = [
+        "recursive type fn MvTF",
+        "sandwich_support_cl41",
+        "let sandwich: MvTF<5>",
+        "raw_16 - raw_8",
+        "safe_weight",
+        "ring_radius",
+    ]
+elif algebra.startswith("canonical CTFE-derived Schedule<32>;"):
+    tokens = [
+        "recursive type fn Schedule",
+        "recursive type fn Storage",
+        "fn eval_specialized",
+        "FOUR_CHUNK_TYPED_EVALUATION",
+        "safe_weight",
+        "ring_radius",
+    ]
+else:
+    raise AssertionError(f"unrecognized CGA algebra contract: {algebra!r}")
+for token in tokens:
     assert token in kernel, f"generated kernel lacks runtime-center cyclide token {token!r}"
 wgsl = (GEN / "frag.wgsl").read_text()
 assert "@fragment" in wgsl and "loop" in wgsl and "sqrt(" in wgsl

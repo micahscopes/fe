@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-"""Static server for the Fe demos ROOT (both keystone and mandelbrot pages).
+"""Static server for the common Fe demos root.
 
-Serves this `demos/` directory on http://localhost:8788 so BOTH pages work off
-one origin:
-  * http://localhost:8788/webgpu-keystone/   (the scalar Fe -> GPU keystone)
-  * http://localhost:8788/webgpu-mandelbrot/ (the first Fe-computed IMAGE)
-
-The mandelbrot page imports the kernel-blind runners from ../webgpu-keystone/
-relatively, so both pages must be served from a common root; that root is here.
 Headers match the per-demo servers:
   * `application/wasm` for `.wasm` (so `WebAssembly.instantiate` streams cleanly);
   * cross-origin isolation headers (COOP: same-origin, COEP: require-corp), set
     so the same server keeps working when wasm threads (SharedArrayBuffer)
     arrive. Not load-bearing for WebGPU or plain wasm here.
-No build step, no framework: just the generated gen/ assets and the fixed runtime
-files.
+Generation and validation belong to `demos/serve.sh`; this module only serves
+the resulting static applications from their required common origin.
 """
 
 import http.server
@@ -51,28 +44,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def main():
-    generators = {
-        "webgpu-keystone": "gen_webgpu_demo",
-        "webgpu-mandelbrot": "gen_mandelbrot_demo",
-        "webgpu-mandelbrot-interactive": "gen_mandelbrot_interactive_demo",
-        "webgpu-cga-inversion": "gen_cga_inversion_demo",
-    }
-    for demo, example in generators.items():
-        gen = os.path.join(ROOT, demo, "gen")
-        if not os.path.isdir(gen) or not os.path.exists(os.path.join(gen, "layout.json")):
-            print(f"WARNING: {demo}/gen is missing or incomplete.")
-            if demo == "webgpu-cga-inversion":
-                print("  Run first: SONATINA_DIR=/path/to/sonatina "
-                      "demos/webgpu-cga-inversion/generate.sh")
-            else:
-                print(f"  Run first: cargo run -p fe-codegen --example {example}")
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((HOST, PORT), Handler) as httpd:
         print(f"Fe demos: serving {ROOT} on {HOST}:{PORT}")
         print(f"  keystone:    http://localhost:{PORT}/webgpu-keystone/")
         print(f"  mandelbrot:  http://localhost:{PORT}/webgpu-mandelbrot/")
         print(f"  interactive: http://localhost:{PORT}/webgpu-mandelbrot-interactive/")
-        print(f"  CGA inversion: http://localhost:{PORT}/webgpu-cga-inversion/")
+        print(f"  Clifford:     http://localhost:{PORT}/webgpu-clifford-interactive/")
+        print(f"  CGA:          http://localhost:{PORT}/webgpu-cga-inversion/")
+        print(f"  QCGA:         http://localhost:{PORT}/webgpu-qcga3d-quadric/")
         print("  (Ctrl-C to stop)")
         try:
             httpd.serve_forever()
