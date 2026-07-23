@@ -82,6 +82,42 @@ case "$verify_mode" in
     ;;
   *) echo "CGA_SMOKE_VERIFY must be 'default', 'off', or 'continuous'" >&2; exit 2 ;;
 esac
+append_query() {
+  query="${query:+$query&}$1=$2"
+}
+bundle="${CGA_SMOKE_BUNDLE:-}"
+case "$bundle" in
+  "") ;;
+  d1|legacy|schedule32) append_query bundle "$bundle" ;;
+  *) echo "CGA_SMOKE_BUNDLE must be 'd1', 'legacy', or 'schedule32'" >&2; exit 2 ;;
+esac
+benchmark="${CGA_SMOKE_BENCHMARK:-}"
+case "$benchmark" in
+  "") ;;
+  continuous) append_query benchmark "$benchmark" ;;
+  *) echo "CGA_SMOKE_BENCHMARK must be 'continuous'" >&2; exit 2 ;;
+esac
+resolution="${CGA_SMOKE_RESOLUTION:-}"
+case "$resolution" in
+  "") ;;
+  128|256|512|768) append_query resolution "$resolution" ;;
+  *) echo "CGA_SMOKE_RESOLUTION must be one of 128, 256, 512, or 768" >&2; exit 2 ;;
+esac
+timing="${CGA_SMOKE_TIMING:-}"
+case "$timing" in
+  "") ;;
+  gpu) append_query timing "$timing" ;;
+  *) echo "CGA_SMOKE_TIMING must be 'gpu'" >&2; exit 2 ;;
+esac
+if [ "$benchmark" = "continuous" ] \
+    && { [ "$verify_mode" != "off" ] || [ "$presentation" != "canvas" ]; }; then
+  echo "CGA_SMOKE_BENCHMARK=continuous requires CGA_SMOKE_VERIFY=off and canvas presentation" >&2
+  exit 2
+fi
+if [ "$timing" = "gpu" ] && [ "$benchmark" != "continuous" ]; then
+  echo "CGA_SMOKE_TIMING=gpu requires CGA_SMOKE_BENCHMARK=continuous" >&2
+  exit 2
+fi
 url="http://127.0.0.1:$port/webgpu-cga-inversion/${query:+?$query}"
 python3 - "$url" "$server_pid" <<'PY'
 import os, sys, time, urllib.request
@@ -118,7 +154,12 @@ fi
 chrome_pid=$!
 
 set +e
-if [ "$verify_mode" = "off" ]; then
+if [ "$benchmark" = "continuous" ]; then
+  python3 "$here/cdp_continuous_benchmark.py" \
+    --debug-port "$debug_port" --url "$url" \
+    --timing "${timing:-submit}" \
+    --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"
+elif [ "$verify_mode" = "off" ]; then
   python3 "$here/cdp_presentation.py" \
     --debug-port "$debug_port" --url "$url" \
     --timeout "${CGA_CHROME_TIMEOUT_SECONDS:-90}"

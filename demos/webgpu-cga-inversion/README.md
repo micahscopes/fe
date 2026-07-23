@@ -84,6 +84,21 @@ without a timestamp query and result readback it makes no GPU-completion claim.
 The benchmark uses the direct WebGPU path and preserves the strict no-Wasm,
 no-Worker, no-readback `verify=off` contract.
 
+The real-browser smoke can drive and assert this contract directly:
+
+```sh
+CGA_SMOKE_VERIFY=off \
+CGA_SMOKE_BUNDLE=schedule32 \
+CGA_SMOKE_BENCHMARK=continuous \
+CGA_SMOKE_RESOLUTION=256 \
+./demos/webgpu-cga-inversion/smoke-chrome.sh
+```
+
+These smoke query knobs are fail-closed. Continuous benchmarking requires
+canvas presentation and `CGA_SMOKE_VERIFY=off`. The smoke waits for the full
+30-frame warmup and 120-frame sample, then rejects Wasm/reference fetches,
+Worker/oracle activity, GPU readback, or malformed benchmark evidence.
+
 For an explicitly synchronized GPU measurement, add `timing=gpu`:
 
 ```text
@@ -101,6 +116,10 @@ never substitutes rAF cadence or CPU time for GPU execution time. Omitting
 `timing=gpu` continues to request no optional GPU features, perform no
 readback/synchronization, and report only submitted-frame cadence and CPU
 submission overhead.
+
+The corresponding real-browser smoke adds `CGA_SMOKE_TIMING=gpu`. It asserts
+120 timestamp samples and 150 timestamp-result readbacks (warmup plus sample);
+this is intentionally a distinct, non-zero-readback contract.
 
 The displayed canvas is responsive and uses device-pixel ratio up to 2, capped
 at 768 pixels per side. Deterministic acceptance remains a separate 128x128
