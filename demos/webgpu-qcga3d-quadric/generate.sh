@@ -6,7 +6,7 @@ repo="$(cd "$here/../.." && pwd)"
 if [ "${FE_DEMO_GENERATION_LOCK_ACTIVE:-0}" != 1 ]; then
   exec "$repo/demos/with-fe-generation-lock.sh" "$0" "$@"
 fi
-expected_sonatina="547519d46f9b6191881943fefb7cddd1880e77cf"
+expected_sonatina="ac266c210cad7872fc98380a73b4ca363877bc1f"
 
 if [ -z "${SONATINA_DIR:-}" ]; then
   echo "QCGA generation requires SONATINA_DIR at Sonatina $expected_sonatina" >&2

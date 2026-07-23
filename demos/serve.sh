@@ -25,7 +25,7 @@ fi
 # pin. The overlay re-enters this script with its clean b260 checkout.
 if [ "$demo" != cga-d1 ] && [ -n "${SONATINA_DIR:-}" ] \
     && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ]; then
-  expected_browser_sonatina="547519d46f9b6191881943fefb7cddd1880e77cf"
+  expected_browser_sonatina="ac266c210cad7872fc98380a73b4ca363877bc1f"
   actual_browser_sonatina="$(git -C "$SONATINA_DIR" rev-parse HEAD 2>/dev/null || true)"
   if [ "$actual_browser_sonatina" != "$expected_browser_sonatina" ] \
       || [ -n "$(git -C "$SONATINA_DIR" status --porcelain 2>/dev/null || true)" ]; then

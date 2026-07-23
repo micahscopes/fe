@@ -25,3 +25,4 @@ c2db7f104f7e63672c433f39c2f8fe41418e49eadb43e84c43470001e42ed3c5  0020-feat-spir
 8338d54828c0534bf666801709b8dd24a53b6b17317f5f8ade3500618855ff67  0025-feat-wasm-lower-scalar-bitwise-and.patch
 ffd4c0d953af0e806dd6bec9e391008f6764883133491825acdc7949775a95af  0026-fix-wasm-lower-narrow-integer-truncation-by-carrier.patch
 5994d346cc761f011fa8cc37f430fd048e0ef4f49f09470639282c2f170519c9  0027-feat-wasm-lower-integer-extension-by-carrier.patch
+0f6b8312e8e0cbcb419ba9108b13f63252c7bbf93de1f9b1ab62aff130112da0  0028-fix-wasm-keep-private-functions-out-of-exports.patch

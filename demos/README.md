@@ -37,7 +37,7 @@ fetches only the pinned `mb2-render-mode` base
 `https://github.com/micahscopes/sonatina.git` into
 `target/fe-browser-cache/sonatina.git`. The commit is checked exactly; the
 tracked, checksum-verified 25-patch series then reconstructs reviewed commit
-`547519d46f9b6191881943fefb7cddd1880e77cf` in an isolated temporary checkout.
+`ac266c210cad7872fc98380a73b4ca363877bc1f` in an isolated temporary checkout.
 Warm generation reuses the cache without contacting the remote.
 
 Set `FE_BROWSER_CACHE_DIR` to relocate that cache. Set

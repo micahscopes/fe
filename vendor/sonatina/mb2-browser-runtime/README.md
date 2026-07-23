@@ -1,7 +1,7 @@
 # Reviewed Sonatina browser-backend overlay
 
-These 27 `git format-patch` files reproduce the exact unpublished Sonatina
-commit `547519d46f9b6191881943fefb7cddd1880e77cf` from the remotely fetchable Fe
+These 28 `git format-patch` files reproduce the exact unpublished Sonatina
+commit `ac266c210cad7872fc98380a73b4ca363877bc1f` from the remotely fetchable Fe
 workspace base `150d327edfa88374802a6cc8089fd77da5fa818b`.
 
 The series is committed evidence for the f32 IR/Wasm/SPIR-V substrate, structured
@@ -15,6 +15,7 @@ opt-in canonical Wasm arena used by the browser demos. In particular:
 - `0026` lowers narrow integer truncation according to its source and target
   carriers;
 - `0027` lowers signed and unsigned integer extension across Wasm carriers.
+- `0028` keeps private helper functions callable but out of the Wasm host ABI.
 
 `demos/with-sonatina-overlay.sh` applies the series to an isolated temporary
 clone, verifies that the resulting commit is exactly `547519d4`, runs the given
@@ -33,7 +34,7 @@ The patch files were produced with:
 
 ```sh
 git -C /workspace/sonatina-eq-clean format-patch \
-  150d327edfa88374802a6cc8089fd77da5fa818b..547519d46f9b6191881943fefb7cddd1880e77cf
+  150d327edfa88374802a6cc8089fd77da5fa818b..ac266c210cad7872fc98380a73b4ca363877bc1f
 ```
 
 They reconstruct the original hashes because those commits use identical author
