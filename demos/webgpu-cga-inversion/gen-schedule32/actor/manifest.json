@@ -4,9 +4,9 @@
   "source_entry": "cga_schedule32_vec5_de_render",
   "artifacts": {
     "wasm": "module.wasm",
-    "wasm_bytes": 47319,
+    "wasm_bytes": 2130,
     "wgsl": "shader.wgsl",
-    "wgsl_bytes": 6281,
+    "wgsl_bytes": 4831,
     "canonical_adapters": [
       {
         "path": "interface.js",

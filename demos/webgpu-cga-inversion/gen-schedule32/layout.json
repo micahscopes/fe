@@ -7,6 +7,7 @@
     "oracle"
   ],
   "actor_wasm": "actor/module.wasm",
+  "actor_wasm_scope": "separate canonical WebBundle owning actor exports and arena",
   "bindings": [
     {
       "access": "Read",
@@ -32,11 +33,12 @@
   ],
   "color_target_format": "rgba8unorm",
   "entry_point": "fs_main",
-  "frag_wasm_bytes": 51082,
+  "frag_wasm_bytes": 1264,
   "frag_wasm_export": "cga_schedule32_vec5_de_render",
   "fragment_entry": "fs_main",
   "height": 128,
   "kernel": "cga_schedule32_vec5_de_render",
+  "kernel_wasm_scope": "entry-rooted fragment only; zero imports; no generated helper or actor exports",
   "mode": "Render",
   "params": [
     {
@@ -76,21 +78,21 @@
     }
   ],
   "provenance": {
-    "algebra": "CTFE-derived 80-to-32 typed plan; four independent depth-8 typed roots balanced into one Vec5 per DE sample",
-    "body_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule32_vec5_de_render_body.fe",
-    "body_fnv1a32": 2067328414,
-    "canonical_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule_ctfe_specialized_render.fe",
-    "canonical_fnv1a32": 2590505657,
-    "composed_source_fnv1a32": 3914491914,
+    "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits five direct lane expressions from the same helpers",
+    "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
+    "body_fnv1a32": 907246819,
+    "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
+    "canonical_fnv1a32": 2663090092,
+    "composed_source_fnv1a32": 566961383,
     "fe_dirty": true,
-    "fe_rev": "df38a7c6e334f1ee4471da979e18386cd5e4294b",
-    "fe_status_fnv1a32": 2799770702,
-    "generated_unix_secs": 1784814189,
+    "fe_rev": "75cf337e066db3cc6f63e0068736941aa643f0d1",
+    "fe_status_fnv1a32": 2335517577,
+    "generated_unix_secs": 1784818200,
     "sonatina_dirty": false,
     "sonatina_path": "/workspace/sonatina-eq-clean",
-    "sonatina_rev": "547519d46f9b6191881943fefb7cddd1880e77cf",
+    "sonatina_rev": "ac266c210cad7872fc98380a73b4ca363877bc1f",
     "sonatina_status_fnv1a32": 2166136261,
-    "source": "canonical Fe CTFE Schedule<32> composed with isolated Vec5 DE body"
+    "source": "canonical Fe helpers shared by forced typed Schedule<32> and bounded provider-emitted five-lane DE body"
   },
   "vertex_entry": "vs_fullscreen",
   "width": 128,
