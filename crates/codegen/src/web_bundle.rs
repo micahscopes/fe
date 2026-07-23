@@ -464,7 +464,9 @@ fn generated_canonical_adapters(
          export function compileActorAdapter() {{\n  \
          return compileCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface);\n}}\n\
          export function createActorAdapter(exports, options) {{\n  \
-         return createCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, exports, options);\n}}\n"
+         return createCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, exports, options);\n}}\n\
+         export function createHostEffectAdapter(handlers, options) {{\n  \
+         return createCanonicalHostEffectAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, handlers, options);\n}}\n"
     );
     let interface_d_ts = canonical_interface_declarations(interface)?;
     let artifact = |path: &str, content: &str| WebGeneratedArtifact {
@@ -574,10 +576,25 @@ fn canonical_interface_declarations(
         ));
     }
     output.push_str(
+        "}\n\n\
+         export interface CanonicalHostEffectHandlers {\n",
+    );
+    for lane in &interface.lanes {
+        let name = canonical_type_name(&lane.name);
+        output.push_str(&format!(
+            "  {:?}?: (request: {name}Request) => {name}Response | PromiseLike<{name}Response>;\n",
+            lane.name
+        ));
+    }
+    output.push_str(
         "}\n\
          export declare function compileActorAdapter(): CanonicalActorShape;\n\
          export declare function createActorAdapter(\n  \
          exports: WebAssembly.Exports,\n  \
+         options?: { maxPendingPerLane?: number },\n\
+         ): CanonicalActorAdapter;\n\
+         export declare function createHostEffectAdapter(\n  \
+         handlers: CanonicalHostEffectHandlers,\n  \
          options?: { maxPendingPerLane?: number },\n\
          ): CanonicalActorAdapter;\n",
     );
@@ -962,6 +979,8 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(interface_js.contains("createInterfaceCaller"));
         assert!(interface_js.contains("compileActorAdapter"));
         assert!(interface_js.contains("createActorAdapter"));
+        assert!(interface_js.contains("createHostEffectAdapter"));
+        assert!(interface_js.contains("createCanonicalHostEffectAdapter"));
         assert!(interface_js.contains("FE_ACTOR_SUPERSEDED"));
         assert!(interface_js.contains("canonicalInterfaceManifest"));
         assert!(interface_d_ts.contains("export type UpdateRequest"));
@@ -976,6 +995,15 @@ pub fn shade(x: u32, y: u32) -> u32 {
             "dispatch(request: CanonicalActorRequest<\"verify\", VerifyRequest>): \
              Promise<VerifyResponse>"
         ));
+        assert!(interface_d_ts.contains(
+            "\"verify\"?: (request: VerifyRequest) => VerifyResponse | \
+             PromiseLike<VerifyResponse>"
+        ));
+        assert!(interface_d_ts.contains(
+            "\"update\"?: (request: UpdateRequest) => UpdateResponse | \
+             PromiseLike<UpdateResponse>"
+        ));
+        assert!(interface_d_ts.contains("createHostEffectAdapter"));
         let interface = required.manifest.canonical_interface.as_ref().unwrap();
         assert_eq!(
             interface

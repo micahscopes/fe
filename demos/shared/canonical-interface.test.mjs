@@ -16,6 +16,7 @@ assert.equal(
 const {
   compileCanonicalActorAdapter,
   createCanonicalActorAdapter,
+  createCanonicalHostEffectAdapter,
 } = compilerOwnedCodec;
 
 const scalar = (kind, size, align) => ({ kind, size, align });
@@ -181,6 +182,86 @@ assert.notEqual(transfer[0], actorMemory.buffer, "live Wasm memory must never tr
 await assert.rejects(
   actor.dispatch({ lane: "missing", payload: {} }),
   /FE_ACTOR_UNKNOWN_LANE: unknown canonical actor lane/,
+);
+
+const hostManifest = structuredClone(manifest);
+hostManifest.lanes.push({
+  ...structuredClone(hostManifest.lanes[0]),
+  name: "gpu_submit",
+  export: "gpu_submit_message",
+});
+const hostCompiled = compileCanonicalInterfaceManifest(hostManifest);
+const hostRequest = (tag) => ({
+  tag, sequence: BigInt(tag), text: `host ${tag}`,
+  payload: new Uint8Array([tag]),
+});
+assert.throws(
+  () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, null),
+  /canonical host-effect handlers must be an object/,
+);
+assert.throws(
+  () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, {}),
+  /at least one canonical host-effect handler is required/,
+);
+assert.throws(
+  () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, { missing() {} }),
+  /unknown canonical host-effect lane missing/,
+);
+assert.throws(
+  () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, { echo: true }),
+  /canonical host-effect handler echo must be a function/,
+);
+
+let releaseFirstHostEffect;
+const hostEffectCalls = [];
+const hostEffects = createCanonicalHostEffectAdapter(
+  hostManifest,
+  hostCompiled,
+  {
+    echo: async (request) => {
+      hostEffectCalls.push(request.tag);
+      if (request.tag === 1) {
+        await new Promise((resolve) => { releaseFirstHostEffect = resolve; });
+      }
+      if (request.tag === 9) throw new Error("sensitive host detail");
+      return new Uint8Array([request.tag]);
+    },
+  },
+  { maxPendingPerLane: 1 },
+);
+await assert.rejects(
+  hostEffects.dispatch({ lane: "gpu_submit", payload: hostRequest(1) }),
+  /FE_ACTOR_UNHANDLED_EFFECT: gpu_submit has no host-effect handler/,
+);
+await assert.rejects(
+  hostEffects.dispatch({ lane: "echo", payload: { nope: true } }),
+  /FE_ACTOR_INVALID_PAYLOAD/,
+);
+const activeHostEffect = hostEffects.dispatch({ lane: "echo", payload: hostRequest(1) });
+while (!releaseFirstHostEffect) await Promise.resolve();
+const displacedHostEffect = hostEffects.dispatch({ lane: "echo", payload: hostRequest(2) });
+const newestHostEffect = hostEffects.dispatch({ lane: "echo", payload: hostRequest(3) });
+await assert.rejects(displacedHostEffect, /FE_ACTOR_SUPERSEDED/);
+releaseFirstHostEffect();
+assert.deepEqual(await activeHostEffect, new Uint8Array([1]));
+const hostBytes = await newestHostEffect;
+assert.deepEqual(hostBytes, new Uint8Array([3]));
+assert.deepEqual(hostEffectCalls, [1, 3]);
+assert.deepEqual(hostEffects.transferResult(hostBytes, { lane: "echo" }), [hostBytes.buffer]);
+await assert.rejects(
+  hostEffects.dispatch({ lane: "echo", payload: hostRequest(9) }),
+  (error) => String(error).includes("FE_ACTOR_HOST_EFFECT: echo host-effect handler failed")
+    && !String(error).includes("sensitive host detail"),
+  "host exceptions must be normalized instead of crossing the actor boundary",
+);
+const invalidHostResponse = createCanonicalHostEffectAdapter(
+  hostManifest,
+  hostCompiled,
+  { echo: () => "not bytes" },
+);
+await assert.rejects(
+  invalidHostResponse.dispatch({ lane: "echo", payload: hostRequest(4) }),
+  /FE_ACTOR_INVALID_RESPONSE: echo result does not match its canonical layout/,
 );
 assert.throws(
   () => compiled.lanes.echo.request.write({

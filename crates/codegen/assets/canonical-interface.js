@@ -459,19 +459,19 @@ export function compileCanonicalActorAdapter(manifest, compiled) {
   });
 }
 
-export function createCanonicalActorAdapter(manifest, compiled, exports, {
+function createCanonicalDispatchAdapter(adapter, invoke, {
   maxPendingPerLane = 1,
+  failureCode,
+  failureDescription,
 } = {}) {
   if (!Number.isSafeInteger(maxPendingPerLane) || maxPendingPerLane < 0) {
     throw new TypeError("maxPendingPerLane must be a non-negative safe integer");
   }
-  const adapter = compileCanonicalActorAdapter(manifest, compiled);
-  const caller = createCanonicalInterfaceCaller(compiled, exports);
   const states = new Map();
 
   const run = (lane, state, entry) => {
     state.active = true;
-    Promise.resolve().then(() => caller.call(lane, entry.payload)).then(
+    Promise.resolve().then(() => invoke(lane, entry.payload)).then(
       (value) => {
         try {
           adapter.responseValidators[lane](value);
@@ -482,9 +482,11 @@ export function createCanonicalActorAdapter(manifest, compiled, exports, {
           ));
         }
       },
-      () => entry.reject(actorError(
-        "FE_ACTOR_CANONICAL_CALL", `${lane} canonical call failed`,
-      )),
+      (error) => entry.reject(
+        error?.name === "CanonicalActorError"
+          ? error
+          : actorError(failureCode, `${lane} ${failureDescription}`),
+      ),
     ).finally(() => {
       const next = state.pending.shift();
       if (next) run(lane, state, next);
@@ -527,4 +529,60 @@ export function createCanonicalActorAdapter(manifest, compiled, exports, {
       });
     },
   });
+}
+
+export function createCanonicalActorAdapter(manifest, compiled, exports, options = {}) {
+  const adapter = compileCanonicalActorAdapter(manifest, compiled);
+  const caller = createCanonicalInterfaceCaller(compiled, exports);
+  return createCanonicalDispatchAdapter(
+    adapter,
+    (lane, payload) => caller.call(lane, payload),
+    {
+      ...options,
+      failureCode: "FE_ACTOR_CANONICAL_CALL",
+      failureDescription: "canonical call failed",
+    },
+  );
+}
+
+export function createCanonicalHostEffectAdapter(
+  manifest,
+  compiled,
+  handlers,
+  options = {},
+) {
+  const adapter = compileCanonicalActorAdapter(manifest, compiled);
+  if (!handlers || typeof handlers !== "object" || Array.isArray(handlers)) {
+    throw new TypeError("canonical host-effect handlers must be an object");
+  }
+  const selected = Object.create(null);
+  for (const [lane, handler] of Object.entries(handlers)) {
+    if (!Object.hasOwn(compiled.lanes, lane)) {
+      throw new TypeError(`unknown canonical host-effect lane ${lane}`);
+    }
+    if (typeof handler !== "function") {
+      throw new TypeError(`canonical host-effect handler ${lane} must be a function`);
+    }
+    selected[lane] = handler;
+  }
+  if (Object.keys(selected).length === 0) {
+    throw new TypeError("at least one canonical host-effect handler is required");
+  }
+  return createCanonicalDispatchAdapter(
+    adapter,
+    (lane, payload) => {
+      const handler = selected[lane];
+      if (!handler) {
+        throw actorError("FE_ACTOR_UNHANDLED_EFFECT", `${lane} has no host-effect handler`);
+      }
+      return Promise.resolve().then(() => handler(payload)).catch(() => {
+        throw actorError("FE_ACTOR_HOST_EFFECT", `${lane} host-effect handler failed`);
+      });
+    },
+    {
+      ...options,
+      failureCode: "FE_ACTOR_HOST_EFFECT",
+      failureDescription: "host-effect handler failed",
+    },
+  );
 }
