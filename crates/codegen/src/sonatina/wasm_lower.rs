@@ -40,8 +40,8 @@ use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
 use mir::{
     AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem, PlaceRoot,
     RBlockId, RExpr, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin,
-    RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint, RuntimeInstance, RuntimeLinkage,
-    RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass, ScalarRepr,
+    RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint, RuntimeInstance,
+    RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass, ScalarRepr,
 };
 use rustc_hash::FxHashMap;
 use sonatina_ir::{
@@ -167,8 +167,7 @@ fn prepare_inline_value_bodies<'db>(
         visiting: &mut HashSet<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey)>,
         done: &mut FxHashMap<(RuntimeInstance<'db>, mir::RuntimeArgShapeKey), RuntimeBody<'db>>,
         specialization_work: &mut usize,
-        #[cfg(test)]
-        residual_stmt_counts: &mut FxHashMap<RuntimeInstance<'db>, (usize, usize)>,
+        #[cfg(test)] residual_stmt_counts: &mut FxHashMap<RuntimeInstance<'db>, (usize, usize)>,
     ) -> RuntimeBody<'db> {
         let cache_key = (instance, arg_shape);
         if let Some(body) = done.get(&cache_key) {
@@ -500,7 +499,8 @@ fn inline_value_call<'db>(
             .map(|(_, local)| local)
     };
     let dst_class = local(dst)?.carrier.value_class()?;
-    if !matches!(ret_class, RuntimeClass::AggregateValue { .. })
+    if ret_class.is_transport()
+        || dst_class.is_transport()
         || !ret_class.shares_runtime_rep_with(db, dst_class)
     {
         return None;
@@ -594,15 +594,15 @@ fn remap_inline_expr<'db>(
                 rhs: map(*rhs)?,
                 class: class.clone(),
             },
-            RuntimeBuiltin::F32FromI32 { value } => {
-                RuntimeBuiltin::F32FromI32 { value: map(*value)? }
-            }
-            RuntimeBuiltin::I32FromF32 { value } => {
-                RuntimeBuiltin::I32FromF32 { value: map(*value)? }
-            }
-            RuntimeBuiltin::F32Sqrt { value } => {
-                RuntimeBuiltin::F32Sqrt { value: map(*value)? }
-            }
+            RuntimeBuiltin::F32FromI32 { value } => RuntimeBuiltin::F32FromI32 {
+                value: map(*value)?,
+            },
+            RuntimeBuiltin::I32FromF32 { value } => RuntimeBuiltin::I32FromF32 {
+                value: map(*value)?,
+            },
+            RuntimeBuiltin::F32Sqrt { value } => RuntimeBuiltin::F32Sqrt {
+                value: map(*value)?,
+            },
             _ => return None,
         }),
         RExpr::AggregateMake { layout, fields } => RExpr::AggregateMake {
@@ -743,6 +743,13 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             let func_ref = self.builder.declare_function(signature).map_err(|err| {
                 LowerError::Internal(format!("failed to declare wasm function: {err}"))
             })?;
+            let inline_hint = match function.inline_hint(self.db) {
+                RuntimeInlineHint::Auto => sonatina_ir::InlineHint::Auto,
+                RuntimeInlineHint::Hint => sonatina_ir::InlineHint::Inline,
+                RuntimeInlineHint::Always => sonatina_ir::InlineHint::Always,
+                RuntimeInlineHint::Never => sonatina_ir::InlineHint::Never,
+            };
+            self.builder.ctx.set_inline_hint(func_ref, inline_hint);
             self.func_map.insert(instance, func_ref);
         }
         Ok(())
@@ -1365,16 +1372,12 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             }
             RExpr::Call { callee, args } => {
                 let callee_body = callee.body(self.module.db);
-                let callee_class = callee_body
-                    .signature
-                    .ret
-                    .as_ref()
-                    .ok_or_else(|| {
-                        LowerError::Unsupported(format!(
-                            "wasm target: unit-returning call to `{}` cannot initialize an aggregate",
-                            self.module.function_symbol(*callee),
-                        ))
-                    })?;
+                let callee_class = callee_body.signature.ret.as_ref().ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "wasm target: unit-returning call to `{}` cannot initialize an aggregate",
+                        self.module.function_symbol(*callee),
+                    ))
+                })?;
                 let dst_class = self.body.value_class(dst).ok_or_else(|| {
                     LowerError::Internal(format!(
                         "aggregate call destination {dst:?} has no runtime class"
@@ -2098,6 +2101,77 @@ mod tests {
             (102, 6),
             "authored nested MvT5 structural residual changed"
         );
+    }
+
+    #[test]
+    fn reduced_staged_scalar_eval_prepares_call_free_entry() {
+        let source = r#"
+struct Zero {}
+struct Term<const I: i32> {}
+struct Add<L, R> {}
+const fn payload(_ i: usize) -> i32 {
+    if i == 0 { 1 } else if i == 1 { 4 } else if i == 2 { 7 } else { 10 }
+}
+recursive type fn Schedule<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{payload(N - 1)}>, Schedule<{N - 1}>>
+    }
+}
+trait Eval { fn eval(x: i32) -> i32 }
+impl Eval for Zero {
+    #[inline(always)]
+    fn eval(x: i32) -> i32 { 0 }
+}
+impl<const I: i32> Eval for Term<I> {
+    #[inline(always)]
+    fn eval(x: i32) -> i32 { x + I }
+}
+impl<L: Eval, R: Eval> Eval for Add<L, R> {
+    #[inline(always)]
+    fn eval(x: i32) -> i32 {
+        <L as Eval>::eval(x: x) + <R as Eval>::eval(x: x)
+    }
+}
+pub fn staged_scalar_schedule4(x: i32) -> i32 {
+    <Schedule<4> as Eval>::eval(x: x)
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///staged_scalar_inline_schedule4.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics:\n{diagnostics}"
+        );
+        let package = mir::build_wasm_runtime_package(&db, top_mod)
+            .expect("reduced staged schedule should lower to Runtime MIR");
+        let entry = package.root_objects(&db)[0].sections(&db)[0]
+            .entry
+            .instance(&db);
+        let prepared = prepare_inline_value_bodies(&db, &package);
+        let body = prepared.bodies.get(&entry).expect("prepared entry body");
+        let callees = body
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .filter_map(|stmt| match stmt {
+                RStmt::Assign {
+                    expr: RExpr::Call { callee, .. },
+                    ..
+                } => package
+                    .functions(&db)
+                    .into_iter()
+                    .find(|function| function.instance(&db) == *callee)
+                    .map(|function| function.symbol(&db).clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(callees.is_empty(), "residual scalar calls: {callees:#?}");
     }
 
     #[test]

@@ -18,6 +18,7 @@ use driver::DriverDataBase;
 use mir::RuntimePackage;
 use sonatina_codegen::Backend as _;
 use sonatina_codegen::isa::spirv::{SpirvArtifact, SpirvBackend};
+use sonatina_codegen::optim::{Pass, Pipeline, Step, inliner::InlinerConfig};
 
 use crate::sonatina::{LowerError, compile_runtime_package_wasm};
 
@@ -70,7 +71,8 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     );
     // REUSE the wasm-path Module. The import side-table is irrelevant to SPIR-V
     // (compute shaders have no wasm-style imports), so it is discarded here.
-    let (module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    inline_spirv_calls(&mut module);
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -116,7 +118,8 @@ pub fn compile_runtime_package_spirv_grid(
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
-    let (module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    inline_spirv_calls(&mut module);
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -170,7 +173,8 @@ pub fn compile_runtime_package_spirv_render(
         "SPIR-V lowering must realize the Kernel DispatchKind (entries invoked directly)"
     );
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
-    let (module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
+    inline_spirv_calls(&mut module);
 
     SpirvBackend::new()
         .with_render()
@@ -184,4 +188,45 @@ pub fn compile_runtime_package_spirv_render(
                     .join("; "),
             )
         })
+}
+
+fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
+    // The SPIR-V translator currently consumes only the first (entry) function
+    // and deliberately rejects calls. Reuse Sonatina's CFG-aware full inliner
+    // and constant/CFG cleanup here, while retaining every declared function:
+    // the stock optimization pipelines include dead-function elimination whose
+    // object-root model is not populated by the wasm-path module lowerer.
+    let mut pipeline = Pipeline::new();
+    pipeline.inliner_config = InlinerConfig {
+        enable_full_inliner: true,
+        // Ordinary hints remain subject to hard, target-local growth caps.
+        // `inline(always)` intentionally overrides these cost caps in Sonatina,
+        // but its recursive-SCC generation guard still prevents unbounded
+        // recursive expansion.
+        max_inlinee_blocks: 64,
+        max_inlinee_insts: 4096,
+        max_growth_per_caller: 65_536,
+        max_total_growth: 262_144,
+        max_inline_depth: 64,
+        ..InlinerConfig::default()
+    };
+    pipeline.add_step(Step::Inline);
+    pipeline.add_step(Step::FuncPasses(vec![
+        Pass::CfgCleanup,
+        Pass::BranchCanonicalize,
+        Pass::Sccp,
+        Pass::ScalarCanonicalize,
+        Pass::Gvn,
+        Pass::CfgCleanup,
+    ]));
+    pipeline.add_step(Step::Inline);
+    pipeline.add_step(Step::FuncPasses(vec![
+        Pass::CfgCleanup,
+        Pass::BranchCanonicalize,
+        Pass::Sccp,
+        Pass::ScalarCanonicalize,
+        Pass::Gvn,
+        Pass::CfgCleanup,
+    ]));
+    pipeline.run(module);
 }
