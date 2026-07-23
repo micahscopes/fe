@@ -14,7 +14,8 @@ pub use layout_utils::*;
 pub use lower::*;
 pub use package::{
     LowerError, build_runtime_package, build_test_runtime_package, build_wasm_runtime_package,
-    build_wasm_runtime_package_for_entry, runtime_instance_stable_key, runtime_instance_symbol_key,
+    build_wasm_runtime_package_for_entries, build_wasm_runtime_package_for_entry,
+    runtime_instance_stable_key, runtime_instance_symbol_key,
 };
 pub use pretty::{
     format_runtime_body, format_runtime_body_excerpt, format_runtime_package,

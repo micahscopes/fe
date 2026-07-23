@@ -472,13 +472,37 @@ pub fn build_wasm_runtime_package_for_entry<'db>(
     top_mod: TopLevelMod<'db>,
     entry_name: &str,
 ) -> Result<RuntimePackage<'db>, LowerError> {
-    build_wasm_runtime_package_impl(db, top_mod, Some(entry_name))
+    build_wasm_runtime_package_for_entries(db, top_mod, &[entry_name.to_owned()])
+}
+
+/// Build the Wasm-shaped runtime package rooted at an ordered set of exact
+/// public top-level functions. Callers must deduplicate names before this
+/// boundary; duplicates fail closed so wrapper selection cannot silently drift.
+pub fn build_wasm_runtime_package_for_entries<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    entry_names: &[String],
+) -> Result<RuntimePackage<'db>, LowerError> {
+    if entry_names.is_empty() {
+        return Err(LowerError::Unsupported(
+            "requested web entry set must not be empty".to_owned(),
+        ));
+    }
+    let mut seen = FxHashSet::default();
+    for name in entry_names {
+        if !seen.insert(name.as_str()) {
+            return Err(LowerError::Unsupported(format!(
+                "requested web entry `{name}` is duplicated"
+            )));
+        }
+    }
+    build_wasm_runtime_package_impl(db, top_mod, Some(entry_names))
 }
 
 fn build_wasm_runtime_package_impl<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
-    requested_entry: Option<&str>,
+    requested_entries: Option<&[String]>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
     // Contracts fail closed on wasm: no silent EVM-shaped behavior.
     if !top_mod.all_contracts(db).is_empty()
@@ -512,44 +536,49 @@ fn build_wasm_runtime_package_impl<'db>(
             RuntimeRootCandidate::Rejected(rejection) => rejections.push(rejection),
         }
     }
-    if let Some(entry_name) = requested_entry {
-        let named = funcs
-            .iter()
-            .copied()
-            .filter(|func| {
-                func.name(db)
-                    .to_opt()
-                    .is_some_and(|name| name.data(db) == entry_name)
-            })
-            .collect::<Vec<_>>();
-        match named.as_slice() {
-            [] => {
-                return Err(LowerError::Unsupported(format!(
-                    "requested web entry `{entry_name}` was not found as a top-level function of the entry module"
-                )));
-            }
-            [func] => {
-                if let Some(rejection) = rejections.iter().find(|rejection| rejection.func == *func)
-                {
-                    return Err(LowerError::Unsupported(format_runtime_root_rejection(
-                        db, rejection,
-                    )));
-                }
-                if !entry_funcs.contains(func) {
+    if let Some(entry_names) = requested_entries {
+        let mut selected = Vec::with_capacity(entry_names.len());
+        for entry_name in entry_names {
+            let named = funcs
+                .iter()
+                .copied()
+                .filter(|func| {
+                    func.name(db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(db) == entry_name)
+                })
+                .collect::<Vec<_>>();
+            match named.as_slice() {
+                [] => {
                     return Err(LowerError::Unsupported(format!(
-                        "requested web entry `{entry_name}` is not an eligible public runtime root"
+                        "requested web entry `{entry_name}` was not found as a top-level function of the entry module"
                     )));
                 }
-                entry_funcs.retain(|candidate| candidate == func);
-            }
-            _ => {
-                return Err(LowerError::Unsupported(format!(
-                    "requested web entry `{entry_name}` is ambiguous in the entry module"
-                )));
+                [func] => {
+                    if let Some(rejection) =
+                        rejections.iter().find(|rejection| rejection.func == *func)
+                    {
+                        return Err(LowerError::Unsupported(format_runtime_root_rejection(
+                            db, rejection,
+                        )));
+                    }
+                    if !entry_funcs.contains(func) {
+                        return Err(LowerError::Unsupported(format!(
+                            "requested web entry `{entry_name}` is not an eligible public runtime root"
+                        )));
+                    }
+                    selected.push(*func);
+                }
+                _ => {
+                    return Err(LowerError::Unsupported(format!(
+                        "requested web entry `{entry_name}` is ambiguous in the entry module"
+                    )));
+                }
             }
         }
+        entry_funcs = selected;
     }
-    if requested_entry.is_none() {
+    if requested_entries.is_none() {
         if let Some(rejection) = rejections
             .iter()
             .find(|rejection| is_main_func(db, rejection.func))

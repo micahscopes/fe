@@ -423,9 +423,10 @@ pub enum WebAction {
         #[arg(long, value_enum, default_value = "disabled")]
         canonical: WebCanonicalPolicy,
         /// Public Fe message-lane entry used by the canonical browser ABI.
-        /// Required when `--canonical` is optional or required.
+        /// Repeat for multiple lanes. At least one is required when
+        /// `--canonical` is optional or required.
         #[arg(long)]
-        canonical_entry: Option<String>,
+        canonical_entry: Vec<String>,
     },
 }
 
@@ -528,7 +529,7 @@ pub fn run(opts: &Options) {
                     [*workgroup_x, *workgroup_y, *workgroup_z],
                     source_id.clone(),
                     *canonical,
-                    canonical_entry.as_deref(),
+                    canonical_entry,
                 ) {
                     eprintln!("Error: {err}");
                     std::process::exit(1);
@@ -1253,7 +1254,7 @@ mod web_cli_tests {
         assert_eq!(entry, "shade");
         assert_eq!(mode, WebMode::Grid);
         assert_eq!(canonical, WebCanonicalPolicy::Disabled);
-        assert_eq!(canonical_entry, None);
+        assert!(canonical_entry.is_empty());
         assert_eq!(
             [workgroup_x, workgroup_y, workgroup_z],
             [Some(8), Some(4), Some(1)]
@@ -1310,10 +1311,43 @@ mod web_cli_tests {
             };
             assert_eq!(canonical, expected);
             assert_eq!(
-                canonical_entry.as_deref(),
-                (expected != WebCanonicalPolicy::Disabled).then_some("update")
+                canonical_entry,
+                if expected != WebCanonicalPolicy::Disabled {
+                    vec!["update".to_owned()]
+                } else {
+                    Vec::new()
+                }
             );
         }
+
+        let options = Options::try_parse_from([
+            "fe",
+            "web",
+            "build",
+            "kernel.fe",
+            "--entry",
+            "shade",
+            "--mode",
+            "render",
+            "--out",
+            "bundle",
+            "--canonical",
+            "required",
+            "--canonical-entry",
+            "render_message",
+            "--canonical-entry",
+            "verify_message",
+        ])
+        .unwrap();
+        let Command::Web {
+            action: WebAction::Build {
+                canonical_entry, ..
+            },
+        } = options.command
+        else {
+            panic!("expected web build");
+        };
+        assert_eq!(canonical_entry, ["render_message", "verify_message"]);
     }
 }
 

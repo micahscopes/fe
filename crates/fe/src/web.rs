@@ -18,25 +18,27 @@ pub fn build(
     workgroup: [Option<u32>; 3],
     source_id: Option<String>,
     canonical: WebCanonicalPolicy,
-    canonical_entry: Option<&str>,
+    canonical_entries: &[String],
 ) -> Result<(), String> {
     if entry.is_empty() {
         return Err("`--entry` must not be empty".to_string());
     }
-    match (canonical, canonical_entry) {
-        (WebCanonicalPolicy::Disabled, Some(_)) => {
+    match (canonical, canonical_entries.is_empty()) {
+        (WebCanonicalPolicy::Disabled, false) => {
             return Err(
                 "`--canonical-entry` is only valid with `--canonical optional|required`"
                     .to_string(),
             );
         }
-        (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required, None) => {
+        (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required, true) => {
             return Err(
                 "`--canonical-entry NAME` is required with `--canonical optional|required`"
                     .to_string(),
             );
         }
-        (_, Some("")) => return Err("`--canonical-entry` must not be empty".to_string()),
+        (_, _) if canonical_entries.iter().any(String::is_empty) => {
+            return Err("`--canonical-entry` must not be empty".to_string());
+        }
         _ => {}
     }
     let workgroup = match (mode, workgroup) {
@@ -108,9 +110,7 @@ pub fn build(
         WebCanonicalPolicy::Optional => codegen::WebCanonicalPolicy::Optional,
         WebCanonicalPolicy::Required => codegen::WebCanonicalPolicy::Required,
     });
-    if let Some(canonical_entry) = canonical_entry {
-        options = options.with_canonical_entry(canonical_entry);
-    }
+    options = options.with_canonical_entries(canonical_entries.iter().cloned());
     let bundle = WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())?;
     bundle
         .write_atomic(out.as_std_path())
@@ -133,7 +133,7 @@ mod tests {
             [Some(8), None, Some(1)],
             None,
             WebCanonicalPolicy::Disabled,
-            None,
+            &[],
         )
         .unwrap_err();
         assert!(missing.contains("requires non-zero"), "{missing}");
@@ -146,7 +146,7 @@ mod tests {
             [Some(8), Some(4), Some(1)],
             None,
             WebCanonicalPolicy::Disabled,
-            None,
+            &[],
         )
         .unwrap_err();
         assert!(render.contains("only valid"), "{render}");
@@ -162,7 +162,7 @@ mod tests {
             [None, None, None],
             None,
             WebCanonicalPolicy::Required,
-            None,
+            &[],
         )
         .unwrap_err();
         assert!(missing.contains("is required"), "{missing}");
@@ -175,7 +175,7 @@ mod tests {
             [None, None, None],
             None,
             WebCanonicalPolicy::Disabled,
-            Some("update"),
+            &["update".to_owned()],
         )
         .unwrap_err();
         assert!(disabled.contains("only valid"), "{disabled}");
@@ -190,8 +190,13 @@ mod tests {
             r#"
 struct Request { value: u32 }
 struct Response { value: u32 }
+struct VerifyRequest { sample: i32 }
+struct VerifyResponse { accepted: i32 }
 pub fn update(request: Request) -> Response {
     Response { value: request.value + 1 }
+}
+pub fn verify(request: VerifyRequest) -> VerifyResponse {
+    VerifyResponse { accepted: request.sample }
 }
 pub fn shade(x: u32, y: u32) -> u32 {
     x + y
@@ -201,7 +206,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
         .unwrap();
         let source = Utf8PathBuf::from_path_buf(source).unwrap();
         let out = Utf8PathBuf::from_path_buf(temp.path().join("bundle")).unwrap();
-        let error = build(
+        build(
             &source,
             "shade",
             WebMode::Render,
@@ -209,7 +214,11 @@ pub fn shade(x: u32, y: u32) -> u32 {
             [None, None, None],
             None,
             WebCanonicalPolicy::Required,
-            Some("update"),
+            &[
+                "verify".to_owned(),
+                "update".to_owned(),
+                "verify".to_owned(),
+            ],
         )
         .unwrap();
         assert!(out.join("module.wasm").exists());
@@ -217,6 +226,11 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let manifest = std::fs::read_to_string(out.join("manifest.json")).unwrap();
         assert!(manifest.contains("\"source_entry\": \"shade\""));
         assert!(manifest.contains("\"export\": \"fe_cabi_update\""));
+        assert!(manifest.contains("\"export\": \"fe_cabi_verify\""));
+        assert!(
+            manifest.find("\"name\": \"verify\"").unwrap()
+                < manifest.find("\"name\": \"update\"").unwrap()
+        );
         assert!(manifest.contains("\"embedded\": true"));
     }
 }

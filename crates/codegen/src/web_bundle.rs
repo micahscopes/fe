@@ -82,8 +82,9 @@ pub struct WebBuildOptions {
     pub workgroup_size: [u32; 3],
     pub provenance: WebProvenance,
     pub canonical_policy: WebCanonicalPolicy,
-    /// Optional message-lane entry when it differs from the GPU kernel.
-    pub canonical_entry: Option<String>,
+    /// Ordered, deduplicated message-lane entries. An empty set means the GPU
+    /// source entry is also the sole canonical lane for direct API callers.
+    pub canonical_entries: Vec<String>,
 }
 
 impl WebBuildOptions {
@@ -94,7 +95,7 @@ impl WebBuildOptions {
             workgroup_size: [0, 0, 0],
             provenance: WebProvenance::new(source_id),
             canonical_policy: WebCanonicalPolicy::Disabled,
-            canonical_entry: None,
+            canonical_entries: Vec::new(),
         }
     }
 
@@ -109,7 +110,7 @@ impl WebBuildOptions {
             workgroup_size,
             provenance: WebProvenance::new(source_id),
             canonical_policy: WebCanonicalPolicy::Disabled,
-            canonical_entry: None,
+            canonical_entries: Vec::new(),
         }
     }
 
@@ -119,7 +120,23 @@ impl WebBuildOptions {
     }
 
     pub fn with_canonical_entry(mut self, entry: impl Into<String>) -> Self {
-        self.canonical_entry = Some(entry.into());
+        let entry = entry.into();
+        if !self.canonical_entries.contains(&entry) {
+            self.canonical_entries.push(entry);
+        }
+        self
+    }
+
+    pub fn with_canonical_entries(
+        mut self,
+        entries: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        for entry in entries {
+            let entry = entry.into();
+            if !self.canonical_entries.contains(&entry) {
+                self.canonical_entries.push(entry);
+            }
+        }
         self
     }
 }
@@ -257,19 +274,22 @@ pub struct WebBundle {
 
 impl WebBundle {
     /// Compile Wasm and browser-profile WGSL from the same resolved module.
-    /// The canonical message lane may be a different public entry from the GPU
-    /// kernel, in which case each backend gets an explicitly selected
-    /// single-root package. Validation is part of construction: an invalid
+    /// Canonical message lanes may be different public entries from the GPU
+    /// kernel. Wasm receives the ordered selected root set while WebGPU retains
+    /// the exact source entry. Validation is part of construction: an invalid
     /// target can never be represented as a `WebBundle`.
     pub fn compile(
         db: &DriverDataBase,
         top_mod: TopLevelMod<'_>,
         options: WebBuildOptions,
     ) -> Result<Self, WebBundleError> {
-        let canonical_entry = options
-            .canonical_entry
-            .as_deref()
-            .unwrap_or(&options.source_entry);
+        let mut canonical_entries = if options.canonical_entries.is_empty() {
+            vec![options.source_entry.clone()]
+        } else {
+            options.canonical_entries.clone()
+        };
+        let mut seen_entries = std::collections::BTreeSet::new();
+        canonical_entries.retain(|entry| seen_entries.insert(entry.clone()));
         let (canonical_candidate, mut canonical_status) = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => (
                 None,
@@ -280,9 +300,11 @@ impl WebBundle {
                 },
             ),
             policy @ (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required) => {
-                let derived =
-                    canonical_lane_decl_from_entry(db, top_mod, canonical_entry, canonical_entry)
-                        .and_then(|lane| CanonicalInterfaceManifest::build(vec![lane]));
+                let derived = canonical_entries
+                    .iter()
+                    .map(|entry| canonical_lane_decl_from_entry(db, top_mod, entry, entry))
+                    .collect::<Result<Vec<_>, _>>()
+                    .and_then(CanonicalInterfaceManifest::build);
                 match derived {
                     Ok(interface) => (
                         Some(interface),
@@ -310,16 +332,17 @@ impl WebBundle {
                 }
             }
         };
-        let wasm_package = mir::build_wasm_runtime_package_for_entry(db, top_mod, canonical_entry)
-            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
+        let wasm_package =
+            mir::build_wasm_runtime_package_for_entries(db, top_mod, &canonical_entries)
+                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
         let wasm_options = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
             WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => canonical_candidate
                 .as_ref()
-                .and_then(|interface| interface.lanes.first())
-                .cloned()
-                .map(|lane| WasmCompileOptions::default().with_canonical_lane(lane))
+                .map(|interface| interface.lanes.clone())
+                .filter(|lanes| !lanes.is_empty())
+                .map(|lanes| WasmCompileOptions::default().with_canonical_lanes(lanes))
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
         let wasm = compile_runtime_package_wasm_with_options(db, &wasm_package, wasm_options)
@@ -443,7 +466,7 @@ fn generated_canonical_adapters(
          export function createActorAdapter(exports, options) {{\n  \
          return createCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, exports, options);\n}}\n"
     );
-    let interface_d_ts = canonical_interface_declarations(interface);
+    let interface_d_ts = canonical_interface_declarations(interface)?;
     let artifact = |path: &str, content: &str| WebGeneratedArtifact {
         path: path.to_owned(),
         bytes: content.len() as u64,
@@ -456,20 +479,22 @@ fn generated_canonical_adapters(
     Ok((Some(interface_js), Some(interface_d_ts), artifacts))
 }
 
-fn canonical_interface_declarations(interface: &CanonicalInterfaceManifest) -> String {
-    fn pascal(name: &str) -> String {
-        name.split('_')
-            .filter(|part| !part.is_empty())
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-                    None => String::new(),
-                }
-            })
-            .collect()
-    }
+fn canonical_type_name(name: &str) -> String {
+    name.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
 
+fn canonical_interface_declarations(
+    interface: &CanonicalInterfaceManifest,
+) -> Result<String, WebBundleError> {
     fn ty(layout: &crate::CanonicalLayout, indent: usize) -> String {
         match &layout.shape {
             crate::CanonicalShape::Bool => "boolean".to_owned(),
@@ -503,8 +528,15 @@ fn canonical_interface_declarations(interface: &CanonicalInterfaceManifest) -> S
         "export declare const canonicalInterfaceManifest: Readonly<object>;\n\
          export declare const compiledCanonicalInterface: Readonly<object>;\n\n",
     );
+    let mut type_names = std::collections::BTreeMap::new();
     for lane in &interface.lanes {
-        let name = pascal(&lane.name);
+        let name = canonical_type_name(&lane.name);
+        if let Some(previous) = type_names.insert(name.clone(), lane.name.clone()) {
+            return Err(WebBundleError::Manifest(format!(
+                "canonical lanes `{previous}` and `{}` collide as generated TypeScript name `{name}`",
+                lane.name
+            )));
+        }
         output.push_str(&format!(
             "export type {name}Request = {};\n\
              export type {name}Response = {};\n\n",
@@ -514,7 +546,7 @@ fn canonical_interface_declarations(interface: &CanonicalInterfaceManifest) -> S
     }
     output.push_str("export interface CanonicalInterfaceCaller {\n");
     for lane in &interface.lanes {
-        let name = pascal(&lane.name);
+        let name = canonical_type_name(&lane.name);
         output.push_str(&format!(
             "  call(lane: {:?}, value: {name}Request): Promise<{name}Response>;\n",
             lane.name
@@ -535,7 +567,7 @@ fn canonical_interface_declarations(interface: &CanonicalInterfaceManifest) -> S
          export interface CanonicalActorAdapter extends CanonicalActorShape {\n",
     );
     for lane in &interface.lanes {
-        let name = pascal(&lane.name);
+        let name = canonical_type_name(&lane.name);
         output.push_str(&format!(
             "  dispatch(request: CanonicalActorRequest<{:?}, {name}Request>): Promise<{name}Response>;\n",
             lane.name
@@ -549,7 +581,7 @@ fn canonical_interface_declarations(interface: &CanonicalInterfaceManifest) -> S
          options?: { maxPendingPerLane?: number },\n\
          ): CanonicalActorAdapter;\n",
     );
-    output
+    Ok(output)
 }
 
 fn verify_canonical_candidate(
@@ -769,9 +801,15 @@ pub fn shade(x: u32, y: u32) -> u32 {
     const CANONICAL_SOURCE: &str = r#"
 struct Request { value: u32 }
 struct Response { value: u32 }
+struct VerifyRequest { sample: i32 }
+struct VerifyResponse { accepted: i32 }
 
 pub fn update(request: Request) -> Response {
     Response { value: request.value + 1 }
+}
+
+pub fn verify(request: VerifyRequest) -> VerifyResponse {
+    VerifyResponse { accepted: request.sample }
 }
 
 pub fn shade(x: u32, y: u32) -> u32 {
@@ -913,7 +951,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
             &db,
             top_mod,
             WebBuildOptions::render("shade", None)
-                .with_canonical_entry("update")
+                .with_canonical_entries(["verify", "update", "verify"])
                 .with_canonical_policy(WebCanonicalPolicy::Required),
         )
         .unwrap();
@@ -928,10 +966,29 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(interface_js.contains("canonicalInterfaceManifest"));
         assert!(interface_d_ts.contains("export type UpdateRequest"));
         assert!(interface_d_ts.contains("export type UpdateResponse"));
+        assert!(interface_d_ts.contains("export type VerifyRequest"));
+        assert!(interface_d_ts.contains("export type VerifyResponse"));
         assert!(interface_d_ts.contains(
             "dispatch(request: CanonicalActorRequest<\"update\", UpdateRequest>): \
              Promise<UpdateResponse>"
         ));
+        assert!(interface_d_ts.contains(
+            "dispatch(request: CanonicalActorRequest<\"verify\", VerifyRequest>): \
+             Promise<VerifyResponse>"
+        ));
+        let interface = required.manifest.canonical_interface.as_ref().unwrap();
+        assert_eq!(
+            interface
+                .lanes
+                .iter()
+                .map(|lane| lane.name.as_str())
+                .collect::<Vec<_>>(),
+            ["verify", "update"],
+            "repeatable canonical entries preserve first occurrence order"
+        );
+        let exports = wasm_exports(&required.wasm);
+        assert!(exports.iter().any(|name| name == "fe_cabi_verify"));
+        assert!(exports.iter().any(|name| name == "fe_cabi_update"));
         assert_eq!(
             required
                 .manifest
@@ -1019,6 +1076,38 @@ pub fn shade(x: u32, y: u32) -> u32 {
             error
                 .to_string()
                 .contains("required canonical interface is unavailable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn generated_type_name_collisions_fail_closed() {
+        let record = || {
+            crate::CanonicalType::Record(vec![crate::CanonicalField::new(
+                "value",
+                crate::CanonicalType::U32,
+            )])
+        };
+        let interface = crate::CanonicalInterfaceManifest::build(vec![
+            crate::CanonicalLaneDecl {
+                name: "foo_bar".to_owned(),
+                export: "fe_cabi_foo_bar".to_owned(),
+                request: record(),
+                response: record(),
+            },
+            crate::CanonicalLaneDecl {
+                name: "foo__bar".to_owned(),
+                export: "fe_cabi_foo__bar".to_owned(),
+                request: record(),
+                response: record(),
+            },
+        ])
+        .unwrap();
+        let error = generated_canonical_adapters(Some(&interface)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("collide as generated TypeScript name `FooBar`"),
             "{error}"
         );
     }

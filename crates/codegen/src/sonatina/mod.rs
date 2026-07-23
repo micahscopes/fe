@@ -39,7 +39,7 @@ use crate::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmCompileOptions {
     canonical_arena: bool,
-    canonical_lane: Option<crate::CanonicalLane>,
+    canonical_lanes: Vec<crate::CanonicalLane>,
 }
 
 impl WasmCompileOptions {
@@ -50,7 +50,13 @@ impl WasmCompileOptions {
 
     pub fn with_canonical_lane(mut self, lane: crate::CanonicalLane) -> Self {
         self.canonical_arena = true;
-        self.canonical_lane = Some(lane);
+        self.canonical_lanes = vec![lane];
+        self
+    }
+
+    pub fn with_canonical_lanes(mut self, lanes: Vec<crate::CanonicalLane>) -> Self {
+        self.canonical_arena = true;
+        self.canonical_lanes = lanes;
         self
     }
 }
@@ -67,10 +73,10 @@ pub fn compile_runtime_package_wasm_with_options(
     use sonatina_codegen::Backend as _;
     use sonatina_codegen::isa::wasm::WasmBackend;
 
-    let (module, import_modules) = wasm_lower::compile_runtime_package_wasm_with_canonical_lane(
+    let (module, import_modules) = wasm_lower::compile_runtime_package_wasm_with_canonical_lanes(
         db,
         package,
-        options.canonical_lane.as_ref(),
+        &options.canonical_lanes,
     )?;
     let backend = WasmBackend::new().with_import_modules(import_modules);
     let backend = if options.canonical_arena {

@@ -87,13 +87,13 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
-    compile_runtime_package_wasm_with_canonical_lane(db, package, None)
+    compile_runtime_package_wasm_with_canonical_lanes(db, package, &[])
 }
 
-pub(crate) fn compile_runtime_package_wasm_with_canonical_lane(
+pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
-    canonical_lane: Option<&crate::CanonicalLane>,
+    canonical_lanes: &[crate::CanonicalLane],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
     // CONSULT (DispatchKind axis): the wasm target realizes the `Export` kind.
     // Every entry (`main`, the `fe_task` task table, the degraded-mode
@@ -112,7 +112,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lane(
     let mut lowerer = WasmModuleLowerer::new(db, builder, &isa, package);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
-    if let Some(lane) = canonical_lane {
+    for lane in canonical_lanes {
         lowerer.synthesize_canonical_lane(lane)?;
     }
     let import_modules = lowerer.import_modules();
