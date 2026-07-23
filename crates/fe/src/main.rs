@@ -11,6 +11,7 @@ mod report;
 mod test;
 #[cfg(not(target_arch = "wasm32"))]
 mod tree;
+mod web;
 mod workspace_ingot;
 
 use std::fs;
@@ -47,6 +48,12 @@ pub enum BuildEmit {
 pub enum TestEmit {
     Ir,
     Rmir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum WebMode {
+    Render,
+    Grid,
 }
 
 fn cli_version() -> &'static str {
@@ -98,6 +105,11 @@ impl OptimizeArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Build explicit browser artifacts from one Fe entry function.
+    Web {
+        #[command(subcommand)]
+        action: WebAction,
+    },
     /// Compile Fe code to EVM bytecode.
     Build {
         /// Path to an ingot/workspace directory (containing fe.toml), a workspace member name, or a .fe file.
@@ -375,6 +387,35 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, Subcommand)]
+pub enum WebAction {
+    /// Compile one source entry to a Wasm + WebGPU bundle.
+    Build {
+        /// Path to a standalone `.fe` file or ingot directory.
+        path: Utf8PathBuf,
+        /// Exact public top-level Fe function to compile.
+        #[arg(long)]
+        entry: String,
+        #[arg(long, value_enum)]
+        mode: WebMode,
+        /// New output directory; existing destinations are rejected.
+        #[arg(long)]
+        out: Utf8PathBuf,
+        /// Grid workgroup X dimension (required for grid mode).
+        #[arg(long)]
+        workgroup_x: Option<u32>,
+        /// Grid workgroup Y dimension (required for grid mode).
+        #[arg(long)]
+        workgroup_y: Option<u32>,
+        /// Grid workgroup Z dimension (required for grid mode).
+        #[arg(long)]
+        workgroup_z: Option<u32>,
+        /// Stable source identity recorded in the bundle manifest.
+        #[arg(long)]
+        source_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
 pub enum DocAction {
     /// Generate a documentation site (separate files by default).
     ///
@@ -452,6 +493,30 @@ pub fn run(opts: &Options) {
     }
 
     match &opts.command {
+        Command::Web { action } => match action {
+            WebAction::Build {
+                path,
+                entry,
+                mode,
+                out,
+                workgroup_x,
+                workgroup_y,
+                workgroup_z,
+                source_id,
+            } => {
+                if let Err(err) = web::build(
+                    path,
+                    entry,
+                    *mode,
+                    out,
+                    [*workgroup_x, *workgroup_y, *workgroup_z],
+                    source_id.clone(),
+                ) {
+                    eprintln!("Error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        },
         Command::Build {
             path,
             ingot,
@@ -1124,6 +1189,69 @@ enum FormatResult {
     Formatted { original: String, formatted: String },
     ParseError(Vec<fe_fmt::ParseError>),
     IoError(std::io::Error),
+}
+
+#[cfg(test)]
+mod web_cli_tests {
+    use super::*;
+
+    #[test]
+    fn web_build_cli_requires_an_explicit_entry_and_parses_grid_shape() {
+        let options = Options::try_parse_from([
+            "fe",
+            "web",
+            "build",
+            "kernel.fe",
+            "--entry",
+            "shade",
+            "--mode",
+            "grid",
+            "--out",
+            "bundle",
+            "--workgroup-x",
+            "8",
+            "--workgroup-y",
+            "4",
+            "--workgroup-z",
+            "1",
+        ])
+        .unwrap();
+        let Command::Web {
+            action:
+                WebAction::Build {
+                    entry,
+                    mode,
+                    workgroup_x,
+                    workgroup_y,
+                    workgroup_z,
+                    ..
+                },
+        } = options.command
+        else {
+            panic!("expected web build");
+        };
+        assert_eq!(entry, "shade");
+        assert_eq!(mode, WebMode::Grid);
+        assert_eq!(
+            [workgroup_x, workgroup_y, workgroup_z],
+            [Some(8), Some(4), Some(1)]
+        );
+
+        assert!(
+            Options::try_parse_from([
+                "fe",
+                "web",
+                "build",
+                "kernel.fe",
+                "--mode",
+                "render",
+                "--out",
+                "bundle",
+            ])
+            .is_err(),
+            "web builds must never infer an entry"
+        );
+    }
 }
 
 fn format_single_file(path: &Utf8PathBuf, config: &fe_fmt::Config, check: bool) -> FormatResult {
