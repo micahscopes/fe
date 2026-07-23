@@ -1,0 +1,142 @@
+From 9615964859d81493e89ef233e95b96aeacf4032c Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Thu, 23 Jul 2026 14:36:04 +0200
+Subject: [PATCH] fix(wasm): lower narrow integer truncation by carrier
+
+---
+ crates/codegen/src/isa/wasm/translate.rs | 38 +++++++++++++--
+ crates/codegen/tests/wasm_backend.rs     | 60 +++++++++++++++++++++++-
+ 2 files changed, 92 insertions(+), 6 deletions(-)
+
+diff --git a/crates/codegen/src/isa/wasm/translate.rs b/crates/codegen/src/isa/wasm/translate.rs
+index e8dd2910..0f0ff6b2 100644
+--- a/crates/codegen/src/isa/wasm/translate.rs
++++ b/crates/codegen/src/isa/wasm/translate.rs
+@@ -885,13 +885,41 @@ fn translate_function(
+                     else if let Some(trunc) = <&sonatina_ir::inst::cast::Trunc as InstDowncast>::downcast(inst_set, inst_data) {
+                         if let Some(result) = function.dfg.inst_result(inst_id) {
+                             let val = resolve_value(function, *trunc.from(), &value_map, &mut body, wb).ok_or("unresolved trunc")?;
++                            let from_ty = function.dfg.value_ty(*trunc.from());
+                             let to_ty = *trunc.ty();
+-                            if matches!(to_ty, Type::I32 | Type::I16 | Type::I8 | Type::I1) {
+-                                let wrapped = body.add_op(wb, Operator::I32WrapI64, &[val], &[WType::I32]);
+-                                value_map.insert(result, wrapped);
++                            let narrowed = if from_ty == Type::I64
++                                && matches!(to_ty, Type::I32 | Type::I16 | Type::I8 | Type::I1)
++                            {
++                                body.add_op(wb, Operator::I32WrapI64, &[val], &[WType::I32])
++                            } else if matches!(from_ty, Type::I32 | Type::I16 | Type::I8 | Type::I1)
++                                && matches!(to_ty, Type::I16 | Type::I8 | Type::I1)
++                            {
++                                val
+                             } else {
+-                                value_map.insert(result, val);
+-                            }
++                                return Err(format!(
++                                    "unsupported wasm trunc `{from_ty:?}` -> `{to_ty:?}`"
++                                ));
++                            };
++                            let narrowed = match to_ty {
++                                Type::I16 | Type::I8 | Type::I1 => {
++                                    let mask = match to_ty {
++                                        Type::I16 => 0xffff,
++                                        Type::I8 => 0xff,
++                                        Type::I1 => 1,
++                                        _ => unreachable!(),
++                                    };
++                                    let mask = body.add_op(
++                                        wb,
++                                        Operator::I32Const { value: mask },
++                                        &[],
++                                        &[WType::I32],
++                                    );
++                                    body.add_op(wb, Operator::I32And, &[narrowed, mask], &[WType::I32])
++                                }
++                                Type::I32 => narrowed,
++                                _ => unreachable!(),
++                            };
++                            value_map.insert(result, narrowed);
+                         }
+                     }
+                     // EvmRevert/EvmStop → unreachable
+diff --git a/crates/codegen/tests/wasm_backend.rs b/crates/codegen/tests/wasm_backend.rs
+index f6ea8868..dd330a76 100644
+--- a/crates/codegen/tests/wasm_backend.rs
++++ b/crates/codegen/tests/wasm_backend.rs
+@@ -4,7 +4,7 @@ use sonatina_ir::{
+     Linkage, Signature, Type,
+     builder::ModuleBuilder,
+     func_cursor::InstInserter,
+-    inst::{arith, cmp, control_flow, data, logic},
++    inst::{arith, cast, cmp, control_flow, data, logic},
+     isa::{Isa, native::Native, wasm32::Wasm32},
+     module::ModuleCtx,
+ };
+@@ -66,6 +66,64 @@ fn wasm_bitwise_and_i32_i64_execute() {
+     );
+ }
+ 
++#[test]
++fn wasm_integer_truncation_respects_source_and_target_carriers() {
++    let isa = Wasm32::new(wasm32_triple());
++    let is = isa.inst_set();
++    let mb = wasm32_module_builder();
++    for (name, source, target) in [
++        ("trunc_i32_i8", Type::I32, Type::I8),
++        ("trunc_i64_i32", Type::I64, Type::I32),
++        ("trunc_i64_i8", Type::I64, Type::I8),
++    ] {
++        let func = mb
++            .declare_function(Signature::new_single(
++                name,
++                Linkage::Public,
++                &[source],
++                target,
++            ))
++            .unwrap();
++        let mut fb = mb.func_builder::<InstInserter>(func);
++        let entry = fb.append_block();
++        fb.switch_to_block(entry);
++        let value = fb.insert_inst(cast::Trunc::new(is, fb.args()[0], target), target);
++        fb.insert_return(value);
++        fb.seal_all();
++        fb.finish();
++    }
++    let artifact = WasmBackend::new().compile_module(&mb.build()).unwrap();
++    wasmparser::validate(&artifact.bytes).unwrap();
++    let engine = wasmtime::Engine::default();
++    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
++    let mut store = wasmtime::Store::new(&engine, ());
++    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
++    assert_eq!(
++        instance
++            .get_typed_func::<i32, i32>(&mut store, "trunc_i32_i8")
++            .unwrap()
++            .call(&mut store, 0x1234_56ab)
++            .unwrap(),
++        0xab
++    );
++    assert_eq!(
++        instance
++            .get_typed_func::<i64, i32>(&mut store, "trunc_i64_i32")
++            .unwrap()
++            .call(&mut store, 0x1234_5678_9abc_def0)
++            .unwrap(),
++        0x9abc_def0u32 as i32
++    );
++    assert_eq!(
++        instance
++            .get_typed_func::<i64, i32>(&mut store, "trunc_i64_i8")
++            .unwrap()
++            .call(&mut store, 0x1234_5678_9abc_def0)
++            .unwrap(),
++        0xf0
++    );
++}
++
+ fn dynamic_alloc_module() -> sonatina_ir::Module {
+     let isa = Wasm32::new(wasm32_triple());
+     let is = isa.inst_set();
+-- 
+2.53.0
+

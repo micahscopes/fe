@@ -128,7 +128,7 @@ loaded by the browser. The runtime manifest pins
 module; no demo-owned copy is an implicit protocol dependency.
 
 Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the later browser
-runtime commit `b2601adc`. The latter is reconstructed reproducibly from the
+runtime commit `96159648`. The latter is reconstructed reproducibly from the
 tracked patch series without modifying the checkout supplied as
 `SONATINA_DIR`. Generate D1 directly from its clean reviewed checkout with:
 

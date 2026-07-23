@@ -23,3 +23,4 @@ c2db7f104f7e63672c433f39c2f8fe41418e49eadb43e84c43470001e42ed3c5  0020-feat-spir
 04e2991e0ef9d7f7d14aeeed9f80ddbd068dec1d6fa7e5a09ed670a484a84d29  0023-feat-wasm-lower-typed-scalar-memory-operations.patch
 4f2d2002904ec92fea404e7ac264335a684ba47cd98b9033c081396d8e776a52  0024-feat-wasm-route-dynamic-allocation-through-arena.patch
 8338d54828c0534bf666801709b8dd24a53b6b17317f5f8ade3500618855ff67  0025-feat-wasm-lower-scalar-bitwise-and.patch
+ffd4c0d953af0e806dd6bec9e391008f6764883133491825acdc7949775a95af  0026-fix-wasm-lower-narrow-integer-truncation-by-carrier.patch

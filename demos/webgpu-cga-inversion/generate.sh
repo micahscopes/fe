@@ -11,7 +11,7 @@ case "$bundle" in
     generator="gen_cga_inversion_demo"
     ;;
   schedule32)
-    expected_sonatina="b2601adc8b80b085aae98f9132a035fdfecec5c3"
+    expected_sonatina="9615964859d81493e89ef233e95b96aeacf4032c"
     generator="gen_cga_schedule32_vec5_demo"
     ;;
   *)

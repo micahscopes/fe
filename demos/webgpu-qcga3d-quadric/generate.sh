@@ -3,7 +3,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-expected_sonatina="b2601adc8b80b085aae98f9132a035fdfecec5c3"
+expected_sonatina="9615964859d81493e89ef233e95b96aeacf4032c"
 
 if [ -z "${SONATINA_DIR:-}" ]; then
   echo "QCGA generation requires SONATINA_DIR at Sonatina $expected_sonatina" >&2

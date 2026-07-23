@@ -37,7 +37,7 @@ fetches only the pinned `mb2-render-mode` base
 `https://github.com/micahscopes/sonatina.git` into
 `target/fe-browser-cache/sonatina.git`. The commit is checked exactly; the
 tracked, checksum-verified 25-patch series then reconstructs reviewed commit
-`b2601adc8b80b085aae98f9132a035fdfecec5c3` in an isolated temporary checkout.
+`9615964859d81493e89ef233e95b96aeacf4032c` in an isolated temporary checkout.
 Warm generation reuses the cache without contacting the remote.
 
 Set `FE_BROWSER_CACHE_DIR` to relocate that cache. Set
@@ -48,7 +48,7 @@ checkout containing the pinned base, and is never modified. Concurrent
 generations serialize cache mutation with `flock`; every reconstructed checkout
 is removed after the command. The wrapper is invoked internally by
 `demos/serve.sh`, so users do not need another build command. This is temporary
-infrastructure until `b2601adc` (or its upstream replacement) is directly
+infrastructure until `96159648` (or its upstream replacement) is directly
 fetchable. Legacy `cga-d1` remains the one exception and requires its older
 reviewed `ed43625b` checkout explicitly.
 

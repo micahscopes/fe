@@ -82,7 +82,7 @@ const VIEW_INIT: (i32, i32, i32) = (-2048, 0, 384);
 
 /// The sonatina fork rev the fe workspace is pinned to (`Cargo.toml`), the render
 /// push #3 rev; recorded in `layout.json` provenance.
-const SONATINA_REV: &str = "b2601adc8b80b085aae98f9132a035fdfecec5c3";
+const SONATINA_REV: &str = "9615964859d81493e89ef233e95b96aeacf4032c";
 
 /// The pinned views the spec (section 7) names, each `(name, center_re, center_im,
 /// scale_q, min_distinct)`. `min_distinct` is a DERIVED non-degeneracy floor: the
