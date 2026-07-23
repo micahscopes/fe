@@ -160,6 +160,12 @@ enum PathClass {
     Other,
 }
 
+#[derive(Clone, Copy)]
+enum ForwardedParam<'db> {
+    Type(Option<IdentId<'db>>),
+    Const(Option<IdentId<'db>>),
+}
+
 struct Checker<'db> {
     db: &'db dyn HirAnalysisDb,
     def: TypeFnDef<'db>,
@@ -168,7 +174,7 @@ struct Checker<'db> {
     /// was found. Body checks that need it are skipped when it is `None`.
     subject_name: Option<IdentId<'db>>,
     /// The names of the type params (all params before the subject), in order.
-    type_param_names: Vec<Option<IdentId<'db>>>,
+    forwarded_params: Vec<ForwardedParam<'db>>,
     /// Whether any arm contained a syntactic self-call, well-formed or not. The
     /// "at least one self-call" rule (spec sec 1.1 rule 5) is about presence, so
     /// an ill-formed self-call still satisfies it (and reports its own error).
@@ -183,7 +189,7 @@ impl<'db> Checker<'db> {
             def,
             diags: vec![],
             subject_name: None,
-            type_param_names: vec![],
+            forwarded_params: vec![],
             saw_self_call: false,
             staged_payloads: vec![],
         }
@@ -239,41 +245,31 @@ impl<'db> Checker<'db> {
         let params = self.def.hir_generic_params(db).data(db);
         let params_span = self.def.span().generic_params().into();
 
-        let const_indices: Vec<usize> = params
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| matches!(p, GenericParam::Const(_)))
-            .map(|(i, _)| i)
-            .collect();
-
-        if const_indices.is_empty() {
+        let Some(subject_idx) = params.len().checked_sub(1) else {
             self.emit(params_span, TypeFnWfError::MissingSubject);
             return None;
-        }
-        if const_indices.len() > 1 {
-            self.emit(
-                params_span,
-                TypeFnWfError::MultipleSubjects {
-                    count: const_indices.len(),
-                },
-            );
-        }
-
-        let subject_idx = *const_indices.last().unwrap();
-        if subject_idx != params.len() - 1 {
+        };
+        let GenericParam::Const(subject) = &params[subject_idx] else {
+            let error = if params.iter().any(|p| matches!(p, GenericParam::Const(_))) {
+                TypeFnWfError::SubjectNotLast
+            } else {
+                TypeFnWfError::MissingSubject
+            };
             self.emit(
                 self.def.span().generic_params().into(),
-                TypeFnWfError::SubjectNotLast,
+                error,
             );
-        }
-
-        let GenericParam::Const(subject) = &params[subject_idx] else {
-            unreachable!("subject_idx points at a const param");
+            return None;
         };
         self.subject_name = subject.name.to_opt();
 
-        // Type params are every param before the subject.
-        self.type_param_names = params[..subject_idx].iter().map(|p| p.name().to_opt()).collect();
+        self.forwarded_params = params[..subject_idx]
+            .iter()
+            .map(|param| match param {
+                GenericParam::Type(param) => ForwardedParam::Type(param.name.to_opt()),
+                GenericParam::Const(param) => ForwardedParam::Const(param.name.to_opt()),
+            })
+            .collect();
 
         // The subject's declared type must be `usize`.
         let is_usize = subject.ty.to_opt().is_some_and(|ty| {
@@ -300,7 +296,10 @@ impl<'db> Checker<'db> {
             self.emit(wc_span.clone(), TypeFnWfError::WhereNotTypeParamBound);
         }
 
-        let type_params: Vec<IdentId> = self.type_param_names.iter().flatten().copied().collect();
+        let type_params: Vec<IdentId> = self.forwarded_params.iter().filter_map(|param| match param {
+            ForwardedParam::Type(name) => *name,
+            ForwardedParam::Const(_) => None,
+        }).collect();
         for pred in wc.data(db) {
             let bounds_type_param = pred.ty.to_opt().is_some_and(|ty| {
                 bare_path_ident(db, ty).is_some_and(|id| type_params.contains(&id))
@@ -644,9 +643,9 @@ impl<'db> Checker<'db> {
         let db = self.db;
         self.saw_self_call = true;
         let args = path.generic_args(db).data(db);
-        let n_type_params = self.type_param_names.len();
+        let n_forwarded = self.forwarded_params.len();
 
-        if args.len() != n_type_params + 1 {
+        if args.len() != n_forwarded + 1 {
             self.emit(
                 self.arm_ty_span(arm_idx),
                 TypeFnWfError::SelfCallArgsNotVerbatim,
@@ -654,13 +653,28 @@ impl<'db> Checker<'db> {
             return;
         }
 
-        for (i, arg) in args[..n_type_params].iter().enumerate() {
-            let ok = match (arg, self.type_param_names[i]) {
-                (GenericArg::Type(t), Some(expected)) => t
+        for (arg, param) in args[..n_forwarded].iter().zip(&self.forwarded_params) {
+            let ok = match (arg, param) {
+                (GenericArg::Type(t), ForwardedParam::Type(Some(expected)))
+                | (GenericArg::Type(t), ForwardedParam::Const(Some(expected))) => t
                     .ty
                     .to_opt()
                     .and_then(|ty| bare_path_ident(db, ty))
-                    .is_some_and(|id| id == expected),
+                    .is_some_and(|id| id == *expected),
+                (GenericArg::Const(c), ForwardedParam::Const(Some(expected))) => {
+                    let ConstGenericArgValue::Expr(Partial::Present(body)) = c.value else {
+                        return self.emit(
+                            self.arm_ty_span(arm_idx),
+                            TypeFnWfError::SelfCallArgsNotVerbatim,
+                        );
+                    };
+                    body_root_expr(db, body)
+                        .and_then(|expr| match expr {
+                            Expr::Path(Partial::Present(path)) => path.as_ident(db),
+                            _ => None,
+                        })
+                        .is_some_and(|id| id == *expected)
+                }
                 _ => false,
             };
             if !ok {
@@ -672,7 +686,7 @@ impl<'db> Checker<'db> {
             }
         }
 
-        match self.distill_subject(&args[n_type_params], l) {
+        match self.distill_subject(&args[n_forwarded], l) {
             Ok(step) => calls.push(step),
             Err(error) => self.emit(self.arm_ty_span(arm_idx), error),
         }
@@ -1423,8 +1437,8 @@ impl<'db> TyFolder<'db> for Unfolder<'db, '_> {
             TyData::ConstTy(cid) => match cid.data(db) {
                 // The bare subject `N` used as a whitelisted const arg: reuse the
                 // root's interned subject literal (canonical interning).
-                ConstTyData::TyParam(p, _) if p.idx == self.subject_idx => {
-                    self.subst_args[self.subject_idx]
+                ConstTyData::TyParam(p, _) if p.idx < self.subst_args.len() => {
+                    self.subst_args[p.idx]
                 }
                 ConstTyData::Abstract(..) => self
                     .result_subject_const(*cid)
@@ -1530,18 +1544,60 @@ mod tests {
         assert!(res.data.is_none(), "ill-formed def must not produce data");
     }
 
+    fn assert_good(src: &str, name: &str) {
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_wf_good.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+        let res = type_fn_wf(&db, find_tf(&db, top_mod, name));
+        assert!(res.diags.is_empty(), "unexpected WF errors: {:?}", res.diags);
+        assert!(res.data.is_some(), "well-formed def must produce data");
+    }
+
     #[test]
-    fn rejects_two_const_subjects() {
+    fn accepts_invariant_const_before_final_subject() {
+        assert_good(
+            r#"
+struct Zero {}
+struct Term<const O: usize> {}
+struct Add<L, R> {}
+recursive type fn ScheduleOutput<const O: usize, const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<O>, ScheduleOutput<O, {N - 1}>>
+    }
+}
+"#,
+            "ScheduleOutput",
+        );
+    }
+
+    #[test]
+    fn rejects_changed_invariant_const() {
         assert_bad(
             r#"
 recursive type fn Bad<const M: usize, const N: usize>() -> (*) {
     match N {
         0 => u8
-        _ => u16
+        _ => Bad<{M + 1}, {N - 1}>
     }
 }
 "#,
-            |e| matches!(e, TypeFnWfError::MultipleSubjects { count: 2 }),
+            |e| matches!(e, TypeFnWfError::SelfCallArgsNotVerbatim),
+        );
+    }
+
+    #[test]
+    fn rejects_swapped_invariant_consts() {
+        assert_bad(
+            r#"
+recursive type fn Bad<const A: usize, const B: usize, const N: usize>() -> (*) {
+    match N {
+        0 => u8
+        _ => Bad<B, A, {N - 1}>
+    }
+}
+"#,
+            |e| matches!(e, TypeFnWfError::SelfCallArgsNotVerbatim),
         );
     }
 
@@ -2046,6 +2102,26 @@ recursive type fn Tagged<const N: usize>() -> (*) {
         assert_eq!(
             probe_field_pretty(&src, "Probe"),
             "Comp<Pair, Comp<Pair, Par>>"
+        );
+    }
+
+    #[test]
+    fn normalizes_forwarded_invariant_const() {
+        let src = r#"
+struct End {}
+struct Term<const O: usize> {}
+struct Add<L, R> {}
+recursive type fn ScheduleOutput<const O: usize, const N: usize>() -> (*) {
+    match N {
+        0 => End
+        _ => Add<Term<O>, ScheduleOutput<O, {N - 1}>>
+    }
+}
+struct Probe { p: ScheduleOutput<4, 2> }
+"#;
+        assert_eq!(
+            probe_field_pretty(src, "Probe"),
+            "Add<Term<4>, Add<Term<4>, End>>"
         );
     }
 

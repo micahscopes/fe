@@ -242,6 +242,9 @@ pub(crate) enum ClassDecline {
     ArgHasHole,
     /// A goal argument is (or contains) a type-fn application.
     ArgHasTypeFn,
+    /// Ground normalization supports invariant consts, but v1 symbolic
+    /// induction only substitutes forwarded type parameters.
+    InvariantConstArg,
     /// A trait argument mentions the recursion subject.
     SubjectInTraitArgs,
     /// Some arm has more than one self-call (out of the v1 single-IH class).
@@ -288,6 +291,9 @@ pub(crate) fn minimal_class<'db>(
 
     // Forwarded type args: var / invalid / hole / type-fn free.
     for &arg in type_args {
+        if matches!(arg.data(db), TyData::ConstTy(_)) {
+            return declined(ClassDecline::InvariantConstArg);
+        }
         if let Some(reason) = arg_decline(db, arg) {
             return declined(reason);
         }
