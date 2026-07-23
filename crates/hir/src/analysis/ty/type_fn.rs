@@ -17,6 +17,7 @@
 
 use num_bigint::BigUint;
 
+use crate::HirDb;
 use crate::analysis::HirAnalysisDb;
 use crate::analysis::name_resolution::{NameDomain, resolve_ident_to_bucket};
 use crate::analysis::ty::const_expr::ConstExpr;
@@ -25,11 +26,11 @@ use crate::analysis::ty::diagnostics::{TyDiagCollection, TyLowerDiag, TypeFnWfEr
 use crate::analysis::ty::fold::{TyFoldable, TyFolder};
 use crate::analysis::ty::trait_resolution::PredicateListId;
 use crate::analysis::ty::ty_def::{
-    InvalidCause, PrimTy, TyBase, TyData, TyId, find_unsaturated_type_fn,
-    kind_mentions_constraint, type_fn_sig,
+    InvalidCause, TyBase, TyData, TyId, find_unsaturated_type_fn, kind_mentions_constraint,
+    type_fn_sig,
 };
-use crate::analysis::ty::ty_lower::{lower_hir_ty, lower_kind};
 use crate::analysis::ty::ty_error::emit_invalid_ty_error;
+use crate::analysis::ty::ty_lower::{lower_hir_ty, lower_kind};
 use crate::core::hir_def::scope_graph::ScopeId;
 use crate::core::hir_def::{
     ArithBinOp, BinOp, Body, ConstGenericArgValue, Expr, GenericArg, GenericParam, IdentId,
@@ -99,7 +100,21 @@ pub(crate) fn type_fn_syntax_wf<'db>(
     db: &'db dyn HirAnalysisDb,
     def: TypeFnDef<'db>,
 ) -> TypeFnWfResult<'db> {
-    Checker::new(db, def).run_syntax()
+    Checker::new_analysis(db, def).run_syntax()
+}
+
+/// The syntax-only recursive-type-function check, available to the
+/// pre-expansion base-graph world.
+///
+/// Unlike [`type_fn_wf`], this entry point never lowers an arm or consults
+/// merged name resolution.  It is therefore safe input to provider-time
+/// ground-plan evaluation.  Both analysis and provider reflection use this
+/// exact checker; there is no provider-local recurrence validator.
+pub(crate) fn type_fn_syntax_wf_base<'db>(
+    db: &'db dyn HirDb,
+    def: TypeFnDef<'db>,
+) -> TypeFnWfResult<'db> {
+    Checker::new_base(db, def).run_syntax()
 }
 
 #[salsa::tracked(return_ref)]
@@ -126,9 +141,7 @@ pub fn type_fn_wf<'db>(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> TypeF
         }
         if lowered.has_invalid(db) {
             has_invalid_arm = true;
-            if let Some(TyDiagCollection::Ty(diag)) =
-                emit_invalid_ty_error(db, lowered, span)
-            {
+            if let Some(TyDiagCollection::Ty(diag)) = emit_invalid_ty_error(db, lowered, span) {
                 result.diags.push(diag);
             }
             continue;
@@ -167,7 +180,8 @@ enum ForwardedParam<'db> {
 }
 
 struct Checker<'db> {
-    db: &'db dyn HirAnalysisDb,
+    db: &'db dyn HirDb,
+    analysis_db: Option<&'db dyn HirAnalysisDb>,
     def: TypeFnDef<'db>,
     diags: Vec<TyLowerDiag<'db>>,
     /// The declared subject parameter name (`N`), if a unique last const param
@@ -183,9 +197,22 @@ struct Checker<'db> {
 }
 
 impl<'db> Checker<'db> {
-    fn new(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> Self {
+    fn new_analysis(db: &'db dyn HirAnalysisDb, def: TypeFnDef<'db>) -> Self {
+        Self::new(db, Some(db), def)
+    }
+
+    fn new_base(db: &'db dyn HirDb, def: TypeFnDef<'db>) -> Self {
+        Self::new(db, None, def)
+    }
+
+    fn new(
+        db: &'db dyn HirDb,
+        analysis_db: Option<&'db dyn HirAnalysisDb>,
+        def: TypeFnDef<'db>,
+    ) -> Self {
         Self {
             db,
+            analysis_db,
             def,
             diags: vec![],
             subject_name: None,
@@ -196,7 +223,8 @@ impl<'db> Checker<'db> {
     }
 
     fn emit(&mut self, primary: crate::span::DynLazySpan<'db>, error: TypeFnWfError<'db>) {
-        self.diags.push(TyLowerDiag::TypeFnIllFormed { primary, error });
+        self.diags
+            .push(TyLowerDiag::TypeFnIllFormed { primary, error });
     }
 
     fn arm_ty_span(&self, arm_idx: usize) -> crate::span::DynLazySpan<'db> {
@@ -255,10 +283,7 @@ impl<'db> Checker<'db> {
             } else {
                 TypeFnWfError::MissingSubject
             };
-            self.emit(
-                self.def.span().generic_params().into(),
-                error,
-            );
+            self.emit(self.def.span().generic_params().into(), error);
             return None;
         };
         self.subject_name = subject.name.to_opt();
@@ -273,8 +298,20 @@ impl<'db> Checker<'db> {
 
         // The subject's declared type must be `usize`.
         let is_usize = subject.ty.to_opt().is_some_and(|ty| {
-            let lowered = lower_hir_ty(db, ty, self.def.scope(), PredicateListId::empty_list(db));
-            matches!(lowered.data(db), TyData::TyBase(TyBase::Prim(PrimTy::Usize)))
+            if let Some(analysis_db) = self.analysis_db {
+                let lowered = lower_hir_ty(
+                    analysis_db,
+                    ty,
+                    self.def.scope(),
+                    PredicateListId::empty_list(analysis_db),
+                );
+                matches!(
+                    lowered.data(analysis_db),
+                    TyData::TyBase(TyBase::Prim(crate::analysis::ty::ty_def::PrimTy::Usize))
+                )
+            } else {
+                bare_path_ident_base(db, ty).is_some_and(|name| name.data(db) == "usize")
+            }
         });
         if !is_usize {
             self.emit(
@@ -296,10 +333,14 @@ impl<'db> Checker<'db> {
             self.emit(wc_span.clone(), TypeFnWfError::WhereNotTypeParamBound);
         }
 
-        let type_params: Vec<IdentId> = self.forwarded_params.iter().filter_map(|param| match param {
-            ForwardedParam::Type(name) => *name,
-            ForwardedParam::Const(_) => None,
-        }).collect();
+        let type_params: Vec<IdentId> = self
+            .forwarded_params
+            .iter()
+            .filter_map(|param| match param {
+                ForwardedParam::Type(name) => *name,
+                ForwardedParam::Const(_) => None,
+            })
+            .collect();
         for pred in wc.data(db) {
             let bounds_type_param = pred.ty.to_opt().is_some_and(|ty| {
                 bare_path_ident(db, ty).is_some_and(|id| type_params.contains(&id))
@@ -370,10 +411,7 @@ impl<'db> Checker<'db> {
             );
         }
         for &pos in wild_positions.iter().filter(|&&p| p + 1 < hir_arms.len()) {
-            self.emit(
-                self.arm_ty_span(pos + 1),
-                TypeFnWfError::ArmAfterWildcard,
-            );
+            self.emit(self.arm_ty_span(pos + 1), TypeFnWfError::ArmAfterWildcard);
         }
 
         // Duplicate literal arms, and the set of matched literals (for `L`).
@@ -466,10 +504,7 @@ impl<'db> Checker<'db> {
                     while let Some(path) = pending.pop() {
                         visited += 1;
                         if visited > 256 {
-                            self.emit(
-                                self.arm_ty_span(arm_idx),
-                                TypeFnWfError::DisallowedArmType,
-                            );
+                            self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmType);
                             break;
                         }
                         for arg in path.generic_args(db).data(db) {
@@ -527,7 +562,10 @@ impl<'db> Checker<'db> {
             None => return,
         };
         let ConstGenericArgValue::Expr(Partial::Present(body)) = arg.value else {
-            self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmConstArg);
+            self.emit(
+                self.arm_ty_span(arm_idx),
+                TypeFnWfError::DisallowedArmConstArg,
+            );
             return;
         };
         let ok = match body_root_expr(db, body) {
@@ -537,13 +575,14 @@ impl<'db> Checker<'db> {
                 if expr_is_ident(db, body, lhs, subject) =>
             {
                 let Some(k) = expr_int_lit(db, body, rhs) else {
-                    self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmConstArg);
+                    self.emit(
+                        self.arm_ty_span(arm_idx),
+                        TypeFnWfError::DisallowedArmConstArg,
+                    );
                     return;
                 };
                 match op {
-                    ArithBinOp::Sub => {
-                        *k.data(db) >= BigUint::from(1u32) && l >= k.data(db)
-                    }
+                    ArithBinOp::Sub => *k.data(db) >= BigUint::from(1u32) && l >= k.data(db),
                     ArithBinOp::Div => {
                         *k.data(db) >= BigUint::from(2u32) && *l >= BigUint::from(1u32)
                     }
@@ -552,9 +591,9 @@ impl<'db> Checker<'db> {
             }
             Some(Expr::Call(callee, args)) => {
                 let approved = self.is_staged_payload_const_fn(body, callee)
-                    && args.iter().all(|arg| {
-                        self.is_staged_payload_arg(body, arg.expr, subject, l)
-                    });
+                    && args
+                        .iter()
+                        .all(|arg| self.is_staged_payload_arg(body, arg.expr, subject, l));
                 if approved {
                     self.staged_payloads.push(body);
                 }
@@ -563,7 +602,10 @@ impl<'db> Checker<'db> {
             _ => false,
         };
         if !ok {
-            self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::DisallowedArmConstArg);
+            self.emit(
+                self.arm_ty_span(arm_idx),
+                TypeFnWfError::DisallowedArmConstArg,
+            );
         }
     }
 
@@ -575,21 +617,30 @@ impl<'db> Checker<'db> {
         body: Body<'db>,
         callee: crate::core::hir_def::ExprId,
     ) -> bool {
-        let Some(Expr::Path(Partial::Present(path))) =
-            body.exprs(self.db)[callee].clone().to_opt()
+        let Some(Expr::Path(Partial::Present(path))) = body.exprs(self.db)[callee].clone().to_opt()
         else {
             return false;
         };
-        let bucket = resolve_ident_to_bucket(self.db, path, self.def.scope());
-        let Some(scope) = bucket
-            .pick(NameDomain::VALUE)
-            .as_ref()
-            .ok()
-            .and_then(|res| res.scope())
-        else {
+        if let Some(analysis_db) = self.analysis_db {
+            let bucket = resolve_ident_to_bucket(analysis_db, path, self.def.scope());
+            return bucket
+                .pick(NameDomain::VALUE)
+                .as_ref()
+                .ok()
+                .and_then(|res| res.scope())
+                .is_some_and(|scope| {
+                    matches!(scope, ScopeId::Item(ItemKind::Func(func))
+                        if func.is_const(analysis_db))
+                });
+        }
+        let Some(name) = path.as_ident(self.db) else {
             return false;
         };
-        matches!(scope, ScopeId::Item(ItemKind::Func(func)) if func.is_const(self.db))
+        let base = crate::core::lower::base_scope_graph_impl(self.db, self.def.top_mod(self.db));
+        base.items_dfs(self.db).any(|item| {
+            matches!(item, ItemKind::Func(func)
+                if func.name(self.db).to_opt() == Some(name) && func.is_const(self.db))
+        })
     }
 
     /// The intentionally small argument language for a staged payload call:
@@ -604,14 +655,14 @@ impl<'db> Checker<'db> {
     ) -> bool {
         match body.exprs(self.db)[expr].clone().to_opt() {
             Some(Expr::Lit(LitKind::Int(_))) => true,
-            Some(Expr::Path(Partial::Present(path))) => path
-                .as_ident(self.db)
-                .is_some_and(|ident| {
+            Some(Expr::Path(Partial::Present(path))) => {
+                path.as_ident(self.db).is_some_and(|ident| {
                     ident == subject
                         || self.forwarded_params.iter().any(|param| {
                             matches!(param, ForwardedParam::Const(Some(name)) if *name == ident)
                         })
-                }),
+                })
+            }
             Some(Expr::Bin(lhs, rhs, BinOp::Arith(op)))
                 if expr_is_ident(self.db, body, lhs, subject) =>
             {
@@ -623,8 +674,7 @@ impl<'db> Checker<'db> {
                         *k.data(self.db) >= BigUint::from(1u32) && l >= k.data(self.db)
                     }
                     ArithBinOp::Div => {
-                        *k.data(self.db) >= BigUint::from(2u32)
-                            && *l >= BigUint::from(1u32)
+                        *k.data(self.db) >= BigUint::from(2u32) && *l >= BigUint::from(1u32)
                     }
                     _ => false,
                 }
@@ -642,7 +692,7 @@ impl<'db> Checker<'db> {
         let db = self.db;
         let scope = self.def.scope();
         if path.parent(db).is_none() {
-            match resolve_leaf_scope(db, path, scope) {
+            match self.resolve_leaf_scope(path, scope) {
                 Some(ScopeId::Item(ItemKind::TypeFn(d))) => {
                     if d == self.def {
                         PathClass::SelfCall
@@ -654,10 +704,17 @@ impl<'db> Checker<'db> {
             }
         } else {
             let root = path.segment(db, 0).unwrap();
-            match resolve_leaf_scope(db, root, scope) {
+            match self.resolve_leaf_scope(root, scope) {
                 Some(ScopeId::GenericParam(..)) => PathClass::AssocProj,
                 _ => PathClass::Other,
             }
+        }
+    }
+
+    fn resolve_leaf_scope(&self, path: PathId<'db>, scope: ScopeId<'db>) -> Option<ScopeId<'db>> {
+        match self.analysis_db {
+            Some(db) => resolve_leaf_scope(db, path, scope),
+            None => resolve_leaf_scope_base(self.db, path, scope),
         }
     }
 
@@ -688,11 +745,11 @@ impl<'db> Checker<'db> {
         for (arg, param) in args[..n_forwarded].iter().zip(&self.forwarded_params) {
             let ok = match (arg, param) {
                 (GenericArg::Type(t), ForwardedParam::Type(Some(expected)))
-                | (GenericArg::Type(t), ForwardedParam::Const(Some(expected))) => t
-                    .ty
-                    .to_opt()
-                    .and_then(|ty| bare_path_ident(db, ty))
-                    .is_some_and(|id| id == *expected),
+                | (GenericArg::Type(t), ForwardedParam::Const(Some(expected))) => {
+                    t.ty.to_opt()
+                        .and_then(|ty| bare_path_ident(db, ty))
+                        .is_some_and(|id| id == *expected)
+                }
                 (GenericArg::Const(c), ForwardedParam::Const(Some(expected))) => {
                     let ConstGenericArgValue::Expr(Partial::Present(body)) = c.value else {
                         return self.emit(
@@ -788,6 +845,42 @@ impl<'db> Checker<'db> {
     }
 }
 
+fn bare_path_ident_base<'db>(db: &'db dyn HirDb, ty: TypeId<'db>) -> Option<IdentId<'db>> {
+    match ty.data(db) {
+        TypeKind::Path(Partial::Present(path)) => path.as_ident(db),
+        _ => None,
+    }
+}
+
+/// Resolves the small identity surface needed by the syntax checker without
+/// consulting imports or the merged graph.  Generic parameters are recognized
+/// from their owning definition; nominal items are found by identity in the
+/// defining top module's base graph.
+fn resolve_leaf_scope_base<'db>(
+    db: &'db dyn HirDb,
+    path: PathId<'db>,
+    scope: ScopeId<'db>,
+) -> Option<ScopeId<'db>> {
+    if path.parent(db).is_some() {
+        return None;
+    }
+    let name = path.ident(db).to_opt()?;
+
+    let owner = scope.item();
+    if let ItemKind::TypeFn(def) = owner {
+        for (idx, param) in def.hir_generic_params(db).data(db).iter().enumerate() {
+            if param.name().to_opt() == Some(name) {
+                return Some(ScopeId::GenericParam(owner, idx.try_into().ok()?));
+            }
+        }
+    }
+
+    let top_mod = scope.top_mod(db);
+    let base = crate::core::lower::base_scope_graph_impl(db, top_mod);
+    base.items_dfs(db)
+        .find_map(|item| (item.name(db) == Some(name)).then_some(ScopeId::Item(item)))
+}
+
 /// Resolves a single-segment path's leaf name to a scope via the early name
 /// resolver (no generic-argument lowering).
 pub(super) fn resolve_leaf_scope<'db>(
@@ -802,7 +895,7 @@ pub(super) fn resolve_leaf_scope<'db>(
 
 /// The root expression of a const-argument body, unwrapping a single-statement
 /// block (the parser wraps a braced subject `{N - 1}` in a block).
-pub(super) fn body_root_expr<'db>(db: &'db dyn HirAnalysisDb, body: Body<'db>) -> Option<Expr<'db>> {
+pub(super) fn body_root_expr<'db>(db: &'db dyn HirDb, body: Body<'db>) -> Option<Expr<'db>> {
     let root_id = body.expr(db);
     let root = body.exprs(db)[root_id].clone().to_opt();
     if let Some(Expr::Block(stmts)) = &root
@@ -816,7 +909,7 @@ pub(super) fn body_root_expr<'db>(db: &'db dyn HirAnalysisDb, body: Body<'db>) -
 
 /// `true` if the expression is a bare path equal to `name`.
 fn expr_is_ident<'db>(
-    db: &'db dyn HirAnalysisDb,
+    db: &'db dyn HirDb,
     body: Body<'db>,
     expr: crate::core::hir_def::ExprId,
     name: IdentId<'db>,
@@ -829,7 +922,7 @@ fn expr_is_ident<'db>(
 
 /// The integer literal an expression is, if any.
 fn expr_int_lit<'db>(
-    db: &'db dyn HirAnalysisDb,
+    db: &'db dyn HirDb,
     body: Body<'db>,
     expr: crate::core::hir_def::ExprId,
 ) -> Option<IntegerId<'db>> {
@@ -840,10 +933,7 @@ fn expr_int_lit<'db>(
 }
 
 /// The bare identifier a type is, if it is a single-segment path with no args.
-pub(super) fn bare_path_ident<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ty: TypeId<'db>,
-) -> Option<IdentId<'db>> {
+pub(super) fn bare_path_ident<'db>(db: &'db dyn HirDb, ty: TypeId<'db>) -> Option<IdentId<'db>> {
     match ty.data(db) {
         TypeKind::Path(Partial::Present(path)) => path.as_ident(db),
         _ => None,
@@ -1114,9 +1204,7 @@ fn hir_ty_mentions_type_fn<'db>(
             .iter()
             .filter_map(|e| e.to_opt())
             .any(|e| hir_ty_mentions_type_fn(db, e, scope)),
-        TypeKind::Array(Partial::Present(elem), _) => {
-            hir_ty_mentions_type_fn(db, *elem, scope)
-        }
+        TypeKind::Array(Partial::Present(elem), _) => hir_ty_mentions_type_fn(db, *elem, scope),
         _ => false,
     }
 }
@@ -1128,10 +1216,10 @@ fn generic_args_mention_type_fn<'db>(
     scope: ScopeId<'db>,
 ) -> bool {
     args.data(db).iter().any(|arg| match arg {
-        GenericArg::Type(t) => t
-            .ty
-            .to_opt()
-            .is_some_and(|ty| hir_ty_mentions_type_fn(db, ty, scope)),
+        GenericArg::Type(t) => {
+            t.ty.to_opt()
+                .is_some_and(|ty| hir_ty_mentions_type_fn(db, ty, scope))
+        }
         // Const args are integer subjects and assoc-type args are projections;
         // neither is a type-fn head position for the ban.
         GenericArg::Const(_) | GenericArg::AssocType(_) => false,
@@ -1167,7 +1255,10 @@ fn make_subject_ty<'db>(
 ) -> TyId<'db> {
     let cid = ConstTyId::new(
         db,
-        ConstTyData::Evaluated(EvaluatedConstTy::LitInt(IntegerId::new(db, value)), subject_ty),
+        ConstTyData::Evaluated(
+            EvaluatedConstTy::LitInt(IntegerId::new(db, value)),
+            subject_ty,
+        ),
     );
     TyId::const_ty(db, cid)
 }
@@ -1176,8 +1267,8 @@ fn make_subject_ty<'db>(
 /// (Fable steering: occurrence-local re-distillation, not positional matching),
 /// reusing the same syntactic destructuring as [`Checker::distill_subject`]. The
 /// subject body is READ, never evaluated.
-fn subject_step_from_body<'db>(
-    db: &'db dyn HirAnalysisDb,
+pub(crate) fn subject_step_from_body<'db>(
+    db: &'db dyn HirDb,
     body: Body<'db>,
 ) -> Option<SubjectStep<'db>> {
     match body_root_expr(db, body)? {
@@ -1194,8 +1285,8 @@ fn subject_step_from_body<'db>(
 
 /// Applies a distilled [`SubjectStep`] to a ground subject as a direct `BigUint`
 /// operation (spec sec 3.3 / 4.1). NEVER the CTFE machine.
-fn apply_subject_step<'db>(
-    db: &'db dyn HirAnalysisDb,
+pub(crate) fn apply_subject_step<'db>(
+    db: &'db dyn HirDb,
     step: SubjectStep<'db>,
     subject: &BigUint,
 ) -> BigUint {
@@ -1216,10 +1307,7 @@ fn apply_subject_step<'db>(
 /// Pure (no fuel), so it is safe to memoize; the DAG sharing this gives is what
 /// makes `Bush<8>` a handful of entries rather than an exponential tree.
 #[salsa::tracked]
-pub(crate) fn unfold_type_fn_step<'db>(
-    db: &'db dyn HirAnalysisDb,
-    app: TyId<'db>,
-) -> TyId<'db> {
+pub(crate) fn unfold_type_fn_step<'db>(db: &'db dyn HirAnalysisDb, app: TyId<'db>) -> TyId<'db> {
     let Some((def, args, subject, subject_ty)) = ground_type_fn_app(db, app) else {
         return TyId::invalid(db, InvalidCause::Other);
     };
@@ -1260,10 +1348,7 @@ pub(crate) fn unfold_type_fn_step<'db>(
 /// iterative head reduction + structural child recursion, fresh constant budget)
 /// keeps fuel OUT of the memo key.
 #[salsa::tracked]
-pub(crate) fn normalize_type_fn_app<'db>(
-    db: &'db dyn HirAnalysisDb,
-    app: TyId<'db>,
-) -> TyId<'db> {
+pub(crate) fn normalize_type_fn_app<'db>(db: &'db dyn HirAnalysisDb, app: TyId<'db>) -> TyId<'db> {
     let mut steps = 0usize;
     normalize_all(db, app, &mut steps)
 }
@@ -1341,7 +1426,11 @@ fn normalize_all<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>, steps: &mut usi
         }
     }
 
-    debug_assert_eq!(results.len(), 1, "normalize_all must yield exactly one root");
+    debug_assert_eq!(
+        results.len(),
+        1,
+        "normalize_all must yield exactly one root"
+    );
     results.pop().unwrap_or(ty)
 }
 
@@ -1555,9 +1644,9 @@ mod tests {
     }
 
     fn has_err(res: &TypeFnWfResult, f: impl Fn(&TypeFnWfError) -> bool) -> bool {
-        res.diags.iter().any(|d| {
-            matches!(d, TyLowerDiag::TypeFnIllFormed { error, .. } if f(error))
-        })
+        res.diags
+            .iter()
+            .any(|d| matches!(d, TyLowerDiag::TypeFnIllFormed { error, .. } if f(error)))
     }
 
     /// Checks the `Bad` type fn in `src` raises a WF error matching `f` and
@@ -1581,7 +1670,11 @@ mod tests {
         let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_wf_good.fe"), src);
         let (top_mod, _) = db.top_mod(file);
         let res = type_fn_wf(&db, find_tf(&db, top_mod, name));
-        assert!(res.diags.is_empty(), "unexpected WF errors: {:?}", res.diags);
+        assert!(
+            res.diags.is_empty(),
+            "unexpected WF errors: {:?}",
+            res.diags
+        );
         assert!(res.data.is_some(), "well-formed def must produce data");
     }
 
@@ -1965,7 +2058,11 @@ recursive type fn Bad<const N: usize>() -> (*) {
 
     #[test]
     fn rejects_nested_or_composed_staged_payload_args() {
-        for expr in ["payload(payload(N))", "payload(N + 1)", "payload(N - 1 + 1)"] {
+        for expr in [
+            "payload(payload(N))",
+            "payload(N + 1)",
+            "payload(N - 1 + 1)",
+        ] {
             let src = format!(
                 r#"
 struct Zero {{}}
@@ -2165,9 +2262,15 @@ recursive type fn Tagged<const N: usize>() -> (*) {
         let s = structs
             .iter()
             .copied()
-            .find(|s| s.name(&db).to_opt().is_some_and(|i| i.data(&db) == struct_name))
+            .find(|s| {
+                s.name(&db)
+                    .to_opt()
+                    .is_some_and(|i| i.data(&db) == struct_name)
+            })
             .unwrap_or_else(|| panic!("missing probe struct `{struct_name}`"));
-        let adt = AdtRef::try_from_item(ItemKind::Struct(s)).unwrap().as_adt(&db);
+        let adt = AdtRef::try_from_item(ItemKind::Struct(s))
+            .unwrap()
+            .as_adt(&db);
         let ty = TyId::adt(&db, adt);
         let field = ty.field_types(&db)[0];
         // No `TyBase::TypeFn` may survive normalization.
@@ -2231,14 +2334,21 @@ struct Probe { p: ScheduleOutput<4, 2> }
         db: &'db HirAnalysisTestDb,
         top_mod: TopLevelMod<'db>,
         struct_name: &str,
-    ) -> (crate::hir_def::PathId<'db>, crate::hir_def::scope_graph::ScopeId<'db>) {
+    ) -> (
+        crate::hir_def::PathId<'db>,
+        crate::hir_def::scope_graph::ScopeId<'db>,
+    ) {
         use crate::hir_def::{Partial, TypeKind};
 
         let structs = top_mod.all_structs(db);
         let s = structs
             .iter()
             .copied()
-            .find(|s| s.name(db).to_opt().is_some_and(|i| i.data(db) == struct_name))
+            .find(|s| {
+                s.name(db)
+                    .to_opt()
+                    .is_some_and(|i| i.data(db) == struct_name)
+            })
             .unwrap_or_else(|| panic!("missing probe struct `{struct_name}`"));
         let field = &s.hir_fields(db).data(db)[0];
         let ty = field.type_ref().to_opt().expect("field must have a type");
@@ -2276,9 +2386,7 @@ struct Probe { p: ScheduleOutput<4, 2> }
     fn hover_normal_form_none_for_symbolic_application() {
         use super::type_fn_application_normal_form;
 
-        let src = format!(
-            "{NORM_FIXTURES}\nstruct Wrap<const M: usize> {{ p: RPow<Pair, M> }}\n"
-        );
+        let src = format!("{NORM_FIXTURES}\nstruct Wrap<const M: usize> {{ p: RPow<Pair, M> }}\n");
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_hover_sym.fe"), &src);
         let (top_mod, _) = db.top_mod(file);
@@ -2423,9 +2531,7 @@ struct Probe { p: Deep<Pair, 2> }
     fn rejects_symbolic_type_fn_outside_body() {
         use crate::test_db::format_diagnostics;
 
-        let src = format!(
-            "{NORM_FIXTURES}\nstruct Wrap<const M: usize> {{ p: RPow<Pair, M> }}\n"
-        );
+        let src = format!("{NORM_FIXTURES}\nstruct Wrap<const M: usize> {{ p: RPow<Pair, M> }}\n");
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_symbolic.fe"), &src);
         let (top_mod, _) = db.top_mod(file);
@@ -2471,9 +2577,7 @@ struct Probe { p: Deep<Pair, 2> }
     fn rejects_impl_on_ground_type_fn_application() {
         use crate::test_db::format_diagnostics;
 
-        let src = format!(
-            "{NORM_FIXTURES}\ntrait LScan {{}}\nimpl LScan for RPow<Pair, 1> {{}}\n"
-        );
+        let src = format!("{NORM_FIXTURES}\ntrait LScan {{}}\nimpl LScan for RPow<Pair, 1> {{}}\n");
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_impl_ban_ground.fe"), &src);
         let (top_mod, _) = db.top_mod(file);
@@ -2556,12 +2660,7 @@ struct Probe { p: Deep<Pair, 2> }
         );
 
         // The MIR-consumed `normalize_ty` reduces it to the concrete normal form.
-        let normal = normalize_ty(
-            &db,
-            app,
-            top_mod.scope(),
-            PredicateListId::empty_list(&db),
-        );
+        let normal = normalize_ty(&db, app, top_mod.scope(), PredicateListId::empty_list(&db));
         assert!(
             collect_type_fn_heads(&db, normal).is_empty(),
             "normalized type must not carry a type-fn head: {}",
@@ -2744,9 +2843,8 @@ recursive type fn RPow<F, const N: usize>() -> (*) {
     /// monomorphized by the analysis pass.
     #[test]
     fn s21_opaque_head_flows_through_signature_no_ice() {
-        let rendered = s21_diags(
-            "fn id_opaque<F, const M: usize>(x: RPow<F, M>) -> RPow<F, M> { return x }",
-        );
+        let rendered =
+            s21_diags("fn id_opaque<F, const M: usize>(x: RPow<F, M>) -> RPow<F, M> { return x }");
         assert!(
             rendered.is_empty(),
             "an opaque type-fn app in a signature/body must type-check cleanly, got:\n{rendered}"
@@ -2791,7 +2889,11 @@ recursive type fn RPow<F, const N: usize>() -> (*) {
         let marker = *top_mod
             .all_traits(&db)
             .iter()
-            .find(|t| t.name(&db).to_opt().is_some_and(|i| i.data(&db) == "Marker"))
+            .find(|t| {
+                t.name(&db)
+                    .to_opt()
+                    .is_some_and(|i| i.data(&db) == "Marker")
+            })
             .expect("missing Marker trait");
         let adt_ty = |name: &str| {
             let s = top_mod
@@ -2800,7 +2902,12 @@ recursive type fn RPow<F, const N: usize>() -> (*) {
                 .copied()
                 .find(|s| s.name(&db).to_opt().is_some_and(|i| i.data(&db) == name))
                 .unwrap_or_else(|| panic!("missing struct `{name}`"));
-            TyId::adt(&db, AdtRef::try_from_item(ItemKind::Struct(s)).unwrap().as_adt(&db))
+            TyId::adt(
+                &db,
+                AdtRef::try_from_item(ItemKind::Struct(s))
+                    .unwrap()
+                    .as_adt(&db),
+            )
         };
         let pair_ty = adt_ty("Pair");
 
@@ -2830,7 +2937,10 @@ recursive type fn RPow<F, const N: usize>() -> (*) {
         let cx_assume = TraitSolveCx::new(&db, rpow.scope()).with_assumptions(assumptions);
         match is_goal_satisfiable(&db, cx_assume, sym_goal) {
             GoalSatisfiability::Satisfied(sol) => assert!(
-                matches!(sol.value.implementor.origin(&db), ImplementorOrigin::Assumption),
+                matches!(
+                    sol.value.implementor.origin(&db),
+                    ImplementorOrigin::Assumption
+                ),
                 "the symbolic discharge must come from the assumption, not an impl"
             ),
             other => panic!("expected Satisfied-from-assumption, got {other:?}"),
@@ -2879,7 +2989,9 @@ recursive type fn RPow<F, const N: usize>() -> (*) {
                         sel, impl_norm,
                         "select_impl on the {label} at n={n} picked a different impl"
                     ),
-                    other => panic!("select_impl on the {label} at n={n} was not Unique: {other:?}"),
+                    other => {
+                        panic!("select_impl on the {label} at n={n} was not Unique: {other:?}")
+                    }
                 }
             }
         }
@@ -2892,9 +3004,8 @@ recursive type fn RPow<F, const N: usize>() -> (*) {
     fn allows_impl_on_combinator() {
         use crate::test_db::format_diagnostics;
 
-        let src = format!(
-            "{NORM_FIXTURES}\ntrait LScan {{}}\nimpl<F, G> LScan for Comp<F, G> {{}}\n"
-        );
+        let src =
+            format!("{NORM_FIXTURES}\ntrait LScan {{}}\nimpl<F, G> LScan for Comp<F, G> {{}}\n");
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_impl_ok.fe"), &src);
         let (top_mod, _) = db.top_mod(file);

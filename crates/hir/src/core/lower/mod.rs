@@ -14,8 +14,8 @@ use crate::{
     HirDb, LowerHirDb,
     hir_def::{
         AttrListId, ExprId, FloatId, IdentId, IntegerId, ItemKind, LitKind, ModuleTree, Partial,
-        StringId,
-        TopLevelMod, TrackedItemId, TrackedItemVariant, Use, Visibility, module_tree_impl,
+        StringId, TopLevelMod, TrackedItemId, TrackedItemVariant, Use, Visibility,
+        module_tree_impl,
         scope_graph::ScopeGraph,
         use_tree::{UsePathId, UsePathSegment},
     },
@@ -45,6 +45,7 @@ mod error;
 mod event;
 mod expansion;
 mod expr;
+mod ground_type_plan;
 mod hir_builder;
 mod item;
 mod msg;

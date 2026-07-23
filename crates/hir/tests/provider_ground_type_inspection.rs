@@ -32,6 +32,7 @@ recursive type fn Plan<const N: usize>() -> (*) {
         _ => Add<Term<{N - 1}>, Plan<{N - 1}>>
     }
 }
+
 type GroundPlan = Plan<3>
 
 struct Target {}
@@ -61,6 +62,104 @@ fn proves_current_boundary(value: <Target as Inspect>::Out) { takes_no(value) }
     );
     let (top_mod, _) = db.top_mod(file);
     db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn normalized_ground_type_inspection_unfolds_recursive_plan_in_exact_order() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_normalized_ground_type_plan.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Inspect { type Out }
+struct Zero {}
+struct Term<const Candidate: usize> {}
+struct Add<L, R> {}
+struct Yes {}
+struct No {}
+
+recursive type fn Plan<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{N - 1}>, Plan<{N - 1}>>
+    }
+}
+type GroundPlan = Plan<3>
+
+struct Target {}
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        let code = 0
+        for nested in builder.ty<GroundPlan>().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                for arg in nested.generic_args() {
+                    if arg.is_const() {
+                        code = code * 10 + arg.const_value()
+                    }
+                }
+            }
+        }
+        let out = builder.ty<No>()
+        if code == 210 {
+            out = builder.ty<Yes>()
+        }
+        builder.emit_assoc_ty("Out", out)
+        builder.finish()
+        ev
+    }
+}
+
+derive Inspect for Target using Inspector
+fn takes_yes(_ value: Yes) {}
+fn proves_normalized_order(value: <Target as Inspect>::Out) { takes_yes(value) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn normalized_ground_type_inspection_fails_closed_on_forwarded_params() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_normalized_ground_type_forwarded.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Inspect { type Out }
+struct Zero {}
+struct Add<L, R> {}
+recursive type fn Plan<F, const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<F, Plan<F, {N - 1}>>
+    }
+}
+type GroundPlan = Plan<Zero, 2>
+struct Target {}
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        for _nested in builder.ty<GroundPlan>().normalized_preorder_types() {}
+        builder.emit_assoc_ty("Out", builder.ty<Zero>())
+        builder.finish()
+        ev
+    }
+}
+derive Inspect for Target using Inspector
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("this construct is not supported in derive provider bodies"),
+        "forwarded ground parameters must fail closed at the opt-in reflection call:\n{rendered}"
+    );
 }
 
 #[test]

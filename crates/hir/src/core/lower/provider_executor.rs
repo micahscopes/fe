@@ -22,6 +22,10 @@ use parser::ast::prelude::*;
 
 use super::{
     base_scope_graph_impl,
+    ground_type_plan::{
+        GroundArg as NormalizedGroundArg, GroundTypePlan, base_ground_constructor,
+        base_ground_type_plan,
+    },
     provider::{TargetReflection, ValidatedProvider, canonical_trait_path, resolve_trait_def},
     top_mod_ast,
 };
@@ -623,6 +627,18 @@ enum Value<'db> {
     Variant(VariantHandle),
     /// A type witness (e.g. the result of `field.ty()`).
     Ty(TypeId<'db>),
+    /// A node in a base-graph-normalized ground recursive type plan.
+    NormalizedTy {
+        plan: usize,
+        node: usize,
+    },
+    /// Resolved nominal constructor identity of a normalized node.
+    NormalizedCtor(ItemKind<'db>),
+    /// An ordered argument of a normalized node.
+    NormalizedArg {
+        plan: usize,
+        arg: NormalizedGroundArg<'db>,
+    },
     /// One exact, source-level generic argument of a ground nominal type.
     GroundArg(GroundArg<'db>),
     /// A generated type (e.g. the result of `str_ty` / `tuple_ty`).
@@ -1006,6 +1022,7 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     tys: Vec<GenTy<'db>>,
     sigs: Vec<GenMethodSig<'db>>,
     quotes: Vec<QuoteTemplate<'db>>,
+    normalized_plans: Vec<GroundTypePlan<'db>>,
     /// The typed effect trace (TD5.1): everything a provider body does that
     /// re-enters ordinary compilation (requirements + emitted members),
     /// recorded in execution order. The sole replay authority for synthesis.
@@ -1061,6 +1078,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             tys: Vec::new(),
             sigs: Vec::new(),
             quotes: Vec::new(),
+            normalized_plans: Vec::new(),
             effects: Vec::new(),
             emitted_methods: Vec::new(),
             emitted_assocs: Vec::new(),
@@ -2736,6 +2754,57 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                         .ground_type_preorder(ty)
                         .map(|types| Value::Seq(types.into_iter().map(Value::Ty).collect()))
                         .ok_or_else(|| self.unsupported_expr(expr)),
+                    "normalized_preorder_types" => {
+                        let plan =
+                            base_ground_type_plan(self.db, ty, self.provider_top_mod.scope())
+                                .map_err(|_| self.unsupported_expr(expr))?;
+                        let plan_id = self.normalized_plans.len();
+                        let root = plan.root;
+                        self.normalized_plans.push(plan);
+                        let nodes = self.normalized_type_preorder(plan_id, root);
+                        Ok(Value::Seq(
+                            nodes
+                                .into_iter()
+                                .map(|node| Value::NormalizedTy {
+                                    plan: plan_id,
+                                    node,
+                                })
+                                .collect(),
+                        ))
+                    }
+                    _ => Err(self.unsupported_expr(expr)),
+                }
+            }
+            Value::NormalizedTy { plan, node } => {
+                if !args.is_empty() {
+                    return Err(self.unsupported_expr(expr));
+                }
+                let Some(node_data) = self
+                    .normalized_plans
+                    .get(plan)
+                    .and_then(|plan| plan.nodes.get(node))
+                else {
+                    return Err(self.unsupported_expr(expr));
+                };
+                match method_name.as_str() {
+                    "constructor" => Ok(Value::NormalizedCtor(node_data.constructor)),
+                    "generic_args" => Ok(Value::Seq(
+                        node_data
+                            .args
+                            .iter()
+                            .copied()
+                            .map(|arg| Value::NormalizedArg { plan, arg })
+                            .collect(),
+                    )),
+                    "preorder_types" | "normalized_preorder_types" => {
+                        let nodes = self.normalized_type_preorder(plan, node);
+                        Ok(Value::Seq(
+                            nodes
+                                .into_iter()
+                                .map(|node| Value::NormalizedTy { plan, node })
+                                .collect(),
+                        ))
+                    }
                     _ => Err(self.unsupported_expr(expr)),
                 }
             }
@@ -2750,6 +2819,22 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     ("is_const", GroundArg::Const(_)) => Ok(Value::Bool(true)),
                     ("ty", GroundArg::Ty(ty)) => Ok(Value::Ty(ty)),
                     ("const_value", GroundArg::Const(value)) => Ok(Value::Int(value)),
+                    _ => Err(self.unsupported_expr(expr)),
+                }
+            }
+            Value::NormalizedArg { plan, arg } => {
+                if !args.is_empty() {
+                    return Err(self.unsupported_expr(expr));
+                }
+                match (method_name.as_str(), arg) {
+                    ("is_type", NormalizedGroundArg::Type(_)) => Ok(Value::Bool(true)),
+                    ("is_type", NormalizedGroundArg::Const(_)) => Ok(Value::Bool(false)),
+                    ("is_const", NormalizedGroundArg::Type(_)) => Ok(Value::Bool(false)),
+                    ("is_const", NormalizedGroundArg::Const(_)) => Ok(Value::Bool(true)),
+                    ("ty", NormalizedGroundArg::Type(node)) => {
+                        Ok(Value::NormalizedTy { plan, node })
+                    }
+                    ("const_value", NormalizedGroundArg::Const(value)) => Ok(Value::Int(value)),
                     _ => Err(self.unsupported_expr(expr)),
                 }
             }
@@ -2840,6 +2925,26 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
         }
         Some(out)
+    }
+
+    fn normalized_type_preorder(&self, plan: usize, root: usize) -> Vec<usize> {
+        let Some(plan) = self.normalized_plans.get(plan) else {
+            return Vec::new();
+        };
+        let mut pending = vec![root];
+        let mut out = Vec::new();
+        while let Some(node) = pending.pop() {
+            let Some(data) = plan.nodes.get(node) else {
+                return Vec::new();
+            };
+            out.push(node);
+            for arg in data.args.iter().rev() {
+                if let NormalizedGroundArg::Type(child) = arg {
+                    pending.push(*child);
+                }
+            }
+        }
+        out
     }
 
     /// Builds the ordinary sequence value produced by a `reflect.*` iterable
@@ -3431,6 +3536,17 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             // `same_field` in RECOGNIZED_BUILDER_OPS (45 → 43).
             (name, [lhs, rhs]) if ReflectionCompare::is_compare_name(name) => {
                 let lhs_value = self.eval_expr(lhs.expr)?;
+                if name == "same_ty"
+                    && let Value::NormalizedCtor(lhs_ctor) = lhs_value
+                {
+                    let Value::Ty(rhs_ty) = self.eval_expr(rhs.expr)? else {
+                        return Err(self.unsupported_expr(rhs.expr));
+                    };
+                    let rhs_ctor =
+                        base_ground_constructor(self.db, rhs_ty, self.provider_top_mod.scope())
+                            .map_err(|_| self.unsupported_expr(rhs.expr))?;
+                    return Ok(Value::Bool(lhs_ctor == rhs_ctor));
+                }
                 // Known compare op: a wrong first operand is attributed to the
                 // operand's span, exactly as the old bespoke arms did.
                 let Some(read) = ReflectionCompare::binary_read(name, &lhs_value) else {
@@ -3899,8 +4015,10 @@ fn value_kind_name(value: &Value) -> &'static str {
         Value::Int(_) => "compile-time integer",
         Value::Field(_) => "`Field` handle",
         Value::Variant(_) => "`Variant` handle",
-        Value::GroundArg(_) => "ground generic argument",
-        Value::Ty(_) | Value::GenTy(_) => "type value",
+        Value::GroundArg(_) | Value::NormalizedArg { .. } => "ground generic argument",
+        Value::Ty(_) | Value::NormalizedTy { .. } | Value::NormalizedCtor(_) | Value::GenTy(_) => {
+            "type value"
+        }
         Value::Expr(_) => "generated expression",
         Value::Pat(_) => "generated pattern",
         Value::Quote(_) => "quote value",

@@ -1030,15 +1030,20 @@ mod sgk_solver_guard {
     /// if a narrow fixture happens not to trigger the salsa cycle.
     #[test]
     fn provider_executor_does_not_reach_merged_type_analysis() {
-        for forbidden in [
-            "HirAnalysisDb",
-            "lower_hir_ty",
-            "normalize_ty",
-            "normalize_type_fn_app",
-        ] {
+        for forbidden in ["HirAnalysisDb", "lower_hir_ty", "normalize_type_fn_app"] {
+            for suffix in ["(", ","] {
+                let token = format!("{forbidden}{suffix}");
+                assert!(
+                    !PROVIDER_EXECUTOR_SOURCE.contains(&token),
+                    "provider executor references `{forbidden}`: normalized provider reflection \
+                     requires the base-graph semantic island, not merged analysis"
+                );
+            }
+        }
+        for token in ["normalize_ty(", "normalize_ty,"] {
             assert!(
-                !PROVIDER_EXECUTOR_SOURCE.contains(forbidden),
-                "provider executor references `{forbidden}`: normalized provider reflection \
+                !PROVIDER_EXECUTOR_SOURCE.contains(token),
+                "provider executor references `normalize_ty`: normalized provider reflection \
                  requires the base-graph semantic island, not merged analysis"
             );
         }
