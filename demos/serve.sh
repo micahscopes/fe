@@ -2,21 +2,42 @@
 # Explicit generation and preflight for repository browser demos.
 #
 # Usage:
-#   demos/serve.sh [all|keystone|mandelbrot|mandelbrot-interactive|
-#                   clifford-interactive|cga|cga-d1|cga-schedule32|qcga]
-# Trunk serving is deliberately separate and has no hidden generation hook.
+#   demos/serve.sh [DEMO] [--serve] [--no-watch]
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/.." && pwd)"
-demo="${1:-cga}"
-if [ "$#" -gt 0 ]; then shift; fi
-if [ "$#" -ne 0 ]; then
-  echo "usage: demos/serve.sh [DEMO]" >&2
+demo=cga
+serve=0
+no_watch=0
+if [ "$#" -gt 0 ] && [[ "$1" != --* ]]; then
+  demo="$1"
+  shift
+fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --serve) serve=1 ;;
+    --no-watch) no_watch=1 ;;
+    -h|--help)
+      echo "usage: demos/serve.sh [DEMO] [--serve] [--no-watch]"
+      exit 0
+      ;;
+    *)
+      echo "usage: demos/serve.sh [DEMO] [--serve] [--no-watch]" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+if [ "$no_watch" = 1 ] && [ "$serve" != 1 ]; then
+  echo "--no-watch requires --serve" >&2
   exit 2
 fi
+rerun_args=("$demo")
+if [ "$serve" = 1 ]; then rerun_args+=(--serve); fi
+if [ "$no_watch" = 1 ]; then rerun_args+=(--no-watch); fi
 if [ "${FE_DEMO_GENERATION_LOCK_ACTIVE:-0}" != 1 ]; then
-  exec "$here/with-fe-generation-lock.sh" "$0" "$demo"
+  exec "$here/with-fe-generation-lock.sh" "$0" "${rerun_args[@]}"
 fi
 
 # Browser-profile generators share the exact 547519d4 Sonatina backend. When a
@@ -29,7 +50,7 @@ if [ "$demo" != cga-d1 ] && [ -n "${SONATINA_DIR:-}" ] \
   actual_browser_sonatina="$(git -C "$SONATINA_DIR" rev-parse HEAD 2>/dev/null || true)"
   if [ "$actual_browser_sonatina" != "$expected_browser_sonatina" ] \
       || [ -n "$(git -C "$SONATINA_DIR" status --porcelain 2>/dev/null || true)" ]; then
-    exec "$here/with-sonatina-overlay.sh" "$0" "$demo"
+    exec "$here/with-sonatina-overlay.sh" "$0" "${rerun_args[@]}"
   fi
 fi
 
@@ -51,7 +72,7 @@ generate_example() {
     fi
   fi
   if [ -z "${FE_DEMO_GENERATE_CMD:-}" ] && [ -z "${SONATINA_DIR:-}" ]; then
-    "$here/with-sonatina-overlay.sh" "$0" "$key"
+    "$here/with-sonatina-overlay.sh" "$0" "${rerun_args[@]}"
     return
   fi
   echo "generating $key..."
@@ -191,4 +212,11 @@ if [ "$demo" = all ]; then
   done
 else
   generate_one "$demo"
+fi
+
+if [ "$serve" = 1 ]; then
+  trunk_args=(serve --config "$here/Trunk.toml")
+  if [ "$no_watch" = 1 ]; then trunk_args+=(--no-autoreload); fi
+  echo "serving browser demos (selected bundle: $demo)..."
+  exec trunk "${trunk_args[@]}"
 fi
