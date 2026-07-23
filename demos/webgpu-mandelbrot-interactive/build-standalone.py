@@ -41,10 +41,9 @@ def js_b64_text(s):
 
 
 def strip_module_seams(src):
+    src = re.sub(r"(?ms)^\s*import\s+.*?;\s*$", "", src)
     out = []
     for line in src.splitlines():
-        if re.match(r"\s*import\s.+from\s", line):
-            continue
         line = re.sub(r"^export\s+", "", line)
         out.append(line)
     return "\n".join(out)
@@ -84,8 +83,11 @@ def main():
         for p in [
             os.path.join(SHARED, "actor-coordinator.js"),
             os.path.join(SHARED, "actor-endpoint.js"),
+            os.path.join(SHARED, "message-port-actor.js"),
+            os.path.join(SHARED, "gpu-actor.js"),
             os.path.join(KEYSTONE, "wasm-runner.js"),
             os.path.join(KEYSTONE, "webgpu-runner.js"),
+            os.path.join(GEN, "ctl-interface.js"),
             os.path.join(HERE, "actor-runtime.js"),
             os.path.join(HERE, "live-pump.js"),
             os.path.join(HERE, "main.js"),

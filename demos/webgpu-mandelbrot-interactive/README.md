@@ -1,11 +1,17 @@
 # Hosted Mandelbrot browser acceptance
 
-The multi-file page uses a real module Worker for the Fe
-`update_view_message` control lane. The request and response are nominal Fe
-records; `ctl-interface.js`, its TypeScript declarations, the canonical arena
-Wasm wrapper, and the Worker validators are generated from those exact semantic
-types. `ctl.json` contains only application event mapping and artifact names—it
+The generated canonical interface contains three nominal Fe lanes:
+`update_view_message`, `render`, and `verify`. The hosted page uses a real module
+Worker for the Fe control lane. Render and verify are explicitly placed as host
+effects on the main-thread WebGPU owner; their request/result validators come
+from the same generated `ctl-interface.js`, rather than a demo-owned JavaScript
+schema. `ctl.json` contains only application event mapping and artifact names—it
 does not restate the actor schema.
+
+Interactive rendering crosses the bounded schema-parametric GPU actor, but the
+GPU owner still submits directly to the presentation target. Normal frames do
+not read pixels back. Only the explicit initial verification lane performs
+readback and compares WebGPU, Fe-Wasm, and generated-reference hashes.
 
 The standalone page deliberately retains the raw eight-argument
 `update_view`/three-result Wasm export. This keeps its import-free path small
@@ -18,9 +24,17 @@ cargo run -p fe-codegen --example gen_mandelbrot_interactive_demo
 bun demos/webgpu-mandelbrot-interactive/worker-control.test.mjs
 ```
 
-The Worker test uses a real module Worker and MessageChannel, executes the
-generated canonical lane, restarts it, observes the incremented actor epoch, and
-executes again. Its structured result is exposed as
+The Worker test executes the generated control lane through a real module Worker
+and MessageChannel, restarts it, observes the incremented actor epoch, and
+executes again. `actor-runtime.test.mjs` separately covers generated render and
+verify schemas, bounded latest-frame backpressure, stable host-effect errors,
+and restart lifecycle:
+
+```sh
+bun demos/webgpu-mandelbrot-interactive/actor-runtime.test.mjs
+```
+
+The page's structured result is exposed as
 `window.__mandelAcceptance` for automation. Green browser acceptance requires
 all of the following in the same hosted Chrome page:
 

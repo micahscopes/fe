@@ -67,6 +67,8 @@ const FRAG_NAME: &str = "mandel_view_frag";
 /// The control export the page drives per input event.
 const CTL_NAME: &str = "update_view";
 const CTL_MESSAGE_NAME: &str = "update_view_message";
+const RENDER_LANE: &str = "render";
+const VERIFY_LANE: &str = "verify";
 
 /// The dispatch frame: 512x512, the proven view resolution (spec section 2).
 const WIDTH: u32 = 512;
@@ -79,7 +81,7 @@ const VIEW_INIT: (i32, i32, i32) = (-2048, 0, 384);
 
 /// The sonatina fork rev the fe workspace is pinned to (`Cargo.toml`), the render
 /// push #3 rev; recorded in `layout.json` provenance.
-const SONATINA_REV: &str = "150d327edfa88374802a6cc8089fd77da5fa818b";
+const SONATINA_REV: &str = "b2601adc8b80b085aae98f9132a035fdfecec5c3";
 
 /// The pinned views the spec (section 7) names, each `(name, center_re, center_im,
 /// scale_q, min_distinct)`. `min_distinct` is a DERIVED non-degeneracy floor: the
@@ -277,7 +279,7 @@ fn main() {
         &canonical_db,
         canonical_db.top_mod(canonical_file),
         WebBuildOptions::render(FRAG_NAME, Some("mandel_view_canonical.fe".to_owned()))
-            .with_canonical_entry(CTL_MESSAGE_NAME)
+            .with_canonical_entries([CTL_MESSAGE_NAME, RENDER_LANE, VERIFY_LANE])
             .with_canonical_policy(WebCanonicalPolicy::Required),
     )
     .expect("Mandelbrot canonical control WebBundle must compile");

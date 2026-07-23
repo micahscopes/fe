@@ -1,25 +1,37 @@
 import { createActorCoordinator } from "../shared/actor-coordinator.js";
-import { actorField, actorResultSchema, createActorEndpoint, createInProcessActorTransport, exactObject } from "../shared/actor-endpoint.js";
+import {
+  createTypedGpuActorClient,
+  createTypedMainThreadGpuBroker,
+  selectActorSchemas,
+} from "../shared/gpu-actor.js";
+import { compileActorAdapter } from "./gen/ctl-interface.js";
 
-const viewPayload = (payload) => exactObject(payload, {
-  view: actorField.int32Array(3),
-});
-const renderValue = (value) => exactObject(value, {
-  submitted: actorField.boolean,
-}, "render result");
-const verifyValue = (value) => exactObject(value, {
-  gpuHash: actorField.finiteNumber,
-  wasmHash: actorField.finiteNumber,
-  referenceHash: actorField.finiteNumber,
-}, "verification result");
+const compiledSchemas = compileActorAdapter();
+const gpuSchemas = selectActorSchemas(compiledSchemas, ["render", "verify"]);
 
+// Compatibility-shaped export for tests and consumers that inspected the old
+// demo-owned schemas. The validators themselves are now compiler-generated.
 export const MANDELBROT_ACTOR_SCHEMAS = Object.freeze({
-  request: Object.freeze({ render: viewPayload, verify: viewPayload }),
-  result: Object.freeze({
-    render: actorResultSchema(renderValue),
-    verify: actorResultSchema(verifyValue),
-  }),
+  request: gpuSchemas.requestSchema,
+  result: gpuSchemas.resultSchema,
 });
+
+const viewRecord = (view) => {
+  if (!Array.isArray(view) && !(view instanceof Int32Array)) {
+    throw new TypeError("Mandelbrot view must be a three-word vector");
+  }
+  if (view.length !== 3) {
+    throw new TypeError("Mandelbrot view must be a three-word vector");
+  }
+  return {
+    center_re: view[0],
+    center_im: view[1],
+    scale_q: view[2],
+  };
+};
+
+const viewArray = ({ center_re, center_im, scale_q }) =>
+  [center_re, center_im, scale_q];
 
 export function createMandelbrotActorRuntime({ render, verify, onError = () => {} }) {
   if (typeof render !== "function" || typeof verify !== "function") {
@@ -27,20 +39,37 @@ export function createMandelbrotActorRuntime({ render, verify, onError = () => {
   }
   let generation = 0;
   const waiters = new Map();
-  const endpoint = createActorEndpoint({
-    transport: createInProcessActorTransport(({ lane, payload }) => {
-      const view = Array.from(payload.view);
-      return lane === "render" ? render(view) : verify(view);
-    }),
-    requestSchema: MANDELBROT_ACTOR_SCHEMAS.request,
-    resultSchema: MANDELBROT_ACTOR_SCHEMAS.result,
-    onProtocolError: onError,
+  const channel = new MessageChannel();
+  const broker = createTypedMainThreadGpuBroker(channel.port1, {
+    handlers: {
+      render: (request) => render(viewArray(request)),
+      verify: async (request) => {
+        const result = await verify(viewArray(request));
+        return {
+          gpu_hash: result.gpuHash,
+          wasm_hash: result.wasmHash,
+          reference_hash: result.referenceHash,
+        };
+      },
+    },
+    ...gpuSchemas,
   });
+  const gpu = createTypedGpuActorClient(channel.port2, gpuSchemas);
 
   const execute = async (request) => {
-    const result = await endpoint.request({ ...request, actorEpoch: endpoint.epoch() });
-    if (!result.payload.ok) throw new Error(result.payload.error);
-    return result.payload.value;
+    const value = await gpu.request(
+      request.lane,
+      request.payload,
+      request.generation,
+    );
+    if (request.lane === "verify") {
+      return {
+        gpuHash: value.gpu_hash,
+        wasmHash: value.wasm_hash,
+        referenceHash: value.reference_hash,
+      };
+    }
+    return value;
   };
   const settle = (result) => {
     const waiter = waiters.get(result.requestId);
@@ -59,13 +88,11 @@ export function createMandelbrotActorRuntime({ render, verify, onError = () => {
   });
 
   const send = (lane, view, nextGeneration) => {
-    if (!Array.isArray(view) && !(view instanceof Int32Array)) {
-      throw new TypeError("Mandelbrot view must be a three-word vector");
-    }
+    const payload = viewRecord(view);
     if (nextGeneration) generation = coordinator.nextGeneration();
     const request = lane === "render"
-      ? coordinator.enqueueRender({ view: new Int32Array(view) }, generation)
-      : coordinator.enqueueVerification({ view: new Int32Array(view) }, generation);
+      ? coordinator.enqueueRender(payload, generation)
+      : coordinator.enqueueVerification(payload, generation);
     return new Promise((resolve, reject) => {
       waiters.set(request.requestId, { resolve, reject });
     });
@@ -78,9 +105,17 @@ export function createMandelbrotActorRuntime({ render, verify, onError = () => {
       return work;
     },
     verify: (view) => send("verify", view, false),
-    close: endpoint.close,
-    reset: endpoint.reset,
-    epoch: endpoint.epoch,
+    close() {
+      gpu.close();
+      broker.close();
+    },
+    reset(reason = "Mandelbrot actor restarted") {
+      const epoch = gpu.restart(reason);
+      broker.restart(epoch);
+      return epoch;
+    },
+    epoch: gpu.epoch,
     state: coordinator.state,
+    gpuState: broker.state,
   });
 }

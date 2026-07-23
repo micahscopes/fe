@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createMandelbrotActorRuntime, MANDELBROT_ACTOR_SCHEMAS } from "./actor-runtime.js";
 
+assert.deepEqual(Object.keys(MANDELBROT_ACTOR_SCHEMAS.request), ["render", "verify"]);
+assert.deepEqual(Object.keys(MANDELBROT_ACTOR_SCHEMAS.result), ["render", "verify"]);
+
 const renders = [];
 const verifications = [];
 const runtime = createMandelbrotActorRuntime({
@@ -22,8 +25,8 @@ assert.deepEqual(await runtime.verify(new Int32Array([3, 4, 128])), {
 assert.deepEqual(verifications, [[3, 4, 128]]);
 assert.throws(() => MANDELBROT_ACTOR_SCHEMAS.request.render({
   view: new Float32Array(3),
-}), /Int32Array\(3\)/);
-await assert.rejects(runtime.verify([1, 2]), /Int32Array\(3\)/);
+}), /FE_ACTOR_INVALID_PAYLOAD/);
+assert.throws(() => runtime.verify([1, 2]), /three-word vector/);
 
 let reported = null;
 const failing = createMandelbrotActorRuntime({
@@ -31,7 +34,7 @@ const failing = createMandelbrotActorRuntime({
   verify: () => Promise.reject(new Error("readback failed")),
   onError: (error) => { reported = error; },
 });
-await assert.rejects(failing.verify([0, 0, 384]), /readback failed/);
+await assert.rejects(failing.verify([0, 0, 384]), /FE_ACTOR_GPU_EFFECT/);
 assert.equal(reported, null, "awaited verification errors belong to the caller");
 
 const deferred = () => {
@@ -69,4 +72,31 @@ assert.deepEqual(burstResults, [
 ]);
 assert.deepEqual(burst.state().render, { active: null, pending: null });
 
-console.log("Mandelbrot protocol-v2 in-process actor runtime: ok");
+const restartingRuns = [];
+const restarting = createMandelbrotActorRuntime({
+  render(view) {
+    const job = deferred();
+    restartingRuns.push({ view, job });
+    return job.promise;
+  },
+  verify: () => ({ gpuHash: 1, wasmHash: 1, referenceHash: 1 }),
+});
+const interrupted = restarting.render([5, 0, 384]);
+await tick();
+assert.equal(restarting.epoch(), 0);
+assert.equal(restarting.reset(), 1);
+await assert.rejects(interrupted, /Mandelbrot actor restarted/);
+assert.equal(restarting.epoch(), 1);
+restartingRuns[0].job.resolve({ submitted: true });
+await tick();
+assert.deepEqual(restarting.gpuState().render, { active: null, pending: null });
+const afterRestart = restarting.render([6, 0, 384]);
+await tick();
+restartingRuns[1].job.resolve({ submitted: true });
+assert.deepEqual(await afterRestart, { submitted: true });
+restarting.close();
+
+runtime.close();
+failing.close();
+burst.close();
+console.log("Mandelbrot generated canonical GPU actor lifecycle: ok");

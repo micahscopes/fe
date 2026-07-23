@@ -107,3 +107,41 @@ pub fn update_view_message(request: own ViewUpdateRequest) -> ViewUpdateResponse
         scale_q: result.2,
     }
 }
+
+// Compiler-owned host-effect surfaces for the browser GPU actor. These bodies
+// are canonical ABI placeholders only: explicit browser placement routes both
+// lanes to the main-thread WebGPU owner and never presents them as Fe/Wasm GPU
+// execution.
+struct RenderRequest {
+    center_re: i32,
+    center_im: i32,
+    scale_q: i32,
+}
+
+struct RenderResponse {
+    submitted: bool,
+}
+
+struct VerifyRequest {
+    center_re: i32,
+    center_im: i32,
+    scale_q: i32,
+}
+
+struct VerifyResponse {
+    gpu_hash: u32,
+    wasm_hash: u32,
+    reference_hash: u32,
+}
+
+pub fn render(_request: own RenderRequest) -> RenderResponse {
+    RenderResponse { submitted: false }
+}
+
+pub fn verify(_request: own VerifyRequest) -> VerifyResponse {
+    VerifyResponse {
+        gpu_hash: 0,
+        wasm_hash: 0,
+        reference_hash: 0,
+    }
+}
