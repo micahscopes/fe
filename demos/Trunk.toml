@@ -1,0 +1,17 @@
+[build]
+target = "index.html"
+dist = "../target/trunk-demos"
+public_url = "/"
+filehash = false
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8788
+no_spa = true
+disable_csp = true
+
+[serve.headers]
+Cross-Origin-Opener-Policy = "same-origin"
+Cross-Origin-Embedder-Policy = "require-corp"
+Cross-Origin-Resource-Policy = "same-origin"
+Cache-Control = "no-store"

@@ -26,7 +26,7 @@ class DemoServeCommandTests(unittest.TestCase):
                 "CALL_LOG": str(log),
             }
             result = subprocess.run(
-                [str(SERVE), demo, "--generate-only"],
+                [str(SERVE), demo],
                 env=env,
                 text=True,
                 capture_output=True,
@@ -53,7 +53,7 @@ class DemoServeCommandTests(unittest.TestCase):
 
     def test_unknown_selector_fails_before_serving(self):
         result = subprocess.run(
-            [str(SERVE), "unknown", "--generate-only"],
+            [str(SERVE), "unknown"],
             text=True,
             capture_output=True,
         )

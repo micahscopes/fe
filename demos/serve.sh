@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
-# One entry point for generating and serving the repository browser demos.
+# Explicit generation and preflight for repository browser demos.
 #
 # Usage:
 #   demos/serve.sh [all|keystone|mandelbrot|mandelbrot-interactive|
 #                   clifford-interactive|cga|cga-d1|cga-schedule32|qcga]
-#                  [--generate-only]
+# Trunk serving is deliberately separate and has no hidden generation hook.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/.." && pwd)"
-demo="${1:-all}"
+demo="${1:-cga}"
 if [ "$#" -gt 0 ]; then shift; fi
-generate_only=0
-if [ "${1:-}" = "--generate-only" ]; then
-  generate_only=1
-  shift
-fi
 if [ "$#" -ne 0 ]; then
-  echo "usage: demos/serve.sh [DEMO] [--generate-only]" >&2
+  echo "usage: demos/serve.sh [DEMO]" >&2
   exit 2
 fi
 
@@ -102,10 +97,3 @@ if [ "$demo" = all ]; then
 else
   generate_one "$demo"
 fi
-
-if [ "$generate_only" = 1 ]; then
-  exit 0
-fi
-
-echo "serving demos at http://${HOST:-127.0.0.1}:${PORT:-8788}/"
-exec python3 "$here/serve.py"

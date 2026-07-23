@@ -55,7 +55,8 @@ PY
 fi
 case "$debug_port" in *[!0-9]*|'') echo "CGA_CDP_PORT must be numeric" >&2; exit 2;; esac
 
-(cd "$demos" && HOST=127.0.0.1 PORT="$port" python3 serve.py) >"$tmp/server.log" 2>&1 &
+NO_COLOR=false trunk serve --config "$demos/Trunk.toml" --port "$port" --no-autoreload \
+  >"$tmp/server.log" 2>&1 &
 server_pid=$!
 default_presentation="offscreen"
 if [ "${CGA_SMOKE_VERIFY:-default}" = "off" ]; then default_presentation="canvas"; fi

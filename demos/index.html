@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fe browser demos</title>
+  <link data-trunk rel="copy-dir" href="shared">
+  <link data-trunk rel="copy-dir" href="fe-sandbox">
+  <link data-trunk rel="copy-dir" href="webgpu-keystone">
+  <link data-trunk rel="copy-dir" href="webgpu-mandelbrot">
+  <link data-trunk rel="copy-dir" href="webgpu-mandelbrot-interactive">
+  <link data-trunk rel="copy-dir" href="webgpu-clifford-interactive">
+  <link data-trunk rel="copy-dir" href="webgpu-cga-inversion">
+  <link data-trunk rel="copy-dir" href="webgpu-qcga3d-quadric">
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { max-width: 52rem; margin: 4rem auto; padding: 0 1.5rem; background: #11151b; color: #e8edf3; }
+    h1 { font-size: 2rem; }
+    p { color: #aab7c4; }
+    ul { display: grid; gap: .75rem; padding: 0; list-style: none; }
+    a { display: block; padding: 1rem; border: 1px solid #344252; border-radius: .5rem;
+        color: #8ed8ff; text-decoration: none; background: #18202a; }
+    a:hover { border-color: #8ed8ff; }
+  </style>
+</head>
+<body>
+  <h1>Fe browser demos</h1>
+  <p>Compiler-produced Wasm and WebGPU artifacts, served from one isolated origin.</p>
+  <ul>
+    <li><a href="webgpu-cga-inversion/?bundle=schedule32">CGA inversion — recursive Schedule32</a></li>
+    <li><a href="webgpu-qcga3d-quadric/">QCGA3D rotated quadric</a></li>
+    <li><a href="webgpu-mandelbrot-interactive/">Interactive Mandelbrot</a></li>
+    <li><a href="webgpu-clifford-interactive/">Interactive Clifford algebra</a></li>
+    <li><a href="webgpu-mandelbrot/">Mandelbrot</a></li>
+    <li><a href="webgpu-keystone/">WebGPU keystone</a></li>
+    <li><a href="fe-sandbox/">Fe sandbox</a></li>
+  </ul>
+</body>
+</html>

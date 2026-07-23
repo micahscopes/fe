@@ -44,7 +44,8 @@ for _ in range(2):
 print(*ports)
 PY
 )
-(cd "$demos" && HOST=127.0.0.1 PORT="$port" python3 serve.py) >"$tmp/server.log" 2>&1 &
+NO_COLOR=false trunk serve --config "$demos/Trunk.toml" --port "$port" --no-autoreload \
+  >"$tmp/server.log" 2>&1 &
 server_pid=$!
 url="http://127.0.0.1:$port/webgpu-mandelbrot-interactive/?acceptance=offscreen"
 

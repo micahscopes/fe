@@ -26,10 +26,11 @@ Generate the five ignored assets from the reviewed local Sonatina commit and
 serve the common demos root:
 
 ```sh
-SONATINA_DIR=/workspace/sonatina demos/webgpu-qcga3d-quadric/serve.sh
+SONATINA_DIR=/workspace/sonatina demos/serve.sh qcga
+trunk serve --config demos/Trunk.toml
 ```
 
-Then open `http://127.0.0.1:8000/webgpu-qcga3d-quadric/`. Set
+Then open `http://127.0.0.1:8788/webgpu-qcga3d-quadric/`. Set
 `FORCE_QCGA_REGEN=1` to regenerate an existing bundle.
 
 The real-browser equality gate compares all 16,384 Fe/Worker/Wasm and WebGPU

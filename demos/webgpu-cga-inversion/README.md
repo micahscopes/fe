@@ -104,14 +104,15 @@ Artifact provenance fails closed if either Git revision cannot be read and
 reports tracked modifications separately from the presence of untracked files;
 it is source-state evidence, not a claim that the wider build environment is
 hermetic. Avoid concurrent Cargo commands while generation owns the lockfile.
-To generate when needed and immediately serve the common demos root, run:
+To generate when needed, then serve the common demos root, run:
 
 ```sh
-SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/serve.sh
+SONATINA_DIR=/path/to/sonatina demos/serve.sh cga-d1
+trunk serve --config demos/Trunk.toml
 ```
 
 Set `FORCE_CGA_REGEN=1` on that command to replace an existing bundle.
-Both `serve.sh` and `smoke-chrome.sh` now run the same fail-closed bundle
+Both `demos/serve.sh cga-d1` and `smoke-chrome.sh` run the same fail-closed bundle
 preflight: all five generated files must exist and pass `verify-assets.py`.
 When any file is missing they generate once if `SONATINA_DIR` is set, otherwise
 they list every missing artifact and print the pinned-local-Sonatina remedy.
@@ -128,7 +129,7 @@ execution acceptance):
 python3 demos/webgpu-cga-inversion/verify-assets.py
 ```
 
-Serve the repository's `demos/` directory with `demos/serve.py`, then open
+Run `trunk serve --config demos/Trunk.toml`, then open
 `webgpu-cga-inversion/`. Do not open the multi-file page directly with `file://`.
 
 For the deterministic real-browser smoke gate:
