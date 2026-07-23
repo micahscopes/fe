@@ -3,9 +3,14 @@ import { DEFAULT_CAMERA, createTrailingCoalescer, normalizeCamera, panCamera, zo
 import { createPerformanceMeter } from "./performance-meter.js";
 import { createCgaActorLifecycle } from "./actor-lifecycle.js";
 import { createCgaWasmWorkerOracle } from "./wasm-worker-oracle.js";
+import { selectArtifactBundle } from "./artifact-bundle.js";
 
 const $ = (id) => document.getElementById(id);
 const query = new URLSearchParams(window.location.search);
+const artifactBundle = selectArtifactBundle(query);
+if (artifactBundle.name !== "legacy") {
+  $("fast-showcase").href = `?bundle=${artifactBundle.name}&verify=off`;
+}
 const acceptanceMode = query.get("acceptance");
 const presentation = acceptanceMode === null || acceptanceMode === ""
   ? "canvas"
@@ -172,14 +177,14 @@ async function main() {
   const artifactFetchStart = performanceMeter.start();
   try {
     [layout, source, wgsl] = await Promise.all([
-      fetchOk("./gen/layout.json", "json"),
-      fetchOk("./gen/kernel.fe", "text"),
-      fetchOk("./gen/frag.wgsl", "text"),
+      fetchOk(artifactBundle.asset("layout.json"), "json"),
+      fetchOk(artifactBundle.asset("kernel.fe"), "text"),
+      fetchOk(artifactBundle.asset("frag.wgsl"), "text"),
     ]);
     if (!verificationOff) {
       [reference, wasm] = await Promise.all([
-        fetchOk("./gen/reference.json", "json"),
-        fetchOk("./gen/frag.wasm", "bytes"),
+        fetchOk(artifactBundle.asset("reference.json"), "json"),
+        fetchOk(artifactBundle.asset("frag.wasm"), "bytes"),
       ]);
     }
     validateTypedLayout(layout);
@@ -192,7 +197,7 @@ async function main() {
 
   $("source").textContent = source;
   $("wgsl").textContent = wgsl;
-  $("meta").textContent = `Fe ${layout.provenance?.fe_rev || "unknown"} | Sonatina ${layout.provenance?.sonatina_rev || "unknown"}`;
+  $("meta").textContent = `${artifactBundle.name} | Fe ${layout.provenance?.fe_rev || "unknown"} | Sonatina ${layout.provenance?.sonatina_rev || "unknown"}`;
 
   validateTypedLayout(layout);
   const renderLayout = { ...layout, params: layout.params };

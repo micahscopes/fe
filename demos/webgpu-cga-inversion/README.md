@@ -8,6 +8,10 @@ This page consumes the compiler-produced typed CGA Render bundle in `gen/`:
 - `reference.json`, containing `width`, `height`, and the pinned RGBA FNV-1a hash.
 - `frag.wasm`, the same Fe fragment compiled for the browser-wasm oracle.
 
+The staged Schedule32 bundle is selected explicitly with
+[`?bundle=schedule32`](./?bundle=schedule32). With no `bundle` parameter the page
+continues to load `gen/`; selection never copies or promotes generated files.
+
 The fragment raymarches the conformal inverse of an offset torus, producing a
 cyclide-like surface. The browser writes
 `(cam_x, cam_y, zoom, inv_cx, inv_cy) = (0.0, 0.0, 0.0125, 0.5, 0.0)` as five
@@ -42,6 +46,9 @@ GPU readback. It loads and initializes only the compiler metadata, WGSL, source,
 and persistent canvas pipeline used for presentation. The Verify button is
 hidden and structured status is `{"state":"presentation","verified":false}`;
 this mode is deliberately not acceptance evidence and never reports green.
+The selectors compose: use
+[`?bundle=schedule32&verify=off`](./?bundle=schedule32&verify=off) for the
+Schedule32 no-Wasm, no-readback presentation path.
 
 Low-overhead CPU-side instrumentation is available as
 `window.__cgaPerformance`. It records artifact-fetch, GPU-initialization,
