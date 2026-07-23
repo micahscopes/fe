@@ -34,6 +34,7 @@ const manifest = {
   lanes: [{
     name: "echo",
     export: "echo_message",
+    intent: { execution: "wasm", placement: "any", capabilities: [] },
     request: {
       kind: "record", size: 32, align: 8,
       fields: [
@@ -185,10 +186,15 @@ await assert.rejects(
 );
 
 const hostManifest = structuredClone(manifest);
+hostManifest.lanes[0].export = null;
+hostManifest.lanes[0].intent = {
+  execution: "host_effect",
+  placement: "main_thread",
+  capabilities: [{ capability: "webgpu_dispatch", mutable: true }],
+};
 hostManifest.lanes.push({
   ...structuredClone(hostManifest.lanes[0]),
   name: "gpu_submit",
-  export: "gpu_submit_message",
 });
 const hostCompiled = compileCanonicalInterfaceManifest(hostManifest);
 const hostRequest = (tag) => ({
@@ -201,7 +207,7 @@ assert.throws(
 );
 assert.throws(
   () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, {}),
-  /at least one canonical host-effect handler is required/,
+  /missing canonical host-effect handlers: echo, gpu_submit/,
 );
 assert.throws(
   () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, { missing() {} }),
@@ -210,6 +216,15 @@ assert.throws(
 assert.throws(
   () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, { echo: true }),
   /canonical host-effect handler echo must be a function/,
+);
+const wrongExecutionAdapter = createCanonicalActorAdapter(
+  hostManifest,
+  hostCompiled,
+  actorExports,
+);
+await assert.rejects(
+  wrongExecutionAdapter.dispatch({ lane: "echo", payload: hostRequest(1) }),
+  /FE_ACTOR_WRONG_EXECUTION: echo is not owned by this adapter/,
 );
 
 let releaseFirstHostEffect;
@@ -226,12 +241,22 @@ const hostEffects = createCanonicalHostEffectAdapter(
       if (request.tag === 9) throw new Error("sensitive host detail");
       return new Uint8Array([request.tag]);
     },
+    gpu_submit: async (request) => new Uint8Array([request.tag]),
   },
   { maxPendingPerLane: 1 },
 );
+const wrongPlacementEffects = createCanonicalHostEffectAdapter(
+  hostManifest,
+  hostCompiled,
+  {
+    echo: async (request) => new Uint8Array([request.tag]),
+    gpu_submit: async (request) => new Uint8Array([request.tag]),
+  },
+  { placement: "worker" },
+);
 await assert.rejects(
-  hostEffects.dispatch({ lane: "gpu_submit", payload: hostRequest(1) }),
-  /FE_ACTOR_UNHANDLED_EFFECT: gpu_submit has no host-effect handler/,
+  wrongPlacementEffects.dispatch({ lane: "echo", payload: hostRequest(1) }),
+  /FE_ACTOR_WRONG_EXECUTION: echo is not owned by this adapter/,
 );
 await assert.rejects(
   hostEffects.dispatch({ lane: "echo", payload: { nope: true } }),
@@ -257,7 +282,10 @@ await assert.rejects(
 const invalidHostResponse = createCanonicalHostEffectAdapter(
   hostManifest,
   hostCompiled,
-  { echo: () => "not bytes" },
+  {
+    echo: () => "not bytes",
+    gpu_submit: async (request) => new Uint8Array([request.tag]),
+  },
 );
 await assert.rejects(
   invalidHostResponse.dispatch({ lane: "echo", payload: hostRequest(4) }),
@@ -271,7 +299,7 @@ assert.throws(
 );
 
 for (const mutate of [
-  (value) => { value.version = 2; },
+  (value) => { value.version = 3; },
   (value) => { value.extra = true; },
   (value) => { value.abi.pointer_width = 64; },
   (value) => { value.lanes[0].request.fields[1].offset = 4; },
@@ -389,4 +417,4 @@ await assert.rejects(failingCaller.call("echo", callValue(1)), /mock lane failur
 assert.equal(resetCount, resetsBeforeFailure + 1, "lane failure must reset the arena");
 assert.ok(allocationCount > 0);
 
-console.log("canonical interface v1 strict manifest and memory codecs: ok");
+console.log("canonical interface v2 intent routing and memory codecs: ok");

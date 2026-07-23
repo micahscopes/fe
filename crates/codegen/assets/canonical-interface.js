@@ -1,5 +1,5 @@
 export const CANONICAL_INTERFACE_PROTOCOL = "fe-canonical-browser-interface";
-export const CANONICAL_INTERFACE_VERSION = 1;
+export const CANONICAL_INTERFACE_VERSION = 2;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -251,23 +251,64 @@ export function compileCanonicalInterfaceManifest(manifest) {
   for (let index = 0; index < manifest.lanes.length; index += 1) {
     const lane = manifest.lanes[index];
     const path = `canonical interface lanes[${index}]`;
-    exactKeys(lane, ["export", "name", "request", "response"], path);
+    exactKeys(lane, ["export", "intent", "name", "request", "response"], path);
     validateName(lane.name, `${path}.name`);
     if (names.has(lane.name)) throw new TypeError(`duplicate canonical lane ${lane.name}`);
-    if (typeof lane.export !== "string" || lane.export.length === 0 || lane.export.length > 128
-        || !/^[A-Za-z0-9_.-]+$/.test(lane.export)) {
+    exactKeys(lane.intent, ["capabilities", "execution", "placement"], `${path}.intent`);
+    if (!["wasm", "host_effect"].includes(lane.intent.execution)) {
+      throw new TypeError(`${path}.intent.execution is unsupported`);
+    }
+    if (!["any", "main_thread", "worker"].includes(lane.intent.placement)) {
+      throw new TypeError(`${path}.intent.placement is unsupported`);
+    }
+    if (!Array.isArray(lane.intent.capabilities)) {
+      throw new TypeError(`${path}.intent.capabilities must be an array`);
+    }
+    const capabilities = new Set();
+    for (let capabilityIndex = 0;
+      capabilityIndex < lane.intent.capabilities.length;
+      capabilityIndex += 1) {
+      const requirement = lane.intent.capabilities[capabilityIndex];
+      const capabilityPath = `${path}.intent.capabilities[${capabilityIndex}]`;
+      exactKeys(requirement, ["capability", "mutable"], capabilityPath);
+      if (requirement.capability !== "webgpu_dispatch"
+          || typeof requirement.mutable !== "boolean") {
+        throw new TypeError(`${capabilityPath} is unsupported`);
+      }
+      if (capabilities.has(requirement.capability)) {
+        throw new TypeError(`${path}.intent has duplicate capability ${requirement.capability}`);
+      }
+      capabilities.add(requirement.capability);
+    }
+    const isWasm = lane.intent.execution === "wasm";
+    if (isWasm && (typeof lane.export !== "string" || lane.export.length === 0
+        || lane.export.length > 128 || !/^[A-Za-z0-9_.-]+$/.test(lane.export))) {
       throw new TypeError(`${path}.export is invalid`);
     }
-    if (["memory", "fe_cabi_alloc", "fe_cabi_reset"].includes(lane.export)) {
+    if (!isWasm && lane.export !== null) {
+      throw new TypeError(`${path}.export must be null for a host effect`);
+    }
+    if (!isWasm && lane.intent.placement === "any") {
+      throw new TypeError(`${path}.intent host effect requires explicit placement`);
+    }
+    if (isWasm && ["memory", "fe_cabi_alloc", "fe_cabi_reset"].includes(lane.export)) {
       throw new TypeError(`${path}.export collides with reserved ABI export`);
     }
-    if (exports.has(lane.export)) throw new TypeError(`duplicate canonical export ${lane.export}`);
-    names.add(lane.name); exports.add(lane.export);
+    if (isWasm && exports.has(lane.export)) {
+      throw new TypeError(`duplicate canonical export ${lane.export}`);
+    }
+    names.add(lane.name);
+    if (isWasm) exports.add(lane.export);
     const layoutState = { nodes: 0 };
     validateLayout(lane.request, `${path}.request`, 0, layoutState);
     validateLayout(lane.response, `${path}.response`, 0, layoutState);
     lanes[lane.name] = Object.freeze({
       export: lane.export,
+      intent: Object.freeze({
+        execution: lane.intent.execution,
+        placement: lane.intent.placement,
+        capabilities: Object.freeze(lane.intent.capabilities.map(Object.freeze)),
+      }),
       request: Object.freeze({
         size: lane.request.size,
         align: lane.request.align,
@@ -310,6 +351,7 @@ export function createCanonicalInterfaceCaller(compiled, exports) {
     throw new TypeError("missing canonical arena allocator/reset exports");
   }
   for (const lane of Object.values(compiled.lanes)) {
+    if (lane.intent.execution !== "wasm") continue;
     if (typeof exports[lane.export] !== "function") {
       throw new TypeError(`missing canonical lane export ${lane.export}`);
     }
@@ -327,6 +369,9 @@ export function createCanonicalInterfaceCaller(compiled, exports) {
       throw new TypeError(`unknown canonical lane ${laneName}`);
     }
     const lane = compiled.lanes[laneName];
+    if (lane.intent.execution !== "wasm") {
+      throw new TypeError(`canonical lane ${laneName} is a host effect`);
+    }
     try {
       const requestPointer = arenaAllocate(lane.request.size, lane.request.align);
       lane.request.write(value, {
@@ -415,6 +460,7 @@ export function compileCanonicalActorAdapter(manifest, compiled) {
   const resultSchema = {};
   const responseValidators = {};
   const responseLayouts = {};
+  const intents = {};
   for (const lane of manifest.lanes) {
     const compiledLane = compiled.lanes[lane.name];
     if (!compiledLane) throw new TypeError(`missing compiled canonical lane ${lane.name}`);
@@ -444,11 +490,13 @@ export function compileCanonicalActorAdapter(manifest, compiled) {
       );
     };
     responseLayouts[lane.name] = lane.response;
+    intents[lane.name] = compiledLane.intent;
   }
   return Object.freeze({
     requestSchema: Object.freeze(requestSchema),
     resultSchema: Object.freeze(resultSchema),
     responseValidators: Object.freeze(responseValidators),
+    intents: Object.freeze(intents),
     transferResult(value, request) {
       const layout = responseLayouts[request?.lane];
       if (!layout) throw actorError("FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane");
@@ -463,6 +511,7 @@ function createCanonicalDispatchAdapter(adapter, invoke, {
   maxPendingPerLane = 1,
   failureCode,
   failureDescription,
+  accepts = () => true,
 } = {}) {
   if (!Number.isSafeInteger(maxPendingPerLane) || maxPendingPerLane < 0) {
     throw new TypeError("maxPendingPerLane must be a non-negative safe integer");
@@ -503,6 +552,11 @@ function createCanonicalDispatchAdapter(adapter, invoke, {
           "FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane",
         ));
       }
+      if (!accepts(lane, adapter.intents[lane])) {
+        return Promise.reject(actorError(
+          "FE_ACTOR_WRONG_EXECUTION", `${lane} is not owned by this adapter`,
+        ));
+      }
       try {
         adapter.requestSchema[lane](request.payload);
       } catch (error) {
@@ -531,14 +585,29 @@ function createCanonicalDispatchAdapter(adapter, invoke, {
   });
 }
 
+function canonicalRuntimePlacement(options) {
+  const placement = options?.placement ?? (
+    typeof WorkerGlobalScope !== "undefined" && globalThis instanceof WorkerGlobalScope
+      ? "worker"
+      : "main_thread"
+  );
+  if (!["main_thread", "worker"].includes(placement)) {
+    throw new TypeError("canonical adapter placement must be main_thread or worker");
+  }
+  return placement;
+}
+
 export function createCanonicalActorAdapter(manifest, compiled, exports, options = {}) {
   const adapter = compileCanonicalActorAdapter(manifest, compiled);
   const caller = createCanonicalInterfaceCaller(compiled, exports);
+  const placement = canonicalRuntimePlacement(options);
   return createCanonicalDispatchAdapter(
     adapter,
     (lane, payload) => caller.call(lane, payload),
     {
       ...options,
+      accepts: (_lane, intent) => intent.execution === "wasm"
+        && (intent.placement === "any" || intent.placement === placement),
       failureCode: "FE_ACTOR_CANONICAL_CALL",
       failureDescription: "canonical call failed",
     },
@@ -552,12 +621,16 @@ export function createCanonicalHostEffectAdapter(
   options = {},
 ) {
   const adapter = compileCanonicalActorAdapter(manifest, compiled);
+  const placement = canonicalRuntimePlacement(options);
   if (!handlers || typeof handlers !== "object" || Array.isArray(handlers)) {
     throw new TypeError("canonical host-effect handlers must be an object");
   }
   const selected = Object.create(null);
+  const hostLanes = Object.entries(adapter.intents)
+    .filter(([, intent]) => intent.execution === "host_effect")
+    .map(([lane]) => lane);
   for (const [lane, handler] of Object.entries(handlers)) {
-    if (!Object.hasOwn(compiled.lanes, lane)) {
+    if (!hostLanes.includes(lane)) {
       throw new TypeError(`unknown canonical host-effect lane ${lane}`);
     }
     if (typeof handler !== "function") {
@@ -565,8 +638,12 @@ export function createCanonicalHostEffectAdapter(
     }
     selected[lane] = handler;
   }
-  if (Object.keys(selected).length === 0) {
-    throw new TypeError("at least one canonical host-effect handler is required");
+  const missing = hostLanes.filter((lane) => !Object.hasOwn(selected, lane));
+  if (missing.length !== 0) {
+    throw new TypeError(`missing canonical host-effect handlers: ${missing.join(", ")}`);
+  }
+  if (hostLanes.length === 0) {
+    throw new TypeError("canonical interface declares no host-effect lanes");
   }
   return createCanonicalDispatchAdapter(
     adapter,
@@ -581,6 +658,8 @@ export function createCanonicalHostEffectAdapter(
     },
     {
       ...options,
+      accepts: (_lane, intent) => intent.execution === "host_effect"
+        && intent.placement === placement,
       failureCode: "FE_ACTOR_HOST_EFFECT",
       failureDescription: "host-effect handler failed",
     },
