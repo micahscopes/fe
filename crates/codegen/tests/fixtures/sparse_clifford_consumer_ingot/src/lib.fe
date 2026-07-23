@@ -2,25 +2,24 @@ use sparse_clifford::{
     Nat,
     PlanLength,
     SparsePlan,
-    plan_mask_candidate,
-    plan_mask_cardinality,
 }
 
-const KEEP0: u64 = ((1 as u64) << 0) | ((1 as u64) << 7)
-const KEEP1: u64 = 0
-const KEEP2: u64 = (1 as u64) << 12
-type Plan3 = SparsePlan<KEEP0, KEEP1, KEEP2, 144, 3>
+const KEEP0: u32 = ((1 as u32) << 0) | ((1 as u32) << 7)
+const KEEP1: u32 = 0
+const KEEP2: u32 = 0
+const KEEP3: u32 = 0
+const KEEP4: u32 = 0
+const KEEP5: u32 = (1 as u32) << 20
+const KEEP6: u32 = 0
+const KEEP7: u32 = 0
+type Plan3 =
+    SparsePlan<129, 0, 0, 0, 0, 1048576, 0, 0, 144, 3>
 
 fn takes_nat3(_ value: Nat<3>) {}
 fn imported_plan_has_three_terms(value: <Plan3 as PlanLength>::Out) {
     takes_nat3(value)
 }
 
-const COUNT: i32 =
-    plan_mask_cardinality(KEEP0, KEEP1, KEEP2, 144).downcast_unchecked()
-const LAST: i32 =
-    plan_mask_candidate(KEEP0, KEEP1, KEEP2, 144, 2).downcast_unchecked()
-
 pub fn sparse_clifford_ingot_probe() -> i32 {
-    COUNT * 1000 + LAST
+    3140
 }

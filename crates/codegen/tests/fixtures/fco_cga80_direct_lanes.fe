@@ -109,40 +109,55 @@ const fn keep_tag(_ triple: usize) -> usize {
     supported_output_tag(triple) * coefficient_keep_tag(triple)
 }
 
-const fn schedule_keep_word(_ first: usize, _ last: usize) -> u64 {
+const fn schedule_keep_word(_ first: usize, _ last: usize) -> u32 {
     let mut triple: usize = first
-    let mut keep_bits: u64 = 0
+    let mut keep_bits: u32 = 0
     while triple < last {
         if keep_tag(triple) != 0 {
-            keep_bits = keep_bits | ((1 as u64) << (triple - first).downcast_truncate())
+            keep_bits = keep_bits | ((1 as u32) << (triple - first).downcast_truncate())
         }
         triple = triple + 1
     }
     keep_bits
 }
 
-const SCHEDULE_KEEP0: u64 = schedule_keep_word(0, 64)
-const SCHEDULE_KEEP1: u64 = schedule_keep_word(64, 80)
-const SCHEDULE_KEEP2: u64 = 0
+const SCHEDULE_KEEP0: u32 = schedule_keep_word(0, 24)
+const SCHEDULE_KEEP1: u32 = schedule_keep_word(24, 48)
+const SCHEDULE_KEEP2: u32 = schedule_keep_word(48, 72)
+const SCHEDULE_KEEP3: u32 = schedule_keep_word(72, 80)
+const SCHEDULE_KEEP4: u32 = 0
+const SCHEDULE_KEEP5: u32 = 0
+const SCHEDULE_KEEP6: u32 = 0
+const SCHEDULE_KEEP7: u32 = 0
 
 const fn survivor_count() -> usize {
-    plan_mask_cardinality(SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2, 80)
+    plan_mask_cardinality(
+        SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2,
+        SCHEDULE_KEEP3, SCHEDULE_KEEP4, SCHEDULE_KEEP5,
+        SCHEDULE_KEEP6, SCHEDULE_KEEP7, 80,
+    )
 }
 
 const fn survivor_triple(_ target: usize) -> usize {
-    plan_mask_candidate(SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2, 80, target)
+    plan_mask_candidate(
+        SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2,
+        SCHEDULE_KEEP3, SCHEDULE_KEEP4, SCHEDULE_KEEP5,
+        SCHEDULE_KEEP6, SCHEDULE_KEEP7, 80, target,
+    )
 }
 
 static_assert(survivor_count() == 32)
-static_assert(SCHEDULE_KEEP0 == 10143307741274919231)
-static_assert(SCHEDULE_KEEP1 == 34952)
+static_assert(SCHEDULE_KEEP0 == 2707775)
+static_assert(SCHEDULE_KEEP1 == 4498990)
+static_assert(SCHEDULE_KEEP2 == 8948932)
+static_assert(SCHEDULE_KEEP3 == 136)
 
 // The inspectable typed witness stores the canonical source-triple identity in
 // exact survivor order. The literals keep today's semantic-MIR lowering from
 // seeing a const-value path in a type argument; the assertions above prove
 // that they are exactly the masks computed from the source semantics.
 type Schedule32 =
-    SparsePlan<{10143307741274919231 as u64}, {34952 as u64}, {0 as u64}, 80, 32>
+    SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>
 
 // BEGIN_FORCE_SCHEDULE32
 fn takes_nat32(_ value: Nat<32>) {}

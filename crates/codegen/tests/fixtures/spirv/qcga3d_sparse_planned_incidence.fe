@@ -49,47 +49,57 @@ const fn contraction_sign(_ candidate: usize) -> usize {
     sign
 }
 
-const fn incidence_keep_word(_ first: usize, _ last: usize) -> u64 {
+const fn incidence_keep_word(_ first: usize, _ last: usize) -> u32 {
     let mut candidate: usize = first
-    let mut keep_bits: u64 = 0
+    let mut keep_bits: u32 = 0
     while candidate < last {
         if contraction_sign(candidate) != 0 {
             keep_bits =
-                keep_bits | ((1 as u64) << (candidate - first).downcast_truncate())
+                keep_bits | ((1 as u32) << (candidate - first).downcast_truncate())
         }
         candidate = candidate + 1
     }
     keep_bits
 }
 
-const INCIDENCE_KEEP0: u64 = incidence_keep_word(0, 64)
-const INCIDENCE_KEEP1: u64 = incidence_keep_word(64, 128)
-const INCIDENCE_KEEP2: u64 = incidence_keep_word(128, CANDIDATES)
+const INCIDENCE_KEEP0: u32 = incidence_keep_word(0, 24)
+const INCIDENCE_KEEP1: u32 = incidence_keep_word(24, 48)
+const INCIDENCE_KEEP2: u32 = incidence_keep_word(48, 72)
+const INCIDENCE_KEEP3: u32 = incidence_keep_word(72, 96)
+const INCIDENCE_KEEP4: u32 = incidence_keep_word(96, 120)
+const INCIDENCE_KEEP5: u32 = incidence_keep_word(120, 144)
+const INCIDENCE_KEEP6: u32 = 0
+const INCIDENCE_KEEP7: u32 = 0
 
 const fn survivor_count() -> usize {
     plan_mask_cardinality(
-        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, CANDIDATES,
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
+        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
+        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES,
     )
 }
 
 const fn survivor_candidate(_ target: usize) -> usize {
     plan_mask_candidate(
-        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, CANDIDATES, target,
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
+        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
+        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES, target,
     )
 }
 
 static_assert(survivor_count() == 12)
-static_assert(INCIDENCE_KEEP0 == 288265560590917633)
-static_assert(INCIDENCE_KEEP1 == 9224498074217351296)
-static_assert(INCIDENCE_KEEP2 == 4096)
+static_assert(INCIDENCE_KEEP0 == 8193)
+static_assert(INCIDENCE_KEEP1 == 2097156)
+static_assert(INCIDENCE_KEEP2 == 8389632)
+static_assert(INCIDENCE_KEEP3 == 65544)
+static_assert(INCIDENCE_KEEP4 == 262176)
+static_assert(INCIDENCE_KEEP5 == 1048704)
 
 // Literal type arguments avoid the current semantic-MIR const-value-path
 // lowering edge; the assertions above tie them to the computed incidence mask.
 type IncidencePlan12 =
     SparsePlan<
-        {288265560590917633 as u64},
-        {9224498074217351296 as u64},
-        {4096 as u64},
+        8193, 2097156, 8389632, 65544, 262176, 1048704, 0, 0,
         CANDIDATES,
         12,
     >
