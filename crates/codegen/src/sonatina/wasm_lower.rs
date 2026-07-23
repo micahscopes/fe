@@ -53,7 +53,7 @@ use sonatina_ir::{
         arith::{Add, Fadd, Fdiv, Fmul, Fneg, Fsqrt, Fsub, Mul, Sar, Shr, Sub},
         cast::{F32ToI32, I32ToF32},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
-        control_flow::{Br, Call, Jump, Return, Unreachable},
+        control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{MemAllocDynamic, Mload, Mstore},
         logic::And,
     },
@@ -1038,6 +1038,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             layout: &crate::CanonicalLayout,
             base: u32,
             leaves: &mut Vec<(u32, Type)>,
+            descriptors: &mut Vec<(u32, u32)>,
         ) -> Result<(), LowerError> {
             use crate::CanonicalShape;
             let ty = match &layout.shape {
@@ -1052,8 +1053,32 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                                 "canonical record field offset overflow".to_owned(),
                             )
                         })?;
-                        flatten(&field.layout, offset, leaves)?;
+                        flatten(&field.layout, offset, leaves, descriptors)?;
                     }
+                    None
+                }
+                CanonicalShape::Bytes {
+                    pointer_offset,
+                    length_offset,
+                }
+                | CanonicalShape::String {
+                    pointer_offset,
+                    length_offset,
+                    ..
+                } => {
+                    let pointer_offset = base.checked_add(*pointer_offset).ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "canonical descriptor pointer offset overflow".to_owned(),
+                        )
+                    })?;
+                    let length_offset = base.checked_add(*length_offset).ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "canonical descriptor length offset overflow".to_owned(),
+                        )
+                    })?;
+                    leaves.push((pointer_offset, Type::I32));
+                    leaves.push((length_offset, Type::I32));
+                    descriptors.push((pointer_offset, length_offset));
                     None
                 }
                 unsupported => {
@@ -1061,8 +1086,6 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                         "canonical wrapper `{}` shape is not supported",
                         match unsupported {
                             CanonicalShape::Bool => "bool",
-                            CanonicalShape::Bytes { .. } => "bytes",
-                            CanonicalShape::String { .. } => "string",
                             _ => "unknown",
                         }
                     )));
@@ -1076,8 +1099,17 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
 
         let mut request = Vec::new();
         let mut response = Vec::new();
-        flatten(&lane.request, 0, &mut request)?;
-        flatten(&lane.response, 0, &mut response)?;
+        let mut request_descriptors = Vec::new();
+        let mut response_descriptors = Vec::new();
+        flatten(&lane.request, 0, &mut request, &mut request_descriptors)?;
+        flatten(
+            &lane.response,
+            0,
+            &mut response,
+            &mut response_descriptors,
+        )?;
+        // Input descriptors remain borrowed views into caller-owned memory.
+        let _ = request_descriptors;
         if request.is_empty() || response.is_empty() {
             return Err(LowerError::Unsupported(
                 "canonical wrapper records must contain scalar leaves".to_owned(),
@@ -1169,7 +1201,62 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             let mask = fb.make_imm_value(Immediate::I32(-(lane.response.align as i32)));
             fb.insert_inst(And::new(is, biased, mask), Type::I32)
         };
+        let mut copied_pointers = HashMap::new();
+        for (pointer_offset, length_offset) in response_descriptors {
+            let pointer_index = response
+                .iter()
+                .position(|(offset, _)| *offset == pointer_offset)
+                .ok_or_else(|| {
+                    LowerError::Internal(
+                        "canonical descriptor pointer leaf was not flattened".to_owned(),
+                    )
+                })?;
+            let length_index = response
+                .iter()
+                .position(|(offset, _)| *offset == length_offset)
+                .ok_or_else(|| {
+                    LowerError::Internal(
+                        "canonical descriptor length leaf was not flattened".to_owned(),
+                    )
+                })?;
+            let source = results[pointer_index];
+            let length = results[length_index];
+            let destination = fb.insert_inst(MemAllocDynamic::new(is, length), Type::I32);
+
+            // Returned descriptors are borrowed inside Fe. The canonical
+            // wrapper establishes explicit host ownership by copying exactly
+            // `len` bytes into its arena before publishing the descriptor.
+            let copy_entry = fb
+                .current_block()
+                .expect("canonical wrapper copy requires a current block");
+            let copy_header = fb.append_block();
+            let copy_body = fb.append_block();
+            let copy_done = fb.append_block();
+            fb.insert_inst_no_result(Jump::new(is, copy_header));
+            fb.switch_to_block(copy_header);
+            let zero = fb.make_imm_value(Immediate::I32(0));
+            let index = fb.insert_inst(Phi::new(is, vec![(zero, copy_entry)]), Type::I32);
+            let more = fb.insert_inst(Lt::new(is, index, length), Type::I1);
+            fb.insert_inst_no_result(Br::new(is, more, copy_body, copy_done));
+
+            fb.switch_to_block(copy_body);
+            let source_byte = fb.insert_inst(Add::new(is, source, index), Type::I32);
+            let destination_byte =
+                fb.insert_inst(Add::new(is, destination, index), Type::I32);
+            let byte = fb.insert_inst(Mload::new(is, source_byte, Type::I8), Type::I8);
+            fb.insert_inst_no_result(Mstore::new(is, destination_byte, byte, Type::I8));
+            let one = fb.make_imm_value(Immediate::I32(1));
+            let next = fb.insert_inst(Add::new(is, index, one), Type::I32);
+            let copy_back = fb
+                .current_block()
+                .expect("canonical wrapper copy body requires a current block");
+            fb.append_phi_arg(index, next, copy_back);
+            fb.insert_inst_no_result(Jump::new(is, copy_header));
+            fb.switch_to_block(copy_done);
+            copied_pointers.insert(pointer_offset, destination);
+        }
         for ((offset, ty), value) in response.into_iter().zip(results) {
+            let value = copied_pointers.get(&offset).copied().unwrap_or(value);
             let addr = if offset == 0 {
                 response_ptr
             } else {

@@ -11,6 +11,7 @@ use hir::{
         HirAnalysisDb,
         ty::{
             adt_def::AdtRef,
+            corelib::resolve_lib_type_path,
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
@@ -244,10 +245,15 @@ pub fn canonical_lane_decl_from_entry<'db>(
     };
     let request = canonical_type_from_semantic(db, *request.skip_binder(), "request")?;
     let response = canonical_type_from_semantic(db, func.return_ty(db), "response")?;
-    if !matches!(request, CanonicalType::Record(_)) || !matches!(response, CanonicalType::Record(_))
-    {
+    let is_message = |ty: &CanonicalType| {
+        matches!(
+            ty,
+            CanonicalType::Record(_) | CanonicalType::Bytes | CanonicalType::String
+        )
+    };
+    if !is_message(&request) || !is_message(&response) {
         return Err(error(format!(
-            "canonical entry `{entry_name}` request and response must both be nominal record types"
+            "canonical entry `{entry_name}` request and response must both be nominal browser message types"
         )));
     }
     Ok(CanonicalLaneDecl {
@@ -264,9 +270,9 @@ pub fn canonical_lane_decl_from_entry<'db>(
 
 /// Map a closed semantic Fe type to milestone-1 canonical metadata.
 ///
-/// Bytes and strings intentionally have no semantic spelling yet. Primitive
-/// `String` and name-based ADT guesses are rejected until explicit nominal
-/// browser descriptor types are introduced.
+/// Bytes and strings use the exact compiler-owned
+/// `core::browser::{BrowserBytes,BrowserString}` descriptor identities.
+/// Primitive `String` and name-based or structural ADT guesses remain rejected.
 pub fn canonical_type_from_semantic<'db>(
     db: &'db dyn HirAnalysisDb,
     ty: TyId<'db>,
@@ -303,6 +309,20 @@ pub fn canonical_type_from_semantic<'db>(
             "{path}: canonical enums and non-record ADTs are not supported"
         )));
     };
+    // Descriptor semantics are attached to the exact compiler-owned core ADTs,
+    // never to a source name or a structurally similar user record.
+    let descriptor = [
+        ("core::browser::BrowserBytes", CanonicalType::Bytes),
+        ("core::browser::BrowserString", CanonicalType::String),
+    ]
+    .into_iter()
+    .find_map(|(lib_path, canonical)| {
+        let resolved = resolve_lib_type_path(db, struct_.scope(), lib_path)?;
+        (resolved.adt_def(db) == Some(adt)).then_some(canonical)
+    });
+    if let Some(descriptor) = descriptor {
+        return Ok(descriptor);
+    }
     let field_types = ty.field_types(db);
     let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
     if field_views.len() != field_types.len() {
@@ -904,9 +924,31 @@ pub fn update(request: Request) -> Response {
             semantic_lane("pub fn update(request: u32) -> u32 { request }\n", "update")
                 .unwrap_err();
         assert!(
-            scalar_error.contains("must both be nominal record types"),
+            scalar_error.contains("must both be nominal browser message types"),
             "{scalar_error}"
         );
+    }
+
+    #[test]
+    fn same_named_user_descriptor_does_not_gain_canonical_string_semantics() {
+        let declaration = semantic_lane(
+            r#"
+struct BrowserString { ptr: u32, len: u32 }
+struct Request { value: BrowserString }
+struct Response { ok: bool }
+pub fn update(request: Request) -> Response { Response { ok: true } }
+"#,
+            "update",
+        )
+        .unwrap();
+        let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+        let CanonicalShape::Record { fields } = &manifest.lanes[0].request.shape else {
+            panic!("request record")
+        };
+        assert!(matches!(
+            fields[0].layout.shape,
+            CanonicalShape::Record { .. }
+        ));
     }
 
     #[test]

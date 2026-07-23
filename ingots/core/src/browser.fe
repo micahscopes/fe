@@ -1,0 +1,20 @@
+/// Borrowed bytes in wasm32 linear memory.
+///
+/// This descriptor does not own its payload. Canonical browser wrappers copy
+/// returned payloads into wrapper-owned arena storage before crossing the ABI.
+pub struct BrowserBytes {
+    pub ptr: u32,
+    pub len: u32,
+}
+
+/// Borrowed UTF-8 bytes in wasm32 linear memory.
+///
+/// The type carries the UTF-8 contract at the browser ABI boundary; it is not
+/// Fe's general-purpose `String<N>` type.
+pub struct BrowserString {
+    pub ptr: u32,
+    pub len: u32,
+}
+
+impl Copy for BrowserBytes {}
+impl Copy for BrowserString {}
