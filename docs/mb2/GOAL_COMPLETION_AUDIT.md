@@ -1,8 +1,11 @@
 # mb2 browser CGA goal: completion evidence audit
 
-Status: audited against the integrated `mb2` lineage on 2026-07-23. Re-run
-the cited gates after later implementation commits rather than treating a
-cherry-picked source hash as a permanent completion marker.
+Status: audited against integrated head `e48729aaa` and
+`/workspace/mb2-HANDOFF.md` on 2026-07-23. The handoff remains useful design
+history, but its 2026-07-22 checkpoint predates the Schedule32 and
+planner-backed QCGA promotions; this matrix is authoritative for current
+completion claims. Re-run the cited gates after later implementation commits
+rather than treating a source hash as a permanent completion marker.
 
 This is a completion audit, not a milestone announcement. `Achieved` means the
 current tree contains direct evidence for the stated scope. `Partial` means a
@@ -26,7 +29,24 @@ treated as browser execution evidence.
 | One-command build / serve / watch ergonomics | **Partial, externally gated** | `crates/fe/src/main.rs`, `web.rs`, and `web_serve.rs` implement real `fe web build` and `fe web serve`, including atomic bundle snapshots, source polling, static serving, and COOP/COEP/CORP headers. The temporary `demos/fe-web` launcher proves direct compiler WebBundle generation of all 11 flagship artifacts, while `with-browser-cargo.sh` is now the sole six-crate overlay owner for Schedule32, QCGA, and generic demo serving; its contract tests cover exact backend provenance and lock restoration. | A clean checkout still cannot build the plain `fe` command: workspace `Cargo.toml` pins Sonatina `150d327`, while current Fe code uses later float/SPIR-V/canonical-arena APIs. The reviewed `ac266c210cad7872fc98380a73b4ca363877bc1f` exists locally but GitHub reports `upload-pack: not our ref`. Publish/merge it, repin workspace dependencies and `Cargo.lock`, remove the compatibility launcher, then prove plain `fe web build/serve` without `SONATINA_DIR` or Cargo patches. Browser auto-reload is also not part of `fe web serve`; watch currently means atomic rebuild. |
 | Sparse multivector usability and support-sized storage without syntax changes | **Partial, with bounded value semantics proven** | `support_bladeset_api.fe` is the sole bounded ordinary-Fe support implementation used by standalone differential probes and canonical Schedule32 composition. `sparse_multivector_api.fe` adds CTFE compact rank, recursive `SparseStorage<N>`, fail-closed ground-support selection, default-zero and present-only APIs; `sparse_cga_value.fe` proves support-cardinality storage equality and semantic point/sphere façades. The mechanically selected absent sphere coefficient executes as import-free Wasm and returns zero, while present-only access rejects. The parser regression ensures multiline ground aliases preserve their RHS. | These remain Rust-composed fixture fragments rather than an importable standard-library package. Support-generic recursive selection and runtime use of computed aggregate aliases still hit current normalization/lowering limits, `Found<rank>` projection is bounded to five populated lanes, and the flagship kernel retains demo-local runtime records/provider definitions. |
 | Proportional HIR/CTFE, Wasm, SPIR-V/WGSL, and browser testing | **Partial** | HIR/type-function fixtures and CTFE tests cover recursive normalization and FCO; codegen tests execute Wasm and audit WGSL/SPIR-V; browser scripts perform actual Chromium acceptance and no-readback checks; runtime JS has adversarial unit tests. The commands above were rerun for the latest runtime changes, and both demo preflights pass. | Full workspace release CI has not been rerun at this head. Hardware WebGPU coverage is absent, and browser results are command output rather than durable CI artifacts. The external Sonatina pin prevents a clean locked workspace build, weakening reproducibility. |
-| Precise generated/actorized/verified/performance/open documentation | **Partial** | `webgpu-cga-inversion/README.md`, `webgpu-qcga3d-quadric/README.md`, `CANONICAL_BROWSER_INTERFACE.md`, `FCO_SPARSE_CONSTRUCTOR_SPIKE.md`, and `SCHEDULE_STRATEGY_COMPARISON.md` document most boundaries explicitly. | The documentation is distributed and some generation wording predates tracked Schedule32 artifacts. This audit is the consolidated source until the dependency and sparse-planner slices update the user-facing runbook. |
+| Precise generated/actorized/verified/performance/open documentation | **Partial** | `webgpu-cga-inversion/README.md`, `webgpu-qcga3d-quadric/README.md`, `QCGA_SPARSE_PLANNER.md`, `CANONICAL_BROWSER_INTERFACE.md`, `FCO_SPARSE_CONSTRUCTOR_SPIKE.md`, and `SCHEDULE_STRATEGY_COMPARISON.md` document the important boundaries explicitly. | The documentation remains distributed. Schedule32 artifacts are tracked, while QCGA `gen/` is intentionally ignored and must be regenerated before its reuse/preflight commands work in a fresh worktree. This audit is the consolidated source until the dependency and reusable sparse-package slices update the runbook. |
+
+## Audit reruns at `e48729aaa`
+
+The following inexpensive gates were rerun directly in a fresh worktree:
+
+- `demos/shared/canonical-interface.test.mjs`: passed;
+- `webgpu-cga-inversion/actor-interface.test.mjs`: passed, including the
+  generated one-call Wasm frame;
+- `webgpu-cga-inversion/actor-lifecycle.test.mjs`: passed;
+- both remote `ls-remote` checks returned no `ac266c21` ref, while the local
+  clean reviewed checkout remains exactly at that commit.
+
+`verify_cga_runtime_reuse.py` correctly failed closed in the fresh worktree
+because QCGA's ignored generated manifest was absent. The immediately preceding
+forced QCGA generation and Chromium acceptance at the same promoted sources
+proved runtime identity and pixel equality, but this distinction matters:
+QCGA browser evidence is reproducible generation output, not a tracked bundle.
 
 ## Typed actor semantics boundary
 
@@ -80,24 +100,25 @@ Acceptance should prove one source of semantics across:
 This closes the largest remaining gap between a convincing one-off and the
 requested Garamon/Conal-style facility.
 
-### 3. Upgrade the second application from a runtime witness to a planner test
+### 3. Generalize the proven bounded planner APIs without overstating QCGA
 
-Keep QCGA as the shared-runtime proof, but replace the fixed scalarized quadric
-with at least one parameterized sparse operator generated through the reusable
-planner from slice 2. Camera and quadric coefficients should cross the same
-compiler-derived interface; presentation stays no-readback, and explicit mode
-compares one-call Wasm, WebGPU, and an independent host evaluator.
+The previous second-application gap is closed: QCGA now uses a parameterized
+12-term CTFE/FCO planner, compiler-derived camera/quadric requests, default
+no-readback presentation, and explicit one-call Wasm/WebGPU equality.
 
-Acceptance must continue to pass the exact six-module runtime identity check.
-Do not describe this as general QCGA until it supports more than the current
-fixed paper-null contraction and documents the supported subalgebra.
+The remaining step is to make the shared package from slice 2 serve both
+Schedule32 and this QCGA incidence plan without duplicating demo-local support,
+plan-tree, length-witness, and provider vocabulary. Preserve the exact
+six-module runtime identity and independent raw-expansion gates. Do not
+describe the result as general QCGA until support extends beyond the documented
+paper-null contraction.
 
 ## Current overall result
 
 The exciting core is real: the browser executes a Fe-authored, typed
 CTFE-derived 80-to-32 Cl(4,1) specialization interactively, and generated typed
 actors connect its Wasm and WebGPU verification paths. The goal is not complete.
-The clean toolchain is blocked on an unpublished backend revision, the sparse
-planner/storage work remains fixture-level rather than a reusable Fe package,
-and QCGA is presently a fixed second-runtime application rather than the same
-recursive planner at a larger algebra.
+The clean toolchain is blocked on an unpublished backend revision, and the
+sparse planner/storage work remains fixture-level rather than a reusable Fe
+package. QCGA now validates the same architectural direction at a larger
+algebra, but only for its explicitly bounded paper-null incidence subalgebra.

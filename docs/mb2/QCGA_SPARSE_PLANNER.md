@@ -38,7 +38,20 @@ root selection and uses the planned sparse contraction as the independent hit
 incidence. This preserves current f32/frame behavior while making the algebraic
 planner execute on the render path.
 
-The planner fixture is not yet the live QCGA browser artifact. Browser promotion
-still requires extending the canonical actor request and UI/runtime values for
-the 15 camera/quadric scalars, regenerating the standard bundle, and rerunning
-the existing default-no-readback and explicit Wasm/WebGPU equality gates.
+The planner is now the live QCGA browser artifact. Its compiler-derived
+`FrameRequest` carries generation plus all 15 camera/quadric scalars across the
+render, verify, and oracle lanes. The generated WebGPU layout independently
+pins those scalars to arguments 2 through 16 and byte offsets 0 through 56.
+
+Observed browser acceptance on Chromium/SwiftShader:
+
+- presentation-only mode fetched only layout, WGSL, and Fe source, created no
+  Worker, loaded no Wasm, and performed zero readbacks;
+- explicit verification used one generated Worker, one canonical full-frame
+  Fe/Wasm oracle call, and one GPU readback;
+- all 16,384 pixels (65,536 RGBA bytes) agreed at FNV-1a-32 `2368784280`
+  (`0x8d30c798`); the browser Wasm oracle took 58.3 ms in that run.
+
+This promotion makes QCGA a genuine second planner-backed browser application.
+It does not broaden the supported algebra beyond the documented 12-by-12
+paper-null incidence plan.
