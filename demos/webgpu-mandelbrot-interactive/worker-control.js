@@ -1,17 +1,15 @@
-import { actorEnvelope } from "../shared/actor-coordinator.js";
-import { createModuleWorkerActor } from "../shared/module-worker-actor.js";
+import { createCanonicalModuleWorkerActor } from "../shared/module-worker-actor.js";
 import { compileActorAdapter } from "./gen/ctl-interface.js";
 
 export async function createMandelbrotWorkerControl({
   wasm, lane, argNames, resultOrder,
 }) {
-  let requestId = 0;
-  const schemas = compileActorAdapter();
-  const actor = await createModuleWorkerActor({
+  const adapter = compileActorAdapter();
+  const actor = await createCanonicalModuleWorkerActor({
     workerUrl: new URL("./control-worker.js", import.meta.url),
     init: { wasm },
-    requestSchema: schemas.requestSchema,
-    resultSchema: schemas.resultSchema,
+    adapter,
+    maxPending: 4,
   });
   return {
     async update(args, generation = 0) {
@@ -19,13 +17,10 @@ export async function createMandelbrotWorkerControl({
         throw new TypeError("control arguments do not match generated control metadata");
       }
       const payload = Object.fromEntries(argNames.map((name, index) => [name, args[index]]));
-      const result = await actor.request(actorEnvelope({ type: "request", lane,
-        actorEpoch: actor.epoch(), generation, requestId: ++requestId,
-        payload }));
-      if (!result.payload.ok) throw new Error(result.payload.error);
-      return resultOrder.map((name) => result.payload.value[name]);
+      const result = await actor.request(lane, payload, generation);
+      return resultOrder.map((name) => result[name]);
     },
-    async restart() { requestId = 0; return actor.restart(); },
+    restart: actor.restart,
     close: actor.close,
     epoch: actor.epoch,
   };

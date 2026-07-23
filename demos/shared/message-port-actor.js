@@ -1,9 +1,20 @@
 import { actorEnvelope, validateActorEnvelope } from "./actor-coordinator.js";
 
 const keyOf = ({ actorEpoch, requestId }) => `${actorEpoch}:${requestId}`;
+const sanitizedActorError = (error, fallback) => {
+  const match = /^FE_ACTOR_[A-Z_]+/.exec(
+    typeof error?.message === "string" ? error.message : "",
+  );
+  return match?.[0] ?? fallback;
+};
 
-export function createMessagePortActorTransport(port) {
+export function createMessagePortActorTransport(port, {
+  transferRequest = () => [],
+} = {}) {
   if (!port || typeof port.postMessage !== "function") throw new TypeError("MessagePort required");
+  if (typeof transferRequest !== "function") {
+    throw new TypeError("transferRequest must be a function");
+  }
   const deliveries = new Map();
   let closed = false;
   const failAll = (reason) => {
@@ -33,8 +44,12 @@ export function createMessagePortActorTransport(port) {
   return {
     send(request, deliver) {
       if (closed) throw new Error("MessagePort actor transport is closed");
-      deliveries.set(keyOf(request), { request, deliver });
-      try { port.postMessage(request); } catch (error) {
+      const key = keyOf(request);
+      if (deliveries.has(key)) throw new TypeError("duplicate in-flight actor request");
+      const transfer = transferRequest(request.payload, request);
+      if (!Array.isArray(transfer)) throw new TypeError("transferRequest must return an array");
+      deliveries.set(key, { request, deliver });
+      try { port.postMessage(request, transfer); } catch (error) {
         deliveries.delete(keyOf(request));
         throw error;
       }
@@ -90,14 +105,14 @@ export function attachMessagePortActorHost(port, dispatch, {
           port.postMessage(actorEnvelope({
             type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
             generation: request.generation, requestId: request.requestId,
-            payload: { ok: false, error: String(error) },
+            payload: { ok: false, error: sanitizedActorError(error, "FE_ACTOR_TRANSFER") },
           }));
         }
       },
       (error) => port.postMessage(actorEnvelope({
         type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
         generation: request.generation, requestId: request.requestId,
-        payload: { ok: false, error: String(error) },
+        payload: { ok: false, error: sanitizedActorError(error, "FE_ACTOR_HOST_DISPATCH") },
       })),
     );
   };

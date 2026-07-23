@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { actorEnvelope } from "./actor-coordinator.js";
 import {
   ActorEndpointClosedError,
+  ActorEndpointBusyError,
   ActorEndpointResetError,
   actorField,
   actorResultSchema,
@@ -206,4 +207,20 @@ assert.deepEqual(hookErrors, [
   ["reset", "reset hook failed"],
 ]);
 
-console.log("shared actor endpoint epoch/close/reset/schema/adversarial transport: ok");
+const boundedJobs = [];
+const bounded = createActorEndpoint({
+  transport: { send(message, deliver) { boundedJobs.push({ message, deliver }); } },
+  requestSchema,
+  resultSchema,
+  maxPending: 1,
+});
+const firstBounded = bounded.request(request("verify", 0, 1, 1, { label: "first" }));
+await assert.rejects(
+  bounded.request(request("verify", 0, 1, 2, { label: "second" })),
+  ActorEndpointBusyError,
+);
+boundedJobs[0].deliver(actorEnvelope({ type: "result", lane: "verify", actorEpoch: 0,
+  generation: 1, requestId: 1, payload: { ok: true, value: "done" } }));
+assert.equal((await firstBounded).payload.value, "done");
+
+console.log("shared actor endpoint bounded/epoch/close/reset/schema/adversarial transport: ok");

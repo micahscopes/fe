@@ -14,6 +14,14 @@ export class ActorEndpointResetError extends Error {
   }
 }
 
+export class ActorEndpointBusyError extends Error {
+  constructor(message = "actor endpoint pending limit reached") {
+    super(message);
+    this.name = "ActorEndpointBusyError";
+    this.code = "FE_ACTOR_BUSY";
+  }
+}
+
 function validatePayload(schema, envelope, direction) {
   const validator = schema && Object.hasOwn(schema, envelope.lane)
     ? schema[envelope.lane]
@@ -121,6 +129,7 @@ export function createActorEndpoint({
   requestSchema,
   resultSchema,
   initialEpoch = 0,
+  maxPending = 32,
   onProtocolError = () => {},
 }) {
   if (!transport || typeof transport.send !== "function") {
@@ -128,6 +137,9 @@ export function createActorEndpoint({
   }
   if (!Number.isSafeInteger(initialEpoch) || initialEpoch < 0) {
     throw new TypeError("initialEpoch must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(maxPending) || maxPending < 1) {
+    throw new TypeError("maxPending must be a positive safe integer");
   }
   let epoch = initialEpoch;
   let closed = false;
@@ -188,6 +200,9 @@ export function createActorEndpoint({
       if (closed) return Promise.reject(new ActorEndpointClosedError());
       if (request.actorEpoch !== epoch) return Promise.reject(new ActorEndpointResetError());
       validatePayload(requestSchema, request, "request");
+      if (pending.size >= maxPending) {
+        return Promise.reject(new ActorEndpointBusyError());
+      }
       if (seen.has(request.requestId)) {
         return Promise.reject(new TypeError("duplicate actor request ID in this epoch"));
       }

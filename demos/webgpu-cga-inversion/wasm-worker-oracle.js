@@ -1,5 +1,4 @@
-import { actorEnvelope } from "../shared/actor-coordinator.js";
-import { createModuleWorkerActor } from "../shared/module-worker-actor.js";
+import { createCanonicalModuleWorkerActor } from "../shared/module-worker-actor.js";
 import {
   createTypedMainThreadGpuBroker,
   selectActorSchemas,
@@ -19,20 +18,19 @@ export async function createCgaWasmWorkerOracle({
   gpuRender,
   gpuVerify,
 }) {
-  let requestId = 0;
   const { compileActorAdapter, compiledCanonicalInterface } =
     await import("./gen-schedule32/actor-interface.js");
-  const schemas = compileActorAdapter();
+  const adapter = compileActorAdapter();
   const gpuLanes = Object.entries(compiledCanonicalInterface.lanes)
     .filter(([, lane]) => lane.intent.capabilities
       .some(({ capability }) => capability === "webgpu_dispatch"))
     .map(([name]) => name);
-  const gpuSchemas = selectActorSchemas(schemas, gpuLanes);
-  const actor = await createModuleWorkerActor({
+  const gpuSchemas = selectActorSchemas(adapter, gpuLanes);
+  const actor = await createCanonicalModuleWorkerActor({
     workerUrl: new URL("./wasm-oracle-worker.js", import.meta.url),
     init: { wasm },
-    requestSchema: schemas.requestSchema,
-    resultSchema: schemas.resultSchema,
+    adapter,
+    maxPending: 8,
     createAuxiliaryPorts(epoch) {
       const channel = new MessageChannel();
       const broker = createTypedMainThreadGpuBroker(channel.port1, {
@@ -51,24 +49,12 @@ export async function createCgaWasmWorkerOracle({
     },
   });
   const request = async (lane, values, generation = 0) => {
-    const result = await actor.request(actorEnvelope({
-      type: "request",
-      lane,
-      actorEpoch: actor.epoch(),
-      generation,
-      requestId: ++requestId,
-      payload: requestPayload(values, generation),
-    }));
-    if (!result.payload.ok) throw new Error(result.payload.error);
-    return result.payload.value;
+    return actor.request(lane, requestPayload(values, generation), generation);
   };
   return {
     render: (values, generation = 0) => request("oracle", values, generation),
     renderGpu: (values, generation = 0) => request("render", values, generation),
-    async restart() {
-      requestId = 0;
-      return actor.restart();
-    },
+    restart: actor.restart,
     close: actor.close,
     epoch: actor.epoch,
   };

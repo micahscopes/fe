@@ -460,6 +460,7 @@ export function compileCanonicalActorAdapter(manifest, compiled) {
   const resultSchema = {};
   const responseValidators = {};
   const responseLayouts = {};
+  const requestLayouts = {};
   const intents = {};
   for (const lane of manifest.lanes) {
     const compiledLane = compiled.lanes[lane.name];
@@ -490,6 +491,7 @@ export function compileCanonicalActorAdapter(manifest, compiled) {
       );
     };
     responseLayouts[lane.name] = lane.response;
+    requestLayouts[lane.name] = lane.request;
     intents[lane.name] = compiledLane.intent;
   }
   return Object.freeze({
@@ -502,6 +504,13 @@ export function compileCanonicalActorAdapter(manifest, compiled) {
       if (!layout) throw actorError("FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane");
       const output = [];
       canonicalTransferList(layout, value, `${request.lane} response`, output, new Set());
+      return output;
+    },
+    transferRequest(value, request) {
+      const layout = requestLayouts[request?.lane];
+      if (!layout) throw actorError("FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane");
+      const output = [];
+      canonicalTransferList(layout, value, `${request.lane} request`, output, new Set());
       return output;
     },
   });

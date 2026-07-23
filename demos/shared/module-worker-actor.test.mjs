@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { actorField, actorResultSchema, exactObject } from "./actor-endpoint.js";
-import { createModuleWorkerActor } from "./module-worker-actor.js";
+import { actorEnvelope } from "./actor-coordinator.js";
+import {
+  createCanonicalModuleWorkerActor,
+  createModuleWorkerActor,
+} from "./module-worker-actor.js";
 
 class FakeWorker {
   static replies = [];
@@ -37,13 +41,61 @@ assert.equal(auxiliaryCloses, 1);
 actor.close();
 assert.equal(auxiliaryCloses, 2);
 
+class CanonicalWorker extends FakeWorker {
+  postMessage(message, transfer) {
+    this.message = message; this.transfer = transfer;
+    message.port.addEventListener("message", ({ data: request }) => {
+      message.port.postMessage(actorEnvelope({
+        type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
+        generation: request.generation, requestId: request.requestId,
+        payload: request.payload.args[0] < 0
+          ? { ok: false, error: "private worker detail" }
+          : { ok: true, value: new Int32Array([request.payload.args[0] * 2]) },
+      }));
+    });
+    message.port.start();
+    queueMicrotask(() => message.port.postMessage({ type: "ready" }));
+  }
+}
+const canonicalAdapter = {
+  ...schemas,
+  transferRequest(value) { return [value.args.buffer]; },
+};
+const canonical = await createCanonicalModuleWorkerActor({
+  workerUrl: "canonical.js", adapter: canonicalAdapter, WorkerCtor: CanonicalWorker,
+});
+const ownedArgs = new Int32Array([4]);
+assert.deepEqual(await canonical.request("render", { args: ownedArgs }, 3), new Int32Array([8]));
+assert.equal(ownedArgs.byteLength, 0, "canonical request policy transfers owned request bytes");
+await assert.rejects(
+  canonical.request("render", { args: new Int32Array([-1]) }, 4),
+  (error) => error.code === "FE_ACTOR_REMOTE"
+    && !error.message.includes("private worker detail"),
+);
+assert.deepEqual(await Promise.all([canonical.restart(), canonical.restart()]), [1, 2]);
+assert.equal(canonical.epoch(), 2);
+canonical.close();
+
 FakeWorker.replies = [{ type: "init-error", error: "bad wasm" }];
 await assert.rejects(createModuleWorkerActor({ workerUrl: "bad.js", ...schemas,
-  WorkerCtor: FakeWorker }), /bad wasm/);
+  WorkerCtor: FakeWorker }), /FE_ACTOR_WORKER_PROTOCOL/);
 assert.equal(FakeWorker.instances.at(-1).terminated, true);
+
+FakeWorker.replies = [{ type: "init-error", error: "FE_ACTOR_WORKER_INIT" }];
+await assert.rejects(createModuleWorkerActor({ workerUrl: "init.js", ...schemas,
+  WorkerCtor: FakeWorker }), (error) =>
+  error.code === "FE_ACTOR_WORKER_INIT" && !error.message.includes("bad wasm"));
 
 FakeWorker.replies = [{ type: "ready", extra: true }];
 await assert.rejects(createModuleWorkerActor({ workerUrl: "malformed.js", ...schemas,
-  WorkerCtor: FakeWorker }), /malformed module worker readiness/);
+  WorkerCtor: FakeWorker }), /FE_ACTOR_WORKER_PROTOCOL/);
 
-console.log("shared module worker actor restart/init-failure/malformed-ready/auxiliary ports: ok");
+class SilentWorker extends FakeWorker {
+  postMessage(message, transfer) { this.message = message; this.transfer = transfer; }
+}
+await assert.rejects(createModuleWorkerActor({ workerUrl: "silent.js", ...schemas,
+  WorkerCtor: SilentWorker, initTimeoutMs: 5 }), (error) =>
+  error.code === "FE_ACTOR_WORKER_TIMEOUT");
+assert.equal(FakeWorker.instances.at(-1).terminated, true);
+
+console.log("canonical module worker transfer/restart/errors plus init timeout: ok");

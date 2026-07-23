@@ -163,6 +163,18 @@ const actorRequest = (payload) => ({
   lane: "echo",
   payload: { tag: 1, sequence: 2n, text: "actor", payload },
 });
+const ownedRequest = actorRequest(new Uint8Array([9]));
+assert.deepEqual(
+  actorShape.transferRequest(ownedRequest.payload, ownedRequest),
+  [ownedRequest.payload.payload.buffer],
+);
+assert.throws(
+  () => actorShape.transferRequest(
+    actorRequest(new Uint8Array(new ArrayBuffer(4), 1, 1)).payload,
+    { lane: "echo" },
+  ),
+  /FE_ACTOR_TRANSFER/,
+);
 const first = actor.dispatch(actorRequest(new Uint8Array([1])));
 const displaced = actor.dispatch(actorRequest(new Uint8Array([2])));
 const newest = actor.dispatch(actorRequest(new Uint8Array([3])));

@@ -8,6 +8,11 @@ from the same generated `ctl-interface.js`, rather than a demo-owned JavaScript
 schema. `ctl.json` contains only application event mapping and artifact names—it
 does not restate the actor schema.
 
+The same canonical module-worker binding used by the CGA flagship owns wire
+request IDs and epochs here. Its in-flight bound, readiness timeout, serialized
+restart, generated owned-byte transfer policy, and stable error codes are
+runtime behavior rather than Mandelbrot-specific orchestration.
+
 Interactive rendering crosses the bounded schema-parametric GPU actor, but the
 GPU owner still submits directly to the presentation target. Normal frames do
 not read pixels back. Only the explicit initial verification lane performs

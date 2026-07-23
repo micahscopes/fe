@@ -64,6 +64,7 @@ export interface CanonicalActorRequest<Lane extends string, Payload> {
 export interface CanonicalActorShape {
   readonly requestSchema: Readonly<Record<string, (value: unknown) => void>>;
   readonly resultSchema: Readonly<Record<string, (value: unknown) => void>>;
+  transferRequest(value: unknown, request: { lane: string }): ArrayBuffer[];
   transferResult(value: unknown, request: { lane: string }): ArrayBuffer[];
 }
 export interface CanonicalActorAdapter extends CanonicalActorShape {

@@ -71,4 +71,22 @@ assert.throws(
 transferEndpoint.close();
 detachTransfer();
 
+const sanitizedChannel = new MessageChannel();
+const detachSanitized = attachMessagePortActorHost(
+  sanitizedChannel.port2,
+  () => Promise.reject(new Error("private host detail")),
+);
+const sanitizedEndpoint = createActorEndpoint({
+  transport: createMessagePortActorTransport(sanitizedChannel.port1),
+  requestSchema: schema,
+  resultSchema: results,
+});
+const sanitized = await sanitizedEndpoint.request(actorEnvelope({
+  type: "request", lane: "verify", actorEpoch: 0,
+  generation: 1, requestId: 5, payload: { value: 1 },
+}));
+assert.deepEqual(sanitized.payload, { ok: false, error: "FE_ACTOR_HOST_DISPATCH" });
+sanitizedEndpoint.close();
+detachSanitized();
+
 console.log("protocol-v2 MessagePort actor transport/host: ok");

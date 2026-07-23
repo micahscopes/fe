@@ -13,6 +13,6 @@ self.addEventListener("message", async (event) => {
     });
     port.postMessage({ type: "ready" });
   } catch (error) {
-    port.postMessage({ type: "init-error", error: String(error) });
+    port.postMessage({ type: "init-error", error: "FE_ACTOR_WORKER_INIT" });
   }
 });

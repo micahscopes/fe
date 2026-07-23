@@ -109,6 +109,14 @@ sphere values inside the distance-estimator loop, executes a support-specialized
 typed `S*P*S` helper, and normalizes its conformal-vector result in Fe. The older
 scalarized D1 fixture remains an independent full-frame regression baseline.
 
+The Wasm oracle Worker uses the compiler-generated canonical actor shape as one
+transport contract: request/result validators, lane names, and owned-byte
+transfer policy are not restated by the demo. The shared module-worker binding
+owns request IDs and epochs, bounds in-flight requests, times out readiness,
+serializes restart, and exposes stable error codes without forwarding Worker
+exception text. GPU lane routing remains explicit so device ownership is
+inspectable rather than hidden in framework configuration.
+
 Generation currently depends on a clean checkout of the unpublished Sonatina
 commit `ed43625bb5680aeab993371e28a8c8e5c7c16f96`. Set `SONATINA_DIR` explicitly
 and generate only this bundle with:

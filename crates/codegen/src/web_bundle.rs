@@ -702,6 +702,7 @@ fn canonical_interface_declarations(
          export interface CanonicalActorShape {\n  \
          readonly requestSchema: Readonly<Record<string, (value: unknown) => void>>;\n  \
          readonly resultSchema: Readonly<Record<string, (value: unknown) => void>>;\n  \
+         transferRequest(value: unknown, request: { lane: string }): ArrayBuffer[];\n  \
          transferResult(value: unknown, request: { lane: string }): ArrayBuffer[];\n\
          }\n\
          export interface CanonicalActorAdapter extends CanonicalActorShape {\n",
