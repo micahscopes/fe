@@ -59,6 +59,18 @@ sharing.
    absent blades, and rejects an unsatisfied present-only bound. This is
    functional but verbose and closed over a known support.
 
+   The follow-up `support_bladeset_ctfe.fe` removes that closed-world
+   limitation for support planning. Its ordinary-Fe `BladeSet` represents up to
+   five basis generators (32 blades) in an explicit portable `u32`;
+   `support_gp` derives conservative product support for any orthogonal,
+   possibly degenerate diagonal metric, while `support_grade` projects any
+   support by computed blade grade. Both operations fail closed above the
+   declared capacity. Ground results erase to constants: the differential Wasm
+   test checks independent Rust oracles, including CGA Point*Sphere and a
+   degenerate square, and rejects any runtime bitwise support interpreter.
+   This is reusable support pruning, not coefficient cancellation: equal output
+   blades may still cancel only after exact coefficients and signs are known.
+
 4. **FCO can publish types and executable code.**
    Providers can inspect exact, already-materialized nominal constructors and
    literal const arguments, walk at most 256 type nodes in preorder, invoke
