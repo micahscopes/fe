@@ -1,5 +1,7 @@
 use fe_hir::test_db::{HirAnalysisTestDb, format_diagnostics};
 
+const CL41_GRADE1_SOURCE: &str = include_str!("fixtures/sparse_cl41_grade1.fe");
+
 const SOURCE: &str = r#"
 struct Missing {}
 struct Found<const Slot: usize> {}
@@ -118,6 +120,14 @@ fn bitset_support_ground_queries_normalize_for_two_masks() {
             format_diagnostics(&db, &diagnostics)
         );
     }
+}
+
+#[test]
+fn cl41_32_blade_grade_pruning_has_exact_ground_support_and_ranks() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone("sparse_cl41_grade1.fe".into(), CL41_GRADE1_SOURCE);
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
 }
 
 #[test]
