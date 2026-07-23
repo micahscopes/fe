@@ -254,14 +254,15 @@ struct Request {
     seed: u8,
 }
 
-pub fn frame(_ request: own Request) -> AllocatedBrowserBytes {
+pub fn frame(request: own Request) -> AllocatedBrowserBytes {
     let first = alloc_bytes(1)
     first.write(0x46)
     let second = alloc_bytes(1)
     second.write(0x65)
     let third = alloc_bytes(1)
     third.write(0x21)
-    AllocatedBrowserBytes { ptr: first, len: 3 }
+    let len = if request.seed == 0 { 3 } else { 4294967295 }
+    AllocatedBrowserBytes { ptr: first, len }
 }
 "#;
     let mut db = DriverDataBase::default();
@@ -298,4 +299,9 @@ pub fn frame(_ request: own Request) -> AllocatedBrowserBytes {
     let mut bytes = vec![0; length];
     memory.read(&store, pointer, &mut bytes).unwrap();
     assert_eq!(bytes, b"Fe!");
+    memory.write(&mut store, 0, &[1]).unwrap();
+    assert!(
+        frame.call(&mut store, 0).is_err(),
+        "an oversized Fe descriptor must trap instead of exposing memory"
+    );
 }

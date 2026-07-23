@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { MessageChannel } from "node:worker_threads";
 import {
   CANONICAL_INTERFACE_PROTOCOL,
   CANONICAL_INTERFACE_VERSION,
@@ -6,6 +7,13 @@ import {
   createCanonicalInterfaceCaller,
 } from "./canonical-interface.js";
 import * as compilerOwnedCodec from "../../crates/codegen/assets/canonical-interface.js";
+import {
+  attachMessagePortActorHost,
+  createMessagePortActorTransport,
+} from "../../crates/codegen/assets/browser-runtime/message-port-actor.js";
+import {
+  actorEnvelope,
+} from "../../crates/codegen/assets/browser-runtime/actor-coordinator.js";
 
 assert.equal(
   compilerOwnedCodec.compileCanonicalInterfaceManifest,
@@ -192,6 +200,48 @@ assert.equal(actorResetCount, 2);
 const transfer = actor.transferResult(newestResult, { lane: "echo" });
 assert.deepEqual(transfer, [newestResult.buffer]);
 assert.notEqual(transfer[0], actorMemory.buffer, "live Wasm memory must never transfer");
+
+const channel = new MessageChannel();
+attachMessagePortActorHost(channel.port2, (request) => actor.dispatch(request), {
+  transferResult: actor.transferResult,
+});
+const workerTransport = createMessagePortActorTransport(channel.port1, {
+  transferRequest: actorShape.transferRequest,
+});
+const workerPayload = new Uint8Array([4, 5, 6]);
+const workerRequest = actorEnvelope({
+  type: "request",
+  lane: "echo",
+  actorEpoch: 0,
+  generation: 1,
+  requestId: 1,
+  payload: {
+    tag: 1,
+    sequence: 2n,
+    text: "worker",
+    payload: workerPayload,
+  },
+});
+const workerReply = new Promise((resolve) => workerTransport.send(workerRequest, resolve));
+assert.equal(workerPayload.byteLength, 0, "owned request bytes must detach at Worker transfer");
+const resetBeforeWorkerReply = actorResetCount;
+const reply = await workerReply;
+assert.equal(reply.payload.ok, true);
+assert.deepEqual(reply.payload.value, new Uint8Array([4, 5, 6]));
+assert.equal(
+  actorResetCount,
+  resetBeforeWorkerReply + 1,
+  "Wasm arena must reset before the owned response crosses the MessagePort",
+);
+assert.equal(
+  reply.payload.value.byteLength,
+  reply.payload.value.buffer.byteLength,
+  "Worker result must remain a transferable full-span Uint8Array",
+);
+assert.notEqual(reply.payload.value.buffer, actorMemory.buffer);
+workerTransport.close();
+channel.port2.close();
+
 await assert.rejects(
   actor.dispatch({ lane: "missing", payload: {} }),
   /FE_ACTOR_UNKNOWN_LANE: unknown canonical actor lane/,
