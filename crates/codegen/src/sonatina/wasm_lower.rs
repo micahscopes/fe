@@ -38,10 +38,11 @@ use std::collections::{HashMap, HashSet};
 use driver::DriverDataBase;
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
 use mir::{
-    AddressSpaceKind, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem, PlaceRoot,
-    RBlockId, RExpr, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody, RuntimeBuiltin,
-    RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint, RuntimeInstance,
-    RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass, ScalarRepr,
+    AddressSpaceKind, ConstNode, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem,
+    PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody,
+    RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint,
+    RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
+    ScalarRepr,
 };
 use rustc_hash::FxHashMap;
 use sonatina_ir::{
@@ -155,6 +156,206 @@ struct PreparedInlineBodies<'db> {
     residuals: FxHashMap<RuntimeInstance<'db>, (usize, usize)>,
 }
 
+/// Materialize const-backed aggregate handles in the backend's private body
+/// overlay. MIR deliberately preserves these handles for EVM const-data
+/// lowering; the value-only Wasm/SPIR-V path instead needs the same immutable
+/// data expressed as scalar leaves and `AggregateMake`s.
+fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
+    fn field_classes<'db>(
+        db: &'db DriverDataBase,
+        layout: LayoutId<'db>,
+    ) -> Option<Vec<RuntimeClass<'db>>> {
+        match layout.data(db) {
+            Layout::Struct(data) => Some(data.fields.to_vec()),
+            Layout::Array(data) => Some(vec![data.elem.clone(); data.len as usize]),
+            Layout::Enum(_) => None,
+        }
+    }
+
+    fn emit<'db>(
+        db: &'db DriverDataBase,
+        locals: &mut Vec<RLocal<'db>>,
+        stmts: &mut Vec<RStmt<'db>>,
+        dst: RLocalId,
+        node: &ConstNode<'db>,
+        class: RuntimeClass<'db>,
+    ) -> Option<()> {
+        match (node, class) {
+            (ConstNode::Scalar(value), RuntimeClass::Scalar(class)) => {
+                locals[dst.as_u32() as usize].carrier =
+                    RuntimeCarrier::Value(RuntimeClass::Scalar(class));
+                locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+                stmts.push(RStmt::Assign {
+                    dst,
+                    expr: RExpr::ConstScalar(value.clone()),
+                });
+            }
+            (ConstNode::Aggregate { layout, fields }, RuntimeClass::AggregateValue { .. }) => {
+                let classes = field_classes(db, *layout)?;
+                if classes.len() != fields.len() {
+                    return None;
+                }
+                let semantic_ty = locals[dst.as_u32() as usize].semantic_ty;
+                let mut values = Vec::with_capacity(fields.len());
+                for (field, class) in fields.iter().zip(classes) {
+                    let value = RLocalId::from_u32(locals.len() as u32);
+                    locals.push(RLocal {
+                        // Backend-overlay locals have no source-level identity.
+                        // Preserve the aggregate constant's provenance type;
+                        // lowering and specialization intentionally use only
+                        // the exact runtime carrier attached below.
+                        semantic_ty,
+                        carrier: RuntimeCarrier::Value(class.clone()),
+                        root: RuntimeLocalRoot::None,
+                    });
+                    emit(db, locals, stmts, value, field, class)?;
+                    values.push(value);
+                }
+                locals[dst.as_u32() as usize].carrier =
+                    RuntimeCarrier::Value(RuntimeClass::AggregateValue { layout: *layout });
+                locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+                stmts.push(RStmt::Assign {
+                    dst,
+                    expr: RExpr::AggregateMake {
+                        layout: *layout,
+                        fields: values.into_boxed_slice(),
+                    },
+                });
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    // Reify only const handles that MIR already materializes as a whole value.
+    // Const refs used by projections/borrows remain refs and therefore retain
+    // the backend's existing fail-closed behavior.
+    let mut materialized = HashSet::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let RStmt::Assign {
+                expr:
+                    RExpr::Load {
+                        place:
+                            RuntimePlace {
+                                root: PlaceRoot::Ref(src),
+                                path,
+                            },
+                    },
+                ..
+            } = stmt
+                && path.is_empty()
+            {
+                materialized.insert(*src);
+            }
+        }
+    }
+    loop {
+        let before = materialized.len();
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let RStmt::Assign {
+                    dst,
+                    expr: RExpr::Use(src),
+                } = stmt
+                    && materialized.contains(dst)
+                {
+                    materialized.insert(*src);
+                }
+            }
+        }
+        if materialized.len() == before {
+            break;
+        }
+    }
+
+    let (locals, blocks) = (&mut body.locals, &mut body.blocks);
+    for block in blocks {
+        let mut rewritten = Vec::with_capacity(block.stmts.len());
+        for stmt in std::mem::take(&mut block.stmts) {
+            if let RStmt::Assign {
+                dst,
+                expr: RExpr::ConstRef { region, layout },
+            } = &stmt
+                && materialized.contains(dst)
+            {
+                let node = region.value(db);
+                if emit(
+                    db,
+                    locals,
+                    &mut rewritten,
+                    *dst,
+                    &node,
+                    RuntimeClass::AggregateValue { layout: *layout },
+                )
+                .is_some()
+                {
+                    continue;
+                }
+            }
+            if let RStmt::Assign {
+                dst,
+                expr: RExpr::Use(src),
+            } = &stmt
+                && let Some(RuntimeClass::AggregateValue { layout }) =
+                    locals[src.as_u32() as usize].carrier.value_class().cloned()
+                && matches!(
+                    locals[dst.as_u32() as usize].carrier.value_class(),
+                    Some(RuntimeClass::Ref {
+                        kind: RefKind::Const,
+                        ..
+                    })
+                )
+            {
+                locals[dst.as_u32() as usize].carrier =
+                    RuntimeCarrier::Value(RuntimeClass::AggregateValue { layout });
+                locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+            }
+            if let RStmt::Assign {
+                dst,
+                expr:
+                    RExpr::Load {
+                        place:
+                            RuntimePlace {
+                                root: PlaceRoot::Ref(src),
+                                path,
+                            },
+                    },
+            } = &stmt
+                && path.is_empty()
+                && let Some(RuntimeClass::AggregateValue { layout }) =
+                    locals[src.as_u32() as usize].carrier.value_class().cloned()
+            {
+                locals[dst.as_u32() as usize].carrier =
+                    RuntimeCarrier::Value(RuntimeClass::AggregateValue { layout });
+                locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+                rewritten.push(RStmt::Assign {
+                    dst: *dst,
+                    expr: RExpr::Use(*src),
+                });
+                continue;
+            }
+            rewritten.push(stmt);
+        }
+        block.stmts = rewritten;
+    }
+    if let Some(ret) = body.blocks.iter().find_map(|block| match block.terminator {
+        RTerminator::Return(Some(value)) => Some(value),
+        _ => None,
+    }) && matches!(
+        body.signature.ret,
+        Some(RuntimeClass::Ref {
+            kind: RefKind::Const,
+            ..
+        })
+    ) {
+        body.signature.ret = body.locals[ret.as_u32() as usize]
+            .carrier
+            .value_class()
+            .cloned();
+    }
+}
+
 fn prepare_inline_value_bodies<'db>(
     db: &'db DriverDataBase,
     package: &RuntimePackage<'db>,
@@ -183,6 +384,7 @@ fn prepare_inline_value_bodies<'db>(
             *specialization_work += 1;
         }
         let mut body = instance.body(db);
+        reify_inline_const_aggregates(db, &mut body);
         if !visiting.insert(cache_key.clone()) {
             return body;
         }
@@ -220,6 +422,20 @@ fn prepare_inline_value_bodies<'db>(
                     #[cfg(test)]
                     residual_stmt_counts,
                 );
+                if let Some(RuntimeClass::AggregateValue { layout }) =
+                    callee_body.signature.ret.clone()
+                    && matches!(
+                        locals[dst.as_u32() as usize].carrier.value_class(),
+                        Some(RuntimeClass::Ref {
+                            kind: RefKind::Const,
+                            ..
+                        })
+                    )
+                {
+                    locals[dst.as_u32() as usize].carrier =
+                        RuntimeCarrier::Value(RuntimeClass::AggregateValue { layout });
+                    locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+                }
                 let Some(replacement) = inline_value_call(
                     db,
                     package,
