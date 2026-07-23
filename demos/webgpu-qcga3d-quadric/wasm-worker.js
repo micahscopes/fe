@@ -1,7 +1,9 @@
 import { instantiateWasm } from "../webgpu-keystone/wasm-runner.js";
 import { attachMessagePortActorHost } from "../shared/message-port-actor.js";
 import { createGpuActorClient } from "../shared/gpu-actor.js";
+import { createExactLaneRouter } from "../shared/actor-router.js";
 import {
+  compiledCanonicalInterface,
   createActorAdapter,
   createHostEffectAdapter,
   createInterfaceCaller,
@@ -37,17 +39,22 @@ self.addEventListener("message", async ({ data }) => {
         return frame;
       },
     });
-    // Lane ownership is explicit: GPU presentation/readback and frame assembly
-    // are host effects; only oracle_pixel enters Fe/Wasm.
-    const dispatch = Object.freeze({
-      render: hostEffects.dispatch,
-      verify: hostEffects.dispatch,
-      oracle: hostEffects.dispatch,
-      oracle_pixel: wasmActor.dispatch,
+    // Placement is explicit application policy, while the complete lane set is
+    // compiler-derived. Initialization fails if a newly generated Fe lane is
+    // unowned or multiply owned; runtime dispatch has no fallback actor.
+    const router = createExactLaneRouter(compiledCanonicalInterface.lanes, {
+      host: {
+        lanes: ["render", "verify", "oracle"],
+        dispatch: hostEffects.dispatch,
+      },
+      wasm: {
+        lanes: ["oracle_pixel"],
+        dispatch: wasmActor.dispatch,
+      },
     });
     attachMessagePortActorHost(
       port,
-      (request) => (dispatch[request?.lane] ?? hostEffects.dispatch)(request),
+      router.dispatch,
       { transferResult: hostEffects.transferResult },
     );
     port.postMessage({ type: "ready" });
