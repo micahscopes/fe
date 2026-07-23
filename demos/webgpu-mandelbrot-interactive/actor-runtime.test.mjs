@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { createMandelbrotActorRuntime, MANDELBROT_ACTOR_SCHEMAS } from "./actor-runtime.js";
+import { createCanonicalIntentRouter } from "../shared/actor-router.js";
+import { compileActorAdapter } from "./gen/ctl-interface.js";
 
 assert.deepEqual(Object.keys(MANDELBROT_ACTOR_SCHEMAS.request), ["render", "verify"]);
 assert.deepEqual(Object.keys(MANDELBROT_ACTOR_SCHEMAS.result), ["render", "verify"]);
+const intentRouter = createCanonicalIntentRouter(compileActorAdapter(), {
+  main_thread_host() {},
+  wasm() {},
+});
+assert.equal(intentRouter.ownerOf("render"), "main_thread_host");
+assert.equal(intentRouter.ownerOf("verify"), "main_thread_host");
+assert.equal(intentRouter.ownerOf("update_view_message"), "wasm");
 
 const renders = [];
 const verifications = [];

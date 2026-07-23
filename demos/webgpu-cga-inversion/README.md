@@ -118,7 +118,9 @@ exception text. GPU lane routing remains explicit so device ownership is
 inspectable rather than hidden in framework configuration: Fe effect
 requirements select the main-thread WebGPU lanes and generated validators,
 while the application supplies only the visible `render` and `verify` device
-handlers.
+handlers. Inside the Worker, the same generated intent partitions lanes between
+the Wasm adapter, worker-local oracle effect, and main-thread GPU client; the
+application supplies those three concrete dispatchers but no lane lists.
 
 Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the later browser
 runtime commit `b2601adc`. The latter is reconstructed reproducibly from the

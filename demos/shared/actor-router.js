@@ -114,3 +114,64 @@ export function createExactLaneRouter(compiledLanes, ownership) {
     },
   });
 }
+
+const canonicalIntentOwner = (lane, intent) => {
+  plainObject(intent, `canonical actor intent ${lane}`);
+  exactKeys(
+    intent,
+    ["capabilities", "execution", "placement"],
+    `canonical actor intent ${lane}`,
+  );
+  if (!Array.isArray(intent.capabilities)) {
+    throw new TypeError(`canonical actor intent ${lane}.capabilities must be an array`);
+  }
+  if (intent.execution === "wasm") {
+    if (!["any", "main_thread", "worker"].includes(intent.placement)
+        || intent.capabilities.length !== 0) {
+      throw new ActorLaneRoutingError(
+        "FE_ACTOR_INVALID_LANE_INTENT",
+        `canonical Wasm lane ${lane} has invalid placement or host capabilities`,
+      );
+    }
+    return "wasm";
+  }
+  if (intent.execution !== "host_effect") {
+    throw new ActorLaneRoutingError(
+      "FE_ACTOR_INVALID_LANE_INTENT",
+      `canonical lane ${lane} has unsupported execution intent`,
+    );
+  }
+  if (intent.placement === "worker") return "worker_host";
+  if (intent.placement === "main_thread") return "main_thread_host";
+  throw new ActorLaneRoutingError(
+    "FE_ACTOR_INVALID_LANE_INTENT",
+    `canonical host-effect lane ${lane} has no concrete placement`,
+  );
+};
+
+/**
+ * Partition compiler-owned lanes by their Fe execution/placement intent.
+ *
+ * Applications still supply the concrete actor dispatchers. Their exact set is
+ * inferred from the declarations: no dispatcher or lane list is optional, and
+ * an extra dispatcher cannot silently become a fallback route.
+ */
+export function createCanonicalIntentRouter(adapter, dispatchers) {
+  plainObject(adapter, "canonical actor adapter");
+  const intents = plainObject(adapter.intents, "canonical actor intents");
+  const lanes = canonicalLaneNames(intents);
+  const partitions = Object.create(null);
+  for (const lane of lanes) {
+    const owner = canonicalIntentOwner(lane, intents[lane]);
+    (partitions[owner] ??= []).push(lane);
+  }
+  const owners = Object.keys(partitions).sort();
+  exactKeys(dispatchers, owners, "canonical actor dispatchers");
+  const ownership = Object.fromEntries(owners.map((owner) => {
+    if (typeof dispatchers[owner] !== "function") {
+      throw new TypeError(`canonical actor dispatchers.${owner} must be a function`);
+    }
+    return [owner, { lanes: partitions[owner], dispatch: dispatchers[owner] }];
+  }));
+  return createExactLaneRouter(intents, ownership);
+}

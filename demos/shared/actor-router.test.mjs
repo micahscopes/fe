@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   ActorLaneRoutingError,
+  createCanonicalIntentRouter,
   createExactLaneRouter,
 } from "./actor-router.js";
 
@@ -81,4 +82,66 @@ assert.throws(
   /invalid canonical lane name/,
 );
 
-console.log("exact compiler-lane actor ownership router: ok");
+const intent = (execution, placement, capabilities = []) =>
+  Object.freeze({ execution, placement, capabilities: Object.freeze(capabilities) });
+const canonicalAdapter = Object.freeze({
+  intents: Object.freeze({
+    render: intent("host_effect", "main_thread", [
+      Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+    ]),
+    verify: intent("host_effect", "main_thread", [
+      Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+    ]),
+    oracle: intent("host_effect", "worker"),
+    oracle_pixel: intent("wasm", "any"),
+  }),
+});
+const intentCalls = [];
+const intentRouter = createCanonicalIntentRouter(canonicalAdapter, {
+  main_thread_host(request) { intentCalls.push(["main", request.lane]); },
+  worker_host(request) { intentCalls.push(["worker", request.lane]); },
+  wasm(request) { intentCalls.push(["wasm", request.lane]); },
+});
+intentRouter.dispatch({ lane: "render" });
+intentRouter.dispatch({ lane: "oracle" });
+intentRouter.dispatch({ lane: "oracle_pixel" });
+assert.deepEqual(intentCalls, [
+  ["main", "render"],
+  ["worker", "oracle"],
+  ["wasm", "oracle_pixel"],
+]);
+assert.equal(intentRouter.ownerOf("verify"), "main_thread_host");
+assert.throws(
+  () => createCanonicalIntentRouter(canonicalAdapter, {
+    main_thread_host() {},
+    wasm() {},
+  }),
+  /unexpected or missing fields/,
+);
+assert.throws(
+  () => createCanonicalIntentRouter(canonicalAdapter, {
+    fallback() {},
+    main_thread_host() {},
+    worker_host() {},
+    wasm() {},
+  }),
+  /unexpected or missing fields/,
+);
+routingError(
+  () => createCanonicalIntentRouter({
+    intents: { misplaced: intent("host_effect", "any") },
+  }, { worker_host() {} }),
+  "FE_ACTOR_INVALID_LANE_INTENT",
+);
+routingError(
+  () => createCanonicalIntentRouter({
+    intents: {
+      confused: intent("wasm", "any", [
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+      ]),
+    },
+  }, { wasm() {} }),
+  "FE_ACTOR_INVALID_LANE_INTENT",
+);
+
+console.log("exact and intent-derived compiler-lane actor routing: ok");

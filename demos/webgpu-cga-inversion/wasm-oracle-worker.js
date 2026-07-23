@@ -3,9 +3,8 @@ import { attachMessagePortActorHost } from "../shared/message-port-actor.js";
 import {
   createCanonicalMainThreadGpuClient,
 } from "../shared/gpu-actor.js";
-import { createExactLaneRouter } from "../shared/actor-router.js";
+import { createCanonicalIntentRouter } from "../shared/actor-router.js";
 import {
-  compiledCanonicalInterface,
   compileActorAdapter,
   createActorAdapter,
   createHostEffectAdapter,
@@ -14,12 +13,6 @@ import {
 
 const WIDTH = 128;
 const HEIGHT = 128;
-
-const laneNames = (execution, placement = null) =>
-  Object.entries(compiledCanonicalInterface.lanes)
-    .filter(([, lane]) => lane.intent.execution === execution
-      && (placement === null || lane.intent.placement === placement))
-  .map(([name]) => name);
 
 self.addEventListener("message", async ({ data }) => {
   if (data?.type !== "init") return;
@@ -47,23 +40,14 @@ self.addEventListener("message", async ({ data }) => {
         return frame;
       },
     }, { placement: "worker" });
-    const router = createExactLaneRouter(compiledCanonicalInterface.lanes, {
-      gpu_main_thread: {
-        lanes: laneNames("host_effect", "main_thread"),
-        dispatch: (request) => gpu.request(
+    const router = createCanonicalIntentRouter(schemas, {
+      main_thread_host: (request) => gpu.request(
           request.lane,
           request.payload,
           request.generation,
         ),
-      },
-      worker_host: {
-        lanes: laneNames("host_effect", "worker"),
-        dispatch: hostEffects.dispatch,
-      },
-      wasm: {
-        lanes: laneNames("wasm"),
-        dispatch: wasmActor.dispatch,
-      },
+      worker_host: hostEffects.dispatch,
+      wasm: wasmActor.dispatch,
     });
     attachMessagePortActorHost(port, router.dispatch, {
       transferResult(value, request) {
