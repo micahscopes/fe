@@ -1,5 +1,17 @@
-// Reusable, fixed-capacity sparse support algebra for diagonal Clifford
-// metrics. A support bit at position B denotes basis blade mask B.
+// Package-like sparse Clifford prelude.
+//
+// This is one ordinary-Fe source unit because Fe does not yet provide a
+// fixture-level module/import mechanism. Consumers prepend it to a
+// domain-specific planner or kernel. It deliberately owns only reusable
+// representation and access semantics:
+//   - fixed-capacity BladeSet support algebra for diagonal metrics;
+//   - Zero/Term/Add sparse operator plans and their length witness;
+//   - support-sized scalar storage with default-zero and present-only access.
+//
+// Domain code still owns its metric, candidate enumeration, survivor ordering,
+// coefficient provider, and operator evaluator.
+//
+// A support bit at position B denotes basis blade mask B.
 //
 // Five basis vectors / 32 blades fit an explicit portable u32. Operations fail
 // closed above that bound. This is composed into domain fixtures by the Rust
@@ -111,13 +123,9 @@ const fn support_cardinality(_ support: BladeSet) -> u32 {
     count
 }
 
-// Reusable finite sparse-operator plan vocabulary.
-//
-// A domain planner supplies its own CTFE candidate enumeration and constructs
-// a ground `Add<Term<Candidate>, ... Zero>` tree.  This fragment deliberately
-// owns only the shared representation and its exact structural-length witness;
-// it does not prescribe a metric, support encoding, survivor ordering, or
-// evaluator.
+// Finite sparse-operator plan vocabulary. A domain planner supplies its own
+// CTFE candidate enumeration and constructs a ground
+// Add<Term<Candidate>, ... Zero> tree.
 
 struct Zero {}
 struct Term<const Candidate: usize> {}
@@ -143,6 +151,103 @@ impl<const Candidate: usize, Tail: PlanLength> PlanLength
     for Add<Term<Candidate>, Tail>
 {
     type Out = NatS<<Tail as PlanLength>::Out>
+}
+
+// Sparse runtime values selected from the 32 blades of Cl(p,q), p+q <= 5.
+// Runtime storage contains exactly popcount(Support) scalars. A recursive
+// rank-to-Here/Next type covers the whole bounded support. Missing coefficient
+// reads specialize to zero; `sparse_present_coefficient` has no missing-blade
+// implementation and therefore rejects absent access during type checking.
+
+struct SparseNil {}
+struct SparseCell<T> { head: f32, tail: T }
+impl Copy for SparseNil {}
+impl<T: Copy> Copy for SparseCell<T> {}
+
+recursive type fn SparseStorage<const N: usize>() -> (*) {
+    match N {
+        0 => SparseNil
+        _ => SparseCell<SparseStorage<{N - 1}>>
+    }
+}
+
+const fn sparse_rank(_ support: usize, _ blade: usize) -> usize {
+    let mut cursor: usize = 0
+    let mut rank: usize = 0
+    while cursor < blade && cursor < 32 {
+        rank = rank + ((support >> cursor) & 1)
+        cursor = cursor + 1
+    }
+    rank
+}
+
+const fn sparse_present(_ support: usize, _ blade: usize) -> usize {
+    if blade < 32 {
+        (support >> blade) & 1
+    } else {
+        0
+    }
+}
+
+struct SparseMissing {}
+struct SparseHere {}
+struct SparseNext<I> {}
+struct SparseSelect<const Present: usize, const Rank: usize> {}
+
+recursive type fn SparseIndex<const Rank: usize>() -> (*) {
+    match Rank {
+        0 => SparseHere
+        _ => SparseNext<SparseIndex<{Rank - 1}>>
+    }
+}
+
+trait SparseSelectOut { type Out }
+impl<const Rank: usize> SparseSelectOut for SparseSelect<0, Rank> {
+    type Out = SparseMissing
+}
+impl<const Rank: usize> SparseSelectOut for SparseSelect<1, Rank> {
+    type Out = SparseIndex<Rank>
+}
+
+trait SparseCoefficient<S> { fn read(value: S) -> f32 }
+impl SparseCoefficient<SparseNil> for SparseMissing {
+    fn read(value: SparseNil) -> f32 { 0.0 }
+}
+impl<T> SparseCoefficient<SparseCell<T>> for SparseMissing {
+    fn read(value: SparseCell<T>) -> f32 { 0.0 }
+}
+impl<T> SparseCoefficient<SparseCell<T>> for SparseHere {
+    fn read(value: SparseCell<T>) -> f32 { value.head }
+}
+impl<I, T> SparseCoefficient<SparseCell<T>> for SparseNext<I>
+    where I: SparseCoefficient<T>
+{
+    fn read(value: SparseCell<T>) -> f32 {
+        <I as SparseCoefficient<T>>::read(value: value.tail)
+    }
+}
+
+// Deliberately lacks a SparseMissing implementation.
+trait SparsePresentCoefficient<S> { fn read_present(value: S) -> f32 }
+impl<T> SparsePresentCoefficient<SparseCell<T>> for SparseHere {
+    fn read_present(value: SparseCell<T>) -> f32 { value.head }
+}
+impl<I, T> SparsePresentCoefficient<SparseCell<T>> for SparseNext<I>
+    where I: SparsePresentCoefficient<T>
+{
+    fn read_present(value: SparseCell<T>) -> f32 {
+        <I as SparsePresentCoefficient<T>>::read_present(value: value.tail)
+    }
+}
+
+fn sparse_coefficient<I: SparseCoefficient<S>, S>(value: S) -> f32
+{
+    <I as SparseCoefficient<S>>::read(value: value)
+}
+
+fn sparse_present_coefficient<I: SparsePresentCoefficient<S>, S>(value: S) -> f32
+{
+    <I as SparsePresentCoefficient<S>>::read_present(value: value)
 }
 
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
