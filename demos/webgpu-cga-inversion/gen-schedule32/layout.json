@@ -1,0 +1,91 @@
+{
+  "bindings": [
+    {
+      "access": "Read",
+      "binding": 1,
+      "group": 0,
+      "name": "input",
+      "role": "Input",
+      "span": 20,
+      "stride": 20
+    }
+  ],
+  "builtin_inputs": [
+    {
+      "arg_index": 0,
+      "scalar": "I32",
+      "source": "FragmentPositionX"
+    },
+    {
+      "arg_index": 1,
+      "scalar": "I32",
+      "source": "FragmentPositionY"
+    }
+  ],
+  "color_target_format": "rgba8unorm",
+  "entry_point": "fs_main",
+  "frag_wasm_bytes": 44119,
+  "frag_wasm_export": "cga_schedule32_vec5_de_render",
+  "fragment_entry": "fs_main",
+  "height": 128,
+  "kernel": "cga_schedule32_vec5_de_render",
+  "mode": "Render",
+  "params": [
+    {
+      "arg_index": 2,
+      "name": "cam_x",
+      "offset": 0,
+      "scalar": "F32",
+      "width": 4
+    },
+    {
+      "arg_index": 3,
+      "name": "cam_y",
+      "offset": 4,
+      "scalar": "F32",
+      "width": 4
+    },
+    {
+      "arg_index": 4,
+      "name": "zoom",
+      "offset": 8,
+      "scalar": "F32",
+      "width": 4
+    },
+    {
+      "arg_index": 5,
+      "name": "inv_cx",
+      "offset": 12,
+      "scalar": "F32",
+      "width": 4
+    },
+    {
+      "arg_index": 6,
+      "name": "inv_cy",
+      "offset": 16,
+      "scalar": "F32",
+      "width": 4
+    }
+  ],
+  "provenance": {
+    "algebra": "CTFE-derived 80-to-32 typed plan; one internal Vec5 traversal per DE sample",
+    "body_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule32_vec5_de_render_body.fe",
+    "body_fnv1a32": 2620847736,
+    "canonical_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule_ctfe_specialized_render.fe",
+    "canonical_fnv1a32": 141510903,
+    "composed_source_fnv1a32": 3418978820,
+    "fe_dirty": true,
+    "fe_rev": "618c1dd09288b91db8d8ded9ad822455e3f9563a",
+    "fe_status_fnv1a32": 2107284018,
+    "generated_unix_secs": 1784777377,
+    "sonatina_dirty": false,
+    "sonatina_path": "/workspace/sonatina-eq-clean",
+    "sonatina_rev": "98a424e60476fba4783ddc01d35d850553ec0e89",
+    "sonatina_status_fnv1a32": 2166136261,
+    "source": "canonical Fe CTFE Schedule<32> composed with isolated Vec5 DE body"
+  },
+  "vertex_entry": "vs_fullscreen",
+  "width": 128,
+  "word": "U32",
+  "word_bytes": 4
+}
