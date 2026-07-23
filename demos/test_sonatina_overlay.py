@@ -14,6 +14,27 @@ TEST_TMP = DEMOS.parent / "output" / "demo-test-tmp"
 
 
 class SonatinaOverlayTests(unittest.TestCase):
+    def test_generation_lock_forces_native_temps_under_demo_workspace(self):
+        TEST_TMP.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as temporary:
+            result = subprocess.run(
+                [
+                    str(GENERATION_LOCK),
+                    "sh",
+                    "-c",
+                    'test "$TMPDIR" = "$FE_DEMO_TMPDIR" && test -d "$TMPDIR"',
+                ],
+                env={
+                    **os.environ,
+                    "FE_DEMO_STATE_DIR": temporary,
+                    "FE_DEMO_TMPDIR": temporary,
+                    "TMPDIR": "/tmp",
+                },
+                text=True,
+                capture_output=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_offline_cache_miss_fails_without_running_command(self):
         TEST_TMP.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_TMP) as cache:
