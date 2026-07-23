@@ -457,6 +457,10 @@ pub fn canonical_type_from_semantic<'db>(
     // never to a source name or a structurally similar user record.
     let descriptor = [
         ("core::browser::BrowserBytes", CanonicalType::Bytes),
+        (
+            "core::browser::AllocatedBrowserBytes",
+            CanonicalType::Bytes,
+        ),
         ("core::browser::BrowserString", CanonicalType::String),
     ]
     .into_iter()

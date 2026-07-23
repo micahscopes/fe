@@ -243,3 +243,59 @@ pub fn echo(request: own Request) -> Response {
         copied_text_ptr + copied_text_len
     );
 }
+
+#[test]
+fn fe_allocated_bytes_can_be_returned_through_one_canonical_call() {
+    let source = r#"
+use core::AllocatedBrowserBytes
+use core::effect_ref::alloc_bytes
+
+struct Request {
+    seed: u8,
+}
+
+pub fn frame(_ request: own Request) -> AllocatedBrowserBytes {
+    let first = alloc_bytes(1)
+    first.write(0x46)
+    let second = alloc_bytes(1)
+    second.write(0x65)
+    let third = alloc_bytes(1)
+    third.write(0x21)
+    AllocatedBrowserBytes { ptr: first, len: 3 }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///wasm_allocated_browser_bytes.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let declaration = canonical_lane_decl_from_entry(&db, top_mod, "frame", "frame").unwrap();
+    let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+    let lane = manifest.lanes[0].clone();
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "frame").unwrap();
+    let artifact = compile_runtime_package_wasm_with_options(
+        &db,
+        &package,
+        WasmCompileOptions::default().with_canonical_lane(lane),
+    )
+    .unwrap();
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let frame = instance
+        .get_typed_func::<i32, i32>(&mut store, "fe_cabi_frame")
+        .unwrap();
+    let response_ptr = frame.call(&mut store, 0).unwrap() as usize;
+    let mut descriptor = [0u8; 8];
+    memory.read(&store, response_ptr, &mut descriptor).unwrap();
+    let pointer = u32::from_le_bytes(descriptor[0..4].try_into().unwrap()) as usize;
+    let length = u32::from_le_bytes(descriptor[4..8].try_into().unwrap()) as usize;
+    let mut bytes = vec![0; length];
+    memory.read(&store, pointer, &mut bytes).unwrap();
+    assert_eq!(bytes, b"Fe!");
+}

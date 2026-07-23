@@ -1,3 +1,5 @@
+use super::effect_ref::MemPtr
+
 /// Borrowed bytes in wasm32 linear memory.
 ///
 /// This descriptor does not own its payload. Canonical browser wrappers copy
@@ -16,8 +18,19 @@ pub struct BrowserString {
     pub len: u32,
 }
 
+/// Allocated bytes returned from Fe through the canonical browser ABI.
+///
+/// Keeping the pointer as `MemPtr<u8>` preserves the backend's native
+/// raw-address carrier. The canonical wrapper copies the payload into its
+/// response arena before exposing an ordinary `BrowserBytes` descriptor.
+pub struct AllocatedBrowserBytes {
+    pub ptr: MemPtr<u8>,
+    pub len: u32,
+}
+
 impl Copy for BrowserBytes {}
 impl Copy for BrowserString {}
+impl Copy for AllocatedBrowserBytes {}
 
 /// Marks a canonical browser lane as host-executed.
 pub trait HostEffect {}
