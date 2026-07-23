@@ -17,6 +17,11 @@ assert.doesNotMatch(
   /postMessage\(\{ type: "init-error", error: String\(error\) \}\)/,
   "arbitrary Worker error strings must not become malformed protocol messages",
 );
+assert.match(
+  workerSource,
+  /createHostEffectAdapter\([\s\S]*\{ placement: "main_thread" \}\)/,
+  "the Worker proxy must select the handlers' main-thread intent explicitly",
+);
 
 const wasm = new Uint8Array(await readFile(
   new URL("./gen/actor-canonical.wasm", import.meta.url),

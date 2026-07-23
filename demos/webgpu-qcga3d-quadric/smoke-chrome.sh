@@ -28,5 +28,12 @@ read -r -a webgpu_flags <<<"${CHROME_WEBGPU_FLAGS:-$default_flags}" || true
 "$chrome" --headless=new --no-sandbox --disable-dev-shm-usage \
   "${webgpu_flags[@]}" --remote-debugging-port="$debug" \
   --user-data-dir="$tmp/profile" "$url" >"$tmp/chrome.out" 2>"$tmp/chrome.log" & chrome_pid=$!
+set +e
 python3 "$here/cdp_acceptance.py" --debug-port "$debug" --url "$url" --mode "$mode" --timeout 90
+acceptance_status=$?
+set -e
+if [ "$acceptance_status" -ne 0 ]; then
+  tail -80 "$tmp/chrome.log" >&2 || true
+  exit "$acceptance_status"
+fi
 echo "PASS: Chrome SwiftShader QCGA mode=$mode"

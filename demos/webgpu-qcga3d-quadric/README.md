@@ -16,6 +16,9 @@ nominal Fe function submitted WebGPU work. `AllocatedBrowserBytes` preserves the
 wasm32 `MemPtr<u8>` carrier while Fe fills the arena, and the canonical wrapper
 copies the complete frame before reset and Worker transfer. Acceptance reports
 the measured one-call `oracleMs`.
+The Worker-side proxy explicitly selects `placement: "main_thread"` for the
+render and verification handlers; it does not use its current JavaScript realm
+to reinterpret the placement declared by Fe.
 
 The canvas scales responsively; the pixel-edge toggle and loupe inspect the
 actual fixed kernel output. There are no pretend algebra controls because this
