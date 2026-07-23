@@ -42,7 +42,8 @@ assert reference["provenance"] == layout["provenance"]
 assert layout["provenance"]["sonatina_rev"] == "ac266c210cad7872fc98380a73b4ca363877bc1f"
 kernel = (gen / "kernel.fe").read_text()
 wgsl = (gen / "frag.wgsl").read_text()
-assert "recursive type fn IncidencePlan" in kernel
+assert "pub recursive type fn SparsePlan" in kernel
+assert "type IncidencePlan12" in kernel
 assert "impl Derive<PlannedIncidence> for QcgaIncidenceProvider" in kernel
 assert "qcga3d_sparse_planned_render" in kernel
 assert "loop {" not in wgsl
