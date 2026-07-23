@@ -76,6 +76,44 @@ assert.deepEqual(await Promise.all([canonical.restart(), canonical.restart()]), 
 assert.equal(canonical.epoch(), 2);
 canonical.close();
 
+class GatedRestartWorker extends FakeWorker {
+  static readyPort;
+  static requestEpochs = [];
+  postMessage(message, transfer) {
+    this.message = message; this.transfer = transfer;
+    message.port.addEventListener("message", ({ data: request }) => {
+      GatedRestartWorker.requestEpochs.push(request.actorEpoch);
+      message.port.postMessage(actorEnvelope({
+        type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
+        generation: request.generation, requestId: request.requestId,
+        payload: { ok: true, value: new Int32Array([request.payload.args[0]]) },
+      }));
+    });
+    message.port.start();
+    if (message.actorEpoch === 0) {
+      queueMicrotask(() => message.port.postMessage({ type: "ready" }));
+    } else {
+      GatedRestartWorker.readyPort = message.port;
+    }
+  }
+}
+const gated = await createCanonicalModuleWorkerActor({
+  workerUrl: "gated.js", adapter: canonicalAdapter, WorkerCtor: GatedRestartWorker,
+});
+const gatedRestart = gated.restart();
+const gatedRequest = gated.request("render", { args: new Int32Array([9]) }, 1);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.deepEqual(
+  GatedRestartWorker.requestEpochs,
+  [],
+  "request issued after restart waits for replacement worker readiness",
+);
+GatedRestartWorker.readyPort.postMessage({ type: "ready" });
+assert.equal(await gatedRestart, 1);
+assert.deepEqual(await gatedRequest, new Int32Array([9]));
+assert.deepEqual(GatedRestartWorker.requestEpochs, [1]);
+gated.close();
+
 FakeWorker.replies = [{ type: "init-error", error: "bad wasm" }];
 await assert.rejects(createModuleWorkerActor({ workerUrl: "bad.js", ...schemas,
   WorkerCtor: FakeWorker }), /FE_ACTOR_WORKER_PROTOCOL/);

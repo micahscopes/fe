@@ -389,13 +389,13 @@
       },
       {
         "path": "runtime/message-port-actor.js",
-        "bytes": 5028,
-        "sha256": "9a8fec9851e58da7dc92e6d1ebc7235dbb3dbde2d507618f0edae864552db1b8"
+        "bytes": 5747,
+        "sha256": "a8e453b5c7b47e2bcab1ef29465ffd74e57dc1b63b390ebdf48625c7d8f9bba4"
       },
       {
         "path": "runtime/module-worker-actor.js",
-        "bytes": 6267,
-        "sha256": "3b3eb3f7fd040ac6f176ead0012a7a4a94742e88dedeab859f1ee92b9a963cf1"
+        "bytes": 6522,
+        "sha256": "457bd522e908dea9f8afccf8d6e7ad5b68b40795745adb2a708c9d9267c2f1a3"
       }
     ]
   }

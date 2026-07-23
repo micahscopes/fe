@@ -89,6 +89,22 @@ export function attachMessagePortActorHost(port, dispatch, {
       validateActorEnvelope(request);
       if (request.type !== "request") throw new TypeError("worker host accepts requests only");
     } catch {
+      // A structurally valid correlation tuple may still arrive in a malformed
+      // envelope (for example, with surplus fields). Reply when it is safe to
+      // do so instead of silently leaving the remote endpoint pending forever.
+      // actorEnvelope is the gate: wholly uncorrelatable input remains ignored.
+      try {
+        port.postMessage(actorEnvelope({
+          type: "result",
+          lane: request?.lane,
+          actorEpoch: request?.actorEpoch,
+          generation: request?.generation,
+          requestId: request?.requestId,
+          payload: { ok: false, error: "FE_ACTOR_PROTOCOL" },
+        }));
+      } catch {
+        // There is no trustworthy request identity to answer.
+      }
       return;
     }
     Promise.resolve().then(() => dispatch(request)).then(

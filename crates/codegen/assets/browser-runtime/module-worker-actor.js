@@ -140,6 +140,10 @@ export async function createCanonicalModuleWorkerActor(options) {
   let restartTail = Promise.resolve();
   return Object.freeze({
     async request(lane, payload, generation = 0) {
+      // Capture the restart chain at call time. Requests made after restart()
+      // wait for the replacement worker to become ready, while requests made
+      // before restart retain their original epoch/lifecycle semantics.
+      await restartTail;
       const result = await actor.request(actorEnvelope({
         type: "request", lane, payload, generation,
         actorEpoch: actor.epoch(), requestId: ++requestId,
