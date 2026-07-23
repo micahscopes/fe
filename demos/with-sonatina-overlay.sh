@@ -4,7 +4,7 @@
 set -euo pipefail
 
 base="150d327edfa88374802a6cc8089fd77da5fa818b"
-target="9615964859d81493e89ef233e95b96aeacf4032c"
+target="547519d46f9b6191881943fefb7cddd1880e77cf"
 remote="https://github.com/micahscopes/sonatina.git"
 remote_ref="refs/heads/mb2-render-mode"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -141,6 +141,48 @@ fn fe_add_runs_on_wasm_and_matches_evm_twin() {
 }
 
 #[test]
+fn generic_integer_downcasts_execute_with_source_and_target_widths() {
+    let source = r#"
+use core::num::IntDowncast
+
+pub fn truncate_u32(value: u32) -> u8 { value.downcast_truncate() }
+pub fn truncate_i32(value: i32) -> i8 { value.downcast_truncate() }
+pub fn widen_u8(value: u8) -> u32 { value.downcast_truncate() }
+pub fn widen_i8(value: i8) -> i32 { value.downcast_truncate() }
+pub fn unchecked_u32(value: u32) -> u8 { value.downcast_unchecked() }
+"#;
+    let wasm = compile_to_wasm("wasm_integer_downcasts.fe", source);
+    assert!(
+        func_imports(&wasm)
+            .iter()
+            .all(|(_, name)| name != "__int_truncate"),
+        "integer truncation must lower to Wasm operators, not a host import"
+    );
+    let (mut store, instance) = instantiate(&wasm);
+    let truncate_u32 = instance
+        .get_typed_func::<i32, i32>(&mut store, "truncate_u32")
+        .unwrap();
+    let truncate_i32 = instance
+        .get_typed_func::<i32, i32>(&mut store, "truncate_i32")
+        .unwrap();
+    let widen_u8 = instance
+        .get_typed_func::<i32, i32>(&mut store, "widen_u8")
+        .unwrap();
+    let widen_i8 = instance
+        .get_typed_func::<i32, i32>(&mut store, "widen_i8")
+        .unwrap();
+    let unchecked_u32 = instance
+        .get_typed_func::<i32, i32>(&mut store, "unchecked_u32")
+        .unwrap();
+
+    assert_eq!(truncate_u32.call(&mut store, 257).unwrap(), 1);
+    assert_eq!(truncate_i32.call(&mut store, -129).unwrap(), 127);
+    assert_eq!(widen_u8.call(&mut store, 255).unwrap(), 255);
+    assert_eq!(widen_i8.call(&mut store, 255).unwrap(), -1);
+    assert_eq!(unchecked_u32.call(&mut store, 513).unwrap(), 1);
+}
+
+#[test]
 fn fe_f32_arithmetic_comparisons_and_neg_run_on_wasm() {
     let source = r#"
 extern {

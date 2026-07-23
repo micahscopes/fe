@@ -16,13 +16,13 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-# Browser-profile generators share the exact 96159648 Sonatina backend. When a
+# Browser-profile generators share the exact 547519d4 Sonatina backend. When a
 # caller provides any checkout containing Fe's fetchable base, reconstruct the
 # reviewed commit internally; cga-d1 deliberately retains its older ed43625b
 # pin. The overlay re-enters this script with its clean b260 checkout.
 if [ "$demo" != cga-d1 ] && [ -n "${SONATINA_DIR:-}" ] \
     && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ]; then
-  expected_browser_sonatina="9615964859d81493e89ef233e95b96aeacf4032c"
+  expected_browser_sonatina="547519d46f9b6191881943fefb7cddd1880e77cf"
   actual_browser_sonatina="$(git -C "$SONATINA_DIR" rev-parse HEAD 2>/dev/null || true)"
   if [ "$actual_browser_sonatina" != "$expected_browser_sonatina" ] \
       || [ -n "$(git -C "$SONATINA_DIR" status --porcelain 2>/dev/null || true)" ]; then

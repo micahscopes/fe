@@ -1,7 +1,7 @@
 # Reviewed Sonatina browser-backend overlay
 
-These 26 `git format-patch` files reproduce the exact unpublished Sonatina
-commit `9615964859d81493e89ef233e95b96aeacf4032c` from the remotely fetchable Fe
+These 27 `git format-patch` files reproduce the exact unpublished Sonatina
+commit `547519d46f9b6191881943fefb7cddd1880e77cf` from the remotely fetchable Fe
 workspace base `150d327edfa88374802a6cc8089fd77da5fa818b`.
 
 The series is committed evidence for the f32 IR/Wasm/SPIR-V substrate, structured
@@ -13,10 +13,11 @@ opt-in canonical Wasm arena used by the browser demos. In particular:
 - `0023`–`0025` add typed scalar memory, dynamic arena allocation, and bitwise
   lowering needed by canonical actor Wasm;
 - `0026` lowers narrow integer truncation according to its source and target
-  carriers.
+  carriers;
+- `0027` lowers signed and unsigned integer extension across Wasm carriers.
 
 `demos/with-sonatina-overlay.sh` applies the series to an isolated temporary
-clone, verifies that the resulting commit is exactly `96159648`, runs the given
+clone, verifies that the resulting commit is exactly `547519d4`, runs the given
 command with that checkout as `SONATINA_DIR`, and removes the clone. With no
 `SONATINA_DIR`, it fetches the exact base from the pinned Sonatina remote branch
 once and retains it under `target/fe-browser-cache`; `FE_BROWSER_CACHE_DIR`
@@ -32,7 +33,7 @@ The patch files were produced with:
 
 ```sh
 git -C /workspace/sonatina-eq-clean format-patch \
-  150d327edfa88374802a6cc8089fd77da5fa818b..9615964859d81493e89ef233e95b96aeacf4032c
+  150d327edfa88374802a6cc8089fd77da5fa818b..547519d46f9b6191881943fefb7cddd1880e77cf
 ```
 
 They reconstruct the original hashes because those commits use identical author

@@ -1,0 +1,187 @@
+From 547519d46f9b6191881943fefb7cddd1880e77cf Mon Sep 17 00:00:00 2001
+From: trial <trial@local>
+Date: Thu, 23 Jul 2026 15:24:47 +0200
+Subject: [PATCH] feat(wasm): lower integer extension by carrier
+
+---
+ crates/codegen/src/isa/wasm/translate.rs | 81 ++++++++++++++++++++++++
+ crates/codegen/tests/wasm_backend.rs     | 71 +++++++++++++++++++++
+ 2 files changed, 152 insertions(+)
+
+diff --git a/crates/codegen/src/isa/wasm/translate.rs b/crates/codegen/src/isa/wasm/translate.rs
+index 0f0ff6b2..00d0bc55 100644
+--- a/crates/codegen/src/isa/wasm/translate.rs
++++ b/crates/codegen/src/isa/wasm/translate.rs
+@@ -922,6 +922,87 @@ fn translate_function(
+                             value_map.insert(result, narrowed);
+                         }
+                     }
++                    else if let Some(ext) = <&sonatina_ir::inst::cast::Zext as InstDowncast>::downcast(inst_set, inst_data) {
++                        if let Some(result) = function.dfg.inst_result(inst_id) {
++                            let val = resolve_value(function, *ext.from(), &value_map, &mut body, wb).ok_or("unresolved zext")?;
++                            let from_ty = function.dfg.value_ty(*ext.from());
++                            let to_ty = *ext.ty();
++                            let normalized = match from_ty {
++                                Type::I1 | Type::I8 | Type::I16 => {
++                                    let mask = match from_ty {
++                                        Type::I1 => 1,
++                                        Type::I8 => 0xff,
++                                        Type::I16 => 0xffff,
++                                        _ => unreachable!(),
++                                    };
++                                    let mask = body.add_op(
++                                        wb,
++                                        Operator::I32Const { value: mask },
++                                        &[],
++                                        &[WType::I32],
++                                    );
++                                    body.add_op(wb, Operator::I32And, &[val, mask], &[WType::I32])
++                                }
++                                Type::I32 => val,
++                                _ => return Err(format!("unsupported wasm zext source `{from_ty:?}`")),
++                            };
++                            let extended = match to_ty {
++                                Type::I8 | Type::I16 | Type::I32 => normalized,
++                                Type::I64 => body.add_op(
++                                    wb,
++                                    Operator::I64ExtendI32U,
++                                    &[normalized],
++                                    &[WType::I64],
++                                ),
++                                _ => return Err(format!("unsupported wasm zext target `{to_ty:?}`")),
++                            };
++                            value_map.insert(result, extended);
++                        }
++                    }
++                    else if let Some(ext) = <&sonatina_ir::inst::cast::Sext as InstDowncast>::downcast(inst_set, inst_data) {
++                        if let Some(result) = function.dfg.inst_result(inst_id) {
++                            let val = resolve_value(function, *ext.from(), &value_map, &mut body, wb).ok_or("unresolved sext")?;
++                            let from_ty = function.dfg.value_ty(*ext.from());
++                            let to_ty = *ext.ty();
++                            let normalized = match from_ty {
++                                Type::I1 => {
++                                    let amount = body.add_op(
++                                        wb,
++                                        Operator::I32Const { value: 31 },
++                                        &[],
++                                        &[WType::I32],
++                                    );
++                                    let shifted = body.add_op(
++                                        wb,
++                                        Operator::I32Shl,
++                                        &[val, amount],
++                                        &[WType::I32],
++                                    );
++                                    body.add_op(
++                                        wb,
++                                        Operator::I32ShrS,
++                                        &[shifted, amount],
++                                        &[WType::I32],
++                                    )
++                                }
++                                Type::I8 => body.add_op(wb, Operator::I32Extend8S, &[val], &[WType::I32]),
++                                Type::I16 => body.add_op(wb, Operator::I32Extend16S, &[val], &[WType::I32]),
++                                Type::I32 => val,
++                                _ => return Err(format!("unsupported wasm sext source `{from_ty:?}`")),
++                            };
++                            let extended = match to_ty {
++                                Type::I8 | Type::I16 | Type::I32 => normalized,
++                                Type::I64 => body.add_op(
++                                    wb,
++                                    Operator::I64ExtendI32S,
++                                    &[normalized],
++                                    &[WType::I64],
++                                ),
++                                _ => return Err(format!("unsupported wasm sext target `{to_ty:?}`")),
++                            };
++                            value_map.insert(result, extended);
++                        }
++                    }
+                     // EvmRevert/EvmStop → unreachable
+                     else if <&sonatina_ir::inst::evm::EvmRevert as InstDowncast>::downcast(inst_set, inst_data).is_some()
+                         || <&sonatina_ir::inst::evm::EvmStop as InstDowncast>::downcast(inst_set, inst_data).is_some() {
+diff --git a/crates/codegen/tests/wasm_backend.rs b/crates/codegen/tests/wasm_backend.rs
+index dd330a76..c968e04c 100644
+--- a/crates/codegen/tests/wasm_backend.rs
++++ b/crates/codegen/tests/wasm_backend.rs
+@@ -124,6 +124,77 @@ fn wasm_integer_truncation_respects_source_and_target_carriers() {
+     );
+ }
+ 
++#[test]
++fn wasm_integer_extension_respects_signedness_and_carriers() {
++    let isa = Wasm32::new(wasm32_triple());
++    let is = isa.inst_set();
++    let mb = wasm32_module_builder();
++    for (name, signed, target) in [
++        ("sext_i8_i32", true, Type::I32),
++        ("sext_i8_i64", true, Type::I64),
++        ("zext_i8_i32", false, Type::I32),
++        ("zext_i8_i64", false, Type::I64),
++    ] {
++        let func = mb
++            .declare_function(Signature::new_single(
++                name,
++                Linkage::Public,
++                &[Type::I8],
++                target,
++            ))
++            .unwrap();
++        let mut fb = mb.func_builder::<InstInserter>(func);
++        let entry = fb.append_block();
++        fb.switch_to_block(entry);
++        let value = if signed {
++            fb.insert_inst(cast::Sext::new(is, fb.args()[0], target), target)
++        } else {
++            fb.insert_inst(cast::Zext::new(is, fb.args()[0], target), target)
++        };
++        fb.insert_return(value);
++        fb.seal_all();
++        fb.finish();
++    }
++    let artifact = WasmBackend::new().compile_module(&mb.build()).unwrap();
++    wasmparser::validate(&artifact.bytes).unwrap();
++    let engine = wasmtime::Engine::default();
++    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
++    let mut store = wasmtime::Store::new(&engine, ());
++    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
++    assert_eq!(
++        instance
++            .get_typed_func::<i32, i32>(&mut store, "sext_i8_i32")
++            .unwrap()
++            .call(&mut store, 0xff)
++            .unwrap(),
++        -1
++    );
++    assert_eq!(
++        instance
++            .get_typed_func::<i32, i64>(&mut store, "sext_i8_i64")
++            .unwrap()
++            .call(&mut store, 0xff)
++            .unwrap(),
++        -1
++    );
++    assert_eq!(
++        instance
++            .get_typed_func::<i32, i32>(&mut store, "zext_i8_i32")
++            .unwrap()
++            .call(&mut store, 0xff)
++            .unwrap(),
++        255
++    );
++    assert_eq!(
++        instance
++            .get_typed_func::<i32, i64>(&mut store, "zext_i8_i64")
++            .unwrap()
++            .call(&mut store, 0xff)
++            .unwrap(),
++        255
++    );
++}
++
+ fn dynamic_alloc_module() -> sonatina_ir::Module {
+     let isa = Wasm32::new(wasm32_triple());
+     let is = isa.inst_set();
+-- 
+2.53.0
+
