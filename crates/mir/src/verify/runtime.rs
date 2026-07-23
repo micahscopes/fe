@@ -729,10 +729,19 @@ fn verify_builtin<'db>(
             let _ = program.code_region(*region);
             Ok(Some(RuntimeClass::Scalar(word_scalar_class())))
         }
-        RuntimeBuiltin::Malloc { size } => {
-            verify_word_value(body, *size)?;
-            Ok(Some(RuntimeClass::Scalar(word_scalar_class())))
-        }
+        RuntimeBuiltin::Malloc { size } => match body.value_class(*size) {
+            Some(RuntimeClass::Scalar(ScalarClass {
+                repr: ScalarRepr::Int { bits: 32, .. },
+                ..
+            })) => Ok(Some(RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                target: None,
+            })),
+            _ => {
+                verify_word_value(body, *size)?;
+                Ok(Some(RuntimeClass::Scalar(word_scalar_class())))
+            }
+        },
         RuntimeBuiltin::Call {
             gas,
             addr,

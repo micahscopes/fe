@@ -2209,6 +2209,20 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 let value = self.local_value(*value)?;
                 Ok(self.fb.insert_inst(Fsqrt::new(is, value), Type::F32))
             }
+            RuntimeBuiltin::Malloc { size } => {
+                let is = self.inst_set();
+                let size = self.local_value(*size)?;
+                if self.fb.type_of(size) != Type::I32 {
+                    return Err(LowerError::Unsupported(
+                        "wasm malloc requires an i32 byte size; wide sizes need an explicit \
+                         checked conversion"
+                            .to_string(),
+                    ));
+                }
+                Ok(self
+                    .fb
+                    .insert_inst(MemAllocDynamic::new(is, size), Type::I32))
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) builtin `{other:?}` is not supported \
                  (memory/EVM-host/addmod/saturating builtins are R2)"

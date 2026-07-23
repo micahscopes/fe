@@ -3499,9 +3499,19 @@ impl<'db> RmirEmitter<'db> {
         Some(match kind {
             RuntimeBuiltinFuncKind::Malloc => {
                 let [size] = args else { return None };
+                let result = match self.value_class(*size) {
+                    Some(RuntimeClass::Scalar(ScalarClass {
+                        repr: ScalarRepr::Int { bits: 32, .. },
+                        ..
+                    })) => RuntimeClass::RawAddr {
+                        space: AddressSpaceKind::Memory,
+                        target: None,
+                    },
+                    _ => word.clone(),
+                };
                 builtin(
                     crate::runtime::RuntimeBuiltin::Malloc { size: *size },
-                    Some(word.clone()),
+                    Some(result),
                 )
             }
             RuntimeBuiltinFuncKind::Mload => {

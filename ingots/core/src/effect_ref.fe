@@ -43,6 +43,11 @@ pub struct StorPtr<T> {
     handle: u256
 }
 
+/// Allocate an untyped byte region in the target's transient linear memory.
+extern {
+    pub fn alloc_bytes(_ size: u32) -> MemPtr<u8>
+}
+
 impl<T> Copy for MemPtr<T> {}
 impl<T> Copy for StorPtr<T> {}
 
