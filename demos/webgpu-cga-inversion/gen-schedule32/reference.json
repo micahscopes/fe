@@ -1,7 +1,265 @@
 {
-  "algebra": "canonical CTFE-derived Schedule<32>; one internal Vec5 traversal per DE sample",
+  "algebra": "canonical CTFE-derived Schedule<32>; four independent depth-8 typed roots balanced into one Vec5 per DE sample",
+  "canonical_survivor_tuples": [
+    [
+      1,
+      1,
+      1,
+      1,
+      1,
+      0
+    ],
+    [
+      1,
+      1,
+      2,
+      2,
+      2,
+      0
+    ],
+    [
+      1,
+      1,
+      8,
+      8,
+      2,
+      0
+    ],
+    [
+      1,
+      1,
+      16,
+      16,
+      2,
+      0
+    ],
+    [
+      1,
+      2,
+      1,
+      2,
+      1,
+      1
+    ],
+    [
+      1,
+      2,
+      2,
+      1,
+      2,
+      0
+    ],
+    [
+      1,
+      4,
+      1,
+      4,
+      1,
+      1
+    ],
+    [
+      1,
+      8,
+      1,
+      8,
+      1,
+      1
+    ],
+    [
+      1,
+      8,
+      8,
+      1,
+      2,
+      0
+    ],
+    [
+      1,
+      16,
+      1,
+      16,
+      1,
+      1
+    ],
+    [
+      1,
+      16,
+      16,
+      1,
+      2,
+      1
+    ],
+    [
+      2,
+      1,
+      2,
+      1,
+      1,
+      1
+    ],
+    [
+      2,
+      2,
+      2,
+      2,
+      1,
+      0
+    ],
+    [
+      2,
+      2,
+      8,
+      8,
+      2,
+      0
+    ],
+    [
+      2,
+      2,
+      16,
+      16,
+      2,
+      0
+    ],
+    [
+      2,
+      4,
+      2,
+      4,
+      1,
+      1
+    ],
+    [
+      2,
+      8,
+      2,
+      8,
+      1,
+      1
+    ],
+    [
+      2,
+      8,
+      8,
+      2,
+      2,
+      0
+    ],
+    [
+      2,
+      16,
+      2,
+      16,
+      1,
+      1
+    ],
+    [
+      2,
+      16,
+      16,
+      2,
+      2,
+      1
+    ],
+    [
+      8,
+      1,
+      8,
+      1,
+      1,
+      1
+    ],
+    [
+      8,
+      2,
+      8,
+      2,
+      1,
+      1
+    ],
+    [
+      8,
+      4,
+      8,
+      4,
+      1,
+      1
+    ],
+    [
+      8,
+      8,
+      8,
+      8,
+      1,
+      0
+    ],
+    [
+      8,
+      8,
+      16,
+      16,
+      2,
+      0
+    ],
+    [
+      8,
+      16,
+      8,
+      16,
+      1,
+      1
+    ],
+    [
+      8,
+      16,
+      16,
+      8,
+      2,
+      1
+    ],
+    [
+      16,
+      1,
+      16,
+      1,
+      1,
+      0
+    ],
+    [
+      16,
+      2,
+      16,
+      2,
+      1,
+      0
+    ],
+    [
+      16,
+      4,
+      16,
+      4,
+      1,
+      0
+    ],
+    [
+      16,
+      8,
+      16,
+      8,
+      1,
+      0
+    ],
+    [
+      16,
+      16,
+      16,
+      16,
+      1,
+      1
+    ]
+  ],
   "distinct_colors": 11,
-  "fnv1a32": 921407292,
+  "fnv1a32": 3470936828,
   "fragment": "cga_schedule32_vec5_de_render",
   "height": 128,
   "hit_pixels": 3512,
@@ -12,14 +270,13 @@
   "inversion_center_runtime": true,
   "lower_pixels": 1585,
   "oracle_agreement": {
-    "exact_mismatches": 1,
-    "exact_pixels": 16383,
-    "max_abs_shade_bucket_delta": 1,
+    "exact_mismatches": 0,
+    "exact_pixels": 16384,
+    "max_abs_shade_bucket_delta": 0,
     "pixels": 16384,
     "policy": "exact topology/material/palette and sky; hit shade may differ by at most one 24-level bucket under f32 reassociation",
     "shade_bucket_delta_histogram": {
-      "-1": 1,
-      "0": 3511
+      "0": 3512
     }
   },
   "parameter_types": [
@@ -30,23 +287,32 @@
     "F32"
   ],
   "provenance": {
-    "algebra": "CTFE-derived 80-to-32 typed plan; one internal Vec5 traversal per DE sample",
+    "algebra": "CTFE-derived 80-to-32 typed plan; four independent depth-8 typed roots balanced into one Vec5 per DE sample",
     "body_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule32_vec5_de_render_body.fe",
-    "body_fnv1a32": 2620847736,
+    "body_fnv1a32": 2067328414,
     "canonical_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule_ctfe_specialized_render.fe",
-    "canonical_fnv1a32": 141510903,
-    "composed_source_fnv1a32": 3418978820,
+    "canonical_fnv1a32": 2590505657,
+    "composed_source_fnv1a32": 3914491914,
     "fe_dirty": true,
-    "fe_rev": "618c1dd09288b91db8d8ded9ad822455e3f9563a",
-    "fe_status_fnv1a32": 2107284018,
-    "generated_unix_secs": 1784777377,
+    "fe_rev": "ff1ef04fd7b2f351cfd90d1101fc5d16380cdc3c",
+    "fe_status_fnv1a32": 2569571626,
+    "generated_unix_secs": 1784795608,
     "sonatina_dirty": false,
     "sonatina_path": "/workspace/sonatina-eq-clean",
-    "sonatina_rev": "98a424e60476fba4783ddc01d35d850553ec0e89",
+    "sonatina_rev": "b2601adc8b80b085aae98f9132a035fdfecec5c3",
     "sonatina_status_fnv1a32": 2166136261,
     "source": "canonical Fe CTFE Schedule<32> composed with isolated Vec5 DE body"
   },
   "runtime": "wasmtime executing composed Fe Wasm; every pixel semantically checked against independent Rust f32 oracle",
+  "runtime_tuple_order": "canonical survivor indices 31 down to 0",
+  "schedule_tuple_fields": [
+    "left_blade",
+    "point_blade",
+    "right_blade",
+    "output_blade",
+    "magnitude",
+    "negative"
+  ],
   "shape": "inverted_offset_torus_cyclide",
   "sky_pixels": 12872,
   "upper_pixels": 1927,

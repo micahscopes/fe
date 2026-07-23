@@ -181,6 +181,24 @@ const fn schedule_magnitude(_ i: usize) -> i32 {
 const fn schedule_negative(_ i: usize) -> i32 {
     triple_negative(survivor_triple(i)).downcast_unchecked()
 }
+const fn schedule8_left(_ i: usize) -> i32 { schedule_left(8 + i) }
+const fn schedule8_middle(_ i: usize) -> i32 { schedule_middle(8 + i) }
+const fn schedule8_right(_ i: usize) -> i32 { schedule_right(8 + i) }
+const fn schedule8_output(_ i: usize) -> i32 { schedule_output(8 + i) }
+const fn schedule8_magnitude(_ i: usize) -> i32 { schedule_magnitude(8 + i) }
+const fn schedule8_negative(_ i: usize) -> i32 { schedule_negative(8 + i) }
+const fn schedule16_left(_ i: usize) -> i32 { schedule_left(16 + i) }
+const fn schedule16_middle(_ i: usize) -> i32 { schedule_middle(16 + i) }
+const fn schedule16_right(_ i: usize) -> i32 { schedule_right(16 + i) }
+const fn schedule16_output(_ i: usize) -> i32 { schedule_output(16 + i) }
+const fn schedule16_magnitude(_ i: usize) -> i32 { schedule_magnitude(16 + i) }
+const fn schedule16_negative(_ i: usize) -> i32 { schedule_negative(16 + i) }
+const fn schedule24_left(_ i: usize) -> i32 { schedule_left(24 + i) }
+const fn schedule24_middle(_ i: usize) -> i32 { schedule_middle(24 + i) }
+const fn schedule24_right(_ i: usize) -> i32 { schedule_right(24 + i) }
+const fn schedule24_output(_ i: usize) -> i32 { schedule_output(24 + i) }
+const fn schedule24_magnitude(_ i: usize) -> i32 { schedule_magnitude(24 + i) }
+const fn schedule24_negative(_ i: usize) -> i32 { schedule_negative(24 + i) }
 
 recursive type fn Schedule<const N: usize>() -> (*) {
     match N {
@@ -199,7 +217,76 @@ recursive type fn Schedule<const N: usize>() -> (*) {
     }
 }
 
-type SpecializedSandwich = Schedule<32>
+type RawSpecializedSandwich = Schedule<32>
+
+// The compiler-facing executable view uses the same 32 CTFE-derived terms in
+// four known chunks. `O` is a forwarded type parameter, while `N` remains the
+// one staged descending const accepted by recursive type functions. This
+// bounds recursive evaluator type depth without introducing a term table.
+recursive type fn ScheduleChunk0<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule_left(N - 1) },
+                { schedule_middle(N - 1) },
+                { schedule_right(N - 1) },
+                { schedule_output(N - 1) },
+                { schedule_magnitude(N - 1) },
+                { schedule_negative(N - 1) },
+            >,
+            ScheduleChunk0<{N - 1}>,
+        >
+    }
+}
+recursive type fn ScheduleChunk8<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule8_left(N - 1) },
+                { schedule8_middle(N - 1) },
+                { schedule8_right(N - 1) },
+                { schedule8_output(N - 1) },
+                { schedule8_magnitude(N - 1) },
+                { schedule8_negative(N - 1) },
+            >,
+            ScheduleChunk8<{N - 1}>,
+        >
+    }
+}
+recursive type fn ScheduleChunk16<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule16_left(N - 1) },
+                { schedule16_middle(N - 1) },
+                { schedule16_right(N - 1) },
+                { schedule16_output(N - 1) },
+                { schedule16_magnitude(N - 1) },
+                { schedule16_negative(N - 1) },
+            >,
+            ScheduleChunk16<{N - 1}>,
+        >
+    }
+}
+recursive type fn ScheduleChunk24<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule24_left(N - 1) },
+                { schedule24_middle(N - 1) },
+                { schedule24_right(N - 1) },
+                { schedule24_output(N - 1) },
+                { schedule24_magnitude(N - 1) },
+                { schedule24_negative(N - 1) },
+            >,
+            ScheduleChunk24<{N - 1}>,
+        >
+    }
+}
 
 struct NatZ {}
 struct NatS<N> {}
@@ -220,29 +307,86 @@ impl<
 }
 fn takes_nat32(_ value: Nat<32>) {}
 fn specialized_schedule_has_exactly_32_terms(
-    value: <SpecializedSandwich as PlanLength>::Out,
+    value: <RawSpecializedSandwich as PlanLength>::Out,
 ) { takes_nat32(value) }
-struct Sphere { s1: f32, s2: f32, s8: f32, s16: f32 }
-struct Point { p1: f32, p2: f32, p4: f32, p8: f32, p16: f32 }
-impl Copy for Sphere {}
-impl Copy for Point {}
+// Closed sparse products. Their runtime shape is derived from support
+// cardinality by CTFE instead of being repeated as Compact4/Compact5 records.
+struct Nil {}
+struct Cell<T> { head: f32, tail: T }
+impl Copy for Nil {}
+impl<T: Copy> Copy for Cell<T> {}
 
-#[inline(always)]
-fn sphere_coeff(_ sphere: Sphere, blade: i32) -> f32 {
-    if blade == 1 { sphere.s1 }
-    else if blade == 2 { sphere.s2 }
-    else if blade == 8 { sphere.s8 }
-    else { sphere.s16 }
+recursive type fn Storage<const N: usize>() -> (*) {
+    match N {
+        0 => Nil
+        _ => Cell<Storage<{N - 1}>>
+    }
 }
 
-#[inline(always)]
-fn point_coeff(_ point: Point, blade: i32) -> f32 {
-    if blade == 1 { point.p1 }
-    else if blade == 2 { point.p2 }
-    else if blade == 4 { point.p4 }
-    else if blade == 8 { point.p8 }
-    else { point.p16 }
+struct Here {}
+struct Next<I> {}
+struct Blade<const B: i32> {}
+
+trait Coefficient<S> { fn read(value: S) -> f32 }
+impl<T> Coefficient<Cell<T>> for Here {
+    fn read(value: Cell<T>) -> f32 { value.head }
 }
+impl<I, T> Coefficient<Cell<T>> for Next<I>
+    where I: Coefficient<T>
+{
+    fn read(value: Cell<T>) -> f32 {
+        <I as Coefficient<T>>::read(value: value.tail)
+    }
+}
+
+fn coefficient<I: Coefficient<S>, S>(value: S) -> f32 {
+    <I as Coefficient<S>>::read(value: value)
+}
+
+type Sphere = Storage<4>
+type Point = Storage<5>
+
+trait SphereCoefficient { fn read(value: Sphere) -> f32 }
+impl SphereCoefficient for Blade<1> {
+    fn read(value: Sphere) -> f32 { coefficient<Here, Sphere>(value: value) }
+}
+impl SphereCoefficient for Blade<2> {
+    fn read(value: Sphere) -> f32 { coefficient<Next<Here>, Sphere>(value: value) }
+}
+impl SphereCoefficient for Blade<8> {
+    fn read(value: Sphere) -> f32 { coefficient<Next<Next<Here>>, Sphere>(value: value) }
+}
+impl SphereCoefficient for Blade<16> {
+    fn read(value: Sphere) -> f32 {
+        coefficient<Next<Next<Next<Here>>>, Sphere>(value: value)
+    }
+}
+
+trait PointCoefficient { fn read(value: Point) -> f32 }
+impl PointCoefficient for Blade<1> {
+    fn read(value: Point) -> f32 { coefficient<Here, Point>(value: value) }
+}
+impl PointCoefficient for Blade<2> {
+    fn read(value: Point) -> f32 { coefficient<Next<Here>, Point>(value: value) }
+}
+impl PointCoefficient for Blade<4> {
+    fn read(value: Point) -> f32 { coefficient<Next<Next<Here>>, Point>(value: value) }
+}
+impl PointCoefficient for Blade<8> {
+    fn read(value: Point) -> f32 {
+        coefficient<Next<Next<Next<Here>>>, Point>(value: value)
+    }
+}
+impl PointCoefficient for Blade<16> {
+    fn read(value: Point) -> f32 {
+        coefficient<Next<Next<Next<Next<Here>>>>, Point>(value: value)
+    }
+}
+
+type SpecializedSandwich = Add<
+    Add<ScheduleChunk24<8>, ScheduleChunk16<8>>,
+    Add<ScheduleChunk8<8>, ScheduleChunk0<8>>,
+>
 
 trait Eval {
     fn eval(sphere: Sphere, point: Point, output: i32) -> f32
@@ -258,12 +402,17 @@ impl Eval for Zero {
 impl<
     const L: i32, const P: i32, const R: i32,
     const O: i32, const M: i32, const N: i32,
-> Eval for Term<L, P, R, O, M, N> {
+> Eval for Term<L, P, R, O, M, N>
+    where Blade<L>: SphereCoefficient,
+          Blade<P>: PointCoefficient,
+          Blade<R>: SphereCoefficient,
+{
     #[inline(always)]
     fn eval(sphere: Sphere, point: Point, output: i32) -> f32 {
-        let product = sphere_coeff(sphere, blade: L)
-            * point_coeff(point, blade: P)
-            * sphere_coeff(sphere, blade: R)
+        let product =
+            <Blade<L> as SphereCoefficient>::read(value: sphere)
+            * <Blade<P> as PointCoefficient>::read(value: point)
+            * <Blade<R> as SphereCoefficient>::read(value: sphere)
         let scaled = if M == 1 { product } else { product + product }
         let signed = if N == 0 { scaled } else { -scaled }
         if output == O { signed } else { 0.0 }
@@ -278,6 +427,25 @@ impl<L: Eval, R: Eval> Eval for Add<L, R> {
     }
 }
 
+#[inline(always)]
+fn eval_specialized_scalar(sphere: Sphere, point: Point, output: i32) -> f32 {
+    let high =
+        <ScheduleChunk24<8> as Eval>::eval(
+            sphere: sphere, point: point, output: output,
+        )
+        + <ScheduleChunk16<8> as Eval>::eval(
+            sphere: sphere, point: point, output: output,
+        )
+    let low =
+        <ScheduleChunk8<8> as Eval>::eval(
+            sphere: sphere, point: point, output: output,
+        )
+        + <ScheduleChunk0<8> as Eval>::eval(
+            sphere: sphere, point: point, output: output,
+        )
+    high + low
+}
+
 // This public coefficient ABI is shared by the Wasm semantic oracle and the
 // render wrapper. The explicit hint makes wrapper flattening independent of
 // whether module-wide inlining visits this call before or after expanding the
@@ -288,10 +456,25 @@ pub fn cga_semantic_plan_hybrid(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> i32 {
-    let sphere = Sphere { s1: s1, s2: s2, s8: s8, s16: s16 }
-    let point = Point { p1: p1, p2: p2, p4: p4, p8: p8, p16: p16 }
+    let sphere: Sphere = Cell {
+        head: s1,
+        tail: Cell {
+            head: s2,
+            tail: Cell { head: s8, tail: Cell { head: s16, tail: Nil {} } },
+        },
+    }
+    let point: Point = Cell {
+        head: p1,
+        tail: Cell {
+            head: p2,
+            tail: Cell {
+                head: p4,
+                tail: Cell { head: p8, tail: Cell { head: p16, tail: Nil {} } },
+            },
+        },
+    }
     __i32_from_f32(
-        <SpecializedSandwich as Eval>::eval(
+        eval_specialized_scalar(
             sphere: sphere,
             point: point,
             output: output,

@@ -1,4 +1,4 @@
-//! Stage the canonical CTFE Schedule<32> + single-traversal Vec5 browser render.
+//! Stage the canonical CTFE Schedule<32> + four-chunk Vec5 browser render.
 //!
 //! This intentionally writes to `gen-schedule32`; promotion to the live demo is
 //! a separate reviewed operation.
@@ -34,22 +34,44 @@ fn composed_source() -> String {
         .split_once("trait Eval {")
         .expect("canonical typed-plan interpreter marker");
     let source = format!("{prefix}\n{BODY}");
-    assert!(source.contains("type SpecializedSandwich = Schedule<32>"));
+    assert!(source.contains("type RawSpecializedSandwich = Schedule<32>"));
+    assert!(source.contains("ScheduleChunk24<8>"));
     assert!(source.contains("const fn survivor_triple"));
     assert!(source.contains("trait Eval5"));
-    assert!(source.contains("SINGLE_SCHEDULE_TRAVERSAL"));
-    assert_eq!(
-        BODY.matches("<SpecializedSandwich as Eval5>::eval5")
-            .count(),
-        1,
-        "render body must interpret Schedule<32> once per DE sample",
-    );
+    assert!(source.contains("FOUR_CHUNK_TYPED_EVALUATION"));
+    for chunk in [24, 16, 8, 0] {
+        assert_eq!(
+            BODY.matches(&format!("<ScheduleChunk{chunk}<8> as Eval5>::eval5"))
+                .count(),
+            1,
+        );
+    }
+    let chunk_root_positions = [24, 16, 8, 0].map(|chunk| {
+        BODY.find(&format!("<ScheduleChunk{chunk}<8> as Eval5>::eval5"))
+            .expect("concrete chunk root")
+    });
+    assert!(chunk_root_positions.windows(2).all(|pair| pair[0] < pair[1]));
+    let chunk_term_order = [24usize, 16, 8, 0]
+        .into_iter()
+        .flat_map(|offset| (offset..offset + 8).rev())
+        .collect::<Vec<_>>();
+    assert_eq!(chunk_term_order, (0usize..32).rev().collect::<Vec<_>>());
+    for offset in [8, 16, 24] {
+        for field in ["left", "middle", "right", "output", "magnitude", "negative"] {
+            assert!(
+                source.contains(&format!(
+                    "const fn schedule{offset}_{field}(_ i: usize) -> i32 {{ schedule_{field}({offset} + i) }}"
+                )),
+                "chunk {offset} {field} must delegate exactly to the canonical tuple component",
+            );
+        }
+    }
     assert!(
         BODY.contains("struct Vec5") && BODY.contains("-> Vec5"),
         "the five-lane evaluator must explicitly construct and return Vec5",
     );
     assert!(
-        BODY.contains("let sandwich: Vec5 = <SpecializedSandwich as Eval5>::eval5"),
+        BODY.contains("let sandwich: Vec5 = eval_specialized"),
         "root traversal must return the explicit five-lane aggregate",
     );
     source
@@ -79,8 +101,13 @@ fn main() {
         eprintln!("Schedule32 Vec5 composed source: HIR clean (backend intentionally skipped)");
         return;
     }
-    let package =
-        mir::build_wasm_runtime_package(&db, top_mod).expect("Schedule32 Vec5 runtime package");
+    let package_started = std::time::Instant::now();
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, NAME)
+        .expect("Schedule32 Vec5 runtime package");
+    eprintln!(
+        "Schedule32 Vec5 runtime package built in {:.3}s",
+        package_started.elapsed().as_secs_f64()
+    );
     assert!(
         package
             .functions(&db)
@@ -270,6 +297,31 @@ fn main() {
         })
         .collect();
     let provenance = provenance(repo, &source);
+    let schedule = independently_derived_schedule();
+    assert_eq!(schedule.len(), 32);
+    let chunk_schedule = [24usize, 16, 8, 0]
+        .into_iter()
+        .flat_map(|offset| (offset..offset + 8).rev())
+        .map(|index| schedule[index])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        chunk_schedule,
+        schedule.iter().rev().copied().collect::<Vec<_>>(),
+        "four-chunk evaluator must preserve the canonical Schedule<32> tuple order",
+    );
+    let schedule_json = schedule
+        .iter()
+        .map(|tuple| {
+            serde_json::json!([
+                tuple.left,
+                tuple.point,
+                tuple.right,
+                tuple.output,
+                tuple.magnitude,
+                tuple.negative
+            ])
+        })
+        .collect::<Vec<_>>();
     let layout_json = serde_json::to_string_pretty(&serde_json::json!({
         "kernel": NAME, "entry_point": layout.entry_point, "mode": "Render",
         "word": "U32", "word_bytes": 4, "vertex_entry": layout.vertex_entry,
@@ -284,7 +336,7 @@ fn main() {
         "view": [CAM_X, CAM_Y, ZOOM], "inversion_center": [INV_CX, INV_CY],
         "parameter_types": ["F32", "F32", "F32", "F32", "F32"],
         "shape": "inverted_offset_torus_cyclide",
-        "algebra": "canonical CTFE-derived Schedule<32>; one internal Vec5 traversal per DE sample",
+        "algebra": "canonical CTFE-derived Schedule<32>; four independent depth-8 typed roots balanced into one Vec5 per DE sample",
         "inversion_center_runtime": true, "fnv1a32": frame_hash,
         "sky_pixels": sky, "hit_pixels": upper + lower,
         "upper_pixels": upper, "lower_pixels": lower, "distinct_colors": distinct.len(),
@@ -297,6 +349,9 @@ fn main() {
             "max_abs_shade_bucket_delta": max_abs_shade_delta,
         },
         "runtime": "wasmtime executing composed Fe Wasm; every pixel semantically checked against independent Rust f32 oracle",
+        "schedule_tuple_fields": ["left_blade", "point_blade", "right_blade", "output_blade", "magnitude", "negative"],
+        "canonical_survivor_tuples": schedule_json,
+        "runtime_tuple_order": "canonical survivor indices 31 down to 0",
         "provenance": provenance,
     })).unwrap();
 
@@ -655,6 +710,64 @@ fn fnv1a32_words(words: &[u32]) -> u32 {
     hash
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScheduleTuple {
+    left: usize,
+    point: usize,
+    right: usize,
+    output: usize,
+    magnitude: usize,
+    negative: usize,
+}
+
+fn independently_derived_schedule() -> Vec<ScheduleTuple> {
+    (0usize..80)
+        .filter(|&triple| keep_tag_rust(triple) != 0)
+        .map(|triple| {
+            let left = sphere_blade_rust(triple / 20);
+            let point = 1usize << ((triple / 4) % 5);
+            let right = sphere_blade_rust(triple % 4);
+            ScheduleTuple {
+                left,
+                point,
+                right,
+                output: left ^ point ^ right,
+                magnitude: 2 - usize::from(triple / 20 == triple % 4),
+                negative: gp_negative_rust(left, point)
+                    ^ gp_negative_rust(left ^ point, right),
+            }
+        })
+        .collect()
+}
+
+fn sphere_blade_rust(slot: usize) -> usize {
+    1usize << (slot + slot / 2)
+}
+
+fn gp_negative_rust(a: usize, b: usize) -> usize {
+    let mut swaps = 0usize;
+    for bit in 1..5 {
+        swaps += ((a >> bit) & 1) * (b & ((1usize << bit) - 1)).count_ones() as usize;
+    }
+    (swaps + ((a >> 4) & 1) * ((b >> 4) & 1)) & 1
+}
+
+fn keep_tag_rust(triple: usize) -> usize {
+    let left_slot = triple / 20;
+    let right_slot = triple % 4;
+    if left_slot > right_slot {
+        return 0;
+    }
+    let left = sphere_blade_rust(left_slot);
+    let point = 1usize << ((triple / 4) % 5);
+    let right = sphere_blade_rust(right_slot);
+    let forward =
+        gp_negative_rust(left, point) ^ gp_negative_rust(left ^ point, right);
+    let reverse =
+        gp_negative_rust(right, point) ^ gp_negative_rust(right ^ point, left);
+    usize::from(forward == reverse)
+}
+
 fn git_output(path: &std::path::Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -704,7 +817,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "canonical_fnv1a32": fnv1a32(CANONICAL.as_bytes()),
         "body_fnv1a32": fnv1a32(BODY.as_bytes()),
         "composed_source_fnv1a32": fnv1a32(source.as_bytes()),
-        "algebra": "CTFE-derived 80-to-32 typed plan; one internal Vec5 traversal per DE sample",
+        "algebra": "CTFE-derived 80-to-32 typed plan; four independent depth-8 typed roots balanced into one Vec5 per DE sample",
         "generated_unix_secs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
     })
 }

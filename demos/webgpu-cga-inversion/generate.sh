@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
-# Generate the D1 browser bundle against the reviewed unpublished Sonatina tree.
+# Generate a browser bundle against its reviewed unpublished Sonatina tree.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-expected_sonatina="ed43625bb5680aeab993371e28a8c8e5c7c16f96"
+bundle="${CGA_BUNDLE:-default}"
+case "$bundle" in
+  default)
+    expected_sonatina="ed43625bb5680aeab993371e28a8c8e5c7c16f96"
+    generator="gen_cga_inversion_demo"
+    ;;
+  schedule32)
+    expected_sonatina="b2601adc8b80b085aae98f9132a035fdfecec5c3"
+    generator="gen_cga_schedule32_vec5_demo"
+    ;;
+  *)
+    echo "CGA_BUNDLE must be 'default' or 'schedule32'" >&2
+    exit 2
+    ;;
+esac
 
 if [ -z "${SONATINA_DIR:-}" ]; then
-  echo "D1 generation requires SONATINA_DIR pointing to Sonatina commit $expected_sonatina" >&2
+  echo "$bundle generation requires SONATINA_DIR pointing to Sonatina commit $expected_sonatina" >&2
   exit 2
 fi
 if ! git -C "$SONATINA_DIR" rev-parse --git-dir >/dev/null 2>&1 \
@@ -17,17 +31,17 @@ if ! git -C "$SONATINA_DIR" rev-parse --git-dir >/dev/null 2>&1 \
 fi
 actual_sonatina="$(git -C "$SONATINA_DIR" rev-parse HEAD)"
 if [ "$actual_sonatina" != "$expected_sonatina" ]; then
-  echo "D1 requires Sonatina HEAD $expected_sonatina; found $actual_sonatina" >&2
+  echo "$bundle requires Sonatina HEAD $expected_sonatina; found $actual_sonatina" >&2
   exit 2
 fi
 if [ -n "$(git -C "$SONATINA_DIR" status --porcelain)" ]; then
-  echo "D1 requires a clean Sonatina checkout at $expected_sonatina" >&2
+  echo "$bundle requires a clean Sonatina checkout at $expected_sonatina" >&2
   exit 2
 fi
 
 fe_revision="$(git -C "$repo" rev-parse HEAD)"
 if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
-  echo "D1 generation requires a Fe checkout with no tracked modifications" >&2
+  echo "$bundle generation requires a Fe checkout with no tracked modifications" >&2
   exit 2
 fi
 fe_status="$(git -C "$repo" status --porcelain --untracked-files=normal)"
@@ -53,4 +67,4 @@ trap restore_lock EXIT
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-triple.path=\"$SONATINA_DIR/crates/triple\"" \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-codegen.path=\"$SONATINA_DIR/crates/codegen\"" \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-verifier.path=\"$SONATINA_DIR/crates/verifier\"" \
-    run -p fe-codegen --example gen_cga_inversion_demo )
+    run -p fe-codegen --example "$generator" )

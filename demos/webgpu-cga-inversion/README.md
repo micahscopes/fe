@@ -74,7 +74,15 @@ and generate only this bundle with:
 SONATINA_DIR=/path/to/sonatina demos/webgpu-cga-inversion/generate.sh
 ```
 
-The script rejects another or dirty Sonatina checkout, applies all four local
+Generate the staged CTFE-derived Schedule32 bundle instead with:
+
+```sh
+CGA_BUNDLE=schedule32 SONATINA_DIR=/path/to/sonatina \
+  demos/webgpu-cga-inversion/generate.sh
+```
+
+Each bundle pins the Sonatina revision it was reviewed against. The script
+rejects another or dirty Sonatina checkout, applies all four local
 Cargo patches, and restores the Fe checkout's `Cargo.lock` byte-for-byte when it
 exits. Generated files remain ignored and must not be hand-edited or committed.
 Artifact provenance fails closed if either Git revision cannot be read and

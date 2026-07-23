@@ -181,6 +181,24 @@ const fn schedule_magnitude(_ i: usize) -> i32 {
 const fn schedule_negative(_ i: usize) -> i32 {
     triple_negative(survivor_triple(i)).downcast_unchecked()
 }
+const fn schedule8_left(_ i: usize) -> i32 { schedule_left(8 + i) }
+const fn schedule8_middle(_ i: usize) -> i32 { schedule_middle(8 + i) }
+const fn schedule8_right(_ i: usize) -> i32 { schedule_right(8 + i) }
+const fn schedule8_output(_ i: usize) -> i32 { schedule_output(8 + i) }
+const fn schedule8_magnitude(_ i: usize) -> i32 { schedule_magnitude(8 + i) }
+const fn schedule8_negative(_ i: usize) -> i32 { schedule_negative(8 + i) }
+const fn schedule16_left(_ i: usize) -> i32 { schedule_left(16 + i) }
+const fn schedule16_middle(_ i: usize) -> i32 { schedule_middle(16 + i) }
+const fn schedule16_right(_ i: usize) -> i32 { schedule_right(16 + i) }
+const fn schedule16_output(_ i: usize) -> i32 { schedule_output(16 + i) }
+const fn schedule16_magnitude(_ i: usize) -> i32 { schedule_magnitude(16 + i) }
+const fn schedule16_negative(_ i: usize) -> i32 { schedule_negative(16 + i) }
+const fn schedule24_left(_ i: usize) -> i32 { schedule_left(24 + i) }
+const fn schedule24_middle(_ i: usize) -> i32 { schedule_middle(24 + i) }
+const fn schedule24_right(_ i: usize) -> i32 { schedule_right(24 + i) }
+const fn schedule24_output(_ i: usize) -> i32 { schedule_output(24 + i) }
+const fn schedule24_magnitude(_ i: usize) -> i32 { schedule_magnitude(24 + i) }
+const fn schedule24_negative(_ i: usize) -> i32 { schedule_negative(24 + i) }
 
 recursive type fn Schedule<const N: usize>() -> (*) {
     match N {
@@ -199,7 +217,76 @@ recursive type fn Schedule<const N: usize>() -> (*) {
     }
 }
 
-type SpecializedSandwich = Schedule<32>
+type RawSpecializedSandwich = Schedule<32>
+
+// The compiler-facing executable view uses the same 32 CTFE-derived terms in
+// four known chunks. `O` is a forwarded type parameter, while `N` remains the
+// one staged descending const accepted by recursive type functions. This
+// bounds recursive evaluator type depth without introducing a term table.
+recursive type fn ScheduleChunk0<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule_left(N - 1) },
+                { schedule_middle(N - 1) },
+                { schedule_right(N - 1) },
+                { schedule_output(N - 1) },
+                { schedule_magnitude(N - 1) },
+                { schedule_negative(N - 1) },
+            >,
+            ScheduleChunk0<{N - 1}>,
+        >
+    }
+}
+recursive type fn ScheduleChunk8<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule8_left(N - 1) },
+                { schedule8_middle(N - 1) },
+                { schedule8_right(N - 1) },
+                { schedule8_output(N - 1) },
+                { schedule8_magnitude(N - 1) },
+                { schedule8_negative(N - 1) },
+            >,
+            ScheduleChunk8<{N - 1}>,
+        >
+    }
+}
+recursive type fn ScheduleChunk16<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule16_left(N - 1) },
+                { schedule16_middle(N - 1) },
+                { schedule16_right(N - 1) },
+                { schedule16_output(N - 1) },
+                { schedule16_magnitude(N - 1) },
+                { schedule16_negative(N - 1) },
+            >,
+            ScheduleChunk16<{N - 1}>,
+        >
+    }
+}
+recursive type fn ScheduleChunk24<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule24_left(N - 1) },
+                { schedule24_middle(N - 1) },
+                { schedule24_right(N - 1) },
+                { schedule24_output(N - 1) },
+                { schedule24_magnitude(N - 1) },
+                { schedule24_negative(N - 1) },
+            >,
+            ScheduleChunk24<{N - 1}>,
+        >
+    }
+}
 
 struct NatZ {}
 struct NatS<N> {}
@@ -220,29 +307,86 @@ impl<
 }
 fn takes_nat32(_ value: Nat<32>) {}
 fn specialized_schedule_has_exactly_32_terms(
-    value: <SpecializedSandwich as PlanLength>::Out,
+    value: <RawSpecializedSandwich as PlanLength>::Out,
 ) { takes_nat32(value) }
-struct Sphere { s1: f32, s2: f32, s8: f32, s16: f32 }
-struct Point { p1: f32, p2: f32, p4: f32, p8: f32, p16: f32 }
-impl Copy for Sphere {}
-impl Copy for Point {}
+// Closed sparse products. Their runtime shape is derived from support
+// cardinality by CTFE instead of being repeated as Compact4/Compact5 records.
+struct Nil {}
+struct Cell<T> { head: f32, tail: T }
+impl Copy for Nil {}
+impl<T: Copy> Copy for Cell<T> {}
 
-#[inline(always)]
-fn sphere_coeff(_ sphere: Sphere, blade: i32) -> f32 {
-    if blade == 1 { sphere.s1 }
-    else if blade == 2 { sphere.s2 }
-    else if blade == 8 { sphere.s8 }
-    else { sphere.s16 }
+recursive type fn Storage<const N: usize>() -> (*) {
+    match N {
+        0 => Nil
+        _ => Cell<Storage<{N - 1}>>
+    }
 }
 
-#[inline(always)]
-fn point_coeff(_ point: Point, blade: i32) -> f32 {
-    if blade == 1 { point.p1 }
-    else if blade == 2 { point.p2 }
-    else if blade == 4 { point.p4 }
-    else if blade == 8 { point.p8 }
-    else { point.p16 }
+struct Here {}
+struct Next<I> {}
+struct Blade<const B: i32> {}
+
+trait Coefficient<S> { fn read(value: S) -> f32 }
+impl<T> Coefficient<Cell<T>> for Here {
+    fn read(value: Cell<T>) -> f32 { value.head }
 }
+impl<I, T> Coefficient<Cell<T>> for Next<I>
+    where I: Coefficient<T>
+{
+    fn read(value: Cell<T>) -> f32 {
+        <I as Coefficient<T>>::read(value: value.tail)
+    }
+}
+
+fn coefficient<I: Coefficient<S>, S>(value: S) -> f32 {
+    <I as Coefficient<S>>::read(value: value)
+}
+
+type Sphere = Storage<4>
+type Point = Storage<5>
+
+trait SphereCoefficient { fn read(value: Sphere) -> f32 }
+impl SphereCoefficient for Blade<1> {
+    fn read(value: Sphere) -> f32 { coefficient<Here, Sphere>(value: value) }
+}
+impl SphereCoefficient for Blade<2> {
+    fn read(value: Sphere) -> f32 { coefficient<Next<Here>, Sphere>(value: value) }
+}
+impl SphereCoefficient for Blade<8> {
+    fn read(value: Sphere) -> f32 { coefficient<Next<Next<Here>>, Sphere>(value: value) }
+}
+impl SphereCoefficient for Blade<16> {
+    fn read(value: Sphere) -> f32 {
+        coefficient<Next<Next<Next<Here>>>, Sphere>(value: value)
+    }
+}
+
+trait PointCoefficient { fn read(value: Point) -> f32 }
+impl PointCoefficient for Blade<1> {
+    fn read(value: Point) -> f32 { coefficient<Here, Point>(value: value) }
+}
+impl PointCoefficient for Blade<2> {
+    fn read(value: Point) -> f32 { coefficient<Next<Here>, Point>(value: value) }
+}
+impl PointCoefficient for Blade<4> {
+    fn read(value: Point) -> f32 { coefficient<Next<Next<Here>>, Point>(value: value) }
+}
+impl PointCoefficient for Blade<8> {
+    fn read(value: Point) -> f32 {
+        coefficient<Next<Next<Next<Here>>>, Point>(value: value)
+    }
+}
+impl PointCoefficient for Blade<16> {
+    fn read(value: Point) -> f32 {
+        coefficient<Next<Next<Next<Next<Here>>>>, Point>(value: value)
+    }
+}
+
+type SpecializedSandwich = Add<
+    Add<ScheduleChunk24<8>, ScheduleChunk16<8>>,
+    Add<ScheduleChunk8<8>, ScheduleChunk0<8>>,
+>
 
 
 // Render body composed after the canonical Schedule<32> definitions in
@@ -257,8 +401,62 @@ extern {
 struct Vec5 { e1: f32, e2: f32, e4: f32, e8: f32, e16: f32 }
 impl Copy for Vec5 {}
 
+// Ground the recursive sparse products once per DE sample. The typed schedule
+// reads this ephemeral scalar cache through blade-specific traits; no runtime
+// blade selector or repeated Storage<N>/Next<I> proof graph remains per Term.
+struct Prepared {
+    s1: f32, s2: f32, s8: f32, s16: f32,
+    p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
+}
+impl Copy for Prepared {}
+
+fn prepare(sphere: Sphere, point: Point) -> Prepared {
+    Prepared {
+        s1: coefficient<Here, Sphere>(value: sphere),
+        s2: coefficient<Next<Here>, Sphere>(value: sphere),
+        s8: coefficient<Next<Next<Here>>, Sphere>(value: sphere),
+        s16: coefficient<Next<Next<Next<Here>>>, Sphere>(value: sphere),
+        p1: coefficient<Here, Point>(value: point),
+        p2: coefficient<Next<Here>, Point>(value: point),
+        p4: coefficient<Next<Next<Here>>, Point>(value: point),
+        p8: coefficient<Next<Next<Next<Here>>>, Point>(value: point),
+        p16: coefficient<Next<Next<Next<Next<Here>>>>, Point>(value: point),
+    }
+}
+
+trait PreparedSphereCoefficient { fn read(value: Prepared) -> f32 }
+impl PreparedSphereCoefficient for Blade<1> {
+    fn read(value: Prepared) -> f32 { value.s1 }
+}
+impl PreparedSphereCoefficient for Blade<2> {
+    fn read(value: Prepared) -> f32 { value.s2 }
+}
+impl PreparedSphereCoefficient for Blade<8> {
+    fn read(value: Prepared) -> f32 { value.s8 }
+}
+impl PreparedSphereCoefficient for Blade<16> {
+    fn read(value: Prepared) -> f32 { value.s16 }
+}
+
+trait PreparedPointCoefficient { fn read(value: Prepared) -> f32 }
+impl PreparedPointCoefficient for Blade<1> {
+    fn read(value: Prepared) -> f32 { value.p1 }
+}
+impl PreparedPointCoefficient for Blade<2> {
+    fn read(value: Prepared) -> f32 { value.p2 }
+}
+impl PreparedPointCoefficient for Blade<4> {
+    fn read(value: Prepared) -> f32 { value.p4 }
+}
+impl PreparedPointCoefficient for Blade<8> {
+    fn read(value: Prepared) -> f32 { value.p8 }
+}
+impl PreparedPointCoefficient for Blade<16> {
+    fn read(value: Prepared) -> f32 { value.p16 }
+}
+
 trait Eval5 {
-    fn eval5(sphere: Sphere, point: Point) -> Vec5
+    fn eval5(prepared: Prepared) -> Vec5
 }
 
 #[inline(always)]
@@ -274,7 +472,7 @@ fn add5(_ a: Vec5, _ b: Vec5) -> Vec5 {
 
 impl Eval5 for Zero {
     #[inline(always)]
-    fn eval5(sphere: Sphere, point: Point) -> Vec5 {
+    fn eval5(prepared: Prepared) -> Vec5 {
         Vec5 { e1: 0.0, e2: 0.0, e4: 0.0, e8: 0.0, e16: 0.0 }
     }
 }
@@ -282,12 +480,17 @@ impl Eval5 for Zero {
 impl<
     const L: i32, const P: i32, const R: i32,
     const O: i32, const M: i32, const N: i32,
-> Eval5 for Term<L, P, R, O, M, N> {
+> Eval5 for Term<L, P, R, O, M, N>
+    where Blade<L>: PreparedSphereCoefficient,
+          Blade<P>: PreparedPointCoefficient,
+          Blade<R>: PreparedSphereCoefficient,
+{
     #[inline(always)]
-    fn eval5(sphere: Sphere, point: Point) -> Vec5 {
-        let product: f32 = sphere_coeff(sphere, blade: L)
-            * point_coeff(point, blade: P)
-            * sphere_coeff(sphere, blade: R)
+    fn eval5(prepared: Prepared) -> Vec5 {
+        let product: f32 =
+            <Blade<L> as PreparedSphereCoefficient>::read(value: prepared)
+            * <Blade<P> as PreparedPointCoefficient>::read(value: prepared)
+            * <Blade<R> as PreparedSphereCoefficient>::read(value: prepared)
         let scaled: f32 = if M == 1 { product } else { product + product }
         let signed: f32 = if N == 0 { scaled } else { -scaled }
         Vec5 {
@@ -302,12 +505,28 @@ impl<
 
 impl<L: Eval5, R: Eval5> Eval5 for Add<L, R> {
     #[inline(always)]
-    fn eval5(sphere: Sphere, point: Point) -> Vec5 {
+    fn eval5(prepared: Prepared) -> Vec5 {
         add5(
-            <L as Eval5>::eval5(sphere: sphere, point: point),
-            <R as Eval5>::eval5(sphere: sphere, point: point),
+            <L as Eval5>::eval5(prepared: prepared),
+            <R as Eval5>::eval5(prepared: prepared),
         )
     }
+}
+
+#[inline(always)]
+fn eval_specialized(prepared: Prepared) -> Vec5 {
+    // Four typed chunk roots keep compiler normalization bounded while
+    // preserving the canonical Schedule32 term set per DE sample.
+    add5(
+        add5(
+            <ScheduleChunk24<8> as Eval5>::eval5(prepared: prepared),
+            <ScheduleChunk16<8> as Eval5>::eval5(prepared: prepared),
+        ),
+        add5(
+            <ScheduleChunk8<8> as Eval5>::eval5(prepared: prepared),
+            <ScheduleChunk0<8> as Eval5>::eval5(prepared: prepared),
+        ),
+    )
 }
 
 pub fn cga_schedule32_vec5_de_render(
@@ -337,26 +556,37 @@ pub fn cga_schedule32_vec5_de_render(
         let z: f32 = -4.0 + rdz * t
         let radius2: f32 = x * x + y * y + z * z
         let center2: f32 = inv_cx * inv_cx + inv_cy * inv_cy
-        let point: Point = Point {
-            p1: x,
-            p2: y,
-            p4: z,
-            p8: (radius2 - 1.0) * 0.5,
-            p16: (radius2 + 1.0) * 0.5,
+        let point: Point = Cell {
+            head: x,
+            tail: Cell {
+                head: y,
+                tail: Cell {
+                    head: z,
+                    tail: Cell {
+                        head: (radius2 - 1.0) * 0.5,
+                        tail: Cell {
+                            head: (radius2 + 1.0) * 0.5,
+                            tail: Nil {},
+                        },
+                    },
+                },
+            },
         }
-        let sphere: Sphere = Sphere {
-            s1: inv_cx,
-            s2: inv_cy,
-            s8: center2 * 0.5 - 1.0,
-            s16: center2 * 0.5,
+        let sphere: Sphere = Cell {
+            head: inv_cx,
+            tail: Cell {
+                head: inv_cy,
+                tail: Cell {
+                    head: center2 * 0.5 - 1.0,
+                    tail: Cell { head: center2 * 0.5, tail: Nil {} },
+                },
+            },
         }
 
-        // SINGLE_SCHEDULE_TRAVERSAL: all five conformal lanes are produced by
-        // this one typed Schedule<32> interpretation for the current DE sample.
-        let sandwich: Vec5 = <SpecializedSandwich as Eval5>::eval5(
-            sphere: sphere,
-            point: point,
-        )
+        // FOUR_CHUNK_TYPED_EVALUATION: four depth-8 typed roots preserve the
+        // canonical Schedule<32> order and are balanced into all five lanes.
+        let prepared: Prepared = prepare(sphere: sphere, point: point)
+        let sandwich: Vec5 = eval_specialized(prepared: prepared)
         let weight: f32 = sandwich.e16 - sandwich.e8
         let safe_weight: f32 = if weight > -0.0004 { -0.0004 } else { weight }
         let weight_adjust: f32 = safe_weight - weight
