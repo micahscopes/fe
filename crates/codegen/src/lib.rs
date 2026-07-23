@@ -1,5 +1,6 @@
 pub mod actor_manifest;
 mod backend;
+pub mod canonical_interface;
 pub mod dispatch;
 mod function_symbols;
 mod layout;
@@ -16,6 +17,11 @@ pub use actor_manifest::{
 pub use backend::{
     Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend, SpirvBackend,
     WasmBackend, layout_for,
+};
+pub use canonical_interface::{
+    CANONICAL_INTERFACE_PROTOCOL, CANONICAL_INTERFACE_VERSION, CanonicalAbi, CanonicalEndianness,
+    CanonicalField, CanonicalFieldLayout, CanonicalInterfaceError, CanonicalInterfaceManifest,
+    CanonicalLane, CanonicalLaneDecl, CanonicalLayout, CanonicalShape, CanonicalType,
 };
 pub use dispatch::DispatchKind;
 pub use layout::{
