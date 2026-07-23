@@ -45,8 +45,16 @@ Set `FE_BROWSER_CACHE_DIR` to relocate that cache. Set
 base then fails with an actionable error. `SONATINA_DIR` remains an optional
 source/offline override: it may name either a clean reviewed checkout or a
 checkout containing the pinned base, and is never modified. Concurrent
-generations serialize cache mutation with `flock`; every reconstructed checkout
-is removed after the command. The wrapper is invoked internally by
+generations serialize both cache mutation and the temporary `Cargo.lock`
+rewrite with `flock`; the generation lock is acquired before source cleanliness
+is checked, so one build cannot make another clean checkout appear dirty. Every
+reconstructed checkout is removed after the command. Temporary overlay checkouts, browser profiles, and
+lockfile backups stay under the ignored workspace-local `output/demo-tmp`
+directory by default; set `FE_DEMO_TMPDIR` to another explicit workspace path
+when needed. Demo generation disables an inherited `RUSTC_WRAPPER` by default,
+preventing a long-lived compiler-cache daemon from silently putting build
+temporaries outside that workspace; opt in explicitly with
+`FE_DEMO_RUSTC_WRAPPER`. The wrapper is invoked internally by
 `demos/serve.sh`, so users do not need another build command. This is temporary
 infrastructure until `547519d4` (or its upstream replacement) is directly
 fetchable. Legacy `cga-d1` remains the one exception and requires its older

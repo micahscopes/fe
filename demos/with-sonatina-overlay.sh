@@ -67,10 +67,12 @@ if [ "$actual" = "$target" ] && [ -z "$(git -C "$source_dir" status --porcelain)
   exec "$@"
 fi
 
-overlay_root="$(mktemp -d "${TMPDIR:-/tmp}/fe-sonatina-overlay.XXXXXX")"
+demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
+mkdir -p "$demo_tmp_root"
+overlay_root="$(mktemp -d "$demo_tmp_root/fe-sonatina-overlay.XXXXXX")"
 cleanup() {
   case "$overlay_root" in
-    "${TMPDIR:-/tmp}"/fe-sonatina-overlay.*) rm -rf -- "$overlay_root" ;;
+    "$demo_tmp_root"/fe-sonatina-overlay.*) rm -rf -- "$overlay_root" ;;
     *) echo "refusing to remove unexpected overlay path: $overlay_root" >&2 ;;
   esac
 }

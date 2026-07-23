@@ -2,10 +2,13 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
+repo="$(cd "$root/.." && pwd)"
 chrome="${CHROME_BIN:-}"
 if [ -z "$chrome" ]; then for c in google-chrome-stable google-chrome chromium chromium-browser; do command -v "$c" >/dev/null 2>&1 && chrome="$(command -v "$c")" && break; done; fi
 if [ -z "$chrome" ]; then echo "Chrome/Chromium unavailable" >&2; exit 69; fi
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/qcga-chrome.XXXXXX")"; mode="${QCGA_MODE:-verify}"
+demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
+mkdir -p "$demo_tmp_root"
+tmp="$(mktemp -d "$demo_tmp_root/qcga-chrome.XXXXXX")"; mode="${QCGA_MODE:-verify}"
 read -r port debug < <(python3 - <<'PY'
 import socket
 ports=[]

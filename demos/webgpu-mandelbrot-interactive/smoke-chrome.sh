@@ -4,7 +4,10 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 demos="$(cd "$here/.." && pwd)"
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/fe-mandel-chrome.XXXXXX")"
+repo="$(cd "$demos/.." && pwd)"
+demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
+mkdir -p "$demo_tmp_root"
+tmp="$(mktemp -d "$demo_tmp_root/fe-mandel-chrome.XXXXXX")"
 server_pid=""
 chrome_pid=""
 cleanup() {

@@ -3,6 +3,9 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+if [ "${FE_DEMO_GENERATION_LOCK_ACTIVE:-0}" != 1 ]; then
+  exec "$repo/demos/with-fe-generation-lock.sh" "$0" "$@"
+fi
 expected_sonatina="547519d46f9b6191881943fefb7cddd1880e77cf"
 
 if [ -z "${SONATINA_DIR:-}" ]; then
@@ -23,12 +26,14 @@ if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
   exit 2
 fi
 
-lock_backup="$(mktemp "${TMPDIR:-/tmp}/fe-qcga-Cargo.lock.XXXXXX")"
+demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
+mkdir -p "$demo_tmp_root"
+lock_backup="$(mktemp "$demo_tmp_root/fe-qcga-Cargo.lock.XXXXXX")"
 cp "$repo/Cargo.lock" "$lock_backup"
 restore_lock() { cp "$lock_backup" "$repo/Cargo.lock"; rm -f -- "$lock_backup"; }
 trap restore_lock EXIT
 
-( cd "$repo" && cargo \
+( cd "$repo" && RUSTC_WRAPPER="${FE_DEMO_RUSTC_WRAPPER:-}" cargo \
   --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-ir.path=\"$SONATINA_DIR/crates/ir\"" \
   --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-triple.path=\"$SONATINA_DIR/crates/triple\"" \
   --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-codegen.path=\"$SONATINA_DIR/crates/codegen\"" \

@@ -7,11 +7,13 @@ import unittest
 
 DEMOS = pathlib.Path(__file__).resolve().parent
 SERVE = DEMOS / "serve.sh"
+TEST_TMP = DEMOS.parent / "output" / "demo-test-tmp"
 
 
 class DemoServeCommandTests(unittest.TestCase):
     def run_generate(self, demo):
-        with tempfile.TemporaryDirectory() as tmp:
+        TEST_TMP.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as tmp:
             tmp = pathlib.Path(tmp)
             log = tmp / "calls"
             command = tmp / "generate"
@@ -24,6 +26,8 @@ class DemoServeCommandTests(unittest.TestCase):
                 "FE_DEMO_GENERATE_CMD": str(command),
                 "FORCE_DEMO_REGEN": "1",
                 "CALL_LOG": str(log),
+                "FE_DEMO_STATE_DIR": str(tmp / "state"),
+                "FE_DEMO_TMPDIR": str(tmp),
             }
             result = subprocess.run(
                 [str(SERVE), demo],

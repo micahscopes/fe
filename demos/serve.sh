@@ -15,6 +15,9 @@ if [ "$#" -ne 0 ]; then
   echo "usage: demos/serve.sh [DEMO]" >&2
   exit 2
 fi
+if [ "${FE_DEMO_GENERATION_LOCK_ACTIVE:-0}" != 1 ]; then
+  exec "$here/with-fe-generation-lock.sh" "$0" "$demo"
+fi
 
 # Browser-profile generators share the exact 547519d4 Sonatina backend. When a
 # caller provides any checkout containing Fe's fetchable base, reconstruct the
@@ -56,7 +59,9 @@ generate_example() {
     "$FE_DEMO_GENERATE_CMD" "$key"
   else
     (
-      lock_backup="$(mktemp "${TMPDIR:-/tmp}/fe-demo-Cargo.lock.XXXXXX")"
+      demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
+      mkdir -p "$demo_tmp_root"
+      lock_backup="$(mktemp "$demo_tmp_root/fe-demo-Cargo.lock.XXXXXX")"
       cp "$repo/Cargo.lock" "$lock_backup"
       restore_lock() {
         cp "$lock_backup" "$repo/Cargo.lock"
@@ -64,7 +69,7 @@ generate_example() {
       }
       trap restore_lock EXIT
       cd "$repo"
-      cargo \
+      RUSTC_WRAPPER="${FE_DEMO_RUSTC_WRAPPER:-}" cargo \
       --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-ir.path=\"$SONATINA_DIR/crates/ir\"" \
       --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-triple.path=\"$SONATINA_DIR/crates/triple\"" \
       --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-codegen.path=\"$SONATINA_DIR/crates/codegen\"" \
