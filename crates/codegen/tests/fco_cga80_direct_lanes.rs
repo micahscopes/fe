@@ -209,6 +209,10 @@ fn canonical_helpers_publish_schedule32_and_emit_exact_five_lanes() {
     );
     let shape = wasm_shape(&wasm);
     assert_eq!(
+        shape.3, 64,
+        "the 32 canonical products must lower to exactly two f32 multiplies each"
+    );
+    assert_eq!(
         shape.5, 0,
         "the specialized arithmetic must contain no runtime schedule loop"
     );

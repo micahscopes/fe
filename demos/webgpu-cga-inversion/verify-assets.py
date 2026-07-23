@@ -57,6 +57,9 @@ assert reference["shape"] == "inverted_offset_torus_cyclide"
 assert reference["inversion_center_runtime"] is True
 kernel = (GEN / "kernel.fe").read_text()
 algebra = reference["algebra"]
+provider_algebra = algebra.startswith(
+    "canonical Fe helpers shared by a forced typed Schedule<32> witness"
+)
 if algebra == "typed support-specialized recursive Cl(4,1) S*P*S":
     tokens = [
         "recursive type fn MvTF",
@@ -75,13 +78,36 @@ elif algebra.startswith("canonical CTFE-derived Schedule<32>;"):
         "safe_weight",
         "ring_radius",
     ]
+elif provider_algebra:
+    tokens = [
+        "recursive type fn Schedule",
+        "type Schedule32 = Schedule<32>",
+        "struct CanonicalCgaProvider",
+        "for triple in 0..80",
+        'builder.emit_method("e1"',
+        'builder.emit_method("e2"',
+        'builder.emit_method("e4"',
+        'builder.emit_method("e8"',
+        'builder.emit_method("e16"',
+        "safe_weight",
+        "ring_radius",
+    ]
 else:
     raise AssertionError(f"unrecognized CGA algebra contract: {algebra!r}")
 for token in tokens:
     assert token in kernel, f"generated kernel lacks runtime-center cyclide token {token!r}"
+if provider_algebra:
+    assert "trait Eval5" not in kernel
+    assert "ScheduleChunk" not in kernel
 wgsl = (GEN / "frag.wgsl").read_text()
 assert "@fragment" in wgsl and "loop" in wgsl and "sqrt(" in wgsl
-if algebra.startswith("canonical CTFE-derived Schedule<32>;"):
+if provider_algebra:
+    for compile_time_token in ["CanonicalCgaProvider", "builder.emit_method", "triple < 80"]:
+        assert compile_time_token not in wgsl, (
+            f"provider compile-time token leaked into browser WGSL: {compile_time_token!r}"
+        )
+    assert wgsl.count("loop {") == 1, "provider schedule must not become a runtime loop"
+if algebra.startswith("canonical CTFE-derived Schedule<32>;") or provider_algebra:
     actor_manifest = json.loads((GEN / "actor/manifest.json").read_text())
     assert actor_manifest["protocol"] == "fe-web-bundle"
     assert actor_manifest["protocol_version"] == 4
