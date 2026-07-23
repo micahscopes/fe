@@ -71,10 +71,14 @@ resulting dependent ingot through Wasm. Canonical interface v3 passed all 11
 Rust layout/derivation/fail-closed tests and its direct JavaScript codec test.
 All seven browser-runtime suites passed, including the adversarial
 ready-boundary supervision recovery case. Fresh Schedule32 and QCGA bundles
-were generated from that compiler state. Real Chromium/SwiftShader QCGA
-acceptance matched all 16,384 Wasm/GPU pixels at FNV `2368784280`; mutating the
-cross-term control submitted a new typed GPU frame; strict presentation mode
-created zero Workers and performed zero readbacks.
+were generated from that compiler state. Real Chromium/SwiftShader Schedule32
+acceptance matched all 16,384 Wasm/GPU pixels at FNV `3470936828`; its strict
+presentation path created zero Workers, invoked zero Wasm oracle renders, and
+performed zero color or timestamp readbacks. QCGA acceptance likewise matched
+all pixels at FNV `2368784280`; mutating the cross-term control submitted a new
+typed GPU frame; strict presentation mode created zero Workers and performed
+zero readbacks. The subsequent shared-scalar hardening reran the complete
+ground-plan/provider suite: 21/21 passed.
 
 `verify_cga_runtime_reuse.py` correctly failed closed in the fresh worktree
 because QCGA's ignored generated manifest was absent. The immediately preceding
