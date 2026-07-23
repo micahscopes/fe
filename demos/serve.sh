@@ -40,7 +40,7 @@ if [ "${FE_DEMO_GENERATION_LOCK_ACTIVE:-0}" != 1 ]; then
   exec "$here/with-fe-generation-lock.sh" "$0" "${rerun_args[@]}"
 fi
 
-# Browser-profile generators share the exact 547519d4 Sonatina backend. When a
+# Browser-profile generators share the exact ac266c21 Sonatina backend. When a
 # caller provides any checkout containing Fe's fetchable base, reconstruct the
 # reviewed commit internally; cga-d1 deliberately retains its older ed43625b
 # pin. The overlay re-enters this script with its clean b260 checkout.

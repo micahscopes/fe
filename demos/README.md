@@ -67,7 +67,8 @@ preventing a long-lived compiler-cache daemon from silently putting build
 temporaries outside that workspace; opt in explicitly with
 `FE_DEMO_RUSTC_WRAPPER`. The wrapper is invoked internally by
 `demos/serve.sh`, so users do not need another build command. This is temporary
-infrastructure until `547519d4` (or its upstream replacement) is directly
+infrastructure until `ac266c210cad7872fc98380a73b4ca363877bc1f` (or its
+upstream replacement) is directly
 fetchable. Legacy `cga-d1` remains the one exception and requires its older
 reviewed `ed43625b` checkout explicitly.
 

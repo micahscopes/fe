@@ -30,7 +30,7 @@ assert reference["width"] * reference["height"] == 16384
 assert isinstance(reference["fnv1a32"], int)
 assert reference["distinct_colors"] > 8
 assert reference["provenance"] == layout["provenance"]
-assert layout["provenance"]["sonatina_rev"].startswith("547519d4")
+assert layout["provenance"]["sonatina_rev"] == "ac266c210cad7872fc98380a73b4ca363877bc1f"
 kernel = (gen / "kernel.fe").read_text()
 assert "struct PointSupport" in kernel and "struct DualQuadricSupport" in kernel
 wgsl = (gen / "frag.wgsl").read_text()

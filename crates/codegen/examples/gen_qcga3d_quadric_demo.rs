@@ -18,7 +18,7 @@ const VERIFY_LANE: &str = "verify";
 const ORACLE_LANE: &str = "oracle";
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 128;
-const SONATINA_REV: &str = "547519d4";
+const SONATINA_REV: &str = "ac266c210cad7872fc98380a73b4ca363877bc1f";
 const ACTOR_SOURCE: &str = r#"
 use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
 use core::effect_ref::alloc_bytes
