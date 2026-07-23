@@ -1,4 +1,4 @@
-//! Stage the canonical CTFE Schedule<32> + four-chunk Vec5 browser render.
+//! Stage the canonical CTFE Schedule<32> + provider-emitted five-lane render.
 //!
 //! This intentionally writes to `gen-schedule32`; promotion to the live demo is
 //! a separate reviewed operation.
@@ -12,18 +12,18 @@ use std::{
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    BackendKind, CanonicalCapability, CanonicalExecution, CanonicalInterfaceManifest,
-    CanonicalPlacement, OptLevel, WebBuildOptions, WebBundle, WebCanonicalPolicy,
-    canonical_lane_decl_from_entry, compile_runtime_package_spirv_render, layout_for,
+    CanonicalCapability, CanonicalExecution, CanonicalInterfaceManifest, CanonicalPlacement,
+    WasmCompileOptions, WebBuildOptions, WebBundle, WebCanonicalPolicy,
+    canonical_lane_decl_from_entry, compile_runtime_package_spirv_render,
+    compile_runtime_package_wasm_with_options,
 };
 use sonatina_codegen::isa::spirv::{
     Access, LayoutMode, Role, SpirvBuiltinSource, SpirvScalarKind, WordKind,
 };
 use url::Url;
 
-const CANONICAL: &str =
-    include_str!("../tests/fixtures/spirv/cga_schedule_ctfe_specialized_render.fe");
-const BODY: &str = include_str!("../tests/fixtures/spirv/cga_schedule32_vec5_de_render_body.fe");
+const CANONICAL: &str = include_str!("../tests/fixtures/fco_cga80_direct_lanes.fe");
+const BODY: &str = include_str!("../tests/fixtures/spirv/fco_cga80_direct_de_body.fe");
 const NAME: &str = "cga_schedule32_vec5_de_render";
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 128;
@@ -132,54 +132,28 @@ pub fn oracle(request: own FrameRequest) -> AllocatedBrowserBytes {
 "#;
 
 fn composed_source() -> String {
-    let (prefix, _) = CANONICAL
-        .split_once("trait Eval {")
-        .expect("canonical typed-plan interpreter marker");
-    let source = format!("{prefix}\n{BODY}");
-    assert!(source.contains("type RawSpecializedSandwich = Schedule<32>"));
-    assert!(source.contains("ScheduleChunk24<8>"));
+    let (prefix, rest) = CANONICAL
+        .split_once("// BEGIN_PUBLIC_ORACLES")
+        .expect("canonical public-oracle begin marker");
+    let (_, suffix) = rest
+        .split_once("// END_PUBLIC_ORACLES")
+        .expect("canonical public-oracle end marker");
+    let source = format!("{prefix}{suffix}\n{BODY}");
+    assert!(source.contains("type Schedule32 = Schedule<32>"));
     assert!(source.contains("const fn survivor_triple"));
-    assert!(source.contains("trait Eval5"));
-    assert!(source.contains("FOUR_CHUNK_TYPED_EVALUATION"));
-    for chunk in [24, 16, 8, 0] {
-        assert_eq!(
-            BODY.matches(&format!("<ScheduleChunk{chunk}<8> as Eval5>::eval5"))
-                .count(),
-            1,
-        );
-    }
-    let chunk_root_positions = [24, 16, 8, 0].map(|chunk| {
-        BODY.find(&format!("<ScheduleChunk{chunk}<8> as Eval5>::eval5"))
-            .expect("concrete chunk root")
-    });
+    assert!(source.contains("struct CanonicalCgaProvider"));
     assert!(
-        chunk_root_positions
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
-    );
-    let chunk_term_order = [24usize, 16, 8, 0]
-        .into_iter()
-        .flat_map(|offset| (offset..offset + 8).rev())
-        .collect::<Vec<_>>();
-    assert_eq!(chunk_term_order, (0usize..32).rev().collect::<Vec<_>>());
-    for offset in [8, 16, 24] {
-        for field in ["left", "middle", "right", "output", "magnitude", "negative"] {
-            assert!(
-                source.contains(&format!(
-                    "const fn schedule{offset}_{field}(_ i: usize) -> i32 {{ schedule_{field}({offset} + i) }}"
-                )),
-                "chunk {offset} {field} must delegate exactly to the canonical tuple component",
-            );
-        }
-    }
-    assert!(
-        BODY.contains("struct Vec5") && BODY.contains("-> Vec5"),
-        "the five-lane evaluator must explicitly construct and return Vec5",
+        CANONICAL.contains("for triple in 0..80"),
+        "the provider must scan the complete semantic candidate universe",
     );
     assert!(
-        BODY.contains("let sandwich: Vec5 = eval_specialized"),
-        "root traversal must return the explicit five-lane aggregate",
+        ["e1", "e2", "e4", "e8", "e16"]
+            .into_iter()
+            .all(|lane| CANONICAL.contains(&format!("builder.emit_method(\"{lane}\""))),
+        "the provider must emit all five vector lanes directly",
     );
+    assert!(!source.contains("trait Eval5"));
+    assert!(!source.contains("ScheduleChunk"));
     source
 }
 
@@ -192,44 +166,31 @@ fn main() {
     let out = repo.join("demos/webgpu-cga-inversion/gen-schedule32");
     let source = composed_source();
 
-    let mut db = DriverDataBase::default();
-    let url = Url::parse("file:///cga_schedule32_vec5_de_render.fe").unwrap();
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(source.clone()));
-    let file = db.workspace().get(&db, &url).expect("composed source");
-    let top_mod = db.top_mod(file);
-    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
-    assert!(
-        diagnostics.is_empty(),
-        "Schedule32 Vec5 composed source has HIR diagnostics:\n{diagnostics}"
-    );
+    // Analyze one module containing both the canonical kernel and actor lanes.
+    // The kernel package remains rooted at `NAME`, so actor-only functions are
+    // unreachable from its Wasm/SPIR-V artifacts.
     let actor_source = format!("{source}\n{ACTOR_SOURCE}");
-    let mut actor_db = DriverDataBase::default();
+    let mut db = DriverDataBase::default();
     let actor_url = Url::parse("file:///cga_schedule32_actor.fe").unwrap();
-    actor_db
+    db.workspace()
+        .touch(&mut db, actor_url.clone(), Some(actor_source.clone()));
+    let actor_file = db
         .workspace()
-        .touch(&mut actor_db, actor_url.clone(), Some(actor_source.clone()));
-    let actor_file = actor_db
-        .workspace()
-        .get(&actor_db, &actor_url)
+        .get(&db, &actor_url)
         .expect("Schedule32 actor source");
-    let actor_top = actor_db.top_mod(actor_file);
-    let actor_diagnostics = actor_db.run_on_top_mod(actor_top).format_diags(&actor_db);
+    let top_mod = db.top_mod(actor_file);
+    let actor_diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
     assert!(
         actor_diagnostics.is_empty(),
         "Schedule32 canonical actor source has diagnostics:\n{actor_diagnostics}"
     );
-    let actor_declarations =
-        [RENDER_LANE, VERIFY_LANE, ORACLE_LANE].map(|lane| {
-            canonical_lane_decl_from_entry(&actor_db, actor_top, lane, lane)
-                .unwrap_or_else(|error| panic!("derive Schedule32 `{lane}` lane: {error}"))
-        });
+    let actor_declarations = [RENDER_LANE, VERIFY_LANE, ORACLE_LANE].map(|lane| {
+        canonical_lane_decl_from_entry(&db, top_mod, lane, lane)
+            .unwrap_or_else(|error| panic!("derive Schedule32 `{lane}` lane: {error}"))
+    });
     for declaration in &actor_declarations[..2] {
         assert_eq!(declaration.intent.execution, CanonicalExecution::HostEffect);
-        assert_eq!(
-            declaration.intent.placement,
-            CanonicalPlacement::MainThread
-        );
+        assert_eq!(declaration.intent.placement, CanonicalPlacement::MainThread);
         assert_eq!(declaration.intent.capabilities.len(), 1);
         assert_eq!(
             declaration.intent.capabilities[0].capability,
@@ -237,8 +198,14 @@ fn main() {
         );
         assert!(declaration.intent.capabilities[0].mutable);
     }
-    assert_eq!(actor_declarations[2].intent.execution, CanonicalExecution::Wasm);
-    assert_eq!(actor_declarations[2].intent.placement, CanonicalPlacement::Any);
+    assert_eq!(
+        actor_declarations[2].intent.execution,
+        CanonicalExecution::Wasm
+    );
+    assert_eq!(
+        actor_declarations[2].intent.placement,
+        CanonicalPlacement::Any
+    );
     assert!(actor_declarations[2].intent.capabilities.is_empty());
     assert!(actor_declarations[2].export.is_some());
     CanonicalInterfaceManifest::build(actor_declarations.to_vec())
@@ -327,14 +294,17 @@ fn main() {
     assert_eq!(layout.builtin_inputs[1].arg_index, 1);
     assert_eq!(layout.builtin_inputs[1].scalar, SpirvScalarKind::I32);
 
-    let wasm = BackendKind::Wasm
-        .create()
-        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
-        .expect("Schedule32 Vec5 Wasm")
-        .into_bytecode()
-        .expect("Wasm bytecode");
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .expect("Schedule32 Vec5 rooted Wasm")
+            .bytes;
     wasmparser::validate(&wasm).expect("valid Wasm");
     assert_zero_imports(&wasm);
+    assert_eq!(
+        function_exports(&wasm),
+        vec![NAME.to_owned()],
+        "entry-rooted kernel Wasm must not expose generated helpers or actor exports",
+    );
     assert_eq!(
         export_signature(&wasm, NAME),
         (
@@ -419,8 +389,8 @@ fn main() {
     let frame_hash = fnv1a32_words(&frame);
 
     let actor_bundle = WebBundle::compile(
-        &actor_db,
-        actor_top,
+        &db,
+        top_mod,
         WebBuildOptions::render(NAME, Some("cga_schedule32_actor.fe".to_owned()))
             .with_canonical_entries([RENDER_LANE, VERIFY_LANE, ORACLE_LANE])
             .with_canonical_policy(WebCanonicalPolicy::Required),
@@ -461,16 +431,6 @@ fn main() {
     let provenance = provenance(repo, &source);
     let schedule = independently_derived_schedule();
     assert_eq!(schedule.len(), 32);
-    let chunk_schedule = [24usize, 16, 8, 0]
-        .into_iter()
-        .flat_map(|offset| (offset..offset + 8).rev())
-        .map(|index| schedule[index])
-        .collect::<Vec<_>>();
-    assert_eq!(
-        chunk_schedule,
-        schedule.iter().rev().copied().collect::<Vec<_>>(),
-        "four-chunk evaluator must preserve the canonical Schedule<32> tuple order",
-    );
     let schedule_json = schedule
         .iter()
         .map(|tuple| {
@@ -494,6 +454,8 @@ fn main() {
         "actor_wasm": "actor/module.wasm",
         "actor_interface": "actor/interface.js",
         "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE],
+        "kernel_wasm_scope": "entry-rooted fragment only; zero imports; no generated helper or actor exports",
+        "actor_wasm_scope": "separate canonical WebBundle owning actor exports and arena",
         "width": WIDTH, "height": HEIGHT, "provenance": provenance.clone(),
     }))
     .unwrap();
@@ -502,7 +464,7 @@ fn main() {
         "view": [CAM_X, CAM_Y, ZOOM], "inversion_center": [INV_CX, INV_CY],
         "parameter_types": ["F32", "F32", "F32", "F32", "F32"],
         "shape": "inverted_offset_torus_cyclide",
-        "algebra": "canonical CTFE-derived Schedule<32>; four independent depth-8 typed roots balanced into one Vec5 per DE sample",
+        "algebra": "canonical Fe helpers shared by a forced typed Schedule<32> witness and a bounded 80-candidate FCO provider that emits five direct lanes",
         "inversion_center_runtime": true, "fnv1a32": frame_hash,
         "sky_pixels": sky, "hit_pixels": upper + lower,
         "upper_pixels": upper, "lower_pixels": lower, "distinct_colors": distinct.len(),
@@ -515,9 +477,13 @@ fn main() {
             "max_abs_shade_bucket_delta": max_abs_shade_delta,
         },
         "runtime": "wasmtime executing composed Fe Wasm; every pixel semantically checked against independent Rust f32 oracle",
+        "artifact_separation": {
+            "frag_wasm": "entry-rooted kernel package; render export only; zero imports; no generated helper or actor exports",
+            "actor_wasm": "canonical WebBundle package; owns actor exports and arena",
+        },
         "schedule_tuple_fields": ["left_blade", "point_blade", "right_blade", "output_blade", "magnitude", "negative"],
         "canonical_survivor_tuples": schedule_json,
-        "runtime_tuple_order": "canonical survivor indices 31 down to 0",
+        "runtime_tuple_order": "canonical candidate scan order with lane-local accumulation",
         "provenance": provenance,
     })).unwrap();
 
@@ -571,6 +537,22 @@ fn assert_zero_imports(bytes: &[u8]) {
             assert_eq!(reader.count(), 0, "browser Wasm must have zero imports");
         }
     }
+}
+
+fn function_exports(bytes: &[u8]) -> Vec<String> {
+    use wasmparser::{ExternalKind, Payload};
+    let mut names = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let Payload::ExportSection(reader) = payload.expect("Wasm payload") {
+            for export in reader {
+                let export = export.expect("Wasm export");
+                if export.kind == ExternalKind::Func {
+                    names.push(export.name.to_owned());
+                }
+            }
+        }
+    }
+    names
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -974,7 +956,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         &["status", "--porcelain", "--untracked-files=normal"],
     );
     serde_json::json!({
-        "source": "canonical Fe CTFE Schedule<32> composed with isolated Vec5 DE body",
+        "source": "canonical Fe helpers shared by forced typed Schedule<32> and bounded provider-emitted five-lane DE body",
         "fe_rev": fe_rev,
         "fe_dirty": !fe_status.is_empty(),
         "fe_status_fnv1a32": fnv1a32(fe_status.as_bytes()),
@@ -982,12 +964,12 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "sonatina_rev": sonatina_rev,
         "sonatina_dirty": !sonatina_status.is_empty(),
         "sonatina_status_fnv1a32": fnv1a32(sonatina_status.as_bytes()),
-        "canonical_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule_ctfe_specialized_render.fe",
-        "body_fixture": "crates/codegen/tests/fixtures/spirv/cga_schedule32_vec5_de_render_body.fe",
+        "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
+        "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
         "canonical_fnv1a32": fnv1a32(CANONICAL.as_bytes()),
         "body_fnv1a32": fnv1a32(BODY.as_bytes()),
         "composed_source_fnv1a32": fnv1a32(source.as_bytes()),
-        "algebra": "CTFE-derived 80-to-32 typed plan; four independent depth-8 typed roots balanced into one Vec5 per DE sample",
+        "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits five direct lane expressions from the same helpers",
         "generated_unix_secs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
     })
 }

@@ -4,7 +4,7 @@ extern {
     const fn __bitcast<From, To>(_: From) -> To
 }
 
-pub fn cga_fco_direct_de_render(
+pub fn cga_schedule32_vec5_de_render(
     px: i32,
     py: i32,
     cam_x: f32,
