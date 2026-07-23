@@ -527,10 +527,23 @@ function createCanonicalDispatchAdapter(adapter, invoke, {
   }
   const states = new Map();
 
+  const finishEntry = (entry) => {
+    entry.signal?.removeEventListener("abort", entry.onAbort);
+  };
   const run = (lane, state, entry) => {
+    if (entry.cancelled) {
+      const next = state.pending.shift();
+      if (next) run(lane, state, next);
+      else state.active = false;
+      return;
+    }
     state.active = true;
-    Promise.resolve().then(() => invoke(lane, entry.payload)).then(
+    entry.active = true;
+    Promise.resolve().then(() => invoke(lane, entry.payload, {
+      signal: entry.signal,
+    })).then(
       (value) => {
+        if (entry.cancelled) return;
         try {
           adapter.responseValidators[lane](value);
           entry.resolve(value);
@@ -540,12 +553,17 @@ function createCanonicalDispatchAdapter(adapter, invoke, {
           ));
         }
       },
-      (error) => entry.reject(
-        error?.name === "CanonicalActorError"
-          ? error
-          : actorError(failureCode, `${lane} ${failureDescription}`),
-      ),
+      (error) => {
+        if (!entry.cancelled) {
+          entry.reject(
+            error?.name === "CanonicalActorError"
+              ? error
+              : actorError(failureCode, `${lane} ${failureDescription}`),
+          );
+        }
+      },
     ).finally(() => {
+      finishEntry(entry);
       const next = state.pending.shift();
       if (next) run(lane, state, next);
       else state.active = false;
@@ -554,7 +572,7 @@ function createCanonicalDispatchAdapter(adapter, invoke, {
 
   return Object.freeze({
     ...adapter,
-    dispatch(request) {
+    dispatch(request, { signal } = {}) {
       const lane = request?.lane;
       if (!Object.hasOwn(adapter.requestSchema, lane)) {
         return Promise.reject(actorError(
@@ -571,20 +589,51 @@ function createCanonicalDispatchAdapter(adapter, invoke, {
       } catch (error) {
         return Promise.reject(error);
       }
+      if (signal !== undefined
+          && (!signal || typeof signal.aborted !== "boolean"
+            || typeof signal.addEventListener !== "function"
+            || typeof signal.removeEventListener !== "function")) {
+        return Promise.reject(new TypeError("canonical dispatch signal must be an AbortSignal"));
+      }
+      if (signal?.aborted) {
+        return Promise.reject(actorError("FE_ACTOR_ABORTED", `${lane} request was aborted`));
+      }
       const state = states.get(lane) ?? { active: false, pending: [] };
       states.set(lane, state);
       return new Promise((resolve, reject) => {
-        const entry = { payload: request.payload, resolve, reject };
+        const entry = {
+          payload: request.payload,
+          resolve,
+          reject,
+          signal,
+          active: false,
+          cancelled: false,
+          onAbort: null,
+        };
+        entry.onAbort = () => {
+          if (entry.cancelled) return;
+          entry.cancelled = true;
+          if (!entry.active) {
+            const index = state.pending.indexOf(entry);
+            if (index >= 0) state.pending.splice(index, 1);
+            finishEntry(entry);
+          }
+          reject(actorError("FE_ACTOR_ABORTED", `${lane} request was aborted`));
+        };
+        signal?.addEventListener("abort", entry.onAbort, { once: true });
         if (!state.active) {
           run(lane, state, entry);
           return;
         }
         if (maxPendingPerLane === 0) {
+          finishEntry(entry);
           reject(actorError("FE_ACTOR_BUSY", `${lane} already has an active request`));
           return;
         }
         while (state.pending.length >= maxPendingPerLane) {
-          state.pending.shift().reject(actorError(
+          const superseded = state.pending.shift();
+          finishEntry(superseded);
+          superseded.reject(actorError(
             "FE_ACTOR_SUPERSEDED", `${lane} pending request was superseded`,
           ));
         }
@@ -676,12 +725,13 @@ export function createCanonicalHostEffectAdapter(
   }
   return createCanonicalDispatchAdapter(
     adapter,
-    (lane, payload) => {
+    (lane, payload, context) => {
       const handler = selected[lane];
       if (!handler) {
         throw actorError("FE_ACTOR_UNHANDLED_EFFECT", `${lane} has no host-effect handler`);
       }
-      return Promise.resolve().then(() => handler(payload)).catch(() => {
+      return Promise.resolve().then(() => handler(payload, context)).catch((error) => {
+        if (error?.name === "CanonicalActorError") throw error;
         throw actorError("FE_ACTOR_HOST_EFFECT", `${lane} host-effect handler failed`);
       });
     },

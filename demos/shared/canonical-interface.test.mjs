@@ -358,6 +358,43 @@ const hostBytes = await newestHostEffect;
 assert.deepEqual(hostBytes, new Uint8Array([3]));
 assert.deepEqual(hostEffectCalls, [1, 3]);
 assert.deepEqual(hostEffects.transferResult(hostBytes, { lane: "echo" }), [hostBytes.buffer]);
+
+let releaseAbortProbe;
+let activeAbortSignal;
+const abortProbeCalls = [];
+const abortableHostEffects = createCanonicalHostEffectAdapter(
+  hostManifest,
+  hostCompiled,
+  {
+    echo: async (request, { signal }) => {
+      abortProbeCalls.push(request.tag);
+      activeAbortSignal = signal;
+      await new Promise((resolve) => { releaseAbortProbe = resolve; });
+      return new Uint8Array([request.tag]);
+    },
+  },
+  { maxPendingPerLane: 1 },
+);
+const activeAbortController = new AbortController();
+const activeAbortProbe = abortableHostEffects.dispatch(
+  { lane: "echo", payload: hostRequest(4) },
+  { signal: activeAbortController.signal },
+);
+while (!releaseAbortProbe) await Promise.resolve();
+activeAbortController.abort();
+await assert.rejects(activeAbortProbe, /FE_ACTOR_ABORTED/);
+assert.equal(activeAbortSignal.aborted, true, "active handler receives abort propagation");
+const queuedAbortController = new AbortController();
+const queuedAbortProbe = abortableHostEffects.dispatch(
+  { lane: "echo", payload: hostRequest(5) },
+  { signal: queuedAbortController.signal },
+);
+queuedAbortController.abort();
+await assert.rejects(queuedAbortProbe, /FE_ACTOR_ABORTED/);
+releaseAbortProbe();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.deepEqual(abortProbeCalls, [4], "aborted pending effect is removed before dispatch");
+
 await assert.rejects(
   hostEffects.dispatch({ lane: "echo", payload: hostRequest(9) }),
   (error) => String(error).includes("FE_ACTOR_HOST_EFFECT: echo host-effect handler failed")

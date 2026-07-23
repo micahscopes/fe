@@ -13,8 +13,10 @@ async, and capability work can extend.
 Canonical lane manifests now derive nominal request and response records from
 Fe semantic signatures, cross-check the emitted Wasm arena ABI, and generate
 the JavaScript codecs and actor/host-effect adapters. Callers select lane names
-but do not restate record fields or typed-array schemas. Actor protocol-v2
+but do not restate record fields or typed-array schemas. Actor protocol-v3
 envelopes remain transport framing, separate from the canonical payload ABI.
+Protocol v3 adds correlated `cancel` messages and propagates an `AbortSignal`
+into Worker and WebGPU host dispatch.
 
 The remaining boundary is deliberately narrower than the Component Model:
 canonical version 1 supports fixed-layout records, scalar leaves, owned bytes,
@@ -120,7 +122,7 @@ interface {
 
 The generated interface module derives actor request/result validators and
 Wasm/host-effect adapters directly from this interface. Existing actor
-protocol-v2 envelopes remain the transport framing.
+protocol-v3 envelopes remain the transport framing.
 
 ## Implementation surfaces
 

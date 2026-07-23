@@ -145,10 +145,10 @@ export function createTypedGpuActorClient(port, {
   const endpoint = createActorEndpoint({ transport: createMessagePortActorTransport(port),
     initialEpoch, requestSchema, resultSchema });
   let requestId = 0;
-  const request = async (lane, payload, generation = 0) => {
+  const request = async (lane, payload, generation = 0, options) => {
     const result = await endpoint.request(actorEnvelope({ type: "request", lane,
       actorEpoch: endpoint.epoch(), generation, requestId: ++requestId,
-      payload }));
+      payload }), options);
     if (!result.payload.ok) throw new Error(result.payload.error);
     return result.payload.value;
   };
@@ -193,12 +193,15 @@ export function createTypedMainThreadGpuBroker(port, {
       actorEpoch: request.actorEpoch, generation: request.generation,
       requestId: request.requestId, payload }));
   };
-  const start = (request) => {
+  const start = (task) => {
+    const { request } = task;
     const lane = lanes[request.lane];
-    lane.active = request;
-    Promise.resolve().then(() => lane.run(request.payload, request)).then(
-      (value) => reply(request, { ok: true, value }),
-      () => reply(request, { ok: false, error: "FE_ACTOR_GPU_EFFECT" }),
+    lane.active = task;
+    Promise.resolve().then(() => lane.run(request.payload, request, {
+      signal: task.controller.signal,
+    })).then(
+      (value) => { if (!task.cancelled) reply(request, { ok: true, value }); },
+      () => { if (!task.cancelled) reply(request, { ok: false, error: "FE_ACTOR_GPU_EFFECT" }); },
     ).finally(() => {
       lane.active = null;
       const next = lane.pending;
@@ -210,8 +213,23 @@ export function createTypedMainThreadGpuBroker(port, {
     const request = event.data;
     try {
       validateActorEnvelope(request);
-      if (request.type !== "request" || request.actorEpoch !== epoch) return;
+      if (request.actorEpoch !== epoch) return;
       if (!Object.hasOwn(lanes, request.lane)) return;
+      if (request.type === "cancel") {
+        const lane = lanes[request.lane];
+        for (const slot of ["active", "pending"]) {
+          const task = lane[slot];
+          if (task?.request.requestId === request.requestId
+              && task.request.generation === request.generation) {
+            task.cancelled = true;
+            task.controller.abort();
+            if (slot === "pending") lane.pending = null;
+            return;
+          }
+        }
+        return;
+      }
+      if (request.type !== "request") return;
       requestSchema[request.lane](request.payload);
     } catch { return; }
     if (request.generation < latestGeneration) {
@@ -220,11 +238,15 @@ export function createTypedMainThreadGpuBroker(port, {
     }
     latestGeneration = request.generation;
     const lane = lanes[request.lane];
+    const task = { request, controller: new AbortController(), cancelled: false };
     if (lane.active) {
-      if (lane.pending) reply(lane.pending,
-        { ok: false, error: "superseded by newer GPU request" });
-      lane.pending = request;
-    } else start(request);
+      if (lane.pending) {
+        lane.pending.cancelled = true;
+        lane.pending.controller.abort();
+        reply(lane.pending.request, { ok: false, error: "superseded by newer GPU request" });
+      }
+      lane.pending = task;
+    } else start(task);
   };
   port.addEventListener("message", onMessage);
   port.start?.();
@@ -232,7 +254,15 @@ export function createTypedMainThreadGpuBroker(port, {
     close() { if (closed) return; closed = true; port.removeEventListener("message", onMessage); port.close?.(); },
     restart(nextEpoch = epoch + 1) {
       for (const lane of Object.values(lanes)) {
-        if (lane.pending) reply(lane.pending, { ok: false, error: "GPU actor restarted" });
+        if (lane.active) {
+          lane.active.cancelled = true;
+          lane.active.controller.abort();
+        }
+        if (lane.pending) {
+          lane.pending.cancelled = true;
+          lane.pending.controller.abort();
+          reply(lane.pending.request, { ok: false, error: "GPU actor restarted" });
+        }
         lane.pending = null;
       }
       epoch = nextEpoch;
@@ -241,8 +271,8 @@ export function createTypedMainThreadGpuBroker(port, {
     },
     epoch: () => epoch,
     state: () => Object.fromEntries(laneNames.map((lane) => [lane, {
-      active: lanes[lane].active?.requestId ?? null,
-      pending: lanes[lane].pending?.requestId ?? null,
+      active: lanes[lane].active?.request.requestId ?? null,
+      pending: lanes[lane].pending?.request.requestId ?? null,
     }])),
   });
 }

@@ -35,7 +35,7 @@ The current system is actorized at a precise browser boundary:
 ```text
 Fe signatures + effects
   -> compiler-owned nominal ABI, schemas, lane intents, transfer policy
-  -> generated protocol-v2 endpoint / Worker / MessagePort / GPU modules
+  -> generated protocol-v3 endpoint / Worker / MessagePort / GPU modules
   -> explicit application dispatchers and browser capability handlers
 ```
 

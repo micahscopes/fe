@@ -20,6 +20,15 @@ const sample = actorEnvelope({
 });
 assert.equal(sample.version, ACTOR_PROTOCOL_VERSION);
 assert.deepEqual(validateActorEnvelope(structuredClone(sample)), sample);
+const cancel = actorEnvelope({
+  type: "cancel", lane: "render", actorEpoch: 0,
+  generation: 3, requestId: 7, payload: null,
+});
+assert.deepEqual(validateActorEnvelope(structuredClone(cancel)), cancel);
+assert.throws(() => actorEnvelope({
+  type: "cancel", lane: "render", actorEpoch: 0,
+  generation: 3, requestId: 7, payload: {},
+}), /payload must be null/);
 assert.equal(validateActorLaneName("compile.tile-2"), "compile.tile-2");
 for (const lane of ["", "Render", "2render", "render/now", "render..now", "render_", "a".repeat(65)]) {
   assert.throws(() => actorEnvelope({ type: "request", lane, generation: 0,

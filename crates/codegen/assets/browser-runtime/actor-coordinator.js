@@ -1,7 +1,7 @@
 // Environment-neutral phase-0 actor protocol for demo work scheduling.
 // It deliberately owns no timers, animation frames, workers, or DOM state.
 
-export const ACTOR_PROTOCOL_VERSION = 2;
+export const ACTOR_PROTOCOL_VERSION = 3;
 
 // Protocol lanes are compiler-addressable identifiers, not a closed rendering
 // enum. Policy layers (such as createActorCoordinator below) may expose a fixed
@@ -45,11 +45,16 @@ function cloneSafe(value, path = "payload", seen = new Set()) {
 }
 
 export function actorEnvelope({ type, lane, actorEpoch = 0, generation, requestId, payload = null }) {
-  if (type !== "request" && type !== "result") throw new TypeError("invalid envelope type");
+  if (type !== "request" && type !== "result" && type !== "cancel") {
+    throw new TypeError("invalid envelope type");
+  }
   validateActorLaneName(lane);
   nonNegativeInteger(actorEpoch, "actorEpoch");
   nonNegativeInteger(generation, "generation");
   nonNegativeInteger(requestId, "requestId");
+  if (type === "cancel" && payload !== null) {
+    throw new TypeError("cancel envelope payload must be null");
+  }
   cloneSafe(payload);
   return {
     protocol: "fe-browser-actor",

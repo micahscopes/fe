@@ -183,4 +183,47 @@ assert.throws(
 );
 typedClient.close();
 typedBroker.close();
-console.log("shared GPU actor bounded lanes, typed replies, and stale generations: ok");
+
+const abortGpuChannel = new MessageChannel();
+const abortGpuJobs = [];
+const abortGpuBroker = createTypedMainThreadGpuBroker(abortGpuChannel.port1, {
+  handlers: {
+    draw(payload, _request, { signal }) {
+      const job = deferred();
+      abortGpuJobs.push({ payload, signal, job });
+      return job.promise;
+    },
+    effect: () => ({ doubled: 0 }),
+    malformed: () => ({ doubled: 0 }),
+  },
+  ...generatedSchemas,
+});
+const abortGpuClient = createTypedGpuActorClient(abortGpuChannel.port2, generatedSchemas);
+const activeGpuAbort = new AbortController();
+const activeGpu = abortGpuClient.request(
+  "draw", { value: 10 }, 1, { signal: activeGpuAbort.signal },
+);
+await tick();
+activeGpuAbort.abort();
+await assert.rejects(activeGpu, (error) => error.code === "FE_ACTOR_ABORTED");
+await tick();
+assert.equal(abortGpuJobs[0].signal.aborted, true);
+const queuedGpuAbort = new AbortController();
+const queuedGpu = abortGpuClient.request(
+  "draw", { value: 11 }, 1, { signal: queuedGpuAbort.signal },
+);
+queuedGpuAbort.abort();
+await assert.rejects(queuedGpu, (error) => error.code === "FE_ACTOR_ABORTED");
+await tick();
+abortGpuJobs[0].job.resolve({ doubled: 20 });
+await tick();
+assert.equal(abortGpuJobs.length, 1, "cancelled pending GPU request never reaches handler");
+assert.deepEqual(abortGpuBroker.state(), {
+  draw: { active: null, pending: null },
+  effect: { active: null, pending: null },
+  malformed: { active: null, pending: null },
+});
+abortGpuClient.close();
+abortGpuBroker.close();
+
+console.log("shared GPU actor bounded lanes, typed replies, cancellation, and stale generations: ok");

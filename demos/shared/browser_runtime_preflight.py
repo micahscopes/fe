@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 RUNTIME_PROTOCOL = "fe-browser-actor-runtime"
-RUNTIME_PROTOCOL_VERSION = 1
+RUNTIME_PROTOCOL_VERSION = 2
 RUNTIME_PATHS = (
     "runtime/actor-coordinator.js",
     "runtime/actor-endpoint.js",

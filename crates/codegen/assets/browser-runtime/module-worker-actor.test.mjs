@@ -114,6 +114,39 @@ assert.deepEqual(await gatedRequest, new Int32Array([9]));
 assert.deepEqual(GatedRestartWorker.requestEpochs, [1]);
 gated.close();
 
+class CancelWorker extends FakeWorker {
+  static messages = [];
+  postMessage(message, transfer) {
+    this.message = message; this.transfer = transfer;
+    message.port.addEventListener("message", ({ data }) => {
+      CancelWorker.messages.push(data);
+    });
+    message.port.start();
+    queueMicrotask(() => message.port.postMessage({ type: "ready" }));
+  }
+}
+const cancellable = await createCanonicalModuleWorkerActor({
+  workerUrl: "cancel.js", adapter: canonicalAdapter, WorkerCtor: CancelWorker,
+});
+const cancelController = new AbortController();
+const cancelArgs = new Int32Array([12]);
+const cancelledRequest = cancellable.request(
+  "render",
+  { args: cancelArgs },
+  2,
+  { signal: cancelController.signal },
+);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(cancelArgs.byteLength, 0, "request ownership transfers before later cancellation");
+cancelController.abort();
+await assert.rejects(cancelledRequest, (error) => error.code === "FE_ACTOR_ABORTED");
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.deepEqual(CancelWorker.messages.map(({ type, requestId }) => [type, requestId]), [
+  ["request", 1],
+  ["cancel", 1],
+]);
+cancellable.close();
+
 FakeWorker.replies = [{ type: "init-error", error: "bad wasm" }];
 await assert.rejects(createModuleWorkerActor({ workerUrl: "bad.js", ...schemas,
   WorkerCtor: FakeWorker }), /FE_ACTOR_WORKER_PROTOCOL/);

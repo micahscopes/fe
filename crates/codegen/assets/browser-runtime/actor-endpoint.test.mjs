@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { actorEnvelope } from "./actor-coordinator.js";
 import {
   ActorEndpointClosedError,
+  ActorEndpointAbortError,
   ActorEndpointBusyError,
   ActorEndpointResetError,
   actorField,
@@ -29,8 +30,10 @@ const request = (lane, epoch, generation, requestId, payload) => actorEnvelope({
 });
 
 const delayed = [];
+const cancelled = [];
 const transport = {
   send(message, deliver) { delayed.push({ message, deliver }); },
+  cancel(message) { cancelled.push(message); },
   close() {},
   reset() {},
 };
@@ -55,6 +58,34 @@ delayed[0].deliver(actorEnvelope({ type: "result", lane: "verify", actorEpoch: 0
   generation: 1, requestId: 1, payload: { ok: true, value: "first result" } }));
 assert.equal((await first).payload.value, "first result");
 assert.equal(endpoint.pendingCount(), 0);
+
+// Abort rejects locally, emits one protocol cancellation, and ignores a late result.
+const abortController = new AbortController();
+const aborted = endpoint.request(
+  request("verify", 0, 2, 7, { label: "abort me" }),
+  { signal: abortController.signal },
+);
+const abortedDelivery = delayed.at(-1);
+abortController.abort();
+await assert.rejects(aborted, (error) =>
+  error instanceof ActorEndpointAbortError && error.code === "FE_ACTOR_ABORTED");
+assert.equal(endpoint.pendingCount(), 0);
+assert.deepEqual(cancelled, [request("verify", 0, 2, 7, { label: "abort me" })]);
+assert.equal(abortedDelivery.deliver(actorEnvelope({
+  type: "result", lane: "verify", actorEpoch: 0,
+  generation: 2, requestId: 7, payload: { ok: true, value: "too late" },
+})), false);
+const alreadyAborted = new AbortController();
+alreadyAborted.abort();
+const sendsBeforePreAbort = delayed.length;
+await assert.rejects(
+  endpoint.request(
+    request("verify", 0, 2, 8, { label: "never sent" }),
+    { signal: alreadyAborted.signal },
+  ),
+  ActorEndpointAbortError,
+);
+assert.equal(delayed.length, sendsBeforePreAbort, "pre-aborted request is never transferred");
 
 // Duplicate results and duplicate request IDs are rejected without republishing.
 assert.equal(delayed[0].deliver(actorEnvelope({ type: "result", lane: "verify", actorEpoch: 0,

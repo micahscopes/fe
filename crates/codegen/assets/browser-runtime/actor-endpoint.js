@@ -22,6 +22,14 @@ export class ActorEndpointBusyError extends Error {
   }
 }
 
+export class ActorEndpointAbortError extends Error {
+  constructor(message = "actor request aborted") {
+    super(message);
+    this.name = "ActorEndpointAbortError";
+    this.code = "FE_ACTOR_ABORTED";
+  }
+}
+
 function validatePayload(schema, envelope, direction) {
   const validator = schema && Object.hasOwn(schema, envelope.lane)
     ? schema[envelope.lane]
@@ -147,7 +155,10 @@ export function createActorEndpoint({
   const seen = new Set();
 
   const rejectPending = (error) => {
-    for (const entry of pending.values()) entry.reject(error);
+    for (const entry of pending.values()) {
+      entry.cleanupAbort();
+      entry.reject(error);
+    }
     pending.clear();
   };
 
@@ -165,6 +176,7 @@ export function createActorEndpoint({
     } catch (error) {
       if (candidateEntry) {
         pending.delete(candidateId);
+        candidateEntry.cleanupAbort();
         candidateEntry.reject(error);
       } else {
         try { onProtocolError(error, result); } catch { /* reporting cannot break transport */ }
@@ -181,10 +193,12 @@ export function createActorEndpoint({
       validatePayload(resultSchema, result, "result");
     } catch (error) {
       pending.delete(result.requestId);
+      entry.cleanupAbort();
       entry.reject(error);
       return false;
     }
     pending.delete(result.requestId);
+    entry.cleanupAbort();
     entry.resolve(result);
     return true;
   };
@@ -194,12 +208,19 @@ export function createActorEndpoint({
     closed: () => closed,
     pendingCount: () => pending.size,
     accept,
-    request(request) {
+    request(request, { signal } = {}) {
       validateActorEnvelope(request);
       if (request.type !== "request") throw new TypeError("endpoint sends only request envelopes");
+      if (signal !== undefined
+          && (!signal || typeof signal.aborted !== "boolean"
+            || typeof signal.addEventListener !== "function"
+            || typeof signal.removeEventListener !== "function")) {
+        throw new TypeError("request signal must be an AbortSignal");
+      }
       if (closed) return Promise.reject(new ActorEndpointClosedError());
       if (request.actorEpoch !== epoch) return Promise.reject(new ActorEndpointResetError());
       validatePayload(requestSchema, request, "request");
+      if (signal?.aborted) return Promise.reject(new ActorEndpointAbortError());
       if (pending.size >= maxPending) {
         return Promise.reject(new ActorEndpointBusyError());
       }
@@ -208,11 +229,26 @@ export function createActorEndpoint({
       }
       seen.add(request.requestId);
       return new Promise((resolve, reject) => {
-        pending.set(request.requestId, { request, resolve, reject });
+        const onAbort = () => {
+          const entry = pending.get(request.requestId);
+          if (!entry) return;
+          pending.delete(request.requestId);
+          entry.cleanupAbort();
+          try {
+            transport.cancel?.(request);
+          } catch (error) {
+            try { onProtocolError(error, { hook: "cancel", request }); } catch {}
+          }
+          reject(new ActorEndpointAbortError());
+        };
+        const cleanupAbort = () => signal?.removeEventListener("abort", onAbort);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        pending.set(request.requestId, { request, resolve, reject, cleanupAbort });
         try {
           transport.send(request, accept);
         } catch (error) {
           pending.delete(request.requestId);
+          cleanupAbort();
           reject(error);
         }
       });

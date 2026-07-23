@@ -113,7 +113,91 @@ assert.deepEqual((await malformedRequestReply).payload, {
   error: "FE_ACTOR_PROTOCOL",
 });
 assert.equal(malformedDispatches, 0, "malformed request never reaches host dispatch");
+const malformedCancelReply = new Promise((resolve) => {
+  malformedRequestChannel.port1.addEventListener("message", ({ data }) => resolve(data), {
+    once: true,
+  });
+});
+malformedRequestChannel.port1.postMessage({
+  ...actorEnvelope({
+    type: "cancel", lane: "verify", actorEpoch: 0,
+    generation: 1, requestId: 6, payload: null,
+  }),
+  surplus: true,
+});
+assert.deepEqual((await malformedCancelReply).payload, {
+  ok: false,
+  error: "FE_ACTOR_PROTOCOL",
+});
+assert.equal(malformedDispatches, 0, "malformed cancel never reaches host dispatch");
 malformedRequestChannel.port1.close();
 detachMalformedRequest();
 
-console.log("protocol-v2 MessagePort actor transport/host: ok");
+const abortChannel = new MessageChannel();
+let hostAbortSignal;
+let settleAbortedHost;
+const abortedHostWork = new Promise((resolve) => { settleAbortedHost = resolve; });
+const detachAbort = attachMessagePortActorHost(
+  abortChannel.port2,
+  (_request, { signal }) => {
+    hostAbortSignal = signal;
+    return abortedHostWork;
+  },
+  { maxInFlight: 1 },
+);
+const abortEndpoint = createActorEndpoint({
+  transport: createMessagePortActorTransport(abortChannel.port1),
+  requestSchema: schema,
+  resultSchema: results,
+});
+const abortController = new AbortController();
+const abortPending = abortEndpoint.request(actorEnvelope({
+  type: "request", lane: "verify", actorEpoch: 0,
+  generation: 1, requestId: 7, payload: { value: 1 },
+}), { signal: abortController.signal });
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(hostAbortSignal.aborted, false);
+abortController.abort();
+await assert.rejects(abortPending, (error) => error.code === "FE_ACTOR_ABORTED");
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(hostAbortSignal.aborted, true, "cancel envelope aborts host dispatch signal");
+assert.equal(abortEndpoint.pendingCount(), 0);
+settleAbortedHost(2);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(abortEndpoint.pendingCount(), 0, "late cancelled host value is suppressed");
+abortEndpoint.close();
+detachAbort();
+
+const boundedHostChannel = new MessageChannel();
+let releaseBounded;
+const boundedHostWork = new Promise((resolve) => { releaseBounded = resolve; });
+const detachBoundedHost = attachMessagePortActorHost(
+  boundedHostChannel.port2,
+  () => boundedHostWork,
+  { maxInFlight: 1 },
+);
+const boundedReplies = [];
+boundedHostChannel.port1.addEventListener("message", ({ data }) => boundedReplies.push(data));
+boundedHostChannel.port1.start();
+for (const requestId of [8, 9]) {
+  boundedHostChannel.port1.postMessage(actorEnvelope({
+    type: "request", lane: "verify", actorEpoch: 0,
+    generation: 1, requestId, payload: { value: requestId },
+  }));
+}
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.deepEqual(boundedReplies.map(({ requestId, payload }) => [requestId, payload]), [
+  [9, { ok: false, error: "FE_ACTOR_BUSY" }],
+]);
+boundedHostChannel.port1.postMessage(actorEnvelope({
+  type: "cancel", lane: "verify", actorEpoch: 0,
+  generation: 1, requestId: 8, payload: null,
+}));
+await new Promise((resolve) => setTimeout(resolve, 0));
+releaseBounded(16);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(boundedReplies.length, 1, "cancelled host work publishes no late result");
+boundedHostChannel.port1.close();
+detachBoundedHost();
+
+console.log("protocol-v3 MessagePort actor cancellation/transport/host: ok");

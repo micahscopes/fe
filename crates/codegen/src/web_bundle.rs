@@ -34,7 +34,7 @@ use crate::{
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
 pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 4;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
-pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 1;
+pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 2;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
@@ -815,6 +815,8 @@ fn canonical_interface_declarations(
     output.push_str(
         "\nexport interface CanonicalActorRequest<Lane extends string, Payload> {\n  \
          lane: Lane;\n  payload: Payload;\n}\n\
+         export interface CanonicalActorContext {\n  \
+         readonly signal: AbortSignal;\n}\n\
          export interface CanonicalActorShape {\n  \
          readonly requestSchema: Readonly<Record<string, (value: unknown) => void>>;\n  \
          readonly resultSchema: Readonly<Record<string, (value: unknown) => void>>;\n  \
@@ -826,7 +828,7 @@ fn canonical_interface_declarations(
     for lane in &interface.lanes {
         let name = canonical_type_name(&lane.name);
         output.push_str(&format!(
-            "  dispatch(request: CanonicalActorRequest<{:?}, {name}Request>): Promise<{name}Response>;\n",
+            "  dispatch(request: CanonicalActorRequest<{:?}, {name}Request>, context?: CanonicalActorContext): Promise<{name}Response>;\n",
             lane.name
         ));
     }
@@ -837,7 +839,7 @@ fn canonical_interface_declarations(
     for lane in &interface.lanes {
         let name = canonical_type_name(&lane.name);
         output.push_str(&format!(
-            "  {:?}?: (request: {name}Request) => {name}Response | PromiseLike<{name}Response>;\n",
+            "  {:?}?: (request: {name}Request, context: CanonicalActorContext) => {name}Response | PromiseLike<{name}Response>;\n",
             lane.name
         ));
     }
