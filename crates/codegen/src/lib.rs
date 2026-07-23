@@ -22,7 +22,7 @@ pub use canonical_interface::{
     CANONICAL_INTERFACE_PROTOCOL, CANONICAL_INTERFACE_VERSION, CanonicalAbi, CanonicalEndianness,
     CanonicalField, CanonicalFieldLayout, CanonicalInterfaceError, CanonicalInterfaceManifest,
     CanonicalLane, CanonicalLaneDecl, CanonicalLayout, CanonicalShape, CanonicalType,
-    canonical_lane_decl_from_entry, canonical_type_from_semantic,
+    canonical_lane_decl_from_entry, canonical_type_from_semantic, verify_canonical_wasm_abi,
 };
 pub use dispatch::DispatchKind;
 pub use layout::{
@@ -45,6 +45,6 @@ pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expe
 pub use web_bundle::{
     WEB_BUNDLE_PROTOCOL, WEB_BUNDLE_PROTOCOL_VERSION, WebArtifactManifest, WebBinding,
     WebBindingAccess, WebBindingMember, WebBindingRole, WebBuildOptions, WebBuiltinInput,
-    WebBuiltinSource, WebBundle, WebBundleError, WebBundleManifest, WebBundleMode, WebLayout,
-    WebProvenance, WebResult, WebScalarKind,
+    WebBuiltinSource, WebBundle, WebBundleError, WebBundleManifest, WebBundleMode,
+    WebCanonicalPolicy, WebCanonicalStatus, WebLayout, WebProvenance, WebResult, WebScalarKind,
 };

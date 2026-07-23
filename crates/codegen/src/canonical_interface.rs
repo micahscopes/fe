@@ -17,6 +17,7 @@ use hir::{
     hir_def::{FieldParent, TopLevelMod},
 };
 use serde::{Deserialize, Serialize};
+use wasmparser::{CompositeInnerType, ExternalKind, Payload, TypeRef, ValType};
 
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
 pub const CANONICAL_INTERFACE_VERSION: u32 = 1;
@@ -320,6 +321,143 @@ pub fn canonical_type_from_semantic<'db>(
     Ok(CanonicalType::Record(fields))
 }
 
+/// Verify the complete milestone-1 canonical ABI against emitted Wasm.
+pub fn verify_canonical_wasm_abi(
+    wasm: &[u8],
+    interface: &CanonicalInterfaceManifest,
+) -> Result<(), CanonicalInterfaceError> {
+    wasmparser::validate(wasm)
+        .map_err(|error| self::error(format!("canonical ABI received invalid Wasm: {error}")))?;
+    let mut types = Vec::<Option<(Vec<ValType>, Vec<ValType>)>>::new();
+    let mut imported_functions = Vec::<u32>::new();
+    let mut defined_functions = Vec::<u32>::new();
+    let mut function_exports = std::collections::BTreeMap::<String, u32>::new();
+    let mut memories = Vec::<wasmparser::MemoryType>::new();
+    let mut memory_exports = std::collections::BTreeMap::<String, u32>::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload.map_err(|error| self::error(error.to_string()))? {
+            Payload::TypeSection(reader) => {
+                for group in reader {
+                    for subtype in group
+                        .map_err(|error| self::error(error.to_string()))?
+                        .into_types()
+                    {
+                        let signature = match &subtype.composite_type.inner {
+                            CompositeInnerType::Func(function) => {
+                                Some((function.params().to_vec(), function.results().to_vec()))
+                            }
+                            _ => None,
+                        };
+                        types.push(signature);
+                    }
+                }
+            }
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    match import.map_err(|error| self::error(error.to_string()))?.ty {
+                        TypeRef::Func(index) => imported_functions.push(index),
+                        TypeRef::Memory(memory) => memories.push(memory),
+                        _ => {}
+                    }
+                }
+            }
+            Payload::FunctionSection(reader) => {
+                for index in reader {
+                    defined_functions.push(index.map_err(|error| self::error(error.to_string()))?);
+                }
+            }
+            Payload::MemorySection(reader) => {
+                for memory in reader {
+                    memories.push(memory.map_err(|error| self::error(error.to_string()))?);
+                }
+            }
+            Payload::ExportSection(reader) => {
+                for export in reader {
+                    let export = export.map_err(|error| self::error(error.to_string()))?;
+                    match export.kind {
+                        ExternalKind::Func => {
+                            function_exports.insert(export.name.to_owned(), export.index);
+                        }
+                        ExternalKind::Memory => {
+                            memory_exports.insert(export.name.to_owned(), export.index);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let memory_index = *memory_exports
+        .get(&interface.abi.memory_export)
+        .ok_or_else(|| {
+            error(format!(
+                "canonical ABI is missing exported memory `{}`",
+                interface.abi.memory_export
+            ))
+        })?;
+    let memory = memories.get(memory_index as usize).ok_or_else(|| {
+        error(format!(
+            "canonical exported memory `{}` has missing memory type at index {memory_index}",
+            interface.abi.memory_export
+        ))
+    })?;
+    if memory.memory64 {
+        return Err(error(format!(
+            "canonical exported memory `{}` is memory64; expected wasm32 memory",
+            interface.abi.memory_export
+        )));
+    }
+    let signature = |name: &str| -> Result<&(Vec<ValType>, Vec<ValType>), CanonicalInterfaceError> {
+        let function_index = *function_exports
+            .get(name)
+            .ok_or_else(|| error(format!("canonical ABI is missing function export `{name}`")))?;
+        let type_index = if let Some(index) = imported_functions.get(function_index as usize) {
+            *index
+        } else {
+            let defined = function_index as usize - imported_functions.len();
+            *defined_functions.get(defined).ok_or_else(|| {
+                error(format!(
+                    "canonical export `{name}` has no function-section type"
+                ))
+            })?
+        };
+        types
+            .get(type_index as usize)
+            .ok_or_else(|| {
+                error(format!(
+                    "canonical export `{name}` has missing type {type_index}"
+                ))
+            })?
+            .as_ref()
+            .ok_or_else(|| {
+                error(format!(
+                    "canonical export `{name}` references non-function type {type_index}"
+                ))
+            })
+    };
+    let require = |name: &str, params: &[ValType], results: &[ValType]| {
+        let actual = signature(name)?;
+        if actual.0 != params || actual.1 != results {
+            return Err(error(format!(
+                "canonical export `{name}` has signature {:?} -> {:?}; expected {params:?} -> {results:?}",
+                actual.0, actual.1
+            )));
+        }
+        Ok(())
+    };
+    require(
+        &interface.abi.alloc_export,
+        &[ValType::I32, ValType::I32],
+        &[ValType::I32],
+    )?;
+    require(&interface.abi.reset_export, &[], &[])?;
+    for lane in &interface.lanes {
+        require(&lane.export, &[ValType::I32], &[ValType::I32])?;
+    }
+    Ok(())
+}
+
 fn layout_type(
     ty: &CanonicalType,
     depth: usize,
@@ -456,6 +594,80 @@ mod tests {
     use common::InputDb;
     use driver::DriverDataBase;
     use url::Url;
+
+    fn push_name(out: &mut Vec<u8>, name: &str) {
+        out.push(name.len() as u8);
+        out.extend_from_slice(name.as_bytes());
+    }
+
+    fn section(module: &mut Vec<u8>, id: u8, payload: Vec<u8>) {
+        module.push(id);
+        module.push(payload.len() as u8);
+        module.extend(payload);
+    }
+
+    fn canonical_wasm(lane_result: u8, include_memory: bool, memory64: bool) -> Vec<u8> {
+        let mut module = b"\0asm\x01\0\0\0".to_vec();
+        // lane (i32)->result, alloc (i32,i32)->i32, reset ()->()
+        section(
+            &mut module,
+            1,
+            vec![
+                3,
+                0x60,
+                1,
+                0x7f,
+                1,
+                lane_result,
+                0x60,
+                2,
+                0x7f,
+                0x7f,
+                1,
+                0x7f,
+                0x60,
+                0,
+                0,
+            ],
+        );
+        section(&mut module, 3, vec![3, 0, 1, 2]);
+        section(&mut module, 5, vec![1, if memory64 { 0x04 } else { 0 }, 1]);
+        let mut exports = vec![if include_memory { 4 } else { 3 }];
+        for (name, kind, index) in [
+            ("update", 0, 0),
+            ("fe_cabi_alloc", 0, 1),
+            ("fe_cabi_reset", 0, 2),
+        ] {
+            push_name(&mut exports, name);
+            exports.extend([kind, index]);
+        }
+        if include_memory {
+            push_name(&mut exports, "memory");
+            exports.extend([2, 0]);
+        }
+        section(&mut module, 7, exports);
+        let lane_body = if lane_result == 0x7f {
+            vec![0, 0x20, 0, 0x0b] // local.get 0
+        } else {
+            vec![0, 0x42, 0, 0x0b] // i64.const 0
+        };
+        let mut code = vec![3, lane_body.len() as u8];
+        code.extend(lane_body);
+        code.extend([4, 0, 0x41, 0, 0x0b]); // alloc returns zero
+        code.extend([2, 0, 0x0b]); // reset
+        section(&mut module, 10, code);
+        module
+    }
+
+    fn one_lane_manifest() -> CanonicalInterfaceManifest {
+        CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
+            name: "update".to_owned(),
+            export: "update".to_owned(),
+            request: CanonicalType::Record(vec![CanonicalField::new("value", CanonicalType::U32)]),
+            response: CanonicalType::Record(vec![CanonicalField::new("value", CanonicalType::U32)]),
+        }])
+        .unwrap()
+    }
 
     fn record(fields: Vec<CanonicalField>) -> CanonicalType {
         CanonicalType::Record(fields)
@@ -689,6 +901,37 @@ pub fn update(request: Request) -> Response {
         assert!(
             scalar_error.contains("must both be nominal record types"),
             "{scalar_error}"
+        );
+    }
+
+    #[test]
+    fn emitted_wasm_verifier_requires_complete_uniform_pointer_abi() {
+        let manifest = one_lane_manifest();
+        verify_canonical_wasm_abi(&canonical_wasm(0x7f, true, false), &manifest).unwrap();
+
+        let missing_memory =
+            verify_canonical_wasm_abi(&canonical_wasm(0x7f, false, false), &manifest).unwrap_err();
+        assert!(
+            missing_memory
+                .to_string()
+                .contains("missing exported memory"),
+            "{missing_memory}"
+        );
+
+        let wrong_lane =
+            verify_canonical_wasm_abi(&canonical_wasm(0x7e, true, false), &manifest).unwrap_err();
+        assert!(
+            wrong_lane.to_string().contains("expected [I32] -> [I32]"),
+            "{wrong_lane}"
+        );
+
+        let memory64 =
+            verify_canonical_wasm_abi(&canonical_wasm(0x7f, true, true), &manifest).unwrap_err();
+        assert!(
+            memory64
+                .to_string()
+                .contains("memory64; expected wasm32 memory"),
+            "{memory64}"
         );
     }
 }

@@ -29,9 +29,12 @@ use crate::sonatina::{
     compile_runtime_package_spirv_grid, compile_runtime_package_spirv_render,
     compile_runtime_package_wasm,
 };
+use crate::{
+    CanonicalInterfaceManifest, canonical_lane_decl_from_entry, verify_canonical_wasm_abi,
+};
 
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
-pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 1;
+pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 2;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
@@ -43,6 +46,14 @@ static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 pub enum WebBundleMode {
     Render,
     Grid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebCanonicalPolicy {
+    Disabled,
+    Optional,
+    Required,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +83,7 @@ pub struct WebBuildOptions {
     /// Used only by grid mode.
     pub workgroup_size: [u32; 3],
     pub provenance: WebProvenance,
+    pub canonical_policy: WebCanonicalPolicy,
 }
 
 impl WebBuildOptions {
@@ -81,6 +93,7 @@ impl WebBuildOptions {
             mode: WebBundleMode::Render,
             workgroup_size: [0, 0, 0],
             provenance: WebProvenance::new(source_id),
+            canonical_policy: WebCanonicalPolicy::Disabled,
         }
     }
 
@@ -94,7 +107,13 @@ impl WebBuildOptions {
             mode: WebBundleMode::Grid,
             workgroup_size,
             provenance: WebProvenance::new(source_id),
+            canonical_policy: WebCanonicalPolicy::Disabled,
         }
+    }
+
+    pub fn with_canonical_policy(mut self, policy: WebCanonicalPolicy) -> Self {
+        self.canonical_policy = policy;
+        self
     }
 }
 
@@ -197,6 +216,15 @@ pub struct WebBundleManifest {
     pub artifacts: WebArtifactManifest,
     pub layout: WebLayout,
     pub provenance: WebProvenance,
+    pub canonical_interface: Option<CanonicalInterfaceManifest>,
+    pub canonical_status: WebCanonicalStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebCanonicalStatus {
+    pub policy: WebCanonicalPolicy,
+    pub embedded: bool,
+    pub omission_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +243,50 @@ impl WebBundle {
         top_mod: TopLevelMod<'_>,
         options: WebBuildOptions,
     ) -> Result<Self, WebBundleError> {
+        let (canonical_candidate, mut canonical_status) = match options.canonical_policy {
+            WebCanonicalPolicy::Disabled => (
+                None,
+                WebCanonicalStatus {
+                    policy: WebCanonicalPolicy::Disabled,
+                    embedded: false,
+                    omission_reason: Some("canonical interface was not requested".to_owned()),
+                },
+            ),
+            policy @ (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required) => {
+                let derived = canonical_lane_decl_from_entry(
+                    db,
+                    top_mod,
+                    &options.source_entry,
+                    &options.source_entry,
+                )
+                .and_then(|lane| CanonicalInterfaceManifest::build(vec![lane]));
+                match derived {
+                    Ok(interface) => (
+                        Some(interface),
+                        WebCanonicalStatus {
+                            policy,
+                            embedded: false,
+                            omission_reason: None,
+                        },
+                    ),
+                    Err(error) if policy == WebCanonicalPolicy::Optional => (
+                        None,
+                        WebCanonicalStatus {
+                            policy,
+                            embedded: false,
+                            omission_reason: Some(format!(
+                                "semantic canonical derivation unavailable: {error}"
+                            )),
+                        },
+                    ),
+                    Err(error) => {
+                        return Err(WebBundleError::CanonicalRequired(format!(
+                            "semantic canonical derivation failed: {error}"
+                        )));
+                    }
+                }
+            }
+        };
         let package = mir::build_wasm_runtime_package_for_entry(db, top_mod, &options.source_entry)
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
@@ -235,6 +307,8 @@ impl WebBundle {
             .bytes;
         wasmparser::validate(&wasm)
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
+        let canonical_interface =
+            verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
 
         let artifact = match options.mode {
             WebBundleMode::Render => compile_runtime_package_spirv_render(db, &package),
@@ -259,6 +333,8 @@ impl WebBundle {
             },
             layout,
             provenance: options.provenance,
+            canonical_interface,
+            canonical_status,
         };
         Ok(Self {
             wasm,
@@ -307,6 +383,31 @@ impl WebBundle {
             let _ = fs::remove_dir_all(&staging);
         }
         result
+    }
+}
+
+fn verify_canonical_candidate(
+    wasm: &[u8],
+    candidate: Option<CanonicalInterfaceManifest>,
+    status: &mut WebCanonicalStatus,
+) -> Result<Option<CanonicalInterfaceManifest>, WebBundleError> {
+    let Some(interface) = candidate else {
+        return Ok(None);
+    };
+    match verify_canonical_wasm_abi(wasm, &interface) {
+        Ok(()) => {
+            status.embedded = true;
+            Ok(Some(interface))
+        }
+        Err(error) if status.policy == WebCanonicalPolicy::Optional => {
+            status.omission_reason = Some(format!(
+                "emitted canonical ABI verification failed: {error}"
+            ));
+            Ok(None)
+        }
+        Err(error) => Err(WebBundleError::CanonicalRequired(format!(
+            "emitted canonical ABI verification failed: {error}"
+        ))),
     }
 }
 
@@ -429,6 +530,7 @@ pub enum WebBundleError {
     WgslParse(String),
     WgslValidation(String),
     UnexpectedLayout(String),
+    CanonicalRequired(String),
     Manifest(String),
     DestinationExists(PathBuf),
     Io(io::Error),
@@ -450,6 +552,9 @@ impl fmt::Display for WebBundleError {
                     f,
                     "web bundle received unsupported SPIR-V layout mode `{mode}`"
                 )
+            }
+            Self::CanonicalRequired(error) => {
+                write!(f, "required canonical interface is unavailable: {error}")
             }
             Self::Manifest(error) => write!(f, "web bundle manifest serialization failed: {error}"),
             Self::DestinationExists(path) => {
@@ -521,11 +626,111 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert_eq!(first.manifest.protocol_version, WEB_BUNDLE_PROTOCOL_VERSION);
         assert_eq!(first.manifest.source_entry, "shade");
         assert_eq!(first.manifest.layout.mode, WebBundleMode::Render);
+        assert_eq!(
+            first.manifest.canonical_status.policy,
+            WebCanonicalPolicy::Disabled
+        );
+        assert!(first.manifest.canonical_interface.is_none());
         assert!(first.manifest.layout.vertex_entry.is_some());
         assert!(first.manifest.layout.fragment_entry.is_some());
         let decoded: WebBundleManifest =
             serde_json::from_slice(&first.manifest_json().unwrap()).unwrap();
         assert_eq!(decoded, first.manifest);
+    }
+
+    #[test]
+    fn canonical_policy_is_fail_closed_and_records_optional_omission() {
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///web_bundle_canonical.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(SOURCE.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+
+        let optional = WebBundle::compile(
+            &db,
+            db.top_mod(file),
+            WebBuildOptions::render("shade", None)
+                .with_canonical_policy(WebCanonicalPolicy::Optional),
+        )
+        .unwrap();
+        assert!(optional.manifest.canonical_interface.is_none());
+        assert_eq!(
+            optional.manifest.canonical_status.policy,
+            WebCanonicalPolicy::Optional
+        );
+        assert!(
+            optional
+                .manifest
+                .canonical_status
+                .omission_reason
+                .as_deref()
+                .unwrap()
+                .contains("semantic canonical derivation unavailable")
+        );
+
+        let required = WebBundle::compile(
+            &db,
+            db.top_mod(file),
+            WebBuildOptions::render("shade", None)
+                .with_canonical_policy(WebCanonicalPolicy::Required),
+        )
+        .unwrap_err();
+        assert!(
+            required
+                .to_string()
+                .contains("required canonical interface is unavailable"),
+            "{required}"
+        );
+    }
+
+    #[test]
+    fn optional_policy_never_embeds_an_unverified_candidate() {
+        let candidate = crate::CanonicalInterfaceManifest::build(vec![crate::CanonicalLaneDecl {
+            name: "update".to_owned(),
+            export: "update".to_owned(),
+            request: crate::CanonicalType::Record(vec![crate::CanonicalField::new(
+                "value",
+                crate::CanonicalType::U32,
+            )]),
+            response: crate::CanonicalType::Record(vec![crate::CanonicalField::new(
+                "value",
+                crate::CanonicalType::U32,
+            )]),
+        }])
+        .unwrap();
+        let wasm_without_abi = b"\0asm\x01\0\0\0";
+        let mut optional = WebCanonicalStatus {
+            policy: WebCanonicalPolicy::Optional,
+            embedded: false,
+            omission_reason: None,
+        };
+        assert!(
+            verify_canonical_candidate(wasm_without_abi, Some(candidate.clone()), &mut optional)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!optional.embedded);
+        assert!(
+            optional
+                .omission_reason
+                .as_deref()
+                .unwrap()
+                .contains("missing exported memory")
+        );
+
+        let mut required = WebCanonicalStatus {
+            policy: WebCanonicalPolicy::Required,
+            embedded: false,
+            omission_reason: None,
+        };
+        let error = verify_canonical_candidate(wasm_without_abi, Some(candidate), &mut required)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("required canonical interface is unavailable"),
+            "{error}"
+        );
     }
 
     #[test]
