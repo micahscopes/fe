@@ -2283,6 +2283,63 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         original_inst
     };
     let assumptions = runtime_callee_assumptions(db, caller_key, caller_typed_body);
+    // The resolver normalizes its private copy of the goal, but MIR also
+    // carries this instance into the resolved body's witness environment and
+    // stable key below. Normalize that carried copy after substitution so a
+    // ground type-function head cannot escape to the stable-key boundary.
+    let normalization_scope = caller_key.impl_env(db).normalization_scope(db);
+    let concrete_inst = TraitInstId::new(
+        db,
+        concrete_inst.def(db),
+        concrete_inst
+            .args(db)
+            .iter()
+            .map(|&arg| normalize_ty(db, arg, normalization_scope, assumptions))
+            .collect::<Vec<TyId<'db>>>(),
+        concrete_inst
+            .assoc_type_bindings(db)
+            .iter()
+            .map(|(&name, &ty)| {
+                (
+                    name,
+                    normalize_ty(db, ty, normalization_scope, assumptions),
+                )
+            })
+            .collect::<common::indexmap::IndexMap<_, _>>(),
+    );
+    let assumptions = PredicateListId::new(
+        db,
+        assumptions
+            .list(db)
+            .iter()
+            .map(|inst| {
+                TraitInstId::new(
+                    db,
+                    inst.def(db),
+                    inst.args(db)
+                        .iter()
+                        .map(|&arg| {
+                            normalize_ty(db, arg, normalization_scope, assumptions)
+                        })
+                        .collect::<Vec<TyId<'db>>>(),
+                    inst.assoc_type_bindings(db)
+                        .iter()
+                        .map(|(&name, &ty)| {
+                            (
+                                name,
+                                normalize_ty(
+                                    db,
+                                    ty,
+                                    normalization_scope,
+                                    assumptions,
+                                ),
+                            )
+                        })
+                        .collect::<common::indexmap::IndexMap<_, _>>(),
+                )
+            })
+            .collect::<Vec<TraitInstId<'db>>>(),
+    );
     // FCO "slide" cascade C1 (+ M3): consume the RECORDED implementor as the
     // resolution SOURCE where typeck committed one, re-resolve only where it did
     // not. The recorded implementor comes from one of two carriers:
@@ -2417,9 +2474,41 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         .get(trait_arg_len..)
         .unwrap_or(callee_key.subst(db).generic_args(db).as_slice());
     impl_args.extend_from_slice(tail);
+    let normalize_witness = |inst: TraitInstId<'db>| {
+        TraitInstId::new(
+            db,
+            inst.def(db),
+            inst.args(db)
+                .iter()
+                .map(|&arg| normalize_ty(db, arg, normalization_scope, assumptions))
+                .collect::<Vec<TyId<'db>>>(),
+            inst.assoc_type_bindings(db)
+                .iter()
+                .map(|(&name, &ty)| {
+                    (
+                        name,
+                        normalize_ty(db, ty, normalization_scope, assumptions),
+                    )
+                })
+                .collect::<common::indexmap::IndexMap<_, _>>(),
+        )
+    };
     let mut witnesses = IndexSet::new();
-    witnesses.extend(caller_key.impl_env(db).witnesses(db).iter().copied());
-    witnesses.extend(impl_env.witnesses(db).iter().copied());
+    witnesses.extend(
+        caller_key
+            .impl_env(db)
+            .witnesses(db)
+            .iter()
+            .copied()
+            .map(normalize_witness),
+    );
+    witnesses.extend(
+        impl_env
+            .witnesses(db)
+            .iter()
+            .copied()
+            .map(normalize_witness),
+    );
     witnesses.insert(concrete_inst);
     Ok(SemanticInstanceKey::new(
         db,

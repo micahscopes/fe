@@ -1114,15 +1114,18 @@ fn display_const_canon_env<'db>(
 
 pub(crate) fn normalize_const_tys_for_comparison<'db>(
     db: &'db dyn HirAnalysisDb,
-    ty: TyId<'db>,
+    mut ty: TyId<'db>,
 ) -> TyId<'db> {
+    let TyData::ConstTy(initial_const_ty) = ty.data(db) else {
+        return ty;
+    };
+    if let Some(env) = display_const_canon_env(db, *initial_const_ty) {
+        ty = canonicalize_ty_for_mode(db, ty, env, ConstCanonMode::Identity);
+    }
+
     let TyData::ConstTy(const_ty) = ty.data(db) else {
         return ty;
     };
-    if let Some(env) = display_const_canon_env(db, *const_ty) {
-        return canonicalize_ty_for_mode(db, ty, env, ConstCanonMode::Identity);
-    }
-
     match const_ty.data(db) {
         ConstTyData::UnEvaluated {
             ty: Some(expected_ty),

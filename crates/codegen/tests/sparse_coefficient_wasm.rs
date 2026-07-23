@@ -53,15 +53,17 @@ impl Coefficient for Found<2> { fn read(compact: Compact4) -> i32 { compact.c2 }
 impl Coefficient for Found<3> { fn read(compact: Compact4) -> i32 { compact.c3 } }
 
 #[inline(always)]
-fn coefficient_at<Lookup: Coefficient>(value: Compact4) -> i32 {
-    <Lookup as Coefficient>::read(compact: value)
+fn coefficient_at<const Blade: usize>(value: Compact4) -> i32
+    where FindA<Blade>: Coefficient
+{
+    <FindA<Blade> as Coefficient>::read(compact: value)
 }
 
 pub fn sparse_present(c0: i32, c1: i32, c2: i32, c3: i32) -> i32 {
-    coefficient_at<FindA<4>>(value: Compact4 { c0: c0, c1: c1, c2: c2, c3: c3 })
+    coefficient_at<4>(value: Compact4 { c0: c0, c1: c1, c2: c2, c3: c3 })
 }
 pub fn sparse_absent(c0: i32, c1: i32, c2: i32, c3: i32) -> i32 {
-    coefficient_at<FindA<3>>(value: Compact4 { c0: c0, c1: c1, c2: c2, c3: c3 })
+    coefficient_at<3>(value: Compact4 { c0: c0, c1: c1, c2: c2, c3: c3 })
 }
 "#;
 

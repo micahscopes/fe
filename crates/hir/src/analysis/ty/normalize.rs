@@ -246,13 +246,19 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                 let folded = ty.super_fold_with(db, self);
                 if super::type_fn::type_fn_app_subject_is_ground(self.db, folded) {
                     // Unfolding can expose staged const payloads whose
-                    // parameters only became ground during the reduction.
-                    // Run only the ordinary ground-const pass on the resulting
-                    // normal form. Do not re-enter type-fn/projection folding.
-                    normalize_staged_const_payloads(
+                    // parameters only became ground during the reduction, and
+                    // can also expose an associated-type projection as the
+                    // normal form (for example `Find<4> -> Select<1, 1>::Out`).
+                    // Finish const payloads first, then resume this normalizer
+                    // so that newly exposed projections reach their concrete
+                    // type. `normalize_type_fn_app` has already fully unfolded
+                    // the rooted recursive application, while the projection
+                    // cache/step budget guards the resumed projection pass.
+                    let normalized = normalize_staged_const_payloads(
                         self.db,
                         super::type_fn::normalize_type_fn_app(self.db, folded),
-                    )
+                    );
+                    self.fold_ty(db, normalized)
                 } else {
                     folded
                 }

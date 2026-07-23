@@ -224,11 +224,54 @@ fn semantic_callee_key_with_assumptions<'db>(
     // rung 3.3 asserts MIR re-resolution agrees on the empty (re-resolve) path.
     // `with_selected_implementors` canonically orders the carrier so equal
     // selection sets mint equal keys.
+    //
+    // Normalize instantiated call-site assumptions before storing them in the
+    // instance identity. Ground substitution can expose a type-function
+    // application (for example `Find<N>: Trait` at `N := 4`); carrying that
+    // redex into MIR both prevents concrete impl selection and violates the
+    // stable-key invariant that type-function heads are gone by this boundary.
+    let assumptions = PredicateListId::new(
+        db,
+        assumptions
+            .list(db)
+            .iter()
+            .map(|inst| {
+                inst.normalize(
+                    db,
+                    impl_env.normalization_scope(db),
+                    assumptions,
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let witnesses = witnesses
+        .into_iter()
+        .map(|inst| {
+            inst.normalize(
+                db,
+                impl_env.normalization_scope(db),
+                assumptions,
+            )
+        })
+        .collect::<Vec<_>>();
+    let selected_implementors = selected_implementors
+        .into_iter()
+        .map(|(inst, implementor)| {
+            (
+                inst.normalize(
+                    db,
+                    impl_env.normalization_scope(db),
+                    assumptions,
+                ),
+                implementor,
+            )
+        })
+        .collect();
     let impl_env = ImplEnv::new(
         db,
         impl_env.normalization_scope(db),
         assumptions,
-        witnesses.into_iter().collect::<Vec<_>>(),
+        witnesses,
     )
     .with_selected_implementors(selected_implementors);
 
