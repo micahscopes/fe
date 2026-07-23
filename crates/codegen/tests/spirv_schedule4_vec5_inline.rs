@@ -33,12 +33,17 @@ impl Eval5 for Zero {
 impl<
     const L: i32, const P: i32, const R: i32,
     const O: i32, const M: i32, const N: i32,
-> Eval5 for Term<L, P, R, O, M, N> {
+> Eval5 for Term<L, P, R, O, M, N>
+    where Blade<L>: SphereCoefficient,
+          Blade<P>: PointCoefficient,
+          Blade<R>: SphereCoefficient,
+{
     #[inline(always)]
     fn eval5(sphere: Sphere, point: Point) -> Vec5 {
-        let product = sphere_coeff(sphere, blade: L)
-            * point_coeff(point, blade: P)
-            * sphere_coeff(sphere, blade: R)
+        let product =
+            <Blade<L> as SphereCoefficient>::read(value: sphere)
+            * <Blade<P> as PointCoefficient>::read(value: point)
+            * <Blade<R> as SphereCoefficient>::read(value: sphere)
         let scaled = if M == 1 { product } else { product + product }
         let signed = if N == 0 { scaled } else { -scaled }
         Vec5 {
@@ -66,8 +71,23 @@ pub fn schedule4_vec5_render(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
 ) -> u32 {
-    let sphere = Sphere { s1: s1, s2: s2, s8: s8, s16: s16 }
-    let point = Point { p1: p1, p2: p2, p4: p4, p8: p8, p16: p16 }
+    let sphere: Sphere = Cell {
+        head: s1,
+        tail: Cell {
+            head: s2,
+            tail: Cell { head: s8, tail: Cell { head: s16, tail: Nil {} } },
+        },
+    }
+    let point: Point = Cell {
+        head: p1,
+        tail: Cell {
+            head: p2,
+            tail: Cell {
+                head: p4,
+                tail: Cell { head: p8, tail: Cell { head: p16, tail: Nil {} } },
+            },
+        },
+    }
     let value = <SpecializedSandwich as Eval5>::eval5(sphere: sphere, point: point)
     __bitcast(__i32_from_f32((value.e1 + value.e2 + value.e4 + value.e8 + value.e16) * 256.0))
 }
@@ -82,9 +102,9 @@ fn source() -> String {
         .split_once("struct NatZ {}")
         .expect("schedule proof marker");
     let (_, structs_and_rest) = proof_and_rest
-        .split_once("struct Sphere")
+        .split_once("struct Nil {}")
         .expect("runtime structs marker");
-    let runtime = format!("struct Sphere{structs_and_rest}");
+    let runtime = format!("struct Nil {{}}{structs_and_rest}");
     let (runtime_prefix, _) = runtime
         .split_once("trait Eval {")
         .expect("scalar interpreter marker");
