@@ -437,7 +437,11 @@ fn generated_canonical_adapters(
          export const compiledCanonicalInterface = \
          compileCanonicalInterfaceManifest(canonicalInterfaceManifest);\n\
          export function createInterfaceCaller(exports) {{\n  \
-         return createCanonicalInterfaceCaller(compiledCanonicalInterface, exports);\n}}\n"
+         return createCanonicalInterfaceCaller(compiledCanonicalInterface, exports);\n}}\n\
+         export function compileActorAdapter() {{\n  \
+         return compileCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface);\n}}\n\
+         export function createActorAdapter(exports, options) {{\n  \
+         return createCanonicalActorAdapter(canonicalInterfaceManifest, compiledCanonicalInterface, exports, options);\n}}\n"
     );
     let interface_d_ts = canonical_interface_declarations(interface);
     let artifact = |path: &str, content: &str| WebGeneratedArtifact {
@@ -519,6 +523,31 @@ fn canonical_interface_declarations(interface: &CanonicalInterfaceManifest) -> S
     output.push_str(
         "}\n\nexport declare function createInterfaceCaller(\n  \
          exports: WebAssembly.Exports,\n): CanonicalInterfaceCaller;\n",
+    );
+    output.push_str(
+        "\nexport interface CanonicalActorRequest<Lane extends string, Payload> {\n  \
+         lane: Lane;\n  payload: Payload;\n}\n\
+         export interface CanonicalActorShape {\n  \
+         readonly requestSchema: Readonly<Record<string, (value: unknown) => void>>;\n  \
+         readonly resultSchema: Readonly<Record<string, (value: unknown) => void>>;\n  \
+         transferResult(value: unknown, request: { lane: string }): ArrayBuffer[];\n\
+         }\n\
+         export interface CanonicalActorAdapter extends CanonicalActorShape {\n",
+    );
+    for lane in &interface.lanes {
+        let name = pascal(&lane.name);
+        output.push_str(&format!(
+            "  dispatch(request: CanonicalActorRequest<{:?}, {name}Request>): Promise<{name}Response>;\n",
+            lane.name
+        ));
+    }
+    output.push_str(
+        "}\n\
+         export declare function compileActorAdapter(): CanonicalActorShape;\n\
+         export declare function createActorAdapter(\n  \
+         exports: WebAssembly.Exports,\n  \
+         options?: { maxPendingPerLane?: number },\n\
+         ): CanonicalActorAdapter;\n",
     );
     output
 }
@@ -893,9 +922,16 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let interface_js = required.interface_js.as_ref().unwrap();
         let interface_d_ts = required.interface_d_ts.as_ref().unwrap();
         assert!(interface_js.contains("createInterfaceCaller"));
+        assert!(interface_js.contains("compileActorAdapter"));
+        assert!(interface_js.contains("createActorAdapter"));
+        assert!(interface_js.contains("FE_ACTOR_SUPERSEDED"));
         assert!(interface_js.contains("canonicalInterfaceManifest"));
         assert!(interface_d_ts.contains("export type UpdateRequest"));
         assert!(interface_d_ts.contains("export type UpdateResponse"));
+        assert!(interface_d_ts.contains(
+            "dispatch(request: CanonicalActorRequest<\"update\", UpdateRequest>): \
+             Promise<UpdateResponse>"
+        ));
         assert_eq!(
             required
                 .manifest

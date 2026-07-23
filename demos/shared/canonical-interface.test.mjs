@@ -13,6 +13,11 @@ assert.equal(
   "demo compatibility module must re-export the compiler-owned codec",
 );
 
+const {
+  compileCanonicalActorAdapter,
+  createCanonicalActorAdapter,
+} = compilerOwnedCodec;
+
 const scalar = (kind, size, align) => ({ kind, size, align });
 const descriptor = (kind) => ({
   kind, size: 8, align: 4, pointer_offset: 0, length_offset: 4,
@@ -113,6 +118,69 @@ assert.throws(
     tag: 1, sequence: 1n, text: "", payload: new Uint8Array(), surplus: true,
   }, { memory: new Uint8Array(64), offset: 0 }),
   /unexpected or missing fields/,
+);
+
+const actorCompiled = compileCanonicalInterfaceManifest(structuredClone(manifest));
+const actorMemory = new WebAssembly.Memory({ initial: 1 });
+let actorCursor = 128;
+let actorResetCount = 0;
+const actorExports = {
+  memory: actorMemory,
+  fe_cabi_alloc(length, align) {
+    actorCursor = Math.ceil(actorCursor / align) * align;
+    const result = actorCursor;
+    actorCursor += length;
+    return result;
+  },
+  fe_cabi_reset() {
+    actorResetCount += 1;
+    actorCursor = 128;
+  },
+  echo_message(requestPointer) {
+    const bytes = actorCompiled.lanes.echo.request.read({
+      memory: () => new Uint8Array(actorMemory.buffer),
+      offset: requestPointer,
+    }).payload;
+    const responsePointer = actorExports.fe_cabi_alloc(8, 4);
+    actorCompiled.lanes.echo.response.write(bytes, {
+      memory: () => new Uint8Array(actorMemory.buffer),
+      offset: responsePointer,
+      allocate: actorExports.fe_cabi_alloc,
+    });
+    return responsePointer;
+  },
+};
+const actorShape = compileCanonicalActorAdapter(manifest, actorCompiled);
+assert.deepEqual(Object.keys(actorShape.requestSchema), ["echo"]);
+assert.throws(
+  () => actorShape.requestSchema.echo({ nope: true }),
+  /FE_ACTOR_INVALID_PAYLOAD/,
+);
+const actor = createCanonicalActorAdapter(manifest, actorCompiled, actorExports);
+const actorRequest = (payload) => ({
+  lane: "echo",
+  payload: { tag: 1, sequence: 2n, text: "actor", payload },
+});
+const first = actor.dispatch(actorRequest(new Uint8Array([1])));
+const displaced = actor.dispatch(actorRequest(new Uint8Array([2])));
+const newest = actor.dispatch(actorRequest(new Uint8Array([3])));
+await assert.rejects(displaced, /FE_ACTOR_SUPERSEDED/);
+assert.deepEqual(await first, new Uint8Array([1]));
+const newestResult = await newest;
+assert.deepEqual(newestResult, new Uint8Array([3]));
+actor.resultSchema.echo({ ok: true, value: newestResult });
+actor.resultSchema.echo({ ok: false, error: "FE_ACTOR_BUSY: busy" });
+assert.throws(
+  () => actor.resultSchema.echo({ ok: true, value: newestResult, extra: true }),
+  /FE_ACTOR_INVALID_RESULT/,
+);
+assert.equal(actorResetCount, 2);
+const transfer = actor.transferResult(newestResult, { lane: "echo" });
+assert.deepEqual(transfer, [newestResult.buffer]);
+assert.notEqual(transfer[0], actorMemory.buffer, "live Wasm memory must never transfer");
+await assert.rejects(
+  actor.dispatch({ lane: "missing", payload: {} }),
+  /FE_ACTOR_UNKNOWN_LANE: unknown canonical actor lane/,
 );
 assert.throws(
   () => compiled.lanes.echo.request.write({

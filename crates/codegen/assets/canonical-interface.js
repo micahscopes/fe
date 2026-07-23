@@ -352,3 +352,179 @@ export function createCanonicalInterfaceCaller(compiled, exports) {
     },
   });
 }
+
+const actorError = (code, message) => {
+  const error = new Error(`${code}: ${message}`);
+  error.name = "CanonicalActorError";
+  return error;
+};
+
+function canonicalActorValidator(codec, name) {
+  return (value) => {
+    let cursor = codec.size;
+    let memory = new Uint8Array(Math.max(64, codec.size));
+    const allocate = (size, align) => {
+      cursor = Math.ceil(cursor / align) * align;
+      const end = cursor + size;
+      if (end > memory.byteLength) {
+        const grown = new Uint8Array(Math.max(end, memory.byteLength * 2));
+        grown.set(memory);
+        memory = grown;
+      }
+      const result = cursor;
+      cursor = end;
+      return result;
+    };
+    try {
+      codec.write(value, { memory: () => memory, offset: 0, allocate });
+    } catch {
+      throw actorError("FE_ACTOR_INVALID_PAYLOAD", `${name} does not match its canonical layout`);
+    }
+  };
+}
+
+function canonicalTransferList(layout, value, name, output, seen) {
+  switch (layout.kind) {
+    case "bytes": {
+      if (!(value instanceof Uint8Array)
+          || !(value.buffer instanceof ArrayBuffer)
+          || value.byteOffset !== 0 || value.byteLength !== value.buffer.byteLength) {
+        throw actorError("FE_ACTOR_TRANSFER", `${name} bytes are not an owned full-span Uint8Array`);
+      }
+      if (!seen.has(value.buffer)) {
+        seen.add(value.buffer);
+        output.push(value.buffer);
+      }
+      return;
+    }
+    case "record":
+      for (const field of layout.fields) {
+        canonicalTransferList(field.layout, value[field.name], `${name}.${field.name}`, output, seen);
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+export function compileCanonicalActorAdapter(manifest, compiled) {
+  if (!manifest || !Array.isArray(manifest.lanes) || !compiled?.lanes) {
+    throw new TypeError("canonical manifest and compiled interface required");
+  }
+  const requestSchema = {};
+  const resultSchema = {};
+  const responseValidators = {};
+  const responseLayouts = {};
+  for (const lane of manifest.lanes) {
+    const compiledLane = compiled.lanes[lane.name];
+    if (!compiledLane) throw new TypeError(`missing compiled canonical lane ${lane.name}`);
+    requestSchema[lane.name] = canonicalActorValidator(
+      compiledLane.request, `${lane.name} request`,
+    );
+    const validateResponse = canonicalActorValidator(
+      compiledLane.response, `${lane.name} response`,
+    );
+    responseValidators[lane.name] = validateResponse;
+    resultSchema[lane.name] = (payload) => {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        throw actorError("FE_ACTOR_INVALID_RESULT", "result payload must be an object");
+      }
+      if (payload.ok === true
+          && Object.keys(payload).sort().join("\0") === "ok\0value") {
+        validateResponse(payload.value);
+        return;
+      }
+      if (payload.ok === false
+          && typeof payload.error === "string"
+          && Object.keys(payload).sort().join("\0") === "error\0ok") {
+        return;
+      }
+      throw actorError(
+        "FE_ACTOR_INVALID_RESULT", "result payload must be a canonical discriminated result",
+      );
+    };
+    responseLayouts[lane.name] = lane.response;
+  }
+  return Object.freeze({
+    requestSchema: Object.freeze(requestSchema),
+    resultSchema: Object.freeze(resultSchema),
+    responseValidators: Object.freeze(responseValidators),
+    transferResult(value, request) {
+      const layout = responseLayouts[request?.lane];
+      if (!layout) throw actorError("FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane");
+      const output = [];
+      canonicalTransferList(layout, value, `${request.lane} response`, output, new Set());
+      return output;
+    },
+  });
+}
+
+export function createCanonicalActorAdapter(manifest, compiled, exports, {
+  maxPendingPerLane = 1,
+} = {}) {
+  if (!Number.isSafeInteger(maxPendingPerLane) || maxPendingPerLane < 0) {
+    throw new TypeError("maxPendingPerLane must be a non-negative safe integer");
+  }
+  const adapter = compileCanonicalActorAdapter(manifest, compiled);
+  const caller = createCanonicalInterfaceCaller(compiled, exports);
+  const states = new Map();
+
+  const run = (lane, state, entry) => {
+    state.active = true;
+    Promise.resolve().then(() => caller.call(lane, entry.payload)).then(
+      (value) => {
+        try {
+          adapter.responseValidators[lane](value);
+          entry.resolve(value);
+        } catch {
+          entry.reject(actorError(
+            "FE_ACTOR_INVALID_RESPONSE", `${lane} result does not match its canonical layout`,
+          ));
+        }
+      },
+      () => entry.reject(actorError(
+        "FE_ACTOR_CANONICAL_CALL", `${lane} canonical call failed`,
+      )),
+    ).finally(() => {
+      const next = state.pending.shift();
+      if (next) run(lane, state, next);
+      else state.active = false;
+    });
+  };
+
+  return Object.freeze({
+    ...adapter,
+    dispatch(request) {
+      const lane = request?.lane;
+      if (!Object.hasOwn(adapter.requestSchema, lane)) {
+        return Promise.reject(actorError(
+          "FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane",
+        ));
+      }
+      try {
+        adapter.requestSchema[lane](request.payload);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      const state = states.get(lane) ?? { active: false, pending: [] };
+      states.set(lane, state);
+      return new Promise((resolve, reject) => {
+        const entry = { payload: request.payload, resolve, reject };
+        if (!state.active) {
+          run(lane, state, entry);
+          return;
+        }
+        if (maxPendingPerLane === 0) {
+          reject(actorError("FE_ACTOR_BUSY", `${lane} already has an active request`));
+          return;
+        }
+        while (state.pending.length >= maxPendingPerLane) {
+          state.pending.shift().reject(actorError(
+            "FE_ACTOR_SUPERSEDED", `${lane} pending request was superseded`,
+          ));
+        }
+        state.pending.push(entry);
+      });
+    },
+  });
+}
