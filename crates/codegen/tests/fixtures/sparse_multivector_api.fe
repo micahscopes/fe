@@ -1,12 +1,14 @@
-// Reusable sparse-value facade for up to five populated coefficients selected
-// from the 32 blades of Cl(p,q), p+q <= 5.
+// Reusable sparse-value facade for populated coefficients selected from the
+// 32 blades of Cl(p,q), p+q <= 5.
 //
 // This fragment deliberately uses only ordinary Fe: CTFE functions, recursive
 // type functions, records, traits, and static dispatch. `Support` is a bitset
 // over blade masks. Runtime storage contains exactly popcount(Support) scalars.
-// Missing coefficient reads specialize to zero; `present_coefficient` instead
-// has no implementation for a missing blade and therefore rejects it at type
-// checking time.
+// A recursive rank-to-Here/Next type works for the whole bounded support rather
+// than requiring one accessor implementation per populated lane. Missing
+// coefficient reads specialize to zero; `present_coefficient` instead has no
+// implementation for a missing blade and therefore rejects it at type checking
+// time.
 
 struct SparseNil {}
 struct SparseCell<T> { head: f32, tail: T }
@@ -39,17 +41,23 @@ const fn sparse_present(_ support: usize, _ blade: usize) -> usize {
 }
 
 struct SparseMissing {}
-struct SparseFound<const Rank: usize> {}
 struct SparseHere {}
 struct SparseNext<I> {}
 struct SparseSelect<const Present: usize, const Rank: usize> {}
+
+recursive type fn SparseIndex<const Rank: usize>() -> (*) {
+    match Rank {
+        0 => SparseHere
+        _ => SparseNext<SparseIndex<{Rank - 1}>>
+    }
+}
 
 trait SparseSelectOut { type Out }
 impl<const Rank: usize> SparseSelectOut for SparseSelect<0, Rank> {
     type Out = SparseMissing
 }
 impl<const Rank: usize> SparseSelectOut for SparseSelect<1, Rank> {
-    type Out = SparseFound<Rank>
+    type Out = SparseIndex<Rank>
 }
 
 trait SparseCoefficient<S> { fn read(value: S) -> f32 }
@@ -58,9 +66,6 @@ impl SparseCoefficient<SparseNil> for SparseMissing {
 }
 impl<T> SparseCoefficient<SparseCell<T>> for SparseMissing {
     fn read(value: SparseCell<T>) -> f32 { 0.0 }
-}
-impl<T> SparseCoefficient<SparseCell<T>> for SparseFound<0> {
-    fn read(value: SparseCell<T>) -> f32 { value.head }
 }
 impl<T> SparseCoefficient<SparseCell<T>> for SparseHere {
     fn read(value: SparseCell<T>) -> f32 { value.head }
@@ -72,28 +77,8 @@ impl<I, T> SparseCoefficient<SparseCell<T>> for SparseNext<I>
         <I as SparseCoefficient<T>>::read(value: value.tail)
     }
 }
-impl<T> SparseCoefficient<SparseCell<SparseCell<T>>> for SparseFound<1> {
-    fn read(value: SparseCell<SparseCell<T>>) -> f32 { value.tail.head }
-}
-impl<T> SparseCoefficient<SparseCell<SparseCell<SparseCell<T>>>> for SparseFound<2> {
-    fn read(value: SparseCell<SparseCell<SparseCell<T>>>) -> f32 { value.tail.tail.head }
-}
-impl<T> SparseCoefficient<SparseCell<SparseCell<SparseCell<SparseCell<T>>>>> for SparseFound<3> {
-    fn read(value: SparseCell<SparseCell<SparseCell<SparseCell<T>>>>) -> f32 {
-        value.tail.tail.tail.head
-    }
-}
-impl<T> SparseCoefficient<SparseCell<SparseCell<SparseCell<SparseCell<SparseCell<T>>>>>> for SparseFound<4> {
-    fn read(value: SparseCell<SparseCell<SparseCell<SparseCell<SparseCell<T>>>>>) -> f32 {
-        value.tail.tail.tail.tail.head
-    }
-}
-
 // Deliberately lacks a SparseMissing implementation.
 trait SparsePresentCoefficient<S> { fn read_present(value: S) -> f32 }
-impl<T> SparsePresentCoefficient<SparseCell<T>> for SparseFound<0> {
-    fn read_present(value: SparseCell<T>) -> f32 { value.head }
-}
 impl<T> SparsePresentCoefficient<SparseCell<T>> for SparseHere {
     fn read_present(value: SparseCell<T>) -> f32 { value.head }
 }
@@ -104,25 +89,6 @@ impl<I, T> SparsePresentCoefficient<SparseCell<T>> for SparseNext<I>
         <I as SparsePresentCoefficient<T>>::read_present(value: value.tail)
     }
 }
-impl<T> SparsePresentCoefficient<SparseCell<SparseCell<T>>> for SparseFound<1> {
-    fn read_present(value: SparseCell<SparseCell<T>>) -> f32 { value.tail.head }
-}
-impl<T> SparsePresentCoefficient<SparseCell<SparseCell<SparseCell<T>>>> for SparseFound<2> {
-    fn read_present(value: SparseCell<SparseCell<SparseCell<T>>>) -> f32 {
-        value.tail.tail.head
-    }
-}
-impl<T> SparsePresentCoefficient<SparseCell<SparseCell<SparseCell<SparseCell<T>>>>> for SparseFound<3> {
-    fn read_present(value: SparseCell<SparseCell<SparseCell<SparseCell<T>>>>) -> f32 {
-        value.tail.tail.tail.head
-    }
-}
-impl<T> SparsePresentCoefficient<SparseCell<SparseCell<SparseCell<SparseCell<SparseCell<T>>>>>> for SparseFound<4> {
-    fn read_present(value: SparseCell<SparseCell<SparseCell<SparseCell<SparseCell<T>>>>>) -> f32 {
-        value.tail.tail.tail.tail.head
-    }
-}
-
 fn sparse_coefficient<I: SparseCoefficient<S>, S>(value: S) -> f32
 {
     <I as SparseCoefficient<S>>::read(value: value)

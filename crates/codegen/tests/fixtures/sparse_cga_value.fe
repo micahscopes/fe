@@ -46,7 +46,7 @@ impl<const Rank: usize> CgaSphereSelectOut for SparseSelect<0, Rank> {
     type Out = CgaSphereMissing
 }
 impl<const Rank: usize> CgaSphereSelectOut for SparseSelect<1, Rank> {
-    type Out = SparseFound<Rank>
+    type Out = SparseIndex<Rank>
 }
 impl SparseCoefficient<CgaInversionSphere> for CgaSphereMissing {
     fn read(value: CgaInversionSphere) -> f32 { 0.0 }
