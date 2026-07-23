@@ -51,8 +51,23 @@ export function createMessagePortActorTransport(port) {
   };
 }
 
-export function attachMessagePortActorHost(port, dispatch) {
+// Transfer a typed array only when its view owns the whole backing buffer.
+// Transferring a subview could expose unrelated bytes and detach storage still
+// owned by another value, so callers must copy such views before opting in.
+export function transferOwnedTypedArray(value) {
+  if (!ArrayBuffer.isView(value) || value instanceof DataView
+      || !(value.buffer instanceof ArrayBuffer)
+      || value.byteOffset !== 0 || value.byteLength !== value.buffer.byteLength) {
+    throw new TypeError("transfer result must be a full-span owned typed array");
+  }
+  return [value.buffer];
+}
+
+export function attachMessagePortActorHost(port, dispatch, {
+  transferResult = () => [],
+} = {}) {
   if (typeof dispatch !== "function") throw new TypeError("actor dispatch required");
+  if (typeof transferResult !== "function") throw new TypeError("transferResult must be a function");
   const onMessage = (event) => {
     const request = event.data;
     try {
@@ -62,11 +77,23 @@ export function attachMessagePortActorHost(port, dispatch) {
       return;
     }
     Promise.resolve().then(() => dispatch(request)).then(
-      (value) => port.postMessage(actorEnvelope({
-        type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
-        generation: request.generation, requestId: request.requestId,
-        payload: { ok: true, value },
-      })),
+      (value) => {
+        try {
+          const transfer = transferResult(value, request);
+          if (!Array.isArray(transfer)) throw new TypeError("transferResult must return an array");
+          port.postMessage(actorEnvelope({
+            type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
+            generation: request.generation, requestId: request.requestId,
+            payload: { ok: true, value },
+          }), transfer);
+        } catch (error) {
+          port.postMessage(actorEnvelope({
+            type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
+            generation: request.generation, requestId: request.requestId,
+            payload: { ok: false, error: String(error) },
+          }));
+        }
+      },
       (error) => port.postMessage(actorEnvelope({
         type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
         generation: request.generation, requestId: request.requestId,
