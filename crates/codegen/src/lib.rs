@@ -29,11 +29,12 @@ pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
 };
 pub use sonatina::{
-    LowerError, SonatinaContractBytecode, SonatinaTestOptions, emit_ingot_sonatina_bytecode,
-    emit_ingot_sonatina_ir, emit_ingot_sonatina_ir_optimized, emit_module_sonatina_bytecode,
-    emit_module_sonatina_ir, emit_module_sonatina_ir_optimized, emit_runtime_package_sonatina_ir,
-    emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina,
-    emit_test_module_sonatina, validate_module_sonatina_ir,
+    LowerError, SonatinaContractBytecode, SonatinaTestOptions, WasmCompileOptions,
+    compile_runtime_package_wasm_with_options, emit_ingot_sonatina_bytecode, emit_ingot_sonatina_ir,
+    emit_ingot_sonatina_ir_optimized, emit_module_sonatina_bytecode, emit_module_sonatina_ir,
+    emit_module_sonatina_ir_optimized, emit_runtime_package_sonatina_ir,
+    emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina, emit_test_module_sonatina,
+    validate_module_sonatina_ir,
 };
 #[cfg(feature = "spirv-backend")]
 pub use sonatina::{

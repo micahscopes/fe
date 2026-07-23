@@ -36,6 +36,49 @@ use crate::{
     test_output::{TestRootMetadataError, runtime_test_root_metadata},
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WasmCompileOptions {
+    canonical_arena: bool,
+}
+
+impl WasmCompileOptions {
+    pub fn with_canonical_arena(mut self) -> Self {
+        self.canonical_arena = true;
+        self
+    }
+}
+
+/// Lower a runtime package through the existing Wasm path and emit Wasm with
+/// explicit Sonatina backend options. The default remains byte-for-byte
+/// equivalent to `compile_runtime_package_wasm` followed by the default
+/// Sonatina Wasm backend; canonical arena exports are opt-in only.
+pub fn compile_runtime_package_wasm_with_options(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    options: WasmCompileOptions,
+) -> Result<sonatina_codegen::isa::wasm::WasmArtifact, LowerError> {
+    use sonatina_codegen::Backend as _;
+    use sonatina_codegen::isa::wasm::WasmBackend;
+
+    let (module, import_modules) = compile_runtime_package_wasm(db, package)?;
+    let backend = WasmBackend::new().with_import_modules(import_modules);
+    let backend = if options.canonical_arena {
+        backend.with_canonical_arena()
+    } else {
+        backend
+    };
+    backend.compile_module(&module).map_err(|errors| {
+        LowerError::Internal(format!(
+            "wasm backend: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))
+    })
+}
+
 #[derive(Debug)]
 pub enum LowerError {
     RuntimeLower(mir::LowerError),
