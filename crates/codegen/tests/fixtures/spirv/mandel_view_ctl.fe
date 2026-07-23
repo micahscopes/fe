@@ -23,6 +23,9 @@
 // (view_init's constant-tuple return and render_rgba's MemPtr fill hit distinct R1
 // gaps and land with the I3 page assembly, not here.)
 
+use core::{HostEffect, MainThread}
+use std::webgpu::{Dispatch, WebGpuBackend}
+
 /// min(v, hi) via one branch (value-carried in R1).
 fn min_i(v: i32, hi: i32) -> i32 {
     if hi < v { hi } else { v }
@@ -134,11 +137,15 @@ struct VerifyResponse {
     reference_hash: u32,
 }
 
-pub fn render(_request: own RenderRequest) -> RenderResponse {
+pub fn render(_request: own RenderRequest) -> RenderResponse
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
     RenderResponse { submitted: false }
 }
 
-pub fn verify(_request: own VerifyRequest) -> VerifyResponse {
+pub fn verify(_request: own VerifyRequest) -> VerifyResponse
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
     VerifyResponse {
         gpu_hash: 0,
         wasm_hash: 0,

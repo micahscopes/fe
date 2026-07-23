@@ -1,13 +1,12 @@
 import { createActorCoordinator } from "../shared/actor-coordinator.js";
 import {
-  createTypedGpuActorClient,
-  createTypedMainThreadGpuBroker,
-  selectActorSchemas,
+  createCanonicalMainThreadGpuChannel,
+  selectCanonicalMainThreadGpuSchemas,
 } from "../shared/gpu-actor.js";
 import { compileActorAdapter } from "./gen/ctl-interface.js";
 
 const compiledSchemas = compileActorAdapter();
-const gpuSchemas = selectActorSchemas(compiledSchemas, ["render", "verify"]);
+const gpuSchemas = selectCanonicalMainThreadGpuSchemas(compiledSchemas);
 
 // Compatibility-shaped export for tests and consumers that inspected the old
 // demo-owned schemas. The validators themselves are now compiler-generated.
@@ -39,8 +38,8 @@ export function createMandelbrotActorRuntime({ render, verify, onError = () => {
   }
   let generation = 0;
   const waiters = new Map();
-  const channel = new MessageChannel();
-  const broker = createTypedMainThreadGpuBroker(channel.port1, {
+  const { broker, client: gpu } = createCanonicalMainThreadGpuChannel({
+    adapter: compiledSchemas,
     handlers: {
       render: (request) => render(viewArray(request)),
       verify: async (request) => {
@@ -52,9 +51,7 @@ export function createMandelbrotActorRuntime({ render, verify, onError = () => {
         };
       },
     },
-    ...gpuSchemas,
   });
-  const gpu = createTypedGpuActorClient(channel.port2, gpuSchemas);
 
   const execute = async (request) => {
     const value = await gpu.request(

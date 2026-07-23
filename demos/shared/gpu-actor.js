@@ -63,6 +63,76 @@ export function selectActorSchemas(schemas, lanes) {
   });
 }
 
+export function selectCanonicalMainThreadGpuSchemas(adapter) {
+  plainObject(adapter, "canonical actor adapter");
+  const intents = plainObject(adapter.intents, "canonical actor intents");
+  const lanes = Object.entries(intents)
+    .filter(([, intent]) => intent?.execution === "host_effect"
+      && intent.placement === "main_thread"
+      && Array.isArray(intent.capabilities)
+      && intent.capabilities.some(({ capability }) => capability === "webgpu_dispatch"))
+    .map(([lane]) => lane)
+    .sort();
+  if (lanes.length === 0) {
+    throw new TypeError("canonical interface declares no main-thread WebGPU lanes");
+  }
+  return Object.freeze({
+    lanes: Object.freeze(lanes),
+    ...selectActorSchemas(adapter, lanes),
+  });
+}
+
+function exactCanonicalGpuHandlers(handlers, lanes) {
+  return exactFunctionMap(handlers, lanes, "canonical WebGPU handlers");
+}
+
+// The compiler-derived intent selects the wire lanes and validators. The
+// application supplies only the visible device-owning effects themselves.
+export function createCanonicalMainThreadGpuBroker(port, {
+  adapter,
+  handlers,
+  initialEpoch = 0,
+}) {
+  const { lanes, requestSchema, resultSchema } =
+    selectCanonicalMainThreadGpuSchemas(adapter);
+  exactCanonicalGpuHandlers(handlers, lanes);
+  return createTypedMainThreadGpuBroker(port, {
+    handlers,
+    requestSchema,
+    resultSchema,
+    initialEpoch,
+  });
+}
+
+export function createCanonicalMainThreadGpuClient(port, {
+  adapter,
+  initialEpoch = 0,
+}) {
+  const { requestSchema, resultSchema } =
+    selectCanonicalMainThreadGpuSchemas(adapter);
+  return createTypedGpuActorClient(port, {
+    requestSchema,
+    resultSchema,
+    initialEpoch,
+  });
+}
+
+export function createCanonicalMainThreadGpuChannel({
+  adapter,
+  handlers,
+  initialEpoch = 0,
+  MessageChannelCtor = MessageChannel,
+}) {
+  const channel = new MessageChannelCtor();
+  const broker = createCanonicalMainThreadGpuBroker(channel.port1, {
+    adapter, handlers, initialEpoch,
+  });
+  const client = createCanonicalMainThreadGpuClient(channel.port2, {
+    adapter, initialEpoch,
+  });
+  return Object.freeze({ broker, client });
+}
+
 export function createTypedGpuActorClient(port, {
   requestSchema,
   resultSchema,

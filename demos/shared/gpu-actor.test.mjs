@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  createCanonicalMainThreadGpuChannel,
   createGpuActorClient,
   createMainThreadGpuBroker,
   createTypedGpuActorClient,
@@ -51,6 +52,61 @@ const generatedSchemas = Object.freeze({
       exactObject(value, { doubled: actorField.finiteNumber })),
   }),
 });
+const canonicalAdapter = Object.freeze({
+  ...generatedSchemas,
+  intents: Object.freeze({
+    draw: Object.freeze({
+      execution: "host_effect",
+      placement: "main_thread",
+      capabilities: Object.freeze([
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+      ]),
+    }),
+    effect: Object.freeze({
+      execution: "host_effect",
+      placement: "main_thread",
+      capabilities: Object.freeze([
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+      ]),
+    }),
+    malformed: Object.freeze({
+      execution: "host_effect",
+      placement: "worker",
+      capabilities: Object.freeze([]),
+    }),
+  }),
+});
+const canonicalRuns = [];
+const canonical = createCanonicalMainThreadGpuChannel({
+  adapter: canonicalAdapter,
+  handlers: {
+    draw: ({ value }) => { canonicalRuns.push(value); return { doubled: value * 2 }; },
+    effect: ({ value }) => ({ doubled: value }),
+  },
+});
+assert.deepEqual(await canonical.client.request("draw", { value: 7 }, 1), { doubled: 14 });
+assert.deepEqual(canonicalRuns, [7]);
+await assert.rejects(
+  canonical.client.request("malformed", { value: 1 }, 1),
+  /no request schema for actor lane malformed/,
+);
+assert.throws(
+  () => createCanonicalMainThreadGpuChannel({
+    adapter: canonicalAdapter,
+    handlers: { draw() {} },
+  }),
+  /must exactly cover actor lanes: draw, effect/,
+);
+assert.throws(
+  () => createCanonicalMainThreadGpuChannel({
+    adapter: canonicalAdapter,
+    handlers: { draw() {}, effect() {}, malformed() {} },
+  }),
+  /must exactly cover actor lanes: draw, effect/,
+);
+canonical.client.close();
+canonical.broker.close();
+
 const typedChannel = new MessageChannel();
 const typedRuns = [];
 const typedBroker = createTypedMainThreadGpuBroker(typedChannel.port1, {

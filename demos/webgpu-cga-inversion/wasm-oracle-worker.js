@@ -1,8 +1,7 @@
 import { instantiateWasm } from "../webgpu-keystone/wasm-runner.js";
 import { attachMessagePortActorHost } from "../shared/message-port-actor.js";
 import {
-  createTypedGpuActorClient,
-  selectActorSchemas,
+  createCanonicalMainThreadGpuClient,
 } from "../shared/gpu-actor.js";
 import { createExactLaneRouter } from "../shared/actor-router.js";
 import {
@@ -22,11 +21,6 @@ const laneNames = (execution, placement = null) =>
       && (placement === null || lane.intent.placement === placement))
   .map(([name]) => name);
 
-const gpuLaneNames = () => Object.entries(compiledCanonicalInterface.lanes)
-  .filter(([, lane]) => lane.intent.capabilities
-    .some(({ capability }) => capability === "webgpu_dispatch"))
-  .map(([name]) => name);
-
 self.addEventListener("message", async ({ data }) => {
   if (data?.type !== "init") return;
   const { port, gpuPort, wasm, actorEpoch } = data;
@@ -35,9 +29,8 @@ self.addEventListener("message", async ({ data }) => {
     const wasmCaller = createInterfaceCaller(exports);
     const wasmActor = createActorAdapter(exports, { placement: "worker" });
     const schemas = compileActorAdapter();
-    const gpuLanes = gpuLaneNames();
-    const gpu = createTypedGpuActorClient(gpuPort, {
-      ...selectActorSchemas(schemas, gpuLanes),
+    const gpu = createCanonicalMainThreadGpuClient(gpuPort, {
+      adapter: schemas,
       initialEpoch: actorEpoch,
     });
     const hostEffects = createHostEffectAdapter({

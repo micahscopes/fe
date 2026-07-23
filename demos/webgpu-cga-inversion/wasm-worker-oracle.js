@@ -1,7 +1,6 @@
 import { createCanonicalModuleWorkerActor } from "../shared/module-worker-actor.js";
 import {
-  createTypedMainThreadGpuBroker,
-  selectActorSchemas,
+  createCanonicalMainThreadGpuBroker,
 } from "../shared/gpu-actor.js";
 
 const requestPayload = (values, generation) => ({
@@ -18,14 +17,9 @@ export async function createCgaWasmWorkerOracle({
   gpuRender,
   gpuVerify,
 }) {
-  const { compileActorAdapter, compiledCanonicalInterface } =
+  const { compileActorAdapter } =
     await import("./gen-schedule32/actor-interface.js");
   const adapter = compileActorAdapter();
-  const gpuLanes = Object.entries(compiledCanonicalInterface.lanes)
-    .filter(([, lane]) => lane.intent.capabilities
-      .some(({ capability }) => capability === "webgpu_dispatch"))
-    .map(([name]) => name);
-  const gpuSchemas = selectActorSchemas(adapter, gpuLanes);
   const actor = await createCanonicalModuleWorkerActor({
     workerUrl: new URL("./wasm-oracle-worker.js", import.meta.url),
     init: { wasm },
@@ -33,12 +27,12 @@ export async function createCgaWasmWorkerOracle({
     maxPending: 8,
     createAuxiliaryPorts(epoch) {
       const channel = new MessageChannel();
-      const broker = createTypedMainThreadGpuBroker(channel.port1, {
+      const broker = createCanonicalMainThreadGpuBroker(channel.port1, {
+        adapter,
         handlers: {
           render: (payload, request) => gpuRender(payload, request),
           verify: (payload, request) => gpuVerify(payload, request),
         },
-        ...gpuSchemas,
         initialEpoch: epoch,
       });
       return {

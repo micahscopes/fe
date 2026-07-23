@@ -50,8 +50,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    BackendKind, OptLevel, WebBuildOptions, WebBundle, WebCanonicalPolicy,
-    compile_runtime_package_spirv_render, layout_for,
+    BackendKind, CanonicalCapability, CanonicalExecution, CanonicalPlacement, OptLevel,
+    WebBuildOptions, WebBundle, WebCanonicalPolicy, compile_runtime_package_spirv_render,
+    layout_for,
 };
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvLayout, WordKind};
 use url::Url;
@@ -283,6 +284,27 @@ fn main() {
             .with_canonical_policy(WebCanonicalPolicy::Required),
     )
     .expect("Mandelbrot canonical control WebBundle must compile");
+    let canonical_interface = canonical_bundle
+        .manifest
+        .canonical_interface
+        .as_ref()
+        .expect("required Mandelbrot canonical interface");
+    for lane_name in [RENDER_LANE, VERIFY_LANE] {
+        let lane = canonical_interface
+            .lanes
+            .iter()
+            .find(|lane| lane.name == lane_name)
+            .unwrap_or_else(|| panic!("missing generated `{lane_name}` lane"));
+        assert_eq!(lane.intent.execution, CanonicalExecution::HostEffect);
+        assert_eq!(lane.intent.placement, CanonicalPlacement::MainThread);
+        assert_eq!(lane.intent.capabilities.len(), 1);
+        assert_eq!(
+            lane.intent.capabilities[0].capability,
+            CanonicalCapability::WebgpuDispatch
+        );
+        assert!(lane.intent.capabilities[0].mutable);
+        assert!(lane.export.is_none());
+    }
     let ctl_interface_js = canonical_bundle
         .interface_js
         .as_ref()

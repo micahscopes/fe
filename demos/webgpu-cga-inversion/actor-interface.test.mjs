@@ -7,6 +7,7 @@ import {
   createInterfaceCaller,
 } from "./gen-schedule32/actor-interface.js";
 import { createExactLaneRouter } from "../shared/actor-router.js";
+import { selectCanonicalMainThreadGpuSchemas } from "../shared/gpu-actor.js";
 
 assert.equal(canonicalInterfaceManifest.version, 2);
 assert.deepEqual(Object.keys(compiledCanonicalInterface.lanes), [
@@ -25,6 +26,10 @@ assert.deepEqual(
 );
 
 const schemas = compileActorAdapter();
+assert.deepEqual(
+  selectCanonicalMainThreadGpuSchemas(schemas).lanes,
+  ["render", "verify"],
+);
 const frame = {
   generation: 7,
   cam_x: 0,

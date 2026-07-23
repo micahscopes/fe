@@ -12,6 +12,10 @@ The same canonical module-worker binding used by the CGA flagship owns wire
 request IDs and epochs here. Its in-flight bound, readiness timeout, serialized
 restart, generated owned-byte transfer policy, and stable error codes are
 runtime behavior rather than Mandelbrot-specific orchestration.
+The `render` and `verify` Fe declarations carry
+`HostEffect + MainThread + mut Dispatch<WebGpuBackend>` requirements. The shared
+canonical GPU binding derives its exact lane set and schemas from those
+requirements; this demo supplies only their concrete WebGPU handlers.
 
 Interactive rendering crosses the bounded schema-parametric GPU actor, but the
 GPU owner still submits directly to the presentation target. Normal frames do

@@ -115,7 +115,10 @@ transfer policy are not restated by the demo. The shared module-worker binding
 owns request IDs and epochs, bounds in-flight requests, times out readiness,
 serializes restart, and exposes stable error codes without forwarding Worker
 exception text. GPU lane routing remains explicit so device ownership is
-inspectable rather than hidden in framework configuration.
+inspectable rather than hidden in framework configuration: Fe effect
+requirements select the main-thread WebGPU lanes and generated validators,
+while the application supplies only the visible `render` and `verify` device
+handlers.
 
 Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the later browser
 runtime commit `b2601adc`. The latter is reconstructed reproducibly from the
