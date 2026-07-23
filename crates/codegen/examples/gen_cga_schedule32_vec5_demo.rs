@@ -23,7 +23,7 @@ use sonatina_codegen::isa::spirv::{
 use url::Url;
 
 const CANONICAL: &str = include_str!("../tests/fixtures/fco_cga80_direct_lanes.fe");
-const SPARSE_CLIFFORD_API: &str = include_str!("../tests/fixtures/sparse_clifford_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const BODY: &str = include_str!("../tests/fixtures/spirv/fco_cga80_direct_de_body.fe");
 const NAME: &str = "cga_schedule32_vec5_de_render";
 const WIDTH: u32 = 128;
@@ -140,7 +140,9 @@ fn composed_source() -> String {
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
     let source = format!("{SPARSE_CLIFFORD_API}\n{prefix}{suffix}\n{BODY}");
-    assert!(source.contains("type Schedule32 = Schedule<32>"));
+    assert!(source.contains(
+        "type Schedule32 = SparsePlan<SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2, 80, 32>",
+    ));
     assert!(source.contains("const fn survivor_triple"));
     assert!(source.contains("struct CanonicalCgaProvider"));
     assert!(
@@ -992,7 +994,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "sonatina_dirty": !sonatina_status.is_empty(),
         "sonatina_status_fnv1a32": fnv1a32(sonatina_status.as_bytes()),
         "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
-        "sparse_clifford_fixture": "crates/codegen/tests/fixtures/sparse_clifford_api.fe",
+        "sparse_clifford_fixture": "ingots/sparse_clifford/src/lib.fe",
         "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
         "canonical_fnv1a32": fnv1a32(CANONICAL.as_bytes()),
         "sparse_clifford_api_fnv1a32": fnv1a32(SPARSE_CLIFFORD_API.as_bytes()),

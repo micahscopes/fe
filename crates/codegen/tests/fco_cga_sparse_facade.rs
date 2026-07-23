@@ -7,7 +7,7 @@ use fe_codegen::{
 use url::Url;
 
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
-const SPARSE_CLIFFORD_API: &str = include_str!("fixtures/sparse_clifford_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const BODY: &str = include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe");
 const ENTRY: &str = "cga_schedule32_vec5_de_render";
 

@@ -59,7 +59,7 @@ sharing.
    absent blades, and rejects an unsatisfied present-only bound. This is
    functional but verbose and closed over a known support.
 
-   The shared `sparse_clifford_api.fe` prelude removes that closed-world
+   The shared `ingots/sparse_clifford` API removes that closed-world
    limitation for support planning. Its ordinary-Fe `BladeSet` represents up to
    five basis generators (32 blades) in an explicit portable `u32`;
    `support_gp` derives conservative product support for any orthogonal,

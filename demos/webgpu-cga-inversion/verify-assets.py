@@ -83,8 +83,8 @@ elif algebra.startswith("canonical CTFE-derived Schedule<32>;"):
     ]
 elif provider_algebra:
     tokens = [
-        "recursive type fn Schedule",
-        "type Schedule32 = Schedule<32>",
+        "recursive type fn SparsePlan",
+        "type Schedule32 = SparsePlan<SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2, 80, 32>",
         "struct CanonicalCgaProvider",
         "for triple in 0..80",
         "const SANDWICH_OUTPUT_BITS",

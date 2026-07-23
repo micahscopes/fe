@@ -1,0 +1,6 @@
+[ingot]
+name = "sparse_clifford_consumer"
+version = "0.1.0"
+
+[dependencies]
+sparse_clifford = "../../../../../ingots/sparse_clifford"

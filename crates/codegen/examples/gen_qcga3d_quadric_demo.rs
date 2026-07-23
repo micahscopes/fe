@@ -13,7 +13,7 @@ use url::Url;
 
 const PLANNER_SOURCE: &str =
     include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
-const SPARSE_CLIFFORD_API: &str = include_str!("../tests/fixtures/sparse_clifford_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const RENDER_SOURCE: &str =
     include_str!("../tests/fixtures/spirv/qcga3d_sparse_planned_render_body.fe");
 const EXPORT: &str = "qcga3d_sparse_planned_render";
@@ -292,7 +292,7 @@ fn main() {
     let fe_rev = git(repo.to_str().unwrap(), &["rev-parse", "HEAD"]);
     let provenance = serde_json::json!({
         "fixture": [
-            "crates/codegen/tests/fixtures/sparse_clifford_api.fe",
+            "ingots/sparse_clifford/src/lib.fe",
             "crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe",
             "crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_render_body.fe",
         ],

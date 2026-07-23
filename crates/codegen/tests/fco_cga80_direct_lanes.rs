@@ -5,7 +5,7 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use url::Url;
 
-const SPARSE_CLIFFORD_API: &str = include_str!("fixtures/sparse_clifford_api.fe");
+const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
 
 fn canonical_source() -> String {

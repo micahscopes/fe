@@ -49,38 +49,50 @@ const fn contraction_sign(_ candidate: usize) -> usize {
     sign
 }
 
-const fn survivor_count() -> usize {
-    let mut candidate: usize = 0
-    let mut count: usize = 0
-    while candidate < CANDIDATES {
-        if contraction_sign(candidate) != 0 { count = count + 1 }
-        candidate = candidate + 1
-    }
-    count
-}
-
-const fn survivor_candidate(_ target: usize) -> usize {
-    let mut candidate: usize = 0
-    let mut seen: usize = 0
-    while candidate < CANDIDATES {
+const fn incidence_keep_word(_ first: usize, _ last: usize) -> u64 {
+    let mut candidate: usize = first
+    let mut keep_bits: u64 = 0
+    while candidate < last {
         if contraction_sign(candidate) != 0 {
-            if seen == target { return candidate }
-            seen = seen + 1
+            keep_bits =
+                keep_bits | ((1 as u64) << (candidate - first).downcast_truncate())
         }
         candidate = candidate + 1
     }
-    CANDIDATES
+    keep_bits
+}
+
+const INCIDENCE_KEEP0: u64 = incidence_keep_word(0, 64)
+const INCIDENCE_KEEP1: u64 = incidence_keep_word(64, 128)
+const INCIDENCE_KEEP2: u64 = incidence_keep_word(128, CANDIDATES)
+
+const fn survivor_count() -> usize {
+    plan_mask_cardinality(
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, CANDIDATES,
+    )
+}
+
+const fn survivor_candidate(_ target: usize) -> usize {
+    plan_mask_candidate(
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, CANDIDATES, target,
+    )
 }
 
 static_assert(survivor_count() == 12)
+static_assert(INCIDENCE_KEEP0 == 288265560590917633)
+static_assert(INCIDENCE_KEEP1 == 9224498074217351296)
+static_assert(INCIDENCE_KEEP2 == 4096)
 
-recursive type fn IncidencePlan<const N: usize>() -> (*) {
-    match N {
-        0 => Zero
-        _ => Add<Term<{survivor_candidate(N - 1)}>, IncidencePlan<{N - 1}>>
-    }
-}
-type IncidencePlan12 = IncidencePlan<12>
+// Literal type arguments avoid the current semantic-MIR const-value-path
+// lowering edge; the assertions above tie them to the computed incidence mask.
+type IncidencePlan12 =
+    SparsePlan<
+        {288265560590917633 as u64},
+        {9224498074217351296 as u64},
+        {4096 as u64},
+        CANDIDATES,
+        12,
+    >
 static_assert(survivor_candidate(0) == 0)
 static_assert(survivor_candidate(1) == 13)
 static_assert(survivor_candidate(2) == 26)

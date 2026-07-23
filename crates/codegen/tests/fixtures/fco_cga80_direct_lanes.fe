@@ -109,41 +109,40 @@ const fn keep_tag(_ triple: usize) -> usize {
     supported_output_tag(triple) * coefficient_keep_tag(triple)
 }
 
-const fn survivor_count() -> usize {
-    let mut triple: usize = 0
-    let mut count: usize = 0
-    while triple < 80 {
-        if keep_tag(triple) != 0 { count = count + 1 }
-        triple = triple + 1
-    }
-    count
-}
-
-const fn survivor_triple(_ target: usize) -> usize {
-    let mut triple: usize = 0
-    let mut seen: usize = 0
-    while triple < 80 {
+const fn schedule_keep_word(_ first: usize, _ last: usize) -> u64 {
+    let mut triple: usize = first
+    let mut keep_bits: u64 = 0
+    while triple < last {
         if keep_tag(triple) != 0 {
-            if seen == target { return triple }
-            seen = seen + 1
+            keep_bits = keep_bits | ((1 as u64) << (triple - first).downcast_truncate())
         }
         triple = triple + 1
     }
-    80
+    keep_bits
+}
+
+const SCHEDULE_KEEP0: u64 = schedule_keep_word(0, 64)
+const SCHEDULE_KEEP1: u64 = schedule_keep_word(64, 80)
+const SCHEDULE_KEEP2: u64 = 0
+
+const fn survivor_count() -> usize {
+    plan_mask_cardinality(SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2, 80)
+}
+
+const fn survivor_triple(_ target: usize) -> usize {
+    plan_mask_candidate(SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2, 80, target)
 }
 
 static_assert(survivor_count() == 32)
+static_assert(SCHEDULE_KEEP0 == 10143307741274919231)
+static_assert(SCHEDULE_KEEP1 == 34952)
 
-// The inspectable typed witness uses the shared sparse-plan vocabulary and
-// stores the canonical source-triple identity in exact survivor order. There
-// is no generated or hand-authored survivor table.
-recursive type fn Schedule<const N: usize>() -> (*) {
-    match N {
-        0 => Zero
-        _ => Add<Term<{survivor_triple(N - 1)}>, Schedule<{N - 1}>>
-    }
-}
-type Schedule32 = Schedule<32>
+// The inspectable typed witness stores the canonical source-triple identity in
+// exact survivor order. The literals keep today's semantic-MIR lowering from
+// seeing a const-value path in a type argument; the assertions above prove
+// that they are exactly the masks computed from the source semantics.
+type Schedule32 =
+    SparsePlan<{10143307741274919231 as u64}, {34952 as u64}, {0 as u64}, 80, 32>
 
 // BEGIN_FORCE_SCHEDULE32
 fn takes_nat32(_ value: Nat<32>) {}

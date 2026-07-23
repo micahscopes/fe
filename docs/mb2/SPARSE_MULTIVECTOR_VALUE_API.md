@@ -1,7 +1,7 @@
 # Bounded sparse multivector value API
 
-The package-like ordinary-Fe prelude
-`crates/codegen/tests/fixtures/sparse_clifford_api.fe` covers three reusable
+The ordinary-Fe ingot
+`ingots/sparse_clifford` covers three reusable
 pieces of a sparse algebra in one source unit: compile-time support planning,
 the `Zero`/`Term`/`Add` operator-plan vocabulary, and support-sized runtime
 values. Schedule32 and QCGA prepend this same source before their domain
@@ -37,9 +37,12 @@ probe calls its accessor rather than injecting an unrelated zero lane. A
 separate gate proves present-only access to sphere e3 cannot produce executable
 Wasm.
 
-This is intentionally not yet the final public algebra package. Fe fixtures do
-not have imports, so Rust tests and generators compose the prelude as source.
-Domain support wrappers
+This is intentionally not yet the final general algebra package. The public
+ingot is imported and code-generated across a real dependency edge by
+`sparse_clifford_ingot.rs`. The current browser artifact generators still
+compose its canonical `src/lib.fe` as source because they publish one
+self-contained `kernel.fe`; `fe web` and the driver already support directory
+ingots. Domain support wrappers
 remain useful to bind a particular support and blade at a readable API
 boundary, but rank depth and computed storage aliases are no longer compiler
 limits: recursive `SparseIndex<7>` and `SparseStorage<8>` both execute. The

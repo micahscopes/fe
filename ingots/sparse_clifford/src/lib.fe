@@ -1,9 +1,9 @@
 // Package-like sparse Clifford prelude.
 //
-// This is one ordinary-Fe source unit because Fe does not yet provide a
-// fixture-level module/import mechanism. Consumers prepend it to a
-// domain-specific planner or kernel. It deliberately owns only reusable
-// representation and access semantics:
+// This is a real Fe ingot with a public API. The current browser generators
+// also prepend this canonical source to their self-contained published
+// `kernel.fe` artifact; ordinary Fe applications can instead import the ingot.
+// It deliberately owns only reusable representation and access semantics:
 //   - fixed-capacity BladeSet support algebra for diagonal metrics;
 //   - Zero/Term/Add sparse operator plans and their length witness;
 //   - support-sized scalar storage with default-zero and present-only access.
@@ -15,15 +15,15 @@
 //
 // Five basis vectors / 32 blades fit an explicit portable u32. Operations fail
 // closed above that bound. This is composed into domain fixtures by the Rust
-// harness because Fe does not yet have a fixture-level module/import mechanism.
-struct BladeSet { bits: u32, dimension: u32 }
+// single-file harness as well as through the ingot API.
+pub struct BladeSet { pub bits: u32, pub dimension: u32 }
 impl Copy for BladeSet {}
 
-const fn support_dimension_valid(_ dimension: u32) -> bool {
+pub const fn support_dimension_valid(_ dimension: u32) -> bool {
     dimension < 6
 }
 
-const fn support_capacity_mask(_ dimension: u32) -> u32 {
+pub const fn support_capacity_mask(_ dimension: u32) -> u32 {
     match dimension {
         0 => 1
         1 => 3
@@ -35,14 +35,14 @@ const fn support_capacity_mask(_ dimension: u32) -> u32 {
     }
 }
 
-const fn blade_set(_ bits: u32, _ dimension: u32) -> BladeSet {
+pub const fn blade_set(_ bits: u32, _ dimension: u32) -> BladeSet {
     BladeSet {
         bits: bits & support_capacity_mask(dimension),
         dimension: dimension,
     }
 }
 
-const fn support_contains(_ support: BladeSet, _ blade: u32) -> bool {
+pub const fn support_contains(_ support: BladeSet, _ blade: u32) -> bool {
     if !support_dimension_valid(support.dimension) { return false }
     if blade < (1 << support.dimension) {
     } else {
@@ -51,7 +51,7 @@ const fn support_contains(_ support: BladeSet, _ blade: u32) -> bool {
     ((support.bits >> blade) & 1) == 1
 }
 
-const fn blade_grade(_ blade: u32) -> u32 {
+pub const fn blade_grade(_ blade: u32) -> u32 {
     let mut value: u32 = blade
     let mut count: u32 = 0
     while 0 < value {
@@ -61,7 +61,7 @@ const fn blade_grade(_ blade: u32) -> u32 {
     count
 }
 
-const fn support_grade(_ support: BladeSet, _ grade: u32) -> BladeSet {
+pub const fn support_grade(_ support: BladeSet, _ grade: u32) -> BladeSet {
     if !support_dimension_valid(support.dimension) {
         return blade_set(0, support.dimension)
     }
@@ -80,7 +80,7 @@ const fn support_grade(_ support: BladeSet, _ grade: u32) -> BladeSet {
 // Conservative geometric-product support in an orthogonal basis. A shared
 // generator outside `nonzero_square_generators` annihilates the pair.
 // Coefficient cancellation is intentionally a later normalization step.
-const fn support_gp(
+pub const fn support_gp(
     _ left: BladeSet,
     _ right: BladeSet,
     _ nonzero_square_generators: u32,
@@ -113,7 +113,7 @@ const fn support_gp(
     blade_set(output, left.dimension)
 }
 
-const fn support_cardinality(_ support: BladeSet) -> u32 {
+pub const fn support_cardinality(_ support: BladeSet) -> u32 {
     let mut value: u32 = support.bits
     let mut count: u32 = 0
     while 0 < value {
@@ -127,21 +127,21 @@ const fn support_cardinality(_ support: BladeSet) -> u32 {
 // CTFE candidate enumeration and constructs a ground
 // Add<Term<Candidate>, ... Zero> tree.
 
-struct Zero {}
-struct Term<const Candidate: usize> {}
-struct Add<L, R> {}
+pub struct Zero {}
+pub struct Term<const Candidate: usize> {}
+pub struct Add<L, R> {}
 
-struct NatZ {}
-struct NatS<N> {}
+pub struct NatZ {}
+pub struct NatS<N> {}
 
-recursive type fn Nat<const N: usize>() -> (*) {
+pub recursive type fn Nat<const N: usize>() -> (*) {
     match N {
         0 => NatZ
         _ => NatS<Nat<{N - 1}>>
     }
 }
 
-trait PlanLength { type Out }
+pub trait PlanLength { type Out }
 
 impl PlanLength for Zero {
     type Out = NatZ
@@ -153,25 +153,100 @@ impl<const Candidate: usize, Tail: PlanLength> PlanLength
     type Out = NatS<<Tail as PlanLength>::Out>
 }
 
+// Bounded candidate-set planner. A domain encodes its surviving candidate
+// identities in three browser-profile u64 words, while this shared layer owns
+// cardinality, canonical ascending selection, and materialization of the
+// ground plan type. The 192-candidate ceiling is explicit; this is not an
+// unbounded sparse operator compiler.
+
+pub const fn plan_mask_contains(
+    _ keep0: u64,
+    _ keep1: u64,
+    _ keep2: u64,
+    _ candidate: usize,
+) -> bool {
+    if candidate < 64 {
+        ((keep0 >> candidate.downcast_truncate()) & 1) == 1
+    } else if candidate < 128 {
+        ((keep1 >> (candidate - 64).downcast_truncate()) & 1) == 1
+    } else if candidate < 192 {
+        ((keep2 >> (candidate - 128).downcast_truncate()) & 1) == 1
+    } else {
+        false
+    }
+}
+
+pub const fn plan_mask_cardinality(
+    _ keep0: u64,
+    _ keep1: u64,
+    _ keep2: u64,
+    _ candidate_count: usize,
+) -> usize {
+    let mut candidate: usize = 0
+    let mut count: usize = 0
+    while candidate < candidate_count && candidate < 192 {
+        if plan_mask_contains(keep0, keep1, keep2, candidate) {
+            count = count + 1
+        }
+        candidate = candidate + 1
+    }
+    count
+}
+
+pub const fn plan_mask_candidate(
+    _ keep0: u64,
+    _ keep1: u64,
+    _ keep2: u64,
+    _ candidate_count: usize,
+    _ target: usize,
+) -> usize {
+    let mut candidate: usize = 0
+    let mut seen: usize = 0
+    while candidate < candidate_count && candidate < 192 {
+        if plan_mask_contains(keep0, keep1, keep2, candidate) {
+            if seen == target { return candidate }
+            seen = seen + 1
+        }
+        candidate = candidate + 1
+    }
+    candidate_count
+}
+
+pub recursive type fn SparsePlan<
+    const Keep0: u64,
+    const Keep1: u64,
+    const Keep2: u64,
+    const CandidateCount: usize,
+    const N: usize,
+>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<{plan_mask_candidate(Keep0, Keep1, Keep2, CandidateCount, N - 1)}>,
+            SparsePlan<Keep0, Keep1, Keep2, CandidateCount, {N - 1}>,
+        >
+    }
+}
+
 // Sparse runtime values selected from the 32 blades of Cl(p,q), p+q <= 5.
 // Runtime storage contains exactly popcount(Support) scalars. A recursive
 // rank-to-Here/Next type covers the whole bounded support. Missing coefficient
 // reads specialize to zero; `sparse_present_coefficient` has no missing-blade
 // implementation and therefore rejects absent access during type checking.
 
-struct SparseNil {}
-struct SparseCell<T> { head: f32, tail: T }
+pub struct SparseNil {}
+pub struct SparseCell<T> { pub head: f32, pub tail: T }
 impl Copy for SparseNil {}
 impl<T: Copy> Copy for SparseCell<T> {}
 
-recursive type fn SparseStorage<const N: usize>() -> (*) {
+pub recursive type fn SparseStorage<const N: usize>() -> (*) {
     match N {
         0 => SparseNil
         _ => SparseCell<SparseStorage<{N - 1}>>
     }
 }
 
-const fn sparse_rank(_ support: usize, _ blade: usize) -> usize {
+pub const fn sparse_rank(_ support: usize, _ blade: usize) -> usize {
     let mut cursor: usize = 0
     let mut rank: usize = 0
     while cursor < blade && cursor < 32 {
@@ -181,7 +256,7 @@ const fn sparse_rank(_ support: usize, _ blade: usize) -> usize {
     rank
 }
 
-const fn sparse_present(_ support: usize, _ blade: usize) -> usize {
+pub const fn sparse_present(_ support: usize, _ blade: usize) -> usize {
     if blade < 32 {
         (support >> blade) & 1
     } else {
@@ -189,19 +264,19 @@ const fn sparse_present(_ support: usize, _ blade: usize) -> usize {
     }
 }
 
-struct SparseMissing {}
-struct SparseHere {}
-struct SparseNext<I> {}
-struct SparseSelect<const Present: usize, const Rank: usize> {}
+pub struct SparseMissing {}
+pub struct SparseHere {}
+pub struct SparseNext<I> {}
+pub struct SparseSelect<const Present: usize, const Rank: usize> {}
 
-recursive type fn SparseIndex<const Rank: usize>() -> (*) {
+pub recursive type fn SparseIndex<const Rank: usize>() -> (*) {
     match Rank {
         0 => SparseHere
         _ => SparseNext<SparseIndex<{Rank - 1}>>
     }
 }
 
-trait SparseSelectOut { type Out }
+pub trait SparseSelectOut { type Out }
 impl<const Rank: usize> SparseSelectOut for SparseSelect<0, Rank> {
     type Out = SparseMissing
 }
@@ -209,7 +284,7 @@ impl<const Rank: usize> SparseSelectOut for SparseSelect<1, Rank> {
     type Out = SparseIndex<Rank>
 }
 
-trait SparseCoefficient<S> { fn read(value: S) -> f32 }
+pub trait SparseCoefficient<S> { fn read(value: S) -> f32 }
 impl SparseCoefficient<SparseNil> for SparseMissing {
     fn read(value: SparseNil) -> f32 { 0.0 }
 }
@@ -228,7 +303,7 @@ impl<I, T> SparseCoefficient<SparseCell<T>> for SparseNext<I>
 }
 
 // Deliberately lacks a SparseMissing implementation.
-trait SparsePresentCoefficient<S> { fn read_present(value: S) -> f32 }
+pub trait SparsePresentCoefficient<S> { fn read_present(value: S) -> f32 }
 impl<T> SparsePresentCoefficient<SparseCell<T>> for SparseHere {
     fn read_present(value: SparseCell<T>) -> f32 { value.head }
 }
@@ -240,12 +315,12 @@ impl<I, T> SparsePresentCoefficient<SparseCell<T>> for SparseNext<I>
     }
 }
 
-fn sparse_coefficient<I: SparseCoefficient<S>, S>(value: S) -> f32
+pub fn sparse_coefficient<I: SparseCoefficient<S>, S>(value: S) -> f32
 {
     <I as SparseCoefficient<S>>::read(value: value)
 }
 
-fn sparse_present_coefficient<I: SparsePresentCoefficient<S>, S>(value: S) -> f32
+pub fn sparse_present_coefficient<I: SparsePresentCoefficient<S>, S>(value: S) -> f32
 {
     <I as SparsePresentCoefficient<S>>::read_present(value: value)
 }

@@ -634,7 +634,7 @@ fn qcga3d_sparse_incidence_paths_compile_and_execute_on_wasm() {
 fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
     let source = format!(
         "{}\n{}",
-        include_str!("fixtures/sparse_clifford_api.fe"),
+        include_str!("../../../ingots/sparse_clifford/src/lib.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
     );
     let mut db = DriverDataBase::default();
@@ -739,7 +739,7 @@ fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
 fn qcga3d_sparse_planned_render_preserves_current_frame_on_wasm() {
     let source = format!(
         "{}\n{}\n{}",
-        include_str!("fixtures/sparse_clifford_api.fe"),
+        include_str!("../../../ingots/sparse_clifford/src/lib.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
         include_str!("fixtures/spirv/qcga3d_sparse_planned_render_body.fe"),
     );

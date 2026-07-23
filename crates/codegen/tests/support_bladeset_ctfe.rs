@@ -3,7 +3,7 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use url::Url;
 
-const API: &str = include_str!("fixtures/sparse_clifford_api.fe");
+const API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const PROBES: &str = include_str!("fixtures/support_bladeset_ctfe.fe");
 
 fn gp_oracle(left: u32, right: u32, dimension: u32, metric: u32) -> u32 {
