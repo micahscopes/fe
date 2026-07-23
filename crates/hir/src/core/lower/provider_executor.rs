@@ -31,10 +31,10 @@ use crate::{
         ty_def::MAX_INLINE_STRING_BYTES,
     },
     hir_def::{
-        BinOp, Body, CompBinOp, Cond, CondId, ConstGenericArgValue, Expr, ExprId, Func, GenericArg,
-        GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp, MatchArm, Partial,
-        Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId, StringId, Trait, TraitRefId, TypeId,
-        TypeKind, scope_graph::ScopeId,
+        ArithBinOp, BinOp, Body, CompBinOp, Cond, CondId, ConstGenericArgValue, Expr, ExprId, Func,
+        GenericArg, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, LogicalBinOp, MatchArm,
+        Partial, Pat, PatId, PathId, PathKind, QuoteBody, Stmt, StmtId, StringId, Trait, TraitRefId,
+        TypeId, TypeKind, scope_graph::ScopeId,
     },
     span::HirOrigin,
 };
@@ -1968,6 +1968,12 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
                 Ok(self.push_gen(GenExpr::Or(lhs, rhs)))
             }
+            Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Add)) => {
+                let (lhs, rhs) = (*lhs, *rhs);
+                let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
+                let rhs = self.elab_template_expr(rhs, template, sig, binders)?;
+                Ok(self.push_gen(GenExpr::Add(lhs, rhs)))
+            }
             Expr::Bin(lhs, rhs, BinOp::Comp(CompBinOp::Eq)) => {
                 let (lhs, rhs) = (*lhs, *rhs);
                 let lhs = self.elab_template_expr(lhs, template, sig, binders)?;
@@ -1988,7 +1994,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             }
             Expr::Bin(..) => Err(self.invalid_quote(
                 expr,
-                "this operator is not supported in quote bodies (quotes support `&&`, `||`, \
+                "this operator is not supported in quote bodies (quotes support `+`, `&&`, `||`, \
                  `==`, `<`, `>`, and method calls)",
             )),
             Expr::Path(_) => {

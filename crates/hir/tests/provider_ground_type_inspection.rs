@@ -20,7 +20,7 @@ fn method_quote_supports_hygienic_local_let_block() {
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 
 trait Compute {
-    fn run(self, _ value: bool) -> bool
+    fn run(self, _ value: i32) -> i32
 }
 
 struct Provider {}
@@ -32,10 +32,10 @@ impl Derive<Compute> for Provider {
         )
     {
         builder.emit_method(quote {
-            fn run(self, _ value: bool) -> bool {
-                let value = value && true
-                let shared = value || false
-                shared && shared
+            fn run(self, _ value: i32) -> i32 {
+                let value = value + value
+                let shared = value + value
+                shared + shared
             }
         })
         builder.finish()
@@ -46,8 +46,8 @@ impl Derive<Compute> for Provider {
 struct Target {}
 derive Compute for Target using Provider
 
-fn use_it(value: Target) -> bool {
-    value.run(true)
+fn use_it(value: Target) -> i32 {
+    value.run(2)
 }
 "#,
     );
