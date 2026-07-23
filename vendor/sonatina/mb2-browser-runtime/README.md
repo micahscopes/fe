@@ -15,11 +15,16 @@ opt-in canonical Wasm arena used by the browser demos. In particular:
 
 `demos/with-sonatina-overlay.sh` applies the series to an isolated temporary
 clone, verifies that the resulting commit is exactly `b2601adc`, runs the given
-command with that checkout as `SONATINA_DIR`, and removes the clone. It never
-patches the user's Sonatina checkout. `SHA256SUMS` is checked before applying
-anything. `demos/serve.sh` invokes the overlay internally, so this is temporary
-build plumbing—not a second user-facing build command. It can be removed once
-the reviewed backend (or its upstream replacement) is remotely fetchable.
+command with that checkout as `SONATINA_DIR`, and removes the clone. With no
+`SONATINA_DIR`, it fetches the exact base from the pinned Sonatina remote branch
+once and retains it under `target/fe-browser-cache`; `FE_BROWSER_CACHE_DIR`
+relocates the cache and `FE_BROWSER_OFFLINE=1` forbids fetching on a miss. A
+caller-supplied checkout remains a supported offline/source override and is
+never patched. Cache mutation is serialized, `SHA256SUMS` is checked before
+applying anything, and warm-cache reconstruction performs no network operation.
+`demos/serve.sh` invokes the overlay internally, so this is temporary build
+plumbing—not a second user-facing build command. It can be removed once the
+reviewed backend (or its upstream replacement) is remotely fetchable.
 
 The patch files were produced with:
 

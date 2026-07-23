@@ -37,10 +37,14 @@ generate_example() {
   if [ "${FORCE_DEMO_REGEN:-0}" != 1 ] && [ -f "$marker" ]; then
     return
   fi
+  if [ -z "${FE_DEMO_GENERATE_CMD:-}" ] && [ -z "${SONATINA_DIR:-}" ]; then
+    "$here/with-sonatina-overlay.sh" "$0" "$key"
+    return
+  fi
   echo "generating $key..."
   if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
     "$FE_DEMO_GENERATE_CMD" "$key"
-  elif [ -n "${SONATINA_DIR:-}" ]; then
+  else
     (
       lock_backup="$(mktemp "${TMPDIR:-/tmp}/fe-demo-Cargo.lock.XXXXXX")"
       cp "$repo/Cargo.lock" "$lock_backup"
@@ -59,12 +63,23 @@ generate_example() {
       --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-parser.path=\"$SONATINA_DIR/crates/parser\"" \
       run -p fe-codegen --example "$example"
     )
-  else
-    echo "$key generation requires the reviewed Sonatina browser backend." >&2
-    echo "Run with:" >&2
-    echo "  SONATINA_DIR=/path/to/sonatina demos/with-sonatina-overlay.sh demos/serve.sh $key" >&2
-    exit 2
   fi
+}
+
+bundle_needs_generation() {
+  local force="$1"
+  local directory="$2"
+  shift 2
+  if [ "$force" = 1 ]; then
+    return 0
+  fi
+  local asset
+  for asset in "$@"; do
+    if [ ! -f "$directory/$asset" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 generate_one() {
@@ -89,9 +104,19 @@ generate_one() {
       if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
         "$FE_DEMO_GENERATE_CMD" cga
       else
+        cga_bundle="$here/webgpu-cga-inversion/gen-schedule32"
+        if [ -z "${SONATINA_DIR:-}" ] \
+            && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ] \
+            && bundle_needs_generation "${FORCE_DEMO_REGEN:-0}" "$cga_bundle" \
+              kernel.fe frag.wgsl layout.json reference.json frag.wasm \
+              actor-canonical.wasm actor-interface.js actor-interface.d.ts \
+              actor-manifest.json actor-source.fe; then
+          "$here/with-sonatina-overlay.sh" "$0" cga
+          return
+        fi
         FORCE_CGA_REGEN="${FORCE_DEMO_REGEN:-0}" \
           CGA_BUNDLE=schedule32 \
-          CGA_BUNDLE_DIR="$here/webgpu-cga-inversion/gen-schedule32" \
+          CGA_BUNDLE_DIR="$cga_bundle" \
           "$here/webgpu-cga-inversion/ensure-assets.sh"
       fi
       ;;
@@ -112,6 +137,16 @@ generate_one() {
       if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
         "$FE_DEMO_GENERATE_CMD" qcga
       else
+        qcga_bundle="$here/webgpu-qcga3d-quadric/gen"
+        if [ -z "${SONATINA_DIR:-}" ] \
+            && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ] \
+            && bundle_needs_generation "${FORCE_DEMO_REGEN:-0}" "$qcga_bundle" \
+              kernel.fe frag.wgsl frag.wasm layout.json reference.json \
+              actor-source.fe actor-canonical.wasm actor-interface.js \
+              actor-interface.d.ts actor-manifest.json; then
+          "$here/with-sonatina-overlay.sh" "$0" qcga
+          return
+        fi
         FORCE_QCGA_REGEN="${FORCE_DEMO_REGEN:-0}" \
           "$here/webgpu-qcga3d-quadric/ensure-assets.sh"
       fi
