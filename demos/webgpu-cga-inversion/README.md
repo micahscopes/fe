@@ -51,6 +51,16 @@ The selectors compose: use
 [`?bundle=schedule32&verify=off`](./?bundle=schedule32&verify=off) for the
 Schedule32 no-Wasm, no-readback presentation path.
 
+Presentation quality is explicit. Use
+[`?bundle=schedule32&verify=off&quality=teaser`](./?bundle=schedule32&verify=off&quality=teaser)
+for the fixed 256×256 teaser profile, or `quality=full` (the default) for the
+existing device-pixel-ratio-aware automatic resolution, capped at 768×768.
+An explicit benchmark `resolution` remains available with `quality=full`;
+`quality=teaser` accepts only its fixed `resolution=256`. Structured acceptance
+status and the visible controls report both the selected profile and actual
+canvas resolution. These profiles change presentation resolution only: both
+execute the same Fe-generated kernel and the same 72-step raymarch bound.
+
 Low-overhead CPU-side instrumentation is available as
 `window.__cgaPerformance`. It records artifact-fetch, GPU-initialization,
 first-frame submission, and (when enabled) initial-acceptance durations, plus a

@@ -8,12 +8,14 @@ import {
   createContinuousBenchmark,
   parseBenchmarkResolution,
 } from "./continuous-benchmark.js";
+import { qualityStatus, resolveQualityProfile } from "./quality-profile.js";
 
 const $ = (id) => document.getElementById(id);
 const query = new URLSearchParams(window.location.search);
 const artifactBundle = selectArtifactBundle(query);
 if (artifactBundle.name !== "legacy") {
-  $("fast-showcase").href = `?bundle=${artifactBundle.name}&verify=off`;
+  $("fast-showcase").href =
+    `?bundle=${artifactBundle.name}&verify=off&quality=teaser`;
 }
 const acceptanceMode = query.get("acceptance");
 const presentation = acceptanceMode === null || acceptanceMode === ""
@@ -23,6 +25,8 @@ const verificationOff = query.get("verify") === "off";
 const continuousVerification = query.get("verify") === "continuous";
 const continuousBenchmark = query.get("benchmark") === "continuous";
 const resolutionQuery = query.get("resolution");
+const qualityQuery = query.get("quality");
+let activeQuality = null;
 const DEFAULT_INVERSION = Object.freeze({ x: 0.5, y: 0, radius: 1 });
 const LOGICAL_SIZE = 128;
 const performanceMeter = createPerformanceMeter();
@@ -180,8 +184,12 @@ async function main() {
     return { state: "red", presentation, reason: "acceptance must be canvas or offscreen" };
   }
   let fixedResolution;
+  let quality;
   try {
     fixedResolution = parseBenchmarkResolution(resolutionQuery);
+    quality = resolveQualityProfile(qualityQuery, fixedResolution);
+    activeQuality = quality;
+    fixedResolution = quality.fixedResolution;
   } catch (error) {
     banner("red", error.message);
     return { state: "red", presentation, reason: error.message };
@@ -287,9 +295,13 @@ async function main() {
     canvas.height = pixels;
     $("inversion-overlay").width = pixels;
     $("inversion-overlay").height = pixels;
+    $("quality-values").textContent =
+      `quality=${quality.profile} resolution=${pixels}×${pixels}`;
     return true;
   };
   resizeDisplayCanvas();
+  $("quality-values").textContent =
+    `quality=${quality.profile} resolution=${canvas.width}×${canvas.height}`;
   const gpuInitStart = performanceMeter.start();
   gpu = await initWebGPURender(
     wgsl,
@@ -581,6 +593,7 @@ async function main() {
     const result = { state: "presentation", presentation, verified: false,
       adapter: gpu.adapter, camera: viewValues(camera, inversion).slice(0, 3),
       inversion: [inversion.x, inversion.y],
+      quality: qualityStatus(quality, canvas.width, canvas.height),
       resolution: { width: canvas.width, height: canvas.height },
       ...(benchmark ? { benchmark } : {}) };
     banner("presentation", `fast WebGPU showcase on ${gpu.adapter}; verification is off`);
@@ -611,14 +624,28 @@ async function main() {
   return completionResult;
 }
 
-window.__cgaAcceptance = { state: "pending", presentation };
+window.__cgaAcceptance = {
+  state: "pending",
+  presentation,
+  requestedQuality: qualityQuery || "full",
+};
 document.documentElement.dataset.status = "pending";
 function publishAcceptance(result) {
-  Object.assign(window.__cgaAcceptance, result);
-  document.documentElement.dataset.status = result.state;
+  const canvas = document.getElementById("view");
+  const enriched = activeQuality && canvas
+    ? {
+        ...result,
+        quality: result.quality
+          ?? qualityStatus(activeQuality, canvas.width, canvas.height),
+        resolution: result.resolution
+          ?? { width: canvas.width, height: canvas.height },
+      }
+    : result;
+  Object.assign(window.__cgaAcceptance, enriched);
+  document.documentElement.dataset.status = enriched.state;
   const node = document.getElementById("acceptance-json");
-  if (node) node.textContent = JSON.stringify(result);
-  return result;
+  if (node) node.textContent = JSON.stringify(enriched);
+  return enriched;
 }
 window.__cgaAcceptance.promise = main().then((result) => {
   return result ? publishAcceptance(result) : window.__cgaAcceptance;
