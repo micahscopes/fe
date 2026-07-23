@@ -17,24 +17,24 @@ assert.deepEqual(Object.keys(frameMeter.state), [
   "gpuInitMs",
   "firstFrameSubmitMs",
   "initialAcceptanceMs",
-  "frames",
+  "interaction",
 ]);
 
 meter.recordFrame(100, 2);
 meter.recordFrame(116, 4);
 meter.recordFrame(132, 3);
-assert.equal(meter.state.frames.count, 3);
-assert.equal(meter.state.frames.sampleCount, 3);
-assert.equal(meter.state.frames.fps, 62.5);
-assert.equal(meter.state.frames.lastSubmitCpuMs, 3);
-assert.equal(meter.state.frames.averageSubmitCpuMs, 3);
-assert.equal(meter.state.frames.maxSubmitCpuMs, 4);
+assert.equal(meter.state.interaction.count, 3);
+assert.equal(meter.state.interaction.sampleCount, 3);
+assert.equal(meter.state.interaction.cadenceHz, 62.5);
+assert.equal(meter.state.interaction.lastSubmitCpuMs, 3);
+assert.equal(meter.state.interaction.averageSubmitCpuMs, 3);
+assert.equal(meter.state.interaction.maxSubmitCpuMs, 4);
 
 meter.recordFrame(148, 1);
-assert.equal(meter.state.frames.count, 4);
-assert.equal(meter.state.frames.sampleCount, 3);
-assert.equal(meter.state.frames.fps, 62.5);
-assert.equal(meter.state.frames.averageSubmitCpuMs, 8 / 3);
-assert.equal(meter.state.frames.maxSubmitCpuMs, 4);
+assert.equal(meter.state.interaction.count, 4);
+assert.equal(meter.state.interaction.sampleCount, 3);
+assert.equal(meter.state.interaction.cadenceHz, 62.5);
+assert.equal(meter.state.interaction.averageSubmitCpuMs, 8 / 3);
+assert.equal(meter.state.interaction.maxSubmitCpuMs, 4);
 
 console.log("CGA performance meter: ok");

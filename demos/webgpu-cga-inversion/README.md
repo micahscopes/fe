@@ -40,8 +40,9 @@ quantized to an immutable five-f32 parameter block for each generation, and zoom
 trailing-debounced and serialized.
 
 For the lowest-latency visual-only path, open
-[`?verify=off`](./?verify=off). This mode does not fetch or instantiate
-`frag.wasm`, does not compute the startup full-frame oracle, and never performs
+[`?verify=off`](./?verify=off). This mode does not fetch or instantiate any
+Wasm module, does not construct an oracle Worker, does not compute the startup
+full-frame oracle, and never performs
 GPU readback. It loads and initializes only the compiler metadata, WGSL, source,
 and persistent canvas pipeline used for presentation. The Verify button is
 hidden and structured status is `{"state":"presentation","verified":false}`;
@@ -53,11 +54,25 @@ Schedule32 no-Wasm, no-readback presentation path.
 Low-overhead CPU-side instrumentation is available as
 `window.__cgaPerformance`. It records artifact-fetch, GPU-initialization,
 first-frame submission, and (when enabled) initial-acceptance durations, plus a
-rolling window of rAF cadence and `renderFrame` submission CPU time. The compact
+rolling window of interaction-triggered rAF cadence and `renderFrame`
+submission CPU time. This interaction cadence is not continuous throughput.
+The compact
 UI stat is rate-limited to four text updates per second. These are host timings,
 not GPU execution timestamps. Instrumentation never inserts a queue wait,
 readback, or GPU synchronization; in `verify=off` it preserves the no-readback
 contract.
+
+For comparable continuous submission measurements, use
+[`?verify=off&benchmark=continuous&resolution=256`](./?verify=off&benchmark=continuous&resolution=256).
+The resolution is fail-closed and must be one of `128`, `256`, `512`, or `768`;
+the same harness works with the legacy and Schedule32 bundle selectors. It
+warms up for 30 frames, samples 120 consecutive rAF submissions, and publishes
+`window.__cgaBenchmark` plus the same structured object under the acceptance
+result. The reported cadence is submitted-frame cadence and the CPU timing is
+submission overhead. It explicitly reports `gpuCompletionMeasured:false`;
+without a timestamp query and result readback it makes no GPU-completion claim.
+The benchmark uses the direct WebGPU path and preserves the strict no-Wasm,
+no-Worker, no-readback `verify=off` contract.
 
 The displayed canvas is responsive and uses device-pixel ratio up to 2, capped
 at 768 pixels per side. Deterministic acceptance remains a separate 128x128
@@ -148,5 +163,6 @@ another.
 smoke. It defaults to canvas presentation, drives 16 pointer moves plus one
 wheel interaction through CDP, and requires bounded rAF/submit-CPU samples. Its
 structured evidence rejects any Wasm/reference fetch, oracle Worker creation,
-oracle render, or GPU readback. It reports observed FPS but deliberately applies
-no hardware-independent FPS threshold.
+oracle render, or GPU readback. It reports observed interaction cadence but deliberately applies
+no hardware-independent threshold. This smoke exercises interaction cadence,
+not the opt-in continuous benchmark described above.

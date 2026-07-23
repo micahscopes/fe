@@ -4,6 +4,10 @@ import { createPerformanceMeter } from "./performance-meter.js";
 import { createCgaActorLifecycle } from "./actor-lifecycle.js";
 import { createCgaWasmWorkerOracle } from "./wasm-worker-oracle.js";
 import { selectArtifactBundle } from "./artifact-bundle.js";
+import {
+  createContinuousBenchmark,
+  parseBenchmarkResolution,
+} from "./continuous-benchmark.js";
 
 const $ = (id) => document.getElementById(id);
 const query = new URLSearchParams(window.location.search);
@@ -17,6 +21,8 @@ const presentation = acceptanceMode === null || acceptanceMode === ""
   : acceptanceMode;
 const verificationOff = query.get("verify") === "off";
 const continuousVerification = query.get("verify") === "continuous";
+const continuousBenchmark = query.get("benchmark") === "continuous";
+const resolutionQuery = query.get("resolution");
 const DEFAULT_INVERSION = Object.freeze({ x: 0.5, y: 0, radius: 1 });
 const LOGICAL_SIZE = 128;
 const performanceMeter = createPerformanceMeter();
@@ -173,6 +179,24 @@ async function main() {
     banner("red", `invalid acceptance presentation: ${presentation}`);
     return { state: "red", presentation, reason: "acceptance must be canvas or offscreen" };
   }
+  let fixedResolution;
+  try {
+    fixedResolution = parseBenchmarkResolution(resolutionQuery);
+  } catch (error) {
+    banner("red", error.message);
+    return { state: "red", presentation, reason: error.message };
+  }
+  if (continuousBenchmark && !verificationOff) {
+    const reason = "continuous benchmark requires verify=off";
+    banner("red", reason);
+    return { state: "red", presentation, reason };
+  }
+  if (continuousBenchmark && presentation !== "canvas") {
+    const reason = "continuous benchmark requires canvas presentation";
+    banner("red", reason);
+    return { state: "red", presentation, reason };
+  }
+  if (continuousBenchmark && fixedResolution === null) fixedResolution = LOGICAL_SIZE;
   let layout, reference, source, wgsl, wasm;
   const artifactFetchStart = performanceMeter.start();
   try {
@@ -254,7 +278,10 @@ async function main() {
     if (presentation !== "canvas") return false;
     const cssWidth = canvas.getBoundingClientRect().width || LOGICAL_SIZE;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const pixels = Math.max(LOGICAL_SIZE, Math.min(768, Math.round(cssWidth * dpr)));
+    const pixels = fixedResolution ?? Math.max(
+      LOGICAL_SIZE,
+      Math.min(768, Math.round(cssWidth * dpr)),
+    );
     if (canvas.width === pixels && canvas.height === pixels) return false;
     canvas.width = pixels;
     canvas.height = pixels;
@@ -420,12 +447,13 @@ async function main() {
   const updatePerformanceUi = (rafTime) => {
     if (rafTime - lastPerformanceUiUpdate < 250) return;
     lastPerformanceUiUpdate = rafTime;
-    const frames = performanceMeter.state.frames;
-    const fps = frames.fps === null ? "--" : frames.fps.toFixed(1);
-    const submit = frames.averageSubmitCpuMs === null
+    const interaction = performanceMeter.state.interaction;
+    const cadence = interaction.cadenceHz === null ? "--" : interaction.cadenceHz.toFixed(1);
+    const submit = interaction.averageSubmitCpuMs === null
       ? "--"
-      : frames.averageSubmitCpuMs.toFixed(2);
-    $("performance-stat").textContent = `rAF ${fps} fps | submit CPU ${submit} ms`;
+      : interaction.averageSubmitCpuMs.toFixed(2);
+    $("performance-stat").textContent =
+      `interaction cadence ${cadence} Hz | submit CPU ${submit} ms`;
   };
   const requestDraw = () => lifecycle.enqueueRender(renderPayload());
 
@@ -528,9 +556,33 @@ async function main() {
     performanceMeter.finish("initialAcceptanceMs", acceptanceStart);
   }
   if (verificationOff) {
+    let benchmark = null;
+    if (continuousBenchmark) {
+      const runner = createContinuousBenchmark({
+        requestFrame: requestAnimationFrame,
+        now: () => performance.now(),
+        submit: () => renderFrame(
+          gpu,
+          viewValues(camera, inversion, canvas.width, canvas.height),
+        ),
+        width: canvas.width,
+        height: canvas.height,
+        path: "direct",
+      });
+      benchmark = await runner.run();
+      window.__cgaBenchmark = benchmark;
+      $("performance-stat").textContent =
+        `continuous submitted cadence ${
+          benchmark.submittedFrameCadenceHz?.toFixed(1) ?? "--"
+        } Hz | submit CPU ${benchmark.averageSubmitCpuMs.toFixed(2)} ms | ${
+          benchmark.resolution.width
+        }² | GPU completion not measured`;
+    }
     const result = { state: "presentation", presentation, verified: false,
       adapter: gpu.adapter, camera: viewValues(camera, inversion).slice(0, 3),
-      inversion: [inversion.x, inversion.y] };
+      inversion: [inversion.x, inversion.y],
+      resolution: { width: canvas.width, height: canvas.height },
+      ...(benchmark ? { benchmark } : {}) };
     banner("presentation", `fast WebGPU showcase on ${gpu.adapter}; verification is off`);
     publishAcceptance(result);
     return result;

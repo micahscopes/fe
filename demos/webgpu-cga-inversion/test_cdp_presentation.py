@@ -23,10 +23,10 @@ def passing_value():
             "gpuInitMs": 12.0,
             "firstFrameSubmitMs": 0.5,
             "initialAcceptanceMs": None,
-            "frames": {
+            "interaction": {
                 "count": 17,
                 "sampleCount": 16,
-                "fps": 58.2,
+                "cadenceHz": 58.2,
                 "lastSubmitCpuMs": 0.2,
                 "averageSubmitCpuMs": 0.3,
                 "maxSubmitCpuMs": 0.7,
@@ -58,7 +58,7 @@ class PresentationPredicateTests(unittest.TestCase):
         for field, bad in [("sampleCount", 7), ("averageSubmitCpuMs", 1000)]:
             with self.subTest(field=field):
                 value = passing_value()
-                value["performance"]["frames"][field] = bad
+                value["performance"]["interaction"][field] = bad
                 self.assertFalse(presentation_passes(value))
 
 

@@ -37,25 +37,29 @@ def presentation_passes(value):
     ):
         return False
     if list(performance) != [
-        "artifactFetchMs", "gpuInitMs", "firstFrameSubmitMs", "initialAcceptanceMs", "frames"
+        "artifactFetchMs", "gpuInitMs", "firstFrameSubmitMs", "initialAcceptanceMs",
+        "interaction",
     ]:
         return False
     if performance.get("initialAcceptanceMs") is not None:
         return False
-    frames = performance.get("frames")
-    if not isinstance(frames, dict) or list(frames) != [
-        "count", "sampleCount", "fps", "lastSubmitCpuMs", "averageSubmitCpuMs", "maxSubmitCpuMs"
+    interaction = performance.get("interaction")
+    if not isinstance(interaction, dict) or list(interaction) != [
+        "count", "sampleCount", "cadenceHz", "lastSubmitCpuMs",
+        "averageSubmitCpuMs", "maxSubmitCpuMs",
     ]:
         return False
-    samples = frames.get("sampleCount")
-    if not isinstance(samples, int) or not 8 <= samples <= 120 or frames.get("count", 0) < samples:
+    samples = interaction.get("sampleCount")
+    if (not isinstance(samples, int) or not 8 <= samples <= 120
+            or interaction.get("count", 0) < samples):
         return False
     for field in ("lastSubmitCpuMs", "averageSubmitCpuMs", "maxSubmitCpuMs"):
-        value = frames.get(field)
+        value = interaction.get(field)
         if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value < 1000:
             return False
-    fps = frames.get("fps")
-    return isinstance(fps, (int, float)) and math.isfinite(fps) and fps >= 0
+    cadence = interaction.get("cadenceHz")
+    return (isinstance(cadence, (int, float))
+            and math.isfinite(cadence) and cadence >= 0)
 
 
 def command(ws, command_id, method, params, deadline):
