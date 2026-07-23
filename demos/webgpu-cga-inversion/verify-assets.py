@@ -87,11 +87,8 @@ elif provider_algebra:
         "type Schedule32 = Schedule<32>",
         "struct CanonicalCgaProvider",
         "for triple in 0..80",
-        'builder.emit_method("e1"',
-        'builder.emit_method("e2"',
-        'builder.emit_method("e4"',
-        'builder.emit_method("e8"',
-        'builder.emit_method("e16"',
+        "const SANDWICH_OUTPUT_BITS",
+        'builder.emit_method("sandwich"',
         "safe_weight",
         "ring_radius",
     ]
