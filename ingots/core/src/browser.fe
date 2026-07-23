@@ -18,3 +18,12 @@ pub struct BrowserString {
 
 impl Copy for BrowserBytes {}
 impl Copy for BrowserString {}
+
+/// Marks a canonical browser lane as host-executed.
+pub trait HostEffect {}
+
+/// Requires a canonical browser lane to reside on the browser main thread.
+pub trait MainThread {}
+
+/// Requires a canonical browser lane to reside in a Worker.
+pub trait Worker {}

@@ -1185,6 +1185,12 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     }
 
     fn synthesize_canonical_lane(&mut self, lane: &crate::CanonicalLane) -> Result<(), LowerError> {
+        let export = lane.export.as_deref().ok_or_else(|| {
+            LowerError::Internal(format!(
+                "host-effect lane `{}` reached canonical Wasm lowering",
+                lane.name
+            ))
+        })?;
         fn flatten(
             layout: &crate::CanonicalLayout,
             base: u32,
@@ -1287,7 +1293,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         let wrapper = self
             .builder
             .declare_function(Signature::new_single(
-                &lane.export,
+                export,
                 Linkage::Public,
                 &[Type::I32],
                 Type::I32,
@@ -1295,7 +1301,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             .map_err(|error| {
                 LowerError::Internal(format!(
                     "failed to declare canonical wrapper `{}`: {error}",
-                    lane.export
+                    export
                 ))
             })?;
         let is = self.isa.inst_set();

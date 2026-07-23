@@ -98,6 +98,32 @@ pub fn lib_func_matches<'db>(db: &'db dyn HirAnalysisDb, func: Func<'db>, path: 
     actual_suffix == target_suffix
 }
 
+/// Returns `true` if `trait_` is the library trait at the fully-qualified path.
+pub fn lib_trait_matches<'db>(
+    db: &'db dyn HirAnalysisDb,
+    trait_: Trait<'db>,
+    path: &str,
+) -> bool {
+    let Some((root, target_suffix)) = path.split_once("::") else {
+        return false;
+    };
+    let expected_kind = match root {
+        "core" => IngotKind::Core,
+        "std" => IngotKind::Std,
+        _ => return false,
+    };
+    if trait_.top_mod(db).ingot(db).kind(db) != expected_kind {
+        return false;
+    }
+    let Some(actual_path) = trait_.scope().pretty_path(db) else {
+        return false;
+    };
+    let Some((_, actual_suffix)) = actual_path.split_once("::") else {
+        return false;
+    };
+    actual_suffix == target_suffix
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Update)]
 pub enum RuntimeBuiltinFuncKind {
     Malloc,

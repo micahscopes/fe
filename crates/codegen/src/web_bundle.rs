@@ -356,15 +356,36 @@ impl WebBundle {
                 }
             }
         };
+        let wasm_entries = match canonical_candidate.as_ref() {
+            Some(interface) => canonical_entries
+                .iter()
+                .zip(&interface.lanes)
+                .filter(|(_, lane)| lane.intent.execution == crate::CanonicalExecution::Wasm)
+                .map(|(entry, _)| entry.clone())
+                .collect::<Vec<_>>(),
+            None => canonical_entries.clone(),
+        };
+        if wasm_entries.is_empty() {
+            return Err(WebBundleError::CanonicalRequired(
+                "canonical bundle requires at least one executable Wasm lane".to_owned(),
+            ));
+        }
         let wasm_package =
-            mir::build_wasm_runtime_package_for_entries(db, top_mod, &canonical_entries)
+            mir::build_wasm_runtime_package_for_entries(db, top_mod, &wasm_entries)
                 .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
         let wasm_options = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
             WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => canonical_candidate
                 .as_ref()
-                .map(|interface| interface.lanes.clone())
+                .map(|interface: &CanonicalInterfaceManifest| {
+                    interface
+                        .lanes
+                        .iter()
+                        .filter(|lane| lane.intent.execution == crate::CanonicalExecution::Wasm)
+                        .cloned()
+                        .collect::<Vec<crate::CanonicalLane>>()
+                })
                 .filter(|lanes| !lanes.is_empty())
                 .map(|lanes| WasmCompileOptions::default().with_canonical_lanes(lanes))
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
@@ -1227,7 +1248,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
     fn optional_policy_never_embeds_an_unverified_candidate() {
         let candidate = crate::CanonicalInterfaceManifest::build(vec![crate::CanonicalLaneDecl {
             name: "update".to_owned(),
-            export: "update".to_owned(),
+            export: Some("update".to_owned()),
             request: crate::CanonicalType::Record(vec![crate::CanonicalField::new(
                 "value",
                 crate::CanonicalType::U32,
@@ -1236,6 +1257,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 "value",
                 crate::CanonicalType::U32,
             )]),
+            intent: crate::CanonicalLaneIntent::default(),
         }])
         .unwrap();
         let wasm_without_abi = b"\0asm\x01\0\0\0";
@@ -1288,15 +1310,17 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let interface = crate::CanonicalInterfaceManifest::build(vec![
             crate::CanonicalLaneDecl {
                 name: "foo_bar".to_owned(),
-                export: "fe_cabi_foo_bar".to_owned(),
+                export: Some("fe_cabi_foo_bar".to_owned()),
                 request: record(),
                 response: record(),
+                intent: crate::CanonicalLaneIntent::default(),
             },
             crate::CanonicalLaneDecl {
                 name: "foo__bar".to_owned(),
-                export: "fe_cabi_foo__bar".to_owned(),
+                export: Some("fe_cabi_foo__bar".to_owned()),
                 request: record(),
                 response: record(),
+                intent: crate::CanonicalLaneIntent::default(),
             },
         ])
         .unwrap();

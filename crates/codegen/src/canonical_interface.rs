@@ -11,17 +11,18 @@ use hir::{
         HirAnalysisDb,
         ty::{
             adt_def::AdtRef,
-            corelib::resolve_lib_type_path,
+            corelib::{lib_trait_matches, resolve_lib_type_path},
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
     hir_def::{FieldParent, TopLevelMod},
+    semantic::EffectRequirementKey,
 };
 use serde::{Deserialize, Serialize};
 use wasmparser::{CompositeInnerType, ExternalKind, Payload, TypeRef, ValType};
 
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
-pub const CANONICAL_INTERFACE_VERSION: u32 = 1;
+pub const CANONICAL_INTERFACE_VERSION: u32 = 2;
 
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 4096;
@@ -58,9 +59,54 @@ impl CanonicalField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalLaneDecl {
     pub name: String,
-    pub export: String,
+    pub export: Option<String>,
     pub request: CanonicalType,
     pub response: CanonicalType,
+    pub intent: CanonicalLaneIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalLaneIntent {
+    pub execution: CanonicalExecution,
+    pub placement: CanonicalPlacement,
+    pub capabilities: Vec<CanonicalCapabilityRequirement>,
+}
+
+impl Default for CanonicalLaneIntent {
+    fn default() -> Self {
+        Self {
+            execution: CanonicalExecution::Wasm,
+            placement: CanonicalPlacement::Any,
+            capabilities: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalExecution {
+    Wasm,
+    HostEffect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalPlacement {
+    Any,
+    MainThread,
+    Worker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalCapabilityRequirement {
+    pub capability: CanonicalCapability,
+    pub mutable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalCapability {
+    WebgpuDispatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,9 +135,10 @@ pub enum CanonicalEndianness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalLane {
     pub name: String,
-    pub export: String,
+    pub export: Option<String>,
     pub request: CanonicalLayout,
     pub response: CanonicalLayout,
+    pub intent: CanonicalLaneIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,23 +202,49 @@ impl CanonicalInterfaceManifest {
         let mut lanes = Vec::with_capacity(declarations.len());
         for declaration in declarations {
             validate_name(&declaration.name, "lane")?;
-            validate_export_name(&declaration.export)?;
+            if declaration.intent.execution == CanonicalExecution::Wasm
+                && declaration.export.is_none()
+            {
+                return Err(error(format!(
+                    "canonical Wasm lane `{}` requires an export",
+                    declaration.name
+                )));
+            }
+            if declaration.intent.execution == CanonicalExecution::HostEffect
+                && declaration.export.is_some()
+            {
+                return Err(error(format!(
+                    "canonical host-effect lane `{}` must not declare a Wasm export",
+                    declaration.name
+                )));
+            }
+            if let Some(export) = &declaration.export {
+                validate_export_name(export)?;
+            }
             if !lane_names.insert(declaration.name.clone()) {
                 return Err(error(format!(
                     "duplicate canonical lane `{}`",
                     declaration.name
                 )));
             }
-            if reserved.contains(&declaration.export.as_str()) {
+            if declaration
+                .export
+                .as_deref()
+                .is_some_and(|export| reserved.contains(&export))
+            {
                 return Err(error(format!(
                     "canonical lane export `{}` collides with a reserved ABI export",
-                    declaration.export
+                    declaration.export.as_deref().unwrap()
                 )));
             }
-            if !exports.insert(declaration.export.clone()) {
+            if declaration
+                .export
+                .as_ref()
+                .is_some_and(|export| !exports.insert(export.clone()))
+            {
                 return Err(error(format!(
                     "duplicate canonical lane export `{}`",
-                    declaration.export
+                    declaration.export.as_deref().unwrap()
                 )));
             }
             let mut nodes = 0;
@@ -182,6 +255,7 @@ impl CanonicalInterfaceManifest {
                 export: declaration.export,
                 request,
                 response,
+                intent: declaration.intent,
             });
         }
         Ok(Self {
@@ -256,15 +330,85 @@ pub fn canonical_lane_decl_from_entry<'db>(
             "canonical entry `{entry_name}` request and response must both be nominal browser message types"
         )));
     }
+    let intent = canonical_lane_intent(db, func)?;
     Ok(CanonicalLaneDecl {
         name: lane_name.to_owned(),
         // The source entry is not itself a canonical adapter, even when its
         // lowered aggregate ABI happens to have the same raw Wasm signature.
         // Reserve a distinct export so verification cannot bless that
         // accidental shape without the generated marshal/unmarshal wrapper.
-        export: format!("fe_cabi_{entry_name}"),
+        export: (intent.execution == CanonicalExecution::Wasm)
+            .then(|| format!("fe_cabi_{entry_name}")),
         request,
         response,
+        intent,
+    })
+}
+
+fn canonical_lane_intent<'db>(
+    db: &'db dyn HirAnalysisDb,
+    func: hir::hir_def::Func<'db>,
+) -> Result<CanonicalLaneIntent, CanonicalInterfaceError> {
+    let scope = func.scope();
+    let webgpu_backend = resolve_lib_type_path(db, scope, "std::webgpu::WebGpuBackend");
+    let mut execution = CanonicalExecution::Wasm;
+    let mut placement = CanonicalPlacement::Any;
+    let mut capabilities = Vec::new();
+    for requirement in func.effect_requirements(db) {
+        let EffectRequirementKey::Trait(trait_inst) = &requirement.key else {
+            return Err(error("canonical lane has unsupported non-trait effect"));
+        };
+        let trait_ = trait_inst.def(db);
+        if lib_trait_matches(db, trait_, "core::browser::HostEffect") {
+            if execution == CanonicalExecution::HostEffect {
+                return Err(error("duplicate canonical HostEffect marker"));
+            }
+            execution = CanonicalExecution::HostEffect;
+            continue;
+        }
+        let marker_placement = if lib_trait_matches(db, trait_, "core::browser::MainThread") {
+            Some(CanonicalPlacement::MainThread)
+        } else if lib_trait_matches(db, trait_, "core::browser::Worker") {
+            Some(CanonicalPlacement::Worker)
+        } else {
+            None
+        };
+        if let Some(next) = marker_placement {
+            if placement != CanonicalPlacement::Any {
+                return Err(error("canonical lane has conflicting placement markers"));
+            }
+            placement = next;
+            continue;
+        }
+        if lib_trait_matches(db, trait_, "std::webgpu::Dispatch")
+            && trait_inst.args(db).len() == 2
+            && webgpu_backend.is_some_and(|backend| trait_inst.args(db)[1] == backend)
+            && trait_inst.assoc_type_bindings(db).is_empty()
+        {
+            capabilities.push(CanonicalCapabilityRequirement {
+                capability: CanonicalCapability::WebgpuDispatch,
+                mutable: requirement.is_mut,
+            });
+            continue;
+        }
+        return Err(error("canonical lane has unsupported capability effect"));
+    }
+    if execution == CanonicalExecution::HostEffect && placement == CanonicalPlacement::Any {
+        return Err(error("canonical host-effect lane requires explicit placement"));
+    }
+    if execution == CanonicalExecution::Wasm && !capabilities.is_empty() {
+        return Err(error(
+            "canonical Wasm lane cannot externalize host capabilities without HostEffect",
+        ));
+    }
+    capabilities.sort_by_key(|requirement| match requirement.capability {
+        CanonicalCapability::WebgpuDispatch => 0,
+    });
+    capabilities.dedup();
+    Ok(CanonicalLaneIntent {
+        execution,
+        placement,
+        capabilities,
     })
 }
 
@@ -477,7 +621,9 @@ pub fn verify_canonical_wasm_abi(
     )?;
     require(&interface.abi.reset_export, &[], &[])?;
     for lane in &interface.lanes {
-        require(&lane.export, &[ValType::I32], &[ValType::I32])?;
+        if let Some(export) = &lane.export {
+            require(export, &[ValType::I32], &[ValType::I32])?;
+        }
     }
     Ok(())
 }
@@ -686,9 +832,10 @@ mod tests {
     fn one_lane_manifest() -> CanonicalInterfaceManifest {
         CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
             name: "update".to_owned(),
-            export: "update".to_owned(),
+            export: Some("update".to_owned()),
             request: CanonicalType::Record(vec![CanonicalField::new("value", CanonicalType::U32)]),
             response: CanonicalType::Record(vec![CanonicalField::new("value", CanonicalType::U32)]),
+            intent: CanonicalLaneIntent::default(),
         }])
         .unwrap()
     }
@@ -713,9 +860,10 @@ mod tests {
         ]);
         let manifest = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
             name: "render".to_owned(),
-            export: "render_message".to_owned(),
+            export: Some("render_message".to_owned()),
             request,
             response: CanonicalType::U32,
+            intent: CanonicalLaneIntent::default(),
         }])
         .unwrap();
         let lane = &manifest.lanes[0];
@@ -747,9 +895,10 @@ mod tests {
     fn rejects_names_collisions_empty_records_and_excessive_depth() {
         let lane = |name: &str, export: &str, request| CanonicalLaneDecl {
             name: name.to_owned(),
-            export: export.to_owned(),
+            export: Some(export.to_owned()),
             request,
             response: CanonicalType::U32,
+            intent: CanonicalLaneIntent::default(),
         };
         assert!(
             CanonicalInterfaceManifest::build(vec![
@@ -832,9 +981,10 @@ mod tests {
         for (index, (ty, size, align)) in cases.into_iter().enumerate() {
             let manifest = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
                 name: format!("lane_{index}"),
-                export: format!("export_{index}"),
+                export: Some(format!("export_{index}")),
                 request: ty,
                 response: CanonicalType::U8,
+                intent: CanonicalLaneIntent::default(),
             }])
             .unwrap();
             assert_eq!(
@@ -876,7 +1026,7 @@ pub fn update(request: Request) -> Response {
         .unwrap();
         let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
         let lane = &manifest.lanes[0];
-        assert_eq!(lane.export, "fe_cabi_update");
+        assert_eq!(lane.export.as_deref(), Some("fe_cabi_update"));
         assert_eq!((lane.request.size, lane.request.align), (32, 8));
         let CanonicalShape::Record { fields } = &lane.request.shape else {
             panic!("request record")
@@ -894,6 +1044,74 @@ pub fn update(request: Request) -> Response {
             ]
         );
         assert_eq!((lane.response.size, lane.response.align), (8, 4));
+    }
+
+    #[test]
+    fn derives_host_execution_and_placement_from_effect_requirements() {
+        let declaration = semantic_lane(
+            r#"
+use core::{HostEffect, MainThread}
+struct Request { value: u32 }
+struct Response { value: u32 }
+pub fn update(request: Request) -> Response
+    uses (HostEffect, MainThread)
+{
+    Response { value: request.value }
+}
+"#,
+            "update",
+        )
+        .unwrap();
+        assert_eq!(declaration.export, None);
+        assert_eq!(
+            declaration.intent,
+            CanonicalLaneIntent {
+                execution: CanonicalExecution::HostEffect,
+                placement: CanonicalPlacement::MainThread,
+                capabilities: vec![],
+            }
+        );
+        let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+        assert_eq!(manifest.version, 2);
+        assert_eq!(manifest.lanes[0].export, None);
+    }
+
+    #[test]
+    fn manifest_rejects_exports_that_disagree_with_execution_intent() {
+        let message = CanonicalType::Record(vec![CanonicalField::new(
+            "value",
+            CanonicalType::U32,
+        )]);
+        let host_with_export = CanonicalLaneDecl {
+            name: "host".to_owned(),
+            export: Some("fe_cabi_host".to_owned()),
+            request: message.clone(),
+            response: message.clone(),
+            intent: CanonicalLaneIntent {
+                execution: CanonicalExecution::HostEffect,
+                placement: CanonicalPlacement::Worker,
+                capabilities: vec![],
+            },
+        };
+        assert!(
+            CanonicalInterfaceManifest::build(vec![host_with_export])
+                .unwrap_err()
+                .to_string()
+                .contains("must not declare a Wasm export")
+        );
+        let wasm_without_export = CanonicalLaneDecl {
+            name: "wasm".to_owned(),
+            export: None,
+            request: message.clone(),
+            response: message,
+            intent: CanonicalLaneIntent::default(),
+        };
+        assert!(
+            CanonicalInterfaceManifest::build(vec![wasm_without_export])
+                .unwrap_err()
+                .to_string()
+                .contains("requires an export")
+        );
     }
 
     #[test]
