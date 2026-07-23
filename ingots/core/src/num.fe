@@ -7,6 +7,7 @@ use super::panic
 // Generic bitcast intrinsic - reinterprets bits between any two primitive integer types
 extern {
     const fn __bitcast<From, To>(_: From) -> To
+    const fn __int_truncate<From: IntWord, To: IntWord>(_: From) -> To
 }
 
 // Generic checked arithmetic intrinsics for primitive integer types.
