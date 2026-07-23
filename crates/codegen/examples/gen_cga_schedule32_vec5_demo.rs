@@ -345,6 +345,10 @@ fn main() {
                 exact_mismatches += 1;
             }
             assert_eq!(
+                got, want,
+                "Wasm/oracle pixel mismatch at ({x},{y}): got=0x{got:08x} want=0x{want:08x}",
+            );
+            assert_eq!(
                 material_class(got),
                 Some(material),
                 "Wasm/oracle material mismatch at ({x},{y}): got=0x{got:08x} want=0x{want:08x}",
@@ -365,11 +369,6 @@ fn main() {
                 PaletteFamily::Upper | PaletteFamily::Lower => {
                     let delta = shade_bucket(got).expect("classified Wasm shade")
                         - shade_bucket(want).expect("classified oracle shade");
-                    assert!(
-                        delta.abs() <= 1,
-                        "Wasm/oracle shade differs by more than one quantization bucket at \
-                         ({x},{y}): delta={delta}, got=0x{got:08x}, want=0x{want:08x}",
-                    );
                     *shade_deltas.entry(delta).or_default() += 1;
                     max_abs_shade_delta = max_abs_shade_delta.max(delta.abs());
                 }
@@ -464,12 +463,12 @@ fn main() {
         "view": [CAM_X, CAM_Y, ZOOM], "inversion_center": [INV_CX, INV_CY],
         "parameter_types": ["F32", "F32", "F32", "F32", "F32"],
         "shape": "inverted_offset_torus_cyclide",
-        "algebra": "canonical Fe helpers shared by a forced typed Schedule<32> witness and a bounded 80-candidate FCO provider that emits five direct lanes",
+        "algebra": "canonical Fe helpers shared by a forced typed Schedule<32> witness and a bounded 80-candidate FCO provider that emits five direct lanes with the canonical four-bucket balanced reduction",
         "inversion_center_runtime": true, "fnv1a32": frame_hash,
         "sky_pixels": sky, "hit_pixels": upper + lower,
         "upper_pixels": upper, "lower_pixels": lower, "distinct_colors": distinct.len(),
         "oracle_agreement": {
-            "policy": "exact topology/material/palette and sky; hit shade may differ by at most one 24-level bucket under f32 reassociation",
+            "policy": "bit-exact 16384/16384 pixels against the independent Rust f32 oracle",
             "pixels": WIDTH * HEIGHT,
             "exact_pixels": WIDTH as usize * HEIGHT as usize - exact_mismatches,
             "exact_mismatches": exact_mismatches,
@@ -483,7 +482,7 @@ fn main() {
         },
         "schedule_tuple_fields": ["left_blade", "point_blade", "right_blade", "output_blade", "magnitude", "negative"],
         "canonical_survivor_tuples": schedule_json,
-        "runtime_tuple_order": "canonical candidate scan order with lane-local accumulation",
+        "runtime_tuple_order": "canonical candidate scan order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
         "provenance": provenance,
     })).unwrap();
 
@@ -845,6 +844,10 @@ fn audit_frame_against_oracle(frame: &[u32]) {
             rgba(want),
         );
     }
+    assert_eq!(
+        exact_mismatches, 0,
+        "Schedule32 Wasm frame must be bit-exact against the independent oracle"
+    );
 }
 
 fn fnv1a32(bytes: &[u8]) -> u32 {
