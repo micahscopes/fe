@@ -1,6 +1,8 @@
 # mb2 browser CGA goal: completion evidence audit
 
-Status: current at `b4686bbc8` on 2026-07-23.
+Status: audited against the integrated `mb2` lineage on 2026-07-23. Re-run
+the cited gates after later implementation commits rather than treating a
+cherry-picked source hash as a permanent completion marker.
 
 This is a completion audit, not a milestone announcement. `Achieved` means the
 current tree contains direct evidence for the stated scope. `Partial` means a
