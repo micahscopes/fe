@@ -312,6 +312,76 @@ pub fn eval_body_owner_const_with_args<'db>(
     )
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Update)]
+struct MemoizedConstCall<'db> {
+    value: SemConstId<'db>,
+    steps: usize,
+    max_recursion: usize,
+}
+
+/// Advisory cache for a nested, fully-concrete const-function call.
+///
+/// Both remaining budgets are part of the key and configure the probe, so it
+/// cannot do work the inline parent was not allowed to do. Only recursively
+/// concrete successes escape this query. `None` (including a cycle, deferred
+/// value, unsupported operation, or ordinary CTFE error) makes the caller use
+/// the original inline path, preserving its fallback behavior and diagnostics.
+#[salsa::tracked(cycle_initial=eval_concrete_const_call_cycle_initial, cycle_fn=eval_concrete_const_call_cycle_recover)]
+fn eval_concrete_const_call<'db>(
+    db: &'db dyn HirAnalysisDb,
+    key: SemanticInstanceKey<'db>,
+    args: Vec<SemConstId<'db>>,
+    recursion_budget: usize,
+    step_budget: usize,
+) -> Option<MemoizedConstCall<'db>> {
+    let instance = get_or_build_semantic_instance(db, key);
+    let origin = SemOrigin::Body(key.owner(db));
+    let mut config = CtfeConfig::default();
+    config.recursion_limit = recursion_budget;
+    config.step_limit = step_budget;
+    let mut machine = CtfeMachine::new(db, config);
+    let value = machine
+        .eval_root(
+            instance,
+            args.into_iter()
+                .map(|arg| CtfeValue::concrete(db, arg))
+                .collect(),
+            origin,
+        )
+        .ok()?;
+    if sem_const_contains_type_level(db, value) {
+        return None;
+    }
+    Some(MemoizedConstCall {
+        value,
+        steps: machine.steps,
+        max_recursion: machine.max_recursion,
+    })
+}
+
+fn eval_concrete_const_call_cycle_initial<'db>(
+    db: &'db dyn HirAnalysisDb,
+    key: SemanticInstanceKey<'db>,
+    _args: Vec<SemConstId<'db>>,
+    _recursion_budget: usize,
+    _step_budget: usize,
+) -> Option<MemoizedConstCall<'db>> {
+    let _ = (db, key);
+    None
+}
+
+fn eval_concrete_const_call_cycle_recover<'db>(
+    _db: &'db dyn HirAnalysisDb,
+    _value: &Option<MemoizedConstCall<'db>>,
+    _count: u32,
+    _key: SemanticInstanceKey<'db>,
+    _args: Vec<SemConstId<'db>>,
+    _recursion_budget: usize,
+    _step_budget: usize,
+) -> salsa::CycleRecoveryAction<Option<MemoizedConstCall<'db>>> {
+    salsa::CycleRecoveryAction::Fallback(None)
+}
+
 fn eval_body_owner_const_with_args_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
@@ -352,6 +422,11 @@ struct CtfeMachine<'db> {
     db: &'db dyn HirAnalysisDb,
     config: CtfeConfig,
     steps: usize,
+    /// Maximum non-const-item call depth reached by this evaluation. Cached
+    /// nested-call successes report this so their parent can charge the same
+    /// recursion budget as inline evaluation.
+    max_recursion: usize,
+    memoize_concrete_calls: bool,
     instance_cache: FxHashMap<SemanticInstanceKey<'db>, SemanticInstance<'db>>,
     body_cache: FxHashMap<SemanticInstanceKey<'db>, Rc<SemanticBody<'db>>>,
     frames: Vec<CtfeFrame<'db>>,
@@ -1054,6 +1129,8 @@ impl<'db> CtfeMachine<'db> {
             db,
             config,
             steps: 0,
+            max_recursion: 0,
+            memoize_concrete_calls: true,
             instance_cache: FxHashMap::default(),
             body_cache: FxHashMap::default(),
             frames: Vec::new(),
@@ -1170,6 +1247,9 @@ impl<'db> CtfeMachine<'db> {
         if self.frames.len().saturating_sub(self.const_stack.len()) >= self.config.recursion_limit {
             return Err(CtfeError::RecursionLimitExceeded { origin });
         }
+        self.max_recursion = self
+            .max_recursion
+            .max(self.frames.len().saturating_sub(self.const_stack.len()) + 1);
 
         let body = self.body_for_instance(instance);
         let mut locals = vec![CtfeSlot::Uninit; body.locals.len()];
@@ -1508,6 +1588,43 @@ impl<'db> CtfeMachine<'db> {
                     && !func.is_const(self.db)
                 {
                     return Err(CtfeError::NonConstCall { origin });
+                }
+                if matches!(instance.key(self.db).owner(self.db), BodyOwner::Func(func) if func.is_const(self.db))
+                    && self.memoize_concrete_calls
+                    && let Some(concrete_args) = args
+                        .iter()
+                        .map(|arg| match arg {
+                            CtfeValue::Value(value) if !value.contains_type_level(self.db) => {
+                                Some(value.materialize(self.db))
+                            }
+                            CtfeValue::Value(_) | CtfeValue::Ref(_) => None,
+                        })
+                        .collect::<Option<Vec<_>>>()
+                {
+                    let current_depth = self.frames.len().saturating_sub(self.const_stack.len());
+                    let recursion_budget =
+                        self.config.recursion_limit.saturating_sub(current_depth);
+                    let step_budget = self.config.step_limit.saturating_sub(self.steps);
+                    if recursion_budget > 0
+                        && step_budget > 0
+                        && let Some(cached) = eval_concrete_const_call(
+                            self.db,
+                            instance.key(self.db),
+                            concrete_args,
+                            recursion_budget,
+                            step_budget,
+                        )
+                    {
+                        let charged_depth = current_depth.saturating_add(cached.max_recursion);
+                        let charged_steps = self.steps.saturating_add(cached.steps);
+                        if charged_depth <= self.config.recursion_limit
+                            && charged_steps <= self.config.step_limit
+                        {
+                            self.steps = charged_steps;
+                            self.max_recursion = self.max_recursion.max(charged_depth);
+                            return Ok(CtfeValue::concrete(self.db, cached.value));
+                        }
+                    }
                 }
                 match self.eval_instance(instance, args.clone(), origin) {
                     Ok(value) => Ok(value),
@@ -3728,5 +3845,120 @@ fn array_len<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<usize> {
     match const_ty.data(db) {
         ConstTyData::Evaluated(EvaluatedConstTy::LitInt(int_id), _) => int_id.data(db).to_usize(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::*;
+    use crate::{hir_def::Partial, test_db::HirAnalysisTestDb};
+
+    #[derive(Clone, Debug, PartialEq, Eq, Update)]
+    struct TestRun<'db> {
+        result: Result<SemConstId<'db>, CtfeError<'db>>,
+        steps: usize,
+        max_recursion: usize,
+    }
+
+    #[salsa::tracked]
+    fn run<'db>(
+        db: &'db dyn HirAnalysisDb,
+        owner: BodyOwner<'db>,
+        config: CtfeConfig,
+        memo: bool,
+    ) -> TestRun<'db> {
+        let instance = get_or_build_semantic_instance(
+            db,
+            crate::analysis::semantic::identity_semantic_instance_key(db, owner),
+        );
+        let mut machine = CtfeMachine::new(db, config);
+        machine.memoize_concrete_calls = memo;
+        let result = machine.eval_root(instance, Vec::new(), SemOrigin::Body(owner));
+        TestRun {
+            result,
+            steps: machine.steps,
+            max_recursion: machine.max_recursion,
+        }
+    }
+
+    fn fixture(source: &str) -> (&'static HirAnalysisTestDb, BodyOwner<'static>) {
+        let db = Box::leak(Box::new(HirAnalysisTestDb::default()));
+        let file = db.new_stand_alone("ctfe_memo_budget.fe".into(), source);
+        let (top_mod, _) = db.top_mod(file);
+        let func = top_mod
+            .all_funcs(db)
+            .iter()
+            .find(|func| matches!(func.name(db), Partial::Present(name) if name.data(db) == "root"))
+            .copied()
+            .expect("missing root");
+        (db, BodyOwner::Func(func))
+    }
+
+    fn outcome(db: &HirAnalysisTestDb, result: &Result<SemConstId<'_>, CtfeError<'_>>) -> String {
+        fn error(err: &CtfeError<'_>) -> String {
+            match err {
+                CtfeError::CalleeError { origin, source, .. } => {
+                    format!("Callee({origin:?}, {})", error(source))
+                }
+                other => format!("{other:?}"),
+            }
+        }
+        match result {
+            Ok(value) => format!("Ok({:?})", value.value(db)),
+            Err(err) => error(err),
+        }
+    }
+
+    #[test]
+    fn memo_and_inline_match_exact_step_boundaries() {
+        let (db, owner) = fixture(
+            r#"
+const fn work(_ n: usize) -> usize {
+    let mut i: usize = 0
+    let mut out: usize = n
+    while i < 8 {
+        out = out + i
+        i = i + 1
+    }
+    out
+}
+const fn root() -> usize {
+    let prefix = 1 + 2 + 3
+    prefix + work(7) + work(7)
+}
+"#,
+        );
+        let exact = run(db, owner, CtfeConfig::default(), false).steps;
+        for limit in [exact - 1, exact, exact + 1] {
+            let config = CtfeConfig {
+                step_limit: limit,
+                ..CtfeConfig::default()
+            };
+            let inline = run(db, owner, config.clone(), false).result;
+            let memo = run(db, owner, config, true).result;
+            assert_eq!(outcome(db, &inline), outcome(db, &memo), "limit {limit}");
+        }
+    }
+
+    #[test]
+    fn memo_and_inline_match_exact_recursion_boundaries() {
+        let (db, owner) = fixture(
+            r#"
+const fn descend(_ n: usize) -> usize {
+    if n == 0 { 0 } else { descend(n - 1) }
+}
+const fn root() -> usize { descend(8) }
+"#,
+        );
+        let exact = run(db, owner, CtfeConfig::default(), false).max_recursion;
+        for limit in [exact - 1, exact, exact + 1] {
+            let config = CtfeConfig {
+                recursion_limit: limit,
+                ..CtfeConfig::default()
+            };
+            let inline = run(db, owner, config.clone(), false).result;
+            let memo = run(db, owner, config, true).result;
+            assert_eq!(outcome(db, &inline), outcome(db, &memo), "limit {limit}");
+        }
     }
 }
