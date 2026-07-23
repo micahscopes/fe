@@ -6206,3 +6206,46 @@ fn qcga3d_rotated_quadric_render_executes_wasm_equal_on_lavapipe() {
         assert_eq!(pixel, expected.to_le_bytes());
     }
 }
+
+#[test]
+fn qcga3d_sparse_planned_render_emits_browser_profile_wgsl() {
+    let source = format!(
+        "{}\n{}",
+        include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
+        include_str!("fixtures/spirv/qcga3d_sparse_planned_render_body.fe"),
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///qcga3d_sparse_planned_render.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
+    let file = db.workspace().get(&db, &url).expect("planned QCGA source");
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "planned QCGA render diagnostics:\n{diagnostics}"
+    );
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "qcga3d_sparse_planned_render")
+            .expect("planned QCGA render runtime package");
+    let artifact = fe_codegen::compile_runtime_package_spirv_render(&db, &package)
+        .expect("planned QCGA Render SPIR-V/WGSL");
+    assert_eq!(count_spirv_entry_points(&artifact.words), 2);
+    assert_eq!(artifact.layout.builtin_inputs.len(), 2);
+    let input = artifact
+        .layout
+        .bindings
+        .iter()
+        .find(|binding| binding.role == sonatina_codegen::isa::spirv::Role::Input)
+        .expect("typed camera/quadric input buffer");
+    assert_eq!(input.members.len(), 15);
+    assert_eq!((input.span, input.stride), (60, 60));
+    let wgsl = artifact.wgsl.expect("planned QCGA WGSL");
+    assert_browser_profile_wgsl(&wgsl);
+    assert!(!wgsl.contains("loop {"), "planner must not become a runtime loop");
+    assert!(!wgsl.contains("32768"), "planner must not materialize dense Cl(9,6)");
+    eprintln!(
+        "QCGA planned WGSL bytes={}, functions={}",
+        wgsl.len(),
+        wgsl.matches("fn ").count(),
+    );
+}

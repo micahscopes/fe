@@ -25,6 +25,13 @@ The canvas scales responsively; the pixel-edge toggle and loupe inspect the
 actual fixed kernel output. There are no pretend algebra controls because this
 first sparse QCGA kernel has no runtime quadric or camera parameters.
 
+The next planner-backed kernel is proven but not promoted into this browser
+bundle yet. See `docs/mb2/QCGA_SPARSE_PLANNER.md`: Fe CTFE derives a recursive
+12-term plan from two sparse 12-entry support lists, an FCO provider publishes
+the aggregate contraction, and parameterized Wasm/WGSL preserves this frame
+bit-for-bit. Until the actor request and UI are regenerated, this page remains
+the fixed runtime-reuse showcase and must not be presented as general QCGA.
+
 Generate the five ignored assets from the reviewed local Sonatina commit and
 serve the common demos root:
 

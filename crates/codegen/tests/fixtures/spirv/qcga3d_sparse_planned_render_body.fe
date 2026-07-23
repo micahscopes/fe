@@ -1,0 +1,141 @@
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
+    fn __sqrt_f32(_: f32) -> f32
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+struct CameraInputs {
+    origin_x: f32,
+    origin_y: f32,
+    origin_z: f32,
+    projection_norm_squared: f32,
+    pixel_scale: f32,
+}
+
+struct QuadricInputs {
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+}
+
+impl Copy for CameraInputs {}
+impl Copy for QuadricInputs {}
+
+// Keep the established fused ray/root association as an independent path.
+// The typed CTFE/FCO sparse contraction is exercised separately at the hit.
+#[inline(always)]
+fn fused_field(
+    x: f32, y: f32, z: f32,
+    q: QuadricInputs,
+) -> f32 {
+    let square: f32 = q.a * x * x + q.b * y * y + q.c * z * z
+    let cross: f32 = q.d * x * y + q.e * x * z + q.f * y * z
+    let linear: f32 = q.g * x + q.h * y + q.i * z
+    square + cross + linear + q.j
+}
+
+pub fn qcga3d_sparse_planned_render(
+    px: i32, py: i32,
+    origin_x: f32, origin_y: f32, origin_z: f32,
+    projection_norm_squared: f32, pixel_scale: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> u32 {
+    let camera = CameraInputs {
+        origin_x, origin_y, origin_z, projection_norm_squared, pixel_scale,
+    }
+    let quadric = QuadricInputs { a, b, c, d, e, f, g, h, i, j }
+    let fx: f32 = __f32_from_i32(px)
+    let fy: f32 = __f32_from_i32(py)
+    let sx: f32 = (fx - 63.5) * camera.pixel_scale
+    let sy: f32 = (fy - 63.5) * -camera.pixel_scale
+    let focal_z: f32 = __sqrt_f32(camera.projection_norm_squared)
+    let inv_len: f32 = 1.0 / __sqrt_f32(
+        sx * sx + sy * sy + camera.projection_norm_squared,
+    )
+    let dx: f32 = sx * inv_len
+    let dy: f32 = sy * inv_len
+    let dz: f32 = focal_z * inv_len
+
+    let ox: f32 = camera.origin_x
+    let oy: f32 = camera.origin_y
+    let oz: f32 = camera.origin_z
+    let f0: f32 = fused_field(x: ox, y: oy, z: oz, q: quadric)
+    let fp: f32 = fused_field(x: ox + dx, y: oy + dy, z: oz + dz, q: quadric)
+    let fm: f32 = fused_field(x: ox - dx, y: oy - dy, z: oz - dz, q: quadric)
+    let alpha: f32 = (fp + fm) * 0.5 - f0
+    let beta: f32 = (fp - fm) * 0.5
+    let abs_alpha: f32 = if alpha < 0.0 { -alpha } else { alpha }
+    let abs_beta: f32 = if beta < 0.0 { -beta } else { beta }
+
+    let t: f32 = if abs_alpha < 0.000001 {
+        if abs_beta >= 0.000001 {
+            let linear_t: f32 = -f0 / beta
+            if linear_t >= 0.0 { linear_t } else { -1.0 }
+        } else { -1.0 }
+    } else {
+        let discriminant: f32 = beta * beta - 4.0 * alpha * f0
+        if discriminant >= 0.0 {
+            let root: f32 = __sqrt_f32(discriminant)
+            let signed_root: f32 = if beta < 0.0 { -root } else { root }
+            let qroot: f32 = -0.5 * (beta + signed_root)
+            let abs_qroot: f32 = if qroot < 0.0 { -qroot } else { qroot }
+            if abs_qroot >= 0.000001 {
+                let t0: f32 = qroot / alpha
+                let t1: f32 = f0 / qroot
+                if t0 >= 0.0 {
+                    if t1 >= 0.0 && t1 < t0 { t1 } else { t0 }
+                } else {
+                    if t1 >= 0.0 { t1 } else { -1.0 }
+                }
+            } else {
+                let fallback: f32 = -beta / (2.0 * alpha)
+                if fallback >= 0.0 { fallback } else { -1.0 }
+            }
+        } else { -1.0 }
+    }
+
+    let horizon: f32 = (fy + 0.5) / 128.0
+    let background_ri: i32 = __i32_from_f32(8.0 + 10.0 * horizon)
+    let background_gi: i32 = __i32_from_f32(11.0 + 15.0 * horizon)
+    let background_bi: i32 = __i32_from_f32(25.0 + 28.0 * horizon)
+    let background: u32 = __bitcast(
+        background_ri + background_gi * 256 + background_bi * 65536 + -16777216,
+    )
+
+    if t >= 0.0 {
+        let x: f32 = ox + dx * t
+        let y: f32 = oy + dy * t
+        let z: f32 = oz + dz * t
+        let residual = qcga3d_incidence_planned(
+            x: x, y: y, z: z,
+            a: quadric.a, b: quadric.b, c: quadric.c, d: quadric.d, e: quadric.e,
+            f: quadric.f, g: quadric.g, h: quadric.h, i: quadric.i, j: quadric.j,
+        )
+        let abs_residual: f32 = if residual < 0.0 { -residual } else { residual }
+        if abs_residual < 0.0002 {
+            let twice_a: f32 = quadric.a + quadric.a
+            let twice_b: f32 = quadric.b + quadric.b
+            let twice_c: f32 = quadric.c + quadric.c
+            let nx: f32 = twice_a * x + quadric.d * y
+                + quadric.e * z + quadric.g
+            let ny: f32 = twice_b * y + quadric.d * x
+                + quadric.f * z + quadric.h
+            let nz: f32 = twice_c * z + quadric.e * x
+                + quadric.f * y + quadric.i
+            let n_inv: f32 = 1.0 / __sqrt_f32(nx * nx + ny * ny + nz * nz)
+            let nnx: f32 = nx * n_inv
+            let nny: f32 = ny * n_inv
+            let nnz: f32 = nz * n_inv
+            let diffuse_raw: f32 = nnx * -0.45 + nny * 0.70 + nnz * -0.55
+            let diffuse: f32 = if diffuse_raw < 0.0 { 0.0 } else { diffuse_raw }
+            let rim_raw: f32 = 1.0 - (-(nnx * dx + nny * dy + nnz * dz))
+            let rim: f32 = if rim_raw < 0.0 { 0.0 } else { rim_raw }
+            let shade: f32 = 0.18 + diffuse * 0.72
+            let ri: i32 = __i32_from_f32(24.0 + 78.0 * shade + 65.0 * rim)
+            let gi: i32 = __i32_from_f32(28.0 + 178.0 * shade + 34.0 * rim)
+            let bi: i32 = __i32_from_f32(52.0 + 196.0 * shade + 55.0 * rim)
+            __bitcast(ri + gi * 256 + bi * 65536 + -16777216)
+        } else { background }
+    } else { background }
+}

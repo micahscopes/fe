@@ -731,6 +731,98 @@ fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
     }
 }
 
+#[test]
+fn qcga3d_sparse_planned_render_preserves_current_frame_on_wasm() {
+    let source = format!(
+        "{}\n{}",
+        include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
+        include_str!("fixtures/spirv/qcga3d_sparse_planned_render_body.fe"),
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///qcga3d_sparse_planned_render.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
+    let file = db.workspace().get(&db, &url).expect("planned render fixture");
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "planned QCGA render semantic analysis failed:\n{diagnostics}"
+    );
+    let package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "qcga3d_sparse_planned_render")
+            .expect("planned QCGA render package");
+    let planned_wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .expect("planned QCGA render Wasm")
+            .bytes;
+    wasmparser::validate(&planned_wasm).expect("valid planned render Wasm");
+    assert!(func_imports(&planned_wasm).is_empty());
+    let planned_shape = wasm_float_shape(&planned_wasm);
+    assert_eq!(planned_shape.4, 0, "planned render has no runtime loop");
+
+    let old_source = include_str!("fixtures/spirv/qcga3d_rotated_quadric_render.fe");
+    let old_wasm = compile_to_wasm("qcga3d_rotated_quadric_render.fe", old_source);
+    let (mut planned_store, planned_instance) = instantiate(&planned_wasm);
+    let (mut old_store, old_instance) = instantiate(&old_wasm);
+    type PlannedInputs = (
+        i32,
+        i32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+    );
+    let planned = planned_instance
+        .get_typed_func::<PlannedInputs, i32>(
+            &mut planned_store,
+            "qcga3d_sparse_planned_render",
+        )
+        .expect("planned render ABI");
+    let old = old_instance
+        .get_typed_func::<(i32, i32), i32>(
+            &mut old_store,
+            "qcga3d_rotated_quadric_render",
+        )
+        .expect("current render ABI");
+    let mut hash = 0x811c9dc5u32;
+    for py in 0..128 {
+        for px in 0..128 {
+            let got = planned
+                .call(
+                    &mut planned_store,
+                    (
+                        px, py, 0.0, 0.0, -4.0, 3.24, 0.018, 0.85, 1.25, 0.65, 0.55, -0.40,
+                        0.30, -0.16, 0.1375, -0.04, -0.979125,
+                    ),
+                )
+                .expect("planned pixel") as u32;
+            let expected = old.call(&mut old_store, (px, py)).expect("current pixel") as u32;
+            assert_eq!(
+                got, expected,
+                "planned/current frame mismatch at ({px},{py}): {got:#010x} != {expected:#010x}"
+            );
+            for byte in got.to_le_bytes() {
+                hash = (hash ^ u32::from(byte)).wrapping_mul(0x01000193);
+            }
+        }
+    }
+    assert_eq!(hash, 2_368_784_280);
+    eprintln!(
+        "QCGA planned frame bit-exact; Wasm shape (add,sub,mul,call,loop)={planned_shape:?}"
+    );
+}
+
 fn qcga3d_quadric_field_oracle(x: f32, y: f32, z: f32) -> f32 {
     let square = 0.85_f32 * x * x + 1.25_f32 * y * y + 0.65_f32 * z * z;
     let cross = 0.55_f32 * x * y - 0.40_f32 * x * z + 0.30_f32 * y * z;
