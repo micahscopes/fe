@@ -262,6 +262,7 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
 struct CanonicalCga {}
 derive Sandwich for CanonicalCga using CanonicalCgaProvider
 
+// BEGIN_PUBLIC_ORACLES
 pub fn cga_fco_e1(
     s1: f32, s2: f32, s8: f32, s16: f32,
     p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
@@ -312,3 +313,4 @@ const SCHEDULE_ORDER_HASH: i32 = schedule_order_hash().downcast_unchecked()
 pub fn cga_schedule_order_hash() -> i32 {
     SCHEDULE_ORDER_HASH
 }
+// END_PUBLIC_ORACLES
