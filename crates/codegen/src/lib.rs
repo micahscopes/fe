@@ -46,7 +46,7 @@ pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expe
 pub use web_bundle::{
     WEB_BUNDLE_PROTOCOL, WEB_BUNDLE_PROTOCOL_VERSION, WebArtifactManifest, WebBinding,
     WebBindingAccess, WebBindingMember, WebBindingRole, WebBuildOptions, WebBuiltinInput,
-    WebBuiltinSource, WebBundle, WebBundleError, WebBundleManifest, WebBundleMode,
+    WebBuiltinSource, WebBundle, WebBundleError, WebBundleFile, WebBundleManifest, WebBundleMode,
     WebCanonicalPolicy, WebCanonicalStatus, WebGeneratedArtifact, WebLayout, WebProvenance,
     WebResult, WebScalarKind,
 };

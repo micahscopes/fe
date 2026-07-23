@@ -9,7 +9,10 @@ use std::{
     fmt, fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use driver::DriverDataBase;
@@ -272,6 +275,27 @@ pub struct WebBundle {
     pub interface_d_ts: Option<String>,
 }
 
+/// One immutable file in a fully materialized [`WebBundle`].
+///
+/// The path is bundle-relative and validated when the snapshot is built.
+/// Shared byte storage makes a snapshot cheap to clone into HTTP request
+/// handlers without exposing mutable compiler artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebBundleFile {
+    path: String,
+    bytes: Arc<[u8]>,
+}
+
+impl WebBundleFile {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl WebBundle {
     /// Compile Wasm and browser-profile WGSL from the same resolved module.
     /// Canonical message lanes may be different public entries from the GPU
@@ -401,6 +425,88 @@ impl WebBundle {
         Ok(json)
     }
 
+    /// Materialize the exact, immutable file set described by this bundle's
+    /// manifest. Both disk publication and browser servers consume this API so
+    /// generated adapters cannot silently diverge between the two paths.
+    pub fn materialized_files(&self) -> Result<Vec<WebBundleFile>, WebBundleError> {
+        let mut files = Vec::with_capacity(3 + self.manifest.artifacts.canonical_adapters.len());
+        let mut paths = std::collections::BTreeSet::new();
+        let mut push = |path: &str, bytes: Arc<[u8]>| -> Result<(), WebBundleError> {
+            validate_materialized_path(path)?;
+            if !paths.insert(path.to_owned()) {
+                return Err(WebBundleError::Materialization(format!(
+                    "duplicate artifact path `{path}`"
+                )));
+            }
+            files.push(WebBundleFile {
+                path: path.to_owned(),
+                bytes,
+            });
+            Ok(())
+        };
+
+        if self.wasm.len() as u64 != self.manifest.artifacts.wasm_bytes {
+            return Err(WebBundleError::Materialization(format!(
+                "artifact `{}` does not match its manifest byte length",
+                self.manifest.artifacts.wasm
+            )));
+        }
+        if self.wgsl.len() as u64 != self.manifest.artifacts.wgsl_bytes {
+            return Err(WebBundleError::Materialization(format!(
+                "artifact `{}` does not match its manifest byte length",
+                self.manifest.artifacts.wgsl
+            )));
+        }
+        push(
+            &self.manifest.artifacts.wasm,
+            Arc::from(self.wasm.as_slice()),
+        )?;
+        push(
+            &self.manifest.artifacts.wgsl,
+            Arc::from(self.wgsl.as_bytes()),
+        )?;
+        for artifact in &self.manifest.artifacts.canonical_adapters {
+            let bytes: Arc<[u8]> = match artifact.path.as_str() {
+                INTERFACE_JS_FILE => self
+                    .interface_js
+                    .as_ref()
+                    .map(|source| Arc::from(source.as_bytes()))
+                    .ok_or_else(|| {
+                        WebBundleError::Materialization(format!(
+                            "manifest declares `{}` but its content is absent",
+                            artifact.path
+                        ))
+                    })?,
+                INTERFACE_D_TS_FILE => self
+                    .interface_d_ts
+                    .as_ref()
+                    .map(|source| Arc::from(source.as_bytes()))
+                    .ok_or_else(|| {
+                        WebBundleError::Materialization(format!(
+                            "manifest declares `{}` but its content is absent",
+                            artifact.path
+                        ))
+                    })?,
+                path => {
+                    return Err(WebBundleError::Materialization(format!(
+                        "manifest declares unsupported generated artifact `{path}`"
+                    )));
+                }
+            };
+            if bytes.len() as u64 != artifact.bytes
+                || hex::encode(Sha256::digest(bytes.as_ref())) != artifact.sha256
+            {
+                return Err(WebBundleError::Materialization(format!(
+                    "generated artifact `{}` does not match its manifest metadata",
+                    artifact.path
+                )));
+            }
+            push(&artifact.path, bytes)?;
+        }
+        push(MANIFEST_FILE, Arc::from(self.manifest_json()?))?;
+        Ok(files)
+    }
+
     /// Publish a complete new bundle directory with one filesystem rename.
     /// Existing destinations are rejected so readers never observe a missing
     /// or mixed-version directory. A future CLI can publish versioned paths and
@@ -424,18 +530,13 @@ impl WebBundle {
 
         let result = (|| {
             fs::create_dir(&staging)?;
-            write_synced(&staging.join(WASM_FILE), &self.wasm)?;
-            write_synced(&staging.join(WGSL_FILE), self.wgsl.as_bytes())?;
-            if let Some(interface_js) = &self.interface_js {
-                write_synced(&staging.join(INTERFACE_JS_FILE), interface_js.as_bytes())?;
+            for file in self.materialized_files()? {
+                let path = staging.join(file.path());
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                write_synced(&path, file.bytes())?;
             }
-            if let Some(interface_d_ts) = &self.interface_d_ts {
-                write_synced(
-                    &staging.join(INTERFACE_D_TS_FILE),
-                    interface_d_ts.as_bytes(),
-                )?;
-            }
-            write_synced(&staging.join(MANIFEST_FILE), &self.manifest_json()?)?;
             fs::rename(&staging, destination)?;
             Ok(())
         })();
@@ -444,6 +545,22 @@ impl WebBundle {
         }
         result
     }
+}
+
+fn validate_materialized_path(path: &str) -> Result<(), WebBundleError> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(WebBundleError::Materialization(format!(
+            "artifact path `{}` is not a safe bundle-relative path",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn generated_canonical_adapters(
@@ -747,6 +864,7 @@ pub enum WebBundleError {
     UnexpectedLayout(String),
     CanonicalRequired(String),
     Manifest(String),
+    Materialization(String),
     DestinationExists(PathBuf),
     Io(io::Error),
 }
@@ -772,6 +890,9 @@ impl fmt::Display for WebBundleError {
                 write!(f, "required canonical interface is unavailable: {error}")
             }
             Self::Manifest(error) => write!(f, "web bundle manifest serialization failed: {error}"),
+            Self::Materialization(error) => {
+                write!(f, "web bundle materialization failed: {error}")
+            }
             Self::DestinationExists(path) => {
                 write!(
                     f,
@@ -1063,6 +1184,28 @@ pub fn shade(x: u32, y: u32) -> u32 {
             assert_eq!(artifact.bytes, content.len() as u64);
             assert_eq!(artifact.sha256, hex::encode(Sha256::digest(content)));
         }
+        let materialized = required.materialized_files().unwrap();
+        assert_eq!(
+            materialized
+                .iter()
+                .map(WebBundleFile::path)
+                .collect::<Vec<_>>(),
+            [
+                WASM_FILE,
+                WGSL_FILE,
+                INTERFACE_JS_FILE,
+                INTERFACE_D_TS_FILE,
+                MANIFEST_FILE,
+            ]
+        );
+        assert_eq!(
+            materialized
+                .iter()
+                .find(|file| file.path() == INTERFACE_JS_FILE)
+                .unwrap()
+                .bytes(),
+            interface_js.as_bytes()
+        );
         let destination = std::env::temp_dir().join(format!(
             "fe-canonical-adapter-test-{}-{}",
             std::process::id(),
@@ -1215,12 +1358,27 @@ pub fn shade(x: u32, y: u32) -> u32 {
             NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed)
         ));
         let destination = root.join("bundle");
+        let materialized = bundle.materialized_files().unwrap();
         bundle.write_atomic(&destination).unwrap();
-        assert_eq!(fs::read(destination.join(WASM_FILE)).unwrap(), bundle.wasm);
-        assert_eq!(
-            fs::read_to_string(destination.join(WGSL_FILE)).unwrap(),
-            bundle.wgsl
-        );
+        let mut disk_paths = fs::read_dir(&destination)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        disk_paths.sort();
+        let mut materialized_paths = materialized
+            .iter()
+            .map(|file| file.path().to_owned())
+            .collect::<Vec<_>>();
+        materialized_paths.sort();
+        assert_eq!(disk_paths, materialized_paths);
+        for file in &materialized {
+            assert_eq!(
+                fs::read(destination.join(file.path())).unwrap(),
+                file.bytes(),
+                "disk publication diverged for {}",
+                file.path()
+            );
+        }
         let disk_manifest: WebBundleManifest =
             serde_json::from_slice(&fs::read(destination.join(MANIFEST_FILE)).unwrap()).unwrap();
         assert_eq!(disk_manifest, bundle.manifest);
@@ -1229,5 +1387,23 @@ pub fn shade(x: u32, y: u32) -> u32 {
             Err(WebBundleError::DestinationExists(_))
         ));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn materialization_rejects_manifest_content_drift() {
+        let mut bundle = compile(WebBundleMode::Render);
+        bundle.manifest.artifacts.wasm = "../module.wasm".to_owned();
+        let error = bundle.materialized_files().unwrap_err().to_string();
+        assert!(error.contains("safe bundle-relative path"), "{error}");
+
+        let mut bundle = compile(WebBundleMode::Render);
+        bundle.manifest.artifacts.wgsl = bundle.manifest.artifacts.wasm.clone();
+        let error = bundle.materialized_files().unwrap_err().to_string();
+        assert!(error.contains("duplicate artifact path"), "{error}");
+
+        let mut bundle = compile(WebBundleMode::Render);
+        bundle.manifest.artifacts.wasm_bytes += 1;
+        let error = bundle.materialized_files().unwrap_err().to_string();
+        assert!(error.contains("manifest byte length"), "{error}");
     }
 }
