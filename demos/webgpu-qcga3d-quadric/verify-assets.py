@@ -42,14 +42,13 @@ assert reference["provenance"] == layout["provenance"]
 assert layout["provenance"]["sonatina_rev"] == "ac266c210cad7872fc98380a73b4ca363877bc1f"
 kernel = (gen / "kernel.fe").read_text()
 wgsl = (gen / "frag.wgsl").read_text()
-assert "struct IncidencePlan" in kernel
-assert "impl QcgaIncidenceProvider" in kernel
+assert "recursive type fn IncidencePlan" in kernel
+assert "impl Derive<PlannedIncidence> for QcgaIncidenceProvider" in kernel
 assert "qcga3d_sparse_planned_render" in kernel
 assert "loop {" not in wgsl
 assert "32768" not in wgsl
-kernel = (gen / "kernel.fe").read_text()
-assert "struct PointSupport" in kernel and "struct DualQuadricSupport" in kernel
-wgsl = (gen / "frag.wgsl").read_text()
+assert "struct SparseIncidenceOperands" in kernel
+assert "two 12-blade support lists" in kernel
 assert "@vertex" in wgsl and "@fragment" in wgsl and "sqrt(" in wgsl
 assert not any(token in wgsl for token in ("i64", "u64"))
 assert (gen / "frag.wasm").read_bytes()[:4] == b"\0asm"

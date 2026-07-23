@@ -26,9 +26,9 @@ export async function createQcgaActor({
       const channel = new MessageChannel();
       const broker = createTypedMainThreadGpuBroker(channel.port1, {
         handlers: {
-          render: (_payload, request) =>
+          render: (request) =>
             gpuRender(params.map(({ name }) => request[name]), request),
-          verify: (_payload, request) =>
+          verify: (request) =>
             gpuVerify(params.map(({ name }) => request[name]), request),
         },
         ...gpuSchemas,
