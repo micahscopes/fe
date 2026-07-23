@@ -36,14 +36,21 @@ use crate::{
     test_output::{TestRootMetadataError, runtime_test_root_metadata},
 };
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmCompileOptions {
     canonical_arena: bool,
+    canonical_lane: Option<crate::CanonicalLane>,
 }
 
 impl WasmCompileOptions {
     pub fn with_canonical_arena(mut self) -> Self {
         self.canonical_arena = true;
+        self
+    }
+
+    pub fn with_canonical_lane(mut self, lane: crate::CanonicalLane) -> Self {
+        self.canonical_arena = true;
+        self.canonical_lane = Some(lane);
         self
     }
 }
@@ -60,7 +67,11 @@ pub fn compile_runtime_package_wasm_with_options(
     use sonatina_codegen::Backend as _;
     use sonatina_codegen::isa::wasm::WasmBackend;
 
-    let (module, import_modules) = compile_runtime_package_wasm(db, package)?;
+    let (module, import_modules) = wasm_lower::compile_runtime_package_wasm_with_canonical_lane(
+        db,
+        package,
+        options.canonical_lane.as_ref(),
+    )?;
     let backend = WasmBackend::new().with_import_modules(import_modules);
     let backend = if options.canonical_arena {
         backend.with_canonical_arena()

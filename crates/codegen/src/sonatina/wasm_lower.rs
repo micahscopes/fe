@@ -46,7 +46,7 @@ use mir::{
 };
 use rustc_hash::FxHashMap;
 use sonatina_ir::{
-    BlockId, Immediate, Module, Signature, Type, ValueId,
+    BlockId, Immediate, Linkage, Module, Signature, Type, ValueId,
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
     inst::{
@@ -54,7 +54,8 @@ use sonatina_ir::{
         cast::{F32ToI32, I32ToF32},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
         control_flow::{Br, Call, Jump, Return, Unreachable},
-        data::{Mload, Mstore},
+        data::{MemAllocDynamic, Mload, Mstore},
+        logic::And,
     },
     isa::{Isa, wasm32::Wasm32},
     module::{FuncRef, ModuleCtx},
@@ -86,6 +87,14 @@ pub fn compile_runtime_package_wasm(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
+    compile_runtime_package_wasm_with_canonical_lane(db, package, None)
+}
+
+pub(crate) fn compile_runtime_package_wasm_with_canonical_lane(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    canonical_lane: Option<&crate::CanonicalLane>,
+) -> Result<(Module, HashMap<String, String>), LowerError> {
     // CONSULT (DispatchKind axis): the wasm target realizes the `Export` kind.
     // Every entry (`main`, the `fe_task` task table, the degraded-mode
     // `on_ready` continuation) is a named export the host invokes directly, with
@@ -103,6 +112,9 @@ pub fn compile_runtime_package_wasm(
     let mut lowerer = WasmModuleLowerer::new(db, builder, &isa, package);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
+    if let Some(lane) = canonical_lane {
+        lowerer.synthesize_canonical_lane(lane)?;
+    }
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
 }
@@ -1018,6 +1030,157 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             })?;
             WasmFunctionLowerer::new(self, body, func_ref)?.lower()?;
         }
+        Ok(())
+    }
+
+    fn synthesize_canonical_lane(&mut self, lane: &crate::CanonicalLane) -> Result<(), LowerError> {
+        fn flatten(
+            layout: &crate::CanonicalLayout,
+            base: u32,
+            leaves: &mut Vec<(u32, Type)>,
+        ) -> Result<(), LowerError> {
+            use crate::CanonicalShape;
+            let ty = match &layout.shape {
+                CanonicalShape::U8 => Some(Type::I8),
+                CanonicalShape::I32 | CanonicalShape::U32 => Some(Type::I32),
+                CanonicalShape::I64 | CanonicalShape::U64 => Some(Type::I64),
+                CanonicalShape::F32 => Some(Type::F32),
+                CanonicalShape::Record { fields } => {
+                    for field in fields {
+                        let offset = base.checked_add(field.offset).ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "canonical record field offset overflow".to_owned(),
+                            )
+                        })?;
+                        flatten(&field.layout, offset, leaves)?;
+                    }
+                    None
+                }
+                unsupported => {
+                    return Err(LowerError::Unsupported(format!(
+                        "canonical wrapper `{}` shape is not supported",
+                        match unsupported {
+                            CanonicalShape::Bool => "bool",
+                            CanonicalShape::Bytes { .. } => "bytes",
+                            CanonicalShape::String { .. } => "string",
+                            _ => "unknown",
+                        }
+                    )));
+                }
+            };
+            if let Some(ty) = ty {
+                leaves.push((base, ty));
+            }
+            Ok(())
+        }
+
+        let mut request = Vec::new();
+        let mut response = Vec::new();
+        flatten(&lane.request, 0, &mut request)?;
+        flatten(&lane.response, 0, &mut response)?;
+        if request.is_empty() || response.is_empty() {
+            return Err(LowerError::Unsupported(
+                "canonical wrapper records must contain scalar leaves".to_owned(),
+            ));
+        }
+
+        let candidates = self
+            .func_map
+            .iter()
+            .filter(|(instance, _)| self.function_symbol(**instance) == lane.name)
+            .map(|(_, func_ref)| *func_ref)
+            .collect::<Vec<_>>();
+        let [callee] = candidates.as_slice() else {
+            return Err(LowerError::Unsupported(format!(
+                "canonical lane `{}` must select exactly one lowered Fe entry (found {})",
+                lane.name,
+                candidates.len()
+            )));
+        };
+        let request_tys = request.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+        let response_tys = response.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+        let signature_matches = self.builder.sig(*callee, |signature| {
+            signature.args() == request_tys && signature.ret_tys() == response_tys
+        });
+        if !signature_matches {
+            return Err(LowerError::Unsupported(format!(
+                "canonical lane `{}` flattened signature does not match selected Fe entry",
+                lane.name
+            )));
+        }
+
+        let wrapper = self
+            .builder
+            .declare_function(Signature::new_single(
+                &lane.export,
+                Linkage::Public,
+                &[Type::I32],
+                Type::I32,
+            ))
+            .map_err(|error| {
+                LowerError::Internal(format!(
+                    "failed to declare canonical wrapper `{}`: {error}",
+                    lane.export
+                ))
+            })?;
+        let is = self.isa.inst_set();
+        let mut fb = self.builder.func_builder::<InstInserter>(wrapper);
+        let entry = fb.append_block();
+        fb.switch_to_block(entry);
+        let request_ptr = fb.args()[0];
+        let mut args = smallvec1::SmallVec::<[ValueId; 8]>::new();
+        for (offset, ty) in request {
+            let addr = if offset == 0 {
+                request_ptr
+            } else {
+                let offset = fb.make_imm_value(Immediate::I32(offset as i32));
+                fb.insert_inst(Add::new(is, request_ptr, offset), Type::I32)
+            };
+            args.push(fb.insert_inst(Mload::new(is, addr, ty), ty));
+        }
+        let results = fb.insert_call_results(*callee, args);
+        if results.len() != response.len() {
+            return Err(LowerError::Internal(
+                "canonical wrapper call result arity changed after signature check".to_owned(),
+            ));
+        }
+        let allocation_size = lane
+            .response
+            .size
+            .checked_add(lane.response.align - 1)
+            .and_then(|size| i32::try_from(size).ok())
+            .ok_or_else(|| {
+                LowerError::Unsupported(
+                    "canonical aligned response allocation exceeds Wasm i32".to_owned(),
+                )
+            })?;
+        let allocation_size = fb.make_imm_value(Immediate::I32(allocation_size));
+        let raw_response_ptr = fb.insert_inst(MemAllocDynamic::new(is, allocation_size), Type::I32);
+        let response_ptr = if lane.response.align == 1 {
+            raw_response_ptr
+        } else {
+            // MemAllocDynamic's Wasm bridge requests byte alignment. Allocate
+            // enough slack and align the exposed canonical response pointer.
+            // Canonical layout construction already guarantees power-of-two
+            // alignment; the arena itself is bounded well below i32::MAX.
+            let align_minus_one =
+                fb.make_imm_value(Immediate::I32((lane.response.align - 1) as i32));
+            let biased = fb.insert_inst(Add::new(is, raw_response_ptr, align_minus_one), Type::I32);
+            let mask = fb.make_imm_value(Immediate::I32(-(lane.response.align as i32)));
+            fb.insert_inst(And::new(is, biased, mask), Type::I32)
+        };
+        for ((offset, ty), value) in response.into_iter().zip(results) {
+            let addr = if offset == 0 {
+                response_ptr
+            } else {
+                let offset = fb.make_imm_value(Immediate::I32(offset as i32));
+                fb.insert_inst(Add::new(is, response_ptr, offset), Type::I32)
+            };
+            fb.insert_inst_no_result(Mstore::new(is, addr, value, ty));
+        }
+        fb.insert_return(response_ptr);
+        fb.seal_all();
+        fb.finish();
         Ok(())
     }
 

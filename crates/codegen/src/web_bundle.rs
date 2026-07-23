@@ -78,6 +78,8 @@ pub struct WebBuildOptions {
     pub workgroup_size: [u32; 3],
     pub provenance: WebProvenance,
     pub canonical_policy: WebCanonicalPolicy,
+    /// Optional message-lane entry when it differs from the GPU kernel.
+    pub canonical_entry: Option<String>,
 }
 
 impl WebBuildOptions {
@@ -88,6 +90,7 @@ impl WebBuildOptions {
             workgroup_size: [0, 0, 0],
             provenance: WebProvenance::new(source_id),
             canonical_policy: WebCanonicalPolicy::Disabled,
+            canonical_entry: None,
         }
     }
 
@@ -102,11 +105,17 @@ impl WebBuildOptions {
             workgroup_size,
             provenance: WebProvenance::new(source_id),
             canonical_policy: WebCanonicalPolicy::Disabled,
+            canonical_entry: None,
         }
     }
 
     pub fn with_canonical_policy(mut self, policy: WebCanonicalPolicy) -> Self {
         self.canonical_policy = policy;
+        self
+    }
+
+    pub fn with_canonical_entry(mut self, entry: impl Into<String>) -> Self {
+        self.canonical_entry = Some(entry.into());
         self
     }
 }
@@ -229,14 +238,20 @@ pub struct WebBundle {
 }
 
 impl WebBundle {
-    /// Compile Wasm and browser-profile WGSL from the same resolved module and
-    /// the same runtime package. Validation is part of construction: an invalid
+    /// Compile Wasm and browser-profile WGSL from the same resolved module.
+    /// The canonical message lane may be a different public entry from the GPU
+    /// kernel, in which case each backend gets an explicitly selected
+    /// single-root package. Validation is part of construction: an invalid
     /// target can never be represented as a `WebBundle`.
     pub fn compile(
         db: &DriverDataBase,
         top_mod: TopLevelMod<'_>,
         options: WebBuildOptions,
     ) -> Result<Self, WebBundleError> {
+        let canonical_entry = options
+            .canonical_entry
+            .as_deref()
+            .unwrap_or(&options.source_entry);
         let (canonical_candidate, mut canonical_status) = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => (
                 None,
@@ -247,13 +262,9 @@ impl WebBundle {
                 },
             ),
             policy @ (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required) => {
-                let derived = canonical_lane_decl_from_entry(
-                    db,
-                    top_mod,
-                    &options.source_entry,
-                    &options.source_entry,
-                )
-                .and_then(|lane| CanonicalInterfaceManifest::build(vec![lane]));
+                let derived =
+                    canonical_lane_decl_from_entry(db, top_mod, canonical_entry, canonical_entry)
+                        .and_then(|lane| CanonicalInterfaceManifest::build(vec![lane]));
                 match derived {
                     Ok(interface) => (
                         Some(interface),
@@ -281,16 +292,19 @@ impl WebBundle {
                 }
             }
         };
-        let package = mir::build_wasm_runtime_package_for_entry(db, top_mod, &options.source_entry)
+        let wasm_package = mir::build_wasm_runtime_package_for_entry(db, top_mod, canonical_entry)
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
         let wasm_options = match options.canonical_policy {
             WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
-            WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => {
-                WasmCompileOptions::default().with_canonical_arena()
-            }
+            WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => canonical_candidate
+                .as_ref()
+                .and_then(|interface| interface.lanes.first())
+                .cloned()
+                .map(|lane| WasmCompileOptions::default().with_canonical_lane(lane))
+                .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
-        let wasm = compile_runtime_package_wasm_with_options(db, &package, wasm_options)
+        let wasm = compile_runtime_package_wasm_with_options(db, &wasm_package, wasm_options)
             .map_err(|error| WebBundleError::Lower(error.to_string()))?
             .bytes;
         wasmparser::validate(&wasm)
@@ -298,10 +312,13 @@ impl WebBundle {
         let canonical_interface =
             verify_canonical_candidate(&wasm, canonical_candidate, &mut canonical_status)?;
 
+        let gpu_package =
+            mir::build_wasm_runtime_package_for_entry(db, top_mod, &options.source_entry)
+                .map_err(|error| WebBundleError::Lower(error.to_string()))?;
         let artifact = match options.mode {
-            WebBundleMode::Render => compile_runtime_package_spirv_render(db, &package),
+            WebBundleMode::Render => compile_runtime_package_spirv_render(db, &gpu_package),
             WebBundleMode::Grid => {
-                compile_runtime_package_spirv_grid(db, &package, options.workgroup_size)
+                compile_runtime_package_spirv_grid(db, &gpu_package, options.workgroup_size)
             }
         }
         .map_err(|error| WebBundleError::Lower(error.to_string()))?;
@@ -595,6 +612,10 @@ struct Response { value: u32 }
 pub fn update(request: Request) -> Response {
     Response { value: request.value + 1 }
 }
+
+pub fn shade(x: u32, y: u32) -> u32 {
+    x + y
+}
 "#;
 
     fn wasm_exports(wasm: &[u8]) -> Vec<String> {
@@ -665,53 +686,62 @@ pub fn update(request: Request) -> Response {
         ])
         .unwrap();
         let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "update").unwrap();
+        let lane = candidate.lanes[0].clone();
         let wasm = compile_runtime_package_wasm_with_options(
             &db,
             &package,
-            WasmCompileOptions::default().with_canonical_arena(),
+            WasmCompileOptions::default().with_canonical_lane(lane),
         )
         .unwrap()
         .bytes;
-        let mut optional = WebCanonicalStatus {
-            policy: WebCanonicalPolicy::Optional,
+        let mut required_status = WebCanonicalStatus {
+            policy: WebCanonicalPolicy::Required,
             embedded: false,
             omission_reason: None,
         };
-        assert!(
-            verify_canonical_candidate(&wasm, Some(candidate), &mut optional)
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(optional.policy, WebCanonicalPolicy::Optional);
-        assert!(
-            optional
-                .omission_reason
-                .as_deref()
-                .unwrap()
-                .contains("missing function export `fe_cabi_update`")
-        );
+        let verified =
+            verify_canonical_candidate(&wasm, Some(candidate), &mut required_status).unwrap();
+        assert!(verified.is_some());
+        assert!(required_status.embedded);
+        assert!(required_status.omission_reason.is_none());
         let exports = wasm_exports(&wasm);
         assert!(exports.iter().any(|name| name == "fe_cabi_alloc"));
         assert!(exports.iter().any(|name| name == "fe_cabi_reset"));
+        assert!(exports.iter().any(|name| name == "fe_cabi_update"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let alloc = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "fe_cabi_alloc")
+            .unwrap();
+        let update = instance
+            .get_typed_func::<i32, i32>(&mut store, "fe_cabi_update")
+            .unwrap();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        // Deliberately leave the arena cursor misaligned before the wrapper's
+        // MemAllocDynamic allocation.
+        assert_eq!(alloc.call(&mut store, (1, 1)).unwrap(), 1024);
+        memory.write(&mut store, 64, &41_u32.to_le_bytes()).unwrap();
+        let response_ptr = update.call(&mut store, 64).unwrap();
+        assert_eq!(response_ptr % 4, 0);
+        let mut response = [0; 4];
+        memory
+            .read(&store, response_ptr as usize, &mut response)
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(response), 42);
 
         let required = WebBundle::compile(
             &db,
             top_mod,
-            WebBuildOptions::render("update", None)
+            WebBuildOptions::render("shade", None)
+                .with_canonical_entry("update")
                 .with_canonical_policy(WebCanonicalPolicy::Required),
         )
-        .unwrap_err();
-        assert!(
-            required
-                .to_string()
-                .contains("required canonical interface is unavailable"),
-            "{required}"
-        );
-        assert!(
-            required
-                .to_string()
-                .contains("missing function export `fe_cabi_update`")
-        );
+        .unwrap();
+        assert!(required.manifest.canonical_interface.is_some());
+        assert!(required.manifest.canonical_status.embedded);
     }
 
     #[test]
