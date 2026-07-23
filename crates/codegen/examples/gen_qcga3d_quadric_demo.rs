@@ -16,12 +16,14 @@ const EXPORT: &str = "qcga3d_rotated_quadric_render";
 const RENDER_LANE: &str = "render";
 const VERIFY_LANE: &str = "verify";
 const ORACLE_LANE: &str = "oracle";
-const ORACLE_PIXEL_LANE: &str = "oracle_pixel";
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 128;
-const SONATINA_REV: &str = "b2601adc";
+const SONATINA_REV: &str = "96159648";
 const ACTOR_SOURCE: &str = r#"
-use core::BrowserBytes
+use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
+use core::effect_ref::alloc_bytes
+use core::num::IntDowncast
+use std::webgpu::{Dispatch, WebGpuBackend}
 
 struct RenderRequest {
     generation: u32,
@@ -39,40 +41,57 @@ struct OracleRequest {
     generation: u32,
 }
 
-struct OraclePixelRequest {
-    x: i32,
-    y: i32,
-}
-
-struct OraclePixelResponse {
-    rgba: u32,
-}
-
 // Nominal host-effect lane. The browser runtime deliberately dispatches this
 // schema to its WebGPU actor; this Fe body is never presented as GPU execution.
-pub fn render(_request: own RenderRequest) -> RenderResponse {
+pub fn render(_request: own RenderRequest) -> RenderResponse
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
     RenderResponse { submitted: false }
 }
 
 // Nominal host-effect lane for explicit GPU readback. The generated schema is
 // authoritative, while the browser runtime supplies the actual WebGPU handler.
-pub fn verify(_request: own VerifyRequest) -> BrowserBytes {
+pub fn verify(_request: own VerifyRequest) -> BrowserBytes
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
     BrowserBytes { ptr: 0, len: 0 }
 }
 
-// Nominal host-orchestration lane. Its explicit browser handler assembles an
-// owned frame by invoking the genuine Fe/Wasm oracle_pixel lane for every pixel.
-pub fn oracle(_request: own OracleRequest) -> BrowserBytes {
-    BrowserBytes { ptr: 0, len: 0 }
+fn append_byte(value: u32) {
+    let byte = alloc_bytes(1)
+    byte.write(value.downcast_truncate())
 }
 
-// Genuine Fe/Wasm computation lane. Full-frame orchestration stays in the
-// generated host adapter until wasm32 pointer-sized byte storage is available
-// without introducing the unsupported u256 scalar envelope.
-pub fn oracle_pixel(request: own OraclePixelRequest) -> OraclePixelResponse {
-    OraclePixelResponse {
-        rgba: qcga3d_rotated_quadric_render(px: request.x, py: request.y),
+fn append_frame_tail(first_rgba: u32) {
+    append_byte(value: first_rgba >> 8)
+    append_byte(value: first_rgba >> 16)
+    append_byte(value: first_rgba >> 24)
+
+    let mut y: i32 = 0
+    let mut x: i32 = 1
+    while y < 128 {
+        while x < 128 {
+            let rgba = qcga3d_rotated_quadric_render(px: x, py: y)
+            append_byte(value: rgba)
+            append_byte(value: rgba >> 8)
+            append_byte(value: rgba >> 16)
+            append_byte(value: rgba >> 24)
+            x = x + 1
+        }
+        y = y + 1
+        x = 0
     }
+}
+
+// Genuine one-call Fe/Wasm full-frame lane. Each allocation is byte-aligned and
+// consecutive in the canonical arena; the wrapper copies this borrowed region
+// into its owned response before the browser resets the arena.
+pub fn oracle(_request: own OracleRequest) -> AllocatedBrowserBytes {
+    let first_rgba = qcga3d_rotated_quadric_render(px: 0, py: 0)
+    let first = alloc_bytes(1)
+    first.write(first_rgba.downcast_truncate())
+    append_frame_tail(first_rgba: first_rgba)
+    AllocatedBrowserBytes { ptr: first, len: 65536 }
 }
 "#;
 
@@ -156,11 +175,15 @@ fn main() {
         &canonical_db,
         canonical_top,
         WebBuildOptions::render(EXPORT, Some("qcga3d_actor.fe".to_owned()))
-            .with_canonical_entries([RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE])
+            .with_canonical_entries([RENDER_LANE, VERIFY_LANE, ORACLE_LANE])
             .with_canonical_policy(WebCanonicalPolicy::Required),
     )
     .expect("QCGA canonical multi-lane WebBundle");
-    assert_eq!(canonical_bundle.wgsl, wgsl);
+    assert_eq!(
+        canonical_bundle.wgsl,
+        normalize_generated_text(wgsl),
+        "adding canonical actor lanes must not change the QCGA render WGSL"
+    );
     let actor_interface_js = canonical_bundle
         .interface_js
         .as_ref()
@@ -195,7 +218,7 @@ fn main() {
         "frag_wasm_export": EXPORT,
         "actor_wasm": "actor-canonical.wasm",
         "actor_interface": "actor-interface.js",
-        "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE, ORACLE_PIXEL_LANE],
+        "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE],
         "provenance": provenance,
     }))
     .unwrap();
@@ -237,7 +260,7 @@ fn main() {
     write(&out.join("reference.json"), reference.as_bytes());
     eprintln!(
         "QCGA bundle: FNV-1a-32={hash} (0x{hash:08x}), colors={distinct}, \
-         canonical lanes={RENDER_LANE},{VERIFY_LANE},{ORACLE_LANE},{ORACLE_PIXEL_LANE}"
+         canonical lanes={RENDER_LANE},{VERIFY_LANE},{ORACLE_LANE}"
     );
 }
 
@@ -288,6 +311,18 @@ fn fnv1a32_bytes(bytes: &[u8]) -> u32 {
     bytes
         .iter()
         .fold(0x811c9dc5, |h, b| (h ^ *b as u32).wrapping_mul(0x01000193))
+}
+
+fn normalize_generated_text(source: &str) -> String {
+    let mut normalized = source
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if source.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
 }
 
 fn git(path: &str, args: &[&str]) -> String {

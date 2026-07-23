@@ -10,55 +10,40 @@ import {
   compileActorAdapter,
   createActorAdapter,
   createHostEffectAdapter,
-  createInterfaceCaller,
 } from "./gen/actor-interface.js";
-
-const WIDTH = 128;
-const HEIGHT = 128;
 
 self.addEventListener("message", async ({ data }) => {
   if (data?.type !== "init") return;
   const { port, gpuPort, wasm, actorEpoch } = data;
   try {
     const exports = await instantiateWasm(wasm);
-    const wasmCaller = createInterfaceCaller(exports);
     const wasmActor = createActorAdapter(exports);
+    const schemas = compileActorAdapter();
     const gpu = createTypedGpuActorClient(gpuPort, {
-      ...selectActorSchemas(compileActorAdapter(), ["render", "verify"]),
+      ...selectActorSchemas(schemas, ["render", "verify"]),
       initialEpoch: actorEpoch,
     });
     const hostEffects = createHostEffectAdapter({
       render: (request) => gpu.request("render", request, request.generation),
       verify: (request) => gpu.request("verify", request, request.generation),
-      oracle: async () => {
-        const frame = new Uint8Array(WIDTH * HEIGHT * 4);
-        const words = new DataView(frame.buffer);
-        for (let y = 0; y < HEIGHT; y += 1) {
-          for (let x = 0; x < WIDTH; x += 1) {
-            const { rgba } = await wasmCaller.call("oracle_pixel", { x, y });
-            words.setUint32((y * WIDTH + x) * 4, rgba, true);
-          }
-        }
-        return frame;
-      },
     });
     // Placement is explicit application policy, while the complete lane set is
     // compiler-derived. Initialization fails if a newly generated Fe lane is
     // unowned or multiply owned; runtime dispatch has no fallback actor.
     const router = createExactLaneRouter(compiledCanonicalInterface.lanes, {
       host: {
-        lanes: ["render", "verify", "oracle"],
+        lanes: ["render", "verify"],
         dispatch: hostEffects.dispatch,
       },
       wasm: {
-        lanes: ["oracle_pixel"],
+        lanes: ["oracle"],
         dispatch: wasmActor.dispatch,
       },
     });
     attachMessagePortActorHost(
       port,
       router.dispatch,
-      { transferResult: hostEffects.transferResult },
+      { transferResult: schemas.transferResult },
     );
     port.postMessage({ type: "ready" });
   } catch (error) {

@@ -3,20 +3,19 @@
 This demo presents the compiler-generated 128x128 rotated-quadric kernel through
 the compiler-packaged Worker, MessagePort, and main-thread WebGPU actor runtime. It is the
 second-application proof for the compiler-owned canonical browser interface.
-The generated `actor-interface.js` derives all four lane schemas from nominal Fe
+The generated `actor-interface.js` derives all three lane schemas from nominal Fe
 records:
 
 - `render` and `verify` are explicitly selected host effects backed by the
   main-thread WebGPU actor;
-- `oracle` is explicit Worker-side frame orchestration;
-- every pixel in that frame is computed by the genuine Fe/Wasm
-  `oracle_pixel` lane through the generated canonical interface caller.
+- `oracle` is a genuine Fe/Wasm lane that allocates, computes, and returns the
+  complete frame through one canonical call.
 
 The ownership map is visible in `wasm-worker.js`; the demo does not claim that a
-nominal Fe function submitted WebGPU work. The full-frame oracle currently makes
-16,384 canonical calls because direct Fe construction of `BrowserBytes` would
-introduce a `u256` pointer into the wasm32 scalar envelope. Acceptance reports
-the measured `oracleMs` rather than hiding that cost.
+nominal Fe function submitted WebGPU work. `AllocatedBrowserBytes` preserves the
+wasm32 `MemPtr<u8>` carrier while Fe fills the arena, and the canonical wrapper
+copies the complete frame before reset and Worker transfer. Acceptance reports
+the measured one-call `oracleMs`.
 
 The canvas scales responsively; the pixel-edge toggle and loupe inspect the
 actual fixed kernel output. There are no pretend algebra controls because this
@@ -33,8 +32,8 @@ trunk serve --config demos/Trunk.toml
 Then open `http://127.0.0.1:8788/webgpu-qcga3d-quadric/`. Set
 `FORCE_QCGA_REGEN=1` to regenerate an existing bundle.
 
-The real-browser equality gate compares all 16,384 Fe/Worker/Wasm and WebGPU
-pixels. GPU presentation and verification both cross the Worker-to-GPU actor
+The real-browser equality gate compares the one-call Fe/Worker/Wasm frame with
+all 16,384 WebGPU pixels. GPU presentation and verification both cross the Worker-to-GPU actor
 port. Generated request/result validators, request correlation, restart
 semantics, bounded queues, and owned-byte transfer are exercised by:
 
