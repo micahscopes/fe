@@ -50,8 +50,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    ActorLaneSpec, ActorRecordField, ActorScalar, BackendKind, OptLevel,
-    actor_manifest_from_wasm_exports, compile_runtime_package_spirv_render, layout_for,
+    BackendKind, OptLevel, WebBuildOptions, WebBundle, WebCanonicalPolicy,
+    compile_runtime_package_spirv_render, layout_for,
 };
 use sonatina_codegen::isa::spirv::{Access, LayoutMode, Role, SpirvLayout, WordKind};
 use url::Url;
@@ -66,6 +66,7 @@ const CTL_SOURCE: &str = include_str!("../tests/fixtures/spirv/mandel_view_ctl.f
 const FRAG_NAME: &str = "mandel_view_frag";
 /// The control export the page drives per input event.
 const CTL_NAME: &str = "update_view";
+const CTL_MESSAGE_NAME: &str = "update_view_message";
 
 /// The dispatch frame: 512x512, the proven view resolution (spec section 2).
 const WIDTH: u32 = 512;
@@ -238,7 +239,9 @@ fn main() {
         "render fragment export `{FRAG_NAME}` must be (i32 x5) -> i32 (px, py + 3 broadcast \
          view members); got {frag_sig:?}"
     );
-    eprintln!("  wasm export `{FRAG_NAME}` signature is exactly (i32 x5) -> i32 (2 coords + 3 view)");
+    eprintln!(
+        "  wasm export `{FRAG_NAME}` signature is exactly (i32 x5) -> i32 (2 coords + 3 view)"
+    );
 
     // --- 3. Fe -> wasm (the controls). --------------------------------------
     let ctl_wasm = compile_to_wasm(CTL_SOURCE, "gen_ctl_wasm");
@@ -252,6 +255,40 @@ fn main() {
          multi-value view reply); got {ctl_sig:?}"
     );
     eprintln!("  wasm export `{CTL_NAME}` signature is exactly (i32 x8) -> (i32, i32, i32)");
+
+    // The Worker-facing module is emitted by the same WebBundle path users invoke
+    // from `fe web build`. Its interface.js is generated from the exact semantic
+    // request/response records and the Wasm module contains the verified arena
+    // plus `fe_cabi_update_view_message` wrapper.
+    let combined_source = format!("{FRAG_SOURCE}\n{CTL_SOURCE}");
+    let mut canonical_db = DriverDataBase::default();
+    let canonical_url =
+        Url::parse("file:///mandel_view_canonical.fe").expect("canonical URL should parse");
+    canonical_db.workspace().touch(
+        &mut canonical_db,
+        canonical_url.clone(),
+        Some(combined_source),
+    );
+    let canonical_file = canonical_db
+        .workspace()
+        .get(&canonical_db, &canonical_url)
+        .expect("canonical source should load");
+    let canonical_bundle = WebBundle::compile(
+        &canonical_db,
+        canonical_db.top_mod(canonical_file),
+        WebBuildOptions::render(FRAG_NAME, Some("mandel_view_canonical.fe".to_owned()))
+            .with_canonical_entry(CTL_MESSAGE_NAME)
+            .with_canonical_policy(WebCanonicalPolicy::Required),
+    )
+    .expect("Mandelbrot canonical control WebBundle must compile");
+    let ctl_interface_js = canonical_bundle
+        .interface_js
+        .as_ref()
+        .expect("required canonical bundle must generate interface.js");
+    let ctl_interface_d_ts = canonical_bundle
+        .interface_d_ts
+        .as_ref()
+        .expect("required canonical bundle must generate interface.d.ts");
 
     // --- 4. Derive the interfaces from the ACTUAL sources (not hardcoded). ---
     // The broadcast param names are the fragment's args 2..4 (parsed from source);
@@ -362,25 +399,11 @@ fn main() {
 
     // --- 6. Serialize + write (only after every gate passed). ---------------
     let layout_json = serialize_render_layout(&artifact.layout, params, frag_wasm.len());
-    // The browser protocol is generated from the compiled Wasm ABI that was
-    // checked above, rather than repeating its arity in application JS.
-    let actor_fields = [ActorRecordField {
-        name: "args",
-        scalar: ActorScalar::I32,
-        length: ctl_sig.0.len(),
-    }];
-    let actor = actor_manifest_from_wasm_exports(
-        &ctl_wasm,
-        &[ActorLaneSpec {
-            lane: "render",
-            export: CTL_NAME,
-            request: &actor_fields,
-            result: ActorScalar::I32,
-        }],
-    )
-    .expect("checked Fe control export must produce actor metadata");
     let ctl_json = serde_json::to_string_pretty(&serde_json::json!({
         "module": "ctl.wasm",
+        "canonical_module": "ctl-canonical.wasm",
+        "canonical_interface": "ctl-interface.js",
+        "canonical_lane": CTL_MESSAGE_NAME,
         "control_export": CTL_NAME,
         "args": ctl_args,
         "arg_types": vec!["i32"; ctl_args.len()],
@@ -391,8 +414,8 @@ fn main() {
         "view_arg_count": 3,
         "view_init": [VIEW_INIT.0, VIEW_INIT.1, VIEW_INIT.2],
         "event_map": event_map,
-        "actor": actor,
         "wasm_bytes": ctl_wasm.len(),
+        "canonical_wasm_bytes": canonical_bundle.wasm.len(),
         "provenance": provenance("cargo run -p fe-codegen --example gen_mandelbrot_interactive_demo"),
     }))
     .expect("ctl.json should serialize");
@@ -411,12 +434,22 @@ fn main() {
     write_file(&gen_dir.join("layout.json"), layout_json.as_bytes());
     write_file(&gen_dir.join("frag.wasm"), &frag_wasm);
     write_file(&gen_dir.join("ctl.wasm"), &ctl_wasm);
+    write_file(&gen_dir.join("ctl-canonical.wasm"), &canonical_bundle.wasm);
+    write_file(
+        &gen_dir.join("ctl-interface.js"),
+        ctl_interface_js.as_bytes(),
+    );
+    write_file(
+        &gen_dir.join("ctl-interface.d.ts"),
+        ctl_interface_d_ts.as_bytes(),
+    );
     write_file(&gen_dir.join("ctl.json"), ctl_json.as_bytes());
     write_file(&gen_dir.join("reference.json"), reference_json.as_bytes());
 
     eprintln!(
-        "gen_mandelbrot_interactive_demo: wrote 8 files to {}\n  \
-         kernel.fe  ctl.fe  frag.wgsl  layout.json  frag.wasm  ctl.wasm  ctl.json  reference.json",
+        "gen_mandelbrot_interactive_demo: wrote 11 files to {}\n  \
+         kernel.fe  ctl.fe  frag.wgsl  layout.json  frag.wasm  ctl.wasm  ctl-canonical.wasm  \
+         ctl-interface.js  ctl-interface.d.ts  ctl.json  reference.json",
         gen_dir.display()
     );
     eprintln!(
@@ -454,8 +487,12 @@ fn assert_browser_profile_wgsl(wgsl: &str) {
 fn compile_to_wasm(source: &str, tag: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
     let url = Url::parse(&format!("file:///{tag}.fe")).expect("wasm gen URL should parse");
-    db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
-    let file = db.workspace().get(&db, &url).expect("wasm gen file should load");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db
+        .workspace()
+        .get(&db, &url)
+        .expect("wasm gen file should load");
     let top_mod = db.top_mod(file);
     let bytes = BackendKind::Wasm
         .create()
@@ -479,7 +516,13 @@ enum WasmTy {
 fn export_signature(bytes: &[u8], export_name: &str) -> (Vec<WasmTy>, Vec<WasmTy>) {
     use wasmparser::{ExternalKind, Payload, TypeRef, ValType};
 
-    let map = |v: &ValType| if matches!(v, ValType::I32) { WasmTy::I32 } else { WasmTy::Other };
+    let map = |v: &ValType| {
+        if matches!(v, ValType::I32) {
+            WasmTy::I32
+        } else {
+            WasmTy::Other
+        }
+    };
 
     let mut func_sigs: Vec<(Vec<WasmTy>, Vec<WasmTy>)> = Vec::new();
     let mut func_type_indices: Vec<u32> = Vec::new();

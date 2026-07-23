@@ -49,9 +49,11 @@ async function loadAssets() {
       wgsl: inl.wgsl,
       fragWasm: b64ToBytes(inl.frag_wasm_b64),
       ctlWasm: b64ToBytes(inl.ctl_wasm_b64),
+      ctlCanonicalWasm: null,
     };
   }
-  const [layout, ctl, reference, fragFe, ctlFe, wgsl, fragWasmBuf, ctlWasmBuf] = await Promise.all([
+  const [layout, ctl, reference, fragFe, ctlFe, wgsl, fragWasmBuf, ctlWasmBuf,
+    ctlCanonicalWasmBuf] = await Promise.all([
     fetchText("./gen/layout.json").then(JSON.parse),
     fetchText("./gen/ctl.json").then(JSON.parse),
     fetchText("./gen/reference.json").then(JSON.parse),
@@ -60,11 +62,13 @@ async function loadAssets() {
     fetchText("./gen/frag.wgsl"),
     fetch("./gen/frag.wasm").then((r) => r.arrayBuffer()),
     fetch("./gen/ctl.wasm").then((r) => r.arrayBuffer()),
+    fetch("./gen/ctl-canonical.wasm").then((r) => r.arrayBuffer()),
   ]);
   return {
     layout, ctl, reference, fragFe, ctlFe, wgsl,
     fragWasm: new Uint8Array(fragWasmBuf),
     ctlWasm: new Uint8Array(ctlWasmBuf),
+    ctlCanonicalWasm: new Uint8Array(ctlCanonicalWasmBuf),
   };
 }
 
@@ -208,9 +212,10 @@ async function main() {
       updateView = (...args) => Promise.resolve(ctlExports[A.ctl.control_export](...args));
     } else {
       controlWorker = await createMandelbrotWorkerControl({
-        wasm: A.ctlWasm,
-        exportName: A.ctl.control_export,
-        actorManifest: A.ctl.actor,
+        wasm: A.ctlCanonicalWasm,
+        lane: A.ctl.canonical_lane,
+        argNames: A.ctl.args,
+        resultOrder: A.ctl.result_order,
       });
       updateView = (...args) => controlWorker.update(args);
       window.__mandelAcceptance = {

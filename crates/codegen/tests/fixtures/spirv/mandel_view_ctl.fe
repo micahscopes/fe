@@ -69,3 +69,41 @@ pub fn update_view(center_re: i32, center_im: i32, scale_q: i32,
     let im_c: i32 = max_i(min_i(im_a, 10240), -10240)
     (re_c, im_c, sq_c)
 }
+
+// Compiler-owned browser-message lane. The raw multi-value export above remains
+// the standalone/demo oracle; Worker transport uses this nominal record surface
+// so its schema and codecs come from Fe semantic types rather than ctl.json.
+struct ViewUpdateRequest {
+    center_re: i32,
+    center_im: i32,
+    scale_q: i32,
+    dx: i32,
+    dy: i32,
+    dzoom: i32,
+    mx: i32,
+    my: i32,
+}
+
+struct ViewUpdateResponse {
+    center_re: i32,
+    center_im: i32,
+    scale_q: i32,
+}
+
+pub fn update_view_message(request: own ViewUpdateRequest) -> ViewUpdateResponse {
+    let result = update_view(
+        request.center_re,
+        request.center_im,
+        request.scale_q,
+        request.dx,
+        request.dy,
+        request.dzoom,
+        request.mx,
+        request.my,
+    )
+    ViewUpdateResponse {
+        center_re: result.0,
+        center_im: result.1,
+        scale_q: result.2,
+    }
+}
