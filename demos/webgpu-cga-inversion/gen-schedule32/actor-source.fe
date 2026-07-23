@@ -111,6 +111,40 @@ const fn support_cardinality(_ support: BladeSet) -> u32 {
     count
 }
 
+// Reusable finite sparse-operator plan vocabulary.
+//
+// A domain planner supplies its own CTFE candidate enumeration and constructs
+// a ground `Add<Term<Candidate>, ... Zero>` tree.  This fragment deliberately
+// owns only the shared representation and its exact structural-length witness;
+// it does not prescribe a metric, support encoding, survivor ordering, or
+// evaluator.
+
+struct Zero {}
+struct Term<const Candidate: usize> {}
+struct Add<L, R> {}
+
+struct NatZ {}
+struct NatS<N> {}
+
+recursive type fn Nat<const N: usize>() -> (*) {
+    match N {
+        0 => NatZ
+        _ => NatS<Nat<{N - 1}>>
+    }
+}
+
+trait PlanLength { type Out }
+
+impl PlanLength for Zero {
+    type Out = NatZ
+}
+
+impl<const Candidate: usize, Tail: PlanLength> PlanLength
+    for Add<Term<Candidate>, Tail>
+{
+    type Out = NatS<<Tail as PlanLength>::Out>
+}
+
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 
 // Canonical Cl(4,1) support semantics. These ordinary Fe const helpers are the
@@ -247,11 +281,9 @@ const fn survivor_triple(_ target: usize) -> usize {
 
 static_assert(survivor_count() == 32)
 
-// The inspectable typed witness stores the canonical source-triple identity in
-// exact survivor order. There is no generated or hand-authored survivor table.
-struct Zero {}
-struct Term<const Triple: usize> {}
-struct Add<L, R> {}
+// The inspectable typed witness uses the shared sparse-plan vocabulary and
+// stores the canonical source-triple identity in exact survivor order. There
+// is no generated or hand-authored survivor table.
 recursive type fn Schedule<const N: usize>() -> (*) {
     match N {
         0 => Zero
@@ -261,19 +293,6 @@ recursive type fn Schedule<const N: usize>() -> (*) {
 type Schedule32 = Schedule<32>
 
 // BEGIN_FORCE_SCHEDULE32
-struct NatZ {}
-struct NatS<N> {}
-recursive type fn Nat<const N: usize>() -> (*) {
-    match N {
-        0 => NatZ
-        _ => NatS<Nat<{N - 1}>>
-    }
-}
-trait PlanLength { type Out }
-impl PlanLength for Zero { type Out = NatZ }
-impl<const I: usize, Tail: PlanLength> PlanLength for Add<Term<I>, Tail> {
-    type Out = NatS<<Tail as PlanLength>::Out>
-}
 fn takes_nat32(_ value: Nat<32>) {}
 fn schedule_has_exactly_32_terms(value: <Schedule32 as PlanLength>::Out) {
     takes_nat32(value)
