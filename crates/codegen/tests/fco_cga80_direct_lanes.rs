@@ -5,6 +5,13 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use url::Url;
 
+const SUPPORT_API: &str = include_str!("fixtures/support_bladeset_api.fe");
+const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+
+fn canonical_source() -> String {
+    format!("{SUPPORT_API}\n{CANONICAL}")
+}
+
 fn compile_to_wasm(source: &str) -> Vec<u8> {
     let total_started = Instant::now();
     let mut db = DriverDataBase::default();
@@ -65,9 +72,9 @@ fn semantic_analysis(name: &str, source: &str) -> std::time::Duration {
 #[test]
 #[ignore = "phase-isolation measurement; run explicitly"]
 fn phase_a_forced_schedule32_without_provider() {
-    let source = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+    let source = canonical_source();
     let source = without_section(
-        source,
+        &source,
         "// BEGIN_PROVIDER_EMITTER",
         "// END_PROVIDER_EMITTER",
     );
@@ -77,9 +84,9 @@ fn phase_a_forced_schedule32_without_provider() {
 #[test]
 #[ignore = "phase-isolation measurement; run explicitly"]
 fn phase_b_provider_with_unforced_schedule_definition() {
-    let source = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+    let source = canonical_source();
     let source = without_section(
-        source,
+        &source,
         "// BEGIN_FORCE_SCHEDULE32",
         "// END_FORCE_SCHEDULE32",
     );
@@ -89,10 +96,8 @@ fn phase_b_provider_with_unforced_schedule_definition() {
 #[test]
 #[ignore = "phase-isolation measurement; run explicitly"]
 fn phase_c_forced_schedule32_and_provider() {
-    semantic_analysis(
-        "fco_cga_phase_c_combined",
-        include_str!("fixtures/fco_cga80_direct_lanes.fe"),
-    );
+    let source = canonical_source();
+    semantic_analysis("fco_cga_phase_c_combined", &source);
 }
 
 fn sphere_blade(slot: usize) -> usize {
@@ -188,9 +193,9 @@ fn wasm_shape(bytes: &[u8]) -> (usize, usize, usize, usize, usize, usize) {
 
 #[test]
 fn canonical_helpers_publish_schedule32_and_emit_exact_five_lanes() {
-    let source = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+    let source = canonical_source();
     let started = Instant::now();
-    let wasm = compile_to_wasm(source);
+    let wasm = compile_to_wasm(&source);
     let compile_elapsed = started.elapsed();
     wasmparser::validate(&wasm).expect("canonical FCO CGA emitted invalid Wasm");
 

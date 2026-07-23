@@ -74,7 +74,7 @@ const fn diagonal_tag(_ triple: usize) -> usize {
     (1 - ((l >> 1) ^ (r >> 1))) * (1 - ((l & 1) ^ (r & 1)))
 }
 
-const fn keep_tag(_ triple: usize) -> usize {
+const fn coefficient_keep_tag(_ triple: usize) -> usize {
     canonical_tag(triple)
         * (1 - (triple_negative(triple) ^ reverse_negative(triple)))
 }
@@ -85,6 +85,28 @@ const fn magnitude(_ triple: usize) -> usize {
 
 const fn output_blade(_ triple: usize) -> usize {
     left_blade(triple) ^ middle_blade(triple) ^ right_blade(triple)
+}
+
+// The shared BladeSet API derives admissible support compositionally. Its
+// conservative result is grade-projected before coefficient/sign cancellation.
+const SPHERE_SUPPORT: BladeSet = blade_set(65798, 5)
+const POINT_SUPPORT: BladeSet = blade_set(65814, 5)
+const SPHERE_POINT_BITS: u32 =
+    support_gp(SPHERE_SUPPORT, POINT_SUPPORT, 31).bits
+const SANDWICH_CANDIDATE_BITS: u32 =
+    support_gp(blade_set(SPHERE_POINT_BITS, 5), SPHERE_SUPPORT, 31).bits
+const SANDWICH_OUTPUT_BITS: u32 =
+    support_grade(blade_set(SANDWICH_CANDIDATE_BITS, 5), 1).bits
+static_assert(SANDWICH_OUTPUT_BITS == 65814)
+
+const fn supported_output_tag(_ triple: usize) -> usize {
+    // FCO's bounded provider executor cannot read struct-valued/global CTFE
+    // results. This scalar literal is sealed by the assertion above.
+    if ((65814 >> output_blade(triple)) & 1) == 1 { 1 } else { 0 }
+}
+
+const fn keep_tag(_ triple: usize) -> usize {
+    supported_output_tag(triple) * coefficient_keep_tag(triple)
 }
 
 const fn survivor_count() -> usize {
@@ -219,9 +241,12 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
 
         // Exhaustively scan the canonical semantic universe. The provider
         // range and global step budgets fail closed if this ceases to be
-        // bounded; no survivor list is supplied.
+        // bounded; no survivor list is supplied. Each aggregate output field
+        // already filters its one grade-1 blade below, so the provider uses the
+        // coefficient predicate rather than spending its stricter interpreter
+        // budget repeating the equivalent support lookup 80 times.
         for triple in 0..80 {
-            if keep_tag(triple) != 0 {
+            if coefficient_keep_tag(triple) != 0 {
                 let left = s1
                 if raw_left_slot(triple) == 1 { left = s2 }
                 if raw_left_slot(triple) == 2 { left = s8 }

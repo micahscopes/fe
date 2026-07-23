@@ -7,6 +7,7 @@ use fe_codegen::{
 use url::Url;
 
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+const SUPPORT_API: &str = include_str!("fixtures/support_bladeset_api.fe");
 const BODY: &str = include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe");
 const ENTRY: &str = "cga_schedule32_vec5_de_render";
 
@@ -17,7 +18,7 @@ fn composed_source() -> String {
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
-    format!("{prefix}{suffix}\n{BODY}")
+    format!("{SUPPORT_API}\n{prefix}{suffix}\n{BODY}")
 }
 
 #[test]
@@ -28,7 +29,8 @@ fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
     assert!(BODY.contains("let point: ConformalPoint = ConformalPoint {"));
     assert!(BODY.contains("let sphere: ConformalSphere = ConformalSphere {"));
     assert_eq!(
-        BODY.matches("<ConformalVector as Sandwich>::sandwich").count(),
+        BODY.matches("<ConformalVector as Sandwich>::sandwich")
+            .count(),
         1,
         "the compact semantic records should feed one specialized aggregate method",
     );

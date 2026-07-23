@@ -1,0 +1,112 @@
+// Reusable, fixed-capacity sparse support algebra for diagonal Clifford
+// metrics. A support bit at position B denotes basis blade mask B.
+//
+// Five basis vectors / 32 blades fit an explicit portable u32. Operations fail
+// closed above that bound. This is composed into domain fixtures by the Rust
+// harness because Fe does not yet have a fixture-level module/import mechanism.
+struct BladeSet { bits: u32, dimension: u32 }
+impl Copy for BladeSet {}
+
+const fn support_dimension_valid(_ dimension: u32) -> bool {
+    dimension < 6
+}
+
+const fn support_capacity_mask(_ dimension: u32) -> u32 {
+    match dimension {
+        0 => 1
+        1 => 3
+        2 => 15
+        3 => 255
+        4 => 65535
+        5 => 4294967295
+        _ => 0
+    }
+}
+
+const fn blade_set(_ bits: u32, _ dimension: u32) -> BladeSet {
+    BladeSet {
+        bits: bits & support_capacity_mask(dimension),
+        dimension: dimension,
+    }
+}
+
+const fn support_contains(_ support: BladeSet, _ blade: u32) -> bool {
+    if !support_dimension_valid(support.dimension) { return false }
+    if blade < (1 << support.dimension) {
+    } else {
+        return false
+    }
+    ((support.bits >> blade) & 1) == 1
+}
+
+const fn blade_grade(_ blade: u32) -> u32 {
+    let mut value: u32 = blade
+    let mut count: u32 = 0
+    while 0 < value {
+        count = count + (value & 1)
+        value = value >> 1
+    }
+    count
+}
+
+const fn support_grade(_ support: BladeSet, _ grade: u32) -> BladeSet {
+    if !support_dimension_valid(support.dimension) {
+        return blade_set(0, support.dimension)
+    }
+    let blade_count: u32 = 1 << support.dimension
+    let mut blade: u32 = 0
+    let mut bits: u32 = 0
+    while blade < blade_count {
+        if ((support.bits >> blade) & 1) == 1 && blade_grade(blade) == grade {
+            bits = bits | (1 << blade)
+        }
+        blade = blade + 1
+    }
+    blade_set(bits, support.dimension)
+}
+
+// Conservative geometric-product support in an orthogonal basis. A shared
+// generator outside `nonzero_square_generators` annihilates the pair.
+// Coefficient cancellation is intentionally a later normalization step.
+const fn support_gp(
+    _ left: BladeSet,
+    _ right: BladeSet,
+    _ nonzero_square_generators: u32,
+) -> BladeSet {
+    if left.dimension == right.dimension {
+    } else {
+        return blade_set(0, left.dimension)
+    }
+    if !support_dimension_valid(left.dimension) {
+        return blade_set(0, left.dimension)
+    }
+    let blade_count: u32 = 1 << left.dimension
+    let mut l: u32 = 0
+    let mut output: u32 = 0
+    while l < blade_count {
+        if ((left.bits >> l) & 1) == 1 {
+            let mut r: u32 = 0
+            while r < blade_count {
+                if ((right.bits >> r) & 1) == 1 {
+                    let shared: u32 = l & r
+                    if (shared & nonzero_square_generators) == shared {
+                        output = output | (1 << (l ^ r))
+                    }
+                }
+                r = r + 1
+            }
+        }
+        l = l + 1
+    }
+    blade_set(output, left.dimension)
+}
+
+const fn support_cardinality(_ support: BladeSet) -> u32 {
+    let mut value: u32 = support.bits
+    let mut count: u32 = 0
+    while 0 < value {
+        count = count + (value & 1)
+        value = value >> 1
+    }
+    count
+}

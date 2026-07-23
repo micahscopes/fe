@@ -3,7 +3,8 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use url::Url;
 
-const SOURCE: &str = include_str!("fixtures/support_bladeset_ctfe.fe");
+const API: &str = include_str!("fixtures/support_bladeset_api.fe");
+const PROBES: &str = include_str!("fixtures/support_bladeset_ctfe.fe");
 
 fn gp_oracle(left: u32, right: u32, dimension: u32, metric: u32) -> u32 {
     if dimension > 5 {
@@ -45,9 +46,9 @@ fn grade_oracle(bits: u32, dimension: u32, grade: u32) -> u32 {
 #[test]
 fn reusable_bladeset_ctfe_matches_independent_support_oracles() {
     let mut db = DriverDataBase::default();
+    let source = format!("{API}\n{PROBES}");
     let url = Url::parse("file:///support_bladeset_ctfe.fe").unwrap();
-    db.workspace()
-        .touch(&mut db, url.clone(), Some(SOURCE.to_owned()));
+    db.workspace().touch(&mut db, url.clone(), Some(source));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
@@ -66,7 +67,10 @@ fn reusable_bladeset_ctfe_matches_independent_support_oracles() {
 
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &wasm).unwrap();
-    assert!(module.imports().next().is_none(), "support algebra must be closed");
+    assert!(
+        module.imports().next().is_none(),
+        "support algebra must be closed"
+    );
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
     let ctfe_case = instance
