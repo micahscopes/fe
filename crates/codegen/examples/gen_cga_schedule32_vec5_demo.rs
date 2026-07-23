@@ -967,7 +967,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
     let fe_tracked_status =
         git_output(repo, &["status", "--porcelain", "--untracked-files=no"]);
     assert!(
-        fe_tracked_status.is_empty() || fe_tracked_status == " M Cargo.lock",
+        fe_tracked_status.is_empty() || fe_tracked_status == "M Cargo.lock",
         "Fe checkout changed after generator preflight: {fe_tracked_status:?}",
     );
     let fe_untracked_present =
