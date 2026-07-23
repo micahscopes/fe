@@ -72,6 +72,42 @@ pub fn run(x: i32) -> i32 {{ <PublishedPlan as Eval>::eval(x: x) }}
     )
 }
 
+fn fco_emitted_shared_dag() -> String {
+    r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Execute32 { fn execute(_ x: i32) -> i32 }
+struct SharedDagProvider {}
+impl Derive<Execute32> for SharedDagProvider {
+    const fn derive<T>(
+        ev: own Evidence<Execute32<T>>,
+    ) -> Evidence<Execute32<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<Execute32<T>>,
+        )
+    {
+        // Measured control: publish a known shared shape. This deliberately
+        // does not claim to normalize or inspect Schedule<32>.
+        builder.emit_method("execute", quote(x) {
+            let x2 = x + x
+            let x4 = x2 + x2
+            let x8 = x4 + x4
+            let x16 = x8 + x8
+            x16 + x16
+        })
+        builder.finish()
+        ev
+    }
+}
+struct Published32 {}
+derive Execute32 for Published32 using SharedDagProvider
+pub fn run(x: i32) -> i32 {
+    <Published32 as Execute32>::execute(x)
+}
+"#
+    .to_string()
+}
+
 const COMPACT: &str = r#"
 pub fn run(x: i32) -> i32 {
     let mut sum: i32 = 0
@@ -93,6 +129,18 @@ pub fn run(x: i32) -> i32 {
     x16 + x16
 }
 "#;
+
+#[test]
+fn fco_can_publish_an_explicit_shared_schedule32_body() {
+    let source = fco_emitted_shared_dag();
+    assert!(source.contains("builder.emit_method"));
+    assert!(source.contains("let x16"));
+    let measurement = measure("fco_emitted_shared_dag_smoke", source);
+    assert!(
+        measurement.rmir_calls <= 1,
+        "the only permitted call-shaped residue is the exported facade calling its derived method"
+    );
+}
 
 #[derive(Debug)]
 struct Measurement {
@@ -167,11 +215,15 @@ fn compare_schedule32_tree_compact_fco_and_actual_dag() {
     assert_eq!(SHARED_DAG.matches("let x").count(), 4);
     assert!(!SHARED_DAG.contains("Schedule<32>"));
 
+    let emitted_dag_source = fco_emitted_shared_dag();
+    assert!(emitted_dag_source.contains("builder.emit_method"));
+    assert!(emitted_dag_source.contains("let x16"));
     let measurements = [
         measure("recursive_tree", tree_source),
         measure("compact_loop", COMPACT.to_string()),
         measure("fco_published_tree", fco_source),
         measure("shared_dag", SHARED_DAG.to_string()),
+        measure("fco_emitted_shared_dag", emitted_dag_source),
     ];
     assert_eq!(
         measurements[0].rmir_bytes, measurements[2].rmir_bytes,
@@ -184,6 +236,10 @@ fn compare_schedule32_tree_compact_fco_and_actual_dag() {
     assert!(measurements[0].rmir_calls > 0);
     assert_eq!(measurements[1].rmir_calls, 0);
     assert_eq!(measurements[3].rmir_calls, 0);
+    assert!(
+        measurements[4].rmir_calls < measurements[0].rmir_calls,
+        "publishing an explicitly shared body must retain less call-shaped work than the tree"
+    );
     eprintln!(
         "strategy                 HIR ms   package ms   backend ms   RMIR B   calls   Wasm B"
     );
