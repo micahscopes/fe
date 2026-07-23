@@ -18,9 +18,26 @@ pub fn build(
     workgroup: [Option<u32>; 3],
     source_id: Option<String>,
     canonical: WebCanonicalPolicy,
+    canonical_entry: Option<&str>,
 ) -> Result<(), String> {
     if entry.is_empty() {
         return Err("`--entry` must not be empty".to_string());
+    }
+    match (canonical, canonical_entry) {
+        (WebCanonicalPolicy::Disabled, Some(_)) => {
+            return Err(
+                "`--canonical-entry` is only valid with `--canonical optional|required`"
+                    .to_string(),
+            );
+        }
+        (WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required, None) => {
+            return Err(
+                "`--canonical-entry NAME` is required with `--canonical optional|required`"
+                    .to_string(),
+            );
+        }
+        (_, Some("")) => return Err("`--canonical-entry` must not be empty".to_string()),
+        _ => {}
     }
     let workgroup = match (mode, workgroup) {
         (WebMode::Render, [None, None, None]) => None,
@@ -82,7 +99,7 @@ pub fn build(
             diagnostics.format_diags(&db)
         ));
     }
-    let options = match mode {
+    let mut options = match mode {
         WebMode::Render => WebBuildOptions::render(entry, source_id),
         WebMode::Grid => WebBuildOptions::grid(entry, workgroup.unwrap(), source_id),
     }
@@ -91,6 +108,9 @@ pub fn build(
         WebCanonicalPolicy::Optional => codegen::WebCanonicalPolicy::Optional,
         WebCanonicalPolicy::Required => codegen::WebCanonicalPolicy::Required,
     });
+    if let Some(canonical_entry) = canonical_entry {
+        options = options.with_canonical_entry(canonical_entry);
+    }
     let bundle = WebBundle::compile(&db, top_mod, options).map_err(|error| error.to_string())?;
     bundle
         .write_atomic(out.as_std_path())
@@ -113,6 +133,7 @@ mod tests {
             [Some(8), None, Some(1)],
             None,
             WebCanonicalPolicy::Disabled,
+            None,
         )
         .unwrap_err();
         assert!(missing.contains("requires non-zero"), "{missing}");
@@ -125,13 +146,43 @@ mod tests {
             [Some(8), Some(4), Some(1)],
             None,
             WebCanonicalPolicy::Disabled,
+            None,
         )
         .unwrap_err();
         assert!(render.contains("only valid"), "{render}");
     }
 
     #[test]
-    fn required_canonical_policy_fails_honestly_without_emitted_abi() {
+    fn canonical_entry_policy_combinations_fail_before_io() {
+        let missing = build(
+            &"missing.fe".into(),
+            "shade",
+            WebMode::Render,
+            &"out".into(),
+            [None, None, None],
+            None,
+            WebCanonicalPolicy::Required,
+            None,
+        )
+        .unwrap_err();
+        assert!(missing.contains("is required"), "{missing}");
+
+        let disabled = build(
+            &"missing.fe".into(),
+            "shade",
+            WebMode::Render,
+            &"out".into(),
+            [None, None, None],
+            None,
+            WebCanonicalPolicy::Disabled,
+            Some("update"),
+        )
+        .unwrap_err();
+        assert!(disabled.contains("only valid"), "{disabled}");
+    }
+
+    #[test]
+    fn one_command_builds_separate_gpu_and_required_canonical_entries() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("canonical.fe");
         std::fs::write(
@@ -140,7 +191,10 @@ mod tests {
 struct Request { value: u32 }
 struct Response { value: u32 }
 pub fn update(request: Request) -> Response {
-    Response { value: request.value }
+    Response { value: request.value + 1 }
+}
+pub fn shade(x: u32, y: u32) -> u32 {
+    x + y
 }
 "#,
         )
@@ -149,22 +203,20 @@ pub fn update(request: Request) -> Response {
         let out = Utf8PathBuf::from_path_buf(temp.path().join("bundle")).unwrap();
         let error = build(
             &source,
-            "update",
+            "shade",
             WebMode::Render,
             &out,
             [None, None, None],
             None,
             WebCanonicalPolicy::Required,
+            Some("update"),
         )
-        .unwrap_err();
-        assert!(
-            error.contains("required canonical interface is unavailable"),
-            "{error}"
-        );
-        assert!(
-            error.contains("emitted canonical ABI verification failed"),
-            "{error}"
-        );
-        assert!(!out.exists(), "failed build must not publish a bundle");
+        .unwrap();
+        assert!(out.join("module.wasm").exists());
+        assert!(out.join("shader.wgsl").exists());
+        let manifest = std::fs::read_to_string(out.join("manifest.json")).unwrap();
+        assert!(manifest.contains("\"source_entry\": \"shade\""));
+        assert!(manifest.contains("\"export\": \"fe_cabi_update\""));
+        assert!(manifest.contains("\"embedded\": true"));
     }
 }

@@ -422,6 +422,10 @@ pub enum WebAction {
         /// Canonical browser ABI policy. No adapter is generated implicitly.
         #[arg(long, value_enum, default_value = "disabled")]
         canonical: WebCanonicalPolicy,
+        /// Public Fe message-lane entry used by the canonical browser ABI.
+        /// Required when `--canonical` is optional or required.
+        #[arg(long)]
+        canonical_entry: Option<String>,
     },
 }
 
@@ -514,6 +518,7 @@ pub fn run(opts: &Options) {
                 workgroup_z,
                 source_id,
                 canonical,
+                canonical_entry,
             } => {
                 if let Err(err) = web::build(
                     path,
@@ -523,6 +528,7 @@ pub fn run(opts: &Options) {
                     [*workgroup_x, *workgroup_y, *workgroup_z],
                     source_id.clone(),
                     *canonical,
+                    canonical_entry.as_deref(),
                 ) {
                     eprintln!("Error: {err}");
                     std::process::exit(1);
@@ -1237,6 +1243,7 @@ mod web_cli_tests {
                     workgroup_y,
                     workgroup_z,
                     canonical,
+                    canonical_entry,
                     ..
                 },
         } = options.command
@@ -1246,6 +1253,7 @@ mod web_cli_tests {
         assert_eq!(entry, "shade");
         assert_eq!(mode, WebMode::Grid);
         assert_eq!(canonical, WebCanonicalPolicy::Disabled);
+        assert_eq!(canonical_entry, None);
         assert_eq!(
             [workgroup_x, workgroup_y, workgroup_z],
             [Some(8), Some(4), Some(1)]
@@ -1271,7 +1279,7 @@ mod web_cli_tests {
             ("optional", WebCanonicalPolicy::Optional),
             ("required", WebCanonicalPolicy::Required),
         ] {
-            let options = Options::try_parse_from([
+            let mut args = vec![
                 "fe",
                 "web",
                 "build",
@@ -1284,15 +1292,27 @@ mod web_cli_tests {
                 "bundle",
                 "--canonical",
                 value,
-            ])
-            .unwrap();
+            ];
+            if expected != WebCanonicalPolicy::Disabled {
+                args.extend(["--canonical-entry", "update"]);
+            }
+            let options = Options::try_parse_from(args).unwrap();
             let Command::Web {
-                action: WebAction::Build { canonical, .. },
+                action:
+                    WebAction::Build {
+                        canonical,
+                        canonical_entry,
+                        ..
+                    },
             } = options.command
             else {
                 panic!("expected web build");
             };
             assert_eq!(canonical, expected);
+            assert_eq!(
+                canonical_entry.as_deref(),
+                (expected != WebCanonicalPolicy::Disabled).then_some("update")
+            );
         }
     }
 }
