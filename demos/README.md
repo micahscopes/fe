@@ -130,3 +130,12 @@ typed-plan witness/provenance, and separate entry-rooted Wasm proof. Publishing
 and repinning the backend is required for the intended direct `fe web` UX and
 removes this compatibility launcher; it does not erase those
 application-specific evidence jobs.
+
+The compiler command itself already accepts either a standalone `.fe` file or
+an ordinary Fe ingot directory; an ingot does not need a web-specific project
+manifest. The flagship generators are retained for the additional evidence
+jobs above, not because `fe web` is limited to single-file programs. Their
+current pages also consume the legacy `frag.wgsl`/`layout.json` contract and
+independent `reference.json`, whereas the generic bundle deliberately exposes
+`shader.wgsl`/`manifest.json`. Repointing those pages without migrating and
+re-proving that contract would hide work rather than simplify it.

@@ -84,6 +84,16 @@ struct AppState {
 
 pub async fn serve(config: ServeConfig) -> Result<(), String> {
     validate_config(&config)?;
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port))
+        .await
+        .map_err(|error| format!("failed to bind web server: {error}"))?;
+    serve_with_listener(config, listener).await
+}
+
+async fn serve_with_listener(
+    config: ServeConfig,
+    listener: tokio::net::TcpListener,
+) -> Result<(), String> {
     let bundle = web::compile(&config.compile)?;
     let snapshot = Arc::new(RwLock::new(Arc::new(BundleSnapshot::from_bundle(
         &bundle, 1,
@@ -93,9 +103,6 @@ pub async fn serve(config: ServeConfig) -> Result<(), String> {
         &config.mount,
         Arc::clone(&snapshot),
     );
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.host, config.port))
-        .await
-        .map_err(|error| format!("failed to bind web server: {error}"))?;
     let address = listener
         .local_addr()
         .map_err(|error| format!("failed to inspect web server address: {error}"))?;
@@ -376,6 +383,7 @@ fn hash_source(path: &Path, hasher: &mut DefaultHasher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{WebCanonicalPolicy, WebMode};
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -522,6 +530,76 @@ mod tests {
         assert!(missing.starts_with("HTTP/1.0 404 Not Found"));
         assert!(missing.contains("cross-origin-embedder-policy: require-corp"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn real_server_publishes_only_successful_watched_compilations() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Utf8PathBuf::from_path_buf(temp.path().join("kernel.fe")).unwrap();
+        let root = Utf8PathBuf::from_path_buf(temp.path().join("app")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("index.html"), "<h1>watched</h1>").unwrap();
+        std::fs::write(&source, render_source("+")).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ServeConfig {
+            compile: CompileRequest {
+                path: source.clone(),
+                entry: "shade".to_owned(),
+                mode: WebMode::Render,
+                workgroup: [None, None, None],
+                source_id: Some("live-reload-integration".to_owned()),
+                canonical: WebCanonicalPolicy::Disabled,
+                canonical_entries: Vec::new(),
+            },
+            root,
+            mount: "/gen".to_owned(),
+            host: "127.0.0.1".to_owned(),
+            port: 0,
+            poll_interval: Duration::from_millis(20),
+            watch: true,
+        };
+        let server =
+            tokio::spawn(async move { serve_with_listener(config, listener).await.unwrap() });
+
+        wait_for_generation(address, 1).await;
+        // Let the spawned watcher capture the initial source fingerprint before
+        // introducing the first edit.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        std::fs::write(&source, render_source("*")).unwrap();
+        wait_for_generation(address, 2).await;
+
+        std::fs::write(&source, "not valid Fe source").unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(generation(address).await, Some(2));
+
+        std::fs::write(&source, render_source("-")).unwrap();
+        wait_for_generation(address, 3).await;
+        server.abort();
+    }
+
+    fn render_source(operator: &str) -> String {
+        format!("pub fn shade(x: u32, y: u32) -> u32 {{\n    x {operator} y\n}}\n")
+    }
+
+    async fn generation(address: SocketAddr) -> Option<u64> {
+        request(address, LIVE_RELOAD_GENERATION_PATH)
+            .await
+            .split_once("\r\n\r\n")
+            .and_then(|(_, body)| body.trim().parse().ok())
+    }
+
+    async fn wait_for_generation(address: SocketAddr, expected: u64) {
+        // A cold browser-profile backend build can take tens of seconds on a
+        // contended CI host. Poll cheaply while retaining a finite bound.
+        for _ in 0..5000 {
+            if generation(address).await == Some(expected) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for web generation {expected}");
     }
 
     async fn request(address: SocketAddr, path: &str) -> String {
