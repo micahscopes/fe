@@ -24,6 +24,68 @@ fn compile_to_wasm(source: &str) -> Vec<u8> {
 }
 
 #[test]
+fn shared_provider_expression_materializes_once_per_method_root() {
+    let source = r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+trait Pair {
+    fn a(_ x: i32, _ __fco_provider_share_2: i32) -> i32
+    fn b(_ x: i32, _ __fco_provider_share_2: i32) -> i32
+}
+struct PairProvider {}
+impl Derive<Pair> for PairProvider {
+    const fn derive<T>(ev: own Evidence<Pair<T>>) -> Evidence<Pair<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Pair<T>>)
+    {
+        let x = builder.arg_ref("x")
+        let square = builder.share(builder.mul(x, x))
+        let fourth = builder.share(builder.mul(square, square))
+        let doubled = builder.add(fourth, fourth)
+        // Reusing one share handle across roots must materialize one hygienic
+        // local independently in each method, never leak a prior root's local.
+        builder.emit_method("a", doubled)
+        builder.emit_method("b", doubled)
+        builder.finish()
+        ev
+    }
+}
+struct Subject {}
+derive Pair for Subject using PairProvider
+pub fn run_a(x: i32) -> i32 { <Subject as Pair>::a(x, 123) }
+pub fn run_b(x: i32) -> i32 { <Subject as Pair>::b(x, 456) }
+"#;
+
+    let wasm = compile_to_wasm(source);
+    wasmparser::validate(&wasm).expect("shared provider expression emitted invalid Wasm");
+    let mut muls = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.unwrap() {
+            let mut ops = body.get_operators_reader().unwrap();
+            while !ops.eof() {
+                if matches!(ops.read().unwrap(), wasmparser::Operator::I32Mul) {
+                    muls += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        muls, 4,
+        "nested shares must emit two ordered multiplies per method root"
+    );
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    for name in ["run_a", "run_b"] {
+        let run = instance
+            .get_typed_func::<i32, i32>(&mut store, name)
+            .unwrap();
+        assert_eq!(run.call(&mut store, 7).unwrap(), 4802);
+    }
+}
+
+#[test]
 fn ordinary_const_helpers_drive_typed_selection_and_direct_provider_arithmetic() {
     let source = r#"
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}

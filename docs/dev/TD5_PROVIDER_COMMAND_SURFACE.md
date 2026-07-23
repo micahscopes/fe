@@ -87,8 +87,15 @@ value; the emitted method/constant's ordinary semantic analysis determines
 types and rejects mismatches.
 
 Quotes expose precisely the same integer subset (`42`, `+`, `-`, `*`, unary
-`-`). Quote-local `let` bindings use hygienic numeric slots and are the sharing
-mechanism for direct arithmetic DAGs.
+`-`). Quote-local `let` bindings use hygienic numeric slots. Explicit
+`builder.share(expr)` is the domain-neutral sharing primitive for constructed
+expression DAGs: it materializes the expression once per emitted member root
+as an eagerly evaluated hygienic local and reuses that local at every
+occurrence. Its input is deliberately restricted to pure root-scope leaves
+(arguments, `self`, constants and safe field projections) composed with the
+arithmetic/logic/comparison builders and nested shares. Calls, aggregates,
+matches, quote blocks, and arm/local binders fail closed; branch-local sharing
+continues to use an ordinary quote-local `let`.
 
 ## Change rule
 

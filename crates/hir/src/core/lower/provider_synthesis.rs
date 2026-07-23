@@ -15,6 +15,10 @@
 //! each generated-expression node onto the corresponding HIR expression.
 
 use num_bigint::BigUint;
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use super::{
     hir_builder::{BodyBuilder, HirBuilder},
@@ -50,11 +54,15 @@ pub(super) fn synthesize_provider_impl<'db>(
 ) {
     let db = builder.db();
     let where_clause = requirement_where_clause(db, generics, output);
+    let shared_exprs = RefCell::new(HashMap::new());
+    let reserved_names = RefCell::new(HashSet::new());
     let replay = ReplayCtxt {
         target_name,
         trait_ref,
         reflection,
         output,
+        shared_exprs: &shared_exprs,
+        reserved_names: &reserved_names,
     };
 
     builder.impl_trait_generic_assocs_build(
@@ -84,8 +92,11 @@ pub(super) fn synthesize_provider_impl<'db>(
                     ProviderEffect::EmitConst { name, ty, value } => {
                         let ty = replay.materialize_ty(builder, *ty);
                         let value_expr = *value;
-                        let value_body = builder
-                            .anonymous_expr_body(|body| replay.replay_expr(body, value_expr));
+                        let value_body = builder.anonymous_expr_body(|body| {
+                                replay.shared_exprs.borrow_mut().clear();
+                                replay.reserved_names.borrow_mut().clear();
+                                replay.replay_expr(body, value_expr)
+                        });
                         consts.push(AssocConstDef {
                             attributes: builder.empty_attrs(),
                             name: Partial::Present(*name),
@@ -126,6 +137,12 @@ pub(super) fn synthesize_provider_impl<'db>(
                     sig.ret,
                     FuncModifiers::new(Visibility::Private, false, false, false),
                     move |body| {
+                        replay.shared_exprs.borrow_mut().clear();
+                        let mut reserved = replay.reserved_names.borrow_mut();
+                        reserved.clear();
+                        reserved.extend(sig.args.iter().map(|(name, _)| *name));
+                        drop(reserved);
+                        replay.reserve_authored_binders(body.db());
                         let result = replay.replay_expr(body, body_expr);
                         body.emit_return(Some(result));
                     },
@@ -302,9 +319,63 @@ struct ReplayCtxt<'a, 'db> {
     trait_ref: TraitRefId<'db>,
     reflection: &'a TargetReflection<'db>,
     output: &'a ProviderOutput<'db>,
+    /// Share nodes already materialized in the current emitted member root.
+    /// Reset before each method/const so handles cannot leak across roots.
+    shared_exprs: &'a RefCell<HashMap<usize, IdentId<'db>>>,
+    /// Authored root binders plus synthetic share locals allocated so far.
+    reserved_names: &'a RefCell<HashSet<IdentId<'db>>>,
 }
 
 impl<'a, 'db> ReplayCtxt<'a, 'db> {
+    /// Reserve every binder spelling that authored generated HIR can
+    /// introduce. Scanning the bounded provider arenas is deliberately
+    /// conservative across member roots and includes unused pattern binders.
+    fn reserve_authored_binders(&self, db: &'db dyn HirDb) {
+        let mut reserved = self.reserved_names.borrow_mut();
+        for expr in &self.output.bodies.exprs {
+            match expr {
+                GenExpr::Block { lets, .. } => {
+                    reserved.extend(lets.iter().map(|(slot, _)| local_slot_ident(db, *slot)));
+                }
+                GenExpr::LocalRef(slot) => {
+                    reserved.insert(local_slot_ident(db, *slot));
+                }
+                GenExpr::VariantBinder {
+                    variant,
+                    field,
+                    prefix,
+                } => {
+                    reserved.insert(self.binder_ident(
+                        db,
+                        *prefix,
+                        FieldKey {
+                            variant: Some(*variant),
+                            index: *field,
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
+        for pat in &self.output.bodies.pats {
+            let GenPat::Variant { variant, prefix } = pat else {
+                continue;
+            };
+            if let Some(reflected) = self.reflection.variant(*variant) {
+                reserved.extend(reflected.fields.iter().map(|field| {
+                    self.binder_ident(
+                        db,
+                        *prefix,
+                        FieldKey {
+                            variant: Some(*variant),
+                            index: field.index,
+                        },
+                    )
+                }));
+            }
+        }
+    }
+
     fn replay_expr(
         &self,
         body: &mut BodyBuilder<'_, 'db, DeriveDesugared>,
@@ -338,6 +409,37 @@ impl<'a, 'db> ReplayCtxt<'a, 'db> {
                 let lhs = self.replay_expr(body, *lhs);
                 let rhs = self.replay_expr(body, *rhs);
                 body.push_expr(Expr::Bin(lhs, rhs, BinOp::Arith(ArithBinOp::Mul)))
+            }
+            GenExpr::Share(value) => {
+                if let Some(name) = self.shared_exprs.borrow().get(&expr.0).copied() {
+                    return body.ident_expr(name);
+                }
+                // `$` is outside Fe's authored identifier grammar, so match
+                // binders and quote holes cannot capture this local. The
+                // reserved set additionally keeps compiler-owned locals
+                // distinct within the current member root.
+                let base = format!("$fco_provider_share_{}", expr.0);
+                let mut suffix = 0usize;
+                let name = loop {
+                    let spelling = if suffix == 0 {
+                        base.clone()
+                    } else {
+                        format!("{base}_{suffix}")
+                    };
+                    let candidate = IdentId::new(db, spelling);
+                    if !self.reserved_names.borrow().contains(&candidate) {
+                        break candidate;
+                    }
+                    suffix += 1;
+                };
+                self.reserved_names.borrow_mut().insert(name);
+                // GenExpr edges always point to already-built nodes, so
+                // dependency materialization is deterministic and acyclic.
+                let init = self.replay_expr(body, *value);
+                let pat = body.bind_pat(name);
+                body.emit_stmt(crate::hir_def::Stmt::Let(pat, None, Some(init)));
+                self.shared_exprs.borrow_mut().insert(expr.0, name);
+                body.ident_expr(name)
             }
             GenExpr::Neg(value) => {
                 let value = self.replay_expr(body, *value);

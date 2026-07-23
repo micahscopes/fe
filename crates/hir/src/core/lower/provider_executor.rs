@@ -96,6 +96,7 @@ const RECOGNIZED_BUILDER_OPS: &[&str] = &[
     "add",
     "sub",
     "mul",
+    "share",
     "neg",
     "eq",
     "lt",
@@ -179,9 +180,9 @@ const _: () = {
     // `with_arg`/`returns`) were dropped — the emitted method's signature is now
     // inferred from the goal trait's declaration at `emit_method(name, body)`
     // (43 → 39). Domain-neutral generated integer literal, subtraction,
-    // multiplication, and negation builders then extend the audited codegen
-    // subset (39 → 43).
-    assert!(RECOGNIZED_BUILDER_OPS.len() == 43);
+    // multiplication, negation, and explicit expression sharing builders then
+    // extend the audited codegen subset (39 → 44).
+    assert!(RECOGNIZED_BUILDER_OPS.len() == 44);
     // TD5c: was 7, then 4, now 0; ALL reflection reads — non-iterating (onto the
     // typed read-only handles `ReflectHandle`/`FieldHandle`/`VariantHandle`) AND
     // the `fields`/`variants` iterables (now ordinary method calls returning a
@@ -278,6 +279,9 @@ pub(super) enum GenExpr<'db> {
     Sub(GenExprId, GenExprId),
     /// `lhs * rhs`
     Mul(GenExprId, GenExprId),
+    /// Materialize `value` once as a hygienic local in each emitted member
+    /// root, then reference that local at every use of this node.
+    Share(GenExprId),
     /// `-value`
     Neg(GenExprId),
     /// The generated method's `self` value.
@@ -3131,6 +3135,19 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 let rhs = self.gen_expr_arg(rhs.expr)?;
                 Ok(self.push_expr(GenExpr::Mul(lhs, rhs)))
             }
+            ("share", [value]) => {
+                let source_expr = value.expr;
+                let value = self.gen_expr_arg(source_expr)?;
+                if !self.share_is_root_safe(value) {
+                    return Err(self.invalid_method(
+                        source_expr,
+                        "`builder.share(..)` only accepts root-scope generated expressions; \
+                         match arms, quote blocks, and their local binders must share inside \
+                         the quote with an ordinary `let`",
+                    ));
+                }
+                Ok(self.push_expr(GenExpr::Share(value)))
+            }
             ("neg", [value]) => {
                 let value = self.gen_expr_arg(value.expr)?;
                 Ok(self.push_expr(GenExpr::Neg(value)))
@@ -3525,6 +3542,53 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             Value::Expr(id) => Ok(id),
             _ => Err(self.unsupported_expr(expr)),
         }
+    }
+
+    /// Whether an expression can be eagerly materialized at the generated
+    /// member root without changing branch evaluation or escaping a binder.
+    fn share_is_root_safe(&self, expr: GenExprId) -> bool {
+        let mut stack = vec![expr];
+        let mut visited = vec![false; self.exprs.len()];
+        while let Some(expr) = stack.pop() {
+            if visited[expr.0] {
+                continue;
+            }
+            visited[expr.0] = true;
+            match &self.exprs[expr.0] {
+                GenExpr::Bool(_)
+                | GenExpr::Int(_)
+                | GenExpr::SelfRef
+                | GenExpr::ArgRef(_)
+                | GenExpr::TraitConst { .. }
+                | GenExpr::QualifiedConst { .. } => {}
+                GenExpr::Neg(value) | GenExpr::Share(value) => stack.push(*value),
+                GenExpr::And(lhs, rhs)
+                | GenExpr::Or(lhs, rhs)
+                | GenExpr::Add(lhs, rhs)
+                | GenExpr::Sub(lhs, rhs)
+                | GenExpr::Mul(lhs, rhs)
+                | GenExpr::EqCmp(lhs, rhs)
+                | GenExpr::LtCmp(lhs, rhs)
+                | GenExpr::GtCmp(lhs, rhs) => {
+                    stack.push(*rhs);
+                    stack.push(*lhs);
+                }
+                GenExpr::FieldGet(base, _) => stack.push(*base),
+                GenExpr::TraitCall { .. }
+                | GenExpr::MethodCall { .. }
+                | GenExpr::StaticCall { .. }
+                | GenExpr::StrLit(_)
+                | GenExpr::Tuple(_)
+                | GenExpr::Keccak(_)
+                | GenExpr::StructInit { .. }
+                | GenExpr::VariantInit { .. }
+                | GenExpr::Match { .. }
+                | GenExpr::Block { .. }
+                | GenExpr::LocalRef(_)
+                | GenExpr::VariantBinder { .. } => return false,
+            }
+        }
+        true
     }
 
     /// DEVX-A: infer the signature of the emitted method `name` from the goal
@@ -3935,7 +3999,7 @@ mod freeze_guard {
         // Pin the count too, so a same-size swap is still flagged for review.
         assert_eq!(
             RECOGNIZED_BUILDER_OPS.len(),
-            43,
+            44,
             "FREEZE (TD5.0): the builder command surface changed size; update the count \
              and docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md as part of a TD5 rung. \
              (TD5c moved `same_ty`/`same_field` — mis-shelved `builder.*`-spelled identity \
@@ -3943,7 +4007,7 @@ mod freeze_guard {
              DEVX-A dropped the four signature-dance ops `method`/`with_self`/`with_arg`/`returns` \
              — the emitted method's signature is inferred from the goal trait's declaration at \
              `emit_method(name, body)`, 43 → 39. Domain-neutral integer literals and \
-             subtract/multiply/negate construction add four audited operations, 39 → 43.)"
+             subtract/multiply/negate/share construction add five audited operations, 39 → 44.)"
         );
     }
 

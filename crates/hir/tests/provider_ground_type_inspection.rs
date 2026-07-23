@@ -180,6 +180,39 @@ derive Compute for Target using Provider
 }
 
 #[test]
+fn provider_share_rejects_non_root_pure_expression_fail_closed() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_share_scope_reject.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Compute { fn run(self, _ value: bool) -> bool }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        let value = builder.arg_ref("value")
+        let effectful = builder.keccak(value)
+        let shared = builder.share(effectful)
+        builder.emit_method("run", shared)
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+    assert!(
+        rendered.contains("only accepts root-scope generated expressions"),
+        "unsafe/effectful sharing must fail with the named scope diagnostic:\n{rendered}"
+    );
+}
+
+#[test]
 fn method_quote_local_let_rejects_typed_binding_fail_closed() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

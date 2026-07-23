@@ -220,7 +220,7 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
                 if raw_right_slot(triple) == 2 { right = builder.arg_ref("s8") }
                 if raw_right_slot(triple) == 3 { right = builder.arg_ref("s16") }
 
-                let product = builder.mul(builder.mul(left, point), right)
+                let product = builder.share(builder.mul(builder.mul(left, point), right))
                 let term = product
                 // Preserve the canonical raw80 IEEE operation order: compute
                 // the full left*point*right product before combining the two
