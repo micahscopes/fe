@@ -1001,6 +1001,14 @@ mod sgk_solver_guard {
         ),
     ];
 
+    /// The lowering-time provider executor, embedded separately from the
+    /// analysis sources above.  Until provider inputs have an explicitly
+    /// base-graph-scoped semantic query, this module may inspect HIR facts but
+    /// must not reach across the phase boundary into semantic type lowering or
+    /// normalization.  Doing so would close the
+    /// `expanded_items -> scope_graph -> expanded_items` cycle.
+    const PROVIDER_EXECUTOR_SOURCE: &str = include_str!("provider_executor.rs");
+
     /// No solver source may mention the staged-generation query or the
     /// expansion-stage query: generation stays strictly upstream of analysis.
     #[test]
@@ -1014,5 +1022,32 @@ mod sgk_solver_guard {
                 );
             }
         }
+    }
+
+    /// Pins the inverse half of the staged-generation boundary.  This is
+    /// intentionally a source-level dependency gate: importing any of these
+    /// analysis entry points into the executor is already a design error even
+    /// if a narrow fixture happens not to trigger the salsa cycle.
+    #[test]
+    fn provider_executor_does_not_reach_merged_type_analysis() {
+        for forbidden in [
+            "HirAnalysisDb",
+            "lower_hir_ty",
+            "normalize_ty",
+            "normalize_type_fn_app",
+        ] {
+            assert!(
+                !PROVIDER_EXECUTOR_SOURCE.contains(forbidden),
+                "provider executor references `{forbidden}`: normalized provider reflection \
+                 requires the base-graph semantic island, not merged analysis"
+            );
+        }
+        assert!(
+            !PROVIDER_EXECUTOR_SOURCE
+                .lines()
+                .any(|line| line.trim() == "scope_graph_impl,"),
+            "provider executor imports merged `scope_graph_impl`: normalized provider reflection \
+             requires the base-graph semantic island"
+        );
     }
 }
