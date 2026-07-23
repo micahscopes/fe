@@ -879,12 +879,7 @@ impl<S: IntWord, T: IntWord> IntDowncast<T> for S {
     }
 
     const fn downcast_truncate(self) -> T {
-        let word = IntWord::to_word(self)
-        if T::IS_SIGNED {
-            T::from_word(sign_extend(word: word, mask: T::MASK, sign_bit: T::SIGN_BIT))
-        } else {
-            T::from_word(word & T::MASK)
-        }
+        __int_truncate(self)
     }
 
     const fn downcast_saturate(self) -> T {
@@ -931,8 +926,7 @@ impl<S: IntWord, T: IntWord> IntDowncast<T> for S {
     }
 
     const fn downcast_unchecked(self) -> T {
-        let word = IntWord::to_word(self)
-        T::from_word(word)
+        __int_truncate(self)
     }
 }
 

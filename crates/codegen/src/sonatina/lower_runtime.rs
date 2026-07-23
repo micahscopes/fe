@@ -1383,6 +1383,13 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
 
     fn lower_builtin(&mut self, builtin: &RuntimeBuiltin<'db>) -> Result<ValueId, LowerError> {
         Ok(match builtin {
+            RuntimeBuiltin::IntTruncate { value, from, to } => {
+                let value = self.local_value(*value)?;
+                let ty = scalar_ty(to)?;
+                let signed =
+                    matches!(from.repr, ScalarRepr::Int { signed: true, .. });
+                self.cast_scalar_with_signedness(value, ty, signed)?
+            }
             RuntimeBuiltin::Mload { addr } => {
                 let addr = self.local_value(*addr)?;
                 self.fb.insert_inst(

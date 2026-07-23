@@ -638,6 +638,9 @@ fn format_terminator<'db>(db: &'db dyn MirDb, term: &RTerminator<'db>) -> String
 
 fn format_builtin<'db>(db: &'db dyn MirDb, builtin: &RuntimeBuiltin<'db>) -> String {
     match builtin {
+        RuntimeBuiltin::IntTruncate { value, from, to } => {
+            format!("int_truncate {} {from:?} -> {to:?}", format_local_id(*value))
+        }
         RuntimeBuiltin::Mload { addr } => format!("mload {}", format_local_id(*addr)),
         RuntimeBuiltin::Mstore { addr, value } => {
             format!(

@@ -563,6 +563,17 @@ fn verify_builtin<'db>(
     builtin: &RuntimeBuiltin<'db>,
 ) -> Result<Option<RuntimeClass<'db>>, VerifyError<'db>> {
     match builtin {
+        RuntimeBuiltin::IntTruncate { value, from, to } => {
+            if runtime_value_class(body, *value)? != &RuntimeClass::Scalar(from.clone()) {
+                return Err(VerifyError::InvalidExprClass(*value));
+            }
+            if !matches!(from.repr, ScalarRepr::Int { .. })
+                || !matches!(to.repr, ScalarRepr::Int { .. })
+            {
+                return Err(VerifyError::InvalidExprClass(*value));
+            }
+            Ok(Some(RuntimeClass::Scalar(to.clone())))
+        }
         RuntimeBuiltin::Mload { addr } => {
             verify_address_operand(body, *addr, AddressSpaceKind::Memory)?;
             Ok(Some(RuntimeClass::Scalar(word_scalar_class())))

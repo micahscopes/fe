@@ -1147,6 +1147,11 @@ pub enum ResolvedPlaceElem<'db> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
 pub enum RuntimeBuiltin<'db> {
+    IntTruncate {
+        value: RValueId,
+        from: ScalarClass<'db>,
+        to: ScalarClass<'db>,
+    },
     Mload {
         addr: RValueId,
     },
@@ -1394,7 +1399,8 @@ impl<'db> RuntimeBuiltin<'db> {
             | RuntimeBuiltin::Mstore8 { .. }
             | RuntimeBuiltin::Mcopy { .. }
             | RuntimeBuiltin::Msize
-            | RuntimeBuiltin::Malloc { .. } => PortableCompute,
+            | RuntimeBuiltin::Malloc { .. }
+            | RuntimeBuiltin::IntTruncate { .. } => PortableCompute,
 
             // Pure arithmetic / value computation.
             RuntimeBuiltin::AddMod { .. }

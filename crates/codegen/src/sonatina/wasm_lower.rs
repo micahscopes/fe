@@ -51,7 +51,7 @@ use sonatina_ir::{
     func_cursor::InstInserter,
     inst::{
         arith::{Add, Fadd, Fdiv, Fmul, Fneg, Fsqrt, Fsub, Mul, Sar, Shr, Sub},
-        cast::{F32ToI32, I32ToF32},
+        cast::{F32ToI32, I32ToF32, Sext, Trunc, Zext},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{MemAllocDynamic, Mload, Mstore},
@@ -2423,6 +2423,42 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     /// closed.
     fn lower_builtin(&mut self, builtin: &RuntimeBuiltin<'db>) -> Result<ValueId, LowerError> {
         match builtin {
+            RuntimeBuiltin::IntTruncate { value, from, to } => {
+                let is = self.inst_set();
+                let value = self.local_value(*value)?;
+                let target = scalar_ty_r1(to)?;
+                let source = self.fb.type_of(value);
+                if source == target {
+                    return Ok(value);
+                }
+                let bits = |ty| match ty {
+                    Type::I1 => Some(1),
+                    Type::I8 => Some(8),
+                    Type::I16 => Some(16),
+                    Type::I32 => Some(32),
+                    Type::I64 => Some(64),
+                    _ => None,
+                };
+                let source_bits = bits(source).ok_or_else(|| {
+                    LowerError::Unsupported("integer truncation requires an integer source".into())
+                })?;
+                let target_bits = bits(target).ok_or_else(|| {
+                    LowerError::Unsupported("integer truncation requires an integer target".into())
+                })?;
+                if source_bits > target_bits {
+                    Ok(self.fb.insert_inst(Trunc::new(is, value, target), target))
+                } else {
+                    let signed = matches!(
+                        from.repr,
+                        ScalarRepr::Int { signed: true, .. }
+                    );
+                    if signed {
+                        Ok(self.fb.insert_inst(Sext::new(is, value, target), target))
+                    } else {
+                        Ok(self.fb.insert_inst(Zext::new(is, value, target), target))
+                    }
+                }
+            }
             RuntimeBuiltin::IntrinsicArith {
                 op,
                 lhs,

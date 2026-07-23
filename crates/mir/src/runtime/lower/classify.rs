@@ -2538,6 +2538,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GenericNumericIntrinsicKind {
     Bitcast,
+    IntTruncate,
     Saturating(SaturatingBinOp),
     CheckedBinary(ArithBinOp),
     CheckedNeg,
@@ -2888,6 +2889,7 @@ pub(super) fn f32_intrinsic_kind(name: &str) -> Option<F32IntrinsicKind> {
 pub(super) fn generic_numeric_intrinsic_kind(name: &str) -> Option<GenericNumericIntrinsicKind> {
     Some(match name {
         "__bitcast" => GenericNumericIntrinsicKind::Bitcast,
+        "__int_truncate" => GenericNumericIntrinsicKind::IntTruncate,
         "__saturating_add" => GenericNumericIntrinsicKind::Saturating(SaturatingBinOp::Add),
         "__saturating_sub" => GenericNumericIntrinsicKind::Saturating(SaturatingBinOp::Sub),
         "__saturating_mul" => GenericNumericIntrinsicKind::Saturating(SaturatingBinOp::Mul),

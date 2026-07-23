@@ -3202,6 +3202,19 @@ impl<'db> RmirEmitter<'db> {
                     to: scalar,
                 }
             }
+            Some(GenericNumericIntrinsicKind::IntTruncate) => {
+                let [value] = args.as_slice() else {
+                    return None;
+                };
+                let RuntimeClass::Scalar(from) = self.value_class(*value)?.clone() else {
+                    return None;
+                };
+                RExpr::Builtin(crate::runtime::RuntimeBuiltin::IntTruncate {
+                    value: *value,
+                    from,
+                    to: scalar,
+                })
+            }
             Some(GenericNumericIntrinsicKind::CheckedBinary(op)) => {
                 let [lhs, rhs] = args.as_slice() else {
                     return None;
