@@ -149,8 +149,14 @@ fn composed_source() -> String {
     );
     assert!(
         CANONICAL.matches("builder.emit_method(").count() == 1
-            && CANONICAL.contains("builder.emit_method(\"sandwich\""),
+            && CANONICAL.contains("builder.emit_method(\"sandwich\", image)"),
         "the provider must emit exactly one aggregate sandwich method",
+    );
+    assert!(
+        ["e1", "e2", "e4", "e8", "e16"]
+            .into_iter()
+            .all(|lane| !CANONICAL.contains(&format!("builder.emit_method(\"{lane}\""))),
+        "the provider must not retain the legacy five scalar methods",
     );
     assert!(!source.contains("trait Eval5"));
     assert!(!source.contains("ScheduleChunk"));
