@@ -15,6 +15,20 @@ use driver::DriverDataBase;
 use fe_codegen::{BackendKind, OptLevel, layout_for};
 use url::Url;
 
+fn exports(bytes: &[u8]) -> Vec<(String, wasmparser::ExternalKind)> {
+    let mut exports = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let wasmparser::Payload::ExportSection(reader) = payload.unwrap() {
+            for export in reader {
+                let export = export.unwrap();
+                exports.push((export.name.to_owned(), export.kind));
+            }
+        }
+    }
+    exports.sort_by(|left, right| left.0.cmp(&right.0));
+    exports
+}
+
 /// Compile Fe source to wasm bytes through the wasm backend.
 fn compile_to_wasm(name: &str, source: &str) -> Vec<u8> {
     let mut db = DriverDataBase::default();
@@ -53,13 +67,23 @@ fn compile_to_wasm_err(name: &str, source: &str) -> String {
 #[test]
 fn wasm_param_carrying_pub_fns_are_export_roots() {
     // No zero-param `main`: the only entries are value-param `pub` fns.
-    let source = "pub fn double(x: u64) -> u64 { x + x }\n\
-                  pub fn add(a: u64, b: u64) -> u64 { a + b }\n";
+    let source = "fn inc(x: u64) -> u64 { x + 1 }\n\
+                  pub fn double(x: u64) -> u64 { x + x }\n\
+                  pub fn add(a: u64, b: u64) -> u64 { inc(a + b - 1) }\n";
 
     let wasm = compile_to_wasm("wasm_export_roots.fe", source);
     assert!(!wasm.is_empty(), "the wasm module must be non-empty");
     assert_eq!(&wasm[..4], b"\0asm", "output must be a wasm module");
     wasmparser::validate(&wasm).expect("produced invalid wasm");
+    assert_eq!(
+        exports(&wasm),
+        vec![
+            ("add".to_owned(), wasmparser::ExternalKind::Func),
+            ("double".to_owned(), wasmparser::ExternalKind::Func),
+            ("memory".to_owned(), wasmparser::ExternalKind::Memory),
+        ],
+        "reachable private helpers remain callable definitions, not host ABI exports",
+    );
 
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &wasm).expect("wasmtime should load the module");

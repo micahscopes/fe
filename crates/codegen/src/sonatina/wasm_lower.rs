@@ -109,7 +109,12 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     );
     let isa = create_wasm32_isa();
     let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
-    let mut lowerer = WasmModuleLowerer::new(db, builder, &isa, package);
+    let canonical_lane_names = canonical_lanes
+        .iter()
+        .map(|lane| lane.name.clone())
+        .collect();
+    let mut lowerer =
+        WasmModuleLowerer::new(db, builder, &isa, package, canonical_lane_names);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     for lane in canonical_lanes {
@@ -1000,6 +1005,7 @@ struct WasmModuleLowerer<'db, 'a> {
     prepared_bodies: FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
     func_symbols: FxHashMap<RuntimeInstance<'db>, String>,
     func_map: FxHashMap<RuntimeInstance<'db>, FuncRef>,
+    canonical_lane_names: HashSet<String>,
 }
 
 impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
@@ -1008,6 +1014,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         builder: ModuleBuilder,
         isa: &'a Wasm32,
         package: &'a RuntimePackage<'db>,
+        canonical_lane_names: HashSet<String>,
     ) -> Self {
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         for body in prepared_bodies.values_mut() {
@@ -1021,6 +1028,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             prepared_bodies,
             func_symbols: assign_sonatina_function_symbols(db, package),
             func_map: FxHashMap::default(),
+            canonical_lane_names,
         }
     }
 
@@ -1161,7 +1169,14 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             }
         };
         let symbol = self.function_symbol(function.instance(self.db));
-        let linkage = linkage_for_runtime(function.linkage(self.db));
+        let linkage = if self.canonical_lane_names.contains(&symbol) {
+            // The host ABI is the synthesized `fe_cabi_*` wrapper. Its
+            // underlying typed Fe lane remains an internal implementation
+            // dependency even though it seeded the lane-specific package.
+            Linkage::Private
+        } else {
+            linkage_for_runtime(function.linkage(self.db))
+        };
         Ok(Signature::new(&symbol, linkage, &args, &ret_tys))
     }
 

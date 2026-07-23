@@ -152,6 +152,7 @@ struct RuntimeGraph<'db> {
     // across runs, which would make `_0`/`_1` suffix assignment for
     // content-identical duplicates non-deterministic.
     nodes: IndexMap<RuntimeInstance<'db>, RuntimeGraphNode<'db>>,
+    public_roots: FxHashSet<RuntimeInstance<'db>>,
     object_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     code_region_roots: Vec<(RuntimeCodeRegion<'db>, RuntimeInstance<'db>)>,
 }
@@ -161,6 +162,7 @@ struct RuntimeGraphBuilder<'db> {
     queue: Vec<RuntimeInstance<'db>>,
     queued: FxHashSet<RuntimeInstance<'db>>,
     nodes: IndexMap<RuntimeInstance<'db>, RuntimeGraphNode<'db>>,
+    public_roots: FxHashSet<RuntimeInstance<'db>>,
     object_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     discovered_contract_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     code_region_roots: Vec<(RuntimeCodeRegion<'db>, RuntimeInstance<'db>)>,
@@ -191,6 +193,7 @@ impl<'db> RuntimeGraphBuilder<'db> {
             queue: Vec::new(),
             queued: FxHashSet::default(),
             nodes: IndexMap::new(),
+            public_roots: roots.iter().copied().collect(),
             object_specs,
             discovered_contract_specs: Vec::new(),
             code_region_roots: Vec::new(),
@@ -251,6 +254,7 @@ impl<'db> RuntimeGraphBuilder<'db> {
             .sort_by_key(|(region, _)| code_region_symbol(self.db, *region));
         Ok(RuntimeGraph {
             nodes: self.nodes,
+            public_roots: self.public_roots,
             object_specs: self.object_specs,
             code_region_roots: self.code_region_roots,
         })
@@ -2291,6 +2295,7 @@ fn collect_runtime_functions<'db>(
                 db,
                 instance,
                 symbol,
+                graph.public_roots.contains(&instance),
                 graph
                     .nodes
                     .get(&instance)
@@ -2328,6 +2333,7 @@ fn runtime_function_for_instance<'db>(
     db: &'db dyn MirDb,
     instance: RuntimeInstance<'db>,
     symbol: String,
+    public_entry: bool,
     referenced_const_regions: Vec<ConstRegionId<'db>>,
 ) -> RuntimeFunction<'db> {
     match instance.key(db).source(db) {
@@ -2339,6 +2345,8 @@ fn runtime_function_for_instance<'db>(
             // externs are recognized builtins, never declared-external here).
             let linkage = if declared_external_func(db, semantic).is_some() {
                 RuntimeLinkage::External
+            } else if public_entry {
+                RuntimeLinkage::Internal
             } else {
                 RuntimeLinkage::Private
             };
@@ -2363,7 +2371,11 @@ fn runtime_function_for_instance<'db>(
                 db,
                 instance,
                 symbol,
-                RuntimeLinkage::Private,
+                if public_entry {
+                    RuntimeLinkage::Internal
+                } else {
+                    RuntimeLinkage::Private
+                },
                 inline_hint,
                 RuntimeFunctionOwner::Synthetic(spec),
                 referenced_const_regions,

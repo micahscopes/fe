@@ -1230,10 +1230,13 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(verified.is_some());
         assert!(required_status.embedded);
         assert!(required_status.omission_reason.is_none());
-        let exports = wasm_exports(&wasm);
-        assert!(exports.iter().any(|name| name == "fe_cabi_alloc"));
-        assert!(exports.iter().any(|name| name == "fe_cabi_reset"));
-        assert!(exports.iter().any(|name| name == "fe_cabi_update"));
+        let mut exports = wasm_exports(&wasm);
+        exports.sort();
+        assert_eq!(
+            exports,
+            ["fe_cabi_alloc", "fe_cabi_reset", "fe_cabi_update", "memory"],
+            "canonical wrapper and arena own the host ABI; the typed Fe lane stays private",
+        );
 
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::new(&engine, &wasm).unwrap();
@@ -1308,9 +1311,19 @@ pub fn shade(x: u32, y: u32) -> u32 {
             ["verify", "update"],
             "repeatable canonical entries preserve first occurrence order"
         );
-        let exports = wasm_exports(&required.wasm);
-        assert!(exports.iter().any(|name| name == "fe_cabi_verify"));
-        assert!(exports.iter().any(|name| name == "fe_cabi_update"));
+        let mut exports = wasm_exports(&required.wasm);
+        exports.sort();
+        assert_eq!(
+            exports,
+            [
+                "fe_cabi_alloc",
+                "fe_cabi_reset",
+                "fe_cabi_update",
+                "fe_cabi_verify",
+                "memory",
+            ],
+            "only canonical wrappers, arena, and memory belong to the actor Wasm ABI",
+        );
         let module = wasmtime::Module::new(&engine, &required.wasm).unwrap();
         let mut store = wasmtime::Store::new(&engine, ());
         let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
