@@ -1287,19 +1287,23 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(interface_d_ts.contains("export type VerifyRequest"));
         assert!(interface_d_ts.contains("export type VerifyResponse"));
         assert!(interface_d_ts.contains(
-            "dispatch(request: CanonicalActorRequest<\"update\", UpdateRequest>): \
+            "dispatch(request: CanonicalActorRequest<\"update\", UpdateRequest>, \
+             context?: CanonicalActorContext): \
              Promise<UpdateResponse>"
         ));
         assert!(interface_d_ts.contains(
-            "dispatch(request: CanonicalActorRequest<\"verify\", VerifyRequest>): \
+            "dispatch(request: CanonicalActorRequest<\"verify\", VerifyRequest>, \
+             context?: CanonicalActorContext): \
              Promise<VerifyResponse>"
         ));
         assert!(interface_d_ts.contains(
-            "\"verify\"?: (request: VerifyRequest) => VerifyResponse | \
+            "\"verify\"?: (request: VerifyRequest, context: CanonicalActorContext) => \
+             VerifyResponse | \
              PromiseLike<VerifyResponse>"
         ));
         assert!(interface_d_ts.contains(
-            "\"update\"?: (request: UpdateRequest) => UpdateResponse | \
+            "\"update\"?: (request: UpdateRequest, context: CanonicalActorContext) => \
+             UpdateResponse | \
              PromiseLike<UpdateResponse>"
         ));
         assert!(interface_d_ts.contains("createHostEffectAdapter"));
