@@ -67,6 +67,9 @@ Available now:
 - compile-time loops and conditionals over that reflection;
 - exact ground nominal constructor/type/literal-const argument inspection;
 - bounded preorder inspection of already-materialized ground types;
+- opt-in base-graph normalization and preorder inspection for local
+  subject-only recursive ground plans, preserving resolved constructor
+  identities and evaluated natural arguments;
 - expression and method quotation, holes, quote folds, and hygienic untyped
   local `let` bindings;
 - associated-type publication with `builder.emit_assoc_ty`;
@@ -79,8 +82,9 @@ Not supplied automatically:
 - conversion of an arbitrary value-level support set into a freshly synthesized
   recursive Fe type;
 - common-subexpression discovery or DAG scheduling from a recursive type tree;
-- semantic normalization of a `Schedule<32>` type-function application inside
-  a provider;
+- normalized provider traversal of imported recursive plans with forwarded
+  invariant type or const parameters (the local subject-only case is now
+  implemented);
 - a general typed `Plan` IR with node identity and explicit sharing;
 - recursive GPU execution (the finite published body still has to lower to
   legal non-recursive shader control flow).

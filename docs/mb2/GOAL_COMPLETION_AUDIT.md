@@ -20,9 +20,10 @@ implemented. The goal remains incomplete for three concrete reasons:
 
 1. the required Sonatina backend revision is not published and a clean locked
    `fe web` build therefore still needs the explicit overlay;
-2. FCO cannot phase-safely reflect the normalized
-   `Add<Term<I>, ... Zero>` result of the public recursive planner, so
-   application providers still rescan bounded candidates;
+2. FCO can now phase-safely reflect a local subject-only normalized
+   `Add<Term<I>, ... Zero>` plan, but the public ingot's imported,
+   forwarded-parameter `SparsePlan` remains outside that first base-graph
+   slice, so application providers still rescan bounded candidates;
 3. clean full-workspace and hardware-WebGPU CI evidence is absent.
 
 ## Evidence matrix
@@ -124,33 +125,34 @@ that generic `fe web` cannot compile an ingot.
 
 ### 2. Add phase-safe normalized FCO plan reflection
 
-The public ingot now computes the desired recursive ground plan, but the
-provider boundary remains exact and unresolved:
+The first base-graph semantic island is implemented for local subject-only
+recursive plans:
 
 ```text
-SparsePlan<mask..., candidate_count, survivor_count>
-  -> normalized Add<Term<I0>, Add<Term<I1>, ... Zero>>
-  -/-> current lowering-time FCO reflection
+Plan<3>
+  -> Add<Term<2>, Add<Term<1>, Add<Term<0>, Zero>>>
+  -> builder.ty<GroundPlan>().normalized_preorder_types()
 ```
 
-`provider_ground_type_inspection.rs` proves that
+`provider_ground_type_inspection.rs` proves exact candidate order `[2, 1, 0]`,
+resolved constructor-identity comparison, preservation of the old syntactic
+API, and deterministic rejection of forwarded parameters. The SGK dependency
+guard prevents the executor from reaching merged semantic normalization.
+It also proves that
 `builder.ty<GroundPlan>().preorder_types()` observes the source alias rather
-than normalized `Term` nodes. Providers operate on syntax `TypeId` before the
-semantic `TyId` normalization query, so calling ordinary merged-graph type
-lowering from the executor would introduce a phase cycle.
+than normalized `Term` nodes.
 
-Implement the base-graph semantic island specified by
-`FCO_PLAN_BRIDGE_OPTIONS.md`, not a second normalizer:
+Complete the base-graph semantic island specified by
+`FCO_PLAN_BRIDGE_OPTIONS.md` without weakening ordinary merged analysis:
 
-1. add explicit base-only path/type resolution that cannot read generated
-   items, impl selection, associated-type normalization, or the merged scope
-   graph;
-2. normalize the closed recursive planner result into semantic identities and
-   evaluated const arguments under existing inspection/fuel limits;
-3. expose only that immutable normalized reflection handle to the provider;
-4. retain the SGK cycle guard and add an inverse dependency guard proving the
-   base-only query cannot call trait resolution or generated-item queries;
-5. check generated output later through ordinary merged analysis.
+1. extend base-only resolution across explicit ingot imports without reading
+   generated items, impl selection, associated-type normalization, or the
+   merged scope graph;
+2. add a ground substitution arena for forwarded invariant type and const
+   parameters so the public `SparsePlan<mask..., count, survivors>` can unfold;
+3. retain the current immutable normalized handles, node/fuel limits, SGK
+   guard, and ordinary semantic resolution policy;
+4. check generated output later through ordinary merged analysis.
 
 Acceptance requires a small `SparsePlan` provider to visit every normalized
 term in canonical order, publish an executable method, reject a phase-unsafe
