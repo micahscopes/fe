@@ -957,18 +957,36 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         sonatina.join("crates/codegen").is_dir(),
         "invalid SONATINA_DIR"
     );
-    let fe_rev = git_output(repo, &["rev-parse", "HEAD"]);
-    let fe_status = git_output(repo, &["status", "--porcelain", "--untracked-files=normal"]);
+    let fe_rev = std::env::var("FE_CGA_SOURCE_REV")
+        .expect("use generate.sh to capture clean Fe provenance before Cargo patches the lockfile");
+    assert_eq!(
+        fe_rev,
+        git_output(repo, &["rev-parse", "HEAD"]),
+        "Fe HEAD changed after generator preflight",
+    );
+    let fe_tracked_status =
+        git_output(repo, &["status", "--porcelain", "--untracked-files=no"]);
+    assert!(
+        fe_tracked_status.is_empty() || fe_tracked_status == " M Cargo.lock",
+        "Fe checkout changed after generator preflight: {fe_tracked_status:?}",
+    );
+    let fe_untracked_present =
+        match std::env::var("FE_CGA_SOURCE_UNTRACKED_PRESENT").as_deref() {
+            Ok("0") => false,
+            Ok("1") => true,
+            _ => panic!("invalid FE_CGA_SOURCE_UNTRACKED_PRESENT generator preflight value"),
+        };
     let sonatina_rev = git_output(&sonatina, &["rev-parse", "HEAD"]);
     let sonatina_status = git_output(
         &sonatina,
         &["status", "--porcelain", "--untracked-files=normal"],
     );
     serde_json::json!({
-        "source": "canonical Fe helpers shared by forced typed Schedule<32> and bounded provider-emitted five-lane DE body",
+        "source": "canonical Fe helpers shared by forced typed Schedule<32> and bounded provider-emitted aggregate sandwich DE body",
         "fe_rev": fe_rev,
-        "fe_dirty": !fe_status.is_empty(),
-        "fe_status_fnv1a32": fnv1a32(fe_status.as_bytes()),
+        "fe_dirty": false,
+        "fe_untracked_present": fe_untracked_present,
+        "fe_status_fnv1a32": fnv1a32(b""),
         "sonatina_path": sonatina.to_string_lossy(),
         "sonatina_rev": sonatina_rev,
         "sonatina_dirty": !sonatina_status.is_empty(),
@@ -980,7 +998,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "support_fnv1a32": fnv1a32(SUPPORT_API.as_bytes()),
         "body_fnv1a32": fnv1a32(BODY.as_bytes()),
         "composed_source_fnv1a32": fnv1a32(source.as_bytes()),
-        "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits five direct lane expressions from the same helpers",
+        "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits one shared five-lane sandwich aggregate from the same helpers",
         "generated_unix_secs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
     })
 }
