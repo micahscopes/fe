@@ -210,6 +210,7 @@ if [ "$demo" = all ]; then
   do
     generate_one "$selected"
   done
+  python3 "$here/shared/verify_cga_runtime_reuse.py"
 else
   generate_one "$demo"
 fi

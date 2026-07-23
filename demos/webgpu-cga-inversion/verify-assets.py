@@ -7,10 +7,13 @@ This does not execute wasm or WebGPU and therefore does not earn acceptance.
 import json
 import os
 import hashlib
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 GEN = Path(os.environ.get("CGA_BUNDLE_DIR", HERE / "gen"))
+sys.path.insert(0, str(HERE.parent / "shared"))
+from browser_runtime_preflight import validate_browser_runtime
 
 required = ["layout.json", "reference.json", "kernel.fe", "frag.wgsl", "frag.wasm"]
 missing = [name for name in required if not (GEN / name).is_file()]
@@ -111,22 +114,16 @@ if algebra.startswith("canonical CTFE-derived Schedule<32>;") or provider_algebr
     actor_manifest = json.loads((GEN / "actor/manifest.json").read_text())
     assert actor_manifest["protocol"] == "fe-web-bundle"
     assert actor_manifest["protocol_version"] == 4
-    runtime = actor_manifest["browser_runtime"]
-    assert runtime["protocol"] == "fe-browser-actor-runtime"
-    assert runtime["protocol_version"] == 1
+    validate_browser_runtime(actor_manifest, GEN / "actor")
     declared = [
         actor_manifest["artifacts"]["wasm"],
         actor_manifest["artifacts"]["wgsl"],
         *[artifact["path"] for artifact in actor_manifest["artifacts"]["canonical_adapters"]],
-        *[artifact["path"] for artifact in runtime["artifacts"]],
     ]
     assert len(declared) == len(set(declared))
     metadata = {
         artifact["path"]: artifact
-        for artifact in [
-            *actor_manifest["artifacts"]["canonical_adapters"],
-            *runtime["artifacts"],
-        ]
+        for artifact in actor_manifest["artifacts"]["canonical_adapters"]
     }
     for name in declared:
         path = GEN / "actor" / name

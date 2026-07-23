@@ -75,6 +75,15 @@ The specialized generators remain authoritative because they produce
 independent oracle/reference data, legacy layout contracts, control modules, or
 canonical actor artifacts beyond the standard `WebBundle`.
 
+`demos/serve.sh all` also performs a cross-application runtime gate after
+generation. It validates every compiler-declared runtime artifact against its
+byte count and SHA-256 digest, then requires Schedule32 CGA and QCGA to package
+the same six-module `fe-browser-actor-runtime` identity. This proves both demos
+consume one compiler-owned coordinator, endpoint, router, MessagePort,
+module-Worker, and GPU-actor surface. Their device handlers and application
+lifecycle code remain explicit and demo-owned; this gate does not claim that Fe
+code directly owns or invokes the browser's WebGPU device.
+
 For a new single-source application that consumes the standard `WebBundle`
 contract, use the compiler directly:
 

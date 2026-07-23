@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import json
+import sys
 from pathlib import Path
 
 here = Path(__file__).resolve().parent
 gen = here / "gen"
+sys.path.insert(0, str(here.parent / "shared"))
+from browser_runtime_preflight import validate_browser_runtime
 required = [
     "kernel.fe", "frag.wgsl", "frag.wasm", "layout.json", "reference.json",
     "actor-source.fe", "actor-canonical.wasm", "actor-interface.js",
@@ -43,6 +46,7 @@ assert "AllocatedBrowserBytes" in actor_source
 interface = (gen / "actor-interface.js").read_text()
 assert "createHostEffectAdapter" in interface and "createInterfaceCaller" in interface
 manifest = json.loads((gen / "actor-manifest.json").read_text())
+validate_browser_runtime(manifest, gen)
 assert manifest["canonical_status"] == {
     "policy": "required", "embedded": True, "omission_reason": None,
 }
