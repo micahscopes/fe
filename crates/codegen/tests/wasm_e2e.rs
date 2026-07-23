@@ -268,7 +268,7 @@ pub fn select_f32(flag: bool, when_true: f32, when_false: f32) -> f32 {
 }
 
 #[test]
-fn aggregate_conditional_slot_projection_fails_closed_on_wasm() {
+fn closed_product_conditional_projection_executes_on_wasm() {
     let source = r#"
 struct Pair {
     left: u64,
@@ -280,10 +280,18 @@ pub fn select_left(flag: bool, when_true: own Pair, when_false: own Pair) -> u64
     selected.left
 }
 "#;
-    let error = compile_to_wasm_err("wasm_aggregate_conditional_slot.fe", source);
-    assert!(
-        error.contains("aggregate") || error.contains("unsupported place") || error.contains("R2"),
-        "aggregate/projection slots must remain outside the whole-scalar slot boundary: {error}",
+    let wasm = compile_to_wasm("wasm_aggregate_conditional_slot.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let select_left = instance
+        .get_typed_func::<(i32, i64, i64, i64, i64), i64>(&mut store, "select_left")
+        .expect("closed Pair transport should flatten to four scalar arguments");
+    assert_eq!(
+        select_left.call(&mut store, (1, 11, 12, 21, 22)).unwrap(),
+        11
+    );
+    assert_eq!(
+        select_left.call(&mut store, (0, 11, 12, 21, 22)).unwrap(),
+        21
     );
 }
 

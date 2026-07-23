@@ -1273,7 +1273,11 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                     .map(|field| self.flat_shape_visit(field, active))
                     .collect::<Option<Vec<_>>>()?;
                 active.remove(layout);
-                (!fields.is_empty()).then_some(FlatShape::Struct(fields))
+                // Unit structs contribute zero leaves but remain a valid node in
+                // a closed product tree. This matters for recursively encoded
+                // products such as `Cell<Cell<Nil>>`: rejecting `Nil` here makes
+                // the otherwise scalar-only parent tree fail flattening.
+                Some(FlatShape::Struct(fields))
             }
             // Preserve the previously admitted immediate one-word transport
             // leaves through the existing admissibility SSOT. This accepts only
@@ -1285,19 +1289,30 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         }
     }
 
-    /// The recursively flattened scalar leaves of a struct tree, or `None` for
-    /// scalars, one-word newtypes, arrays/enums, refs, and unsupported leaves.
+    /// The recursively flattened scalar leaves of a nontrivial struct tree, or
+    /// `None` for scalars, the existing direct one-word-newtype path,
+    /// arrays/enums, refs, and unsupported leaves. Unit structs flatten to zero
+    /// leaves, as required for terminal `Nil` products.
     /// This is the INTERFACE-level generalization of the single-scalar-field
     /// newtype scalarization to N fields: a `(Pending<B,T1>, Pending<B,T2>)`
     /// own-tuple param flattens into N wasm params, and a `(u64, u64)` return
-    /// flattens into N wasm results, with one SSA variable per element. It is NOT
-    /// a place/memory model: no element is ever addressed, offset, or stored.
+    /// flattens into N wasm results, with one SSA variable per leaf. A product
+    /// with one scalar leaf plus unit structure (for example `Cell<Nil>`) also
+    /// uses this path; a direct one-field scalar newtype keeps the R3.4b path.
+    /// It is NOT a place/memory model: no element is ever addressed, offset, or
+    /// stored.
     ///
     fn scalar_tuple_element_tys(&self, class: &RuntimeClass<'db>) -> Option<Vec<Type>> {
         let shape = self.flat_shape(class)?;
         let mut leaves = Vec::new();
         shape.leaf_types(&mut leaves);
-        (leaves.len() >= 2).then_some(leaves)
+        let preserves_scalar_newtype_path = matches!(
+            class,
+            RuntimeClass::AggregateValue { layout }
+                if self.single_scalar_field(*layout).is_some()
+        );
+        (matches!(class, RuntimeClass::AggregateValue { .. }) && !preserves_scalar_newtype_path)
+            .then_some(leaves)
     }
 }
 
@@ -1595,6 +1610,33 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     /// else fails closed.
     fn lower_tuple_assign(&mut self, dst: RLocalId, expr: &RExpr<'db>) -> Result<(), LowerError> {
         match expr {
+            RExpr::Placeholder { class } => {
+                let dst_class = self.body.value_class(dst).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "zero-leaf product destination {dst:?} has no runtime class"
+                    ))
+                })?;
+                let dst_vars = self.tuple_vars.get(&dst).ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "zero-leaf product destination {dst:?} has no flattened variables"
+                    ))
+                })?;
+                let placeholder_is_unit_product = self
+                    .module
+                    .scalar_tuple_element_tys(class)
+                    .is_some_and(|leaves| leaves.is_empty());
+                if dst_vars.is_empty()
+                    && placeholder_is_unit_product
+                    && class.shares_runtime_rep_with(self.module.db, dst_class)
+                {
+                    // A closed unit product has no runtime bits to initialize.
+                    return Ok(());
+                }
+                Err(LowerError::Unsupported(format!(
+                    "wasm target (R2.2): non-unit aggregate placeholder for {dst:?} \
+                     cannot be represented as flattened SSA values"
+                )))
+            }
             RExpr::AggregateMake { fields, .. } => {
                 let elem_vars = self.tuple_vars.get(&dst).cloned().ok_or_else(|| {
                     LowerError::Internal(format!("R2.1 tuple dst {dst:?} has no element vars"))
