@@ -1,0 +1,179 @@
+// Semantic Cl(4,1) values built on sparse_multivector_api.fe.
+//
+// Basis blade masks 1,2,4,8,16 are grade-one vectors. Conformal points use all
+// five. The inversion sphere used by the flagship demo has zero e3 and stores
+// only e1,e2,e4,e5, hence four runtime scalars.
+const fn cga_point_support() -> usize {
+    support_grade(blade_set(4294967295, 5), 1).bits.downcast_unchecked()
+}
+const fn cga_inversion_sphere_support() -> usize {
+    blade_set((1 << 1) | (1 << 2) | (1 << 8) | (1 << 16), 5)
+        .bits
+        .downcast_unchecked()
+}
+
+const fn cga_support_size(_ support: usize) -> usize {
+    support_cardinality(blade_set(support.downcast_unchecked(), 5))
+        .downcast_unchecked()
+}
+
+static_assert(cga_support_size(cga_point_support()) == 5)
+static_assert(cga_support_size(cga_inversion_sphere_support()) == 4)
+
+// Runtime aggregate lowering currently needs ground aliases. The conversion
+// proofs below tie these ground spellings back to support-derived Storage<N>.
+type CgaPoint =
+    SparseCell<SparseCell<SparseCell<SparseCell<SparseCell<SparseNil>>>>>
+type CgaInversionSphere =
+    SparseCell<SparseCell<SparseCell<SparseCell<SparseNil>>>>
+
+const fn cga_point_present(_ blade: usize) -> usize {
+    sparse_present(cga_point_support(), blade)
+}
+const fn cga_point_rank(_ blade: usize) -> usize {
+    sparse_rank(cga_point_support(), blade)
+}
+const fn cga_sphere_present(_ blade: usize) -> usize {
+    sparse_present(cga_inversion_sphere_support(), blade)
+}
+const fn cga_sphere_rank(_ blade: usize) -> usize {
+    sparse_rank(cga_inversion_sphere_support(), blade)
+}
+
+struct CgaSphereMissing {}
+trait CgaSphereSelectOut { type Out }
+impl<const Rank: usize> CgaSphereSelectOut for SparseSelect<0, Rank> {
+    type Out = CgaSphereMissing
+}
+impl<const Rank: usize> CgaSphereSelectOut for SparseSelect<1, Rank> {
+    type Out = SparseFound<Rank>
+}
+impl SparseCoefficient<CgaInversionSphere> for CgaSphereMissing {
+    fn read(value: CgaInversionSphere) -> f32 { 0.0 }
+}
+fn cga_sphere_manual_missing_coefficient(value: CgaInversionSphere) -> f32 {
+    // Manual domain accessor. The separate CgaSphereLookup<4,4> witness proves
+    // the blade is absent, but current semantic MIR lowering cannot yet lower
+    // the mechanically linked SparseCoefficient trait call.
+    0.0
+}
+
+// Sound domain selectors count down a staged subject while preserving the
+// requested blade as an invariant parameter. At zero they derive Found/Missing
+// and compact rank directly from the ground support. Out-of-range targets fail
+// closed because sparse_present(Target) is zero.
+recursive type fn CgaPointLookup<
+    const Target: usize,
+    const Countdown: usize,
+>() -> (*) {
+    match Countdown {
+        0 => <SparseSelect<
+            {cga_point_present(Target)},
+            {cga_point_rank(Target)},
+        > as SparseSelectOut>::Out
+        _ => CgaPointLookup<Target, {Countdown - 1}>
+    }
+}
+
+recursive type fn CgaSphereLookup<
+    const Target: usize,
+    const Countdown: usize,
+>() -> (*) {
+    match Countdown {
+        0 => <SparseSelect<
+            {cga_sphere_present(Target)},
+            {cga_sphere_rank(Target)},
+        > as CgaSphereSelectOut>::Out
+        _ => CgaSphereLookup<Target, {Countdown - 1}>
+    }
+}
+
+// Ground executable aliases avoid carrying const expressions into runtime
+// trait selection. Static proofs keep these spellings tied to CTFE rank.
+static_assert(cga_point_rank(4) == 2)
+static_assert(cga_sphere_rank(1) == 0)
+static_assert(cga_sphere_rank(16) == 3)
+type CgaPointE3 = SparseNext<SparseNext<SparseHere>>
+type CgaSphereE1 = SparseHere
+type CgaSphereE5 = SparseNext<SparseNext<SparseNext<SparseHere>>>
+
+fn takes_sphere_missing(_ value: CgaSphereMissing) {}
+fn sphere_e3_lookup_is_missing(value: CgaSphereLookup<4, 4>) {
+    takes_sphere_missing(value)
+}
+
+// Accepted compile-time equality witnesses tie the manual ground aliases to
+// the support-cardinality-derived recursive storage types. These remain
+// type-check-only because aggregate runtime lowering still requires ground
+// aliases.
+fn takes_support_point(
+    _ value: SparseStorage<{cga_support_size(cga_point_support())}>,
+) {}
+fn point_ground_alias_matches_support(value: CgaPoint) {
+    takes_support_point(value)
+}
+fn takes_support_sphere(
+    _ value: SparseStorage<{cga_support_size(cga_inversion_sphere_support())}>,
+) {}
+fn sphere_ground_alias_matches_support(value: CgaInversionSphere) {
+    takes_support_sphere(value)
+}
+
+fn cga_point(x: f32, y: f32, z: f32) -> CgaPoint {
+    let radius2 = x * x + y * y + z * z
+    SparseCell {
+        head: x,
+        tail: SparseCell {
+            head: y,
+            tail: SparseCell {
+                head: z,
+                tail: SparseCell {
+                    head: (radius2 - 1.0) * 0.5,
+                    tail: SparseCell {
+                        head: (radius2 + 1.0) * 0.5,
+                        tail: SparseNil {},
+                    },
+                },
+            },
+        },
+    }
+}
+
+fn cga_inversion_sphere(cx: f32, cy: f32) -> CgaInversionSphere {
+    let center2 = cx * cx + cy * cy
+    SparseCell {
+        head: cx,
+        tail: SparseCell {
+            head: cy,
+            tail: SparseCell {
+                head: center2 * 0.5 - 1.0,
+                tail: SparseCell {
+                    head: center2 * 0.5,
+                    tail: SparseNil {},
+                },
+            },
+        },
+    }
+}
+
+pub fn sparse_cga_semantic_probe(
+    x: f32,
+    y: f32,
+    z: f32,
+    cx: f32,
+    cy: f32,
+) -> f32 {
+    let point = cga_point(x, y, z)
+    let sphere = cga_inversion_sphere(cx, cy)
+    // Present field projections are grounded after the CTFE rank proofs above.
+    // e3 is absent from the sphere and statically selects default zero.
+    point.tail.tail.head
+        + sphere.head
+        + sphere.tail.tail.tail.head
+        + cga_sphere_manual_missing_coefficient(value: sphere)
+}
+
+pub fn sparse_cga_sphere_default_zero(cx: f32, cy: f32) -> f32 {
+    // CgaSphereLookup<4,4> is proven equal to CgaSphereMissing above.
+    cga_sphere_manual_missing_coefficient(value: cga_inversion_sphere(cx, cy))
+}
