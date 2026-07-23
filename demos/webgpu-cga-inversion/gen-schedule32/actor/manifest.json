@@ -10,8 +10,8 @@
     "canonical_adapters": [
       {
         "path": "interface.js",
-        "bytes": 31687,
-        "sha256": "855ddffb5fbc12603fc59039e7d5c93a35cfc39bb457627db8d63dd49ea457ac"
+        "bytes": 36137,
+        "sha256": "a88181b3eda13e0132f47d9c9fce0c3e13538acb179d60c75ede1a8b95a8850f"
       },
       {
         "path": "interface.d.ts",
@@ -97,7 +97,7 @@
   },
   "canonical_interface": {
     "protocol": "fe-canonical-browser-interface",
-    "version": 2,
+    "version": 3,
     "abi": {
       "pointer_width": 32,
       "endianness": "little",
@@ -394,8 +394,8 @@
       },
       {
         "path": "runtime/module-worker-actor.js",
-        "bytes": 6558,
-        "sha256": "99d7f1c7be62cebb0f40f5fe89f80392675e5a20cbf853410e4846d67f4f508e"
+        "bytes": 15709,
+        "sha256": "9995373fe4ce6d4ee6248b73838383f133defe21927c511be661ef4a7bee8ed1"
       }
     ]
   }
