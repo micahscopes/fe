@@ -83,7 +83,6 @@ elif algebra.startswith("canonical CTFE-derived Schedule<32>;"):
     ]
 elif provider_algebra:
     tokens = [
-        "recursive type fn SparsePlan",
         "type Schedule32 =",
         "SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",
         "struct CanonicalCgaProvider",
@@ -98,6 +97,18 @@ else:
 for token in tokens:
     assert token in kernel, f"generated kernel lacks runtime-center cyclide token {token!r}"
 if provider_algebra:
+    app_manifest = GEN / "app" / "fe.toml"
+    app_source = GEN / "app" / "src" / "lib.fe"
+    assert app_manifest.is_file() and app_source.is_file()
+    assert 'sparse_clifford = { path = "../../../../ingots/sparse_clifford" }' in (
+        app_manifest.read_text()
+    )
+    assert app_source.read_text().startswith("use sparse_clifford::{")
+    sparse_dependency = HERE.parents[1] / "ingots" / "sparse_clifford" / "src" / "lib.fe"
+    assert "pub recursive type fn SparsePlan" in sparse_dependency.read_text()
+    assert "recursive type fn SparsePlan" not in kernel
+    assert layout["source_model"] == "application ingot with sparse_clifford path dependency"
+    assert layout["kernel_source"].endswith("(dependency-backed; not standalone)")
     assert "trait Eval5" not in kernel
     assert "ScheduleChunk" not in kernel
 wgsl = (GEN / "frag.wgsl").read_text()
