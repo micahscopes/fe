@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Trunk-like entry point for the compiler-owned Fe browser bundle.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "$#" -eq 0 ]; then
+  echo "usage: $0 {build|serve} FE_WEB_ARG [FE_WEB_ARG ...]" >&2
+  exit 2
+fi
+case "$1" in
+  build|serve) ;;
+  *)
+    echo "expected 'build' or 'serve', got '$1'" >&2
+    exit 2
+    ;;
+esac
+
+exec "$here/with-browser-cargo.sh" run --quiet -p fe --features web-server -- web "$@"

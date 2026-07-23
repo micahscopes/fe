@@ -85,10 +85,33 @@ module-Worker, and GPU-actor surface. Their device handlers and application
 lifecycle code remain explicit and demo-owned; this gate does not claim that Fe
 code directly owns or invokes the browser's WebGPU device.
 
-For a new single-source application that consumes the standard `WebBundle`
-contract, use the compiler directly:
+For a single-source application that consumes the standard `WebBundle`
+contract, the temporary one-command entry point is:
 
 ```sh
-fe web serve path/to/kernel.fe --entry kernel --mode render \
+demos/fe-web serve path/to/kernel.fe --entry kernel --mode render \
   --root path/to/static-app
 ```
+
+Use `build ... --out path/to/bundle` for an atomic on-disk bundle. The command
+is the real `fe web build|serve` CLI; `demos/with-browser-cargo.sh` only supplies
+the checksum-verified, clean Sonatina `ac266c21` overlay that the unpublished
+workspace dependency cannot yet fetch. It owns the six Cargo path patches,
+workspace-local temporary/target directories, generation lock, inherited
+`RUSTC_WRAPPER` removal, and byte-for-byte `Cargo.lock` restoration. A wrong or
+dirty `SONATINA_DIR` fails closed.
+
+Canonical lanes remain explicit and inspectable rather than name-inferred:
+
+```sh
+demos/fe-web build path/to/kernel.fe --entry render_kernel --mode render \
+  --canonical required --canonical-entry render --canonical-entry verify \
+  --canonical-entry oracle --out path/to/bundle
+```
+
+This standard bundle contains compiler-derived Wasm, WGSL, manifest,
+interfaces, and actor runtime modules. The Schedule32 generator remains
+necessary for source composition, its independently executed Rust oracle,
+typed-plan witness/provenance, and separate entry-rooted Wasm proof. Publishing
+and repinning the backend removes the wrapper; it does not erase those
+application-specific evidence jobs.
