@@ -604,7 +604,14 @@ impl<'db> Checker<'db> {
     ) -> bool {
         match body.exprs(self.db)[expr].clone().to_opt() {
             Some(Expr::Lit(LitKind::Int(_))) => true,
-            Some(Expr::Path(Partial::Present(path))) => path.as_ident(self.db) == Some(subject),
+            Some(Expr::Path(Partial::Present(path))) => path
+                .as_ident(self.db)
+                .is_some_and(|ident| {
+                    ident == subject
+                        || self.forwarded_params.iter().any(|param| {
+                            matches!(param, ForwardedParam::Const(Some(name)) if *name == ident)
+                        })
+                }),
             Some(Expr::Bin(lhs, rhs, BinOp::Arith(op)))
                 if expr_is_ident(self.db, body, lhs, subject) =>
             {
@@ -1975,6 +1982,28 @@ recursive type fn Bad<const N: usize>() -> (*) {{
             );
             assert_bad(&src, |e| matches!(e, TypeFnWfError::DisallowedArmConstArg));
         }
+    }
+
+    #[test]
+    fn accepts_forwarded_invariant_consts_as_staged_payload_args() {
+        assert_good(
+            r#"
+struct Zero {}
+struct Term<const I: usize, T> {}
+const fn payload(_ want: usize, _ offset: usize, _ n: usize) -> usize {
+    want + offset + n
+}
+recursive type fn Good<
+    const Want: usize, const Offset: usize, const N: usize,
+>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Term<{payload(Want, Offset, N)}, Good<Want, Offset, {N - 1}>>
+    }
+}
+"#,
+            "Good",
+        );
     }
 
     /// Hole 2 (Fable steering finding 2): a foreign type-fn reference reached via
