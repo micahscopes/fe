@@ -73,6 +73,7 @@ pub fn compile_runtime_package_spirv_with_workgroup(
     // (compute shaders have no wasm-style imports), so it is discarded here.
     let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
     inline_spirv_calls(&mut module);
+    ensure_spirv_entry_call_free(&module)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -120,6 +121,7 @@ pub fn compile_runtime_package_spirv_grid(
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
     let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
     inline_spirv_calls(&mut module);
+    ensure_spirv_entry_call_free(&module)?;
 
     SpirvBackend::new()
         .with_workgroup_size(workgroup_size[0], workgroup_size[1], workgroup_size[2])
@@ -175,6 +177,7 @@ pub fn compile_runtime_package_spirv_render(
     // REUSE the wasm-path Module (see `compile_runtime_package_spirv_with_workgroup`).
     let (mut module, _import_modules) = compile_runtime_package_wasm(db, package)?;
     inline_spirv_calls(&mut module);
+    ensure_spirv_entry_call_free(&module)?;
 
     SpirvBackend::new()
         .with_render()
@@ -199,12 +202,13 @@ fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
     let mut pipeline = Pipeline::new();
     pipeline.inliner_config = InlinerConfig {
         enable_full_inliner: true,
-        // Ordinary hints remain subject to hard, target-local growth caps.
-        // `inline(always)` intentionally overrides these cost caps in Sonatina,
-        // but its recursive-SCC generation guard still prevents unbounded
-        // recursive expansion.
+        // Auto calls are subject to target-local block/instruction and growth
+        // caps. `inline` may bypass the local-size cap but still obeys growth
+        // and depth limits. `inline(always)` intentionally overrides cost caps
+        // in Sonatina, while its recursive-SCC generation guard still prevents
+        // unbounded recursive expansion.
         max_inlinee_blocks: 64,
-        max_inlinee_insts: 4096,
+        max_inlinee_insts: 4_096,
         max_growth_per_caller: 65_536,
         max_total_growth: 262_144,
         max_inline_depth: 64,
@@ -229,4 +233,37 @@ fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
         Pass::CfgCleanup,
     ]));
     pipeline.run(module);
+}
+
+fn ensure_spirv_entry_call_free(module: &sonatina_ir::Module) -> Result<(), LowerError> {
+    let Some(&entry) = module.funcs().first() else {
+        return Err(LowerError::Spirv(
+            "SPIR-V module has no entry function".to_string(),
+        ));
+    };
+    let entry_name = module
+        .ctx
+        .get_sig(entry)
+        .map(|signature| signature.name().to_string())
+        .unwrap_or_else(|| format!("{entry:?}"));
+    let residual = module.func_store.view(entry, |function| {
+        function.layout.iter_block().find_map(|block| {
+            function.layout.iter_inst(block).find_map(|inst| {
+                let call = function.dfg.call_info(inst)?;
+                let callee = call.callee();
+                let callee_name = module
+                    .ctx
+                    .get_sig(callee)
+                    .map(|signature| signature.name().to_string())
+                    .unwrap_or_else(|| format!("{callee:?}"));
+                Some(callee_name)
+            })
+        })
+    });
+    match residual {
+        Some(callee) => Err(LowerError::Spirv(format!(
+            "SPIR-V entry `{entry_name}` is not call-free after bounded inlining; residual call to `{callee}`"
+        ))),
+        None => Ok(()),
+    }
 }
