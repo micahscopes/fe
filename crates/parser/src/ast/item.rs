@@ -1220,6 +1220,14 @@ mod tests {
         let t: TypeAlias = parse_item(source);
         assert_eq!(t.alias().unwrap().text(), "MyError");
         assert!(matches!(t.ty().unwrap().kind(), TypeKind::Path(_)));
+
+        let source = r#"
+                type Multiline =
+                    Error<String>
+            "#;
+        let t: TypeAlias = parse_item(source);
+        assert_eq!(t.alias().unwrap().text(), "Multiline");
+        assert!(matches!(t.ty().unwrap().kind(), TypeKind::Path(_)));
     }
 
     #[test]

@@ -51,11 +51,10 @@ impl<const Rank: usize> CgaSphereSelectOut for SparseSelect<1, Rank> {
 impl SparseCoefficient<CgaInversionSphere> for CgaSphereMissing {
     fn read(value: CgaInversionSphere) -> f32 { 0.0 }
 }
-fn cga_sphere_manual_missing_coefficient(value: CgaInversionSphere) -> f32 {
-    // Manual domain accessor. The separate CgaSphereLookup<4,4> witness proves
-    // the blade is absent, but current semantic MIR lowering cannot yet lower
-    // the mechanically linked SparseCoefficient trait call.
-    0.0
+fn cga_sphere_missing_coefficient(value: CgaInversionSphere) -> f32 {
+    <CgaSphereMissing as SparseCoefficient<CgaInversionSphere>>::read(
+        value: value,
+    )
 }
 
 // Sound domain selectors count down a staged subject while preserving the
@@ -170,10 +169,10 @@ pub fn sparse_cga_semantic_probe(
     point.tail.tail.head
         + sphere.head
         + sphere.tail.tail.tail.head
-        + cga_sphere_manual_missing_coefficient(value: sphere)
+        + cga_sphere_missing_coefficient(value: sphere)
 }
 
 pub fn sparse_cga_sphere_default_zero(cx: f32, cy: f32) -> f32 {
     // CgaSphereLookup<4,4> is proven equal to CgaSphereMissing above.
-    cga_sphere_manual_missing_coefficient(value: cga_inversion_sphere(cx, cy))
+    cga_sphere_missing_coefficient(value: cga_inversion_sphere(cx, cy))
 }

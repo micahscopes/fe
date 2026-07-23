@@ -1103,6 +1103,7 @@ impl super::Parse for TypeAliasScope {
 
         if parser.find_and_pop(SyntaxKind::Eq, ExpectedKind::Unspecified)? {
             parser.bump();
+            parser.bump_continuation_newlines();
             parse_type(parser, None)?;
         }
         Ok(())
