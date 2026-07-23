@@ -630,9 +630,31 @@ export function createCanonicalHostEffectAdapter(
   options = {},
 ) {
   const adapter = compileCanonicalActorAdapter(manifest, compiled);
-  const placement = canonicalRuntimePlacement(options);
   if (!handlers || typeof handlers !== "object" || Array.isArray(handlers)) {
     throw new TypeError("canonical host-effect handlers must be an object");
+  }
+  const handlerLanes = Object.keys(handlers);
+  for (const lane of handlerLanes) {
+    if (adapter.intents[lane]?.execution !== "host_effect") {
+      throw new TypeError(`unknown canonical host-effect lane ${lane}`);
+    }
+  }
+  const declaredPlacements = new Set(
+    handlerLanes.map((lane) => adapter.intents[lane].placement),
+  );
+  let placement;
+  if (options?.placement !== undefined) {
+    placement = canonicalRuntimePlacement(options);
+    if ([...declaredPlacements].some((declared) => declared !== placement)) {
+      throw new TypeError("canonical host-effect handlers disagree with explicit placement");
+    }
+  } else {
+    if (declaredPlacements.size !== 1) {
+      throw new TypeError(
+        "canonical host-effect handlers must declare one shared placement",
+      );
+    }
+    [placement] = declaredPlacements;
   }
   const selected = Object.create(null);
   const hostLanes = Object.entries(adapter.intents)
@@ -640,9 +662,6 @@ export function createCanonicalHostEffectAdapter(
       && intent.placement === placement)
     .map(([lane]) => lane);
   for (const [lane, handler] of Object.entries(handlers)) {
-    if (!hostLanes.includes(lane)) {
-      throw new TypeError(`unknown canonical host-effect lane ${lane}`);
-    }
     if (typeof handler !== "function") {
       throw new TypeError(`canonical host-effect handler ${lane} must be a function`);
     }

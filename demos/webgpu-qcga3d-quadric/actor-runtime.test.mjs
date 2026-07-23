@@ -19,8 +19,13 @@ assert.doesNotMatch(
 );
 assert.match(
   workerSource,
-  /createHostEffectAdapter\([\s\S]*\{ placement: "main_thread" \}\)/,
-  "the Worker proxy must select the handlers' main-thread intent explicitly",
+  /createHostEffectAdapter\(\{[\s\S]*render:[\s\S]*verify:/,
+  "the Worker proxy must supply the exact generated host-effect lane set",
+);
+assert.doesNotMatch(
+  workerSource,
+  /placement: "main_thread"/,
+  "the Worker proxy must not restate Fe-declared placement",
 );
 
 const wasm = new Uint8Array(await readFile(

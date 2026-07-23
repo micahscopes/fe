@@ -274,7 +274,7 @@ assert.throws(
 );
 assert.throws(
   () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, {}),
-  /missing canonical host-effect handlers: echo/,
+  /host-effect handlers must declare one shared placement/,
 );
 assert.throws(
   () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, { missing() {} }),
@@ -318,6 +318,26 @@ const wrongPlacementEffects = createCanonicalHostEffectAdapter(
     gpu_submit: async (request) => new Uint8Array([request.tag]),
   },
   { placement: "worker" },
+);
+assert.throws(
+  () => createCanonicalHostEffectAdapter(
+    hostManifest,
+    hostCompiled,
+    {
+      echo() {},
+      gpu_submit() {},
+    },
+  ),
+  /host-effect handlers must declare one shared placement/,
+);
+assert.throws(
+  () => createCanonicalHostEffectAdapter(
+    hostManifest,
+    hostCompiled,
+    { echo() {} },
+    { placement: "worker" },
+  ),
+  /host-effect handlers disagree with explicit placement/,
 );
 await assert.rejects(
   wrongPlacementEffects.dispatch({ lane: "echo", payload: hostRequest(1) }),

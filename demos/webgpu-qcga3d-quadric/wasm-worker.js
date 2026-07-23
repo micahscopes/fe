@@ -26,7 +26,7 @@ self.addEventListener("message", async ({ data }) => {
     const hostEffects = createHostEffectAdapter({
       render: (request) => gpu.request("render", request, request.generation),
       verify: (request) => gpu.request("verify", request, request.generation),
-    }, { placement: "main_thread" });
+    });
     // Placement is explicit application policy, while the complete lane set is
     // compiler-derived. Initialization fails if a newly generated Fe lane is
     // unowned or multiply owned; runtime dispatch has no fallback actor.
