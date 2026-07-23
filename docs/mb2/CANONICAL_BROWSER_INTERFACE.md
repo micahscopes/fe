@@ -18,16 +18,61 @@ envelopes remain transport framing, separate from the canonical payload ABI.
 Protocol v3 adds correlated `cancel` messages and propagates an `AbortSignal`
 into Worker and WebGPU host dispatch.
 
-The remaining boundary is deliberately narrower than the Component Model:
-canonical version 1 supports fixed-layout records, scalar leaves, owned bytes,
-and UTF-8 strings. General lists, variants, resources, futures, streams, and
-shared-memory zero-copy remain later work.
+The remaining boundary is deliberately narrower than the Component Model.
+Versions 1–2 established fixed-layout records, scalar leaves, owned bytes, and
+UTF-8 strings. Version 3 adds the bounded host-effect variant family below.
+General lists, Wasm enum values, resources, futures, streams, and shared-memory
+zero-copy remain later work.
 
 ## Protocol
 
 Protocol name: `fe-canonical-browser-interface`
 
-Version: `1`
+## Version 3: bounded tagged variants
+
+Version 3 adds compiler-derived enum metadata for actor and host-effect
+messages. It intentionally does not claim general serde or a Wasm component
+model.
+
+Only unit variants and record variants with named fields are admitted. Tuple
+variants fail closed so the wire API never invents positional JavaScript field
+names. Variant names are deterministically converted from Fe `UpperCamelCase`
+to lowercase snake case. The JavaScript and generated TypeScript value is a
+discriminated object:
+
+```ts
+{ readonly tag: "empty" }
+| { readonly tag: "data"; code: number; payload: Uint8Array }
+```
+
+The wasm32 wire envelope is pinned even though Wasm lanes cannot consume it
+yet:
+
+- a little-endian `u32` tag at offset 0;
+- tags are dense declaration-order indices starting at zero;
+- each case payload starts after the tag and follows the existing canonical
+  field alignment rules;
+- all case payloads overlay one union region;
+- union alignment is `max(4, field alignments)` and size is the aligned maximum
+  case end;
+- encoders zero the complete inactive payload region;
+- unknown tags, non-dense manifests, bad offsets, invalid nested descriptors,
+  unexpected fields, and non-owned byte transfers fail closed.
+
+Bytes nested in the active case retain the v2 ownership rule: codecs copy them,
+and actor transfer is zero-copy only for an owned full-span `Uint8Array`.
+Strings remain copied UTF-8 values. The one-call arena still resets in
+`finally`; every decoded descriptor is copied before reset.
+
+The current wasm32 lowering represents an enum parameter as an enum runtime
+class, while its function ABI lowering supports scalars and selected scalar
+newtypes only. Flattening a union envelope in the wrapper would therefore not
+match the selected Fe function signature. Version 3 rejects variants on Wasm
+lanes with this explicit reason. Tagged variants are currently usable for
+compiler-derived actor/host-effect schemas; completing Wasm support requires
+enum runtime-class lowering, not another JavaScript convention.
+
+Version: `3`
 
 Each canonical lane has one uniform exported signature:
 
@@ -54,8 +99,8 @@ Milestone 1 supports:
 - UTF-8 strings represented by the same physical descriptor and distinct
   nominal interface metadata.
 
-Lists, options, enums, resources, futures, and streams are not part of version
-1.
+Lists, Wasm options/enums, resources, futures, and streams are not part of
+version 3.
 
 ## Arena and lifetime
 

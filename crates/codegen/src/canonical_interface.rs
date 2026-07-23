@@ -15,14 +15,14 @@ use hir::{
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
-    hir_def::{FieldParent, TopLevelMod},
+    hir_def::{EnumVariant, FieldParent, TopLevelMod, VariantKind},
     semantic::EffectRequirementKey,
 };
 use serde::{Deserialize, Serialize};
 use wasmparser::{CompositeInnerType, ExternalKind, Payload, TypeRef, ValType};
 
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
-pub const CANONICAL_INTERFACE_VERSION: u32 = 2;
+pub const CANONICAL_INTERFACE_VERSION: u32 = 3;
 
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 4096;
@@ -39,6 +39,7 @@ pub enum CanonicalType {
     Bytes,
     String,
     Record(Vec<CanonicalField>),
+    Variant(Vec<CanonicalVariant>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,12 @@ impl CanonicalField {
             ty,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalVariant {
+    pub name: String,
+    pub fields: Vec<CanonicalField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +178,10 @@ pub enum CanonicalShape {
     Record {
         fields: Vec<CanonicalFieldLayout>,
     },
+    Variant {
+        tag_offset: u32,
+        variants: Vec<CanonicalVariantLayout>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +189,13 @@ pub struct CanonicalFieldLayout {
     pub name: String,
     pub offset: u32,
     pub layout: CanonicalLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalVariantLayout {
+    pub name: String,
+    pub tag: u32,
+    pub fields: Vec<CanonicalFieldLayout>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +225,15 @@ impl CanonicalInterfaceManifest {
             {
                 return Err(error(format!(
                     "canonical Wasm lane `{}` requires an export",
+                    declaration.name
+                )));
+            }
+            if declaration.intent.execution == CanonicalExecution::Wasm
+                && (contains_variant(&declaration.request)
+                    || contains_variant(&declaration.response))
+            {
+                return Err(error(format!(
+                    "canonical Wasm lane `{}` cannot use variants until enum runtime classes are lowered by the wasm32 backend",
                     declaration.name
                 )));
             }
@@ -322,7 +349,10 @@ pub fn canonical_lane_decl_from_entry<'db>(
     let is_message = |ty: &CanonicalType| {
         matches!(
             ty,
-            CanonicalType::Record(_) | CanonicalType::Bytes | CanonicalType::String
+            CanonicalType::Record(_)
+                | CanonicalType::Variant(_)
+                | CanonicalType::Bytes
+                | CanonicalType::String
         )
     };
     if !is_message(&request) || !is_message(&response) {
@@ -449,18 +479,72 @@ pub fn canonical_type_from_semantic<'db>(
         )));
     };
     let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
-        return Err(error(format!(
-            "{path}: canonical enums and non-record ADTs are not supported"
-        )));
+        let AdtRef::Enum(enum_) = adt.adt_ref(db) else {
+            return Err(error(format!("{path}: unsupported canonical ADT")));
+        };
+        let args = ty.generic_args(db);
+        let mut variants = Vec::new();
+        for (tag, variant) in enum_.variants(db).enumerate() {
+            let name = variant
+                .name(db)
+                .map(|name| canonical_variant_name(name.data(db)))
+                .ok_or_else(|| error(format!("{path}: unnamed enum variant is unsupported")))?;
+            validate_name(&name, "variant")?;
+            let field_tys = variant
+                .field_tys(db)
+                .into_iter()
+                .map(|field| field.instantiate(db, args))
+                .collect::<Vec<_>>();
+            let fields = match variant.kind(db) {
+                VariantKind::Unit => Vec::new(),
+                VariantKind::Tuple(_) => {
+                    return Err(error(format!(
+                        "{path}.{name}: tuple variants are not canonical; use a record variant with named fields"
+                    )));
+                }
+                VariantKind::Record(_) => {
+                    let field_views = FieldParent::Variant(EnumVariant::new(enum_, variant.idx))
+                        .fields(db)
+                        .collect::<Vec<_>>();
+                    if field_views.len() != field_tys.len() {
+                        return Err(error(format!(
+                            "{path}.{name}: semantic variant field metadata is inconsistent"
+                        )));
+                    }
+                    field_views
+                        .into_iter()
+                        .zip(field_tys)
+                        .map(|(field, field_ty)| {
+                            let field_name = field
+                                .name(db)
+                                .map(|name| name.data(db).to_string())
+                                .ok_or_else(|| {
+                                error(format!(
+                                    "{path}.{name}: unnamed variant field is unsupported"
+                                ))
+                            })?;
+                            Ok(CanonicalField::new(
+                                field_name.clone(),
+                                canonical_type_from_semantic(
+                                    db,
+                                    field_ty,
+                                    &format!("{path}.{name}.{field_name}"),
+                                )?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, CanonicalInterfaceError>>()?
+                }
+            };
+            let _ = tag;
+            variants.push(CanonicalVariant { name, fields });
+        }
+        return Ok(CanonicalType::Variant(variants));
     };
     // Descriptor semantics are attached to the exact compiler-owned core ADTs,
     // never to a source name or a structurally similar user record.
     let descriptor = [
         ("core::browser::BrowserBytes", CanonicalType::Bytes),
-        (
-            "core::browser::AllocatedBrowserBytes",
-            CanonicalType::Bytes,
-        ),
+        ("core::browser::AllocatedBrowserBytes", CanonicalType::Bytes),
         ("core::browser::BrowserString", CanonicalType::String),
     ]
     .into_iter()
@@ -717,7 +801,112 @@ fn layout_type(
                 shape: CanonicalShape::Record { fields: layouts },
             }
         }
+        CanonicalType::Variant(variants) => {
+            if variants.is_empty() {
+                return Err(error(format!("{path} variant must have at least one case")));
+            }
+            let mut names = BTreeSet::new();
+            let mut variant_layouts = Vec::with_capacity(variants.len());
+            let mut overall_align = 4u32;
+            let mut overall_size = 4u32;
+            for (tag, variant) in variants.iter().enumerate() {
+                *nodes = nodes
+                    .checked_add(1)
+                    .ok_or_else(|| error("canonical type node count overflow"))?;
+                if *nodes > MAX_NODES {
+                    return Err(error(format!(
+                        "{path} exceeds maximum type node count {MAX_NODES}"
+                    )));
+                }
+                validate_name(&variant.name, "variant")?;
+                if !names.insert(variant.name.clone()) {
+                    return Err(error(format!(
+                        "{path} has duplicate variant `{}`",
+                        variant.name
+                    )));
+                }
+                let mut field_names = BTreeSet::new();
+                let mut offset = 4u32;
+                let mut fields = Vec::with_capacity(variant.fields.len());
+                for field in &variant.fields {
+                    validate_name(&field.name, "field")?;
+                    if field.name == "tag" {
+                        return Err(error(format!(
+                            "{path}.{} reserves field name `tag`",
+                            variant.name
+                        )));
+                    }
+                    if !field_names.insert(field.name.clone()) {
+                        return Err(error(format!(
+                            "{path}.{} has duplicate field `{}`",
+                            variant.name, field.name
+                        )));
+                    }
+                    let field_path = format!("{path}.{}.{}", variant.name, field.name);
+                    let layout = layout_type(&field.ty, depth + 1, nodes, &field_path)?;
+                    offset = align_up(offset, layout.align, &field_path)?;
+                    let field_offset = offset;
+                    offset = offset.checked_add(layout.size).ok_or_else(|| {
+                        error(format!(
+                            "{field_path} makes canonical variant size overflow u32"
+                        ))
+                    })?;
+                    overall_align = overall_align.max(layout.align);
+                    fields.push(CanonicalFieldLayout {
+                        name: field.name.clone(),
+                        offset: field_offset,
+                        layout,
+                    });
+                }
+                overall_size = overall_size.max(offset);
+                variant_layouts.push(CanonicalVariantLayout {
+                    name: variant.name.clone(),
+                    tag: u32::try_from(tag)
+                        .map_err(|_| error(format!("{path} has too many variants")))?,
+                    fields,
+                });
+            }
+            CanonicalLayout {
+                size: align_up(overall_size, overall_align, path)?,
+                align: overall_align,
+                shape: CanonicalShape::Variant {
+                    tag_offset: 0,
+                    variants: variant_layouts,
+                },
+            }
+        }
     })
+}
+
+fn canonical_variant_name(name: &str) -> String {
+    let mut output = String::new();
+    for (index, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if index > 0 {
+                output.push('_');
+            }
+            output.push(character.to_ascii_lowercase());
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn contains_variant(ty: &CanonicalType) -> bool {
+    match ty {
+        CanonicalType::Variant(_) => true,
+        CanonicalType::Record(fields) => fields.iter().any(|field| contains_variant(&field.ty)),
+        CanonicalType::Bool
+        | CanonicalType::U8
+        | CanonicalType::I32
+        | CanonicalType::U32
+        | CanonicalType::I64
+        | CanonicalType::U64
+        | CanonicalType::F32
+        | CanonicalType::Bytes
+        | CanonicalType::String => false,
+    }
 }
 
 fn align_up(value: u32, align: u32, path: &str) -> Result<u32, CanonicalInterfaceError> {
@@ -1001,6 +1190,119 @@ mod tests {
         }
     }
 
+    #[test]
+    fn variants_have_a_pinned_tagged_union_layout_and_wasm_fails_closed() {
+        let message = CanonicalType::Variant(vec![
+            CanonicalVariant {
+                name: "none".to_owned(),
+                fields: vec![],
+            },
+            CanonicalVariant {
+                name: "data".to_owned(),
+                fields: vec![
+                    CanonicalField::new("code", CanonicalType::U8),
+                    CanonicalField::new("sequence", CanonicalType::U64),
+                    CanonicalField::new("payload", CanonicalType::Bytes),
+                ],
+            },
+        ]);
+        let host = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
+            name: "deliver".to_owned(),
+            export: None,
+            request: message.clone(),
+            response: CanonicalType::Record(vec![CanonicalField::new(
+                "accepted",
+                CanonicalType::Bool,
+            )]),
+            intent: CanonicalLaneIntent {
+                execution: CanonicalExecution::HostEffect,
+                placement: CanonicalPlacement::Worker,
+                capabilities: vec![],
+            },
+        }])
+        .unwrap();
+        assert_eq!(
+            (host.lanes[0].request.size, host.lanes[0].request.align),
+            (24, 8)
+        );
+        let CanonicalShape::Variant {
+            tag_offset,
+            variants,
+        } = &host.lanes[0].request.shape
+        else {
+            panic!("tagged variant")
+        };
+        assert_eq!(*tag_offset, 0);
+        assert_eq!(variants[0].tag, 0);
+        assert_eq!(variants[1].tag, 1);
+        assert_eq!(
+            variants[1]
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.offset))
+                .collect::<Vec<_>>(),
+            [("code", 4), ("sequence", 8), ("payload", 16)]
+        );
+
+        let error = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
+            name: "deliver".to_owned(),
+            export: Some("fe_cabi_deliver".to_owned()),
+            request: message,
+            response: CanonicalType::U32,
+            intent: CanonicalLaneIntent::default(),
+        }])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("enum runtime classes"), "{error}");
+    }
+
+    #[test]
+    fn semantic_record_variants_are_derived_but_tuple_variants_are_rejected() {
+        let declaration = semantic_lane(
+            r#"
+enum Message {
+    Empty,
+    Data { code: u8, payload: u32 },
+}
+struct Response { accepted: bool }
+pub fn update(request: Message) -> Response {
+    Response { accepted: true }
+}
+"#,
+            "update",
+        )
+        .unwrap();
+        let CanonicalType::Variant(variants) = declaration.request else {
+            panic!("semantic variant")
+        };
+        assert_eq!(variants[0].name, "empty");
+        assert_eq!(variants[1].name, "data");
+        assert_eq!(
+            variants[1]
+                .fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["code", "payload"]
+        );
+
+        let error = semantic_lane(
+            r#"
+enum Message { Empty, Data(u32) }
+struct Response { accepted: bool }
+pub fn update(request: Message) -> Response {
+    Response { accepted: true }
+}
+"#,
+            "update",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("tuple variants are not canonical"),
+            "{error}"
+        );
+    }
+
     fn semantic_lane(source: &str, entry: &str) -> Result<CanonicalLaneDecl, String> {
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///canonical_semantic.fe").unwrap();
@@ -1076,7 +1378,7 @@ pub fn update(request: Request) -> Response
             }
         );
         let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
-        assert_eq!(manifest.version, 2);
+        assert_eq!(manifest.version, CANONICAL_INTERFACE_VERSION);
         assert_eq!(manifest.lanes[0].export, None);
     }
 

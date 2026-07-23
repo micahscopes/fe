@@ -777,6 +777,26 @@ fn canonical_interface_declarations(
                     .join("\n");
                 format!("{{\n{fields}\n{padding}}}")
             }
+            crate::CanonicalShape::Variant { variants, .. } => variants
+                .iter()
+                .map(|variant| {
+                    let padding = " ".repeat(indent);
+                    let field_padding = " ".repeat(indent + 2);
+                    let mut fields = vec![format!(
+                        "{field_padding}readonly tag: {:?};",
+                        variant.name
+                    )];
+                    fields.extend(variant.fields.iter().map(|field| {
+                        format!(
+                            "{field_padding}{}: {};",
+                            field.name,
+                            ty(&field.layout, indent + 2)
+                        )
+                    }));
+                    format!("{{\n{}\n{padding}}}", fields.join("\n"))
+                })
+                .collect::<Vec<_>>()
+                .join(" | "),
         }
     }
 
@@ -1658,5 +1678,44 @@ pub fn shade(x: u32, y: u32) -> u32 {
             "runtime/unknown.js".to_owned();
         let error = bundle.materialized_files().unwrap_err().to_string();
         assert!(error.contains("unsupported browser runtime artifact"), "{error}");
+    }
+
+    #[test]
+    fn declarations_emit_discriminated_tagged_variant_types() {
+        let manifest = CanonicalInterfaceManifest::build(vec![crate::CanonicalLaneDecl {
+            name: "deliver".to_owned(),
+            export: None,
+            request: crate::CanonicalType::Variant(vec![
+                crate::CanonicalVariant {
+                    name: "empty".to_owned(),
+                    fields: vec![],
+                },
+                crate::CanonicalVariant {
+                    name: "data".to_owned(),
+                    fields: vec![
+                        crate::CanonicalField::new("code", crate::CanonicalType::U8),
+                        crate::CanonicalField::new(
+                            "payload",
+                            crate::CanonicalType::Bytes,
+                        ),
+                    ],
+                },
+            ]),
+            response: crate::CanonicalType::Record(vec![crate::CanonicalField::new(
+                "accepted",
+                crate::CanonicalType::Bool,
+            )]),
+            intent: crate::CanonicalLaneIntent {
+                execution: crate::CanonicalExecution::HostEffect,
+                placement: crate::CanonicalPlacement::Worker,
+                capabilities: vec![],
+            },
+        }])
+        .unwrap();
+        let declarations = canonical_interface_declarations(&manifest).unwrap();
+        assert!(declarations.contains("readonly tag: \"empty\";"));
+        assert!(declarations.contains("readonly tag: \"data\";"));
+        assert!(declarations.contains("payload: Uint8Array;"));
+        assert!(declarations.contains("export type DeliverRequest"));
     }
 }

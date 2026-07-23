@@ -18,7 +18,7 @@ pub use canonical_interface::{
     CanonicalField, CanonicalFieldLayout, CanonicalInterfaceError, CanonicalInterfaceManifest,
     CanonicalCapability, CanonicalCapabilityRequirement, CanonicalExecution, CanonicalLane,
     CanonicalLaneDecl, CanonicalLaneIntent, CanonicalLayout, CanonicalPlacement, CanonicalShape,
-    CanonicalType,
+    CanonicalType, CanonicalVariant, CanonicalVariantLayout,
     canonical_lane_decl_from_entry, canonical_type_from_semantic, verify_canonical_wasm_abi,
 };
 pub use dispatch::DispatchKind;

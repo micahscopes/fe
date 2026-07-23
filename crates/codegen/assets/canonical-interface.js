@@ -1,5 +1,5 @@
 export const CANONICAL_INTERFACE_PROTOCOL = "fe-canonical-browser-interface";
-export const CANONICAL_INTERFACE_VERSION = 2;
+export const CANONICAL_INTERFACE_VERSION = 3;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -88,6 +88,59 @@ function validateLayout(layout, path, depth = 0, state = { nodes: 0 }) {
     if (layout.size !== 8 || layout.align !== 4 || layout.encoding !== "utf-8"
         || layout.pointer_offset !== 0 || layout.length_offset !== 4) {
       throw new TypeError(`${path} has non-canonical string descriptor`);
+    }
+    return layout;
+  }
+  if (layout.kind === "variant") {
+    exactKeys(layout, [...baseKeys, "tag_offset", "variants"], path);
+    if (layout.tag_offset !== 0 || layout.align < 4 || layout.size < 4
+        || !Number.isSafeInteger(layout.size) || !Number.isSafeInteger(layout.align)
+        || (layout.align & (layout.align - 1)) !== 0
+        || layout.size % layout.align !== 0) {
+      throw new TypeError(`${path} has non-canonical variant envelope`);
+    }
+    if (!Array.isArray(layout.variants) || layout.variants.length === 0) {
+      throw new TypeError(`${path}.variants must be a non-empty array`);
+    }
+    const names = new Set();
+    let variantAlign = 4;
+    let variantSize = 4;
+    for (let index = 0; index < layout.variants.length; index += 1) {
+      state.nodes += 1;
+      if (state.nodes > 4096) {
+        throw new TypeError(`${path} exceeds maximum type node count`);
+      }
+      const variant = layout.variants[index];
+      const variantPath = `${path}.variants[${index}]`;
+      exactKeys(variant, ["fields", "name", "tag"], variantPath);
+      validateName(variant.name, `${variantPath}.name`);
+      if (names.has(variant.name)) throw new TypeError(`${path} has duplicate variant ${variant.name}`);
+      names.add(variant.name);
+      if (variant.tag !== index) throw new TypeError(`${variantPath}.tag is non-canonical`);
+      if (!Array.isArray(variant.fields)) throw new TypeError(`${variantPath}.fields must be an array`);
+      const fieldNames = new Set();
+      let offset = 4;
+      for (let fieldIndex = 0; fieldIndex < variant.fields.length; fieldIndex += 1) {
+        const field = variant.fields[fieldIndex];
+        const fieldPath = `${variantPath}.fields[${fieldIndex}]`;
+        exactKeys(field, ["layout", "name", "offset"], fieldPath);
+        validateName(field.name, `${fieldPath}.name`);
+        if (field.name === "tag" || fieldNames.has(field.name)) {
+          throw new TypeError(`${variantPath} has reserved or duplicate field ${field.name}`);
+        }
+        fieldNames.add(field.name);
+        validateLayout(field.layout, `${fieldPath}.layout`, depth + 1, state);
+        offset = alignUp(offset, field.layout.align, fieldPath);
+        if (field.offset !== offset) throw new TypeError(`${fieldPath}.offset is non-canonical`);
+        offset += field.layout.size;
+        if (offset > layout.size) throw new TypeError(`${fieldPath} exceeds variant envelope`);
+        variantAlign = Math.max(variantAlign, field.layout.align);
+      }
+      variantSize = Math.max(variantSize, offset);
+    }
+    variantSize = alignUp(variantSize, variantAlign, path);
+    if (layout.align !== variantAlign || layout.size !== variantSize) {
+      throw new TypeError(`${path} has non-canonical variant size or alignment`);
     }
     return layout;
   }
@@ -189,6 +242,20 @@ function writeLayout(layout, value, memory, offset, allocate, path) {
       }
       return;
     }
+    case "variant": {
+      const variant = layout.variants.find((candidate) => candidate.name === value?.tag);
+      if (!variant) throw new TypeError(`${path}.tag is not a known variant`);
+      exactKeys(value, ["tag", ...variant.fields.map((field) => field.name)], path);
+      view.setUint32(layout.tag_offset, variant.tag, true);
+      // Canonicalize inactive payload bytes so equal values have one wire image
+      // and stale arena data cannot cross the boundary.
+      memoryBytes(memory).fill(0, offset + 4, offset + layout.size);
+      for (const field of variant.fields) {
+        writeLayout(field.layout, value[field.name], memory, offset + field.offset, allocate,
+          `${path}.${field.name}`);
+      }
+      return;
+    }
     default: throw new TypeError(`${path}.kind is unsupported`);
   }
 }
@@ -221,6 +288,20 @@ function readLayout(layout, memory, offset, path) {
         field.name,
         readLayout(field.layout, memory, offset + field.offset, `${path}.${field.name}`),
       ]));
+    case "variant": {
+      const tag = view.getUint32(layout.tag_offset, true);
+      const variant = layout.variants[tag];
+      if (!variant || variant.tag !== tag) {
+        throw new TypeError(`${path} contains invalid variant tag ${tag}`);
+      }
+      return Object.fromEntries([
+        ["tag", variant.name],
+        ...variant.fields.map((field) => [
+          field.name,
+          readLayout(field.layout, memory, offset + field.offset, `${path}.${field.name}`),
+        ]),
+      ]);
+    }
     default: throw new TypeError(`${path}.kind is unsupported`);
   }
 }
@@ -447,6 +528,18 @@ function canonicalTransferList(layout, value, name, output, seen) {
         canonicalTransferList(field.layout, value[field.name], `${name}.${field.name}`, output, seen);
       }
       return;
+    case "variant": {
+      const variant = layout.variants.find((candidate) => candidate.name === value?.tag);
+      if (!variant) {
+        throw actorError("FE_ACTOR_TRANSFER", `${name}.tag is not a known variant`);
+      }
+      for (const field of variant.fields) {
+        canonicalTransferList(
+          field.layout, value[field.name], `${name}.${field.name}`, output, seen,
+        );
+      }
+      return;
+    }
     default:
       return;
   }

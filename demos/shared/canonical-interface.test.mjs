@@ -95,6 +95,77 @@ assert.deepEqual(nested.lanes.echo.request.read({ memory, offset: 0 }), {
   inner: { value: -42 }, tail: true,
 });
 
+const variantManifest = structuredClone(manifest);
+variantManifest.lanes[0].request = {
+  kind: "variant", size: 24, align: 8, tag_offset: 0,
+  variants: [
+    { name: "none", tag: 0, fields: [] },
+    {
+      name: "data", tag: 1, fields: [
+        { name: "code", offset: 4, layout: scalar("u8", 1, 1) },
+        { name: "sequence", offset: 8, layout: scalar("u64", 8, 8) },
+        { name: "payload", offset: 16, layout: descriptor("bytes") },
+      ],
+    },
+  ],
+};
+const variant = compileCanonicalInterfaceManifest(variantManifest);
+memory.fill(0xaa, 0, 64);
+variant.lanes.echo.request.write(
+  { tag: "data", code: 7, sequence: 9n, payload: new Uint8Array([3, 1, 4]) },
+  { memory, offset: 0, allocate },
+);
+assert.deepEqual(variant.lanes.echo.request.read({ memory, offset: 0 }), {
+  tag: "data", code: 7, sequence: 9n, payload: new Uint8Array([3, 1, 4]),
+});
+variant.lanes.echo.request.write({ tag: "none" }, { memory, offset: 0, allocate });
+assert.deepEqual(variant.lanes.echo.request.read({ memory, offset: 0 }), { tag: "none" });
+assert.deepEqual(
+  [...memory.slice(4, 24)],
+  Array(20).fill(0),
+  "inactive tagged-union payload bytes must be canonicalized",
+);
+new DataView(memory.buffer).setUint32(0, 0xffffffff, true);
+assert.throws(
+  () => variant.lanes.echo.request.read({ memory, offset: 0 }),
+  /invalid variant tag/,
+);
+assert.throws(
+  () => variant.lanes.echo.request.write(
+    { tag: "data", code: 7, sequence: 9n, payload: new Uint8Array(), extra: true },
+    { memory, offset: 0, allocate },
+  ),
+  /unexpected or missing fields/,
+);
+const malformedVariant = structuredClone(variantManifest);
+malformedVariant.lanes[0].request.variants[1].tag = 7;
+assert.throws(
+  () => compileCanonicalInterfaceManifest(malformedVariant),
+  /tag is non-canonical/,
+);
+const excessiveVariant = structuredClone(variantManifest);
+excessiveVariant.lanes[0].request.variants = Array.from(
+  { length: 4096 },
+  (_, tag) => ({ name: `case_${tag}`, tag, fields: [] }),
+);
+assert.throws(
+  () => compileCanonicalInterfaceManifest(excessiveVariant),
+  /maximum type node count/,
+);
+const variantActorShape = compileCanonicalActorAdapter(variantManifest, variant);
+const variantOwned = new Uint8Array([2, 7, 1]);
+assert.deepEqual(
+  variantActorShape.transferRequest(
+    { tag: "data", code: 1, sequence: 2n, payload: variantOwned },
+    { lane: "echo" },
+  ),
+  [variantOwned.buffer],
+);
+assert.deepEqual(
+  variantActorShape.transferRequest({ tag: "none" }, { lane: "echo" }),
+  [],
+);
+
 const responseSource = new Uint8Array([1, 2, 3, 4]);
 compiled.lanes.echo.response.write(responseSource, { memory, offset: 40, allocate });
 const response = compiled.lanes.echo.response.read({ memory, offset: 40 });
@@ -420,7 +491,7 @@ assert.throws(
 );
 
 for (const mutate of [
-  (value) => { value.version = 3; },
+  (value) => { value.version = 2; },
   (value) => { value.extra = true; },
   (value) => { value.abi.pointer_width = 64; },
   (value) => { value.lanes[0].request.fields[1].offset = 4; },
@@ -538,4 +609,4 @@ await assert.rejects(failingCaller.call("echo", callValue(1)), /mock lane failur
 assert.equal(resetCount, resetsBeforeFailure + 1, "lane failure must reset the arena");
 assert.ok(allocationCount > 0);
 
-console.log("canonical interface v2 intent routing and memory codecs: ok");
+console.log("canonical interface v3 variants, intent routing, and memory codecs: ok");

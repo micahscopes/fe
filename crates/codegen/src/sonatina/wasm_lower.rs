@@ -1230,6 +1230,11 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                     }
                     None
                 }
+                CanonicalShape::Variant { .. } => {
+                    return Err(LowerError::Unsupported(
+                        "canonical variants require wasm32 enum runtime-class lowering".to_owned(),
+                    ));
+                }
                 CanonicalShape::Bytes {
                     pointer_offset,
                     length_offset,
