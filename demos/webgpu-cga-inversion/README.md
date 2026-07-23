@@ -148,8 +148,9 @@ loaded by the browser. The runtime manifest pins
 `fe-browser-actor-runtime` version 2 and SHA-256 metadata for every packaged
 module; no demo-owned copy is an implicit protocol dependency.
 
-Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the later browser
-runtime commit `547519d4`. The latter is reconstructed reproducibly from the
+Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the reviewed
+browser-runtime commit `ac266c210cad7872fc98380a73b4ca363877bc1f`. The latter
+is reconstructed reproducibly from the
 tracked patch series without modifying the checkout supplied as
 `SONATINA_DIR`. Generate D1 directly from its clean reviewed checkout with:
 
@@ -169,7 +170,10 @@ checksum-verifies and applies the tracked browser-backend overlay in a temporary
 checkout. `SONATINA_DIR` remains an optional offline/source override. The
 generator rejects another or dirty prepared Sonatina checkout, applies Cargo path
 overrides for all required Sonatina crates, and restores the Fe checkout's `Cargo.lock` byte-for-byte when it
-exits. Generated files remain ignored and must not be hand-edited or committed.
+exits. The canonical Schedule32 bundle under `gen-schedule32/` is tracked so a
+fresh checkout can run the showcase without regeneration; regenerate and
+commit it only through the authoritative generator. Legacy `gen/` and QCGA's
+generated bundle remain ignored. Generated files must never be hand-edited.
 Artifact provenance fails closed if either Git revision cannot be read and
 reports tracked modifications separately from the presence of untracked files;
 it is source-state evidence, not a claim that the wider build environment is
