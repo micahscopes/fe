@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{
+    BackendKind, OptLevel, WasmCompileOptions, compile_runtime_package_spirv_render,
+    compile_runtime_package_wasm_with_options, layout_for,
+};
 use url::Url;
 
 const TREE_VOCABULARY: &str = r#"
@@ -253,6 +256,229 @@ fn compare_schedule32_tree_compact_fco_and_actual_dag() {
             m.rmir_bytes,
             m.rmir_calls,
             m.wasm_bytes,
+        );
+    }
+}
+
+fn canonical_fco_cga_de() -> String {
+    let base = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+    let (prefix, rest) = base
+        .split_once("// BEGIN_PUBLIC_ORACLES")
+        .expect("public-oracle begin marker");
+    let (_, suffix) = rest
+        .split_once("// END_PUBLIC_ORACLES")
+        .expect("public-oracle end marker");
+    format!(
+        "{prefix}{suffix}\n{}",
+        include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe")
+    )
+}
+
+fn compact_schedule32_cga_de() -> String {
+    format!(
+        "{}\n{}",
+        include_str!("fixtures/spirv/cga_schedule_ctfe_specialized_render.fe"),
+        include_str!("fixtures/spirv/cga_schedule32_vec5_de_render_body.fe"),
+    )
+}
+
+#[derive(Debug)]
+struct CgaMeasurement {
+    strategy: &'static str,
+    analysis: Duration,
+    package: Duration,
+    wasm_codegen: Duration,
+    spirv_codegen: Duration,
+    rmir_bytes: usize,
+    rmir_calls: usize,
+    wasm_bytes: usize,
+    wasm_f32_add: usize,
+    wasm_f32_mul: usize,
+    wasm_calls: usize,
+    wasm_loops: usize,
+    wgsl_bytes: usize,
+    wgsl_lines: usize,
+    wgsl_functions: usize,
+    wgsl_loops: usize,
+}
+
+fn wasm_operator_shape(bytes: &[u8]) -> (usize, usize, usize, usize) {
+    let mut adds = 0;
+    let mut muls = 0;
+    let mut calls = 0;
+    let mut loops = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.unwrap() {
+            let mut ops = body.get_operators_reader().unwrap();
+            while !ops.eof() {
+                match ops.read().unwrap() {
+                    wasmparser::Operator::F32Add => adds += 1,
+                    wasmparser::Operator::F32Mul => muls += 1,
+                    wasmparser::Operator::Call { .. } => calls += 1,
+                    wasmparser::Operator::Loop { .. } => loops += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    (adds, muls, calls, loops)
+}
+
+type RenderArgs = (i32, i32, f32, f32, f32, f32, f32);
+
+fn measure_cga(
+    strategy: &'static str,
+    entry: &'static str,
+    source: String,
+) -> (CgaMeasurement, Vec<u32>) {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///cga_strategy_{strategy}.fe")).unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+
+    let started = Instant::now();
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    let analysis = started.elapsed();
+    assert!(
+        diagnostics.is_empty(),
+        "{strategy} analysis:\n{diagnostics}"
+    );
+
+    let started = Instant::now();
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, entry)
+        .unwrap_or_else(|error| panic!("{strategy} package: {error}"));
+    let package_time = started.elapsed();
+    let rmir = mir::format_runtime_package(&db, &package);
+
+    let started = Instant::now();
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap_or_else(|error| panic!("{strategy} Wasm: {error}"));
+    let wasm_codegen = started.elapsed();
+    wasmparser::validate(&wasm.bytes).unwrap();
+    let (wasm_f32_add, wasm_f32_mul, wasm_calls, wasm_loops) = wasm_operator_shape(&wasm.bytes);
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm.bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let render = instance
+        .get_typed_func::<RenderArgs, i32>(&mut store, entry)
+        .unwrap();
+    let probes = [
+        (0, 0),
+        (32, 32),
+        (64, 64),
+        (96, 96),
+        (127, 127),
+        (0, 84),
+        (63, 80),
+        (85, 54),
+    ];
+    let pixels = probes
+        .map(|(x, y)| {
+            render
+                .call(&mut store, (x, y, 0.0, 0.0, 0.0085, 0.0, 0.0))
+                .unwrap() as u32
+        })
+        .to_vec();
+
+    let started = Instant::now();
+    let spirv = compile_runtime_package_spirv_render(&db, &package)
+        .unwrap_or_else(|error| panic!("{strategy} SPIR-V: {error}"));
+    let spirv_codegen = started.elapsed();
+    let wgsl = spirv.wgsl.expect("render profile must emit WGSL");
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .unwrap();
+
+    (
+        CgaMeasurement {
+            strategy,
+            analysis,
+            package: package_time,
+            wasm_codegen,
+            spirv_codegen,
+            rmir_bytes: rmir.len(),
+            rmir_calls: rmir.matches("call ").count(),
+            wasm_bytes: wasm.bytes.len(),
+            wasm_f32_add,
+            wasm_f32_mul,
+            wasm_calls,
+            wasm_loops,
+            wgsl_bytes: wgsl.len(),
+            wgsl_lines: wgsl.lines().count(),
+            wgsl_functions: wgsl.matches("fn ").count(),
+            wgsl_loops: wgsl.matches("loop {").count(),
+        },
+        pixels,
+    )
+}
+
+#[test]
+#[ignore = "real CGA comparison; timings are reported, structural/semantic checks are enforced"]
+fn compare_real_cga_tree_compact_schedule32_and_fco_shared_dag() {
+    let rows = [
+        measure_cga(
+            "canonical_recursive_tree",
+            "cga_inversion_cyclide_recursive_support",
+            include_str!("fixtures/spirv/cga_inversion_cyclide_recursive_support.fe").to_string(),
+        ),
+        measure_cga(
+            "compact_schedule32",
+            "cga_schedule32_vec5_de_render",
+            compact_schedule32_cga_de(),
+        ),
+        measure_cga(
+            "fco_shared_dag",
+            "cga_schedule32_vec5_de_render",
+            canonical_fco_cga_de(),
+        ),
+    ];
+    assert_eq!(rows[0].1, rows[1].1, "tree and compact probe pixels");
+    assert_eq!(rows[0].1, rows[2].1, "tree and FCO probe pixels");
+    for (measurement, _) in &rows {
+        assert_eq!(
+            measurement.wgsl_functions, 2,
+            "{} must inline to vertex + fragment only",
+            measurement.strategy
+        );
+        assert_eq!(
+            measurement.wgsl_loops, 1,
+            "{} may retain only the ray-march loop",
+            measurement.strategy
+        );
+    }
+    assert!(
+        rows[2].0.wasm_calls <= rows[1].0.wasm_calls,
+        "FCO/shared-DAG execution must not restore the recursive evaluator call graph"
+    );
+
+    eprintln!(
+        "strategy\tanalysis_ms\tpackage_ms\twasm_ms\tspirv_ms\trmir_B\trmir_calls\twasm_B\tf32_add\tf32_mul\twasm_calls\twasm_loops\twgsl_B\twgsl_lines"
+    );
+    for (m, _) in rows {
+        eprintln!(
+            "{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            m.strategy,
+            m.analysis.as_secs_f64() * 1000.0,
+            m.package.as_secs_f64() * 1000.0,
+            m.wasm_codegen.as_secs_f64() * 1000.0,
+            m.spirv_codegen.as_secs_f64() * 1000.0,
+            m.rmir_bytes,
+            m.rmir_calls,
+            m.wasm_bytes,
+            m.wasm_f32_add,
+            m.wasm_f32_mul,
+            m.wasm_calls,
+            m.wasm_loops,
+            m.wgsl_bytes,
+            m.wgsl_lines,
         );
     }
 }

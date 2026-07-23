@@ -65,3 +65,42 @@ have exactly the same formatted RMIR size and pre-inlining call count. FCO
 changes publication, not the normalized evaluator graph. The compact loop and
 explicit DAG instead remove the recursive runtime call graph and are two orders
 of magnitude smaller at the RMIR boundary in this reduced workload.
+
+## Real Cl(4,1) inversion comparison
+
+The ignored test
+`compare_real_cga_tree_compact_schedule32_and_fco_shared_dag` runs the actual
+cyclide distance estimator through three executable representations:
+
+- the generated recursive `MvTF<5>`/Cayley sandwich tree;
+- the four-chunk typed `Schedule<32>` evaluator;
+- the bounded FCO provider using `builder.share` to emit five direct lanes.
+
+All three use the same seven-argument render ABI. The test requires identical
+results at fixed probe pixels, validates WGSL with browser-default Naga
+capabilities, requires exactly the single ray-march loop, and reports
+Wasm/RMIR/WGSL shape. Timings remain observations; semantic and structural
+properties are assertions.
+
+One debug/O0 run on 2026-07-23 produced:
+
+| Strategy | Analysis ms | Package ms | Wasm ms | SPIR-V ms | RMIR bytes | RMIR calls | Wasm bytes | f32 add | f32 mul | Wasm calls | WGSL bytes/lines |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| recursive Cayley tree | 48864.40 | 4442.78 | 340.70 | 293.34 | 154782 | 1 | 1607 | 93 | 155 | 0 | 4824 / 122 |
+| typed Schedule32 | 303275.03 | 131373.81 | 181.64 | 524.58 | 686650 | 235 | 36550 | 387 | 91 | 196 | 6284 / 137 |
+| FCO/shared direct lanes | 37793.03 | 1071.95 | 6.12 | 19.95 | 78077 | 5 | 1456 | 74 | 91 | 5 | 5545 / 132 |
+
+The recursive Cayley tree has compact final artifacts, but performs 155 float
+multiplications because its decomposition does not exploit the 80-to-32
+commutative/cancellation specialization. The typed Schedule32 proves the
+compile-time plan and reaches 91 multiplications, but interpreting that plan
+through recursive traits is by far the largest and slowest compiler path: its
+runtime package retains 235 call sites before backend inlining.
+
+The FCO/shared-DAG route preserves Schedule32 as an inspectable typed witness
+while emitting specialized executable lanes from the same canonical Fe
+helpers. It reaches the same 91-multiply arithmetic shape with the smallest
+RMIR and Wasm in this comparison, and no runtime algebra loop. It should
+therefore remain the canonical executable path. The recursive tree remains a
+semantic/reference implementation; compact Schedule32 remains a type-level
+proof and regression fixture, not the default runtime evaluator.
