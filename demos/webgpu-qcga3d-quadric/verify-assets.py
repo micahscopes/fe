@@ -66,6 +66,7 @@ assert not any(token in wgsl for token in ("i64", "u64"))
 assert (gen / "frag.wasm").read_bytes()[:4] == b"\0asm"
 assert (gen / "actor-canonical.wasm").read_bytes()[:4] == b"\0asm"
 actor_source = (gen / "actor-source.fe").read_text()
+assert app_source == actor_source
 assert "pub fn render(" in actor_source and "pub fn verify(" in actor_source
 assert "pub fn oracle(" in actor_source
 assert "pub fn oracle_pixel(" not in actor_source
