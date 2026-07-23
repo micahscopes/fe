@@ -4,8 +4,8 @@ The ordinary-Fe ingot
 `ingots/sparse_clifford` covers three reusable
 pieces of a sparse algebra in one source unit: compile-time support planning,
 the `Zero`/`Term`/`Add` operator-plan vocabulary, and support-sized runtime
-values. Schedule32 and QCGA prepend this same source before their domain
-planner and kernel.
+values. Schedule32 consumes it through a real Fe ingot dependency; QCGA still
+prepends the same canonical source before its domain planner and kernel.
 
 For supports selected from the 32 blades of a dimension-at-most-five algebra:
 
@@ -39,15 +39,16 @@ Wasm.
 
 This is intentionally not yet the final general algebra package. The public
 ingot is imported and code-generated across a real dependency edge by
-`sparse_clifford_ingot.rs`. The current browser artifact generators still
-compose its canonical `src/lib.fe` as source because they publish one
+`sparse_clifford_ingot.rs`. Schedule32 now does the same and publishes its
+application manifest and source beside its dependency-backed kernel. QCGA's
+legacy artifact generator still composes the canonical `src/lib.fe` into one
 self-contained `kernel.fe`; `fe web` and the driver already support directory
 ingots. Domain support wrappers
 remain useful to bind a particular support and blade at a readable API
 boundary, but rank depth and computed storage aliases are no longer compiler
 limits: recursive `SparseIndex<7>` and `SparseStorage<8>` both execute. The
 true ingot dependency keeps its callable CTFE helpers public without rooting
-them as runtime exports. The current standalone browser publication path
+them as runtime exports. The remaining standalone QCGA publication path
 explicitly removes `pub` only from const helpers while composing the ingot
 source into the app's root module; otherwise source composition would erase
 the module boundary and expose compile-time-only bitwise/`usize` bodies to the
