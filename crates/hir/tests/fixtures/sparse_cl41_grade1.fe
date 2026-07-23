@@ -100,6 +100,8 @@ fn e5_rank(value: FindVector<16>) { takes_found4(value) }
 fn pseudoscalar_is_pruned(value: FindVector<31>) { takes_missing(value) }
 
 struct Compact5 { c0: i32, c1: i32, c2: i32, c3: i32, c4: i32 }
+struct SparseVector { compact: Compact5 }
+struct BladeAt<const Blade: usize> {}
 trait Coefficient { fn read(value: Compact5) -> i32 }
 impl Coefficient for Missing { fn read(value: Compact5) -> i32 { 0 } }
 impl Coefficient for Found<0> { fn read(value: Compact5) -> i32 { value.c0 } }
@@ -108,21 +110,52 @@ impl Coefficient for Found<2> { fn read(value: Compact5) -> i32 { value.c2 } }
 impl Coefficient for Found<3> { fn read(value: Compact5) -> i32 { value.c3 } }
 impl Coefficient for Found<4> { fn read(value: Compact5) -> i32 { value.c4 } }
 
+// Ground-helper route under investigation: impl selection happens on the
+// ground blade argument, and each impl delegates rank/default-zero semantics
+// back to FindVector rather than spelling a field selector.
+trait SparseCoefficient<const Blade: usize> {
+    fn coefficient(value: Self) -> i32
+}
+
+impl SparseCoefficient<16> for SparseVector {
+    #[inline(always)]
+    fn coefficient(value: SparseVector) -> i32 {
+        <FindVector<16> as Coefficient>::read(value: value.compact)
+    }
+}
+
+impl SparseCoefficient<3> for SparseVector {
+    #[inline(always)]
+    fn coefficient(value: SparseVector) -> i32 {
+        <FindVector<3> as Coefficient>::read(value: value.compact)
+    }
+}
+
 #[inline(always)]
-fn coefficient_at<Lookup: Coefficient>(value: Compact5) -> i32 {
-    <Lookup as Coefficient>::read(value: value)
+fn coefficient<const Blade: usize, M: SparseCoefficient<Blade>>(
+    value: M,
+    blade: BladeAt<Blade>,
+) -> i32
+{
+    <M as SparseCoefficient<Blade>>::coefficient(value: value)
 }
 
 pub fn cl41_e5(c0: i32, c1: i32, c2: i32, c3: i32, c4: i32) -> i32 {
-    coefficient_at<FindVector<16>>(
-        value: Compact5 { c0: c0, c1: c1, c2: c2, c3: c3, c4: c4 },
+    coefficient(
+        value: SparseVector {
+            compact: Compact5 { c0: c0, c1: c1, c2: c2, c3: c3, c4: c4 },
+        },
+        blade: BladeAt<16> {},
     )
 }
 
 pub fn cl41_bivector_default_zero(
     c0: i32, c1: i32, c2: i32, c3: i32, c4: i32,
 ) -> i32 {
-    coefficient_at<FindVector<3>>(
-        value: Compact5 { c0: c0, c1: c1, c2: c2, c3: c3, c4: c4 },
+    coefficient(
+        value: SparseVector {
+            compact: Compact5 { c0: c0, c1: c1, c2: c2, c3: c3, c4: c4 },
+        },
+        blade: BladeAt<3> {},
     )
 }

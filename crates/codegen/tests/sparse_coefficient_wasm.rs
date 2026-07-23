@@ -148,8 +148,8 @@ fn cl41_32_blade_grade_pruned_coefficients_execute_in_wasm() {
         "the explicit 32-blade source selector should remain inspectably small"
     );
     assert!(
-        bytes.len() < 16_384,
-        "ground specialization should not retain a large runtime selector: {} bytes",
+        bytes.len() < 800,
+        "ground specialization should erase the 32-way selector: {} bytes",
         bytes.len()
     );
     eprintln!(
