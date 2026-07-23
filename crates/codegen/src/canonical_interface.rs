@@ -252,7 +252,11 @@ pub fn canonical_lane_decl_from_entry<'db>(
     }
     Ok(CanonicalLaneDecl {
         name: lane_name.to_owned(),
-        export: entry_name.to_owned(),
+        // The source entry is not itself a canonical adapter, even when its
+        // lowered aggregate ABI happens to have the same raw Wasm signature.
+        // Reserve a distinct export so verification cannot bless that
+        // accidental shape without the generated marshal/unmarshal wrapper.
+        export: format!("fe_cabi_{entry_name}"),
         request,
         response,
     })
@@ -852,6 +856,7 @@ pub fn update(request: Request) -> Response {
         .unwrap();
         let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
         let lane = &manifest.lanes[0];
+        assert_eq!(lane.export, "fe_cabi_update");
         assert_eq!((lane.request.size, lane.request.align), (32, 8));
         let CanonicalShape::Record { fields } = &lane.request.shape else {
             panic!("request record")

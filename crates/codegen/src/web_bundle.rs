@@ -15,19 +15,13 @@ use std::{
 use driver::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use serde::{Deserialize, Serialize};
-use sonatina_codegen::{
-    Backend as _,
-    isa::{
-        spirv::{
-            Access, LayoutMode, Role, SpirvBuiltinSource, SpirvLayout, SpirvScalarKind, WordKind,
-        },
-        wasm::WasmBackend as SonatinaWasmBackend,
-    },
+use sonatina_codegen::isa::spirv::{
+    Access, LayoutMode, Role, SpirvBuiltinSource, SpirvLayout, SpirvScalarKind, WordKind,
 };
 
 use crate::sonatina::{
-    compile_runtime_package_spirv_grid, compile_runtime_package_spirv_render,
-    compile_runtime_package_wasm,
+    WasmCompileOptions, compile_runtime_package_spirv_grid, compile_runtime_package_spirv_render,
+    compile_runtime_package_wasm_with_options,
 };
 use crate::{
     CanonicalInterfaceManifest, canonical_lane_decl_from_entry, verify_canonical_wasm_abi,
@@ -290,20 +284,14 @@ impl WebBundle {
         let package = mir::build_wasm_runtime_package_for_entry(db, top_mod, &options.source_entry)
             .map_err(|error| WebBundleError::Lower(error.to_string()))?;
 
-        let (wasm_module, import_modules) = compile_runtime_package_wasm(db, &package)
-            .map_err(|error| WebBundleError::Lower(error.to_string()))?;
-        let wasm = SonatinaWasmBackend::new()
-            .with_import_modules(import_modules)
-            .compile_module(&wasm_module)
-            .map_err(|errors| {
-                WebBundleError::Wasm(
-                    errors
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                )
-            })?
+        let wasm_options = match options.canonical_policy {
+            WebCanonicalPolicy::Disabled => WasmCompileOptions::default(),
+            WebCanonicalPolicy::Optional | WebCanonicalPolicy::Required => {
+                WasmCompileOptions::default().with_canonical_arena()
+            }
+        };
+        let wasm = compile_runtime_package_wasm_with_options(db, &package, wasm_options)
+            .map_err(|error| WebBundleError::Lower(error.to_string()))?
             .bytes;
         wasmparser::validate(&wasm)
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
@@ -600,6 +588,29 @@ pub fn shade(x: u32, y: u32) -> u32 {
 }
 "#;
 
+    const CANONICAL_SOURCE: &str = r#"
+struct Request { value: u32 }
+struct Response { value: u32 }
+
+pub fn update(request: Request) -> Response {
+    Response { value: request.value + 1 }
+}
+"#;
+
+    fn wasm_exports(wasm: &[u8]) -> Vec<String> {
+        let mut exports = Vec::new();
+        for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+            if let wasmparser::Payload::ExportSection(reader) = payload.unwrap() {
+                exports.extend(
+                    reader
+                        .into_iter()
+                        .map(|export| export.unwrap().name.to_owned()),
+                );
+            }
+        }
+        exports
+    }
+
     fn compile(mode: WebBundleMode) -> WebBundle {
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///web_bundle.fe").unwrap();
@@ -631,6 +642,9 @@ pub fn shade(x: u32, y: u32) -> u32 {
             WebCanonicalPolicy::Disabled
         );
         assert!(first.manifest.canonical_interface.is_none());
+        let exports = wasm_exports(&first.wasm);
+        assert!(!exports.iter().any(|name| name == "fe_cabi_alloc"));
+        assert!(!exports.iter().any(|name| name == "fe_cabi_reset"));
         assert!(first.manifest.layout.vertex_entry.is_some());
         assert!(first.manifest.layout.fragment_entry.is_some());
         let decoded: WebBundleManifest =
@@ -643,35 +657,47 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///web_bundle_canonical.fe").unwrap();
         db.workspace()
-            .touch(&mut db, url.clone(), Some(SOURCE.to_string()));
+            .touch(&mut db, url.clone(), Some(CANONICAL_SOURCE.to_string()));
         let file = db.workspace().get(&db, &url).unwrap();
-
-        let optional = WebBundle::compile(
-            &db,
-            db.top_mod(file),
-            WebBuildOptions::render("shade", None)
-                .with_canonical_policy(WebCanonicalPolicy::Optional),
-        )
+        let top_mod = db.top_mod(file);
+        let candidate = CanonicalInterfaceManifest::build(vec![
+            canonical_lane_decl_from_entry(&db, top_mod, "update", "update").unwrap(),
+        ])
         .unwrap();
-        assert!(optional.manifest.canonical_interface.is_none());
-        assert_eq!(
-            optional.manifest.canonical_status.policy,
-            WebCanonicalPolicy::Optional
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "update").unwrap();
+        let wasm = compile_runtime_package_wasm_with_options(
+            &db,
+            &package,
+            WasmCompileOptions::default().with_canonical_arena(),
+        )
+        .unwrap()
+        .bytes;
+        let mut optional = WebCanonicalStatus {
+            policy: WebCanonicalPolicy::Optional,
+            embedded: false,
+            omission_reason: None,
+        };
+        assert!(
+            verify_canonical_candidate(&wasm, Some(candidate), &mut optional)
+                .unwrap()
+                .is_none()
         );
+        assert_eq!(optional.policy, WebCanonicalPolicy::Optional);
         assert!(
             optional
-                .manifest
-                .canonical_status
                 .omission_reason
                 .as_deref()
                 .unwrap()
-                .contains("semantic canonical derivation unavailable")
+                .contains("missing function export `fe_cabi_update`")
         );
+        let exports = wasm_exports(&wasm);
+        assert!(exports.iter().any(|name| name == "fe_cabi_alloc"));
+        assert!(exports.iter().any(|name| name == "fe_cabi_reset"));
 
         let required = WebBundle::compile(
             &db,
-            db.top_mod(file),
-            WebBuildOptions::render("shade", None)
+            top_mod,
+            WebBuildOptions::render("update", None)
                 .with_canonical_policy(WebCanonicalPolicy::Required),
         )
         .unwrap_err();
@@ -680,6 +706,11 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 .to_string()
                 .contains("required canonical interface is unavailable"),
             "{required}"
+        );
+        assert!(
+            required
+                .to_string()
+                .contains("missing function export `fe_cabi_update`")
         );
     }
 
