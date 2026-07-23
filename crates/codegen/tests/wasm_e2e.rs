@@ -1636,6 +1636,111 @@ fn fe_webgpu_ntt8_runs_on_wasm_fake_device() {
     );
 }
 
+#[test]
+fn raw_memory_scalar_roundtrips_are_byte_exact_on_wasm() {
+    let source = r#"
+use core::MemPtr
+
+fn write_u8(_ value: u8) uses (target: mut u8) { target = value }
+fn read_u8() -> u8 uses (target: u8) { target }
+pub fn roundtrip_u8(_ ptr: MemPtr<u8>, value: u8) -> u8 {
+    with (ptr) {
+        write_u8(value)
+        read_u8()
+    }
+}
+
+fn write_u16(_ value: u16) uses (target: mut u16) { target = value }
+fn read_u16() -> u16 uses (target: u16) { target }
+pub fn roundtrip_u16(_ ptr: MemPtr<u16>, value: u16) -> u16 {
+    with (ptr) {
+        write_u16(value)
+        read_u16()
+    }
+}
+
+fn write_u32(_ value: u32) uses (target: mut u32) { target = value }
+fn read_u32() -> u32 uses (target: u32) { target }
+pub fn roundtrip_u32(_ ptr: MemPtr<u32>, value: u32) -> u32 {
+    with (ptr) {
+        write_u32(value)
+        read_u32()
+    }
+}
+
+fn write_u64(_ value: u64) uses (target: mut u64) { target = value }
+fn read_u64() -> u64 uses (target: u64) { target }
+pub fn roundtrip_u64(_ ptr: MemPtr<u64>, value: u64) -> u64 {
+    with (ptr) {
+        write_u64(value)
+        read_u64()
+    }
+}
+
+fn write_f32(_ value: f32) uses (target: mut f32) { target = value }
+fn read_f32() -> f32 uses (target: f32) { target }
+pub fn roundtrip_f32(_ ptr: MemPtr<f32>, value: f32) -> f32 {
+    with (ptr) {
+        write_f32(value)
+        read_f32()
+    }
+}
+"#;
+    let wasm = compile_to_wasm("wasm_raw_memory_scalars.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("raw scalar access requires exported linear memory");
+
+    assert_eq!(
+        instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "roundtrip_u8")
+            .unwrap()
+            .call(&mut store, (17, 0xab))
+            .unwrap(),
+        0xab
+    );
+    assert_eq!(
+        instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "roundtrip_u16")
+            .unwrap()
+            .call(&mut store, (18, 0xcdef))
+            .unwrap(),
+        0xcdef
+    );
+    assert_eq!(
+        instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "roundtrip_u32")
+            .unwrap()
+            .call(&mut store, (20, 0x78563412))
+            .unwrap(),
+        0x78563412
+    );
+    assert_eq!(
+        instance
+            .get_typed_func::<(i32, i64), i64>(&mut store, "roundtrip_u64")
+            .unwrap()
+            .call(&mut store, (24, 0x0807060504030201))
+            .unwrap(),
+        0x0807060504030201
+    );
+    assert_eq!(
+        instance
+            .get_typed_func::<(i32, f32), f32>(&mut store, "roundtrip_f32")
+            .unwrap()
+            .call(&mut store, (32, -13.25))
+            .unwrap(),
+        -13.25
+    );
+
+    let bytes = memory.data(&store);
+    assert_eq!(&bytes[17..18], &[0xab]);
+    assert_eq!(&bytes[18..20], &0xcdef_u16.to_le_bytes());
+    assert_eq!(&bytes[20..24], &0x78563412_u32.to_le_bytes());
+    assert_eq!(&bytes[24..32], &0x0807060504030201_u64.to_le_bytes());
+    assert_eq!(&bytes[32..36], &(-13.25_f32).to_le_bytes());
+}
+
 /// R3.4b twin: the `on_ready` continuation lane. `main_begin` composes WITHOUT
 /// `Wait` (create..readback_begin) and returns the `Pending<()>`; the output region
 /// is UNCHANGED until the host drives `on_ready(token)`, which completes the copy

@@ -54,6 +54,7 @@ use sonatina_ir::{
         cast::{F32ToI32, I32ToF32},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
         control_flow::{Br, Call, Jump, Return, Unreachable},
+        data::{Mload, Mstore},
     },
     isa::{Isa, wasm32::Wasm32},
     module::{FuncRef, ModuleCtx},
@@ -1354,6 +1355,17 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 self.fb.def_var(var, value);
                 Ok(())
             }
+            RStmt::Store { dst, src } => {
+                if let Some((addr, ty)) = self.raw_memory_scalar_place(dst)? {
+                    let value = self.local_value(*src)?;
+                    self.fb
+                        .insert_inst_no_result(Mstore::new(self.inst_set(), addr, value, ty));
+                    return Ok(());
+                }
+                Err(LowerError::Unsupported(format!(
+                    "wasm target (R1) statement `{stmt:?}` is not supported"
+                )))
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) statement `{other:?}` is not supported"
             ))),
@@ -1756,6 +1768,11 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
     /// other paths, multi-field pointees, and all real linear memory) stays
     /// fail-closed as R2. See the ladder doc section 7.2 for the exact boundary.
     fn lower_place_read(&mut self, place: &RuntimePlace<'db>) -> Result<ValueId, LowerError> {
+        if let Some((addr, ty)) = self.raw_memory_scalar_place(place)? {
+            return Ok(self
+                .fb
+                .insert_inst(Mload::new(self.inst_set(), addr, ty), ty));
+        }
         if let (PlaceRoot::Slot(local), []) = (&place.root, &*place.path) {
             if matches!(self.body.value_class(*local), Some(RuntimeClass::Scalar(_))) {
                 return self.local_value(*local);
@@ -1798,6 +1815,59 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
             }
             _ => Err(unsupported_place(place)),
         }
+    }
+
+    /// Resolve the first real Wasm linear-memory place shape: an empty-path
+    /// scalar behind a memory `RawAddr`. Raw addresses are byte offsets carried
+    /// as `i32` on wasm32, not Sonatina compound pointers. Consequently field or
+    /// index address arithmetic will use checked/ordinary `i32` Add/Mul when it
+    /// lands; `Gep` would be the wrong representation here. This slice admits
+    /// only the base scalar access and emits a typed `Mload`/`Mstore`.
+    fn raw_memory_scalar_place(
+        &mut self,
+        place: &RuntimePlace<'db>,
+    ) -> Result<Option<(ValueId, Type)>, LowerError> {
+        if !place.path.is_empty() {
+            return Ok(None);
+        }
+        let program = self.module.db as &dyn mir::MirDb;
+        let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
+            .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
+        let RuntimeClass::Scalar(scalar) = &resolved.result_class else {
+            return Ok(None);
+        };
+        let addr_local = match resolved.root_kind {
+            mir::ResolvedPlaceRootKind::Ref { value, .. }
+                if matches!(
+                    self.body.value_class(value),
+                    Some(RuntimeClass::RawAddr {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    })
+                ) =>
+            {
+                value
+            }
+            mir::ResolvedPlaceRootKind::Provider {
+                value,
+                provider_class:
+                    RuntimeClass::RawAddr {
+                        space: AddressSpaceKind::Memory,
+                        ..
+                    },
+                ..
+            } => value,
+            mir::ResolvedPlaceRootKind::Ptr {
+                addr,
+                space: AddressSpaceKind::Memory,
+                ..
+            } => addr,
+            _ => return Ok(None),
+        };
+        Ok(Some((
+            self.local_value(addr_local)?,
+            scalar_ty_r1(scalar)?,
+        )))
     }
 
     /// `AggregateMake` of a single-scalar-field newtype: the aggregate IS its one
