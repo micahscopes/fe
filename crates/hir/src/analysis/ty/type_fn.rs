@@ -33,8 +33,8 @@ use crate::analysis::ty::ty_error::emit_invalid_ty_error;
 use crate::core::hir_def::scope_graph::ScopeId;
 use crate::core::hir_def::{
     ArithBinOp, BinOp, Body, ConstGenericArgValue, Expr, GenericArg, GenericParam, IdentId,
-    ImplTrait, IntegerId, ItemKind, LitKind, Partial, PathId, Stmt, TypeFnDef, TypeFnPat, TypeId,
-    TypeKind,
+    ImplTrait, IntegerId, ItemKind, LitKind, Partial, PathId, PathKind, Stmt, TypeFnDef, TypeFnPat,
+    TypeId, TypeKind,
 };
 
 /// A single step the recursion subject takes at a self-call (spec sec 3.3),
@@ -457,19 +457,44 @@ impl<'db> Checker<'db> {
                     self.emit(self.arm_ty_span(arm_idx), TypeFnWfError::AssocProjInArm)
                 }
                 PathClass::Other => {
-                    for arg in path.generic_args(db).data(db) {
-                        match arg {
-                            GenericArg::Type(t) => {
-                                if let Partial::Present(ty) = t.ty {
-                                    self.walk_arm_ty(arm_idx, ty, l, calls);
+                    // Qualified projections carry their concrete self type on
+                    // a parent path segment (`<Select<...> as Trait>::Out`).
+                    // Walk every segment so a recursive tail cannot disappear
+                    // from the WF/termination traversal behind the leaf `Out`.
+                    let mut pending = vec![*path];
+                    let mut visited = 0usize;
+                    while let Some(path) = pending.pop() {
+                        visited += 1;
+                        if visited > 256 {
+                            self.emit(
+                                self.arm_ty_span(arm_idx),
+                                TypeFnWfError::DisallowedArmType,
+                            );
+                            break;
+                        }
+                        for arg in path.generic_args(db).data(db) {
+                            match arg {
+                                GenericArg::Type(t) => {
+                                    if let Partial::Present(ty) = t.ty {
+                                        self.walk_arm_ty(arm_idx, ty, l, calls);
+                                    }
                                 }
-                            }
-                            GenericArg::AssocType(a) => {
-                                if let Partial::Present(ty) = a.ty {
-                                    self.walk_arm_ty(arm_idx, ty, l, calls);
+                                GenericArg::AssocType(a) => {
+                                    if let Partial::Present(ty) = a.ty {
+                                        self.walk_arm_ty(arm_idx, ty, l, calls);
+                                    }
                                 }
+                                GenericArg::Const(c) => self.check_arm_const_arg(arm_idx, c, l),
                             }
-                            GenericArg::Const(c) => self.check_arm_const_arg(arm_idx, c, l),
+                        }
+                        if let PathKind::QualifiedType { type_, trait_ } = path.kind(db) {
+                            self.walk_arm_ty(arm_idx, type_, l, calls);
+                            if let Partial::Present(trait_path) = trait_.path(db) {
+                                pending.push(trait_path);
+                            }
+                        }
+                        if let Some(parent) = path.parent(db) {
+                            pending.push(parent);
                         }
                     }
                 }
@@ -1721,6 +1746,44 @@ recursive type fn Bad<F, const N: usize>() -> (*)
 }
 "#,
             |e| matches!(e, TypeFnWfError::AssocProjInArm),
+        );
+    }
+
+    #[test]
+    fn accepts_decreasing_self_call_nested_in_concrete_projection_parent() {
+        assert_good(
+            r#"
+struct End {}
+struct Select<T> {}
+trait Out { type Ty }
+impl<T> Out for Select<T> { type Ty = T }
+recursive type fn Good<const N: usize>() -> (*) {
+    match N {
+        0 => End
+        _ => <Select<Good<{N - 1}>> as Out>::Ty
+    }
+}
+"#,
+            "Good",
+        );
+    }
+
+    #[test]
+    fn rejects_nondecreasing_self_call_hidden_in_projection_parent() {
+        assert_bad(
+            r#"
+struct End {}
+struct Select<T> {}
+trait Out { type Ty }
+impl<T> Out for Select<T> { type Ty = T }
+recursive type fn Bad<const N: usize>() -> (*) {
+    match N {
+        0 => End
+        _ => <Select<Bad<{N + 1}>> as Out>::Ty
+    }
+}
+"#,
+            |e| matches!(e, TypeFnWfError::SubjectNotDecreasing),
         );
     }
 
