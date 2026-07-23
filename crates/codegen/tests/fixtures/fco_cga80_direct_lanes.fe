@@ -177,16 +177,27 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
         // A typed f32 zero without a float-literal codegen primitive.
         let s1 = builder.arg_ref("s1")
         let zero = builder.sub(s1, s1)
-        let lane1 = zero
-        let lane2 = zero
-        let lane4 = zero
-        let lane8 = zero
-        let lane16 = zero
-        let has1 = false
-        let has2 = false
-        let has4 = false
-        let has8 = false
-        let has16 = false
+        let lane1_0 = zero
+        let lane1_1 = zero
+        let lane1_2 = zero
+        let lane1_3 = zero
+        let lane2_0 = zero
+        let lane2_1 = zero
+        let lane2_2 = zero
+        let lane2_3 = zero
+        let lane4_0 = zero
+        let lane4_1 = zero
+        let lane4_2 = zero
+        let lane4_3 = zero
+        let lane8_0 = zero
+        let lane8_1 = zero
+        let lane8_2 = zero
+        let lane8_3 = zero
+        let lane16_0 = zero
+        let lane16_1 = zero
+        let lane16_2 = zero
+        let lane16_3 = zero
+        let survivor = 0
 
         // Exhaustively scan the canonical semantic universe. The provider
         // range and global step budgets fail closed if this ceases to be
@@ -211,49 +222,54 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
 
                 let product = builder.mul(builder.mul(left, point), right)
                 let term = product
-                // Apply the known multiplicity decomposition before building
-                // the product. This preserves two multiplications per term
-                // without requiring the replay layer to rediscover that
-                // `product + product` is a shared DAG node.
+                // Preserve the canonical raw80 IEEE operation order: compute
+                // the full left*point*right product before combining the two
+                // equal ordered orientations.
                 if magnitude(triple) == 2 {
-                    term = builder.mul(builder.mul(builder.add(left, left), point), right)
+                    term = builder.add(product, product)
                 }
                 if triple_negative(triple) != 0 { term = builder.neg(term) }
 
                 let output = output_blade(triple)
                 if output == 1 {
-                    if has1 { lane1 = builder.add(lane1, term) }
-                    else { lane1 = term }
-                    has1 = true
+                    if survivor < 8 { lane1_0 = builder.add(term, lane1_0) }
+                    else if survivor < 16 { lane1_1 = builder.add(term, lane1_1) }
+                    else if survivor < 24 { lane1_2 = builder.add(term, lane1_2) }
+                    else { lane1_3 = builder.add(term, lane1_3) }
                 }
                 if output == 2 {
-                    if has2 { lane2 = builder.add(lane2, term) }
-                    else { lane2 = term }
-                    has2 = true
+                    if survivor < 8 { lane2_0 = builder.add(term, lane2_0) }
+                    else if survivor < 16 { lane2_1 = builder.add(term, lane2_1) }
+                    else if survivor < 24 { lane2_2 = builder.add(term, lane2_2) }
+                    else { lane2_3 = builder.add(term, lane2_3) }
                 }
                 if output == 4 {
-                    if has4 { lane4 = builder.add(lane4, term) }
-                    else { lane4 = term }
-                    has4 = true
+                    if survivor < 8 { lane4_0 = builder.add(term, lane4_0) }
+                    else if survivor < 16 { lane4_1 = builder.add(term, lane4_1) }
+                    else if survivor < 24 { lane4_2 = builder.add(term, lane4_2) }
+                    else { lane4_3 = builder.add(term, lane4_3) }
                 }
                 if output == 8 {
-                    if has8 { lane8 = builder.add(lane8, term) }
-                    else { lane8 = term }
-                    has8 = true
+                    if survivor < 8 { lane8_0 = builder.add(term, lane8_0) }
+                    else if survivor < 16 { lane8_1 = builder.add(term, lane8_1) }
+                    else if survivor < 24 { lane8_2 = builder.add(term, lane8_2) }
+                    else { lane8_3 = builder.add(term, lane8_3) }
                 }
                 if output == 16 {
-                    if has16 { lane16 = builder.add(lane16, term) }
-                    else { lane16 = term }
-                    has16 = true
+                    if survivor < 8 { lane16_0 = builder.add(term, lane16_0) }
+                    else if survivor < 16 { lane16_1 = builder.add(term, lane16_1) }
+                    else if survivor < 24 { lane16_2 = builder.add(term, lane16_2) }
+                    else { lane16_3 = builder.add(term, lane16_3) }
                 }
+                survivor = survivor + 1
             }
         }
 
-        builder.emit_method("e1", lane1)
-        builder.emit_method("e2", lane2)
-        builder.emit_method("e4", lane4)
-        builder.emit_method("e8", lane8)
-        builder.emit_method("e16", lane16)
+        builder.emit_method("e1", builder.add(builder.add(lane1_3, lane1_2), builder.add(lane1_1, lane1_0)))
+        builder.emit_method("e2", builder.add(builder.add(lane2_3, lane2_2), builder.add(lane2_1, lane2_0)))
+        builder.emit_method("e4", builder.add(builder.add(lane4_3, lane4_2), builder.add(lane4_1, lane4_0)))
+        builder.emit_method("e8", builder.add(builder.add(lane8_3, lane8_2), builder.add(lane8_1, lane8_0)))
+        builder.emit_method("e16", builder.add(builder.add(lane16_3, lane16_2), builder.add(lane16_1, lane16_0)))
         builder.finish()
         ev
     }
