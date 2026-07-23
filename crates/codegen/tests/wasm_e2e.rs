@@ -1787,6 +1787,71 @@ pub fn ordinary_roundtrip(_ ptr: MemPtr<u32>, value: u32) -> u32 {
     );
 }
 
+#[test]
+fn raw_memory_record_fields_use_wasm_layout_offsets() {
+    let source = r#"
+use core::MemPtr
+
+struct Mixed {
+    a: u8,
+    b: u32,
+    c: u16,
+    d: u64,
+}
+
+fn write_mixed(a: u8, b: u32, c: u16, d: u64) uses (record: mut Mixed) {
+    record.a = a
+    record.b = b
+    record.c = c
+    record.d = d
+}
+
+fn read_d() -> u64 uses (record: Mixed) {
+    record.d
+}
+
+pub fn record_roundtrip(
+    _ ptr: MemPtr<Mixed>,
+    a: u8,
+    b: u32,
+    c: u16,
+    d: u64,
+) -> u64 {
+    with (ptr) {
+        write_mixed(a, b, c, d)
+        read_d()
+    }
+}
+"#;
+    let wasm = compile_to_wasm("wasm_raw_memory_record_fields.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let memory = instance
+        .get_memory(&mut store, "memory")
+        .expect("record field access requires exported linear memory");
+    let roundtrip = instance
+        .get_typed_func::<(i32, i32, i32, i32, i64), i64>(&mut store, "record_roundtrip")
+        .expect("record_roundtrip export");
+
+    const BASE: i32 = 17;
+    let d = 0x0807060504030201_i64;
+    assert_eq!(
+        roundtrip
+            .call(&mut store, (BASE, 0xab, 0x78563412, 0xcdef, d))
+            .unwrap(),
+        d
+    );
+    // WASM_LAYOUT is an eight-byte word layout: each scalar field begins at
+    // the next word, while Mstore itself writes only the scalar's true width.
+    let bytes = &memory.data(&store)[BASE as usize..BASE as usize + 32];
+    assert_eq!(&bytes[0..1], &[0xab]);
+    assert_eq!(&bytes[1..8], &[0; 7]);
+    assert_eq!(&bytes[8..12], &0x78563412_u32.to_le_bytes());
+    assert_eq!(&bytes[12..16], &[0; 4]);
+    assert_eq!(&bytes[16..18], &0xcdef_u16.to_le_bytes());
+    assert_eq!(&bytes[18..24], &[0; 6]);
+    assert_eq!(&bytes[24..32], &d.to_le_bytes());
+}
+
 /// R3.4b twin: the `on_ready` continuation lane. `main_begin` composes WITHOUT
 /// `Wait` (create..readback_begin) and returns the `Pending<()>`; the output region
 /// is UNCHANGED until the host drives `on_ready(token)`, which completes the copy

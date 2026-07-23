@@ -1744,6 +1744,29 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 }
                 self.lower_scalar_newtype_extract(*value, *index)
             }
+            // On wasm32 both a memory provider handle and its explicit raw form
+            // are the same i32 linear-memory byte offset. Keep this conversion
+            // as a checked representation identity; object/const/non-memory
+            // providers remain outside the admitted RawAddr slice.
+            RExpr::ProviderToRaw { value }
+                if matches!(
+                    self.body.value_class(*value),
+                    Some(
+                        RuntimeClass::RawAddr {
+                            space: AddressSpaceKind::Memory,
+                            ..
+                        } | RuntimeClass::Ref {
+                            kind: RefKind::Provider {
+                                space: AddressSpaceKind::Memory,
+                                ..
+                            },
+                            ..
+                        }
+                    )
+                ) =>
+            {
+                self.local_value(*value)
+            }
             // R2.0 (Fable seat ruling, control-effects ladder section 7): the only
             // place read the wasm target lowers is an IDENTITY on an already
             // value-carried transport word. Own-mode consumption of a word-carried
@@ -1817,27 +1840,24 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
         }
     }
 
-    /// Resolve the first real Wasm linear-memory place shape: an empty-path
-    /// scalar behind a memory `RawAddr`. Raw addresses are byte offsets carried
+    /// Resolve a Wasm linear-memory scalar place behind a memory `RawAddr`.
+    /// Raw addresses are byte offsets carried
     /// as `i32` on wasm32, not Sonatina compound pointers. Consequently field or
-    /// index address arithmetic will use checked/ordinary `i32` Add/Mul when it
-    /// lands; `Gep` would be the wrong representation here. This slice admits
-    /// only the base scalar access and emits a typed `Mload`/`Mstore`.
+    /// index address arithmetic uses checked/ordinary `i32` Add/Mul rather than
+    /// `Gep`. Struct field offsets come exclusively from MIR's target-layout
+    /// SSOT. Dynamic indexes, variants, and dereferences remain fail-closed.
     fn raw_memory_scalar_place(
         &mut self,
         place: &RuntimePlace<'db>,
     ) -> Result<Option<(ValueId, Type)>, LowerError> {
-        if !place.path.is_empty() {
-            return Ok(None);
-        }
         let program = self.module.db as &dyn mir::MirDb;
         let resolved = mir::resolve_runtime_place(self.module.db, &program, &self.body, place)
             .map_err(|error| LowerError::Internal(format!("invalid runtime place: {error:?}")))?;
-        let RuntimeClass::Scalar(scalar) = &resolved.result_class else {
+        let RuntimeClass::Scalar(scalar) = resolved.result_class.clone() else {
             return Ok(None);
         };
-        let addr_local = match resolved.root_kind {
-            mir::ResolvedPlaceRootKind::Ref { value, .. }
+        let (addr_local, mut current_class) = match resolved.root_kind {
+            mir::ResolvedPlaceRootKind::Ref { value, class }
                 if matches!(
                     self.body.value_class(value),
                     Some(RuntimeClass::RawAddr {
@@ -1846,7 +1866,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     })
                 ) =>
             {
-                value
+                (value, class)
             }
             mir::ResolvedPlaceRootKind::Provider {
                 value,
@@ -1855,18 +1875,62 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                         space: AddressSpaceKind::Memory,
                         ..
                     },
+                class,
                 ..
-            } => value,
+            } => (value, class),
             mir::ResolvedPlaceRootKind::Ptr {
                 addr,
                 space: AddressSpaceKind::Memory,
-                ..
-            } => addr,
+                class,
+            } => (addr, class),
             _ => return Ok(None),
         };
+        let mut byte_offset = 0usize;
+        for elem in resolved.path {
+            match elem {
+                mir::ResolvedPlaceElem::Field { field, class } => {
+                    let RuntimeClass::AggregateValue { layout } = current_class else {
+                        return Err(LowerError::Internal(
+                            "resolved field projection base is not a struct".to_string(),
+                        ));
+                    };
+                    byte_offset = byte_offset
+                        .checked_add(mir::struct_field_offset_bytes(
+                            self.module.db,
+                            layout,
+                            field,
+                            crate::WASM_LAYOUT,
+                        ))
+                        .ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "wasm RawAddr struct field byte offset overflow".to_string(),
+                            )
+                        })?;
+                    current_class = class;
+                }
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm RawAddr scalar place projection `{other:?}` is not supported; \
+                         only struct fields have target-layout byte-offset lowering"
+                    )));
+                }
+            }
+        }
+        let mut addr = self.local_value(addr_local)?;
+        if byte_offset != 0 {
+            let offset = i32::try_from(byte_offset).map_err(|_| {
+                LowerError::Unsupported(format!(
+                    "wasm RawAddr struct field offset {byte_offset} exceeds i32"
+                ))
+            })?;
+            let offset = self.fb.make_imm_value(Immediate::I32(offset));
+            addr = self
+                .fb
+                .insert_inst(Add::new(self.inst_set(), addr, offset), Type::I32);
+        }
         Ok(Some((
-            self.local_value(addr_local)?,
-            scalar_ty_r1(scalar)?,
+            addr,
+            scalar_ty_r1(&scalar)?,
         )))
     }
 
