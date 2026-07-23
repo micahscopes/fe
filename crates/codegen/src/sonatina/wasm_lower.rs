@@ -849,6 +849,149 @@ fn remap_inline_expr<'db>(
     })
 }
 
+/// Reify statically projected read-only aggregate parameters as flattened
+/// values for Wasm. Fe presents ordinary record parameters as references, but
+/// the Wasm product ABI already carries closed scalar trees by value. Convert
+/// only compile-time `Field` paths through struct layouts; dynamic indexes,
+/// enums, stores, address-taking, and non-aggregate/resource pointees are left
+/// untouched and continue to fail closed in normal lowering.
+fn is_reifiable_aggregate_ref(kind: &RefKind<'_>) -> bool {
+    matches!(kind, RefKind::Const)
+}
+
+fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
+    let candidates = body
+        .signature
+        .params
+        .iter()
+        .filter_map(|param| match &param.class {
+            RuntimeClass::Ref {
+                pointee,
+                kind,
+                ..
+            }
+                if is_reifiable_aggregate_ref(kind)
+                    && matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. }) =>
+            {
+                Some((param.local, pointee.as_ref().clone()))
+            }
+            _ => None,
+        })
+        .collect::<FxHashMap<_, _>>();
+    if candidates.is_empty() {
+        return;
+    }
+
+    for param in &mut body.signature.params {
+        if let Some(class) = candidates.get(&param.local) {
+            param.class = class.clone();
+            body.locals[param.local.as_u32() as usize].carrier =
+                RuntimeCarrier::Value(class.clone());
+            body.locals[param.local.as_u32() as usize].root = RuntimeLocalRoot::None;
+        }
+    }
+
+    let (locals, blocks) = (&mut body.locals, &mut body.blocks);
+    for block in blocks {
+        let mut rewritten = Vec::with_capacity(block.stmts.len());
+        for stmt in std::mem::take(&mut block.stmts) {
+            let RStmt::Assign {
+                dst,
+                expr:
+                    RExpr::Load {
+                        place:
+                            RuntimePlace {
+                                root: PlaceRoot::Ref(root),
+                                path,
+                            },
+                    },
+            } = &stmt
+            else {
+                rewritten.push(stmt);
+                continue;
+            };
+            let Some(mut class) = candidates.get(root).cloned() else {
+                rewritten.push(stmt);
+                continue;
+            };
+            if path.is_empty() {
+                locals[dst.as_u32() as usize].carrier = RuntimeCarrier::Value(class);
+                locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+                rewritten.push(RStmt::Assign {
+                    dst: *dst,
+                    expr: RExpr::Use(*root),
+                });
+                continue;
+            }
+            if !path.iter().all(|elem| matches!(elem, PlaceElem::Field(_))) {
+                rewritten.push(stmt);
+                continue;
+            }
+
+            let mut current = *root;
+            let mut semantic_ty = locals[root.as_u32() as usize].semantic_ty;
+            let mut projections = Vec::with_capacity(path.len());
+            let mut valid = true;
+            for (position, elem) in path.iter().enumerate() {
+                let PlaceElem::Field(index) = elem else {
+                    unreachable!()
+                };
+                let RuntimeClass::AggregateValue { layout } = class else {
+                    valid = false;
+                    break;
+                };
+                let Layout::Struct(struct_layout) = layout.data(db) else {
+                    valid = false;
+                    break;
+                };
+                let Some(field_class) = struct_layout.fields.get(index.0 as usize).cloned() else {
+                    valid = false;
+                    break;
+                };
+                let semantic_fields = semantic_ty
+                    .as_view(db)
+                    .unwrap_or(semantic_ty)
+                    .field_types(db);
+                let Some(field_semantic_ty) =
+                    semantic_fields.get(index.0 as usize).copied()
+                else {
+                    valid = false;
+                    break;
+                };
+                let target = if position + 1 == path.len() {
+                    *dst
+                } else {
+                    let temp = RLocalId::from_u32(locals.len() as u32);
+                    locals.push(RLocal {
+                        semantic_ty: field_semantic_ty,
+                        carrier: RuntimeCarrier::Value(field_class.clone()),
+                        root: RuntimeLocalRoot::None,
+                    });
+                    temp
+                };
+                projections.push(RStmt::Assign {
+                    dst: target,
+                    expr: RExpr::AggregateExtract {
+                        value: current,
+                        index: u32::from(index.0),
+                    },
+                });
+                current = target;
+                class = field_class;
+                semantic_ty = field_semantic_ty;
+            }
+            if valid {
+                locals[dst.as_u32() as usize].carrier = RuntimeCarrier::Value(class);
+                locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
+                rewritten.extend(projections);
+            } else {
+                rewritten.push(stmt);
+            }
+        }
+        block.stmts = rewritten;
+    }
+}
+
 struct WasmModuleLowerer<'db, 'a> {
     db: &'db DriverDataBase,
     builder: ModuleBuilder,
@@ -866,7 +1009,10 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         isa: &'a Wasm32,
         package: &'a RuntimePackage<'db>,
     ) -> Self {
-        let prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
+        let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
+        for body in prepared_bodies.values_mut() {
+            reify_static_aggregate_params(db, body);
+        }
         Self {
             db,
             builder,
@@ -985,7 +1131,12 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
     }
 
     fn lower_signature(&mut self, function: RuntimeFunction<'db>) -> Result<Signature, LowerError> {
-        let body = function.instance(self.db).body(self.db);
+        let instance = function.instance(self.db);
+        let body = self
+            .prepared_bodies
+            .get(&instance)
+            .cloned()
+            .unwrap_or_else(|| instance.body(self.db));
         // R2.1: a scalar-tuple param/return FLATTENS into N wasm scalar
         // params/results (one per element word); every other param/return maps
         // 1:1 through `ty_for_class` exactly as before. The flattening order is
@@ -2705,6 +2856,12 @@ mod tests {
     use common::InputDb;
     use mir::ScalarRole;
     use url::Url;
+
+    #[test]
+    fn aggregate_param_reification_excludes_mutable_object_refs() {
+        assert!(is_reifiable_aggregate_ref(&RefKind::Const));
+        assert!(!is_reifiable_aggregate_ref(&RefKind::Object));
+    }
 
     #[test]
     fn authored_mvt2_specialization_prunes_structural_residuals() {

@@ -1,8 +1,7 @@
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalInterfaceManifest, CanonicalLaneDecl, CanonicalShape, CanonicalType,
-    WasmCompileOptions,
+    CanonicalInterfaceManifest, CanonicalShape, WasmCompileOptions,
     canonical_lane_decl_from_entry, compile_runtime_package_wasm_with_options,
 };
 use url::Url;
@@ -132,18 +131,27 @@ fn canonical_browser_descriptors_roundtrip_owned_bytes_and_utf8() {
     let source = r#"
 use core::{BrowserBytes, BrowserString}
 
-struct RawDescriptor { ptr: u32, len: u32 }
-
-pub fn echo(ptr: u32, len: u32) -> RawDescriptor {
-    RawDescriptor { ptr, len }
+struct Request {
+    bytes: BrowserBytes,
+    text: BrowserString,
 }
 
-pub fn describe_string(request: BrowserString) -> BrowserString {
-    request
+struct Response {
+    bytes: BrowserBytes,
+    text: BrowserString,
 }
 
-pub fn describe_bytes(request: BrowserBytes) -> BrowserBytes {
-    request
+pub fn echo(request: own Request) -> Response {
+    Response {
+        bytes: BrowserBytes {
+            ptr: request.bytes.ptr,
+            len: request.bytes.len,
+        },
+        text: BrowserString {
+            ptr: request.text.ptr,
+            len: request.text.len,
+        },
+    }
 }
 "#;
     let mut db = DriverDataBase::default();
@@ -154,33 +162,17 @@ pub fn describe_bytes(request: BrowserBytes) -> BrowserBytes {
     let top_mod = db.top_mod(file);
     let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
     assert!(diagnostics.is_empty(), "{diagnostics}");
-    let declaration =
-        canonical_lane_decl_from_entry(&db, top_mod, "describe_string", "describe_string")
-            .unwrap();
-    let semantic_manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+    let declaration = canonical_lane_decl_from_entry(&db, top_mod, "echo", "echo").unwrap();
+    let manifest = CanonicalInterfaceManifest::build(vec![declaration]).unwrap();
+    let lane = manifest.lanes[0].clone();
+    let CanonicalShape::Record { fields } = &lane.request.shape else {
+        panic!("request record")
+    };
+    assert!(matches!(fields[0].layout.shape, CanonicalShape::Bytes { .. }));
     assert!(matches!(
-        semantic_manifest.lanes[0].request.shape,
+        fields[1].layout.shape,
         CanonicalShape::String { ref encoding, .. } if encoding == "utf-8"
     ));
-    let bytes_declaration =
-        canonical_lane_decl_from_entry(&db, top_mod, "describe_bytes", "describe_bytes").unwrap();
-    let bytes_manifest = CanonicalInterfaceManifest::build(vec![bytes_declaration]).unwrap();
-    assert!(matches!(
-        bytes_manifest.lanes[0].request.shape,
-        CanonicalShape::Bytes { .. }
-    ));
-
-    // The wrapper mechanics are exercised independently of the still-narrow
-    // Fe aggregate parameter lowering: its selected entry has the exact
-    // flattened descriptor signature.
-    let manifest = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
-        name: "echo".to_owned(),
-        export: "fe_cabi_echo".to_owned(),
-        request: CanonicalType::String,
-        response: CanonicalType::String,
-    }])
-    .unwrap();
-    let lane = manifest.lanes[0].clone();
 
     let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "echo").unwrap();
     let artifact = compile_runtime_package_wasm_with_options(
@@ -202,33 +194,48 @@ pub fn describe_bytes(request: BrowserBytes) -> BrowserBytes {
         .unwrap();
 
     let request_ptr = 64usize;
+    let bytes_ptr = 128usize;
     let text_ptr = 192usize;
+    let bytes = b"x\0y";
     let text = "a\0héllo 🌍".as_bytes();
+    memory.write(&mut store, bytes_ptr, bytes).unwrap();
     memory.write(&mut store, text_ptr - 1, &[0xcc]).unwrap();
     memory.write(&mut store, text_ptr, text).unwrap();
     memory
         .write(&mut store, text_ptr + text.len(), &[0xdd])
         .unwrap();
     let mut request = Vec::new();
+    request.extend_from_slice(&(bytes_ptr as u32).to_le_bytes());
+    request.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     request.extend_from_slice(&(text_ptr as u32).to_le_bytes());
     request.extend_from_slice(&(text.len() as u32).to_le_bytes());
     memory.write(&mut store, request_ptr, &request).unwrap();
 
     let response_ptr = echo.call(&mut store, request_ptr as i32).unwrap() as usize;
-    let mut response = [0u8; 8];
+    let mut response = [0u8; 16];
     memory.read(&store, response_ptr, &mut response).unwrap();
     let word = |offset| {
         u32::from_le_bytes(response[offset..offset + 4].try_into().unwrap()) as usize
     };
-    let copied_text_ptr = word(0);
-    let copied_text_len = word(4);
+    let copied_bytes_ptr = word(0);
+    let copied_bytes_len = word(4);
+    let copied_text_ptr = word(8);
+    let copied_text_len = word(12);
+    assert_eq!(copied_bytes_len, bytes.len());
     assert_eq!(copied_text_len, text.len());
+    assert_ne!(copied_bytes_ptr, bytes_ptr);
     assert_ne!(copied_text_ptr, text_ptr);
+    assert!(copied_bytes_ptr + copied_bytes_len <= memory.data_size(&store));
     assert!(copied_text_ptr + copied_text_len <= memory.data_size(&store));
+    let mut copied_bytes = vec![0; copied_bytes_len];
     let mut copied_text = vec![0; copied_text_len];
+    memory
+        .read(&store, copied_bytes_ptr, &mut copied_bytes)
+        .unwrap();
     memory
         .read(&store, copied_text_ptr, &mut copied_text)
         .unwrap();
+    assert_eq!(copied_bytes, bytes);
     assert_eq!(copied_text, text);
     assert_eq!(std::str::from_utf8(&copied_text).unwrap(), "a\0héllo 🌍");
     assert_eq!(
