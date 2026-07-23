@@ -195,6 +195,11 @@ hostManifest.lanes[0].intent = {
 hostManifest.lanes.push({
   ...structuredClone(hostManifest.lanes[0]),
   name: "gpu_submit",
+  intent: {
+    execution: "host_effect",
+    placement: "worker",
+    capabilities: [{ capability: "webgpu_dispatch", mutable: true }],
+  },
 });
 const hostCompiled = compileCanonicalInterfaceManifest(hostManifest);
 const hostRequest = (tag) => ({
@@ -207,7 +212,7 @@ assert.throws(
 );
 assert.throws(
   () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, {}),
-  /missing canonical host-effect handlers: echo, gpu_submit/,
+  /missing canonical host-effect handlers: echo/,
 );
 assert.throws(
   () => createCanonicalHostEffectAdapter(hostManifest, hostCompiled, { missing() {} }),
@@ -241,7 +246,6 @@ const hostEffects = createCanonicalHostEffectAdapter(
       if (request.tag === 9) throw new Error("sensitive host detail");
       return new Uint8Array([request.tag]);
     },
-    gpu_submit: async (request) => new Uint8Array([request.tag]),
   },
   { maxPendingPerLane: 1 },
 );
@@ -249,7 +253,6 @@ const wrongPlacementEffects = createCanonicalHostEffectAdapter(
   hostManifest,
   hostCompiled,
   {
-    echo: async (request) => new Uint8Array([request.tag]),
     gpu_submit: async (request) => new Uint8Array([request.tag]),
   },
   { placement: "worker" },
@@ -284,7 +287,6 @@ const invalidHostResponse = createCanonicalHostEffectAdapter(
   hostCompiled,
   {
     echo: () => "not bytes",
-    gpu_submit: async (request) => new Uint8Array([request.tag]),
   },
 );
 await assert.rejects(

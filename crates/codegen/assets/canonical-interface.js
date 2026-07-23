@@ -627,7 +627,8 @@ export function createCanonicalHostEffectAdapter(
   }
   const selected = Object.create(null);
   const hostLanes = Object.entries(adapter.intents)
-    .filter(([, intent]) => intent.execution === "host_effect")
+    .filter(([, intent]) => intent.execution === "host_effect"
+      && intent.placement === placement)
     .map(([lane]) => lane);
   for (const [lane, handler] of Object.entries(handlers)) {
     if (!hostLanes.includes(lane)) {
