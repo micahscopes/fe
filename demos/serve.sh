@@ -200,6 +200,9 @@ fi
 if [ "$serve" = 1 ]; then
   trunk_args=(serve --config "$here/Trunk.toml")
   if [ "$no_watch" = 1 ]; then trunk_args+=(--no-autoreload); fi
+  # Trunk's clap parser expects an explicit boolean, while the conventional
+  # NO_COLOR environment variable is commonly exported as `1`.
+  if [ "${NO_COLOR:-}" = 1 ]; then export NO_COLOR=true; fi
   echo "serving browser demos (selected bundle: $demo)..."
   exec trunk "${trunk_args[@]}"
 fi
