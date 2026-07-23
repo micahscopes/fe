@@ -93,6 +93,20 @@ class BrowserCargoTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("requires clean reviewed Sonatina", result.stderr)
 
+    def test_browser_call_sites_share_one_patch_owner(self) -> None:
+        cga = (DEMOS / "webgpu-cga-inversion" / "generate.sh").read_text()
+        qcga = (DEMOS / "webgpu-qcga3d-quadric" / "generate.sh").read_text()
+        serve = (DEMOS / "serve.sh").read_text()
+        self.assertIn('if [ "$bundle" = schedule32 ]', cga)
+        self.assertIn('"$repo/demos/with-browser-cargo.sh"', cga)
+        self.assertIn('"$repo/demos/with-browser-cargo.sh"', qcga)
+        self.assertIn('"$here/with-browser-cargo.sh"', serve)
+        self.assertNotIn('patch.\\"https://github.com/micahscopes/sonatina', qcga)
+        self.assertNotIn('patch.\\"https://github.com/micahscopes/sonatina', serve)
+        # The only remaining local patches are the four-crate legacy D1 block,
+        # whose ed43625b backend deliberately predates the browser runner.
+        self.assertEqual(cga.count('patch.\\"https://github.com/micahscopes/sonatina'), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

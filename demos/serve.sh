@@ -79,26 +79,8 @@ generate_example() {
   if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
     "$FE_DEMO_GENERATE_CMD" "$key"
   else
-    (
-      demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
-      mkdir -p "$demo_tmp_root"
-      lock_backup="$(mktemp "$demo_tmp_root/fe-demo-Cargo.lock.XXXXXX")"
-      cp "$repo/Cargo.lock" "$lock_backup"
-      restore_lock() {
-        cp "$lock_backup" "$repo/Cargo.lock"
-        rm -f -- "$lock_backup"
-      }
-      trap restore_lock EXIT
-      cd "$repo"
-      RUSTC_WRAPPER="${FE_DEMO_RUSTC_WRAPPER:-}" cargo \
-      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-ir.path=\"$SONATINA_DIR/crates/ir\"" \
-      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-triple.path=\"$SONATINA_DIR/crates/triple\"" \
-      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-codegen.path=\"$SONATINA_DIR/crates/codegen\"" \
-      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-verifier.path=\"$SONATINA_DIR/crates/verifier\"" \
-      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-macros.path=\"$SONATINA_DIR/crates/macros\"" \
-      --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-parser.path=\"$SONATINA_DIR/crates/parser\"" \
+    "$here/with-browser-cargo.sh" \
       run -p fe-codegen --example "$example"
-    )
   fi
 }
 

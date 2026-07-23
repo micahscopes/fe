@@ -54,22 +54,30 @@ else
   fe_untracked_present=0
 fi
 
-demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
-mkdir -p "$demo_tmp_root"
-lock_backup="$(mktemp "$demo_tmp_root/fe-cga-Cargo.lock.XXXXXX")"
-cp "$repo/Cargo.lock" "$lock_backup"
-restore_lock() {
-  cp "$lock_backup" "$repo/Cargo.lock"
-  rm -f -- "$lock_backup"
-}
-trap restore_lock EXIT
-
-( cd "$repo" && \
+if [ "$bundle" = schedule32 ]; then
   FE_CGA_SOURCE_REV="$fe_revision" \
   FE_CGA_SOURCE_UNTRACKED_PRESENT="$fe_untracked_present" \
-  RUSTC_WRAPPER="${FE_DEMO_RUSTC_WRAPPER:-}" cargo \
+    "$repo/demos/with-browser-cargo.sh" \
+    run -p fe-codegen --example "$generator"
+else
+  # Legacy D1 is pinned to an older backend and cannot use the browser runner's
+  # exact ac266c21 contract.
+  demo_tmp_root="${FE_DEMO_TMPDIR:-$repo/output/demo-tmp}"
+  mkdir -p "$demo_tmp_root"
+  lock_backup="$(mktemp "$demo_tmp_root/fe-cga-Cargo.lock.XXXXXX")"
+  cp "$repo/Cargo.lock" "$lock_backup"
+  restore_lock() {
+    cp "$lock_backup" "$repo/Cargo.lock"
+    rm -f -- "$lock_backup"
+  }
+  trap restore_lock EXIT
+  ( cd "$repo" && \
+    FE_CGA_SOURCE_REV="$fe_revision" \
+    FE_CGA_SOURCE_UNTRACKED_PRESENT="$fe_untracked_present" \
+    RUSTC_WRAPPER="${FE_DEMO_RUSTC_WRAPPER:-}" cargo \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-ir.path=\"$SONATINA_DIR/crates/ir\"" \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-triple.path=\"$SONATINA_DIR/crates/triple\"" \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-codegen.path=\"$SONATINA_DIR/crates/codegen\"" \
     --config "patch.\"https://github.com/micahscopes/sonatina\".sonatina-verifier.path=\"$SONATINA_DIR/crates/verifier\"" \
     run -p fe-codegen --example "$generator" )
+fi

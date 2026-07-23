@@ -86,15 +86,15 @@ lifecycle code remain explicit and demo-owned; this gate does not claim that Fe
 code directly owns or invokes the browser's WebGPU device.
 
 For a single-source application that consumes the standard `WebBundle`
-contract, the temporary one-command entry point is:
+contract, the temporary compatibility launcher is:
 
 ```sh
 demos/fe-web serve path/to/kernel.fe --entry kernel --mode render \
   --root path/to/static-app
 ```
 
-Use `build ... --out path/to/bundle` for an atomic on-disk bundle. The command
-is the real `fe web build|serve` CLI; `demos/with-browser-cargo.sh` only supplies
+Use `build ... --out path/to/bundle` for an atomic on-disk bundle. The launcher
+invokes the real `fe web build|serve` CLI; `demos/with-browser-cargo.sh` only supplies
 the checksum-verified, clean Sonatina `ac266c21` overlay that the unpublished
 workspace dependency cannot yet fetch. It owns the six Cargo path patches,
 workspace-local temporary/target directories, generation lock, inherited
@@ -113,5 +113,6 @@ This standard bundle contains compiler-derived Wasm, WGSL, manifest,
 interfaces, and actor runtime modules. The Schedule32 generator remains
 necessary for source composition, its independently executed Rust oracle,
 typed-plan witness/provenance, and separate entry-rooted Wasm proof. Publishing
-and repinning the backend removes the wrapper; it does not erase those
+and repinning the backend is required for the intended direct `fe web` UX and
+removes this compatibility launcher; it does not erase those
 application-specific evidence jobs.
