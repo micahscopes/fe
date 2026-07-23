@@ -315,3 +315,79 @@ derive Compute for Target using Provider
 "#,
     );
 }
+
+#[test]
+fn provider_const_helper_supports_canonical_unsigned_arithmetic() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_const_helper_arithmetic.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+const fn canonical(_ x: usize) -> usize {
+    let slot = (x / 4) % 5
+    let blade = 1 << (slot + 1)
+    let mixed = ((blade >> 1) & 7) ^ 3
+    mixed * 2 + (10 - mixed)
+}
+trait Compute { fn run(self) -> bool }
+struct Provider {}
+impl Derive<Compute> for Provider {
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {
+        if canonical(8) == 17 {
+            builder.emit_method(quote { fn run(self) -> bool { true } })
+        } else {
+            builder.emit_method(quote { fn run(self) -> bool { false } })
+        }
+        builder.finish()
+        ev
+    }
+}
+struct Target {}
+derive Compute for Target using Provider
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+fn arithmetic_helper_source(expr: &str) -> String {
+    format!(
+        r#"
+use core::derive::{{Derive, Evidence, ImplBuilder, Reflect}}
+const fn bad() -> usize {{ {expr} }}
+trait Compute {{ fn run(self) -> bool }}
+struct Provider {{}}
+impl Derive<Compute> for Provider {{
+    const fn derive<T>(ev: own Evidence<Compute<T>>) -> Evidence<Compute<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Compute<T>>)
+    {{
+        if bad() == 0 {{ builder.emit_method(quote {{ fn run(self) -> bool {{ true }} }}) }}
+        builder.finish()
+        ev
+    }}
+}}
+struct Target {{}}
+derive Compute for Target using Provider
+"#
+    )
+}
+
+#[test]
+fn provider_const_helper_arithmetic_edges_fail_closed() {
+    for (name, expr) in [
+        ("underflow", "0 - 1"),
+        ("division_by_zero", "1 / 0"),
+        ("remainder_by_zero", "1 % 0"),
+        ("invalid_shift", "1 << 256"),
+        (
+            "overflow",
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935 + 1",
+        ),
+        ("unsupported_bit_or", "1 | 2"),
+    ] {
+        let source = arithmetic_helper_source(expr);
+        assert_provider_helper_rejected(&format!("provider_const_helper_{name}.fe"), &source);
+    }
+}

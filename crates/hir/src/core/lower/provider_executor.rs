@@ -16,6 +16,7 @@
 //! * enforces an explicit step budget and a command-count cap, so a buggy
 //!   provider degrades into a diagnostic instead of a hang.
 
+use num_traits::{CheckedSub, ToPrimitive};
 use parser::TextRange;
 use parser::ast::prelude::*;
 
@@ -1345,6 +1346,58 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     lhs.data(self.db),
                     rhs.data(self.db),
                 )))
+            }
+            Expr::Bin(lhs, rhs, BinOp::Arith(op)) => {
+                let lhs = self.int_value(*lhs)?;
+                let rhs = self.int_value(*rhs)?;
+                let lhs = lhs.data(self.db);
+                let rhs = rhs.data(self.db);
+                let value = match op {
+                    ArithBinOp::Add => lhs + rhs,
+                    ArithBinOp::Sub => lhs
+                        .checked_sub(rhs)
+                        .ok_or_else(|| self.unsupported_expr(expr))?,
+                    ArithBinOp::Mul => lhs * rhs,
+                    ArithBinOp::Div => {
+                        if rhs.bits() == 0 {
+                            return Err(self.unsupported_expr(expr));
+                        }
+                        lhs / rhs
+                    }
+                    ArithBinOp::Rem => {
+                        if rhs.bits() == 0 {
+                            return Err(self.unsupported_expr(expr));
+                        }
+                        lhs % rhs
+                    }
+                    ArithBinOp::LShift => {
+                        let shift = rhs
+                            .to_usize()
+                            .filter(|shift| *shift < 256)
+                            .ok_or_else(|| self.unsupported_expr(expr))?;
+                        lhs << shift
+                    }
+                    ArithBinOp::RShift => {
+                        let shift = rhs
+                            .to_usize()
+                            .filter(|shift| *shift < 256)
+                            .ok_or_else(|| self.unsupported_expr(expr))?;
+                        lhs >> shift
+                    }
+                    ArithBinOp::BitAnd => lhs & rhs,
+                    ArithBinOp::BitXor => lhs ^ rhs,
+                    ArithBinOp::Pow | ArithBinOp::BitOr | ArithBinOp::Range => {
+                        return Err(self.unsupported_expr(expr));
+                    }
+                };
+                // Provider integers model the unannotated/`usize` CTFE shape:
+                // Fe's 256-bit unsigned compile-time word. Typed signed
+                // arithmetic is intentionally outside this lowering-phase
+                // executor because expression type analysis is downstream.
+                if value.bits() > 256 {
+                    return Err(self.unsupported_expr(expr));
+                }
+                Ok(Value::Int(IntegerId::new(self.db, value)))
             }
             Expr::Path(_) => {
                 let Some(name) = self.simple_expr_path_ident(expr) else {
