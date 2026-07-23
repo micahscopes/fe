@@ -8,6 +8,11 @@
 // EXPLICITLY from that metadata, never via wgpu/Tint reflection. A different
 // kernel is just different gen/ files + this same runner.
 
+import {
+  decodeGpuTimestampPair,
+  timestampFeaturePlan,
+} from "../shared/gpu-timestamp.js";
+
 const WORD_STAGE_ALIGN = 4; // WebGPU copy size / buffer size must be a multiple of 4.
 
 function align4(n) {
@@ -412,7 +417,12 @@ function buildRenderBindings(device, layout) {
 // success, or { ok:false, reason, messages? }
 // (fail-closed) when WebGPU is absent / the device is unavailable / the shader
 // fails to compile. AMBER is the caller's job (this returns ok:false, no draw).
-export async function initWebGPURender(wgslText, layout, canvas) {
+export async function initWebGPURender(
+  wgslText,
+  layout,
+  canvas,
+  { timestampQuery = false } = {},
+) {
   if (layout.mode !== "Render") {
     return { ok: false, reason: `initWebGPURender requires layout.mode === "Render"; got "${layout.mode}"` };
   }
@@ -430,10 +440,13 @@ export async function initWebGPURender(wgslText, layout, canvas) {
     return { ok: false, reason: "requestAdapter() returned null (no WebGPU adapter available)" };
   }
   const name = await adapterName(adapter);
+  const gpuTimestamp = timestampFeaturePlan(adapter.features, timestampQuery);
 
   let device;
   try {
-    device = await adapter.requestDevice();
+    device = await adapter.requestDevice({
+      requiredFeatures: [...gpuTimestamp.requiredFeatures],
+    });
   } catch (e) {
     return { ok: false, reason: `requestDevice() failed: ${e.message || e}`, adapter: name };
   }
@@ -508,6 +521,8 @@ export async function initWebGPURender(wgslText, layout, canvas) {
     presentation: canvas === null ? "offscreen" : "canvas",
     deviceError: () => deviceError,
     deviceLost: () => deviceLost,
+    gpuTimestamp,
+    gpuTimestampResources: null,
   };
 }
 
@@ -565,6 +580,80 @@ export function renderFrame(handle, viewWords) {
   pass.draw(3, 1, 0, 0);
   pass.end();
   queue.submit([encoder.finish()]);
+}
+
+// Explicit benchmark-only GPU completion timing. Unlike renderFrame, this
+// resolves two timestamp queries, copies them to a MAP_READ buffer, and waits
+// for mapAsync. Callers must never use it for the default presentation path.
+export async function renderFrameGpuTimed(handle, viewWords) {
+  const {
+    device, queue, ctx, displayPipeline, inputBuf, bindGroup, layout, gpuTimestamp,
+  } = handle;
+  if (!ctx || !displayPipeline) {
+    throw new Error(
+      "renderFrameGpuTimed requires a canvas-backed render handle",
+    );
+  }
+  if (!gpuTimestamp?.requested || !gpuTimestamp.supported) {
+    throw new Error(
+      gpuTimestamp?.reason || "timestamp-query was not requested for this render handle",
+    );
+  }
+  if (!handle.gpuTimestampResources) {
+    handle.gpuTimestampResources = {
+      querySet: device.createQuerySet({ type: "timestamp", count: 2 }),
+      resolve: device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      }),
+      staging: device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      }),
+      busy: false,
+    };
+  }
+  const resources = handle.gpuTimestampResources;
+  if (resources.busy) {
+    throw new Error("GPU timestamp measurement is already in flight");
+  }
+  resources.busy = true;
+  const { querySet, resolve, staging } = resources;
+  const params = layout.params || [];
+  writeTypedParams(queue, inputBuf, params, viewWords);
+  const view = ctx.getCurrentTexture().createView();
+  const cpuStarted = performance.now();
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [
+      { view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } },
+    ],
+    timestampWrites: {
+      querySet,
+      beginningOfPassWriteIndex: 0,
+      endOfPassWriteIndex: 1,
+    },
+  });
+  pass.setPipeline(displayPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(3, 1, 0, 0);
+  pass.end();
+  encoder.resolveQuerySet(querySet, 0, 2, resolve, 0);
+  encoder.copyBufferToBuffer(resolve, 0, staging, 0, 16);
+  queue.submit([encoder.finish()]);
+  const cpuSubmitMs = Math.max(0, performance.now() - cpuStarted);
+  try {
+    await staging.mapAsync(GPUMapMode.READ);
+    const bytes = staging.getMappedRange().slice(0);
+    staging.unmap();
+    return Object.freeze({
+      cpuSubmitMs,
+      ...decodeGpuTimestampPair(bytes),
+    });
+  } finally {
+    if (staging.mapState === "mapped") staging.unmap();
+    resources.busy = false;
+  }
 }
 
 // Submit one offscreen frame without allocating a staging buffer or reading it

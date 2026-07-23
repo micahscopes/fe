@@ -19,6 +19,7 @@
     .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0 18px; }
     .controls button { color: #e6edf3; background: #161b22; border: 1px solid #30363d;
       border-radius: 5px; padding: 6px 10px; cursor: pointer; }
+    .controls a { color: #79c0ff; }
     #camera-values, #pointer-values, #inversion-values { font: 13px ui-monospace, monospace; }
   </style>
 </head>
@@ -36,6 +37,10 @@
     <button id="freeze-inversion" type="button">Freeze inversion</button>
     <button id="reset-camera" type="button">Reset camera</button>
     <button id="verify-view" type="button">Verify current view</button>
+    <span class="muted">Quality:
+      <a id="quality-teaser" href="?verify=off&amp;quality=teaser">Teaser 256²</a>
+      · <a id="quality-full" href="?quality=full">Full auto</a>
+    </span>
     <span id="camera-values">cam_x=0.00000 cam_y=0.00000 zoom=0.012500</span>
     <span id="pointer-values">pointer_world=—</span>
     <span id="inversion-values">inv_center=(0.50000, 0.00000)</span>

@@ -1,4 +1,10 @@
-import { initWebGPURender, renderFrame, submitOffscreenFrame, verifyView } from "../webgpu-keystone/webgpu-runner.js";
+import {
+  initWebGPURender,
+  renderFrame,
+  renderFrameGpuTimed,
+  submitOffscreenFrame,
+  verifyView,
+} from "../webgpu-keystone/webgpu-runner.js";
 import { DEFAULT_CAMERA, createTrailingCoalescer, normalizeCamera, panCamera, zoomCamera } from "./camera-controls.js";
 import { createPerformanceMeter } from "./performance-meter.js";
 import { createCgaActorLifecycle } from "./actor-lifecycle.js";
@@ -6,13 +12,23 @@ import { createCgaWasmWorkerOracle } from "./wasm-worker-oracle.js";
 import { selectArtifactBundle } from "./artifact-bundle.js";
 import {
   createContinuousBenchmark,
+  gpuTimingUnavailableResult,
   parseBenchmarkResolution,
+  parseBenchmarkTiming,
 } from "./continuous-benchmark.js";
 import { qualityStatus, resolveQualityProfile } from "./quality-profile.js";
 
 const $ = (id) => document.getElementById(id);
 const query = new URLSearchParams(window.location.search);
 const artifactBundle = selectArtifactBundle(query);
+function qualityHref(profile) {
+  const params = new URLSearchParams(query);
+  params.set("quality", profile);
+  if (profile === "teaser") params.delete("resolution");
+  return `?${params.toString()}`;
+}
+$("quality-teaser").href = qualityHref("teaser");
+$("quality-full").href = qualityHref("full");
 if (artifactBundle.name !== "legacy") {
   $("fast-showcase").href =
     `?bundle=${artifactBundle.name}&verify=off&quality=teaser`;
@@ -25,6 +41,7 @@ const verificationOff = query.get("verify") === "off";
 const continuousVerification = query.get("verify") === "continuous";
 const continuousBenchmark = query.get("benchmark") === "continuous";
 const resolutionQuery = query.get("resolution");
+const timingQuery = query.get("timing");
 const qualityQuery = query.get("quality");
 let activeQuality = null;
 const DEFAULT_INVERSION = Object.freeze({ x: 0.5, y: 0, radius: 1 });
@@ -38,6 +55,7 @@ const presentationEvidence = {
   wasmOracleRenderCount: 0,
   gpuActorRenderCount: 0,
   gpuReadbackCount: 0,
+  gpuTimestampReadbackCount: 0,
   interactionCount: 0,
 };
 window.__cgaPresentationEvidence = presentationEvidence;
@@ -185,8 +203,10 @@ async function main() {
   }
   let fixedResolution;
   let quality;
+  let benchmarkTiming;
   try {
     fixedResolution = parseBenchmarkResolution(resolutionQuery);
+    benchmarkTiming = parseBenchmarkTiming(timingQuery);
     quality = resolveQualityProfile(qualityQuery, fixedResolution);
     activeQuality = quality;
     fixedResolution = quality.fixedResolution;
@@ -201,6 +221,11 @@ async function main() {
   }
   if (continuousBenchmark && presentation !== "canvas") {
     const reason = "continuous benchmark requires canvas presentation";
+    banner("red", reason);
+    return { state: "red", presentation, reason };
+  }
+  if (!continuousBenchmark && benchmarkTiming === "gpu") {
+    const reason = "timing=gpu requires benchmark=continuous";
     banner("red", reason);
     return { state: "red", presentation, reason };
   }
@@ -307,6 +332,7 @@ async function main() {
     wgsl,
     renderLayout,
     presentation === "offscreen" ? null : $("view"),
+    { timestampQuery: continuousBenchmark && benchmarkTiming === "gpu" },
   );
   performanceMeter.finish("gpuInitMs", gpuInitStart);
   if (!gpu.ok) {
@@ -570,25 +596,56 @@ async function main() {
   if (verificationOff) {
     let benchmark = null;
     if (continuousBenchmark) {
-      const runner = createContinuousBenchmark({
-        requestFrame: requestAnimationFrame,
-        now: () => performance.now(),
-        submit: () => renderFrame(
-          gpu,
-          viewValues(camera, inversion, canvas.width, canvas.height),
-        ),
-        width: canvas.width,
-        height: canvas.height,
-        path: "direct",
-      });
-      benchmark = await runner.run();
+      if (benchmarkTiming === "gpu" && !gpu.gpuTimestamp.supported) {
+        benchmark = gpuTimingUnavailableResult({
+          width: canvas.width,
+          height: canvas.height,
+          reason: gpu.gpuTimestamp.reason,
+        });
+      } else {
+        const gpuTimed = benchmarkTiming === "gpu";
+        const runner = createContinuousBenchmark({
+          requestFrame: requestAnimationFrame,
+          now: () => performance.now(),
+          submit: gpuTimed
+            ? async () => {
+                presentationEvidence.gpuReadbackCount += 1;
+                presentationEvidence.gpuTimestampReadbackCount += 1;
+                return renderFrameGpuTimed(
+                  gpu,
+                  viewValues(camera, inversion, canvas.width, canvas.height),
+                );
+              }
+            : () => renderFrame(
+                gpu,
+                viewValues(camera, inversion, canvas.width, canvas.height),
+              ),
+          width: canvas.width,
+          height: canvas.height,
+          path: "direct",
+          timing: benchmarkTiming,
+        });
+        benchmark = await runner.run();
+      }
       window.__cgaBenchmark = benchmark;
-      $("performance-stat").textContent =
-        `continuous submitted cadence ${
-          benchmark.submittedFrameCadenceHz?.toFixed(1) ?? "--"
-        } Hz | submit CPU ${benchmark.averageSubmitCpuMs.toFixed(2)} ms | ${
-          benchmark.resolution.width
-        }² | GPU completion not measured`;
+      if (benchmark.gpuCompletionMeasured) {
+        $("performance-stat").textContent =
+          `GPU ${benchmark.timestampQuery.averageGpuElapsedMs.toFixed(2)} ms | completed cadence ${
+            benchmark.completedFrameCadenceHz?.toFixed(1) ?? "--"
+          } Hz | submit CPU ${benchmark.averageSubmitCpuMs.toFixed(2)} ms | ${
+            benchmark.resolution.width
+          }²`;
+      } else if (benchmark.mode === "gpu_timestamp_unsupported") {
+        $("performance-stat").textContent =
+          `GPU timing unavailable: ${benchmark.timestampQuery.reason}`;
+      } else {
+        $("performance-stat").textContent =
+          `continuous submitted cadence ${
+            benchmark.submittedFrameCadenceHz?.toFixed(1) ?? "--"
+          } Hz | submit CPU ${benchmark.averageSubmitCpuMs.toFixed(2)} ms | ${
+            benchmark.resolution.width
+          }² | GPU completion not measured`;
+      }
     }
     const result = { state: "presentation", presentation, verified: false,
       adapter: gpu.adapter, camera: viewValues(camera, inversion).slice(0, 3),

@@ -84,6 +84,24 @@ without a timestamp query and result readback it makes no GPU-completion claim.
 The benchmark uses the direct WebGPU path and preserves the strict no-Wasm,
 no-Worker, no-readback `verify=off` contract.
 
+For an explicitly synchronized GPU measurement, add `timing=gpu`:
+
+```text
+?bundle=schedule32&verify=off&benchmark=continuous&resolution=256&timing=gpu
+```
+
+This opt-in mode requests the WebGPU `timestamp-query` feature, writes beginning
+and end timestamps around each render pass, resolves them, maps the 16-byte
+result, and reports GPU elapsed milliseconds plus completed-frame cadence.
+Consequently it performs one timestamp readback and GPU-completion wait per
+frame and is not the low-overhead presentation benchmark. If the adapter does
+not expose `timestamp-query`, status reports
+`mode: "gpu_timestamp_unsupported"` and `gpuCompletionMeasured: false`; it
+never substitutes rAF cadence or CPU time for GPU execution time. Omitting
+`timing=gpu` continues to request no optional GPU features, perform no
+readback/synchronization, and report only submitted-frame cadence and CPU
+submission overhead.
+
 The displayed canvas is responsive and uses device-pixel ratio up to 2, capped
 at 768 pixels per side. Deterministic acceptance remains a separate 128x128
 offscreen render. The shipped fragment constructs recursive `MvTF<5>` point and
