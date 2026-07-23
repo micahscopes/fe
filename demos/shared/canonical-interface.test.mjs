@@ -3,6 +3,7 @@ import {
   CANONICAL_INTERFACE_PROTOCOL,
   CANONICAL_INTERFACE_VERSION,
   compileCanonicalInterfaceManifest,
+  createCanonicalInterfaceCaller,
 } from "./canonical-interface.js";
 
 const scalar = (kind, size, align) => ({ kind, size, align });
@@ -148,5 +149,88 @@ assert.throws(
   () => compileCanonicalInterfaceManifest(oversizedType),
   /maximum type node count/,
 );
+
+const wasmMemory = new WebAssembly.Memory({ initial: 1 });
+const initialBuffer = wasmMemory.buffer;
+let arenaCursor = 1024;
+let resetCount = 0;
+let allocationCount = 0;
+const growingAllocate = (length, align) => {
+  allocationCount += 1;
+  // Deliberately invalidate every previously-created view.
+  wasmMemory.grow(1);
+  arenaCursor = Math.ceil(arenaCursor / align) * align;
+  const pointer = arenaCursor;
+  arenaCursor += length;
+  return pointer;
+};
+const mockExports = {
+  memory: wasmMemory,
+  fe_cabi_alloc: growingAllocate,
+  fe_cabi_reset() {
+    resetCount += 1;
+    arenaCursor = 1024;
+  },
+  echo_message(requestPointer) {
+    const request = compiled.lanes.echo.request.read({
+      memory: () => new Uint8Array(wasmMemory.buffer),
+      offset: requestPointer,
+    });
+    const responsePointer = growingAllocate(
+      compiled.lanes.echo.response.size,
+      compiled.lanes.echo.response.align,
+    );
+    compiled.lanes.echo.response.write(
+      new Uint8Array([...request.payload, request.tag]),
+      {
+        memory: () => new Uint8Array(wasmMemory.buffer),
+        offset: responsePointer,
+        allocate: growingAllocate,
+      },
+    );
+    return responsePointer;
+  },
+};
+const caller = createCanonicalInterfaceCaller(compiled, mockExports);
+const callValue = (tag) => ({
+  tag, sequence: BigInt(tag), text: `growth ${tag}`,
+  payload: new Uint8Array([tag + 1, tag + 2]),
+});
+const firstCall = await caller.call("echo", callValue(4));
+assert.deepEqual(firstCall, new Uint8Array([5, 6, 4]));
+assert.equal(initialBuffer.byteLength, 0, "memory.grow must detach the initially captured view");
+new Uint8Array(wasmMemory.buffer).fill(77);
+assert.deepEqual(firstCall, new Uint8Array([5, 6, 4]),
+  "arena caller result must remain copied after memory mutation/reset");
+
+const callOrder = [];
+const orderedExports = {
+  ...mockExports,
+  echo_message(requestPointer) {
+    const tag = compiled.lanes.echo.request.read({
+      memory: () => new Uint8Array(wasmMemory.buffer),
+      offset: requestPointer,
+    }).tag;
+    callOrder.push(tag);
+    return mockExports.echo_message(requestPointer);
+  },
+};
+const orderedCaller = createCanonicalInterfaceCaller(compiled, orderedExports);
+const [orderedA, orderedB] = await Promise.all([
+  orderedCaller.call("echo", callValue(10)),
+  orderedCaller.call("echo", callValue(20)),
+]);
+assert.deepEqual(callOrder, [10, 20]);
+assert.deepEqual(orderedA, new Uint8Array([11, 12, 10]));
+assert.deepEqual(orderedB, new Uint8Array([21, 22, 20]));
+
+const resetsBeforeFailure = resetCount;
+const failingCaller = createCanonicalInterfaceCaller(compiled, {
+  ...mockExports,
+  echo_message() { throw new Error("mock lane failure"); },
+});
+await assert.rejects(failingCaller.call("echo", callValue(1)), /mock lane failure/);
+assert.equal(resetCount, resetsBeforeFailure + 1, "lane failure must reset the arena");
+assert.ok(allocationCount > 0);
 
 console.log("canonical interface v1 strict manifest and memory codecs: ok");

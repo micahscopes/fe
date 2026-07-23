@@ -22,6 +22,7 @@ function uint(value, path, maximum = 0xffffffff) {
 }
 
 function checkedEnd(offset, length, memory, path) {
+  memory = memoryBytes(memory);
   uint(offset, `${path} offset`);
   uint(length, `${path} length`);
   const end = offset + length;
@@ -32,8 +33,9 @@ function checkedEnd(offset, length, memory, path) {
 }
 
 function memoryBytes(memory) {
+  if (typeof memory === "function") memory = memory();
   if (!(memory instanceof Uint8Array)) {
-    throw new TypeError("canonical memory must be a Uint8Array");
+    throw new TypeError("canonical memory must be a Uint8Array or memory-view provider");
   }
   return memory;
 }
@@ -121,7 +123,7 @@ function validateLayout(layout, path, depth = 0, state = { nodes: 0 }) {
 }
 
 function viewFor(memory, offset, size, path) {
-  memoryBytes(memory);
+  memory = memoryBytes(memory);
   checkedEnd(offset, size, memory, path);
   return new DataView(memory.buffer, memory.byteOffset + offset, size);
 }
@@ -142,8 +144,9 @@ function writeDescriptor(layout, value, memory, offset, allocate, path) {
       throw new TypeError(`${path} requires an allocate(length, align) callback`);
     }
     pointer = uint(allocate(bytes.byteLength, 1), `${path} allocation pointer`);
-    checkedEnd(pointer, bytes.byteLength, memory, `${path} allocation`);
-    memory.set(bytes, pointer);
+    const currentMemory = memoryBytes(memory);
+    checkedEnd(pointer, bytes.byteLength, currentMemory, `${path} allocation`);
+    currentMemory.set(bytes, pointer);
   }
   const view = viewFor(memory, offset, layout.size, path);
   view.setUint32(layout.pointer_offset, pointer, true);
@@ -208,8 +211,9 @@ function readLayout(layout, memory, offset, path) {
     case "string": {
       const pointer = view.getUint32(layout.pointer_offset, true);
       const length = view.getUint32(layout.length_offset, true);
-      const end = checkedEnd(pointer, length, memory, `${path} descriptor`);
-      const copy = memory.slice(pointer, end);
+      const currentMemory = memoryBytes(memory);
+      const end = checkedEnd(pointer, length, currentMemory, `${path} descriptor`);
+      const copy = currentMemory.slice(pointer, end);
       return layout.kind === "string" ? textDecoder.decode(copy) : copy;
     }
     case "record":
@@ -265,22 +269,86 @@ export function compileCanonicalInterfaceManifest(manifest) {
     lanes[lane.name] = Object.freeze({
       export: lane.export,
       request: Object.freeze({
+        size: lane.request.size,
+        align: lane.request.align,
         write(value, { memory, offset, allocate } = {}) {
-          writeLayout(lane.request, value, memoryBytes(memory), offset, allocate, `${lane.name} request`);
+          writeLayout(lane.request, value, memory, offset, allocate, `${lane.name} request`);
         },
         read({ memory, offset } = {}) {
-          return readLayout(lane.request, memoryBytes(memory), offset, `${lane.name} request`);
+          return readLayout(lane.request, memory, offset, `${lane.name} request`);
         },
       }),
       response: Object.freeze({
+        size: lane.response.size,
+        align: lane.response.align,
         write(value, { memory, offset, allocate } = {}) {
-          writeLayout(lane.response, value, memoryBytes(memory), offset, allocate, `${lane.name} response`);
+          writeLayout(lane.response, value, memory, offset, allocate, `${lane.name} response`);
         },
         read({ memory, offset } = {}) {
-          return readLayout(lane.response, memoryBytes(memory), offset, `${lane.name} response`);
+          return readLayout(lane.response, memory, offset, `${lane.name} response`);
         },
       }),
     });
   }
   return Object.freeze({ abi: Object.freeze({ ...manifest.abi }), lanes: Object.freeze(lanes) });
+}
+
+export function createCanonicalInterfaceCaller(compiled, exports) {
+  if (!compiled || !compiled.abi || !compiled.lanes) {
+    throw new TypeError("compiled canonical interface required");
+  }
+  if (!exports || typeof exports !== "object") {
+    throw new TypeError("canonical Wasm exports object required");
+  }
+  const memory = exports[compiled.abi.memory_export];
+  if (!memory || !("buffer" in memory)) {
+    throw new TypeError(`missing canonical memory export ${compiled.abi.memory_export}`);
+  }
+  const allocate = exports[compiled.abi.alloc_export];
+  const reset = exports[compiled.abi.reset_export];
+  if (typeof allocate !== "function" || typeof reset !== "function") {
+    throw new TypeError("missing canonical arena allocator/reset exports");
+  }
+  for (const lane of Object.values(compiled.lanes)) {
+    if (typeof exports[lane.export] !== "function") {
+      throw new TypeError(`missing canonical lane export ${lane.export}`);
+    }
+  }
+
+  const currentMemory = () => new Uint8Array(memory.buffer);
+  const arenaAllocate = (size, align) => uint(
+    allocate(size, align),
+    `canonical allocation (${size} bytes, align ${align})`,
+  );
+  let tail = Promise.resolve();
+
+  const invoke = (laneName, value) => {
+    if (!Object.hasOwn(compiled.lanes, laneName)) {
+      throw new TypeError(`unknown canonical lane ${laneName}`);
+    }
+    const lane = compiled.lanes[laneName];
+    try {
+      const requestPointer = arenaAllocate(lane.request.size, lane.request.align);
+      lane.request.write(value, {
+        memory: currentMemory,
+        offset: requestPointer,
+        allocate: arenaAllocate,
+      });
+      const responsePointer = uint(
+        exports[lane.export](requestPointer),
+        `${laneName} response pointer`,
+      );
+      return lane.response.read({ memory: currentMemory, offset: responsePointer });
+    } finally {
+      reset();
+    }
+  };
+
+  return Object.freeze({
+    call(laneName, value) {
+      const result = tail.then(() => invoke(laneName, value));
+      tail = result.catch(() => {});
+      return result;
+    },
+  });
 }
