@@ -54,6 +54,13 @@ export function createMessagePortActorTransport(port, {
         throw error;
       }
     },
+    cancel(request) {
+      if (closed) return;
+      port.postMessage(actorEnvelope({
+        type: "cancel", lane: request.lane, actorEpoch: request.actorEpoch,
+        generation: request.generation, requestId: request.requestId, payload: null,
+      }));
+    },
     fail: failAll,
     close(reason = "MessagePort actor transport closed") {
       if (closed) return;
@@ -80,13 +87,34 @@ export function transferOwnedTypedArray(value) {
 
 export function attachMessagePortActorHost(port, dispatch, {
   transferResult = () => [],
+  maxInFlight = 32,
 } = {}) {
   if (typeof dispatch !== "function") throw new TypeError("actor dispatch required");
   if (typeof transferResult !== "function") throw new TypeError("transferResult must be a function");
+  if (!Number.isSafeInteger(maxInFlight) || maxInFlight < 1) {
+    throw new TypeError("maxInFlight must be a positive safe integer");
+  }
+  const inFlight = new Map();
+  const reply = (request, payload, transfer = []) => {
+    port.postMessage(actorEnvelope({
+      type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
+      generation: request.generation, requestId: request.requestId, payload,
+    }), transfer);
+  };
   const onMessage = (event) => {
     const request = event.data;
     try {
       validateActorEnvelope(request);
+      if (request.type === "cancel") {
+        const entry = inFlight.get(keyOf(request));
+        if (entry
+            && entry.request.lane === request.lane
+            && entry.request.generation === request.generation) {
+          entry.cancelled = true;
+          entry.controller.abort();
+        }
+        return;
+      }
       if (request.type !== "request") throw new TypeError("worker host accepts requests only");
     } catch {
       // A structurally valid correlation tuple may still arrive in a malformed
@@ -107,34 +135,48 @@ export function attachMessagePortActorHost(port, dispatch, {
       }
       return;
     }
-    Promise.resolve().then(() => dispatch(request)).then(
+    if (inFlight.size >= maxInFlight) {
+      reply(request, { ok: false, error: "FE_ACTOR_BUSY" });
+      return;
+    }
+    const key = keyOf(request);
+    if (inFlight.has(key)) {
+      reply(request, { ok: false, error: "FE_ACTOR_PROTOCOL" });
+      return;
+    }
+    const entry = { request, controller: new AbortController(), cancelled: false };
+    inFlight.set(key, entry);
+    Promise.resolve().then(() => dispatch(request, {
+      signal: entry.controller.signal,
+    })).then(
       (value) => {
+        inFlight.delete(key);
+        if (entry.cancelled) return;
         try {
           const transfer = transferResult(value, request);
           if (!Array.isArray(transfer)) throw new TypeError("transferResult must return an array");
-          port.postMessage(actorEnvelope({
-            type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
-            generation: request.generation, requestId: request.requestId,
-            payload: { ok: true, value },
-          }), transfer);
+          reply(request, { ok: true, value }, transfer);
         } catch (error) {
-          port.postMessage(actorEnvelope({
-            type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
-            generation: request.generation, requestId: request.requestId,
-            payload: { ok: false, error: sanitizedActorError(error, "FE_ACTOR_TRANSFER") },
-          }));
+          reply(request, {
+            ok: false, error: sanitizedActorError(error, "FE_ACTOR_TRANSFER"),
+          });
         }
       },
-      (error) => port.postMessage(actorEnvelope({
-        type: "result", lane: request.lane, actorEpoch: request.actorEpoch,
-        generation: request.generation, requestId: request.requestId,
-        payload: { ok: false, error: sanitizedActorError(error, "FE_ACTOR_HOST_DISPATCH") },
-      })),
+      (error) => {
+        inFlight.delete(key);
+        if (!entry.cancelled) {
+          reply(request, {
+            ok: false, error: sanitizedActorError(error, "FE_ACTOR_HOST_DISPATCH"),
+          });
+        }
+      },
     );
   };
   port.addEventListener("message", onMessage);
   port.start?.();
   return () => {
+    for (const entry of inFlight.values()) entry.controller.abort();
+    inFlight.clear();
     port.removeEventListener("message", onMessage);
     port.close?.();
   };

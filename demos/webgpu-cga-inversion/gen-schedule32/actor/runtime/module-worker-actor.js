@@ -115,7 +115,7 @@ export async function createModuleWorkerActor({
     return operation;
   };
   return Object.freeze({
-    request: (envelope) => endpoint.request(envelope),
+    request: (envelope, options) => endpoint.request(envelope, options),
     restart,
     close() {
       if (closed) return;
@@ -139,7 +139,7 @@ export async function createCanonicalModuleWorkerActor(options) {
   let requestId = 0;
   let restartTail = Promise.resolve();
   return Object.freeze({
-    async request(lane, payload, generation = 0) {
+    async request(lane, payload, generation = 0, options) {
       // Capture the restart chain at call time. Requests made after restart()
       // wait for the replacement worker to become ready, while requests made
       // before restart retain their original epoch/lifecycle semantics.
@@ -147,7 +147,7 @@ export async function createCanonicalModuleWorkerActor(options) {
       const result = await actor.request(actorEnvelope({
         type: "request", lane, payload, generation,
         actorEpoch: actor.epoch(), requestId: ++requestId,
-      }));
+      }), options);
       if (result.payload.ok) return result.payload.value;
       const match = /^FE_ACTOR_[A-Z_]+/.exec(result.payload.error);
       const code = match?.[0] ?? "FE_ACTOR_REMOTE";

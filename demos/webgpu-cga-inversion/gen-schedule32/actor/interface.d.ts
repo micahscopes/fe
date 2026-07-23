@@ -47,6 +47,9 @@ export interface CanonicalActorRequest<Lane extends string, Payload> {
   lane: Lane;
   payload: Payload;
 }
+export interface CanonicalActorContext {
+  readonly signal: AbortSignal;
+}
 export interface CanonicalActorShape {
   readonly requestSchema: Readonly<Record<string, (value: unknown) => void>>;
   readonly resultSchema: Readonly<Record<string, (value: unknown) => void>>;
@@ -54,15 +57,15 @@ export interface CanonicalActorShape {
   transferResult(value: unknown, request: { lane: string }): ArrayBuffer[];
 }
 export interface CanonicalActorAdapter extends CanonicalActorShape {
-  dispatch(request: CanonicalActorRequest<"render", RenderRequest>): Promise<RenderResponse>;
-  dispatch(request: CanonicalActorRequest<"verify", VerifyRequest>): Promise<VerifyResponse>;
-  dispatch(request: CanonicalActorRequest<"oracle", OracleRequest>): Promise<OracleResponse>;
+  dispatch(request: CanonicalActorRequest<"render", RenderRequest>, context?: CanonicalActorContext): Promise<RenderResponse>;
+  dispatch(request: CanonicalActorRequest<"verify", VerifyRequest>, context?: CanonicalActorContext): Promise<VerifyResponse>;
+  dispatch(request: CanonicalActorRequest<"oracle", OracleRequest>, context?: CanonicalActorContext): Promise<OracleResponse>;
 }
 
 export interface CanonicalHostEffectHandlers {
-  "render"?: (request: RenderRequest) => RenderResponse | PromiseLike<RenderResponse>;
-  "verify"?: (request: VerifyRequest) => VerifyResponse | PromiseLike<VerifyResponse>;
-  "oracle"?: (request: OracleRequest) => OracleResponse | PromiseLike<OracleResponse>;
+  "render"?: (request: RenderRequest, context: CanonicalActorContext) => RenderResponse | PromiseLike<RenderResponse>;
+  "verify"?: (request: VerifyRequest, context: CanonicalActorContext) => VerifyResponse | PromiseLike<VerifyResponse>;
+  "oracle"?: (request: OracleRequest, context: CanonicalActorContext) => OracleResponse | PromiseLike<OracleResponse>;
 }
 export declare function compileActorAdapter(): CanonicalActorShape;
 export declare function createActorAdapter(

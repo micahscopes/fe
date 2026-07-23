@@ -4,19 +4,19 @@
   "source_entry": "cga_schedule32_vec5_de_render",
   "artifacts": {
     "wasm": "module.wasm",
-    "wasm_bytes": 2322,
+    "wasm_bytes": 2147,
     "wgsl": "shader.wgsl",
-    "wgsl_bytes": 5542,
+    "wgsl_bytes": 5563,
     "canonical_adapters": [
       {
         "path": "interface.js",
-        "bytes": 29288,
-        "sha256": "0651b5cb3ec35b3f10b258223bb5551c7382072151c6724447f1252dd89a9764"
+        "bytes": 31687,
+        "sha256": "855ddffb5fbc12603fc59039e7d5c93a35cfc39bb457627db8d63dd49ea457ac"
       },
       {
         "path": "interface.d.ts",
-        "bytes": 2562,
-        "sha256": "b2eb1964c8c9e35af95bb8f3f2223ea3a159db119c22be2a78ca562408099e9c"
+        "bytes": 2832,
+        "sha256": "a16960ef08163f65075539761feea61dacaba526828a08666c921b54be6ea325"
       }
     ]
   },
@@ -365,17 +365,17 @@
   },
   "browser_runtime": {
     "protocol": "fe-browser-actor-runtime",
-    "protocol_version": 1,
+    "protocol_version": 2,
     "artifacts": [
       {
         "path": "runtime/actor-coordinator.js",
-        "bytes": 7947,
-        "sha256": "ce595d59862f804207f7887d7ee882cb98c73b746ec613694d61967b9f8bff22"
+        "bytes": 8094,
+        "sha256": "6793f2d0803cab4968d3efffc8996b64d07aad3dd1e49fca7e0e33308f6c4eed"
       },
       {
         "path": "runtime/actor-endpoint.js",
-        "bytes": 8542,
-        "sha256": "f1b0806175ee7a0da31edcea685be9ec6ae22b2caac0a83b081acf8305e7919c"
+        "bytes": 9908,
+        "sha256": "9f480a9f0eb269c992c3b35a5b386be374f6ba5b9ab1b6e797864e4e311a7d55"
       },
       {
         "path": "runtime/actor-router.js",
@@ -384,18 +384,18 @@
       },
       {
         "path": "runtime/gpu-actor.js",
-        "bytes": 10670,
-        "sha256": "98695279c68ce67b4bc649976c9aeb6e7654a7071279e30bca81971ebb859c9e"
+        "bytes": 11741,
+        "sha256": "262c703494035e1c369226d3d7849143a809ce0f968e30025a08b84f43dea268"
       },
       {
         "path": "runtime/message-port-actor.js",
-        "bytes": 5747,
-        "sha256": "a8e453b5c7b47e2bcab1ef29465ffd74e57dc1b63b390ebdf48625c7d8f9bba4"
+        "bytes": 6920,
+        "sha256": "d1e72991b703759c4f82d56ac5da5404e9d4674982d9ef0384087b9a78b673fb"
       },
       {
         "path": "runtime/module-worker-actor.js",
-        "bytes": 6522,
-        "sha256": "457bd522e908dea9f8afccf8d6e7ad5b68b40795745adb2a708c9d9267c2f1a3"
+        "bytes": 6558,
+        "sha256": "99d7f1c7be62cebb0f40f5fe89f80392675e5a20cbf853410e4846d67f4f508e"
       }
     ]
   }
