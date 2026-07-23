@@ -89,4 +89,31 @@ assert.deepEqual(sanitized.payload, { ok: false, error: "FE_ACTOR_HOST_DISPATCH"
 sanitizedEndpoint.close();
 detachSanitized();
 
+const malformedRequestChannel = new MessageChannel();
+let malformedDispatches = 0;
+const detachMalformedRequest = attachMessagePortActorHost(
+  malformedRequestChannel.port2,
+  () => { malformedDispatches += 1; },
+);
+const malformedRequestReply = new Promise((resolve) => {
+  malformedRequestChannel.port1.addEventListener("message", ({ data }) => resolve(data), {
+    once: true,
+  });
+});
+malformedRequestChannel.port1.start();
+malformedRequestChannel.port1.postMessage({
+  ...actorEnvelope({
+    type: "request", lane: "verify", actorEpoch: 0,
+    generation: 1, requestId: 6, payload: { value: 1 },
+  }),
+  surplus: true,
+});
+assert.deepEqual((await malformedRequestReply).payload, {
+  ok: false,
+  error: "FE_ACTOR_PROTOCOL",
+});
+assert.equal(malformedDispatches, 0, "malformed request never reaches host dispatch");
+malformedRequestChannel.port1.close();
+detachMalformedRequest();
+
 console.log("protocol-v2 MessagePort actor transport/host: ok");
