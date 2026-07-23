@@ -4,8 +4,8 @@ The ordinary-Fe ingot
 `ingots/sparse_clifford` covers three reusable
 pieces of a sparse algebra in one source unit: compile-time support planning,
 the `Zero`/`Term`/`Add` operator-plan vocabulary, and support-sized runtime
-values. Schedule32 consumes it through a real Fe ingot dependency; QCGA still
-prepends the same canonical source before its domain planner and kernel.
+values. Schedule32 and QCGA both consume it through real Fe ingot
+dependencies.
 
 For supports selected from the 32 blades of a dimension-at-most-five algebra:
 
@@ -39,26 +39,19 @@ Wasm.
 
 This is intentionally not yet the final general algebra package. The public
 ingot is imported and code-generated across a real dependency edge by
-`sparse_clifford_ingot.rs`. Schedule32 now does the same and publishes its
-application manifest and source beside its dependency-backed kernel. QCGA's
-legacy artifact generator still composes the canonical `src/lib.fe` into one
-self-contained `kernel.fe`; `fe web` and the driver already support directory
-ingots. Domain support wrappers
+`sparse_clifford_ingot.rs`. Schedule32 and QCGA now do the same and publish
+their application manifests and sources beside dependency-backed kernels.
+`fe web` and the driver already support directory ingots. Domain support wrappers
 remain useful to bind a particular support and blade at a readable API
 boundary, but rank depth and computed storage aliases are no longer compiler
 limits: recursive `SparseIndex<7>` and `SparseStorage<8>` both execute. The
 true ingot dependency keeps its callable CTFE helpers public without rooting
-them as runtime exports. The remaining standalone QCGA publication path
-explicitly removes `pub` only from const helpers while composing the ingot
-source into the app's root module; otherwise source composition would erase
-the module boundary and expose compile-time-only bitwise/`usize` bodies to the
-Wasm R1 runtime package. This is publication plumbing, not an API restriction.
-Schedule32 is the first flagship exception to that legacy publication path:
-its generator initializes a real temporary application ingot with a
-`sparse_clifford` dependency, and publishes the app manifest and source next
-to the dependency-backed (explicitly non-standalone) `kernel.fe`. A regression
-builds the app's complete public-root package and proves dependency-public CTFE
-helpers do not become application runtime roots.
+them as runtime exports. Both flagship generators initialize real temporary
+application ingots with `sparse_clifford` dependencies and publish the app
+manifest and source next to dependency-backed, explicitly non-standalone
+`kernel.fe` files. Schedule32 additionally builds the app's complete
+public-root package and proves dependency-public CTFE helpers do not become
+application runtime roots.
 parser explicitly consumes a continuation newline after a
 type-alias `=`, so formatting that ground alias over multiple lines no longer
 silently leaves its RHS invalid during later trait selection.
