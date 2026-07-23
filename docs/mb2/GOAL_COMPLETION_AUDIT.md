@@ -1,6 +1,6 @@
 # mb2 browser CGA goal: completion evidence audit
 
-Status: audited against integrated head `e48729aaa` and
+Status: audited against integrated head `d1558645f` and
 `/workspace/mb2-HANDOFF.md` on 2026-07-23. The handoff remains useful design
 history, but its 2026-07-22 checkpoint predates the Schedule32 and
 planner-backed QCGA promotions; this matrix is authoritative for current
@@ -12,6 +12,18 @@ current tree contains direct evidence for the stated scope. `Partial` means a
 real implementation exists but the goal asks for a broader or stronger claim.
 `Missing` means the named result is not present. A schema preflight is never
 treated as browser execution evidence.
+
+Current verdict: the bounded browser showcase, exact verification path,
+canonical actor runtime, second application, shared bounded sparse planner,
+support-sized storage, real public Fe ingot, and opt-in live reload are
+implemented. The goal remains incomplete for three concrete reasons:
+
+1. the required Sonatina backend revision is not published and a clean locked
+   `fe web` build therefore still needs the explicit overlay;
+2. FCO cannot phase-safely reflect the normalized
+   `Add<Term<I>, ... Zero>` result of the public recursive planner, so
+   application providers still rescan bounded candidates;
+3. clean full-workspace and hardware-WebGPU CI evidence is absent.
 
 ## Evidence matrix
 
@@ -29,7 +41,7 @@ treated as browser execution evidence.
 | One-command build / serve / watch ergonomics | **Partial, externally gated** | `crates/fe/src/main.rs`, `web.rs`, and `web_serve.rs` implement real `fe web build` and `fe web serve`, including atomic bundle snapshots, source polling, explicit opt-in browser reload, static serving, and COOP/COEP/CORP headers. Failed compiles preserve the last good page and bundle. The temporary `demos/fe-web` launcher proves direct compiler WebBundle generation of all 11 flagship artifacts, while `with-browser-cargo.sh` is now the sole six-crate overlay owner for Schedule32, QCGA, and generic demo serving; its contract tests cover exact backend provenance and lock restoration. See `FE_WEB_BACKEND_REPRODUCIBILITY.md` for the measured dependency audit. | A clean checkout still cannot build the plain `fe` command: workspace `Cargo.toml` pins Sonatina `150d327`, while current Fe code uses later float/SPIR-V/canonical-arena APIs. The reviewed `ac266c210cad7872fc98380a73b4ca363877bc1f` exists locally but is not advertised by the audited GitHub remotes. Publish/merge it, repin workspace dependencies and `Cargo.lock`, remove the compatibility launcher, then prove plain `fe web build/serve` without `SONATINA_DIR` or Cargo patches. Vendoring is supported but would duplicate a multi-megabyte six-crate backend to replace the existing 528 KiB reviewed patch series. The specialized demos still require their provenance/oracle generators rather than only the generic WebBundle command. |
 | Sparse multivector usability and support-sized storage without syntax changes | **Achieved for the bounded substrate; partial as a general algebra package** | The public ordinary-Fe `ingots/sparse_clifford` package owns bounded `BladeSet` support algebra, `Zero/Term/Add`, the bounded mask planner, CTFE compact rank, recursive `SparseStorage<N>`/`SparseIndex<rank>`, default-zero, and present-only APIs. A real dependent ingot imports it, materializes a three-term plan spanning candidate 140, and executes import-free Wasm. Schedule32 and QCGA use the same canonical source in their self-contained generated kernels. | The browser generators still prepend the ingot source because their published artifact contract is one standalone `kernel.fe`; this is generator plumbing, not a Fe module limitation. Domain constructors, metrics, coefficient semantics, output grouping, and FCO evaluators remain application-specific. |
 | Proportional HIR/CTFE, Wasm, SPIR-V/WGSL, and browser testing | **Partial** | HIR/type-function fixtures and CTFE tests cover recursive normalization and FCO; codegen tests execute Wasm and audit WGSL/SPIR-V; browser scripts perform actual Chromium acceptance and no-readback checks; runtime JS has adversarial unit tests. The commands above were rerun for the latest runtime changes, and both demo preflights pass. | Full workspace release CI has not been rerun at this head. Hardware WebGPU coverage is absent, and browser results are command output rather than durable CI artifacts. The external Sonatina pin prevents a clean locked workspace build, weakening reproducibility. |
-| Precise generated/actorized/verified/performance/open documentation | **Partial** | `webgpu-cga-inversion/README.md`, `webgpu-qcga3d-quadric/README.md`, `QCGA_SPARSE_PLANNER.md`, `CANONICAL_BROWSER_INTERFACE.md`, `FCO_SPARSE_CONSTRUCTOR_SPIKE.md`, and `SCHEDULE_STRATEGY_COMPARISON.md` document the important boundaries explicitly. | The documentation remains distributed. Schedule32 artifacts are tracked, while QCGA `gen/` is intentionally ignored and must be regenerated before its reuse/preflight commands work in a fresh worktree. This audit is the consolidated source until the dependency and reusable sparse-package slices update the runbook. |
+| Precise generated/actorized/verified/performance/open documentation | **Partial** | `webgpu-cga-inversion/README.md`, `webgpu-qcga3d-quadric/README.md`, `QCGA_SPARSE_PLANNER.md`, `CANONICAL_BROWSER_INTERFACE.md`, `FCO_SPARSE_CONSTRUCTOR_SPIKE.md`, `FE_WEB_BACKEND_REPRODUCIBILITY.md`, and this audit document the important boundaries explicitly. | Schedule32 artifacts are tracked, while QCGA `gen/` is intentionally ignored and must be regenerated before its reuse/preflight commands work in a fresh worktree. Performance evidence is still SwiftShader-specific and command-local rather than a durable hardware result. |
 
 ## Recent audit reruns
 
@@ -49,7 +61,7 @@ assumptions: forced inlining had erased the public
 `cga_semantic_plan_hybrid` Wasm export, and the recursive-Vec5 WGSL test still
 constructed the pre-storage sparse records. The repaired full hybrid
 raw-80/typed-plan/generic-Fe equivalence test and recursive-Vec5 browser-WGSL
-test both pass. The `fe web serve` server suite passes all six live-reload,
+test both pass. The `fe web serve` server suite passes all seven live-reload,
 atomic-publication, mount, and response-header tests.
 
 `verify_cga_runtime_reuse.py` correctly failed closed in the fresh worktree
@@ -74,63 +86,127 @@ explicit main-thread WebGPU actor through typed compiler-packaged transports.
 It is not accurate to say that Fe itself currently implements Worker creation,
 WebGPU device ownership, supervision, cancellation, or the browser event loop.
 
-## Ranked next implementation slices
+## Ranked remaining-work runbook
 
-### 1. Publish and repin the browser-capable Sonatina backend
+Completed slices are intentionally absent from this list. In particular, do
+not reopen shared `Zero/Term/Add`, bounded mask planning, support-sized storage,
+public-ingot packaging, representative QCGA interaction, actor-runtime reuse,
+or live reload unless a regression contradicts their cited gates.
 
-This is the highest-leverage prerequisite. Make the reviewed backend commit
-reachable from the dependency URL (or merge it to an upstream reachable
-revision), repin all workspace Sonatina crates and `Cargo.lock`, and run:
+### 1. Publish, repin, and prove the browser-capable backend
+
+This is the only external prerequisite and the highest-leverage remaining
+slice. Follow `FE_WEB_BACKEND_REPRODUCIBILITY.md`:
+
+1. make reviewed Sonatina `ac266c210cad7872fc98380a73b4ca363877bc1f`
+   (or a reviewed upstream replacement) fetchable from the dependency URL;
+2. repin the four direct workspace dependencies and all six locked Sonatina
+   packages to one durable revision;
+3. from a fresh checkout with no `SONATINA_DIR`, Cargo patch, or warm private
+   cache, run:
+
+   ```text
+   cargo check --workspace --locked
+   cargo test -p fe --bin fe web_serve
+   cargo test -p fe-codegen --test fco_cga80_direct_lanes \
+     --test fco_cga80_direct_de_spirv --test wasm_e2e --test spirv_e2e
+   cargo run -p fe -- web build <minimal.fe-or-ingot> \
+     --entry <entry> --mode render --out <new-dir>
+   cargo run -p fe -- web serve <minimal.fe-or-ingot> \
+     --entry <entry> --mode render --root <app>
+   ```
+
+Acceptance requires plain locked Cargo and plain `fe web`; only then remove the
+compatibility launcher and six-crate Cargo patching layer. Do not remove the
+specialized flagship generators: their independent oracle, plan witness,
+provenance, and legacy artifact publication are additional jobs, not evidence
+that generic `fe web` cannot compile an ingot.
+
+### 2. Add phase-safe normalized FCO plan reflection
+
+The public ingot now computes the desired recursive ground plan, but the
+provider boundary remains exact and unresolved:
 
 ```text
-cargo run -p fe -- web --help
-cargo run -p fe -- web build <minimal.fe> --entry <entry> --mode render --out <dir>
-cargo run -p fe -- web serve <minimal.fe> --entry <entry> --mode render --root <app>
+SparsePlan<mask..., candidate_count, survivor_count>
+  -> normalized Add<Term<I0>, Add<Term<I1>, ... Zero>>
+  -/-> current lowering-time FCO reflection
 ```
 
-Acceptance requires no local path override and no demo-specific generator
-script. Then migrate one showcase to plain `fe web serve` and decide explicitly
-whether opt-in browser reload belongs in this transparent server.
+`provider_ground_type_inspection.rs` proves that
+`builder.ty<GroundPlan>().preorder_types()` observes the source alias rather
+than normalized `Term` nodes. Providers operate on syntax `TypeId` before the
+semantic `TyId` normalization query, so calling ordinary merged-graph type
+lowering from the executor would introduce a phase cycle.
 
-### 2. Turn the bounded Schedule32 planner into a reusable sparse CGA package
+Implement the base-graph semantic island specified by
+`FCO_PLAN_BRIDGE_OPTIONS.md`, not a second normalizer:
 
-Move support masks, grade selection, compact rank/default-zero access,
-support-sized storage, canonical `Term/Add/Zero` plan witnesses, and FCO
-publication out of the demo fixture into one ordinary Fe API. Parameterize it
-by metric/support/operator within the already proven finite bounds. Make the
-browser kernel consume that package rather than carrying local copies.
+1. add explicit base-only path/type resolution that cannot read generated
+   items, impl selection, associated-type normalization, or the merged scope
+   graph;
+2. normalize the closed recursive planner result into semantic identities and
+   evaluated const arguments under existing inspection/fuel limits;
+3. expose only that immutable normalized reflection handle to the provider;
+4. retain the SGK cycle guard and add an inverse dependency guard proving the
+   base-only query cannot call trait resolution or generated-item queries;
+5. check generated output later through ordinary merged analysis.
 
-Acceptance should prove one source of semantics across:
+Acceptance requires a small `SparsePlan` provider to visit every normalized
+term in canonical order, publish an executable method, reject a phase-unsafe
+alias/trait case deterministically, and preserve normal type-function
+diagnostics and cache/fuel behavior.
 
-- recursive typed witness and support cardinality;
-- support-sized runtime storage with absent coefficients defaulting to zero;
-- direct/raw expansion, shared provider body, Wasm, and WGSL;
-- the existing independent full-frame host oracle plus raw-80 algebra oracle.
+### 3. Consume the reflected plan without duplicating candidate discovery
 
-This closes the largest remaining gap between a convincing one-off and the
-requested Garamon/Conal-style facility.
+After slice 2, migrate Schedule32 and QCGA FCO providers from rescanning their
+bounded candidate universes to traversing the exact normalized plan produced
+by `ingots/sparse_clifford`. Domain-specific metric signs, operand projection,
+coefficient magnitude, output routing, and reduction topology remain explicit
+application policy; the shared package should not pretend those semantics are
+universal.
 
-### 3. Generalize the proven bounded planner APIs without overstating QCGA
+Acceptance requires:
 
-The previous second-application gap is closed: QCGA now uses a parameterized
-12-term CTFE/FCO planner, compiler-derived camera/quadric requests, default
-no-readback presentation, and explicit one-call Wasm/WebGPU equality.
+- Schedule32 still proves raw-80 = typed-plan = generic-recursive Fe and retains
+  the 80-to-32 witness;
+- QCGA still proves raw 144-candidate semantics = reflected 12-term execution;
+- generated Wasm/WGSL remain browser-profile valid and the pinned full-frame
+  hashes/oracles remain exact;
+- both apps continue packaging byte-identical actor runtime modules;
+- provider sources no longer independently rediscover the keep set.
 
-The remaining step is to make the shared package from slice 2 serve both
-Schedule32 and this QCGA incidence plan without duplicating demo-local support,
-plan-tree, length-witness, and provider vocabulary. Preserve the exact
-six-module runtime identity and independent raw-expansion gates. Do not
-describe the result as general QCGA until support extends beyond the documented
-paper-null contraction.
+This is the remaining step from a shared planner representation to a genuinely
+shared reflected execution route. It still does not imply arbitrary dense
+Clifford/QCGA products or automatic common-subexpression discovery.
 
-## Current overall result
+### 4. Close durable verification and performance evidence
 
-The exciting core is real: the browser executes a Fe-authored, typed
-CTFE-derived 80-to-32 Cl(4,1) specialization interactively, and generated typed
-actors connect its Wasm and WebGPU verification paths. The goal is not complete.
-The clean toolchain is blocked on an unpublished backend revision. Sparse
-planning and storage now have a real bounded Fe ingot, but the browser
-generators still publish source-composed standalone kernels and the
-application-specific operator evaluators are not generalized. QCGA validates
-the same architectural direction at a larger algebra, but only for its
-explicitly bounded paper-null incidence subalgebra.
+Once the clean backend is available, run the full locked workspace/release
+suite and publish durable browser artifacts for:
+
+- Schedule32 verification and strict `verify=off` no-Wasm/no-Worker/no-readback;
+- interactive QCGA presentation and explicit exact verification;
+- lifecycle pressure, cancellation, restart, and runtime-identity gates;
+- at least one hardware WebGPU adapter in addition to SwiftShader.
+
+Record adapter identity, resolution, submission and GPU-completion timing
+separately. A 60 Hz submission loop or CPU submit time is not a hardware GPU
+throughput claim. Keep QCGA described as the bounded paper-null incidence
+operator until broader algebra support is independently implemented and
+tested.
+
+## Overall status
+
+The central result is no longer speculative: browser-profile WebGPU executes
+the Fe-authored CTFE-derived Schedule32 Cl(4,1) specialization interactively,
+the default presentation path performs no per-frame readback, explicit
+verification is bit-exact through Fe/Wasm and an independent host oracle, and
+the reusable generated actor runtime is exercised by both Schedule32 and a
+typed interactive QCGA operator. Sparse representation and planning now live
+in a real public Fe ingot.
+
+The goal is still active. Clean direct tooling awaits backend publication;
+FCO still rescans candidates because normalized recursive plan reflection is
+not phase-safe yet; and durable full-workspace/hardware-WebGPU evidence remains
+to be produced.
