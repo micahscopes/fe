@@ -1,4 +1,3 @@
-pub mod actor_manifest;
 mod backend;
 pub mod canonical_interface;
 pub mod dispatch;
@@ -10,10 +9,6 @@ mod test_output;
 #[cfg(feature = "spirv-backend")]
 mod web_bundle;
 
-pub use actor_manifest::{
-    ACTOR_PROTOCOL, ACTOR_PROTOCOL_VERSION, ActorLaneSpec, ActorManifestError, ActorRecordField,
-    ActorScalar, actor_manifest_from_wasm_exports,
-};
 pub use backend::{
     Backend, BackendError, BackendKind, BackendOutput, OptLevel, SonatinaBackend, SpirvBackend,
     WasmBackend, layout_for,

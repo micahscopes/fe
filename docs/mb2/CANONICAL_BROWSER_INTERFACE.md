@@ -1,6 +1,7 @@
 # Fe canonical browser interface: milestone 1
 
-Status: implementation contract, not yet implemented.
+Status: milestone 1 implemented. The legacy post-Wasm `actor_manifest`
+derivation described by the original plan has been removed.
 
 This milestone supplies the first compiler-owned ABI between Fe Wasm actors and
 JavaScript Workers. It is intentionally smaller than the Component Model, but
@@ -9,16 +10,16 @@ async, and capability work can extend.
 
 ## Current boundary
 
-The actor manifest currently inspects emitted Wasm signatures after each caller
-manually describes every record field. JavaScript schemas support a small set of
-fixed scalar and typed-array shapes. The direct Wasm backend flattens value
-structs, but rejects real address-taking, memory loads/stores, allocation,
-arrays, and enums.
+Canonical lane manifests now derive nominal request and response records from
+Fe semantic signatures, cross-check the emitted Wasm arena ABI, and generate
+the JavaScript codecs and actor/host-effect adapters. Callers select lane names
+but do not restate record fields or typed-array schemas. Actor protocol-v2
+envelopes remain transport framing, separate from the canonical payload ABI.
 
-MIR already represents raw memory addresses, providers, `AddrOf`, `Load`,
-`Store`, `MemoryCopy`, `MemoryFill`, and `Malloc`. The missing work is primarily
-Wasm lowering, emission, canonical interface metadata, and generated adapters;
-it does not require a new Fe type-system feature.
+The remaining boundary is deliberately narrower than the Component Model:
+canonical version 1 supports fixed-layout records, scalar leaves, owned bytes,
+and UTF-8 strings. General lists, variants, resources, futures, streams, and
+shared-memory zero-copy remain later work.
 
 ## Protocol
 
@@ -117,9 +118,9 @@ interface {
 }
 ```
 
-`actor_manifest_from_canonical_interface` then derives actor request/result
-schemas from this interface. Existing actor protocol-v2 envelopes remain the
-transport framing.
+The generated interface module derives actor request/result validators and
+Wasm/host-effect adapters directly from this interface. Existing actor
+protocol-v2 envelopes remain the transport framing.
 
 ## Implementation surfaces
 
@@ -139,15 +140,16 @@ transport framing.
    - nominal `BrowserBytes` and `BrowserString` descriptors;
    - bounded byte/length primitives;
    - no reuse of Solidity/EVM `Bytes` or `DynString`.
-5. `demos/shared/canonical-interface.js`
+5. `crates/codegen/assets/canonical-interface.js`
    - strict manifest validation;
    - `DataView` record codec;
    - fatal UTF-8 decode and validated encode;
    - arena invocation with reset-in-finally.
-6. First migration
-   - migrate a small scalar/record actor lane, then Mandelbrot control;
-   - remove its manually authored `ActorRecordField` description;
-   - migrate CGA only after record compatibility is proven.
+6. First migrations
+   - Mandelbrot control uses its generated canonical interface;
+   - QCGA uses generated multi-lane actor, Wasm caller, and host-effect
+     adapters;
+   - the Schedule32 CGA showcase should use the canonical path from inception.
 
 ## Acceptance gates
 
