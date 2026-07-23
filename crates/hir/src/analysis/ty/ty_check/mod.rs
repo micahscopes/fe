@@ -3693,6 +3693,14 @@ impl<'db> TypedBody<'db> {
     /// selected semantic operation even when inference happened to assign the
     /// expression a non-invalid result type.
     pub fn has_smir_lowering_blocker(&self, db: &'db dyn HirAnalysisDb) -> bool {
+        // A body whose declared result was invalidated by type checking may
+        // still have enough per-expression metadata to build semantic MIR.
+        // Its runtime ABI is nevertheless unknowable: treating that result as
+        // erased can make a caller's otherwise-concrete operand disappear and
+        // panic later during argument selection.
+        if self.result_ty.has_invalid(db) {
+            return true;
+        }
         let Some(body) = self.body else {
             return false;
         };

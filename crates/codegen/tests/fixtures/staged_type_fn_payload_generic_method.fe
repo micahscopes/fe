@@ -1,0 +1,27 @@
+// A staged recursive type schedule interpreted through generic methods. The
+// payload is i32 throughout so every selected Eval implementation has a valid,
+// concrete Wasm result ABI.
+struct Zero {}
+struct Term<const I: i32> {}
+struct Add<L, R> {}
+const fn payload(_ i: usize) -> i32 {
+    if i == 0 { 1 }
+    else if i == 1 { 4 }
+    else if i == 2 { 7 }
+    else { 10 }
+}
+recursive type fn Schedule<T, const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{payload(N - 1)}>, Schedule<T, {N - 1}>>
+    }
+}
+trait Eval { fn eval() -> i32 }
+impl Eval for Zero { fn eval() -> i32 { 0 } }
+impl<const I: i32> Eval for Term<I> { fn eval() -> i32 { I } }
+impl<L: Eval, R: Eval> Eval for Add<L, R> {
+    fn eval() -> i32 { <L as Eval>::eval() + <R as Eval>::eval() }
+}
+pub fn staged_payload_entry() -> i32 {
+    <Schedule<u8, 4> as Eval>::eval()
+}

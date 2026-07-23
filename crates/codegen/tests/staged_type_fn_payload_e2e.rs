@@ -50,6 +50,8 @@ pub fn staged_payload_entry() -> i32 {
     db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
     let file = db.workspace().get(&db, &url).unwrap();
     let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "unexpected fixture diagnostics:\n{diagnostics}");
     let bytes = BackendKind::Wasm
         .create()
         .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
@@ -67,4 +69,61 @@ pub fn staged_payload_entry() -> i32 {
         .get_typed_func::<(), i32>(&mut store, "staged_payload_entry")
         .unwrap();
     assert_eq!(entry.call(&mut store, ()).unwrap(), 22);
+}
+
+#[test]
+fn staged_recursive_type_fn_payload_executes_through_generic_methods() {
+    let source = include_str!("fixtures/staged_type_fn_payload_generic_method.fe");
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///staged_type_fn_payload_generic_method.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "unexpected fixture diagnostics:\n{diagnostics}");
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("staged type-fn payload should compile through generic Eval methods")
+        .into_bytecode()
+        .expect("Wasm output should be bytecode");
+    wasmparser::validate(&bytes).expect("generic staged payload emitted invalid Wasm");
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).unwrap();
+    assert!(module.imports().next().is_none());
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let entry = instance
+        .get_typed_func::<(), i32>(&mut store, "staged_payload_entry")
+        .unwrap();
+    assert_eq!(entry.call(&mut store, ()).unwrap(), 22);
+}
+
+#[test]
+fn invalid_generic_const_cast_is_rejected_before_runtime_arg_selection() {
+    let source = r#"
+struct Term<const I: usize> {}
+trait Eval { fn eval() -> i32 }
+impl<const I: usize> Eval for Term<I> {
+    fn eval() -> i32 { I as i32 }
+}
+pub fn run() -> i32 { <Term<10> as Eval>::eval() }
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///invalid_generic_const_cast.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.contains("cast is not provably lossless"));
+
+    let error = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect_err("an invalid generic result ABI must fail before MIR argument selection");
+    assert!(
+        format!("{error:?}").contains("type checking left unresolved or invalid body operations"),
+        "unexpected fail-closed error: {error:?}"
+    );
 }
