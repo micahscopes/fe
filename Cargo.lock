@@ -2542,6 +2542,7 @@ dependencies = [
  "num-bigint",
  "pollster",
  "rustc-hash 2.1.1",
+ "serde",
  "serde_json",
  "smallvec 1.15.1",
  "smallvec 2.0.0-alpha.12",

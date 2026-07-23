@@ -6,6 +6,8 @@ mod layout;
 mod runtime_package;
 mod sonatina;
 mod test_output;
+#[cfg(feature = "spirv-backend")]
+mod web_bundle;
 
 pub use actor_manifest::{
     ACTOR_PROTOCOL, ACTOR_PROTOCOL_VERSION, ActorLaneSpec, ActorManifestError, ActorRecordField,
@@ -19,11 +21,6 @@ pub use dispatch::DispatchKind;
 pub use layout::{
     DISCRIMINANT_SIZE_BYTES, EVM_LAYOUT, Endianness, TargetDataLayout, WASM_LAYOUT, WORD_SIZE_BYTES,
 };
-#[cfg(feature = "spirv-backend")]
-pub use sonatina::{
-    compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
-    compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
-};
 pub use sonatina::{
     LowerError, SonatinaContractBytecode, SonatinaTestOptions, emit_ingot_sonatina_bytecode,
     emit_ingot_sonatina_ir, emit_ingot_sonatina_ir_optimized, emit_module_sonatina_bytecode,
@@ -31,4 +28,16 @@ pub use sonatina::{
     emit_runtime_package_sonatina_ir_optimized, emit_test_ingot_sonatina,
     emit_test_module_sonatina, validate_module_sonatina_ir,
 };
+#[cfg(feature = "spirv-backend")]
+pub use sonatina::{
+    compile_runtime_package_spirv, compile_runtime_package_spirv_grid,
+    compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
+};
 pub use test_output::{ExpectedRevert, TestMetadata, TestModuleOutput, parse_expected_revert};
+#[cfg(feature = "spirv-backend")]
+pub use web_bundle::{
+    WEB_BUNDLE_PROTOCOL, WEB_BUNDLE_PROTOCOL_VERSION, WebArtifactManifest, WebBinding,
+    WebBindingAccess, WebBindingMember, WebBindingRole, WebBuildOptions, WebBuiltinInput,
+    WebBuiltinSource, WebBundle, WebBundleError, WebBundleManifest, WebBundleMode, WebLayout,
+    WebProvenance, WebResult, WebScalarKind,
+};

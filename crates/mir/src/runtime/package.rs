@@ -461,6 +461,25 @@ pub fn build_wasm_runtime_package<'db>(
     db: &'db dyn MirDb,
     top_mod: TopLevelMod<'db>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
+    build_wasm_runtime_package_impl(db, top_mod, None)
+}
+
+/// Build the Wasm-shaped runtime package rooted at one caller-selected public
+/// top-level function. Unlike [`build_wasm_runtime_package`], this never relies
+/// on source/declaration ordering to choose the package entry.
+pub fn build_wasm_runtime_package_for_entry<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    entry_name: &str,
+) -> Result<RuntimePackage<'db>, LowerError> {
+    build_wasm_runtime_package_impl(db, top_mod, Some(entry_name))
+}
+
+fn build_wasm_runtime_package_impl<'db>(
+    db: &'db dyn MirDb,
+    top_mod: TopLevelMod<'db>,
+    requested_entry: Option<&str>,
+) -> Result<RuntimePackage<'db>, LowerError> {
     // Contracts fail closed on wasm: no silent EVM-shaped behavior.
     if !top_mod.all_contracts(db).is_empty()
         || !discover_manual_contract_roots(db, top_mod)?.is_empty()
@@ -493,13 +512,52 @@ pub fn build_wasm_runtime_package<'db>(
             RuntimeRootCandidate::Rejected(rejection) => rejections.push(rejection),
         }
     }
-    if let Some(rejection) = rejections
-        .iter()
-        .find(|rejection| is_main_func(db, rejection.func))
-    {
-        return Err(LowerError::Unsupported(format_runtime_root_rejection(
-            db, rejection,
-        )));
+    if let Some(entry_name) = requested_entry {
+        let named = funcs
+            .iter()
+            .copied()
+            .filter(|func| {
+                func.name(db)
+                    .to_opt()
+                    .is_some_and(|name| name.data(db) == entry_name)
+            })
+            .collect::<Vec<_>>();
+        match named.as_slice() {
+            [] => {
+                return Err(LowerError::Unsupported(format!(
+                    "requested web entry `{entry_name}` was not found as a top-level function of the entry module"
+                )));
+            }
+            [func] => {
+                if let Some(rejection) = rejections.iter().find(|rejection| rejection.func == *func)
+                {
+                    return Err(LowerError::Unsupported(format_runtime_root_rejection(
+                        db, rejection,
+                    )));
+                }
+                if !entry_funcs.contains(func) {
+                    return Err(LowerError::Unsupported(format!(
+                        "requested web entry `{entry_name}` is not an eligible public runtime root"
+                    )));
+                }
+                entry_funcs.retain(|candidate| candidate == func);
+            }
+            _ => {
+                return Err(LowerError::Unsupported(format!(
+                    "requested web entry `{entry_name}` is ambiguous in the entry module"
+                )));
+            }
+        }
+    }
+    if requested_entry.is_none() {
+        if let Some(rejection) = rejections
+            .iter()
+            .find(|rejection| is_main_func(db, rejection.func))
+        {
+            return Err(LowerError::Unsupported(format_runtime_root_rejection(
+                db, rejection,
+            )));
+        }
     }
     if entry_funcs.is_empty() {
         if let Some(rejection) = rejections.first() {

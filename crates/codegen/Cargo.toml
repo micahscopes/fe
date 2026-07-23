@@ -19,7 +19,12 @@ smallvec.workspace = true
 smallvec1.workspace = true
 tracing.workspace = true
 wasmparser = "0.248.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+# Web bundles reparse and validate emitted WGSL against the browser-default
+# capability set as a production gate, rather than relying only on the
+# SPIR-V backend's less restrictive internal validation.
+naga = { version = "29", features = ["wgsl-in"] }
 
 [features]
 # On by default so the standard build/test carries the Fe -> SPIR-V wire
@@ -47,8 +52,8 @@ pollster = "0.4.0"
 # `wgsl-in` front end and re-validates it with `Capabilities::default()` (the
 # browser-shaped capability set, NO SHADER_INT64 - sonatina itself validates
 # with `Capabilities::all()`, so this is a strictly stronger independent gate).
-# Same naga 29.0.4 already in the graph via wgpu, so no version fork.
-naga = { version = "29", features = ["wgsl-in"] }
+# Same naga 29.0.4 already in the graph via wgpu, so no version fork. It is a
+# normal dependency because the reusable WebBundle API performs this gate.
 # The EVM leg of the S2 keystone executes the same Fe source's EVM bytecode
 # under revm. This is a dev-only (test-target) dependency, so the
 # codegen -> contract-harness -> codegen edge is a dev-dependency cycle, which
