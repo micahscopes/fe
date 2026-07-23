@@ -1,0 +1,304 @@
+// Bounded Fe-native sparse planner for the grade-1 QCGA point/dual-quadric
+// contraction used by the rotated-quadric demo.
+//
+// This intentionally represents two 12-blade support lists, not a dense
+// 2^15-entry Cl(9,6) multivector. It plans exactly this null-vector
+// contraction; it is not a general QCGA product engine.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+const POINT_TERMS: usize = 12
+const QUADRIC_TERMS: usize = 12
+const CANDIDATES: usize = POINT_TERMS * QUADRIC_TERMS
+
+// Slots in the paper-null basis:
+// e1,e2,e3, eo1..eo6, ei1..ei6.
+const fn point_blade(_ slot: usize) -> usize {
+    if slot < 6 { slot } else { slot + 3 }
+}
+
+const fn quadric_blade(_ slot: usize) -> usize {
+    slot
+}
+
+const fn candidate_left(_ candidate: usize) -> usize {
+    candidate / 12
+}
+
+const fn candidate_right(_ candidate: usize) -> usize {
+    candidate % 12
+}
+
+// +1 for equal Euclidean blades, -1 for eo_k/ei_k and ei_k/eo_k, 0
+// otherwise. Encoding: 0=annihilated, 1=positive, 2=negative.
+const fn contraction_sign(_ candidate: usize) -> usize {
+    let left = point_blade(candidate_left(candidate))
+    let right = quadric_blade(candidate_right(candidate))
+    let mut sign: usize = 0
+    if left == right {
+        if left < 3 { sign = 1 }
+    }
+    if left >= 3 {
+        if left < 9 {
+            if right == left + 6 { sign = 2 }
+        }
+    }
+    if left >= 9 {
+        if right + 6 == left { sign = 2 }
+    }
+    sign
+}
+
+const fn survivor_count() -> usize {
+    let mut candidate: usize = 0
+    let mut count: usize = 0
+    while candidate < CANDIDATES {
+        if contraction_sign(candidate) != 0 { count = count + 1 }
+        candidate = candidate + 1
+    }
+    count
+}
+
+const fn survivor_candidate(_ target: usize) -> usize {
+    let mut candidate: usize = 0
+    let mut seen: usize = 0
+    while candidate < CANDIDATES {
+        if contraction_sign(candidate) != 0 {
+            if seen == target { return candidate }
+            seen = seen + 1
+        }
+        candidate = candidate + 1
+    }
+    CANDIDATES
+}
+
+static_assert(survivor_count() == 12)
+
+struct Zero {}
+struct Term<const Candidate: usize> {}
+struct Add<L, R> {}
+recursive type fn IncidencePlan<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{survivor_candidate(N - 1)}>, IncidencePlan<{N - 1}>>
+    }
+}
+type IncidencePlan12 = IncidencePlan<12>
+static_assert(survivor_candidate(0) == 0)
+static_assert(survivor_candidate(1) == 13)
+static_assert(survivor_candidate(2) == 26)
+static_assert(survivor_candidate(3) == 45)
+static_assert(survivor_candidate(4) == 58)
+static_assert(survivor_candidate(5) == 71)
+static_assert(survivor_candidate(6) == 75)
+static_assert(survivor_candidate(7) == 88)
+static_assert(survivor_candidate(8) == 101)
+static_assert(survivor_candidate(9) == 114)
+static_assert(survivor_candidate(10) == 127)
+static_assert(survivor_candidate(11) == 140)
+
+struct NatZ {}
+struct NatS<N> {}
+recursive type fn Nat<const N: usize>() -> (*) {
+    match N {
+        0 => NatZ
+        _ => NatS<Nat<{N - 1}>>
+    }
+}
+trait PlanLength { type Out }
+impl PlanLength for Zero { type Out = NatZ }
+impl<const I: usize, Tail: PlanLength> PlanLength for Add<Term<I>, Tail> {
+    type Out = NatS<<Tail as PlanLength>::Out>
+}
+fn takes_nat12(_ value: Nat<12>) {}
+fn planned_support_has_twelve_terms(value: <IncidencePlan12 as PlanLength>::Out) {
+    takes_nat12(value)
+}
+
+// Flat reflected carrier: the first twelve fields are the point support list,
+// the second twelve are the dual-quadric support list. The provider selects
+// fields exclusively from the CTFE support functions above.
+struct SparseIncidenceOperands {
+    p0: f32, p1: f32, p2: f32, p3: f32, p4: f32, p5: f32,
+    p6: f32, p7: f32, p8: f32, p9: f32, p10: f32, p11: f32,
+    q0: f32, q1: f32, q2: f32, q3: f32, q4: f32, q5: f32,
+    q6: f32, q7: f32, q8: f32, q9: f32, q10: f32, q11: f32,
+}
+impl Copy for SparseIncidenceOperands {}
+
+trait PlannedIncidence {
+    fn incidence(_ operands: SparseIncidenceOperands) -> f32
+}
+
+struct QcgaIncidenceProvider {}
+impl Derive<PlannedIncidence> for QcgaIncidenceProvider {
+    const fn derive<T>(ev: own Evidence<PlannedIncidence<T>>) -> Evidence<PlannedIncidence<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<PlannedIncidence<T>>)
+    {
+        let operands = builder.arg_ref("operands")
+        let p0 = operands
+        let p1 = operands
+        let p2 = operands
+        let p3 = operands
+        let p4 = operands
+        let p5 = operands
+        let p6 = operands
+        let p7 = operands
+        let p8 = operands
+        let p9 = operands
+        let p10 = operands
+        let p11 = operands
+        let q0 = operands
+        let q1 = operands
+        let q2 = operands
+        let q3 = operands
+        let q4 = operands
+        let q5 = operands
+        let q6 = operands
+        let q7 = operands
+        let q8 = operands
+        let q9 = operands
+        let q10 = operands
+        let q11 = operands
+        let field_index = 0
+        for field in reflect.fields() {
+            if field_index == 0 { p0 = builder.field_get(operands, field) }
+            if field_index == 1 { p1 = builder.field_get(operands, field) }
+            if field_index == 2 { p2 = builder.field_get(operands, field) }
+            if field_index == 3 { p3 = builder.field_get(operands, field) }
+            if field_index == 4 { p4 = builder.field_get(operands, field) }
+            if field_index == 5 { p5 = builder.field_get(operands, field) }
+            if field_index == 6 { p6 = builder.field_get(operands, field) }
+            if field_index == 7 { p7 = builder.field_get(operands, field) }
+            if field_index == 8 { p8 = builder.field_get(operands, field) }
+            if field_index == 9 { p9 = builder.field_get(operands, field) }
+            if field_index == 10 { p10 = builder.field_get(operands, field) }
+            if field_index == 11 { p11 = builder.field_get(operands, field) }
+            if field_index == 12 { q0 = builder.field_get(operands, field) }
+            if field_index == 13 { q1 = builder.field_get(operands, field) }
+            if field_index == 14 { q2 = builder.field_get(operands, field) }
+            if field_index == 15 { q3 = builder.field_get(operands, field) }
+            if field_index == 16 { q4 = builder.field_get(operands, field) }
+            if field_index == 17 { q5 = builder.field_get(operands, field) }
+            if field_index == 18 { q6 = builder.field_get(operands, field) }
+            if field_index == 19 { q7 = builder.field_get(operands, field) }
+            if field_index == 20 { q8 = builder.field_get(operands, field) }
+            if field_index == 21 { q9 = builder.field_get(operands, field) }
+            if field_index == 22 { q10 = builder.field_get(operands, field) }
+            if field_index == 23 { q11 = builder.field_get(operands, field) }
+            field_index = field_index + 1
+        }
+        let zero = builder.sub(p0, p0)
+        let sum0 = zero
+        let sum1 = zero
+        let sum2 = zero
+        let survivor = 0
+        for candidate in 0..144 {
+            // The provider interpreter cannot branch inside an ordinary const
+            // helper. Keep the same slot semantics visible here while the
+            // typed plan consumes `contraction_sign` above.
+            let left_slot = candidate / 12
+            let right_slot = candidate % 12
+            let sign = 0
+            if left_slot == right_slot {
+                if left_slot < 3 { sign = 1 }
+            }
+            if left_slot >= 3 {
+                if left_slot < 6 {
+                    if right_slot == left_slot + 6 { sign = 2 }
+                }
+            }
+            if left_slot >= 6 {
+                if right_slot + 3 == left_slot { sign = 2 }
+            }
+            if sign != 0 {
+                let left = p0
+                if left_slot == 1 { left = p1 }
+                if left_slot == 2 { left = p2 }
+                if left_slot == 3 { left = p3 }
+                if left_slot == 4 { left = p4 }
+                if left_slot == 5 { left = p5 }
+                if left_slot == 6 { left = p6 }
+                if left_slot == 7 { left = p7 }
+                if left_slot == 8 { left = p8 }
+                if left_slot == 9 { left = p9 }
+                if left_slot == 10 { left = p10 }
+                if left_slot == 11 { left = p11 }
+
+                let right = q0
+                if right_slot == 1 { right = q1 }
+                if right_slot == 2 { right = q2 }
+                if right_slot == 3 { right = q3 }
+                if right_slot == 4 { right = q4 }
+                if right_slot == 5 { right = q5 }
+                if right_slot == 6 { right = q6 }
+                if right_slot == 7 { right = q7 }
+                if right_slot == 8 { right = q8 }
+                if right_slot == 9 { right = q9 }
+                if right_slot == 10 { right = q10 }
+                if right_slot == 11 { right = q11 }
+
+                let term = builder.mul(left, right)
+                if sign == 2 { term = builder.neg(term) }
+                if survivor < 4 { sum0 = builder.add(sum0, term) }
+                else if survivor < 8 { sum1 = builder.add(sum1, term) }
+                else { sum2 = builder.add(sum2, term) }
+                survivor = survivor + 1
+            }
+        }
+        let result = builder.add(builder.add(sum0, sum1), sum2)
+        builder.emit_method("incidence", result)
+        builder.finish()
+        ev
+    }
+}
+
+derive PlannedIncidence for SparseIncidenceOperands using QcgaIncidenceProvider
+
+pub fn qcga3d_incidence_planned(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    let half: f32 = 0.5
+    let j_third: f32 = j / 3.0
+    let negative_j_third: f32 = 0.0 - j_third
+    <SparseIncidenceOperands as PlannedIncidence>::incidence(SparseIncidenceOperands {
+        p0: x, p1: y, p2: z,
+        p3: 1.0, p4: 1.0, p5: 1.0,
+        p6: x * x * half, p7: y * y * half, p8: z * z * half,
+        p9: x * y, p10: x * z, p11: y * z,
+        q0: g, q1: h, q2: i,
+        q3: -2.0 * a, q4: -2.0 * b, q5: -2.0 * c,
+        q6: -d, q7: -e, q8: -f,
+        q9: negative_j_third, q10: negative_j_third, q11: negative_j_third,
+    })
+}
+
+// Independently authored raw 12-term null contraction in canonical candidate
+// order. It shares no support-list, candidate, schedule, reflection, or
+// provider machinery with the planned path.
+pub fn qcga3d_incidence_raw(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    let zero: f32 = x - x
+    let j_third: f32 = j / 3.0
+    let sum0: f32 = zero + x * g + y * h + z * i + j_third
+    let sum1: f32 = zero + j_third + j_third + x * x * a + y * y * b
+    let sum2: f32 = zero + z * z * c + x * y * d + x * z * e + y * z * f
+    (sum0 + sum1) + sum2
+}
+
+// Algebraically fused polynomial oracle. IEEE association intentionally
+// differs from the canonical sparse-candidate order above.
+pub fn qcga3d_incidence_polynomial(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    a * x * x + b * y * y + c * z * z
+        + d * x * y + e * x * z + f * y * z
+        + g * x + h * y + i * z + j
+}

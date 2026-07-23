@@ -15,7 +15,10 @@
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{
+    BackendKind, OptLevel, WasmCompileOptions, compile_runtime_package_wasm_with_options,
+    layout_for,
+};
 use url::Url;
 
 /// Compile Fe source to wasm bytes through the wasm backend.
@@ -101,6 +104,30 @@ fn func_imports(bytes: &[u8]) -> Vec<(String, String)> {
         }
     }
     imports
+}
+
+fn wasm_float_shape(bytes: &[u8]) -> (usize, usize, usize, usize, usize) {
+    let mut adds = 0;
+    let mut subs = 0;
+    let mut muls = 0;
+    let mut calls = 0;
+    let mut loops = 0;
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let wasmparser::Payload::CodeSectionEntry(body) = payload.expect("valid wasm") {
+            let mut reader = body.get_operators_reader().expect("operators");
+            while !reader.eof() {
+                match reader.read().expect("operator") {
+                    wasmparser::Operator::F32Add => adds += 1,
+                    wasmparser::Operator::F32Sub => subs += 1,
+                    wasmparser::Operator::F32Mul => muls += 1,
+                    wasmparser::Operator::Call { .. } => calls += 1,
+                    wasmparser::Operator::Loop { .. } => loops += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    (adds, subs, muls, calls, loops)
 }
 
 /// THE MILESTONE: `#[target(wasm)] pub fn add(a, b) -> a + b`, compiled Fe ->
@@ -599,6 +626,107 @@ fn qcga3d_sparse_incidence_paths_compile_and_execute_on_wasm() {
         assert!(
             (expanded_value - fused_value).abs() <= 2.0e-5,
             "path mismatch for KAT {index}"
+        );
+    }
+}
+
+#[test]
+fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
+    let source = include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///qcga3d_sparse_planned_incidence.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_owned()));
+    let file = db.workspace().get(&db, &url).expect("planner fixture");
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "planned QCGA semantic analysis failed:\n{diagnostics}"
+    );
+    let compile_entry = |entry: &str| {
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, entry)
+            .unwrap_or_else(|err| panic!("runtime package for `{entry}` failed: {err}"));
+        let bytes = compile_runtime_package_wasm_with_options(
+            &db,
+            &package,
+            WasmCompileOptions::default(),
+        )
+        .unwrap_or_else(|err| panic!("entry-rooted wasm for `{entry}` failed: {err}"))
+        .bytes;
+        wasmparser::validate(&bytes).expect("produced invalid entry-rooted wasm");
+        bytes
+    };
+    let planned_wasm = compile_entry("qcga3d_incidence_planned");
+    let raw_wasm = compile_entry("qcga3d_incidence_raw");
+    let polynomial_wasm = compile_entry("qcga3d_incidence_polynomial");
+    assert!(
+        func_imports(&planned_wasm).is_empty() && func_imports(&raw_wasm).is_empty(),
+        "planned sparse incidence fixture must have zero imports"
+    );
+    let planned_shape = wasm_float_shape(&planned_wasm);
+    assert_eq!(
+        (planned_shape.3, planned_shape.4),
+        (1, 0),
+        "entry plus one shared FCO aggregate helper must contain no runtime loop: {planned_shape:?}"
+    );
+    eprintln!("QCGA sparse planned Wasm shape (add,sub,mul,call,loop)={planned_shape:?}");
+    let (mut planned_store, planned_instance) = instantiate(&planned_wasm);
+    let (mut raw_store, raw_instance) = instantiate(&raw_wasm);
+    let (mut polynomial_store, polynomial_instance) = instantiate(&polynomial_wasm);
+    type Inputs = (
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+    );
+    let planned = planned_instance
+        .get_typed_func::<Inputs, f32>(&mut planned_store, "qcga3d_incidence_planned")
+        .expect("CTFE/FCO planned sparse incidence ABI");
+    let raw = raw_instance
+        .get_typed_func::<Inputs, f32>(&mut raw_store, "qcga3d_incidence_raw")
+        .expect("independent raw polynomial ABI");
+    let polynomial = polynomial_instance
+        .get_typed_func::<Inputs, f32>(
+            &mut polynomial_store,
+            "qcga3d_incidence_polynomial",
+        )
+        .expect("independent fused polynomial ABI");
+    let cases: [Inputs; 7] = [
+        (3.0, 4.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0),
+        (0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -25.0),
+        (2.0, -1.0, 2.0, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, -2.0, 8.0, -6.0, 0.0),
+        (2.0, -1.0, 3.0, 5.0, 5.0, 2.0, 6.0, -4.0, 2.0, -3.0, 7.0, 1.0, 5.0 / 3.0),
+        (1.0, 2.0, -1.0, 2.0, -1.0, 3.0, 1.0, -2.0, 4.0, 5.0, -3.0, 2.0, 1.0 / 7.0),
+        (0.25, -0.75, 1.5, 0.85, 1.25, 0.65, 0.55, -0.40, 0.30, -0.16, 0.1375, -0.04, -0.979125),
+        (-2.25, 0.5, 3.75, -1.5, 2.25, 0.125, -0.75, 1.5, -2.0, 0.375, -1.25, 2.5, 0.0625),
+    ];
+    for (case_index, inputs) in cases.into_iter().enumerate() {
+        let planned_value = planned
+            .call(&mut planned_store, inputs)
+            .expect("planned incidence");
+        let raw_value = raw.call(&mut raw_store, inputs).expect("raw incidence");
+        let polynomial_value = polynomial
+            .call(&mut polynomial_store, inputs)
+            .expect("polynomial incidence");
+        assert_eq!(
+            planned_value.to_bits(),
+            raw_value.to_bits(),
+            "planned and raw incidence differ for case {case_index}: {planned_value} != {raw_value}"
+        );
+        assert!(
+            (planned_value - polynomial_value).abs() <= 2.0e-5,
+            "planned and fused polynomial differ for case {case_index}: \
+             {planned_value} != {polynomial_value}"
         );
     }
 }

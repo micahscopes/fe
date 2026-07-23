@@ -129,6 +129,26 @@ def check():
     )
     assert len(POINT_SUPPORT) == len(set(POINT_SUPPORT)) == 12
     assert len(DUAL_SUPPORT) == len(set(DUAL_SUPPORT)) == 12
+    planned = []
+    for point_slot, point_generator in enumerate(POINT_SUPPORT):
+        for quadric_slot, quadric_generator in enumerate(DUAL_SUPPORT):
+            sign = 0
+            if point_generator < 3 and point_generator == quadric_generator:
+                sign = 1
+            elif 3 <= point_generator < 9 and quadric_generator == point_generator + 6:
+                sign = -1
+            elif point_generator >= 9 and quadric_generator + 6 == point_generator:
+                sign = -1
+            if sign:
+                planned.append(
+                    (point_slot * 12 + quadric_slot, point_generator, quadric_generator, sign)
+                )
+    assert tuple(planned) == (
+        (0, 0, 0, 1), (13, 1, 1, 1), (26, 2, 2, 1),
+        (45, 3, 9, -1), (58, 4, 10, -1), (71, 5, 11, -1),
+        (75, 9, 3, -1), (88, 10, 4, -1), (101, 11, 5, -1),
+        (114, 12, 6, -1), (127, 13, 7, -1), (140, 14, 8, -1),
+    )
     assert tuple(COEFFICIENT_NAMES) == ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
     for label, xyz, coefficients, expected in KATS:
         expanded = null_dot(point(*xyz), dual_quadric(coefficients))
