@@ -1,0 +1,314 @@
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+// Canonical Cl(4,1) support semantics. These ordinary Fe const helpers are the
+// only source used by both the typed Schedule32 witness and the FCO emitter.
+const fn sphere_blade(_ slot: usize) -> usize {
+    1 << (slot + slot / 2)
+}
+
+const fn point_blade(_ slot: usize) -> usize {
+    1 << slot
+}
+
+const fn raw_left_slot(_ triple: usize) -> usize { triple / 20 }
+const fn raw_point_slot(_ triple: usize) -> usize { (triple / 4) % 5 }
+const fn raw_right_slot(_ triple: usize) -> usize { triple % 4 }
+
+const fn left_blade(_ triple: usize) -> usize {
+    sphere_blade(raw_left_slot(triple))
+}
+
+const fn middle_blade(_ triple: usize) -> usize {
+    point_blade(raw_point_slot(triple))
+}
+
+const fn right_blade(_ triple: usize) -> usize {
+    sphere_blade(raw_right_slot(triple))
+}
+
+const fn popcount5(_ value: usize) -> usize {
+    (value & 1) + ((value >> 1) & 1) + ((value >> 2) & 1)
+        + ((value >> 3) & 1) + ((value >> 4) & 1)
+}
+
+// 0 is positive and 1 is negative. Generator 4 (mask 16) squares to -1.
+const fn gp_negative(_ a: usize, _ b: usize) -> usize {
+    (
+        (((a >> 1) & 1) * popcount5(b & 1))
+        + (((a >> 2) & 1) * popcount5(b & 3))
+        + (((a >> 3) & 1) * popcount5(b & 7))
+        + (((a >> 4) & 1) * popcount5(b & 15))
+        + (((a >> 4) & 1) * ((b >> 4) & 1))
+    ) & 1
+}
+
+const fn triple_negative(_ triple: usize) -> usize {
+    let l = left_blade(triple)
+    let p = middle_blade(triple)
+    let r = right_blade(triple)
+    gp_negative(l, p) ^ gp_negative(l ^ p, r)
+}
+
+const fn reverse_negative(_ triple: usize) -> usize {
+    let l = left_blade(triple)
+    let p = middle_blade(triple)
+    let r = right_blade(triple)
+    gp_negative(r, p) ^ gp_negative(r ^ p, l)
+}
+
+const fn canonical_tag(_ triple: usize) -> usize {
+    let l = raw_left_slot(triple)
+    let r = raw_right_slot(triple)
+    let l0 = l & 1
+    let l1 = (l >> 1) & 1
+    let r0 = r & 1
+    let r1 = (r >> 1) & 1
+    let same_high = 1 - (l1 ^ r1)
+    let greater = l1 * (1 - r1) + same_high * l0 * (1 - r0)
+    1 - greater
+}
+
+const fn diagonal_tag(_ triple: usize) -> usize {
+    let l = raw_left_slot(triple)
+    let r = raw_right_slot(triple)
+    (1 - ((l >> 1) ^ (r >> 1))) * (1 - ((l & 1) ^ (r & 1)))
+}
+
+const fn keep_tag(_ triple: usize) -> usize {
+    canonical_tag(triple)
+        * (1 - (triple_negative(triple) ^ reverse_negative(triple)))
+}
+
+const fn magnitude(_ triple: usize) -> usize {
+    2 - diagonal_tag(triple)
+}
+
+const fn output_blade(_ triple: usize) -> usize {
+    left_blade(triple) ^ middle_blade(triple) ^ right_blade(triple)
+}
+
+const fn survivor_count() -> usize {
+    let mut triple: usize = 0
+    let mut count: usize = 0
+    while triple < 80 {
+        if keep_tag(triple) != 0 { count = count + 1 }
+        triple = triple + 1
+    }
+    count
+}
+
+const fn survivor_triple(_ target: usize) -> usize {
+    let mut triple: usize = 0
+    let mut seen: usize = 0
+    while triple < 80 {
+        if keep_tag(triple) != 0 {
+            if seen == target { return triple }
+            seen = seen + 1
+        }
+        triple = triple + 1
+    }
+    80
+}
+
+static_assert(survivor_count() == 32)
+
+// The inspectable typed witness stores the canonical source-triple identity in
+// exact survivor order. There is no generated or hand-authored survivor table.
+struct Zero {}
+struct Term<const Triple: usize> {}
+struct Add<L, R> {}
+recursive type fn Schedule<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{survivor_triple(N - 1)}>, Schedule<{N - 1}>>
+    }
+}
+type Schedule32 = Schedule<32>
+
+// BEGIN_FORCE_SCHEDULE32
+struct NatZ {}
+struct NatS<N> {}
+recursive type fn Nat<const N: usize>() -> (*) {
+    match N {
+        0 => NatZ
+        _ => NatS<Nat<{N - 1}>>
+    }
+}
+trait PlanLength { type Out }
+impl PlanLength for Zero { type Out = NatZ }
+impl<const I: usize, Tail: PlanLength> PlanLength for Add<Term<I>, Tail> {
+    type Out = NatS<<Tail as PlanLength>::Out>
+}
+fn takes_nat32(_ value: Nat<32>) {}
+fn schedule_has_exactly_32_terms(value: <Schedule32 as PlanLength>::Out) {
+    takes_nat32(value)
+}
+// END_FORCE_SCHEDULE32
+
+// BEGIN_PROVIDER_EMITTER
+trait Sandwich {
+    fn e1(
+        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
+        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
+    ) -> f32
+    fn e2(
+        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
+        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
+    ) -> f32
+    fn e4(
+        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
+        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
+    ) -> f32
+    fn e8(
+        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
+        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
+    ) -> f32
+    fn e16(
+        _ s1: f32, _ s2: f32, _ s8: f32, _ s16: f32,
+        _ p1: f32, _ p2: f32, _ p4: f32, _ p8: f32, _ p16: f32,
+    ) -> f32
+}
+
+struct CanonicalCgaProvider {}
+impl Derive<Sandwich> for CanonicalCgaProvider {
+    const fn derive<T>(ev: own Evidence<Sandwich<T>>) -> Evidence<Sandwich<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Sandwich<T>>)
+    {
+        // A typed f32 zero without a float-literal codegen primitive.
+        let s1 = builder.arg_ref("s1")
+        let zero = builder.sub(s1, s1)
+        let lane1 = zero
+        let lane2 = zero
+        let lane4 = zero
+        let lane8 = zero
+        let lane16 = zero
+        let has1 = false
+        let has2 = false
+        let has4 = false
+        let has8 = false
+        let has16 = false
+
+        // Exhaustively scan the canonical semantic universe. The provider
+        // range and global step budgets fail closed if this ceases to be
+        // bounded; no survivor list is supplied.
+        for triple in 0..80 {
+            if keep_tag(triple) != 0 {
+                let left = builder.arg_ref("s1")
+                if raw_left_slot(triple) == 1 { left = builder.arg_ref("s2") }
+                if raw_left_slot(triple) == 2 { left = builder.arg_ref("s8") }
+                if raw_left_slot(triple) == 3 { left = builder.arg_ref("s16") }
+
+                let point = builder.arg_ref("p1")
+                if raw_point_slot(triple) == 1 { point = builder.arg_ref("p2") }
+                if raw_point_slot(triple) == 2 { point = builder.arg_ref("p4") }
+                if raw_point_slot(triple) == 3 { point = builder.arg_ref("p8") }
+                if raw_point_slot(triple) == 4 { point = builder.arg_ref("p16") }
+
+                let right = builder.arg_ref("s1")
+                if raw_right_slot(triple) == 1 { right = builder.arg_ref("s2") }
+                if raw_right_slot(triple) == 2 { right = builder.arg_ref("s8") }
+                if raw_right_slot(triple) == 3 { right = builder.arg_ref("s16") }
+
+                let product = builder.mul(builder.mul(left, point), right)
+                let term = product
+                // Apply the known multiplicity decomposition before building
+                // the product. This preserves two multiplications per term
+                // without requiring the replay layer to rediscover that
+                // `product + product` is a shared DAG node.
+                if magnitude(triple) == 2 {
+                    term = builder.mul(builder.mul(builder.add(left, left), point), right)
+                }
+                if triple_negative(triple) != 0 { term = builder.neg(term) }
+
+                let output = output_blade(triple)
+                if output == 1 {
+                    if has1 { lane1 = builder.add(lane1, term) }
+                    else { lane1 = term }
+                    has1 = true
+                }
+                if output == 2 {
+                    if has2 { lane2 = builder.add(lane2, term) }
+                    else { lane2 = term }
+                    has2 = true
+                }
+                if output == 4 {
+                    if has4 { lane4 = builder.add(lane4, term) }
+                    else { lane4 = term }
+                    has4 = true
+                }
+                if output == 8 {
+                    if has8 { lane8 = builder.add(lane8, term) }
+                    else { lane8 = term }
+                    has8 = true
+                }
+                if output == 16 {
+                    if has16 { lane16 = builder.add(lane16, term) }
+                    else { lane16 = term }
+                    has16 = true
+                }
+            }
+        }
+
+        builder.emit_method("e1", lane1)
+        builder.emit_method("e2", lane2)
+        builder.emit_method("e4", lane4)
+        builder.emit_method("e8", lane8)
+        builder.emit_method("e16", lane16)
+        builder.finish()
+        ev
+    }
+}
+
+struct CanonicalCga {}
+derive Sandwich for CanonicalCga using CanonicalCgaProvider
+
+pub fn cga_fco_e1(
+    s1: f32, s2: f32, s8: f32, s16: f32,
+    p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
+) -> f32 {
+    <CanonicalCga as Sandwich>::e1(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+}
+pub fn cga_fco_e2(
+    s1: f32, s2: f32, s8: f32, s16: f32,
+    p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
+) -> f32 {
+    <CanonicalCga as Sandwich>::e2(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+}
+pub fn cga_fco_e4(
+    s1: f32, s2: f32, s8: f32, s16: f32,
+    p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
+) -> f32 {
+    <CanonicalCga as Sandwich>::e4(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+}
+pub fn cga_fco_e8(
+    s1: f32, s2: f32, s8: f32, s16: f32,
+    p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
+) -> f32 {
+    <CanonicalCga as Sandwich>::e8(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+}
+pub fn cga_fco_e16(
+    s1: f32, s2: f32, s8: f32, s16: f32,
+    p1: f32, p2: f32, p4: f32, p8: f32, p16: f32,
+) -> f32 {
+    <CanonicalCga as Sandwich>::e16(s1, s2, s8, s16, p1, p2, p4, p8, p16)
+}
+// END_PROVIDER_EMITTER
+
+// Order-sensitive provenance over the helper-derived Schedule32. CTFE freezes
+// the value so the Wasm runtime does not need the wider compile-time `usize`
+// arithmetic used by the bounded scan.
+const fn schedule_order_hash() -> usize {
+    let mut triple: usize = 0
+    let mut hash: usize = 17
+    while triple < 80 {
+        if keep_tag(triple) != 0 {
+            hash = (hash * 83 + triple + 1) % 1000003
+        }
+        triple = triple + 1
+    }
+    hash
+}
+const SCHEDULE_ORDER_HASH: i32 = schedule_order_hash().downcast_unchecked()
+pub fn cga_schedule_order_hash() -> i32 {
+    SCHEDULE_ORDER_HASH
+}
