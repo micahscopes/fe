@@ -1,23 +1,97 @@
 use sparse_clifford::{
+    Add,
     Nat,
     PlanLength,
     SparsePlan,
+    Term,
 }
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 
-const KEEP0: u32 = ((1 as u32) << 0) | ((1 as u32) << 7)
-const KEEP1: u32 = 0
-const KEEP2: u32 = 0
-const KEEP3: u32 = 0
+const KEEP0: u32 = 2707775
+const KEEP1: u32 = 4498990
+const KEEP2: u32 = 8948932
+const KEEP3: u32 = 136
 const KEEP4: u32 = 0
-const KEEP5: u32 = (1 as u32) << 20
+const KEEP5: u32 = 0
 const KEEP6: u32 = 0
 const KEEP7: u32 = 0
-type Plan3 =
-    SparsePlan<129, 0, 0, 0, 0, 1048576, 0, 0, 144, 3>
+type Plan32 =
+    SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>
 
-fn takes_nat3(_ value: Nat<3>) {}
-fn imported_plan_has_three_terms(value: <Plan3 as PlanLength>::Out) {
-    takes_nat3(value)
+fn takes_nat32(_ value: Nat<32>) {}
+fn imported_plan_has_thirty_two_terms(value: <Plan32 as PlanLength>::Out) {
+    takes_nat32(value)
+}
+
+const fn expected_candidate(_ i: usize) -> usize {
+    if i == 0 { return 0 }
+    if i == 1 { return 1 }
+    if i == 2 { return 2 }
+    if i == 3 { return 3 }
+    if i == 4 { return 4 }
+    if i == 5 { return 5 }
+    if i == 6 { return 8 }
+    if i == 7 { return 12 }
+    if i == 8 { return 14 }
+    if i == 9 { return 16 }
+    if i == 10 { return 19 }
+    if i == 11 { return 21 }
+    if i == 12 { return 25 }
+    if i == 13 { return 26 }
+    if i == 14 { return 27 }
+    if i == 15 { return 29 }
+    if i == 16 { return 33 }
+    if i == 17 { return 34 }
+    if i == 18 { return 37 }
+    if i == 19 { return 39 }
+    if i == 20 { return 42 }
+    if i == 21 { return 46 }
+    if i == 22 { return 50 }
+    if i == 23 { return 54 }
+    if i == 24 { return 55 }
+    if i == 25 { return 58 }
+    if i == 26 { return 59 }
+    if i == 27 { return 63 }
+    if i == 28 { return 67 }
+    if i == 29 { return 71 }
+    if i == 30 { return 75 }
+    79
+}
+
+trait InspectPlan { type Out }
+struct Yes {}
+struct No {}
+struct Inspector {}
+struct Target {}
+
+impl Derive<InspectPlan> for Inspector {
+    const fn derive<T>(ev: own Evidence<InspectPlan<T>>) -> Evidence<InspectPlan<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<InspectPlan<T>>)
+    {
+        let ordinal: usize = 0
+        let exact = true
+        for nested in builder.ty<Plan32>().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                for arg in nested.generic_args() {
+                    if arg.is_const() {
+                        if arg.const_value() != expected_candidate(ordinal) { exact = false }
+                        ordinal = ordinal + 1
+                    }
+                }
+            }
+        }
+        let out = builder.ty<No>()
+        if exact && ordinal == 32 { out = builder.ty<Yes>() }
+        builder.emit_assoc_ty("Out", out)
+        builder.finish()
+        ev
+    }
+}
+
+derive InspectPlan for Target using Inspector
+fn takes_yes(_ value: Yes) {}
+fn imported_plan_reflects_exact_survivors(value: <Target as InspectPlan>::Out) {
+    takes_yes(value)
 }
 
 pub fn sparse_clifford_ingot_probe() -> i32 {

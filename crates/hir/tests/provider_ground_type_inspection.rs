@@ -1,6 +1,21 @@
 use fe_hir::test_db::HirAnalysisTestDb;
 
 #[test]
+fn imported_sparse_plan_reflects_exact_thirty_two_survivors() {
+    use common::InputDb;
+    use driver::DriverDataBase;
+    use fe_hir::hir_def::HirIngot;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../codegen/tests/fixtures/sparse_clifford_consumer_ingot");
+    let url = url::Url::from_directory_path(path.canonicalize().unwrap()).unwrap();
+    let mut db = DriverDataBase::default();
+    assert!(!driver::init_ingot(&mut db, &url));
+    let ingot = db.workspace().containing_ingot(&db, url).unwrap();
+    let diagnostics = db.run_on_top_mod(ingot.root_mod(&db)).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+}
+
+#[test]
 fn ground_type_inspection_exposes_constructor_and_ordered_args() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

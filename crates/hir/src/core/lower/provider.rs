@@ -685,6 +685,67 @@ pub(super) fn resolve_trait_def<'db>(
         })
 }
 
+/// Resolves a nominal item path against base graphs only. This is the
+/// definition-identity half of pre-expansion ground-type reflection: generic
+/// arguments stay on the caller's original path while this function resolves
+/// the imported/qualified head to its owning HIR item.
+pub(super) fn resolve_base_item<'db>(
+    db: &'db dyn HirDb,
+    from: TopLevelMod<'db>,
+    written: PathId<'db>,
+) -> Option<ItemKind<'db>> {
+    let path = if written.len(db) == 1 {
+        let name = written.ident(db).to_opt()?;
+        let base = base_scope_graph_impl(db, from);
+        let locals = base
+            .child_items(from.scope())
+            .filter(|item| !matches!(item, ItemKind::Use(_)) && item.name(db) == Some(name))
+            .collect::<Vec<_>>();
+        match locals.as_slice() {
+            [local] => return Some(*local),
+            [] => {}
+            _ => return None,
+        }
+        let imports = base
+            .child_items(from.scope())
+            .filter_map(|item| match item {
+                ItemKind::Use(use_) if use_.imported_name(db) == Some(name) => Some(use_),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [use_] = imports.as_slice() else {
+            return None;
+        };
+        let segments = use_.path(db).to_opt()?.data(db);
+        let mut idents = segments
+            .iter()
+            .map(|segment| segment.to_opt().and_then(UsePathSegment::ident))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter();
+        let mut path = PathId::from_ident(db, idents.next()?);
+        for ident in idents {
+            path = path.push_ident(db, ident);
+        }
+        path
+    } else {
+        written
+    };
+    let len = path.len(db);
+    let mut idents = Vec::with_capacity(len);
+    for idx in 0..len {
+        let seg = path.segment(db, idx)?;
+        idents.push(seg.ident(db).to_opt()?);
+    }
+    let (&last, leading) = idents.split_last()?;
+    let (mut module, walk) = resolve_path_root(db, from, &idents, leading)?;
+    for &segment in walk {
+        module = nav_child_module(db, module, segment)?;
+    }
+    let base = base_scope_graph_impl(db, module.graph_owner());
+    base.child_items(module.scope())
+        .find(|item| item.name(db) == Some(last))
+}
+
 /// Resolves the *root* segment of a trait path to the module its leading
 /// segments walk from, returning that module and the submodule steps still to
 /// walk (everything between that starting module and the final trait segment).
@@ -1325,8 +1386,44 @@ pub fn derived_impl_provenance<'db>(
 
 #[cfg(test)]
 mod tests {
-    use super::{core_providers, goal_matches_provider, is_core_derivable, resolve_trait_def};
+    use super::{
+        core_providers, goal_matches_provider, is_core_derivable, resolve_base_item,
+        resolve_trait_def,
+    };
     use crate::{hir_def::PathId, lower::map_file_to_mod, test_db::TestDb};
+
+    #[test]
+    fn base_item_resolver_handles_grouped_and_renamed_direct_imports() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file("use core::ops::{Eq as Equal};\nstruct Local {}\n");
+        let top_mod = map_file_to_mod(&db, file);
+        let imported = resolve_base_item(&db, top_mod, PathId::from_str(&db, "Equal"))
+            .expect("renamed grouped direct import resolves");
+        let qualified = resolve_base_item(
+            &db,
+            top_mod,
+            PathId::from_segments(&db, &["core", "ops", "Eq"]),
+        )
+        .expect("qualified path resolves exactly");
+        assert_eq!(imported, qualified);
+        assert!(resolve_base_item(&db, top_mod, PathId::from_str(&db, "Local")).is_some());
+    }
+
+    #[test]
+    fn base_item_resolver_does_not_leak_nested_imports() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file("mod nested { use core::ops::Eq; }\n");
+        let top_mod = map_file_to_mod(&db, file);
+        assert!(resolve_base_item(&db, top_mod, PathId::from_str(&db, "Eq")).is_none());
+    }
+
+    #[test]
+    fn base_item_resolver_fails_closed_on_duplicate_direct_imports() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file("use core::ops::Eq;\nuse core::cmp::Eq;\n");
+        let top_mod = map_file_to_mod(&db, file);
+        assert!(resolve_base_item(&db, top_mod, PathId::from_str(&db, "Eq")).is_none());
+    }
 
     /// The selection SSOT — [`resolve_trait_def`] — keys on the resolved
     /// `Trait` *def*, so two traits that *spell* the same last segment in

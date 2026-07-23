@@ -38,6 +38,7 @@ pub(crate) mod parse;
 
 mod abi_field;
 mod attr;
+mod base_const_eval;
 mod body;
 mod contract;
 mod derive;

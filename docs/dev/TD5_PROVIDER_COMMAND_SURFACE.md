@@ -60,7 +60,7 @@ Generated types:
 - `ty`, `target_ty`, `self_ty`, `str_ty`, `tuple_ty`, `with_elem_ty`,
   `trait_assoc_ty`
 
-The canonical inventory currently contains 43 operations. Reflection reads are
+The canonical inventory currently contains 44 operations. Reflection reads are
 not string-dispatched `ImplBuilder` commands; typed handle vocabularies own
 them, so the bespoke reflection-operation inventory is empty.
 

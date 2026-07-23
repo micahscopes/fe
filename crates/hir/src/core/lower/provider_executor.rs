@@ -16,11 +16,12 @@
 //! * enforces an explicit step budget and a command-count cap, so a buggy
 //!   provider degrades into a diagnostic instead of a hang.
 
-use num_traits::{CheckedSub, ToPrimitive};
+use num_traits::ToPrimitive;
 use parser::TextRange;
 use parser::ast::prelude::*;
 
 use super::{
+    base_const_eval::{BaseConstValue, BaseUIntKind, eval_base_const_func, eval_base_uint_binop},
     base_scope_graph_impl,
     ground_type_plan::{
         GroundArg as NormalizedGroundArg, GroundTypePlan, base_ground_constructor,
@@ -59,7 +60,6 @@ const GROUND_TYPE_ARG_BUDGET: usize = 256;
 const NAT_RANGE_BUDGET: usize = 4_096;
 /// Ordinary const helpers are a convenience for sharing pure steering
 /// semantics with type-level CTFE, not an unbounded second evaluator.
-const CONST_HELPER_CALL_DEPTH_BUDGET: usize = 32;
 
 // === FROZEN command surface (TD5.0) ====================================
 //
@@ -1037,9 +1037,6 @@ pub(super) struct ProviderExecutor<'a, 'db> {
     /// Lazily resolved syntax root of the provider's file, for error spans.
     root: Option<parser::SyntaxNode>,
     fallback_range: TextRange,
-    /// Active ordinary const helpers. Re-entry is rejected (rather than
-    /// interpreted recursively), and nesting has an independent hard cap.
-    helper_call_stack: Vec<Func<'db>>,
 }
 
 impl<'a, 'db> ProviderExecutor<'a, 'db> {
@@ -1088,7 +1085,6 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             next_quote_local: 0,
             root: None,
             fallback_range,
-            helper_call_stack: Vec::new(),
         };
 
         let root_expr = executor.body.expr(db);
@@ -1419,55 +1415,11 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                     }
                     return Ok(Value::Seq(items));
                 }
-                let value = match op {
-                    ArithBinOp::Add => lhs + rhs,
-                    ArithBinOp::Sub => lhs
-                        .checked_sub(rhs)
-                        .ok_or_else(|| self.unsupported_expr(expr))?,
-                    ArithBinOp::Mul => lhs * rhs,
-                    ArithBinOp::Div => {
-                        if rhs.bits() == 0 {
-                            return Err(self.unsupported_expr(expr));
-                        }
-                        lhs / rhs
-                    }
-                    ArithBinOp::Rem => {
-                        if rhs.bits() == 0 {
-                            return Err(self.unsupported_expr(expr));
-                        }
-                        lhs % rhs
-                    }
-                    ArithBinOp::LShift => {
-                        let shift = rhs
-                            .to_usize()
-                            .filter(|shift| *shift < 256)
-                            .ok_or_else(|| self.unsupported_expr(expr))?;
-                        lhs << shift
-                    }
-                    ArithBinOp::RShift => {
-                        let shift = rhs
-                            .to_usize()
-                            .filter(|shift| *shift < 256)
-                            .ok_or_else(|| self.unsupported_expr(expr))?;
-                        lhs >> shift
-                    }
-                    ArithBinOp::BitAnd => lhs & rhs,
-                    ArithBinOp::BitXor => lhs ^ rhs,
-                    ArithBinOp::Pow | ArithBinOp::BitOr => {
-                        return Err(self.unsupported_expr(expr));
-                    }
-                    ArithBinOp::Range => {
-                        unreachable!("provider natural ranges return before scalar arithmetic")
-                    }
-                };
-                // Provider integers model the unannotated/`usize` CTFE shape:
-                // Fe's 256-bit unsigned compile-time word. Typed signed
-                // arithmetic is intentionally outside this lowering-phase
-                // executor because expression type analysis is downstream.
-                if value.bits() > 256 {
-                    return Err(self.unsupported_expr(expr));
-                }
-                Ok(Value::Int(IntegerId::new(self.db, value)))
+                let lhs = IntegerId::new(self.db, lhs.clone());
+                let rhs = IntegerId::new(self.db, rhs.clone());
+                let value = eval_base_uint_binop(self.db, *op, lhs, rhs, BaseUIntKind::Usize)
+                    .map_err(|_| self.unsupported_expr(expr))?;
+                Ok(Value::Int(value))
             }
             Expr::Path(_) => {
                 let Some(name) = self.simple_expr_path_ident(expr) else {
@@ -1543,96 +1495,24 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
             return Err(self.unsupported_expr(at));
         };
 
-        if !func.is_const(self.db)
-            || func.modifiers(self.db).is_extern
-            || !func.generic_params(self.db).data(self.db).is_empty()
-            || !func.effects(self.db).data(self.db).is_empty()
-            || self.helper_call_stack.contains(&func)
-            || self.helper_call_stack.len() >= CONST_HELPER_CALL_DEPTH_BUDGET
-        {
-            return Err(self.unsupported_expr(at));
-        }
-        let Some(body) = func.body(self.db) else {
-            return Err(self.unsupported_expr(at));
-        };
-        let Some(params) = func.params_list(self.db).to_opt() else {
-            return Err(self.unsupported_expr(at));
-        };
-        let params = params.data(self.db);
-        if params.len() != args.len() || args.iter().any(|arg| arg.label.is_some()) {
+        if args.iter().any(|arg| arg.label.is_some()) {
             return Err(self.unsupported_expr(at));
         }
 
-        let mut bindings = Vec::with_capacity(params.len());
-        for (param, arg) in params.iter().zip(args) {
-            let Some(param_name) = param.name() else {
-                return Err(self.unsupported_expr(at));
-            };
-            bindings.push((param_name, self.eval_expr(arg.expr)?));
-        }
-
-        let old_body = std::mem::replace(&mut self.body, body);
-        let old_root = self.root.take();
-        self.helper_call_stack.push(func);
-        self.scopes.push(bindings);
-        let result = self.eval_const_helper_value(body.expr(self.db));
-        self.scopes.pop();
-        self.helper_call_stack.pop();
-        self.body = old_body;
-        self.root = old_root;
-        result
-    }
-
-    /// Value-returning subset for ordinary helper bodies. Provider top-level
-    /// execution remains effect-oriented; helpers require an explicit tail
-    /// value (or `return value`) and admit only hygienic `let` bindings.
-    fn eval_const_helper_value(&mut self, expr: ExprId) -> Result<Value<'db>, ExecError> {
-        let range = self.expr_range(expr);
-        self.tick(range)?;
-        let Partial::Present(data) = expr.data(self.db, self.body) else {
-            return Err(self.unsupported_expr(expr));
-        };
-        match data {
-            Expr::Block(stmts) => {
-                let stmts = stmts.clone();
-                self.scopes.push(Vec::new());
-                let result = (|| {
-                    let Some((&last, prefix)) = stmts.split_last() else {
-                        return Err(self.unsupported_expr(expr));
-                    };
-                    for &stmt in prefix {
-                        let Partial::Present(Stmt::Let(pat, _ty, Some(init))) =
-                            stmt.data(self.db, self.body)
-                        else {
-                            return Err(self.unsupported_stmt(stmt));
-                        };
-                        let Some(name) = self.simple_pat_binding(*pat) else {
-                            return Err(self.unsupported_stmt(stmt));
-                        };
-                        let value = self.eval_expr(*init)?;
-                        self.bind(name, value);
-                    }
-                    match last.data(self.db, self.body) {
-                        Partial::Present(Stmt::Expr(value))
-                        | Partial::Present(Stmt::Return(Some(value))) => {
-                            self.eval_const_helper_value(*value)
-                        }
-                        _ => Err(self.unsupported_stmt(last)),
-                    }
-                })();
-                self.scopes.pop();
-                result
-            }
-            Expr::If(cond, then_expr, else_expr) => {
-                if self.eval_cond(*cond)? {
-                    self.eval_const_helper_value(*then_expr)
-                } else if let Some(else_expr) = else_expr {
-                    self.eval_const_helper_value(*else_expr)
-                } else {
-                    Err(self.unsupported_expr(expr))
-                }
-            }
-            _ => self.eval_expr(expr),
+        let values = args
+            .iter()
+            .map(|arg| match self.eval_expr(arg.expr)? {
+                Value::Bool(value) => Ok(BaseConstValue::Bool(value)),
+                Value::Int(value) => Ok(BaseConstValue::UInt {
+                    value,
+                    kind: super::base_const_eval::BaseUIntKind::Usize,
+                }),
+                _ => Err(self.unsupported_expr(arg.expr)),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        match eval_base_const_func(self.db, func, values).map_err(|_| self.unsupported_expr(at))? {
+            BaseConstValue::Bool(value) => Ok(Value::Bool(value)),
+            BaseConstValue::UInt { value, .. } => Ok(Value::Int(value)),
         }
     }
 
@@ -2735,6 +2615,7 @@ impl<'a, 'db> ProviderExecutor<'a, 'db> {
                 }
                 Err(self.unsupported_expr(expr))
             }
+            // FREEZE (TD5.0): end typed reflect/field/variant dispatch.
             Value::Ty(ty) => {
                 if !args.is_empty() {
                     return Err(self.unsupported_expr(expr));
@@ -4141,7 +4022,7 @@ mod freeze_guard {
         // forever, letting a new bespoke reflect-op arm land unnoticed.
         let body = slice_between(
             "// FREEZE (TD5.0): the reflection-read method names are pinned by",
-            "fn eval_builder_method(",
+            "// FREEZE (TD5.0): end typed reflect/field/variant dispatch.",
         );
         let mut dispatch = arm_keys(body);
         // `eval_method_call`'s arms repeat no names except across receiver
@@ -4195,8 +4076,8 @@ mod freeze_guard {
 
     #[test]
     fn total_recognized_method_surface_is_pinned() {
-        // The full named method surface the freeze pins: 39 builder ops + 0
-        // reflection reads = 39 distinct literals. TD5c first moved the three
+        // The full named method surface the freeze pins: 44 builder ops + 0
+        // reflection reads = 44 distinct literals. TD5c first moved the three
         // `reflect.*` scalar reads onto `ReflectHandle` (54 → 51), then moved
         // the `field.*`/`variant.*` reads onto `FieldHandle`/`VariantHandle`
         // (RECOGNIZED_REFLECT_OPS → 0) and `same_ty`/`same_field` onto
@@ -4209,7 +4090,7 @@ mod freeze_guard {
         // `builder.*` is the executor's only named surface.
         let total = RECOGNIZED_BUILDER_OPS.len() + RECOGNIZED_REFLECT_OPS.len();
         assert_eq!(
-            total, 39,
+            total, 44,
             "FREEZE (TD5.0): the recognized command surface changed size. A new op requires \
              a TD5 category decision — see docs/dev/TD5_PROVIDER_COMMAND_SURFACE.md."
         );
@@ -4265,7 +4146,12 @@ mod freeze_guard {
             "FREEZE (SGK-B): steering integer comparison must route through the shared \
              `compare_nats` primitive, not a provider-local comparator."
         );
-        let local_arith = format!("BinOp::{}", "Arith");
+        let shared_arith = format!("eval_base_uint_{}(", "binop");
+        assert!(
+            eval.contains(&shared_arith),
+            "FREEZE (SGK-B): steering scalar arithmetic must route through shared typed CTFE."
+        );
+        let local_arith = format!("let value = {}", "match op");
         assert!(
             !eval.contains(&local_arith),
             "FREEZE (SGK-B): steering evaluates integer arithmetic locally; route any numeric \

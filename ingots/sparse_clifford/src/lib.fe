@@ -223,6 +223,26 @@ pub const fn plan_mask_candidate(
     candidate_count
 }
 
+pub const fn plan_mask_candidate_ascending(
+    _ keep0: u32, _ keep1: u32, _ keep2: u32, _ keep3: u32,
+    _ keep4: u32, _ keep5: u32, _ keep6: u32, _ keep7: u32,
+    _ candidate_count: usize,
+    _ remaining: usize,
+) -> usize {
+    // SparsePlan's public invariant is `remaining <= cardinality(mask within
+    // candidate_count)`; its canonical entry point uses equality. Subtracting
+    // remaining therefore enumerates the retained candidates from low to high
+    // while preserving the evaluator's `Add<Term, Tail>` cons shape.
+    plan_mask_candidate(
+        keep0, keep1, keep2, keep3, keep4, keep5, keep6, keep7,
+        candidate_count,
+        plan_mask_cardinality(
+            keep0, keep1, keep2, keep3, keep4, keep5, keep6, keep7,
+            candidate_count,
+        ) - remaining,
+    )
+}
+
 pub recursive type fn SparsePlan<
     const Keep0: u32, const Keep1: u32, const Keep2: u32, const Keep3: u32,
     const Keep4: u32, const Keep5: u32, const Keep6: u32, const Keep7: u32,
@@ -232,9 +252,9 @@ pub recursive type fn SparsePlan<
     match N {
         0 => Zero
         _ => Add<
-            Term<{plan_mask_candidate(
+            Term<{plan_mask_candidate_ascending(
                 Keep0, Keep1, Keep2, Keep3, Keep4, Keep5, Keep6, Keep7,
-                CandidateCount, N - 1,
+                CandidateCount, N,
             )}>,
             SparsePlan<
                 Keep0, Keep1, Keep2, Keep3, Keep4, Keep5, Keep6, Keep7,
