@@ -59,7 +59,7 @@ sharing.
    absent blades, and rejects an unsatisfied present-only bound. This is
    functional but verbose and closed over a known support.
 
-   The shared `support_bladeset_api.fe` fragment removes that closed-world
+   The shared `sparse_clifford_api.fe` prelude removes that closed-world
    limitation for support planning. Its ordinary-Fe `BladeSet` represents up to
    five basis generators (32 blades) in an explicit portable `u32`;
    `support_gp` derives conservative product support for any orthogonal,
@@ -67,7 +67,7 @@ sharing.
    support by computed blade grade. Both operations fail closed above the
    declared capacity. Ground results erase to constants: the differential Wasm
    `support_bladeset_ctfe.fe` probe and the canonical Schedule32 source both
-   compose that same fragment. The differential Wasm test checks independent
+   compose that same prelude. The differential Wasm test checks independent
    Rust oracles, including CGA Point*Sphere and a
    degenerate square, and rejects any runtime bitwise support interpreter.
    The canonical `S*P*S` plan now derives its candidate support with two

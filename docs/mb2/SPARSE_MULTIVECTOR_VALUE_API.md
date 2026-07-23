@@ -1,10 +1,11 @@
 # Bounded sparse multivector value API
 
-The reusable source fragments
-`crates/codegen/tests/fixtures/support_bladeset_api.fe` and
-`sparse_multivector_api.fe` now cover both halves of a sparse algebra:
-compile-time support planning and support-sized runtime values. They use
-ordinary Fe only.
+The package-like ordinary-Fe prelude
+`crates/codegen/tests/fixtures/sparse_clifford_api.fe` covers three reusable
+pieces of a sparse algebra in one source unit: compile-time support planning,
+the `Zero`/`Term`/`Add` operator-plan vocabulary, and support-sized runtime
+values. Schedule32 and QCGA prepend this same source before their domain
+planner and kernel.
 
 For supports selected from the 32 blades of a dimension-at-most-five algebra:
 
@@ -37,7 +38,8 @@ separate gate proves present-only access to sphere e3 cannot produce executable
 Wasm.
 
 This is intentionally not yet the final public algebra package. Fe fixtures do
-not have imports, so Rust tests compose the fragments. Domain support wrappers
+not have imports, so Rust tests and generators compose the prelude as source.
+Domain support wrappers
 remain useful to bind a particular support and blade at a readable API
 boundary, but rank depth and computed storage aliases are no longer compiler
 limits: recursive `SparseIndex<7>` and `SparseStorage<8>` both execute. The
@@ -50,7 +52,6 @@ targets Sonatina `150d327e`, which lacks the float and layout APIs used by this
 branch, so codegen gates require `/workspace/sonatina-sparse-api`.
 
 The flagship aggregate `Sandwich::sandwich` implementation remains unchanged.
-Its operator-plan representation now shares `sparse_plan_api.fe` with the QCGA
-showcase, while this value fragment owns support-sized runtime storage,
-recursive coefficient access, default-zero reads, and fail-closed present-only
-reads.
+It and the QCGA showcase now consume the same prelude, while each still owns
+its metric, candidate enumeration, coefficient provider, survivor ordering,
+and operator evaluation.
