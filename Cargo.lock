@@ -2551,6 +2551,7 @@ dependencies = [
  "sonatina-ir",
  "sonatina-triple",
  "sonatina-verifier",
+ "tempfile",
  "tracing",
  "url",
  "wasmparser 0.248.0",
