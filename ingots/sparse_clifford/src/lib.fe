@@ -360,3 +360,230 @@ pub fn sparse_present_coefficient<I: SparsePresentCoefficient<S>, S>(value: S) -
 {
     <I as SparsePresentCoefficient<S>>::read_present(value: value)
 }
+
+// Dense recursive semantic baseline for authored Clifford products.
+//
+// This is the Fuchs–Théry binary decomposition, represented directly as an Fe
+// recursive type. SparsePlan remains the optimized execution representation;
+// this recurrence is the independent authored algebra from which specialized
+// plans can be checked.
+
+pub struct CliffordScalarF32 { pub scalar: f32 }
+pub struct CliffordNodeF32<A> { pub low: A, pub high: A }
+impl Copy for CliffordScalarF32 {}
+impl<A: Copy> Copy for CliffordNodeF32<A> {}
+
+pub recursive type fn CliffordMvF32<const N: usize>() -> (*) {
+    match N {
+        0 => CliffordScalarF32
+        _ => CliffordNodeF32<CliffordMvF32<{N - 1}>>
+    }
+}
+
+/// A type-level policy for an orthogonal metric. `level` is the one-based
+/// generator introduced by the current recursive node.
+pub trait OrthogonalMetric {
+    const fn square_is_negative(self, level: i32) -> bool
+}
+
+/// Cl(4,1), with the fifth recursive generator squaring to -1.
+pub struct Cl41Metric {}
+impl Copy for Cl41Metric {}
+impl OrthogonalMetric for Cl41Metric {
+    #[inline(always)]
+    const fn square_is_negative(self, level: i32) -> bool {
+        level == 5
+    }
+}
+
+pub trait CliffordApplySign {
+    const fn clifford_apply_sign(self, negative: bool) -> Self
+}
+impl CliffordApplySign for CliffordScalarF32 {
+    #[inline(always)]
+    const fn clifford_apply_sign(self, negative: bool) -> Self {
+        CliffordScalarF32 {
+            scalar: if negative { -self.scalar } else { self.scalar },
+        }
+    }
+}
+impl<A: CliffordApplySign> CliffordApplySign for CliffordNodeF32<A> {
+    #[inline(always)]
+    const fn clifford_apply_sign(self, negative: bool) -> Self {
+        CliffordNodeF32 {
+            low: self.low.clifford_apply_sign(negative: negative),
+            high: self.high.clifford_apply_sign(negative: negative),
+        }
+    }
+}
+
+pub trait CliffordInvolution {
+    const fn clifford_involution(self) -> Self
+}
+impl CliffordInvolution for CliffordScalarF32 {
+    #[inline(always)]
+    const fn clifford_involution(self) -> Self { self }
+}
+impl<A: CliffordInvolution + CliffordApplySign> CliffordInvolution
+    for CliffordNodeF32<A>
+{
+    #[inline(always)]
+    const fn clifford_involution(self) -> Self {
+        CliffordNodeF32 {
+            low: self.low.clifford_involution(),
+            high: self.high.clifford_involution()
+                .clifford_apply_sign(negative: true),
+        }
+    }
+}
+
+pub trait CliffordAdd {
+    const fn clifford_add(self, other: Self) -> Self
+}
+impl CliffordAdd for CliffordScalarF32 {
+    #[inline(always)]
+    const fn clifford_add(self, other: Self) -> Self {
+        CliffordScalarF32 { scalar: self.scalar + other.scalar }
+    }
+}
+impl<A: CliffordAdd> CliffordAdd for CliffordNodeF32<A> {
+    #[inline(always)]
+    const fn clifford_add(self, other: Self) -> Self {
+        CliffordNodeF32 {
+            low: self.low.clifford_add(other: other.low),
+            high: self.high.clifford_add(other: other.high),
+        }
+    }
+}
+
+/// Authored generic Clifford product. The carrier and metric are independent
+/// type parameters; closing them at `CliffordMvF32<5>, Cl41Metric` specializes
+/// the recurrence to Cl(4,1).
+pub trait CliffordGp<M> {
+    const fn clifford_gp(self, other: Self, metric: M, level: i32) -> Self
+}
+impl<M> CliffordGp<M> for CliffordScalarF32 {
+    #[inline(always)]
+    const fn clifford_gp(
+        self,
+        other: Self,
+        metric: M,
+        level: i32,
+    ) -> Self {
+        CliffordScalarF32 { scalar: self.scalar * other.scalar }
+    }
+}
+impl<
+    A: CliffordGp<M> + CliffordInvolution + CliffordAdd
+        + CliffordApplySign + Copy,
+    M: OrthogonalMetric + Copy,
+> CliffordGp<M> for CliffordNodeF32<A> {
+    #[inline(always)]
+    const fn clifford_gp(
+        self,
+        other: Self,
+        metric: M,
+        level: i32,
+    ) -> Self {
+        let aa = self.low.clifford_gp(
+            other: other.low, metric: metric, level: level - 1,
+        )
+        let bhb = self.high.clifford_gp(
+            other: other.high.clifford_involution(),
+            metric: metric,
+            level: level - 1,
+        )
+        let ab = self.low.clifford_gp(
+            other: other.high, metric: metric, level: level - 1,
+        )
+        let bha = self.high.clifford_gp(
+            other: other.low.clifford_involution(),
+            metric: metric,
+            level: level - 1,
+        )
+        CliffordNodeF32 {
+            low: aa.clifford_add(other: bhb.clifford_apply_sign(
+                negative: metric.square_is_negative(level: level),
+            )),
+            high: ab.clifford_add(other: bha),
+        }
+    }
+}
+
+pub trait CliffordSetLeaf {
+    const fn clifford_set_leaf(
+        self,
+        index: i32,
+        size: i32,
+        value: f32,
+    ) -> Self
+}
+impl CliffordSetLeaf for CliffordScalarF32 {
+    #[inline(always)]
+    const fn clifford_set_leaf(
+        self,
+        index: i32,
+        size: i32,
+        value: f32,
+    ) -> Self {
+        CliffordScalarF32 { scalar: value }
+    }
+}
+impl<A: CliffordSetLeaf + Copy> CliffordSetLeaf for CliffordNodeF32<A> {
+    #[inline(always)]
+    const fn clifford_set_leaf(
+        self,
+        index: i32,
+        size: i32,
+        value: f32,
+    ) -> Self {
+        let half: i32 = size >> 1
+        if index < half {
+            CliffordNodeF32 {
+                low: self.low.clifford_set_leaf(
+                    index: index, size: half, value: value,
+                ),
+                high: self.high,
+            }
+        } else {
+            CliffordNodeF32 {
+                low: self.low,
+                high: self.high.clifford_set_leaf(
+                    index: index - half, size: half, value: value,
+                ),
+            }
+        }
+    }
+}
+
+pub trait CliffordGetLeaf {
+    const fn clifford_get_leaf(self, index: i32, size: i32) -> f32
+}
+impl CliffordGetLeaf for CliffordScalarF32 {
+    #[inline(always)]
+    const fn clifford_get_leaf(self, index: i32, size: i32) -> f32 {
+        self.scalar
+    }
+}
+impl<A: CliffordGetLeaf> CliffordGetLeaf for CliffordNodeF32<A> {
+    #[inline(always)]
+    const fn clifford_get_leaf(self, index: i32, size: i32) -> f32 {
+        let half: i32 = size >> 1
+        if index < half {
+            self.low.clifford_get_leaf(index: index, size: half)
+        } else {
+            self.high.clifford_get_leaf(index: index - half, size: half)
+        }
+    }
+}
+
+/// Closed zero constructor used by the first reusable Cl(4,1) consumer.
+#[inline(always)]
+pub fn clifford_zero_mvt5(_ zero: f32) -> CliffordMvF32<5> {
+    let z0: CliffordMvF32<0> = CliffordScalarF32 { scalar: zero }
+    let z1: CliffordMvF32<1> = CliffordNodeF32 { low: z0, high: z0 }
+    let z2: CliffordMvF32<2> = CliffordNodeF32 { low: z1, high: z1 }
+    let z3: CliffordMvF32<3> = CliffordNodeF32 { low: z2, high: z2 }
+    let z4: CliffordMvF32<4> = CliffordNodeF32 { low: z3, high: z3 }
+    CliffordNodeF32 { low: z4, high: z4 }
+}
