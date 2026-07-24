@@ -155,5 +155,50 @@ routingError(
   }, { wasm() {} }),
   "FE_ACTOR_INVALID_LANE_INTENT",
 );
+routingError(
+  () => createCanonicalIntentRouter({
+    intents: {
+      invented: intent("host_effect", "main_thread", [
+        Object.freeze({ capability: "ambient_authority", mutable: false }),
+      ]),
+    },
+  }, { main_thread_host() {} }),
+  "FE_ACTOR_INVALID_LANE_INTENT",
+);
+routingError(
+  () => createCanonicalIntentRouter({
+    intents: {
+      repeated: intent("host_effect", "main_thread", [
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+      ]),
+    },
+  }, { main_thread_host() {} }),
+  "FE_ACTOR_INVALID_LANE_INTENT",
+);
+assert.throws(
+  () => createCanonicalIntentRouter({
+    intents: {
+      malformed: intent("host_effect", "main_thread", [
+        Object.freeze({ capability: "webgpu_dispatch", mutable: "yes" }),
+      ]),
+    },
+  }, { main_thread_host() {} }),
+  /mutable must be a boolean/,
+);
+assert.throws(
+  () => createCanonicalIntentRouter({
+    intents: {
+      embellished: intent("host_effect", "main_thread", [
+        Object.freeze({
+          capability: "webgpu_dispatch",
+          mutable: true,
+          fallback: "ambient",
+        }),
+      ]),
+    },
+  }, { main_thread_host() {} }),
+  /unexpected or missing fields/,
+);
 
 console.log("exact and intent-derived compiler-lane actor routing: ok");

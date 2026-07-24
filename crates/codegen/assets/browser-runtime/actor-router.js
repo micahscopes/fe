@@ -125,6 +125,28 @@ const canonicalIntentOwner = (lane, intent) => {
   if (!Array.isArray(intent.capabilities)) {
     throw new TypeError(`canonical actor intent ${lane}.capabilities must be an array`);
   }
+  const seenCapabilities = new Set();
+  for (const [index, requirement] of intent.capabilities.entries()) {
+    const name = `canonical actor intent ${lane}.capabilities[${index}]`;
+    exactKeys(requirement, ["capability", "mutable"], name);
+    if (requirement.capability !== "webgpu_dispatch") {
+      throw new ActorLaneRoutingError(
+        "FE_ACTOR_INVALID_LANE_INTENT",
+        `canonical lane ${lane} names unsupported host capability ${String(requirement.capability)}`,
+      );
+    }
+    if (typeof requirement.mutable !== "boolean") {
+      throw new TypeError(`${name}.mutable must be a boolean`);
+    }
+    const key = `${requirement.capability}\0${requirement.mutable}`;
+    if (seenCapabilities.has(key)) {
+      throw new ActorLaneRoutingError(
+        "FE_ACTOR_INVALID_LANE_INTENT",
+        `canonical lane ${lane} repeats host capability ${requirement.capability}`,
+      );
+    }
+    seenCapabilities.add(key);
+  }
   if (intent.execution === "wasm") {
     if (!["any", "main_thread", "worker"].includes(intent.placement)
         || intent.capabilities.length !== 0) {
