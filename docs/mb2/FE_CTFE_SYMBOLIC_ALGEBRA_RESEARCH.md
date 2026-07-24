@@ -723,22 +723,25 @@ and shared-DAG staging are measured and trustworthy.
 - `docs/mb2/SCHEDULE_STRATEGY_COMPARISON.md`
 - `demos/webgpu-cga-inversion/gen-schedule32/actor-source.fe`
 
-## Remaining FCO plan-interpretation boundary
+## Current FCO plan-interpretation boundary
 
-FCO can inspect constructor and literal generic arguments of a source-level
-ground nominal type with `preorder_types()`. It cannot currently interpret the
-normalized result of a recursive type-function alias: a focused provider gate
-proves `builder.ty<GroundPlan>().preorder_types()` sees the alias itself and no
-underlying `Term<Candidate>` nodes.
+The earlier alias-only limitation has been removed. Phase-safe imported-plan
+reflection now normalizes a ground recursive type-function result before
+`normalized_preorder_types()` exposes its constructor tree to a provider.
+Schedule32 observes the exact 32 `Term<Candidate>` survivors of its imported
+`SparsePlan<..., 80, 32>` in canonical order; QCGA likewise observes the exact
+12 terms of its imported incidence plan. Neither provider rescans its bounded
+candidate universe to rediscover the keep set. Resolver, phase, cycle, depth,
+fuel, integer-width, and duplicate-import gates fail closed.
 
-Bridging this is not a small executor tweak. Providers run in lowering over
-syntax `TypeId`, strictly upstream of the semantic `TyId` normalization query.
-A normalized staged type-reflection handle therefore needs an explicit
-phase-safe compiler design. Until then Schedule32 and QCGA consume the same
-scalar CTFE candidate semantics, but their FCO emitters must scan the bounded
-candidate universe rather than interpret the recursive plan tree directly.
-Their domain-specific sign, magnitude, operand projection, output routing and
-reduction topology remain honest application policy.
+The remaining boundary is scheduling rather than plan visibility. Current FCO
+providers still own domain-specific sign, magnitude, operand projection,
+output routing, and reduction topology. `builder.share` publishes explicit
+value reuse, but there is no automatic stable-node DAG construction or
+hash-consing pass. The next comparison therefore feeds one reflected canonical
+Schedule32 plan to tree, compact straight-line, and deterministic shared-DAG
+emitters, measuring actual reuse rather than assuming that specialization must
+produce it.
 
 ## External design references
 
