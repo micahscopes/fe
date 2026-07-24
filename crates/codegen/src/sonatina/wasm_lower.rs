@@ -864,6 +864,152 @@ fn is_reifiable_aggregate_ref(kind: &RefKind<'_>) -> bool {
     matches!(kind, RefKind::Const)
 }
 
+fn is_static_leaf_load_from_slot<'db>(
+    db: &'db DriverDataBase,
+    body: &RuntimeBody<'db>,
+    stmt: &RStmt<'_>,
+    candidate: RLocalId,
+) -> bool {
+    let RStmt::Assign {
+        expr:
+            RExpr::Load {
+                place:
+                    RuntimePlace {
+                        root: PlaceRoot::Slot(root),
+                        path,
+                    },
+            },
+        ..
+    } = stmt
+    else {
+        return false;
+    };
+    if *root != candidate || path.is_empty() {
+        return false;
+    }
+    let Some(mut class) = body.value_class(candidate).cloned() else {
+        return false;
+    };
+    for elem in path.iter() {
+        let PlaceElem::Field(index) = elem else {
+            return false;
+        };
+        let RuntimeClass::AggregateValue { layout } = class else {
+            return false;
+        };
+        let Layout::Struct(struct_layout) = layout.data(db) else {
+            return false;
+        };
+        let Some(field) = struct_layout.fields.get(index.0 as usize).cloned() else {
+            return false;
+        };
+        class = field;
+    }
+    !matches!(class, RuntimeClass::AggregateValue { .. })
+}
+
+fn place_is_rooted_at(place: &RuntimePlace<'_>, candidate: RLocalId) -> bool {
+    match place.root {
+        PlaceRoot::Slot(root) | PlaceRoot::Ref(root) => root == candidate,
+        PlaceRoot::Ptr { addr, .. } => addr == candidate,
+        PlaceRoot::Provider(_) => false,
+    }
+}
+
+fn expr_mentions_aggregate_candidate(expr: &RExpr<'_>, candidate: RLocalId) -> bool {
+    match expr {
+        RExpr::Use(value)
+        | RExpr::Unary { value, .. }
+        | RExpr::Cast { value, .. }
+        | RExpr::MaterializeToObject { src: value }
+        | RExpr::ProviderFromRaw { raw: value, .. }
+        | RExpr::WordToRawAddr { value, .. }
+        | RExpr::ProviderToRaw { value }
+        | RExpr::RetagRef { value }
+        | RExpr::AggregateExtract { value, .. }
+        | RExpr::EnumTagOfValue { value }
+        | RExpr::EnumIsVariant { value, .. }
+        | RExpr::EnumExtract { value, .. }
+        | RExpr::EnumGetTag { root: value }
+        | RExpr::EnumAssertVariantRef { root: value, .. } => *value == candidate,
+        RExpr::Binary { lhs, rhs, .. } => *lhs == candidate || *rhs == candidate,
+        RExpr::MaterializePlaceToObject { place }
+        | RExpr::AddrOf { place }
+        | RExpr::Load { place } => place_is_rooted_at(place, candidate),
+        RExpr::AggregateMake { fields, .. }
+        | RExpr::Call { args: fields, .. }
+        | RExpr::EnumMake { fields, .. } => fields.contains(&candidate),
+        // Runtime builtins accept scalar/address operands, never an aggregate
+        // value. The candidate's AggregateValue class therefore makes it
+        // impossible for its local id to occur in a well-typed builtin.
+        RExpr::Builtin(_)
+        | RExpr::ConstScalar(_)
+        | RExpr::Placeholder { .. }
+        | RExpr::ConstRef { .. }
+        | RExpr::AllocObject { .. } => false,
+    }
+}
+
+/// Prove that an own aggregate parameter is observed only by immutable,
+/// statically-known field projections. Unrelated computation is allowed, but
+/// every occurrence of the candidate itself is checked exhaustively.
+fn slot_param_has_only_static_field_reads<'db>(
+    db: &'db DriverDataBase,
+    body: &RuntimeBody<'db>,
+    candidate: RLocalId,
+) -> bool {
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if is_static_leaf_load_from_slot(db, body, stmt, candidate) {
+                continue;
+            }
+            match stmt {
+                RStmt::Assign { expr, .. } => {
+                    if expr_mentions_aggregate_candidate(expr, candidate) {
+                        return false;
+                    }
+                }
+                RStmt::Store { dst, src } | RStmt::CopyInto { dst, src } => {
+                    if *src == candidate || place_is_rooted_at(dst, candidate) {
+                        return false;
+                    }
+                }
+                RStmt::EnumAssertVariant { value, .. } => {
+                    if *value == candidate {
+                        return false;
+                    }
+                }
+                RStmt::EnumSetTag { root, .. } => {
+                    if *root == candidate {
+                        return false;
+                    }
+                }
+                RStmt::EnumWriteVariant { root, fields, .. } => {
+                    if *root == candidate || fields.contains(&candidate) {
+                        return false;
+                    }
+                }
+            }
+        }
+        let terminator_is_safe = match &block.terminator {
+            RTerminator::Goto(_) | RTerminator::Trap | RTerminator::Stop => true,
+            RTerminator::Branch { cond, .. } => *cond != candidate,
+            RTerminator::SwitchScalar { discr, .. }
+            | RTerminator::MatchEnumTag { tag: discr, .. } => *discr != candidate,
+            RTerminator::TerminalCall { args, .. } => !args.contains(&candidate),
+            RTerminator::ReturnData { offset, len } | RTerminator::Revert { offset, len } => {
+                *offset != candidate && *len != candidate
+            }
+            RTerminator::SelfDestruct { beneficiary } => *beneficiary != candidate,
+            RTerminator::Return(value) => value.is_none_or(|value| value != candidate),
+        };
+        if !terminator_is_safe {
+            return false;
+        }
+    }
+    true
+}
+
 fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
     let candidates = body
         .signature
@@ -879,6 +1025,14 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
                     && matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. }) =>
             {
                 Some((param.local, pointee.as_ref().clone()))
+            }
+            RuntimeClass::AggregateValue { .. }
+                if matches!(
+                    body.locals[param.local.as_u32() as usize].root,
+                    RuntimeLocalRoot::Slot(_)
+                ) && slot_param_has_only_static_field_reads(db, body, param.local) =>
+            {
+                Some((param.local, param.class.clone()))
             }
             _ => None,
         })
@@ -902,20 +1056,21 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
         for stmt in std::mem::take(&mut block.stmts) {
             let RStmt::Assign {
                 dst,
-                expr:
-                    RExpr::Load {
-                        place:
-                            RuntimePlace {
-                                root: PlaceRoot::Ref(root),
-                                path,
-                            },
-                    },
+                expr: RExpr::Load { place },
             } = &stmt
             else {
                 rewritten.push(stmt);
                 continue;
             };
-            let Some(mut class) = candidates.get(root).cloned() else {
+            let root = match place.root {
+                PlaceRoot::Ref(root) | PlaceRoot::Slot(root) => root,
+                _ => {
+                    rewritten.push(stmt);
+                    continue;
+                }
+            };
+            let path = &place.path;
+            let Some(mut class) = candidates.get(&root).cloned() else {
                 rewritten.push(stmt);
                 continue;
             };
@@ -924,7 +1079,7 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
                 locals[dst.as_u32() as usize].root = RuntimeLocalRoot::None;
                 rewritten.push(RStmt::Assign {
                     dst: *dst,
-                    expr: RExpr::Use(*root),
+                    expr: RExpr::Use(root),
                 });
                 continue;
             }
@@ -933,7 +1088,7 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
                 continue;
             }
 
-            let mut current = *root;
+            let mut current = root;
             let mut semantic_ty = locals[root.as_u32() as usize].semantic_ty;
             let mut projections = Vec::with_capacity(path.len());
             let mut valid = true;
@@ -2990,6 +3145,7 @@ fn immediate_for_const_scalar(constant: &ConstScalar, ty: Type) -> Result<Immedi
 mod tests {
     use super::*;
     use common::InputDb;
+    use hir::analysis::semantic::FieldIndex;
     use mir::ScalarRole;
     use url::Url;
 
@@ -2997,6 +3153,104 @@ mod tests {
     fn aggregate_param_reification_excludes_mutable_object_refs() {
         assert!(is_reifiable_aggregate_ref(&RefKind::Const));
         assert!(!is_reifiable_aggregate_ref(&RefKind::Object));
+    }
+
+    #[test]
+    fn own_aggregate_slot_reification_is_leaf_read_only_and_fail_closed() {
+        let source = r#"
+use core::BrowserList
+
+struct Request {
+    values: BrowserList<u32, 4>,
+    mode: u32,
+}
+
+pub fn lane(request: own Request) -> u32 {
+    request.values.len + request.mode
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///aggregate_slot_reification.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_owned()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "lane").unwrap();
+        let function = package.functions(&db)[0];
+        let body = function.instance(&db).body(&db);
+        let candidate = body.signature.params[0].local;
+        assert!(slot_param_has_only_static_field_reads(
+            &db, &body, candidate
+        ));
+
+        let mut whole = body.clone();
+        let RStmt::Assign {
+            expr: RExpr::Load { place },
+            ..
+        } = &mut whole.blocks[0].stmts[0]
+        else {
+            panic!("expected projected request load");
+        };
+        place.path = Box::new([]);
+        assert!(!slot_param_has_only_static_field_reads(
+            &db, &whole, candidate
+        ));
+        let mut multi_leaf = body.clone();
+        let RStmt::Assign {
+            expr: RExpr::Load { place },
+            ..
+        } = &mut multi_leaf.blocks[0].stmts[0]
+        else {
+            panic!("expected projected request load");
+        };
+        place.path = Box::new([PlaceElem::Field(FieldIndex(0))]);
+        assert!(!slot_param_has_only_static_field_reads(
+            &db,
+            &multi_leaf,
+            candidate
+        ));
+        let mut dynamic = body.clone();
+        let RStmt::Assign {
+            expr: RExpr::Load { place },
+            ..
+        } = &mut dynamic.blocks[0].stmts[0]
+        else {
+            panic!("expected projected request load");
+        };
+        place.path = Box::new([PlaceElem::Deref]);
+        assert!(!slot_param_has_only_static_field_reads(
+            &db, &dynamic, candidate
+        ));
+
+        let mut address_taken = body.clone();
+        let RStmt::Assign {
+            expr: RExpr::Load { place },
+            ..
+        } = &mut address_taken.blocks[0].stmts[0]
+        else {
+            panic!("expected projected request load");
+        };
+        let place = place.clone();
+        address_taken.blocks[0].stmts[0] = RStmt::Assign {
+            dst: RLocalId::from_u32(1),
+            expr: RExpr::AddrOf {
+                place: place.clone(),
+            },
+        };
+        assert!(!slot_param_has_only_static_field_reads(
+            &db,
+            &address_taken,
+            candidate
+        ));
+
+        let mut stored = body.clone();
+        stored.blocks[0].stmts[0] = RStmt::Store {
+            dst: place,
+            src: RLocalId::from_u32(1),
+        };
+        assert!(!slot_param_has_only_static_field_reads(
+            &db, &stored, candidate
+        ));
     }
 
     #[test]

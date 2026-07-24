@@ -34,11 +34,9 @@ pub struct AllocatedBrowserBytes {
 /// expose only `u32` and `f32` instantiations and copy returned elements into
 /// wrapper-owned arena storage before publishing the descriptor.
 pub struct BrowserList<T, const MAX: usize> {
-    // The element type is carried by the nominal descriptor. Keeping the wire
-    // address as wasm32's plain scalar word lets ordinary message records be
-    // scalarized by the canonical wrapper, while preventing this borrowed
-    // browser view from masquerading as an owning/dereferenceable Fe pointer.
-    pub ptr: u32,
+    // The typed pointer preserves Fe's memory-provider semantics while the
+    // canonical wasm32 boundary carries its physical address as one i32 word.
+    pub ptr: MemPtr<T>,
     pub len: u32,
 }
 

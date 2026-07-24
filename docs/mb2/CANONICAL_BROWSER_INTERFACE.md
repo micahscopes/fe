@@ -46,13 +46,15 @@ and Wasm response copying ignore the pointer when `len == 0`. Wasm wrappers
 validate Fe-produced descriptors and copy exactly `len * 4` bytes into an
 aligned canonical-arena result before publishing it.
 
-This is a transport ABI, not a Fe collection API. Current Fe code can carry and
-return the descriptor, but cannot yet safely mint or dereference its typed
-payload. The explored provider path reaches a concrete compiler boundary:
-runtime MIR cannot coerce `Scalar(u32, Plain)` into a memory-space `RawAddr`;
-the existing generic `MemPtr<T>` route instead introduces a `u256` address
-outside the Wasm R1 scalar envelope. Closing that lowering gap is later work,
-and no v4 demo should imply Fe-side list computation until it is closed.
+This remains a bounded borrowed view, not a general Fe collection API.
+`BrowserList<T, MAX>` preserves its address as `MemPtr<T>` in Fe, so a lane can
+read the pointed-to element with ordinary provider semantics; the canonical
+wasm32 boundary carries that memory `RawAddr` as one physical `i32` word.
+Read-only aggregate parameters are reified only when every use is a static
+field path ending in one scalar/address leaf. Whole-aggregate reads,
+multi-leaf projections, dynamic paths, stores, and address-taking fail closed.
+There is not yet typed pointer arithmetic/indexing or a typed list allocator,
+so v4 does not claim general iteration or Fe-minted lists.
 
 ## Version 3: bounded tagged variants
 

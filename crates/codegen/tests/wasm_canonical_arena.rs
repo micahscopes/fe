@@ -263,12 +263,20 @@ struct EmptyRequest {
 }
 
 pub fn echo_u32(request: own U32Request) -> BrowserList<u32, 4> {
-    let len = if request.mode == 0 { request.values.len } else { request.mode }
+    let len = if request.values.len == 0 {
+        0
+    } else if request.mode == 0 {
+        if request.values.ptr.read() == 1 { request.values.len } else { 5 }
+    } else {
+        request.mode
+    }
     BrowserList { ptr: request.values.ptr, len }
 }
 
 pub fn echo_f32(request: own F32Request) -> BrowserList<f32, 4> {
-    BrowserList { ptr: request.values.ptr, len: request.values.len }
+    let first = request.values.ptr.read()
+    let len = if first == 1.5 { request.values.len } else { 5 }
+    BrowserList { ptr: request.values.ptr, len }
 }
 
 pub fn echo_empty(request: own EmptyRequest) -> BrowserList<u32, 0> {
