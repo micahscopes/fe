@@ -1210,7 +1210,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             layout: &crate::CanonicalLayout,
             base: u32,
             leaves: &mut Vec<(u32, Type)>,
-            descriptors: &mut Vec<(u32, u32)>,
+            descriptors: &mut Vec<(u32, u32, u32, u32, u32)>,
         ) -> Result<(), LowerError> {
             use crate::CanonicalShape;
             let ty = match &layout.shape {
@@ -1256,7 +1256,40 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                     })?;
                     leaves.push((pointer_offset, Type::I32));
                     leaves.push((length_offset, Type::I32));
-                    descriptors.push((pointer_offset, length_offset));
+                    descriptors.push((pointer_offset, length_offset, 1, u32::MAX, 1));
+                    None
+                }
+                CanonicalShape::List {
+                    max,
+                    stride,
+                    pointer_offset,
+                    length_offset,
+                    ..
+                } => {
+                    let pointer_offset = base.checked_add(*pointer_offset).ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "canonical list pointer offset overflow".to_owned(),
+                        )
+                    })?;
+                    let length_offset = base.checked_add(*length_offset).ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "canonical list length offset overflow".to_owned(),
+                        )
+                    })?;
+                    if *stride != 4 || *max > u32::MAX / *stride {
+                        return Err(LowerError::Unsupported(
+                            "canonical list has unsafe stride or maximum".to_owned(),
+                        ));
+                    }
+                    leaves.push((pointer_offset, Type::I32));
+                    leaves.push((length_offset, Type::I32));
+                    descriptors.push((
+                        pointer_offset,
+                        length_offset,
+                        *stride,
+                        *max,
+                        *stride,
+                    ));
                     None
                 }
             };
@@ -1371,7 +1404,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             fb.insert_inst(And::new(is, biased, mask), Type::I32)
         };
         let mut copied_pointers = HashMap::new();
-        for (pointer_offset, length_offset) in response_descriptors {
+        for (pointer_offset, length_offset, stride, max, alignment) in response_descriptors {
             let pointer_index = response
                 .iter()
                 .position(|(offset, _)| *offset == pointer_offset)
@@ -1390,11 +1423,60 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                 })?;
             let source = results[pointer_index];
             let length = results[length_index];
-            let destination = fb.insert_inst(MemAllocDynamic::new(is, length), Type::I32);
+            if stride > 1 {
+                let maximum = fb.make_imm_value(Immediate::I32(max as i32));
+                let too_long = fb.insert_inst(Lt::new(is, maximum, length), Type::I1);
+                let valid = fb.append_block();
+                let invalid = fb.append_block();
+                fb.insert_inst_no_result(Br::new(is, too_long, invalid, valid));
+                fb.switch_to_block(invalid);
+                fb.insert_inst_no_result(Unreachable::new(is));
+                fb.switch_to_block(valid);
+                // The pointer is semantically ignored for an empty list, just
+                // as it is by the JS decoder. Non-empty typed payloads must be
+                // naturally aligned before the byte-copy loop can read them.
+                let zero = fb.make_imm_value(Immediate::I32(0));
+                let empty = fb.insert_inst(CmpEq::new(is, length, zero), Type::I1);
+                let aligned_block = fb.append_block();
+                let check_alignment = fb.append_block();
+                fb.insert_inst_no_result(Br::new(is, empty, aligned_block, check_alignment));
+                fb.switch_to_block(check_alignment);
+                let mask = fb.make_imm_value(Immediate::I32((alignment - 1) as i32));
+                let low_bits = fb.insert_inst(And::new(is, source, mask), Type::I32);
+                let aligned = fb.insert_inst(CmpEq::new(is, low_bits, zero), Type::I1);
+                let misaligned = fb.append_block();
+                fb.insert_inst_no_result(Br::new(is, aligned, aligned_block, misaligned));
+                fb.switch_to_block(misaligned);
+                fb.insert_inst_no_result(Unreachable::new(is));
+                fb.switch_to_block(aligned_block);
+            }
+            let byte_length = if stride == 1 {
+                length
+            } else {
+                let stride = fb.make_imm_value(Immediate::I32(stride as i32));
+                fb.insert_inst(Mul::new(is, length, stride), Type::I32)
+            };
+            let allocation_length = if alignment == 1 {
+                byte_length
+            } else {
+                let slack = fb.make_imm_value(Immediate::I32((alignment - 1) as i32));
+                fb.insert_inst(Add::new(is, byte_length, slack), Type::I32)
+            };
+            let raw_destination =
+                fb.insert_inst(MemAllocDynamic::new(is, allocation_length), Type::I32);
+            let destination = if alignment == 1 {
+                raw_destination
+            } else {
+                let slack = fb.make_imm_value(Immediate::I32((alignment - 1) as i32));
+                let biased = fb.insert_inst(Add::new(is, raw_destination, slack), Type::I32);
+                let mask = fb.make_imm_value(Immediate::I32(-(alignment as i32)));
+                fb.insert_inst(And::new(is, biased, mask), Type::I32)
+            };
 
             // Returned descriptors are borrowed inside Fe. The canonical
             // wrapper establishes explicit host ownership by copying exactly
-            // `len` bytes into its arena before publishing the descriptor.
+            // `len * stride` bytes into its arena before publishing the
+            // descriptor. The length leaf remains an element count.
             let copy_entry = fb
                 .current_block()
                 .expect("canonical wrapper copy requires a current block");
@@ -1405,7 +1487,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             fb.switch_to_block(copy_header);
             let zero = fb.make_imm_value(Immediate::I32(0));
             let index = fb.insert_inst(Phi::new(is, vec![(zero, copy_entry)]), Type::I32);
-            let more = fb.insert_inst(Lt::new(is, index, length), Type::I1);
+            let more = fb.insert_inst(Lt::new(is, index, byte_length), Type::I1);
             fb.insert_inst_no_result(Br::new(is, more, copy_body, copy_done));
 
             fb.switch_to_block(copy_body);

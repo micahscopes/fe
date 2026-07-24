@@ -11,6 +11,7 @@ use hir::{
         HirAnalysisDb,
         ty::{
             adt_def::AdtRef,
+            const_ty::{ConstTyData, EvaluatedConstTy},
             corelib::{lib_trait_matches, resolve_lib_type_path},
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use wasmparser::{CompositeInnerType, ExternalKind, Payload, TypeRef, ValType};
 
 pub const CANONICAL_INTERFACE_PROTOCOL: &str = "fe-canonical-browser-interface";
-pub const CANONICAL_INTERFACE_VERSION: u32 = 3;
+pub const CANONICAL_INTERFACE_VERSION: u32 = 4;
 
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 4096;
@@ -38,8 +39,19 @@ pub enum CanonicalType {
     F32,
     Bytes,
     String,
+    List {
+        element: CanonicalListElement,
+        max: u32,
+    },
     Record(Vec<CanonicalField>),
     Variant(Vec<CanonicalVariant>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalListElement {
+    U32,
+    F32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +186,13 @@ pub enum CanonicalShape {
         pointer_offset: u32,
         length_offset: u32,
         encoding: String,
+    },
+    List {
+        element: CanonicalListElement,
+        max: u32,
+        stride: u32,
+        pointer_offset: u32,
+        length_offset: u32,
     },
     Record {
         fields: Vec<CanonicalFieldLayout>,
@@ -353,6 +372,7 @@ pub fn canonical_lane_decl_from_entry<'db>(
                 | CanonicalType::Variant(_)
                 | CanonicalType::Bytes
                 | CanonicalType::String
+                | CanonicalType::List { .. }
         )
     };
     if !is_message(&request) || !is_message(&response) {
@@ -444,8 +464,8 @@ fn canonical_lane_intent<'db>(
 
 /// Map a closed semantic Fe type to milestone-1 canonical metadata.
 ///
-/// Bytes and strings use the exact compiler-owned
-/// `core::browser::{BrowserBytes,BrowserString}` descriptor identities.
+/// Bytes, strings, and lists use exact compiler-owned `core::browser`
+/// descriptor identities.
 /// Primitive `String` and name-based or structural ADT guesses remain rejected.
 pub fn canonical_type_from_semantic<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -554,6 +574,56 @@ pub fn canonical_type_from_semantic<'db>(
     });
     if let Some(descriptor) = descriptor {
         return Ok(descriptor);
+    }
+    if resolve_lib_type_path(db, struct_.scope(), "core::browser::BrowserList")
+        .is_some_and(|resolved| resolved.adt_def(db) == Some(adt))
+    {
+        let [element, max] = ty.generic_args(db) else {
+            return Err(error(format!(
+                "{path}: BrowserList requires exactly one element type and one const maximum"
+            )));
+        };
+        let element = match element.base_ty(db).data(db) {
+            TyData::TyBase(TyBase::Prim(PrimTy::U32)) => CanonicalListElement::U32,
+            TyData::TyBase(TyBase::Prim(PrimTy::F32)) => CanonicalListElement::F32,
+            _ => {
+                return Err(error(format!(
+                    "{path}: BrowserList element must be exactly `u32` or `f32`"
+                )));
+            }
+        };
+        let TyData::ConstTy(max) = max.data(db) else {
+            return Err(error(format!(
+                "{path}: BrowserList maximum must be a concrete `usize` const"
+            )));
+        };
+        let evaluated = max.evaluate(db, None);
+        let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(max), max_ty) = evaluated.data(db)
+        else {
+            return Err(error(format!(
+                "{path}: BrowserList maximum must evaluate to a concrete integer"
+            )));
+        };
+        if !matches!(
+            max_ty.base_ty(db).data(db),
+            TyData::TyBase(TyBase::Prim(PrimTy::Usize))
+        ) {
+            return Err(error(format!(
+                "{path}: BrowserList maximum must have type `usize`"
+            )));
+        }
+        let max = u32::try_from(max.data(db)).map_err(|_| {
+            error(format!(
+                "{path}: BrowserList maximum does not fit the wasm32 canonical ABI"
+            ))
+        })?;
+        if max > u32::MAX / 4 {
+            return Err(error(format!(
+                "{path}: BrowserList maximum {max} exceeds the safe four-byte element bound {}",
+                u32::MAX / 4
+            )));
+        }
+        return Ok(CanonicalType::List { element, max });
     }
     let field_types = ty.field_types(db);
     let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
@@ -761,6 +831,24 @@ fn layout_type(
                 encoding: "utf-8".to_owned(),
             },
         ),
+        CanonicalType::List { element, max } => {
+            if *max > u32::MAX / 4 {
+                return Err(error(format!(
+                    "{path}: canonical list maximum exceeds wasm32 byte capacity"
+                )));
+            }
+            scalar(
+                8,
+                4,
+                CanonicalShape::List {
+                    element: *element,
+                    max: *max,
+                    stride: 4,
+                    pointer_offset: 0,
+                    length_offset: 4,
+                },
+            )
+        }
         CanonicalType::Record(fields) => {
             if fields.is_empty() {
                 return Err(error(format!(
@@ -905,7 +993,8 @@ fn contains_variant(ty: &CanonicalType) -> bool {
         | CanonicalType::U64
         | CanonicalType::F32
         | CanonicalType::Bytes
-        | CanonicalType::String => false,
+        | CanonicalType::String
+        | CanonicalType::List { .. } => false,
     }
 }
 
@@ -1188,6 +1277,112 @@ mod tests {
                 (size, align)
             );
         }
+    }
+
+    #[test]
+    fn bounded_list_layout_is_pinned_and_checks_wasm32_capacity() {
+        for (element, max) in [
+            (CanonicalListElement::U32, 0),
+            (CanonicalListElement::F32, 17),
+            (CanonicalListElement::U32, u32::MAX / 4),
+        ] {
+            let manifest = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
+                name: "list".to_owned(),
+                export: Some("list".to_owned()),
+                request: CanonicalType::List { element, max },
+                response: CanonicalType::U8,
+                intent: CanonicalLaneIntent::default(),
+            }])
+            .unwrap();
+            assert_eq!(
+                manifest.lanes[0].request,
+                CanonicalLayout {
+                    size: 8,
+                    align: 4,
+                    shape: CanonicalShape::List {
+                        element,
+                        max,
+                        stride: 4,
+                        pointer_offset: 0,
+                        length_offset: 4,
+                    },
+                }
+            );
+        }
+        let error = CanonicalInterfaceManifest::build(vec![CanonicalLaneDecl {
+            name: "list".to_owned(),
+            export: Some("list".to_owned()),
+            request: CanonicalType::List {
+                element: CanonicalListElement::U32,
+                max: u32::MAX / 4 + 1,
+            },
+            response: CanonicalType::U8,
+            intent: CanonicalLaneIntent::default(),
+        }])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("byte capacity"), "{error}");
+    }
+
+    #[test]
+    fn semantic_browser_list_requires_exact_nominal_supported_instantiation() {
+        let declaration = semantic_lane(
+            r#"
+use core::BrowserList
+const MAX: usize = 8
+struct Request { indices: BrowserList<u32, MAX>, weights: BrowserList<f32, 0> }
+struct Response { accepted: bool }
+pub fn update(request: Request) -> Response {
+    Response { accepted: request.indices.len == request.weights.len }
+}
+"#,
+            "update",
+        )
+        .unwrap();
+        let CanonicalType::Record(fields) = declaration.request else {
+            panic!("request record")
+        };
+        assert_eq!(
+            fields[0].ty,
+            CanonicalType::List {
+                element: CanonicalListElement::U32,
+                max: 8,
+            }
+        );
+        assert_eq!(
+            fields[1].ty,
+            CanonicalType::List {
+                element: CanonicalListElement::F32,
+                max: 0,
+            }
+        );
+
+        let lookalike = semantic_lane(
+            r#"
+struct BrowserList<T, const MAX: usize> { ptr: u32, len: u32 }
+struct Request { values: BrowserList<u32, 4> }
+struct Response { accepted: bool }
+pub fn update(request: Request) -> Response { Response { accepted: true } }
+"#,
+            "update",
+        )
+        .unwrap();
+        let CanonicalType::Record(fields) = lookalike.request else {
+            panic!("request record")
+        };
+        assert!(matches!(fields[0].ty, CanonicalType::Record(_)));
+
+        let unsupported = semantic_lane(
+            r#"
+use core::BrowserList
+struct Request { values: BrowserList<u8, 4> }
+struct Response { accepted: bool }
+pub fn update(request: Request) -> Response { Response { accepted: true } }
+"#,
+            "update",
+        )
+        .unwrap_err();
+        assert!(unsupported.contains("exactly `u32` or `f32`"), "{unsupported}");
     }
 
     #[test]

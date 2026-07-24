@@ -20,13 +20,39 @@ into Worker and WebGPU host dispatch.
 
 The remaining boundary is deliberately narrower than the Component Model.
 Versions 1–2 established fixed-layout records, scalar leaves, owned bytes, and
-UTF-8 strings. Version 3 adds the bounded host-effect variant family below.
-General lists, Wasm enum values, resources, futures, streams, and shared-memory
-zero-copy remain later work.
+UTF-8 strings. Version 3 added the bounded host-effect variant family below.
+Version 4 adds the exact nominal bounded-list transport described below.
+Unbounded and nested lists, Wasm enum values, resources, futures, streams, and
+shared-memory zero-copy remain later work.
 
 ## Protocol
 
 Protocol name: `fe-canonical-browser-interface`
+
+## Version 4: bounded typed-list transport
+
+The exact nominal Fe descriptor `BrowserList<T, MAX>` is admitted when `T` is
+`u32` or `f32` and `MAX` is a concrete `usize` constant whose four-byte payload
+fits in wasm32. Its wire layout is `{ ptr: u32, len: u32 }`, size 8, alignment
+4; `len` is an element count. JavaScript values are respectively `Uint32Array`
+and `Float32Array`.
+
+Codecs enforce the element-specific typed-array class, `len <= MAX`, four-byte
+alignment for non-empty descriptors, and checked Wasm bounds. Encoding and
+decoding copy the payload. Actor transfer recursively finds active list values
+inside records and variants, transfers only owned full-span buffers, and
+deduplicates shared buffers. Empty encodes use `{ ptr: 0, len: 0 }`; decoders
+and Wasm response copying ignore the pointer when `len == 0`. Wasm wrappers
+validate Fe-produced descriptors and copy exactly `len * 4` bytes into an
+aligned canonical-arena result before publishing it.
+
+This is a transport ABI, not a Fe collection API. Current Fe code can carry and
+return the descriptor, but cannot yet safely mint or dereference its typed
+payload. The explored provider path reaches a concrete compiler boundary:
+runtime MIR cannot coerce `Scalar(u32, Plain)` into a memory-space `RawAddr`;
+the existing generic `MemPtr<T>` route instead introduces a `u256` address
+outside the Wasm R1 scalar envelope. Closing that lowering gap is later work,
+and no v4 demo should imply Fe-side list computation until it is closed.
 
 ## Version 3: bounded tagged variants
 
@@ -72,7 +98,7 @@ lanes with this explicit reason. Tagged variants are currently usable for
 compiler-derived actor/host-effect schemas; completing Wasm support requires
 enum runtime-class lowering, not another JavaScript convention.
 
-Version: `3`
+Version: `4`
 
 Each canonical lane has one uniform exported signature:
 
@@ -97,10 +123,11 @@ Milestone 1 supports:
 - nested fixed-layout records;
 - byte strings represented by `{ ptr: u32, len: u32 }`;
 - UTF-8 strings represented by the same physical descriptor and distinct
-  nominal interface metadata.
+  nominal interface metadata;
+- bounded `BrowserList<u32, MAX>` and `BrowserList<f32, MAX>` descriptors.
 
-Lists, Wasm options/enums, resources, futures, and streams are not part of
-version 3.
+Unbounded or nested lists, Wasm options/enums, resources, futures, and streams
+are not part of version 4.
 
 ## Arena and lifetime
 
@@ -219,7 +246,7 @@ protocol-v3 envelopes remain the transport framing.
 - general allocation/free and concurrent outstanding borrows;
 - affine/linear ownership and resource destructors;
 - shared-memory zero-copy;
-- options, variants, general lists, and recursive values;
+- options, general or nested lists, and recursive values;
 - async, futures, streams, and cancellation;
 - generated supervision, placement, and backpressure policy;
 - WebGPU resource ownership;

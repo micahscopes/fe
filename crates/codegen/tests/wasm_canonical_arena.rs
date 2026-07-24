@@ -245,6 +245,214 @@ pub fn echo(request: own Request) -> Response {
 }
 
 #[test]
+fn canonical_bounded_lists_roundtrip_as_owned_typed_payloads_and_trap_invalid_results() {
+    let source = r#"
+use core::BrowserList
+
+struct U32Request {
+    values: BrowserList<u32, 4>,
+    mode: u32,
+}
+
+struct F32Request {
+    values: BrowserList<f32, 4>,
+}
+
+struct EmptyRequest {
+    values: BrowserList<u32, 0>,
+}
+
+pub fn echo_u32(request: own U32Request) -> BrowserList<u32, 4> {
+    let len = if request.mode == 0 { request.values.len } else { request.mode }
+    BrowserList { ptr: request.values.ptr, len }
+}
+
+pub fn echo_f32(request: own F32Request) -> BrowserList<f32, 4> {
+    BrowserList { ptr: request.values.ptr, len: request.values.len }
+}
+
+pub fn echo_empty(request: own EmptyRequest) -> BrowserList<u32, 0> {
+    BrowserList { ptr: request.values.ptr, len: request.values.len }
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///wasm_canonical_bounded_lists.fe").unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_owned()));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(diagnostics.is_empty(), "{diagnostics}");
+    let declarations = ["echo_u32", "echo_f32", "echo_empty"]
+        .map(|entry| canonical_lane_decl_from_entry(&db, top_mod, entry, entry).unwrap());
+    let manifest = CanonicalInterfaceManifest::build(declarations.to_vec()).unwrap();
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, "echo_u32").unwrap();
+    let artifact = compile_runtime_package_wasm_with_options(
+        &db,
+        &package,
+        WasmCompileOptions::default().with_canonical_lane(manifest.lanes[0].clone()),
+    )
+    .unwrap();
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &artifact.bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let echo_u32 = instance
+        .get_typed_func::<i32, i32>(&mut store, "fe_cabi_echo_u32")
+        .unwrap();
+
+    let read_descriptor = |store: &wasmtime::Store<()>, pointer: i32| {
+        let mut descriptor = [0u8; 8];
+        memory
+            .read(store, pointer as usize, &mut descriptor)
+            .unwrap();
+        (
+            u32::from_le_bytes(descriptor[0..4].try_into().unwrap()),
+            u32::from_le_bytes(descriptor[4..8].try_into().unwrap()),
+        )
+    };
+    let request_ptr = 64usize;
+    let payload_ptr = 128usize;
+    let values = [1u32, 0x01020304, u32::MAX];
+    let payload = values
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    memory.write(&mut store, payload_ptr, &payload).unwrap();
+    let mut request = Vec::new();
+    request.extend_from_slice(&(payload_ptr as u32).to_le_bytes());
+    request.extend_from_slice(&(values.len() as u32).to_le_bytes());
+    request.extend_from_slice(&0u32.to_le_bytes());
+    memory.write(&mut store, request_ptr, &request).unwrap();
+    let response = echo_u32.call(&mut store, request_ptr as i32).unwrap();
+    let (copied_ptr, copied_len) = read_descriptor(&store, response);
+    assert_eq!(copied_len, values.len() as u32, "length is an element count");
+    assert_eq!(copied_ptr % 4, 0);
+    assert_ne!(copied_ptr, payload_ptr as u32);
+    let mut copied = vec![0; payload.len()];
+    memory
+        .read(&store, copied_ptr as usize, &mut copied)
+        .unwrap();
+    assert_eq!(copied, payload);
+
+    // A forged Fe result cannot publish more than MAX elements.
+    memory
+        .write(&mut store, request_ptr + 8, &5u32.to_le_bytes())
+        .unwrap();
+    assert!(echo_u32.call(&mut store, request_ptr as i32).is_err());
+    // Nor can a non-empty typed result publish a misaligned source.
+    memory
+        .write(&mut store, request_ptr, &129u32.to_le_bytes())
+        .unwrap();
+    memory
+        .write(&mut store, request_ptr + 8, &0u32.to_le_bytes())
+        .unwrap();
+    assert!(echo_u32.call(&mut store, request_ptr as i32).is_err());
+
+    // Empty descriptors do not dereference or impose alignment on an ignored pointer.
+    memory
+        .write(&mut store, request_ptr, &129u32.to_le_bytes())
+        .unwrap();
+    memory
+        .write(&mut store, request_ptr + 4, &0u32.to_le_bytes())
+        .unwrap();
+    memory
+        .write(&mut store, request_ptr + 8, &0u32.to_le_bytes())
+        .unwrap();
+    let response = echo_u32.call(&mut store, request_ptr as i32).unwrap();
+    let (_, copied_len) = read_descriptor(&store, response);
+    assert_eq!(copied_len, 0);
+
+    // Compile each lane from its own MIR root, matching production's one-entry package.
+    let f32_package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "echo_f32").unwrap();
+    let f32_artifact = compile_runtime_package_wasm_with_options(
+        &db,
+        &f32_package,
+        WasmCompileOptions::default().with_canonical_lane(manifest.lanes[1].clone()),
+    )
+    .unwrap();
+    let f32_module = wasmtime::Module::new(&engine, &f32_artifact.bytes).unwrap();
+    let mut f32_store = wasmtime::Store::new(&engine, ());
+    let f32_instance = wasmtime::Instance::new(&mut f32_store, &f32_module, &[]).unwrap();
+    let f32_memory = f32_instance.get_memory(&mut f32_store, "memory").unwrap();
+    let echo_f32 = f32_instance
+        .get_typed_func::<i32, i32>(&mut f32_store, "fe_cabi_echo_f32")
+        .unwrap();
+    let f32_bits = [1.5f32.to_bits(), (-0.0f32).to_bits(), 0x7fc0_1234];
+    let f32_payload = f32_bits
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    f32_memory
+        .write(&mut f32_store, payload_ptr, &f32_payload)
+        .unwrap();
+    let mut f32_request = Vec::new();
+    f32_request.extend_from_slice(&(payload_ptr as u32).to_le_bytes());
+    f32_request.extend_from_slice(&(f32_bits.len() as u32).to_le_bytes());
+    f32_memory
+        .write(&mut f32_store, request_ptr, &f32_request)
+        .unwrap();
+    let f32_response = echo_f32
+        .call(&mut f32_store, request_ptr as i32)
+        .unwrap();
+    let mut f32_descriptor = [0u8; 8];
+    f32_memory
+        .read(&f32_store, f32_response as usize, &mut f32_descriptor)
+        .unwrap();
+    let f32_copied_ptr =
+        u32::from_le_bytes(f32_descriptor[0..4].try_into().unwrap()) as usize;
+    let f32_copied_len = u32::from_le_bytes(f32_descriptor[4..8].try_into().unwrap());
+    assert_eq!(f32_copied_len, f32_bits.len() as u32);
+    assert_eq!(f32_copied_ptr % 4, 0);
+    assert_ne!(f32_copied_ptr, payload_ptr);
+    let mut f32_copied = vec![0; f32_payload.len()];
+    f32_memory
+        .read(&f32_store, f32_copied_ptr, &mut f32_copied)
+        .unwrap();
+    assert_eq!(
+        f32_copied, f32_payload,
+        "the Wasm transport preserves f32 payload bits"
+    );
+
+    let empty_package =
+        mir::build_wasm_runtime_package_for_entry(&db, top_mod, "echo_empty").unwrap();
+    let empty_artifact = compile_runtime_package_wasm_with_options(
+        &db,
+        &empty_package,
+        WasmCompileOptions::default().with_canonical_lane(manifest.lanes[2].clone()),
+    )
+    .unwrap();
+    let empty_module = wasmtime::Module::new(&engine, &empty_artifact.bytes).unwrap();
+    let mut empty_store = wasmtime::Store::new(&engine, ());
+    let empty_instance = wasmtime::Instance::new(&mut empty_store, &empty_module, &[]).unwrap();
+    let empty_memory = empty_instance.get_memory(&mut empty_store, "memory").unwrap();
+    let echo_empty = empty_instance
+        .get_typed_func::<i32, i32>(&mut empty_store, "fe_cabi_echo_empty")
+        .unwrap();
+    empty_memory
+        .write(&mut empty_store, request_ptr, &129u32.to_le_bytes())
+        .unwrap();
+    let empty_response = echo_empty
+        .call(&mut empty_store, request_ptr as i32)
+        .unwrap();
+    let mut empty_descriptor = [0u8; 8];
+    empty_memory
+        .read(
+            &empty_store,
+            empty_response as usize,
+            &mut empty_descriptor,
+        )
+        .unwrap();
+    assert_eq!(
+        u32::from_le_bytes(empty_descriptor[4..8].try_into().unwrap()),
+        0
+    );
+}
+
+#[test]
 fn fe_allocated_bytes_can_be_returned_through_one_canonical_call() {
     let source = r#"
 use core::AllocatedBrowserBytes

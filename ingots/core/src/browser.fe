@@ -28,9 +28,24 @@ pub struct AllocatedBrowserBytes {
     pub len: u32,
 }
 
+/// Borrowed bounded homogeneous values in wasm32 linear memory.
+///
+/// `MAX` is part of the browser ABI contract. Canonical wrappers currently
+/// expose only `u32` and `f32` instantiations and copy returned elements into
+/// wrapper-owned arena storage before publishing the descriptor.
+pub struct BrowserList<T, const MAX: usize> {
+    // The element type is carried by the nominal descriptor. Keeping the wire
+    // address as wasm32's plain scalar word lets ordinary message records be
+    // scalarized by the canonical wrapper, while preventing this borrowed
+    // browser view from masquerading as an owning/dereferenceable Fe pointer.
+    pub ptr: u32,
+    pub len: u32,
+}
+
 impl Copy for BrowserBytes {}
 impl Copy for BrowserString {}
 impl Copy for AllocatedBrowserBytes {}
+impl<T, const MAX: usize> Copy for BrowserList<T, MAX> {}
 
 /// Marks a canonical browser lane as host-executed.
 pub trait HostEffect {}

@@ -769,6 +769,10 @@ fn canonical_interface_declarations(
             crate::CanonicalShape::I64 | crate::CanonicalShape::U64 => "bigint".to_owned(),
             crate::CanonicalShape::Bytes { .. } => "Uint8Array".to_owned(),
             crate::CanonicalShape::String { .. } => "string".to_owned(),
+            crate::CanonicalShape::List { element, .. } => match element {
+                crate::CanonicalListElement::U32 => "Uint32Array".to_owned(),
+                crate::CanonicalListElement::F32 => "Float32Array".to_owned(),
+            },
             crate::CanonicalShape::Record { fields } => {
                 let padding = " ".repeat(indent);
                 let field_padding = " ".repeat(indent + 2);
@@ -1583,6 +1587,27 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 .contains("collide as generated TypeScript name `FooBar`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn generated_typescript_uses_element_specific_bounded_list_views() {
+        let interface = crate::CanonicalInterfaceManifest::build(vec![crate::CanonicalLaneDecl {
+            name: "weights".to_owned(),
+            export: Some("fe_cabi_weights".to_owned()),
+            request: crate::CanonicalType::List {
+                element: crate::CanonicalListElement::U32,
+                max: 8,
+            },
+            response: crate::CanonicalType::List {
+                element: crate::CanonicalListElement::F32,
+                max: 8,
+            },
+            intent: crate::CanonicalLaneIntent::default(),
+        }])
+        .unwrap();
+        let declarations = canonical_interface_declarations(&interface).unwrap();
+        assert!(declarations.contains("export type WeightsRequest = Uint32Array;"));
+        assert!(declarations.contains("export type WeightsResponse = Float32Array;"));
     }
 
     #[test]
