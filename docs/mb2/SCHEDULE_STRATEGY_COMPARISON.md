@@ -104,3 +104,45 @@ RMIR and Wasm in this comparison, and no runtime algebra loop. It should
 therefore remain the canonical executable path. The recursive tree remains a
 semantic/reference implementation; compact Schedule32 remains a type-level
 proof and regression fixture, not the default runtime evaluator.
+
+## One reflected plan: honest term sharing
+
+The non-ignored
+`one_reflected_plan_drives_tree_compact_terms_and_honest_shared_dag` gate in
+`crates/codegen/tests/fco_cga80_direct_lanes.rs` removes an ambiguity in the
+older table. All three rows are derived from the same normalized
+`SparsePlan<...,80,32>` traversal and never rescan `0..80`:
+
+- `UnsharedTree` embeds every reused expression at each edge;
+- `CompactTerms` materializes a product only when its magnitude-two term
+  references that product twice;
+- `SharedDag` materializes every product as a potential shared node.
+
+This is not the reduced harness's runtime compact loop. `CompactTerms` is an
+unrolled finite term schedule, named separately so the two representations are
+not conflated.
+
+Schedule32 contains 32 distinct operand-product keys. Its twelve off-diagonal
+terms each have one genuine repeated edge because their magnitude is two;
+there is no cross-term product reuse. The measured O0 five-lane Wasm shapes
+therefore are:
+
+| Execution | f32 multiplies | runtime loops | Wasm bytes |
+| --- | ---: | ---: | ---: |
+| unshared tree | 440 | 0 | 4031 |
+| compact terms | 320 | 0 | 3991 |
+| shared DAG | 320 | 0 | 3991 |
+
+Eight deterministic coefficient cases across all five lanes agree with the
+independent raw-80 expansion and with one another. A second non-ignored gate
+executes the complete pinned 128x128 frame for compact terms and shared DAG.
+Both produce the independently generated reference FNV `3470936828`; both
+validate with browser-default Naga capabilities as two-function WGSL with only
+the raymarch loop. Compact-term WGSL is 5541 bytes/132 lines and full-share
+WGSL is 5566 bytes/132 lines. The extra sharing annotations change local
+materialization but discover no additional arithmetic reuse.
+
+That is the bounded, Cl(4,1)-specific result: explicit sharing is useful for the
+twelve known repeated edges, while general hash-consing has no further win for
+this canonical plan. It is not evidence for an automatic general GA DAG
+planner.

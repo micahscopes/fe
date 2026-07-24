@@ -2,11 +2,18 @@ use std::time::Instant;
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{layout_for, BackendKind, OptLevel};
+use fe_codegen::{
+    compile_runtime_package_spirv_render, compile_runtime_package_wasm_with_options, layout_for,
+    BackendKind, OptLevel, WasmCompileOptions,
+};
 use url::Url;
 
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+const SCHEDULE32_REFERENCE: &str =
+    include_str!("../../../demos/webgpu-cga-inversion/gen-schedule32/reference.json");
+const PINNED_REFERENCE_HASH: u32 = 3_470_936_828;
+const PINNED_VIEW: (f32, f32, f32, f32, f32) = (0.0, 0.0, 0.0125, 0.5, 0.0);
 
 fn canonical_source() -> String {
     assert!(
@@ -46,6 +53,20 @@ fn canonical_source_for(execution: PlanExecution) -> String {
         ),
         PlanExecution::SharedDag => source,
     }
+}
+
+fn render_source_for(execution: PlanExecution) -> String {
+    let source = canonical_source_for(execution);
+    let (prefix, rest) = source
+        .split_once("// BEGIN_PUBLIC_ORACLES")
+        .expect("public-oracle begin marker");
+    let (_, suffix) = rest
+        .split_once("// END_PUBLIC_ORACLES")
+        .expect("public-oracle end marker");
+    format!(
+        "{prefix}{suffix}\n{}",
+        include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe"),
+    )
 }
 
 fn compile_to_wasm(source: &str) -> Vec<u8> {
@@ -239,6 +260,77 @@ fn call_lanes(
     (values, wasm_shape(bytes))
 }
 
+fn browser_profile_frame(execution: PlanExecution) -> (Vec<u32>, String) {
+    const ENTRY: &str = "cga_schedule32_vec5_de_render";
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///canonical_sandwich_{execution:?}.fe")).unwrap();
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(render_source_for(execution)));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "{execution:?} browser-profile analysis:\n{diagnostics}",
+    );
+    let package = mir::build_wasm_runtime_package_for_entry(&db, top_mod, ENTRY)
+        .unwrap_or_else(|error| panic!("{execution:?} runtime package: {error}"));
+    let wasm =
+        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
+            .unwrap_or_else(|error| panic!("{execution:?} Wasm: {error}"));
+    wasmparser::validate(&wasm.bytes).expect("valid browser-profile Wasm");
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &wasm.bytes).unwrap();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+    let render = instance
+        .get_typed_func::<(i32, i32, f32, f32, f32, f32, f32), i32>(&mut store, ENTRY)
+        .unwrap();
+    let mut frame = Vec::with_capacity(128 * 128);
+    let (cam_x, cam_y, zoom, inv_cx, inv_cy) = PINNED_VIEW;
+    for y in 0..128 {
+        for x in 0..128 {
+            frame.push(
+                render
+                    .call(&mut store, (x, y, cam_x, cam_y, zoom, inv_cx, inv_cy))
+                    .unwrap() as u32,
+            );
+        }
+    }
+
+    let spirv = compile_runtime_package_spirv_render(&db, &package)
+        .unwrap_or_else(|error| panic!("{execution:?} SPIR-V: {error}"));
+    let wgsl = spirv.wgsl.expect("Render profile must emit WGSL");
+    let module = naga::front::wgsl::parse_str(&wgsl).expect("browser-profile WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::default(),
+    )
+    .validate(&module)
+    .expect("browser-profile WGSL validates");
+    assert_eq!(
+        wgsl.matches("fn ").count(),
+        2,
+        "{execution:?} must inline to vertex + fragment only",
+    );
+    assert_eq!(
+        wgsl.matches("loop {").count(),
+        1,
+        "{execution:?} may retain only the raymarch loop",
+    );
+    (frame, wgsl)
+}
+
+fn frame_fnv1a32(frame: &[u32]) -> u32 {
+    frame
+        .iter()
+        .flat_map(|pixel| pixel.to_le_bytes())
+        .fold(0x811c_9dc5, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        })
+}
+
 #[test]
 fn one_reflected_plan_drives_tree_compact_terms_and_honest_shared_dag() {
     let survivors = canonical_survivors();
@@ -341,6 +433,36 @@ fn one_reflected_plan_drives_tree_compact_terms_and_honest_shared_dag() {
         rows.iter()
             .map(|(strategy, _, shape, bytes)| (strategy, shape, bytes))
             .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn compact_terms_and_shared_dag_preserve_the_full_browser_profile_frame() {
+    assert!(
+        SCHEDULE32_REFERENCE.contains(&format!("\"fnv1a32\": {PINNED_REFERENCE_HASH}"))
+            && SCHEDULE32_REFERENCE.contains("0.012500000186264515")
+            && SCHEDULE32_REFERENCE.contains("\"inversion_center\": [\n    0.5,\n    0.0"),
+        "the named pinned view/hash must remain anchored to gen-schedule32/reference.json",
+    );
+    let (compact, compact_wgsl) = browser_profile_frame(PlanExecution::CompactTerms);
+    let (dag, dag_wgsl) = browser_profile_frame(PlanExecution::SharedDag);
+    assert_eq!(
+        compact, dag,
+        "full 128x128 compact-term and shared-DAG frames",
+    );
+    assert_eq!(
+        frame_fnv1a32(&compact),
+        PINNED_REFERENCE_HASH,
+        "frame must retain the independently generated Schedule32 reference hash",
+    );
+    eprintln!(
+        "CanonicalSandwichPlan32 browser profile: 128x128 FNV {}, \
+         compact WGSL {} bytes / {} lines, DAG WGSL {} bytes / {} lines",
+        frame_fnv1a32(&compact),
+        compact_wgsl.len(),
+        compact_wgsl.lines().count(),
+        dag_wgsl.len(),
+        dag_wgsl.lines().count(),
     );
 }
 
