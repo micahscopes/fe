@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use common::InputDb;
 use driver::DriverDataBase;
-use fe_codegen::{BackendKind, OptLevel, layout_for};
+use fe_codegen::{layout_for, BackendKind, OptLevel};
 use url::Url;
 
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
@@ -16,6 +16,36 @@ fn canonical_source() -> String {
     );
     let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
     format!("{sparse_api}\n{CANONICAL}")
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PlanExecution {
+    UnsharedTree,
+    CompactTerms,
+    SharedDag,
+}
+
+fn canonical_source_for(execution: PlanExecution) -> String {
+    let source = canonical_source();
+    let shared_product =
+        "let product = builder.share(builder.mul(builder.mul(left, point), right))";
+    assert_eq!(
+        source.matches(shared_product).count(),
+        1,
+        "the strategy seam must identify exactly one canonical product emission site",
+    );
+    match execution {
+        PlanExecution::UnsharedTree => source.replace(
+            shared_product,
+            "let product = builder.mul(builder.mul(left, point), right)",
+        ),
+        PlanExecution::CompactTerms => source.replace(
+            shared_product,
+            "let product = builder.mul(builder.mul(left, point), right)\n\
+             if magnitude(triple) == 2 { product = builder.share(product) }",
+        ),
+        PlanExecution::SharedDag => source,
+    }
 }
 
 fn compile_to_wasm(source: &str) -> Vec<u8> {
@@ -169,6 +199,149 @@ fn deterministic_coefficient(state: &mut u32) -> f32 {
     *state ^= *state >> 17;
     *state ^= *state << 5;
     ((*state % 2001) as i32 - 1000) as f32 / 257.0
+}
+
+fn call_lanes(
+    bytes: &[u8],
+    cases: &[([f32; 4], [f32; 5])],
+) -> (Vec<[f32; 5]>, (usize, usize, usize, usize, usize, usize)) {
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, bytes).expect("valid Wasm module");
+    assert!(
+        module.imports().next().is_none(),
+        "canonical plan strategies must need no host imports",
+    );
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("zero-import instance");
+    type Args = (f32, f32, f32, f32, f32, f32, f32, f32, f32);
+    let lanes = [
+        "cga_fco_e1",
+        "cga_fco_e2",
+        "cga_fco_e4",
+        "cga_fco_e8",
+        "cga_fco_e16",
+    ]
+    .map(|name| {
+        instance
+            .get_typed_func::<Args, f32>(&mut store, name)
+            .unwrap_or_else(|_| panic!("missing {name} export"))
+    });
+    let values = cases
+        .iter()
+        .map(|(sphere, point)| {
+            let args = (
+                sphere[0], sphere[1], sphere[2], sphere[3], point[0], point[1], point[2], point[3],
+                point[4],
+            );
+            std::array::from_fn(|lane| lanes[lane].call(&mut store, args).unwrap())
+        })
+        .collect();
+    (values, wasm_shape(bytes))
+}
+
+#[test]
+fn one_reflected_plan_drives_tree_compact_terms_and_honest_shared_dag() {
+    let survivors = canonical_survivors();
+    assert_eq!(survivors.len(), 32);
+    let repeated_product_edges = survivors
+        .iter()
+        .filter(|&&triple| triple / 20 != triple % 4)
+        .count();
+    assert_eq!(
+        repeated_product_edges, 12,
+        "only off-diagonal canonical terms reuse their product for magnitude two",
+    );
+    let unique_product_keys = survivors
+        .iter()
+        .map(|&triple| (triple / 20, (triple / 4) % 5, triple % 4))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unique_product_keys.len(),
+        survivors.len(),
+        "Schedule32 has no cross-term product reuse to manufacture into a DAG",
+    );
+
+    let mut cases = vec![
+        ([0.5, -0.25, -0.875, 0.125], [2.0, 0.5, -0.75, 1.25, 1.75]),
+        ([1.0, 0.5, -1.0, 0.25], [-0.5, 2.0, 0.25, -1.5, 1.0]),
+    ];
+    let mut state = 0xDAD3_8032;
+    for _ in 0..6 {
+        cases.push((
+            std::array::from_fn(|_| deterministic_coefficient(&mut state)),
+            std::array::from_fn(|_| deterministic_coefficient(&mut state)),
+        ));
+    }
+
+    let mut rows = Vec::new();
+    for execution in [
+        PlanExecution::UnsharedTree,
+        PlanExecution::CompactTerms,
+        PlanExecution::SharedDag,
+    ] {
+        let source = canonical_source_for(execution);
+        assert_eq!(
+            source
+                .matches("builder.ty<Schedule32>().normalized_preorder_types()")
+                .count(),
+            1,
+            "{execution:?} must consume the one reflected Schedule32 witness",
+        );
+        assert!(
+            !source.contains("for triple in 0..80"),
+            "{execution:?} must not rediscover candidates",
+        );
+        let bytes = compile_to_wasm(&source);
+        let (values, shape) = call_lanes(&bytes, &cases);
+        rows.push((execution, values, shape, bytes.len()));
+    }
+
+    for (case_index, (sphere, point)) in cases.iter().enumerate() {
+        let raw = raw80(*sphere, *point);
+        let expected = [raw[1], raw[2], raw[4], raw[8], raw[16]];
+        for (execution, values, _, _) in &rows {
+            for lane in 0..5 {
+                let tolerance = 2.0e-5 * expected[lane].abs().max(1.0);
+                assert!(
+                    (values[case_index][lane] - expected[lane]).abs() <= tolerance,
+                    "{execution:?} case {case_index} lane {lane}: got {}, expected {}",
+                    values[case_index][lane],
+                    expected[lane],
+                );
+            }
+        }
+        assert_eq!(
+            rows[0].1[case_index], rows[1].1[case_index],
+            "tree and compact-term executions must preserve exact f32 order",
+        );
+        assert_eq!(
+            rows[1].1[case_index], rows[2].1[case_index],
+            "compact-term and DAG executions must preserve exact f32 order",
+        );
+    }
+
+    let tree = rows[0].2;
+    let compact = rows[1].2;
+    let dag = rows[2].2;
+    assert_eq!(tree.5, 0);
+    assert_eq!(compact.5, 0);
+    assert_eq!(dag.5, 0);
+    assert!(
+        tree.3 > compact.3,
+        "unshared tree must repeat magnitude-two product expressions",
+    );
+    assert_eq!(
+        compact.3, dag.3,
+        "with no cross-term duplicate keys, full DAG interning cannot remove more multiplies",
+    );
+    eprintln!(
+        "CanonicalSandwichPlan32: 32 terms, {repeated_product_edges} repeated edges, \
+         {} unique product keys; rows (strategy, shape, Wasm bytes) = {:?}",
+        unique_product_keys.len(),
+        rows.iter()
+            .map(|(strategy, _, shape, bytes)| (strategy, shape, bytes))
+            .collect::<Vec<_>>(),
+    );
 }
 
 fn wasm_shape(bytes: &[u8]) -> (usize, usize, usize, usize, usize, usize) {
