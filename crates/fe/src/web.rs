@@ -1,14 +1,16 @@
+use std::collections::HashSet;
+
 use camino::Utf8PathBuf;
 use codegen::{WebBuildOptions, WebBundle};
 use common::InputDb;
 use driver::{
+    cli_target::{resolve_cli_target, CliTarget},
     DriverDataBase,
-    cli_target::{CliTarget, resolve_cli_target},
 };
 use hir::hir_def::HirIngot;
 use url::Url;
 
-use crate::{WebCanonicalPolicy, WebMode};
+use crate::{dependency_diagnostics::DependencyIssues, WebCanonicalPolicy, WebMode};
 
 #[derive(Debug, Clone)]
 pub struct CompileRequest {
@@ -77,7 +79,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
 
     let mut db = DriverDataBase::default();
     let target = resolve_cli_target(&mut db, path, false)?;
-    let top_mod = match target {
+    let (top_mod, ingot_target) = match target {
         CliTarget::StandaloneFile(file_path) => {
             let canonical = file_path
                 .canonicalize_utf8()
@@ -91,7 +93,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
                 .workspace()
                 .get(&db, &url)
                 .ok_or_else(|| format!("failed to load `{file_path}`"))?;
-            db.top_mod(file)
+            (db.top_mod(file), None)
         }
         CliTarget::Directory(dir_path) => {
             let canonical = dir_path
@@ -104,22 +106,35 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
             }
             let ingot = db
                 .workspace()
-                .containing_ingot(&db, url)
+                .containing_ingot(&db, url.clone())
                 .ok_or_else(|| {
                     format!(
                         "`{dir_path}` did not resolve to one ingot; target an ingot directory explicitly"
                     )
                 })?;
-            ingot.root_mod(&db)
+            (ingot.root_mod(&db), Some((url, ingot)))
         }
     };
 
-    let diagnostics = db.run_on_top_mod(top_mod);
+    let diagnostics = match ingot_target {
+        Some((_, ingot)) => db.run_on_ingot(ingot),
+        None => db.run_on_top_mod(top_mod),
+    };
     if !diagnostics.is_empty() {
         return Err(format!(
             "source diagnostics prevent web build:\n{}",
             diagnostics.format_diags(&db)
         ));
+    }
+    if let Some((ingot_url, _)) = ingot_target {
+        let mut seen = HashSet::from([ingot_url.clone()]);
+        let dependency_issues = DependencyIssues::collect(&db, &ingot_url, &mut seen);
+        if !dependency_issues.is_empty() {
+            return Err(format!(
+                "dependency diagnostics prevent web build:\n{}",
+                dependency_issues.format(&db)
+            ));
+        }
     }
     let mut options = match mode {
         WebMode::Render => WebBuildOptions::render(entry, source_id.clone()),
@@ -220,6 +235,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(disabled.contains("only valid"), "{disabled}");
+    }
+
+    #[test]
+    fn ingot_web_build_rejects_diagnostics_in_unused_dependency() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let dependency = temp.path().join("broken_dependency");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::create_dir_all(dependency.join("src")).unwrap();
+        std::fs::write(
+            app.join("fe.toml"),
+            "[ingot]\nname = \"web_app\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nbroken = { path = \"../broken_dependency\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("src/lib.fe"),
+            "pub fn shade(x: u32, y: u32) -> u32 { x + y }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("fe.toml"),
+            "[ingot]\nname = \"broken_dependency\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("src/lib.fe"),
+            "pub fn unused_but_invalid() -> i32 { missing_value }\n",
+        )
+        .unwrap();
+
+        let app = Utf8PathBuf::from_path_buf(app).unwrap();
+        let error = compile(&CompileRequest {
+            path: app,
+            entry: "shade".to_owned(),
+            mode: WebMode::Render,
+            workgroup: [None, None, None],
+            source_id: None,
+            canonical: WebCanonicalPolicy::Disabled,
+            canonical_entries: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("dependency diagnostics prevent web build")
+                && error.contains("broken_dependency")
+                && error.contains("missing_value"),
+            "{error}"
+        );
     }
 
     #[test]
