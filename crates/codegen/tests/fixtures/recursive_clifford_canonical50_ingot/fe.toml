@@ -4,3 +4,4 @@ version = "0.1.0"
 
 [dependencies]
 sparse_clifford = "../../../../../ingots/sparse_clifford"
+canonical_cl41_schedule = "../../../../../ingots/canonical_cl41_schedule"

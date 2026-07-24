@@ -726,7 +726,7 @@ pub const fn clifford_support_mvt5(_ bits: u32) -> CliffordSupportMv<5> {
     let z2: CliffordSupportMv<2> = CliffordNode { low: z1, high: z1 }
     let z3: CliffordSupportMv<3> = CliffordNode { low: z2, high: z2 }
     let z4: CliffordSupportMv<4> = CliffordNode { low: z3, high: z3 }
-    let value: CliffordSupportMv<5> = CliffordNode { low: z4, high: z4 }
+    let mut value: CliffordSupportMv<5> = CliffordNode { low: z4, high: z4 }
     let mut blade: i32 = 0
     while blade < 32 {
         if ((bits >> blade.downcast_truncate()) & 1) == 1 {
@@ -801,7 +801,7 @@ impl CliffordGetLeaf for CliffordScalar<f32> {
         self.clifford_get_coefficient(index: index, size: size)
     }
 }
-impl<A: CliffordCoefficientAccess<f32>> CliffordGetLeaf
+impl<A: CliffordCoefficientAccess<f32> + Copy> CliffordGetLeaf
     for CliffordNode<A>
 {
     #[inline(always)]

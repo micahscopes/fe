@@ -6,6 +6,7 @@ use std::path::Path;
 use url::Url;
 
 const SOURCE: &str = include_str!("fixtures/recursive_clifford_canonical50_ingot/src/lib.fe");
+const PLANNER_SOURCE: &str = include_str!("../../../ingots/canonical_cl41_schedule/src/lib.fe");
 
 fn gp_negative_cl41(a: usize, b: usize) -> bool {
     let mut negative = false;
@@ -71,9 +72,10 @@ fn independent_canonical50() -> Vec<[i32; 7]> {
 
 #[test]
 fn public_recurrence_derives_exact_canonical50_schedule32() {
-    assert_eq!(SOURCE.matches(".clifford_gp(").count(), 2);
-    assert!(SOURCE.contains("use sparse_clifford::{"));
-    assert!(SOURCE.contains("SparsePlan<"));
+    assert_eq!(PLANNER_SOURCE.matches(".clifford_gp(").count(), 2);
+    assert!(PLANNER_SOURCE.contains("use sparse_clifford::{"));
+    assert!(PLANNER_SOURCE.contains("pub type Canonical50Schedule32 = SparsePlan<"));
+    assert!(SOURCE.contains("use canonical_cl41_schedule::{"));
     assert_eq!(SOURCE.matches("const CANONICAL50_SIGN_").count(), 50);
     assert_eq!(SOURCE.matches("const CANONICAL50_OUTPUT_").count(), 50);
     assert_eq!(SOURCE.matches("= canonical50_projected_sign(").count(), 50);

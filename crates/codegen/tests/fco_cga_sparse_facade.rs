@@ -8,18 +8,24 @@ use url::Url;
 
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
+const CANONICAL50_API: &str = include_str!("../../../ingots/canonical_cl41_schedule/src/lib.fe");
 const BODY: &str = include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe");
 const ENTRY: &str = "cga_schedule32_vec5_de_render";
 
 fn composed_source() -> String {
-    let (prefix, rest) = CANONICAL
+    let (_, provider_and_oracles) = CANONICAL
+        .split_once("// BEGIN_PROVIDER_EMITTER")
+        .expect("canonical provider begin marker");
+    let provider_and_oracles = format!("// BEGIN_PROVIDER_EMITTER{provider_and_oracles}");
+    let (provider, rest) = provider_and_oracles
         .split_once("// BEGIN_PUBLIC_ORACLES")
         .expect("canonical public-oracle begin marker");
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
     let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
-    format!("{sparse_api}\n{prefix}{suffix}\n{BODY}")
+    let canonical50_api = fe_codegen::standalone_ctfe_ingot_source(CANONICAL50_API);
+    format!("{sparse_api}\n{canonical50_api}\n{provider}{suffix}\n{BODY}")
 }
 
 #[test]

@@ -1,175 +1,7 @@
-use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
-
-// Canonical Cl(4,1) support semantics. These ordinary Fe const helpers are the
-// only source used by both the typed Schedule32 witness and the FCO emitter.
-const fn sphere_blade(_ slot: usize) -> usize {
-    1 << (slot + slot / 2)
-}
-
-const fn point_blade(_ slot: usize) -> usize {
-    1 << slot
-}
-
-const fn raw_left_slot(_ triple: usize) -> usize { triple / 20 }
-const fn raw_point_slot(_ triple: usize) -> usize { (triple / 4) % 5 }
-const fn raw_right_slot(_ triple: usize) -> usize { triple % 4 }
-
-const fn left_blade(_ triple: usize) -> usize {
-    sphere_blade(raw_left_slot(triple))
-}
-
-const fn middle_blade(_ triple: usize) -> usize {
-    point_blade(raw_point_slot(triple))
-}
-
-const fn right_blade(_ triple: usize) -> usize {
-    sphere_blade(raw_right_slot(triple))
-}
-
-const fn popcount5(_ value: usize) -> usize {
-    (value & 1) + ((value >> 1) & 1) + ((value >> 2) & 1)
-        + ((value >> 3) & 1) + ((value >> 4) & 1)
-}
-
-// 0 is positive and 1 is negative. Generator 4 (mask 16) squares to -1.
-const fn gp_negative(_ a: usize, _ b: usize) -> usize {
-    (
-        (((a >> 1) & 1) * popcount5(b & 1))
-        + (((a >> 2) & 1) * popcount5(b & 3))
-        + (((a >> 3) & 1) * popcount5(b & 7))
-        + (((a >> 4) & 1) * popcount5(b & 15))
-        + (((a >> 4) & 1) * ((b >> 4) & 1))
-    ) & 1
-}
-
-const fn triple_negative(_ triple: usize) -> usize {
-    let l = left_blade(triple)
-    let p = middle_blade(triple)
-    let r = right_blade(triple)
-    gp_negative(l, p) ^ gp_negative(l ^ p, r)
-}
-
-const fn reverse_negative(_ triple: usize) -> usize {
-    let l = left_blade(triple)
-    let p = middle_blade(triple)
-    let r = right_blade(triple)
-    gp_negative(r, p) ^ gp_negative(r ^ p, l)
-}
-
-const fn canonical_tag(_ triple: usize) -> usize {
-    let l = raw_left_slot(triple)
-    let r = raw_right_slot(triple)
-    let l0 = l & 1
-    let l1 = (l >> 1) & 1
-    let r0 = r & 1
-    let r1 = (r >> 1) & 1
-    let same_high = 1 - (l1 ^ r1)
-    let greater = l1 * (1 - r1) + same_high * l0 * (1 - r0)
-    1 - greater
-}
-
-const fn diagonal_tag(_ triple: usize) -> usize {
-    let l = raw_left_slot(triple)
-    let r = raw_right_slot(triple)
-    (1 - ((l >> 1) ^ (r >> 1))) * (1 - ((l & 1) ^ (r & 1)))
-}
-
-const fn coefficient_keep_tag(_ triple: usize) -> usize {
-    canonical_tag(triple)
-        * (1 - (triple_negative(triple) ^ reverse_negative(triple)))
-}
-
-const fn magnitude(_ triple: usize) -> usize {
-    2 - diagonal_tag(triple)
-}
-
-const fn output_blade(_ triple: usize) -> usize {
-    left_blade(triple) ^ middle_blade(triple) ^ right_blade(triple)
-}
-
-// The shared BladeSet API derives admissible support compositionally. Its
-// conservative result is grade-projected before coefficient/sign cancellation.
-const SPHERE_SUPPORT: BladeSet = blade_set(65798, 5)
-const POINT_SUPPORT: BladeSet = blade_set(65814, 5)
-const SPHERE_POINT_BITS: u32 =
-    support_gp(SPHERE_SUPPORT, POINT_SUPPORT, 31).bits
-const SANDWICH_CANDIDATE_BITS: u32 =
-    support_gp(blade_set(SPHERE_POINT_BITS, 5), SPHERE_SUPPORT, 31).bits
-const SANDWICH_OUTPUT_BITS: u32 =
-    support_grade(blade_set(SANDWICH_CANDIDATE_BITS, 5), 1).bits
-static_assert(SANDWICH_OUTPUT_BITS == 65814)
-
-const fn supported_output_tag(_ triple: usize) -> usize {
-    // FCO's bounded provider executor cannot read struct-valued/global CTFE
-    // results. This scalar literal is sealed by the assertion above.
-    if ((65814 >> output_blade(triple)) & 1) == 1 { 1 } else { 0 }
-}
-
-const fn keep_tag(_ triple: usize) -> usize {
-    supported_output_tag(triple) * coefficient_keep_tag(triple)
-}
-
-const fn schedule_keep_word(_ first: usize, _ last: usize) -> u32 {
-    let mut triple: usize = first
-    let mut keep_bits: u32 = 0
-    while triple < last {
-        if keep_tag(triple) != 0 {
-            keep_bits = keep_bits | ((1 as u32) << (triple - first).downcast_truncate())
-        }
-        triple = triple + 1
-    }
-    keep_bits
-}
-
-const SCHEDULE_KEEP0: u32 = schedule_keep_word(0, 24)
-const SCHEDULE_KEEP1: u32 = schedule_keep_word(24, 48)
-const SCHEDULE_KEEP2: u32 = schedule_keep_word(48, 72)
-const SCHEDULE_KEEP3: u32 = schedule_keep_word(72, 80)
-const SCHEDULE_KEEP4: u32 = 0
-const SCHEDULE_KEEP5: u32 = 0
-const SCHEDULE_KEEP6: u32 = 0
-const SCHEDULE_KEEP7: u32 = 0
-
-const fn survivor_count() -> usize {
-    plan_mask_cardinality(
-        SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2,
-        SCHEDULE_KEEP3, SCHEDULE_KEEP4, SCHEDULE_KEEP5,
-        SCHEDULE_KEEP6, SCHEDULE_KEEP7, 80,
-    )
-}
-
-const fn survivor_triple(_ target: usize) -> usize {
-    plan_mask_candidate(
-        SCHEDULE_KEEP0, SCHEDULE_KEEP1, SCHEDULE_KEEP2,
-        SCHEDULE_KEEP3, SCHEDULE_KEEP4, SCHEDULE_KEEP5,
-        SCHEDULE_KEEP6, SCHEDULE_KEEP7, 80, target,
-    )
-}
-
-static_assert(survivor_count() == 32)
-static_assert(SCHEDULE_KEEP0 == 2707775)
-static_assert(SCHEDULE_KEEP1 == 4498990)
-static_assert(SCHEDULE_KEEP2 == 8948932)
-static_assert(SCHEDULE_KEEP3 == 136)
-
-// The inspectable typed witness stores the canonical source-triple identity in
-// exact survivor order. The literals keep today's semantic-MIR lowering from
-// seeing a const-value path in a type argument; the assertions above prove
-// that they are exactly the masks computed from the source semantics.
-type Schedule32 =
-    SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>
-
-// BEGIN_FORCE_SCHEDULE32
-fn takes_nat32(_ value: Nat<32>) {}
-fn schedule_has_exactly_32_terms(value: <Schedule32 as PlanLength>::Out) {
-    takes_nat32(value)
-}
-// END_FORCE_SCHEDULE32
-
 // BEGIN_PROVIDER_EMITTER
-// One reflected five-lane storage record lets the current provider API project
-// inputs and materialize the result without runtime accessors.  The semantic
-// names remain visible at the call boundary as aliases.
+// The exact recursive canonical50 plan is interpreted as ordinary typed Fe.
+// Monomorphization sees one Eval5 instance per retained Term<Candidate>; the
+// recursive planner and candidate metadata remain compile-time-only.
 struct ConformalVector {
     e1: f32,
     e2: f32,
@@ -185,153 +17,91 @@ trait Sandwich {
     fn sandwich(_ sphere: ConformalSphere, _ point: ConformalPoint) -> ConformalVector
 }
 
-struct CanonicalCgaProvider {}
-impl Derive<Sandwich> for CanonicalCgaProvider {
-    const fn derive<T>(ev: own Evidence<Sandwich<T>>) -> Evidence<Sandwich<T>>
-        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Sandwich<T>>)
-    {
-        // A typed f32 zero without a float-literal codegen primitive.
-        let sphere = builder.arg_ref("sphere")
-        let point_arg = builder.arg_ref("point")
-        let s1 = sphere
-        let s2 = sphere
-        let s8 = sphere
-        let s16 = sphere
-        let p1 = point_arg
-        let p2 = point_arg
-        let p4 = point_arg
-        let p8 = point_arg
-        let p16 = point_arg
-        let field_index = 0
-        for field in reflect.fields() {
-            if field_index == 0 { s1 = builder.field_get(sphere, field) }
-            if field_index == 1 { s2 = builder.field_get(sphere, field) }
-            if field_index == 3 { s8 = builder.field_get(sphere, field) }
-            if field_index == 4 { s16 = builder.field_get(sphere, field) }
-            if field_index == 0 { p1 = builder.field_get(point_arg, field) }
-            if field_index == 1 { p2 = builder.field_get(point_arg, field) }
-            if field_index == 2 { p4 = builder.field_get(point_arg, field) }
-            if field_index == 3 { p8 = builder.field_get(point_arg, field) }
-            if field_index == 4 { p16 = builder.field_get(point_arg, field) }
-            field_index = field_index + 1
-        }
-        let zero = builder.sub(s1, s1)
-        let lane1_0 = zero
-        let lane1_1 = zero
-        let lane1_2 = zero
-        let lane1_3 = zero
-        let lane2_0 = zero
-        let lane2_1 = zero
-        let lane2_2 = zero
-        let lane2_3 = zero
-        let lane4_0 = zero
-        let lane4_1 = zero
-        let lane4_2 = zero
-        let lane4_3 = zero
-        let lane8_0 = zero
-        let lane8_1 = zero
-        let lane8_2 = zero
-        let lane8_3 = zero
-        let lane16_0 = zero
-        let lane16_1 = zero
-        let lane16_2 = zero
-        let lane16_3 = zero
-        let survivor = 0
+trait Eval5 {
+    fn eval5(_ sphere: ConformalSphere, _ point: ConformalPoint) -> ConformalVector
+}
 
-        // Consume the normalized public SparsePlan tree directly. Term's
-        // staged const payload is the canonical source-triple identity, so the
-        // emitted lanes cannot drift from the typed 32-survivor witness by
-        // independently rescanning the 80-candidate universe.
-        for nested in builder.ty<Schedule32>().normalized_preorder_types() {
-            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
-                for arg in nested.generic_args() {
-                    if arg.is_const() {
-                        let triple = arg.const_value()
-                let left = s1
-                if raw_left_slot(triple) == 1 { left = s2 }
-                if raw_left_slot(triple) == 2 { left = s8 }
-                if raw_left_slot(triple) == 3 { left = s16 }
-
-                let point = p1
-                if raw_point_slot(triple) == 1 { point = p2 }
-                if raw_point_slot(triple) == 2 { point = p4 }
-                if raw_point_slot(triple) == 3 { point = p8 }
-                if raw_point_slot(triple) == 4 { point = p16 }
-
-                let right = s1
-                if raw_right_slot(triple) == 1 { right = s2 }
-                if raw_right_slot(triple) == 2 { right = s8 }
-                if raw_right_slot(triple) == 3 { right = s16 }
-
-                let product = builder.share(builder.mul(builder.mul(left, point), right))
-                let term = product
-                // Preserve the canonical raw80 IEEE operation order: compute
-                // the full left*point*right product before combining the two
-                // equal ordered orientations.
-                if magnitude(triple) == 2 {
-                    term = builder.add(product, product)
-                }
-                if triple_negative(triple) != 0 { term = builder.neg(term) }
-
-                let output = output_blade(triple)
-                if output == 1 {
-                    if survivor < 8 { lane1_0 = builder.add(term, lane1_0) }
-                    else if survivor < 16 { lane1_1 = builder.add(term, lane1_1) }
-                    else if survivor < 24 { lane1_2 = builder.add(term, lane1_2) }
-                    else { lane1_3 = builder.add(term, lane1_3) }
-                }
-                if output == 2 {
-                    if survivor < 8 { lane2_0 = builder.add(term, lane2_0) }
-                    else if survivor < 16 { lane2_1 = builder.add(term, lane2_1) }
-                    else if survivor < 24 { lane2_2 = builder.add(term, lane2_2) }
-                    else { lane2_3 = builder.add(term, lane2_3) }
-                }
-                if output == 4 {
-                    if survivor < 8 { lane4_0 = builder.add(term, lane4_0) }
-                    else if survivor < 16 { lane4_1 = builder.add(term, lane4_1) }
-                    else if survivor < 24 { lane4_2 = builder.add(term, lane4_2) }
-                    else { lane4_3 = builder.add(term, lane4_3) }
-                }
-                if output == 8 {
-                    if survivor < 8 { lane8_0 = builder.add(term, lane8_0) }
-                    else if survivor < 16 { lane8_1 = builder.add(term, lane8_1) }
-                    else if survivor < 24 { lane8_2 = builder.add(term, lane8_2) }
-                    else { lane8_3 = builder.add(term, lane8_3) }
-                }
-                if output == 16 {
-                    if survivor < 8 { lane16_0 = builder.add(term, lane16_0) }
-                    else if survivor < 16 { lane16_1 = builder.add(term, lane16_1) }
-                    else if survivor < 24 { lane16_2 = builder.add(term, lane16_2) }
-                    else { lane16_3 = builder.add(term, lane16_3) }
-                }
-                survivor = survivor + 1
-                    }
-                }
-            }
-        }
-
-        let out1 = builder.add(builder.add(lane1_3, lane1_2), builder.add(lane1_1, lane1_0))
-        let out2 = builder.add(builder.add(lane2_3, lane2_2), builder.add(lane2_1, lane2_0))
-        let out4 = builder.add(builder.add(lane4_3, lane4_2), builder.add(lane4_1, lane4_0))
-        let out8 = builder.add(builder.add(lane8_3, lane8_2), builder.add(lane8_1, lane8_0))
-        let out16 = builder.add(builder.add(lane16_3, lane16_2), builder.add(lane16_1, lane16_0))
-        let image = builder.struct_init()
-        let field_index = 0
-        for field in reflect.fields() {
-            if field_index == 0 { image = builder.with_field(image, field, out1) }
-            if field_index == 1 { image = builder.with_field(image, field, out2) }
-            if field_index == 2 { image = builder.with_field(image, field, out4) }
-            if field_index == 3 { image = builder.with_field(image, field, out8) }
-            if field_index == 4 { image = builder.with_field(image, field, out16) }
-            field_index = field_index + 1
-        }
-        builder.emit_method("sandwich", image)
-        builder.finish()
-        ev
+#[inline(always)]
+fn add5(_ left: ConformalVector, _ right: ConformalVector) -> ConformalVector {
+    ConformalVector {
+        e1: left.e1 + right.e1,
+        e2: left.e2 + right.e2,
+        e4: left.e4 + right.e4,
+        e8: left.e8 + right.e8,
+        e16: left.e16 + right.e16,
     }
 }
 
-derive Sandwich for ConformalVector using CanonicalCgaProvider
+impl Eval5 for Zero {
+    #[inline(always)]
+    fn eval5(_ sphere: ConformalSphere, _ point: ConformalPoint) -> ConformalVector {
+        ConformalVector { e1: 0.0, e2: 0.0, e4: 0.0, e8: 0.0, e16: 0.0 }
+    }
+}
+
+impl<
+    const Candidate: i32,
+    const Left: i32,
+    const Point: i32,
+    const Right: i32,
+    const Output: i32,
+    const Magnitude: i32,
+    const Negative: i32,
+> Eval5
+    for Canonical50Term<Candidate, Left, Point, Right, Output, Magnitude, Negative>
+{
+    #[inline(always)]
+    fn eval5(_ sphere: ConformalSphere, _ point: ConformalPoint) -> ConformalVector {
+        let mut left = sphere.e1
+        if Left == 1 { left = sphere.e2 }
+        if Left == 2 { left = sphere.e8 }
+        if Left == 3 { left = sphere.e16 }
+
+        let mut point_value = point.e1
+        if Point == 1 { point_value = point.e2 }
+        if Point == 2 { point_value = point.e4 }
+        if Point == 3 { point_value = point.e8 }
+        if Point == 4 { point_value = point.e16 }
+
+        let mut right = sphere.e1
+        if Right == 1 { right = sphere.e2 }
+        if Right == 2 { right = sphere.e8 }
+        if Right == 3 { right = sphere.e16 }
+
+        let product = left * point_value * right
+        let mut term = product
+        if Magnitude == 2 {
+            term = product + right * point_value * left
+        }
+        if Negative != 0 { term = -term }
+        ConformalVector {
+            e1: if Output == 1 { term } else { 0.0 },
+            e2: if Output == 2 { term } else { 0.0 },
+            e4: if Output == 4 { term } else { 0.0 },
+            e8: if Output == 8 { term } else { 0.0 },
+            e16: if Output == 16 { term } else { 0.0 },
+        }
+    }
+}
+
+impl<L: Eval5, R: Eval5> Eval5 for Add<L, R> {
+    #[inline(always)]
+    fn eval5(_ sphere: ConformalSphere, _ point: ConformalPoint) -> ConformalVector {
+        add5(
+            <L as Eval5>::eval5(sphere: sphere, point: point),
+            <R as Eval5>::eval5(sphere: sphere, point: point),
+        )
+    }
+}
+
+impl Sandwich for ConformalVector {
+    #[inline(always)]
+    fn sandwich(_ sphere: ConformalSphere, _ point: ConformalPoint) -> ConformalVector {
+        <Canonical50TypedBalancedSchedule32 as Eval5>::eval5(
+            sphere: sphere, point: point,
+        )
+    }
+}
 
 // BEGIN_PUBLIC_ORACLES
 pub fn cga_fco_e1(
@@ -381,21 +151,9 @@ pub fn cga_fco_e16(
 }
 // END_PROVIDER_EMITTER
 
-// Order-sensitive provenance over the helper-derived Schedule32. CTFE freezes
-// the value so the Wasm runtime does not need the wider compile-time `usize`
-// arithmetic used by the bounded scan.
-const fn schedule_order_hash() -> usize {
-    let mut triple: usize = 0
-    let mut hash: usize = 17
-    while triple < 80 {
-        if keep_tag(triple) != 0 {
-            hash = (hash * 83 + triple + 1) % 1000003
-        }
-        triple = triple + 1
-    }
-    hash
-}
-const SCHEDULE_ORDER_HASH: i32 = schedule_order_hash().downcast_unchecked()
+// Order-sensitive provenance over the recurrence-derived pair-major plan.
+const SCHEDULE_ORDER_HASH: i32 =
+    canonical50_order_hash().downcast_unchecked()
 pub fn cga_schedule_order_hash() -> i32 {
     SCHEDULE_ORDER_HASH
 }
