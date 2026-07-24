@@ -60,8 +60,10 @@ assert reference["shape"] == "inverted_offset_torus_cyclide"
 assert reference["inversion_center_runtime"] is True
 kernel = (GEN / "kernel.fe").read_text()
 algebra = reference["algebra"]
-provider_algebra = algebra.startswith(
+typed_plan_algebra = algebra.startswith(
     "canonical Fe helpers produce an inspectable typed Schedule<32>"
+) or algebra.startswith(
+    "the public recursive Cl(4,1) recurrence derives an exact canonical50-to-32 SparsePlan"
 )
 if algebra == "typed support-specialized recursive Cl(4,1) S*P*S":
     tokens = [
@@ -81,47 +83,92 @@ elif algebra.startswith("canonical CTFE-derived Schedule<32>;"):
         "safe_weight",
         "ring_radius",
     ]
-elif provider_algebra:
+elif typed_plan_algebra:
     tokens = [
-        "type Schedule32 =",
-        "SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",
-        "struct CanonicalCgaProvider",
-        "normalized_preorder_types",
-        "builder.same_ty(nested.constructor(), builder.ty<Term>())",
-        "const SANDWICH_OUTPUT_BITS",
-        'builder.emit_method("sandwich"',
+        "use canonical_cl41_schedule::{",
+        "Canonical50Term",
+        "Canonical50TypedBalancedSchedule32",
+        "for Canonical50Term<Candidate, Left, Point, Right, Output, Magnitude, Negative>",
+        "impl<L: Eval5, R: Eval5> Eval5 for Add<L, R>",
+        "<Canonical50TypedBalancedSchedule32 as Eval5>::eval5(",
         "safe_weight",
         "ring_radius",
     ]
-    assert "for triple in 0..80" not in kernel
+    for forbidden in [
+        "for triple in 0..80",
+        "SCHEDULE_KEEP",
+        "2707775",
+        "4498990",
+        "8948932",
+        "gp_negative",
+        "triple_negative",
+        "reverse_negative",
+        "survivor_triple",
+    ]:
+        assert forbidden not in kernel, (
+            f"generated kernel retained old schedule semantic {forbidden!r}"
+        )
 else:
     raise AssertionError(f"unrecognized CGA algebra contract: {algebra!r}")
 for token in tokens:
     assert token in kernel, f"generated kernel lacks runtime-center cyclide token {token!r}"
-if provider_algebra:
+if typed_plan_algebra:
     app_manifest = GEN / "app" / "fe.toml"
     app_source = GEN / "app" / "src" / "lib.fe"
     assert app_manifest.is_file() and app_source.is_file()
     assert 'sparse_clifford = { path = "../../../../ingots/sparse_clifford" }' in (
         app_manifest.read_text()
     )
-    assert app_source.read_text().startswith("use sparse_clifford::{")
+    assert (
+        'canonical_cl41_schedule = { path = "../../../../ingots/canonical_cl41_schedule" }'
+        in app_manifest.read_text()
+    )
+    generated_app = app_source.read_text()
+    assert generated_app.startswith("use sparse_clifford::{")
+    assert "use sparse_clifford::{" in generated_app
+    assert "use canonical_cl41_schedule::{" in generated_app
+    assert "ImplBuilder" not in generated_app
+    assert "normalized_preorder_types" not in generated_app
     sparse_dependency = HERE.parents[1] / "ingots" / "sparse_clifford" / "src" / "lib.fe"
+    canonical50_dependency = (
+        HERE.parents[1] / "ingots" / "canonical_cl41_schedule" / "src" / "lib.fe"
+    )
     assert "pub recursive type fn SparsePlan" in sparse_dependency.read_text()
+    canonical50_source = canonical50_dependency.read_text()
+    assert canonical50_source.count(".clifford_gp(") == 2
+    assert "pub type Canonical50Schedule32 = SparsePlan<" in canonical50_source
+    assert "pub struct Canonical50Term<" in canonical50_source
+    assert "pub type Canonical50TypedBalancedSchedule32" in canonical50_source
+    assert "CANONICAL50_KEEP_VALID" in canonical50_source
     assert "recursive type fn SparsePlan" not in kernel
-    assert layout["source_model"] == "application ingot with sparse_clifford path dependency"
+    assert layout["source_model"] == (
+        "application ingot with canonical_cl41_schedule and sparse_clifford path dependencies"
+    )
     assert layout["kernel_source"].endswith("(dependency-backed; not standalone)")
-    assert "trait Eval5" not in kernel
+    assert "trait Eval5" in kernel
     assert "ScheduleChunk" not in kernel
 wgsl = (GEN / "frag.wgsl").read_text()
 assert "@fragment" in wgsl and "loop" in wgsl and "sqrt(" in wgsl
-if provider_algebra:
-    for compile_time_token in ["CanonicalCgaProvider", "builder.emit_method", "triple < 80"]:
+if typed_plan_algebra:
+    for compile_time_token in [
+        "CanonicalCgaProvider",
+        "builder.emit_method",
+        "Eval5",
+        "Canonical50Schedule32",
+        "SparsePlan",
+        "canonical50_",
+        "packed_",
+        "clifford_gp",
+        "triple < 80",
+        "i64",
+        "u64",
+        "i256",
+    ]:
         assert compile_time_token not in wgsl, (
-            f"provider compile-time token leaked into browser WGSL: {compile_time_token!r}"
+            f"typed-plan compile-time token leaked into browser WGSL: {compile_time_token!r}"
         )
-    assert wgsl.count("loop {") == 1, "provider schedule must not become a runtime loop"
-if algebra.startswith("canonical CTFE-derived Schedule<32>;") or provider_algebra:
+    assert wgsl.count("loop {") == 1, "typed schedule must not become a runtime loop"
+if algebra.startswith("canonical CTFE-derived Schedule<32>;") or typed_plan_algebra:
     actor_manifest = json.loads((GEN / "actor/manifest.json").read_text())
     assert actor_manifest["protocol"] == "fe-web-bundle"
     assert actor_manifest["protocol_version"] == 4
