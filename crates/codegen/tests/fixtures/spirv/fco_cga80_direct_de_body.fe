@@ -1,7 +1,57 @@
 extern {
     fn __f32_from_i32(_: i32) -> f32
+    fn __i32_from_f32(_: f32) -> i32
     fn __sqrt_f32(_: f32) -> f32
     const fn __bitcast<From, To>(_: From) -> To
+}
+
+// Evidence-only scalar view of the same reflected aggregate Sandwich used by
+// the renderer. It exposes all 32 Cl(4,1) blade slots without introducing a
+// second plan or provider: the five vector lanes are selected directly and
+// every other grade is definitionally zero for this S*P*S specialization.
+pub fn cga_schedule32_all_blades(
+    output: i32,
+    s1: f32,
+    s2: f32,
+    s8: f32,
+    s16: f32,
+    p1: f32,
+    p2: f32,
+    p4: f32,
+    p8: f32,
+    p16: f32,
+) -> i32 {
+    let image: ConformalVector =
+        <ConformalVector as Sandwich>::sandwich(
+            ConformalVector {
+                e1: s1,
+                e2: s2,
+                e4: 0.0,
+                e8: s8,
+                e16: s16,
+            },
+            ConformalVector {
+                e1: p1,
+                e2: p2,
+                e4: p4,
+                e8: p8,
+                e16: p16,
+            },
+        )
+    let coefficient: f32 = if output == 1 {
+        image.e1
+    } else if output == 2 {
+        image.e2
+    } else if output == 4 {
+        image.e4
+    } else if output == 8 {
+        image.e8
+    } else if output == 16 {
+        image.e16
+    } else {
+        0.0
+    }
+    __i32_from_f32(coefficient * 256.0)
 }
 
 // Semantic sparse Cl(4,1) values. Their fields are exactly the compact support
