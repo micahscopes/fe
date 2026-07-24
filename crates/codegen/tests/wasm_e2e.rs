@@ -632,13 +632,50 @@ fn qcga3d_sparse_incidence_paths_compile_and_execute_on_wasm() {
 
 #[test]
 fn qcga3d_sparse_planner_fco_matches_independent_raw_expansion_on_wasm() {
+    let fixture = include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe");
+    assert!(
+        fixture.contains("builder.ty<IncidencePlan12>().normalized_preorder_types()")
+            && !fixture.contains("for candidate in 0..144")
+            && !fixture.contains("builder.share("),
+        "QCGA must traverse the exact reflected plan without candidate rediscovery \
+         or claiming nonexistent product sharing",
+    );
+    let survivors = (0..144)
+        .filter(|candidate| {
+            let left_slot = candidate / 12;
+            let right_slot = candidate % 12;
+            let left_blade = if left_slot < 6 {
+                left_slot
+            } else {
+                left_slot + 3
+            };
+            (left_blade == right_slot && left_blade < 3)
+                || (left_blade >= 3 && left_blade < 9 && right_slot == left_blade + 6)
+                || (left_blade >= 9 && right_slot + 6 == left_blade)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        survivors,
+        [0, 13, 26, 45, 58, 71, 75, 88, 101, 114, 127, 140],
+        "independent paper-null survivor order",
+    );
+    let product_keys = survivors
+        .iter()
+        .map(|candidate| (candidate / 12, candidate % 12))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        product_keys.len(),
+        survivors.len(),
+        "all twelve QCGA product keys are unique, so plan-level DAG fanout is zero",
+    );
+
     let sparse_api = fe_codegen::standalone_ctfe_ingot_source(include_str!(
         "../../../ingots/sparse_clifford/src/lib.fe"
     ));
     let source = format!(
         "{}\n{}",
         sparse_api,
-        include_str!("fixtures/spirv/qcga3d_sparse_planned_incidence.fe"),
+        fixture,
     );
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///qcga3d_sparse_planned_incidence.fe").unwrap();

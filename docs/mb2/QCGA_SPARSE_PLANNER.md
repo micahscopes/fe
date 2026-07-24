@@ -38,6 +38,30 @@ root selection and uses the planned sparse contraction as the independent hit
 incidence. This preserves current f32/frame behavior while making the algebraic
 planner execute on the render path.
 
+## Sharing boundary
+
+The exact retained product keys are:
+
+| Sign | Point/quadric slot pairs |
+| --- | --- |
+| positive | `(0,0)`, `(1,1)`, `(2,2)` |
+| negative | `(3,9)`, `(4,10)`, `(5,11)`, `(6,3)`, `(7,4)`, `(8,5)`, `(9,6)`, `(10,7)`, `(11,8)` |
+
+All twelve keys are distinct and every term has coefficient magnitude one.
+Consequently the direct unrolled provider is already the compact/shared-DAG
+fixed point for this operator: there is neither within-term fanout nor a
+cross-term product to reuse. The repeated `j / 3` value is shared while the
+ordinary Fe caller constructs its operand record; it is not a repeated
+plan-product node.
+
+The Wasm planner gate independently enumerates this order, requires twelve
+unique keys, and rejects both runtime candidate rediscovery and a misleading
+`builder.share` annotation. Unlike the Cl(4,1) Schedule32 comparison, adding
+three QCGA executors would produce no distinct execution graph and would only
+duplicate the existing raw-expansion, full-frame, and browser-profile gates.
+This is evidence about this bounded incidence operator, not proof that general
+QCGA expressions lack useful common subexpressions.
+
 The planner is now the live QCGA browser artifact. Its compiler-derived
 `FrameRequest` carries generation plus all 15 camera/quadric scalars across the
 render, verify, and oracle lanes. The generated WebGPU layout independently
