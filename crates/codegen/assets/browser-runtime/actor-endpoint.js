@@ -138,6 +138,8 @@ export function createActorEndpoint({
   resultSchema,
   initialEpoch = 0,
   maxPending = 32,
+  maxQueued = 0,
+  saturation = "reject",
   onProtocolError = () => {},
 }) {
   if (!transport || typeof transport.send !== "function") {
@@ -149,17 +151,49 @@ export function createActorEndpoint({
   if (!Number.isSafeInteger(maxPending) || maxPending < 1) {
     throw new TypeError("maxPending must be a positive safe integer");
   }
+  if (!Number.isSafeInteger(maxQueued) || maxQueued < 0) {
+    throw new TypeError("maxQueued must be a non-negative safe integer");
+  }
+  if (saturation !== "reject" && saturation !== "wait") {
+    throw new TypeError("saturation must be \"reject\" or \"wait\"");
+  }
+  if (saturation === "wait" && maxQueued < 1) {
+    throw new TypeError("wait saturation requires a positive maxQueued");
+  }
   let epoch = initialEpoch;
   let closed = false;
   const pending = new Map();
+  const queued = [];
   const seen = new Set();
 
-  const rejectPending = (error) => {
+  const rejectOutstanding = (error) => {
     for (const entry of pending.values()) {
+      entry.state = "settled";
       entry.cleanupAbort();
       entry.reject(error);
     }
     pending.clear();
+    for (const entry of queued.splice(0)) {
+      entry.state = "settled";
+      entry.cleanupAbort();
+      entry.reject(error);
+    }
+  };
+  let drain = () => {};
+  let draining = false;
+
+  const send = (entry) => {
+    entry.state = "active";
+    pending.set(entry.request.requestId, entry);
+    try {
+      transport.send(entry.request, accept);
+    } catch (error) {
+      pending.delete(entry.request.requestId);
+      entry.state = "settled";
+      entry.cleanupAbort();
+      entry.reject(error);
+      drain();
+    }
   };
 
   const accept = (result) => {
@@ -176,8 +210,10 @@ export function createActorEndpoint({
     } catch (error) {
       if (candidateEntry) {
         pending.delete(candidateId);
+        candidateEntry.state = "settled";
         candidateEntry.cleanupAbort();
         candidateEntry.reject(error);
+        drain();
       } else {
         try { onProtocolError(error, result); } catch { /* reporting cannot break transport */ }
       }
@@ -193,20 +229,39 @@ export function createActorEndpoint({
       validatePayload(resultSchema, result, "result");
     } catch (error) {
       pending.delete(result.requestId);
+      entry.state = "settled";
       entry.cleanupAbort();
       entry.reject(error);
+      drain();
       return false;
     }
     pending.delete(result.requestId);
+    entry.state = "settled";
     entry.cleanupAbort();
     entry.resolve(result);
+    drain();
     return true;
+  };
+
+  drain = () => {
+    if (closed || draining) return;
+    draining = true;
+    try {
+      while (pending.size < maxPending && queued.length > 0) {
+        const entry = queued.shift();
+        if (entry.state !== "queued") continue;
+        send(entry);
+      }
+    } finally {
+      draining = false;
+    }
   };
 
   return {
     epoch: () => epoch,
     closed: () => closed,
     pendingCount: () => pending.size,
+    queuedCount: () => queued.length,
     accept,
     request(request, { signal } = {}) {
       validateActorEnvelope(request);
@@ -221,7 +276,11 @@ export function createActorEndpoint({
       if (request.actorEpoch !== epoch) return Promise.reject(new ActorEndpointResetError());
       validatePayload(requestSchema, request, "request");
       if (signal?.aborted) return Promise.reject(new ActorEndpointAbortError());
-      if (pending.size >= maxPending) {
+      const saturated = pending.size >= maxPending;
+      if (saturated && saturation === "reject") {
+        return Promise.reject(new ActorEndpointBusyError());
+      }
+      if (saturated && queued.length >= maxQueued) {
         return Promise.reject(new ActorEndpointBusyError());
       }
       if (seen.has(request.requestId)) {
@@ -230,33 +289,36 @@ export function createActorEndpoint({
       seen.add(request.requestId);
       return new Promise((resolve, reject) => {
         const onAbort = () => {
-          const entry = pending.get(request.requestId);
-          if (!entry) return;
-          pending.delete(request.requestId);
+          if (entry.state === "queued") {
+            const index = queued.indexOf(entry);
+            if (index !== -1) queued.splice(index, 1);
+          } else if (entry.state === "active") {
+            pending.delete(request.requestId);
+            try {
+              transport.cancel?.(request);
+            } catch (error) {
+              try { onProtocolError(error, { hook: "cancel", request }); } catch {}
+            }
+          } else return;
+          entry.state = "settled";
           entry.cleanupAbort();
-          try {
-            transport.cancel?.(request);
-          } catch (error) {
-            try { onProtocolError(error, { hook: "cancel", request }); } catch {}
-          }
           reject(new ActorEndpointAbortError());
+          drain();
         };
         const cleanupAbort = () => signal?.removeEventListener("abort", onAbort);
+        const entry = {
+          request, resolve, reject, cleanupAbort,
+          state: saturated ? "queued" : "active",
+        };
         signal?.addEventListener("abort", onAbort, { once: true });
-        pending.set(request.requestId, { request, resolve, reject, cleanupAbort });
-        try {
-          transport.send(request, accept);
-        } catch (error) {
-          pending.delete(request.requestId);
-          cleanupAbort();
-          reject(error);
-        }
+        if (saturated) queued.push(entry);
+        else send(entry);
       });
     },
     close(reason = "actor endpoint closed") {
       if (closed) return;
       closed = true;
-      rejectPending(new ActorEndpointClosedError(reason));
+      rejectOutstanding(new ActorEndpointClosedError(reason));
       try {
         transport.close?.(reason);
       } catch (error) {
@@ -265,7 +327,7 @@ export function createActorEndpoint({
     },
     reset(reason = "actor endpoint reset") {
       if (epoch === Number.MAX_SAFE_INTEGER) throw new RangeError("actor epoch exhausted");
-      rejectPending(new ActorEndpointResetError(reason));
+      rejectOutstanding(new ActorEndpointResetError(reason));
       epoch += 1;
       closed = false;
       seen.clear();

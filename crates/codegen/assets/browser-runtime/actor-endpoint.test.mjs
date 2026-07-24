@@ -254,4 +254,163 @@ boundedJobs[0].deliver(actorEnvelope({ type: "result", lane: "verify", actorEpoc
   generation: 1, requestId: 1, payload: { ok: true, value: "done" } }));
 assert.equal((await firstBounded).payload.value, "done");
 
+// Opt-in wait saturation provides bounded FIFO admission. Transferable payloads
+// remain owned by the caller until their request actually enters an active slot.
+const admitted = [];
+const admissionCancels = [];
+const admissionTransport = {
+  send(message, deliver) {
+    structuredClone(message, { transfer: [message.payload.values.buffer] });
+    admitted.push({ message, deliver });
+  },
+  cancel(message) { admissionCancels.push(message.requestId); },
+};
+const waiting = createActorEndpoint({
+  transport: admissionTransport,
+  requestSchema,
+  resultSchema,
+  maxPending: 1,
+  maxQueued: 2,
+  saturation: "wait",
+});
+const values1 = new Float32Array([1, 1]);
+const values2 = new Float32Array([2, 2]);
+const values3 = new Float32Array([3, 3]);
+const values4 = new Float32Array([4, 4]);
+const wait1 = waiting.request(request("render", 0, 8, 1, {
+  initial: true, values: values1,
+}));
+const wait2 = waiting.request(request("render", 0, 8, 2, {
+  initial: false, values: values2,
+}));
+const queuedAbort = new AbortController();
+const wait3 = waiting.request(request("render", 0, 8, 3, {
+  initial: false, values: values3,
+}), { signal: queuedAbort.signal });
+await assert.rejects(
+  waiting.request(request("render", 0, 8, 4, {
+    initial: false, values: values4,
+  })),
+  (error) => error instanceof ActorEndpointBusyError && error.code === "FE_ACTOR_BUSY",
+);
+assert.equal(values1.byteLength, 0, "active request transfers immediately");
+assert.equal(values2.byteLength, 8, "queued request retains ownership");
+assert.equal(values3.byteLength, 8, "second queued request retains ownership");
+assert.equal(values4.byteLength, 8, "overflow rejection retains ownership");
+assert.equal(waiting.pendingCount(), 1);
+assert.equal(waiting.queuedCount(), 2);
+
+queuedAbort.abort();
+await assert.rejects(wait3, ActorEndpointAbortError);
+assert.deepEqual(admissionCancels, [], "queued abort never emits protocol cancellation");
+assert.equal(admitted.length, 1, "queued abort is never sent");
+assert.equal(values3.byteLength, 8, "queued abort retains transferable ownership");
+assert.equal(waiting.queuedCount(), 1);
+
+admitted[0].deliver(actorEnvelope({ type: "result", lane: "render", actorEpoch: 0,
+  generation: 8, requestId: 1, payload: { ok: true, value: "first admitted" } }));
+assert.equal((await wait1).payload.value, "first admitted");
+assert.equal(admitted.length, 2);
+assert.equal(admitted[1].message.requestId, 2, "admission order is FIFO");
+assert.equal(values2.byteLength, 0, "ownership transfers exactly at admission");
+admitted[1].deliver(actorEnvelope({ type: "result", lane: "render", actorEpoch: 0,
+  generation: 8, requestId: 2, payload: { ok: true, value: "second admitted" } }));
+assert.equal((await wait2).payload.value, "second admitted");
+
+const abortJobs = [];
+const abortCancels = [];
+const abortWaiting = createActorEndpoint({
+  transport: {
+    send(message, deliver) { abortJobs.push({ message, deliver }); },
+    cancel(message) { abortCancels.push(message.requestId); },
+  },
+  requestSchema,
+  resultSchema,
+  maxPending: 1,
+  maxQueued: 1,
+  saturation: "wait",
+});
+const activeAbortController = new AbortController();
+const activeAbort = abortWaiting.request(
+  request("verify", 0, 8, 1, { label: "abort active" }),
+  { signal: activeAbortController.signal },
+);
+const afterActiveAbort = abortWaiting.request(
+  request("verify", 0, 8, 2, { label: "admit after abort" }),
+);
+activeAbortController.abort();
+await assert.rejects(activeAbort, ActorEndpointAbortError);
+assert.deepEqual(abortCancels, [1], "active abort emits exactly one cancellation");
+assert.equal(abortJobs.length, 2, "active abort drains the next queued request");
+assert.equal(abortJobs[1].message.requestId, 2);
+abortJobs[1].deliver(actorEnvelope({ type: "result", lane: "verify", actorEpoch: 0,
+  generation: 8, requestId: 2, payload: { ok: true, value: "after abort" } }));
+assert.equal((await afterActiveAbort).payload.value, "after abort");
+
+// A synchronous send failure rejects that admission and immediately gives the
+// released active slot to the next queued request.
+const failureJobs = [];
+const failingRequestIds = new Set([2, 3]);
+const failureWaiting = createActorEndpoint({
+  transport: {
+    send(message, deliver) {
+      if (failingRequestIds.has(message.requestId)) throw new Error("synchronous send failure");
+      failureJobs.push({ message, deliver });
+    },
+  },
+  requestSchema,
+  resultSchema,
+  maxPending: 1,
+  maxQueued: 3,
+  saturation: "wait",
+});
+const failure1 = failureWaiting.request(request("verify", 0, 9, 1, { label: "active" }));
+const failure2 = failureWaiting.request(request("verify", 0, 9, 2, { label: "will fail" }));
+const failure3 = failureWaiting.request(request("verify", 0, 9, 3, { label: "also fails" }));
+const failure4 = failureWaiting.request(request("verify", 0, 9, 4, { label: "must drain" }));
+failureJobs[0].deliver(actorEnvelope({ type: "result", lane: "verify", actorEpoch: 0,
+  generation: 9, requestId: 1, payload: { ok: true, value: "released" } }));
+assert.equal((await failure1).payload.value, "released");
+await assert.rejects(failure2, /synchronous send failure/);
+await assert.rejects(failure3, /synchronous send failure/);
+assert.equal(failureJobs.at(-1).message.requestId, 4);
+failureJobs.at(-1).deliver(actorEnvelope({ type: "result", lane: "verify", actorEpoch: 0,
+  generation: 9, requestId: 4, payload: { ok: true, value: "drained" } }));
+assert.equal((await failure4).payload.value, "drained");
+assert.equal(failureWaiting.pendingCount(), 0);
+assert.equal(failureWaiting.queuedCount(), 0);
+
+// Close and reset reject unsent work without transfer or cancellation.
+for (const lifecycle of ["close", "reset"]) {
+  const lifecycleJobs = [];
+  const lifecycleCancels = [];
+  const lifecycleEndpoint = createActorEndpoint({
+    transport: {
+      send(message, deliver) { lifecycleJobs.push({ message, deliver }); },
+      cancel(message) { lifecycleCancels.push(message.requestId); },
+    },
+    requestSchema,
+    resultSchema,
+    maxPending: 1,
+    maxQueued: 1,
+    saturation: "wait",
+  });
+  const active = lifecycleEndpoint.request(
+    request("verify", 0, 10, 1, { label: `${lifecycle} active` }),
+  );
+  const queued = lifecycleEndpoint.request(
+    request("verify", 0, 10, 2, { label: `${lifecycle} queued` }),
+  );
+  lifecycleEndpoint[lifecycle](`${lifecycle} test`);
+  const ExpectedError = lifecycle === "close"
+    ? ActorEndpointClosedError
+    : ActorEndpointResetError;
+  await assert.rejects(active, ExpectedError);
+  await assert.rejects(queued, ExpectedError);
+  assert.equal(lifecycleJobs.length, 1, `${lifecycle} never sends queued work`);
+  assert.deepEqual(lifecycleCancels, [], `${lifecycle} does not cancel queued work`);
+  assert.equal(lifecycleEndpoint.pendingCount(), 0);
+  assert.equal(lifecycleEndpoint.queuedCount(), 0);
+}
+
 console.log("shared actor endpoint bounded/epoch/close/reset/schema/adversarial transport: ok");

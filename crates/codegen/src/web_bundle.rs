@@ -34,7 +34,7 @@ use crate::{
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
 pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 4;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
-pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 3;
+pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 4;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
