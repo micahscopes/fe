@@ -2396,6 +2396,11 @@ impl<'db> CtfeMachine<'db> {
         let Some((bits, _)) = int_ty_shape(self.db, result_ty) else {
             return Err(CtfeError::NotConstEvaluable { origin });
         };
+        if self.is_type_level(value) {
+            return self
+                .eval_type_level_cast(result_ty, value.clone(), origin)
+                .ok_or(CtfeError::NotConstEvaluable { origin });
+        }
         let value = self.expect_int(frame_idx, value.clone(), origin)?;
         let word = u256_from_bigint(&normalize_int_to_shape(value, bits, false));
         Ok(CtfeConstValue::int_word(self.db, result_ty, word))
@@ -3297,6 +3302,31 @@ impl<'db> CtfeMachine<'db> {
         let const_value = value.materialize(self.db);
         let const_ty = TyId::const_ty(self.db, const_ty_from_sem_const(self.db, const_value));
         let expr = ConstExprId::new(self.db, ConstExpr::UnOp { op, expr: const_ty });
+        let const_ty = ConstTyId::new(self.db, ConstTyData::Abstract(expr, result_ty))
+            .evaluate(self.db, Some(result_ty));
+        sem_const_from_ty(self.db, TyId::const_ty(self.db, const_ty)).map(|const_value| {
+            self.value_with_origin(
+                CtfeConstValue::concrete(self.db, const_value),
+                value.deferred_origin.or(Some(origin)),
+            )
+        })
+    }
+
+    fn eval_type_level_cast(
+        &self,
+        result_ty: TyId<'db>,
+        value: CtfeConstValue<'db>,
+        origin: SemOrigin<'db>,
+    ) -> Option<CtfeConstValue<'db>> {
+        let const_value = value.materialize(self.db);
+        let const_ty = TyId::const_ty(self.db, const_ty_from_sem_const(self.db, const_value));
+        let expr = ConstExprId::new(
+            self.db,
+            ConstExpr::Cast {
+                expr: const_ty,
+                to: result_ty,
+            },
+        );
         let const_ty = ConstTyId::new(self.db, ConstTyData::Abstract(expr, result_ty))
             .evaluate(self.db, Some(result_ty));
         sem_const_from_ty(self.db, TyId::const_ty(self.db, const_ty)).map(|const_value| {

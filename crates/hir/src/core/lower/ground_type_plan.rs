@@ -177,21 +177,38 @@ impl<'db> Evaluator<'db> {
             }
             ItemKind::TypeFn(def) => self.eval_type_fn(def, *path, top_mod, env),
             ItemKind::Struct(_) | ItemKind::Enum(_) => {
+                let params = match item {
+                    ItemKind::Struct(item) => item.generic_params(self.db),
+                    ItemKind::Enum(item) => item.generic_params(self.db),
+                    _ => unreachable!(),
+                };
+                let params = params.data(self.db);
+                let generic_args = path.generic_args(self.db).data(self.db);
+                if params.len() != generic_args.len() {
+                    return Err(GroundTypePlanError::Unsupported);
+                }
                 let mut args = Vec::new();
-                for arg in path.generic_args(self.db).data(self.db) {
+                for (param, arg) in params.iter().zip(generic_args) {
                     args.push(match arg {
-                        GenericArg::Type(arg) => GroundArg::Type(self.eval_ty(
-                            arg.ty.to_opt().ok_or(GroundTypePlanError::Unsupported)?,
-                            top_mod,
-                            env,
-                        )?),
-                        GenericArg::Const(arg) => {
-                            let BaseConstValue::UInt { value, .. } = self.eval_const_arg(
-                                arg.value,
+                        GenericArg::Type(arg) => {
+                            if !matches!(param, GenericParam::Type(_)) {
+                                return Err(GroundTypePlanError::Unsupported);
+                            }
+                            GroundArg::Type(self.eval_ty(
+                                arg.ty.to_opt().ok_or(GroundTypePlanError::Unsupported)?,
                                 top_mod,
                                 env,
-                                BaseUIntKind::Inferred,
-                            )?
+                            )?)
+                        }
+                        GenericArg::Const(arg) => {
+                            let GenericParam::Const(param) = param else {
+                                return Err(GroundTypePlanError::Unsupported);
+                            };
+                            let expected =
+                                super::base_const_eval::raw_uint_kind(self.db, param.ty.to_opt())
+                                    .ok_or(GroundTypePlanError::Unsupported)?;
+                            let BaseConstValue::UInt { value, .. } =
+                                self.eval_const_arg(arg.value, top_mod, env, expected)?
                             else {
                                 return Err(GroundTypePlanError::Unsupported);
                             };

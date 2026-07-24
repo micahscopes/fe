@@ -1,0 +1,1129 @@
+use sparse_clifford::{
+    Add,
+    Cl41Metric,
+    CliffordCoefficient,
+    CliffordCoefficientAccess,
+    CliffordGp,
+    CliffordMv,
+    PlanLength,
+    SparsePlan,
+    Term,
+    Zero,
+}
+
+// Bounded symbolic coefficient interpretation for one Cl(4,1) S*P*S
+// specialization. The public Fuchs–Théry CliffordGp recurrence owns all blade
+// signs and product decomposition. This coefficient algebra only canonicalizes
+// commutative scalar monomials and combines their signed multiplicities.
+//
+// Four sphere seeds and five point seeds produce 20 S*P intermediates and 50
+// Sym^2(S)*P final monomials. Each polynomial digit is an isolated signed
+// five-bit lane in five u64 words: representable -16..=15, intentionally
+// checked to -8..=8. Twelve lanes occupy each word (the last uses two).
+// Arithmetic is digitwise; packed carries are never polynomial arithmetic.
+
+const STAGE_ZERO: u32 = 0
+const STAGE_SPHERE: u32 = 1
+const STAGE_POINT: u32 = 2
+const STAGE_SP: u32 = 3
+const STAGE_SSP: u32 = 4
+const STAGE_INVALID: u32 = 255
+
+const PACKED_MASK: u64 = 31
+const SP_COUNT: usize = 20
+const SSP_COUNT: usize = 50
+
+// Named seed decomposition. These are input support declarations, not an
+// expansion table.
+const SPHERE_E1: i32 = 1
+const SPHERE_E2: i32 = 2
+const SPHERE_E4: i32 = 8
+const SPHERE_E5: i32 = 16
+const POINT_E1: i32 = 1
+const POINT_E2: i32 = 2
+const POINT_E3: i32 = 4
+const POINT_E4: i32 = 8
+const POINT_E5: i32 = 16
+
+struct Words {
+    word0: u64,
+    word1: u64,
+    word2: u64,
+    word3: u64,
+    word4: u64,
+}
+impl Copy for Words {}
+
+struct Packed {
+    code: Words,
+    valid: bool,
+}
+impl Copy for Packed {}
+
+struct PackedWord {
+    code: u64,
+    valid: bool,
+}
+impl Copy for PackedWord {}
+
+struct CanonicalNative {
+    valid: bool,
+    count: u32,
+    maximum: i32,
+    keep0: u32,
+    keep1: u32,
+    keep2: u32,
+    mag0: u32,
+    mag1: u32,
+    mag2: u32,
+    mag3: u32,
+    sign0: u32,
+    sign1: u32,
+}
+impl Copy for CanonicalNative {}
+
+struct Canonical50Coefficient {
+    stage: u32,
+    index: usize,
+    negative: bool,
+    code: Words,
+    valid: bool,
+}
+impl Copy for Canonical50Coefficient {}
+
+const fn packed_zero(_ count: usize) -> Words {
+    Words { word0: 0, word1: 0, word2: 0, word3: 0, word4: 0 }
+}
+
+const fn packed_word(_ code: Words, _ word: usize) -> u64 {
+    match word {
+        0 => code.word0
+        1 => code.word1
+        2 => code.word2
+        3 => code.word3
+        _ => code.word4
+    }
+}
+
+const fn packed_with_word(_ code: Words, _ word: usize, _ value: u64) -> Words {
+    match word {
+        0 => Words { word0: value, word1: code.word1, word2: code.word2, word3: code.word3, word4: code.word4 }
+        1 => Words { word0: code.word0, word1: value, word2: code.word2, word3: code.word3, word4: code.word4 }
+        2 => Words { word0: code.word0, word1: code.word1, word2: value, word3: code.word3, word4: code.word4 }
+        3 => Words { word0: code.word0, word1: code.word1, word2: code.word2, word3: value, word4: code.word4 }
+        _ => Words { word0: code.word0, word1: code.word1, word2: code.word2, word3: code.word3, word4: value }
+    }
+}
+
+const fn packed_coefficient(_ code: Words, _ bin: usize) -> i32 {
+    let word = bin / 12
+    let shift: u64 = ((bin % 12) * 5).downcast_unchecked()
+    let digit: usize =
+        ((packed_word(code, word) >> shift) & PACKED_MASK).downcast_unchecked()
+    if digit < 16 {
+        digit.downcast_unchecked()
+    } else {
+        let signed: i32 = digit.downcast_unchecked()
+        signed - 32
+    }
+}
+
+const fn packed_set(
+    _ code: Words,
+    _ bin: usize,
+    _ coefficient: i32,
+) -> Words {
+    let word = bin / 12
+    let shift: u64 = ((bin % 12) * 5).downcast_unchecked()
+    let place: u64 = 1 << shift
+    let old_word = packed_word(code, word)
+    let old = (old_word >> shift) & PACKED_MASK
+    let encoded = if coefficient < 0 { coefficient + 32 } else { coefficient }
+    let digit: u64 = encoded.downcast_unchecked()
+    packed_with_word(code, word, old_word - old * place + digit * place)
+}
+
+const fn packed_add(_ a: Words, _ b: Words, _ count: usize) -> Packed {
+    let word0 = packed_add_word(a.word0, b.word0, if count < 12 { count } else { 12 })
+    let word1 = packed_add_word(a.word1, b.word1, if count <= 12 { 0 } else if count < 24 { count - 12 } else { 12 })
+    let word2 = packed_add_word(a.word2, b.word2, if count <= 24 { 0 } else if count < 36 { count - 24 } else { 12 })
+    let word3 = packed_add_word(a.word3, b.word3, if count <= 36 { 0 } else if count < 48 { count - 36 } else { 12 })
+    let word4 = packed_add_word(a.word4, b.word4, if count <= 48 { 0 } else if count < 60 { count - 48 } else { 12 })
+    Packed {
+        code: Words {
+            word0: word0.code,
+            word1: word1.code,
+            word2: word2.code,
+            word3: word3.code,
+            word4: word4.code,
+        },
+        valid: word0.valid && word1.valid && word2.valid
+            && word3.valid && word4.valid,
+    }
+}
+
+const fn packed_add_word(_ a: u64, _ b: u64, _ count: usize) -> PackedWord {
+    let mut code: u64 = 0
+    let mut valid = true
+    let mut bin: usize = 0
+    while bin < count {
+        let shift: u64 = (bin * 5).downcast_unchecked()
+        let a_digit: i32 = ((a >> shift) & PACKED_MASK).downcast_unchecked()
+        let b_digit: i32 = ((b >> shift) & PACKED_MASK).downcast_unchecked()
+        let a_value = if a_digit < 16 { a_digit } else { a_digit - 32 }
+        let b_value = if b_digit < 16 { b_digit } else { b_digit - 32 }
+        let coefficient = a_value + b_value
+        if coefficient < -8 || 8 < coefficient {
+            valid = false
+        } else {
+            let encoded = if coefficient < 0 { coefficient + 32 } else { coefficient }
+            let digit: u64 = encoded.downcast_unchecked()
+            code = code | (digit << shift)
+        }
+        bin = bin + 1
+    }
+    PackedWord { code: code, valid: valid }
+}
+
+const fn packed_neg(_ code: Words, _ count: usize) -> Packed {
+    let word0 = packed_neg_word(code.word0, if count < 12 { count } else { 12 })
+    let word1 = packed_neg_word(code.word1, if count <= 12 { 0 } else if count < 24 { count - 12 } else { 12 })
+    let word2 = packed_neg_word(code.word2, if count <= 24 { 0 } else if count < 36 { count - 24 } else { 12 })
+    let word3 = packed_neg_word(code.word3, if count <= 36 { 0 } else if count < 48 { count - 36 } else { 12 })
+    let word4 = packed_neg_word(code.word4, if count <= 48 { 0 } else if count < 60 { count - 48 } else { 12 })
+    Packed {
+        code: Words {
+            word0: word0,
+            word1: word1,
+            word2: word2,
+            word3: word3,
+            word4: word4,
+        },
+        valid: true,
+    }
+}
+
+const fn packed_neg_word(_ code: u64, _ count: usize) -> u64 {
+    let mut out: u64 = 0
+    let mut bin: usize = 0
+    while bin < count {
+        let shift: u64 = (bin * 5).downcast_unchecked()
+        let digit: i32 = ((code >> shift) & PACKED_MASK).downcast_unchecked()
+        let value = if digit < 16 { digit } else { digit - 32 }
+        let negated = -value
+        let encoded = if negated < 0 { negated + 32 } else { negated }
+        let encoded_digit: u64 = encoded.downcast_unchecked()
+        out = out | (encoded_digit << shift)
+        bin = bin + 1
+    }
+    out
+}
+
+const fn packed_add_at(
+    _ code: Words,
+    _ bin: usize,
+    _ delta: i32,
+) -> Packed {
+    let coefficient = packed_coefficient(code, bin) + delta
+    if coefficient < -8 || 8 < coefficient {
+        Packed { code: code, valid: false }
+    } else {
+        Packed {
+            code: packed_set(code, bin, coefficient),
+            valid: true,
+        }
+    }
+}
+
+const fn coefficient_zero() -> Canonical50Coefficient {
+    Canonical50Coefficient {
+        stage: STAGE_ZERO,
+        index: 0,
+        negative: false,
+        code: packed_zero(SSP_COUNT),
+        valid: true,
+    }
+}
+
+const fn coefficient_invalid() -> Canonical50Coefficient {
+    Canonical50Coefficient {
+        stage: STAGE_INVALID,
+        index: 0,
+        negative: false,
+        code: packed_zero(SSP_COUNT),
+        valid: false,
+    }
+}
+
+const fn sphere_seed(_ index: usize) -> Canonical50Coefficient {
+    Canonical50Coefficient {
+        stage: STAGE_SPHERE,
+        index: index,
+        negative: false,
+        code: packed_zero(SSP_COUNT),
+        valid: index < 4,
+    }
+}
+
+const fn point_seed(_ index: usize) -> Canonical50Coefficient {
+    Canonical50Coefficient {
+        stage: STAGE_POINT,
+        index: index,
+        negative: false,
+        code: packed_zero(SSP_COUNT),
+        valid: index < 5,
+    }
+}
+
+const fn polynomial_single(
+    _ stage: u32,
+    _ count: usize,
+    _ bin: usize,
+    _ negative: bool,
+    _ valid: bool,
+) -> Canonical50Coefficient {
+    let code = if bin < count {
+        packed_set(
+            packed_zero(count),
+            bin,
+            if negative { -1 } else { 1 },
+        )
+    } else {
+        packed_zero(count)
+    }
+    Canonical50Coefficient {
+        stage: stage,
+        index: 0,
+        negative: false,
+        code: code,
+        valid: valid && bin < count,
+    }
+}
+
+const fn sphere_pair_rank(_ a: usize, _ b: usize) -> usize {
+    let lo = if a < b { a } else { b }
+    let hi = if a < b { b } else { a }
+    let mut rank: usize = 0
+    let mut left: usize = 0
+    while left < lo {
+        rank = rank + (4 - left)
+        left = left + 1
+    }
+    rank + hi - lo
+}
+
+const fn multiply_sp_sphere(
+    _ sp: Canonical50Coefficient,
+    _ sphere: Canonical50Coefficient,
+) -> Canonical50Coefficient {
+    let mut code = packed_zero(SSP_COUNT)
+    let mut valid = sp.valid && sphere.valid
+    let mut bin: usize = 0
+    while bin < SP_COUNT {
+        let mut coefficient = packed_coefficient(sp.code, bin)
+        if sphere.negative { coefficient = -coefficient }
+        if coefficient != 0 {
+            let sphere_left = bin / 5
+            let point = bin % 5
+            let target =
+                sphere_pair_rank(sphere_left, sphere.index) * 5 + point
+            let updated = packed_add_at(code, target, coefficient)
+            code = updated.code
+            valid = valid && updated.valid
+        }
+        bin = bin + 1
+    }
+    Canonical50Coefficient {
+        stage: STAGE_SSP,
+        index: 0,
+        negative: false,
+        code: code,
+        valid: valid,
+    }
+}
+
+impl CliffordCoefficient for Canonical50Coefficient {
+    const fn clifford_coefficient_add(self, other: Self) -> Self {
+        if self.stage == STAGE_ZERO { return other }
+        if other.stage == STAGE_ZERO { return self }
+        if self.stage != other.stage { return coefficient_invalid() }
+        if self.stage != STAGE_SP && self.stage != STAGE_SSP {
+            return coefficient_invalid()
+        }
+        let count = if self.stage == STAGE_SP { SP_COUNT } else { SSP_COUNT }
+        let sum = packed_add(self.code, other.code, count)
+        Canonical50Coefficient {
+            stage: self.stage,
+            index: 0,
+            negative: false,
+            code: sum.code,
+            valid: self.valid && other.valid && sum.valid,
+        }
+    }
+
+    const fn clifford_coefficient_mul(self, other: Self) -> Self {
+        if self.stage == STAGE_ZERO || other.stage == STAGE_ZERO {
+            return coefficient_zero()
+        }
+        if self.stage == STAGE_SPHERE && other.stage == STAGE_POINT {
+            return polynomial_single(
+                STAGE_SP,
+                SP_COUNT,
+                self.index * 5 + other.index,
+                self.negative ^ other.negative,
+                self.valid && other.valid,
+            )
+        }
+        if self.stage == STAGE_POINT && other.stage == STAGE_SPHERE {
+            return polynomial_single(
+                STAGE_SP,
+                SP_COUNT,
+                other.index * 5 + self.index,
+                self.negative ^ other.negative,
+                self.valid && other.valid,
+            )
+        }
+        if self.stage == STAGE_SP && other.stage == STAGE_SPHERE {
+            return multiply_sp_sphere(self, other)
+        }
+        if self.stage == STAGE_SPHERE && other.stage == STAGE_SP {
+            return multiply_sp_sphere(other, self)
+        }
+        coefficient_invalid()
+    }
+
+    const fn clifford_coefficient_neg(self) -> Self {
+        if self.stage == STAGE_ZERO { return self }
+        if self.stage == STAGE_SPHERE || self.stage == STAGE_POINT {
+            return Canonical50Coefficient {
+                stage: self.stage,
+                index: self.index,
+                negative: !self.negative,
+                code: self.code,
+                valid: self.valid,
+            }
+        }
+        if self.stage == STAGE_SP || self.stage == STAGE_SSP {
+            let count =
+                if self.stage == STAGE_SP { SP_COUNT } else { SSP_COUNT }
+            let negated = packed_neg(self.code, count)
+            return Canonical50Coefficient {
+                stage: self.stage,
+                index: 0,
+                negative: false,
+                code: negated.code,
+                valid: self.valid && negated.valid,
+            }
+        }
+        coefficient_invalid()
+    }
+}
+
+type SymbolicMv5 = CliffordMv<Canonical50Coefficient, 5>
+
+const fn symbolic_zero_mvt5() -> SymbolicMv5 {
+    let zero = coefficient_zero()
+    let z0: CliffordMv<Canonical50Coefficient, 0> =
+        sparse_clifford::CliffordScalar { scalar: zero }
+    let z1: CliffordMv<Canonical50Coefficient, 1> =
+        sparse_clifford::CliffordNode { low: z0, high: z0 }
+    let z2: CliffordMv<Canonical50Coefficient, 2> =
+        sparse_clifford::CliffordNode { low: z1, high: z1 }
+    let z3: CliffordMv<Canonical50Coefficient, 3> =
+        sparse_clifford::CliffordNode { low: z2, high: z2 }
+    let z4: CliffordMv<Canonical50Coefficient, 4> =
+        sparse_clifford::CliffordNode { low: z3, high: z3 }
+    sparse_clifford::CliffordNode { low: z4, high: z4 }
+}
+
+const fn symbolic_sandwich() -> SymbolicMv5 {
+    let sphere0 = symbolic_zero_mvt5()
+    let sphere1 = sphere0.clifford_set_coefficient(
+        index: SPHERE_E1, size: 32, value: sphere_seed(0),
+    )
+    let sphere2 = sphere1.clifford_set_coefficient(
+        index: SPHERE_E2, size: 32, value: sphere_seed(1),
+    )
+    let sphere3 = sphere2.clifford_set_coefficient(
+        index: SPHERE_E4, size: 32, value: sphere_seed(2),
+    )
+    let sphere = sphere3.clifford_set_coefficient(
+        index: SPHERE_E5, size: 32, value: sphere_seed(3),
+    )
+
+    let point0 = symbolic_zero_mvt5()
+    let point1 = point0.clifford_set_coefficient(
+        index: POINT_E1, size: 32, value: point_seed(0),
+    )
+    let point2 = point1.clifford_set_coefficient(
+        index: POINT_E2, size: 32, value: point_seed(1),
+    )
+    let point3 = point2.clifford_set_coefficient(
+        index: POINT_E3, size: 32, value: point_seed(2),
+    )
+    let point4 = point3.clifford_set_coefficient(
+        index: POINT_E4, size: 32, value: point_seed(3),
+    )
+    let point = point4.clifford_set_coefficient(
+        index: POINT_E5, size: 32, value: point_seed(4),
+    )
+
+    let metric = Cl41Metric {}
+    let first = sphere.clifford_gp(
+        other: point, metric: metric, level: 5,
+    )
+    first.clifford_gp(other: sphere, metric: metric, level: 5)
+}
+
+const fn sphere_seed_blade_i32(_ index: i32) -> i32 {
+    match index {
+        0 => SPHERE_E1
+        1 => SPHERE_E2
+        2 => SPHERE_E4
+        _ => SPHERE_E5
+    }
+}
+
+const fn point_seed_blade_i32(_ index: i32) -> i32 {
+    match index {
+        0 => POINT_E1
+        1 => POINT_E2
+        2 => POINT_E3
+        3 => POINT_E4
+        _ => POINT_E5
+    }
+}
+
+const fn sphere_pair_left_i32(_ rank: i32) -> i32 {
+    match rank {
+        0 => 0
+        1 => 0
+        2 => 0
+        3 => 0
+        4 => 1
+        5 => 1
+        6 => 1
+        7 => 2
+        8 => 2
+        _ => 3
+    }
+}
+
+const fn sphere_pair_right_i32(_ rank: i32) -> i32 {
+    match rank {
+        0 => 0
+        1 => 1
+        2 => 2
+        3 => 3
+        4 => 1
+        5 => 2
+        6 => 3
+        7 => 2
+        8 => 3
+        _ => 3
+    }
+}
+
+const fn candidate_output_blade_i32(_ candidate: i32) -> i32 {
+    let pair =
+        if candidate < 5 { 0 }
+        else if candidate < 10 { 1 }
+        else if candidate < 15 { 2 }
+        else if candidate < 20 { 3 }
+        else if candidate < 25 { 4 }
+        else if candidate < 30 { 5 }
+        else if candidate < 35 { 6 }
+        else if candidate < 40 { 7 }
+        else if candidate < 45 { 8 }
+        else { 9 }
+    let point =
+        if candidate < 5 { candidate }
+        else if candidate < 10 { candidate - 5 }
+        else if candidate < 15 { candidate - 10 }
+        else if candidate < 20 { candidate - 15 }
+        else if candidate < 25 { candidate - 20 }
+        else if candidate < 30 { candidate - 25 }
+        else if candidate < 35 { candidate - 30 }
+        else if candidate < 40 { candidate - 35 }
+        else if candidate < 45 { candidate - 40 }
+        else { candidate - 45 }
+    sphere_seed_blade_i32(sphere_pair_left_i32(pair))
+        ^ point_seed_blade_i32(point)
+        ^ sphere_seed_blade_i32(sphere_pair_right_i32(pair))
+}
+
+const fn canonical50_result() -> Packed {
+    let sandwich = symbolic_sandwich()
+    let mut code = packed_zero(SSP_COUNT)
+    let mut valid = true
+    let mut blade: i32 = 0
+    while blade < 32 {
+        let coefficient: Canonical50Coefficient =
+            sandwich.clifford_get_coefficient(
+            index: blade, size: 32,
+        )
+        if coefficient.stage != STAGE_ZERO {
+            valid = valid
+                && coefficient.stage == STAGE_SSP
+                && coefficient.valid
+            let mut candidate: usize = 0
+            while candidate < SSP_COUNT {
+                let value = packed_coefficient(
+                    coefficient.code, candidate,
+                )
+                if value != 0 {
+                    let candidate_i32: i32 = candidate.downcast_unchecked()
+                    let expected =
+                        candidate_output_blade_i32(candidate_i32)
+                    valid = valid && expected == blade
+                    let updated = packed_add_at(code, candidate, value)
+                    code = updated.code
+                    valid = valid && updated.valid
+                }
+                candidate = candidate + 1
+            }
+        }
+        blade = blade + 1
+    }
+    Packed { code: code, valid: valid }
+}
+
+const fn canonical50_count(_ code: Words) -> usize {
+    let mut count: usize = 0
+    let mut candidate: usize = 0
+    while candidate < SSP_COUNT {
+        if packed_coefficient(code, candidate) != 0 {
+            count = count + 1
+        }
+        candidate = candidate + 1
+    }
+    count
+}
+
+const fn canonical50_max_abs(_ code: Words) -> i32 {
+    let mut maximum: i32 = 0
+    let mut candidate: usize = 0
+    while candidate < SSP_COUNT {
+        let value = packed_coefficient(code, candidate)
+        let magnitude = if value < 0 { -value } else { value }
+        if maximum < magnitude { maximum = magnitude }
+        candidate = candidate + 1
+    }
+    maximum
+}
+
+const fn canonical50_keep_word(
+    _ code: Words,
+    _ first: usize,
+    _ last: usize,
+) -> u32 {
+    let mut candidate = first
+    let mut bits: u32 = 0
+    while candidate < last {
+        if packed_coefficient(code, candidate) != 0 {
+            bits = bits
+                | ((1 as u32) << (candidate - first).downcast_truncate())
+        }
+        candidate = candidate + 1
+    }
+    bits
+}
+
+const fn canonical50_magnitude_word(
+    _ code: Words,
+    _ first: usize,
+    _ last: usize,
+) -> u32 {
+    let mut candidate = first
+    let mut bits: u32 = 0
+    while candidate < last {
+        let value = packed_coefficient(code, candidate)
+        let magnitude: u32 =
+            (if value < 0 { -value } else { value }).downcast_unchecked()
+        bits = bits
+            | (magnitude << ((candidate - first) * 2).downcast_truncate())
+        candidate = candidate + 1
+    }
+    bits
+}
+
+const fn canonical50_sign_word(
+    _ code: Words,
+    _ first: usize,
+    _ last: usize,
+) -> u32 {
+    let mut candidate = first
+    let mut bits: u32 = 0
+    while candidate < last {
+        if packed_coefficient(code, candidate) < 0 {
+            bits = bits
+                | ((1 as u32) << (candidate - first).downcast_truncate())
+        }
+        candidate = candidate + 1
+    }
+    bits
+}
+
+const fn canonical50_native() -> CanonicalNative {
+    let result = canonical50_result()
+    let code = result.code
+    CanonicalNative {
+        valid: result.valid,
+        count: canonical50_count(code).downcast_unchecked(),
+        maximum: canonical50_max_abs(code),
+        keep0: canonical50_keep_word(code, 0, 24),
+        keep1: canonical50_keep_word(code, 24, 48),
+        keep2: canonical50_keep_word(code, 48, 50),
+        mag0: canonical50_magnitude_word(code, 0, 16),
+        mag1: canonical50_magnitude_word(code, 16, 32),
+        mag2: canonical50_magnitude_word(code, 32, 48),
+        mag3: canonical50_magnitude_word(code, 48, 50),
+        sign0: canonical50_sign_word(code, 0, 32),
+        sign1: canonical50_sign_word(code, 32, 50),
+    }
+}
+
+const fn canonical50_projection(_ selector: u32) -> u64 {
+    let native = canonical50_native()
+    if selector == 0 {
+        let keep0: u64 = native.keep0.downcast_unchecked()
+        let keep1: u64 = native.keep1.downcast_unchecked()
+        let keep2: u64 = native.keep2.downcast_unchecked()
+        keep0 | (keep1 << 24) | (keep2 << 48)
+            | ((if native.valid { 1 as u64 } else { 0 as u64 }) << 63)
+    } else {
+        let keep0: u64 = native.keep0.downcast_unchecked()
+        let keep1: u64 = native.keep1.downcast_unchecked()
+        let keep2: u64 = native.keep2.downcast_unchecked()
+        let keep = keep0 | (keep1 << 24) | (keep2 << 48)
+        let mag0: u64 = native.mag0.downcast_unchecked()
+        let mag1: u64 = native.mag1.downcast_unchecked()
+        let mag2: u64 = native.mag2.downcast_unchecked()
+        let mag3: u64 = native.mag3.downcast_unchecked()
+        let sign0: u64 = native.sign0.downcast_unchecked()
+        let sign1: u64 = native.sign1.downcast_unchecked()
+        let mut candidate: u64 = 0
+        let mut valid = native.valid
+        while candidate < 50 {
+            if ((keep >> candidate) & 1) == 1 {
+                let magnitude = if candidate < 16 {
+                    (mag0 >> (candidate * 2)) & 3
+                } else if candidate < 32 {
+                    (mag1 >> ((candidate - 16) * 2)) & 3
+                } else if candidate < 48 {
+                    (mag2 >> ((candidate - 32) * 2)) & 3
+                } else {
+                    (mag3 >> ((candidate - 48) * 2)) & 3
+                }
+                let pair = candidate / 5
+                let expected = if pair == 0 || pair == 4
+                    || pair == 7 || pair == 9 { 1 } else { 2 }
+                valid = valid && magnitude == expected
+            }
+            candidate = candidate + 1
+        }
+        sign0 | (sign1 << 32)
+            | ((if valid { 1 as u64 } else { 0 as u64 }) << 63)
+    }
+}
+
+const CANONICAL50_KEEP_VALID: u64 = canonical50_projection(0)
+const CANONICAL50_COEFFICIENTS: u64 = canonical50_projection(1)
+
+const fn canonical50_projected_count() -> usize {
+    let mut count: usize = 0
+    let mut candidate: u64 = 0
+    while candidate < 50 {
+        if ((CANONICAL50_KEEP_VALID >> candidate) & 1) == 1 {
+            count = count + 1
+        }
+        candidate = candidate + 1
+    }
+    count
+}
+
+static_assert(((CANONICAL50_KEEP_VALID >> 63) & 1) == 1)
+static_assert(((CANONICAL50_COEFFICIENTS >> 63) & 1) == 1)
+static_assert(canonical50_projected_count() == 32)
+
+type Canonical50Schedule32 = SparsePlan<
+    {(CANONICAL50_KEEP_VALID & 0xffffff).downcast_unchecked()},
+    {((CANONICAL50_KEEP_VALID >> 24) & 0xffffff).downcast_unchecked()},
+    {((CANONICAL50_KEEP_VALID >> 48) & 3).downcast_unchecked()},
+    0, 0, 0, 0, 0,
+    50,
+    {canonical50_projected_count()},
+>
+
+// Force the public recursive SparsePlan/Term representation itself.
+fn canonical50_plan_has_32_terms(
+    _ value: <Canonical50Schedule32 as PlanLength>::Out,
+) {}
+
+fn candidate_magnitude(_ candidate: i32) -> i32 {
+    let pair = runtime_candidate_pair(candidate)
+    if pair == 0 || pair == 4 || pair == 7 || pair == 9 { 1 } else { 2 }
+}
+
+fn runtime_candidate_pair(_ candidate: i32) -> i32 {
+    if candidate < 5 { 0 }
+    else if candidate < 10 { 1 }
+    else if candidate < 15 { 2 }
+    else if candidate < 20 { 3 }
+    else if candidate < 25 { 4 }
+    else if candidate < 30 { 5 }
+    else if candidate < 35 { 6 }
+    else if candidate < 40 { 7 }
+    else if candidate < 45 { 8 }
+    else { 9 }
+}
+
+fn runtime_candidate_point(_ candidate: i32) -> i32 {
+    if candidate < 5 { candidate }
+    else if candidate < 10 { candidate - 5 }
+    else if candidate < 15 { candidate - 10 }
+    else if candidate < 20 { candidate - 15 }
+    else if candidate < 25 { candidate - 20 }
+    else if candidate < 30 { candidate - 25 }
+    else if candidate < 35 { candidate - 30 }
+    else if candidate < 40 { candidate - 35 }
+    else if candidate < 45 { candidate - 40 }
+    else { candidate - 45 }
+}
+
+fn candidate_negative(_ candidate: i32) -> i32 {
+    runtime_projected_sign(candidate)
+}
+
+const fn canonical50_projected_sign(_ candidate: u64) -> i32 {
+    ((CANONICAL50_COEFFICIENTS >> candidate) & 1).downcast_truncate()
+}
+
+// These scalar globals are projections, not a copied semantic table. Keeping
+// them scalar lets the Wasm R1 inspector consume the CTFE result without
+// retaining shifts/bitwise operations or aggregate const regions at runtime.
+const CANONICAL50_SIGN_0: i32 = canonical50_projected_sign(0)
+const CANONICAL50_SIGN_1: i32 = canonical50_projected_sign(1)
+const CANONICAL50_SIGN_2: i32 = canonical50_projected_sign(2)
+const CANONICAL50_SIGN_3: i32 = canonical50_projected_sign(3)
+const CANONICAL50_SIGN_4: i32 = canonical50_projected_sign(4)
+const CANONICAL50_SIGN_5: i32 = canonical50_projected_sign(5)
+const CANONICAL50_SIGN_6: i32 = canonical50_projected_sign(6)
+const CANONICAL50_SIGN_7: i32 = canonical50_projected_sign(7)
+const CANONICAL50_SIGN_8: i32 = canonical50_projected_sign(8)
+const CANONICAL50_SIGN_9: i32 = canonical50_projected_sign(9)
+const CANONICAL50_SIGN_10: i32 = canonical50_projected_sign(10)
+const CANONICAL50_SIGN_11: i32 = canonical50_projected_sign(11)
+const CANONICAL50_SIGN_12: i32 = canonical50_projected_sign(12)
+const CANONICAL50_SIGN_13: i32 = canonical50_projected_sign(13)
+const CANONICAL50_SIGN_14: i32 = canonical50_projected_sign(14)
+const CANONICAL50_SIGN_15: i32 = canonical50_projected_sign(15)
+const CANONICAL50_SIGN_16: i32 = canonical50_projected_sign(16)
+const CANONICAL50_SIGN_17: i32 = canonical50_projected_sign(17)
+const CANONICAL50_SIGN_18: i32 = canonical50_projected_sign(18)
+const CANONICAL50_SIGN_19: i32 = canonical50_projected_sign(19)
+const CANONICAL50_SIGN_20: i32 = canonical50_projected_sign(20)
+const CANONICAL50_SIGN_21: i32 = canonical50_projected_sign(21)
+const CANONICAL50_SIGN_22: i32 = canonical50_projected_sign(22)
+const CANONICAL50_SIGN_23: i32 = canonical50_projected_sign(23)
+const CANONICAL50_SIGN_24: i32 = canonical50_projected_sign(24)
+const CANONICAL50_SIGN_25: i32 = canonical50_projected_sign(25)
+const CANONICAL50_SIGN_26: i32 = canonical50_projected_sign(26)
+const CANONICAL50_SIGN_27: i32 = canonical50_projected_sign(27)
+const CANONICAL50_SIGN_28: i32 = canonical50_projected_sign(28)
+const CANONICAL50_SIGN_29: i32 = canonical50_projected_sign(29)
+const CANONICAL50_SIGN_30: i32 = canonical50_projected_sign(30)
+const CANONICAL50_SIGN_31: i32 = canonical50_projected_sign(31)
+const CANONICAL50_SIGN_32: i32 = canonical50_projected_sign(32)
+const CANONICAL50_SIGN_33: i32 = canonical50_projected_sign(33)
+const CANONICAL50_SIGN_34: i32 = canonical50_projected_sign(34)
+const CANONICAL50_SIGN_35: i32 = canonical50_projected_sign(35)
+const CANONICAL50_SIGN_36: i32 = canonical50_projected_sign(36)
+const CANONICAL50_SIGN_37: i32 = canonical50_projected_sign(37)
+const CANONICAL50_SIGN_38: i32 = canonical50_projected_sign(38)
+const CANONICAL50_SIGN_39: i32 = canonical50_projected_sign(39)
+const CANONICAL50_SIGN_40: i32 = canonical50_projected_sign(40)
+const CANONICAL50_SIGN_41: i32 = canonical50_projected_sign(41)
+const CANONICAL50_SIGN_42: i32 = canonical50_projected_sign(42)
+const CANONICAL50_SIGN_43: i32 = canonical50_projected_sign(43)
+const CANONICAL50_SIGN_44: i32 = canonical50_projected_sign(44)
+const CANONICAL50_SIGN_45: i32 = canonical50_projected_sign(45)
+const CANONICAL50_SIGN_46: i32 = canonical50_projected_sign(46)
+const CANONICAL50_SIGN_47: i32 = canonical50_projected_sign(47)
+const CANONICAL50_SIGN_48: i32 = canonical50_projected_sign(48)
+const CANONICAL50_SIGN_49: i32 = canonical50_projected_sign(49)
+
+const CANONICAL50_OUTPUT_0: i32 = candidate_output_blade_i32(0)
+const CANONICAL50_OUTPUT_1: i32 = candidate_output_blade_i32(1)
+const CANONICAL50_OUTPUT_2: i32 = candidate_output_blade_i32(2)
+const CANONICAL50_OUTPUT_3: i32 = candidate_output_blade_i32(3)
+const CANONICAL50_OUTPUT_4: i32 = candidate_output_blade_i32(4)
+const CANONICAL50_OUTPUT_5: i32 = candidate_output_blade_i32(5)
+const CANONICAL50_OUTPUT_6: i32 = candidate_output_blade_i32(6)
+const CANONICAL50_OUTPUT_7: i32 = candidate_output_blade_i32(7)
+const CANONICAL50_OUTPUT_8: i32 = candidate_output_blade_i32(8)
+const CANONICAL50_OUTPUT_9: i32 = candidate_output_blade_i32(9)
+const CANONICAL50_OUTPUT_10: i32 = candidate_output_blade_i32(10)
+const CANONICAL50_OUTPUT_11: i32 = candidate_output_blade_i32(11)
+const CANONICAL50_OUTPUT_12: i32 = candidate_output_blade_i32(12)
+const CANONICAL50_OUTPUT_13: i32 = candidate_output_blade_i32(13)
+const CANONICAL50_OUTPUT_14: i32 = candidate_output_blade_i32(14)
+const CANONICAL50_OUTPUT_15: i32 = candidate_output_blade_i32(15)
+const CANONICAL50_OUTPUT_16: i32 = candidate_output_blade_i32(16)
+const CANONICAL50_OUTPUT_17: i32 = candidate_output_blade_i32(17)
+const CANONICAL50_OUTPUT_18: i32 = candidate_output_blade_i32(18)
+const CANONICAL50_OUTPUT_19: i32 = candidate_output_blade_i32(19)
+const CANONICAL50_OUTPUT_20: i32 = candidate_output_blade_i32(20)
+const CANONICAL50_OUTPUT_21: i32 = candidate_output_blade_i32(21)
+const CANONICAL50_OUTPUT_22: i32 = candidate_output_blade_i32(22)
+const CANONICAL50_OUTPUT_23: i32 = candidate_output_blade_i32(23)
+const CANONICAL50_OUTPUT_24: i32 = candidate_output_blade_i32(24)
+const CANONICAL50_OUTPUT_25: i32 = candidate_output_blade_i32(25)
+const CANONICAL50_OUTPUT_26: i32 = candidate_output_blade_i32(26)
+const CANONICAL50_OUTPUT_27: i32 = candidate_output_blade_i32(27)
+const CANONICAL50_OUTPUT_28: i32 = candidate_output_blade_i32(28)
+const CANONICAL50_OUTPUT_29: i32 = candidate_output_blade_i32(29)
+const CANONICAL50_OUTPUT_30: i32 = candidate_output_blade_i32(30)
+const CANONICAL50_OUTPUT_31: i32 = candidate_output_blade_i32(31)
+const CANONICAL50_OUTPUT_32: i32 = candidate_output_blade_i32(32)
+const CANONICAL50_OUTPUT_33: i32 = candidate_output_blade_i32(33)
+const CANONICAL50_OUTPUT_34: i32 = candidate_output_blade_i32(34)
+const CANONICAL50_OUTPUT_35: i32 = candidate_output_blade_i32(35)
+const CANONICAL50_OUTPUT_36: i32 = candidate_output_blade_i32(36)
+const CANONICAL50_OUTPUT_37: i32 = candidate_output_blade_i32(37)
+const CANONICAL50_OUTPUT_38: i32 = candidate_output_blade_i32(38)
+const CANONICAL50_OUTPUT_39: i32 = candidate_output_blade_i32(39)
+const CANONICAL50_OUTPUT_40: i32 = candidate_output_blade_i32(40)
+const CANONICAL50_OUTPUT_41: i32 = candidate_output_blade_i32(41)
+const CANONICAL50_OUTPUT_42: i32 = candidate_output_blade_i32(42)
+const CANONICAL50_OUTPUT_43: i32 = candidate_output_blade_i32(43)
+const CANONICAL50_OUTPUT_44: i32 = candidate_output_blade_i32(44)
+const CANONICAL50_OUTPUT_45: i32 = candidate_output_blade_i32(45)
+const CANONICAL50_OUTPUT_46: i32 = candidate_output_blade_i32(46)
+const CANONICAL50_OUTPUT_47: i32 = candidate_output_blade_i32(47)
+const CANONICAL50_OUTPUT_48: i32 = candidate_output_blade_i32(48)
+const CANONICAL50_OUTPUT_49: i32 = candidate_output_blade_i32(49)
+
+fn runtime_projected_sign(_ candidate: i32) -> i32 {
+    match candidate {
+        0 => CANONICAL50_SIGN_0
+        1 => CANONICAL50_SIGN_1
+        2 => CANONICAL50_SIGN_2
+        3 => CANONICAL50_SIGN_3
+        4 => CANONICAL50_SIGN_4
+        5 => CANONICAL50_SIGN_5
+        6 => CANONICAL50_SIGN_6
+        7 => CANONICAL50_SIGN_7
+        8 => CANONICAL50_SIGN_8
+        9 => CANONICAL50_SIGN_9
+        10 => CANONICAL50_SIGN_10
+        11 => CANONICAL50_SIGN_11
+        12 => CANONICAL50_SIGN_12
+        13 => CANONICAL50_SIGN_13
+        14 => CANONICAL50_SIGN_14
+        15 => CANONICAL50_SIGN_15
+        16 => CANONICAL50_SIGN_16
+        17 => CANONICAL50_SIGN_17
+        18 => CANONICAL50_SIGN_18
+        19 => CANONICAL50_SIGN_19
+        20 => CANONICAL50_SIGN_20
+        21 => CANONICAL50_SIGN_21
+        22 => CANONICAL50_SIGN_22
+        23 => CANONICAL50_SIGN_23
+        24 => CANONICAL50_SIGN_24
+        25 => CANONICAL50_SIGN_25
+        26 => CANONICAL50_SIGN_26
+        27 => CANONICAL50_SIGN_27
+        28 => CANONICAL50_SIGN_28
+        29 => CANONICAL50_SIGN_29
+        30 => CANONICAL50_SIGN_30
+        31 => CANONICAL50_SIGN_31
+        32 => CANONICAL50_SIGN_32
+        33 => CANONICAL50_SIGN_33
+        34 => CANONICAL50_SIGN_34
+        35 => CANONICAL50_SIGN_35
+        36 => CANONICAL50_SIGN_36
+        37 => CANONICAL50_SIGN_37
+        38 => CANONICAL50_SIGN_38
+        39 => CANONICAL50_SIGN_39
+        40 => CANONICAL50_SIGN_40
+        41 => CANONICAL50_SIGN_41
+        42 => CANONICAL50_SIGN_42
+        43 => CANONICAL50_SIGN_43
+        44 => CANONICAL50_SIGN_44
+        45 => CANONICAL50_SIGN_45
+        46 => CANONICAL50_SIGN_46
+        47 => CANONICAL50_SIGN_47
+        48 => CANONICAL50_SIGN_48
+        _ => CANONICAL50_SIGN_49
+    }
+}
+
+fn runtime_projected_output(_ candidate: i32) -> i32 {
+    match candidate {
+        0 => CANONICAL50_OUTPUT_0
+        1 => CANONICAL50_OUTPUT_1
+        2 => CANONICAL50_OUTPUT_2
+        3 => CANONICAL50_OUTPUT_3
+        4 => CANONICAL50_OUTPUT_4
+        5 => CANONICAL50_OUTPUT_5
+        6 => CANONICAL50_OUTPUT_6
+        7 => CANONICAL50_OUTPUT_7
+        8 => CANONICAL50_OUTPUT_8
+        9 => CANONICAL50_OUTPUT_9
+        10 => CANONICAL50_OUTPUT_10
+        11 => CANONICAL50_OUTPUT_11
+        12 => CANONICAL50_OUTPUT_12
+        13 => CANONICAL50_OUTPUT_13
+        14 => CANONICAL50_OUTPUT_14
+        15 => CANONICAL50_OUTPUT_15
+        16 => CANONICAL50_OUTPUT_16
+        17 => CANONICAL50_OUTPUT_17
+        18 => CANONICAL50_OUTPUT_18
+        19 => CANONICAL50_OUTPUT_19
+        20 => CANONICAL50_OUTPUT_20
+        21 => CANONICAL50_OUTPUT_21
+        22 => CANONICAL50_OUTPUT_22
+        23 => CANONICAL50_OUTPUT_23
+        24 => CANONICAL50_OUTPUT_24
+        25 => CANONICAL50_OUTPUT_25
+        26 => CANONICAL50_OUTPUT_26
+        27 => CANONICAL50_OUTPUT_27
+        28 => CANONICAL50_OUTPUT_28
+        29 => CANONICAL50_OUTPUT_29
+        30 => CANONICAL50_OUTPUT_30
+        31 => CANONICAL50_OUTPUT_31
+        32 => CANONICAL50_OUTPUT_32
+        33 => CANONICAL50_OUTPUT_33
+        34 => CANONICAL50_OUTPUT_34
+        35 => CANONICAL50_OUTPUT_35
+        36 => CANONICAL50_OUTPUT_36
+        37 => CANONICAL50_OUTPUT_37
+        38 => CANONICAL50_OUTPUT_38
+        39 => CANONICAL50_OUTPUT_39
+        40 => CANONICAL50_OUTPUT_40
+        41 => CANONICAL50_OUTPUT_41
+        42 => CANONICAL50_OUTPUT_42
+        43 => CANONICAL50_OUTPUT_43
+        44 => CANONICAL50_OUTPUT_44
+        45 => CANONICAL50_OUTPUT_45
+        46 => CANONICAL50_OUTPUT_46
+        47 => CANONICAL50_OUTPUT_47
+        48 => CANONICAL50_OUTPUT_48
+        _ => CANONICAL50_OUTPUT_49
+    }
+}
+
+fn runtime_sphere_pair_left(_ rank: i32) -> i32 {
+    if rank < 4 { 0 }
+    else if rank < 7 { 1 }
+    else if rank < 9 { 2 }
+    else { 3 }
+}
+
+fn runtime_sphere_pair_right(_ rank: i32) -> i32 {
+    match rank {
+        0 => 0
+        1 => 1
+        2 => 2
+        3 => 3
+        4 => 1
+        5 => 2
+        6 => 3
+        7 => 2
+        8 => 3
+        _ => 3
+    }
+}
+
+fn runtime_sphere_seed_blade(_ index: i32) -> i32 {
+    match index {
+        0 => SPHERE_E1
+        1 => SPHERE_E2
+        2 => SPHERE_E4
+        _ => SPHERE_E5
+    }
+}
+
+fn runtime_point_seed_blade(_ index: i32) -> i32 {
+    match index {
+        0 => POINT_E1
+        1 => POINT_E2
+        2 => POINT_E3
+        3 => POINT_E4
+        _ => POINT_E5
+    }
+}
+
+struct ObservedZero {}
+struct ObservedTerm<const Candidate: i32> {}
+struct ObservedAdd<L, R> {}
+
+trait ObserveCanonical50 { type Out }
+impl ObserveCanonical50 for Zero { type Out = ObservedZero }
+impl<const Candidate: usize> ObserveCanonical50 for Term<Candidate> {
+    type Out = ObservedTerm<{Candidate.downcast_truncate()}>
+}
+impl<L: ObserveCanonical50, R: ObserveCanonical50> ObserveCanonical50
+    for Add<L, R>
+{
+    type Out = ObservedAdd<
+        <L as ObserveCanonical50>::Out,
+        <R as ObserveCanonical50>::Out,
+    >
+}
+
+type ObservedCanonical50 =
+    <Canonical50Schedule32 as ObserveCanonical50>::Out
+
+trait InspectCanonical50 {
+    fn field(index: i32, field: i32) -> i32
+}
+impl InspectCanonical50 for ObservedZero {
+    fn field(index: i32, field: i32) -> i32 { -1 }
+}
+impl<const Candidate: i32> InspectCanonical50 for ObservedTerm<Candidate> {
+    fn field(index: i32, field: i32) -> i32 {
+        if index == 0 {
+            let candidate: i32 = Candidate
+            let pair = runtime_candidate_pair(candidate)
+            let point = runtime_candidate_point(candidate)
+            if field == 0 {
+                candidate
+            } else if field == 1 {
+                runtime_projected_output(candidate)
+            } else if field == 2 {
+                runtime_sphere_seed_blade(runtime_sphere_pair_left(pair))
+            } else if field == 3 {
+                runtime_point_seed_blade(point)
+            } else if field == 4 {
+                runtime_sphere_seed_blade(runtime_sphere_pair_right(pair))
+            } else if field == 5 {
+                candidate_magnitude(candidate)
+            } else {
+                candidate_negative(candidate)
+            }
+        } else {
+            -1
+        }
+    }
+}
+impl<H: InspectCanonical50, T: InspectCanonical50> InspectCanonical50
+    for ObservedAdd<H, T>
+{
+    fn field(index: i32, field: i32) -> i32 {
+        if index == 0 {
+            <H as InspectCanonical50>::field(index: 0, field: field)
+        } else {
+            <T as InspectCanonical50>::field(
+                index: index - 1, field: field,
+            )
+        }
+    }
+}
+
+pub fn canonical50_schedule_field(index: i32, field: i32) -> i32 {
+    <ObservedCanonical50 as InspectCanonical50>::field(
+        index: index, field: field,
+    )
+}

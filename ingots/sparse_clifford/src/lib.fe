@@ -571,6 +571,87 @@ impl CliffordCoefficient for CliffordSupport {
 
 pub type CliffordSupportMv<const N: usize> = CliffordMv<CliffordSupport, N>
 
+/// Uniform coefficient access for every recursive Clifford carrier.
+///
+/// Domain-specific coefficient interpretations use this one traversal rather
+/// than defining another scalar/node setter and getter pair.
+pub trait CliffordCoefficientAccess<C> {
+    const fn clifford_set_coefficient(
+        self,
+        index: i32,
+        size: i32,
+        value: C,
+    ) -> Self
+    const fn clifford_get_coefficient(
+        self,
+        index: i32,
+        size: i32,
+    ) -> C
+}
+impl<C: Copy> CliffordCoefficientAccess<C> for CliffordScalar<C> {
+    #[inline(always)]
+    const fn clifford_set_coefficient(
+        self,
+        index: i32,
+        size: i32,
+        value: C,
+    ) -> Self {
+        CliffordScalar { scalar: value }
+    }
+    #[inline(always)]
+    const fn clifford_get_coefficient(
+        self,
+        index: i32,
+        size: i32,
+    ) -> C {
+        self.scalar
+    }
+}
+impl<C: Copy, A: CliffordCoefficientAccess<C> + Copy>
+    CliffordCoefficientAccess<C> for CliffordNode<A>
+{
+    #[inline(always)]
+    const fn clifford_set_coefficient(
+        self,
+        index: i32,
+        size: i32,
+        value: C,
+    ) -> Self {
+        let half: i32 = size >> 1
+        if index < half {
+            CliffordNode {
+                low: self.low.clifford_set_coefficient(
+                    index: index, size: half, value: value,
+                ),
+                high: self.high,
+            }
+        } else {
+            CliffordNode {
+                low: self.low,
+                high: self.high.clifford_set_coefficient(
+                    index: index - half, size: half, value: value,
+                ),
+            }
+        }
+    }
+    #[inline(always)]
+    const fn clifford_get_coefficient(
+        self,
+        index: i32,
+        size: i32,
+    ) -> C {
+        let half: i32 = size >> 1
+        if index < half {
+            self.low.clifford_get_coefficient(index: index, size: half)
+        } else {
+            self.high.clifford_get_coefficient(
+                index: index - half, size: half,
+            )
+        }
+    }
+}
+
+// Compatibility names retained for the first public support API.
 pub trait CliffordSetSupportLeaf {
     const fn clifford_set_support_leaf(
         self,
@@ -587,11 +668,13 @@ impl CliffordSetSupportLeaf for CliffordScalar<CliffordSupport> {
         size: i32,
         value: CliffordSupport,
     ) -> Self {
-        CliffordScalar { scalar: value }
+        self.clifford_set_coefficient(
+            index: index, size: size, value: value,
+        )
     }
 }
-impl<A: CliffordSetSupportLeaf + Copy> CliffordSetSupportLeaf
-    for CliffordNode<A>
+impl<A: CliffordCoefficientAccess<CliffordSupport> + Copy>
+    CliffordSetSupportLeaf for CliffordNode<A>
 {
     #[inline(always)]
     const fn clifford_set_support_leaf(
@@ -600,22 +683,9 @@ impl<A: CliffordSetSupportLeaf + Copy> CliffordSetSupportLeaf
         size: i32,
         value: CliffordSupport,
     ) -> Self {
-        let half: i32 = size >> 1
-        if index < half {
-            CliffordNode {
-                low: self.low.clifford_set_support_leaf(
-                    index: index, size: half, value: value,
-                ),
-                high: self.high,
-            }
-        } else {
-            CliffordNode {
-                low: self.low,
-                high: self.high.clifford_set_support_leaf(
-                    index: index - half, size: half, value: value,
-                ),
-            }
-        }
+        self.clifford_set_coefficient(
+            index: index, size: size, value: value,
+        )
     }
 }
 
@@ -633,24 +703,19 @@ impl CliffordGetSupportLeaf for CliffordScalar<CliffordSupport> {
         index: i32,
         size: i32,
     ) -> CliffordSupport {
-        self.scalar
+        self.clifford_get_coefficient(index: index, size: size)
     }
 }
-impl<A: CliffordGetSupportLeaf> CliffordGetSupportLeaf for CliffordNode<A> {
+impl<A: CliffordCoefficientAccess<CliffordSupport> + Copy>
+    CliffordGetSupportLeaf for CliffordNode<A>
+{
     #[inline(always)]
     const fn clifford_get_support_leaf(
         self,
         index: i32,
         size: i32,
     ) -> CliffordSupport {
-        let half: i32 = size >> 1
-        if index < half {
-            self.low.clifford_get_support_leaf(index: index, size: half)
-        } else {
-            self.high.clifford_get_support_leaf(
-                index: index - half, size: half,
-            )
-        }
+        self.clifford_get_coefficient(index: index, size: size)
     }
 }
 
@@ -706,10 +771,14 @@ impl CliffordSetLeaf for CliffordScalar<f32> {
         size: i32,
         value: f32,
     ) -> Self {
-        CliffordScalar { scalar: value }
+        self.clifford_set_coefficient(
+            index: index, size: size, value: value,
+        )
     }
 }
-impl<A: CliffordSetLeaf + Copy> CliffordSetLeaf for CliffordNode<A> {
+impl<A: CliffordCoefficientAccess<f32> + Copy> CliffordSetLeaf
+    for CliffordNode<A>
+{
     #[inline(always)]
     const fn clifford_set_leaf(
         self,
@@ -717,22 +786,9 @@ impl<A: CliffordSetLeaf + Copy> CliffordSetLeaf for CliffordNode<A> {
         size: i32,
         value: f32,
     ) -> Self {
-        let half: i32 = size >> 1
-        if index < half {
-            CliffordNode {
-                low: self.low.clifford_set_leaf(
-                    index: index, size: half, value: value,
-                ),
-                high: self.high,
-            }
-        } else {
-            CliffordNode {
-                low: self.low,
-                high: self.high.clifford_set_leaf(
-                    index: index - half, size: half, value: value,
-                ),
-            }
-        }
+        self.clifford_set_coefficient(
+            index: index, size: size, value: value,
+        )
     }
 }
 
@@ -742,18 +798,15 @@ pub trait CliffordGetLeaf {
 impl CliffordGetLeaf for CliffordScalar<f32> {
     #[inline(always)]
     const fn clifford_get_leaf(self, index: i32, size: i32) -> f32 {
-        self.scalar
+        self.clifford_get_coefficient(index: index, size: size)
     }
 }
-impl<A: CliffordGetLeaf> CliffordGetLeaf for CliffordNode<A> {
+impl<A: CliffordCoefficientAccess<f32>> CliffordGetLeaf
+    for CliffordNode<A>
+{
     #[inline(always)]
     const fn clifford_get_leaf(self, index: i32, size: i32) -> f32 {
-        let half: i32 = size >> 1
-        if index < half {
-            self.low.clifford_get_leaf(index: index, size: half)
-        } else {
-            self.high.clifford_get_leaf(index: index - half, size: half)
-        }
+        self.clifford_get_coefficient(index: index, size: size)
     }
 }
 

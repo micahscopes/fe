@@ -1,6 +1,59 @@
 use fe_hir::test_db::HirAnalysisTestDb;
 
 #[test]
+fn reflected_const_candidate_can_narrow_into_an_exact_i32_term() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "reflected_const_candidate_i32.fe".into(),
+        r#"
+struct Term<const Candidate: usize> {}
+struct ObservedTerm<const Candidate: i32> {}
+trait Observe { type Out }
+impl<const Candidate: usize> Observe for Term<Candidate> {
+    type Out = ObservedTerm<{Candidate.downcast_truncate()}>
+}
+type Closed = <Term<49> as Observe>::Out
+fn expects_exact(_ value: ObservedTerm<49>) {}
+fn proves_exact(value: Closed) { expects_exact(value) }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
+fn normalized_ground_type_inspection_rejects_type_arg_for_const_param() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "provider_ground_type_arg_kind_mismatch.fe".into(),
+        r#"
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+trait Inspect {}
+struct Zero {}
+struct ConstOnly<const N: usize> {}
+struct Target {}
+struct Inspector {}
+impl Derive<Inspect> for Inspector {
+    const fn derive<T>(ev: own Evidence<Inspect<T>>) -> Evidence<Inspect<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<Inspect<T>>)
+    {
+        for _ in builder.ty<ConstOnly<Zero>>().normalized_preorder_types() {}
+        builder.finish()
+        ev
+    }
+}
+derive Inspect for Target using Inspector
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod);
+    assert!(
+        !diagnostics.is_empty(),
+        "a type argument must not be accepted for a nominal const parameter"
+    );
+}
+
+#[test]
 fn imported_sparse_plan_reflects_exact_thirty_two_survivors() {
     use common::InputDb;
     use driver::DriverDataBase;

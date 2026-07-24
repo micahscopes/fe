@@ -34,6 +34,7 @@ pub(super) enum BaseConstValue<'db> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BaseUIntKind {
     U32,
+    I32,
     Usize,
     Inferred,
 }
@@ -41,7 +42,7 @@ pub(super) enum BaseUIntKind {
 impl BaseUIntKind {
     fn bits(self) -> usize {
         match self {
-            Self::U32 => 32,
+            Self::U32 | Self::I32 => 32,
             Self::Usize | Self::Inferred => 256,
         }
     }
@@ -153,6 +154,7 @@ pub(super) fn raw_uint_kind(
     };
     match path.as_ident(db)?.data(db).as_str() {
         "u32" => Some(BaseUIntKind::U32),
+        "i32" => Some(BaseUIntKind::I32),
         "usize" => Some(BaseUIntKind::Usize),
         _ => None,
     }
@@ -185,6 +187,12 @@ fn coerce_uint<'db>(
         }
         value.data(db).clone()
     };
+    // The pre-expansion evaluator intentionally models only non-negative
+    // integers. Preserve that fail-closed subset for signed targets instead
+    // of silently treating a high-bit two's-complement result as unsigned.
+    if kind == BaseUIntKind::I32 && raw >= (BigUint::one() << 31) {
+        return Err(BaseConstEvalError::Unsupported);
+    }
     Ok(BaseConstValue::UInt {
         value: IntegerId::new(db, raw),
         kind,
@@ -318,7 +326,11 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
         path.as_ident(self.db)
     }
 
-    fn eval_stmt(&mut self, stmt: StmtId) -> Result<Flow<'db>, BaseConstEvalError> {
+    fn eval_stmt(
+        &mut self,
+        stmt: StmtId,
+        expected: Option<BaseUIntKind>,
+    ) -> Result<Flow<'db>, BaseConstEvalError> {
         self.tick()?;
         let body = self.body()?;
         let Partial::Present(stmt) = stmt.data(self.db, body) else {
@@ -332,8 +344,8 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
                 self.bind(name, value);
                 Ok(Flow::Next(None))
             }
-            Stmt::Expr(expr) => self.eval_expr(*expr, None),
-            Stmt::Return(Some(expr)) => Ok(Flow::Return(self.value(*expr, None)?)),
+            Stmt::Expr(expr) => self.eval_expr(*expr, expected),
+            Stmt::Return(Some(expr)) => Ok(Flow::Return(self.value(*expr, expected)?)),
             Stmt::While(cond, loop_body) => {
                 while self.eval_cond(*cond)? {
                     match self.eval_expr(*loop_body, None)? {
@@ -364,8 +376,10 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
             Expr::Block(stmts) => {
                 self.scopes.push(Vec::new());
                 let mut tail = None;
-                for stmt in stmts {
-                    match self.eval_stmt(stmt)? {
+                let last = stmts.len().checked_sub(1);
+                for (index, stmt) in stmts.into_iter().enumerate() {
+                    let stmt_expected = (Some(index) == last).then_some(expected).flatten();
+                    match self.eval_stmt(stmt, stmt_expected)? {
                         Flow::Next(value) => tail = value,
                         flow @ Flow::Return(_) => {
                             self.scopes.pop();
@@ -491,6 +505,19 @@ impl<'db> BaseConstEvaluator<'_, 'db> {
                     .iter()
                     .map(|arg| self.value(arg.expr, None))
                     .collect::<Result<Vec<_>, _>>()?;
+                if func.is_const(self.db)
+                    && func.is_extern(self.db)
+                    && func
+                        .name(self.db)
+                        .to_opt()
+                        .is_some_and(|name| name.data(self.db) == "__int_truncate")
+                {
+                    let [value] = values.as_slice() else {
+                        return Err(BaseConstEvalError::Unsupported);
+                    };
+                    let target = expected.ok_or(BaseConstEvalError::Unsupported)?;
+                    return coerce_uint(self.db, *value, target, true);
+                }
                 self.call(func, values)
             }
             Expr::MethodCall(receiver, method, generic_args, args)
@@ -732,6 +759,78 @@ mod tests {
         let top_mod = map_file_to_mod(&db, file);
         let func = find_func(&db, top_mod, "overflow");
         assert!(eval_base_const_func(&db, func, vec![]).is_err());
+    }
+
+    #[test]
+    fn positive_usize_can_truncate_to_i32_in_base_ctfe() {
+        let mut db = TestDb::default();
+        let file = db.standalone_file(
+            "const fn narrow(_ value: usize) -> i32 { value.downcast_truncate() }\n\
+             const fn nested(_ value: usize) -> i32 { { value.downcast_truncate() } }\n\
+             const fn returned(_ value: usize) -> i32 { return value.downcast_truncate() }\n\
+             const fn non_tail(_ value: usize) -> i32 {\n\
+                 value.downcast_truncate()\n\
+                 7\n\
+             }\n",
+        );
+        let top_mod = map_file_to_mod(&db, file);
+        for name in ["narrow", "nested", "returned"] {
+            let func = find_func(&db, top_mod, name);
+            assert_eq!(
+                eval_base_const_func(&db, func, vec![uint(&db, 49, BaseUIntKind::Usize)],),
+                Ok(uint(&db, 49, BaseUIntKind::I32)),
+                "{name} should inherit its result context"
+            );
+        }
+        let narrow = find_func(&db, top_mod, "narrow");
+        assert!(
+            eval_base_const_func(
+                &db,
+                narrow,
+                vec![uint(&db, 1usize << 31, BaseUIntKind::Usize)],
+            )
+            .is_err(),
+            "pre-expansion signed evaluation must fail closed outside its non-negative subset"
+        );
+        let non_tail = find_func(&db, top_mod, "non_tail");
+        assert!(
+            eval_base_const_func(&db, non_tail, vec![uint(&db, 49, BaseUIntKind::Usize)],).is_err(),
+            "the result context must not leak into an earlier statement"
+        );
+    }
+
+    #[test]
+    fn only_the_const_extern_truncate_intrinsic_uses_the_base_ctfe_bridge() {
+        let mut db = TestDb::default();
+        let intrinsic_file = db.standalone_file(
+            "extern {\n\
+                 const fn __int_truncate<From, To>(_ value: From) -> To\n\
+             }\n\
+             const fn narrow(_ value: usize) -> i32 { __int_truncate(value) }\n",
+        );
+        let intrinsic_mod = map_file_to_mod(&db, intrinsic_file);
+        let narrow = find_func(&db, intrinsic_mod, "narrow");
+        assert_eq!(
+            eval_base_const_func(&db, narrow, vec![uint(&db, 49, BaseUIntKind::Usize)],),
+            Ok(uint(&db, 49, BaseUIntKind::I32))
+        );
+
+        let mut spoof_db = TestDb::default();
+        let spoof_file = spoof_db.standalone_file(
+            "const fn __int_truncate(_ value: usize) -> i32 { 5 }\n\
+             const fn narrow(_ value: usize) -> i32 { __int_truncate(value) }\n",
+        );
+        let spoof_mod = map_file_to_mod(&spoof_db, spoof_file);
+        let spoof = find_func(&spoof_db, spoof_mod, "narrow");
+        assert_eq!(
+            eval_base_const_func(
+                &spoof_db,
+                spoof,
+                vec![uint(&spoof_db, 49, BaseUIntKind::Usize)],
+            ),
+            Ok(uint(&spoof_db, 5, BaseUIntKind::I32)),
+            "a bodied function with the intrinsic name must retain its body semantics"
+        );
     }
 
     #[test]
