@@ -394,8 +394,8 @@
       },
       {
         "path": "runtime/module-worker-actor.js",
-        "bytes": 15709,
-        "sha256": "9995373fe4ce6d4ee6248b73838383f133defe21927c511be661ef4a7bee8ed1"
+        "bytes": 16238,
+        "sha256": "8f46d3d4772af6e3b3e830a8f936bdb25b56435832fb134957430ecd2f2d13ae"
       }
     ]
   }
