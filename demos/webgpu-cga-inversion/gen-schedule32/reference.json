@@ -1,5 +1,5 @@
 {
-  "algebra": "canonical Fe helpers produce an inspectable typed Schedule<32> whose normalized Term payloads directly drive the FCO provider's five lanes and canonical four-bucket balanced reduction",
+  "algebra": "the public recursive Cl(4,1) recurrence derives an exact canonical50-to-32 SparsePlan interpreted directly by ordinary recursive Eval5 specialization",
   "artifact_separation": {
     "actor_wasm": "canonical WebBundle package; owns actor exports and arena",
     "frag_wasm": "entry-rooted kernel package; render export only; zero imports; no generated helper or actor exports"
@@ -15,43 +15,11 @@
     ],
     [
       1,
-      1,
-      2,
-      2,
-      2,
-      0
-    ],
-    [
-      1,
-      1,
-      8,
-      8,
-      2,
-      0
-    ],
-    [
-      1,
-      1,
-      16,
-      16,
-      2,
-      0
-    ],
-    [
-      1,
       2,
       1,
       2,
       1,
       1
-    ],
-    [
-      1,
-      2,
-      2,
-      1,
-      2,
-      0
     ],
     [
       1,
@@ -71,14 +39,6 @@
     ],
     [
       1,
-      8,
-      8,
-      1,
-      2,
-      0
-    ],
-    [
-      1,
       16,
       1,
       16,
@@ -87,6 +47,46 @@
     ],
     [
       1,
+      1,
+      2,
+      2,
+      2,
+      0
+    ],
+    [
+      1,
+      2,
+      2,
+      1,
+      2,
+      0
+    ],
+    [
+      1,
+      1,
+      8,
+      8,
+      2,
+      0
+    ],
+    [
+      1,
+      8,
+      8,
+      1,
+      2,
+      0
+    ],
+    [
+      1,
+      1,
+      16,
+      16,
+      2,
+      0
+    ],
+    [
+      1,
       16,
       16,
       1,
@@ -107,22 +107,6 @@
       2,
       2,
       1,
-      0
-    ],
-    [
-      2,
-      2,
-      8,
-      8,
-      2,
-      0
-    ],
-    [
-      2,
-      2,
-      16,
-      16,
-      2,
       0
     ],
     [
@@ -143,6 +127,22 @@
     ],
     [
       2,
+      16,
+      2,
+      16,
+      1,
+      1
+    ],
+    [
+      2,
+      2,
+      8,
+      8,
+      2,
+      0
+    ],
+    [
+      2,
       8,
       8,
       2,
@@ -151,11 +151,11 @@
     ],
     [
       2,
-      16,
       2,
       16,
-      1,
-      1
+      16,
+      2,
+      0
     ],
     [
       2,
@@ -199,19 +199,19 @@
     ],
     [
       8,
-      8,
-      16,
-      16,
-      2,
-      0
-    ],
-    [
-      8,
       16,
       8,
       16,
       1,
       1
+    ],
+    [
+      8,
+      8,
+      16,
+      16,
+      2,
+      0
     ],
     [
       8,
@@ -291,31 +291,36 @@
     "F32"
   ],
   "provenance": {
-    "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits one shared five-lane sandwich aggregate from the same helpers",
-    "application_kernel_source_fnv1a32": 67794813,
+    "algebra": "public recursive Cl(4,1) CTFE derives the exact canonical50-to-32 typed plan; ordinary recursive Eval5 interpretation is erased by monomorphization",
+    "application_kernel_source_fnv1a32": 279966898,
     "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
     "body_fnv1a32": 1730017086,
+    "canonical50_api_fnv1a32": 2009488090,
+    "canonical50_planner": "ingots/canonical_cl41_schedule/src/lib.fe",
     "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
-    "canonical_fnv1a32": 2027989085,
+    "canonical_fnv1a32": 3016829791,
     "fe_dirty": false,
-    "fe_rev": "5dd5018dae5816d3314497b83bcee0c63e754f66",
+    "fe_rev": "df2ba2ef2273a857459696851e90e96cf4dda1cb",
     "fe_status_fnv1a32": 2166136261,
-    "fe_untracked_present": false,
-    "generated_unix_secs": 1784859541,
+    "fe_untracked_present": true,
+    "generated_unix_secs": 1784900003,
     "kernel_source_self_contained": false,
     "published_app_manifest": "demos/webgpu-cga-inversion/gen-schedule32/app/fe.toml",
     "published_app_source": "demos/webgpu-cga-inversion/gen-schedule32/app/src/lib.fe",
-    "published_dependency_path": "../../../../ingots/sparse_clifford",
+    "published_dependency_paths": [
+      "../../../../ingots/canonical_cl41_schedule",
+      "../../../../ingots/sparse_clifford"
+    ],
     "sonatina_dirty": false,
-    "sonatina_path": "/workspace/build/runtime-v4-demo-tmp/fe-sonatina-overlay.Q6TTr4/sonatina",
+    "sonatina_path": "/workspace/fe-worktrees/canonical50-browser-provider/output/demo-tmp/fe-sonatina-overlay.4m994l/sonatina",
     "sonatina_rev": "ac266c210cad7872fc98380a73b4ca363877bc1f",
     "sonatina_status_fnv1a32": 2166136261,
-    "source": "Schedule32 application ingot depending on the public sparse_clifford ingot",
-    "sparse_clifford_api_fnv1a32": 3708522204,
+    "source": "Schedule32 application ingot depending on the public canonical_cl41_schedule planner and sparse_clifford recurrence",
+    "sparse_clifford_api_fnv1a32": 4107637637,
     "sparse_clifford_fixture": "ingots/sparse_clifford/src/lib.fe"
   },
   "runtime": "wasmtime executing dependency-backed Fe application-ingot Wasm; every pixel semantically checked against independent Rust f32 oracle",
-  "runtime_tuple_order": "canonical normalized Schedule32 Term order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
+  "runtime_tuple_order": "pair-major canonical50 survivor order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
   "schedule_tuple_fields": [
     "left_blade",
     "point_blade",
