@@ -9,6 +9,7 @@ sys.path.insert(0, str(HERE))
 
 from browser_runtime_preflight import (
     RUNTIME_PATHS,
+    RUNTIME_PROTOCOL_VERSION,
     validate_browser_runtime,
     validate_shared_browser_runtime,
 )
@@ -29,7 +30,7 @@ def fixture(root, suffix=b""):
     return {
         "browser_runtime": {
             "protocol": "fe-browser-actor-runtime",
-            "protocol_version": 1,
+            "protocol_version": RUNTIME_PROTOCOL_VERSION,
             "artifacts": artifacts,
         },
     }
@@ -46,7 +47,22 @@ class BrowserRuntimePreflightTests(unittest.TestCase):
                 "qcga": (fixture(qcga), qcga),
             })
             self.assertEqual(identity[0], "fe-browser-actor-runtime")
-            self.assertEqual(len(identity[2]), 6)
+            self.assertEqual(identity[1], RUNTIME_PROTOCOL_VERSION)
+            self.assertEqual(len(identity[2]), len(RUNTIME_PATHS))
+
+    def test_accepts_v4_and_rejects_stale_packaged_runtime_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = fixture(root)
+            self.assertEqual(
+                validate_browser_runtime(manifest, root)[1],
+                RUNTIME_PROTOCOL_VERSION,
+            )
+            manifest["browser_runtime"]["protocol_version"] = (
+                RUNTIME_PROTOCOL_VERSION - 1
+            )
+            with self.assertRaises(AssertionError):
+                validate_browser_runtime(manifest, root)
 
     def test_rejects_divergent_application_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
