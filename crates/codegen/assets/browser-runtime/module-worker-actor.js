@@ -347,6 +347,10 @@ export async function createCanonicalModuleWorkerActor(options) {
   const actor = await createModuleWorkerActor(options);
   let requestId = 0;
   let restartTail = Promise.resolve();
+  // A restart is a synchronous lifecycle fence even though replacement
+  // construction is asynchronous. This distinguishes calls already in flight
+  // from calls intentionally issued after restart() and waiting on its tail.
+  let lifecycleVersion = 0;
   const awaitRestart = (operation, signal) => {
     if (!signal) return operation;
     if (signal.aborted) {
@@ -369,7 +373,12 @@ export async function createCanonicalModuleWorkerActor(options) {
       // Capture the restart chain at call time. Requests made after restart()
       // wait for the replacement worker to become ready, while requests made
       // before restart retain their original epoch/lifecycle semantics.
-      await awaitRestart(restartTail, options?.signal);
+      const requestLifecycle = lifecycleVersion;
+      const requestRestartTail = restartTail;
+      await awaitRestart(requestRestartTail, options?.signal);
+      if (requestLifecycle !== lifecycleVersion) {
+        throw runtimeError("FE_ACTOR_WORKER_RESTART", "restarting module worker");
+      }
       await actor.ready(options);
       const result = await actor.request(actorEnvelope({
         type: "request", lane, payload, generation,
@@ -384,6 +393,7 @@ export async function createCanonicalModuleWorkerActor(options) {
       // Reserve the underlying lifecycle transition synchronously. Besides
       // preserving call order, this lets a same-turn crash observe that the
       // explicit restart already owns replacement construction.
+      lifecycleVersion += 1;
       const operation = actor.restart().then((next) => {
         requestId = 0;
         return next;

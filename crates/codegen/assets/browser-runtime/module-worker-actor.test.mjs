@@ -72,8 +72,17 @@ await assert.rejects(
   (error) => error.code === "FE_ACTOR_REMOTE"
     && !error.message.includes("private worker detail"),
 );
-assert.deepEqual(await Promise.all([canonical.restart(), canonical.restart()]), [1, 2]);
-assert.equal(canonical.epoch(), 2);
+const interrupted = canonical.request("render", { args: new Int32Array([7]) }, 5);
+const interruptingRestart = canonical.restart();
+await assert.rejects(
+  interrupted,
+  (error) => error.code === "FE_ACTOR_WORKER_RESTART"
+    && error.message.includes("restarting module worker"),
+  "a request started before restart must not slip onto the replacement epoch",
+);
+assert.equal(await interruptingRestart, 1);
+assert.deepEqual(await Promise.all([canonical.restart(), canonical.restart()]), [2, 3]);
+assert.equal(canonical.epoch(), 3);
 canonical.close();
 
 class GatedRestartWorker extends FakeWorker {
