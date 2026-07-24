@@ -22,6 +22,83 @@ fn proves_exact(value: Closed) { expects_exact(value) }
 }
 
 #[test]
+fn nested_associated_type_normalizes_multiple_helper_computed_const_payloads() {
+    let mut db = HirAnalysisTestDb::default();
+    let file = db.new_stand_alone(
+        "reflected_const_candidate_repeated_i32.fe".into(),
+        r#"
+struct Term<const Candidate: usize> {}
+struct Zero {}
+struct Add<L, R> {}
+struct ObservedZero {}
+struct ObservedTerm<
+    const Candidate: i32,
+    const Left: i32,
+    const Point: i32,
+    const Output: i32,
+    const Magnitude: i32,
+    const Negative: i32,
+> {}
+struct ObservedAdd<L, R> {}
+const fn candidate_left(_ candidate: usize) -> i32 { 1 }
+const fn candidate_point(_ candidate: usize) -> i32 { 2 }
+const fn candidate_output(_ candidate: usize) -> i32 {
+    (candidate + 1).downcast_truncate()
+}
+const fn candidate_magnitude(_ candidate: usize) -> i32 { 2 }
+const fn candidate_negative(_ candidate: usize) -> i32 {
+    (candidate & 1).downcast_truncate()
+}
+trait Observe { type Out }
+impl<const Candidate: usize> Observe for Term<Candidate> {
+    type Out = ObservedTerm<
+        {Candidate.downcast_truncate()},
+        {candidate_left(Candidate)},
+        {candidate_point(Candidate)},
+        {candidate_output(Candidate)},
+        {candidate_magnitude(Candidate)},
+        {candidate_negative(Candidate)},
+    >
+}
+impl Observe for Zero { type Out = ObservedZero }
+impl<L: Observe, R: Observe> Observe for Add<L, R> {
+    // Keep the projected first argument visually separate from the generic
+    // opener: `ObservedAdd<<L ...` is the shift token, not two `<` tokens.
+    type Out = ObservedAdd<
+        <L as Observe>::Out,
+        <R as Observe>::Out,
+    >
+}
+trait Eval { fn eval() -> i32 }
+impl Eval for ObservedZero { fn eval() -> i32 { 0 } }
+impl<
+    const Candidate: i32,
+    const Left: i32,
+    const Point: i32,
+    const Output: i32,
+    const Magnitude: i32,
+    const Negative: i32,
+> Eval for ObservedTerm<Candidate, Left, Point, Output, Magnitude, Negative> {
+    fn eval() -> i32 {
+        Candidate + Left + Point + Output + Magnitude + Negative
+    }
+}
+impl<L: Eval, R: Eval> Eval for ObservedAdd<L, R> {
+    fn eval() -> i32 { <L as Eval>::eval() + <R as Eval>::eval() }
+}
+type ObservedPlan = <Add<Term<7>, Zero> as Observe>::Out
+fn expects_exact(
+    _ value: ObservedAdd<ObservedTerm<7, 1, 2, 8, 2, 1>, ObservedZero>,
+) {}
+fn proves_payloads(value: ObservedPlan) { expects_exact(value) }
+fn proves_exact() -> i32 { <ObservedPlan as Eval>::eval() }
+"#,
+    );
+    let (top_mod, _) = db.top_mod(file);
+    db.assert_no_diags(top_mod);
+}
+
+#[test]
 fn normalized_ground_type_inspection_rejects_type_arg_for_const_param() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(
