@@ -365,7 +365,7 @@
   },
   "browser_runtime": {
     "protocol": "fe-browser-actor-runtime",
-    "protocol_version": 2,
+    "protocol_version": 3,
     "artifacts": [
       {
         "path": "runtime/actor-coordinator.js",
@@ -396,6 +396,16 @@
         "path": "runtime/module-worker-actor.js",
         "bytes": 16238,
         "sha256": "8f46d3d4772af6e3b3e830a8f936bdb25b56435832fb134957430ecd2f2d13ae"
+      },
+      {
+        "path": "runtime/worker-host.js",
+        "bytes": 2403,
+        "sha256": "12c3154c0a5da1230cf2e86efcbdfcaa24a8019736266f5112740613b0573e40"
+      },
+      {
+        "path": "runtime/actor-client.js",
+        "bytes": 1213,
+        "sha256": "5d3725557f446077453cd66d75526d6073d24608fc1ef247685d27bd36900db5"
       }
     ]
   }

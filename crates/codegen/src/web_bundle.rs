@@ -34,7 +34,7 @@ use crate::{
 pub const WEB_BUNDLE_PROTOCOL: &str = "fe-web-bundle";
 pub const WEB_BUNDLE_PROTOCOL_VERSION: u32 = 4;
 pub const WEB_ACTOR_RUNTIME_PROTOCOL: &str = "fe-browser-actor-runtime";
-pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 2;
+pub const WEB_ACTOR_RUNTIME_VERSION: u32 = 3;
 
 const WASM_FILE: &str = "module.wasm";
 const WGSL_FILE: &str = "shader.wgsl";
@@ -66,6 +66,14 @@ const WEB_ACTOR_RUNTIME: &[(&str, &str)] = &[
     (
         "runtime/module-worker-actor.js",
         include_str!("../assets/browser-runtime/module-worker-actor.js"),
+    ),
+    (
+        "runtime/worker-host.js",
+        include_str!("../assets/browser-runtime/worker-host.js"),
+    ),
+    (
+        "runtime/actor-client.js",
+        include_str!("../assets/browser-runtime/actor-client.js"),
     ),
 ];
 static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
@@ -1432,6 +1440,8 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 "runtime/gpu-actor.js",
                 "runtime/message-port-actor.js",
                 "runtime/module-worker-actor.js",
+                "runtime/worker-host.js",
+                "runtime/actor-client.js",
                 MANIFEST_FILE,
             ]
         );
@@ -1453,6 +1463,22 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 source.as_bytes()
             );
         }
+        let worker_host = WEB_ACTOR_RUNTIME
+            .iter()
+            .find_map(|(path, source)| (*path == "runtime/worker-host.js").then_some(*source))
+            .unwrap();
+        assert!(worker_host.contains("createCanonicalIntentRouter"));
+        assert!(worker_host.contains("adapter.intents"));
+        assert!(!worker_host.contains("lanes: ["));
+        assert!(!worker_host.contains("[\"render\", \"verify\"]"));
+        let actor_client = WEB_ACTOR_RUNTIME
+            .iter()
+            .find_map(|(path, source)| (*path == "runtime/actor-client.js").then_some(*source))
+            .unwrap();
+        assert!(actor_client.contains("createCanonicalBrowserActor"));
+        assert!(actor_client.contains("createCanonicalMainThreadGpuBroker"));
+        assert!(actor_client.contains("createCanonicalModuleWorkerActor"));
+        assert!(!actor_client.contains("actorEnvelope"));
         let destination = std::env::temp_dir().join(format!(
             "fe-canonical-adapter-test-{}-{}",
             std::process::id(),

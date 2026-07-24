@@ -4,14 +4,15 @@ import { performance } from "node:perf_hooks";
 import { createQcgaActor } from "./worker-client.js";
 
 const workerSource = await readFile(
-  new URL("./wasm-worker.js", import.meta.url),
+  new URL("./gen/runtime/worker-host.js", import.meta.url),
   "utf8",
 );
 assert.match(
   workerSource,
-  /postMessage\(\{ type: "init-error", error: "FE_ACTOR_WORKER_INIT" \}\)/,
+  /const INIT_ERROR = "FE_ACTOR_WORKER_INIT"/,
   "the Worker readiness boundary must use the canonical non-leaky init failure",
 );
+assert.match(workerSource, /postMessage\(\{ type: "init-error", error: INIT_ERROR \}\)/);
 assert.doesNotMatch(
   workerSource,
   /postMessage\(\{ type: "init-error", error: String\(error\) \}\)/,
@@ -24,7 +25,7 @@ assert.doesNotMatch(
 );
 assert.match(
   workerSource,
-  /createCanonicalIntentRouter\(adapter,/,
+  /createCanonicalIntentRouter\(\s*adapter,/,
   "Worker routing must be partitioned from compiler-derived lane intents",
 );
 assert.match(
@@ -39,7 +40,7 @@ assert.doesNotMatch(
 );
 
 const clientSource = await readFile(
-  new URL("./worker-client.js", import.meta.url),
+  new URL("./gen/runtime/actor-client.js", import.meta.url),
   "utf8",
 );
 assert.match(
@@ -56,6 +57,22 @@ assert.doesNotMatch(
   clientSource,
   /actorEnvelope|createModuleWorkerActor|selectActorSchemas|requestId/,
   "the application client must not duplicate canonical actor protocol machinery",
+);
+assert.doesNotMatch(
+  `${workerSource}\n${clientSource}`,
+  /lanes:\s*\[|\["render",\s*"verify"\]/,
+  "generated composition must derive the lane set from compiler intent",
+);
+
+const wrapperSource = await readFile(
+  new URL("./worker-client.js", import.meta.url),
+  "utf8",
+);
+assert.match(wrapperSource, /createCanonicalBrowserActor\(\{/);
+assert.doesNotMatch(
+  wrapperSource,
+  /MessageChannel|createAuxiliaryPorts|actorEnvelope|requestId/,
+  "the QCGA wrapper must retain only domain mapping and ergonomic methods",
 );
 
 const wasm = new Uint8Array(await readFile(
@@ -81,6 +98,31 @@ const gpuBytes = new Uint8Array(128 * 128 * 4);
 gpuBytes.fill(19);
 let renderGeneration = null;
 let verifyGeneration = null;
+const { createCanonicalBrowserActor } =
+  await import("./gen/runtime/actor-client.js");
+class UnusedWorker {
+  addEventListener() {}
+  removeEventListener() {}
+  terminate() {}
+}
+for (const handlers of [
+  { render() { return { submitted: true }; } },
+  {
+    render() { return { submitted: true }; },
+    verify() { return gpuBytes; },
+    extra() {},
+  },
+]) {
+  await assert.rejects(
+    createCanonicalBrowserActor({
+      wasm,
+      handlers,
+      WorkerCtor: UnusedWorker,
+    }),
+    /module worker initialization failed/,
+    "generated composition must fail closed when handlers differ from Fe intents",
+  );
+}
 const actor = await createQcgaActor({
   wasm,
   width: 128,
@@ -120,6 +162,11 @@ try {
   assert.equal(fnv1a32(oracle), reference.fnv1a32 >>> 0);
 
   const interrupted = actor.wasm(frame(6));
+  const pendingDeadline = performance.now() + 2_000;
+  while (actor.pendingCount() === 0 && performance.now() < pendingDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.ok(actor.pendingCount() > 0, "restart fixture must have an in-flight Wasm request");
   const restarted = actor.restart();
   await assert.rejects(interrupted, /restarting module worker/);
   assert.equal(await restarted, 1);

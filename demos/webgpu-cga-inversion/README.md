@@ -145,8 +145,9 @@ application supplies the two concrete dispatchers but no lane lists.
 The complete canonical actor is emitted as an intact `actor/` WebBundle v4:
 its manifest paths name the exact Wasm, shader, interfaces, and runtime modules
 loaded by the browser. The runtime manifest pins
-`fe-browser-actor-runtime` version 2 and SHA-256 metadata for every packaged
-module; no demo-owned copy is an implicit protocol dependency.
+`fe-browser-actor-runtime` version 3 and SHA-256 metadata for all eight packaged
+modules, including the generated Worker host and actor client; no demo-owned
+copy is an implicit protocol dependency.
 
 Legacy D1 generation uses Sonatina `ed43625b`; Schedule32 uses the reviewed
 browser-runtime commit `ac266c210cad7872fc98380a73b4ca363877bc1f`. The latter

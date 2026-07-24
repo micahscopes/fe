@@ -11,8 +11,9 @@ records:
 - `oracle` is a genuine Fe/Wasm lane that allocates, computes, and returns the
   complete frame through one canonical call.
 
-The ownership map is visible in `wasm-worker.js`; the demo does not claim that a
-nominal Fe function submitted WebGPU work. `AllocatedBrowserBytes` preserves the
+The ownership map is derived from the generated Fe intents by
+`gen/runtime/worker-host.js`; the demo does not claim that a nominal Fe
+function submitted WebGPU work. `AllocatedBrowserBytes` preserves the
 wasm32 `MemPtr<u8>` carrier while Fe fills the arena, and the canonical wrapper
 copies the complete frame before reset and Worker transfer. Acceptance reports
 the measured one-call `oracleMs`.

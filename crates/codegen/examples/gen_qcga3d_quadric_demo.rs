@@ -361,6 +361,14 @@ fn main() {
         &out.join("actor-interface.d.ts"),
         actor_interface_d_ts.as_bytes(),
     );
+    // The compiler-packaged composition modules import the canonical
+    // WebBundle names. Retain the legacy actor-prefixed aliases above for the
+    // demo's public artifact contract while publishing the standard siblings.
+    write(&out.join("interface.js"), actor_interface_js.as_bytes());
+    write(
+        &out.join("interface.d.ts"),
+        actor_interface_d_ts.as_bytes(),
+    );
     for file in canonical_bundle
         .browser_runtime_files()
         .expect("QCGA browser actor runtime materializes")

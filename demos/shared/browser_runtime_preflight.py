@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 RUNTIME_PROTOCOL = "fe-browser-actor-runtime"
-RUNTIME_PROTOCOL_VERSION = 2
+RUNTIME_PROTOCOL_VERSION = 3
 RUNTIME_PATHS = (
     "runtime/actor-coordinator.js",
     "runtime/actor-endpoint.js",
@@ -13,6 +13,8 @@ RUNTIME_PATHS = (
     "runtime/gpu-actor.js",
     "runtime/message-port-actor.js",
     "runtime/module-worker-actor.js",
+    "runtime/worker-host.js",
+    "runtime/actor-client.js",
 )
 
 

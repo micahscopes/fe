@@ -1,9 +1,6 @@
 import {
-  createCanonicalModuleWorkerActor,
-} from "./gen/runtime/module-worker-actor.js";
-import {
-  createCanonicalMainThreadGpuBroker,
-} from "./gen/runtime/gpu-actor.js";
+  createCanonicalBrowserActor,
+} from "./gen/runtime/actor-client.js";
 
 export async function createQcgaActor({
   wasm,
@@ -13,29 +10,13 @@ export async function createQcgaActor({
   gpuRender,
   gpuVerify,
 }) {
-  const { compileActorAdapter } = await import("./gen/actor-interface.js");
-  const adapter = compileActorAdapter();
-  const actor = await createCanonicalModuleWorkerActor({
-    workerUrl: new URL("./wasm-worker.js", import.meta.url),
-    init: { wasm },
-    adapter,
-    createAuxiliaryPorts(epoch) {
-      const channel = new MessageChannel();
-      const broker = createCanonicalMainThreadGpuBroker(channel.port1, {
-        adapter,
-        handlers: {
-          render: (request) =>
-            gpuRender(params.map(({ name }) => request[name]), request),
-          verify: (request) =>
-            gpuVerify(params.map(({ name }) => request[name]), request),
-        },
-        initialEpoch: epoch,
-      });
-      return {
-        message: { gpuPort: channel.port2 },
-        transfer: [channel.port2],
-        close: () => broker.close(),
-      };
+  const actor = await createCanonicalBrowserActor({
+    wasm,
+    handlers: {
+      render: (request) =>
+        gpuRender(params.map(({ name }) => request[name]), request),
+      verify: (request) =>
+        gpuVerify(params.map(({ name }) => request[name]), request),
     },
   });
   const request = (lane, payload, options) =>
