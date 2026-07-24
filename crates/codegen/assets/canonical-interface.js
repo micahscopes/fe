@@ -588,8 +588,15 @@ function canonicalTransferList(layout, value, name, output, seen) {
           || value.byteOffset !== 0 || value.byteLength !== value.buffer.byteLength) {
         throw actorError("FE_ACTOR_TRANSFER", `${name} bytes are not an owned full-span Uint8Array`);
       }
-      if (!seen.has(value.buffer)) {
-        seen.add(value.buffer);
+      const prior = seen.get(value.buffer);
+      if (prior !== undefined && prior !== "bytes") {
+        throw actorError(
+          "FE_ACTOR_TRANSFER",
+          `${name} aliases a buffer through incompatible canonical transfer layouts`,
+        );
+      }
+      if (prior === undefined) {
+        seen.set(value.buffer, "bytes");
         output.push(value.buffer);
       }
       return;
@@ -606,8 +613,16 @@ function canonicalTransferList(layout, value, name, output, seen) {
       if (value.length > layout.max) {
         throw actorError("FE_ACTOR_TRANSFER", `${name} exceeds maximum length ${layout.max}`);
       }
-      if (!seen.has(value.buffer)) {
-        seen.add(value.buffer);
+      const signature = `list:${layout.element}:${layout.max}`;
+      const prior = seen.get(value.buffer);
+      if (prior !== undefined && prior !== signature) {
+        throw actorError(
+          "FE_ACTOR_TRANSFER",
+          `${name} aliases a buffer through incompatible canonical transfer layouts`,
+        );
+      }
+      if (prior === undefined) {
+        seen.set(value.buffer, signature);
         output.push(value.buffer);
       }
       return;
@@ -685,14 +700,14 @@ export function compileCanonicalActorAdapter(manifest, compiled) {
       const layout = responseLayouts[request?.lane];
       if (!layout) throw actorError("FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane");
       const output = [];
-      canonicalTransferList(layout, value, `${request.lane} response`, output, new Set());
+      canonicalTransferList(layout, value, `${request.lane} response`, output, new Map());
       return output;
     },
     transferRequest(value, request) {
       const layout = requestLayouts[request?.lane];
       if (!layout) throw actorError("FE_ACTOR_UNKNOWN_LANE", "unknown canonical actor lane");
       const output = [];
-      canonicalTransferList(layout, value, `${request.lane} request`, output, new Set());
+      canonicalTransferList(layout, value, `${request.lane} request`, output, new Map());
       return output;
     },
   });

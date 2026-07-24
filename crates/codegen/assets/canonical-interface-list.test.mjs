@@ -194,6 +194,58 @@ test("recursive record and active variant traversal deduplicates shared list buf
   );
 });
 
+test("nested transfer rejects incompatible typed aliases of one owned buffer", () => {
+  const request = {
+    align: 4,
+    fields: [
+      { layout: list("u32", 4), name: "words", offset: 0 },
+      {
+        layout: {
+          align: 4,
+          kind: "variant",
+          size: 12,
+          tag_offset: 0,
+          variants: [
+            { fields: [], name: "none", tag: 0 },
+            {
+              fields: [{
+                layout: {
+                  align: 4,
+                  kind: "bytes",
+                  length_offset: 4,
+                  pointer_offset: 0,
+                  size: 8,
+                },
+                name: "bytes",
+                offset: 4,
+              }],
+              name: "some",
+              tag: 1,
+            },
+          ],
+        },
+        name: "nested",
+        offset: 8,
+      },
+    ],
+    kind: "record",
+    size: 20,
+  };
+  const source = manifest(request, list("f32", 1));
+  const actor = compileCanonicalActorAdapter(
+    source,
+    compileCanonicalInterfaceManifest(source),
+  );
+  const buffer = new ArrayBuffer(8);
+  assert.throws(
+    () => actor.transferRequest({
+      words: new Uint32Array(buffer),
+      nested: { tag: "some", bytes: new Uint8Array(buffer) },
+    }, { lane: "update" }),
+    /aliases a buffer through incompatible canonical transfer layouts/,
+  );
+});
+
 test("manifest rejects unsafe list vocabulary", () => {
   assert.throws(
     () => compileCanonicalInterfaceManifest(manifest(list("u8", 4))),
