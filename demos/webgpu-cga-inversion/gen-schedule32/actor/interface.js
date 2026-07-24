@@ -1,5 +1,5 @@
 export const CANONICAL_INTERFACE_PROTOCOL = "fe-canonical-browser-interface";
-export const CANONICAL_INTERFACE_VERSION = 3;
+export const CANONICAL_INTERFACE_VERSION = 4;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -88,6 +88,19 @@ function validateLayout(layout, path, depth = 0, state = { nodes: 0 }) {
     if (layout.size !== 8 || layout.align !== 4 || layout.encoding !== "utf-8"
         || layout.pointer_offset !== 0 || layout.length_offset !== 4) {
       throw new TypeError(`${path} has non-canonical string descriptor`);
+    }
+    return layout;
+  }
+  if (layout.kind === "list") {
+    exactKeys(layout, [
+      ...baseKeys, "element", "length_offset", "max", "pointer_offset", "stride",
+    ], path);
+    if (layout.size !== 8 || layout.align !== 4
+        || !["u32", "f32"].includes(layout.element)
+        || layout.pointer_offset !== 0 || layout.length_offset !== 4
+        || layout.stride !== 4 || !Number.isSafeInteger(layout.max)
+        || layout.max < 0 || layout.max > Math.floor(0xffffffff / layout.stride)) {
+      throw new TypeError(`${path} has non-canonical bounded list descriptor`);
     }
     return layout;
   }
@@ -206,6 +219,41 @@ function writeDescriptor(layout, value, memory, offset, allocate, path) {
   view.setUint32(layout.length_offset, bytes.byteLength, true);
 }
 
+function listClass(layout) {
+  return layout.element === "u32" ? Uint32Array : Float32Array;
+}
+
+function writeList(layout, value, memory, offset, allocate, path) {
+  const Expected = listClass(layout);
+  if (!(value instanceof Expected)) {
+    throw new TypeError(`${path} must be a ${Expected.name}`);
+  }
+  if (value.length > layout.max) {
+    throw new RangeError(`${path} exceeds maximum length ${layout.max}`);
+  }
+  const byteLength = value.length * layout.stride;
+  let pointer = 0;
+  if (byteLength > 0) {
+    if (typeof allocate !== "function") {
+      throw new TypeError(`${path} requires an allocate(length, align) callback`);
+    }
+    pointer = uint(allocate(byteLength, layout.stride), `${path} allocation pointer`);
+    if (pointer % layout.stride !== 0) {
+      throw new RangeError(`${path} allocation pointer is misaligned`);
+    }
+    const bytes = memoryBytes(memory);
+    checkedEnd(pointer, byteLength, bytes, `${path} allocation`);
+    const payload = new DataView(bytes.buffer, bytes.byteOffset + pointer, byteLength);
+    for (let index = 0; index < value.length; index += 1) {
+      if (layout.element === "u32") payload.setUint32(index * 4, value[index], true);
+      else payload.setFloat32(index * 4, value[index], true);
+    }
+  }
+  const descriptor = viewFor(memory, offset, layout.size, path);
+  descriptor.setUint32(layout.pointer_offset, pointer, true);
+  descriptor.setUint32(layout.length_offset, value.length, true);
+}
+
 function writeLayout(layout, value, memory, offset, allocate, path) {
   const view = viewFor(memory, offset, layout.size, path);
   switch (layout.kind) {
@@ -234,6 +282,7 @@ function writeLayout(layout, value, memory, offset, allocate, path) {
       view.setFloat32(0, value, true); return;
     case "bytes":
     case "string": writeDescriptor(layout, value, memory, offset, allocate, path); return;
+    case "list": writeList(layout, value, memory, offset, allocate, path); return;
     case "record": {
       exactKeys(value, layout.fields.map((field) => field.name), path);
       for (const field of layout.fields) {
@@ -282,6 +331,28 @@ function readLayout(layout, memory, offset, path) {
       const end = checkedEnd(pointer, length, currentMemory, `${path} descriptor`);
       const copy = currentMemory.slice(pointer, end);
       return layout.kind === "string" ? textDecoder.decode(copy) : copy;
+    }
+    case "list": {
+      const pointer = view.getUint32(layout.pointer_offset, true);
+      const length = view.getUint32(layout.length_offset, true);
+      if (length > layout.max) {
+        throw new RangeError(`${path} exceeds maximum length ${layout.max}`);
+      }
+      if (length === 0) return new (listClass(layout))(0);
+      if (pointer % layout.stride !== 0) {
+        throw new RangeError(`${path} descriptor pointer is misaligned`);
+      }
+      const byteLength = length * layout.stride;
+      const bytes = memoryBytes(memory);
+      checkedEnd(pointer, byteLength, bytes, `${path} descriptor`);
+      const payload = new DataView(bytes.buffer, bytes.byteOffset + pointer, byteLength);
+      const result = new (listClass(layout))(length);
+      for (let index = 0; index < length; index += 1) {
+        result[index] = layout.element === "u32"
+          ? payload.getUint32(index * 4, true)
+          : payload.getFloat32(index * 4, true);
+      }
+      return result;
     }
     case "record":
       return Object.fromEntries(layout.fields.map((field) => [
@@ -516,6 +587,24 @@ function canonicalTransferList(layout, value, name, output, seen) {
           || !(value.buffer instanceof ArrayBuffer)
           || value.byteOffset !== 0 || value.byteLength !== value.buffer.byteLength) {
         throw actorError("FE_ACTOR_TRANSFER", `${name} bytes are not an owned full-span Uint8Array`);
+      }
+      if (!seen.has(value.buffer)) {
+        seen.add(value.buffer);
+        output.push(value.buffer);
+      }
+      return;
+    }
+    case "list": {
+      const Expected = listClass(layout);
+      if (!(value instanceof Expected)
+          || !(value.buffer instanceof ArrayBuffer)
+          || value.byteOffset !== 0 || value.byteLength !== value.buffer.byteLength) {
+        throw actorError(
+          "FE_ACTOR_TRANSFER", `${name} is not an owned full-span ${Expected.name}`,
+        );
+      }
+      if (value.length > layout.max) {
+        throw actorError("FE_ACTOR_TRANSFER", `${name} exceeds maximum length ${layout.max}`);
       }
       if (!seen.has(value.buffer)) {
         seen.add(value.buffer);
@@ -838,7 +927,7 @@ export function createCanonicalHostEffectAdapter(
   );
 }
 
-export const canonicalInterfaceManifest = Object.freeze({"protocol":"fe-canonical-browser-interface","version":3,"abi":{"pointer_width":32,"endianness":"little","memory_export":"memory","alloc_export":"fe_cabi_alloc","reset_export":"fe_cabi_reset"},"lanes":[{"name":"render","export":null,"request":{"size":24,"align":4,"kind":"record","fields":[{"name":"generation","offset":0,"layout":{"size":4,"align":4,"kind":"u32"}},{"name":"cam_x","offset":4,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"cam_y","offset":8,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"zoom","offset":12,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cx","offset":16,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cy","offset":20,"layout":{"size":4,"align":4,"kind":"f32"}}]},"response":{"size":1,"align":1,"kind":"record","fields":[{"name":"submitted","offset":0,"layout":{"size":1,"align":1,"kind":"bool"}}]},"intent":{"execution":"host_effect","placement":"main_thread","capabilities":[{"capability":"webgpu_dispatch","mutable":true}]}},{"name":"verify","export":null,"request":{"size":24,"align":4,"kind":"record","fields":[{"name":"generation","offset":0,"layout":{"size":4,"align":4,"kind":"u32"}},{"name":"cam_x","offset":4,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"cam_y","offset":8,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"zoom","offset":12,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cx","offset":16,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cy","offset":20,"layout":{"size":4,"align":4,"kind":"f32"}}]},"response":{"size":8,"align":4,"kind":"bytes","pointer_offset":0,"length_offset":4},"intent":{"execution":"host_effect","placement":"main_thread","capabilities":[{"capability":"webgpu_dispatch","mutable":true}]}},{"name":"oracle","export":"fe_cabi_oracle","request":{"size":24,"align":4,"kind":"record","fields":[{"name":"generation","offset":0,"layout":{"size":4,"align":4,"kind":"u32"}},{"name":"cam_x","offset":4,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"cam_y","offset":8,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"zoom","offset":12,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cx","offset":16,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cy","offset":20,"layout":{"size":4,"align":4,"kind":"f32"}}]},"response":{"size":8,"align":4,"kind":"bytes","pointer_offset":0,"length_offset":4},"intent":{"execution":"wasm","placement":"any","capabilities":[]}}]});
+export const canonicalInterfaceManifest = Object.freeze({"protocol":"fe-canonical-browser-interface","version":4,"abi":{"pointer_width":32,"endianness":"little","memory_export":"memory","alloc_export":"fe_cabi_alloc","reset_export":"fe_cabi_reset"},"lanes":[{"name":"render","export":null,"request":{"size":24,"align":4,"kind":"record","fields":[{"name":"generation","offset":0,"layout":{"size":4,"align":4,"kind":"u32"}},{"name":"cam_x","offset":4,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"cam_y","offset":8,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"zoom","offset":12,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cx","offset":16,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cy","offset":20,"layout":{"size":4,"align":4,"kind":"f32"}}]},"response":{"size":1,"align":1,"kind":"record","fields":[{"name":"submitted","offset":0,"layout":{"size":1,"align":1,"kind":"bool"}}]},"intent":{"execution":"host_effect","placement":"main_thread","capabilities":[{"capability":"webgpu_dispatch","mutable":true}]}},{"name":"verify","export":null,"request":{"size":24,"align":4,"kind":"record","fields":[{"name":"generation","offset":0,"layout":{"size":4,"align":4,"kind":"u32"}},{"name":"cam_x","offset":4,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"cam_y","offset":8,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"zoom","offset":12,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cx","offset":16,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cy","offset":20,"layout":{"size":4,"align":4,"kind":"f32"}}]},"response":{"size":8,"align":4,"kind":"bytes","pointer_offset":0,"length_offset":4},"intent":{"execution":"host_effect","placement":"main_thread","capabilities":[{"capability":"webgpu_dispatch","mutable":true}]}},{"name":"oracle","export":"fe_cabi_oracle","request":{"size":24,"align":4,"kind":"record","fields":[{"name":"generation","offset":0,"layout":{"size":4,"align":4,"kind":"u32"}},{"name":"cam_x","offset":4,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"cam_y","offset":8,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"zoom","offset":12,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cx","offset":16,"layout":{"size":4,"align":4,"kind":"f32"}},{"name":"inv_cy","offset":20,"layout":{"size":4,"align":4,"kind":"f32"}}]},"response":{"size":8,"align":4,"kind":"bytes","pointer_offset":0,"length_offset":4},"intent":{"execution":"wasm","placement":"any","capabilities":[]}}]});
 export const compiledCanonicalInterface = compileCanonicalInterfaceManifest(canonicalInterfaceManifest);
 export function createInterfaceCaller(exports) {
   return createCanonicalInterfaceCaller(compiledCanonicalInterface, exports);

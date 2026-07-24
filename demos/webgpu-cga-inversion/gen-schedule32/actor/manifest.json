@@ -10,8 +10,8 @@
     "canonical_adapters": [
       {
         "path": "interface.js",
-        "bytes": 36137,
-        "sha256": "a88181b3eda13e0132f47d9c9fce0c3e13538acb179d60c75ede1a8b95a8850f"
+        "bytes": 39895,
+        "sha256": "2cdd685f612c67316e40b7e5b3b17d5c446ee89eb61538ca6541ccd5b05a3119"
       },
       {
         "path": "interface.d.ts",
@@ -97,7 +97,7 @@
   },
   "canonical_interface": {
     "protocol": "fe-canonical-browser-interface",
-    "version": 3,
+    "version": 4,
     "abi": {
       "pointer_width": 32,
       "endianness": "little",
@@ -365,7 +365,7 @@
   },
   "browser_runtime": {
     "protocol": "fe-browser-actor-runtime",
-    "protocol_version": 3,
+    "protocol_version": 4,
     "artifacts": [
       {
         "path": "runtime/actor-coordinator.js",
@@ -374,8 +374,8 @@
       },
       {
         "path": "runtime/actor-endpoint.js",
-        "bytes": 9908,
-        "sha256": "9f480a9f0eb269c992c3b35a5b386be374f6ba5b9ab1b6e797864e4e311a7d55"
+        "bytes": 11750,
+        "sha256": "f0244e2468b077c086d4b6032dd61f451b5e6cb503333ae8150a68ea5df533cd"
       },
       {
         "path": "runtime/actor-router.js",
