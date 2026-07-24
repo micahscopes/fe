@@ -20,10 +20,10 @@ implemented. The goal remains incomplete for four concrete reasons:
 
 1. the required Sonatina backend revision is not published and a clean locked
    `fe web` build therefore still needs the explicit overlay;
-2. the public authored recursive `CliffordGp<Cl41Metric>` now derives its
-   conservative support and grade plan through a second coefficient
-   interpretation, but signed symbolic cancellation does not yet derive the
-   exact optimized Schedule32 terms from that recurrence;
+2. the public authored recursive `CliffordGp<Cl41Metric>` now derives the exact
+   signed canonical-50-to-32 plan through a symbolic coefficient
+   interpretation, but that plan has not yet replaced the older
+   demo-specific Schedule32 provider in the browser hot path;
 3. the reusable algebra and actor substrates remain bounded: application code
    still owns domain metrics/reductions and concrete browser capability
    handlers, while general sparse products, automatic shared-DAG discovery,
@@ -35,8 +35,8 @@ implemented. The goal remains incomplete for four concrete reasons:
 | Goal requirement | Status | Authoritative evidence | Exact boundary / remaining work |
 | --- | --- | --- | --- |
 | Fe-authored interactive Cl(4,1) browser render | **Achieved for the bounded showcase** | `demos/webgpu-cga-inversion/gen-schedule32/kernel.fe` contains the complete DE render, runtime inversion center, `CanonicalCga as Sandwich`, and the five conformal-vector outputs. `demos/webgpu-cga-inversion/main.js` owns only interaction and WebGPU submission. `bun demos/webgpu-cga-inversion/actor-interface.test.mjs` executes the generated one-call Wasm frame. | This proves this Cl(4,1) showcase, not a general geometric-algebra library or arbitrary operator compiler. Interaction math and concrete WebGPU device handlers remain explicit JavaScript host policy. |
-| Typed CTFE-derived Garamon/Fuchs-Théry-style `S * P * S` specialization | **Achieved for Schedule32 and recurrence-derived conservative support; partial for exact inferred specialization** | The public ordinary ingot exposes one coefficient-generic recursive `CliffordGp<Cl41Metric>` recurrence. Its `f32` interpretation remains exact against raw80; its support-semiring interpretation calls the same recurrence twice, CTFE-derives conservative `S*P*S` support `376007062`, grade-projects to conformal-vector support `65814`, and feeds the computed five-blade mask/count into public `SparsePlan`. The ordinary dependent-ingot gate forbids `support_gp`, GP-sign helpers, raw/triple scans, schedule masks, term literals, Python, and `ImplBuilder`. Separately, `cga_authored_reflected_bridge.rs` checks all 32 blades for two inputs against independent raw80 and authoritative Schedule32. | Conservative support intentionally cannot see coefficient cancellation. The exact Schedule32 plan is still constructed by application CTFE from 80 ordered triples; a bounded signed-symbolic coefficient interpretation must canonicalize sphere monomials, combine signs/magnitudes, remove zeros, and publish the full normalized term sequence. The authored recurrence currently lowers to 16,489-byte Wasm with 175 calls, while reflected Schedule32 lowers to 926-byte Wasm with one call. |
-| Browser-profile WebGPU execution of the specialization | **Achieved** | Generated `frag.wgsl`, `layout.json`, and `actor/shader.wgsl` live under `demos/webgpu-cga-inversion/gen-schedule32/`. `python3 demos/webgpu-cga-inversion/verify-assets.py` checks browser WGSL shape, absence of leaked CTFE/provider tokens, the single runtime raymarch loop, and required canonical artifacts. `smoke-chrome.sh` is the real-browser gate. Last observed real Chromium/SwiftShader acceptance in this worktree produced bit-equal Wasm/GPU hash `3470936828`. | The checked-in files and preflight prove artifact shape, while the smoke command proves execution only when run. No durable hardware-GPU CI result is stored; the recorded run used SwiftShader. |
+| Typed CTFE-derived Garamon/Fuchs-Théry-style `S * P * S` specialization | **Achieved as an exact ordinary-ingot proof; browser-provider migration pending** | The public ordinary ingot exposes one coefficient-generic recursive `CliffordGp<Cl41Metric>` recurrence. Its `f32` interpretation remains exact against raw80; its support-semiring interpretation derives the conservative five-blade grade plan; and its bounded signed-symbolic interpretation invokes that same public recurrence exactly twice, canonicalizes the 50 `Sym²(S)×P` monomials, cancels to 32 survivors, and feeds computed masks into public `SparsePlan`. `recursive_clifford_canonical50.rs` compares the full ordered 32×7 candidate/output/left/point/right/magnitude/sign sequence against an independent Rust raw80 evaluator, validates import-free R1 Wasm, and forbids runtime wide carriers and R2-only operations. Source-contract checks forbid copied keep/sign/output tables, GP-sign helpers, raw triple scans, Python, source concatenation, and provider builders. | This proves exact derivation and executable typed-plan reflection, but the tracked browser bundle still consumes its older demo-owned 80-candidate Schedule32 source. The canonical-50 order differs, so browser migration must use the independent geometric oracle rather than preserve the old term order or hash artificially. The exact proof currently takes about 10 minutes and roughly 1 GiB at CTFE; memoization/shared evaluation is a major ergonomics requirement before routine rebuilds. |
+| Browser-profile WebGPU execution of the specialization | **Achieved for the older exact Schedule32 provider; canonical-50 migration pending** | Generated `frag.wgsl`, `layout.json`, and `actor/shader.wgsl` live under `demos/webgpu-cga-inversion/gen-schedule32/`. `python3 demos/webgpu-cga-inversion/verify-assets.py` checks browser WGSL shape, absence of leaked CTFE/provider tokens, the single runtime raymarch loop, and required canonical artifacts. `smoke-chrome.sh` is the real-browser gate. Last observed real Chromium/SwiftShader acceptance in this worktree produced bit-equal Wasm/GPU hash `3470936828`. | These artifacts still derive their plan through the demo-owned 80-candidate helpers rather than the new public recurrence interpretation. The checked-in files and preflight prove artifact shape, while the smoke command proves execution only when run. No durable hardware-GPU CI result is stored; the recorded run used SwiftShader. |
 | Fast interactive presentation with no per-frame readback by default | **Achieved for submission behavior; performance claim remains partial** | `README.md` documents the persistent pipeline, rAF coalescing, and typed input-buffer updates. After initial acceptance, normal interaction does not invoke Wasm or read back GPU data. `?verify=off` is stricter: no Wasm/reference fetch, Worker, oracle render, or readback. `CGA_SMOKE_VERIFY=off CGA_SMOKE_BENCHMARK=continuous ... smoke-chrome.sh` asserts those counters. Last observed 256x256 SwiftShader run submitted at about 60 Hz with average CPU submit near 0.202 ms and `gpuReadbackCount == 0`. | Default mode intentionally performs one startup verification readback; only presentation mode is zero-readback from startup. The no-readback benchmark measures submitted-frame cadence, not GPU completion. Timestamp mode is explicit and necessarily reads timestamp results. No portable performance threshold or hardware-adapter result is established. |
 | Explicit Wasm/WebGPU verification against an independent oracle | **Achieved for the pinned full frame and explicit current-view checks** | Browser acceptance compares every GPU byte with the one-call Fe/Worker/Wasm frame; Schedule32 currently agrees at FNV `3470936828`. Before writing `reference.json`, `crates/codegen/examples/gen_cga_schedule32_vec5_demo.rs::oracle` independently reimplements the complete camera, 72-step raymarch, conformal inversion, torus DE, hit policy, shading, and packing in Rust `f32`; generation requires bit-exact agreement for all 16,384 Wasm pixels and records `oracle_agreement.exact_mismatches == 0`. `hybrid_cga_plan_e2e.rs` separately compares the algebraic specialization with a raw-80 Rust evaluator and a generic recursive Fe evaluator. | Browser verification is transitive but exact: independently gated host oracle = generated reference = Fe/Wasm = WebGPU. Interactive current-view verification compares Wasm and GPU for arbitrary controls but does not rerun the Rust host oracle in the browser; the independent host gate is the pinned generation view. |
 | Compiler-derived canonical request/response interface | **Achieved for canonical interface v4** | `crates/codegen/assets/canonical-interface.js`, `crates/codegen/src/web_bundle.rs`, and generated `actor/interface.{js,d.ts}` derive nominal records, bounded named-record variants, and exact nominal bounded `u32`/`f32` lists, including offsets, codecs, lane schemas, effect intents, transfer policy, and abort-aware dispatch context. List codecs use element-specific typed arrays, enforce `MAX`, copy across the Wasm arena, and recursively transfer owned full-span buffers. Wasmtime executes Fe-side typed `MemPtr<u32/f32>` reads and covers aligned owned response copying plus invalid results; Bun covers nested record/variant transfer and adversarial descriptors. `CANONICAL_BROWSER_INTERFACE.md` specifies the ABI. | Version 4 provides a bounded borrowed view, not a general collection: Fe can read the pointed-to element, but typed pointer arithmetic/indexing and a typed list allocator remain absent. Read-only aggregate reification admits only static single-leaf field projections and fails closed on whole/multi-leaf/dynamic/mutating/address-taking uses. Unbounded/nested lists, tuple variants, resources, futures/streams, borrowed/shared memory, and persistent resources remain unsupported. |
@@ -138,7 +138,19 @@ computed `SparsePlan`. The focused gate executes the ascending five-blade plan
 through Wasm; on the authoritative integrated head it passed 1/1 in 48.59
 seconds. The full compatibility suite also retains raw80 Wasm equality and
 browser-profile WGSL/Naga validity. This proves recurrence-to-plan const/type
-normalization, but not exact signed cancellation.
+normalization; the later canonical-50 proof adds exact signed cancellation.
+
+At `510804d54`, the signed-symbolic interpretation closes that remaining
+algebra gap. The exact ordinary-ingot gate passed in 591.16 seconds and compared
+all 224 fields of its 32 normalized terms with independent raw80. The compiler
+changes that make the reflected plan executable are reusable and fail closed:
+declared nominal const-parameter widths reach ground-plan evaluation,
+type-level integer truncation is preserved as a deferred cast until outer
+substitution, positive base-FCO `usize` to `i32` narrowing rejects values above
+`i32::MAX`, and mismatched generic argument kinds reject. On the authoritative
+dirty worktree, the nine base-const evaluator tests plus the exact narrowing
+and mismatched-kind regressions pass while the pre-existing unstaged CTFE
+formatting change remains outside the integration commit.
 
 ## Typed actor semantics boundary
 
@@ -219,9 +231,11 @@ not evidence against sharing in larger composed programs.
 
 The next reusable slices are:
 
-- derive the optimized sparse plan from the public authored recurrence and
-  high-level operator composition, preserving an inspectable CTFE/FCO witness
-  instead of adding another copied provider or survivor table;
+- migrate the browser provider from its demo-owned 80-candidate schedule to
+  the exact canonical-50 recurrence-derived witness, preserving the independent
+  geometric oracle and keeping wide symbolic coefficients out of runtime WGSL;
+- memoize/share the two expensive symbolic CTFE projections so exact
+  specialization is practical in an incremental browser build;
 - move flagship runtime operands onto the public support-derived
   `SparseStorage`/default-zero API where that improves rather than obscures
   generated code;
@@ -255,7 +269,7 @@ typed interactive QCGA operator. Sparse representation and planning now live
 in a real public Fe ingot.
 
 The goal is still active. Clean direct tooling awaits backend publication; the
-authored recurrence drives conservative support but not yet the exact signed
-Schedule32 specialization; general composed sparse execution and richer
-resource/stream substrate remain incomplete; and durable
-full-workspace/hardware-WebGPU evidence remains to be produced.
+exact signed specialization is proven but not yet wired into the browser
+provider; general composed sparse execution and richer resource/stream
+substrate remain incomplete; and durable full-workspace/hardware-WebGPU
+evidence remains to be produced.
