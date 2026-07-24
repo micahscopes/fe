@@ -740,9 +740,14 @@ fn ensure_semantic_instance_is_smir_lowerable<'db>(
 ) -> Result<(), LowerError> {
     let key = semantic.key(db);
     if key.typed_body(db).has_smir_lowering_blocker(db) {
+        let owner = key.owner(db);
+        let display = match owner {
+            BodyOwner::Func(func) => func_display_name(db, func),
+            _ => format!("{owner:?}"),
+        };
         return Err(LowerError::Unsupported(format!(
-            "cannot lower {:?} to semantic MIR because type checking left unresolved or invalid body operations",
-            key.owner(db),
+            "cannot lower {display} ({owner:?}) to semantic MIR because type checking left unresolved or invalid body operations: {}",
+            key.typed_body(db).smir_lowering_blocker_details(db).join("; "),
         )));
     }
     Ok(())
