@@ -1,5 +1,5 @@
 {
-  "algebra": "canonical Fe helpers shared by a forced typed Schedule<32> witness and a bounded 80-candidate FCO provider that emits five direct lanes with the canonical four-bucket balanced reduction",
+  "algebra": "canonical Fe helpers produce an inspectable typed Schedule<32> whose normalized Term payloads directly drive the FCO provider's five lanes and canonical four-bucket balanced reduction",
   "artifact_separation": {
     "actor_wasm": "canonical WebBundle package; owns actor exports and arena",
     "frag_wasm": "entry-rooted kernel package; render export only; zero imports; no generated helper or actor exports"
@@ -292,16 +292,16 @@
   ],
   "provenance": {
     "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits one shared five-lane sandwich aggregate from the same helpers",
-    "application_kernel_source_fnv1a32": 457282101,
+    "application_kernel_source_fnv1a32": 1722418121,
     "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
     "body_fnv1a32": 1056869854,
     "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
-    "canonical_fnv1a32": 1700960151,
+    "canonical_fnv1a32": 2027989085,
     "fe_dirty": false,
-    "fe_rev": "bf8b1e1e98745a63ff8c332c561038f3a2cb1381",
+    "fe_rev": "0cca45e85f938ebe1e67e4c3a16a471a2343543a",
     "fe_status_fnv1a32": 2166136261,
     "fe_untracked_present": false,
-    "generated_unix_secs": 1784847872,
+    "generated_unix_secs": 1784851506,
     "kernel_source_self_contained": false,
     "published_app_manifest": "demos/webgpu-cga-inversion/gen-schedule32/app/fe.toml",
     "published_app_source": "demos/webgpu-cga-inversion/gen-schedule32/app/src/lib.fe",
@@ -315,7 +315,7 @@
     "sparse_clifford_fixture": "ingots/sparse_clifford/src/lib.fe"
   },
   "runtime": "wasmtime executing dependency-backed Fe application-ingot Wasm; every pixel semantically checked against independent Rust f32 oracle",
-  "runtime_tuple_order": "canonical candidate scan order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
+  "runtime_tuple_order": "canonical normalized Schedule32 Term order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
   "schedule_tuple_fields": [
     "left_blade",
     "point_blade",

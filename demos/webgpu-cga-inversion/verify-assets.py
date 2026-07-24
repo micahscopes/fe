@@ -61,7 +61,7 @@ assert reference["inversion_center_runtime"] is True
 kernel = (GEN / "kernel.fe").read_text()
 algebra = reference["algebra"]
 provider_algebra = algebra.startswith(
-    "canonical Fe helpers shared by a forced typed Schedule<32> witness"
+    "canonical Fe helpers produce an inspectable typed Schedule<32>"
 )
 if algebra == "typed support-specialized recursive Cl(4,1) S*P*S":
     tokens = [
@@ -86,12 +86,14 @@ elif provider_algebra:
         "type Schedule32 =",
         "SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",
         "struct CanonicalCgaProvider",
-        "for triple in 0..80",
+        "normalized_preorder_types",
+        "builder.same_ty(nested.constructor(), builder.ty<Term>())",
         "const SANDWICH_OUTPUT_BITS",
         'builder.emit_method("sandwich"',
         "safe_weight",
         "ring_radius",
     ]
+    assert "for triple in 0..80" not in kernel
 else:
     raise AssertionError(f"unrecognized CGA algebra contract: {algebra!r}")
 for token in tokens:

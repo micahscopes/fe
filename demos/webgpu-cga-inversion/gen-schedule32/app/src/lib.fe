@@ -1,5 +1,5 @@
 use sparse_clifford::{
-    BladeSet, Nat, PlanLength, SparsePlan, blade_set, plan_mask_candidate,
+    BladeSet, Nat, PlanLength, SparsePlan, Term, blade_set, plan_mask_candidate,
     plan_mask_cardinality, support_gp, support_grade,
 }
 
@@ -243,14 +243,15 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
         let lane16_3 = zero
         let survivor = 0
 
-        // Exhaustively scan the canonical semantic universe. The provider
-        // range and global step budgets fail closed if this ceases to be
-        // bounded; no survivor list is supplied. Each aggregate output field
-        // already filters its one grade-1 blade below, so the provider uses the
-        // coefficient predicate rather than spending its stricter interpreter
-        // budget repeating the equivalent support lookup 80 times.
-        for triple in 0..80 {
-            if coefficient_keep_tag(triple) != 0 {
+        // Consume the normalized public SparsePlan tree directly. Term's
+        // staged const payload is the canonical source-triple identity, so the
+        // emitted lanes cannot drift from the typed 32-survivor witness by
+        // independently rescanning the 80-candidate universe.
+        for nested in builder.ty<Schedule32>().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                for arg in nested.generic_args() {
+                    if arg.is_const() {
+                        let triple = arg.const_value()
                 let left = s1
                 if raw_left_slot(triple) == 1 { left = s2 }
                 if raw_left_slot(triple) == 2 { left = s8 }
@@ -309,6 +310,8 @@ impl Derive<Sandwich> for CanonicalCgaProvider {
                     else { lane16_3 = builder.add(term, lane16_3) }
                 }
                 survivor = survivor + 1
+                    }
+                }
             }
         }
 
