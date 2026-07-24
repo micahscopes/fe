@@ -1467,6 +1467,13 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 source.as_bytes()
             );
         }
+        let actor_router = WEB_ACTOR_RUNTIME
+            .iter()
+            .find_map(|(path, source)| (*path == "runtime/actor-router.js").then_some(*source))
+            .unwrap();
+        assert!(actor_router.contains("FE_ACTOR_CONFLICTING_CAPABILITY_OWNER"));
+        assert!(actor_router.contains("FE_ACTOR_CONFLICTING_CAPABILITY_CLAIM"));
+        assert!(actor_router.contains("FE_ACTOR_CONFLICTING_LANE_DESCRIPTORS"));
         let worker_host = WEB_ACTOR_RUNTIME
             .iter()
             .find_map(|(path, source)| (*path == "runtime/worker-host.js").then_some(*source))

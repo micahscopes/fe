@@ -176,6 +176,47 @@ routingError(
   }, { main_thread_host() {} }),
   "FE_ACTOR_INVALID_LANE_INTENT",
 );
+routingError(
+  () => createCanonicalIntentRouter({
+    intents: {
+      main_gpu: intent("host_effect", "main_thread", [
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+      ]),
+      worker_gpu: intent("host_effect", "worker", [
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+      ]),
+    },
+  }, { main_thread_host() {}, worker_host() {} }),
+  "FE_ACTOR_CONFLICTING_CAPABILITY_OWNER",
+);
+routingError(
+  () => createCanonicalIntentRouter({
+    intents: {
+      render: intent("host_effect", "main_thread", [
+        Object.freeze({ capability: "webgpu_dispatch", mutable: true }),
+      ]),
+      inspect: intent("host_effect", "main_thread", [
+        Object.freeze({ capability: "webgpu_dispatch", mutable: false }),
+      ]),
+    },
+  }, { main_thread_host() {} }),
+  "FE_ACTOR_CONFLICTING_CAPABILITY_CLAIM",
+);
+routingError(
+  () => createCanonicalIntentRouter({
+    intents: { render: intent("host_effect", "main_thread") },
+    requestSchema: { render() {} },
+  }, { main_thread_host() {} }),
+  "FE_ACTOR_CONFLICTING_LANE_DESCRIPTORS",
+);
+assert.throws(
+  () => createCanonicalIntentRouter({
+    intents: { render: intent("host_effect", "main_thread") },
+    requestSchema: { render() {}, invented() {} },
+    resultSchema: { render() {} },
+  }, { main_thread_host() {} }),
+  /unexpected or missing fields/,
+);
 assert.throws(
   () => createCanonicalIntentRouter({
     intents: {

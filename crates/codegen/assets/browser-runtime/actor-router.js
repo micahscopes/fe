@@ -138,7 +138,7 @@ const canonicalIntentOwner = (lane, intent) => {
     if (typeof requirement.mutable !== "boolean") {
       throw new TypeError(`${name}.mutable must be a boolean`);
     }
-    const key = `${requirement.capability}\0${requirement.mutable}`;
+    const key = requirement.capability;
     if (seenCapabilities.has(key)) {
       throw new ActorLaneRoutingError(
         "FE_ACTOR_INVALID_LANE_INTENT",
@@ -183,9 +183,44 @@ export function createCanonicalIntentRouter(adapter, dispatchers) {
   const intents = plainObject(adapter.intents, "canonical actor intents");
   const lanes = canonicalLaneNames(intents);
   const partitions = Object.create(null);
+  const capabilityClaims = new Map();
   for (const lane of lanes) {
     const owner = canonicalIntentOwner(lane, intents[lane]);
     (partitions[owner] ??= []).push(lane);
+    for (const requirement of intents[lane].capabilities) {
+      const previous = capabilityClaims.get(requirement.capability);
+      if (previous && previous.owner !== owner) {
+        throw new ActorLaneRoutingError(
+          "FE_ACTOR_CONFLICTING_CAPABILITY_OWNER",
+          `canonical capability ${requirement.capability} is claimed by both `
+            + `${previous.owner} (${previous.lane}) and ${owner} (${lane})`,
+        );
+      }
+      if (previous && previous.mutable !== requirement.mutable) {
+        throw new ActorLaneRoutingError(
+          "FE_ACTOR_CONFLICTING_CAPABILITY_CLAIM",
+          `canonical capability ${requirement.capability} has conflicting mutable claims `
+            + `on lanes ${previous.lane} and ${lane}`,
+        );
+      }
+      capabilityClaims.set(requirement.capability, {
+        lane,
+        mutable: requirement.mutable,
+        owner,
+      });
+    }
+  }
+  const hasRequestSchemas = Object.hasOwn(adapter, "requestSchema");
+  const hasResultSchemas = Object.hasOwn(adapter, "resultSchema");
+  if (hasRequestSchemas !== hasResultSchemas) {
+    throw new ActorLaneRoutingError(
+      "FE_ACTOR_CONFLICTING_LANE_DESCRIPTORS",
+      "canonical actor adapter must publish request and result lane descriptors together",
+    );
+  }
+  if (hasRequestSchemas) {
+    exactKeys(adapter.requestSchema, lanes, "canonical actor request schemas");
+    exactKeys(adapter.resultSchema, lanes, "canonical actor result schemas");
   }
   const owners = Object.keys(partitions).sort();
   exactKeys(dispatchers, owners, "canonical actor dispatchers");
