@@ -267,6 +267,30 @@ pub fn eval_body_owner_const<'db>(
     eval_const_instance(db, get_or_build_semantic_instance(db, key))
 }
 
+/// Evaluates a ground staged const payload with an explicit, caller-owned
+/// step budget. This keeps unusually expensive type-level specialization from
+/// silently raising the ordinary CTFE limit.
+#[salsa::tracked]
+pub fn eval_body_owner_const_with_step_budget<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+    generic_args: Vec<crate::analysis::ty::ty_def::TyId<'db>>,
+    step_limit: usize,
+) -> Result<SemConstId<'db>, CtfeError<'db>> {
+    let key = SemanticInstanceKey::new(
+        db,
+        owner,
+        GenericSubst::new(db, generic_args),
+        crate::analysis::semantic::EffectProviderSubst::empty(db),
+        ImplEnv::empty(db, owner.scope()),
+    );
+    let instance = get_or_build_semantic_instance(db, key);
+    let mut config = CtfeConfig::default();
+    config.step_limit = step_limit;
+    let mut machine = CtfeMachine::new(db, config);
+    machine.eval_root(instance, Vec::new(), SemOrigin::Body(owner))
+}
+
 fn eval_body_owner_const_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
@@ -3958,6 +3982,29 @@ mod memo_tests {
             Ok(value) => format!("Ok({:?})", value.value(db)),
             Err(err) => error(err),
         }
+    }
+
+    #[test]
+    fn explicit_step_budget_fails_closed_without_changing_default() {
+        let (db, owner) = fixture(
+            r#"
+const fn root() -> usize {
+    let mut i: usize = 0
+    while i < 16 { i = i + 1 }
+    i
+}
+"#,
+        );
+        let limited = eval_body_owner_const_with_step_budget(db, owner, Vec::new(), 1);
+        assert!(
+            outcome(db, &limited).contains("StepLimitExceeded"),
+            "explicit low budget must preserve the CTFE cause: {}",
+            outcome(db, &limited)
+        );
+        assert!(
+            eval_body_owner_const(db, owner, Vec::new()).is_ok(),
+            "the ordinary one-million-step CTFE path must remain independent"
+        );
     }
 
     #[test]

@@ -1950,6 +1950,30 @@ fn concrete_payload(x: Term<{payload(3)}>) { takes_term10(x) }
     }
 
     #[test]
+    fn staged_signed_const_payloads_materialize_both_signs() {
+        let src = r#"
+struct Zero {}
+struct Term<const Sign: i32> {}
+struct Add<L, R> {}
+const fn sign(_ i: usize) -> i32 {
+    if i == 0 { -1 } else { 1 }
+}
+recursive type fn Signs<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<Term<{sign(N - 1)}>, Signs<{N - 1}>>
+    }
+}
+fn takes(_ x: Add<Term<1>, Add<Term<4294967295>, Zero>>) {}
+fn exact(x: Signs<2>) { takes(x) }
+"#;
+        let mut db = HirAnalysisTestDb::default();
+        let file = db.new_stand_alone(Utf8PathBuf::from("staged_signed_payload.fe"), src);
+        let (top_mod, _) = db.top_mod(file);
+        db.assert_no_diags(top_mod);
+    }
+
+    #[test]
     fn existing_subject_steps_remain_exact_in_result_payloads() {
         let src = r#"
 struct Zero {}
