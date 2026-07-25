@@ -1,0 +1,324 @@
+// FCO staging spike for the real Cl(4,1) S*P*S support problem.
+//
+// Sphere support: {e1,e2,e4,e5}; point support: {e1,e2,e3,e4,e5}.
+// RawSlots<80> enumerates all 4*5*4 triples. Fold stores their signed,
+// commutatively canonicalized monomial coefficients in 50 base-5 bins.
+// Lower turns the bins into a typed Add<Term<...>, ...> schedule, dropping
+// the 18 zero/cancelled bins. The derive provider only publishes that Fe
+// projection; it does not contain the algebra or the expected answer.
+
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+
+struct End {}
+struct Raw<const I: usize> {}
+struct Cons<H, T> {}
+
+recursive type fn RawSlots<const N: usize>() -> (*) {
+    match N {
+        0 => End
+        _ => Cons<Raw<{N - 1}>, RawSlots<{N - 1}>>
+    }
+}
+
+const fn pow5(_ n: usize) -> u256 {
+    let mut result: u256 = 1
+    let mut i: usize = 0
+    while i < n {
+        result = result * 5
+        i = i + 1
+    }
+    result
+}
+
+// Every balanced base-5 digit starts at 2, representing coefficient zero.
+const fn initial_code() -> u256 {
+    let mut result: u256 = 0
+    let mut i: usize = 0
+    while i < 50 {
+        result = result + 2 * pow5(i)
+        i = i + 1
+    }
+    result
+}
+
+const fn sphere_blade(_ i: usize) -> usize {
+    if i == 0 { 1 } else if i == 1 { 2 } else if i == 2 { 8 } else { 16 }
+}
+
+const fn point_blade(_ i: usize) -> usize {
+    if i == 0 { 1 } else if i == 1 { 2 } else if i == 2 { 4 }
+    else if i == 3 { 8 } else { 16 }
+}
+
+const fn pair_rank(_ a: usize, _ c: usize) -> usize {
+    let lo: usize = if a < c { a } else { c }
+    let hi: usize = if a < c { c } else { a }
+    if lo == 0 {
+        hi
+    } else if lo == 1 {
+        4 + hi - 1
+    } else if lo == 2 {
+        7 + hi - 2
+    } else {
+        9
+    }
+}
+
+const fn raw_a(_ i: usize) -> usize { i / 20 }
+const fn raw_b(_ i: usize) -> usize { (i % 20) / 4 }
+const fn raw_c(_ i: usize) -> usize { i % 4 }
+
+const fn candidate_pair(_ bin: usize) -> usize { bin / 5 }
+const fn candidate_b(_ bin: usize) -> usize { bin % 5 }
+
+const fn candidate_a_index(_ bin: usize) -> usize {
+    let pair: usize = candidate_pair(bin)
+    if pair < 4 { 0 }
+    else if pair < 7 { 1 }
+    else if pair < 9 { 2 }
+    else { 3 }
+}
+
+const fn candidate_c_index(_ bin: usize) -> usize {
+    let pair: usize = candidate_pair(bin)
+    if pair < 4 { pair }
+    else if pair < 7 { pair - 3 }
+    else if pair < 9 { pair - 5 }
+    else { 3 }
+}
+
+// Cl(4,1), with the fifth generator (bit 16) negative.
+const fn gp_sign(_ a: usize, _ b: usize) -> usize {
+    let mut parity: usize = 0
+    let mut bit: usize = 0
+    while bit < 5 {
+        if ((a >> bit) & 1) == 1 {
+            let lower: usize = b & ((1 << bit) - 1)
+            let mut x: usize = lower
+            while x != 0 {
+                parity = parity ^ (x & 1)
+                x = x >> 1
+            }
+        }
+        bit = bit + 1
+    }
+    if (a & b & 16) != 0 { parity ^ 1 } else { parity }
+}
+
+const fn raw_negative(_ i: usize) -> usize {
+    let a: usize = sphere_blade(raw_a(i))
+    let b: usize = point_blade(raw_b(i))
+    let c: usize = sphere_blade(raw_c(i))
+    gp_sign(a, b) ^ gp_sign(a ^ b, c)
+}
+
+const fn raw_bin(_ i: usize) -> usize {
+    pair_rank(raw_a(i), raw_c(i)) * 5 + raw_b(i)
+}
+
+const fn update(_ code: u256, _ i: usize) -> u256 {
+    let place: u256 = pow5(raw_bin(i))
+    if raw_negative(i) == 0 { code + place } else { code - place }
+}
+
+// Do the algebraic fold as value CTFE. Keeping this loop in one const
+// evaluation avoids asking trait selection to normalize an 80-deep projection
+// chain merely to transport one packed integer.
+const fn fold_all_raw_triples() -> u256 {
+    let mut code: u256 = initial_code()
+    let mut i: usize = 0
+    while i < 80 {
+        code = update(code, i)
+        i = i + 1
+    }
+    code
+}
+
+struct Packed<const Code: u256> {}
+
+trait Fold<const Acc: u256> { type Out }
+
+impl<const Acc: u256> Fold<Acc> for End { type Out = Packed<Acc> }
+
+impl<const I: usize, T, const Acc: u256> Fold<Acc> for Cons<Raw<I>, T>
+    where T: Fold<{update(Acc, I)}>
+{
+    type Out = <T as Fold<{update(Acc, I)}>>::Out
+}
+
+struct Zero {}
+struct Term<
+    const Out: usize,
+    const SphereL: usize,
+    const Point: usize,
+    const SphereR: usize,
+    const Magnitude: usize,
+    const Negative: usize,
+> {}
+struct Add<L, R> {}
+
+const fn digit(_ code: u256, _ bin: usize) -> usize {
+    ((code / pow5(bin)) % 5).downcast_unchecked()
+}
+
+const CL41_CODE: u256 = fold_all_raw_triples()
+
+const fn survivor_count(_ code: u256) -> usize {
+    let mut count: usize = 0
+    let mut bin: usize = 0
+    while bin < 50 {
+        if digit(code, bin) != 2 { count = count + 1 }
+        bin = bin + 1
+    }
+    count
+}
+
+const fn survivor_bin(_ code: u256, _ target: usize) -> usize {
+    let mut seen: usize = 0
+    let mut bin: usize = 0
+    while bin < 50 {
+        if digit(code, bin) != 2 {
+            if seen == target { return bin }
+            seen = seen + 1
+        }
+        bin = bin + 1
+    }
+    50
+}
+
+const fn coefficient_magnitude(_ code: u256, _ bin: usize) -> usize {
+    let value: usize = digit(code, bin)
+    if value < 2 { 2 - value } else { value - 2 }
+}
+
+const fn coefficient_negative(_ code: u256, _ bin: usize) -> usize {
+    if digit(code, bin) < 2 { 1 } else { 0 }
+}
+
+recursive type fn Schedule<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                {
+                    sphere_blade(candidate_a_index(survivor_bin(CL41_CODE, N - 1)))
+                    ^ point_blade(candidate_b(survivor_bin(CL41_CODE, N - 1)))
+                    ^ sphere_blade(candidate_c_index(survivor_bin(CL41_CODE, N - 1)))
+                },
+                { sphere_blade(candidate_a_index(survivor_bin(CL41_CODE, N - 1))) },
+                { point_blade(candidate_b(survivor_bin(CL41_CODE, N - 1))) },
+                { sphere_blade(candidate_c_index(survivor_bin(CL41_CODE, N - 1))) },
+                { coefficient_magnitude(CL41_CODE, survivor_bin(CL41_CODE, N - 1)) },
+                { coefficient_negative(CL41_CODE, survivor_bin(CL41_CODE, N - 1)) },
+            >,
+            Schedule<{N - 1}>,
+        >
+    }
+}
+
+// Staged-payload formulation: the recursive type function changes only N.
+// Each payload helper receives the ground rank after unfolding, and performs
+// the complete survivor lookup in ordinary value CTFE.
+const fn schedule_out(_ rank: usize) -> usize {
+    let bin = survivor_bin(CL41_CODE, rank)
+    sphere_blade(candidate_a_index(bin))
+        ^ point_blade(candidate_b(bin))
+        ^ sphere_blade(candidate_c_index(bin))
+}
+const fn schedule_left(_ rank: usize) -> usize {
+    sphere_blade(candidate_a_index(survivor_bin(CL41_CODE, rank)))
+}
+const fn schedule_point(_ rank: usize) -> usize {
+    point_blade(candidate_b(survivor_bin(CL41_CODE, rank)))
+}
+const fn schedule_right(_ rank: usize) -> usize {
+    sphere_blade(candidate_c_index(survivor_bin(CL41_CODE, rank)))
+}
+const fn schedule_magnitude(_ rank: usize) -> usize {
+    let bin = survivor_bin(CL41_CODE, rank)
+    coefficient_magnitude(CL41_CODE, bin)
+}
+const fn schedule_negative(_ rank: usize) -> usize {
+    let bin = survivor_bin(CL41_CODE, rank)
+    coefficient_negative(CL41_CODE, bin)
+}
+
+recursive type fn StagedSchedule<const N: usize>() -> (*) {
+    match N {
+        0 => Zero
+        _ => Add<
+            Term<
+                { schedule_out(N - 1) },
+                { schedule_left(N - 1) },
+                { schedule_point(N - 1) },
+                { schedule_right(N - 1) },
+                { schedule_magnitude(N - 1) },
+                { schedule_negative(N - 1) },
+            >,
+            StagedSchedule<{N - 1}>,
+        >
+    }
+}
+
+type CanonicalSchedule = StagedSchedule<32>
+
+// This numeral is an independent oracle for all 50 balanced coefficients.
+// Equality therefore pins every grouped sign and every cancelled bin, while
+// the second assertion names the required 80 -> 32 cardinality explicitly.
+static_assert(CL41_CODE == 31070042768560893015012804584997658)
+static_assert(survivor_count(CL41_CODE) == 32)
+
+trait HasSchedule { type Schedule }
+struct Cl41ScheduleProvider {}
+
+impl Derive<HasSchedule> for Cl41ScheduleProvider {
+    const fn derive<T>(ev: own Evidence<HasSchedule<T>>) -> Evidence<HasSchedule<T>>
+        uses (
+            reflect: Reflect<T>,
+            builder: mut ImplBuilder<HasSchedule<T>>,
+        )
+    {
+        builder.emit_assoc_ty("Schedule", builder.ty<CanonicalSchedule>())
+        builder.finish()
+        ev
+    }
+}
+
+struct Cl41Sandwich {}
+derive HasSchedule for Cl41Sandwich using Cl41ScheduleProvider
+type PublishedSchedule = <Cl41Sandwich as HasSchedule>::Schedule
+
+fn takes_computed(_ schedule: CanonicalSchedule) {}
+
+fn provider_projection_is_exact(
+    schedule: <Cl41Sandwich as HasSchedule>::Schedule,
+) {
+    takes_computed(schedule)
+}
+
+// The published projection is not merely inspectable by HIR.  It can be used
+// as the subject of an ordinary recursive runtime interpretation.
+trait Eval { fn eval() -> i32 }
+
+impl Eval for Zero {
+    fn eval() -> i32 { 0 }
+}
+
+impl<
+    const Out: usize,
+    const SphereL: usize,
+    const Point: usize,
+    const SphereR: usize,
+    const Magnitude: usize,
+    const Negative: usize,
+> Eval for Term<Out, SphereL, Point, SphereR, Magnitude, Negative> {
+    fn eval() -> i32 { 1 }
+}
+
+impl<L: Eval, R: Eval> Eval for Add<L, R> {
+    fn eval() -> i32 { <L as Eval>::eval() + <R as Eval>::eval() }
+}
+
+pub fn fco_published_schedule_runtime() -> i32 {
+    <PublishedSchedule as Eval>::eval()
+}
