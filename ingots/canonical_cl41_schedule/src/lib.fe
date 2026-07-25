@@ -476,7 +476,11 @@ const fn symbolic_sandwich() -> SymbolicMv5 {
     first.clifford_gp(other: sphere, metric: metric, level: 5)
 }
 
-const fn sphere_seed_blade_i32(_ index: i32) -> i32 {
+/// Sphere operand support: index -> blade. Public because consumers (including
+/// the recursive-Clifford fixture) need the mapping without duplicating the
+/// operand's blade literals. The signature is deliberately index-based so it
+/// survives the support becoming derived rather than declared.
+pub const fn sphere_seed_blade_i32(_ index: i32) -> i32 {
     match index {
         0 => SPHERE_E1
         1 => SPHERE_E2
@@ -485,7 +489,9 @@ const fn sphere_seed_blade_i32(_ index: i32) -> i32 {
     }
 }
 
-const fn point_seed_blade_i32(_ index: i32) -> i32 {
+/// Point operand support: index -> blade. Public for the same reason as
+/// `sphere_seed_blade_i32`, with the same index-based signature.
+pub const fn point_seed_blade_i32(_ index: i32) -> i32 {
     match index {
         0 => POINT_E1
         1 => POINT_E2

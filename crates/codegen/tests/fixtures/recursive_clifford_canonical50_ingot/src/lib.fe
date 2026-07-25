@@ -2,6 +2,8 @@ use canonical_cl41_schedule::{
     Canonical50Schedule32,
     candidate_output_blade_i32,
     canonical50_projected_sign,
+    point_seed_blade_i32,
+    sphere_seed_blade_i32,
 }
 use sparse_clifford::{Add, PlanLength, Term, Zero}
 
@@ -283,24 +285,10 @@ fn runtime_sphere_pair_right(_ rank: i32) -> i32 {
     }
 }
 
-fn runtime_sphere_seed_blade(_ index: i32) -> i32 {
-    match index {
-        0 => SPHERE_E1
-        1 => SPHERE_E2
-        2 => SPHERE_E4
-        _ => SPHERE_E5
-    }
-}
-
-fn runtime_point_seed_blade(_ index: i32) -> i32 {
-    match index {
-        0 => POINT_E1
-        1 => POINT_E2
-        2 => POINT_E3
-        3 => POINT_E4
-        _ => POINT_E5
-    }
-}
+// The index -> blade mappings live in the schedule ingot and are imported
+// above. Local copies used to exist here and referenced operand constants that
+// moved into that ingot in 9c15dc1c2 without becoming public, which is what
+// left this fixture unable to resolve them.
 
 struct ObservedZero {}
 struct ObservedTerm<const Candidate: i32> {}
@@ -340,11 +328,11 @@ impl<const Candidate: i32> InspectCanonical50 for ObservedTerm<Candidate> {
             } else if field == 1 {
                 runtime_projected_output(candidate)
             } else if field == 2 {
-                runtime_sphere_seed_blade(runtime_sphere_pair_left(pair))
+                sphere_seed_blade_i32(runtime_sphere_pair_left(pair))
             } else if field == 3 {
-                runtime_point_seed_blade(point)
+                point_seed_blade_i32(point)
             } else if field == 4 {
-                runtime_sphere_seed_blade(runtime_sphere_pair_right(pair))
+                sphere_seed_blade_i32(runtime_sphere_pair_right(pair))
             } else if field == 5 {
                 candidate_magnitude(candidate)
             } else {
