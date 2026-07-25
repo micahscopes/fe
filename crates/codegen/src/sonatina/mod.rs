@@ -40,11 +40,23 @@ use crate::{
 pub struct WasmCompileOptions {
     canonical_arena: bool,
     canonical_lanes: Vec<crate::CanonicalLane>,
+    /// Run Sonatina's ISA-independent optimization pipeline before emitting
+    /// wasm. Defaults to OFF so the documented byte-for-byte-equivalent
+    /// default is preserved; opt in to measure or to ship smaller modules.
+    optimize: bool,
 }
 
 impl WasmCompileOptions {
     pub fn with_canonical_arena(mut self) -> Self {
         self.canonical_arena = true;
+        self
+    }
+
+    /// Opt into `optim::Pipeline::size()` before wasm emission. The wasm path
+    /// has historically run zero passes, which leaves one uninlined monomorph
+    /// per recursive-helper instantiation.
+    pub fn with_optimization(mut self) -> Self {
+        self.optimize = true;
         self
     }
 
@@ -73,11 +85,22 @@ pub fn compile_runtime_package_wasm_with_options(
     use sonatina_codegen::Backend as _;
     use sonatina_codegen::isa::wasm::WasmBackend;
 
-    let (module, import_modules) = wasm_lower::compile_runtime_package_wasm_with_canonical_lanes(
-        db,
-        package,
-        &options.canonical_lanes,
-    )?;
+    let (mut module, import_modules) =
+        wasm_lower::compile_runtime_package_wasm_with_canonical_lanes(
+            db,
+            package,
+            &options.canonical_lanes,
+        )?;
+    // Sonatina's `Pipeline` is ISA-independent (`EvmPipeline` is the
+    // EVM-specific one) and `EvmCompile::optimize` runs it with no target
+    // check, but the wasm path has always run zero passes. That leaves
+    // recursive helpers as one uninlined monomorph per instantiation: the
+    // canonical-50 Cl(4,1) kernel emits 67 `eval5__g*` functions totalling
+    // 20,003 of its 27,393 bytes. This is the seam `fe web build` actually
+    // uses; `WasmBackend::compile` in backend.rs is the other one.
+    if options.optimize {
+        sonatina_codegen::optim::Pipeline::size().run(&mut module);
+    }
     let backend = WasmBackend::new().with_import_modules(import_modules);
     let backend = if options.canonical_arena {
         backend.with_canonical_arena()

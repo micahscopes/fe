@@ -437,9 +437,14 @@ impl WebBundle {
                 .map(|lanes| WasmCompileOptions::default().with_canonical_lanes(lanes))
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
-        let wasm = compile_runtime_package_wasm_with_options(db, &wasm_package, wasm_options)
-            .map_err(|error| WebBundleError::Lower(error.to_string()))?
-            .bytes;
+        let wasm =
+            compile_runtime_package_wasm_with_options(
+                db,
+                &wasm_package,
+                wasm_options.with_optimization(),
+            )
+                .map_err(|error| WebBundleError::Lower(error.to_string()))?
+                .bytes;
         wasmparser::validate(&wasm)
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
         let canonical_interface =

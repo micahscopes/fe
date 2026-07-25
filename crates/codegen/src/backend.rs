@@ -228,13 +228,27 @@ impl Backend for WasmBackend {
         db: &DriverDataBase,
         top_mod: TopLevelMod<'_>,
         _layout: TargetDataLayout,
-        _opt_level: OptLevel,
+        opt_level: OptLevel,
     ) -> Result<BackendOutput, BackendError> {
         use sonatina_codegen::Backend as SonatinaBackend;
         use sonatina_codegen::isa::wasm::WasmBackend as SonatinaWasmBackend;
+        use sonatina_codegen::optim::Pipeline;
 
         let package = mir::build_wasm_runtime_package(db, top_mod)?;
-        let (module, import_modules) = crate::sonatina::compile_runtime_package_wasm(db, &package)?;
+        let (mut module, import_modules) =
+            crate::sonatina::compile_runtime_package_wasm(db, &package)?;
+        // Sonatina's `Pipeline` is ISA-independent (the EVM-specific one is
+        // `EvmPipeline`), and `EvmCompile::optimize` runs it with no target
+        // check. Until now the wasm path ran zero passes, which left recursive
+        // helpers as one uninlined monomorph per instantiation: the canonical-50
+        // Cl(4,1) kernel emitted 67 `eval5__g*` functions totalling 20,003 of
+        // its 27,393 bytes. Honour the opt level that was already threaded here
+        // and previously discarded.
+        match opt_level {
+            OptLevel::O0 => {}
+            OptLevel::Os => Pipeline::size().run(&mut module),
+            OptLevel::O1 | OptLevel::O2 => Pipeline::speed().run(&mut module),
+        }
         let artifact = SonatinaWasmBackend::new()
             .with_import_modules(import_modules)
             .compile_module(&module)
