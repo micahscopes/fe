@@ -2786,14 +2786,27 @@ fn fe_worker_await2_shaped_two_token_join_equals_oracle() {
 /// is proven executably by the task rail's two-token `coeff_pair` and the
 /// await2-shaped `join2` above; the local provider is the same semantics, deferred.
 #[test]
-fn fe_worker_par_local_provider_typechecks_wasm_exec_is_r2_1() {
+fn fe_worker_par_local_provider_executes() {
+    // WAS a fail-closed test at the R2.1 aggregate (tuple) wall: `par.fork`
+    // returns a `(u64, u64)`. The aggregate-flattening work removed that wall,
+    // so the fork/join now compiles AND RUNS. Pinned by execution against the
+    // same NTT8_OUTPUT oracle the sequential rail uses.
     let src = worker_par_src();
-    let err = compile_to_wasm_err("wasm_worker_par.fe", &src);
-    assert!(
-        err.contains("aggregate") || err.contains("single-scalar-field") || err.contains("R2"),
-        "Par<WasmBackend> fork-join should fail-close at the R2.1 aggregate (tuple) wall, \
-         got: {err}"
-    );
+    let wasm = compile_to_wasm("wasm_worker_par.fe", &src);
+    let (mut store, instance) = instantiate_task_pool(&wasm);
+    let par_pair = instance
+        .get_typed_func::<(i64, i64), i64>(&mut store, "par_pair")
+        .expect("`par_pair` export should exist");
+    for (k0, k1) in [(0usize, 1usize), (2, 5), (7, 7)] {
+        let got = par_pair
+            .call(&mut store, (k0 as i64, k1 as i64))
+            .expect("Par fork/join should run through the task rail");
+        let expected = (NTT8_OUTPUT[k0] as u64 + NTT8_OUTPUT[k1] as u64) % 12289;
+        assert_eq!(
+            got as u64, expected,
+            "par_pair({k0}, {k1}) should be addmod_q of the two pinned NTT-8 coefficients"
+        );
+    }
 }
 
 /// CE-5: the one-shot `READY -> CONSUMED` CAS backstop. Safe Fe cannot double-consume
@@ -3344,13 +3357,29 @@ fn fe_ce9_result_flagship_fails_closed_at_enum_wall() {
 /// local across the branch. Straight-line capability bodies and pure branchy bodies
 /// both lower fine; this is specific to control flow over a capability environment.
 #[test]
-fn fe_ce9_capability_body_control_flow_fails_closed() {
-    let err = compile_to_wasm_err("wasm_ce9_cap_cf.fe", CE9_CAP_CONTROL_FLOW_SRC);
-    assert!(
-        err.contains("value-carried scalar") || err.contains("aggregate"),
-        "an `if` inside a capability body should fail closed at the aggregate \
-         provision-env local (R2), got: {err}"
-    );
+fn fe_ce9_capability_body_control_flow_executes() {
+    // WAS a fail-closed test: an `if` inside a capability body used to be
+    // rejected at the aggregate provision-env local (R2). The
+    // aggregate-flattening work (recursive values, owned record params, closed
+    // products) removed that wall, so the program now compiles AND RUNS. Pinned
+    // by execution rather than deleted, so the capability is a tested guarantee.
+    let wasm = compile_to_wasm("wasm_ce9_cap_cf.fe", CE9_CAP_CONTROL_FLOW_SRC);
+    let (mut store, instance) = instantiate_worker_and_clock(&wasm);
+    let run = instance
+        .get_typed_func::<i64, i64>(&mut store, "run")
+        .expect("`run` export should exist");
+    // n = BASE_CLOCK_MS = 1000, so `5 < n` holds and `branchy` yields
+    // `raw` = fe_task(0, pair) = pair + 100 (not the `+ 1` else-arm).
+    for pair in [5i64, 0, 42] {
+        let got = run
+            .call(&mut store, pair)
+            .expect("a capability body with an `if` should fork/join and branch");
+        assert_eq!(
+            got as u64,
+            pair as u64 + 100,
+            "run({pair}) should take the `5 < n` arm and return raw = pair + 100"
+        );
+    }
 }
 
 /// CE-9 WHAT EXECUTES: the direct-style THREE-CAPABILITY rail runs end to end. Three
@@ -3447,3 +3476,4 @@ fn pub_fn_reachable_as_callee_is_still_exported() {
         "`pub fn add` should be exported even though `main` calls it; got {exports:?}"
     );
 }
+
