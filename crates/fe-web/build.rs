@@ -9,8 +9,20 @@ const FNV1A64_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV1A64_PRIME: u64 = 0x100000001b3;
 
 fn main() {
-    let grammar_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tree-sitter-fe");
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Read CARGO_MANIFEST_DIR at RUNTIME, not with `env!`.
+    //
+    // `env!` bakes the path in when the build script itself is compiled, so a
+    // `target/` directory that is copied, shared, or cached across checkouts
+    // carries the ORIGINAL absolute path and the build fails looking for files
+    // under a directory that does not exist on this machine. Cargo supplies
+    // this variable on every invocation; asking it each time is the only form
+    // that is relocatable.
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR")
+            .expect("cargo sets CARGO_MANIFEST_DIR for build scripts"),
+    );
+    let grammar_dir = manifest_dir.join("../tree-sitter-fe");
+    let manifest_dir = manifest_dir.as_path();
     let vendor_wasm = manifest_dir.join("vendor/tree-sitter-fe.wasm");
     let stamp_file = manifest_dir.join("vendor/tree-sitter-fe.wasm.inputs");
     let inputs = tree_sitter_inputs(&grammar_dir);
