@@ -3408,3 +3408,43 @@ fn fe_ce9_three_capability_rail_executes() {
         "one run should walk task_begin + host_now + (wait, task_result)"
     );
 }
+
+/// A top-level `pub fn` that is reachable as a callee is NOT exported.
+///
+/// KNOWN BUG, ignored rather than red. `wasm_runtime_root_candidate` admits
+/// every `pub`, non-associated function of the entry module as a root
+/// candidate, but `build_wasm_runtime_package_impl` then narrows to
+/// `seed_funcs` by dropping candidates reachable as a callee, and only seeded
+/// roots receive `RuntimeLinkage::Internal` -> `Linkage::Public`. That
+/// narrowing is documented as safe because a callee-reachable candidate is
+/// "bare-named via the export-everything policy (the R1 status quo)".
+///
+/// Sonatina `ac266c21` ("fix(wasm): keep private functions out of exports")
+/// removed export-everything, gating exports on `Linkage::Public`. The
+/// assumption the narrowing rests on is therefore false, and callee-reachable
+/// `pub fn`s silently stopped being exported. Measured export surface for the
+/// source below is `["memory", "main"]`; `add` is missing.
+///
+/// The fix is to decouple "is exported" from "is a seeded root": every admitted
+/// candidate in `entry_funcs` should get public linkage on its single existing
+/// instance, leaving root seeding untouched (seeding them would mint a second
+/// scope-only-distinct instance and mangle both symbols).
+#[test]
+#[ignore = "known bug: callee-reachable `pub fn` loses its wasm export since sonatina ac266c21"]
+fn pub_fn_reachable_as_callee_is_still_exported() {
+    let source = "pub fn add(a: u64, b: u64) -> u64 { a + b }\n\
+                  pub fn main() -> u64 { add(2, 3) }\n";
+    let wasm = compile_to_wasm("pub_callee_export.fe", source);
+    let mut exports = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let Ok(wasmparser::Payload::ExportSection(reader)) = payload {
+            for export in reader {
+                exports.push(export.expect("export should parse").name.to_string());
+            }
+        }
+    }
+    assert!(
+        exports.iter().any(|name| name == "add"),
+        "`pub fn add` should be exported even though `main` calls it; got {exports:?}"
+    );
+}
