@@ -3409,9 +3409,9 @@ fn fe_ce9_three_capability_rail_executes() {
     );
 }
 
-/// A top-level `pub fn` that is reachable as a callee is NOT exported.
+/// A top-level `pub fn` that is reachable as a callee is still exported.
 ///
-/// KNOWN BUG, ignored rather than red. `wasm_runtime_root_candidate` admits
+/// REGRESSION TEST for a bug fixed 2026-07-25. `wasm_runtime_root_candidate` admits
 /// every `pub`, non-associated function of the entry module as a root
 /// candidate, but `build_wasm_runtime_package_impl` then narrows to
 /// `seed_funcs` by dropping candidates reachable as a callee, and only seeded
@@ -3425,12 +3425,11 @@ fn fe_ce9_three_capability_rail_executes() {
 /// `pub fn`s silently stopped being exported. Measured export surface for the
 /// source below is `["memory", "main"]`; `add` is missing.
 ///
-/// The fix is to decouple "is exported" from "is a seeded root": every admitted
-/// candidate in `entry_funcs` should get public linkage on its single existing
+/// Fixed by decoupling "is exported" from "is a seeded root": every admitted
+/// candidate in `entry_funcs` now gets public linkage on its single existing
 /// instance, leaving root seeding untouched (seeding them would mint a second
 /// scope-only-distinct instance and mangle both symbols).
 #[test]
-#[ignore = "known bug: callee-reachable `pub fn` loses its wasm export since sonatina ac266c21"]
 fn pub_fn_reachable_as_callee_is_still_exported() {
     let source = "pub fn add(a: u64, b: u64) -> u64 { a + b }\n\
                   pub fn main() -> u64 { add(2, 3) }\n";

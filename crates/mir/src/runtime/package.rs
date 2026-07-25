@@ -153,6 +153,15 @@ struct RuntimeGraph<'db> {
     // content-identical duplicates non-deterministic.
     nodes: IndexMap<RuntimeInstance<'db>, RuntimeGraphNode<'db>>,
     public_roots: FxHashSet<RuntimeInstance<'db>>,
+    /// Functions the SOURCE declared as the module's public surface, whether or
+    /// not they were seeded as roots. Entry-only root seeding deliberately drops
+    /// callee-reachable candidates (seeding them would mint a second,
+    /// scope-only-distinct instance and mangle both symbols), and that was safe
+    /// only while the wasm backend exported every function. Sonatina
+    /// `ac266c21` gated exports on `Linkage::Public`, so export eligibility must
+    /// now be carried explicitly rather than inferred from root-ness. Empty on
+    /// the EVM path, which has its own entry ABI.
+    public_export_funcs: FxHashSet<Func<'db>>,
     object_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     code_region_roots: Vec<(RuntimeCodeRegion<'db>, RuntimeInstance<'db>)>,
 }
@@ -163,6 +172,7 @@ struct RuntimeGraphBuilder<'db> {
     queued: FxHashSet<RuntimeInstance<'db>>,
     nodes: IndexMap<RuntimeInstance<'db>, RuntimeGraphNode<'db>>,
     public_roots: FxHashSet<RuntimeInstance<'db>>,
+    public_export_funcs: FxHashSet<Func<'db>>,
     object_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     discovered_contract_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     code_region_roots: Vec<(RuntimeCodeRegion<'db>, RuntimeInstance<'db>)>,
@@ -182,6 +192,7 @@ impl<'db> RuntimeGraphBuilder<'db> {
         db: &'db dyn MirDb,
         roots: Vec<RuntimeInstance<'db>>,
         object_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
+        public_export_funcs: FxHashSet<Func<'db>>,
     ) -> Self {
         let materialized_contracts = materialized_contracts_for_roots(db, &roots);
         let materialized_object_names = object_specs
@@ -194,6 +205,7 @@ impl<'db> RuntimeGraphBuilder<'db> {
             queued: FxHashSet::default(),
             nodes: IndexMap::new(),
             public_roots: roots.iter().copied().collect(),
+            public_export_funcs,
             object_specs,
             discovered_contract_specs: Vec::new(),
             code_region_roots: Vec::new(),
@@ -255,6 +267,7 @@ impl<'db> RuntimeGraphBuilder<'db> {
         Ok(RuntimeGraph {
             nodes: self.nodes,
             public_roots: self.public_roots,
+            public_export_funcs: self.public_export_funcs,
             object_specs: self.object_specs,
             code_region_roots: self.code_region_roots,
         })
@@ -432,6 +445,8 @@ pub fn build_runtime_package<'db>(
         package_roots,
         vec![(sanitize_object_name("main"), RuntimeSectionName::Main, root)],
         Some("main"),
+        // Non-wasm path: export eligibility is the EVM entry ABI's concern.
+        FxHashSet::default(),
     )?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
@@ -663,12 +678,17 @@ fn build_wasm_runtime_package_impl<'db>(
         package_roots.push(instance);
     }
     let entry = main_root.unwrap_or(package_roots[0]);
+    // Export eligibility is the SOURCE's `pub` declaration, not root-seeding.
+    // `seed_funcs` deliberately excludes callee-reachable candidates; they still
+    // belong to the module's public surface and must keep their wasm export.
+    let public_export_funcs = entry_funcs.iter().copied().collect::<FxHashSet<_>>();
     let package = build_non_contract_package(
         db,
         top_mod,
         package_roots,
         vec![(sanitize_object_name("main"), RuntimeSectionName::Main, entry)],
         Some("main"),
+        public_export_funcs,
     )?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
@@ -908,7 +928,14 @@ pub fn build_test_runtime_package<'db>(
     }
 
     let primary = (objects.len() == 1).then(|| objects[0].0.clone());
-    let package = build_sectioned_package(db, top_mod, roots, objects, primary.as_deref())?;
+    let package = build_sectioned_package(
+        db,
+        top_mod,
+        roots,
+        objects,
+        primary.as_deref(),
+        FxHashSet::default(),
+    )?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
     Ok(package)
@@ -932,7 +959,14 @@ fn build_contract_package<'db>(
     }
 
     let primary = (objects.len() == 1).then(|| objects[0].0.clone());
-    let package = build_sectioned_package(db, top_mod, roots, objects, primary.as_deref())?;
+    let package = build_sectioned_package(
+        db,
+        top_mod,
+        roots,
+        objects,
+        primary.as_deref(),
+        FxHashSet::default(),
+    )?;
     verify_runtime_package(db, package)
         .map_err(|err| LowerError::Unsupported(format!("invalid runtime package: {err:?}")))?;
     Ok(package)
@@ -1343,6 +1377,7 @@ fn build_non_contract_package<'db>(
     roots: Vec<RuntimeInstance<'db>>,
     object_specs: Vec<(String, RuntimeSectionName, RuntimeInstance<'db>)>,
     primary_object_name: Option<&str>,
+    public_export_funcs: FxHashSet<Func<'db>>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
     build_sectioned_package(
         db,
@@ -1353,6 +1388,7 @@ fn build_non_contract_package<'db>(
             .map(|(name, section, entry)| (name, vec![(section, entry)]))
             .collect(),
         primary_object_name,
+        public_export_funcs,
     )
 }
 
@@ -1362,12 +1398,14 @@ fn build_sectioned_package<'db>(
     roots: Vec<RuntimeInstance<'db>>,
     object_specs: Vec<(String, Vec<(RuntimeSectionName, RuntimeInstance<'db>)>)>,
     primary_object_name: Option<&str>,
+    public_export_funcs: FxHashSet<Func<'db>>,
 ) -> Result<RuntimePackage<'db>, LowerError> {
     let root_object_names = object_specs
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<FxHashSet<_>>();
-    let mut graph = RuntimeGraphBuilder::new(db, roots, object_specs).build()?;
+    let mut graph =
+        RuntimeGraphBuilder::new(db, roots, object_specs, public_export_funcs).build()?;
     let functions = collect_runtime_functions(db, &graph);
     let functions_by_instance = functions
         .iter()
@@ -2300,7 +2338,8 @@ fn collect_runtime_functions<'db>(
                 db,
                 instance,
                 symbol,
-                graph.public_roots.contains(&instance),
+                graph.public_roots.contains(&instance)
+                    || instance_is_declared_public_export(db, instance, &graph.public_export_funcs),
                 graph
                     .nodes
                     .get(&instance)
@@ -2332,6 +2371,29 @@ fn runtime_instance_symbol(
     }
     *ordinal += 1;
     symbol
+}
+
+/// Is this instance one the source declared `pub` in the entry module?
+///
+/// Export eligibility must not be inferred from root-seeding: entry-only root
+/// seeding drops callee-reachable candidates on purpose, and that was only safe
+/// while the wasm backend exported every function (sonatina `ac266c21` ended
+/// that). An empty set, as on the EVM path, makes this a no-op.
+fn instance_is_declared_public_export<'db>(
+    db: &'db dyn MirDb,
+    instance: RuntimeInstance<'db>,
+    public_export_funcs: &FxHashSet<Func<'db>>,
+) -> bool {
+    if public_export_funcs.is_empty() {
+        return false;
+    }
+    let RuntimeInstanceSource::Semantic(semantic) = instance.key(db).source(db) else {
+        return false;
+    };
+    let BodyOwner::Func(func) = semantic.key(db).owner(db) else {
+        return false;
+    };
+    public_export_funcs.contains(&func)
 }
 
 fn runtime_function_for_instance<'db>(
