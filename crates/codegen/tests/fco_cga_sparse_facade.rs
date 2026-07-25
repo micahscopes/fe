@@ -25,6 +25,19 @@ fn composed_source() -> String {
         .expect("canonical public-oracle end marker");
     let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
     let canonical50_api = fe_codegen::standalone_ctfe_ingot_source(CANONICAL50_API);
+    // Both ingot sources are inlined into ONE file, so canonical50's cross-ingot
+    // references cannot resolve: there is no `sparse_clifford` ingot in a
+    // single-file compile. Drop its import header and strip the qualified
+    // prefix, exactly as fco_cga80_direct_lanes.rs:37-43 already does. Without
+    // this the composed source reports `sparse_clifford is not found` at its
+    // `use` line and at every `sparse_clifford::` path.
+    let (_, canonical50_api) = canonical50_api
+        .split_once("// Bounded symbolic coefficient interpretation")
+        .expect("canonical standalone source begins after its ingot import");
+    let canonical50_api = format!(
+        "// Bounded symbolic coefficient interpretation{}",
+        canonical50_api.replace("sparse_clifford::", "")
+    );
     format!("{sparse_api}\n{canonical50_api}\n{provider}{suffix}\n{BODY}")
 }
 
