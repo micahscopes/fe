@@ -1,4 +1,4 @@
-//! Stage the canonical CTFE Schedule<32> + provider-emitted five-lane render.
+//! Stage the canonical CTFE Schedule<32> + typed five-lane interpreter render.
 //!
 //! This intentionally writes to `gen-schedule32`; promotion to the live demo is
 //! a separate reviewed operation.
@@ -25,6 +25,7 @@ use url::Url;
 
 const CANONICAL: &str = include_str!("../tests/fixtures/fco_cga80_direct_lanes.fe");
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
+const CANONICAL50_API: &str = include_str!("../../../ingots/canonical_cl41_schedule/src/lib.fe");
 const BODY: &str = include_str!("../tests/fixtures/spirv/fco_cga80_direct_de_body.fe");
 const NAME: &str = "cga_schedule32_vec5_de_render";
 const WIDTH: u32 = 128;
@@ -37,9 +38,11 @@ const INV_CY: f32 = 0.0;
 const RENDER_LANE: &str = "render";
 const VERIFY_LANE: &str = "verify";
 const ORACLE_LANE: &str = "oracle";
-const APP_IMPORTS: &str = r#"use sparse_clifford::{
-    BladeSet, Nat, PlanLength, SparsePlan, Term, blade_set, plan_mask_candidate,
-    plan_mask_cardinality, support_gp, support_grade,
+const APP_IMPORTS: &str = r#"use sparse_clifford::{Add, Zero}
+use canonical_cl41_schedule::{
+    Canonical50Term,
+    Canonical50TypedChunk0,
+    Canonical50TypedBalancedSchedule32,
 }
 "#;
 const ACTOR_SOURCE: &str = r#"
@@ -139,33 +142,74 @@ pub fn oracle(request: own FrameRequest) -> AllocatedBrowserBytes {
 "#;
 
 fn app_source() -> String {
-    let (prefix, rest) = CANONICAL
+    let (_, provider_and_oracles) = CANONICAL
+        .split_once("// BEGIN_PROVIDER_EMITTER")
+        .expect("canonical provider begin marker");
+    let provider_and_oracles = format!("// BEGIN_PROVIDER_EMITTER{provider_and_oracles}");
+    let (provider, rest) = provider_and_oracles
         .split_once("// BEGIN_PUBLIC_ORACLES")
         .expect("canonical public-oracle begin marker");
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("canonical public-oracle end marker");
-    let source = format!("{APP_IMPORTS}\n{prefix}{suffix}\n{BODY}");
-    assert!(source.contains("SparsePlan<2707775, 4498990, 8948932, 136, 0, 0, 0, 0, 80, 32>",));
-    assert!(source.contains("const fn survivor_triple"));
-    assert!(source.contains("struct CanonicalCgaProvider"));
+    let mut source = format!("{APP_IMPORTS}\n{provider}{suffix}\n{BODY}");
+    assert!(CANONICAL50_API.matches(".clifford_gp(").count() == 2);
+    assert!(CANONICAL50_API.contains("pub type Canonical50Schedule32 = SparsePlan<"));
+    assert!(CANONICAL50_API.contains("pub struct Canonical50Term<"));
+    assert!(CANONICAL50_API.contains(
+        "pub type Canonical50TypedBalancedSchedule32"
+    ));
+    assert!(CANONICAL50_API.contains("CANONICAL50_KEEP_VALID"));
+    assert!(source.contains(
+        "for Canonical50Term<Candidate, Left, Point, Right, Output, Magnitude, Negative>"
+    ));
     assert!(
-        CANONICAL.contains("builder.ty<Schedule32>().normalized_preorder_types()"),
-        "the provider must consume the normalized typed Schedule32 plan",
+        source.contains("<Canonical50TypedBalancedSchedule32 as Eval5>::eval5("),
+        "the ordinary typed interpreter must consume the exact canonical50 plan",
     );
+    if let Some(root) = std::env::var_os("FE_CGA_EVAL_ROOT") {
+        let root = root
+            .into_string()
+            .expect("FE_CGA_EVAL_ROOT must be valid UTF-8");
+        let allowed = [
+            "Zero",
+            "Canonical50TypedChunk0<1>",
+            "Canonical50TypedChunk0<2>",
+            "Canonical50TypedChunk0<8>",
+            "Canonical50TypedBalancedSchedule32",
+        ];
+        assert!(
+            allowed.contains(&root.as_str()),
+            "unsupported FE_CGA_EVAL_ROOT `{root}`"
+        );
+        source = source.replace(
+            "Canonical50TypedBalancedSchedule32 as Eval5",
+            &format!("{root} as Eval5"),
+        );
+    }
     assert!(
-        CANONICAL.matches("builder.emit_method(").count() == 1
-            && CANONICAL.contains("builder.emit_method(\"sandwich\", image)"),
-        "the provider must emit exactly one aggregate sandwich method",
+        !source.contains("normalized_preorder_types")
+            && !source.contains("ImplBuilder")
+            && !source.contains("CanonicalCgaProvider"),
+        "the browser operator must not depend on provider-side plan traversal",
     );
-    assert!(
-        ["e1", "e2", "e4", "e8", "e16"]
-            .into_iter()
-            .all(|lane| !CANONICAL.contains(&format!("builder.emit_method(\"{lane}\""))),
-        "the provider must not retain the legacy five scalar methods",
-    );
-    assert!(!source.contains("trait Eval5"));
     assert!(!source.contains("ScheduleChunk"));
+    for forbidden in [
+        "2707775",
+        "4498990",
+        "8948932",
+        "SCHEDULE_KEEP",
+        "gp_negative",
+        "triple_negative",
+        "reverse_negative",
+        "survivor_triple",
+        "for triple in 0..80",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "browser application source retained old schedule semantic `{forbidden}`",
+        );
+    }
     source
 }
 
@@ -194,7 +238,9 @@ fn main() {
         app_dir.path().join("fe.toml"),
         format!(
             "[ingot]\nname = \"cga_schedule32_app\"\nversion = \"0.1.0\"\n\n\
-             [dependencies]\nsparse_clifford = {{ path = \"../../../ingots/sparse_clifford\" }}\n",
+             [dependencies]\n\
+             sparse_clifford = {{ path = \"../../../ingots/sparse_clifford\" }}\n\
+             canonical_cl41_schedule = {{ path = \"../../../ingots/canonical_cl41_schedule\" }}\n",
         ),
     )
     .expect("temporary Schedule32 fe.toml");
@@ -252,8 +298,12 @@ fn main() {
                 && !symbol.contains("plan_mask_")
                 && !symbol.contains("sparse_rank")
                 && !symbol.contains("sparse_present")
+                && !symbol.contains("canonical50_")
+                && !symbol.contains("symbolic_sandwich")
+                && !symbol.contains("clifford_gp")
+                && !symbol.contains("packed_")
         }),
-        "public CTFE helpers from the sparse_clifford dependency must not become app runtime roots",
+        "public planner/recurrence helpers must not become app runtime roots",
     );
     if std::env::var_os("FE_CGA_SCHEDULE32_HIR_ONLY").is_some() {
         eprintln!(
@@ -275,6 +325,25 @@ fn main() {
             .iter()
             .all(|f| f.linkage(&db) != mir::RuntimeLinkage::External)
     );
+    let runtime_ir = mir::format_runtime_package(&db, &package);
+    eprintln!(
+        "Schedule32 Vec5 runtime package: {} functions, {} formatted MIR bytes",
+        package.functions(&db).len(),
+        runtime_ir.len(),
+    );
+    for forbidden in [
+        "carrier=int64",
+        "carrier=int256",
+        "canonical50_",
+        "symbolic_sandwich",
+        "clifford_gp",
+        "packed_",
+    ] {
+        assert!(
+            !runtime_ir.contains(forbidden),
+            "compile-time canonical50 planner leaked into runtime MIR as `{forbidden}`",
+        );
+    }
     if std::env::var_os("FE_CGA_SCHEDULE32_PACKAGE_ONLY").is_some() {
         eprintln!(
             "Schedule32 Vec5 composed source: runtime package clean (backends intentionally skipped)"
@@ -498,7 +567,7 @@ fn main() {
         "actor_wasm": "actor/module.wasm",
         "actor_interface": "actor/interface.js",
         "actor_lanes": [RENDER_LANE, VERIFY_LANE, ORACLE_LANE],
-        "source_model": "application ingot with sparse_clifford path dependency",
+        "source_model": "application ingot with canonical_cl41_schedule and sparse_clifford path dependencies",
         "application_manifest": "app/fe.toml",
         "application_source": "app/src/lib.fe",
         "kernel_source": "kernel.fe (dependency-backed; not standalone)",
@@ -512,7 +581,7 @@ fn main() {
         "view": [CAM_X, CAM_Y, ZOOM], "inversion_center": [INV_CX, INV_CY],
         "parameter_types": ["F32", "F32", "F32", "F32", "F32"],
         "shape": "inverted_offset_torus_cyclide",
-        "algebra": "canonical Fe helpers produce an inspectable typed Schedule<32> whose normalized Term payloads directly drive the FCO provider's five lanes and canonical four-bucket balanced reduction",
+        "algebra": "the public recursive Cl(4,1) recurrence derives an exact canonical50-to-32 SparsePlan interpreted directly by ordinary recursive Eval5 specialization",
         "inversion_center_runtime": true, "fnv1a32": frame_hash,
         "sky_pixels": sky, "hit_pixels": upper + lower,
         "upper_pixels": upper, "lower_pixels": lower, "distinct_colors": distinct.len(),
@@ -531,7 +600,7 @@ fn main() {
         },
         "schedule_tuple_fields": ["left_blade", "point_blade", "right_blade", "output_blade", "magnitude", "negative"],
         "canonical_survivor_tuples": schedule_json,
-        "runtime_tuple_order": "canonical normalized Schedule32 Term order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
+        "runtime_tuple_order": "pair-major canonical50 survivor order; four ordinal buckets of eight, term-prepend within each bucket, then balanced (3+2)+(1+0) reduction",
         "provenance": provenance,
     })).unwrap();
 
@@ -541,7 +610,9 @@ fn main() {
     write(
         &out.join("app/fe.toml"),
         b"[ingot]\nname = \"cga_schedule32_app\"\nversion = \"0.1.0\"\n\n\
-[dependencies]\nsparse_clifford = { path = \"../../../../ingots/sparse_clifford\" }\n",
+[dependencies]\n\
+sparse_clifford = { path = \"../../../../ingots/sparse_clifford\" }\n\
+canonical_cl41_schedule = { path = \"../../../../ingots/canonical_cl41_schedule\" }\n",
     );
     write(&out.join("app/src/lib.fe"), actor_source.as_bytes());
     write(&out.join("frag.wgsl"), wgsl.as_bytes());
@@ -565,7 +636,20 @@ fn assert_browser_wgsl(wgsl: &str) {
     for token in ["@vertex", "@fragment", "loop", "sqrt(", "unpack4x8unorm"] {
         assert!(wgsl.contains(token), "WGSL lacks {token}");
     }
-    assert!(!wgsl.contains("i64") && !wgsl.contains("u64"));
+    for forbidden in [
+        "i64",
+        "u64",
+        "i256",
+        "canonical50_",
+        "symbolic_sandwich",
+        "clifford_gp",
+        "packed_",
+    ] {
+        assert!(
+            !wgsl.contains(forbidden),
+            "compile-time planner token leaked into WGSL: `{forbidden}`",
+        );
+    }
     let module = naga::front::wgsl::parse_str(wgsl).expect("reparse WGSL");
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
@@ -934,19 +1018,54 @@ struct ScheduleTuple {
 }
 
 fn independently_derived_schedule() -> Vec<ScheduleTuple> {
-    (0usize..80)
-        .filter(|&triple| keep_tag_rust(triple) != 0)
-        .map(|triple| {
-            let left = sphere_blade_rust(triple / 20);
-            let point = 1usize << ((triple / 4) % 5);
-            let right = sphere_blade_rust(triple % 4);
+    let pairs = [
+        (0usize, 0usize),
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (1, 1),
+        (1, 2),
+        (1, 3),
+        (2, 2),
+        (2, 3),
+        (3, 3),
+    ];
+    let mut coefficients = [0i32; 50];
+    for left_slot in 0..4 {
+        let left = sphere_blade_rust(left_slot);
+        for point_slot in 0..5 {
+            let point = 1usize << point_slot;
+            for right_slot in 0..4 {
+                let right = sphere_blade_rust(right_slot);
+                let pair = pairs
+                    .iter()
+                    .position(|&(lo, hi)| {
+                        (lo, hi) == (left_slot.min(right_slot), left_slot.max(right_slot))
+                    })
+                    .expect("sphere pair rank");
+                let candidate = pair * 5 + point_slot;
+                let negative =
+                    gp_negative_rust(left, point) ^ gp_negative_rust(left ^ point, right);
+                coefficients[candidate] += if negative != 0 { -1 } else { 1 };
+            }
+        }
+    }
+    coefficients
+        .into_iter()
+        .enumerate()
+        .filter(|(_, coefficient)| *coefficient != 0)
+        .map(|(candidate, coefficient)| {
+            let (left_slot, right_slot) = pairs[candidate / 5];
+            let left = sphere_blade_rust(left_slot);
+            let point = 1usize << (candidate % 5);
+            let right = sphere_blade_rust(right_slot);
             ScheduleTuple {
                 left,
                 point,
                 right,
                 output: left ^ point ^ right,
-                magnitude: 2 - usize::from(triple / 20 == triple % 4),
-                negative: gp_negative_rust(left, point) ^ gp_negative_rust(left ^ point, right),
+                magnitude: coefficient.unsigned_abs() as usize,
+                negative: usize::from(coefficient < 0),
             }
         })
         .collect()
@@ -962,20 +1081,6 @@ fn gp_negative_rust(a: usize, b: usize) -> usize {
         swaps += ((a >> bit) & 1) * (b & ((1usize << bit) - 1)).count_ones() as usize;
     }
     (swaps + ((a >> 4) & 1) * ((b >> 4) & 1)) & 1
-}
-
-fn keep_tag_rust(triple: usize) -> usize {
-    let left_slot = triple / 20;
-    let right_slot = triple % 4;
-    if left_slot > right_slot {
-        return 0;
-    }
-    let left = sphere_blade_rust(left_slot);
-    let point = 1usize << ((triple / 4) % 5);
-    let right = sphere_blade_rust(right_slot);
-    let forward = gp_negative_rust(left, point) ^ gp_negative_rust(left ^ point, right);
-    let reverse = gp_negative_rust(right, point) ^ gp_negative_rust(right ^ point, left);
-    usize::from(forward == reverse)
 }
 
 fn git_output(path: &std::path::Path, args: &[&str]) -> String {
@@ -1029,7 +1134,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         &["status", "--porcelain", "--untracked-files=normal"],
     );
     serde_json::json!({
-        "source": "Schedule32 application ingot depending on the public sparse_clifford ingot",
+        "source": "Schedule32 application ingot depending on the public canonical_cl41_schedule planner and sparse_clifford recurrence",
         "fe_rev": fe_rev,
         "fe_dirty": false,
         "fe_untracked_present": fe_untracked_present,
@@ -1039,17 +1144,22 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "sonatina_dirty": !sonatina_status.is_empty(),
         "sonatina_status_fnv1a32": fnv1a32(sonatina_status.as_bytes()),
         "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
+        "canonical50_planner": "ingots/canonical_cl41_schedule/src/lib.fe",
         "sparse_clifford_fixture": "ingots/sparse_clifford/src/lib.fe",
         "published_app_manifest": "demos/webgpu-cga-inversion/gen-schedule32/app/fe.toml",
         "published_app_source": "demos/webgpu-cga-inversion/gen-schedule32/app/src/lib.fe",
-        "published_dependency_path": "../../../../ingots/sparse_clifford",
+        "published_dependency_paths": [
+            "../../../../ingots/canonical_cl41_schedule",
+            "../../../../ingots/sparse_clifford"
+        ],
         "kernel_source_self_contained": false,
         "body_fixture": "crates/codegen/tests/fixtures/spirv/fco_cga80_direct_de_body.fe",
         "canonical_fnv1a32": fnv1a32(CANONICAL.as_bytes()),
+        "canonical50_api_fnv1a32": fnv1a32(CANONICAL50_API.as_bytes()),
         "sparse_clifford_api_fnv1a32": fnv1a32(SPARSE_CLIFFORD_API.as_bytes()),
         "body_fnv1a32": fnv1a32(BODY.as_bytes()),
         "application_kernel_source_fnv1a32": fnv1a32(source.as_bytes()),
-        "algebra": "CTFE-derived 80-to-32 typed witness; bounded FCO provider emits one shared five-lane sandwich aggregate from the same helpers",
+        "algebra": "public recursive Cl(4,1) CTFE derives the exact canonical50-to-32 typed plan; ordinary recursive Eval5 interpretation is erased by monomorphization",
         "generated_unix_secs": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
     })
 }

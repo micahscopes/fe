@@ -8,15 +8,22 @@ fn source() -> String {
     let sparse_clifford_api = fe_codegen::standalone_ctfe_ingot_source(include_str!(
         "../../../ingots/sparse_clifford/src/lib.fe"
     ));
+    let canonical50_api = fe_codegen::standalone_ctfe_ingot_source(include_str!(
+        "../../../ingots/canonical_cl41_schedule/src/lib.fe"
+    ));
     let base = include_str!("fixtures/fco_cga80_direct_lanes.fe");
-    let (prefix, rest) = base
+    let (_, provider_and_oracles) = base
+        .split_once("// BEGIN_PROVIDER_EMITTER")
+        .expect("provider begin marker");
+    let provider_and_oracles = format!("// BEGIN_PROVIDER_EMITTER{provider_and_oracles}");
+    let (provider, rest) = provider_and_oracles
         .split_once("// BEGIN_PUBLIC_ORACLES")
         .expect("public-oracle begin marker");
     let (_, suffix) = rest
         .split_once("// END_PUBLIC_ORACLES")
         .expect("public-oracle end marker");
     format!(
-        "{sparse_clifford_api}\n{prefix}{suffix}\n{}",
+        "{sparse_clifford_api}\n{canonical50_api}\n{provider}{suffix}\n{}",
         include_str!("fixtures/spirv/fco_cga80_direct_de_body.fe")
     )
 }

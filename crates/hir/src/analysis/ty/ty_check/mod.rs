@@ -3718,6 +3718,34 @@ impl<'db> TypedBody<'db> {
                 .any(|(_, cond_data)| matches!(cond_data, Partial::Absent))
     }
 
+    pub fn smir_lowering_blocker_details(&self, db: &'db dyn HirAnalysisDb) -> Vec<String> {
+        let mut details = Vec::new();
+        if self.result_ty.has_invalid(db) {
+            details.push(format!("invalid result type {}", self.result_ty.pretty_print(db)));
+        }
+        if let Some(body) = self.body {
+            for (expr, expr_data) in body.exprs(db).iter() {
+                if self.expr_has_smir_lowering_blocker(db, expr, expr_data) {
+                    details.push(format!(
+                        "expression {expr:?}: {expr_data:?}; type={}",
+                        self.expr_ty(db, expr).pretty_print(db),
+                    ));
+                }
+            }
+            for (stmt, stmt_data) in body.stmts(db).iter() {
+                if self.stmt_has_smir_lowering_blocker(stmt, stmt_data) {
+                    details.push(format!("statement {stmt:?}: {stmt_data:?}"));
+                }
+            }
+            for (cond, cond_data) in body.conds(db).iter() {
+                if matches!(cond_data, Partial::Absent) {
+                    details.push(format!("condition {cond:?}: absent"));
+                }
+            }
+        }
+        details
+    }
+
     fn expr_has_smir_lowering_blocker(
         &self,
         db: &'db dyn HirAnalysisDb,

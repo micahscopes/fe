@@ -856,7 +856,9 @@ impl<'db> TyId<'db> {
                 Ok(TyId::const_ty(db, const_ty.with_ty(db, ty)))
             }
             (Some(expected_const_ty), _) => {
-                if expected_const_ty.has_invalid(db) {
+                if let Some(cause) = self.invalid_cause(db) {
+                    Err(cause)
+                } else if expected_const_ty.has_invalid(db) {
                     Err(InvalidCause::Other)
                 } else {
                     Err(InvalidCause::ConstTyExpected {
@@ -959,7 +961,9 @@ impl<'db> TyId<'db> {
             }
 
             (Some(expected_const_ty), _) => {
-                if expected_const_ty.has_invalid(db) {
+                if let Some(cause) = self.invalid_cause(db) {
+                    Err(cause)
+                } else if expected_const_ty.has_invalid(db) {
                     Err(InvalidCause::Other)
                 } else {
                     Err(InvalidCause::ConstTyExpected {

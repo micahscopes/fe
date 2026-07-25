@@ -1899,16 +1899,26 @@ pub(crate) fn evaluate_const_ty<'db>(
         Err(cause) => return ConstTyId::invalid(db, cause),
     };
 
-    let evaluated = match eval_body_owner_const(
-        db,
-        super::ty_check::BodyOwner::AnonConstBody {
-            body,
-            expected: validated.expected_ty,
-        },
-        generic_args,
-    )
-    .map(|value| const_ty_from_sem_const(db, value))
-    {
+    // Ground payloads exposed by recursive type-function reduction can encode
+    // substantially larger specialization programs than ordinary source
+    // constants. Give only that captured-generic case a separate finite
+    // budget; the ordinary CTFE default remains unchanged.
+    const STAGED_GROUND_PAYLOAD_STEP_LIMIT: usize = 2_000_000;
+    let owner = super::ty_check::BodyOwner::AnonConstBody {
+        body,
+        expected: validated.expected_ty,
+    };
+    let evaluation = if const_def.is_none() && !generic_args.is_empty() {
+        super::super::semantic::ctfe::eval_body_owner_const_with_step_budget(
+            db,
+            owner,
+            generic_args,
+            STAGED_GROUND_PAYLOAD_STEP_LIMIT,
+        )
+    } else {
+        eval_body_owner_const(db, owner, generic_args)
+    };
+    let evaluated = match evaluation.map(|value| const_ty_from_sem_const(db, value)) {
         Ok(value) => value,
         Err(CtfeError::NotConstEvaluable { .. }) => validated.const_ty,
         Err(err) => {

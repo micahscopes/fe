@@ -267,6 +267,30 @@ pub fn eval_body_owner_const<'db>(
     eval_const_instance(db, get_or_build_semantic_instance(db, key))
 }
 
+/// Evaluates a ground staged const payload with an explicit, caller-owned
+/// step budget. This keeps unusually expensive type-level specialization from
+/// silently raising the ordinary CTFE limit.
+#[salsa::tracked]
+pub fn eval_body_owner_const_with_step_budget<'db>(
+    db: &'db dyn HirAnalysisDb,
+    owner: BodyOwner<'db>,
+    generic_args: Vec<crate::analysis::ty::ty_def::TyId<'db>>,
+    step_limit: usize,
+) -> Result<SemConstId<'db>, CtfeError<'db>> {
+    let key = SemanticInstanceKey::new(
+        db,
+        owner,
+        GenericSubst::new(db, generic_args),
+        crate::analysis::semantic::EffectProviderSubst::empty(db),
+        ImplEnv::empty(db, owner.scope()),
+    );
+    let instance = get_or_build_semantic_instance(db, key);
+    let mut config = CtfeConfig::default();
+    config.step_limit = step_limit;
+    let mut machine = CtfeMachine::new(db, config);
+    machine.eval_root(instance, Vec::new(), SemOrigin::Body(owner))
+}
+
 fn eval_body_owner_const_cycle_initial<'db>(
     _db: &'db dyn HirAnalysisDb,
     owner: BodyOwner<'db>,
@@ -321,24 +345,22 @@ struct MemoizedConstCall<'db> {
 
 /// Advisory cache for a nested, fully-concrete const-function call.
 ///
-/// Both remaining budgets are part of the key and configure the probe, so it
-/// cannot do work the inline parent was not allowed to do. Only recursively
-/// concrete successes escape this query. `None` (including a cycle, deferred
-/// value, unsupported operation, or ordinary CTFE error) makes the caller use
-/// the original inline path, preserving its fallback behavior and diagnostics.
+/// The semantic instance and concrete arguments are the complete cache key.
+/// The query evaluates with the ordinary fixed CTFE limits and publishes only
+/// a completed concrete success plus its measured cost. Callers must establish
+/// that the original measured cost fits their remaining budgets before using
+/// the result; this keeps cache warmth from changing success/failure at budget
+/// boundaries. Failures, deferred values, and exhausted partial evaluations
+/// are never cached as successful results.
 #[salsa::tracked(cycle_initial=eval_concrete_const_call_cycle_initial, cycle_fn=eval_concrete_const_call_cycle_recover)]
 fn eval_concrete_const_call<'db>(
     db: &'db dyn HirAnalysisDb,
     key: SemanticInstanceKey<'db>,
     args: Vec<SemConstId<'db>>,
-    recursion_budget: usize,
-    step_budget: usize,
 ) -> Option<MemoizedConstCall<'db>> {
     let instance = get_or_build_semantic_instance(db, key);
     let origin = SemOrigin::Body(key.owner(db));
-    let mut config = CtfeConfig::default();
-    config.recursion_limit = recursion_budget;
-    config.step_limit = step_budget;
+    let config = CtfeConfig::default();
     let mut machine = CtfeMachine::new(db, config);
     let value = machine
         .eval_root(
@@ -363,8 +385,6 @@ fn eval_concrete_const_call_cycle_initial<'db>(
     db: &'db dyn HirAnalysisDb,
     key: SemanticInstanceKey<'db>,
     _args: Vec<SemConstId<'db>>,
-    _recursion_budget: usize,
-    _step_budget: usize,
 ) -> Option<MemoizedConstCall<'db>> {
     let _ = (db, key);
     None
@@ -376,8 +396,6 @@ fn eval_concrete_const_call_cycle_recover<'db>(
     _count: u32,
     _key: SemanticInstanceKey<'db>,
     _args: Vec<SemConstId<'db>>,
-    _recursion_budget: usize,
-    _step_budget: usize,
 ) -> salsa::CycleRecoveryAction<Option<MemoizedConstCall<'db>>> {
     salsa::CycleRecoveryAction::Fallback(None)
 }
@@ -404,6 +422,31 @@ fn eval_body_owner_const_with_args_cycle_recover<'db>(
     salsa::CycleRecoveryAction::Iterate
 }
 
+/// Shared cache for a fully evaluated const item. As with concrete calls, only
+/// successful values escape; callers retain the measured logical cost for
+/// budget checks. The cache machine disables this same route so recursive const
+/// references fall back to its ordinary local recursion detection.
+#[salsa::tracked]
+fn eval_completed_const_item<'db>(
+    db: &'db dyn HirAnalysisDb,
+    key: SemanticInstanceKey<'db>,
+) -> Option<MemoizedConstCall<'db>> {
+    let instance = get_or_build_semantic_instance(db, key);
+    let mut machine = CtfeMachine::new(db, CtfeConfig::default());
+    machine.memoize_const_items = false;
+    let value = machine
+        .eval_root(instance, Vec::new(), SemOrigin::Body(key.owner(db)))
+        .ok()?;
+    if sem_const_contains_type_level(db, value) {
+        return None;
+    }
+    Some(MemoizedConstCall {
+        value,
+        steps: machine.steps,
+        max_recursion: machine.max_recursion,
+    })
+}
+
 pub(super) fn try_eval_expr_to_const<'db>(
     db: &'db dyn HirAnalysisDb,
     instance: SemanticInstance<'db>,
@@ -427,6 +470,7 @@ struct CtfeMachine<'db> {
     /// recursion budget as inline evaluation.
     max_recursion: usize,
     memoize_concrete_calls: bool,
+    memoize_const_items: bool,
     instance_cache: FxHashMap<SemanticInstanceKey<'db>, SemanticInstance<'db>>,
     body_cache: FxHashMap<SemanticInstanceKey<'db>, Rc<SemanticBody<'db>>>,
     frames: Vec<CtfeFrame<'db>>,
@@ -1131,6 +1175,7 @@ impl<'db> CtfeMachine<'db> {
             steps: 0,
             max_recursion: 0,
             memoize_concrete_calls: true,
+            memoize_const_items: true,
             instance_cache: FxHashMap::default(),
             body_cache: FxHashMap::default(),
             frames: Vec::new(),
@@ -1219,6 +1264,22 @@ impl<'db> CtfeMachine<'db> {
         let origin = cref.origin(self.db);
         if self.const_stack.contains(&key) {
             return Err(CtfeError::RecursiveConst { origin });
+        }
+
+        if self.memoize_const_items
+            && let Some(cached) = eval_completed_const_item(self.db, key)
+        {
+            let current_depth = self.frames.len().saturating_sub(self.const_stack.len());
+            let charged_depth = current_depth.saturating_add(cached.max_recursion);
+            let charged_steps = self.steps.saturating_add(cached.steps);
+            if charged_depth <= self.config.recursion_limit
+                && charged_steps <= self.config.step_limit
+            {
+                self.steps = charged_steps;
+                self.max_recursion = self.max_recursion.max(charged_depth);
+                self.const_results.insert(key, Ok(cached.value));
+                return Ok(cached.value);
+            }
         }
 
         self.const_stack.push(key);
@@ -1611,16 +1672,19 @@ impl<'db> CtfeMachine<'db> {
                             self.db,
                             instance.key(self.db),
                             concrete_args,
-                            recursion_budget,
-                            step_budget,
                         )
                     {
                         let charged_depth = current_depth.saturating_add(cached.max_recursion);
-                        let charged_steps = self.steps.saturating_add(cached.steps);
+                        let eligible_steps = self.steps.saturating_add(cached.steps);
                         if charged_depth <= self.config.recursion_limit
-                            && charged_steps <= self.config.step_limit
+                            && eligible_steps <= self.config.step_limit
                         {
-                            self.steps = charged_steps;
+                            // Preserve the logical CTFE cost so cache warmth
+                            // cannot change any budget boundary. The completed
+                            // Salsa query avoids re-executing those steps in
+                            // wall-clock work; this counter is semantic
+                            // accounting, not an instruction replay.
+                            self.steps = eligible_steps;
                             self.max_recursion = self.max_recursion.max(charged_depth);
                             return Ok(CtfeValue::concrete(self.db, cached.value));
                         }
@@ -3924,6 +3988,7 @@ mod memo_tests {
         );
         let mut machine = CtfeMachine::new(db, config);
         machine.memoize_concrete_calls = memo;
+        machine.memoize_const_items = memo;
         let result = machine.eval_root(instance, Vec::new(), SemOrigin::Body(owner));
         TestRun {
             result,
@@ -3958,6 +4023,76 @@ mod memo_tests {
             Ok(value) => format!("Ok({:?})", value.value(db)),
             Err(err) => error(err),
         }
+    }
+
+    #[test]
+    fn explicit_step_budget_fails_closed_without_changing_default() {
+        let (db, owner) = fixture(
+            r#"
+const fn root() -> usize {
+    let mut i: usize = 0
+    while i < 16 { i = i + 1 }
+    i
+}
+"#,
+        );
+        let limited = eval_body_owner_const_with_step_budget(db, owner, Vec::new(), 1);
+        assert!(
+            outcome(db, &limited).contains("StepLimitExceeded"),
+            "explicit low budget must preserve the CTFE cause: {}",
+            outcome(db, &limited)
+        );
+        assert!(
+            eval_body_owner_const(db, owner, Vec::new()).is_ok(),
+            "the ordinary one-million-step CTFE path must remain independent"
+        );
+    }
+
+    #[test]
+    fn completed_call_cache_keys_include_semantic_instance_and_arguments() {
+        let (db, owner) = fixture(
+            r#"
+const fn left(_ n: usize) -> usize { n + 1 }
+const fn right(_ n: usize) -> usize { n + 2 }
+const fn root() -> usize {
+    left(7) + left(8) + right(7)
+}
+"#,
+        );
+        let inline = run(db, owner, CtfeConfig::default(), false);
+        let memo = run(db, owner, CtfeConfig::default(), true);
+        assert_eq!(outcome(db, &inline.result), outcome(db, &memo.result));
+        assert!(
+            outcome(db, &memo.result).contains("Ok(Scalar")
+                && outcome(db, &memo.result).contains("value: 26"),
+            "different functions/arguments must not alias: {}",
+            outcome(db, &memo.result)
+        );
+    }
+
+    #[test]
+    fn completed_const_item_cache_keys_include_semantic_instance() {
+        let (db, owner) = fixture(
+            r#"
+const LEFT: usize = 11
+const RIGHT: usize = 13
+const fn root() -> usize {
+    LEFT + LEFT + RIGHT
+}
+"#,
+        );
+        let inline = run(db, owner, CtfeConfig::default(), false);
+        let memo = run(db, owner, CtfeConfig::default(), true);
+        assert_eq!(outcome(db, &inline.result), outcome(db, &memo.result));
+        assert!(
+            outcome(db, &memo.result).contains("value: 35"),
+            "different const items must not alias: {}",
+            outcome(db, &memo.result)
+        );
+        assert_eq!(
+            inline.steps, memo.steps,
+            "cache warmth must preserve logical budget accounting"
+        );
     }
 
     #[test]

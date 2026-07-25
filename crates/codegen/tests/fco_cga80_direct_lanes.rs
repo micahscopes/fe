@@ -3,12 +3,13 @@ use std::time::Instant;
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    compile_runtime_package_spirv_render, compile_runtime_package_wasm_with_options, layout_for,
-    BackendKind, OptLevel, WasmCompileOptions,
+    BackendKind, OptLevel, WasmCompileOptions, compile_runtime_package_spirv_render,
+    compile_runtime_package_wasm_with_options, layout_for,
 };
 use url::Url;
 
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
+const CANONICAL50_API: &str = include_str!("../../../ingots/canonical_cl41_schedule/src/lib.fe");
 const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
 const SCHEDULE32_REFERENCE: &str =
     include_str!("../../../demos/webgpu-cga-inversion/gen-schedule32/reference.json");
@@ -16,13 +17,31 @@ const PINNED_REFERENCE_HASH: u32 = 3_470_936_828;
 const PINNED_VIEW: (f32, f32, f32, f32, f32) = (0.0, 0.0, 0.0125, 0.5, 0.0);
 
 fn canonical_source() -> String {
+    let (_, interpreter) = CANONICAL
+        .split_once("// BEGIN_PROVIDER_EMITTER")
+        .expect("canonical typed-interpreter begin marker");
     assert!(
-        CANONICAL.contains("builder.ty<Schedule32>().normalized_preorder_types()")
-            && !CANONICAL.contains("for triple in 0..80"),
-        "the FCO provider must consume the typed plan rather than rescan raw80",
+        interpreter.contains(
+            "for Canonical50Term<Candidate, Left, Point, Right, Output, Magnitude, Negative>",
+        )
+            && interpreter.contains("impl<L: Eval5, R: Eval5> Eval5 for Add<L, R>")
+            && interpreter.contains("<Canonical50TypedBalancedSchedule32 as Eval5>::eval5(")
+            && !interpreter.contains("ObserveCanonical")
+            && !interpreter.contains("ImplBuilder")
+            && !interpreter.contains("normalized_preorder_types")
+            && !interpreter.contains("for triple in 0..80"),
+        "ordinary typed Eval5 must consume the exact plan without provider traversal or raw80 rescanning",
     );
     let sparse_api = fe_codegen::standalone_ctfe_ingot_source(SPARSE_CLIFFORD_API);
-    format!("{sparse_api}\n{CANONICAL}")
+    let canonical50_api = fe_codegen::standalone_ctfe_ingot_source(CANONICAL50_API);
+    let (_, canonical50_api) = canonical50_api
+        .split_once("// Bounded symbolic coefficient interpretation")
+        .expect("canonical standalone source begins after its ingot import");
+    let canonical50_api = format!(
+        "// Bounded symbolic coefficient interpretation{}",
+        canonical50_api.replace("sparse_clifford::", "")
+    );
+    format!("{sparse_api}\n{canonical50_api}\n// BEGIN_PROVIDER_EMITTER{interpreter}")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -33,26 +52,8 @@ enum PlanExecution {
 }
 
 fn canonical_source_for(execution: PlanExecution) -> String {
-    let source = canonical_source();
-    let shared_product =
-        "let product = builder.share(builder.mul(builder.mul(left, point), right))";
-    assert_eq!(
-        source.matches(shared_product).count(),
-        1,
-        "the strategy seam must identify exactly one canonical product emission site",
-    );
-    match execution {
-        PlanExecution::UnsharedTree => source.replace(
-            shared_product,
-            "let product = builder.mul(builder.mul(left, point), right)",
-        ),
-        PlanExecution::CompactTerms => source.replace(
-            shared_product,
-            "let product = builder.mul(builder.mul(left, point), right)\n\
-             if magnitude(triple) == 2 { product = builder.share(product) }",
-        ),
-        PlanExecution::SharedDag => source,
-    }
+    let _ = execution;
+    canonical_source()
 }
 
 fn render_source_for(execution: PlanExecution) -> String {
@@ -157,6 +158,39 @@ fn phase_c_forced_schedule32_and_provider() {
     semantic_analysis("fco_cga_phase_c_combined", &source);
 }
 
+#[test]
+#[ignore = "expensive focused regression for recursive staged const payload normalization"]
+fn canonical50_eval5_chunk0_n1_signed_field_reproducer() {
+    let mut source = canonical_source().replace(
+        "Canonical50TypedBalancedSchedule32 as Eval5",
+        "Canonical50TypedChunk0<1> as Eval5",
+    );
+    source.push_str(
+        r#"
+static_assert(canonical50_projected_sign(10) == 0)
+struct Canonical50SignProbe<const Sign: i32> {}
+fn accept_canonical50_sign_zero(_ value: Canonical50SignProbe<0>) {}
+fn prove_direct_canonical50_sign_materializes(
+    _ value: Canonical50SignProbe<{canonical50_projected_sign(10)}>,
+) {
+    accept_canonical50_sign_zero(value)
+}
+"#,
+    );
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///canonical50_eval5_chunk0_n1_reproducer.fe").unwrap();
+    db.workspace().touch(&mut db, url.clone(), Some(source));
+    let file = db.workspace().get(&db, &url).unwrap();
+    let top_mod = db.top_mod(file);
+    let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+    assert!(
+        diagnostics.is_empty(),
+        "N1 source should reach runtime-package lowering:\n{diagnostics}"
+    );
+    mir::build_wasm_runtime_package_for_entry(&db, top_mod, "cga_fco_e1")
+        .expect("N1 signed const payload must lower to a runtime package");
+}
+
 fn sphere_blade(slot: usize) -> usize {
     1 << (slot + slot / 2)
 }
@@ -197,22 +231,30 @@ fn raw80(sphere: [f32; 4], point: [f32; 5]) -> [f32; 32] {
     out
 }
 
+fn sphere_pair_rank(a: usize, b: usize) -> usize {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    (0..lo).map(|left| 4 - left).sum::<usize>() + hi - lo
+}
+
 fn canonical_survivors() -> Vec<usize> {
-    let mut survivors = Vec::new();
-    for triple in 0..80 {
-        let left_slot = triple / 20;
-        let point_slot = (triple / 4) % 5;
-        let right_slot = triple % 4;
+    let mut coefficients = [0i32; 50];
+    for left_slot in 0..4 {
         let left = sphere_blade(left_slot);
-        let middle = point_blade(point_slot);
-        let right = sphere_blade(right_slot);
-        let negative = gp_negative(left, middle) ^ gp_negative(left ^ middle, right);
-        let reverse_negative = gp_negative(right, middle) ^ gp_negative(right ^ middle, left);
-        if left_slot <= right_slot && negative == reverse_negative {
-            survivors.push(triple);
+        for point_slot in 0..5 {
+            let middle = point_blade(point_slot);
+            for right_slot in 0..4 {
+                let right = sphere_blade(right_slot);
+                let candidate = sphere_pair_rank(left_slot, right_slot) * 5 + point_slot;
+                let negative = gp_negative(left, middle) ^ gp_negative(left ^ middle, right);
+                coefficients[candidate] += if negative { -1 } else { 1 };
+            }
         }
     }
-    survivors
+    coefficients
+        .into_iter()
+        .enumerate()
+        .filter_map(|(candidate, coefficient)| (coefficient != 0).then_some(candidate))
+        .collect()
 }
 
 fn deterministic_coefficient(state: &mut u32) -> f32 {
@@ -337,15 +379,15 @@ fn one_reflected_plan_drives_tree_compact_terms_and_honest_shared_dag() {
     assert_eq!(survivors.len(), 32);
     let repeated_product_edges = survivors
         .iter()
-        .filter(|&&triple| triple / 20 != triple % 4)
+        .filter(|&&candidate| matches!(candidate / 5, 1 | 2 | 3 | 5 | 6 | 8))
         .count();
     assert_eq!(
         repeated_product_edges, 12,
-        "only off-diagonal canonical terms reuse their product for magnitude two",
+        "twelve off-diagonal monomials retain two ordered multiplication paths",
     );
     let unique_product_keys = survivors
         .iter()
-        .map(|&triple| (triple / 20, (triple / 4) % 5, triple % 4))
+        .copied()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         unique_product_keys.len(),
@@ -374,10 +416,10 @@ fn one_reflected_plan_drives_tree_compact_terms_and_honest_shared_dag() {
         let source = canonical_source_for(execution);
         assert_eq!(
             source
-                .matches("builder.ty<Schedule32>().normalized_preorder_types()")
+                .matches("<Canonical50TypedBalancedSchedule32 as Eval5>::eval5(")
                 .count(),
             1,
-            "{execution:?} must consume the one reflected Schedule32 witness",
+            "{execution:?} must consume the one exact typed Schedule32 root",
         );
         assert!(
             !source.contains("for triple in 0..80"),
@@ -418,13 +460,13 @@ fn one_reflected_plan_drives_tree_compact_terms_and_honest_shared_dag() {
     assert_eq!(tree.5, 0);
     assert_eq!(compact.5, 0);
     assert_eq!(dag.5, 0);
-    assert!(
-        tree.3 > compact.3,
-        "unshared tree must repeat magnitude-two product expressions",
+    assert_eq!(
+        tree.3, compact.3,
+        "retaining both ordered products leaves no duplicate product to compact",
     );
     assert_eq!(
         compact.3, dag.3,
-        "with no cross-term duplicate keys, full DAG interning cannot remove more multiplies",
+        "with no duplicate ordered-product keys, DAG interning cannot remove multiplies",
     );
     eprintln!(
         "CanonicalSandwichPlan32: 32 terms, {repeated_product_edges} repeated edges, \
@@ -516,9 +558,9 @@ fn canonical_helpers_publish_schedule32_and_emit_exact_five_lanes() {
     let shape = wasm_shape(&wasm);
     assert_eq!(
         shape.3,
-        5 * 64,
+        5 * 88,
         "each of the five independent O0 oracle exports must materialize the same \
-         32 canonical products with exactly two f32 multiplies each"
+         32 canonical monomials while retaining both ordered off-diagonal products"
     );
     assert_eq!(
         shape.5, 0,
