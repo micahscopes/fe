@@ -35,12 +35,30 @@ fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
     assert!(CANONICAL.contains("struct ConformalVector {"));
     assert!(BODY.contains("let point: ConformalPoint = ConformalPoint {"));
     assert!(BODY.contains("let sphere: ConformalSphere = ConformalSphere {"));
-    assert_eq!(
-        BODY.matches("<ConformalVector as Sandwich>::sandwich")
-            .count(),
-        1,
-        "the compact semantic records should feed one specialized aggregate method",
+    // This used to assert exactly ONE call site. That was a proxy for "one
+    // specialized aggregate method", and the proxy broke when 28d74b524 added a
+    // second caller to expose reflected Schedule32 coefficients. Two callers of
+    // one aggregate still satisfy the property; a call count never measured it.
+    //
+    // Assert the property directly instead. BODY must FEED an aggregate, not
+    // define one: it contains no `impl`/`trait`/`fn` for Sandwich at all, and
+    // every use goes through the single `ConformalVector` aggregate.
+    let sandwich_calls = BODY.matches("as Sandwich>::sandwich").count();
+    assert!(
+        sandwich_calls >= 1,
+        "the compact semantic records must feed the specialized aggregate method",
     );
+    assert_eq!(
+        BODY.matches("<ConformalVector as Sandwich>::sandwich").count(),
+        sandwich_calls,
+        "every aggregate call must go through the one ConformalVector aggregate",
+    );
+    for defines in ["impl Sandwich", "trait Sandwich", "fn sandwich"] {
+        assert!(
+            !BODY.contains(defines),
+            "the body must delegate to the aggregate, not define its own `{defines}`",
+        );
+    }
     assert!(
         !BODY.contains("#[inline(always)]"),
         "the facade's zero-cost claim must not depend on backend-specific inlining",

@@ -148,19 +148,30 @@ fn ordinary_ingots_bridge_authored_recurrence_and_reflected_schedule32() {
     assert!(AUTHORED_SOURCE.contains("CliffordGp"));
     assert!(REFLECTED_SOURCE.contains("use sparse_clifford::{"));
     assert!(REFLECTED_SOURCE.contains("cga_schedule32_all_blades"));
+    // These two assertions used to spell the invariant as
+    // `derive Sandwich for ConformalVector using CanonicalCgaProvider` and
+    // `impl Derive<Sandwich> for CanonicalCgaProvider`. Both spellings were
+    // retired with the derive grammar, so they matched zero times and the test
+    // was asserting the absence of syntax rather than the presence of a
+    // property.
+    //
+    // The invariant itself is unchanged, and the artifact states it in its own
+    // comment: the evidence view is "the same reflected aggregate Sandwich used
+    // by the renderer ... without introducing a second plan or provider". So
+    // assert exactly that: one aggregate, reached through one canonical plan.
     assert_eq!(
         REFLECTED_SOURCE
-            .matches("derive Sandwich for ConformalVector using CanonicalCgaProvider")
+            .matches("impl Sandwich for ConformalVector")
             .count(),
         1,
-        "the evidence selector must reuse the canonical reflected provider"
+        "the evidence selector must reuse one aggregate Sandwich, not add a second"
     );
     assert_eq!(
         REFLECTED_SOURCE
-            .matches("impl Derive<Sandwich> for CanonicalCgaProvider")
+            .matches("Canonical50TypedBalancedSchedule32 as Eval5")
             .count(),
         1,
-        "the reflected application must contain one canonical provider"
+        "the reflected application must route through exactly one canonical plan"
     );
     for forbidden in ["include_str", "for triple in 0..80", "python"] {
         assert!(
