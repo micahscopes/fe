@@ -1,3 +1,29 @@
+//! The **EVM/Solidity contract ABI** descriptor.
+//!
+//! This module is named `abi`, but it does not describe "the" ABI: it describes
+//! ONE target's ABI. Everything here is EVM-specific by construction. It emits
+//! Solidity type strings (`uint256`, `int256`, `address`, `bytes32`, `bytes4`),
+//! computes Keccak function selectors, and models a contract's external
+//! interface. None of that is meaningful for wasm, whose interface is imports
+//! and exports over `i32`/`i64`/`f32`/`f64`, or for SPIR-V, whose interface is
+//! binding groups and builtins.
+//!
+//! Naming it plainly is the precondition for parameterizing it. A target cannot
+//! become a parameter while one target is unnamed and implicit: "ABI" reads as
+//! universal, so every EVM assumption it carries is invisible.
+//!
+//! Concretely, the EVM-only assumptions living here are the 256-bit word
+//! (`PrimTy::I256`/`Usize` map to `uint256`/`int256`), the head/tail encoding,
+//! Keccak-256 selectors, and the notion of a "contract" as the unit with an
+//! external interface.
+//!
+//! The intended generalization, which is also on the upstream roadmap
+//! (`argotorg/fe` #1197: "AbiSize trait should be generic (or replaced by
+//! `AbiEncode<A: Abi>::ENCODED_SIZE`)"), is for `Abi` to become a parameter,
+//! with this module supplying the EVM instance. `f32` returning an error below
+//! is the current stand-in: a hand-written reject where an unsatisfied
+//! capability obligation belongs. See `/workspace/mb2/GOAL.md`.
+
 use std::collections::HashSet;
 
 use common::ingot::IngotKind;
