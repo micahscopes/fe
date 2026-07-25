@@ -40,19 +40,9 @@ if [ "${FE_DEMO_GENERATION_LOCK_ACTIVE:-0}" != 1 ]; then
   exec "$here/with-fe-generation-lock.sh" "$0" "${rerun_args[@]}"
 fi
 
-# Browser-profile generators share the exact ac266c21 Sonatina backend. When a
-# caller provides any checkout containing Fe's fetchable base, reconstruct the
-# reviewed commit internally; cga-d1 deliberately retains its older ed43625b
-# pin. The overlay re-enters this script with its clean b260 checkout.
-if [ "$demo" != cga-d1 ] && [ -n "${SONATINA_DIR:-}" ] \
-    && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ]; then
-  expected_browser_sonatina="ac266c210cad7872fc98380a73b4ca363877bc1f"
-  actual_browser_sonatina="$(git -C "$SONATINA_DIR" rev-parse HEAD 2>/dev/null || true)"
-  if [ "$actual_browser_sonatina" != "$expected_browser_sonatina" ] \
-      || [ -n "$(git -C "$SONATINA_DIR" status --porcelain 2>/dev/null || true)" ]; then
-    exec "$here/with-sonatina-overlay.sh" "$0" "${rerun_args[@]}"
-  fi
-fi
+# The workspace pins the reviewed browser backend ac266c21 directly, so
+# generation is plain locked cargo. The former overlay reconstructed that commit
+# from tracked patches because the manifest still said 150d327e; that is gone.
 
 generate_example() {
   local key="$1"
@@ -71,16 +61,11 @@ generate_example() {
       return
     fi
   fi
-  if [ -z "${FE_DEMO_GENERATE_CMD:-}" ] && [ -z "${SONATINA_DIR:-}" ]; then
-    "$here/with-sonatina-overlay.sh" "$0" "${rerun_args[@]}"
-    return
-  fi
   echo "generating $key..."
   if [ -n "${FE_DEMO_GENERATE_CMD:-}" ]; then
     "$FE_DEMO_GENERATE_CMD" "$key"
   else
-    "$here/with-browser-cargo.sh" \
-      run -p fe-codegen --example "$example"
+    (cd "$repo" && cargo run --locked -p fe-codegen --example "$example")
   fi
 }
 
@@ -125,19 +110,6 @@ generate_one() {
         "$FE_DEMO_GENERATE_CMD" cga
       else
         cga_bundle="$here/webgpu-cga-inversion/gen-schedule32"
-        if [ -z "${SONATINA_DIR:-}" ] \
-            && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ] \
-            && bundle_needs_generation "${FORCE_DEMO_REGEN:-0}" "$cga_bundle" \
-              kernel.fe frag.wgsl layout.json reference.json frag.wasm \
-              actor/module.wasm actor/shader.wgsl actor/manifest.json \
-              actor/interface.js actor/interface.d.ts \
-              actor/runtime/actor-coordinator.js actor/runtime/actor-endpoint.js \
-              actor/runtime/actor-router.js actor/runtime/gpu-actor.js \
-              actor/runtime/message-port-actor.js \
-              actor/runtime/module-worker-actor.js actor-source.fe; then
-          "$here/with-sonatina-overlay.sh" "$0" cga
-          return
-        fi
         FORCE_CGA_REGEN="${FORCE_DEMO_REGEN:-0}" \
           CGA_BUNDLE=schedule32 \
           CGA_BUNDLE_DIR="$cga_bundle" \
@@ -162,18 +134,6 @@ generate_one() {
         "$FE_DEMO_GENERATE_CMD" qcga
       else
         qcga_bundle="$here/webgpu-qcga3d-quadric/gen"
-        if [ -z "${SONATINA_DIR:-}" ] \
-            && [ "${FE_SONATINA_OVERLAY_ACTIVE:-0}" != 1 ] \
-            && bundle_needs_generation "${FORCE_DEMO_REGEN:-0}" "$qcga_bundle" \
-              kernel.fe frag.wgsl frag.wasm layout.json reference.json \
-              actor-source.fe actor-canonical.wasm actor-interface.js \
-              actor-interface.d.ts actor-manifest.json \
-              runtime/actor-coordinator.js runtime/actor-endpoint.js \
-              runtime/actor-router.js runtime/gpu-actor.js \
-              runtime/message-port-actor.js runtime/module-worker-actor.js; then
-          "$here/with-sonatina-overlay.sh" "$0" qcga
-          return
-        fi
         FORCE_QCGA_REGEN="${FORCE_DEMO_REGEN:-0}" \
           "$here/webgpu-qcga3d-quadric/ensure-assets.sh"
       fi

@@ -23,25 +23,10 @@ case "$bundle" in
     ;;
 esac
 
-if [ -z "${SONATINA_DIR:-}" ]; then
-  echo "$bundle generation requires SONATINA_DIR pointing to Sonatina commit $expected_sonatina" >&2
-  exit 2
-fi
-if ! git -C "$SONATINA_DIR" rev-parse --git-dir >/dev/null 2>&1 \
-    || [ ! -d "$SONATINA_DIR/crates/codegen" ]; then
-  echo "SONATINA_DIR is not the expected Sonatina git checkout: $SONATINA_DIR" >&2
-  exit 2
-fi
-actual_sonatina="$(git -C "$SONATINA_DIR" rev-parse HEAD)"
-if [ "$actual_sonatina" != "$expected_sonatina" ]; then
-  echo "$bundle requires Sonatina HEAD $expected_sonatina; found $actual_sonatina" >&2
-  exit 2
-fi
-if [ -n "$(git -C "$SONATINA_DIR" status --porcelain)" ]; then
-  echo "$bundle requires a clean Sonatina checkout at $expected_sonatina" >&2
-  exit 2
-fi
-
+# The workspace manifest pins the reviewed browser backend ac266c21 directly, so
+# Cargo enforces the revision. The former SONATINA_DIR precondition was a
+# hand-maintained restatement of that invariant, needed only while the manifest
+# said 150d327e and the overlay patched it at build time.
 fe_revision="$(git -C "$repo" rev-parse HEAD)"
 if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]; then
   echo "$bundle generation requires a Fe checkout with no tracked modifications" >&2
@@ -57,8 +42,8 @@ fi
 if [ "$bundle" = schedule32 ]; then
   FE_CGA_SOURCE_REV="$fe_revision" \
   FE_CGA_SOURCE_UNTRACKED_PRESENT="$fe_untracked_present" \
-    "$repo/demos/with-browser-cargo.sh" \
-    run -p fe-codegen --example "$generator"
+    cargo run --locked --manifest-path "$repo/Cargo.toml" \
+    -p fe-codegen --example "$generator"
 else
   # Legacy D1 is pinned to an older backend and cannot use the browser runner's
   # exact ac266c21 contract.
