@@ -1,3 +1,4 @@
+use ingot::Copy
 use super::effect_ref::MemPtr
 
 /// Borrowed bytes in wasm32 linear memory.
