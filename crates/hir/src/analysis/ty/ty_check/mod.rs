@@ -3759,7 +3759,21 @@ impl<'db> TypedBody<'db> {
 
         match expr_data {
             Expr::Path(_) => {
-                expr_ty.has_invalid(db)
+                // A `with (<T as Trait>)` / `with (Alias)` head names a
+                // (Trait, Type) GOAL, not a value. `check_with` records it via
+                // `record_scoped_selection_expr` and deliberately never gives
+                // it a value type, so `invalid(Other)` there is by design. The
+                // lowerer already skips these (`semantic/lower/effects.rs:39`,
+                // "no value-path classification, so SKIP lowering it"), so
+                // reporting one as a blocker refuses a body that lowers fine.
+                //
+                // This is the fifth path classification. The other four are
+                // below; missing this one is what made the whole cascade
+                // family unlowerable once `a9f2a0f70` repurposed this
+                // predicate from "given errors, is it ALSO unlowerable" into a
+                // total lowerability test without revisiting its arms.
+                !self.is_scoped_selection_expr(expr)
+                    && expr_ty.has_invalid(db)
                     && self.expr_binding(expr).is_none()
                     && self.expr_const_ref(expr).is_none()
                     && self.expr_code_region_ref(db, expr).is_none()
