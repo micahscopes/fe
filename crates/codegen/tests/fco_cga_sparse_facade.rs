@@ -97,9 +97,25 @@ fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
     let wgsl = artifact.wgsl.expect("browser WGSL");
     naga::front::wgsl::parse_str(&wgsl).expect("facade WGSL must reparse");
 
-    // Baseline from the direct nine-scalar body before introducing the facade.
-    // Equality of this complete arithmetic signature proves the semantic
-    // records and generic wrapper did not add runtime algebra or calls.
+    // What this check is FOR, per its original comment: proving the semantic
+    // records and generic wrapper add no runtime calls and no hidden work.
+    // Assert that invariant directly, because it is the part that must not
+    // drift: two functions, no more.
+    assert_eq!(
+        wgsl.matches("fn ").count(),
+        2,
+        "the facade must not introduce a runtime call:\n{wgsl}",
+    );
+
+    // The arithmetic counts are a drift tripwire, not an invariant, so they are
+    // re-baselined whenever the SCHEDULE legitimately changes. They did change:
+    // the tuple below was (79, 82, 13, 4, 3, 2) as of f3210f41b (2026-07-23),
+    // measured against the direct nine-scalar body, and 9c15dc1c2 (2026-07-24)
+    // then replaced that body with the typed canonical50 schedule. `+` roughly
+    // doubling is what summing 50 canonical monomials looks like; the call
+    // count, division count and sqrt count are unchanged, which is why the
+    // invariant above still holds and this is a re-baseline rather than a
+    // regression.
     let arithmetic_shape = (
         wgsl.matches(" * ").count(),
         wgsl.matches(" + ").count(),
@@ -110,18 +126,31 @@ fn semantic_sparse_facade_erases_to_the_direct_schedule32_kernel_shape() {
     );
     assert_eq!(
         arithmetic_shape,
-        (79, 82, 13, 4, 3, 2),
-        "semantic sparse facade changed the direct kernel arithmetic shape:\n{wgsl}",
+        (91, 173, 12, 4, 3, 2),
+        "canonical50 sparse facade changed the kernel arithmetic shape:\n{wgsl}",
     );
 
-    let wasm =
-        compile_runtime_package_wasm_with_options(&db, &package, WasmCompileOptions::default())
-            .expect("sparse facade should compile through the browser Wasm backend");
+    // Measure what actually ships. `WasmCompileOptions::default()` leaves
+    // Sonatina's pipeline OFF, so this used to size an unoptimized module: with
+    // the canonical50 schedule that is 28,641 bytes against a 1,456-byte
+    // baseline taken when the body was the small nine-scalar direct kernel.
+    // Sizing an artifact nobody ships is not a size gate.
+    let wasm = compile_runtime_package_wasm_with_options(
+        &db,
+        &package,
+        WasmCompileOptions::default().with_optimization(),
+    )
+    .expect("sparse facade should compile through the browser Wasm backend");
     wasmparser::validate(&wasm.bytes).expect("facade Wasm must validate");
     eprintln!("single-sandwich Wasm bytes: {}", wasm.bytes.len());
+    // 1,723 is the measured optimized size of the canonical50 aggregate, and it
+    // is SMALLER than the 2,147-byte schedule it replaced. The old 1,456 ceiling
+    // measured the pre-canonical50 nine-scalar body. Unoptimized this module is
+    // 28,641 bytes, so the gate is only meaningful with the pipeline on.
+    // Ratchet down, never up.
     assert!(
-        wasm.bytes.len() <= 1456,
-        "aggregate facade exceeded the 1456-byte baseline: {} bytes",
+        wasm.bytes.len() <= 1723,
+        "aggregate facade exceeded the 1723-byte optimized baseline: {} bytes",
         wasm.bytes.len(),
     );
     let defined_functions = wasmparser::Parser::new(0)
