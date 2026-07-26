@@ -11,9 +11,14 @@ use mir::{
 use url::Url;
 
 fn sonatina_function_body<'a>(ir: &'a str, name: &str) -> &'a str {
-    let marker = format!("func private %{name}");
-    let start = ir
-        .find(&marker)
+    // Linkage is not part of a function's identity, and these tests are about
+    // body shape. Matching only `func private` silently coupled every lookup to
+    // export eligibility, so when `d6c8f1375` made entry roots `Linkage::Public`
+    // the lookup reported the function "missing" from IR that plainly defines
+    // it. Accept either linkage and let the assertions speak about the body.
+    let start = ["private", "public"]
+        .iter()
+        .find_map(|linkage| ir.find(&format!("func {linkage} %{name}")))
         .unwrap_or_else(|| panic!("missing function `{name}` in Sonatina IR:\n{ir}"));
     let tail = &ir[start..];
     let end = tail
