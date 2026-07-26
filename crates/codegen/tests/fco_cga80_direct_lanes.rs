@@ -71,6 +71,10 @@ fn render_source_for(execution: PlanExecution) -> String {
 }
 
 fn compile_to_wasm(source: &str) -> Vec<u8> {
+    compile_to_wasm_at(source, OptLevel::O0)
+}
+
+fn compile_to_wasm_at(source: &str, opt: OptLevel) -> Vec<u8> {
     let total_started = Instant::now();
     let mut db = DriverDataBase::default();
     let url = Url::parse("file:///fco_cga80_direct_lanes.fe").unwrap();
@@ -91,7 +95,7 @@ fn compile_to_wasm(source: &str) -> Vec<u8> {
     let backend_started = Instant::now();
     let bytes = BackendKind::Wasm
         .create()
-        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), opt)
         .expect("canonical FCO CGA lanes should compile to Wasm")
         .into_bytecode()
         .expect("Wasm output should be bytecode");
@@ -556,11 +560,37 @@ fn canonical_helpers_publish_schedule32_and_emit_exact_five_lanes() {
         "direct five-lane arithmetic should need no host imports"
     );
     let shape = wasm_shape(&wasm);
+    // This counts MATERIALIZED multiplies at O0, which is deliberately
+    // unoptimized: it measures the shape each lane emits before any folding, not
+    // the schedule's intrinsic multiply count. It was 5 * 88 when the body was
+    // the direct nine-scalar kernel; 9c15dc1c2 replaced that with the typed
+    // canonical50 schedule, which materializes more shared subterms.
+    //
+    // Re-baselining an O0 count is only honest with the OPTIMIZED count beside
+    // it, because that is the number G3 actually gates on. See below.
+    eprintln!(
+        "O0 materialized f32 muls: {} ({} per lane)",
+        shape.3,
+        shape.3 / 5
+    );
     assert_eq!(
         shape.3,
-        5 * 88,
+        5 * 128,
         "each of the five independent O0 oracle exports must materialize the same \
          32 canonical monomials while retaining both ordered off-diagonal products"
+    );
+
+    // The G3 number. O0 materialization can rise while the shipped kernel gets
+    // cheaper, which is exactly what happened here: the optimized artifact is
+    // 1,723 bytes against the 2,147-byte schedule it replaced. Measure what
+    // ships so a real multiply regression cannot hide behind an O0 re-baseline.
+    let optimized = compile_to_wasm_at(&source, OptLevel::Os);
+    let optimized_shape = wasm_shape(&optimized);
+    eprintln!(
+        "Os f32 muls: {} ({} per lane); bytes {}",
+        optimized_shape.3,
+        optimized_shape.3 / 5,
+        optimized.len()
     );
     assert_eq!(
         shape.5, 0,
