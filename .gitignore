@@ -19,3 +19,7 @@ CLAUDE.md
 # Local debug artifacts
 stackify_*.txt
 trace_*.txt
+
+# insta writes these next to the accepted snapshot on a failing assertion.
+# They are review scratch, never review output.
+*.snap.new
