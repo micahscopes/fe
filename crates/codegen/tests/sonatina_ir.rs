@@ -470,6 +470,17 @@ fn sonatina_ir_snap(fixture: Fixture<&str>) {
             warn!("SKIP {}: internal error ({msg})", fixture.path());
             return;
         }
+        // A CTFE-only fixture (no runtime roots) is legitimately unsupported by
+        // a runtime-IR snapshot suite, and the mir layer says so with
+        // `mir::LowerError::Unsupported`. That categorization was being lost:
+        // `?` wraps it as `LowerError::RuntimeLower(..)`, so the `Unsupported`
+        // arm above never matched and an intentional refusal reached the
+        // panic arm instead. Skip it the same way, since the intent above is
+        // exactly this.
+        Err(fe_codegen::LowerError::RuntimeLower(mir::LowerError::Unsupported(msg))) => {
+            info!("SKIP {}: unsupported ({msg})", fixture.path());
+            return;
+        }
         Err(err) => panic!("Sonatina IR lowering failed: {err}"),
     };
 
