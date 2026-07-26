@@ -63,7 +63,7 @@ func private %init() {
         unreachable;
 }
 
-func private %manual_contract_init_root_NestedStruct() {
+func public %manual_contract_init_root_NestedStruct() {
     block0:
         jump block1;
 
@@ -72,7 +72,7 @@ func private %manual_contract_init_root_NestedStruct() {
         evm_stop;
 }
 
-func private %manual_contract_runtime_root_NestedStruct() {
+func public %manual_contract_runtime_root_NestedStruct() {
     block0:
         jump block1;
 

@@ -9,7 +9,7 @@ type @layout_0 = {i256, i256};
 
 global private const @layout_0 $const_region_0 = {1, 7};
 
-func private %effect_ptr_name_collision() -> i256 {
+func public %effect_ptr_name_collision() -> i256 {
     block0:
         jump block1;
 
@@ -20,7 +20,7 @@ func private %effect_ptr_name_collision() -> i256 {
         return v4;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

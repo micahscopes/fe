@@ -7,7 +7,7 @@ target = "evm-ethereum-osaka"
 
 global private const [i256; 3] $const_region_0 = [10, 20, 30];
 
-func private %get_sum() -> i256 {
+func public %get_sum() -> i256 {
     block0:
         jump block1;
 
@@ -16,7 +16,7 @@ func private %get_sum() -> i256 {
         return 11.i256;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

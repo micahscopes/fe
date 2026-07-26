@@ -154,7 +154,7 @@ func private %log3(v0.objref<@layout_3>, v1.i256, v2.i256, v3.i256, v4.i256, v5.
         return;
 }
 
-func private %main() {
+func public %main() {
     block0:
         jump block1;
 
@@ -165,7 +165,7 @@ func private %main() {
         return;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

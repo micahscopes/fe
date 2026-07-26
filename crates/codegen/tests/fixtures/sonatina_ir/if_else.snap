@@ -42,7 +42,7 @@ func private %if_else(v0.i1) -> i64 {
         return v6;
 }
 
-func private %main() -> i64 {
+func public %main() -> i64 {
     block0:
         jump block1;
 
@@ -51,7 +51,7 @@ func private %main() -> i64 {
         return v1;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

@@ -150,7 +150,7 @@ func private %init() {
         unreachable;
 }
 
-func private %manual_contract_init_root_Coin() {
+func public %manual_contract_init_root_Coin() {
     block0:
         jump block1;
 
@@ -159,7 +159,7 @@ func private %manual_contract_init_root_Coin() {
         evm_stop;
 }
 
-func private %manual_contract_runtime_root_Coin() {
+func public %manual_contract_runtime_root_Coin() {
     block0:
         jump block1;
 

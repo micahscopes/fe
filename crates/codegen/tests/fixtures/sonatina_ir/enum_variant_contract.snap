@@ -54,7 +54,7 @@ func private %init() {
         unreachable;
 }
 
-func private %manual_contract_init_root_EnumContract() {
+func public %manual_contract_init_root_EnumContract() {
     block0:
         jump block1;
 
@@ -63,7 +63,7 @@ func private %manual_contract_init_root_EnumContract() {
         evm_stop;
 }
 
-func private %manual_contract_runtime_root_EnumContract() {
+func public %manual_contract_runtime_root_EnumContract() {
     block0:
         jump block1;
 

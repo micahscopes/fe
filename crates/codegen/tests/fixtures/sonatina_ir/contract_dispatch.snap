@@ -22,7 +22,7 @@ func private %emit_code() -> i64 {
         return 1.i64;
 }
 
-func private %manual_contract_runtime_root_MinimalDispatcher() {
+func public %manual_contract_runtime_root_MinimalDispatcher() {
     block0:
         jump block1;
 

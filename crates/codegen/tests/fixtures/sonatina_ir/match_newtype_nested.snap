@@ -11,7 +11,7 @@ type @layout_1 = {@layout_0};
 global private const @layout_0 $const_region_0 = {10};
 global private const @layout_1 $const_region_1 = {{10}};
 
-func private %f() -> i256 {
+func public %f() -> i256 {
     block0:
         jump block1;
 
@@ -26,7 +26,7 @@ func private %f() -> i256 {
         return v6;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

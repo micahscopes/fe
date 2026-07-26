@@ -5,7 +5,7 @@ input_file: crates/codegen/tests/fixtures/while.fe
 ---
 target = "evm-ethereum-osaka"
 
-func private %do_while() -> i64 {
+func public %do_while() -> i64 {
     block0:
         jump block1;
 
@@ -33,7 +33,7 @@ func private %do_while() -> i64 {
         jump block2;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

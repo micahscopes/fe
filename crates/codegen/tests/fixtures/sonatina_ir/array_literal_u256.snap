@@ -7,7 +7,7 @@ target = "evm-ethereum-osaka"
 
 global private const [i256; 4] $const_region_0 = [1, 2, 3, 4];
 
-func private %fixed_u256_array_literal() -> [i256; 4] {
+func public %fixed_u256_array_literal() -> [i256; 4] {
     block0:
         jump block1;
 
@@ -20,7 +20,7 @@ func private %fixed_u256_array_literal() -> [i256; 4] {
         return v7;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

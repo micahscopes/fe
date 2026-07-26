@@ -86,7 +86,7 @@ func private %exhaustive_inner_outer_wildcard(v0.@layout_1) -> i8 {
         jump block2;
 }
 
-func private %main() -> @layout_3 {
+func public %main() -> @layout_3 {
     block0:
         jump block1;
 
@@ -117,7 +117,7 @@ func private %main() -> @layout_3 {
         return v27;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

@@ -1,6 +1,5 @@
 ---
 source: crates/codegen/tests/sonatina_ir.rs
-assertion_line: 455
 expression: output
 input_file: crates/codegen/tests/fixtures/match_nested_enum.fe
 ---
@@ -15,7 +14,7 @@ type @layout_1 = enum {
     #Second(i8),
 };
 
-func private %main() -> i8 {
+func public %main() -> i8 {
     block0:
         jump block1;
 
@@ -27,7 +26,7 @@ func private %main() -> i8 {
         return v4;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

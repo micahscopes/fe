@@ -49,7 +49,7 @@ func private %standalone_name_collisions__name_collisions__add_9cf2_0() -> i32 {
         return 123.i32;
 }
 
-func private %standalone_name_collisions__name_collisions__add_9cf2_1() -> i32 {
+func public %standalone_name_collisions__name_collisions__add_9cf2_1() -> i32 {
     block0:
         jump block1;
 
@@ -57,7 +57,7 @@ func private %standalone_name_collisions__name_collisions__add_9cf2_1() -> i32 {
         return 123.i32;
 }
 
-func private %standalone_name_collisions__name_collisions__a__b__flattened_fn_97f0() -> i32 {
+func public %standalone_name_collisions__name_collisions__a__b__flattened_fn_97f0() -> i32 {
     block0:
         jump block1;
 
@@ -97,7 +97,7 @@ func private %standalone_name_collisions__name_collisions__a_b__flattened_fn_e3a
         return 2.i32;
 }
 
-func private %standalone_name_collisions__name_collisions__a_b__flattened_fn_ec84() -> i32 {
+func public %standalone_name_collisions__name_collisions__a_b__flattened_fn_ec84() -> i32 {
     block0:
         jump block1;
 
@@ -137,7 +137,7 @@ func private %standalone_name_collisions__name_collisions__generic_fn__gb148_5d9
         return v0;
 }
 
-func private %main() -> i32 {
+func public %main() -> i32 {
     block0:
         jump block1;
 
@@ -153,7 +153,7 @@ func private %main() -> i32 {
         return 0.i32;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -390,7 +390,7 @@ func private %standalone_name_collisions__name_collisions__impl_trait_MultiTrait
         return v6;
 }
 
-func private %standalone_name_collisions__name_collisions__test_backend_reserved_fn_collision_d33d() -> i32 {
+func public %standalone_name_collisions__name_collisions__test_backend_reserved_fn_collision_d33d() -> i32 {
     block0:
         jump block1;
 
@@ -408,7 +408,7 @@ func private %standalone_name_collisions__name_collisions__test_backend_reserved
         return v0;
 }
 
-func private %standalone_name_collisions__name_collisions__test_generic_type_collision_baa3() -> i32 {
+func public %standalone_name_collisions__name_collisions__test_generic_type_collision_baa3() -> i32 {
     block0:
         jump block1;
 
@@ -448,7 +448,7 @@ func private %standalone_name_collisions__name_collisions__test_generic_type_col
         return 42.i32;
 }
 
-func private %standalone_name_collisions__name_collisions__test_impl_method_collision_666c() -> i32 {
+func public %standalone_name_collisions__name_collisions__test_impl_method_collision_666c() -> i32 {
     block0:
         jump block1;
 
@@ -476,7 +476,7 @@ func private %standalone_name_collisions__name_collisions__test_impl_method_coll
         return v6;
 }
 
-func private %standalone_name_collisions__name_collisions__test_module_qualifier_flatten_collision_0454() -> i32 {
+func public %standalone_name_collisions__name_collisions__test_module_qualifier_flatten_collision_0454() -> i32 {
     block0:
         jump block1;
 
@@ -514,7 +514,7 @@ func private %standalone_name_collisions__name_collisions__test_module_qualifier
         return v2;
 }
 
-func private %standalone_name_collisions__name_collisions__test_param_local_collision_c9bd() -> i32 {
+func public %standalone_name_collisions__name_collisions__test_param_local_collision_c9bd() -> i32 {
     block0:
         jump block1;
 
@@ -532,7 +532,7 @@ func private %standalone_name_collisions__name_collisions__test_param_local_coll
         return v1;
 }
 
-func private %standalone_name_collisions__name_collisions__test_ret_param_collision_dc54() -> i32 {
+func public %standalone_name_collisions__name_collisions__test_ret_param_collision_dc54() -> i32 {
     block0:
         jump block1;
 
@@ -550,7 +550,7 @@ func private %standalone_name_collisions__name_collisions__test_ret_param_collis
         return v1;
 }
 
-func private %standalone_name_collisions__name_collisions__test_trait_method_collision_540b() -> i32 {
+func public %standalone_name_collisions__name_collisions__test_trait_method_collision_540b() -> i32 {
     block0:
         jump block1;
 
@@ -596,7 +596,7 @@ func private %standalone_name_collisions__name_collisions__test_trait_method_col
         return v7;
 }
 
-func private %standalone_name_collisions__name_collisions__test_user_defined_conversion_pattern_name_d546() -> i256 {
+func public %standalone_name_collisions__name_collisions__test_user_defined_conversion_pattern_name_d546() -> i256 {
     block0:
         jump block1;
 

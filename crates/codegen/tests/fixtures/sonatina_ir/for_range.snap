@@ -9,7 +9,7 @@ type @layout_0 = {i256, i256};
 
 global private const @layout_0 $const_region_0 = {0, 10};
 
-func private %for_range_sum() -> i256 {
+func public %for_range_sum() -> i256 {
     block0:
         jump block1;
 
@@ -100,7 +100,7 @@ func private %len(v0.constref<@layout_0>) -> i256 {
         jump block4;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

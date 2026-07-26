@@ -7,7 +7,7 @@ target = "evm-ethereum-osaka"
 
 type @layout_0 = {i256, i256};
 
-func private %call_view_param_aggregate_value() -> i256 {
+func public %call_view_param_aggregate_value() -> i256 {
     block0:
         jump block1;
 
@@ -16,7 +16,7 @@ func private %call_view_param_aggregate_value() -> i256 {
         return v2;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

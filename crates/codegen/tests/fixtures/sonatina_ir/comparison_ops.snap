@@ -9,7 +9,7 @@ type @layout_0 = {i1, i1, i1, i1, i1, i1};
 
 global private const @layout_0 $const_region_0 = {1, 1, 1, 1, 1, 1};
 
-func private %comparison_ops() -> @layout_0 {
+func public %comparison_ops() -> @layout_0 {
     block0:
         v0.*i256 = alloca i256;
         v1.*i256 = alloca i256;
@@ -33,7 +33,7 @@ func private %comparison_ops() -> @layout_0 {
         return v12;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

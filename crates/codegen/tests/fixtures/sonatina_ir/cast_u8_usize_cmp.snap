@@ -58,7 +58,7 @@ func private %cast_u8_usize_cmp(v0.constref<[i8; 8]>, v1.i256, v2.i256) -> i8 {
         br v13 block2 block3;
 }
 
-func private %main() -> i8 {
+func public %main() -> i8 {
     block0:
         jump block1;
 
@@ -68,7 +68,7 @@ func private %main() -> i8 {
         return v11;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

@@ -48,7 +48,7 @@ func private %checked_add_u64(v0.i64, v1.i64) -> i64 {
         return 77.i64;
 }
 
-func private %main() -> @layout_1 {
+func public %main() -> @layout_1 {
     block0:
         jump block1;
 
@@ -60,7 +60,7 @@ func private %main() -> @layout_1 {
         return v8;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

@@ -5,7 +5,7 @@ input_file: crates/codegen/tests/fixtures/math_ops.fe
 ---
 target = "evm-ethereum-osaka"
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -14,7 +14,7 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %math_ops() -> i64 {
+func public %math_ops() -> i64 {
     block0:
         jump block1;
 

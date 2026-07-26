@@ -9,7 +9,7 @@ type @layout_0 = {i64, i256};
 
 global private const @layout_0 $const_region_0 = {42, 99};
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -18,7 +18,7 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %make_dummy() -> @layout_0 {
+func public %make_dummy() -> @layout_0 {
     block0:
         jump block1;
 

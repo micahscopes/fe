@@ -5,7 +5,7 @@ input_file: crates/codegen/tests/fixtures/block_expr.fe
 ---
 target = "evm-ethereum-osaka"
 
-func private %block_expr() -> i64 {
+func public %block_expr() -> i64 {
     block0:
         jump block1;
 
@@ -13,7 +13,7 @@ func private %block_expr() -> i64 {
         return 3.i64;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

@@ -10,7 +10,7 @@ type @layout_1 = {i64};
 
 global private const @layout_1 $const_region_0 = {10};
 
-func private %call() -> @layout_0 {
+func public %call() -> @layout_0 {
     block0:
         jump block1;
 
@@ -33,7 +33,7 @@ func private %foo(v0.constref<@layout_1>) -> @layout_0 {
         return v9;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

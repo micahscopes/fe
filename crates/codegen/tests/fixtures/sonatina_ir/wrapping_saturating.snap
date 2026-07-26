@@ -9,7 +9,7 @@ type @layout_0 = {i64, i64, i64};
 type @layout_1 = {i256, i256, i256};
 type @layout_2 = {@layout_0, @layout_0, @layout_1, @layout_1};
 
-func private %main() -> @layout_2 {
+func public %main() -> @layout_2 {
     block0:
         jump block1;
 
@@ -25,7 +25,7 @@ func private %main() -> @layout_2 {
         return v14;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

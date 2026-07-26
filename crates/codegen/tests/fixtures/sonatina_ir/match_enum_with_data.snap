@@ -10,7 +10,7 @@ type @layout_0 = enum {
     #Some(i64),
 };
 
-func private %main() -> i64 {
+func public %main() -> i64 {
     block0:
         jump block1;
 
@@ -20,7 +20,7 @@ func private %main() -> i64 {
         return v2;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

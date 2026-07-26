@@ -152,7 +152,7 @@ func private %init() {
         unreachable;
 }
 
-func private %manual_contract_init_root_BalanceMap() {
+func public %manual_contract_init_root_BalanceMap() {
     block0:
         jump block1;
 
@@ -161,7 +161,7 @@ func private %manual_contract_init_root_BalanceMap() {
         evm_stop;
 }
 
-func private %manual_contract_runtime_root_BalanceMap() {
+func public %manual_contract_runtime_root_BalanceMap() {
     block0:
         jump block1;
 

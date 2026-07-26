@@ -9,7 +9,7 @@ type @layout_0 = {i64, i1};
 
 global private const @layout_0 $const_region_0 = {3, 1};
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -18,7 +18,7 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %tuple_expr() -> @layout_0 {
+func public %tuple_expr() -> @layout_0 {
     block0:
         jump block1;
 

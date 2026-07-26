@@ -5,7 +5,7 @@ input_file: crates/codegen/tests/fixtures/generic_identity.fe
 ---
 target = "evm-ethereum-osaka"
 
-func private %call_identity_bool() -> i1 {
+func public %call_identity_bool() -> i1 {
     block0:
         jump block1;
 
@@ -14,7 +14,7 @@ func private %call_identity_bool() -> i1 {
         return v1;
 }
 
-func private %call_identity_u32() -> i32 {
+func public %call_identity_u32() -> i32 {
     block0:
         jump block1;
 
@@ -39,7 +39,7 @@ func private %identity__gda9b(v0.i1) -> i1 {
         return v0;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

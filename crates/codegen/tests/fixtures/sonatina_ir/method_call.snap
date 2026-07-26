@@ -5,7 +5,7 @@ input_file: crates/codegen/tests/fixtures/method_call.fe
 ---
 target = "evm-ethereum-osaka"
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -14,7 +14,7 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %make_value() -> i64 {
+func public %make_value() -> i64 {
     block0:
         jump block1;
 

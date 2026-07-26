@@ -40,7 +40,7 @@ func private %len() -> i256 {
         return v3;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -49,7 +49,7 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %sum_const() -> i256 {
+func public %sum_const() -> i256 {
     block0:
         jump block1;
 

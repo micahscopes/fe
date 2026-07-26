@@ -173,7 +173,7 @@ func private %init() {
         unreachable;
 }
 
-func private %manual_contract_init_root_ShapeDispatcher() {
+func public %manual_contract_init_root_ShapeDispatcher() {
     block0:
         jump block1;
 
@@ -182,7 +182,7 @@ func private %manual_contract_init_root_ShapeDispatcher() {
         evm_stop;
 }
 
-func private %manual_contract_runtime_root_ShapeDispatcher() {
+func public %manual_contract_runtime_root_ShapeDispatcher() {
     block0:
         jump block1;
 

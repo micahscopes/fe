@@ -397,7 +397,7 @@ func private %init() {
         unreachable;
 }
 
-func private %manual_contract_init_root_Erc20Contract() {
+func public %manual_contract_init_root_Erc20Contract() {
     block0:
         jump block1;
 
@@ -406,7 +406,7 @@ func private %manual_contract_init_root_Erc20Contract() {
         evm_stop;
 }
 
-func private %manual_contract_runtime_root_Erc20Contract() {
+func public %manual_contract_runtime_root_Erc20Contract() {
     block0:
         jump block1;
 

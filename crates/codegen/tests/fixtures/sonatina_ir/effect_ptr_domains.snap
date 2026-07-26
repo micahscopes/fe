@@ -110,7 +110,7 @@ func private %impl_trait_MemPtr__from_raw__gb2d8(v0.i256) -> i256 {
         return v0;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -137,7 +137,7 @@ func private %stor_ptr(v0.objref<@layout_2>, v1.i256) -> i256 {
         return v3;
 }
 
-func private %test_effect_ptr_domains() {
+func public %test_effect_ptr_domains() {
     block0:
         jump block1;
 

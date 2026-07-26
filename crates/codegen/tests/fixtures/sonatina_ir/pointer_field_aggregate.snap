@@ -55,7 +55,7 @@ func private %from_raw(v0.i256) -> i256 {
         return v0;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -73,7 +73,7 @@ func private %mem_ptr(v0.objref<@layout_1>, v1.i256) -> i256 {
         return v3;
 }
 
-func private %pointer_field_aggregate() {
+func public %pointer_field_aggregate() {
     block0:
         jump block1;
 

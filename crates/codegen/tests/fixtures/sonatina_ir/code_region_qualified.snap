@@ -31,7 +31,7 @@ func private %init() {
         unreachable;
 }
 
-func private %manual_contract_init_root_Foo() {
+func public %manual_contract_init_root_Foo() {
     block0:
         jump block1;
 
@@ -40,7 +40,7 @@ func private %manual_contract_init_root_Foo() {
         evm_stop;
 }
 
-func private %manual_contract_runtime_root_Foo() {
+func public %manual_contract_runtime_root_Foo() {
     block0:
         jump block1;
 

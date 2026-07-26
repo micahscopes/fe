@@ -1,0 +1,66 @@
+---
+source: crates/codegen/tests/sonatina_ir.rs
+assertion_line: 486
+expression: output
+input_file: crates/codegen/tests/fixtures/tuple_literal_field_access.fe
+---
+target = "evm-ethereum-osaka"
+
+type @layout_0 = {i256, i256};
+type @layout_1 = {@layout_0};
+type @layout_2 = {i256, @layout_0};
+
+global private const @layout_0 $const_region_0 = {2, 3};
+global private const @layout_0 $const_region_1 = {1, 2};
+global private const @layout_1 $const_region_2 = {{1, 2}};
+
+func public %main_root() {
+    block0:
+        jump block1;
+
+    block1:
+        v0.i256 = call %tuple_literal_field_access;
+        evm_stop;
+}
+
+func public %tuple_literal_field_access() -> i256 {
+    block0:
+        jump block1;
+
+    block1:
+        v4.@layout_0 = insert_value undef.@layout_0 0.i256 1.i256;
+        v5.@layout_0 = insert_value v4 1.i256 2.i256;
+        return 2.i256;
+}
+
+func public %tuple_literal_nested_access() -> i256 {
+    block0:
+        jump block1;
+
+    block1:
+        v3.constref<@layout_0> = const.ref $const_region_0;
+        v6.@layout_0 = insert_value undef.@layout_0 0.i256 2.i256;
+        v7.@layout_0 = insert_value v6 1.i256 3.i256;
+        v9.@layout_2 = insert_value undef.@layout_2 0.i256 1.i256;
+        v10.@layout_2 = insert_value v9 1.i256 v7;
+        v11.constref<@layout_0> = const.ref $const_region_0;
+        return 2.i256;
+}
+
+func public %tuple_literal_struct_chain() -> i256 {
+    block0:
+        jump block1;
+
+    block1:
+        v2.constref<@layout_0> = const.ref $const_region_1;
+        v3.constref<@layout_1> = const.ref $const_region_2;
+        v4.constref<@layout_0> = const.ref $const_region_1;
+        return 2.i256;
+}
+
+
+object @main {
+    section main {
+        entry %main_root;
+    }
+}

@@ -22,7 +22,7 @@ func private %add_one(v0.i64) -> i64 {
         return v3;
 }
 
-func private %call_add_one() -> i64 {
+func public %call_add_one() -> i64 {
     block0:
         jump block1;
 
@@ -31,7 +31,7 @@ func private %call_add_one() -> i64 {
         return v1;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

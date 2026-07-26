@@ -11,7 +11,7 @@ type @layout_0 = enum {
     #C,
 };
 
-func private %main() -> i8 {
+func public %main() -> i8 {
     block0:
         jump block1;
 
@@ -21,7 +21,7 @@ func private %main() -> i8 {
         return v1;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

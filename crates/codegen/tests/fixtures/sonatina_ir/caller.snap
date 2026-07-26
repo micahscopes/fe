@@ -29,7 +29,7 @@ func private %std__lib__evm__effects__impl_trait_Evm_a1e8__caller_650b_0(v0.objr
         return v4;
 }
 
-func private %main() -> @layout_2 {
+func public %main() -> @layout_2 {
     block0:
         jump block1;
 
@@ -38,7 +38,7 @@ func private %main() -> @layout_2 {
         return v0;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -47,7 +47,7 @@ func private %main_root() {
         evm_stop;
 }
 
-func private %standalone_caller__caller__who_called__gcd5c_4c8a() -> @layout_2 {
+func public %standalone_caller__caller__who_called__gcd5c_4c8a() -> @layout_2 {
     block0:
         jump block1;
 

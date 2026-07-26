@@ -29,7 +29,7 @@ func private %f(v0.@layout_0) {
         unreachable;
 }
 
-func private %main() {
+func public %main() {
     block0:
         jump block1;
 
@@ -39,7 +39,7 @@ func private %main() {
         unreachable;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

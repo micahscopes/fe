@@ -27,7 +27,7 @@ func private %bump(v0.i256) {
         return;
 }
 
-func private %explicit_raw_boundaries() {
+func public %explicit_raw_boundaries() {
     block0:
         jump block1;
 
@@ -55,7 +55,7 @@ func private %from_raw__g4a95(v0.i256) -> i256 {
         return v0;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
@@ -126,7 +126,7 @@ func private %raw_store__gc18b(v0.i256) {
         return;
 }
 
-func private %raw_store__g64c6(v0.i256) {
+func public %raw_store__g64c6(v0.i256) {
     block0:
         jump block1;
 

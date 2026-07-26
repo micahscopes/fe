@@ -1,0 +1,90 @@
+---
+source: crates/codegen/tests/sonatina_ir.rs
+assertion_line: 486
+expression: output
+input_file: crates/codegen/tests/fixtures/const_u8_array.fe
+---
+target = "evm-ethereum-osaka"
+
+global private const [i8; 2] $const_region_0 = [1, 2];
+global private const [i8; 40] $const_region_1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39];
+
+func public %alias_then_index() -> i8 {
+    block0:
+        jump block1;
+
+    block1:
+        v0.constref<[i8; 2]> = const.ref $const_region_0;
+        v1.constref<[i8; 2]> = const.ref $const_region_0;
+        v2.objref<[i8; 2]> = obj.alloc [i8; 2];
+        obj.init.const v2 v1;
+        v3.[i8; 2] = obj.load v2;
+        return 1.i8;
+}
+
+func public %big_copy_first() -> i8 {
+    block0:
+        jump block1;
+
+    block1:
+        v0.constref<[i8; 40]> = const.ref $const_region_1;
+        v1.constref<[i8; 40]> = const.ref $const_region_1;
+        v2.objref<[i8; 40]> = obj.alloc [i8; 40];
+        obj.init.const v2 v1;
+        v3.[i8; 40] = obj.load v2;
+        return 0.i8;
+}
+
+func public %big_index() -> i8 {
+    block0:
+        jump block1;
+
+    block1:
+        v0.constref<[i8; 40]> = const.ref $const_region_1;
+        return 39.i8;
+}
+
+func private %f(v0.constref<[i8; 2]>) -> i8 {
+    block0:
+        jump block1;
+
+    block1:
+        v3.constref<i8> = const.index v0 1.i256;
+        v4.i8 = const.load v3;
+        return v4;
+}
+
+func public %index_direct() -> i8 {
+    block0:
+        jump block1;
+
+    block1:
+        v0.constref<[i8; 2]> = const.ref $const_region_0;
+        return 2.i8;
+}
+
+func public %main_root() {
+    block0:
+        jump block1;
+
+    block1:
+        v0.i8 = call %alias_then_index;
+        evm_stop;
+}
+
+func public %pass_then_index() -> i8 {
+    block0:
+        jump block1;
+
+    block1:
+        v0.constref<[i8; 2]> = const.ref $const_region_0;
+        v1.i8 = call %f v0;
+        return v1;
+}
+
+
+object @main {
+    section main {
+        entry %main_root;
+    }
+}

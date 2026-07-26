@@ -40,7 +40,7 @@ func private %logical_and(v0.i8) -> i1 {
         br v18 block2 block3;
 }
 
-func private %logical_ops() -> @layout_0 {
+func public %logical_ops() -> @layout_0 {
     block0:
         jump block1;
 
@@ -84,7 +84,7 @@ func private %logical_or(v0.i8) -> i1 {
         br v17 block2 block3;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

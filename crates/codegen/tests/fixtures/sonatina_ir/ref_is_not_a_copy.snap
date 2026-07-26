@@ -22,7 +22,7 @@ func private %live_view(v0.constref<@layout_0>) -> @layout_1 {
         return v8;
 }
 
-func private %main() {
+func public %main() {
     block0:
         jump block1;
 
@@ -31,7 +31,7 @@ func private %main() {
         return;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 

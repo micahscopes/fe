@@ -18,7 +18,7 @@ func private %standalone_revert__revert__fail__gcd5c_35c3() {
         unreachable;
 }
 
-func private %standalone_revert__revert__fail__gcd5c_cdbf() {
+func public %standalone_revert__revert__fail__gcd5c_cdbf() {
     block0:
         jump block1;
 
@@ -28,7 +28,7 @@ func private %standalone_revert__revert__fail__gcd5c_cdbf() {
         unreachable;
 }
 
-func private %main() {
+func public %main() {
     block0:
         jump block1;
 
@@ -37,7 +37,7 @@ func private %main() {
         unreachable;
 }
 
-func private %main_root() {
+func public %main_root() {
     block0:
         jump block1;
 
