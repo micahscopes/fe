@@ -23,7 +23,7 @@ use sonatina_codegen::isa::spirv::{
 };
 use url::Url;
 
-const CANONICAL: &str = include_str!("../tests/fixtures/fco_cga80_direct_lanes.fe");
+const CANONICAL: &str = include_str!("../tests/fixtures/composed/fco_cga80_direct_lanes.fe");
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const CANONICAL50_API: &str = include_str!("../../../ingots/canonical_cl41_schedule/src/lib.fe");
 const BODY: &str = include_str!("../tests/fixtures/spirv/fco_cga80_direct_de_body.fe");
@@ -1143,7 +1143,7 @@ fn provenance(repo: &std::path::Path, source: &str) -> serde_json::Value {
         "sonatina_rev": sonatina_rev,
         "sonatina_dirty": !sonatina_status.is_empty(),
         "sonatina_status_fnv1a32": fnv1a32(sonatina_status.as_bytes()),
-        "canonical_fixture": "crates/codegen/tests/fixtures/fco_cga80_direct_lanes.fe",
+        "canonical_fixture": "crates/codegen/tests/fixtures/composed/fco_cga80_direct_lanes.fe",
         "canonical50_planner": "ingots/canonical_cl41_schedule/src/lib.fe",
         "sparse_clifford_fixture": "ingots/sparse_clifford/src/lib.fe",
         "published_app_manifest": "demos/webgpu-cga-inversion/gen-schedule32/app/fe.toml",

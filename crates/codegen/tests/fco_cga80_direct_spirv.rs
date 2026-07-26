@@ -11,7 +11,7 @@ fn source() -> String {
     let canonical50_api = fe_codegen::standalone_ctfe_ingot_source(include_str!(
         "../../../ingots/canonical_cl41_schedule/src/lib.fe"
     ));
-    let base = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+    let base = include_str!("fixtures/composed/fco_cga80_direct_lanes.fe");
     let (_, provider_and_oracles) = base
         .split_once("// BEGIN_PROVIDER_EMITTER")
         .expect("provider begin marker");

@@ -10,7 +10,7 @@ use url::Url;
 
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
 const CANONICAL50_API: &str = include_str!("../../../ingots/canonical_cl41_schedule/src/lib.fe");
-const CANONICAL: &str = include_str!("fixtures/fco_cga80_direct_lanes.fe");
+const CANONICAL: &str = include_str!("fixtures/composed/fco_cga80_direct_lanes.fe");
 const SCHEDULE32_REFERENCE: &str =
     include_str!("../../../demos/webgpu-cga-inversion/gen-schedule32/reference.json");
 const PINNED_REFERENCE_HASH: u32 = 3_470_936_828;
