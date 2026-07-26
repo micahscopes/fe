@@ -30,9 +30,21 @@ const STAGE_SP: u32 = 3
 const STAGE_SSP: u32 = 4
 const STAGE_INVALID: u32 = 255
 
-const PACKED_MASK: u64 = 31
-const SP_COUNT: usize = 20
-const SSP_COUNT: usize = 50
+// Operand cardinalities. Every monomial count in this file is a consequence of
+// these two and is written as that consequence: an S*P intermediate is one
+// sphere seed times one point seed, and an S*P*S monomial is one unordered
+// sphere pair times one point seed.
+const SPHERE_COUNT: usize = 4
+const POINT_COUNT: usize = 5
+const SPHERE_PAIR_COUNT: usize = SPHERE_COUNT * (SPHERE_COUNT + 1) / 2
+const SP_COUNT: usize = SPHERE_COUNT * POINT_COUNT
+const SSP_COUNT: usize = SPHERE_PAIR_COUNT * POINT_COUNT
+
+// Packed signed-digit lane geometry. LANE_BITS is a storage width, unrelated to
+// POINT_COUNT and to the algebra dimension despite sharing their value; only
+// PACKED_MASK and the lane shifts may be derived from it.
+const LANE_BITS: usize = 5
+const PACKED_MASK: u64 = ((1 as u64) << LANE_BITS.downcast_unchecked()) - 1
 
 // Named seed decomposition. These are input support declarations, not an
 // expansion table.
@@ -118,7 +130,7 @@ const fn packed_with_word(_ code: Words, _ word: usize, _ value: u64) -> Words {
 
 const fn packed_coefficient(_ code: Words, _ bin: usize) -> i32 {
     let word = bin / 12
-    let shift: u64 = ((bin % 12) * 5).downcast_unchecked()
+    let shift: u64 = ((bin % 12) * LANE_BITS).downcast_unchecked()
     let digit: usize =
         ((packed_word(code, word) >> shift) & PACKED_MASK).downcast_unchecked()
     if digit < 16 {
@@ -135,7 +147,7 @@ const fn packed_set(
     _ coefficient: i32,
 ) -> Words {
     let word = bin / 12
-    let shift: u64 = ((bin % 12) * 5).downcast_unchecked()
+    let shift: u64 = ((bin % 12) * LANE_BITS).downcast_unchecked()
     let place: u64 = 1 << shift
     let old_word = packed_word(code, word)
     let old = (old_word >> shift) & PACKED_MASK
@@ -168,7 +180,7 @@ const fn packed_add_word(_ a: u64, _ b: u64, _ count: usize) -> PackedWord {
     let mut valid = true
     let mut bin: usize = 0
     while bin < count {
-        let shift: u64 = (bin * 5).downcast_unchecked()
+        let shift: u64 = (bin * LANE_BITS).downcast_unchecked()
         let a_digit: i32 = ((a >> shift) & PACKED_MASK).downcast_unchecked()
         let b_digit: i32 = ((b >> shift) & PACKED_MASK).downcast_unchecked()
         let a_value = if a_digit < 16 { a_digit } else { a_digit - 32 }
@@ -208,7 +220,7 @@ const fn packed_neg_word(_ code: u64, _ count: usize) -> u64 {
     let mut out: u64 = 0
     let mut bin: usize = 0
     while bin < count {
-        let shift: u64 = (bin * 5).downcast_unchecked()
+        let shift: u64 = (bin * LANE_BITS).downcast_unchecked()
         let digit: i32 = ((code >> shift) & PACKED_MASK).downcast_unchecked()
         let value = if digit < 16 { digit } else { digit - 32 }
         let negated = -value
@@ -262,7 +274,7 @@ const fn sphere_seed(_ index: usize) -> Canonical50Coefficient {
         index: index,
         negative: false,
         code: packed_zero(SSP_COUNT),
-        valid: index < 4,
+        valid: index < SPHERE_COUNT,
     }
 }
 
@@ -272,7 +284,7 @@ const fn point_seed(_ index: usize) -> Canonical50Coefficient {
         index: index,
         negative: false,
         code: packed_zero(SSP_COUNT),
-        valid: index < 5,
+        valid: index < POINT_COUNT,
     }
 }
 
@@ -307,7 +319,7 @@ const fn sphere_pair_rank(_ a: usize, _ b: usize) -> usize {
     let mut rank: usize = 0
     let mut left: usize = 0
     while left < lo {
-        rank = rank + (4 - left)
+        rank = rank + (SPHERE_COUNT - left)
         left = left + 1
     }
     rank + hi - lo
@@ -324,10 +336,11 @@ const fn multiply_sp_sphere(
         let mut coefficient = packed_coefficient(sp.code, bin)
         if sphere.negative { coefficient = -coefficient }
         if coefficient != 0 {
-            let sphere_left = bin / 5
-            let point = bin % 5
+            let sphere_left = bin / POINT_COUNT
+            let point = bin % POINT_COUNT
             let target =
-                sphere_pair_rank(sphere_left, sphere.index) * 5 + point
+                sphere_pair_rank(sphere_left, sphere.index) * POINT_COUNT
+                    + point
             let updated = packed_add_at(code, target, coefficient)
             code = updated.code
             valid = valid && updated.valid
@@ -370,7 +383,7 @@ impl CliffordCoefficient for Canonical50Coefficient {
             return polynomial_single(
                 STAGE_SP,
                 SP_COUNT,
-                self.index * 5 + other.index,
+                self.index * POINT_COUNT + other.index,
                 self.negative ^ other.negative,
                 self.valid && other.valid,
             )
@@ -379,7 +392,7 @@ impl CliffordCoefficient for Canonical50Coefficient {
             return polynomial_single(
                 STAGE_SP,
                 SP_COUNT,
-                other.index * 5 + self.index,
+                other.index * POINT_COUNT + self.index,
                 self.negative ^ other.negative,
                 self.valid && other.valid,
             )
@@ -680,13 +693,13 @@ const fn canonical50_native() -> CanonicalNative {
         maximum: canonical50_max_abs(code),
         keep0: canonical50_keep_word(code, 0, 24),
         keep1: canonical50_keep_word(code, 24, 48),
-        keep2: canonical50_keep_word(code, 48, 50),
+        keep2: canonical50_keep_word(code, 48, SSP_COUNT),
         mag0: canonical50_magnitude_word(code, 0, 16),
         mag1: canonical50_magnitude_word(code, 16, 32),
         mag2: canonical50_magnitude_word(code, 32, 48),
-        mag3: canonical50_magnitude_word(code, 48, 50),
+        mag3: canonical50_magnitude_word(code, 48, SSP_COUNT),
         sign0: canonical50_sign_word(code, 0, 32),
-        sign1: canonical50_sign_word(code, 32, 50),
+        sign1: canonical50_sign_word(code, 32, SSP_COUNT),
     }
 }
 
@@ -709,9 +722,11 @@ const fn canonical50_projection(_ selector: u32) -> u64 {
         let mag3: u64 = native.mag3.downcast_unchecked()
         let sign0: u64 = native.sign0.downcast_unchecked()
         let sign1: u64 = native.sign1.downcast_unchecked()
+        let candidate_count: u64 = SSP_COUNT.downcast_unchecked()
+        let point_count: u64 = POINT_COUNT.downcast_unchecked()
         let mut candidate: u64 = 0
         let mut valid = native.valid
-        while candidate < 50 {
+        while candidate < candidate_count {
             if ((keep >> candidate) & 1) == 1 {
                 let magnitude = if candidate < 16 {
                     (mag0 >> (candidate * 2)) & 3
@@ -722,7 +737,7 @@ const fn canonical50_projection(_ selector: u32) -> u64 {
                 } else {
                     (mag3 >> ((candidate - 48) * 2)) & 3
                 }
-                let pair = candidate / 5
+                let pair = candidate / point_count
                 let expected = if pair == 0 || pair == 4
                     || pair == 7 || pair == 9 { 1 } else { 2 }
                 valid = valid && magnitude == expected
@@ -738,9 +753,10 @@ pub const CANONICAL50_KEEP_VALID: u64 = canonical50_projection(0)
 pub const CANONICAL50_COEFFICIENTS: u64 = canonical50_projection(1)
 
 pub const fn canonical50_projected_count() -> usize {
+    let candidate_count: u64 = SSP_COUNT.downcast_unchecked()
     let mut count: usize = 0
     let mut candidate: u64 = 0
-    while candidate < 50 {
+    while candidate < candidate_count {
         if ((CANONICAL50_KEEP_VALID >> candidate) & 1) == 1 {
             count = count + 1
         }
@@ -758,7 +774,7 @@ pub type Canonical50Schedule32 = SparsePlan<
     {((CANONICAL50_KEEP_VALID >> 24) & 0xffffff).downcast_unchecked()},
     {((CANONICAL50_KEEP_VALID >> 48) & 3).downcast_unchecked()},
     0, 0, 0, 0, 0,
-    50,
+    {SSP_COUNT},
     {canonical50_projected_count()},
 >
 
@@ -772,17 +788,17 @@ pub const fn canonical50_projected_sign(_ candidate: u64) -> i32 {
 /// providers. The public recursive plan remains the authority for survivor
 /// selection and sign; these helpers decode its candidate identity.
 pub const fn canonical50_candidate_left_slot(_ candidate: usize) -> usize {
-    let pair_i32: i32 = (candidate / 5).downcast_unchecked()
+    let pair_i32: i32 = (candidate / POINT_COUNT).downcast_unchecked()
     sphere_pair_left_i32(pair_i32).downcast_unchecked()
 }
 
 pub const fn canonical50_candidate_right_slot(_ candidate: usize) -> usize {
-    let pair_i32: i32 = (candidate / 5).downcast_unchecked()
+    let pair_i32: i32 = (candidate / POINT_COUNT).downcast_unchecked()
     sphere_pair_right_i32(pair_i32).downcast_unchecked()
 }
 
 pub const fn canonical50_candidate_point_slot(_ candidate: usize) -> usize {
-    candidate % 5
+    candidate % POINT_COUNT
 }
 
 pub const fn canonical50_candidate_output(_ candidate: usize) -> usize {
@@ -791,7 +807,7 @@ pub const fn canonical50_candidate_output(_ candidate: usize) -> usize {
 }
 
 pub const fn canonical50_candidate_magnitude(_ candidate: usize) -> usize {
-    let pair = candidate / 5
+    let pair = candidate / POINT_COUNT
     if pair == 0 || pair == 4 || pair == 7 || pair == 9 { 1 } else { 2 }
 }
 
@@ -801,9 +817,10 @@ pub const fn canonical50_candidate_negative(_ candidate: usize) -> usize {
 }
 
 pub const fn canonical50_order_hash() -> usize {
+    let candidate_count: u64 = SSP_COUNT.downcast_unchecked()
     let mut candidate: u64 = 0
     let mut hash: u64 = 17
-    while candidate < 50 {
+    while candidate < candidate_count {
         if ((CANONICAL50_KEEP_VALID >> candidate) & 1) == 1 {
             hash = (hash * 83 + candidate + 1) % 1000003
         }
@@ -832,7 +849,7 @@ pub const fn canonical50_candidate_at_rank(_ rank: usize) -> usize {
         ((CANONICAL50_KEEP_VALID >> 24) & 0xffffff).downcast_unchecked(),
         ((CANONICAL50_KEEP_VALID >> 48) & 3).downcast_unchecked(),
         0, 0, 0, 0, 0,
-        50,
+        SSP_COUNT,
         rank,
     )
 }
