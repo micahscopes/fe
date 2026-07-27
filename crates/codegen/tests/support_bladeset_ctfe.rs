@@ -98,10 +98,19 @@ fn reusable_bladeset_ctfe_matches_independent_support_oracles() {
 
     let mut runtime_bitwise_ops = 0;
     let mut defined_functions = 0;
+    let mut exported_functions: Vec<String> = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
         match payload.unwrap() {
             wasmparser::Payload::FunctionSection(reader) => {
                 defined_functions += reader.count();
+            }
+            wasmparser::Payload::ExportSection(reader) => {
+                for export in reader {
+                    let export = export.unwrap();
+                    if matches!(export.kind, wasmparser::ExternalKind::Func) {
+                        exported_functions.push(export.name.to_string());
+                    }
+                }
             }
             wasmparser::Payload::CodeSectionEntry(body) => {
                 let mut ops = body.get_operators_reader().unwrap();
@@ -124,7 +133,8 @@ fn reusable_bladeset_ctfe_matches_independent_support_oracles() {
     }
     assert_eq!(
         defined_functions, 1,
-        "only the constant result selector should reach runtime Wasm",
+        "only the constant result selector should reach runtime Wasm; exports were \
+         {exported_functions:?} with {runtime_bitwise_ops} runtime bitwise ops",
     );
     assert_eq!(
         runtime_bitwise_ops, 0,
