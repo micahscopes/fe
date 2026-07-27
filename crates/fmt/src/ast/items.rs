@@ -364,8 +364,18 @@ impl ToDoc for ast::Item {
             Some(ItemKind::Use(use_)) => use_.to_doc(ctx),
             Some(ItemKind::Extern(extern_)) => extern_.to_doc(ctx),
             Some(ItemKind::Msg(msg)) => msg.to_doc(ctx),
+            Some(ItemKind::Actor(actor)) => actor.to_doc(ctx),
             None => ctx.alloc.nil(),
         }
+    }
+}
+
+impl ToDoc for ast::Actor {
+    fn to_doc<'a>(&self, ctx: &'a RewriteContext<'a>) -> Doc<'a> {
+        // v1: the `actor` construct is not yet pretty-printed structurally
+        // (it desugars away in HIR lowering). Emit the node verbatim so
+        // formatting is the identity on actor items rather than dropping them.
+        ctx.alloc.text(self.syntax().text().to_string())
     }
 }
 

@@ -39,6 +39,7 @@ impl Item {
             .or_else(|| support::child(self.syntax()).map(ItemKind::Func))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Struct))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Contract))
+            .or_else(|| support::child(self.syntax()).map(ItemKind::Actor))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Msg))
             .or_else(|| support::child(self.syntax()).map(ItemKind::Enum))
             .or_else(|| support::child(self.syntax()).map(ItemKind::TypeAlias))
@@ -187,6 +188,43 @@ impl Contract {
 
     /// Returns all `recv` blocks declared in the contract.
     pub fn recvs(&self) -> rowan::ast::AstChildren<ContractRecv> {
+        support::children(self.syntax())
+    }
+}
+
+ast_node! {
+    /// `actor Name uses (<row>) { <fields> <behaviors> }`
+    pub struct Actor,
+    SK::Actor,
+}
+impl super::AttrListOwner for Actor {}
+impl super::ItemModifierOwner for Actor {}
+impl Actor {
+    /// Returns the name of the actor.
+    ///
+    /// The node carries two direct `Ident` tokens: the contextual `actor`
+    /// keyword and the actor's name. The name is the second one (field and
+    /// behavior identifiers live inside child nodes, not as direct tokens).
+    pub fn name(&self) -> Option<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|elem| elem.into_token())
+            .filter(|tok| tok.kind() == SK::Ident)
+            .nth(1)
+    }
+
+    /// Returns the optional placement `uses` clause of the actor.
+    pub fn uses_clause(&self) -> Option<super::UsesClause> {
+        support::child(self.syntax())
+    }
+
+    /// Returns the actor's state fields, in declaration order.
+    pub fn fields(&self) -> rowan::ast::AstChildren<RecordFieldDef> {
+        support::children(self.syntax())
+    }
+
+    /// Returns the actor's behavior functions, in declaration order.
+    pub fn behaviors(&self) -> rowan::ast::AstChildren<Func> {
         support::children(self.syntax())
     }
 }
@@ -962,6 +1000,7 @@ pub enum ItemKind {
     Func(Func),
     Struct(Struct),
     Contract(Contract),
+    Actor(Actor),
     Msg(Msg),
     Enum(Enum),
     TypeAlias(TypeAlias),

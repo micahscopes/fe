@@ -268,6 +268,17 @@ pub enum DesugaredOrigin {
     Error(ErrorDesugared),
     /// The HIR node is the result of desugaring a `#[derive(..)]` struct.
     Derive(DeriveDesugared),
+    /// The HIR node is the result of desugaring an `actor` item.
+    /// `actor` items are desugared into a state struct plus flattened free
+    /// functions (`crates/hir/src/core/lower/actor.rs`).
+    Actor(ActorDesugared),
+}
+
+/// Tracks the origin of HIR nodes desugared from an `actor` item.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ActorDesugared {
+    /// The original `actor` AST node.
+    pub actor: AstPtr<ast::Actor>,
 }
 
 /// Tracks the origin of HIR nodes desugared from a `msg` block.

@@ -14,6 +14,7 @@ use crate::{
         GenericParamListId, IdentId, IntegerId, KindBound, Partial, PathId, TraitRefId,
         TupleTypeId, TypeBound, TypeId, WhereClauseId, item::*,
     },
+    lower::actor::lower_actor_as_items,
     lower::msg::lower_msg_as_mod,
     span::HirOrigin,
 };
@@ -366,6 +367,15 @@ impl<'db> ItemKind<'db> {
                     contract.name().map(|name| name.text().to_string()),
                 );
                 Contract::lower_ast(ctxt, contract);
+            }
+            ast::ItemKind::Actor(actor) => {
+                validate_unsupported_item_attrs(
+                    ctxt,
+                    actor.attr_list(),
+                    "actor",
+                    actor.name().map(|name| name.text().to_string()),
+                );
+                lower_actor_as_items(ctxt, actor);
             }
             ast::ItemKind::Enum(enum_) => {
                 validate_enum_attrs(

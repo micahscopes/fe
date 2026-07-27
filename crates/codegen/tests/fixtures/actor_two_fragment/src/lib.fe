@@ -1,0 +1,15 @@
+// Reject fixture: a `GpuProgram` actor with TWO `FragmentSurface` behaviors.
+// A render program has exactly one fragment entry, so the entry derivation
+// must refuse to pick one.
+
+actor Two uses (GpuProgram<i32>) {
+    x: i32,
+
+    fn a(self, p: i32) -> i32 uses (FragmentSurface) {
+        self.x + p
+    }
+
+    fn b(self, p: i32) -> i32 uses (FragmentSurface) {
+        self.x - p
+    }
+}

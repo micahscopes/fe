@@ -1,0 +1,21 @@
+// Reproduction fixture (actor side): a `GpuProgram` actor whose `FragmentSurface`
+// behavior `paint` must desugar byte-for-byte to the hand-written free `paint`
+// in the sibling `actor_repro_free` ingot. The kernel uses only `<`, `+`, `-`
+// (the DEC render kernel cannot lower to wasm because it uses `!=`, an
+// unrelated R2 gap), so the byte comparison is achievable here.
+//
+// The behavior reads its state via `self.<field>`; the desugar flattens the
+// fields into trailing positional parameters and rewrites `self.a` to `a`.
+
+actor Painter uses (GpuProgram<i32>) {
+    a: i32, b: i32, c: i32,
+
+    fn paint(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        let base: i32 = px + py + self.a
+        if self.b < self.c {
+            base + self.b
+        } else {
+            base - self.c
+        }
+    }
+}

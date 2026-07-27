@@ -37,6 +37,7 @@ pub use provider::{DerivedImplProvenance, derived_impl_provenance};
 pub(crate) mod parse;
 
 mod abi_field;
+mod actor;
 mod attr;
 mod base_const_eval;
 mod body;
@@ -240,6 +241,96 @@ pub(crate) fn top_mod_ast(db: &dyn HirDb, top_mod: TopLevelMod) -> ast::Root {
     ast::Root::cast(node).unwrap()
 }
 
+/// One `actor` declaration, read structurally from the source AST.
+///
+/// `actor` items are desugared away in HIR lowering, so this is how downstream
+/// tooling (the `fe web` entry derivation) recovers the declared unit: its
+/// placement row and its behaviors with their role markers. Markers are the
+/// last path segment of each `uses`-row entry, matched by name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorDecl {
+    pub name: String,
+    /// Last path segment of each placement-row entry, e.g. `GpuProgram`.
+    pub row_markers: Vec<String>,
+    pub behaviors: Vec<ActorBehaviorDecl>,
+}
+
+/// One behavior of an [`ActorDecl`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorBehaviorDecl {
+    pub name: String,
+    /// Last path segment of each role-row entry, e.g. `FragmentSurface`.
+    pub role_markers: Vec<String>,
+}
+
+/// The `actor` declarations reachable from `top_mod`'s source, in declaration
+/// order (including actors nested in submodules of the same file).
+pub fn module_actor_decls(db: &dyn HirDb, top_mod: TopLevelMod) -> Vec<ActorDecl> {
+    let mut decls = Vec::new();
+    if let Some(items) = top_mod_ast(db, top_mod).items() {
+        collect_actor_decls(items, &mut decls);
+    }
+    decls
+}
+
+fn collect_actor_decls(items: ast::ItemList, out: &mut Vec<ActorDecl>) {
+    for item in items {
+        match item.kind() {
+            Some(ast::ItemKind::Actor(actor)) => out.push(actor_decl(&actor)),
+            Some(ast::ItemKind::Mod(mod_)) => {
+                if let Some(nested) = mod_.items() {
+                    collect_actor_decls(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn actor_decl(actor: &ast::Actor) -> ActorDecl {
+    let name = actor
+        .name()
+        .map(|token| token.text().to_string())
+        .unwrap_or_default();
+    let row_markers = uses_markers(actor.uses_clause());
+    let behaviors = actor
+        .behaviors()
+        .filter_map(|behavior| {
+            let sig = behavior.signature_opt()?;
+            Some(ActorBehaviorDecl {
+                name: sig
+                    .name()
+                    .map(|token| token.text().to_string())
+                    .unwrap_or_default(),
+                role_markers: uses_markers(sig.uses_clause()),
+            })
+        })
+        .collect();
+    ActorDecl {
+        name,
+        row_markers,
+        behaviors,
+    }
+}
+
+/// The last path segment identifier of each entry in a `uses` clause.
+fn uses_markers(uses: Option<ast::UsesClause>) -> Vec<String> {
+    let Some(uses) = uses else {
+        return Vec::new();
+    };
+    let params: Vec<ast::UsesParam> = match uses.param_list() {
+        Some(list) => list.into_iter().collect(),
+        None => uses.param().into_iter().collect(),
+    };
+    params
+        .into_iter()
+        .filter_map(|param| {
+            let last = param.path()?.segments().last()?;
+            Some(last.ident()?.text().to_string())
+        })
+        .collect()
+}
+
 pub(super) struct FileLowerCtxt<'db> {
     builder: ScopeGraphBuilder<'db>,
     next_impl_idx: u32,
@@ -247,6 +338,10 @@ pub(super) struct FileLowerCtxt<'db> {
     next_derive_provider_scope_idx: u32,
     next_derive_decl_idx: u32,
     next_static_assert_idx: u32,
+    /// When lowering an actor behavior body, the actor's state-field idents.
+    /// A `self.<field>` access inside such a body is rewritten to a bare path
+    /// to the flattened parameter `<field>` (see `expr.rs` and `actor.rs`).
+    actor_self_fields: Option<Vec<crate::hir_def::IdentId<'db>>>,
 }
 
 impl<'db> FileLowerCtxt<'db> {
@@ -258,7 +353,40 @@ impl<'db> FileLowerCtxt<'db> {
             next_derive_provider_scope_idx: 0,
             next_derive_decl_idx: 0,
             next_static_assert_idx: 0,
+            actor_self_fields: None,
         }
+    }
+
+    /// Sets the active actor state-field rewrite set, returning the previous
+    /// value so the caller can restore it after lowering a behavior body.
+    pub(super) fn set_actor_self_fields(
+        &mut self,
+        fields: Option<Vec<crate::hir_def::IdentId<'db>>>,
+    ) -> Option<Vec<crate::hir_def::IdentId<'db>>> {
+        std::mem::replace(&mut self.actor_self_fields, fields)
+    }
+
+    /// If a `self.<field>` access should be rewritten to a bare path to the
+    /// flattened parameter, returns that field ident.
+    pub(super) fn actor_self_field_rewrite(
+        &self,
+        field: &parser::ast::FieldExpr,
+    ) -> Option<crate::hir_def::IdentId<'db>> {
+        let fields = self.actor_self_fields.as_ref()?;
+        // The receiver must be a bare `self` value path.
+        let receiver = field.receiver()?;
+        let parser::ast::ExprKind::Path(path_expr) = receiver.kind() else {
+            return None;
+        };
+        let path = path_expr.path()?;
+        let mut segments = path.segments();
+        let seg = segments.next()?;
+        if segments.next().is_some() || !seg.is_self() {
+            return None;
+        }
+        let name_token = field.field_name()?;
+        let ident = crate::hir_def::IdentId::new(self.db(), name_token.text().to_string());
+        fields.contains(&ident).then_some(ident)
     }
 
     /// Creates a lowering context for the post-lowering expansion stage of
@@ -273,6 +401,7 @@ impl<'db> FileLowerCtxt<'db> {
             next_derive_provider_scope_idx: 0,
             next_derive_decl_idx: 0,
             next_static_assert_idx: 0,
+            actor_self_fields: None,
         }
     }
 

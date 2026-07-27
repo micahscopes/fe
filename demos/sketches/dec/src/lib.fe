@@ -1,0 +1,842 @@
+//! Discrete exterior calculus operators, served by one Fe actor.
+//!
+//! This demo is an ACTOR, not a shader entrypoint. It is a graded operator
+//! server for one fixed oriented simplicial 2-complex (a fan-triangulated
+//! regular hexagon). Everything the browser needs is declared in this file's
+//! signatures: the message types, the execution substrate of each lane, and
+//! its placement, all as Fe types and effect rows. The JS that binds it is
+//! generated from these signatures (the canonical interface manifest plus the
+//! fixed fe-web browser runtime); no per-demo JS exists or is wanted.
+//!
+//! Actor topology: two PROGRAMS, each an actor with state, behaviors, and a
+//! mailbox. Stages are behaviors internal to their program, not actors.
+//!   - The OPERATOR PROGRAM: a wasm module instance placed in a Worker. Its
+//!     state is the module instance and canonical arena; its behaviors are
+//!     the six request/response lanes `probe`, `d0`, `d1`, `dd0`, `laplace0`,
+//!     `hodge` (each declares `uses (Worker)`, and the generated router
+//!     refuses to dispatch them anywhere else); its mailbox is the Worker
+//!     message port with the runtime's admission control in front of it.
+//!   - The RENDER PROGRAM: the pipeline that owns the uniform state
+//!     (`ViewRequest`'s cochain values and flags), seated on the main thread
+//!     with the WebGPU dispatch capability via the `view` lane. Its internal
+//!     behaviors are the synthesized fullscreen vertex stage and the
+//!     `dec_render` fragment behavior below: the SAME graded operators the
+//!     Worker lanes run, lowered through the render path instead of the wasm
+//!     path. Draw requests are its messages; the command queue is its
+//!     mailbox. One set of operator definitions, two substrates.
+//!
+//! The one piece of tooling this demo forces: GRADE-INDEXED OPERATOR TYPES.
+//! `Form<D>` and `Dual<D>` carry the cochain grade in the type; `d` raises
+//! the grade through the token successor `D::Up`, `star` crosses to the dual
+//! complex through `D::Star`, and the 0-form Laplacian is the composition
+//! `star_inv(d_dual(star(d(f))))` whose grade bookkeeping the compiler checks
+//! arrow by arrow. Applying `d` at the top grade is a COMPILE error, because
+//! the successor grade has no `OnComplex` impl, not because any name says so.
+//! The rejection fixture lives at
+//! `crates/codegen/tests/fixtures/dec_wrong_grade_ingot`.
+//!
+//! Honesty register (VISION 3.1 and 7):
+//!   - No parallelism is claimed anywhere here. The wasm lanes execute
+//!     sequentially. The GPU picture is a driver-scheduled full-surface pass,
+//!     which is the WRONG exhibit for the schedule-type thesis, and in the
+//!     build sandbox it renders under SOFTWARE rendering (SwiftShader or
+//!     lavapipe). No performance claim attaches to any of it.
+//!   - Grade safety is what the types buy. It does NOT reach discretization
+//!     quality: the diagonal Hodge star below is the standard circumcentric
+//!     one, and a type-correct star with a bad quadrature would type-check
+//!     identically. Said out loud, once, here.
+//!
+//! The render PROGRAM is named as one unit by the `DecSurface` actor below: its
+//! uniform state (the actor's fields), its `FragmentSurface` behavior
+//! (`dec_render`), and its placement row live in one declaration, and
+//! `fe web build` derives the render entry and mode from it rather than from
+//! `--entry`/`--mode` flags (`DESIGN_ACTOR_CONSTRUCT.md`, slice R-A1).
+
+use core::marker::Copy
+use core::{HostEffect, MainThread, Worker}
+use std::webgpu::{Dispatch, WebGpuBackend}
+use fmath::{clamp01, from_i32, palette, rgba, sqrt}
+
+// ---------------------------------------------------------------------------
+// The complex: a fan-triangulated regular hexagon.
+//
+// The base mesh is fixture DATA, not something we derive (VISION 5: mesh
+// combinatorics belong to the base; this demo serves the graded fiber over
+// it). The fan family is parameterized by its sector count so the incidence
+// operators are arithmetic in the fan structure rather than baked tables.
+//
+//   vertices: index 0 is the center; 1..=SECTORS are the ring, counter
+//             clockwise from the positive x axis.
+//   edges:    0..SECTORS are spokes, edge s oriented center -> ring vertex
+//             s+1; SECTORS..2*SECTORS are ring edges, edge SECTORS+i
+//             oriented ring vertex i+1 -> ring vertex next(i)+1.
+//   faces:    face t is the triangle (center, ring t+1, ring next(t)+1),
+//             oriented counterclockwise.
+// ---------------------------------------------------------------------------
+
+const SECTORS: i32 = 6
+
+pub const fn vertex_count() -> i32 { SECTORS + 1 }
+pub const fn edge_count() -> i32 { SECTORS * 2 }
+pub const fn face_count() -> i32 { SECTORS }
+
+// The Euler characteristic of a disk, checked at compile time.
+static_assert(vertex_count() - edge_count() + face_count() == 1)
+
+const fn next_sector(_ i: i32) -> i32 {
+    if i == SECTORS - 1 { 0 } else { i + 1 }
+}
+
+/// Signed incidence of the fan complex. `k` selects the operator grade:
+/// `k == 0` gives the vertex-to-edge coefficients (rows are edges, columns
+/// are vertices), `k == 1` the edge-to-face coefficients (rows are faces,
+/// columns are edges). Derived from the fan structure, never enumerated.
+pub const fn incidence(k: i32, row: i32, col: i32) -> i32 {
+    if k == 0 {
+        if row < SECTORS {
+            // Spoke `row`: center -> ring vertex row+1.
+            if col == 0 { -1 }
+            else if col == row + 1 { 1 }
+            else { 0 }
+        } else {
+            // Ring edge: ring vertex i+1 -> ring vertex next(i)+1.
+            let i = row - SECTORS
+            if col == i + 1 { -1 }
+            else if col == next_sector(i) + 1 { 1 }
+            else { 0 }
+        }
+    } else {
+        // Face `row` boundary: +spoke row, +ring row, -spoke next(row).
+        if col == row { 1 }
+        else if col == SECTORS + row { 1 }
+        else if col == next_sector(row) { -1 }
+        else { 0 }
+    }
+}
+
+// d compose d is the zero map, witnessed by CTFE over the integer incidence
+// itself, independent of every runtime path below.
+const fn dd_abs_total() -> i32 {
+    let mut total: i32 = 0
+    let mut t: i32 = 0
+    while t < face_count() {
+        let mut v: i32 = 0
+        while v < vertex_count() {
+            let mut entry: i32 = 0
+            let mut e: i32 = 0
+            while e < edge_count() {
+                entry = entry
+                    + incidence(k: 1, row: t, col: e) * incidence(k: 0, row: e, col: v)
+                e = e + 1
+            }
+            if entry < 0 { entry = -entry }
+            total = total + entry
+            v = v + 1
+        }
+        t = t + 1
+    }
+    total
+}
+static_assert(dd_abs_total() == 0)
+
+// ---------------------------------------------------------------------------
+// Cochain carriers: depth-indexed value trees.
+//
+// The same pair-tree idiom as `sparse_clifford::CliffordMv`: a carrier of
+// 2^L slots reached by index/size recursion. Cell counts are not powers of
+// two, so each grade uses the smallest tree that holds it and the spare
+// slots stay at zero (written by fill, never read: every loop below is
+// bounded by the true cell count).
+// ---------------------------------------------------------------------------
+
+pub struct SlotLeaf { pub value: f32 }
+pub struct SlotNode<A> { pub low: A, pub high: A }
+impl Copy for SlotLeaf {}
+impl<A: Copy> Copy for SlotNode<A> {}
+
+pub recursive type fn Slots<const L: usize>() -> (*) {
+    match L {
+        0 => SlotLeaf
+        _ => SlotNode<Slots<{L - 1}>>
+    }
+}
+
+/// 8 slots, 7 vertices used.
+pub type VertSlots = Slots<3>
+/// 16 slots, 12 edges used.
+pub type EdgeSlots = Slots<4>
+/// 8 slots, 6 faces used.
+pub type FaceSlots = Slots<3>
+
+pub trait SlotsFill {
+    const fn slots_filled(value: f32) -> Self
+}
+impl SlotsFill for SlotLeaf {
+    const fn slots_filled(value: f32) -> Self {
+        SlotLeaf { value: value }
+    }
+}
+impl<A: SlotsFill> SlotsFill for SlotNode<A> {
+    const fn slots_filled(value: f32) -> Self {
+        SlotNode {
+            low: <A as SlotsFill>::slots_filled(value: value),
+            high: <A as SlotsFill>::slots_filled(value: value),
+        }
+    }
+}
+
+pub trait SlotsAccess {
+    const fn slots_get(self, index: i32, size: i32) -> f32
+    const fn slots_set(self, index: i32, size: i32, value: f32) -> Self
+}
+impl SlotsAccess for SlotLeaf {
+    #[inline(always)]
+    const fn slots_get(self, index: i32, size: i32) -> f32 {
+        self.value
+    }
+    #[inline(always)]
+    const fn slots_set(self, index: i32, size: i32, value: f32) -> Self {
+        SlotLeaf { value: value }
+    }
+}
+impl<A: SlotsAccess + Copy> SlotsAccess for SlotNode<A> {
+    #[inline(always)]
+    const fn slots_get(self, index: i32, size: i32) -> f32 {
+        let half: i32 = size >> 1
+        if index < half {
+            self.low.slots_get(index: index, size: half)
+        } else {
+            self.high.slots_get(index: index - half, size: half)
+        }
+    }
+    #[inline(always)]
+    const fn slots_set(self, index: i32, size: i32, value: f32) -> Self {
+        let half: i32 = size >> 1
+        if index < half {
+            SlotNode {
+                low: self.low.slots_set(index: index, size: half, value: value),
+                high: self.high,
+            }
+        } else {
+            SlotNode {
+                low: self.low,
+                high: self.high.slots_set(index: index - half, size: half, value: value),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grades as types.
+//
+// `D0`, `D1`, `D2` are the grades present on this 2-complex. `DTop` is the
+// grade ABOVE it: a real token that deliberately carries no graded impls, so
+// any operator whose type arithmetic lands there fails to solve. That absence
+// is the negative space the whole demo leans on.
+//
+// `OnComplex` grades the PRIMAL complex, `OnDualComplex` the circumcentric
+// dual. The same tokens index both, with different cell counts: dual k-cells
+// biject with primal (2-k)-cells, which is exactly what the `Carrier`
+// assignments below say.
+// ---------------------------------------------------------------------------
+
+pub struct D0 {}
+pub struct D1 {}
+pub struct D2 {}
+pub struct DTop {}
+
+pub trait OnComplex {
+    type Carrier
+    type Up
+    type Star
+    const fn grade() -> i32
+    const fn cells() -> i32
+    const fn span() -> i32
+}
+
+pub trait OnDualComplex {
+    type Carrier
+    type Up
+    type Star
+    const fn grade() -> i32
+    const fn cells() -> i32
+    const fn span() -> i32
+}
+
+impl OnComplex for D0 {
+    type Carrier = VertSlots
+    type Up = D1
+    type Star = D2
+    const fn grade() -> i32 { 0 }
+    const fn cells() -> i32 { vertex_count() }
+    const fn span() -> i32 { 8 }
+}
+impl OnComplex for D1 {
+    type Carrier = EdgeSlots
+    type Up = D2
+    type Star = D1
+    const fn grade() -> i32 { 1 }
+    const fn cells() -> i32 { edge_count() }
+    const fn span() -> i32 { 16 }
+}
+impl OnComplex for D2 {
+    type Carrier = FaceSlots
+    type Up = DTop
+    type Star = D0
+    const fn grade() -> i32 { 2 }
+    const fn cells() -> i32 { face_count() }
+    const fn span() -> i32 { 8 }
+}
+
+impl OnDualComplex for D0 {
+    // Dual vertices sit on primal faces.
+    type Carrier = FaceSlots
+    type Up = D1
+    type Star = D2
+    const fn grade() -> i32 { 0 }
+    const fn cells() -> i32 { face_count() }
+    const fn span() -> i32 { 8 }
+}
+impl OnDualComplex for D1 {
+    // Dual edges cross primal edges.
+    type Carrier = EdgeSlots
+    type Up = D2
+    type Star = D1
+    const fn grade() -> i32 { 1 }
+    const fn cells() -> i32 { edge_count() }
+    const fn span() -> i32 { 16 }
+}
+impl OnDualComplex for D2 {
+    // Dual faces cap primal vertices.
+    type Carrier = VertSlots
+    type Up = DTop
+    type Star = D0
+    const fn grade() -> i32 { 2 }
+    const fn cells() -> i32 { vertex_count() }
+    const fn span() -> i32 { 8 }
+}
+
+/// A primal `D`-graded cochain on the complex.
+pub struct Form<D: OnComplex> { pub data: <D as OnComplex>::Carrier }
+
+/// A dual `D`-graded cochain on the circumcentric dual complex.
+pub struct Dual<D: OnDualComplex> { pub data: <D as OnDualComplex>::Carrier }
+
+// The space in `Form< <D as OnComplex>::Up >` is load-bearing and must not be
+// tidied away. Fe's path parser refuses to open a generic argument list when
+// the next two tokens are `<` `<` (`PathSegmentScope` in
+// `crates/parser/src/parser/path.rs` guards on `is_lshift`, unconditionally,
+// not only in expression position). So `Form<<D as OnComplex>::Up>` never
+// reaches the type checker as an application at all: the head is left bare and
+// the only thing reported is a downstream `3-0000` kind error on the whole
+// span. One space defeats the guard and the qualified projection lowers
+// exactly as written. Recorded in /workspace/mb2/HARVEST.md.
+//
+// The trait must stay named explicitly here: every grade token implements BOTH
+// `OnComplex` and `OnDualComplex`, so the `D::Up` sugar is a genuine
+// `2-0009` ambiguity, and the compiler's own hint for that ambiguity is the
+// qualified form the parser then refuses in this position.
+
+// Compile-time witnesses that the token ladders close up as documented.
+// Each is an identity function that only type-checks if the projection on
+// the right normalizes to the token on the left. Zero runtime content.
+fn witness_up_of_d0(_ f: Form< <D0 as OnComplex>::Up >) -> Form<D1> { f }
+fn witness_up_of_d1(_ f: Form< <D1 as OnComplex>::Up >) -> Form<D2> { f }
+fn witness_star_of_d1(_ w: Dual< <D1 as OnComplex>::Star >) -> Dual<D1> { w }
+fn witness_star_round_trip(
+    _ f: Form< <<D0 as OnComplex>::Star as OnDualComplex>::Star >,
+) -> Form<D0> {
+    f
+}
+
+// ---------------------------------------------------------------------------
+// The diagonal Hodge star weights, circumcentric, for the unit fan
+// (ring radius 1, all triangles equilateral with side 1).
+//
+// Hand-derivable: triangle area sqrt(3)/4; each triangle corner region is a
+// third of that; interior dual edges join adjacent circumcenters at distance
+// sqrt(3)/3; boundary dual edges run circumcenter to edge midpoint, length
+// sqrt(3)/6. The acceptance test pins these against independently written
+// decimal constants (G2: the oracle shares no code with this file).
+// ---------------------------------------------------------------------------
+
+fn hodge_weight(_ k: i32, _ cell: i32) -> f32 {
+    let s3: f32 = sqrt(3.0)
+    if k == 0 {
+        // Dual area over primal point weight.
+        if cell == 0 { s3 * 0.5 } else { s3 / 6.0 }
+    } else if k == 1 {
+        // Dual length over primal length: spokes are interior, ring edges
+        // sit on the boundary.
+        if cell < SECTORS { s3 / 3.0 } else { s3 / 6.0 }
+    } else {
+        // Dual point weight over primal area.
+        4.0 / s3
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The graded operators. ONE definition each, generic over the grade token;
+// the per-grade content is only the incidence arithmetic and the star
+// weights. This is the exhibit: the reference implementations in the wild
+// write one function per grade and keep the grade in the name.
+// ---------------------------------------------------------------------------
+
+/// Discrete exterior derivative: raises the grade by one.
+pub fn d<D: OnComplex>(f: Form<D>) -> Form< <D as OnComplex>::Up >
+    where
+        <D as OnComplex>::Up: OnComplex,
+        <D as OnComplex>::Carrier: SlotsAccess + Copy,
+        <<D as OnComplex>::Up as OnComplex>::Carrier: SlotsAccess + SlotsFill + Copy,
+{
+    let mut out =
+        <<<D as OnComplex>::Up as OnComplex>::Carrier as SlotsFill>::slots_filled(value: 0.0)
+    let rows: i32 = <<D as OnComplex>::Up as OnComplex>::cells()
+    let cols: i32 = <D as OnComplex>::cells()
+    let out_span: i32 = <<D as OnComplex>::Up as OnComplex>::span()
+    let in_span: i32 = <D as OnComplex>::span()
+    let k: i32 = <D as OnComplex>::grade()
+    let mut row: i32 = 0
+    while row < rows {
+        let mut acc: f32 = 0.0
+        let mut col: i32 = 0
+        while col < cols {
+            let sign: i32 = incidence(k: k, row: row, col: col)
+            if sign != 0 {
+                let value: f32 = f.data.slots_get(index: col, size: in_span)
+                acc = if sign > 0 { acc + value } else { acc - value }
+            }
+            col = col + 1
+        }
+        out = out.slots_set(index: row, size: out_span, value: acc)
+        row = row + 1
+    }
+    Form { data: out }
+}
+
+/// Diagonal Hodge star: crosses to the dual complex. Dual (2-k)-cells biject
+/// with primal k-cells, so the carrier length is preserved cell by cell and
+/// only the grade moves, which is exactly what the type says.
+pub fn star<D: OnComplex>(f: Form<D>) -> Dual< <D as OnComplex>::Star >
+    where
+        <D as OnComplex>::Star: OnDualComplex,
+        <D as OnComplex>::Carrier: SlotsAccess + Copy,
+        <<D as OnComplex>::Star as OnDualComplex>::Carrier: SlotsAccess + SlotsFill + Copy,
+{
+    let mut out =
+        <<<D as OnComplex>::Star as OnDualComplex>::Carrier as SlotsFill>::slots_filled(value: 0.0)
+    let cells: i32 = <D as OnComplex>::cells()
+    let out_span: i32 = <<D as OnComplex>::Star as OnDualComplex>::span()
+    let in_span: i32 = <D as OnComplex>::span()
+    let k: i32 = <D as OnComplex>::grade()
+    let mut cell: i32 = 0
+    while cell < cells {
+        let value: f32 = f.data.slots_get(index: cell, size: in_span)
+        out = out.slots_set(
+            index: cell,
+            size: out_span,
+            value: value * hodge_weight(k, cell),
+        )
+        cell = cell + 1
+    }
+    Dual { data: out }
+}
+
+/// Exterior derivative on the dual complex: the transpose of the primal
+/// incidence, read through the primal-cell bijection. No sign convention
+/// beyond the plain transpose is applied; `laplace0` documents the resulting
+/// Laplacian sign.
+pub fn d_dual<D: OnDualComplex>(w: Dual<D>) -> Dual< <D as OnDualComplex>::Up >
+    where
+        <D as OnDualComplex>::Up: OnDualComplex,
+        <D as OnDualComplex>::Carrier: SlotsAccess + Copy,
+        <<D as OnDualComplex>::Up as OnDualComplex>::Carrier: SlotsAccess + SlotsFill + Copy,
+{
+    let mut out =
+        <<<D as OnDualComplex>::Up as OnDualComplex>::Carrier as SlotsFill>::slots_filled(value: 0.0)
+    let rows: i32 = <<D as OnDualComplex>::Up as OnDualComplex>::cells()
+    let cols: i32 = <D as OnDualComplex>::cells()
+    let out_span: i32 = <<D as OnDualComplex>::Up as OnDualComplex>::span()
+    let in_span: i32 = <D as OnDualComplex>::span()
+    // Dual k-cells are primal (2-k)-cells; the dual derivative at dual grade
+    // k is the transpose of the primal derivative at primal grade 1-k.
+    let pk: i32 = 1 - <D as OnDualComplex>::grade()
+    let mut row: i32 = 0
+    while row < rows {
+        let mut acc: f32 = 0.0
+        let mut col: i32 = 0
+        while col < cols {
+            let sign: i32 = incidence(k: pk, row: col, col: row)
+            if sign != 0 {
+                let value: f32 = w.data.slots_get(index: col, size: in_span)
+                acc = if sign > 0 { acc + value } else { acc - value }
+            }
+            col = col + 1
+        }
+        out = out.slots_set(index: row, size: out_span, value: acc)
+        row = row + 1
+    }
+    Dual { data: out }
+}
+
+/// Inverse diagonal Hodge star: returns from the dual complex.
+pub fn star_inv<D: OnDualComplex>(w: Dual<D>) -> Form< <D as OnDualComplex>::Star >
+    where
+        <D as OnDualComplex>::Star: OnComplex,
+        <D as OnDualComplex>::Carrier: SlotsAccess + Copy,
+        <<D as OnDualComplex>::Star as OnComplex>::Carrier: SlotsAccess + SlotsFill + Copy,
+{
+    let mut out =
+        <<<D as OnDualComplex>::Star as OnComplex>::Carrier as SlotsFill>::slots_filled(value: 0.0)
+    let cells: i32 = <D as OnDualComplex>::cells()
+    let out_span: i32 = <<D as OnDualComplex>::Star as OnComplex>::span()
+    let in_span: i32 = <D as OnDualComplex>::span()
+    let pk: i32 = 2 - <D as OnDualComplex>::grade()
+    let mut cell: i32 = 0
+    while cell < cells {
+        let value: f32 = w.data.slots_get(index: cell, size: in_span)
+        out = out.slots_set(
+            index: cell,
+            size: out_span,
+            value: value / hodge_weight(pk, cell),
+        )
+        cell = cell + 1
+    }
+    Form { data: out }
+}
+
+/// The 0-form Laplacian, composed from the graded operators AT THE TYPE
+/// LEVEL: Form<D0> -> Form<D1> -> Dual<D1> -> Dual<D2> -> Form<D0>. The
+/// compiler checks each arrow's grade arithmetic.
+///
+/// Sign convention, stated once: this is the plain-transpose composition, so
+///   laplace0(f)(v) = (1 / star0(v)) * sum over edges e at v of
+///                    star1(e) * (f(v) - f(other end of e)),
+/// the positive-semidefinite orientation. It is exactly zero on constants.
+pub fn laplacian0(f: Form<D0>) -> Form<D0> {
+    star_inv(w: d_dual(w: star(f: d(f: f))))
+}
+
+// ---------------------------------------------------------------------------
+// Wire messages. Flat nominal records, one per grade, so the generated
+// binding table carries a distinct layout and validator per grade and a
+// wrong-shape payload dies in the generated code before reaching wasm.
+// Nothing here owns a buffer, so plain by-value requests are the honest
+// declaration (nothing to transfer).
+// ---------------------------------------------------------------------------
+
+pub struct ProbeRequest { pub generation: u32 }
+pub struct ComplexInfo {
+    pub vertices: i32,
+    pub edges: i32,
+    pub faces: i32,
+    pub euler: i32,
+}
+
+pub struct Cochain0 {
+    pub v0: f32, pub v1: f32, pub v2: f32, pub v3: f32,
+    pub v4: f32, pub v5: f32, pub v6: f32,
+}
+pub struct Cochain1 {
+    pub e0: f32, pub e1: f32, pub e2: f32, pub e3: f32,
+    pub e4: f32, pub e5: f32, pub e6: f32, pub e7: f32,
+    pub e8: f32, pub e9: f32, pub e10: f32, pub e11: f32,
+}
+pub struct Cochain2 {
+    pub t0: f32, pub t1: f32, pub t2: f32,
+    pub t3: f32, pub t4: f32, pub t5: f32,
+}
+
+pub struct HodgeRequest { pub generation: u32 }
+pub struct HodgeDiagonal {
+    pub star0_center: f32,
+    pub star0_ring: f32,
+    pub star1_spoke: f32,
+    pub star1_ring: f32,
+    pub star2_face: f32,
+}
+
+pub struct ViewRequest {
+    pub generation: u32,
+    pub c0: f32, pub c1: f32, pub c2: f32, pub c3: f32,
+    pub c4: f32, pub c5: f32, pub c6: f32,
+    pub show_laplacian: f32,
+}
+pub struct ViewResponse { pub submitted: bool }
+
+impl Copy for ProbeRequest {}
+impl Copy for ComplexInfo {}
+impl Copy for Cochain0 {}
+impl Copy for Cochain1 {}
+impl Copy for Cochain2 {}
+impl Copy for HodgeRequest {}
+impl Copy for HodgeDiagonal {}
+impl Copy for ViewRequest {}
+impl Copy for ViewResponse {}
+
+// Wire <-> typed marshalling. This boundary layer is the only place the flat
+// records and the graded types meet.
+
+pub fn form0(c: Cochain0) -> Form<D0> {
+    let mut t = <VertSlots as SlotsFill>::slots_filled(value: 0.0)
+    t = t.slots_set(index: 0, size: 8, value: c.v0)
+    t = t.slots_set(index: 1, size: 8, value: c.v1)
+    t = t.slots_set(index: 2, size: 8, value: c.v2)
+    t = t.slots_set(index: 3, size: 8, value: c.v3)
+    t = t.slots_set(index: 4, size: 8, value: c.v4)
+    t = t.slots_set(index: 5, size: 8, value: c.v5)
+    t = t.slots_set(index: 6, size: 8, value: c.v6)
+    Form { data: t }
+}
+
+fn form1(c: Cochain1) -> Form<D1> {
+    let mut t = <EdgeSlots as SlotsFill>::slots_filled(value: 0.0)
+    t = t.slots_set(index: 0, size: 16, value: c.e0)
+    t = t.slots_set(index: 1, size: 16, value: c.e1)
+    t = t.slots_set(index: 2, size: 16, value: c.e2)
+    t = t.slots_set(index: 3, size: 16, value: c.e3)
+    t = t.slots_set(index: 4, size: 16, value: c.e4)
+    t = t.slots_set(index: 5, size: 16, value: c.e5)
+    t = t.slots_set(index: 6, size: 16, value: c.e6)
+    t = t.slots_set(index: 7, size: 16, value: c.e7)
+    t = t.slots_set(index: 8, size: 16, value: c.e8)
+    t = t.slots_set(index: 9, size: 16, value: c.e9)
+    t = t.slots_set(index: 10, size: 16, value: c.e10)
+    t = t.slots_set(index: 11, size: 16, value: c.e11)
+    Form { data: t }
+}
+
+fn wire0(f: Form<D0>) -> Cochain0 {
+    Cochain0 {
+        v0: f.data.slots_get(index: 0, size: 8),
+        v1: f.data.slots_get(index: 1, size: 8),
+        v2: f.data.slots_get(index: 2, size: 8),
+        v3: f.data.slots_get(index: 3, size: 8),
+        v4: f.data.slots_get(index: 4, size: 8),
+        v5: f.data.slots_get(index: 5, size: 8),
+        v6: f.data.slots_get(index: 6, size: 8),
+    }
+}
+
+fn wire1(f: Form<D1>) -> Cochain1 {
+    Cochain1 {
+        e0: f.data.slots_get(index: 0, size: 16),
+        e1: f.data.slots_get(index: 1, size: 16),
+        e2: f.data.slots_get(index: 2, size: 16),
+        e3: f.data.slots_get(index: 3, size: 16),
+        e4: f.data.slots_get(index: 4, size: 16),
+        e5: f.data.slots_get(index: 5, size: 16),
+        e6: f.data.slots_get(index: 6, size: 16),
+        e7: f.data.slots_get(index: 7, size: 16),
+        e8: f.data.slots_get(index: 8, size: 16),
+        e9: f.data.slots_get(index: 9, size: 16),
+        e10: f.data.slots_get(index: 10, size: 16),
+        e11: f.data.slots_get(index: 11, size: 16),
+    }
+}
+
+fn wire2(f: Form<D2>) -> Cochain2 {
+    Cochain2 {
+        t0: f.data.slots_get(index: 0, size: 8),
+        t1: f.data.slots_get(index: 1, size: 8),
+        t2: f.data.slots_get(index: 2, size: 8),
+        t3: f.data.slots_get(index: 3, size: 8),
+        t4: f.data.slots_get(index: 4, size: 8),
+        t5: f.data.slots_get(index: 5, size: 8),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The actor lanes. Placement is DECLARED: `uses (Worker)` on the wasm lanes,
+// main-thread host seating on `view`. The generated router enforces both.
+// ---------------------------------------------------------------------------
+
+/// Shape of the complex, computed from the graded structure itself.
+pub fn probe(_request: ProbeRequest) -> ComplexInfo
+    uses (Worker)
+{
+    ComplexInfo {
+        vertices: <D0 as OnComplex>::cells(),
+        edges: <D1 as OnComplex>::cells(),
+        faces: <D2 as OnComplex>::cells(),
+        euler: <D0 as OnComplex>::cells() -
+            <D1 as OnComplex>::cells() +
+            <D2 as OnComplex>::cells(),
+    }
+}
+
+/// Exterior derivative of a 0-form.
+pub fn d0(_ request: Cochain0) -> Cochain1
+    uses (Worker)
+{
+    wire1(f: d(f: form0(c: request)))
+}
+
+/// Exterior derivative of a 1-form.
+pub fn d1(_ request: Cochain1) -> Cochain2
+    uses (Worker)
+{
+    wire2(f: d(f: form1(c: request)))
+}
+
+/// d compose d, through the same typed interior as `d0` and `d1`. The
+/// acceptance test asserts the response is EXACTLY zero for a basis of
+/// 0-forms: the incidence arithmetic is integer-valued, so f32 is exact here.
+pub fn dd0(_ request: Cochain0) -> Cochain2
+    uses (Worker)
+{
+    wire2(f: d(f: d(f: form0(c: request))))
+}
+
+/// The composed 0-form Laplacian (see `laplacian0` for the convention).
+pub fn laplace0(_ request: Cochain0) -> Cochain0
+    uses (Worker)
+{
+    wire0(f: laplacian0(f: form0(c: request)))
+}
+
+/// The five distinct diagonal Hodge weights of this complex, for the oracle.
+pub fn hodge(_request: HodgeRequest) -> HodgeDiagonal
+    uses (Worker)
+{
+    HodgeDiagonal {
+        star0_center: hodge_weight(0, 0),
+        star0_ring: hodge_weight(0, 1),
+        star1_spoke: hodge_weight(1, 0),
+        star1_ring: hodge_weight(1, SECTORS),
+        star2_face: hodge_weight(2, 0),
+    }
+}
+
+/// The render program's message lane: a main-thread host-effect lane holding
+/// the WebGPU dispatch capability. A `ViewRequest` is a draw message carrying
+/// the program's uniform state; the browser runtime routes this schema to its
+/// GPU actor, and this Fe body is never presented as GPU execution. The
+/// fragment behavior that realizes it is the `DecSurface` actor's `dec_render`
+/// below, and `fe web build` derives the render entry and mode from that
+/// declaration.
+pub fn view(_request: ViewRequest) -> ViewResponse
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
+    ViewResponse { submitted: false }
+}
+
+// ---------------------------------------------------------------------------
+// The render program, named as one unit: the `DecSurface` actor (below the
+// pixel helpers it uses).
+//
+// Its fields ARE the uniform record (the cochain values and the flag), spelled
+// once. Its one behavior is the full-surface fragment stage: `fe web` render
+// mode hands it pixel coordinates plus those uniforms and expects a packed
+// RGBA8 word. The body runs the SAME graded operators as the Worker lanes:
+// with `show_laplacian` set, every fragment evaluates `laplacian0` through the
+// identical typed composition the wasm lanes execute, then interpolates the
+// resulting vertex values over the fan triangle under the pixel.
+//
+// The actor desugars to exactly the flattened free `dec_render` kernel this
+// file used to hand-write (the context params `px`, `py`, then the state
+// fields as trailing parameters, with `self.<field>` rewritten to those
+// parameters), so the render path consumes an identical input with zero
+// backend change. See `DESIGN_ACTOR_CONSTRUCT.md`, slice R-A1.
+// ---------------------------------------------------------------------------
+
+const RESOLUTION: f32 = 128.0
+const VIEW_SCALE: f32 = 1.15
+
+// Ring vertex coordinates of the unit hexagon, counterclockwise from the
+// positive x axis. 0.8660254 is sqrt(3)/2.
+fn ring_x(_ i: i32) -> f32 {
+    if i == 0 { 1.0 }
+    else if i == 1 { 0.5 }
+    else if i == 2 { -0.5 }
+    else if i == 3 { -1.0 }
+    else if i == 4 { -0.5 }
+    else { 0.5 }
+}
+
+fn ring_y(_ i: i32) -> f32 {
+    if i == 0 { 0.0 }
+    else if i == 1 { 0.8660254 }
+    else if i == 2 { 0.8660254 }
+    else if i == 3 { 0.0 }
+    else if i == 4 { -0.8660254 }
+    else { -0.8660254 }
+}
+
+fn pick_vertex(
+    _ g0: f32, _ g1: f32, _ g2: f32, _ g3: f32,
+    _ g4: f32, _ g5: f32, _ g6: f32, _ index: i32,
+) -> f32 {
+    if index == 0 { g0 }
+    else if index == 1 { g1 }
+    else if index == 2 { g2 }
+    else if index == 3 { g3 }
+    else if index == 4 { g4 }
+    else if index == 5 { g5 }
+    else { g6 }
+}
+
+actor DecSurface uses (GpuProgram<WebGpuBackend>) {
+    c0: f32, c1: f32, c2: f32, c3: f32,
+    c4: f32, c5: f32, c6: f32,
+    show_laplacian: f32,
+
+    /// The fragment behavior: the render program's per-pixel stage. The
+    /// context is the pixel coordinate; the uniform record is the actor's own
+    /// fields, reached as `self.*`; the result is the packed RGBA8 word.
+    fn dec_render(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        let field: Form<D0> = if self.show_laplacian >= 0.5 {
+            laplacian0(f: form0(c: Cochain0 {
+                v0: self.c0, v1: self.c1, v2: self.c2, v3: self.c3,
+                v4: self.c4, v5: self.c5, v6: self.c6,
+            }))
+        } else {
+            form0(c: Cochain0 {
+                v0: self.c0, v1: self.c1, v2: self.c2, v3: self.c3,
+                v4: self.c4, v5: self.c5, v6: self.c6,
+            })
+        }
+        let g0: f32 = field.data.slots_get(index: 0, size: 8)
+        let g1: f32 = field.data.slots_get(index: 1, size: 8)
+        let g2: f32 = field.data.slots_get(index: 2, size: 8)
+        let g3: f32 = field.data.slots_get(index: 3, size: 8)
+        let g4: f32 = field.data.slots_get(index: 4, size: 8)
+        let g5: f32 = field.data.slots_get(index: 5, size: 8)
+        let g6: f32 = field.data.slots_get(index: 6, size: 8)
+
+        // Pixel center to the hexagon's plane, y up.
+        let u: f32 = ((from_i32(px) + 0.5) / RESOLUTION * 2.0 - 1.0) * VIEW_SCALE
+        let v: f32 = (1.0 - (from_i32(py) + 0.5) / RESOLUTION * 2.0) * VIEW_SCALE
+
+        // Barycentric walk over the six fan triangles. The faces tile the
+        // hexagon, so at most one triangle claims the pixel (shared edges may
+        // claim it twice with the same interpolated value, which is harmless).
+        let mut inside: bool = false
+        let mut value: f32 = 0.0
+        let mut t: i32 = 0
+        while t < 6 {
+            let n: i32 = if t == 5 { 0 } else { t + 1 }
+            let ax: f32 = ring_x(t)
+            let ay: f32 = ring_y(t)
+            let bx: f32 = ring_x(n)
+            let by: f32 = ring_y(n)
+            let denom: f32 = ax * by - ay * bx
+            let wa: f32 = (u * by - v * bx) / denom
+            let wb: f32 = (ax * v - ay * u) / denom
+            let wo: f32 = 1.0 - wa - wb
+            if wa >= 0.0 && wb >= 0.0 && wo >= 0.0 {
+                inside = true
+                value = wo * g0
+                    + wa * pick_vertex(g0, g1, g2, g3, g4, g5, g6, t + 1)
+                    + wb * pick_vertex(g0, g1, g2, g3, g4, g5, g6, n + 1)
+            }
+            t = t + 1
+        }
+
+        if inside {
+            palette(clamp01(0.5 + value * 0.18), 0.0, 0.33, 0.67)
+        } else {
+            rgba(0.06, 0.07, 0.09)
+        }
+    }
+}

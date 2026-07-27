@@ -403,6 +403,8 @@ pub enum SyntaxKind {
     RecvArmList,
     /// `Pattern -> RetTy uses (...) { body }`
     RecvArm,
+    /// `actor Foo uses (..) { <fields> <behaviors> }`
+    Actor,
     /// `enum Foo { .. }`
     Enum,
     /// `type Foo = i32`
@@ -800,6 +802,7 @@ impl SyntaxKind {
             SyntaxKind::ContractFields => "contract fields",
             SyntaxKind::ContractInit => "contract init block",
             SyntaxKind::ContractRecv => "contract recv block",
+            SyntaxKind::Actor => "actor definition",
             SyntaxKind::Msg => "message definition",
             SyntaxKind::MsgVariant => "message variant",
             SyntaxKind::MsgVariantParams => "message variant parameters",

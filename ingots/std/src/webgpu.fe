@@ -38,6 +38,25 @@ pub use core::pending::{Pending, Wait, Notify, Spawn, TaskId}
 /// four-way non-degenerate (two GPU-shaped backends that must not conflate).
 pub struct WebGpuBackend {}
 
+// ---------------------------------------------------------------------------
+// R-A1 actor placement markers.
+// ---------------------------------------------------------------------------
+//
+// These name the boundary shape of an `actor` (`GpuProgram<B>`: a surface
+// program placed on backend `B`) and the role of a behavior (`FragmentSurface`:
+// the per-pixel fragment stage). v1 consumes them STRUCTURALLY: the `fe web`
+// entry derivation reads them off the `actor` declaration by name to recover
+// the render entry and mode, so no trait obligation is raised and the flattened
+// kernel carries no placement effect. The `Cx`/`Out`-checked `Stage` vocabulary
+// (layering 2.2) that TYPES these roles follows in the typed slice; here they
+// are pure carriers.
+
+/// The boundary shape of a surface program on backend `B`.
+pub struct GpuProgram<B> {}
+
+/// The per-pixel fragment stage role of an actor behavior.
+pub struct FragmentSurface {}
+
 /// WebGPU class-typed reference: a bind-group BINDING INDEX, which is what a
 /// WebGPU resource honestly is at the API boundary (not a pointer). `T` and `S`
 /// are phantom (representation-only stand-in, like the other backends' refs); the

@@ -157,6 +157,18 @@ impl super::Parse for ItemScope {
             return Ok(());
         }
 
+        // `actor` is recognized contextually (like `recursive`/`derive`/`with`):
+        // it is not a reserved keyword, so no identifier named `actor` breaks. An
+        // item head that starts with the identifier `actor` is an actor
+        // definition. `pub` is allowed; `unsafe` is not.
+        if parser.is_ident("actor") {
+            if modifiers.is_unsafe {
+                parser.error("`actor` cannot be `unsafe`");
+            }
+            parser.parse_cp(ActorScope::default(), checkpoint)?;
+            return Ok(());
+        }
+
         parser.expect(
             &[
                 ModKw,
@@ -560,6 +572,85 @@ impl super::Parse for RecvArmScope {
         Ok(())
     }
 }
+// Parses an `actor` definition:
+//
+//   actor Name uses (<row>) {
+//       <field>*
+//       <fn behavior>*
+//   }
+//
+// The body admits record fields (the actor's state) and `fn` behaviors. In HIR
+// lowering the whole item is desugared to a plain struct plus flattened free
+// functions (`crates/hir/src/core/lower/actor.rs`); nothing about `actor`
+// survives into name resolution or type checking, so the construct is pure
+// sugar. v1 keeps the body deliberately small: fields plus behaviors, no `init`
+// or `recv` compartments yet.
+define_scope! { ActorScope, Actor }
+impl super::Parse for ActorScope {
+    type Error = Recovery<ErrProof>;
+
+    fn parse<S: TokenStream>(&mut self, parser: &mut Parser<S>) -> Result<(), Self::Error> {
+        debug_assert!(parser.is_ident("actor"));
+        parser.bump(); // contextual `actor`
+
+        parser.set_scope_recovery_stack(&[
+            SyntaxKind::Ident,
+            SyntaxKind::UsesKw,
+            SyntaxKind::LBrace,
+        ]);
+
+        if parser.find_and_pop(SyntaxKind::Ident, ExpectedKind::Name(SyntaxKind::Actor))? {
+            parser.bump();
+        }
+
+        // Optional placement `uses` clause after the actor name.
+        if parser.current_kind() == Some(SyntaxKind::UsesKw) {
+            parser.parse(UsesClauseScope::default())?;
+        }
+        parser.pop_recovery_stack(); // remove `UsesKw` from recovery stack
+
+        if parser.find_and_pop(SyntaxKind::LBrace, ExpectedKind::Body(SyntaxKind::Actor))? {
+            parser.bump_expected(SyntaxKind::LBrace);
+
+            loop {
+                parser.set_newline_as_trivia(true);
+                match parser.current_kind() {
+                    Some(SyntaxKind::RBrace) | None => break,
+                    // A behavior with no leading attributes/doc. Behaviors parse
+                    // like impl methods so a `self` receiver is admitted; the
+                    // desugar flattens it away.
+                    Some(SyntaxKind::FnKw) => {
+                        parser.parse(FuncScope::new(FuncDefScope::Impl))?;
+                    }
+                    // Leading attributes or a doc comment: they belong to a
+                    // behavior `fn` when one follows, otherwise to a field.
+                    Some(SyntaxKind::Pound) | Some(SyntaxKind::DocComment) => {
+                        let precedes_fn = parser.dry_run(|p| {
+                            let _ = attr::parse_attr_list(p);
+                            p.current_kind() == Some(SyntaxKind::FnKw)
+                        });
+                        if precedes_fn {
+                            let checkpoint = parse_attr_list(parser)?;
+                            parser.parse_cp(FuncScope::new(FuncDefScope::Impl), checkpoint)?;
+                        } else {
+                            parser.parse(RecordFieldDefScope::default())?;
+                            let _ = parser.bump_if(SyntaxKind::Comma);
+                        }
+                    }
+                    // Otherwise a state field.
+                    _ => {
+                        parser.parse(RecordFieldDefScope::default())?;
+                        let _ = parser.bump_if(SyntaxKind::Comma);
+                    }
+                }
+            }
+
+            parser.bump_or_recover(SyntaxKind::RBrace, "expected `}` to close the actor body")?;
+        }
+        Ok(())
+    }
+}
+
 define_scope! { MsgScope, Msg }
 impl super::Parse for MsgScope {
     type Error = Recovery<ErrProof>;

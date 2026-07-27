@@ -180,6 +180,108 @@ impl WebBuildOptions {
     }
 }
 
+/// The placement-row marker naming a surface program: `uses (GpuProgram<B>)`.
+const GPU_PROGRAM_MARKER: &str = "GpuProgram";
+/// The behavior-role marker naming the per-pixel fragment stage.
+const FRAGMENT_SURFACE_MARKER: &str = "FragmentSurface";
+
+/// The render entry and mode derived from a module's unique GPU-program actor,
+/// or `None` when the module declares no such actor (the pre-actor flag path).
+///
+/// This is R-A1's zero-config derivation: it reads the `actor` declaration
+/// structurally (via [`hir::lower::module_actor_decls`]) and maps the unique
+/// `FragmentSurface` behavior to `(entry, WebBundleMode::Render)`. The single
+/// `FragmentSurface -> Render` shell-key row is a deliberate, temporary closed
+/// recognizer (design 7, edit 4), removed when the role recognizer opens.
+pub fn actor_web_entry(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+) -> Result<Option<(String, WebBundleMode)>, WebBundleError> {
+    let decls = hir::lower::module_actor_decls(db, top_mod);
+    let gpu_actors: Vec<&hir::lower::ActorDecl> = decls
+        .iter()
+        .filter(|actor| {
+            actor
+                .row_markers
+                .iter()
+                .any(|marker| marker == GPU_PROGRAM_MARKER)
+        })
+        .collect();
+    let actor = match gpu_actors.as_slice() {
+        [] => return Ok(None),
+        [actor] => *actor,
+        _ => {
+            return Err(WebBundleError::EntryDerivation(format!(
+                "module declares {} `GpuProgram` actors; the render entry cannot be derived from more than one",
+                gpu_actors.len()
+            )));
+        }
+    };
+
+    let fragment_behaviors: Vec<&hir::lower::ActorBehaviorDecl> = actor
+        .behaviors
+        .iter()
+        .filter(|behavior| {
+            behavior
+                .role_markers
+                .iter()
+                .any(|marker| marker == FRAGMENT_SURFACE_MARKER)
+        })
+        .collect();
+    match fragment_behaviors.as_slice() {
+        [behavior] => Ok(Some((behavior.name.clone(), WebBundleMode::Render))),
+        [] => Err(WebBundleError::EntryDerivation(format!(
+            "actor `{}` has a `GpuProgram` row but no `FragmentSurface` behavior to serve as the render entry",
+            actor.name
+        ))),
+        _ => Err(WebBundleError::EntryDerivation(format!(
+            "actor `{}` declares {} `FragmentSurface` behaviors; a render program has exactly one",
+            actor.name,
+            fragment_behaviors.len()
+        ))),
+    }
+}
+
+/// Resolves the render entry and mode, reconciling any explicit `--entry`/
+/// `--mode` with the module's `actor` declaration.
+///
+/// - With an actor present, absent flags are DERIVED, and present flags must
+///   MATCH the declaration or this errors naming both sources.
+/// - With no actor, the explicit flags are required (today's path, unchanged).
+pub fn resolve_web_entry(
+    db: &DriverDataBase,
+    top_mod: TopLevelMod<'_>,
+    explicit_entry: Option<String>,
+    explicit_mode: Option<WebBundleMode>,
+) -> Result<(String, WebBundleMode), WebBundleError> {
+    match actor_web_entry(db, top_mod)? {
+        Some((derived_entry, derived_mode)) => {
+            if let Some(entry) = &explicit_entry
+                && entry != &derived_entry
+            {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "explicit --entry `{entry}` contradicts the render entry `{derived_entry}` derived from the actor declaration"
+                )));
+            }
+            if let Some(mode) = explicit_mode
+                && mode != derived_mode
+            {
+                return Err(WebBundleError::EntryDerivation(format!(
+                    "explicit --mode `{mode:?}` contradicts the mode `{derived_mode:?}` derived from the actor declaration"
+                )));
+            }
+            Ok((derived_entry, derived_mode))
+        }
+        None => match (explicit_entry, explicit_mode) {
+            (Some(entry), Some(mode)) => Ok((entry, mode)),
+            _ => Err(WebBundleError::EntryDerivation(
+                "no `actor` declaration to derive from; both --entry and --mode are required"
+                    .to_owned(),
+            )),
+        },
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebArtifactManifest {
     pub wasm: String,
@@ -1054,6 +1156,9 @@ pub enum WebBundleError {
     CanonicalRequired(String),
     Manifest(String),
     Materialization(String),
+    /// The `--entry`/`--mode` could not be derived from (or contradict) the
+    /// module's `actor` declaration.
+    EntryDerivation(String),
     DestinationExists(PathBuf),
     Io(io::Error),
 }
@@ -1081,6 +1186,9 @@ impl fmt::Display for WebBundleError {
             Self::Manifest(error) => write!(f, "web bundle manifest serialization failed: {error}"),
             Self::Materialization(error) => {
                 write!(f, "web bundle materialization failed: {error}")
+            }
+            Self::EntryDerivation(error) => {
+                write!(f, "web entry derivation failed: {error}")
             }
             Self::DestinationExists(path) => {
                 write!(

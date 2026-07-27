@@ -3,8 +3,8 @@ use parser::ast::{self, prelude::*};
 use super::body::BodyCtxt;
 use crate::{
     hir_def::{
-        Body, FuncParamListId, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, Pat,
-        PathId, Stmt, TypeId, expr::*,
+        Body, FuncParamListId, GenericArgListId, IdentId, IntegerId, ItemKind, LitKind, Partial,
+        Pat, PathId, Stmt, TypeId, expr::*,
     },
     span::HirOrigin,
 };
@@ -126,6 +126,14 @@ impl<'db> Expr<'db> {
             }
 
             ast::ExprKind::Field(field) => {
+                // Actor-behavior desugar: inside an actor behavior body, a
+                // `self.<field>` access is rewritten to a bare path to the
+                // flattened parameter `<field>`. The receiver is deliberately
+                // not lowered, so no dangling `self` reference is left behind.
+                if let Some(field_ident) = ctxt.f_ctxt.actor_self_field_rewrite(&field) {
+                    let path = PathId::from_ident(ctxt.f_ctxt.db(), field_ident);
+                    return ctxt.push_expr(Self::Path(Partial::Present(path)), HirOrigin::raw(&ast));
+                }
                 let receiver = Self::push_to_body_opt(ctxt, field.receiver());
                 if let Some(hole) = field.field_hole() {
                     let inner = Self::push_to_body_opt(ctxt, hole.expr());

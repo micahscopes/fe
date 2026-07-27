@@ -56,5 +56,5 @@ pub use web_bundle::{
     WebBindingMember, WebBindingRole, WebBrowserRuntimeManifest, WebBuildOptions, WebBuiltinInput,
     WebBuiltinSource, WebBundle, WebBundleError, WebBundleFile, WebBundleManifest, WebBundleMode,
     WebCanonicalPolicy, WebCanonicalStatus, WebGeneratedArtifact, WebLayout, WebProvenance,
-    WebResult, WebScalarKind,
+    WebResult, WebScalarKind, actor_web_entry, resolve_web_entry,
 };
