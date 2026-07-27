@@ -4,7 +4,7 @@ use fe_codegen::{compile_runtime_package_wasm_with_options, WasmCompileOptions};
 use url::Url;
 
 const SPARSE_CLIFFORD_API: &str = include_str!("../../../ingots/sparse_clifford/src/lib.fe");
-const CGA: &str = include_str!("fixtures/sparse_cga_value.fe");
+const CGA: &str = include_str!("fixtures/composed/sparse_cga_value.fe");
 const WIDE_VALUE_PROBE: &str = r#"
 fn takes_sparse_index7(_ value: SparseIndex<7>) {}
 fn selected_rank7_is_recursive(
