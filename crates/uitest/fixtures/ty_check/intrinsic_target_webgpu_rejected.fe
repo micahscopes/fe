@@ -1,0 +1,20 @@
+#![target(webgpu)]
+
+// The cross-target negative from a target with NO entry interface at all. The
+// `#[target(webgpu)]` file-level override selects `std::webgpu::WebGpuTarget` as
+// this unit's capability root; its root effect `std::webgpu::WebGpuHost`
+// implements neither `ContractHost` nor `StorageIntrinsic`, so the obligation
+// raised by the `use_storage_intrinsic()` call (the exact trait-keyed gate
+// `std::evm::ops::sload` carries) is left `Missing` and reported as `8-0036` at
+// the use site, byte-identically to the wasm leg.
+//
+// `WebGpuTarget` is only writable because `Target::RootEffect` is unbounded: a
+// compute target is not a contract host, and it no longer has to pretend to be
+// one to be a target.
+use core::contracts::StorageIntrinsic
+
+fn use_storage_intrinsic() uses (_t: StorageIntrinsic) {}
+
+fn caller() {
+    use_storage_intrinsic()
+}

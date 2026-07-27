@@ -2,6 +2,7 @@ use core::backend::{Backend, Supports, Global, Constant, Shared, Local}
 use core::atomic::Atomic
 use core::barrier::Barrier
 use core::conal::Functor
+use core::contracts::Target
 use core::Fn
 use core::MemPtr
 use raw::{gpu_buffer_create, gpu_upload, gpu_dispatch, gpu_readback_begin, wait as async_wait}
@@ -112,6 +113,41 @@ impl Supports<Global> for WebGpuBackend {}
 impl Supports<Constant> for WebGpuBackend {}
 impl Supports<Shared> for WebGpuBackend {}
 impl Supports<Local> for WebGpuBackend {}
+
+// ---------------------------------------------------------------------------
+// The WebGPU capability root (`impl Target for WebGpuTarget`).
+// ---------------------------------------------------------------------------
+//
+// The third per-target capability root, and the one the tree could not write
+// while `Target::RootEffect` was bound to `ContractHost`: a compute target is
+// not a contract host, so the target had to be deferred rather than stated. With
+// the bound gone the statement is direct, and the two deliberate ABSENCES below
+// are the honest content.
+pub struct WebGpuTarget {}
+
+struct WebGpuTargetPrivate {}
+
+/// The WebGPU target's root effect: the queue-shaped outermost handler frame.
+/// Carries NO entry interface (no `ContractHost`: a compute target does not host
+/// chain-contract selector dispatch with slot storage) and NO
+/// `core::contracts::StorageIntrinsic` (the second cross-target negative, so an
+/// EVM-storage intrinsic under `#[target(webgpu)]` is rejected as `8-0036`). The
+/// queue host interface it will carry is the compute-entry work, additive here.
+pub struct WebGpuHost { seal: WebGpuTargetPrivate }
+
+/// The WebGPU target's intrinsic-capability carrier
+/// (`<WebGpuTarget as Target>::Intrinsics`). Names the per-target intrinsic
+/// family (design #93); the WebGPU intrinsic families are added by later slices.
+pub struct WebGpuIntrinsics { seal: WebGpuTargetPrivate }
+
+impl Target for WebGpuTarget {
+    type RootEffect = WebGpuHost
+    type Intrinsics = WebGpuIntrinsics
+}
+
+// DELIBERATELY NO `impl AbiTarget for WebGpuTarget`: no byte-stream codec exists
+// at this boundary. The binding layout is the analogue and it is not an `Abi`.
+// This absence is the honest statement the old bound made impossible.
 
 // ---------------------------------------------------------------------------
 // The WebGPU atomic capability (DECLARATION-LEVEL only), the B1 idiom.

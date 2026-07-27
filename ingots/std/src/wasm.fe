@@ -1,8 +1,6 @@
 use core::backend::{Backend, Supports, Global, Constant, Local}
 use core::MemPtr
-use core::contracts::{Target, ContractHost}
-use core::effect_ref::StorPtr
-use super::evm::MemoryBytes
+use core::contracts::{AbiTarget, Target}
 use super::abi::Sol
 
 /// A TYPE-LEVEL wasm backend.
@@ -51,24 +49,29 @@ impl Supports<Local> for WasmBackend {}
 // making the single hardcoded default target selectable (A6 root-mint
 // generalization). It is a TYPE-LEVEL stub: no wasm code-generation pipeline
 // exists on this branch (wasm EXECUTION is blocked on the Sonatina seam port).
-// The bodies of the `ContractHost` methods call `core::panic()` (never-typed)
-// because they are never lowered in the sandbox; the type-level surface matters:
-// selecting this target seeds `WasmHost` as the program root, and `WasmHost`
-// deliberately does NOT implement `core::contracts::StorageIntrinsic`, so an
-// EVM-storage intrinsic used under the wasm target is rejected (`8-0036`), the
-// honest cross-target negative this slice unblocks.
+// The type-level surface is what matters: selecting this target seeds `WasmHost`
+// as the program root, and `WasmHost` deliberately does NOT implement
+// `core::contracts::StorageIntrinsic`, so an EVM-storage intrinsic used under the
+// wasm target is rejected (`8-0036`), the honest cross-target negative.
 //
-// A wasm SMART-CONTRACT target genuinely is a `ContractHost` (CosmWasm / Stylus /
-// Soroban are contract hosts), which is why `WasmTarget` composes with the
-// `Target` trait. A GPU compute target is NOT a contract host, so `GpuTarget` is
-// deferred to the B-track SPIR-V slices where the compute-dispatch entry model
-// (not `ContractHost`) is designed; see the A6 build-log entry.
+// `WasmHost` carries NO entry interface here. A wasm SMART-CONTRACT shape
+// (CosmWasm / Stylus / Soroban) genuinely is a `ContractHost`, and the impl that
+// says so belongs with the wasm contract entry generator that needs it, not with
+// the target: `Target::RootEffect` is unbounded, so an entry interface is
+// demanded by the entries placed on the root, never by the trait definition.
+// What used to stand here was six never-typed panicking stubs written only to
+// satisfy that bound, plus the note apologizing for them.
+//
+// The message codec is a separate face (`AbiTarget` below), because a
+// wasm CHAIN shape does have a byte-stream codec even though the target as such
+// carries no host interface.
 pub struct WasmTarget {}
 
 struct WasmPrivate {}
 
 /// The wasm target's root effect. Seeded at the program root when the wasm
-/// target is selected; carries `ContractHost` but NOT `StorageIntrinsic`.
+/// target is selected; carries neither an entry interface nor
+/// `StorageIntrinsic`.
 pub struct WasmHost { seal: WasmPrivate }
 
 /// The wasm target's intrinsic-capability carrier (`<WasmTarget as Target>::Intrinsics`).
@@ -78,32 +81,11 @@ pub struct WasmIntrinsics { seal: WasmPrivate }
 
 impl Target for WasmTarget {
     type RootEffect = WasmHost
-    type DefaultAbi = Sol
     type Intrinsics = WasmIntrinsics
 }
 
-impl ContractHost for WasmHost {
-    type Input = MemoryBytes
-    type InitInput = MemoryBytes
-
-    fn input(self) -> MemoryBytes {
-        core::panic()
-    }
-    fn init_input<F>(mut self, _ runtime: F) -> MemoryBytes {
-        core::panic()
-    }
-    fn field<T>(mut self, _ slot: u256) -> StorPtr<T> {
-        core::panic()
-    }
-    fn create_contract<F>(mut self, _ runtime: F) -> ! {
-        core::panic()
-    }
-    fn abort(self) -> ! {
-        core::panic()
-    }
-    fn return_bytes(self, ptr: u256, len: u256) -> ! {
-        core::panic()
-    }
+impl AbiTarget for WasmTarget {
+    type DefaultAbi = Sol
 }
 
 // DELIBERATELY NO `impl StorageIntrinsic for WasmHost`: the wasm target's root

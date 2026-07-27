@@ -66,16 +66,30 @@ pub fn decode_runtime_args<H, A, T>(_ host: mut H) -> T
     T::decode_from_prechecked_head(input, base, len)
 }
 
-/// Target configuration used by compiler-generated contract entrypoints.
+/// Target configuration used by compiler-generated entrypoints.
 pub trait Target {
-    type RootEffect: ContractHost
-    type DefaultAbi: Abi
+    /// The ambient authority the toolchain seeds at the program root: the
+    /// outermost handler frame. UNBOUNDED on purpose. Which entry interfaces it
+    /// implements (`ContractHost` for chain-contract units, a queue-shaped host
+    /// for GPU program units, none for plain exports) is demanded BY THE ENTRIES
+    /// PLACED ON IT, as ordinary trait obligations, so a target that cannot host
+    /// an entry kind fails at the placement with a named missing impl rather than
+    /// at the trait definition for everyone.
+    type RootEffect
     /// The target's intrinsic-capability carrier (FCO effects-as-capabilities,
     /// instance #2). A backend's intrinsics gate on holding this; the toolchain
     /// seeds the selected target's `Intrinsics` at the program root. Authority
     /// only (non-scarce): using an intrinsic is freely multiple, so unlike the
     /// `#[fixed]` money floor there is no <=1 count, just the in-scope check.
     type Intrinsics
+}
+
+/// The message-codec face of a target: present exactly where boundary messages
+/// are ABI byte streams. Chain targets have one; a compute target's analogue is
+/// the binding layout, which is not an `Abi` and must not be forced to
+/// impersonate one.
+pub trait AbiTarget: Target {
+    type DefaultAbi: Abi
 }
 
 /// Capability to use a backend's EVM-storage intrinsics (`SLOAD`/`SSTORE`).

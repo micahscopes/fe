@@ -90,6 +90,7 @@ pub use provider::{
 const TARGET_REGISTRY: &[(&str, &[&str])] = &[
     ("evm", &["std", "evm", "EvmTarget"]),
     ("wasm", &["std", "wasm", "WasmTarget"]),
+    ("webgpu", &["std", "webgpu", "WebGpuTarget"]),
 ];
 
 /// The default target when no `#[target(...)]` override is in scope. Keeping this

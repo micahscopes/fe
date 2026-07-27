@@ -1,0 +1,15 @@
+// The positive leg of the unbounded `Target::RootEffect`: a target whose root
+// effect implements NO entry interface still checks as a `Target`, and its
+// projection still normalizes.
+//
+// `<WebGpuTarget as Target>::RootEffect` is used as a parameter type and returned
+// where `WebGpuHost` is expected, so the projection must normalize to `WebGpuHost`
+// for this to type-check. If `RootEffect` still carried a `ContractHost` bound,
+// `impl Target for WebGpuTarget` could not exist at all and this file would fail
+// at the import. No diagnostics expected.
+use core::contracts::Target
+use std::webgpu::{WebGpuHost, WebGpuTarget}
+
+fn root_identity(_ host: <WebGpuTarget as Target>::RootEffect) -> WebGpuHost {
+    host
+}

@@ -1,10 +1,15 @@
-use core::contracts::Target
+use core::contracts::{AbiTarget, Target}
 use super::effects::{Evm, EvmIntrinsics}
 
 pub struct EvmTarget {}
 
 impl Target for EvmTarget {
     type RootEffect = Evm
-    type DefaultAbi = super::super::abi::Sol
     type Intrinsics = EvmIntrinsics
+}
+
+// The EVM boundary genuinely is a byte-stream codec, so `EvmTarget` carries the
+// codec face separately from the target itself.
+impl AbiTarget for EvmTarget {
+    type DefaultAbi = super::super::abi::Sol
 }

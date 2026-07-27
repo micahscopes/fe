@@ -1,0 +1,12 @@
+---
+source: crates/uitest/tests/ty_check.rs
+expression: diags
+input_file: fixtures/ty_check/intrinsic_target_webgpu_rejected.fe
+---
+error[8-0036]: missing effect `StorageIntrinsic` required by `use_storage_intrinsic`
+   ┌─ intrinsic_target_webgpu_rejected.fe:19:5
+   │
+19 │     use_storage_intrinsic()
+   │     ^^^^^^^^^^^^^^^^^^^^^^^ `use_storage_intrinsic` requires effect `StorageIntrinsic` to be in scope
+   │
+   = provide it with `with (StorageIntrinsic = value)` or require it via `uses StorageIntrinsic`
