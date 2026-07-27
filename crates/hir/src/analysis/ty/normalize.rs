@@ -165,7 +165,28 @@ impl<'db> TyFolder<'db> for TypeNormalizer<'db> {
                 // existing integer const evaluator to collapse the ground
                 // tree. Symbolic trees remain unchanged.
                 let folded = ty.super_fold_with(db, self);
-                normalize_const_tys_for_comparison(self.db, folded)
+                // ABSTRACT trees only. `normalize_const_tys_for_comparison`
+                // additionally FORCES an `UnEvaluated` const, which is right at
+                // a comparison boundary but wrong here: normalization runs over
+                // every typed-body type, and an `UnEvaluated` const is exactly
+                // how a metadata-only generic default (`struct Foo<const N,
+                // const M = plus1(N)>`) is carried. Forcing it turns
+                // `Foo<4, plus1(4)>` into `Foo<4, 5>` in the typed body, which
+                // `generic_default_metadata` requires not to happen. Ground
+                // folding, which is what this arm is for, only needs the
+                // `Abstract` case.
+                if matches!(
+                    folded.data(db),
+                    TyData::ConstTy(const_ty)
+                        if matches!(
+                            const_ty.data(db),
+                            super::const_ty::ConstTyData::UnEvaluated { .. }
+                        )
+                ) {
+                    folded
+                } else {
+                    normalize_const_tys_for_comparison(self.db, folded)
+                }
             }
             TyData::AssocTy(assoc_ty) => {
                 // Guard G1 (bare arm): a bare GAT head `B::Buffer` (decl carries
