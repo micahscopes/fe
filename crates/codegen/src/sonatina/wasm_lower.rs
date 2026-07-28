@@ -50,12 +50,12 @@ use sonatina_ir::{
     builder::{FunctionBuilder, ModuleBuilder, Variable},
     func_cursor::InstInserter,
     inst::{
-        arith::{Add, Fadd, Fdiv, Fmul, Fneg, Fsqrt, Fsub, Mul, Sar, Shr, Sub},
+        arith::{Add, Fadd, Fdiv, Fmul, Fneg, Fsqrt, Fsub, Mul, Sar, Shl, Shr, Sub},
         cast::{F32ToI32, I32ToF32, Sext, Trunc, Zext},
         cmp::{Eq as CmpEq, Feq, Fle, Flt, Lt, Slt},
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{MemAllocDynamic, Mload, Mstore},
-        logic::And,
+        logic::{And, Or, Xor},
     },
     isa::{Isa, wasm32::Wasm32},
     module::{FuncRef, ModuleCtx},
@@ -2887,10 +2887,22 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                             self.fb.insert_inst(Shr::new(is, rhs, lhs), ty)
                         }
                     }
+                    // Left shift is bit-identical for signed and unsigned, so no
+                    // signedness branch. Shift constructor order is (bits, value)
+                    // like Sar/Shr (EVM precedent lower_runtime.rs:4128).
+                    ArithBinOp::LShift => self.fb.insert_inst(Shl::new(is, rhs, lhs), ty),
+                    // Bitwise: direct operand order. The sonatina fork's SPIR-V
+                    // emitter maps And/Or/Xor as of e423231f + 43e9f3b0 (the R2
+                    // bitwise re-pin), matching the wasm translator leg. This is
+                    // exactly blake3's op set (XOR + shifts + wrapping Add), so a
+                    // blake3 const fn lowers on the runtime legs, not just CTFE.
+                    ArithBinOp::BitAnd => self.fb.insert_inst(And::new(is, lhs, rhs), ty),
+                    ArithBinOp::BitOr => self.fb.insert_inst(Or::new(is, lhs, rhs), ty),
+                    ArithBinOp::BitXor => self.fb.insert_inst(Xor::new(is, lhs, rhs), ty),
                     other => {
                         return Err(LowerError::Unsupported(format!(
                             "wasm target (R1) arithmetic op `{other:?}` is not supported \
-                             (div/rem/pow/`<<`/bitwise/unsigned `>>` are R2)"
+                             (div/rem/pow are R2)"
                         )));
                     }
                 })

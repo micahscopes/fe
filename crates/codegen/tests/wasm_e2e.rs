@@ -423,6 +423,213 @@ pub fn le_u32(a: u32, b: u32) -> bool { a <= b }
     assert_eq!(le_u32.call(&mut store, (-1, 1)).unwrap(), 0, "0xFFFFFFFF <= 1 unsigned");
 }
 
+/// R2 bitwise: `& | ^ << >>` on i32 and u32 through the R1 wasm path, each
+/// checked against a Rust oracle. and/or/xor result bits are signedness-blind;
+/// `>>` is NOT (Sar for i32, Shr for u32), so both shift-right opcodes must
+/// appear and the `(-1) >> 1` divergence is asserted. Shift amounts are in
+/// range (0..31) only, the established R1 posture (oversize behavior is R2).
+#[test]
+fn fe_i32_u32_bitwise_matrix_runs_on_wasm_with_signedness() {
+    let source = r#"
+pub fn and_i32(a: i32, b: i32) -> i32 { a & b }
+pub fn or_i32(a: i32, b: i32) -> i32 { a | b }
+pub fn xor_i32(a: i32, b: i32) -> i32 { a ^ b }
+pub fn shl_i32(a: i32, n: i32) -> i32 { a << n }
+pub fn shr_i32(a: i32, n: i32) -> i32 { a >> n }
+pub fn and_u32(a: u32, b: u32) -> u32 { a & b }
+pub fn or_u32(a: u32, b: u32) -> u32 { a | b }
+pub fn xor_u32(a: u32, b: u32) -> u32 { a ^ b }
+pub fn shl_u32(a: u32, n: u32) -> u32 { a << n }
+pub fn shr_u32(a: u32, n: u32) -> u32 { a >> n }
+pub fn main() -> u32 {
+    let a: u32 = 0xF0F0_F0F0
+    let b: u32 = 0x0F0F_0F0F
+    let m: u32 = (a & b) | (a ^ b)
+    (m << 4) >> 4
+}
+"#;
+    let wasm = compile_to_wasm("wasm_int_bitwise_matrix.fe", source);
+
+    // Structural guard: the emitted wasm must carry all five bit opcodes plus
+    // BOTH shift-right variants. A sign-blind `>>` choice would drop one of
+    // `I32ShrS`/`I32ShrU`; a missing arm would drop `I32And`/`I32Or`/`I32Xor`.
+    let operators = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(|payload| match payload.expect("valid wasm") {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .expect("operator reader")
+                    .into_iter()
+                    .map(|op| format!("{:?}", op.expect("valid operator")))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    for opcode in ["I32And", "I32Or", "I32Xor", "I32Shl", "I32ShrS", "I32ShrU"] {
+        assert!(
+            operators.contains(opcode),
+            "generated wasm lacks {opcode} (R2 bitwise arm regressed):\n{operators}"
+        );
+    }
+
+    let (mut store, instance) = instantiate(&wasm);
+
+    // and/or/xor: same bits fed to i32 and u32 funcs; the RESULT bits are
+    // identical across signedness (these ops don't read sign), so the oracle
+    // just compares bit patterns.
+    let patterns: [i32; 7] = [
+        0,
+        1,
+        0x0F0F_0F0F,
+        0xAAAA_AAAAu32 as i32,
+        -1,
+        i32::MIN,
+        i32::MAX,
+    ];
+    for &a in &patterns {
+        for &b in &patterns {
+            let (ua, ub) = (a as u32, b as u32);
+            let cases = [
+                ("and_i32", a & b),
+                ("or_i32", a | b),
+                ("xor_i32", a ^ b),
+                ("and_u32", (ua & ub) as i32),
+                ("or_u32", (ua | ub) as i32),
+                ("xor_u32", (ua ^ ub) as i32),
+            ];
+            for (name, expected) in cases {
+                let func = int_cmp(&instance, &mut store, name);
+                assert_eq!(
+                    func.call(&mut store, (a, b)).unwrap(),
+                    expected,
+                    "{name}({a:#010x}, {b:#010x})"
+                );
+            }
+        }
+    }
+
+    // Shifts, in-range amounts only. `<<` is signedness-blind; `>>` picks Sar
+    // (i32, sign-extending) vs Shr (u32, zero-filling) by operand class.
+    let amounts: [i32; 5] = [0, 1, 7, 16, 31];
+    for &a in &patterns {
+        for &n in &amounts {
+            let ua = a as u32;
+            let un = n as u32;
+            let cases = [
+                ("shl_i32", a.wrapping_shl(un)),
+                ("shr_i32", a.wrapping_shr(un)),
+                ("shl_u32", ua.wrapping_shl(un) as i32),
+                ("shr_u32", ua.wrapping_shr(un) as i32),
+            ];
+            for (name, expected) in cases {
+                let func = int_cmp(&instance, &mut store, name);
+                assert_eq!(
+                    func.call(&mut store, (a, n)).unwrap(),
+                    expected,
+                    "{name}({a:#010x} by {n})"
+                );
+            }
+        }
+    }
+
+    // The load-bearing signedness divergence, spelled out: 0xFFFFFFFF is -1 as
+    // i32 (arithmetic `>>` keeps the sign, staying -1) but 4294967295 as u32
+    // (logical `>>` fills zero, giving 0x7FFFFFFF). Same bits in, opposite bits
+    // out, proving Sar vs Shr is chosen by operand class.
+    let shr_i32 = int_cmp(&instance, &mut store, "shr_i32");
+    let shr_u32 = int_cmp(&instance, &mut store, "shr_u32");
+    assert_eq!(shr_i32.call(&mut store, (-1, 1)).unwrap(), -1, "-1 >> 1 signed (Sar)");
+    assert_eq!(
+        shr_u32.call(&mut store, (-1, 1)).unwrap(),
+        0x7FFF_FFFF,
+        "0xFFFFFFFF >> 1 unsigned (Shr)"
+    );
+    // `<<` agrees bit-for-bit across widths: 1 << 31 = 0x80000000 either way.
+    let shl_i32 = int_cmp(&instance, &mut store, "shl_i32");
+    let shl_u32 = int_cmp(&instance, &mut store, "shl_u32");
+    assert_eq!(shl_i32.call(&mut store, (1, 31)).unwrap(), i32::MIN, "1 << 31 i32");
+    assert_eq!(shl_u32.call(&mut store, (1, 31)).unwrap(), i32::MIN, "1 << 31 u32 (same bits)");
+
+    // Cross-backend twin: one source, both backends. `main` folds `& | ^ << >>`
+    // into the EVM root object, and the EVM path already lowers all five
+    // (lower_runtime.rs:4128-4146), so this is cheap and proves
+    // one-source-two-backends for the R2 bitwise set.
+    let evm = compile_to_evm("wasm_int_bitwise_matrix.fe", source);
+    assert!(!evm.is_empty(), "evm twin bytecode must be non-empty");
+}
+
+/// The riff-cat kernel path witness: one blake3 G-mix column, rotr spelled as
+/// shift/shift/or with literal amounts (16, 12, 8, 7), wrapping add via the
+/// `WrappingAdd` intrinsic. Exercises XOR + both shifts + OR + wrapping Add
+/// together against a Rust G oracle, including top-bit-set inputs where the
+/// logical-shift choice in rotr is load-bearing.
+#[test]
+fn fe_blake3_g_mix_runs_on_wasm() {
+    // rotr(x, n) = (x >> n) | (x << (32 - n)); u32 `>>` is logical (Shr).
+    // Literal amounts only (O0 does not fold `32 - n`), so complements are
+    // spelled directly: 16/16, 12/20, 8/24, 7/25.
+    let source = r#"
+pub fn g_mix(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> u32 {
+    let a1: u32 = a.wrapping_add(b).wrapping_add(mx)
+    let da1: u32 = d ^ a1
+    let d1: u32 = ((da1) >> 16) | ((da1) << 16)
+    let c1: u32 = c.wrapping_add(d1)
+    let bc1: u32 = b ^ c1
+    let b1: u32 = ((bc1) >> 12) | ((bc1) << 20)
+    let a2: u32 = a1.wrapping_add(b1).wrapping_add(my)
+    let da2: u32 = d1 ^ a2
+    let d2: u32 = ((da2) >> 8) | ((da2) << 24)
+    let c2: u32 = c1.wrapping_add(d2)
+    let bc2: u32 = b1 ^ c2
+    let b2: u32 = ((bc2) >> 7) | ((bc2) << 25)
+    (a2 ^ b2) ^ (c2 ^ d2)
+}
+"#;
+    let wasm = compile_to_wasm("wasm_blake3_g_mix.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let g = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32), i32>(&mut store, "g_mix")
+        .expect("g_mix export");
+
+    // Independent Rust oracle for one blake3 G column, same rotr spelling.
+    fn rotr(x: u32, n: u32) -> u32 {
+        (x >> n) | (x << (32 - n))
+    }
+    fn g_oracle(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> u32 {
+        let a1 = a.wrapping_add(b).wrapping_add(mx);
+        let d1 = rotr(d ^ a1, 16);
+        let c1 = c.wrapping_add(d1);
+        let b1 = rotr(b ^ c1, 12);
+        let a2 = a1.wrapping_add(b1).wrapping_add(my);
+        let d2 = rotr(d1 ^ a2, 8);
+        let c2 = c1.wrapping_add(d2);
+        let b2 = rotr(b1 ^ c2, 7);
+        a2 ^ b2 ^ c2 ^ d2
+    }
+
+    // Vectors include top-bit-set words so the logical-shift choice inside rotr
+    // is exercised (an arithmetic `>>` would smear the sign bit and diverge).
+    let vectors: [[u32; 6]; 4] = [
+        [0, 0, 0, 0, 0, 0],
+        [1, 2, 3, 4, 5, 6],
+        [0x8000_0000, 0xFFFF_FFFF, 0x1234_5678, 0x9ABC_DEF0, 0xDEAD_BEEF, 0xCAFE_BABE],
+        [0x0102_0408, 0x1020_4080, 0xFEDC_BA98, 0x7654_3210, 0xA5A5_A5A5, 0x5A5A_5A5A],
+    ];
+    for v in vectors {
+        let expected = g_oracle(v[0], v[1], v[2], v[3], v[4], v[5]) as i32;
+        let got = g
+            .call(
+                &mut store,
+                (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32, v[4] as i32, v[5] as i32),
+            )
+            .unwrap();
+        assert_eq!(got, expected, "g_mix{v:08x?}");
+    }
+}
+
 fn int_cmp<'a>(
     instance: &wasmtime::Instance,
     store: &mut wasmtime::Store<()>,
