@@ -319,6 +319,120 @@ pub fn ge(a: f32, b: f32) -> bool { a >= b }
     }
 }
 
+/// R1 integer compare matrix: the four ops the arm now derives (`>`, `!=`,
+/// `>=`, `<=`) on BOTH `i32` and `u32`, executed on wasm against Rust's own
+/// integer semantics as an independent oracle. The signed/unsigned distinction
+/// is the point: the same 32-bit pattern is read signed by the `i32` funcs and
+/// unsigned by the `u32` funcs, so any pattern with the top bit set must make
+/// `<`/`>`/`<=`/`>=` DIVERGE between the two. `==`/`!=` stay sign-agnostic.
+#[test]
+fn fe_i32_u32_compare_matrix_runs_on_wasm_with_signedness() {
+    let source = r#"
+pub fn lt_i32(a: i32, b: i32) -> bool { a < b }
+pub fn eq_i32(a: i32, b: i32) -> bool { a == b }
+pub fn gt_i32(a: i32, b: i32) -> bool { a > b }
+pub fn ne_i32(a: i32, b: i32) -> bool { a != b }
+pub fn ge_i32(a: i32, b: i32) -> bool { a >= b }
+pub fn le_i32(a: i32, b: i32) -> bool { a <= b }
+pub fn lt_u32(a: u32, b: u32) -> bool { a < b }
+pub fn eq_u32(a: u32, b: u32) -> bool { a == b }
+pub fn gt_u32(a: u32, b: u32) -> bool { a > b }
+pub fn ne_u32(a: u32, b: u32) -> bool { a != b }
+pub fn ge_u32(a: u32, b: u32) -> bool { a >= b }
+pub fn le_u32(a: u32, b: u32) -> bool { a <= b }
+"#;
+    let wasm = compile_to_wasm("wasm_int_compare_matrix.fe", source);
+
+    // Structural guard: the sign-aware less-than every derived op is built from
+    // must reach the width-correct signed AND unsigned wasm opcodes (`Slt` ->
+    // `I32LtS`, `Lt` -> `I32LtU`). A regression to i64-only operands or a
+    // sign-blind choice would drop one of these.
+    let operators = wasmparser::Parser::new(0)
+        .parse_all(&wasm)
+        .filter_map(|payload| match payload.expect("valid wasm") {
+            wasmparser::Payload::CodeSectionEntry(body) => Some(
+                body.get_operators_reader()
+                    .expect("operator reader")
+                    .into_iter()
+                    .map(|op| format!("{:?}", op.expect("valid operator")))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    for opcode in ["I32LtS", "I32LtU"] {
+        assert!(
+            operators.contains(opcode),
+            "generated wasm lacks {opcode} (sign-aware i32 compare regressed):\n{operators}"
+        );
+    }
+
+    let (mut store, instance) = instantiate(&wasm);
+
+    // Sweep a spread of 32-bit patterns, several with the top bit set. Each
+    // pattern is fed to both the i32 and u32 funcs as the SAME wasm i32 bits;
+    // the oracle reads it signed for the `*_i32` funcs and unsigned for the
+    // `*_u32` funcs.
+    let patterns: [i32; 8] = [0, 1, 5, -1, -5, 7, i32::MIN, i32::MAX];
+    for &a in &patterns {
+        for &b in &patterns {
+            let (ua, ub) = (a as u32, b as u32);
+            let cases = [
+                ("lt_i32", a < b),
+                ("eq_i32", a == b),
+                ("gt_i32", a > b),
+                ("ne_i32", a != b),
+                ("ge_i32", a >= b),
+                ("le_i32", a <= b),
+                ("lt_u32", ua < ub),
+                ("eq_u32", ua == ub),
+                ("gt_u32", ua > ub),
+                ("ne_u32", ua != ub),
+                ("ge_u32", ua >= ub),
+                ("le_u32", ua <= ub),
+            ];
+            for (name, expected) in cases {
+                let func = instance
+                    .get_typed_func::<(i32, i32), i32>(&mut store, name)
+                    .unwrap_or_else(|error| panic!("{name} export: {error}"));
+                assert_eq!(
+                    func.call(&mut store, (a, b)).unwrap(),
+                    expected as i32,
+                    "{name}({a:#010x}, {b:#010x})"
+                );
+            }
+        }
+    }
+
+    // The load-bearing divergence, spelled out: 0xFFFFFFFF is -1 as i32 (so
+    // `< 1`, not `> 1`) but 4294967295 as u32 (so `> 1`, not `< 1`). Same bits,
+    // opposite answers, proving the inner `lt` picks Slt vs Lt by operand class.
+    let gt_i32 = int_cmp(&instance, &mut store, "gt_i32");
+    let gt_u32 = int_cmp(&instance, &mut store, "gt_u32");
+    let lt_i32 = int_cmp(&instance, &mut store, "lt_i32");
+    let lt_u32 = int_cmp(&instance, &mut store, "lt_u32");
+    let ge_i32 = int_cmp(&instance, &mut store, "ge_i32");
+    let le_u32 = int_cmp(&instance, &mut store, "le_u32");
+    assert_eq!(gt_i32.call(&mut store, (-1, 1)).unwrap(), 0, "-1 > 1 signed");
+    assert_eq!(gt_u32.call(&mut store, (-1, 1)).unwrap(), 1, "0xFFFFFFFF > 1 unsigned");
+    assert_eq!(lt_i32.call(&mut store, (-1, 1)).unwrap(), 1, "-1 < 1 signed");
+    assert_eq!(lt_u32.call(&mut store, (-1, 1)).unwrap(), 0, "0xFFFFFFFF < 1 unsigned");
+    assert_eq!(ge_i32.call(&mut store, (-1, 1)).unwrap(), 0, "-1 >= 1 signed");
+    assert_eq!(le_u32.call(&mut store, (-1, 1)).unwrap(), 0, "0xFFFFFFFF <= 1 unsigned");
+}
+
+fn int_cmp<'a>(
+    instance: &wasmtime::Instance,
+    store: &mut wasmtime::Store<()>,
+    name: &'a str,
+) -> wasmtime::TypedFunc<(i32, i32), i32> {
+    instance
+        .get_typed_func::<(i32, i32), i32>(store, name)
+        .unwrap_or_else(|error| panic!("{name} export: {error}"))
+}
+
 #[test]
 fn conditional_f32_value_materializes_into_wasm_result_slot() {
     let source = r#"

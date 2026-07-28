@@ -2895,28 +2895,64 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                     }
                 })
             }
-            BinOp::Comp(comp) => Ok(match comp {
-                CompBinOp::Lt => {
-                    // Sign-aware (M2): i32 -> Slt, u32 -> Lt. Signedness comes from
-                    // the operand CLASS, not the sonatina type (signless).
-                    if self.operand_signedness(lhs_local, rhs_local)? {
-                        self.fb.insert_inst(Slt::new(is, lhs, rhs), Type::I1)
-                    } else {
-                        self.fb.insert_inst(Lt::new(is, lhs, rhs), Type::I1)
+            BinOp::Comp(comp) => {
+                // Sign-aware (M2): the whole matrix derives from a signed/unsigned
+                // less-than. Signedness comes from the operand CLASS, not the
+                // sonatina type (signless). The key is symmetric in the pair, so the
+                // `>`/`>=`/`<=` operand swaps below reuse it unchanged.
+                let signed = self.operand_signedness(lhs_local, rhs_local)?;
+                Ok(match comp {
+                    // i32 -> Slt, u32 -> Lt.
+                    CompBinOp::Lt => self.int_lt(lhs, rhs, signed),
+                    CompBinOp::Eq => self.fb.insert_inst(CmpEq::new(is, lhs, rhs), Type::I1),
+                    // `a > b` is `b < a`: swap the operands. The signedness key is
+                    // symmetric in the pair, so the Slt-vs-Lt choice is unchanged.
+                    CompBinOp::Gt => self.int_lt(rhs, lhs, signed),
+                    // There is no native int `!=`/`<=`/`>=`. Derive them by negating
+                    // an i1 with `CmpEq(x, false)` (returns 1 iff x == 0, i.e. boolean
+                    // NOT), the identical construction the float `NotEq` arm above uses
+                    // and one the SPIR-V translator maps.
+                    CompBinOp::NotEq => {
+                        let equal = self.fb.insert_inst(CmpEq::new(is, lhs, rhs), Type::I1);
+                        let false_value = self.fb.make_imm_value(Immediate::from(false));
+                        self.fb
+                            .insert_inst(CmpEq::new(is, equal, false_value), Type::I1)
                     }
-                }
-                CompBinOp::Eq => self.fb.insert_inst(CmpEq::new(is, lhs, rhs), Type::I1),
-                other => {
-                    return Err(LowerError::Unsupported(format!(
-                        "wasm target (R1) comparison `{other:?}` is not supported \
-                         (only `<` and `==`; LtEq/Gt/GtEq need an IsZero lowering the SPIR-V \
-                         translator does not map yet, so the full compare matrix is R2)"
-                    )));
-                }
-            }),
+                    // `a >= b` == `!(a < b)`. `lt` is computed with the correct
+                    // signedness first; the negation is sign-agnostic.
+                    CompBinOp::GtEq => {
+                        let less = self.int_lt(lhs, rhs, signed);
+                        let false_value = self.fb.make_imm_value(Immediate::from(false));
+                        self.fb
+                            .insert_inst(CmpEq::new(is, less, false_value), Type::I1)
+                    }
+                    // `a <= b` == `!(b < a)`.
+                    CompBinOp::LtEq => {
+                        let greater = self.int_lt(rhs, lhs, signed);
+                        let false_value = self.fb.make_imm_value(Immediate::from(false));
+                        self.fb
+                            .insert_inst(CmpEq::new(is, greater, false_value), Type::I1)
+                    }
+                })
+            }
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) binary op `{other:?}` is not supported"
             ))),
+        }
+    }
+
+    /// Sign-aware integer less-than `a < b`, the primitive the R1 compare
+    /// matrix derives from: `Slt` for signed operands (i32), `Lt` for unsigned
+    /// (u32). The signedness comes from the operand CLASS, not the sonatina type
+    /// (which is signless), so callers pass the flag they already resolved from
+    /// the operand pair; the derived `>`/`>=`/`<=` cases can then swap `a`/`b`
+    /// while keeping that same class key. Result is `Type::I1`.
+    fn int_lt(&mut self, a: ValueId, b: ValueId, signed: bool) -> ValueId {
+        let is = self.inst_set();
+        if signed {
+            self.fb.insert_inst(Slt::new(is, a, b), Type::I1)
+        } else {
+            self.fb.insert_inst(Lt::new(is, a, b), Type::I1)
         }
     }
 
