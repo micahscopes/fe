@@ -245,48 +245,15 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
         Some(())
     }
 
-    // Reify only const handles that MIR already materializes as a whole value.
-    // Const refs used by projections/borrows remain refs and therefore retain
-    // the backend's existing fail-closed behavior.
-    let mut materialized = HashSet::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            if let RStmt::Assign {
-                expr:
-                    RExpr::Load {
-                        place:
-                            RuntimePlace {
-                                root: PlaceRoot::Ref(src),
-                                path,
-                            },
-                    },
-                ..
-            } = stmt
-                && path.is_empty()
-            {
-                materialized.insert(*src);
-            }
-        }
-    }
-    loop {
-        let before = materialized.len();
-        for block in &body.blocks {
-            for stmt in &block.stmts {
-                if let RStmt::Assign {
-                    dst,
-                    expr: RExpr::Use(src),
-                } = stmt
-                    && materialized.contains(dst)
-                {
-                    materialized.insert(*src);
-                }
-            }
-        }
-        if materialized.len() == before {
-            break;
-        }
-    }
-
+    // Reify every const handle whose ConstNode `emit` can expand into scalar
+    // leaves + AggregateMake (structs and arrays; enums return None below and
+    // stay fail-closed). This was formerly gated to const refs consumed by a
+    // whole-value `Load`, but dec's `slots_filled(0.0)` cochain seeds are
+    // consumed as a call receiver and as an AggregateMake field, never a
+    // whole-value Load, so that gate left them as `Ref{Const, AggregateValue}`
+    // and `ty_for_class` rejected them. Expanding unconditionally is sound: a
+    // reifiable const aggregate IS a value, and this pass never rewrites a
+    // projection/borrow consumer, so any such consumer keeps its prior behavior.
     let (locals, blocks) = (&mut body.locals, &mut body.blocks);
     for block in blocks {
         let mut rewritten = Vec::with_capacity(block.stmts.len());
@@ -295,7 +262,6 @@ fn reify_inline_const_aggregates<'db>(db: &'db DriverDataBase, body: &mut Runtim
                 dst,
                 expr: RExpr::ConstRef { region, layout },
             } = &stmt
-                && materialized.contains(dst)
             {
                 let node = region.value(db);
                 if emit(

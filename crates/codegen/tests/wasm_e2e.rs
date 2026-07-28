@@ -630,6 +630,141 @@ pub fn g_mix(a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) -> u32 {
     }
 }
 
+/// D1 const-aggregate seed reification: dec's exact escape shape. A CTFE'd
+/// `filled(0.0)` produces a const-aggregate handle (`Ref{Const, AggregateValue}`)
+/// that is seeded into a `let mut`, then reassigned via a MULTI-BLOCK method
+/// taking `self` by value (so it is NOT inlined and the const handle reaches the
+/// call as a value). Before D1 this reached `ty_for_class` as a `Ref{Const}` and
+/// was rejected ("supports only scalar values"); reifying every reifiable
+/// `ConstRef` unconditionally expands it to scalar leaves + `AggregateMake`.
+/// Value assertions catch a wrong leaf order, which a compile-only test misses.
+#[test]
+fn wasm_const_aggregate_seed_flows_through_call_and_join() {
+    let source = r#"
+struct Leaf { v: f32 }
+impl Copy for Leaf {}
+struct Node { lo: Leaf, hi: Leaf }
+impl Copy for Node {}
+
+pub trait Fill { const fn filled(value: f32) -> Self }
+impl Fill for Node {
+    const fn filled(value: f32) -> Self {
+        Node { lo: Leaf { v: value }, hi: Leaf { v: value } }
+    }
+}
+
+pub trait Access {
+    const fn set(self, index: i32, value: f32) -> Self
+    const fn get(self, index: i32) -> f32
+}
+impl Access for Node {
+    const fn set(self, index: i32, value: f32) -> Self {
+        if index < 1 {
+            Node { lo: Leaf { v: value }, hi: self.hi }
+        } else {
+            Node { lo: self.lo, hi: Leaf { v: value } }
+        }
+    }
+    const fn get(self, index: i32) -> f32 {
+        if index < 1 { self.lo.v } else { self.hi.v }
+    }
+}
+
+// The written leaf reads back the runtime value.
+pub fn seed_set_get(which: i32, value: f32) -> f32 {
+    let mut t: Node = <Node as Fill>::filled(value: 0.0)
+    t = t.set(index: which, value: value)
+    t.get(index: which)
+}
+
+// The OTHER leaf must still read the seed 0.0 (proves the seed materialized,
+// not garbage, and the join preserves the untouched field).
+pub fn seed_untouched(which: i32, value: f32) -> f32 {
+    let mut t: Node = <Node as Fill>::filled(value: 0.0)
+    t = t.set(index: which, value: value)
+    if which < 1 { t.get(index: 1) } else { t.get(index: 0) }
+}
+"#;
+    let wasm = compile_to_wasm("wasm_const_aggregate_seed_arg.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+
+    let set_get = instance
+        .get_typed_func::<(i32, f32), f32>(&mut store, "seed_set_get")
+        .expect("seed_set_get export");
+    let untouched = instance
+        .get_typed_func::<(i32, f32), f32>(&mut store, "seed_untouched")
+        .expect("seed_untouched export");
+
+    for (which, value) in [(0i32, 3.5f32), (1, -2.0)] {
+        assert_eq!(
+            set_get.call(&mut store, (which, value)).unwrap(),
+            value,
+            "written leaf {which} should read back {value}"
+        );
+        assert_eq!(
+            untouched.call(&mut store, (which, value)).unwrap(),
+            0.0,
+            "untouched leaf (opposite of {which}) should still be the seed 0.0"
+        );
+    }
+}
+
+/// Aggregate loop-carry over a reified const aggregate: a const-agg seed is
+/// accumulated across a `while` back-edge (the shape dec's `d`/`star` operators
+/// use on their `Slots` cochains), then a leaf read feeds a post-loop fmul.
+/// Exercises D1's reification inside a loop, end to end under wasmtime.
+#[test]
+fn wasm_aggregate_loop_carry_then_scale() {
+    let source = r#"
+struct Leaf { v: f32 }
+impl Copy for Leaf {}
+struct Node { lo: Leaf, hi: Leaf }
+impl Copy for Node {}
+
+pub trait Fill { const fn filled(value: f32) -> Self }
+impl Fill for Node {
+    const fn filled(value: f32) -> Self {
+        Node { lo: Leaf { v: value }, hi: Leaf { v: value } }
+    }
+}
+pub trait Access {
+    const fn set(self, index: i32, value: f32) -> Self
+    const fn get(self, index: i32) -> f32
+}
+impl Access for Node {
+    const fn set(self, index: i32, value: f32) -> Self {
+        if index < 1 {
+            Node { lo: Leaf { v: value }, hi: self.hi }
+        } else {
+            Node { lo: self.lo, hi: Leaf { v: value } }
+        }
+    }
+    const fn get(self, index: i32) -> f32 {
+        if index < 1 { self.lo.v } else { self.hi.v }
+    }
+}
+
+pub fn accumulate(n: i32, x: f32) -> f32 {
+    let mut acc: Node = <Node as Fill>::filled(value: 0.0)
+    let mut t: i32 = 0
+    while t < n {
+        let cur: f32 = acc.get(index: 0)
+        acc = acc.set(index: 0, value: cur + x)
+        t = t + 1
+    }
+    acc.get(index: 0) * 0.5
+}
+"#;
+    let wasm = compile_to_wasm("wasm_aggregate_loop_carry.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let f = instance
+        .get_typed_func::<(i32, f32), f32>(&mut store, "accumulate")
+        .expect("accumulate export");
+    // n iterations add x each time: acc[0] = n*x; result = n*x*0.5.
+    assert_eq!(f.call(&mut store, (4, 1.5)).unwrap(), 4.0 * 1.5 * 0.5, "4 iters");
+    assert_eq!(f.call(&mut store, (0, 1.5)).unwrap(), 0.0, "0 iters stays seed");
+}
+
 fn int_cmp<'a>(
     instance: &wasmtime::Instance,
     store: &mut wasmtime::Store<()>,
