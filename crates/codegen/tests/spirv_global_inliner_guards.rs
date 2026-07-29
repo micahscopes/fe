@@ -93,20 +93,42 @@ pub fn a_second_entry(x: i32, y: i32) -> i32 { x + y + 22 }
 }
 
 #[test]
-fn excessive_non_always_inlinee_stays_capped_and_fails_closed() {
+fn oversized_ordinary_inlinee_is_inlined_by_the_legality_pass() {
+    // The SPIR-V lane inlines unconditionally (it is a legality pass, not a cost
+    // model), so an oversized ordinary helper is flattened into the entry rather
+    // than left as a residual call. `Ok` alone is a tautology, so assert the
+    // helper's body actually arrived: the distinctive constant 69 from its last
+    // branch must appear in the emitted WGSL. This 70-branch fixture is the minimal
+    // dec-shaped case (a large ordinary helper the old size cap wrongly rejected).
     let mut source = String::from("fn oversized_helper(x: i32) -> i32 {\n");
     for index in 0..70 {
         source.push_str(&format!("if x == {index} {{ return {index} }}\n"));
     }
     source.push_str("x\n}\npub fn oversized_entry(x: i32) -> i32 { oversized_helper(x: x) }\n");
 
-    let error = match compile(&source, "spirv_ordinary_growth_guard") {
-        Ok(_) => panic!("oversized ordinary inlinee must remain capped"),
+    let artifact = compile(&source, "spirv_ordinary_growth_guard")
+        .expect("an oversized ordinary helper must inline and compile under the legality pass");
+    let wgsl = artifact.wgsl.as_deref().expect("WGSL side artifact");
+    assert!(
+        wgsl.contains("69"),
+        "oversized helper body was not inlined into the entry:\n{wgsl}"
+    );
+}
+
+#[test]
+fn recursive_ordinary_inlinee_fails_closed_with_callee_name() {
+    // Recursion is genuinely irreducible for the inliner (`allow_inline_recursive`
+    // is false), so even under the unconditional legality pass a self-recursive
+    // call survives as a residual and fails closed with the callee named — the
+    // fail-closed diagnostic the repurposed size test no longer covers.
+    let source = r#"
+fn recur(x: i32) -> i32 { if x == 0 { 0 } else { recur(x: x - 1) } }
+pub fn recur_entry(x: i32) -> i32 { recur(x: x) }
+"#;
+    let error = match compile(source, "spirv_recursive_guard") {
+        Ok(_) => panic!("a self-recursive call must remain a residual and fail closed"),
         Err(error) => error.to_string(),
     };
     assert!(error.contains("not call-free"), "unexpected error: {error}");
-    assert!(
-        error.contains("oversized_helper"),
-        "callee missing from error: {error}"
-    );
+    assert!(error.contains("recur"), "callee missing from error: {error}");
 }

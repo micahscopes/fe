@@ -202,16 +202,31 @@ fn inline_spirv_calls(module: &mut sonatina_ir::Module) {
     let mut pipeline = Pipeline::new();
     pipeline.inliner_config = InlinerConfig {
         enable_full_inliner: true,
-        // Auto calls are subject to target-local block/instruction and growth
-        // caps. `inline` may bypass the local-size cap but still obeys growth
-        // and depth limits. `inline(always)` intentionally overrides cost caps
-        // in Sonatina, while its recursive-SCC generation guard still prevents
-        // unbounded recursive expansion.
-        max_inlinee_blocks: 64,
-        max_inlinee_insts: 4_096,
-        max_growth_per_caller: 65_536,
-        max_total_growth: 262_144,
-        max_inline_depth: 64,
+        // In the SPIR-V lane the inliner is a LEGALITY pass, not an optimization:
+        // `ensure_spirv_entry_call_free` below makes any residual call in the entry
+        // a hard error, because the SPIR-V translator consumes only the entry
+        // function. So inline UNCONDITIONALLY — the per-inlinee size caps and depth
+        // are 0 ("no cap": `exceeds_cap`/depth gate on `> 0`) and the thresholds are
+        // maxed so the cost model never declines a call. The only remaining
+        // decliners are the genuinely-irreducible cases (`#[inline(never)]`, a
+        // missing body, and the recursive-SCC guard), for which
+        // `ensure_spirv_entry_call_free` is the fail-closed backstop with a
+        // callee-named error. Ordinary loop-carrying `pub fn`s (dec's operators and
+        // their helpers) flatten into the fragment entry with no annotation.
+        max_inlinee_blocks: 0,
+        max_inlinee_insts: 0,
+        max_growth_per_caller: 0,
+        max_inline_depth: 0,
+        inline_threshold: i32::MAX,
+        inline_threshold_cold: i32::MAX,
+        // The one finite bound: a coarse OOM fuse that converts a pathological
+        // inlining blowup into the same `not call-free` diagnostic instead of an
+        // OOM-killed process. NOTE it does NOT bound `#[inline(always)]` (ALWAYS
+        // short-circuits before the growth check in sonatina's `decide_inline`), so
+        // it protects the ordinary / `#[inline]` paths only. Deliberately
+        // untestable: any fixture that trips it re-creates the size-cap bind this
+        // fix removed.
+        max_total_growth: 10_000_000,
         ..InlinerConfig::default()
     };
     pipeline.add_step(Step::Inline);
