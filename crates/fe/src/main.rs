@@ -411,16 +411,23 @@ pub enum WebAction {
         #[command(flatten)]
         compile: WebCompileArgs,
         /// Static application root served at `/`.
+        ///
+        /// When omitted, the compiled bundle's own emitted files (including
+        /// its `index.html`) are served at `/` instead, so the generated
+        /// page and its relative sibling fetches resolve with no static
+        /// root needed.
         #[arg(long)]
-        root: Utf8PathBuf,
+        root: Option<Utf8PathBuf>,
         /// URL prefix at which generated bundle files are served.
         #[arg(long, default_value = "/gen")]
         mount: String,
         /// Interface on which to listen.
-        #[arg(long, default_value = "127.0.0.1")]
+        // 0.0.0.0 is revisit-before-upstream (Vite et al. default to loopback
+        // deliberately); kept for the host-drives-guest dev workflow.
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
         /// Port on which to listen. Pass 0 to select a free port.
-        #[arg(long, default_value_t = 8788)]
+        #[arg(long, default_value_t = 8000)]
         port: u16,
         /// Source polling and rebuild debounce interval.
         #[arg(long, default_value_t = 250)]
@@ -1459,7 +1466,7 @@ mod web_cli_tests {
         };
         assert_eq!(compile.path, Utf8PathBuf::from("kernel.fe"));
         assert_eq!(compile.entry, "shade");
-        assert_eq!(root, Utf8PathBuf::from("demo"));
+        assert_eq!(root, Some(Utf8PathBuf::from("demo")));
         assert_eq!(mount, "/generated");
         assert_eq!(host, "0.0.0.0");
         assert_eq!(port, 0);

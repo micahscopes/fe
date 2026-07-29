@@ -49,7 +49,10 @@ poll();
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub compile: CompileRequest,
-    pub root: Utf8PathBuf,
+    /// Static application root served at `/`. When `None`, the compiled
+    /// bundle's own emitted files (including its `index.html`) are served
+    /// at `/` instead, from the same snapshot that backs `mount`.
+    pub root: Option<Utf8PathBuf>,
     pub mount: String,
     pub host: String,
     pub port: u16,
@@ -77,7 +80,10 @@ impl BundleSnapshot {
 
 #[derive(Clone)]
 struct AppState {
-    root: Arc<PathBuf>,
+    /// Disk root served at `/`, when one was configured. `None` means `/`
+    /// falls back to the bundle snapshot (the same content served at
+    /// `mount`).
+    root: Option<Arc<PathBuf>>,
     mount: Arc<str>,
     snapshot: Arc<RwLock<Arc<BundleSnapshot>>>,
 }
@@ -99,14 +105,25 @@ async fn serve_with_listener(
         &bundle, 1,
     )?)));
     let app = router(
-        config.root.as_std_path().to_path_buf(),
+        config
+            .root
+            .as_ref()
+            .map(|root| root.as_std_path().to_path_buf()),
         &config.mount,
         Arc::clone(&snapshot),
     );
     let address = listener
         .local_addr()
         .map_err(|error| format!("failed to inspect web server address: {error}"))?;
-    println!("serving Fe web app at http://{address}");
+    if address.ip().is_unspecified() {
+        let port = address.port();
+        println!("serving Fe web app at http://localhost:{port}/");
+        println!(
+            "  (bound to all interfaces; from another host use this machine's LAN address, e.g. http://<LAN-IP>:{port}/)"
+        );
+    } else {
+        println!("serving Fe web app at http://{address}/");
+    }
 
     let watcher = config
         .watch
@@ -121,8 +138,10 @@ async fn serve_with_listener(
 }
 
 fn validate_config(config: &ServeConfig) -> Result<(), String> {
-    if !config.root.is_dir() {
-        return Err(format!("static root `{}` is not a directory", config.root));
+    if let Some(root) = &config.root {
+        if !root.is_dir() {
+            return Err(format!("static root `{root}` is not a directory"));
+        }
     }
     if config.poll_interval.is_zero() {
         return Err("`--poll-ms` must be greater than zero".to_owned());
@@ -147,12 +166,16 @@ fn validate_mount(mount: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn router(root: PathBuf, mount: &str, snapshot: Arc<RwLock<Arc<BundleSnapshot>>>) -> Router {
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+fn router(
+    root: Option<PathBuf>,
+    mount: &str,
+    snapshot: Arc<RwLock<Arc<BundleSnapshot>>>,
+) -> Router {
+    let root = root.map(|root| std::fs::canonicalize(&root).unwrap_or(root));
     Router::new()
         .fallback(get(handle_request))
         .with_state(AppState {
-            root: Arc::new(root),
+            root: root.map(Arc::new),
             mount: Arc::from(mount),
             snapshot,
         })
@@ -207,7 +230,17 @@ async fn serve_static(state: &AppState, request_path: &str) -> Response {
     let Some(relative) = safe_relative_path(relative) else {
         return status(StatusCode::NOT_FOUND);
     };
-    let path = state.root.join(relative);
+    match state.root.as_deref() {
+        Some(root) => serve_disk(root, relative).await,
+        // No disk root configured: serve `/` from the compiled bundle
+        // snapshot itself (the emitted `index.html` and its relative
+        // sibling fetches like `./manifest.json`), same content as `mount`.
+        None => serve_bundle(state, &relative.to_string_lossy()),
+    }
+}
+
+async fn serve_disk(root: &Path, relative: &Path) -> Response {
+    let path = root.join(relative);
     let path = if path.is_dir() {
         path.join("index.html")
     } else {
@@ -216,7 +249,7 @@ async fn serve_static(state: &AppState, request_path: &str) -> Response {
     let Ok(canonical) = tokio::fs::canonicalize(&path).await else {
         return status(StatusCode::NOT_FOUND);
     };
-    if !canonical.starts_with(state.root.as_ref()) {
+    if !canonical.starts_with(root) {
         return status(StatusCode::NOT_FOUND);
     }
     match tokio::fs::read(&canonical).await {
@@ -489,7 +522,11 @@ mod tests {
                 ("module.wasm".to_owned(), Arc::from(&b"\0asm"[..])),
             ]),
         })));
-        let app = router(temp.path().to_path_buf(), "/gen", Arc::clone(&snapshot));
+        let app = router(
+            Some(temp.path().to_path_buf()),
+            "/gen",
+            Arc::clone(&snapshot),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -533,6 +570,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_disk_root_serves_bundle_snapshot_at_site_root() {
+        let snapshot = Arc::new(RwLock::new(Arc::new(BundleSnapshot {
+            generation: 1,
+            files: BTreeMap::from([
+                (
+                    "index.html".to_owned(),
+                    Arc::from(&b"<h1>generated</h1>"[..]),
+                ),
+                ("manifest.json".to_owned(), Arc::from(&b"{\"v\":1}"[..])),
+                ("module.wasm".to_owned(), Arc::from(&b"\0asm"[..])),
+            ]),
+        })));
+        let app = router(None, "/gen", Arc::clone(&snapshot));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // `/` resolves to the bundle's own emitted `index.html`.
+        let root = request(address, "/").await;
+        assert!(root.starts_with("HTTP/1.0 200 OK"));
+        assert!(root.contains("content-type: text/html; charset=utf-8"));
+        assert!(root.ends_with("<h1>generated</h1>"));
+
+        // `index.html`'s relative `./manifest.json` fetch resolves at site
+        // root too, from the same snapshot.
+        let manifest = request(address, "/manifest.json").await;
+        assert!(manifest.contains("content-type: application/json; charset=utf-8"));
+        assert!(manifest.ends_with("{\"v\":1}"));
+
+        let wasm = request(address, "/module.wasm").await;
+        assert!(wasm.contains("content-type: application/wasm"));
+
+        // The `--mount` path keeps serving the same bundle content.
+        let mounted = request(address, "/gen/manifest.json").await;
+        assert!(mounted.ends_with("{\"v\":1}"));
+
+        // Traversal attempts still 404 rather than falling back further.
+        let missing = request(address, "/%2e%2e/Cargo.toml").await;
+        assert!(missing.starts_with("HTTP/1.0 404 Not Found"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn real_server_publishes_only_successful_watched_compilations() {
         let temp = tempfile::tempdir().unwrap();
         let source = Utf8PathBuf::from_path_buf(temp.path().join("kernel.fe")).unwrap();
@@ -553,7 +634,7 @@ mod tests {
                 canonical: WebCanonicalPolicy::Disabled,
                 canonical_entries: Vec::new(),
             },
-            root,
+            root: Some(root),
             mount: "/gen".to_owned(),
             host: "127.0.0.1".to_owned(),
             port: 0,
