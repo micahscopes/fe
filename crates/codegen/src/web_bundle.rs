@@ -42,6 +42,12 @@ const MANIFEST_FILE: &str = "manifest.json";
 const INTERFACE_JS_FILE: &str = "interface.js";
 const INTERFACE_D_TS_FILE: &str = "interface.d.ts";
 const CANONICAL_INTERFACE_JS: &str = include_str!("../assets/canonical-interface.js");
+/// Compiler-emitted host page for render bundles. It reads `manifest.json` and
+/// drives the two lowerings of the render kernel it describes: `shader.wgsl`
+/// via WebGPU, with a per-pixel `module.wasm` fallback. Emitted verbatim next to
+/// the bundle so `--mode render` output is directly openable, not hand-authored.
+const RENDER_INDEX_FILE: &str = "index.html";
+const RENDER_RUNTIME_HTML: &str = include_str!("../assets/render-runtime/index.html");
 const WEB_ACTOR_RUNTIME: &[(&str, &str)] = &[
     (
         "runtime/actor-coordinator.js",
@@ -717,6 +723,14 @@ impl WebBundle {
             }
         }
         push(MANIFEST_FILE, Arc::from(self.manifest_json()?))?;
+        // Render bundles ship a compiler-emitted host page so the directory is
+        // directly openable (WebGPU shader.wgsl, with a wasm per-pixel fallback).
+        if self.manifest.layout.mode == WebBundleMode::Render {
+            push(
+                RENDER_INDEX_FILE,
+                Arc::from(RENDER_RUNTIME_HTML.as_bytes()),
+            )?;
+        }
         Ok(files)
     }
 
@@ -1560,6 +1574,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
                 "runtime/worker-host.js",
                 "runtime/actor-client.js",
                 MANIFEST_FILE,
+                RENDER_INDEX_FILE,
             ]
         );
         assert_eq!(
