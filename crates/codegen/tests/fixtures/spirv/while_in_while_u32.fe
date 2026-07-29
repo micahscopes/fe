@@ -1,0 +1,24 @@
+// A loop nested inside a loop: a `while` inside a `while`. This is the
+// structurizer shape dec's operators produce after full inlining (an inner
+// accumulator loop inside an outer iteration), and the shape the SPIR-V emitter
+// must support: a `Region::Loop` inside a loop body (`emit_regions_in_loop`).
+//
+// The inner bound `i < j` depends on the outer loop-carried `j`, so the outer
+// body contains a real loop and is not unrolled away; the outer runs while
+// `j < 4`. u32-only and overflow-free (acc <= sum over j<4 of 0+..+(j-1) = 4),
+// so it lands in the browser word. `px` keeps the entry live.
+pub fn while_in_while_u32(px: i32, py: i32) -> u32 {
+    let mut acc: u32 = 0
+    if px < 65536 {
+        let mut j: u32 = 0
+        while j < 4 {
+            let mut i: u32 = 0
+            while i < j {
+                acc = acc + i
+                i = i + 1
+            }
+            j = j + 1
+        }
+    }
+    acc + acc * 256 + acc * 65536 + 4278190080
+}
