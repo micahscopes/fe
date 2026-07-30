@@ -442,11 +442,13 @@ pub enum WebAction {
 pub struct WebCompileArgs {
     /// Path to a standalone `.fe` file or ingot directory.
     path: Utf8PathBuf,
-    /// Exact public top-level Fe function to compile.
+    /// Public top-level Fe function to compile. Optional: when omitted, the
+    /// render entry is derived from the module's `actor` declaration.
     #[arg(long)]
-    entry: String,
+    entry: Option<String>,
+    /// Render or grid. Optional: derived from the `actor` declaration when omitted.
     #[arg(long, value_enum)]
-    mode: WebMode,
+    mode: Option<WebMode>,
     /// Grid workgroup X dimension (required for grid mode).
     #[arg(long)]
     workgroup_x: Option<u32>,
@@ -1316,8 +1318,8 @@ mod web_cli_tests {
         else {
             panic!("expected web build");
         };
-        assert_eq!(entry, "shade");
-        assert_eq!(mode, WebMode::Grid);
+        assert_eq!(entry, Some("shade".to_owned()));
+        assert_eq!(mode, Some(WebMode::Grid));
         assert_eq!(canonical, WebCanonicalPolicy::Disabled);
         assert!(canonical_entry.is_empty());
         assert_eq!(
@@ -1325,19 +1327,24 @@ mod web_cli_tests {
             [Some(8), Some(4), Some(1)]
         );
 
-        assert!(
-            Options::try_parse_from([
-                "fe",
-                "web",
-                "build",
-                "kernel.fe",
-                "--mode",
-                "render",
-                "--out",
-                "bundle",
-            ])
-            .is_err(),
-            "web builds must never infer an entry"
+        // --entry and --mode are optional at parse time; when omitted the render
+        // entry and mode are derived from the module's `actor` declaration at
+        // compile time (see web::compile -> resolve_web_entry).
+        let derived = Options::try_parse_from(["fe", "web", "build", "kernel.fe", "--out", "bundle"])
+            .unwrap();
+        let Command::Web {
+            action: WebAction::Build { compile, .. },
+        } = derived.command
+        else {
+            panic!("expected web build");
+        };
+        assert_eq!(
+            compile.entry, None,
+            "entry is derived from the actor, not required"
+        );
+        assert_eq!(
+            compile.mode, None,
+            "mode is derived from the actor, not required"
         );
 
         for (value, expected) in [
@@ -1465,7 +1472,7 @@ mod web_cli_tests {
             panic!("expected web serve");
         };
         assert_eq!(compile.path, Utf8PathBuf::from("kernel.fe"));
-        assert_eq!(compile.entry, "shade");
+        assert_eq!(compile.entry, Some("shade".to_owned()));
         assert_eq!(root, Some(Utf8PathBuf::from("demo")));
         assert_eq!(mount, "/generated");
         assert_eq!(host, "0.0.0.0");

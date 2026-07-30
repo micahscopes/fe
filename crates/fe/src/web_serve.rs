@@ -627,8 +627,8 @@ mod tests {
         let config = ServeConfig {
             compile: CompileRequest {
                 path: source.clone(),
-                entry: "shade".to_owned(),
-                mode: WebMode::Render,
+                entry: Some("shade".to_owned()),
+                mode: Some(WebMode::Render),
                 workgroup: [None, None, None],
                 source_id: Some("live-reload-integration".to_owned()),
                 canonical: WebCanonicalPolicy::Disabled,

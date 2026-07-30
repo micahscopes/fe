@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use camino::Utf8PathBuf;
-use codegen::{WebBuildOptions, WebBundle};
+use codegen::{resolve_web_entry, WebBuildOptions, WebBundle, WebBundleMode};
 use common::InputDb;
 use driver::{
     cli_target::{resolve_cli_target, CliTarget},
@@ -15,12 +15,50 @@ use crate::{dependency_diagnostics::DependencyIssues, WebCanonicalPolicy, WebMod
 #[derive(Debug, Clone)]
 pub struct CompileRequest {
     pub path: Utf8PathBuf,
-    pub entry: String,
-    pub mode: WebMode,
+    /// Explicit render entry, or `None` to derive it from the module's `actor`
+    /// declaration (its single `FragmentSurface` behavior).
+    pub entry: Option<String>,
+    /// Explicit mode, or `None` to derive it from the `actor` declaration.
+    pub mode: Option<WebMode>,
     pub workgroup: [Option<u32>; 3],
     pub source_id: Option<String>,
     pub canonical: WebCanonicalPolicy,
     pub canonical_entries: Vec<String>,
+}
+
+fn to_bundle_mode(mode: WebMode) -> WebBundleMode {
+    match mode {
+        WebMode::Render => WebBundleMode::Render,
+        WebMode::Grid => WebBundleMode::Grid,
+    }
+}
+
+fn from_bundle_mode(mode: WebBundleMode) -> WebMode {
+    match mode {
+        WebBundleMode::Render => WebMode::Render,
+        WebBundleMode::Grid => WebMode::Grid,
+    }
+}
+
+/// Reconcile the resolved mode against the `--workgroup-*` flags. Render takes no
+/// workgroup; grid requires all three non-zero.
+fn validate_workgroup(
+    mode: WebMode,
+    workgroup: [Option<u32>; 3],
+) -> Result<Option<[u32; 3]>, String> {
+    match (mode, workgroup) {
+        (WebMode::Render, [None, None, None]) => Ok(None),
+        (WebMode::Render, _) => {
+            Err("workgroup flags are only valid with `--mode grid`".to_string())
+        }
+        (WebMode::Grid, [Some(x), Some(y), Some(z)]) if x > 0 && y > 0 && z > 0 => {
+            Ok(Some([x, y, z]))
+        }
+        (WebMode::Grid, _) => Err(
+            "grid mode requires non-zero `--workgroup-x`, `--workgroup-y`, and `--workgroup-z`"
+                .to_string(),
+        ),
+    }
 }
 
 pub fn build(request: &CompileRequest, out: &Utf8PathBuf) -> Result<(), String> {
@@ -42,7 +80,7 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         canonical,
         canonical_entries,
     } = request;
-    if entry.is_empty() {
+    if matches!(entry.as_deref(), Some("")) {
         return Err("`--entry` must not be empty".to_string());
     }
     match (*canonical, canonical_entries.is_empty()) {
@@ -63,19 +101,11 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
         }
         _ => {}
     }
-    let workgroup = match (*mode, *workgroup) {
-        (WebMode::Render, [None, None, None]) => None,
-        (WebMode::Render, _) => {
-            return Err("workgroup flags are only valid with `--mode grid`".to_string());
-        }
-        (WebMode::Grid, [Some(x), Some(y), Some(z)]) if x > 0 && y > 0 && z > 0 => Some([x, y, z]),
-        (WebMode::Grid, _) => {
-            return Err(
-                "grid mode requires non-zero `--workgroup-x`, `--workgroup-y`, and `--workgroup-z`"
-                    .to_string(),
-            );
-        }
-    };
+    // When the mode is given explicitly, reconcile it with the workgroup flags
+    // before any I/O; a derived mode is re-checked after the actor is resolved.
+    if let Some(mode) = mode {
+        validate_workgroup(*mode, *workgroup)?;
+    }
 
     let mut db = DriverDataBase::default();
     let target = resolve_cli_target(&mut db, path, false)?;
@@ -136,9 +166,17 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
             ));
         }
     }
+    // Derive the render entry and mode from the module's `actor` declaration when
+    // not given explicitly; when supplied, they are reconciled against the
+    // declaration (a mismatch errors, naming both sources).
+    let (entry, mode) = resolve_web_entry(&db, top_mod, (*entry).clone(), (*mode).map(to_bundle_mode))
+        .map_err(|error| error.to_string())?;
+    let mode = from_bundle_mode(mode);
+    let workgroup = validate_workgroup(mode, *workgroup)?;
+
     let mut options = match mode {
-        WebMode::Render => WebBuildOptions::render(entry, source_id.clone()),
-        WebMode::Grid => WebBuildOptions::grid(entry, workgroup.unwrap(), source_id.clone()),
+        WebMode::Render => WebBuildOptions::render(&entry, source_id.clone()),
+        WebMode::Grid => WebBuildOptions::grid(&entry, workgroup.unwrap(), source_id.clone()),
     }
     .with_canonical_policy(match canonical {
         WebCanonicalPolicy::Disabled => codegen::WebCanonicalPolicy::Disabled,
@@ -163,8 +201,8 @@ mod tests {
     ) -> CompileRequest {
         CompileRequest {
             path: path.into(),
-            entry: entry.to_owned(),
-            mode,
+            entry: Some(entry.to_owned()),
+            mode: Some(mode),
             workgroup,
             source_id: None,
             canonical,
@@ -269,8 +307,8 @@ mod tests {
         let app = Utf8PathBuf::from_path_buf(app).unwrap();
         let error = compile(&CompileRequest {
             path: app,
-            entry: "shade".to_owned(),
-            mode: WebMode::Render,
+            entry: Some("shade".to_owned()),
+            mode: Some(WebMode::Render),
             workgroup: [None, None, None],
             source_id: None,
             canonical: WebCanonicalPolicy::Disabled,
@@ -312,8 +350,8 @@ pub fn shade(x: u32, y: u32) -> u32 {
         let out = Utf8PathBuf::from_path_buf(temp.path().join("bundle")).unwrap();
         let request = CompileRequest {
             path: source,
-            entry: "shade".to_owned(),
-            mode: WebMode::Render,
+            entry: Some("shade".to_owned()),
+            mode: Some(WebMode::Render),
             workgroup: [None, None, None],
             source_id: None,
             canonical: WebCanonicalPolicy::Required,
