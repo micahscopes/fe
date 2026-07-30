@@ -1,5 +1,5 @@
 //! A quadric pencil on a slice plane, drawn per pixel by the REAL sparse QCGA
-//! contraction — and the contraction's shader code is GENERATED, not written.
+//! contraction: and the contraction's shader code is GENERATED, not written.
 //!
 //! The division of labor, in one breath:
 //!   - the GENERIC sparse-Clifford library owns the algebra: the null-basis
@@ -9,7 +9,7 @@
 //!     slot carries (the paper's point embedding and dual-quadric layout), and
 //!     how the ten quadric coefficients pack into that layout;
 //!   - one FCO derive provider walks the plan type and, for each Term, asks
-//!     the library for the metric sign and emits `mul`/`neg`/`add` — the
+//!     the library for the metric sign and emits `mul`/`neg`/`add`; the
 //!     generated `incidence` body is flat f32 arithmetic with no loops, no
 //!     branches, and no runtime reflection, so it lowers to the WebGPU
 //!     fragment stage like any hand-written kernel.
@@ -30,59 +30,17 @@
 //! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
 //! parallelism claim (VISION 3.1).
 //!
-//!     fe web build demos/sketches/cga --out <dir>
+//!     fe web build demos/sketches/qcga --out <dir>
 
 use core::marker::Copy
 use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
 use core::num::IntDowncast
 use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
 use sparse_clifford::{
-    Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
+    Nat, PlanLength, SparsePlan, Term, null_vector_pairing, plan_candidate_left,
+    plan_candidate_right, plan_mask_candidate, plan_mask_cardinality,
 }
 use fmath::{PI, abs, clamp01, cos, from_i32, mix, rgba, sin, smoothstep, sqrt}
-
-// ---------------------------------------------------------------------------
-// [STAGED FOR sparse_clifford] Generic conformal-null-basis metric pairing.
-//
-// The scalar pairing <l . r> between two grade-1 basis vectors of the
-// standard conformal-style null basis
-//     [e_1 .. e_E,  eo_1 .. eo_N,  ei_1 .. ei_N]
-// with e_i . e_i = +1, eo_k . ei_k = ei_k . eo_k = -1, everything else 0.
-// E = 3, N = 1 is classic CGA Cl(4,1); E = 3, N = 6 is QCGA R(9,6). Encoding
-// matches the plan-mask sign convention: 0 = annihilated, 1 = +1, 2 = -1.
-//
-// This is the library gap that forced qcga_pencil's hand-written sign table:
-// `support_gp` models DIAGONAL metrics only (shared-generator annihilation),
-// so the null basis' off-diagonal eo/ei pairing was out of vocabulary. It
-// lives here demo-locally only until the ingot move lands.
-// ---------------------------------------------------------------------------
-
-pub const fn null_vector_pairing(
-    _ left: usize, _ right: usize, _ euclidean: usize, _ pairs: usize,
-) -> usize {
-    if left < euclidean {
-        if left == right { 1 } else { 0 }
-    } else if left < euclidean + pairs {
-        // left is eo_k: pairs only with ei_k.
-        if right == left + pairs { 2 } else { 0 }
-    } else if left < euclidean + 2 * pairs {
-        // left is ei_k: pairs only with eo_k.
-        if right + pairs == left { 2 } else { 0 }
-    } else {
-        0
-    }
-}
-
-/// [STAGED FOR sparse_clifford] A candidate's left operand slot under the
-/// plan's row-major (left * right_terms + right) candidate numbering.
-pub const fn plan_candidate_left(_ candidate: usize, _ right_terms: usize) -> usize {
-    candidate / right_terms
-}
-
-/// [STAGED FOR sparse_clifford] A candidate's right operand slot.
-pub const fn plan_candidate_right(_ candidate: usize, _ right_terms: usize) -> usize {
-    candidate % right_terms
-}
 
 // ---------------------------------------------------------------------------
 // The QCGA facts. This is the WHOLE domain-specific surface of the
@@ -323,7 +281,7 @@ pub fn eval_quadric(_ q: Quadric, _ x: f32, _ y: f32, _ z: f32) -> f32 {
 
 const RESOLUTION: f32 = 128.0
 
-actor CgaSurface uses (GpuProgram<WebGpuBackend>) {
+actor QcgaSurface uses (GpuProgram<WebGpuBackend>) {
     /// Pencil parameter: [0, 1] sweeps cylinder -> sphere-like -> plane pair.
     lambda: f32,
     /// Rotation of the member about the y axis; makes the xz cross term live.
