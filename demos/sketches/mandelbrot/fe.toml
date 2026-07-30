@@ -1,0 +1,7 @@
+[ingot]
+name = "mandelbrot"
+version = "0.1.0"
+
+[dependencies]
+core = true
+fmath = "../fmath"

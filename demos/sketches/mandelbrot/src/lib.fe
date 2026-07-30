@@ -1,0 +1,70 @@
+//! Mandelbrot escape-time, as an actor that RENDERS.
+//!
+//! The oldest fractal, now a fragment behavior. `MandelbrotSurface` maps each
+//! pixel to a point `c` in the complex plane, iterates `z <- z*z + c` until it
+//! escapes the disc of radius two, and reads the escape count through a palette.
+//! Points that never escape are the set itself, drawn black.
+//!
+//! The iteration is a real loop with a nested branch, so this demo only lowers
+//! now that the SPIR-V structurizer emits loops with inner conditionals. It is
+//! written without early `return` from the loop, without `bool`, and without
+//! `&&`: an `i32` `done` flag freezes the orbit after escape (so the count is
+//! preserved and `z` never blows to NaN) and the loop runs a fixed trip count.
+//!
+//!     fe web build demos/sketches/mandelbrot --out <dir>
+//!
+//! Software rendering (lavapipe/SwiftShader) in the sandbox; no performance or
+//! parallelism claim (VISION 3.1).
+
+use std::webgpu::{FragmentSurface, GpuProgram, WebGpuBackend}
+use fmath::{from_i32, palette}
+
+const RESOLUTION: f32 = 128.0
+const MAX_ITER: i32 = 96
+
+actor MandelbrotSurface uses (GpuProgram<WebGpuBackend>) {
+    /// Complex-plane centre and half-extent the page can pan and zoom.
+    center_x: f32,
+    center_y: f32,
+    zoom: f32,
+
+    /// Pixel coordinate in, packed RGBA8 word out.
+    fn escape(self, px: i32, py: i32) -> i32 uses (FragmentSurface) {
+        // Pixel centre to [-1, 1], y up, then into the complex plane.
+        let u: f32 = (from_i32(px) + 0.5) / RESOLUTION * 2.0 - 1.0
+        let v: f32 = 1.0 - (from_i32(py) + 0.5) / RESOLUTION * 2.0
+        let cx: f32 = self.center_x + u * self.zoom
+        let cy: f32 = self.center_y + v * self.zoom
+
+        let mut zx: f32 = 0.0
+        let mut zy: f32 = 0.0
+        let mut count: i32 = 0
+        // 0 while still iterating, 1 once the orbit has escaped.
+        let mut done: i32 = 0
+        let mut i: i32 = 0
+        while i < MAX_ITER {
+            if done == 0 {
+                let xx: f32 = zx * zx
+                let yy: f32 = zy * zy
+                if xx + yy > 4.0 {
+                    done = 1
+                } else {
+                    let new_zx: f32 = xx - yy + cx
+                    zy = 2.0 * zx * zy + cy
+                    zx = new_zx
+                    count = count + 1
+                }
+            }
+            i = i + 1
+        }
+
+        if done == 1 {
+            // Escaped: colour by how long it survived.
+            let t: f32 = from_i32(count) / from_i32(MAX_ITER)
+            palette(t, 0.0, 0.33, 0.67)
+        } else {
+            // Inside the set: opaque black (0xFF000000).
+            -16777216
+        }
+    }
+}
