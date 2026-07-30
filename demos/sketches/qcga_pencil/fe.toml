@@ -1,0 +1,8 @@
+[ingot]
+name = "qcga_pencil"
+version = "0.1.0"
+
+[dependencies]
+core = true
+fmath = "../fmath"
+sparse_clifford = "../../../ingots/sparse_clifford"

@@ -10,4 +10,7 @@ members = [
   { path = "demos/sketches/dec", name = "dec" },
   { path = "demos/sketches/gradient", name = "gradient" },
   { path = "demos/sketches/mandelbrot", name = "mandelbrot" },
+  { path = "ingots/sparse_clifford", name = "sparse_clifford" },
+  { path = "demos/sketches/cga", name = "cga" },
+  { path = "demos/sketches/qcga_pencil", name = "qcga_pencil" },
 ]

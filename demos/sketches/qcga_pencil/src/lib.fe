@@ -1,0 +1,1578 @@
+//! Nine points decide a quadric. Sometimes they abstain.
+//!
+//! Drag nine points in space and a quadric surface passes through them. That
+//! sounds like a nonlinear fitting problem, and classically it is treated as
+//! one. In QCGA the dual quadric is a grade-1 vector and point incidence is a
+//! CONTRACTION, linear in the quadric coefficients, so "the quadric through
+//! nine points" is the nullspace of a 9 x 10 linear system whose entries are
+//! literally that contraction. The solver below builds each matrix entry by
+//! calling the planned sparse QCGA contraction with a unit basis dual quadric:
+//! the linear system IS the incidence operator, by construction.
+//!
+//! The quirk this demo illustrates: nine points in general position pin the
+//! quadric uniquely, but nine points that lie on the intersection curve of two
+//! quadrics (here, the circle pair where the unit sphere meets the cone
+//! z^2 = x^2 + y^2) impose only EIGHT independent conditions. The nullspace
+//! becomes two dimensional and a whole projective pencil of quadrics passes
+//! through all nine points at once: cylinder, sphere, cone, plane pair, and
+//! every hyperboloid between them. Sweeping the pencil parameter deforms the
+//! surface through genuine topology changes while every point stays exactly
+//! incident. Nudge one point off the curve and the freedom snaps shut: rank
+//! returns to nine and the pencil collapses to a single surface. Rank drop is
+//! trivially observable here BECAUSE incidence is linear; no nonlinear
+//! degeneracy analysis is involved anywhere.
+//!
+//! THE PROGRAM IS THE ACTOR. The unit with actor status here is the shader
+//! program `PencilSurface`, not any single stage: it owns the control points,
+//! the derived pencil basis, and the view as declared private state (at
+//! runtime: its buffers, bind groups and uniforms), and its behaviors consume
+//! that state. Dragging a point is a MESSAGE to the actor, not a uniform poke
+//! arranged by host glue. The vertex behavior does the QCGA work (project the
+//! template vertex onto the constraint surface); the fragment behavior shades
+//! the interpolated result; the value passed between them, `SurfaceVarying`,
+//! is a TYPED HANDOFF between two behaviors of one actor. This mirrors the
+//! contract anatomy already shipping in Fe (storage = private state, `recv`
+//! arms = behaviors, calls = messages, address = identity); see the
+//! `PencilSurface` section for the target spelling and for what today's
+//! toolchain forces us to flatten.
+//!
+//! Rendering model: ordinary rasterization, no raycasting and no path tracing.
+//! A template direction sphere is generated procedurally from the vertex index
+//! and each vertex is projected radially onto the current pencil member by
+//! solving q(c + t d) = 0, whose three coefficients are three planned QCGA
+//! contractions (the polynomial is exactly quadratic along the line, so three
+//! evaluations determine it). The surface normal is six more contractions
+//! (central differences are EXACT for a quadric), and each emitted vertex
+//! re-checks its own incidence with a final contraction: ten planned sparse
+//! contractions per vertex, all in the vertex behavior. The fragment behavior
+//! contains no QCGA at all, only per-pixel shading of the interpolated
+//! handoff. Directions on which the constraint has no solution emit clipped
+//! vertices, so the mesh visibly TEARS along the asymptotic cone when the
+//! surface changes topology. Nothing smooths over that; the tear is the
+//! constraint speaking.
+//!
+//! Honesty registers, binding on every consumer of this ingot:
+//! - No GPU performance claims, anywhere, of any kind.
+//! - Any GPU-rendered result shown on the development host is software
+//!   rendered (SwiftShader or lavapipe; there is no real Vulkan adapter), and
+//!   every surface that displays such a result must say so out loud.
+//! - No `Par` parallelism claims; no shipped `Par` provider executes anything
+//!   in parallel today.
+//! - The only artifacts executable today are the wasm actor lanes. The
+//!   stage placements declared below are claims that current tooling cannot
+//!   discharge; this ingot is the acceptance test for that gap, and no shim
+//!   pretends otherwise.
+
+use core::marker::Copy
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use core::{AllocatedBrowserBytes, BrowserBytes, HostEffect, MainThread}
+use core::backend::Backend
+use core::effect_ref::alloc_bytes
+use core::num::IntDowncast
+use std::webgpu::{Dispatch, WebGpuBackend}
+use sparse_clifford::{
+    Nat, PlanLength, SparsePlan, Term, plan_mask_candidate, plan_mask_cardinality,
+}
+use fmath::{PI, TAU, abs, clamp01, cos, from_i32, max, min, rgba, sin, sqrt}
+
+extern {
+    const fn __bitcast<From, To>(_: From) -> To
+}
+
+// ---------------------------------------------------------------------------
+// Behavior placement, declared in the language.
+//
+// Placement is an effect on this branch, not command-line wiring. The shader
+// PROGRAM is the actor; its stages are behaviors of that one actor, so these
+// markers place a BEHAVIOR within its program, in the house marker idiom
+// (`HostEffect` / `MainThread` / `Worker` in core::browser).
+//
+// Both markers are declared HERE, demo-locally, as stand-ins: the in-language
+// actor composition and placement vocabulary is a separate design task
+// (DESIGN_ACTOR_COMPOSITION_IN_FE.md) and these migrate into core/std when it
+// lands. Declaring them locally keeps the claims visible and typed without
+// pretending the vocabulary is ratified.
+// ---------------------------------------------------------------------------
+
+/// Requires a behavior to execute per vertex in the rasterization vertex
+/// stage of its program's pipeline on backend `B`. Stand-in marker; see the
+/// section comment above.
+pub trait VertexStage<B: Backend> {}
+
+/// Requires a behavior to execute per fragment in the rasterization fragment
+/// stage of its program's pipeline on backend `B`, consuming the interpolated
+/// typed handoff emitted by the program's vertex behavior. Stand-in marker.
+pub trait FragmentStage<B: Backend> {}
+
+// ---------------------------------------------------------------------------
+// The planned sparse QCGA incidence contraction.
+//
+// Copied intact from
+// crates/codegen/tests/fixtures/spirv/qcga3d_sparse_planned_incidence.fe
+// (the artifact documented in docs/mb2/QCGA_SPARSE_PLANNER.md), modulo this
+// comment and the import block above. It represents two 12-blade paper-null
+// support lists, Fe CTFE enumerates their 144 candidate pairs and retains the
+// 12 metric survivors, and one FCO provider publishes the aggregate
+// contraction. It plans exactly this null-vector contraction; it is not a
+// general QCGA product engine.
+// ---------------------------------------------------------------------------
+
+const POINT_TERMS: usize = 12
+const QUADRIC_TERMS: usize = 12
+const CANDIDATES: usize = POINT_TERMS * QUADRIC_TERMS
+
+// Slots in the paper-null basis:
+// e1,e2,e3, eo1..eo6, ei1..ei6.
+const fn point_blade(_ slot: usize) -> usize {
+    if slot < 6 { slot } else { slot + 3 }
+}
+
+const fn quadric_blade(_ slot: usize) -> usize {
+    slot
+}
+
+const fn candidate_left(_ candidate: usize) -> usize {
+    candidate / 12
+}
+
+const fn candidate_right(_ candidate: usize) -> usize {
+    candidate % 12
+}
+
+// +1 for equal Euclidean blades, -1 for eo_k/ei_k and ei_k/eo_k, 0
+// otherwise. Encoding: 0=annihilated, 1=positive, 2=negative.
+const fn contraction_sign(_ candidate: usize) -> usize {
+    let left = point_blade(candidate_left(candidate))
+    let right = quadric_blade(candidate_right(candidate))
+    let mut sign: usize = 0
+    if left == right {
+        if left < 3 { sign = 1 }
+    }
+    if left >= 3 {
+        if left < 9 {
+            if right == left + 6 { sign = 2 }
+        }
+    }
+    if left >= 9 {
+        if right + 6 == left { sign = 2 }
+    }
+    sign
+}
+
+const fn incidence_keep_word(_ first: usize, _ last: usize) -> u32 {
+    let mut candidate: usize = first
+    let mut keep_bits: u32 = 0
+    while candidate < last {
+        if contraction_sign(candidate) != 0 {
+            keep_bits =
+                keep_bits | ((1 as u32) << (candidate - first).downcast_truncate())
+        }
+        candidate = candidate + 1
+    }
+    keep_bits
+}
+
+const INCIDENCE_KEEP0: u32 = incidence_keep_word(0, 24)
+const INCIDENCE_KEEP1: u32 = incidence_keep_word(24, 48)
+const INCIDENCE_KEEP2: u32 = incidence_keep_word(48, 72)
+const INCIDENCE_KEEP3: u32 = incidence_keep_word(72, 96)
+const INCIDENCE_KEEP4: u32 = incidence_keep_word(96, 120)
+const INCIDENCE_KEEP5: u32 = incidence_keep_word(120, 144)
+const INCIDENCE_KEEP6: u32 = 0
+const INCIDENCE_KEEP7: u32 = 0
+
+const fn survivor_count() -> usize {
+    plan_mask_cardinality(
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
+        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
+        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES,
+    )
+}
+
+const fn survivor_candidate(_ target: usize) -> usize {
+    plan_mask_candidate(
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2,
+        INCIDENCE_KEEP3, INCIDENCE_KEEP4, INCIDENCE_KEEP5,
+        INCIDENCE_KEEP6, INCIDENCE_KEEP7, CANDIDATES, target,
+    )
+}
+
+static_assert(survivor_count() == 12)
+static_assert(INCIDENCE_KEEP0 == 8193)
+static_assert(INCIDENCE_KEEP1 == 2097156)
+static_assert(INCIDENCE_KEEP2 == 8389632)
+static_assert(INCIDENCE_KEEP3 == 65544)
+static_assert(INCIDENCE_KEEP4 == 262176)
+static_assert(INCIDENCE_KEEP5 == 1048704)
+
+// The exact imported ground plan consumes the named CTFE-derived mask and
+// candidate-count constants directly; normalized provider reflection unfolds
+// only its twelve retained Term nodes.
+type IncidencePlan12 =
+    SparsePlan<
+        INCIDENCE_KEEP0, INCIDENCE_KEEP1, INCIDENCE_KEEP2, INCIDENCE_KEEP3,
+        INCIDENCE_KEEP4, INCIDENCE_KEEP5, INCIDENCE_KEEP6, INCIDENCE_KEEP7,
+        CANDIDATES,
+        12,
+    >
+static_assert(survivor_candidate(0) == 0)
+static_assert(survivor_candidate(1) == 13)
+static_assert(survivor_candidate(2) == 26)
+static_assert(survivor_candidate(3) == 45)
+static_assert(survivor_candidate(4) == 58)
+static_assert(survivor_candidate(5) == 71)
+static_assert(survivor_candidate(6) == 75)
+static_assert(survivor_candidate(7) == 88)
+static_assert(survivor_candidate(8) == 101)
+static_assert(survivor_candidate(9) == 114)
+static_assert(survivor_candidate(10) == 127)
+static_assert(survivor_candidate(11) == 140)
+
+fn takes_nat12(_ value: Nat<12>) {}
+fn planned_support_has_twelve_terms(value: <IncidencePlan12 as PlanLength>::Out) {
+    takes_nat12(value)
+}
+
+// Flat reflected carrier: the first twelve fields are the point support list,
+// the second twelve are the dual-quadric support list. The provider selects
+// fields exclusively from the CTFE support functions above.
+struct SparseIncidenceOperands {
+    p0: f32, p1: f32, p2: f32, p3: f32, p4: f32, p5: f32,
+    p6: f32, p7: f32, p8: f32, p9: f32, p10: f32, p11: f32,
+    q0: f32, q1: f32, q2: f32, q3: f32, q4: f32, q5: f32,
+    q6: f32, q7: f32, q8: f32, q9: f32, q10: f32, q11: f32,
+}
+impl Copy for SparseIncidenceOperands {}
+
+trait PlannedIncidence {
+    fn incidence(_ operands: SparseIncidenceOperands) -> f32
+}
+
+struct QcgaIncidenceProvider {}
+impl Derive<PlannedIncidence> for QcgaIncidenceProvider {
+    const fn derive<T>(ev: own Evidence<PlannedIncidence<T>>) -> Evidence<PlannedIncidence<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<PlannedIncidence<T>>)
+    {
+        let operands = builder.arg_ref("operands")
+        let p0 = operands
+        let p1 = operands
+        let p2 = operands
+        let p3 = operands
+        let p4 = operands
+        let p5 = operands
+        let p6 = operands
+        let p7 = operands
+        let p8 = operands
+        let p9 = operands
+        let p10 = operands
+        let p11 = operands
+        let q0 = operands
+        let q1 = operands
+        let q2 = operands
+        let q3 = operands
+        let q4 = operands
+        let q5 = operands
+        let q6 = operands
+        let q7 = operands
+        let q8 = operands
+        let q9 = operands
+        let q10 = operands
+        let q11 = operands
+        let field_index = 0
+        for field in reflect.fields() {
+            if field_index == 0 { p0 = builder.field_get(operands, field) }
+            if field_index == 1 { p1 = builder.field_get(operands, field) }
+            if field_index == 2 { p2 = builder.field_get(operands, field) }
+            if field_index == 3 { p3 = builder.field_get(operands, field) }
+            if field_index == 4 { p4 = builder.field_get(operands, field) }
+            if field_index == 5 { p5 = builder.field_get(operands, field) }
+            if field_index == 6 { p6 = builder.field_get(operands, field) }
+            if field_index == 7 { p7 = builder.field_get(operands, field) }
+            if field_index == 8 { p8 = builder.field_get(operands, field) }
+            if field_index == 9 { p9 = builder.field_get(operands, field) }
+            if field_index == 10 { p10 = builder.field_get(operands, field) }
+            if field_index == 11 { p11 = builder.field_get(operands, field) }
+            if field_index == 12 { q0 = builder.field_get(operands, field) }
+            if field_index == 13 { q1 = builder.field_get(operands, field) }
+            if field_index == 14 { q2 = builder.field_get(operands, field) }
+            if field_index == 15 { q3 = builder.field_get(operands, field) }
+            if field_index == 16 { q4 = builder.field_get(operands, field) }
+            if field_index == 17 { q5 = builder.field_get(operands, field) }
+            if field_index == 18 { q6 = builder.field_get(operands, field) }
+            if field_index == 19 { q7 = builder.field_get(operands, field) }
+            if field_index == 20 { q8 = builder.field_get(operands, field) }
+            if field_index == 21 { q9 = builder.field_get(operands, field) }
+            if field_index == 22 { q10 = builder.field_get(operands, field) }
+            if field_index == 23 { q11 = builder.field_get(operands, field) }
+            field_index = field_index + 1
+        }
+        let zero = builder.sub(p0, p0)
+        let sum0 = zero
+        let sum1 = zero
+        let sum2 = zero
+        let survivor = 0
+        // Interpret the exact normalized imported SparsePlan rather than
+        // rescanning its 144-candidate source universe. Each Term carries the
+        // canonical candidate identity selected by the shared CTFE planner.
+        for nested in builder.ty<IncidencePlan12>().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                let candidate: usize = 144
+                for arg in nested.generic_args() {
+                    if arg.is_const() { candidate = arg.const_value() }
+                }
+
+                // Keep the QCGA metric semantics explicit at the provider
+                // boundary. The plan guarantees that this branch is reached
+                // exactly twelve times, in ascending candidate order.
+                if candidate < 144 {
+                    let left_slot = candidate / 12
+                    let right_slot = candidate % 12
+                    let sign = 0
+                    if left_slot == right_slot {
+                        if left_slot < 3 { sign = 1 }
+                    }
+                    if left_slot >= 3 {
+                        if left_slot < 6 {
+                            if right_slot == left_slot + 6 { sign = 2 }
+                        }
+                    }
+                    if left_slot >= 6 {
+                        if right_slot + 3 == left_slot { sign = 2 }
+                    }
+                    if sign != 0 {
+                        let left = p0
+                        if left_slot == 1 { left = p1 }
+                        if left_slot == 2 { left = p2 }
+                        if left_slot == 3 { left = p3 }
+                        if left_slot == 4 { left = p4 }
+                        if left_slot == 5 { left = p5 }
+                        if left_slot == 6 { left = p6 }
+                        if left_slot == 7 { left = p7 }
+                        if left_slot == 8 { left = p8 }
+                        if left_slot == 9 { left = p9 }
+                        if left_slot == 10 { left = p10 }
+                        if left_slot == 11 { left = p11 }
+
+                        let right = q0
+                        if right_slot == 1 { right = q1 }
+                        if right_slot == 2 { right = q2 }
+                        if right_slot == 3 { right = q3 }
+                        if right_slot == 4 { right = q4 }
+                        if right_slot == 5 { right = q5 }
+                        if right_slot == 6 { right = q6 }
+                        if right_slot == 7 { right = q7 }
+                        if right_slot == 8 { right = q8 }
+                        if right_slot == 9 { right = q9 }
+                        if right_slot == 10 { right = q10 }
+                        if right_slot == 11 { right = q11 }
+
+                        let term = builder.mul(left, right)
+                        if sign == 2 { term = builder.neg(term) }
+                        if survivor < 4 { sum0 = builder.add(sum0, term) }
+                        else if survivor < 8 { sum1 = builder.add(sum1, term) }
+                        else { sum2 = builder.add(sum2, term) }
+                        survivor = survivor + 1
+                    }
+                }
+            }
+        }
+        let result = builder.add(builder.add(sum0, sum1), sum2)
+        builder.emit_method("incidence", result)
+        builder.finish()
+        ev
+    }
+}
+
+derive PlannedIncidence for SparseIncidenceOperands using QcgaIncidenceProvider
+
+pub fn qcga3d_incidence_planned(
+    x: f32, y: f32, z: f32,
+    a: f32, b: f32, c: f32, d: f32, e: f32,
+    f: f32, g: f32, h: f32, i: f32, j: f32,
+) -> f32 {
+    let half: f32 = 0.5
+    let j_third: f32 = j / 3.0
+    let negative_j_third: f32 = 0.0 - j_third
+    <SparseIncidenceOperands as PlannedIncidence>::incidence(SparseIncidenceOperands {
+        p0: x, p1: y, p2: z,
+        p3: 1.0, p4: 1.0, p5: 1.0,
+        p6: x * x * half, p7: y * y * half, p8: z * z * half,
+        p9: x * y, p10: x * z, p11: y * z,
+        q0: g, q1: h, q2: i,
+        q3: -2.0 * a, q4: -2.0 * b, q5: -2.0 * c,
+        q6: -d, q7: -e, q8: -f,
+        q9: negative_j_third, q10: negative_j_third, q11: negative_j_third,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Dual quadrics as values.
+// ---------------------------------------------------------------------------
+
+/// The ten coefficients of a dual quadric, in the demo-wide canonical order:
+/// a x^2 + b y^2 + c z^2 + d xy + e xz + f yz + g x + h y + i z + j.
+pub struct Quadric {
+    pub a: f32, pub b: f32, pub c: f32, pub d: f32, pub e: f32,
+    pub f: f32, pub g: f32, pub h: f32, pub i: f32, pub j: f32,
+}
+impl Copy for Quadric {}
+
+/// Point/quadric incidence through the planned sparse contraction. Every use
+/// of "does this point lie on this surface" in this ingot flows through here;
+/// there is no second evaluation path to drift from.
+pub fn eval_quadric(_ q: Quadric, _ x: f32, _ y: f32, _ z: f32) -> f32 {
+    qcga3d_incidence_planned(
+        x: x, y: y, z: z,
+        a: q.a, b: q.b, c: q.c, d: q.d, e: q.e,
+        f: q.f, g: q.g, h: q.h, i: q.i, j: q.j,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Mesh, camera, and shading constants. All template geometry is derived from
+// the vertex index; there is no vertex buffer to bake and no mesh asset.
+// ---------------------------------------------------------------------------
+
+pub const ROWS: u32 = 24
+pub const COLS: u32 = 48
+/// Six vertices (two triangles) per grid quad, one full direction sphere per
+/// sheet.
+pub const SHEET_VERTS: u32 = ROWS * COLS * 6
+/// Sheet 0 takes the nearer positive root along each direction, sheet 1 the
+/// farther one, so closed surfaces (which show one positive root per
+/// direction from an interior centre) collapse sheet 1 instead of
+/// double-covering.
+pub const VERTEX_COUNT: u32 = 2 * SHEET_VERTS
+
+static_assert(SHEET_VERTS == 6912)
+static_assert(VERTEX_COUNT == 13824)
+
+/// Roots below this parameter are treated as the centre itself, not a hit.
+pub const T_MIN: f32 = 0.001
+/// Truncation radius for unbounded members (hyperboloids, planes): the drawn
+/// surface is honestly a clip of the infinite one, and the copy says so.
+pub const T_MAX: f32 = 12.0
+
+const NEAR: f32 = 0.25
+const FAR: f32 = 64.0
+const FOCAL: f32 = 1.6
+
+// Fixed world-space light direction, approximately unit length.
+const LX: f32 = 0.37
+const LY: f32 = 0.82
+const LZ: f32 = 0.44
+
+// ---------------------------------------------------------------------------
+// The actor's state records and the typed behavior handoff.
+// ---------------------------------------------------------------------------
+
+/// The nine dragged control points, the actor's primary owned state.
+pub struct ControlPoints {
+    pub p0x: f32, pub p0y: f32, pub p0z: f32,
+    pub p1x: f32, pub p1y: f32, pub p1z: f32,
+    pub p2x: f32, pub p2y: f32, pub p2z: f32,
+    pub p3x: f32, pub p3y: f32, pub p3z: f32,
+    pub p4x: f32, pub p4y: f32, pub p4z: f32,
+    pub p5x: f32, pub p5y: f32, pub p5z: f32,
+    pub p6x: f32, pub p6y: f32, pub p6z: f32,
+    pub p7x: f32, pub p7y: f32, pub p7z: f32,
+    pub p8x: f32, pub p8y: f32, pub p8z: f32,
+}
+impl Copy for ControlPoints {}
+
+/// The state slice both GPU behaviors read (at runtime: the program's uniform
+/// block): the solved pencil basis, the pencil parameter, and the orbit view.
+/// Derived from `ControlPoints` by the `resolve` behavior; the binding table
+/// is generated from this one nominal record and nothing restates it.
+pub struct PencilFrame {
+    pub generation: u32,
+    /// Pencil parameter. The blend weights are cos(PI*lambda), sin(PI*lambda),
+    /// so [0,1] sweeps the full projective pencil line and returns to the
+    /// starting surface (with flipped sign, the same quadric).
+    pub lambda: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub dist: f32,
+    /// Projection centre: the centroid of the nine constraint points.
+    pub cx: f32,
+    pub cy: f32,
+    pub cz: f32,
+    /// 1.0 when the solver found rank <= 8 (the pencil is unlocked), else 0.0.
+    /// Read by the fragment behavior for the warm tint, so the degenerate
+    /// state is visible without any host-side presentation logic.
+    pub pencil_free: f32,
+    pub a0: f32, pub b0: f32, pub c0: f32, pub d0: f32, pub e0: f32,
+    pub f0: f32, pub g0: f32, pub h0: f32, pub i0: f32, pub j0: f32,
+    pub a1: f32, pub b1: f32, pub c1: f32, pub d1: f32, pub e1: f32,
+    pub f1: f32, pub g1: f32, pub h1: f32, pub i1: f32, pub j1: f32,
+}
+impl Copy for PencilFrame {}
+
+/// The current pencil member. The blend happens on COEFFICIENTS, which is the
+/// same thing as blending incidence values only because the QCGA contraction
+/// is linear in the dual quadric; the acceptance test checks that equality
+/// rather than assuming it.
+pub fn pencil_member(_ frame: PencilFrame) -> Quadric {
+    let th: f32 = PI * frame.lambda
+    let w0: f32 = cos(th)
+    let w1: f32 = sin(th)
+    Quadric {
+        a: w0 * frame.a0 + w1 * frame.a1,
+        b: w0 * frame.b0 + w1 * frame.b1,
+        c: w0 * frame.c0 + w1 * frame.c1,
+        d: w0 * frame.d0 + w1 * frame.d1,
+        e: w0 * frame.e0 + w1 * frame.e1,
+        f: w0 * frame.f0 + w1 * frame.f1,
+        g: w0 * frame.g0 + w1 * frame.g1,
+        h: w0 * frame.h0 + w1 * frame.h1,
+        i: w0 * frame.i0 + w1 * frame.i1,
+        j: w0 * frame.j0 + w1 * frame.j1,
+    }
+}
+
+/// THE TYPED HANDOFF between the actor's two GPU behaviors: what the vertex
+/// behavior emits and the fragment behavior receives after interpolation.
+/// Clip position (`x`,`y`,`z`,`w`; the rasterizer divides by `w`) plus the
+/// interpolated surface data shading needs: the exact quadric gradient, the
+/// discriminant glow, the sheet identity, and the vertex's self-accusation
+/// flag. No color crosses this boundary; color is the fragment behavior's
+/// job.
+pub struct SurfaceVarying {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+    pub nx: f32,
+    pub ny: f32,
+    pub nz: f32,
+    /// Approaches 1 as the radial discriminant approaches zero: the tear line
+    /// along the asymptotic cone announces itself.
+    pub glow: f32,
+    /// 0.0 for the near sheet, 1.0 for the far sheet.
+    pub sheet: f32,
+    /// 1.0 when this vertex failed its own incidence receipt (beyond the f32
+    /// cancellation budget at its distance). The fragment behavior turns it
+    /// magenta instead of quietly drawing it; the acceptance test asserts it
+    /// never fires on honest frames and DOES fire on corrupted ones.
+    pub accuse: f32,
+}
+impl Copy for SurfaceVarying {}
+
+/// Everything the vertex behavior knows, for the verification lanes. The
+/// GPU-facing `SurfaceVarying` is a strict projection of this.
+pub struct SurfaceSample {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+    pub nx: f32,
+    pub ny: f32,
+    pub nz: f32,
+    pub glow: f32,
+    pub sheet: f32,
+    pub accuse: f32,
+    /// Radial hit parameter, -1.0 on a miss.
+    pub t: f32,
+    /// World-space hit point (all zero on a miss).
+    pub hx: f32,
+    pub hy: f32,
+    pub hz: f32,
+    /// The vertex's own incidence receipt: the planned contraction of the
+    /// emitted point against the current pencil member. Near zero on every
+    /// honest hit.
+    pub residual: f32,
+    /// Discriminant of the radial quadratic; approaches zero at the tear.
+    pub disc: f32,
+    pub missed: u32,
+}
+impl Copy for SurfaceSample {}
+
+fn miss_sample(_ sheet: f32, _ disc: f32) -> SurfaceSample {
+    // z = 2, w = 1 lies outside 0 <= z <= w, so the rasterizer clips the
+    // vertex; a torn triangle is dropped rather than smoothed over.
+    SurfaceSample {
+        x: 0.0, y: 0.0, z: 2.0, w: 1.0,
+        nx: 0.0, ny: 0.0, nz: 0.0,
+        glow: 0.0, sheet, accuse: 0.0,
+        t: -1.0, hx: 0.0, hy: 0.0, hz: 0.0,
+        residual: 0.0, disc, missed: 1,
+    }
+}
+
+/// Per-vertex QCGA projection onto the current pencil member.
+///
+/// Per vertex: decode the template direction from the vertex index; three
+/// planned contractions determine the exact quadratic q(c + t d) along the
+/// radial line; the stable root pair picks this sheet's parameter; six more
+/// contractions give the exact surface normal (central differences are exact
+/// on a quadric); one final contraction is the emitted point's own incidence
+/// receipt. Ten planned 12-term sparse contractions per vertex, no loops over
+/// blades, and no QCGA anywhere else in the pipeline.
+fn sample_vertex(_ vid: u32, _ frame: PencilFrame) -> SurfaceSample {
+    let sheet: u32 = vid / SHEET_VERTS
+    let sheet_f: f32 = from_i32(sheet.downcast_truncate())
+    let rem: u32 = vid % SHEET_VERTS
+    let quad: u32 = rem / 6
+    let corner: u32 = rem % 6
+    let band: u32 = quad / COLS
+    let col: u32 = quad % COLS
+
+    // Quad corners: triangle 0 is (0,0) (1,0) (0,1), triangle 1 is
+    // (0,1) (1,0) (1,1).
+    let mut dr: u32 = 0
+    let mut dc: u32 = 0
+    if corner == 1 { dr = 1 }
+    if corner == 2 { dc = 1 }
+    if corner == 3 { dc = 1 }
+    if corner == 4 { dr = 1 }
+    if corner == 5 {
+        dr = 1
+        dc = 1
+    }
+
+    // Template unit direction from the (band, col) lattice. The longitude seam
+    // closes only to the accuracy of the polynomial sin/cos in fmath; that
+    // hairline is a property of the arithmetic and is left visible.
+    let theta: f32 =
+        PI * from_i32((band + dr).downcast_truncate())
+            / from_i32(ROWS.downcast_truncate())
+    let phi: f32 =
+        TAU * from_i32((col + dc).downcast_truncate())
+            / from_i32(COLS.downcast_truncate())
+    let st: f32 = sin(theta)
+    let dx: f32 = st * cos(phi)
+    let dy: f32 = cos(theta)
+    let dz: f32 = st * sin(phi)
+
+    // The radial constraint: q(c + t d) is EXACTLY alpha t^2 + beta t + qc,
+    // and three planned contractions pin all three coefficients.
+    let q: Quadric = pencil_member(frame)
+    let qc: f32 = eval_quadric(q, frame.cx, frame.cy, frame.cz)
+    let qp: f32 = eval_quadric(q, frame.cx + dx, frame.cy + dy, frame.cz + dz)
+    let qm: f32 = eval_quadric(q, frame.cx - dx, frame.cy - dy, frame.cz - dz)
+    let alpha: f32 = (qp + qm) * 0.5 - qc
+    let beta: f32 = (qp - qm) * 0.5
+
+    let mut hit: u32 = 0
+    let mut t_near: f32 = -1.0
+    let mut t_far: f32 = -1.0
+    let mut disc: f32 = 0.0
+    if abs(alpha) < 0.0000001 {
+        // Degenerate member (planes and near-planes): the constraint is linear
+        // along the ray.
+        if abs(beta) >= 0.0000001 {
+            let t_lin: f32 = -qc / beta
+            if t_lin > T_MIN {
+                hit = 1
+                t_near = t_lin
+                t_far = t_lin
+            }
+        }
+    } else {
+        disc = beta * beta - 4.0 * alpha * qc
+        if disc >= 0.0 {
+            let root: f32 = sqrt(disc)
+            let signed_root: f32 = if beta < 0.0 { -root } else { root }
+            let qroot: f32 = -0.5 * (beta + signed_root)
+            let mut ta: f32 = 0.0
+            let mut tb: f32 = 0.0
+            if abs(qroot) >= 0.0000001 {
+                ta = qroot / alpha
+                tb = qc / qroot
+            }
+            let lo: f32 = min(ta, tb)
+            let hi: f32 = max(ta, tb)
+            if hi > T_MIN {
+                hit = 1
+                t_far = hi
+                t_near = if lo > T_MIN { lo } else { hi }
+            }
+        }
+    }
+
+    let mut t: f32 = t_near
+    if sheet == 1 {
+        // The far sheet exists only where the constraint supplies a second
+        // visible root.
+        t = if t_far > t_near { t_far } else { -1.0 }
+    }
+    if hit == 0 { t = -1.0 }
+    if t > T_MAX { t = -1.0 }
+    if t <= 0.0 { return miss_sample(sheet_f, disc) }
+
+    let hx: f32 = frame.cx + dx * t
+    let hy: f32 = frame.cy + dy * t
+    let hz: f32 = frame.cz + dz * t
+
+    // The emitted point's own incidence receipt, through the same planned
+    // contraction the solver used to build the constraint matrix.
+    let residual: f32 = eval_quadric(q, hx, hy, hz)
+    let accuse: f32 =
+        if abs(residual) > 0.004 * (1.0 + t * t) { 1.0 } else { 0.0 }
+
+    // Exact gradient: central differences with h = 1 are exact for a degree-2
+    // polynomial, so six contractions give the true surface normal.
+    let gx: f32 = (eval_quadric(q, hx + 1.0, hy, hz) - eval_quadric(q, hx - 1.0, hy, hz)) * 0.5
+    let gy: f32 = (eval_quadric(q, hx, hy + 1.0, hz) - eval_quadric(q, hx, hy - 1.0, hz)) * 0.5
+    let gz: f32 = (eval_quadric(q, hx, hy, hz + 1.0) - eval_quadric(q, hx, hy, hz - 1.0)) * 0.5
+    let glen: f32 = sqrt(gx * gx + gy * gy + gz * gz)
+    let ginv: f32 = if glen > 0.0000001 { 1.0 / glen } else { 0.0 }
+
+    let disc_scale: f32 = beta * beta + 4.0 * abs(alpha * qc) + 0.000001
+    let glow: f32 = clamp01(1.0 - (disc / disc_scale) * 5.0)
+
+    // Orbit camera: yaw about +y, pitch about +x, dolly along view z.
+    let wx: f32 = hx - frame.cx
+    let wy: f32 = hy - frame.cy
+    let wz: f32 = hz - frame.cz
+    let cyaw: f32 = cos(frame.yaw)
+    let syaw: f32 = sin(frame.yaw)
+    let cpit: f32 = cos(frame.pitch)
+    let spit: f32 = sin(frame.pitch)
+    let rx: f32 = cyaw * wx + syaw * wz
+    let rz0: f32 = cyaw * wz - syaw * wx
+    let ry: f32 = cpit * wy - spit * rz0
+    let rz: f32 = spit * wy + cpit * rz0
+    let vz: f32 = rz + frame.dist
+    if vz < NEAR { return miss_sample(sheet_f, disc) }
+
+    SurfaceSample {
+        x: rx * FOCAL,
+        y: ry * FOCAL,
+        z: (vz * FAR - FAR * NEAR) / (FAR - NEAR),
+        w: vz,
+        nx: gx * ginv,
+        ny: gy * ginv,
+        nz: gz * ginv,
+        glow,
+        sheet: sheet_f,
+        accuse,
+        t, hx, hy, hz, residual, disc,
+        missed: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE ACTOR: the shader program `PencilSurface`.
+//
+// The program, not the stage, is the unit with actor status: it owns private
+// state with a lifetime longer than any invocation (control points, the
+// solved pencil basis, the view; at runtime, the pipeline's buffers and bind
+// groups), its behaviors consume that state, and interaction is messaging
+// (a drag is a message, not a uniform poke). Draws are its messages too; the
+// command queue is its mailbox. This is the same anatomy as the contract
+// layer already shipping in Fe, and the target spelling is the contract one:
+//
+//     msg SurfaceMsg {
+//         Drag { index: u32, x: f32, y: f32, z: f32 },
+//         SetLambda { value: f32 },
+//         Orbit { yaw: f32, pitch: f32, dist: f32 },
+//     }
+//
+//     pub actor PencilSurface {
+//         mut state: SurfaceState
+//
+//         init() uses (mut state) { ... defaults + resolve ... }
+//
+//         recv SurfaceMsg {
+//             Drag { index, x, y, z } uses (mut state) { ... resolve ... }
+//             ...
+//         }
+//
+//         behavior vertex(vid: u32) -> SurfaceVarying
+//             uses (state, VertexStage<WebGpuBackend>) { ... }
+//
+//         behavior fragment(v: SurfaceVarying) -> u32
+//             uses (state, FragmentStage<WebGpuBackend>) { ... }
+//     }
+//
+// No `actor` / `behavior` items exist yet and `recv` is contract-only, so
+// TODAY the actor is spelled as a plain state record plus an impl whose
+// methods are the behaviors. The flattening this forces is recorded as a
+// tooling gap, not silently accepted: today's canonical lanes are stateless,
+// so the state round-trips through the host between messages instead of
+// living in the actor.
+// ---------------------------------------------------------------------------
+
+pub struct PencilSurface {
+    /// Primary state: the nine dragged points.
+    pub points: ControlPoints,
+    /// Derived state both GPU behaviors read; rebuilt by `resolve`.
+    pub frame: PencilFrame,
+    /// Rank of the incidence system at the last resolve.
+    pub rank: u32,
+    /// Worst incidence receipt of the published basis at the last resolve.
+    pub residual: f32,
+}
+impl Copy for PencilSurface {}
+
+impl PencilSurface {
+    /// Boot the actor in the quirky state: nine points on the sphere-cone
+    /// intersection curve, already resolved (rank 8, pencil unlocked).
+    pub fn spawn() -> PencilSurface {
+        let initial = defaults(request: DefaultsRequest { generation: 0 })
+        let mut actor = PencilSurface {
+            points: ControlPoints {
+                p0x: initial.p0x, p0y: initial.p0y, p0z: initial.p0z,
+                p1x: initial.p1x, p1y: initial.p1y, p1z: initial.p1z,
+                p2x: initial.p2x, p2y: initial.p2y, p2z: initial.p2z,
+                p3x: initial.p3x, p3y: initial.p3y, p3z: initial.p3z,
+                p4x: initial.p4x, p4y: initial.p4y, p4z: initial.p4z,
+                p5x: initial.p5x, p5y: initial.p5y, p5z: initial.p5z,
+                p6x: initial.p6x, p6y: initial.p6y, p6z: initial.p6z,
+                p7x: initial.p7x, p7y: initial.p7y, p7z: initial.p7z,
+                p8x: initial.p8x, p8y: initial.p8y, p8z: initial.p8z,
+            },
+            frame: PencilFrame {
+                generation: 0,
+                lambda: 0.15,
+                yaw: 0.6, pitch: 0.35, dist: 4.0,
+                cx: 0.0, cy: 0.0, cz: 0.0,
+                pencil_free: 0.0,
+                a0: 0.0, b0: 0.0, c0: 0.0, d0: 0.0, e0: 0.0,
+                f0: 0.0, g0: 0.0, h0: 0.0, i0: 0.0, j0: 0.0,
+                a1: 0.0, b1: 0.0, c1: 0.0, d1: 0.0, e1: 0.0,
+                f1: 0.0, g1: 0.0, h1: 0.0, i1: 0.0, j1: 0.0,
+            },
+            rank: 0,
+            residual: 0.0,
+        }
+        actor.resolve()
+        actor
+    }
+
+    /// Message: move one control point. The actor immediately re-solves so it
+    /// is never displayed in a state its own constraints do not certify.
+    pub fn drag(mut self, _ index: u32, _ x: f32, _ y: f32, _ z: f32) {
+        if index == 0 {
+            self.points.p0x = x
+            self.points.p0y = y
+            self.points.p0z = z
+        }
+        if index == 1 {
+            self.points.p1x = x
+            self.points.p1y = y
+            self.points.p1z = z
+        }
+        if index == 2 {
+            self.points.p2x = x
+            self.points.p2y = y
+            self.points.p2z = z
+        }
+        if index == 3 {
+            self.points.p3x = x
+            self.points.p3y = y
+            self.points.p3z = z
+        }
+        if index == 4 {
+            self.points.p4x = x
+            self.points.p4y = y
+            self.points.p4z = z
+        }
+        if index == 5 {
+            self.points.p5x = x
+            self.points.p5y = y
+            self.points.p5z = z
+        }
+        if index == 6 {
+            self.points.p6x = x
+            self.points.p6y = y
+            self.points.p6z = z
+        }
+        if index == 7 {
+            self.points.p7x = x
+            self.points.p7y = y
+            self.points.p7z = z
+        }
+        if index == 8 {
+            self.points.p8x = x
+            self.points.p8y = y
+            self.points.p8z = z
+        }
+        self.resolve()
+    }
+
+    /// Message: sweep the pencil. Pure view state; no re-solve needed, and
+    /// when rank == 9 the basis is degenerate so the sweep honestly does
+    /// nothing.
+    pub fn set_lambda(mut self, _ value: f32) {
+        self.frame.lambda = value
+    }
+
+    /// Message: orbit the camera.
+    pub fn orbit(mut self, _ yaw: f32, _ pitch: f32, _ dist: f32) {
+        self.frame.yaw = yaw
+        self.frame.pitch = pitch
+        self.frame.dist = dist
+    }
+
+    /// Internal behavior: rebuild the derived state from the control points
+    /// through the linear QCGA incidence solve.
+    pub fn resolve(mut self) {
+        let pts: [f32; 27] = [
+            self.points.p0x, self.points.p0y, self.points.p0z,
+            self.points.p1x, self.points.p1y, self.points.p1z,
+            self.points.p2x, self.points.p2y, self.points.p2z,
+            self.points.p3x, self.points.p3y, self.points.p3z,
+            self.points.p4x, self.points.p4y, self.points.p4z,
+            self.points.p5x, self.points.p5y, self.points.p5z,
+            self.points.p6x, self.points.p6y, self.points.p6z,
+            self.points.p7x, self.points.p7y, self.points.p7z,
+            self.points.p8x, self.points.p8y, self.points.p8z,
+        ]
+        let solved: SolvedState = solve_points(pts)
+        let sol: PencilSolution = solved.sol
+        let q0: [f32; 10] = sol.q0
+        let q1: [f32; 10] = sol.q1
+        self.rank = sol.rank
+        self.residual = sol.residual
+        self.frame.cx = solved.cx
+        self.frame.cy = solved.cy
+        self.frame.cz = solved.cz
+        self.frame.pencil_free = if sol.rank <= 8 { 1.0 } else { 0.0 }
+        self.frame.a0 = q0[0]
+        self.frame.b0 = q0[1]
+        self.frame.c0 = q0[2]
+        self.frame.d0 = q0[3]
+        self.frame.e0 = q0[4]
+        self.frame.f0 = q0[5]
+        self.frame.g0 = q0[6]
+        self.frame.h0 = q0[7]
+        self.frame.i0 = q0[8]
+        self.frame.j0 = q0[9]
+        self.frame.a1 = q1[0]
+        self.frame.b1 = q1[1]
+        self.frame.c1 = q1[2]
+        self.frame.d1 = q1[3]
+        self.frame.e1 = q1[4]
+        self.frame.f1 = q1[5]
+        self.frame.g1 = q1[6]
+        self.frame.h1 = q1[7]
+        self.frame.i1 = q1[8]
+        self.frame.j1 = q1[9]
+    }
+
+    /// GPU behavior (vertex): all the QCGA. Substrate-blind body; the stage
+    /// placement claim lives on the program boundary adapter
+    /// `surface_vertex`, mirroring the established mode-blind-body doctrine.
+    pub fn vertex(self, _ vid: u32) -> SurfaceVarying {
+        let s: SurfaceSample = sample_vertex(vid, self.frame)
+        SurfaceVarying {
+            x: s.x, y: s.y, z: s.z, w: s.w,
+            nx: s.nx, ny: s.ny, nz: s.nz,
+            glow: s.glow, sheet: s.sheet, accuse: s.accuse,
+        }
+    }
+
+    /// GPU behavior (fragment): shading only, no QCGA. Reads the interpolated
+    /// typed handoff plus the actor state it shares with the vertex behavior
+    /// (`pencil_free` drives the warm tint), and turns any vertex
+    /// self-accusation into visible magenta rather than a quiet pixel.
+    pub fn fragment(self, _ v: SurfaceVarying) -> u32 {
+        // Interpolation denormalizes the gradient; renormalize per pixel.
+        let nlen: f32 = sqrt(v.nx * v.nx + v.ny * v.ny + v.nz * v.nz)
+        let ninv: f32 = if nlen > 0.0000001 { 1.0 / nlen } else { 0.0 }
+        let nx: f32 = v.nx * ninv
+        let ny: f32 = v.ny * ninv
+        let nz: f32 = v.nz * ninv
+        // Two-sided lighting: open sheets are seen from both sides.
+        let lit: f32 = 0.22 + 0.78 * abs(nx * LX + ny * LY + nz * LZ)
+        let warm: f32 = clamp01(self.frame.pencil_free)
+        let sheet: f32 = clamp01(v.sheet)
+        let glow: f32 = clamp01(v.glow)
+        let mut red: f32 = lit * (0.18 + 0.30 * sheet + 0.34 * warm) + glow * 0.55
+        let mut grn: f32 = lit * (0.55 - 0.18 * sheet + 0.10 * warm) + glow * 0.30
+        let mut blu: f32 = lit * (0.78 - 0.22 * sheet - 0.25 * warm) + glow * 0.10
+        if v.accuse > 0.5 {
+            red = 1.0
+            grn = 0.0
+            blu = 1.0
+        }
+        __bitcast(rgba(red, grn, blu))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Program boundary adapters: where the placement claims live. These are the
+// entry points a raster pipeline build would root, exactly as the current
+// render mode roots one fragment entry. Today's toolchain can root neither;
+// the acceptance suite pins both refusals.
+// ---------------------------------------------------------------------------
+
+/// The vertex stage of the `PencilSurface` program.
+pub fn surface_vertex(_ actor: PencilSurface, _ vid: u32) -> SurfaceVarying
+    uses (VertexStage<WebGpuBackend>)
+{
+    actor.vertex(vid)
+}
+
+/// The fragment stage of the `PencilSurface` program, consuming the
+/// interpolated handoff emitted by `surface_vertex`.
+pub fn surface_fragment(_ actor: PencilSurface, _ v: SurfaceVarying) -> u32
+    uses (FragmentStage<WebGpuBackend>)
+{
+    actor.fragment(v)
+}
+
+pub struct RenderResponse {
+    pub submitted: bool,
+}
+
+// Nominal host-effect lane. The browser runtime dispatches this schema to its
+// WebGPU actor; this Fe body is never presented as GPU execution. Whenever a
+// frame produced through this lane is displayed on the development host, the
+// display is software rendering (SwiftShader or lavapipe) and the surface
+// showing it must say so.
+pub fn render(_request: own PencilFrame) -> RenderResponse
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
+    RenderResponse { submitted: false }
+}
+
+// Nominal host-effect lane for explicit GPU readback of the rasterized frame,
+// the comparison target for `mesh_oracle`. Same software-rendering disclosure
+// as `render`.
+pub fn verify(_request: own PencilFrame) -> BrowserBytes
+    uses (HostEffect, MainThread, mut Dispatch<WebGpuBackend>)
+{
+    BrowserBytes { ptr: 0, len: 0 }
+}
+
+// ---------------------------------------------------------------------------
+// The solver: nine points to a pencil, entirely through linear incidence.
+// ---------------------------------------------------------------------------
+
+/// One entry of the 9 x 10 incidence matrix: the planned QCGA contraction of
+/// the embedded point against the k-th basis dual quadric. The linear system
+/// is the incidence operator by construction; there is no separately derived
+/// Veronese table to drift from it.
+fn incidence_row_entry(_ x: f32, _ y: f32, _ z: f32, _ k: usize) -> f32 {
+    let mut unit: [f32; 10] = [0.0; 10]
+    unit[k] = 1.0
+    qcga3d_incidence_planned(
+        x: x, y: y, z: z,
+        a: unit[0], b: unit[1], c: unit[2], d: unit[3], e: unit[4],
+        f: unit[5], g: unit[6], h: unit[7], i: unit[8], j: unit[9],
+    )
+}
+
+pub struct PencilSolution {
+    pub rank: u32,
+    pub residual: f32,
+    pub q0: [f32; 10],
+    pub q1: [f32; 10],
+}
+
+/// Gauss-Jordan elimination with partial pivoting on the 9 x 10 incidence
+/// matrix, then the first two nullspace basis vectors. rank == 9 means the
+/// nine points genuinely decide the quadric and `q1` degenerates to `q0`;
+/// rank <= 8 means the points abstain and `q0`, `q1` span (the first plane
+/// of) the surviving pencil.
+pub fn solve_pencil(_ pts: [f32; 27]) -> PencilSolution {
+    let mut m: [f32; 90] = [0.0; 90]
+    let mut r: usize = 0
+    while r < 9 {
+        let x: f32 = pts[r * 3]
+        let y: f32 = pts[r * 3 + 1]
+        let z: f32 = pts[r * 3 + 2]
+        let mut c: usize = 0
+        while c < 10 {
+            m[r * 10 + c] = incidence_row_entry(x, y, z, c)
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    // Relative rank tolerance from the matrix scale.
+    let mut mat_scale: f32 = 0.0
+    let mut k: usize = 0
+    while k < 90 {
+        mat_scale = max(mat_scale, abs(m[k]))
+        k = k + 1
+    }
+    let tol: f32 = mat_scale * 0.0001 + 0.000000001
+
+    let mut pivot_col_of_row: [usize; 9] = [10; 9]
+    let mut col_is_pivot: [u32; 10] = [0; 10]
+    let mut rank: usize = 0
+    let mut col: usize = 0
+    while col < 10 {
+        if rank < 9 {
+            let mut best_row: usize = rank
+            let mut best_abs: f32 = 0.0
+            let mut rr: usize = rank
+            while rr < 9 {
+                let a: f32 = abs(m[rr * 10 + col])
+                if a > best_abs {
+                    best_abs = a
+                    best_row = rr
+                }
+                rr = rr + 1
+            }
+            if best_abs > tol {
+                let mut cc: usize = 0
+                while cc < 10 {
+                    let tmp: f32 = m[rank * 10 + cc]
+                    m[rank * 10 + cc] = m[best_row * 10 + cc]
+                    m[best_row * 10 + cc] = tmp
+                    cc = cc + 1
+                }
+                let inv: f32 = 1.0 / m[rank * 10 + col]
+                cc = 0
+                while cc < 10 {
+                    m[rank * 10 + cc] = m[rank * 10 + cc] * inv
+                    cc = cc + 1
+                }
+                let mut er: usize = 0
+                while er < 9 {
+                    if er != rank {
+                        let factor: f32 = m[er * 10 + col]
+                        let mut ec: usize = 0
+                        while ec < 10 {
+                            m[er * 10 + ec] = m[er * 10 + ec] - factor * m[rank * 10 + ec]
+                            ec = ec + 1
+                        }
+                    }
+                    er = er + 1
+                }
+                pivot_col_of_row[rank] = col
+                col_is_pivot[col] = 1
+                rank = rank + 1
+            }
+        }
+        col = col + 1
+    }
+
+    // Nullspace basis vectors from the free columns, first two retained.
+    let mut q0: [f32; 10] = [0.0; 10]
+    let mut q1: [f32; 10] = [0.0; 10]
+    let mut found: usize = 0
+    let mut fc: usize = 0
+    while fc < 10 {
+        if col_is_pivot[fc] == 0 {
+            if found < 2 {
+                let mut v: [f32; 10] = [0.0; 10]
+                v[fc] = 1.0
+                let mut pr: usize = 0
+                while pr < rank {
+                    let pc: usize = pivot_col_of_row[pr]
+                    v[pc] = 0.0 - m[pr * 10 + fc]
+                    pr = pr + 1
+                }
+                if found == 0 { q0 = v } else { q1 = v }
+            }
+            found = found + 1
+        }
+        fc = fc + 1
+    }
+
+    // Orthonormalize the pencil plane so the lambda sweep is well conditioned.
+    // All vector algebra below stays element-level on the two mut locals; no
+    // whole-array temporaries change hands.
+    let mut n0sq: f32 = 0.0
+    let mut k0: usize = 0
+    while k0 < 10 {
+        n0sq = n0sq + q0[k0] * q0[k0]
+        k0 = k0 + 1
+    }
+    let n0: f32 = sqrt(n0sq)
+    if n0 > 0.0000001 {
+        let inv0: f32 = 1.0 / n0
+        let mut k1: usize = 0
+        while k1 < 10 {
+            q0[k1] = q0[k1] * inv0
+            k1 = k1 + 1
+        }
+    }
+    // Deterministic sign: the largest-magnitude coefficient points positive,
+    // so the pencil basis does not flip between drags.
+    let mut lead: usize = 0
+    let mut lead_abs: f32 = 0.0
+    let mut k2: usize = 0
+    while k2 < 10 {
+        let a0: f32 = abs(q0[k2])
+        if a0 > lead_abs {
+            lead_abs = a0
+            lead = k2
+        }
+        k2 = k2 + 1
+    }
+    if q0[lead] < 0.0 {
+        let mut k3: usize = 0
+        while k3 < 10 {
+            q0[k3] = 0.0 - q0[k3]
+            k3 = k3 + 1
+        }
+    }
+    if rank >= 9 {
+        let mut k4: usize = 0
+        while k4 < 10 {
+            q1[k4] = q0[k4]
+            k4 = k4 + 1
+        }
+    } else {
+        let mut proj: f32 = 0.0
+        let mut k5: usize = 0
+        while k5 < 10 {
+            proj = proj + q0[k5] * q1[k5]
+            k5 = k5 + 1
+        }
+        let mut n1sq: f32 = 0.0
+        let mut k6: usize = 0
+        while k6 < 10 {
+            q1[k6] = q1[k6] - proj * q0[k6]
+            n1sq = n1sq + q1[k6] * q1[k6]
+            k6 = k6 + 1
+        }
+        let n1: f32 = sqrt(n1sq)
+        if n1 > 0.0000001 {
+            let inv1: f32 = 1.0 / n1
+            let mut k7: usize = 0
+            while k7 < 10 {
+                q1[k7] = q1[k7] * inv1
+                k7 = k7 + 1
+            }
+            let mut lead1: usize = 0
+            let mut lead1_abs: f32 = 0.0
+            let mut k8: usize = 0
+            while k8 < 10 {
+                let a1: f32 = abs(q1[k8])
+                if a1 > lead1_abs {
+                    lead1_abs = a1
+                    lead1 = k8
+                }
+                k8 = k8 + 1
+            }
+            if q1[lead1] < 0.0 {
+                let mut k9: usize = 0
+                while k9 < 10 {
+                    q1[k9] = 0.0 - q1[k9]
+                    k9 = k9 + 1
+                }
+            }
+        } else {
+            let mut ka: usize = 0
+            while ka < 10 {
+                q1[ka] = q0[ka]
+                ka = ka + 1
+            }
+        }
+    }
+
+    // The receipt: the worst incidence of the returned surfaces over all nine
+    // points, measured by the SAME planned contraction the vertex stage runs.
+    let qa: Quadric = Quadric {
+        a: q0[0], b: q0[1], c: q0[2], d: q0[3], e: q0[4],
+        f: q0[5], g: q0[6], h: q0[7], i: q0[8], j: q0[9],
+    }
+    let qb: Quadric = Quadric {
+        a: q1[0], b: q1[1], c: q1[2], d: q1[3], e: q1[4],
+        f: q1[5], g: q1[6], h: q1[7], i: q1[8], j: q1[9],
+    }
+    let mut residual: f32 = 0.0
+    let mut pr2: usize = 0
+    while pr2 < 9 {
+        let x: f32 = pts[pr2 * 3]
+        let y: f32 = pts[pr2 * 3 + 1]
+        let z: f32 = pts[pr2 * 3 + 2]
+        residual = max(residual, abs(eval_quadric(qa, x, y, z)))
+        residual = max(residual, abs(eval_quadric(qb, x, y, z)))
+        pr2 = pr2 + 1
+    }
+
+    PencilSolution { rank: rank.downcast_truncate(), residual, q0, q1 }
+}
+
+/// Centroid plus pencil solution: the full derivation `resolve` and the
+/// `solve` lane share.
+pub struct SolvedState {
+    pub cx: f32,
+    pub cy: f32,
+    pub cz: f32,
+    pub sol: PencilSolution,
+}
+
+pub fn solve_points(_ pts: [f32; 27]) -> SolvedState {
+    let mut sx: f32 = 0.0
+    let mut sy: f32 = 0.0
+    let mut sz: f32 = 0.0
+    let mut pi: usize = 0
+    while pi < 9 {
+        sx = sx + pts[pi * 3]
+        sy = sy + pts[pi * 3 + 1]
+        sz = sz + pts[pi * 3 + 2]
+        pi = pi + 1
+    }
+    let ninth: f32 = 1.0 / 9.0
+    let cx: f32 = sx * ninth
+    let cy: f32 = sy * ninth
+    let cz: f32 = sz * ninth
+    let sol: PencilSolution = solve_pencil(pts)
+    SolvedState { cx, cy, cz, sol }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical wasm lanes: the actor's message surface, FLATTENED.
+//
+// Today's canonical lanes are stateless free functions, so each message must
+// carry the full state it needs and the actor state round-trips through the
+// host between messages. Under the target model, `defaults` is the spawn
+// payload, `solve` is the Drag/resolve arm, and `probe` / `mesh_oracle` are
+// verification behaviors reading actor state. The flattening is a recorded
+// tooling gap, not a design choice.
+// ---------------------------------------------------------------------------
+
+pub struct DefaultsRequest {
+    pub generation: u32,
+}
+
+pub struct SolveRequest {
+    pub generation: u32,
+    pub p0x: f32, pub p0y: f32, pub p0z: f32,
+    pub p1x: f32, pub p1y: f32, pub p1z: f32,
+    pub p2x: f32, pub p2y: f32, pub p2z: f32,
+    pub p3x: f32, pub p3y: f32, pub p3z: f32,
+    pub p4x: f32, pub p4y: f32, pub p4z: f32,
+    pub p5x: f32, pub p5y: f32, pub p5z: f32,
+    pub p6x: f32, pub p6y: f32, pub p6z: f32,
+    pub p7x: f32, pub p7y: f32, pub p7z: f32,
+    pub p8x: f32, pub p8y: f32, pub p8z: f32,
+}
+impl Copy for SolveRequest {}
+
+pub struct SolveResponse {
+    pub generation: u32,
+    /// Rank of the incidence system. 9 = the points decide one quadric,
+    /// 8 = a full pencil survives, lower = the points are even further from
+    /// general position (the response still carries the first two basis
+    /// surfaces and reports the honest rank).
+    pub rank: u32,
+    /// Worst planned-contraction incidence of the returned basis surfaces
+    /// over all nine points.
+    pub residual: f32,
+    pub cx: f32,
+    pub cy: f32,
+    pub cz: f32,
+    pub a0: f32, pub b0: f32, pub c0: f32, pub d0: f32, pub e0: f32,
+    pub f0: f32, pub g0: f32, pub h0: f32, pub i0: f32, pub j0: f32,
+    pub a1: f32, pub b1: f32, pub c1: f32, pub d1: f32, pub e1: f32,
+    pub f1: f32, pub g1: f32, pub h1: f32, pub i1: f32, pub j1: f32,
+}
+impl Copy for SolveResponse {}
+
+/// The initial nine points: five on the upper circle and four on the lower
+/// circle of (unit sphere) intersect (cone z^2 = x^2 + y^2), both circles of
+/// radius 1/sqrt(2) at z = +-1/sqrt(2). Nine points, yet rank 8: the whole
+/// pencil alpha(x^2 + y^2 - 1/2) + beta(z^2 - 1/2) survives, so the demo
+/// OPENS in the quirky state. Published as a lane so the page's initial state
+/// is computed, not baked.
+pub fn defaults(request: own DefaultsRequest) -> SolveRequest {
+    SolveRequest {
+        generation: request.generation,
+        p0x: 0.70710678, p0y: 0.0, p0z: 0.70710678,
+        p1x: 0.21850801, p1y: 0.67249851, p1z: 0.70710678,
+        p2x: -0.57206140, p2y: 0.41562694, p2z: 0.70710678,
+        p3x: -0.57206140, p3y: -0.41562694, p3z: 0.70710678,
+        p4x: 0.21850801, p4y: -0.67249851, p4z: 0.70710678,
+        p5x: 0.69636424, p5y: 0.12278780, p5z: -0.70710678,
+        p6x: -0.12278780, p6y: 0.69636424, p6z: -0.70710678,
+        p7x: -0.69636424, p7y: -0.12278780, p7z: -0.70710678,
+        p8x: 0.12278780, p8y: -0.69636424, p8z: -0.70710678,
+    }
+}
+
+/// The constraint solve: nine dragged points to a pencil basis, one call.
+/// This is the flattened form of the actor's Drag/resolve arm.
+pub fn solve(request: own SolveRequest) -> SolveResponse {
+    let pts: [f32; 27] = [
+        request.p0x, request.p0y, request.p0z,
+        request.p1x, request.p1y, request.p1z,
+        request.p2x, request.p2y, request.p2z,
+        request.p3x, request.p3y, request.p3z,
+        request.p4x, request.p4y, request.p4z,
+        request.p5x, request.p5y, request.p5z,
+        request.p6x, request.p6y, request.p6z,
+        request.p7x, request.p7y, request.p7z,
+        request.p8x, request.p8y, request.p8z,
+    ]
+    let solved: SolvedState = solve_points(pts)
+    let sol: PencilSolution = solved.sol
+    let q0: [f32; 10] = sol.q0
+    let q1: [f32; 10] = sol.q1
+
+    SolveResponse {
+        generation: request.generation,
+        rank: sol.rank,
+        residual: sol.residual,
+        cx: solved.cx, cy: solved.cy, cz: solved.cz,
+        a0: q0[0], b0: q0[1], c0: q0[2], d0: q0[3], e0: q0[4],
+        f0: q0[5], g0: q0[6], h0: q0[7], i0: q0[8], j0: q0[9],
+        a1: q1[0], b1: q1[1], c1: q1[2], d1: q1[3], e1: q1[4],
+        f1: q1[5], g1: q1[6], h1: q1[7], i1: q1[8], j1: q1[9],
+    }
+}
+
+/// Rehydrate a `PencilSurface` from its wire-form state slice. This function
+/// existing at all is the statelessness gap made visible: under the target
+/// model the actor holds its state and no lane needs to rebuild it.
+fn actor_from_frame(_ frame: PencilFrame) -> PencilSurface {
+    PencilSurface {
+        points: ControlPoints {
+            p0x: 0.0, p0y: 0.0, p0z: 0.0,
+            p1x: 0.0, p1y: 0.0, p1z: 0.0,
+            p2x: 0.0, p2y: 0.0, p2z: 0.0,
+            p3x: 0.0, p3y: 0.0, p3z: 0.0,
+            p4x: 0.0, p4y: 0.0, p4z: 0.0,
+            p5x: 0.0, p5y: 0.0, p5z: 0.0,
+            p6x: 0.0, p6y: 0.0, p6z: 0.0,
+            p7x: 0.0, p7y: 0.0, p7z: 0.0,
+            p8x: 0.0, p8y: 0.0, p8z: 0.0,
+        },
+        frame,
+        rank: if frame.pencil_free > 0.5 { 8 } else { 9 },
+        residual: 0.0,
+    }
+}
+
+pub struct VertexProbe {
+    pub generation: u32,
+    pub vid: u32,
+    pub lambda: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub dist: f32,
+    pub cx: f32,
+    pub cy: f32,
+    pub cz: f32,
+    pub pencil_free: f32,
+    pub a0: f32, pub b0: f32, pub c0: f32, pub d0: f32, pub e0: f32,
+    pub f0: f32, pub g0: f32, pub h0: f32, pub i0: f32, pub j0: f32,
+    pub a1: f32, pub b1: f32, pub c1: f32, pub d1: f32, pub e1: f32,
+    pub f1: f32, pub g1: f32, pub h1: f32, pub i1: f32, pub j1: f32,
+}
+
+pub struct ProbeResponse {
+    pub generation: u32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+    pub nx: f32,
+    pub ny: f32,
+    pub nz: f32,
+    pub glow: f32,
+    pub sheet: f32,
+    pub accuse: f32,
+    /// The fragment behavior's color for this vertex's own (un-interpolated)
+    /// handoff: what the pipeline computes AT the vertex.
+    pub rgba: u32,
+    pub t: f32,
+    pub hx: f32,
+    pub hy: f32,
+    pub hz: f32,
+    pub residual: f32,
+    pub disc: f32,
+    pub missed: u32,
+}
+
+/// Single-vertex verification lane: runs BOTH behaviors of the actor for one
+/// vertex, exactly as declared (vertex, then fragment on the vertex's own
+/// handoff), and returns the full evidence. The acceptance test drives this
+/// lane; a future raster pipeline is verified against it, with the stated
+/// caveat that between vertices the GPU shades INTERPOLATED handoffs.
+pub fn probe(request: own VertexProbe) -> ProbeResponse {
+    let actor: PencilSurface = actor_from_frame(PencilFrame {
+        generation: request.generation,
+        lambda: request.lambda,
+        yaw: request.yaw,
+        pitch: request.pitch,
+        dist: request.dist,
+        cx: request.cx, cy: request.cy, cz: request.cz,
+        pencil_free: request.pencil_free,
+        a0: request.a0, b0: request.b0, c0: request.c0, d0: request.d0, e0: request.e0,
+        f0: request.f0, g0: request.g0, h0: request.h0, i0: request.i0, j0: request.j0,
+        a1: request.a1, b1: request.b1, c1: request.c1, d1: request.d1, e1: request.e1,
+        f1: request.f1, g1: request.g1, h1: request.h1, i1: request.i1, j1: request.j1,
+    })
+    let s: SurfaceSample = sample_vertex(request.vid, actor.frame)
+    let v: SurfaceVarying = SurfaceVarying {
+        x: s.x, y: s.y, z: s.z, w: s.w,
+        nx: s.nx, ny: s.ny, nz: s.nz,
+        glow: s.glow, sheet: s.sheet, accuse: s.accuse,
+    }
+    let color: u32 = actor.fragment(v)
+    ProbeResponse {
+        generation: request.generation,
+        x: s.x, y: s.y, z: s.z, w: s.w,
+        nx: s.nx, ny: s.ny, nz: s.nz,
+        glow: s.glow, sheet: s.sheet, accuse: s.accuse,
+        rgba: color,
+        t: s.t,
+        hx: s.hx, hy: s.hy, hz: s.hz,
+        residual: s.residual,
+        disc: s.disc,
+        missed: s.missed,
+    }
+}
+
+fn append_byte(_ value: u32) {
+    let byte = alloc_bytes(1)
+    byte.write(value.downcast_truncate())
+}
+
+fn append_word_tail(_ word: u32) {
+    append_byte(word >> 8)
+    append_byte(word >> 16)
+    append_byte(word >> 24)
+}
+
+fn append_word(_ word: u32) {
+    append_byte(word)
+    append_word_tail(word)
+}
+
+fn append_clip_and_color(_ v: SurfaceVarying, _ color: u32) {
+    let xw: u32 = __bitcast(v.x)
+    let yw: u32 = __bitcast(v.y)
+    let zw: u32 = __bitcast(v.z)
+    let ww: u32 = __bitcast(v.w)
+    append_word(xw)
+    append_word(yw)
+    append_word(zw)
+    append_word(ww)
+    append_word(color)
+}
+
+/// The complete CPU-side vertex stream: for every vertex, the clip position
+/// the vertex behavior emits and the fragment behavior's color for that
+/// vertex's own handoff. 20 bytes per vertex (4 x f32 LE, then RGBA8 as one
+/// LE u32), `VERTEX_COUNT` vertices in vid order. This is the canonical
+/// comparison target for a raster pipeline claiming to run these behaviors
+/// on the GPU (vertex stream against vertex stream; between vertices the GPU
+/// shades interpolated handoffs, which this stream deliberately does not
+/// model). Any GPU frame shown from it on the development host is software
+/// rendering (SwiftShader or lavapipe) and must be labeled so.
+pub fn mesh_oracle(request: own PencilFrame) -> AllocatedBrowserBytes {
+    let actor: PencilSurface = actor_from_frame(request)
+    let first_v: SurfaceVarying = actor.vertex(0)
+    let first_color: u32 = actor.fragment(first_v)
+    let first_word: u32 = __bitcast(first_v.x)
+    let head = alloc_bytes(1)
+    head.write(first_word.downcast_truncate())
+    append_word_tail(first_word)
+    let yw: u32 = __bitcast(first_v.y)
+    let zw: u32 = __bitcast(first_v.z)
+    let ww: u32 = __bitcast(first_v.w)
+    append_word(yw)
+    append_word(zw)
+    append_word(ww)
+    append_word(first_color)
+    let mut vid: u32 = 1
+    while vid < VERTEX_COUNT {
+        let v: SurfaceVarying = actor.vertex(vid)
+        let color: u32 = actor.fragment(v)
+        append_clip_and_color(v, color)
+        vid = vid + 1
+    }
+    AllocatedBrowserBytes { ptr: head, len: VERTEX_COUNT * 20 }
+}
