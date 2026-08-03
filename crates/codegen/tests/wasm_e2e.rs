@@ -5128,3 +5128,208 @@ fn slice_c_poseidon_dual_gate_body() {
         );
     }
 }
+
+// ============================================================================
+// Arrays rung STEP 1, Slice D: THE SERIAL POSEIDON-MERKLE ROOT BUILDER (the
+// ungated wasm prover leg of Rollcall). A function-local `[u32; N*20]` tree
+// buffer plus the PROVEN loop-form limb Poseidon `hash2` permutation (Slice C,
+// reused VERBATIM as the node-combine primitive) builds a Poseidon-Merkle root
+// over N leaves by hashing (even,odd) child pairs level-by-level, collapsing the
+// levels IN PLACE up the local buffer, on wasm under wasmtime. The reassembled
+// root is asserted bit-exact to an INDEPENDENT num-bigint Poseidon-Merkle-tree
+// oracle (the same plain-field circomlib `hash2` as the Slice C oracle, same
+// MDS / round constants parsed straight out of `const_poseidon.fe`), over random
+// and edge leaf sets, at O0 AND O2, for depth 2 (N=4) and depth 3 (N=8). The
+// pairing convention (parent = hash2(even child, odd child)) is EXACTLY the
+// RollcallRegistry / `rollcall_e2e::build_tree` convention, so a root built here
+// and a sibling path derived from it verify on-chain (see `rollcall_e2e`).
+// ============================================================================
+
+const SLICE_D_MERKLE4_SRC: &str = include_str!("fixtures/spirv/poseidon_merkle_root_loop.fe");
+const SLICE_D_MERKLE8_SRC: &str = include_str!("fixtures/spirv/poseidon_merkle8_root_loop.fe");
+
+/// INDEPENDENT oracle: build a Poseidon-Merkle root over `leaves` bottom-up with
+/// the plain-field circomlib `hash2` (`slice_c_poseidon_oracle`), pairing
+/// (even, odd) children -- the exact RollcallRegistry / `build_tree` convention.
+fn slice_d_merkle_root_oracle(
+    leaves: &[BigUint],
+    p: &BigUint,
+    mds: &[BigUint],
+    rc: &[BigUint],
+) -> BigUint {
+    assert!(
+        leaves.len().is_power_of_two() && leaves.len() >= 2,
+        "leaf count must be a power of two >= 2"
+    );
+    let mut level: Vec<BigUint> = leaves.to_vec();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for pair in level.chunks(2) {
+            next.push(slice_c_poseidon_oracle(&pair[0], &pair[1], p, mds, rc));
+        }
+        level = next;
+    }
+    level.into_iter().next().expect("one root remains")
+}
+
+/// Run the wasm merkle-root builder over all `n` output limb indices (arg0 = k),
+/// passing the N leaves' PLAIN limbs (leaf j at args `[1 + j*n ..]`) as the rest.
+/// Returns the root's `n` limbs. Untyped `Func::call` path (arity past 16).
+fn slice_d_merkle_root_limbs(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    fn_name: &str,
+    leaf_limbs: &[Vec<u32>],
+    n: usize,
+) -> Vec<u32> {
+    use wasmtime::Val;
+    let f = instance
+        .get_func(&mut *store, fn_name)
+        .unwrap_or_else(|| panic!("`{fn_name}` export should exist"));
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut params: Vec<Val> = Vec::with_capacity(1 + leaf_limbs.len() * n);
+        params.push(Val::I32(k as i32));
+        for leaf in leaf_limbs {
+            for &l in leaf {
+                params.push(Val::I32(l as i32));
+            }
+        }
+        let mut results = [Val::I32(0)];
+        f.call(&mut *store, &params, &mut results)
+            .unwrap_or_else(|e| panic!("{fn_name}(k={k}) should run: {e:?}"));
+        out.push(match results[0] {
+            Val::I32(v) => v as u32,
+            other => panic!("{fn_name} result must be i32, got {other:?}"),
+        });
+    }
+    out
+}
+
+/// THE SLICE D MERKLE GATE: the serial loop-form Poseidon-Merkle root builder,
+/// compiled to wasm and run under wasmtime, equals the independent num-bigint
+/// Poseidon-Merkle-tree oracle bit-exact, over edge + pseudo-random leaf sets at
+/// depth 2 (N=4) and depth 3 (N=8), at O0 AND O2. Runs on a wide-stack worker
+/// thread for the same reason as the Slice C Poseidon gate (large generated
+/// function; a compiler-stack accommodation, not a change to what it computes).
+#[test]
+fn serial_poseidon_merkle_root_matches_bigint_tree_oracle_on_wasm_at_o0_and_o2() {
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(slice_d_merkle_gate_body)
+        .expect("spawn wide-stack worker for the Merkle gate")
+        .join()
+        .expect("Merkle gate worker thread should not panic");
+}
+
+fn slice_d_merkle_gate_body() {
+    let p = slice_b_bn254_fr_prime();
+    let n = SLICE_B_N;
+    let mds = slice_c_parse_const_block(CONST_POSEIDON_SRC, "POSEIDON_T3_MDS");
+    let rc = slice_c_parse_const_block(CONST_POSEIDON_SRC, "POSEIDON_T3_ROUND_CONSTANTS");
+    assert_eq!(mds.len(), 9, "t=3 MDS should be 3x3");
+    assert_eq!(rc.len(), 195, "t=3 round constants should be 65x3");
+
+    // Anchor the tree oracle's hash2 to circomlib (same pin as Slice C), so a
+    // matching Merkle root means matching the u256 form's hash2 at every node.
+    let pin_00 = BigUint::parse_bytes(
+        b"2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864",
+        16,
+    )
+    .unwrap();
+    assert_eq!(
+        slice_c_poseidon_oracle(&0u32.into(), &0u32.into(), &p, &mds, &rc),
+        pin_00,
+        "the tree oracle's node hash2 must reproduce circomlib hash2(0,0)"
+    );
+
+    let one = BigUint::from(1u32);
+    let two = BigUint::from(2u32);
+
+    // Deterministic pseudo-random leaf sets + edge sets, per depth.
+    let mut seed: u64 = 0xD1B5_4A32_D192_ED03;
+    let mut make_random_set = |count: usize| -> Vec<BigUint> {
+        (0..count).map(|_| slice_b_next_field(&mut seed, &p)).collect()
+    };
+
+    // depth 2 (N=4): edge set (0, 1, p-1, p-2), ascending, + 2 random sets.
+    let sets4: Vec<(String, Vec<BigUint>)> = vec![
+        (
+            "edge4".into(),
+            vec![0u32.into(), one.clone(), &p - &one, &p - &two],
+        ),
+        (
+            "asc4".into(),
+            vec![11u32.into(), 22u32.into(), 33u32.into(), 44u32.into()],
+        ),
+        ("rand4a".into(), make_random_set(4)),
+        ("rand4b".into(), make_random_set(4)),
+    ];
+    // depth 3 (N=8): ascending + 1 random set.
+    let sets8: Vec<(String, Vec<BigUint>)> = vec![
+        ("asc8".into(), (1u32..=8u32).map(BigUint::from).collect()),
+        ("rand8".into(), make_random_set(8)),
+    ];
+
+    // The build jobs: (fixture file, export fn name, source, opt, leaf sets).
+    // N=4 (depth 2) is the primary deliverable, gated at O0 AND O2 (the O2 speed
+    // pipeline runs GVN / load-store forwarding over the new tree-buffer memory).
+    // N=8 (depth 3) is extra evidence that the level loop runs deeper (an added
+    // intermediate collapse); it is gated at O0 (recompiling the larger function
+    // at O2 is redundant for the depth claim and each compile of this ~2.9k-stmt
+    // function is minutes-costly). Each generated function is loop-only.
+    let jobs: Vec<(&str, &str, &str, OptLevel, &Vec<(String, Vec<BigUint>)>)> = vec![
+        (
+            "poseidon_merkle_root_loop.fe",
+            "poseidon_merkle_root_loop",
+            SLICE_D_MERKLE4_SRC,
+            OptLevel::O0,
+            &sets4,
+        ),
+        (
+            "poseidon_merkle_root_loop.fe",
+            "poseidon_merkle_root_loop",
+            SLICE_D_MERKLE4_SRC,
+            OptLevel::O2,
+            &sets4,
+        ),
+        (
+            "poseidon_merkle8_root_loop.fe",
+            "poseidon_merkle8_root_loop",
+            SLICE_D_MERKLE8_SRC,
+            OptLevel::O0,
+            &sets8,
+        ),
+    ];
+
+    for (file, export, src, opt, src_sets) in jobs {
+        let wasm = slice_b_compile_at(file, src, opt);
+        // Self-contained: the tree buffer lives in the synthesized canonical arena.
+        assert!(
+            func_imports(&wasm).is_empty(),
+            "[{opt:?}] the {export} Merkle builder should need no host imports; got {:?}",
+            func_imports(&wasm)
+        );
+
+        let (mut store, instance) = instantiate(&wasm);
+        for (name, leaves) in src_sets.iter() {
+            let leaf_limbs: Vec<Vec<u32>> =
+                leaves.iter().map(|x| slice_b_to_limbs(x, n)).collect();
+            let got_limbs =
+                slice_d_merkle_root_limbs(&mut store, &instance, export, &leaf_limbs, n);
+            let got = slice_c_limbs_to_biguint(&got_limbs);
+            let oracle = slice_d_merkle_root_oracle(leaves, &p, &mds, &rc);
+            assert_eq!(
+                got, oracle,
+                "[{opt:?}] serial wasm Poseidon-Merkle root for {export}({name}) must equal \
+                 the independent num-bigint Poseidon-Merkle-tree oracle"
+            );
+        }
+        eprintln!(
+            "  Slice D Merkle gate [{opt:?}]: serial wasm {export} root == num-bigint \
+             Poseidon-Merkle-tree oracle, bit-exact, over {} leaf sets.",
+            src_sets.len()
+        );
+    }
+}
+
