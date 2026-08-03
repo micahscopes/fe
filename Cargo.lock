@@ -2689,6 +2689,7 @@ name = "fe-codegen"
 version = "26.2.0"
 dependencies = [
  "dir-test",
+ "ethers-core",
  "fe-common",
  "fe-compiler-db",
  "fe-contract-harness",

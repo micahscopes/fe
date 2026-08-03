@@ -72,6 +72,10 @@ pollster = "0.4.0"
 # codegen -> contract-harness -> codegen edge is a dev-dependency cycle, which
 # Cargo permits (the lib graph stays acyclic).
 fe-contract-harness = { path = "../contract-harness" }
+# The Rollcall EVM test needs to build ABI calldata (Token::Uint/FixedArray)
+# for a fixed-size-array contract call; fe-contract-harness already depends on
+# the same version, so this adds no new resolved version to the graph.
+ethers-core = "2"
 # The B3 page generator (`examples/gen_webgpu_demo.rs`) serializes the
 # compiler-stated `SpirvLayout` to `layout.json`. The fork carries no serde dep
 # (plan ruling 1 item 5); the fe side does the serialization, here via the
