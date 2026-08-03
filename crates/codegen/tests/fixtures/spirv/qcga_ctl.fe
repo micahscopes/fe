@@ -1,0 +1,70 @@
+// I-qcga (interactive controls-in-Fe): the QUADRIC-PENCIL CONTROLLER, compiled
+// ONLY to wasm. Pure, stateless, oracle-checkable. JavaScript never touches the
+// quadric's geometric state: it forwards one pointer-drag/wheel event to
+// update_quadric and relays the returned (lambda, theta, zoom) triple, which
+// IS the actor's three uniforms verbatim (demos/sketches/qcga/src/lib.fe
+// reads them as `self.lambda` / `self.theta` / `self.zoom`).
+//
+// Horizontal drag (dx) sweeps the pencil parameter lambda: the quadric member
+// Q(lambda) = cos(PI*lambda)*Q0 + sin(PI*lambda)*Q1 deforms through genuine
+// topology changes (line pair -> ellipse -> line pair -> hyperbola), clamped to
+// [0, 1] (the fragment's own domain). Vertical drag (dy) turns theta, rotating
+// the member about the y axis so the xz cross term goes live; unbounded is fine
+// because theta only ever feeds cos/sin in the fragment, which wrap on their
+// own. The wheel (dzoom) zooms the visible slice half-extent, clamped to
+// [0.3, 4.0] so the conic never vanishes to a point or a haze.
+//
+// No fixed-point trick here (unlike the clifford rotor / mandelbrot view):
+// the fragment already takes lambda/theta/zoom as plain f32, so the control
+// fn stays in f32 too, converting only the two integer pointer deltas.
+
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+}
+
+const LAMBDA_SENSITIVITY: f32 = 0.0025
+const THETA_SENSITIVITY: f32 = 0.01
+const ZOOM_MIN: f32 = 0.3
+const ZOOM_MAX: f32 = 4.0
+const ZOOM_STEP_IN: f32 = 0.875
+const ZOOM_STEP_OUT: f32 = 1.125
+
+/// min(a, b) via one branch.
+fn min_f(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
+
+/// max(a, b) via one branch (written `a < b`, never `>`).
+fn max_f(a: f32, b: f32) -> f32 {
+    if a < b { b } else { a }
+}
+
+fn clamp01_f(x: f32) -> f32 {
+    min_f(max_f(x, 0.0), 1.0)
+}
+
+fn clamp_zoom(z: f32) -> f32 {
+    min_f(max_f(z, ZOOM_MIN), ZOOM_MAX)
+}
+
+/// One wheel notch IN (dzoom < 0): shrink the visible half-extent by 1/8.
+fn zoom_in_if(z: f32, dzoom: i32) -> f32 {
+    if dzoom < 0 { z * ZOOM_STEP_IN } else { z }
+}
+
+/// One wheel notch OUT (dzoom > 0): grow the visible half-extent by 1/8.
+/// Applied to the zoom-in result; since at most one leg fires per event, the
+/// input equals the original zoom whenever this leg fires.
+fn zoom_out_if(z: f32, dzoom: i32) -> f32 {
+    if 0 < dzoom { z * ZOOM_STEP_OUT } else { z }
+}
+
+pub fn update_quadric(lambda: f32, theta: f32, zoom: f32,
+                      dx: i32, dy: i32, dzoom: i32) -> (f32, f32, f32) {
+    let dxf: f32 = __f32_from_i32(dx)
+    let dyf: f32 = __f32_from_i32(dy)
+    let lambda1: f32 = clamp01_f(lambda + dxf * LAMBDA_SENSITIVITY)
+    let theta1: f32 = theta + dyf * THETA_SENSITIVITY
+    let zoom1: f32 = clamp_zoom(zoom_out_if(zoom_in_if(zoom, dzoom), dzoom))
+    (lambda1, theta1, zoom1)
+}
