@@ -1257,6 +1257,19 @@ fn is_u256_unsigned(repr: ScalarRepr) -> bool {
     )
 }
 
+/// Whether a big-endian integer constant (`ConstScalar::Int::words`, the byte
+/// order `bytes_to_i256` / `I256::from_be_bytes` consume) fits in an unsigned
+/// 32-bit value. A narrowed `usize` carries a 32-bit value on wasm32; a wider
+/// constant would truncate its high bits when rematerialized at the narrowed i32
+/// type, and a semantically out-of-bounds index (`>= 2^32`) whose low 32 bits
+/// happen to be small would slip past the unsigned array bounds check. Such a
+/// constant must NOT be narrowed (the body falls back to the 256-bit fail-closed
+/// path instead).
+fn const_int_fits_u32(words: &[u8]) -> bool {
+    let len = words.len();
+    len <= 4 || words[..len - 4].iter().all(|&byte| byte == 0)
+}
+
 /// Change 4: narrow `usize` scalar locals (256-bit in MIR) to `i32` on the wasm
 /// path so a runtime array index / loop counter can materialize and address
 /// linear memory. This is the target-correct width for `usize` on wasm32, not a
@@ -1334,11 +1347,34 @@ fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db
                     }
                 }
                 RExpr::Builtin(RuntimeBuiltin::IntTruncate { value, from, to }) => {
-                    if dst_narrowed && is_u256_unsigned(to.repr) {
-                        to.repr = USIZE_WASM_REPR;
+                    // Fail closed on any repr mismatch (staged-body property "any
+                    // inconsistency leaves the body untouched"): a partial rewrite
+                    // would leave one side 256-bit and silently miscompile.
+                    if dst_narrowed {
+                        if is_u256_unsigned(to.repr) {
+                            to.repr = USIZE_WASM_REPR;
+                        } else {
+                            ok = false;
+                        }
                     }
-                    if is_narrowed(value) && is_u256_unsigned(from.repr) {
-                        from.repr = USIZE_WASM_REPR;
+                    if is_narrowed(value) {
+                        if is_u256_unsigned(from.repr) {
+                            from.repr = USIZE_WASM_REPR;
+                        } else {
+                            ok = false;
+                        }
+                    }
+                }
+                // CRITICAL bounds-safety: a narrowed `usize` carries a 32-bit value
+                // on wasm32. A `usize` constant whose value exceeds `u32::MAX` would
+                // truncate its high bits when rematerialized at the narrowed i32
+                // type (`immediate_for_const_scalar` -> `Immediate::from_i256`), so
+                // a semantically out-of-bounds index could alias an in-bounds
+                // element before the unsigned bounds check ever runs. Refuse to
+                // narrow: the whole body falls back to the 256-bit fail-closed path.
+                RExpr::ConstScalar(ConstScalar::Int { words, signed, .. }) if dst_narrowed => {
+                    if *signed || !const_int_fits_u32(words.as_slice()) {
+                        ok = false;
                     }
                 }
                 _ => {}
@@ -1850,6 +1886,74 @@ fn collect_builtin_uses(builtin: &RuntimeBuiltin<'_>, used: &mut FxHashMap<RLoca
 /// `collect_used_locals`). The removed local's carrier becomes `Erased` so the
 /// SSA declaration loop skips it. Iterated to a fixpoint: erasing `%a = use %b`
 /// can make `%b` dead in turn.
+/// Item 3 (slice A ownership contract): the canonical arena bump-allocates
+/// upward from byte 1024 and knows nothing about host-chosen fixed addresses. A
+/// function that BOTH allocates a local array (`AllocObject` -> `MemAllocDynamic`)
+/// AND accesses a direct host memory region (a `MemPtr` / `RawAddr{Memory}`
+/// parameter, or a raw `Ptr{Memory}` place) could grow its array over the host
+/// region. Until a disjoint address partition exists, that mix fails closed.
+/// Functions that only allocate, or only touch host memory, are unaffected
+/// (object-ref array element accesses use `Ref`-rooted places, never `Ptr`).
+fn check_host_region_arena_disjoint(body: &RuntimeBody<'_>) -> Result<(), LowerError> {
+    let allocates_array = body.blocks.iter().any(|block| {
+        block
+            .stmts
+            .iter()
+            .any(|stmt| matches!(stmt, RStmt::Assign { expr: RExpr::AllocObject { .. }, .. }))
+    });
+    if !allocates_array {
+        return Ok(());
+    }
+    let host_region_param = body.signature.params.iter().any(|param| {
+        matches!(
+            param.class,
+            RuntimeClass::RawAddr {
+                space: AddressSpaceKind::Memory,
+                ..
+            }
+        )
+    });
+    let host_region_place = body
+        .blocks
+        .iter()
+        .any(|block| block.stmts.iter().any(stmt_uses_host_memory_pointer));
+    if host_region_param || host_region_place {
+        return Err(LowerError::Unsupported(
+            "wasm target: a function that allocates a local array cannot also use a direct \
+             host memory region (a `MemPtr`/`RawAddr{Memory}` parameter or raw memory \
+             pointer); the canonical arena and host-chosen fixed addresses have no disjoint \
+             partition in slice A, so this mix fails closed"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a statement dereferences a raw host memory address (`Ptr{Memory}`
+/// place root). Object-ref array accesses use `Ref`-rooted places, so this never
+/// flags an arena allocation's own element reads/writes.
+fn stmt_uses_host_memory_pointer(stmt: &RStmt<'_>) -> bool {
+    fn is_host_memory_ptr(place: &RuntimePlace<'_>) -> bool {
+        matches!(
+            place.root,
+            PlaceRoot::Ptr {
+                space: AddressSpaceKind::Memory,
+                ..
+            }
+        )
+    }
+    match stmt {
+        RStmt::Store { dst, .. } | RStmt::CopyInto { dst, .. } => is_host_memory_ptr(dst),
+        RStmt::Assign { expr, .. } => match expr {
+            RExpr::Load { place }
+            | RExpr::AddrOf { place }
+            | RExpr::MaterializePlaceToObject { place } => is_host_memory_ptr(place),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 fn drop_dead_pure_aggregate_values<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
     fn is_pure_aggregate_def(expr: &RExpr<'_>) -> bool {
         matches!(
@@ -1870,7 +1974,13 @@ fn drop_dead_pure_aggregate_values<'db>(db: &'db DriverDataBase, body: &mut Runt
 
     loop {
         let used = collect_used_locals(body);
-        let mut dead: Vec<RLocalId> = Vec::new();
+        // A destination is eligible for deletion only when EVERY assignment to it
+        // is a pure aggregate def. A multi-definition local (for example a pure
+        // aggregate def plus an effectful `Call` def to the same runtime
+        // destination) must keep all of its assignments: deleting the effectful
+        // def on the strength of one pure def would drop the side effect. Fold
+        // over every def of a candidate dst, disqualifying it if any is impure.
+        let mut candidates: FxHashMap<RLocalId, bool> = FxHashMap::default();
         for block in &body.blocks {
             for stmt in &block.stmts {
                 let RStmt::Assign { dst, expr } = stmt else {
@@ -1887,11 +1997,14 @@ fn drop_dead_pure_aggregate_values<'db>(db: &'db DriverDataBase, body: &mut Runt
                 if !matches!(layout.data(db), Layout::Array(_) | Layout::Enum(_)) {
                     continue;
                 }
-                if is_pure_aggregate_def(expr) {
-                    dead.push(*dst);
-                }
+                let all_pure = candidates.entry(*dst).or_insert(true);
+                *all_pure &= is_pure_aggregate_def(expr);
             }
         }
+        let dead: Vec<RLocalId> = candidates
+            .into_iter()
+            .filter_map(|(dst, all_pure)| all_pure.then_some(dst))
+            .collect();
         if dead.is_empty() {
             return;
         }
@@ -3007,13 +3120,14 @@ where
     /// (`aggregate_make`), passed as flattened params, and returned as flattened
     /// results.
     tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
-    /// Change 3: the lazily-created per-function out-of-bounds trap block. A
-    /// dynamic array index emits `Br(idx < len, ok, trap)`; every such check in
-    /// the function branches to this one block, whose sole instruction is
-    /// `Unreachable` (a wasm trap, the portable image of the EVM revert an OOB
-    /// index would take). Created on first use so functions without a dynamic
-    /// index emit no trap block.
-    oob_trap_block: Option<BlockId>,
+    /// Change 3: the lazily-created per-function trap block. A dynamic array
+    /// index emits `Br(idx < len, ok, trap)`, and checked `usize` overflow emits
+    /// `Br(overflow, trap, cont)`; every such check in the function branches to
+    /// this one block, whose sole instruction is `Unreachable` (a wasm trap, the
+    /// portable image of the EVM revert an out-of-bounds index or overflow panic
+    /// would take). Created on first use so functions with no such check emit no
+    /// trap block.
+    trap_block: Option<BlockId>,
 }
 
 impl<'ctx, 'db, 'a, I> PortableFunctionLowerer<'ctx, 'db, 'a, I>
@@ -3083,7 +3197,7 @@ where
             block_map,
             vars,
             tuple_vars,
-            oob_trap_block: None,
+            trap_block: None,
         })
     }
 
@@ -3092,6 +3206,7 @@ where
     }
 
     fn lower(mut self) -> Result<(), LowerError> {
+        check_host_region_arena_disjoint(&self.body)?;
         let is = self.inst_set();
 
         // Prologue: bind incoming argument values to their parameter locals,
@@ -3543,7 +3658,27 @@ where
 
     fn lower_expr(&mut self, expr: &RExpr<'db>, dst: RLocalId) -> Result<ValueId, LowerError> {
         match expr {
-            RExpr::Use(src) => self.local_value(*src),
+            RExpr::Use(src) => {
+                // Item 2: a whole-aggregate local behind an object/memory-provider
+                // reference carries its arena POINTER as its SSA value, so a plain
+                // `Use` copies the pointer, not the bytes. This is SAFE when it
+                // binds a freshly produced object to its variable (`a = use <temp>`
+                // where `<temp>` is an `AllocObject`/`MaterializeToObject`/... -- the
+                // ordinary local-array init: `a` and the temp are one array). It is
+                // the ALIASING BUG when it copies an EXISTING array reference
+                // (`let b = a` lowers to `b = use a`, where `a` is itself bound from
+                // an object): `a[0] = 9; b[0]` would wrongly observe 9, whereas Fe
+                // `[T; N]` is `Copy` (deep-copy semantics). Fail closed on the
+                // latter; deep array copy is deferred (design slice A).
+                if self.is_object_ref_local(*src) && !self.is_fresh_object_binding(*src) {
+                    return Err(LowerError::Unsupported(format!(
+                        "wasm target: whole-aggregate value copy (`{dst:?} = use {src:?}`) of an \
+                         existing array would alias the backing arena pointer; array/object value \
+                         copies are not lowered (slice A fails closed, deep copy is deferred)"
+                    )));
+                }
+                self.local_value(*src)
+            }
             RExpr::ConstScalar(constant) => {
                 let ty = self.local_ty(dst)?;
                 let imm = immediate_for_const_scalar(constant, ty)?;
@@ -3562,7 +3697,7 @@ where
                 self.local_value(*value)
             }
             RExpr::Call { callee, args } => self.lower_call(*callee, args),
-            RExpr::Builtin(builtin) => self.lower_builtin(builtin),
+            RExpr::Builtin(builtin) => self.lower_builtin(builtin, dst),
             // R3.4b step 2: single-scalar-field newtype construction/projection is
             // a no-op on the represented word. `AggregateMake` of one field yields
             // that field's value; `AggregateExtract` at index 0 yields the
@@ -3901,7 +4036,7 @@ where
                             // so an out-of-range (or wrapped) value fails the check
                             // and traps.
                             let in_bounds = self.fb.insert_inst(Lt::new(is, idx, len_val), Type::I1);
-                            let trap = self.oob_trap_block();
+                            let trap = self.trap_block();
                             let ok = self.fb.append_block();
                             self.fb
                                 .insert_inst_no_result(Br::new(is, in_bounds, ok, trap));
@@ -3950,13 +4085,14 @@ where
             .insert_inst(Add::new(self.inst_set(), addr, offset), Type::I32))
     }
 
-    /// The lazily-created per-function out-of-bounds trap block: a single block
-    /// whose sole instruction is `Unreachable` (a wasm trap). Every dynamic-index
-    /// bounds check branches here on failure. Created on first use and cached so
-    /// index-free functions emit no trap block; the builder's current block is
-    /// restored so callers continue emitting into their own block.
-    fn oob_trap_block(&mut self) -> BlockId {
-        if let Some(block) = self.oob_trap_block {
+    /// The lazily-created per-function trap block: a single block whose sole
+    /// instruction is `Unreachable` (a wasm trap). Every dynamic-index bounds
+    /// check and every checked-`usize` overflow check branches here on failure.
+    /// Created on first use and cached so functions with no such check emit no
+    /// trap block; the builder's current block is restored so callers continue
+    /// emitting into their own block.
+    fn trap_block(&mut self) -> BlockId {
+        if let Some(block) = self.trap_block {
             return block;
         }
         let is = self.inst_set();
@@ -3967,8 +4103,19 @@ where
         if let Some(resume) = resume {
             self.fb.switch_to_block(resume);
         }
-        self.oob_trap_block = Some(block);
+        self.trap_block = Some(block);
         block
+    }
+
+    /// Branch to the shared trap block when `cond` (an `i1`) is set, continuing
+    /// in a fresh block otherwise. Used by checked-`usize` overflow detection;
+    /// the dynamic-index bounds check inlines the equivalent `Br` directly.
+    fn trap_if(&mut self, cond: ValueId) {
+        let is = self.inst_set();
+        let trap = self.trap_block();
+        let cont = self.fb.append_block();
+        self.fb.insert_inst_no_result(Br::new(is, cond, trap, cont));
+        self.fb.switch_to_block(cont);
     }
 
     /// `AggregateMake` of a single-scalar-field newtype: the aggregate IS its one
@@ -4017,7 +4164,11 @@ where
     /// flag as 0), so R1 requires non-overflowing values. Every other builtin
     /// (memory, EVM host, addmod/mulmod, saturating, byte/sign-extend) fails
     /// closed.
-    fn lower_builtin(&mut self, builtin: &RuntimeBuiltin<'db>) -> Result<ValueId, LowerError> {
+    fn lower_builtin(
+        &mut self,
+        builtin: &RuntimeBuiltin<'db>,
+        dst: RLocalId,
+    ) -> Result<ValueId, LowerError> {
         match builtin {
             RuntimeBuiltin::IntTruncate { value, from, to } => {
                 let is = self.inst_set();
@@ -4057,8 +4208,8 @@ where
                 lhs,
                 rhs,
                 class,
-                ..
-            } => self.lower_intrinsic_arith(*op, *lhs, *rhs, class),
+                checked,
+            } => self.lower_intrinsic_arith(*op, *lhs, *rhs, class, *checked, dst),
             RuntimeBuiltin::F32FromI32 { value } => {
                 let is = self.inst_set();
                 let value = self.local_value(*value)?;
@@ -4101,6 +4252,8 @@ where
         lhs: RLocalId,
         rhs: RLocalId,
         class: &ScalarClass<'db>,
+        checked: bool,
+        dst: RLocalId,
     ) -> Result<ValueId, LowerError> {
         if matches!(class.repr, ScalarRepr::Float { .. }) {
             let is = self.inst_set();
@@ -4118,8 +4271,23 @@ where
                 }
             });
         }
-        let is = self.inst_set();
         let ty = scalar_ty_r1(class)?;
+        // CRITICAL bounds-safety: checked arithmetic on a narrowed `usize` (the
+        // wasm32 pointer width) MUST trap on overflow. R1 otherwise ignores the
+        // `checked` flag and emits a wrapping op, which would turn a semantically
+        // out-of-range index (`usize::MAX + 1`) into a small in-bounds one and
+        // slip past the array bounds check. Scoped strictly to the narrowed usize
+        // path (keyed on semantic `Usize` + i32 width): every other scalar keeps
+        // R1's wrapping behavior, so no existing kernel changes.
+        if checked
+            && ty == Type::I32
+            && is_usize_semantic_ty(self.module.db, self.body.locals[dst.as_u32() as usize].semantic_ty)
+        {
+            let lhs = self.local_value(lhs)?;
+            let rhs = self.local_value(rhs)?;
+            return self.lower_checked_usize_arith(op, lhs, rhs);
+        }
+        let is = self.inst_set();
         let lhs = self.local_value(lhs)?;
         let rhs = self.local_value(rhs)?;
         Ok(match op {
@@ -4133,6 +4301,49 @@ where
                 )));
             }
         })
+    }
+
+    /// Checked unsigned 32-bit (`usize` on wasm32) arithmetic: compute the result
+    /// and trap (`Unreachable`) on overflow, matching Fe's checked-overflow panic.
+    /// `Add`/`Sub` detect wrap with an unsigned compare; `Mul` widens to i64,
+    /// multiplies, and traps when the product exceeds `u32::MAX`. Only Add/Sub/Mul
+    /// reach here (Div/Rem/Pow already fail closed on the wasm R1 path).
+    fn lower_checked_usize_arith(
+        &mut self,
+        op: IntrinsicArithBinOp,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Result<ValueId, LowerError> {
+        let is = self.inst_set();
+        match op {
+            IntrinsicArithBinOp::Add => {
+                let sum = self.fb.insert_inst(Add::new(is, lhs, rhs), Type::I32);
+                // Unsigned overflow iff the wrapped sum is below an addend.
+                let overflow = self.fb.insert_inst(Lt::new(is, sum, lhs), Type::I1);
+                self.trap_if(overflow);
+                Ok(sum)
+            }
+            IntrinsicArithBinOp::Sub => {
+                // Unsigned underflow iff lhs < rhs.
+                let underflow = self.fb.insert_inst(Lt::new(is, lhs, rhs), Type::I1);
+                self.trap_if(underflow);
+                Ok(self.fb.insert_inst(Sub::new(is, lhs, rhs), Type::I32))
+            }
+            IntrinsicArithBinOp::Mul => {
+                let lhs64 = self.fb.insert_inst(Zext::new(is, lhs, Type::I64), Type::I64);
+                let rhs64 = self.fb.insert_inst(Zext::new(is, rhs, Type::I64), Type::I64);
+                let product = self.fb.insert_inst(Mul::new(is, lhs64, rhs64), Type::I64);
+                let limit = self.fb.make_imm_value(Immediate::I64(u32::MAX as i64));
+                // Overflow iff the 64-bit product exceeds u32::MAX (unsigned `>`).
+                let overflow = self.fb.insert_inst(Lt::new(is, limit, product), Type::I1);
+                self.trap_if(overflow);
+                Ok(self.fb.insert_inst(Trunc::new(is, product, Type::I32), Type::I32))
+            }
+            other => Err(LowerError::Unsupported(format!(
+                "wasm target: checked usize intrinsic arithmetic `{other:?}` is not supported \
+                 (div/rem/pow are R2)"
+            ))),
+        }
     }
 
     /// Signedness of a binary op's operands, from the MIR value class (the EVM
@@ -4436,6 +4647,48 @@ where
     fn local_value(&mut self, local: RLocalId) -> Result<ValueId, LowerError> {
         let var = self.var_for(local)?;
         Ok(self.fb.use_var(var))
+    }
+
+    /// Whether `local` is a memory-lowerable object/memory-provider reference
+    /// (Change 1): its SSA value is an arena i32 pointer, not a copyable value.
+    fn is_object_ref_local(&self, local: RLocalId) -> bool {
+        self.body
+            .value_class(local)
+            .is_some_and(|class| self.module.is_memory_lowerable_object_ref(class))
+    }
+
+    /// Whether an object-ref `local` is bound directly from a FRESHLY produced
+    /// object (every definition is an `AllocObject` / `MaterializeToObject` /
+    /// `MaterializePlaceToObject` / `ConstRef`). The ordinary local-array init
+    /// (`a = use <alloc/materialize temp>`) satisfies this: the variable and the
+    /// temp name one array, so binding the pointer is a safe move. A copy of an
+    /// existing array (`b = use a`, where `a`'s definition is itself a `use` of an
+    /// object) does NOT, so it fails closed rather than pointer-aliasing. A local
+    /// with no definition (an array parameter) also does not qualify (deferred).
+    fn is_fresh_object_binding(&self, local: RLocalId) -> bool {
+        let mut has_fresh_def = false;
+        for block in &self.body.blocks {
+            for stmt in &block.stmts {
+                let RStmt::Assign { dst, expr } = stmt else {
+                    continue;
+                };
+                if *dst != local {
+                    continue;
+                }
+                if matches!(
+                    expr,
+                    RExpr::AllocObject { .. }
+                        | RExpr::MaterializeToObject { .. }
+                        | RExpr::MaterializePlaceToObject { .. }
+                        | RExpr::ConstRef { .. }
+                ) {
+                    has_fresh_def = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        has_fresh_def
     }
 
     fn var_for(&self, local: RLocalId) -> Result<Variable, LowerError> {
@@ -4876,5 +5129,147 @@ pub fn kernel(k: u32) -> u256 {
         };
         let error = scalar_ty_r1(&class).unwrap_err().to_string();
         assert!(error.contains("f64") && error.contains("f32"), "{error}");
+    }
+
+    #[test]
+    fn const_int_fits_u32_rejects_high_words() {
+        // `words` are big-endian (bytes_to_i256 / I256::from_be_bytes order).
+        assert!(const_int_fits_u32(&[]));
+        assert!(const_int_fits_u32(&[0x2a]));
+        assert!(const_int_fits_u32(&[0xff, 0xff, 0xff, 0xff])); // u32::MAX
+        // 0x80000000 and 0xffffffff FIT in u32 (their bit pattern is preserved and
+        // the unsigned bounds check rejects them); only genuinely wider values are
+        // refused.
+        assert!(const_int_fits_u32(&[0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00]));
+        assert!(const_int_fits_u32(&[0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff]));
+        // 2^32 and above do NOT fit: a high word is set.
+        assert!(!const_int_fits_u32(&[0x01, 0x00, 0x00, 0x00, 0x00]));
+        assert!(!const_int_fits_u32(&[
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
+        ]));
+    }
+
+    #[test]
+    fn dead_aggregate_pass_keeps_multi_definition_with_effectful_call() {
+        // The dead-aggregate pass may delete a value-carried array/enum local only
+        // when EVERY definition of it is a pure aggregate def. A multi-definition
+        // local with an effectful `Call` def must keep all of its assignments;
+        // deleting the call on the strength of one pure def would drop the effect.
+        let source = r#"
+fn seed(_ x: u32) -> u32 { x }
+pub fn kernel(k: u32) -> u32 {
+    let mut a: [u32; 2] = [0; 2]
+    a[0] = seed(k)
+    a[k as usize]
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///dead_aggregate_multidef.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package =
+            mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let real = package.functions(&db)[0].instance(&db).body(&db);
+
+        // A real, effectful `Call` expression (the call to `seed`).
+        let call_expr = real
+            .blocks
+            .iter()
+            .flat_map(|block| &block.stmts)
+            .find_map(|stmt| match stmt {
+                RStmt::Assign {
+                    expr: expr @ RExpr::Call { .. },
+                    ..
+                } => Some(expr.clone()),
+                _ => None,
+            })
+            .expect("kernel should contain a Call to seed");
+
+        // A real `[u32; 2]` Array layout (from the array object-ref or its value).
+        let array_layout = real
+            .locals
+            .iter()
+            .find_map(|local| match &local.carrier {
+                RuntimeCarrier::Value(RuntimeClass::Ref { pointee, .. }) => match &**pointee {
+                    RuntimeClass::AggregateValue { layout }
+                        if matches!(layout.data(&db), Layout::Array(_)) =>
+                    {
+                        Some(*layout)
+                    }
+                    _ => None,
+                },
+                RuntimeCarrier::Value(RuntimeClass::AggregateValue { layout })
+                    if matches!(layout.data(&db), Layout::Array(_)) =>
+                {
+                    Some(*layout)
+                }
+                _ => None,
+            })
+            .expect("kernel should have an Array-layout local");
+
+        // A real scalar local to borrow as an inert operand + semantic_ty.
+        let scalar_local = real
+            .locals
+            .iter()
+            .find(|local| {
+                matches!(&local.carrier, RuntimeCarrier::Value(RuntimeClass::Scalar(_)))
+            })
+            .expect("kernel should have a scalar local")
+            .clone();
+        let any_ty = scalar_local.semantic_ty;
+
+        // Fabricate a two-local body: local 0 is an inert scalar; local 1 is an
+        // UNUSED array-value local with TWO defs -- a pure `Use` and the effectful
+        // `Call`. Keep the real owner/key/signature so the body stays well-formed.
+        let mut body = real.clone();
+        body.provider_bindings = Vec::new();
+        body.signature.params = Vec::new();
+        body.locals = vec![
+            scalar_local,
+            RLocal {
+                semantic_ty: any_ty,
+                carrier: RuntimeCarrier::Value(RuntimeClass::AggregateValue {
+                    layout: array_layout,
+                }),
+                root: RuntimeLocalRoot::None,
+            },
+        ];
+        let dead = RLocalId::from_u32(1);
+        body.blocks.truncate(1);
+        body.blocks[0].stmts = vec![
+            RStmt::Assign {
+                dst: dead,
+                expr: RExpr::Use(RLocalId::from_u32(0)),
+            },
+            RStmt::Assign {
+                dst: dead,
+                expr: call_expr,
+            },
+        ];
+        body.blocks[0].terminator = RTerminator::Stop;
+
+        drop_dead_pure_aggregate_values(&db, &mut body);
+
+        assert!(
+            body.blocks[0]
+                .stmts
+                .iter()
+                .any(|stmt| matches!(
+                    stmt,
+                    RStmt::Assign {
+                        expr: RExpr::Call { .. },
+                        ..
+                    }
+                )),
+            "the effectful Call definition must not be deleted"
+        );
+        assert!(
+            !matches!(body.locals[1].carrier, RuntimeCarrier::Erased),
+            "a multi-def local with an impure def must not be erased"
+        );
     }
 }

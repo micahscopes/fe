@@ -4460,3 +4460,179 @@ pub fn takes_array(a: [u32; 4]) -> u32 {
         "an array in an export signature should fail closed; got: {error}"
     );
 }
+
+// ----------------------------------------------------------------------------
+// Arrays rung STEP 1, Slice A: adversarial bounds-safety + ownership gates
+// (Codex NO-GO follow-ups). High-bit / oversized / overflowing `usize` indexes
+// must trap or fail closed, never alias an in-bounds element; whole-array copies
+// and host-region/local-array mixes fail closed.
+// ----------------------------------------------------------------------------
+
+/// A high-bit `u32` index (`0x80000000`, `0xffffffff`) is a valid u32 but far out
+/// of bounds. The UNSIGNED bounds check must trap, never alias `a[low bits]`
+/// (a signed comparison would treat these as negative and mis-handle them).
+#[test]
+fn local_u32_array_high_bit_index_traps_not_aliases() {
+    let source = r#"
+pub fn probe(k: u32) -> u32 {
+    let mut a: [u32; 8] = [0; 8]
+    let mut i: u32 = 0
+    while i < 8 {
+        a[i as usize] = i * i
+        i = i + 1
+    }
+    a[k as usize]
+}
+"#;
+    let wasm = compile_to_wasm("wasm_array_high_bit_index.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<i32, i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+
+    // Sanity: an in-range index still works.
+    assert_eq!(probe.call(&mut store, 3).unwrap(), 9);
+
+    for bits in [0x8000_0000_u32, 0xffff_ffff_u32] {
+        assert!(
+            probe.call(&mut store, bits as i32).is_err(),
+            "index {bits:#x} is out of bounds and must TRAP, not alias an in-bounds slot"
+        );
+    }
+}
+
+/// A direct `usize` constant above `u32::MAX` cannot be a wasm32 index; narrowing
+/// it to i32 would truncate its high bits and (for a low-bits-small value) slip
+/// past the bounds check. The narrowing pass refuses (fails open), so the body
+/// falls back to the 256-bit fail-closed path rather than miscompiling.
+#[test]
+fn local_u32_array_oversized_usize_const_index_fails_closed() {
+    let source = r#"
+pub fn probe() -> u32 {
+    let mut a: [u32; 2] = [7; 2]
+    let idx: usize = 4294967296
+    a[idx]
+}
+"#;
+    let error = compile_to_wasm_err("wasm_array_oversized_const_index.fe", source);
+    assert!(
+        error.contains("wasm target") || error.contains("256") || error.contains("usize"),
+        "an oversized (> u32::MAX) usize const index must fail closed; got: {error}"
+    );
+}
+
+/// Checked `usize` arithmetic that overflows the wasm32 pointer width must TRAP
+/// (Fe's checked-overflow panic), never wrap to a small in-bounds index. With the
+/// default checked-arithmetic mode, `hi + 1` for `hi == u32::MAX` overflows. The
+/// array is filled via a loop (the supported zero-init + element-write shape) so
+/// `a[i] == i`, making a wrong wrap-to-0 observable as reading `a[0] == 0`.
+#[test]
+fn local_u32_array_checked_usize_overflow_traps_not_aliases() {
+    let source = r#"
+pub fn probe(k: u32) -> u32 {
+    let mut a: [u32; 4] = [0; 4]
+    let mut j: u32 = 0
+    while j < 4 {
+        a[j as usize] = j
+        j = j + 1
+    }
+    let hi: usize = k as usize
+    let idx: usize = hi + 1
+    a[idx]
+}
+"#;
+    let wasm = compile_to_wasm("wasm_array_checked_usize_overflow.fe", source);
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<i32, i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+
+    // In range: hi = 1 -> idx = 2 -> a[2] == 2.
+    assert_eq!(probe.call(&mut store, 1).unwrap(), 2);
+
+    // hi = u32::MAX -> hi + 1 overflows -> trap (a wrap-to-0 would read a[0] == 0
+    // and return Ok(0), so `is_err()` distinguishes the correct trap).
+    assert!(
+        probe.call(&mut store, 0xffff_ffff_u32 as i32).is_err(),
+        "checked usize overflow (u32::MAX + 1) must trap, not alias a[0]"
+    );
+}
+
+/// A whole-array copy (`let b = a`) must NOT pointer-alias the backing arena: a
+/// later `a[0] = 9` must not be observable through `b`. The array is seeded from a
+/// runtime parameter so the copy is not constant-folded away and the real
+/// object-ref `Use` path is exercised. Slice A defers deep array copy, so the
+/// accepted behaviors are a genuine deep copy (result `seed`) OR a deliberate
+/// compile-time fail-closed. A silent alias (result `9`) is the bug.
+#[test]
+fn local_u32_array_copy_deep_copies_or_fails_closed() {
+    let source = r#"
+pub fn probe(seed: u32) -> u32 {
+    let mut a: [u32; 2] = [seed; 2]
+    let mut b: [u32; 2] = a
+    a[0] = 9
+    b[0]
+}
+"#;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///wasm_array_copy.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let result =
+        BackendKind::Wasm
+            .create()
+            .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0);
+    match result {
+        Ok(output) => {
+            let bytes = output.into_bytecode().expect("wasm output should be bytecode");
+            wasmparser::validate(&bytes).expect("produced invalid wasm");
+            let (mut store, instance) = instantiate(&bytes);
+            let probe = instance
+                .get_typed_func::<i32, i32>(&mut store, "probe")
+                .expect("`probe` export should exist");
+            let seed = 4;
+            assert_eq!(
+                probe.call(&mut store, seed).unwrap(),
+                seed,
+                "array copy must be a DEEP copy (b independent of a), never a pointer alias \
+                 (an alias would return 9 after `a[0] = 9`)"
+            );
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("wasm target"),
+                "array copy should fail closed with a named wasm error; got: {message}"
+            );
+        }
+    }
+}
+
+/// Ownership contract: a function that BOTH allocates a local array AND uses a
+/// direct host memory region (`MemPtr`) could grow the array over the host
+/// region (the arena bumps up from byte 1024, ignorant of host-chosen fixed
+/// addresses). Until a disjoint partition exists, that mix fails closed.
+#[test]
+fn host_region_plus_local_array_fails_closed() {
+    let source = r#"
+use core::MemPtr
+
+fn write_u32(_ value: u32) uses (target: mut u32) { target = value }
+
+pub fn mixed(_ ptr: MemPtr<u32>, value: u32) -> u32 {
+    let mut a: [u32; 4] = [0; 4]
+    a[0] = value
+    with (ptr) {
+        write_u32(a[0])
+    }
+    a[1]
+}
+"#;
+    let error = compile_to_wasm_err("wasm_host_region_plus_array.fe", source);
+    assert!(
+        error.contains("host memory region"),
+        "a host-region + local-array mix must fail closed with the ownership error; got: {error}"
+    );
+}
