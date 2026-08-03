@@ -1,0 +1,22 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 1
+  },
+  "root": "fe-memory:///app/src/lib.fe",
+  "sources": [
+    {
+      "url": "fe-memory:///app/src/lib.fe",
+      "text": "pub fn main() -> u32 { 42 }",
+      "sha256": "da4eef8786a680b60595c299390fcb77ce73ddda8a697604d18eb6ab144a80d9"
+    }
+  ],
+  "target": "wasm",
+  "entries": [
+    "main"
+  ],
+  "options": {
+    "optimization": "none",
+    "debug_info": false
+  }
+}
