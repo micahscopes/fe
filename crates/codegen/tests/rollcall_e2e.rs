@@ -38,11 +38,16 @@
 //! on the number of levels folded, not the sibling values). This gives a
 //! direct D=20 number instead of a guessed extrapolation.
 
+use common::InputDb;
+use driver::DriverDataBase;
 use ethers_core::abi::Token;
 use ethers_core::types::U256 as AbiU256;
+use fe_codegen::{BackendKind, OptLevel, layout_for};
 use fe_contract_harness::{
     Address, ExecutionOptions, FeContractHarness, RuntimeInstance, U256, bytes_to_u256,
 };
+use num_bigint::BigUint;
+use url::Url;
 
 /// `const_poseidon.fe`'s hash2/hash5 pinned to circomlib vectors (t=3 Poseidon:
 /// real MDS matrix + round constants). Included verbatim; see module docs.
@@ -483,5 +488,247 @@ fn rollcall_registry_gas_at_depth20_is_l2_honest() {
     assert!(
         verify_result.gas_used > 0,
         "gas_used should be a real positive measurement"
+    );
+}
+
+// ============================================================================
+// END-TO-END: prove(wasm) -> commit(EVM) -> verify(EVM), one Poseidon.
+//
+// The SERIAL wasm Poseidon-Merkle root builder (`poseidon_merkle_root_loop.fe`,
+// the ungated prover leg proven bit-exact vs an independent oracle in
+// `wasm_e2e::serial_poseidon_merkle_root_matches_bigint_tree_oracle_on_wasm_at_o0_and_o2`)
+// builds a root from N=4 leaves on wasm under wasmtime; that root is committed to
+// the `RollcallRegistry` under revm; then a sibling path derived from the SAME
+// tree verifies membership on-chain (accept for a real member, reject for a
+// non-member and a tampered path). The wasm-built root is additionally
+// cross-checked equal to the tree built by the on-chain `hash2` probe, so the
+// SAME Poseidon (circomlib t=3) runs on the wasm prover leg and the EVM verifier
+// leg -- the prove->commit->verify flow closed end to end.
+// ============================================================================
+
+const MERKLE4_SRC: &str = include_str!("fixtures/spirv/poseidon_merkle_root_loop.fe");
+const MERKLE_LIMB_BITS: usize = 13;
+const MERKLE_N_LIMBS: usize = 20;
+
+/// Decompose a field element into `n` little-endian 13-bit limbs (the wasm
+/// builder's input schema).
+fn merkle_to_limbs(x: &BigUint, n: usize) -> Vec<u32> {
+    let mask = BigUint::from(8191u32);
+    (0..n)
+        .map(|j| {
+            let limb = (x >> (MERKLE_LIMB_BITS * j)) & &mask;
+            limb.to_u32_digits().first().copied().unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Reassemble little-endian 13-bit limbs into a field element.
+fn merkle_limbs_to_biguint(limbs: &[u32]) -> BigUint {
+    let mut acc = BigUint::from(0u32);
+    for (j, &l) in limbs.iter().enumerate() {
+        acc |= BigUint::from(l) << (MERKLE_LIMB_BITS * j);
+    }
+    acc
+}
+
+/// A `BigUint` field element (< p < 2^256) as an ABI u256, zero-padded big-endian.
+fn biguint_to_abi_u256(x: &BigUint) -> AbiU256 {
+    let bytes = x.to_bytes_be();
+    assert!(bytes.len() <= 32, "field element must fit in 32 bytes");
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(&bytes);
+    AbiU256::from_big_endian(&buf)
+}
+
+/// PROVE: compile + run the serial wasm Poseidon-Merkle root builder over
+/// `leaves` (N=4 field elements), returning the root as a field element. Runs on
+/// a wide-stack worker thread (the generated function is large; a compiler-stack
+/// accommodation, mirroring the wasm_e2e Poseidon/Merkle gates).
+fn merkle_root_on_wasm(leaves: &[BigUint]) -> BigUint {
+    assert_eq!(leaves.len(), 4, "this end-to-end uses the N=4 (depth-2) builder");
+    let leaves = leaves.to_vec();
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(move || merkle_root_on_wasm_body(&leaves))
+        .expect("spawn wide-stack worker for the wasm Merkle builder")
+        .join()
+        .expect("wasm Merkle worker thread should not panic")
+}
+
+fn merkle_root_on_wasm_body(leaves: &[BigUint]) -> BigUint {
+    let n = MERKLE_N_LIMBS;
+    let mut db = DriverDataBase::default();
+    let url = Url::parse("file:///poseidon_merkle_root_loop.fe").expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(MERKLE4_SRC.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), OptLevel::O0)
+        .expect("wasm compilation of the Merkle builder should succeed")
+        .into_bytecode()
+        .expect("wasm output should be bytecode");
+
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, &bytes).expect("wasmtime should load the module");
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance =
+        wasmtime::Instance::new(&mut store, &module, &[]).expect("wasmtime should instantiate");
+    let f = instance
+        .get_func(&mut store, "poseidon_merkle_root_loop")
+        .expect("`poseidon_merkle_root_loop` export should exist");
+
+    let leaf_limbs: Vec<Vec<u32>> = leaves.iter().map(|x| merkle_to_limbs(x, n)).collect();
+    let mut root_limbs = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut params: Vec<wasmtime::Val> = Vec::with_capacity(1 + leaf_limbs.len() * n);
+        params.push(wasmtime::Val::I32(k as i32));
+        for leaf in &leaf_limbs {
+            for &l in leaf {
+                params.push(wasmtime::Val::I32(l as i32));
+            }
+        }
+        let mut results = [wasmtime::Val::I32(0)];
+        f.call(&mut store, &params, &mut results)
+            .unwrap_or_else(|e| panic!("merkle builder (k={k}) should run under wasmtime: {e:?}"));
+        root_limbs.push(match results[0] {
+            wasmtime::Val::I32(v) => v as u32,
+            other => panic!("merkle builder result must be i32, got {other:?}"),
+        });
+    }
+    merkle_limbs_to_biguint(&root_limbs)
+}
+
+/// Build a genuine `2^depth`-leaf tree bottom-up from explicit `leaves` via the
+/// on-chain `hash2Probe` (the SAME `hash2` the registry folds with).
+fn build_tree_from_leaves(
+    instance: &mut RuntimeInstance,
+    leaves: &[AbiU256],
+    depth: usize,
+) -> Vec<Vec<AbiU256>> {
+    assert_eq!(leaves.len(), 1usize << depth, "leaf count must be 2^depth");
+    let mut levels = vec![leaves.to_vec()];
+    for _ in 0..depth {
+        let prev = levels.last().expect("at least one level");
+        let mut next = Vec::with_capacity(prev.len() / 2);
+        for pair in prev.chunks(2) {
+            next.push(call_hash2(instance, pair[0], pair[1]));
+        }
+        levels.push(next);
+    }
+    levels
+}
+
+/// THE END-TO-END GATE: prove a Poseidon-Merkle root on wasm, commit it to the
+/// `RollcallRegistry` under revm, and verify membership on-chain -- accept for a
+/// real member, reject for a non-member and a tampered path. The wasm-built root
+/// equals the on-chain-probe-built root, so the identical circomlib Poseidon runs
+/// on both the (wasm) prover and (EVM) verifier legs.
+#[test]
+fn rollcall_prove_on_wasm_commit_on_evm_and_verify_membership_end_to_end() {
+    const DEPTH: usize = 2; // N = 4 leaves
+    let source = rollcall_source(DEPTH);
+
+    // The member list (field elements): the SAME leaves fed to the wasm prover
+    // and to the on-chain hash2 probe.
+    let leaves_u64: [u64; 4] = [111, 222, 333, 444];
+    let leaves_big: Vec<BigUint> = leaves_u64.iter().map(|&v| BigUint::from(v)).collect();
+    let leaves_abi: Vec<AbiU256> = leaves_u64.iter().map(|&v| AbiU256::from(v)).collect();
+
+    // PROVE (wasm): the serial loop-form Poseidon-Merkle builder produces the root.
+    let wasm_root_big = merkle_root_on_wasm(&leaves_big);
+    let wasm_root = biguint_to_abi_u256(&wasm_root_big);
+
+    // Cross-leg agreement: build the same tree on-chain via hash2Probe and assert
+    // the wasm-built root equals it (identical Poseidon on the prover + verifier).
+    let hash2_harness =
+        FeContractHarness::compile("Hash2Exec", &source).expect("Hash2Exec should compile");
+    let mut hash2_instance = hash2_harness
+        .deploy_with_init()
+        .expect("Hash2Exec should deploy under revm");
+    let levels = build_tree_from_leaves(&mut hash2_instance, &leaves_abi, DEPTH);
+    let probe_root = levels[DEPTH][0];
+    assert_eq!(
+        wasm_root, probe_root,
+        "the serial wasm-built Poseidon-Merkle root must equal the on-chain hash2-built root \
+         (same circomlib Poseidon on both legs)"
+    );
+
+    // COMMIT (EVM): owner commits the wasm-built root.
+    let registry_harness = FeContractHarness::compile("RollcallRegistry", &source)
+        .expect("RollcallRegistry should compile");
+    let mut registry = registry_harness
+        .deploy_with_init()
+        .expect("RollcallRegistry should deploy under revm");
+    registry
+        .call_function(
+            "commit(uint256)",
+            &[Token::Uint(wasm_root)],
+            ExecutionOptions::default(),
+        )
+        .expect("owner commit of the wasm-built root should succeed");
+
+    // VERIFY (EVM): a real member verifies against the committed wasm-built root.
+    let target_index = 2usize; // leaf value 333
+    let member_leaf = leaves_abi[target_index];
+    let path = sibling_path(&levels, target_index);
+    assert_eq!(path.len(), DEPTH);
+
+    let accept = registry
+        .call_function(
+            "verifyMembership(uint256,uint256,uint256[2])",
+            &[
+                Token::Uint(member_leaf),
+                Token::Uint(AbiU256::from(target_index as u64)),
+                path_tokens(&path),
+            ],
+            ExecutionOptions::default(),
+        )
+        .expect("verifyMembership should execute");
+    assert!(
+        decode_bool(&accept.return_data),
+        "a real member must verify against the committed wasm-built root"
+    );
+
+    // REJECT: a non-member leaf value with an otherwise-valid path.
+    let nonmember = registry
+        .call_function(
+            "verifyMembership(uint256,uint256,uint256[2])",
+            &[
+                Token::Uint(AbiU256::from(999u64)),
+                Token::Uint(AbiU256::from(target_index as u64)),
+                path_tokens(&path),
+            ],
+            ExecutionOptions::default(),
+        )
+        .expect("verifyMembership should execute for a bad leaf (returns false, no revert)");
+    assert!(
+        !decode_bool(&nonmember.return_data),
+        "a non-member leaf must be rejected"
+    );
+
+    // REJECT: a tampered sibling in the path.
+    let mut tampered = path.clone();
+    tampered[0] = tampered[0] + AbiU256::from(1u64);
+    let reject = registry
+        .call_function(
+            "verifyMembership(uint256,uint256,uint256[2])",
+            &[
+                Token::Uint(member_leaf),
+                Token::Uint(AbiU256::from(target_index as u64)),
+                path_tokens(&tampered),
+            ],
+            ExecutionOptions::default(),
+        )
+        .expect("verifyMembership should execute for a tampered path (returns false, no revert)");
+    assert!(
+        !decode_bool(&reject.return_data),
+        "a tampered membership path must be rejected"
+    );
+
+    eprintln!(
+        "Rollcall e2e: prove(wasm) Poseidon-Merkle root == probe(EVM) root; committed on-chain; \
+         verifyMembership ACCEPT (member) + REJECT (non-member, tampered path) all pass."
     );
 }
