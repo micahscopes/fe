@@ -1,0 +1,146 @@
+// Arrays rung STEP 1, Slice B: a ROLLED (loop-form) BN254 scalar-field (Fr)
+// CIOS Montgomery multiply, 13-bit x 20 limbs in u32 words, computed over
+// FUNCTION-LOCAL [u32; N] limb arrays indexed by loop variables. It is the
+// dual-gate twin of the fully-unrolled field_mul_bn254_fr.fe: identical limb
+// schema, identical Montgomery constants (p limbs, mu = 8191), identical
+// arithmetic, re-expressed as `while` loops over local arrays. Proves the
+// wasm local-array memory lowering (Slice A) is correct on a real Montgomery
+// multiply, at O0 and O2. Operands arrive as SCALAR limbs (array PARAMS are
+// deferred in Slice A); they are copied into zero-init local arrays here.
+//
+//   p = BN254 Fr, R = 2^260, mu = -p^-1 mod 2^13 = 8191
+//   result = a * b * R^-1 mod p     (CIOS Montgomery multiplication)
+//
+// arg0 = k = the OUTPUT LIMB INDEX (0..19); arg1 = row (unused); args 2.. =
+// the 40 broadcast input limbs a0..a19,b0..b19. Each invocation recomputes
+// the whole product and returns limb k via a dynamic array index.
+pub fn field_mul_bn254_fr_loop(k: u32, _row: u32, a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32, a6: u32, a7: u32, a8: u32, a9: u32, a10: u32, a11: u32, a12: u32, a13: u32, a14: u32, a15: u32, a16: u32, a17: u32, a18: u32, a19: u32, b0: u32, b1: u32, b2: u32, b3: u32, b4: u32, b5: u32, b6: u32, b7: u32, b8: u32, b9: u32, b10: u32, b11: u32, b12: u32, b13: u32, b14: u32, b15: u32, b16: u32, b17: u32, b18: u32, b19: u32) -> u32 {
+    let mut a: [u32; 20] = [0; 20]
+    let mut b: [u32; 20] = [0; 20]
+    let mut p: [u32; 20] = [0; 20]
+    let mut t: [u32; 22] = [0; 22]
+    let mut d: [u32; 20] = [0; 20]
+    let mut res: [u32; 20] = [0; 20]
+
+    a[0] = a0
+    a[1] = a1
+    a[2] = a2
+    a[3] = a3
+    a[4] = a4
+    a[5] = a5
+    a[6] = a6
+    a[7] = a7
+    a[8] = a8
+    a[9] = a9
+    a[10] = a10
+    a[11] = a11
+    a[12] = a12
+    a[13] = a13
+    a[14] = a14
+    a[15] = a15
+    a[16] = a16
+    a[17] = a17
+    a[18] = a18
+    a[19] = a19
+    b[0] = b0
+    b[1] = b1
+    b[2] = b2
+    b[3] = b3
+    b[4] = b4
+    b[5] = b5
+    b[6] = b6
+    b[7] = b7
+    b[8] = b8
+    b[9] = b9
+    b[10] = b10
+    b[11] = b11
+    b[12] = b12
+    b[13] = b13
+    b[14] = b14
+    b[15] = b15
+    b[16] = b16
+    b[17] = b17
+    b[18] = b18
+    b[19] = b19
+
+    p[0] = 1
+    p[1] = 0
+    p[2] = 1276
+    p[3] = 1003
+    p[4] = 5182
+    p[5] = 6216
+    p[6] = 1765
+    p[7] = 2319
+    p[8] = 5096
+    p[9] = 2369
+    p[10] = 5655
+    p[11] = 770
+    p[12] = 7016
+    p[13] = 2082
+    p[14] = 1761
+    p[15] = 5125
+    p[16] = 305
+    p[17] = 5015
+    p[18] = 6419
+    p[19] = 96
+
+    let mut zt: u32 = 0
+    while zt < 22 {
+        t[zt as usize] = 0
+        zt = zt + 1
+    }
+
+    let mut i: u32 = 0
+    while i < 20 {
+        // multiply phase: t += a * b[i]
+        let mut c: u32 = 0
+        let mut j: u32 = 0
+        while j < 20 {
+            let s: u32 = t[j as usize] + a[j as usize] * b[i as usize] + c
+            c = s >> 13
+            t[j as usize] = s - c * 8192
+            j = j + 1
+        }
+        let s20: u32 = t[20] + c
+        let chi: u32 = s20 >> 13
+        t[20] = s20 - chi * 8192
+        t[21] = chi
+        // reduction phase: t = (t + m*p) / 2^13, m = t[0]*mu mod 2^13
+        let m0: u32 = t[0] * 8191
+        let m: u32 = m0 - (m0 >> 13) * 8192
+        let mut cr: u32 = (t[0] + m * p[0]) >> 13
+        let mut jr: u32 = 1
+        while jr < 20 {
+            let sr: u32 = t[jr as usize] + m * p[jr as usize] + cr
+            cr = sr >> 13
+            let jm1: u32 = jr - 1
+            t[jm1 as usize] = sr - cr * 8192
+            jr = jr + 1
+        }
+        let s19: u32 = t[20] + cr
+        cr = s19 >> 13
+        t[19] = s19 - cr * 8192
+        t[20] = t[21] + cr
+        i = i + 1
+    }
+
+    // conditional subtract of p (constant-time select on the final borrow)
+    let mut borrow: u32 = 0
+    let mut jc: u32 = 0
+    while jc < 20 {
+        let dd: u32 = t[jc as usize] + 8192 - p[jc as usize] - borrow
+        let db: u32 = dd >> 13
+        borrow = 1 - db
+        d[jc as usize] = dd - db * 8192
+        jc = jc + 1
+    }
+    let keep_t: u32 = borrow
+    let keep_diff: u32 = 1 - borrow
+    let mut js: u32 = 0
+    while js < 20 {
+        res[js as usize] = keep_t * t[js as usize] + keep_diff * d[js as usize]
+        js = js + 1
+    }
+
+    res[k as usize]
+}

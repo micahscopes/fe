@@ -4636,3 +4636,244 @@ pub fn mixed(_ ptr: MemPtr<u32>, value: u32) -> u32 {
         "a host-region + local-array mix must fail closed with the ownership error; got: {error}"
     );
 }
+
+// ============================================================================
+// Arrays rung STEP 1, Slice B: THE DUAL GATE. A ROLLED (loop-form) BN254 Fr
+// CIOS Montgomery multiply computed over FUNCTION-LOCAL `[u32; N]` limb arrays
+// indexed by loop variables is compiled to wasm, executed under wasmtime, and
+// asserted BIT-IDENTICAL, limb-for-limb, to the fully-unrolled oracle-validated
+// `field_mul_bn254_fr` on the same in-range field elements, at O0 AND O2 (so the
+// optimizer's load/store/GVN pipeline runs over the new Mload/Mstore array
+// pattern inside the gate). The loop-form is also checked directly against an
+// independent num-bigint Montgomery oracle. If the loop-form matches the
+// unrolled kernel bit-for-bit, the Slice A wasm local-array lowering is proven
+// correct on a real Montgomery multiply (the Poseidon/MSM inner kernel).
+// ============================================================================
+
+use num_bigint::BigUint;
+
+const SLICE_B_LIMB_BITS: usize = 13;
+const SLICE_B_N: usize = 20;
+const SLICE_B_UNROLLED_SRC: &str = include_str!("fixtures/spirv/field_mul_bn254_fr.fe");
+const SLICE_B_LOOP_SRC: &str = include_str!("fixtures/spirv/field_mul_bn254_fr_loop.fe");
+
+/// BN254 (alt_bn128) scalar field order Fr, parsed from decimal (never trusted
+/// from a limb table), so the oracle is anchored to the canonical curve constant.
+fn slice_b_bn254_fr_prime() -> BigUint {
+    BigUint::parse_bytes(
+        b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
+        10,
+    )
+    .expect("BN254 Fr decimal should parse")
+}
+
+/// Decompose a field element into `n` little-endian 13-bit limbs (u32 words).
+fn slice_b_to_limbs(x: &BigUint, n: usize) -> Vec<u32> {
+    let mask = BigUint::from(8191u32);
+    (0..n)
+        .map(|j| {
+            let limb = (x >> (SLICE_B_LIMB_BITS * j)) & &mask;
+            limb.to_u32_digits().first().copied().unwrap_or(0)
+        })
+        .collect()
+}
+
+/// The INDEPENDENT bigint oracle: the CIOS Montgomery product a*b*R^-1 mod p,
+/// computed with num-bigint (which knows nothing of 13-bit limbs or CIOS), then
+/// decomposed into `n` limbs. R^-1 is R^(p-2) mod p (Fermat; p prime).
+fn slice_b_mont_oracle(a: &BigUint, b: &BigUint, p: &BigUint, n: usize) -> Vec<u32> {
+    let r = BigUint::from(1u32) << (SLICE_B_LIMB_BITS * n);
+    let rinv = r.modpow(&(p - BigUint::from(2u32)), p);
+    let mont = (((a * b) % p) * &rinv) % p;
+    slice_b_to_limbs(&mont, n)
+}
+
+/// A deterministic pseudo-random field element (xorshift64, no rand dep).
+fn slice_b_next_field(s: &mut u64, p: &BigUint) -> BigUint {
+    let mut x = BigUint::from(0u32);
+    for _ in 0..5 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        x = (x << 64) | BigUint::from(*s);
+    }
+    x % p
+}
+
+/// Compile Fe source to wasm bytes through the wasm backend at a chosen opt level.
+fn slice_b_compile_at(name: &str, source: &str, opt: OptLevel) -> Vec<u8> {
+    let mut db = DriverDataBase::default();
+    let url = Url::parse(&format!("file:///{name}")).expect("test URL should parse");
+    db.workspace()
+        .touch(&mut db, url.clone(), Some(source.to_string()));
+    let file = db.workspace().get(&db, &url).expect("file should load");
+    let top_mod = db.top_mod(file);
+    let bytes = BackendKind::Wasm
+        .create()
+        .compile(&db, top_mod, layout_for(BackendKind::Wasm), opt)
+        .unwrap_or_else(|err| panic!("wasm compilation of `{name}` at {opt:?} failed: {err}"))
+        .into_bytecode()
+        .expect("wasm output should be bytecode");
+    wasmparser::validate(&bytes).expect("produced invalid wasm");
+    bytes
+}
+
+/// Execute the field-mul over all `n` limb indices (arg0 = k = limb index) for a
+/// single (a, b). The kernel takes `2 + 2n` args (past wasmtime's typed-tuple
+/// arity), so the untyped `Func::call` path is used.
+fn slice_b_field_mul_limbs(
+    store: &mut wasmtime::Store<()>,
+    instance: &wasmtime::Instance,
+    fn_name: &str,
+    a_limbs: &[u32],
+    b_limbs: &[u32],
+    n: usize,
+) -> Vec<u32> {
+    use wasmtime::Val;
+    let f = instance
+        .get_func(&mut *store, fn_name)
+        .unwrap_or_else(|| panic!("`{fn_name}` export should exist"));
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let mut params: Vec<Val> = Vec::with_capacity(2 + 2 * n);
+        params.push(Val::I32(k as i32));
+        params.push(Val::I32(0));
+        for &l in a_limbs {
+            params.push(Val::I32(l as i32));
+        }
+        for &l in b_limbs {
+            params.push(Val::I32(l as i32));
+        }
+        let mut results = [Val::I32(0)];
+        f.call(&mut *store, &params, &mut results)
+            .unwrap_or_else(|e| panic!("{fn_name}(k={k}) should run: {e:?}"));
+        out.push(match results[0] {
+            Val::I32(v) => v as u32,
+            other => panic!("{fn_name} result must be i32, got {other:?}"),
+        });
+    }
+    out
+}
+
+/// THE SLICE B DUAL GATE: the rolled loop-form BN254 Fr field-mul, compiled to
+/// wasm and executed under wasmtime, is BIT-IDENTICAL limb-for-limb to the
+/// unrolled `field_mul_bn254_fr` (and to the num-bigint Montgomery oracle) on the
+/// canonical edges (incl. 0, 1, p-1 so p-1 x p-1 is the top-carry case), the
+/// dense all-limbs-saturated value, the Montgomery anchors R and R^2, and a few
+/// hundred deterministic pseudo-random operand pairs, at O0 AND O2.
+#[test]
+fn loop_form_bn254_fr_field_mul_matches_unrolled_kernel_on_wasm_at_o0_and_o2() {
+    let p = slice_b_bn254_fr_prime();
+    let n = SLICE_B_N;
+    let one = BigUint::from(1u32);
+    let two = BigUint::from(2u32);
+
+    // Canonical edges. p-1 x p-1 (the maximal top-carry case) and 0 / 1 fall out
+    // of the edge x edge cross product below.
+    let mut edges: Vec<(String, BigUint)> = vec![
+        ("0".into(), BigUint::from(0u32)),
+        ("1".into(), one.clone()),
+        ("2".into(), two.clone()),
+        ("p-1".into(), &p - &one),
+        ("p-2".into(), &p - &two),
+        ("(p-1)/2".into(), (&p - &one) / &two),
+    ];
+    let mut dense = BigUint::from(0u32);
+    for j in 0..n {
+        dense |= BigUint::from(8191u32) << (SLICE_B_LIMB_BITS * j);
+    }
+    edges.push(("dense".into(), &dense % &p));
+    let r = BigUint::from(1u32) << (SLICE_B_LIMB_BITS * n);
+    edges.push(("R".into(), &r % &p));
+    edges.push(("R^2".into(), (&r * &r) % &p));
+
+    // Full product list: edge x edge (81 pairs) plus 256 pseudo-random pairs.
+    let mut products: Vec<(String, BigUint, BigUint)> = Vec::new();
+    for (na, a) in &edges {
+        for (nb, b) in &edges {
+            products.push((format!("{na} x {nb}"), a.clone(), b.clone()));
+        }
+    }
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    for idx in 0..256 {
+        let a = slice_b_next_field(&mut seed, &p);
+        let b = slice_b_next_field(&mut seed, &p);
+        products.push((format!("rand{idx}"), a, b));
+    }
+
+    // Precompute limb decompositions + the bigint oracle once per product.
+    let cases: Vec<(String, Vec<u32>, Vec<u32>, Vec<u32>)> = products
+        .iter()
+        .map(|(name, a, b)| {
+            (
+                name.clone(),
+                slice_b_to_limbs(a, n),
+                slice_b_to_limbs(b, n),
+                slice_b_mont_oracle(a, b, &p, n),
+            )
+        })
+        .collect();
+
+    // Run the gate at BOTH opt levels: O0 (raw Mload/Mstore) and O2 (the sonatina
+    // speed pipeline: inlining, GVN, load/store forwarding over the array memory).
+    for opt in [OptLevel::O0, OptLevel::O2] {
+        let loop_wasm = slice_b_compile_at("field_mul_bn254_fr_loop.fe", SLICE_B_LOOP_SRC, opt);
+        let unrolled_wasm =
+            slice_b_compile_at("field_mul_bn254_fr.fe", SLICE_B_UNROLLED_SRC, opt);
+
+        // The loop kernel's limb arrays live in the synthesized canonical arena,
+        // so the module must stay self-contained (no host imports to instantiate).
+        assert!(
+            func_imports(&loop_wasm).is_empty(),
+            "[{opt:?}] the loop-form field-mul should need no host imports; got {:?}",
+            func_imports(&loop_wasm)
+        );
+
+        let (mut loop_store, loop_instance) = instantiate(&loop_wasm);
+        let (mut unrolled_store, unrolled_instance) = instantiate(&unrolled_wasm);
+
+        for (name, al, bl, oracle) in &cases {
+            let got_loop = slice_b_field_mul_limbs(
+                &mut loop_store,
+                &loop_instance,
+                "field_mul_bn254_fr_loop",
+                al,
+                bl,
+                n,
+            );
+            let got_unrolled = slice_b_field_mul_limbs(
+                &mut unrolled_store,
+                &unrolled_instance,
+                "field_mul_bn254_fr",
+                al,
+                bl,
+                n,
+            );
+
+            // THE DUAL GATE: the rolled loop-form is bit-identical to the
+            // unrolled kernel, limb for limb.
+            assert_eq!(
+                got_loop, got_unrolled,
+                "[{opt:?}] loop-form field_mul({name}) must be BIT-IDENTICAL to the unrolled \
+                 kernel, limb for limb"
+            );
+            // Independent oracle on the loop-form directly.
+            assert_eq!(
+                &got_loop, oracle,
+                "[{opt:?}] loop-form field_mul({name}) must equal the num-bigint Montgomery \
+                 oracle a*b*R^-1 mod p"
+            );
+            // The unrolled twin also equals the oracle (anchors the comparison).
+            assert_eq!(
+                &got_unrolled, oracle,
+                "[{opt:?}] unrolled field_mul({name}) must equal the num-bigint oracle"
+            );
+        }
+        eprintln!(
+            "  Slice B dual gate [{opt:?}]: rolled loop-form BN254 Fr field-mul == unrolled kernel \
+             == num-bigint Montgomery oracle, limb-for-limb, over {} operand products (incl \
+             p-1 x p-1 top-carry, dense-limb, R, R^2).",
+            cases.len()
+        );
+    }
+}
