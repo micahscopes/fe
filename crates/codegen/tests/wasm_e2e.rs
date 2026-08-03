@@ -4877,3 +4877,254 @@ fn loop_form_bn254_fr_field_mul_matches_unrolled_kernel_on_wasm_at_o0_and_o2() {
         );
     }
 }
+
+// ============================================================================
+// Arrays rung STEP 1, Slice C: THE POSEIDON DUAL GATE. A ROLLED (loop-form)
+// BN254 Fr circomlib Poseidon t=3 `hash2(left, right)`, computed over
+// FUNCTION-LOCAL `[u32; N]` 13-bit x 20-limb Montgomery arrays (the CIOS montmul
+// from Slice B, plus limbwise field-add + conditional subtract, an x^5 montmul
+// chain, a rolled 3x3 MDS matmul, and a rolled 8-full/57-partial round schedule
+// indexing a local Montgomery constant table), is compiled to wasm, executed
+// under wasmtime, its 20 output limbs reassembled to a field element, and
+// asserted bit-exact to BOTH (i) the checked-in circomlib vectors (which the
+// u256 `const_poseidon.fe` form is static_assert-pinned to) AND (ii) an
+// independent num-bigint PLAIN-FIELD Poseidon oracle driven by the SAME
+// MDS / round constants parsed straight out of `const_poseidon.fe` (the u256
+// form's own source of truth, using ordinary modular reduction, not CIOS/limbs).
+// Run at O0 AND O2. If the loop-form matches on every vector, the loop-form limb
+// Poseidon prover kernel is proven == circomlib == the u256 form on wasm.
+// ============================================================================
+
+const SLICE_C_POSEIDON_SRC: &str = include_str!("fixtures/spirv/poseidon_bn254_loop.fe");
+const CONST_POSEIDON_SRC: &str =
+    include_str!("../../fe/tests/fixtures/fe_test/const_poseidon.fe");
+
+/// Extract the `0x..` field-element literals of a named `const` array block out of
+/// `const_poseidon.fe` (bracket-matched from the block's opening `[`), so the
+/// oracle's MDS / round constants come from the u256 form's OWN source, never a
+/// re-transcription. Used only on the t=3 blocks (which precede the t=6 ones).
+fn slice_c_parse_const_block(src: &str, name: &str) -> Vec<BigUint> {
+    let bytes = src.as_bytes();
+    let i = src.find(name).expect("named const block should exist");
+    let j = i + src[i..].find('=').expect("block should have `=`");
+    let k = j + src[j..].find('[').expect("block should have opening `[`");
+    let mut depth = 0usize;
+    let mut end = k;
+    for (m, &b) in bytes.iter().enumerate().skip(k) {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = m;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let block = &src[k..=end];
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    while let Some(p) = block[idx..].find("0x") {
+        let s = idx + p + 2;
+        let mut e = s;
+        while e < block.len() && block.as_bytes()[e].is_ascii_hexdigit() {
+            e += 1;
+        }
+        out.push(BigUint::parse_bytes(block[s..e].as_bytes(), 16).expect("hex limb"));
+        idx = e;
+    }
+    out
+}
+
+/// The INDEPENDENT oracle: circomlib Poseidon t=3 in PLAIN modular arithmetic
+/// (8 full + 57 partial rounds, x^5 S-box, 3x3 MDS), structurally unlike the
+/// Montgomery-limb kernel. `mds` is 9 row-major entries; `rc` is 195
+/// (65 rounds x 3). Mirrors `const_poseidon.fe`'s `permute3` / `hash2`.
+fn slice_c_poseidon_oracle(
+    left: &BigUint,
+    right: &BigUint,
+    p: &BigUint,
+    mds: &[BigUint],
+    rc: &[BigUint],
+) -> BigUint {
+    const FULL: usize = 8;
+    const PART: usize = 57;
+    const HALF: usize = FULL / 2;
+    let pow5 = |x: &BigUint| -> BigUint {
+        let x2 = (x * x) % p;
+        let x4 = (&x2 * &x2) % p;
+        (&x4 * x) % p
+    };
+    let zero = BigUint::from(0u32);
+    let mut st = [zero.clone(), left % p, right % p];
+    for r in 0..(FULL + PART) {
+        for i in 0..3 {
+            st[i] = (&st[i] + &rc[r * 3 + i]) % p;
+        }
+        let is_full = r < HALF || r >= HALF + PART;
+        if is_full {
+            for i in 0..3 {
+                st[i] = pow5(&st[i]);
+            }
+        } else {
+            st[0] = pow5(&st[0]);
+        }
+        let mut new = [zero.clone(), zero.clone(), zero.clone()];
+        for row in 0..3 {
+            let mut acc = zero.clone();
+            for col in 0..3 {
+                acc = (acc + &st[col] * &mds[row * 3 + col]) % p;
+            }
+            new[row] = acc;
+        }
+        st = new;
+    }
+    st[0].clone()
+}
+
+/// Reassemble little-endian 13-bit limbs (u32 words) into a field element.
+fn slice_c_limbs_to_biguint(limbs: &[u32]) -> BigUint {
+    let mut acc = BigUint::from(0u32);
+    for (j, &l) in limbs.iter().enumerate() {
+        acc |= BigUint::from(l) << (SLICE_B_LIMB_BITS * j);
+    }
+    acc
+}
+
+/// THE SLICE C POSEIDON DUAL GATE: the rolled loop-form limb Poseidon `hash2`,
+/// compiled to wasm and run under wasmtime, equals the circomlib vectors AND the
+/// plain-field u256-equivalent oracle, bit-exact, on a spread of operand pairs
+/// (incl. the two circomlib pins, `p-1 x p-2`, and wide operands), at O0 AND O2.
+///
+/// The generated kernel is a single ~2.8k-statement function with sizeable local
+/// constant tables; sonatina's straight-line lowering / opt passes recurse deeply
+/// enough over it to exhaust a default libtest thread stack (SIGABRT stack
+/// overflow under the plain CI invocation, which sets no `RUST_MIN_STACK`), so the
+/// gate body runs on an explicitly wide-stacked worker thread. The kernel itself
+/// is loop-only (no recursion); this is a compiler-stack accommodation for a large
+/// generated function, not a change to what the kernel computes.
+#[test]
+fn loop_form_bn254_poseidon_hash2_matches_circomlib_and_u256_form_on_wasm_at_o0_and_o2() {
+    std::thread::Builder::new()
+        .stack_size(1 << 31)
+        .spawn(slice_c_poseidon_dual_gate_body)
+        .expect("spawn wide-stack worker for the Poseidon gate")
+        .join()
+        .expect("Poseidon dual-gate worker thread should not panic");
+}
+
+fn slice_c_poseidon_dual_gate_body() {
+    let p = slice_b_bn254_fr_prime();
+    let n = SLICE_B_N;
+    let mds = slice_c_parse_const_block(CONST_POSEIDON_SRC, "POSEIDON_T3_MDS");
+    let rc = slice_c_parse_const_block(CONST_POSEIDON_SRC, "POSEIDON_T3_ROUND_CONSTANTS");
+    assert_eq!(mds.len(), 9, "t=3 MDS should be 3x3");
+    assert_eq!(rc.len(), 195, "t=3 round constants should be 65x3");
+
+    // The checked-in circomlib vectors: exactly the values the u256
+    // `const_poseidon.fe` form is static_assert-pinned to (its `hash2(0,0)` /
+    // `hash2(1,2)`), so matching these == matching the u256 form on those inputs.
+    let pin_00 = BigUint::parse_bytes(
+        b"2098f5fb9e239eab3ceac3f27b81e481dc3124d55ffed523a839ee8446b64864",
+        16,
+    )
+    .unwrap();
+    let pin_12 = BigUint::parse_bytes(
+        b"115cc0f5e7d690413df64c6b9662e9cf2a3617f2743245519e19607a4417189a",
+        16,
+    )
+    .unwrap();
+    // Anchor the independent oracle to circomlib: the plain-field recomputation
+    // reproduces the u256 form's pinned outputs, so it faithfully stands in for
+    // "the u256 form" on the non-pinned vectors below.
+    assert_eq!(
+        slice_c_poseidon_oracle(&0u32.into(), &0u32.into(), &p, &mds, &rc),
+        pin_00,
+        "plain-field oracle must reproduce circomlib hash2(0,0)"
+    );
+    assert_eq!(
+        slice_c_poseidon_oracle(&1u32.into(), &2u32.into(), &p, &mds, &rc),
+        pin_12,
+        "plain-field oracle must reproduce circomlib hash2(1,2)"
+    );
+
+    let one = BigUint::from(1u32);
+    let two = BigUint::from(2u32);
+    let vectors: Vec<(String, BigUint, BigUint)> = vec![
+        ("hash2(0,0)".into(), 0u32.into(), 0u32.into()),
+        ("hash2(1,2)".into(), 1u32.into(), 2u32.into()),
+        ("hash2(3,4)".into(), 3u32.into(), 4u32.into()),
+        ("hash2(7,7)".into(), 7u32.into(), 7u32.into()),
+        ("hash2(p-1,p-2)".into(), &p - &one, &p - &two),
+        ("hash2(12345,678910)".into(), 12345u32.into(), 678910u32.into()),
+    ];
+
+    for opt in [OptLevel::O0, OptLevel::O2] {
+        let wasm = slice_b_compile_at("poseidon_bn254_loop.fe", SLICE_C_POSEIDON_SRC, opt);
+
+        // The kernel's limb arrays live in the synthesized canonical arena, so the
+        // module must stay self-contained (no host imports needed to instantiate).
+        assert!(
+            func_imports(&wasm).is_empty(),
+            "[{opt:?}] the loop-form Poseidon should need no host imports; got {:?}",
+            func_imports(&wasm)
+        );
+
+        let (mut store, instance) = instantiate(&wasm);
+
+        for (name, left, right) in &vectors {
+            let left_limbs = slice_b_to_limbs(left, n);
+            let right_limbs = slice_b_to_limbs(right, n);
+            // Reuse the Slice B limb driver: arg0 = k = output limb index, arg1 = 0,
+            // then the 20 left + 20 right PLAIN input limbs.
+            let got_limbs = slice_b_field_mul_limbs(
+                &mut store,
+                &instance,
+                "poseidon_bn254_loop",
+                &left_limbs,
+                &right_limbs,
+                n,
+            );
+            let got = slice_c_limbs_to_biguint(&got_limbs);
+            let oracle = slice_c_poseidon_oracle(left, right, &p, &mds, &rc);
+
+            // THE DUAL GATE, leg (ii): loop-form == the plain-field u256-equivalent
+            // oracle (same MDS/round constants, plain modular arithmetic).
+            assert_eq!(
+                got, oracle,
+                "[{opt:?}] loop-form Poseidon {name} must equal the plain-field u256-form oracle"
+            );
+        }
+
+        // THE DUAL GATE, leg (i): the loop-form reproduces the checked-in circomlib
+        // pins exactly (redundant with the anchored oracle above, but asserts the
+        // literal published vectors directly against the wasm output).
+        let h00 = slice_c_limbs_to_biguint(&slice_b_field_mul_limbs(
+            &mut store,
+            &instance,
+            "poseidon_bn254_loop",
+            &slice_b_to_limbs(&0u32.into(), n),
+            &slice_b_to_limbs(&0u32.into(), n),
+            n,
+        ));
+        let h12 = slice_c_limbs_to_biguint(&slice_b_field_mul_limbs(
+            &mut store,
+            &instance,
+            "poseidon_bn254_loop",
+            &slice_b_to_limbs(&1u32.into(), n),
+            &slice_b_to_limbs(&2u32.into(), n),
+            n,
+        ));
+        assert_eq!(h00, pin_00, "[{opt:?}] loop-form hash2(0,0) must equal the circomlib vector");
+        assert_eq!(h12, pin_12, "[{opt:?}] loop-form hash2(1,2) must equal the circomlib vector");
+
+        eprintln!(
+            "  Slice C Poseidon dual gate [{opt:?}]: rolled loop-form limb Poseidon hash2 == \
+             circomlib vectors == plain-field u256-form oracle, bit-exact, over {} vectors \
+             (incl the two circomlib pins + p-1 x p-2).",
+            vectors.len()
+        );
+    }
+}
