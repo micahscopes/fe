@@ -1,4 +1,4 @@
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use mir::RuntimePackage;
 
 pub(crate) fn ensure_runtime_package_has_roots(

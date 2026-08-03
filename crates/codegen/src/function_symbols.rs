@@ -1,4 +1,4 @@
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use hir::analysis::{
     semantic::SemanticInstance,
     ty::{

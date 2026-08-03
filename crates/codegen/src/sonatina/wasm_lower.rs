@@ -35,7 +35,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
 use mir::{
     AddressSpaceKind, ConstNode, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem,
@@ -56,9 +56,16 @@ use sonatina_ir::{
         control_flow::{Br, Call, Jump, Phi, Return, Unreachable},
         data::{MemAllocDynamic, Mload, Mstore},
         logic::{And, Or, Xor},
+        native::inst_set::NativeInstSet,
     },
     isa::{Isa, wasm32::Wasm32},
     module::{FuncRef, ModuleCtx},
+};
+#[cfg(feature = "sonatina-indirect-calls")]
+use sonatina_ir::{
+    GlobalVariableData,
+    global_variable::GvInitializer,
+    inst::{control_flow::CallIndirect, data::GetFunctionPtr},
 };
 use sonatina_triple::{Architecture, OperatingSystem, TargetTriple, Vendor};
 
@@ -90,11 +97,59 @@ pub fn compile_runtime_package_wasm(
     compile_runtime_package_wasm_with_canonical_lanes(db, package, &[])
 }
 
+/// Overlay-only callback-capstone entry point. The default pin cannot name the
+/// typed indirect-call instructions used here, so normal builds do not compile
+/// this surface.
+#[cfg(feature = "sonatina-indirect-calls")]
+pub fn compile_runtime_package_wasm_with_guest_callbacks(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+    callbacks: &[crate::guest_callbacks::ResolvedGuestCallback],
+) -> Result<(Module, HashMap<String, String>), LowerError> {
+    let isa = create_wasm32_isa();
+    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
+    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new());
+    lowerer.declare_functions()?;
+    lowerer.lower_bodies()?;
+    lowerer.synthesize_guest_callbacks(callbacks)?;
+    let import_modules = lowerer.import_modules();
+    Ok((lowerer.finish(), import_modules))
+}
+
 pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     db: &DriverDataBase,
     package: &RuntimePackage<'_>,
     canonical_lanes: &[crate::CanonicalLane],
 ) -> Result<(Module, HashMap<String, String>), LowerError> {
+    // Reject unsupported indirect host results before constructing any
+    // Sonatina signatures. A local wrapper may itself return the authored enum
+    // and appear before the import in package order, so gating inside
+    // `declare_functions` is already too late.
+    for function in package.functions(db) {
+        let instance = function.instance(db);
+        let Some(name) = mir::host_import_name(db, instance) else {
+            continue;
+        };
+        let Some(descriptor) = mir::indirect_host_result(db, instance) else {
+            continue;
+        };
+        let mut missing = Vec::new();
+        if descriptor.requires_realloc {
+            missing.push("realloc");
+        }
+        if descriptor.requires_post_return {
+            missing.push("post-return");
+        }
+        if !missing.is_empty() {
+            return Err(LowerError::Unsupported(format!(
+                "extern host import `{name}` uses indirect host result codec `{}`, but the Wasm \
+                 backend is missing required capabilities: {}",
+                mir::IndirectHostResult::FE_HOST_WASM_PROTOCOL,
+                missing.join(", ")
+            )));
+        }
+    }
+
     // CONSULT (DispatchKind axis): the wasm target realizes the `Export` kind.
     // Every entry (`main`, the `fe_task` task table, the degraded-mode
     // `on_ready` continuation) is a named export the host invokes directly, with
@@ -113,8 +168,7 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
         .iter()
         .map(|lane| lane.name.clone())
         .collect();
-    let mut lowerer =
-        WasmModuleLowerer::new(db, builder, &isa, package, canonical_lane_names);
+    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, canonical_lane_names);
     lowerer.declare_functions()?;
     lowerer.lower_bodies()?;
     for lane in canonical_lanes {
@@ -122,6 +176,36 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     }
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
+}
+
+/// Lower through the same fail-closed portable instruction vocabulary as Wasm,
+/// but attach the host-native data layout required by Cranelift.
+#[cfg(all(
+    feature = "native-backend",
+    not(target_arch = "wasm32"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn compile_runtime_package_native(
+    db: &DriverDataBase,
+    package: &RuntimePackage<'_>,
+) -> Result<Module, LowerError> {
+    use sonatina_ir::isa::native::Native;
+
+    let architecture = if cfg!(target_arch = "x86_64") {
+        Architecture::X86_64
+    } else {
+        Architecture::Aarch64
+    };
+    let isa = Native::new(TargetTriple::new(
+        architecture,
+        Vendor::Unknown,
+        OperatingSystem::Native,
+    ));
+    let builder = ModuleBuilder::new(ModuleCtx::new(&isa));
+    let mut lowerer = PortableModuleLowerer::new(db, builder, &isa, package, HashSet::new());
+    lowerer.declare_functions()?;
+    lowerer.lower_bodies()?;
+    Ok(lowerer.finish())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -982,11 +1066,7 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
         .params
         .iter()
         .filter_map(|param| match &param.class {
-            RuntimeClass::Ref {
-                pointee,
-                kind,
-                ..
-            }
+            RuntimeClass::Ref { pointee, kind, .. }
                 if is_reifiable_aggregate_ref(kind)
                     && matches!(pointee.as_ref(), RuntimeClass::AggregateValue { .. }) =>
             {
@@ -1078,9 +1158,7 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
                     .as_view(db)
                     .unwrap_or(semantic_ty)
                     .field_types(db);
-                let Some(field_semantic_ty) =
-                    semantic_fields.get(index.0 as usize).copied()
-                else {
+                let Some(field_semantic_ty) = semantic_fields.get(index.0 as usize).copied() else {
                     valid = false;
                     break;
                 };
@@ -1118,10 +1196,13 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
     }
 }
 
-struct WasmModuleLowerer<'db, 'a> {
+struct PortableModuleLowerer<'db, 'a, I>
+where
+    I: Isa<InstSet = NativeInstSet>,
+{
     db: &'db DriverDataBase,
     builder: ModuleBuilder,
-    isa: &'a Wasm32,
+    isa: &'a I,
     package: &'a RuntimePackage<'db>,
     prepared_bodies: FxHashMap<RuntimeInstance<'db>, RuntimeBody<'db>>,
     func_symbols: FxHashMap<RuntimeInstance<'db>, String>,
@@ -1129,11 +1210,14 @@ struct WasmModuleLowerer<'db, 'a> {
     canonical_lane_names: HashSet<String>,
 }
 
-impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
+impl<'db, 'a, I> PortableModuleLowerer<'db, 'a, I>
+where
+    I: Isa<InstSet = NativeInstSet>,
+{
     fn new(
         db: &'db DriverDataBase,
         builder: ModuleBuilder,
-        isa: &'a Wasm32,
+        isa: &'a I,
         package: &'a RuntimePackage<'db>,
         canonical_lane_names: HashSet<String>,
     ) -> Self {
@@ -1174,10 +1258,10 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         functions
     }
 
-    /// The symbol -> wasm-import-module side table for external declarations
-    /// (R3.3). Each non-builtin `extern` whose block carries
-    /// `#[wasm_import(module = "...")]` maps its Sonatina symbol (which becomes
-    /// the import's field name) to that module string. Attribute-less externs are
+    /// The symbol -> host-namespace side table for external declarations. Each
+    /// non-builtin `extern` whose block carries
+    /// `#[host_import(module = "...")]` maps its Sonatina symbol (which becomes
+    /// the Wasm import's field name) to that module string. Attribute-less externs are
     /// omitted, so the WAFFLE backend falls back to the flat `"fe"` convention for
     /// them. Keyed by the same symbol the lowering assigns, so it matches the
     /// import name the backend reads.
@@ -1188,7 +1272,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                 continue;
             }
             let instance = function.instance(self.db);
-            if let Some(module) = mir::wasm_import_module(self.db, instance) {
+            if let Some(module) = mir::host_import_module(self.db, instance) {
                 modules.insert(self.function_symbol(instance), module);
             }
         }
@@ -1201,7 +1285,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         // internal Sonatina symbol, which is mangled per instance
         // (`std__lib__webgpu__raw__gpu_buffer_create_HASH`). The fork's WAFFLE emitter
         // uses this string verbatim as the wasm import field name.
-        if let Some(name) = mir::wasm_import_name(self.db, instance) {
+        if let Some(name) = mir::host_import_name(self.db, instance) {
             return name;
         }
         self.func_symbols
@@ -1227,9 +1311,27 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         let mut import_refs: FxHashMap<(String, String), FuncRef> = FxHashMap::default();
         for function in self.functions_in_declaration_order() {
             let instance = function.instance(self.db);
-            if let Some(name) = mir::wasm_import_name(self.db, instance) {
+            if let Some(name) = mir::host_import_name(self.db, instance) {
+                if let Some(descriptor) = mir::indirect_host_result(self.db, instance) {
+                    let mut missing = Vec::new();
+                    if descriptor.requires_realloc {
+                        missing.push("realloc");
+                    }
+                    if descriptor.requires_post_return {
+                        missing.push("post-return");
+                    }
+                    if !missing.is_empty() {
+                        return Err(LowerError::Unsupported(format!(
+                            "extern host import `{name}` uses indirect host result codec \
+                             `{}`, but the Wasm backend is missing required \
+                             capabilities: {}",
+                            mir::IndirectHostResult::FE_HOST_WASM_PROTOCOL,
+                            missing.join(", ")
+                        )));
+                    }
+                }
                 let module =
-                    mir::wasm_import_module(self.db, instance).unwrap_or_else(|| "fe".to_string());
+                    mir::host_import_module(self.db, instance).unwrap_or_else(|| "fe".to_string());
                 let key = (module, name);
                 if let Some(func_ref) = import_refs.get(&key) {
                     self.func_map.insert(instance, *func_ref);
@@ -1315,7 +1417,346 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
             let func_ref = *self.func_map.get(&instance).ok_or_else(|| {
                 LowerError::Internal("wasm function lowered before it was declared".to_string())
             })?;
-            WasmFunctionLowerer::new(self, body, func_ref)?.lower()?;
+            PortableFunctionLowerer::new(self, body, func_ref)?.lower()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "sonatina-indirect-calls")]
+    fn synthesize_guest_callbacks(
+        &mut self,
+        callbacks: &[crate::guest_callbacks::ResolvedGuestCallback],
+    ) -> Result<(), LowerError> {
+        use smallvec1::smallvec;
+
+        fn core_ty(ty: fe_host_abi::CoreType) -> Result<Type, LowerError> {
+            Ok(match ty {
+                fe_host_abi::CoreType::I32 => Type::I32,
+                fe_host_abi::CoreType::I64 => Type::I64,
+                fe_host_abi::CoreType::F32 => Type::F32,
+                fe_host_abi::CoreType::F64 => {
+                    return Err(LowerError::Unsupported(
+                        "f64 guest callbacks await an f64 Sonatina carrier".into(),
+                    ));
+                }
+            })
+        }
+
+        for (index, callback) in callbacks.iter().enumerate() {
+            // Rich and async lanes never reach this resolved scalar manifest.
+            // Keep this first materializer deliberately single-result.
+            if callback.core_params.len() != 1 || callback.core_results.len() > 1 {
+                return Err(LowerError::Unsupported(
+                    "guest callback trampolines currently require one scalar parameter and at \
+                     most one scalar result"
+                        .into(),
+                ));
+            }
+            let target = self
+                .func_symbols
+                .iter()
+                .find_map(|(instance, symbol)| {
+                    (symbol == &callback.runtime_symbol)
+                        .then(|| self.func_map.get(instance).copied())
+                        .flatten()
+                })
+                .ok_or_else(|| {
+                    LowerError::Internal(format!(
+                        "resolved guest callback target `{}` was not declared",
+                        callback.runtime_symbol
+                    ))
+                })?;
+            let params = callback
+                .core_params
+                .iter()
+                .copied()
+                .map(core_ty)
+                .collect::<Result<Vec<_>, _>>()?;
+            let results = callback
+                .core_results
+                .iter()
+                .copied()
+                .map(core_ty)
+                .collect::<Result<Vec<_>, _>>()?;
+            let function_ty = self
+                .builder
+                .ctx
+                .with_ty_store_mut(|types| types.make_func(&params, &results));
+            let function_ptr_ty = function_ty.to_ptr(&self.builder.ctx);
+            let prefix = format!("fe_guest_callback_{index}");
+            let generation = self.builder.declare_gv(GlobalVariableData::new(
+                format!("{prefix}_generation"),
+                Type::I32,
+                Linkage::Private,
+                false,
+                Some(GvInitializer::make_imm(0i32)),
+            ));
+            let occupied = self.builder.declare_gv(GlobalVariableData::new(
+                format!("{prefix}_occupied"),
+                Type::I32,
+                Linkage::Private,
+                false,
+                Some(GvInitializer::make_imm(0i32)),
+            ));
+
+            // register() -> token. One manifest entry owns one reusable slot;
+            // generation is bumped before every re-registration.
+            let register = self
+                .builder
+                .declare_function(Signature::new_single(
+                    &format!("{prefix}_register"),
+                    Linkage::Public,
+                    &[],
+                    Type::I32,
+                ))
+                .map_err(|error| LowerError::Internal(error.to_string()))?;
+            {
+                let mut fb = self.builder.func_builder::<InstInserter>(register);
+                let entry = fb.append_block();
+                let valid = fb.append_block();
+                let invalid = fb.append_block();
+                fb.switch_to_block(entry);
+                let occupied_addr = fb.make_global_value(occupied);
+                let occupied_value = fb.insert_inst(
+                    Mload::new(self.isa.inst_set(), occupied_addr, Type::I32),
+                    Type::I32,
+                );
+                let zero = fb.make_imm_value(Immediate::I32(0));
+                let vacant = fb.insert_inst(
+                    CmpEq::new(self.isa.inst_set(), occupied_value, zero),
+                    Type::I1,
+                );
+                fb.insert_inst_no_result(Br::new(self.isa.inst_set(), vacant, valid, invalid));
+                fb.switch_to_block(invalid);
+                fb.insert_inst_no_result(Unreachable::new(self.isa.inst_set()));
+                fb.switch_to_block(valid);
+                let generation_addr = fb.make_global_value(generation);
+                let old_generation = fb.insert_inst(
+                    Mload::new(self.isa.inst_set(), generation_addr, Type::I32),
+                    Type::I32,
+                );
+                let one = fb.make_imm_value(Immediate::I32(1));
+                let next = fb.insert_inst(
+                    Add::new(self.isa.inst_set(), old_generation, one),
+                    Type::I32,
+                );
+                fb.insert_inst_no_result(Mstore::new(
+                    self.isa.inst_set(),
+                    generation_addr,
+                    next,
+                    Type::I32,
+                ));
+                fb.insert_inst_no_result(Mstore::new(
+                    self.isa.inst_set(),
+                    occupied_addr,
+                    one,
+                    Type::I32,
+                ));
+                let scale = fb.make_imm_value(Immediate::I32(1 << 16));
+                let generation_bits =
+                    fb.insert_inst(Mul::new(self.isa.inst_set(), next, scale), Type::I32);
+                let token = fb.insert_inst(
+                    Add::new(self.isa.inst_set(), generation_bits, one),
+                    Type::I32,
+                );
+                fb.insert_return(token);
+                fb.seal_all();
+                fb.finish();
+            }
+
+            let mut trampoline_params = vec![Type::I32];
+            trampoline_params.extend_from_slice(&params);
+
+            // Expose the opaque Wasm table index separately from the lifetime
+            // token. Hosts may retain it as dispatch metadata, but registration
+            // authority is still the generation-checked token below.
+            let pointer_export = self
+                .builder
+                .declare_function(Signature::new_single(
+                    &format!("{prefix}_table_slot"),
+                    Linkage::Public,
+                    &[],
+                    function_ptr_ty,
+                ))
+                .map_err(|error| LowerError::Internal(error.to_string()))?;
+            {
+                let mut fb = self.builder.func_builder::<InstInserter>(pointer_export);
+                let entry = fb.append_block();
+                fb.switch_to_block(entry);
+                let pointer = fb.insert_inst(
+                    GetFunctionPtr::new(self.isa.inst_set(), target),
+                    function_ptr_ty,
+                );
+                fb.insert_return(pointer);
+                fb.seal_all();
+                fb.finish();
+            }
+
+            let mut raw_params = vec![function_ptr_ty];
+            raw_params.extend_from_slice(&params);
+            let raw_invoke = self
+                .builder
+                .declare_function(Signature::new(
+                    &format!("{prefix}_invoke_raw"),
+                    Linkage::Public,
+                    &raw_params,
+                    &results,
+                ))
+                .map_err(|error| LowerError::Internal(error.to_string()))?;
+            {
+                let mut fb = self.builder.func_builder::<InstInserter>(raw_invoke);
+                let entry = fb.append_block();
+                fb.switch_to_block(entry);
+                let args = fb.args().to_vec();
+                let call = CallIndirect::new(
+                    self.isa.inst_set(),
+                    args[0],
+                    function_ptr_ty,
+                    smallvec![args[1]],
+                );
+                if results.is_empty() {
+                    fb.insert_inst_no_result(call);
+                    fb.insert_return_unit();
+                } else {
+                    let result = fb.insert_inst(call, results[0]);
+                    fb.insert_return(result);
+                }
+                fb.seal_all();
+                fb.finish();
+            }
+
+            let invoke = self
+                .builder
+                .declare_function(Signature::new(
+                    &format!("{prefix}_invoke"),
+                    Linkage::Public,
+                    &trampoline_params,
+                    &results,
+                ))
+                .map_err(|error| LowerError::Internal(error.to_string()))?;
+            {
+                let mut fb = self.builder.func_builder::<InstInserter>(invoke);
+                let entry = fb.append_block();
+                let valid = fb.append_block();
+                let invalid = fb.append_block();
+                fb.switch_to_block(entry);
+                let args = fb.args().to_vec();
+                let occupied_addr = fb.make_global_value(occupied);
+                let generation_addr = fb.make_global_value(generation);
+                let occupied_value = fb.insert_inst(
+                    Mload::new(self.isa.inst_set(), occupied_addr, Type::I32),
+                    Type::I32,
+                );
+                let current_generation = fb.insert_inst(
+                    Mload::new(self.isa.inst_set(), generation_addr, Type::I32),
+                    Type::I32,
+                );
+                let one = fb.make_imm_value(Immediate::I32(1));
+                let scale = fb.make_imm_value(Immediate::I32(1 << 16));
+                let generation_bits = fb.insert_inst(
+                    Mul::new(self.isa.inst_set(), current_generation, scale),
+                    Type::I32,
+                );
+                let expected = fb.insert_inst(
+                    Add::new(self.isa.inst_set(), generation_bits, one),
+                    Type::I32,
+                );
+                let token_ok =
+                    fb.insert_inst(CmpEq::new(self.isa.inst_set(), args[0], expected), Type::I1);
+                let occupied_ok = fb.insert_inst(
+                    CmpEq::new(self.isa.inst_set(), occupied_value, one),
+                    Type::I1,
+                );
+                let valid_token = fb.insert_inst(
+                    And::new(self.isa.inst_set(), token_ok, occupied_ok),
+                    Type::I1,
+                );
+                fb.insert_inst_no_result(Br::new(self.isa.inst_set(), valid_token, valid, invalid));
+                fb.switch_to_block(invalid);
+                fb.insert_inst_no_result(Unreachable::new(self.isa.inst_set()));
+                fb.switch_to_block(valid);
+                let callee = fb.insert_inst(
+                    GetFunctionPtr::new(self.isa.inst_set(), target),
+                    function_ptr_ty,
+                );
+                let call = CallIndirect::new(
+                    self.isa.inst_set(),
+                    callee,
+                    function_ptr_ty,
+                    smallvec![args[1]],
+                );
+                if results.is_empty() {
+                    fb.insert_inst_no_result(call);
+                    fb.insert_return_unit();
+                } else {
+                    let result = fb.insert_inst(call, results[0]);
+                    fb.insert_return(result);
+                }
+                fb.seal_all();
+                fb.finish();
+            }
+
+            let release = self
+                .builder
+                .declare_function(Signature::new(
+                    &format!("{prefix}_release"),
+                    Linkage::Public,
+                    &[Type::I32],
+                    &[],
+                ))
+                .map_err(|error| LowerError::Internal(error.to_string()))?;
+            {
+                let mut fb = self.builder.func_builder::<InstInserter>(release);
+                let entry = fb.append_block();
+                let valid = fb.append_block();
+                let invalid = fb.append_block();
+                fb.switch_to_block(entry);
+                let token = fb.args()[0];
+                let occupied_addr = fb.make_global_value(occupied);
+                let generation_addr = fb.make_global_value(generation);
+                let occupied_value = fb.insert_inst(
+                    Mload::new(self.isa.inst_set(), occupied_addr, Type::I32),
+                    Type::I32,
+                );
+                let current_generation = fb.insert_inst(
+                    Mload::new(self.isa.inst_set(), generation_addr, Type::I32),
+                    Type::I32,
+                );
+                let one = fb.make_imm_value(Immediate::I32(1));
+                let scale = fb.make_imm_value(Immediate::I32(1 << 16));
+                let generation_bits = fb.insert_inst(
+                    Mul::new(self.isa.inst_set(), current_generation, scale),
+                    Type::I32,
+                );
+                let expected = fb.insert_inst(
+                    Add::new(self.isa.inst_set(), generation_bits, one),
+                    Type::I32,
+                );
+                let token_ok =
+                    fb.insert_inst(CmpEq::new(self.isa.inst_set(), token, expected), Type::I1);
+                let occupied_ok = fb.insert_inst(
+                    CmpEq::new(self.isa.inst_set(), occupied_value, one),
+                    Type::I1,
+                );
+                let valid_token = fb.insert_inst(
+                    And::new(self.isa.inst_set(), token_ok, occupied_ok),
+                    Type::I1,
+                );
+                fb.insert_inst_no_result(Br::new(self.isa.inst_set(), valid_token, valid, invalid));
+                fb.switch_to_block(invalid);
+                fb.insert_inst_no_result(Unreachable::new(self.isa.inst_set()));
+                fb.switch_to_block(valid);
+                let zero = fb.make_imm_value(Immediate::I32(0));
+                fb.insert_inst_no_result(Mstore::new(
+                    self.isa.inst_set(),
+                    occupied_addr,
+                    zero,
+                    Type::I32,
+                ));
+                fb.insert_return_unit();
+                fb.seal_all();
+                fb.finish();
+            }
         }
         Ok(())
     }
@@ -1388,14 +1829,10 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                     ..
                 } => {
                     let pointer_offset = base.checked_add(*pointer_offset).ok_or_else(|| {
-                        LowerError::Unsupported(
-                            "canonical list pointer offset overflow".to_owned(),
-                        )
+                        LowerError::Unsupported("canonical list pointer offset overflow".to_owned())
                     })?;
                     let length_offset = base.checked_add(*length_offset).ok_or_else(|| {
-                        LowerError::Unsupported(
-                            "canonical list length offset overflow".to_owned(),
-                        )
+                        LowerError::Unsupported("canonical list length offset overflow".to_owned())
                     })?;
                     if *stride != 4 || *max > u32::MAX / *stride {
                         return Err(LowerError::Unsupported(
@@ -1404,13 +1841,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
                     }
                     leaves.push((pointer_offset, Type::I32));
                     leaves.push((length_offset, Type::I32));
-                    descriptors.push((
-                        pointer_offset,
-                        length_offset,
-                        *stride,
-                        *max,
-                        *stride,
-                    ));
+                    descriptors.push((pointer_offset, length_offset, *stride, *max, *stride));
                     None
                 }
             };
@@ -1425,12 +1856,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
         let mut request_descriptors = Vec::new();
         let mut response_descriptors = Vec::new();
         flatten(&lane.request, 0, &mut request, &mut request_descriptors)?;
-        flatten(
-            &lane.response,
-            0,
-            &mut response,
-            &mut response_descriptors,
-        )?;
+        flatten(&lane.response, 0, &mut response, &mut response_descriptors)?;
         // Input descriptors remain borrowed views into caller-owned memory.
         let _ = request_descriptors;
         if request.is_empty() || response.is_empty() {
@@ -1613,8 +2039,7 @@ impl<'db, 'a> WasmModuleLowerer<'db, 'a> {
 
             fb.switch_to_block(copy_body);
             let source_byte = fb.insert_inst(Add::new(is, source, index), Type::I32);
-            let destination_byte =
-                fb.insert_inst(Add::new(is, destination, index), Type::I32);
+            let destination_byte = fb.insert_inst(Add::new(is, destination, index), Type::I32);
             let byte = fb.insert_inst(Mload::new(is, source_byte, Type::I8), Type::I8);
             fb.insert_inst_no_result(Mstore::new(is, destination_byte, byte, Type::I8));
             let one = fb.make_imm_value(Immediate::I32(1));
@@ -1797,8 +2222,11 @@ fn scalar_ty_r1<'db>(scalar: &ScalarClass<'db>) -> Result<Type, LowerError> {
     }
 }
 
-struct WasmFunctionLowerer<'ctx, 'db, 'a> {
-    module: &'ctx mut WasmModuleLowerer<'db, 'a>,
+struct PortableFunctionLowerer<'ctx, 'db, 'a, I>
+where
+    I: Isa<InstSet = NativeInstSet>,
+{
+    module: &'ctx mut PortableModuleLowerer<'db, 'a, I>,
     body: RuntimeBody<'db>,
     fb: FunctionBuilder<InstInserter>,
     prologue_block: BlockId,
@@ -1814,9 +2242,12 @@ struct WasmFunctionLowerer<'ctx, 'db, 'a> {
     tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
 }
 
-impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
+impl<'ctx, 'db, 'a, I> PortableFunctionLowerer<'ctx, 'db, 'a, I>
+where
+    I: Isa<InstSet = NativeInstSet>,
+{
     fn new(
-        module: &'ctx mut WasmModuleLowerer<'db, 'a>,
+        module: &'ctx mut PortableModuleLowerer<'db, 'a, I>,
         body: RuntimeBody<'db>,
         func_ref: FuncRef,
     ) -> Result<Self, LowerError> {
@@ -2592,10 +3023,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 .fb
                 .insert_inst(Add::new(self.inst_set(), addr, offset), Type::I32);
         }
-        Ok(Some((
-            addr,
-            scalar_ty_r1(&scalar)?,
-        )))
+        Ok(Some((addr, scalar_ty_r1(&scalar)?)))
     }
 
     /// `AggregateMake` of a single-scalar-field newtype: the aggregate IS its one
@@ -2671,10 +3099,7 @@ impl<'ctx, 'db, 'a> WasmFunctionLowerer<'ctx, 'db, 'a> {
                 if source_bits > target_bits {
                     Ok(self.fb.insert_inst(Trunc::new(is, value, target), target))
                 } else {
-                    let signed = matches!(
-                        from.repr,
-                        ScalarRepr::Int { signed: true, .. }
-                    );
+                    let signed = matches!(from.repr, ScalarRepr::Int { signed: true, .. });
                     if signed {
                         Ok(self.fb.insert_inst(Sext::new(is, value, target), target))
                     } else {

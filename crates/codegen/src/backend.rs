@@ -1,6 +1,6 @@
 use std::fmt;
 
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 
 use crate::TargetDataLayout;

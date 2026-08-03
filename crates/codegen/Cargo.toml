@@ -4,13 +4,13 @@ version = "26.2.0"
 edition.workspace = true
 
 [dependencies]
-driver = { path = "../driver", package = "fe-driver" }
+compiler-db = { path = "../compiler-db", package = "fe-compiler-db" }
 mir = { path = "../mir", package = "fe-mir" }
 hir.workspace = true
 common.workspace = true
+fe-host-abi = { path = "../host-abi" }
 hex = "0.4"
 num-bigint.workspace = true
-tempfile = "3.23"
 rustc-hash.workspace = true
 sonatina-ir.workspace = true
 sonatina-triple.workspace = true
@@ -26,7 +26,7 @@ sha2 = "0.10"
 # Web bundles reparse and validate emitted WGSL against the browser-default
 # capability set as a production gate, rather than relying only on the
 # SPIR-V backend's less restrictive internal validation.
-naga = { version = "29", features = ["wgsl-in"] }
+naga = { version = "29", features = ["wgsl-in"], optional = true }
 
 [features]
 # On by default so the standard build/test carries the Fe -> SPIR-V wire
@@ -35,13 +35,21 @@ naga = { version = "29", features = ["wgsl-in"] }
 # is off (`--no-default-features`), the `BackendKind::Spirv` driver fails closed
 # with a clear `UnsupportedBackend` error rather than emitting wrong bytes.
 default = ["spirv-backend"]
-spirv-backend = ["sonatina-codegen/spirv-backend"]
+spirv-backend = ["sonatina-codegen/spirv-backend", "dep:naga"]
+# Host-only JIT support. Kept out of the default graph so browser/compiler
+# builds do not pull Cranelift, native object support, or a JIT runtime.
+native-backend = ["sonatina-codegen/cranelift"]
+# Reviewed overlay capability. This is deliberately off by default because
+# Fe's published Sonatina pin predates typed indirect-call IR/table lowering.
+sonatina-indirect-calls = []
 
 [dev-dependencies]
 dir-test.workspace = true
+driver.workspace = true
 test-utils.workspace = true
 url.workspace = true
 hir = { workspace = true, features = ["testutils"] }
+fe-webidl-bindgen = { path = "../webidl-bindgen" }
 # Execution harness for the Fe -> wasm acceptance test (mirrors the Sonatina
 # wasm backend's own wasmtime test versions).
 wasmtime = "44.0.1"

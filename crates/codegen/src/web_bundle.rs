@@ -15,7 +15,7 @@ use std::{
     },
 };
 
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use hir::hir_def::TopLevelMod;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -545,14 +545,13 @@ impl WebBundle {
                 .map(|lanes| WasmCompileOptions::default().with_canonical_lanes(lanes))
                 .unwrap_or_else(|| WasmCompileOptions::default().with_canonical_arena()),
         };
-        let wasm =
-            compile_runtime_package_wasm_with_options(
-                db,
-                &wasm_package,
-                wasm_options.with_optimization(),
-            )
-                .map_err(|error| WebBundleError::Lower(error.to_string()))?
-                .bytes;
+        let wasm = compile_runtime_package_wasm_with_options(
+            db,
+            &wasm_package,
+            wasm_options.with_optimization(),
+        )
+        .map_err(|error| WebBundleError::Lower(error.to_string()))?
+        .bytes;
         wasmparser::validate(&wasm)
             .map_err(|error| WebBundleError::WasmValidation(error.to_string()))?;
         let canonical_interface =
@@ -726,10 +725,7 @@ impl WebBundle {
         // Render bundles ship a compiler-emitted host page so the directory is
         // directly openable (WebGPU shader.wgsl, with a wasm per-pixel fallback).
         if self.manifest.layout.mode == WebBundleMode::Render {
-            push(
-                RENDER_INDEX_FILE,
-                Arc::from(RENDER_RUNTIME_HTML.as_bytes()),
-            )?;
+            push(RENDER_INDEX_FILE, Arc::from(RENDER_RUNTIME_HTML.as_bytes()))?;
         }
         Ok(files)
     }
@@ -915,10 +911,8 @@ fn canonical_interface_declarations(
                 .map(|variant| {
                     let padding = " ".repeat(indent);
                     let field_padding = " ".repeat(indent + 2);
-                    let mut fields = vec![format!(
-                        "{field_padding}readonly tag: {:?};",
-                        variant.name
-                    )];
+                    let mut fields =
+                        vec![format!("{field_padding}readonly tag: {:?};", variant.name)];
                     fields.extend(variant.fields.iter().map(|field| {
                         format!(
                             "{field_padding}{}: {};",
@@ -1854,16 +1848,21 @@ pub fn shade(x: u32, y: u32) -> u32 {
         assert!(error.contains("runtime protocol metadata"), "{error}");
 
         let mut bundle = canonical.clone();
-        bundle.manifest.browser_runtime.as_mut().unwrap().artifacts[0].sha256 =
-            "00".repeat(32);
+        bundle.manifest.browser_runtime.as_mut().unwrap().artifacts[0].sha256 = "00".repeat(32);
         let error = bundle.materialized_files().unwrap_err().to_string();
-        assert!(error.contains("does not match its manifest metadata"), "{error}");
+        assert!(
+            error.contains("does not match its manifest metadata"),
+            "{error}"
+        );
 
         let mut bundle = canonical;
         bundle.manifest.browser_runtime.as_mut().unwrap().artifacts[0].path =
             "runtime/unknown.js".to_owned();
         let error = bundle.materialized_files().unwrap_err().to_string();
-        assert!(error.contains("unsupported browser runtime artifact"), "{error}");
+        assert!(
+            error.contains("unsupported browser runtime artifact"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1880,10 +1879,7 @@ pub fn shade(x: u32, y: u32) -> u32 {
                     name: "data".to_owned(),
                     fields: vec![
                         crate::CanonicalField::new("code", crate::CanonicalType::U8),
-                        crate::CanonicalField::new(
-                            "payload",
-                            crate::CanonicalType::Bytes,
-                        ),
+                        crate::CanonicalField::new("payload", crate::CanonicalType::Bytes),
                     ],
                 },
             ]),

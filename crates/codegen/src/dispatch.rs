@@ -97,7 +97,9 @@ mod tests {
     #[test]
     fn selector_needs_a_synthetic_root() {
         let with_fallback = DispatchKind::Selector { has_fallback: true };
-        let no_fallback = DispatchKind::Selector { has_fallback: false };
+        let no_fallback = DispatchKind::Selector {
+            has_fallback: false,
+        };
         assert!(with_fallback.needs_synthetic_root());
         assert!(no_fallback.needs_synthetic_root());
         assert!(!with_fallback.entries_invoked_directly());

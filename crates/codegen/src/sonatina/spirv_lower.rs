@@ -14,7 +14,7 @@
 //! honest rung this slice earns is R-val: validated, NOT executed). Execution on
 //! a real GPU runtime (lavapipe) is a later slice.
 
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use mir::RuntimePackage;
 use sonatina_codegen::Backend as _;
 use sonatina_codegen::isa::spirv::{SpirvArtifact, SpirvBackend};

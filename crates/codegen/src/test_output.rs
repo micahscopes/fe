@@ -1,4 +1,4 @@
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use hir::{
     HirDb,
     analysis::ty::ty_check::BodyOwner,

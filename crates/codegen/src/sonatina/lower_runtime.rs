@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use driver::DriverDataBase;
+use compiler_db::DriverDataBase;
 use hir::{
     analysis::{
         semantic::FieldIndex,
@@ -1386,8 +1386,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
             RuntimeBuiltin::IntTruncate { value, from, to } => {
                 let value = self.local_value(*value)?;
                 let ty = scalar_ty(to)?;
-                let signed =
-                    matches!(from.repr, ScalarRepr::Int { signed: true, .. });
+                let signed = matches!(from.repr, ScalarRepr::Int { signed: true, .. });
                 self.cast_scalar_with_signedness(value, ty, signed)?
             }
             RuntimeBuiltin::Mload { addr } => {
@@ -2270,7 +2269,7 @@ impl<'ctx, 'db, 'a> FunctionLowerer<'ctx, 'db, 'a> {
                     args,
                 ));
                 self.fb
-                    .insert_inst_no_result(Unreachable::new_unchecked(self.module.inst_set()));
+                    .insert_inst_no_result(Unreachable::new(self.module.inst_set()));
             }
             RTerminator::ReturnData { offset, len } => {
                 let offset = self.local_value(*offset)?;

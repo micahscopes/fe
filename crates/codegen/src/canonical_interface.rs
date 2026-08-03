@@ -12,11 +12,12 @@ use hir::{
         ty::{
             adt_def::AdtRef,
             const_ty::{ConstTyData, EvaluatedConstTy},
-            corelib::{lib_trait_matches, resolve_lib_type_path},
             ty_def::{PrimTy, TyBase, TyData, TyId},
         },
     },
-    hir_def::{EnumVariant, FieldParent, TopLevelMod, VariantKind},
+    hir_def::{
+        EnumVariant, FieldParent, HostExecution, HostPlacement, HostType, TopLevelMod, VariantKind,
+    },
     semantic::EffectRequirementKey,
 };
 use serde::{Deserialize, Serialize};
@@ -122,10 +123,20 @@ pub struct CanonicalCapabilityRequirement {
     pub mutable: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CanonicalCapability {
-    WebgpuDispatch,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CanonicalCapability(String);
+
+impl CanonicalCapability {
+    pub fn new(identity: impl Into<String>) -> Result<Self, CanonicalInterfaceError> {
+        let identity = identity.into();
+        validate_name(&identity, "capability")?;
+        Ok(Self(identity))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +250,9 @@ impl CanonicalInterfaceManifest {
         let mut lanes = Vec::with_capacity(declarations.len());
         for declaration in declarations {
             validate_name(&declaration.name, "lane")?;
+            for requirement in &declaration.intent.capabilities {
+                validate_name(requirement.capability.as_str(), "capability")?;
+            }
             if declaration.intent.execution == CanonicalExecution::Wasm
                 && declaration.export.is_none()
             {
@@ -399,8 +413,6 @@ fn canonical_lane_intent<'db>(
     db: &'db dyn HirAnalysisDb,
     func: hir::hir_def::Func<'db>,
 ) -> Result<CanonicalLaneIntent, CanonicalInterfaceError> {
-    let scope = func.scope();
-    let webgpu_backend = resolve_lib_type_path(db, scope, "std::webgpu::WebGpuBackend");
     let mut execution = CanonicalExecution::Wasm;
     let mut placement = CanonicalPlacement::Any;
     let mut capabilities = Vec::new();
@@ -409,19 +421,21 @@ fn canonical_lane_intent<'db>(
             return Err(error("canonical lane has unsupported non-trait effect"));
         };
         let trait_ = trait_inst.def(db);
-        if lib_trait_matches(db, trait_, "core::browser::HostEffect") {
+        let attrs = trait_
+            .scope()
+            .attrs(db)
+            .expect("trait declarations always carry an attribute list");
+        if attrs.host_execution(db) == Some(HostExecution::External) {
             if execution == CanonicalExecution::HostEffect {
-                return Err(error("duplicate canonical HostEffect marker"));
+                return Err(error("duplicate canonical host-execution marker"));
             }
             execution = CanonicalExecution::HostEffect;
             continue;
         }
-        let marker_placement = if lib_trait_matches(db, trait_, "core::browser::MainThread") {
-            Some(CanonicalPlacement::MainThread)
-        } else if lib_trait_matches(db, trait_, "core::browser::Worker") {
-            Some(CanonicalPlacement::Worker)
-        } else {
-            None
+        let marker_placement = match attrs.host_placement(db) {
+            Some(HostPlacement::MainThread) => Some(CanonicalPlacement::MainThread),
+            Some(HostPlacement::Worker) => Some(CanonicalPlacement::Worker),
+            None => None,
         };
         if let Some(next) = marker_placement {
             if placement != CanonicalPlacement::Any {
@@ -430,13 +444,14 @@ fn canonical_lane_intent<'db>(
             placement = next;
             continue;
         }
-        if lib_trait_matches(db, trait_, "std::webgpu::Dispatch")
+        if let Some(identity) = attrs.host_capability(db)
             && trait_inst.args(db).len() == 2
-            && webgpu_backend.is_some_and(|backend| trait_inst.args(db)[1] == backend)
+            && semantic_type_host_capability_backend(db, trait_inst.args(db)[1]).as_deref()
+                == Some(identity.as_str())
             && trait_inst.assoc_type_bindings(db).is_empty()
         {
             capabilities.push(CanonicalCapabilityRequirement {
-                capability: CanonicalCapability::WebgpuDispatch,
+                capability: CanonicalCapability::new(identity)?,
                 mutable: requirement.is_mut,
             });
             continue;
@@ -444,16 +459,16 @@ fn canonical_lane_intent<'db>(
         return Err(error("canonical lane has unsupported capability effect"));
     }
     if execution == CanonicalExecution::HostEffect && placement == CanonicalPlacement::Any {
-        return Err(error("canonical host-effect lane requires explicit placement"));
+        return Err(error(
+            "canonical host-effect lane requires explicit placement",
+        ));
     }
     if execution == CanonicalExecution::Wasm && !capabilities.is_empty() {
         return Err(error(
             "canonical Wasm lane cannot externalize host capabilities without HostEffect",
         ));
     }
-    capabilities.sort_by_key(|requirement| match requirement.capability {
-        CanonicalCapability::WebgpuDispatch => 0,
-    });
+    capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
     capabilities.dedup();
     Ok(CanonicalLaneIntent {
         execution,
@@ -462,10 +477,18 @@ fn canonical_lane_intent<'db>(
     })
 }
 
+fn semantic_type_host_capability_backend(db: &dyn HirAnalysisDb, ty: TyId<'_>) -> Option<String> {
+    let adt = ty.adt_def(db)?;
+    let AdtRef::Struct(struct_) = adt.adt_ref(db) else {
+        return None;
+    };
+    struct_.scope().attrs(db)?.host_capability_backend(db)
+}
+
 /// Map a closed semantic Fe type to milestone-1 canonical metadata.
 ///
-/// Bytes, strings, and lists use exact compiler-owned `core::browser`
-/// descriptor identities.
+/// Bytes, strings, and lists use explicitly annotated nominal descriptor
+/// identities.
 /// Primitive `String` and name-based or structural ADT guesses remain rejected.
 pub fn canonical_type_from_semantic<'db>(
     db: &'db dyn HirAnalysisDb,
@@ -560,70 +583,64 @@ pub fn canonical_type_from_semantic<'db>(
         }
         return Ok(CanonicalType::Variant(variants));
     };
-    // Descriptor semantics are attached to the exact compiler-owned core ADTs,
-    // never to a source name or a structurally similar user record.
-    let descriptor = [
-        ("core::browser::BrowserBytes", CanonicalType::Bytes),
-        ("core::browser::AllocatedBrowserBytes", CanonicalType::Bytes),
-        ("core::browser::BrowserString", CanonicalType::String),
-    ]
-    .into_iter()
-    .find_map(|(lib_path, canonical)| {
-        let resolved = resolve_lib_type_path(db, struct_.scope(), lib_path)?;
-        (resolved.adt_def(db) == Some(adt)).then_some(canonical)
-    });
-    if let Some(descriptor) = descriptor {
-        return Ok(descriptor);
-    }
-    if resolve_lib_type_path(db, struct_.scope(), "core::browser::BrowserList")
-        .is_some_and(|resolved| resolved.adt_def(db) == Some(adt))
+    // Descriptor semantics are explicit nominal metadata, never source-name or
+    // structural guesses.
+    match struct_
+        .scope()
+        .attrs(db)
+        .and_then(|attrs| attrs.host_type(db))
     {
-        let [element, max] = ty.generic_args(db) else {
-            return Err(error(format!(
-                "{path}: BrowserList requires exactly one element type and one const maximum"
-            )));
-        };
-        let element = match element.base_ty(db).data(db) {
-            TyData::TyBase(TyBase::Prim(PrimTy::U32)) => CanonicalListElement::U32,
-            TyData::TyBase(TyBase::Prim(PrimTy::F32)) => CanonicalListElement::F32,
-            _ => {
+        Some(HostType::Bytes) => return Ok(CanonicalType::Bytes),
+        Some(HostType::String) => return Ok(CanonicalType::String),
+        Some(HostType::List) => {
+            let [element, max] = ty.generic_args(db) else {
                 return Err(error(format!(
-                    "{path}: BrowserList element must be exactly `u32` or `f32`"
+                    "{path}: canonical list requires exactly one element type and one const maximum"
+                )));
+            };
+            let element = match element.base_ty(db).data(db) {
+                TyData::TyBase(TyBase::Prim(PrimTy::U32)) => CanonicalListElement::U32,
+                TyData::TyBase(TyBase::Prim(PrimTy::F32)) => CanonicalListElement::F32,
+                _ => {
+                    return Err(error(format!(
+                        "{path}: canonical list element must be exactly `u32` or `f32`"
+                    )));
+                }
+            };
+            let TyData::ConstTy(max) = max.data(db) else {
+                return Err(error(format!(
+                    "{path}: BrowserList maximum must be a concrete `usize` const"
+                )));
+            };
+            let evaluated = max.evaluate(db, None);
+            let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(max), max_ty) = evaluated.data(db)
+            else {
+                return Err(error(format!(
+                    "{path}: BrowserList maximum must evaluate to a concrete integer"
+                )));
+            };
+            if !matches!(
+                max_ty.base_ty(db).data(db),
+                TyData::TyBase(TyBase::Prim(PrimTy::Usize))
+            ) {
+                return Err(error(format!(
+                    "{path}: BrowserList maximum must have type `usize`"
                 )));
             }
-        };
-        let TyData::ConstTy(max) = max.data(db) else {
-            return Err(error(format!(
-                "{path}: BrowserList maximum must be a concrete `usize` const"
-            )));
-        };
-        let evaluated = max.evaluate(db, None);
-        let ConstTyData::Evaluated(EvaluatedConstTy::LitInt(max), max_ty) = evaluated.data(db)
-        else {
-            return Err(error(format!(
-                "{path}: BrowserList maximum must evaluate to a concrete integer"
-            )));
-        };
-        if !matches!(
-            max_ty.base_ty(db).data(db),
-            TyData::TyBase(TyBase::Prim(PrimTy::Usize))
-        ) {
-            return Err(error(format!(
-                "{path}: BrowserList maximum must have type `usize`"
-            )));
+            let max = u32::try_from(max.data(db)).map_err(|_| {
+                error(format!(
+                    "{path}: BrowserList maximum does not fit the wasm32 canonical ABI"
+                ))
+            })?;
+            if max > u32::MAX / 4 {
+                return Err(error(format!(
+                    "{path}: BrowserList maximum {max} exceeds the safe four-byte element bound {}",
+                    u32::MAX / 4
+                )));
+            }
+            return Ok(CanonicalType::List { element, max });
         }
-        let max = u32::try_from(max.data(db)).map_err(|_| {
-            error(format!(
-                "{path}: BrowserList maximum does not fit the wasm32 canonical ABI"
-            ))
-        })?;
-        if max > u32::MAX / 4 {
-            return Err(error(format!(
-                "{path}: BrowserList maximum {max} exceeds the safe four-byte element bound {}",
-                u32::MAX / 4
-            )));
-        }
-        return Ok(CanonicalType::List { element, max });
+        None => {}
     }
     let field_types = ty.field_types(db);
     let field_views = FieldParent::Struct(struct_).fields(db).collect::<Vec<_>>();
@@ -1382,7 +1399,10 @@ pub fn update(request: Request) -> Response { Response { accepted: true } }
             "update",
         )
         .unwrap_err();
-        assert!(unsupported.contains("exactly `u32` or `f32`"), "{unsupported}");
+        assert!(
+            unsupported.contains("exactly `u32` or `f32`"),
+            "{unsupported}"
+        );
     }
 
     #[test]
@@ -1578,11 +1598,64 @@ pub fn update(request: Request) -> Response
     }
 
     #[test]
+    fn user_defined_host_metadata_drives_intent_without_library_paths() {
+        let declaration = semantic_lane(
+            r#"
+#[host_execution(external)]
+trait RunElsewhere {}
+#[host_placement(worker)]
+trait OffThread {}
+#[host_capability(device_dispatch)]
+trait DeviceOps<B> {}
+#[host_capability_backend(device_dispatch)]
+struct Device {}
+struct Request { value: u32 }
+struct Response { value: u32 }
+pub fn update(request: Request) -> Response
+    uses (RunElsewhere, OffThread, mut DeviceOps<Device>)
+{
+    Response { value: request.value }
+}
+"#,
+            "update",
+        )
+        .unwrap();
+        assert_eq!(
+            declaration.intent,
+            CanonicalLaneIntent {
+                execution: CanonicalExecution::HostEffect,
+                placement: CanonicalPlacement::Worker,
+                capabilities: vec![CanonicalCapabilityRequirement {
+                    capability: CanonicalCapability::new("device_dispatch").unwrap(),
+                    mutable: true,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn same_named_unannotated_effect_traits_have_no_host_semantics() {
+        let error = semantic_lane(
+            r#"
+trait HostEffect {}
+trait MainThread {}
+struct Request { value: u32 }
+struct Response { value: u32 }
+pub fn update(request: Request) -> Response
+    uses (HostEffect, MainThread)
+{
+    Response { value: request.value }
+}
+"#,
+            "update",
+        )
+        .unwrap_err();
+        assert!(error.contains("unsupported capability effect"), "{error}");
+    }
+
+    #[test]
     fn manifest_rejects_exports_that_disagree_with_execution_intent() {
-        let message = CanonicalType::Record(vec![CanonicalField::new(
-            "value",
-            CanonicalType::U32,
-        )]);
+        let message = CanonicalType::Record(vec![CanonicalField::new("value", CanonicalType::U32)]);
         let host_with_export = CanonicalLaneDecl {
             name: "host".to_owned(),
             export: Some("fe_cabi_host".to_owned()),
