@@ -1,0 +1,26 @@
+// A subscription has one cancellation owner. The first `cancel` consumes the
+// token; a second cancellation is a compile-time move conflict.
+
+use std::reactive::{Cancelled, Event, EventSource, Subscription}
+
+struct Source {}
+impl Copy for Source {}
+
+impl EventSource for Source {
+    fn subscribe(self) -> Subscription {
+        Subscription::new()
+    }
+
+    fn next(self, _ subscription: own Subscription) -> (Subscription, Event) {
+        (subscription, Event::none())
+    }
+
+    fn cancel(self, _ subscription: own Subscription) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+fn double_cancel(_ source: Source, _ subscription: own Subscription) {
+    source.cancel(subscription)
+    source.cancel(subscription)
+}

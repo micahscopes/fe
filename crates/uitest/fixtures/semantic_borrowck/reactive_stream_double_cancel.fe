@@ -1,0 +1,26 @@
+// Stream preserves EventSource's affine cleanup ownership. Its first `cancel`
+// consumes the subscription, so a second cancellation cannot compile.
+
+use std::reactive::{Cancelled, Event, EventSource, Stream, Subscription}
+
+struct Source {}
+impl Copy for Source {}
+
+impl EventSource for Source {
+    fn subscribe(self) -> Subscription {
+        Subscription::new()
+    }
+
+    fn next(self, _ subscription: own Subscription) -> (Subscription, Event) {
+        (subscription, Event::none())
+    }
+
+    fn cancel(self, _ subscription: own Subscription) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+fn double_stream_cancel(_ stream: Stream<Source>, _ subscription: own Subscription) {
+    stream.cancel(subscription)
+    stream.cancel(subscription)
+}

@@ -1,0 +1,110 @@
+// One transport-neutral event tape is consumed through the raw EventSource
+// interface, through Stream, and through pure FRP transformations. All three
+// subscriptions observe the same values and report identical cleanup.
+
+use core::Fn
+use std::reactive::{
+    Cancelled, Event, EventSource, Stepped, Stream, Subscription,
+    filter_event, hold, map_event,
+}
+
+struct Tape {
+    values: [u32; 4],
+}
+
+impl Copy for Tape {}
+
+impl EventSource for Tape {
+    fn subscribe(self) -> Subscription {
+        Subscription::new()
+    }
+
+    fn next(self, _ subscription: own Subscription) -> (Subscription, Event) {
+        let advanced = subscription.advance()
+        let next_subscription = advanced.0
+        let cursor = advanced.1
+        if cursor < 4 {
+            (next_subscription, Event::occurrence(value: self.values[cursor as usize]))
+        } else {
+            (next_subscription, Event::none())
+        }
+    }
+
+    fn cancel(self, _ subscription: own Subscription) -> Cancelled {
+        Cancelled { consumed: subscription.cursor() }
+    }
+}
+
+struct Double {}
+
+impl Fn<u32, u32> for Double {
+    fn call(self, _ value: own u32) -> u32 {
+        value * 2
+    }
+}
+
+struct AtLeastFour {}
+
+impl Fn<u32, bool> for AtLeastFour {
+    fn call(self, _ value: own u32) -> bool {
+        value >= 4
+    }
+}
+
+#[test]
+fn imperative_stream_and_frp_consumers_share_values_and_cleanup() {
+    let tape = Tape { values: [1, 2, 3, 4] }
+    let stream = Stream::new(source: tape)
+    let mut imperative = tape.subscribe()
+    let mut streamed = stream.subscribe()
+    let mut reactive = tape.subscribe()
+    let mut held = Stepped { held: 0 }
+    let mut i: u32 = 0
+
+    while i < 4 {
+        let raw_step = tape.next(imperative)
+        imperative = raw_step.0
+        let raw = raw_step.1
+
+        let stream_step = stream.next(streamed)
+        streamed = stream_step.0
+        let stream_event = stream_step.1
+
+        let frp_step = tape.next(reactive)
+        reactive = frp_step.0
+        let mapped = map_event(frp_step.1, Double {})
+        let selected = filter_event(mapped, AtLeastFour {})
+        held = hold(held, selected)
+
+        assert(raw.present)
+        assert(stream_event.present)
+        assert(stream_event.value == raw.value)
+        assert(mapped.present)
+        assert(mapped.value == raw.value * 2)
+        if raw.value >= 2 {
+            assert(selected.present)
+            assert(held.held == raw.value * 2)
+        } else {
+            assert(!selected.present)
+            assert(held.held == 0)
+        }
+        i = i + 1
+    }
+
+    let imperative_cleanup = tape.cancel(imperative)
+    let stream_cleanup = stream.cancel(streamed)
+    let reactive_cleanup = tape.cancel(reactive)
+    assert(imperative_cleanup.consumed == 4)
+    assert(stream_cleanup.consumed == imperative_cleanup.consumed)
+    assert(reactive_cleanup.consumed == imperative_cleanup.consumed)
+    assert(held.held == 8)
+}
+
+#[test]
+fn absence_survives_map_filter_and_hold() {
+    let absent = map_event(Event::none(), Double {})
+    assert(!absent.present)
+    let selected = filter_event(absent, AtLeastFour {})
+    assert(!selected.present)
+    assert(hold(Stepped { held: 9 }, selected).held == 9)
+}
