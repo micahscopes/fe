@@ -249,19 +249,28 @@ impl Backend for WasmBackend {
             OptLevel::Os => Pipeline::size().run(&mut module),
             OptLevel::O1 | OptLevel::O2 => Pipeline::speed().run(&mut module),
         }
-        let artifact = SonatinaWasmBackend::new()
-            .with_import_modules(import_modules)
-            .compile_module(&module)
-            .map_err(|errors| {
-                BackendError::Sonatina(format!(
-                    "wasm backend: {}",
-                    errors
-                        .iter()
-                        .map(|error| error.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                ))
-            })?;
+        // Change 5: enable the canonical arena only when the module actually
+        // allocates dynamically (a function-local aggregate's `AllocObject`, a
+        // `Malloc` builtin, or a canonical lane emits `MemAllocDynamic`, whose
+        // callee `fe_cabi_alloc` the arena synthesizes). A no-alloc module stays
+        // byte-identical to the pre-arena default, keeping the opt-in arena
+        // assertions intact.
+        let backend = SonatinaWasmBackend::new().with_import_modules(import_modules);
+        let backend = if crate::sonatina::module_emits_dynamic_alloc(&module) {
+            backend.with_canonical_arena()
+        } else {
+            backend
+        };
+        let artifact = backend.compile_module(&module).map_err(|errors| {
+            BackendError::Sonatina(format!(
+                "wasm backend: {}",
+                errors
+                    .iter()
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ))
+        })?;
         Ok(BackendOutput::Bytecode(artifact.bytes))
     }
 }

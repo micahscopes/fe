@@ -36,10 +36,12 @@
 use std::collections::{HashMap, HashSet};
 
 use compiler_db::DriverDataBase;
+use hir::analysis::ty::ty_def::{PrimTy, TyBase, TyData};
 use hir::hir_def::{ArithBinOp, BinOp, CompBinOp, UnOp};
+use hir::projection::IndexSource;
 use mir::{
     AddressSpaceKind, ConstNode, ConstScalar, IntrinsicArithBinOp, Layout, LayoutId, PlaceElem,
-    PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RuntimeBody,
+    PlaceRoot, RBlockId, RExpr, RLocal, RLocalId, RStmt, RTerminator, RefKind, RefView, RuntimeBody,
     RuntimeBuiltin, RuntimeCarrier, RuntimeClass, RuntimeFunction, RuntimeInlineHint,
     RuntimeInstance, RuntimeLinkage, RuntimeLocalRoot, RuntimePackage, RuntimePlace, ScalarClass,
     ScalarRepr,
@@ -176,6 +178,31 @@ pub(crate) fn compile_runtime_package_wasm_with_canonical_lanes(
     }
     let import_modules = lowerer.import_modules();
     Ok((lowerer.finish(), import_modules))
+}
+
+/// Change 5: whether the lowered module emits any `MemAllocDynamic`. The default
+/// `BackendKind::Wasm` driver must build with `.with_canonical_arena()` iff so
+/// (`MemAllocDynamic` lowers to the arena's `fe_cabi_alloc`, which only exists
+/// when the arena is enabled); a module with no dynamic allocation stays
+/// byte-identical to the pre-arena default (preserving the canonical-arena
+/// opt-in assertions). Scans every function's instructions, downcasting to
+/// `MemAllocDynamic` against each function's own instruction set.
+pub(crate) fn module_emits_dynamic_alloc(module: &Module) -> bool {
+    use sonatina_ir::InstDowncast;
+    module.funcs().into_iter().any(|func_ref| {
+        module
+            .func_store
+            .try_view(func_ref, |function| {
+                let inst_set = function.inst_set();
+                function.layout.iter_block().any(|block| {
+                    function.layout.iter_inst(block).any(|inst_id| {
+                        let inst_data = function.dfg.inst(inst_id);
+                        <&MemAllocDynamic as InstDowncast>::downcast(inst_set, inst_data).is_some()
+                    })
+                })
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Lower through the same fail-closed portable instruction vocabulary as Wasm,
@@ -1196,6 +1223,690 @@ fn reify_static_aggregate_params<'db>(db: &'db DriverDataBase, body: &mut Runtim
     }
 }
 
+/// True when a runtime local's source-level type is `usize`. On wasm32 `usize`
+/// is a 32-bit pointer-width integer, but MIR classifies it as a 256-bit scalar
+/// (shared with `u256`, `type_info.rs`). The narrowing pass below keys on this
+/// exact predicate so a genuine `u256` (semantic_ty `U256`) stays 256-bit and
+/// fail-closed, while a `usize` index/counter narrows to `i32`.
+fn is_usize_semantic_ty<'db>(
+    db: &'db DriverDataBase,
+    ty: hir::analysis::ty::ty_def::TyId<'db>,
+) -> bool {
+    matches!(
+        ty.base_ty(db).data(db),
+        TyData::TyBase(TyBase::Prim(PrimTy::Usize))
+    )
+}
+
+/// The i32-width unsigned scalar repr that a narrowed `usize` carries on wasm32.
+const USIZE_WASM_REPR: ScalarRepr = ScalarRepr::Int {
+    bits: 32,
+    signed: false,
+};
+
+/// Whether a scalar repr is the 256-bit unsigned integer that MIR assigns to
+/// `usize` (and `u256`). Only the ones whose local's `semantic_ty` is `usize`
+/// are narrowed; the rest stay 256-bit and fail closed.
+fn is_u256_unsigned(repr: ScalarRepr) -> bool {
+    matches!(
+        repr,
+        ScalarRepr::Int {
+            bits: 256,
+            signed: false
+        }
+    )
+}
+
+/// Change 4: narrow `usize` scalar locals (256-bit in MIR) to `i32` on the wasm
+/// path so a runtime array index / loop counter can materialize and address
+/// linear memory. This is the target-correct width for `usize` on wasm32, not a
+/// truncation hack: `usize` IS 32-bit there.
+///
+/// The pass keys strictly on `semantic_ty == PrimTy::Usize`, so a real `u256`
+/// (semantic `U256`) keeps its 256-bit repr and stays rejected by
+/// `scalar_ty_r1`. It rewrites the narrowed locals' carriers plus the embedded
+/// `ScalarClass` reprs keyed off them (a `Cast`'s `to`, an `IntrinsicArith`'s
+/// `class`, an `IntTruncate`'s `from`/`to`) and any signature params that are
+/// narrowed locals. `ConstScalar` literals need no rewrite: their immediate is
+/// re-materialized at the narrowed carrier type.
+///
+/// It is fail-open: the rewrite is staged on a clone and only committed if every
+/// embedded repr keyed off a narrowed local was the expected 256-bit unsigned
+/// one. Any inconsistency leaves the body untouched so the old fail-closed error
+/// fires instead of a silently-miscompiled narrowing.
+fn narrow_usize_scalars<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
+    let narrowed: FxHashMap<RLocalId, ()> = body
+        .locals
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, local)| {
+            let RuntimeCarrier::Value(RuntimeClass::Scalar(scalar)) = &local.carrier else {
+                return None;
+            };
+            (is_u256_unsigned(scalar.repr) && is_usize_semantic_ty(db, local.semantic_ty))
+                .then_some((RLocalId::from_u32(idx as u32), ()))
+        })
+        .collect();
+    if narrowed.is_empty() {
+        return;
+    }
+    let is_narrowed = |local: &RLocalId| narrowed.contains_key(local);
+
+    let mut staged = body.clone();
+    let mut ok = true;
+
+    for id in narrowed.keys() {
+        if let RuntimeCarrier::Value(RuntimeClass::Scalar(scalar)) =
+            &mut staged.locals[id.as_u32() as usize].carrier
+        {
+            scalar.repr = USIZE_WASM_REPR;
+        }
+    }
+    for param in &mut staged.signature.params {
+        if is_narrowed(&param.local) {
+            if let RuntimeClass::Scalar(scalar) = &mut param.class {
+                scalar.repr = USIZE_WASM_REPR;
+            } else {
+                ok = false;
+            }
+        }
+    }
+
+    for block in &mut staged.blocks {
+        for stmt in &mut block.stmts {
+            let RStmt::Assign { dst, expr } = stmt else {
+                continue;
+            };
+            let dst_narrowed = is_narrowed(dst);
+            match expr {
+                RExpr::Cast { value: _, to } if dst_narrowed => {
+                    if is_u256_unsigned(to.repr) {
+                        to.repr = USIZE_WASM_REPR;
+                    } else {
+                        ok = false;
+                    }
+                }
+                RExpr::Builtin(RuntimeBuiltin::IntrinsicArith { class, .. }) if dst_narrowed => {
+                    if is_u256_unsigned(class.repr) {
+                        class.repr = USIZE_WASM_REPR;
+                    } else {
+                        ok = false;
+                    }
+                }
+                RExpr::Builtin(RuntimeBuiltin::IntTruncate { value, from, to }) => {
+                    if dst_narrowed && is_u256_unsigned(to.repr) {
+                        to.repr = USIZE_WASM_REPR;
+                    }
+                    if is_narrowed(value) && is_u256_unsigned(from.repr) {
+                        from.repr = USIZE_WASM_REPR;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if ok {
+        *body = staged;
+    }
+}
+
+/// The set of runtime locals referenced as an operand anywhere in `body`. Every
+/// `match` below destructures WITHOUT `..`, so the compiler forces each field to
+/// be named: no operand position can be silently missed (the safety net for a
+/// pass that erases locals). A definition (`RStmt::Assign.dst`, a place that is
+/// written) is NOT a use; only reads are collected.
+fn collect_used_locals(body: &RuntimeBody<'_>) -> FxHashMap<RLocalId, ()> {
+    let mut used = FxHashMap::default();
+    // Provider bindings pin their backing value local.
+    for binding in &body.provider_bindings {
+        used.insert(binding.value, ());
+    }
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            collect_stmt_uses(stmt, &mut used);
+        }
+        collect_terminator_uses(&block.terminator, &mut used);
+    }
+    used
+}
+
+fn collect_place_uses(place: &RuntimePlace<'_>, used: &mut FxHashMap<RLocalId, ()>) {
+    match &place.root {
+        PlaceRoot::Slot(local) => {
+            used.insert(*local, ());
+        }
+        PlaceRoot::Ref(value) => {
+            used.insert(*value, ());
+        }
+        PlaceRoot::Provider(_) => {}
+        PlaceRoot::Ptr {
+            addr,
+            space: _,
+            class: _,
+        } => {
+            used.insert(*addr, ());
+        }
+    }
+    for elem in place.path.iter() {
+        match elem {
+            PlaceElem::Field(_) => {}
+            PlaceElem::Index(IndexSource::Constant(_)) => {}
+            PlaceElem::Index(IndexSource::Dynamic(value)) => {
+                used.insert(*value, ());
+            }
+            PlaceElem::VariantField {
+                variant: _,
+                field: _,
+            } => {}
+            PlaceElem::Deref => {}
+        }
+    }
+}
+
+fn collect_expr_uses(expr: &RExpr<'_>, used: &mut FxHashMap<RLocalId, ()>) {
+    match expr {
+        RExpr::Use(value) => {
+            used.insert(*value, ());
+        }
+        RExpr::ConstScalar(_) => {}
+        RExpr::Placeholder { class: _ } => {}
+        RExpr::Builtin(builtin) => collect_builtin_uses(builtin, used),
+        RExpr::Unary { op: _, value } => {
+            used.insert(*value, ());
+        }
+        RExpr::Binary { op: _, lhs, rhs } => {
+            used.insert(*lhs, ());
+            used.insert(*rhs, ());
+        }
+        RExpr::Cast { value, to: _ } => {
+            used.insert(*value, ());
+        }
+        RExpr::ConstRef {
+            region: _,
+            layout: _,
+        } => {}
+        RExpr::AllocObject { layout: _ } => {}
+        RExpr::MaterializeToObject { src } => {
+            used.insert(*src, ());
+        }
+        RExpr::MaterializePlaceToObject { place } => collect_place_uses(place, used),
+        RExpr::ProviderFromRaw {
+            raw,
+            provider_ty: _,
+            space: _,
+            target: _,
+        } => {
+            used.insert(*raw, ());
+        }
+        RExpr::WordToRawAddr {
+            value,
+            space: _,
+            target: _,
+        } => {
+            used.insert(*value, ());
+        }
+        RExpr::ProviderToRaw { value } => {
+            used.insert(*value, ());
+        }
+        RExpr::RetagRef { value } => {
+            used.insert(*value, ());
+        }
+        RExpr::AddrOf { place } => collect_place_uses(place, used),
+        RExpr::Load { place } => collect_place_uses(place, used),
+        RExpr::AggregateExtract { value, index: _ } => {
+            used.insert(*value, ());
+        }
+        RExpr::AggregateMake { layout: _, fields } => {
+            for field in fields.iter() {
+                used.insert(*field, ());
+            }
+        }
+        RExpr::Call { callee: _, args } => {
+            for arg in args.iter() {
+                used.insert(*arg, ());
+            }
+        }
+        RExpr::EnumMake {
+            layout: _,
+            variant: _,
+            fields,
+        } => {
+            for field in fields.iter() {
+                used.insert(*field, ());
+            }
+        }
+        RExpr::EnumTagOfValue { value } => {
+            used.insert(*value, ());
+        }
+        RExpr::EnumIsVariant { value, variant: _ } => {
+            used.insert(*value, ());
+        }
+        RExpr::EnumExtract {
+            value,
+            variant: _,
+            field: _,
+        } => {
+            used.insert(*value, ());
+        }
+        RExpr::EnumGetTag { root } => {
+            used.insert(*root, ());
+        }
+        RExpr::EnumAssertVariantRef { root, variant: _ } => {
+            used.insert(*root, ());
+        }
+    }
+}
+
+fn collect_stmt_uses(stmt: &RStmt<'_>, used: &mut FxHashMap<RLocalId, ()>) {
+    match stmt {
+        RStmt::Assign { dst: _, expr } => collect_expr_uses(expr, used),
+        RStmt::EnumAssertVariant { value, variant: _ } => {
+            used.insert(*value, ());
+        }
+        RStmt::Store { dst, src } => {
+            collect_place_uses(dst, used);
+            used.insert(*src, ());
+        }
+        RStmt::CopyInto { dst, src } => {
+            collect_place_uses(dst, used);
+            used.insert(*src, ());
+        }
+        RStmt::EnumSetTag { root, variant: _ } => {
+            used.insert(*root, ());
+        }
+        RStmt::EnumWriteVariant {
+            root,
+            variant: _,
+            fields,
+        } => {
+            used.insert(*root, ());
+            for field in fields.iter() {
+                used.insert(*field, ());
+            }
+        }
+    }
+}
+
+fn collect_terminator_uses(terminator: &RTerminator<'_>, used: &mut FxHashMap<RLocalId, ()>) {
+    match terminator {
+        RTerminator::Goto(_) => {}
+        RTerminator::Branch {
+            cond,
+            then_bb: _,
+            else_bb: _,
+        } => {
+            used.insert(*cond, ());
+        }
+        RTerminator::SwitchScalar {
+            discr,
+            cases: _,
+            default: _,
+        } => {
+            used.insert(*discr, ());
+        }
+        RTerminator::MatchEnumTag {
+            tag,
+            enum_layout: _,
+            cases: _,
+            default: _,
+        } => {
+            used.insert(*tag, ());
+        }
+        RTerminator::TerminalCall { callee: _, args } => {
+            for arg in args.iter() {
+                used.insert(*arg, ());
+            }
+        }
+        RTerminator::ReturnData { offset, len } => {
+            used.insert(*offset, ());
+            used.insert(*len, ());
+        }
+        RTerminator::Revert { offset, len } => {
+            used.insert(*offset, ());
+            used.insert(*len, ());
+        }
+        RTerminator::SelfDestruct { beneficiary } => {
+            used.insert(*beneficiary, ());
+        }
+        RTerminator::Trap => {}
+        RTerminator::Return(value) => {
+            if let Some(value) = value {
+                used.insert(*value, ());
+            }
+        }
+        RTerminator::Stop => {}
+    }
+}
+
+fn collect_builtin_uses(builtin: &RuntimeBuiltin<'_>, used: &mut FxHashMap<RLocalId, ()>) {
+    let mut mark = |value: &RLocalId| {
+        used.insert(*value, ());
+    };
+    match builtin {
+        RuntimeBuiltin::IntTruncate {
+            value,
+            from: _,
+            to: _,
+        } => mark(value),
+        RuntimeBuiltin::Mload { addr } => mark(addr),
+        RuntimeBuiltin::Mstore { addr, value } => {
+            mark(addr);
+            mark(value);
+        }
+        RuntimeBuiltin::Mstore8 { addr, value } => {
+            mark(addr);
+            mark(value);
+        }
+        RuntimeBuiltin::Mcopy { dst, src, len } => {
+            mark(dst);
+            mark(src);
+            mark(len);
+        }
+        RuntimeBuiltin::Msize => {}
+        RuntimeBuiltin::Sload { slot } => mark(slot),
+        RuntimeBuiltin::Sstore { slot, value } => {
+            mark(slot);
+            mark(value);
+        }
+        RuntimeBuiltin::CallValue => {}
+        RuntimeBuiltin::ReturnDataSize => {}
+        RuntimeBuiltin::ReturnDataCopy { dst, offset, len } => {
+            mark(dst);
+            mark(offset);
+            mark(len);
+        }
+        RuntimeBuiltin::CallDataSize => {}
+        RuntimeBuiltin::CallDataLoad { offset } => mark(offset),
+        RuntimeBuiltin::CallDataCopy { dst, offset, len } => {
+            mark(dst);
+            mark(offset);
+            mark(len);
+        }
+        RuntimeBuiltin::CodeSize => {}
+        RuntimeBuiltin::CodeCopy { dst, offset, len } => {
+            mark(dst);
+            mark(offset);
+            mark(len);
+        }
+        RuntimeBuiltin::ExtCodeSize { addr } => mark(addr),
+        RuntimeBuiltin::ExtCodeCopy {
+            addr,
+            dst,
+            offset,
+            len,
+        } => {
+            mark(addr);
+            mark(dst);
+            mark(offset);
+            mark(len);
+        }
+        RuntimeBuiltin::ExtCodeHash { addr } => mark(addr),
+        RuntimeBuiltin::Keccak256 { offset, len } => {
+            mark(offset);
+            mark(len);
+        }
+        RuntimeBuiltin::AddMod { lhs, rhs, modulus } => {
+            mark(lhs);
+            mark(rhs);
+            mark(modulus);
+        }
+        RuntimeBuiltin::MulMod { lhs, rhs, modulus } => {
+            mark(lhs);
+            mark(rhs);
+            mark(modulus);
+        }
+        RuntimeBuiltin::Byte { pos, value } => {
+            mark(pos);
+            mark(value);
+        }
+        RuntimeBuiltin::SignExtend { byte, value } => {
+            mark(byte);
+            mark(value);
+        }
+        RuntimeBuiltin::IntrinsicArith {
+            op: _,
+            checked: _,
+            lhs,
+            rhs,
+            class: _,
+        } => {
+            mark(lhs);
+            mark(rhs);
+        }
+        RuntimeBuiltin::Saturating {
+            op: _,
+            lhs,
+            rhs,
+            class: _,
+        } => {
+            mark(lhs);
+            mark(rhs);
+        }
+        RuntimeBuiltin::F32FromI32 { value } => mark(value),
+        RuntimeBuiltin::I32FromF32 { value } => mark(value),
+        RuntimeBuiltin::F32Sqrt { value } => mark(value),
+        RuntimeBuiltin::Address => {}
+        RuntimeBuiltin::Caller => {}
+        RuntimeBuiltin::Origin => {}
+        RuntimeBuiltin::GasPrice => {}
+        RuntimeBuiltin::CoinBase => {}
+        RuntimeBuiltin::Balance { addr } => mark(addr),
+        RuntimeBuiltin::Timestamp => {}
+        RuntimeBuiltin::Number => {}
+        RuntimeBuiltin::PrevRandao => {}
+        RuntimeBuiltin::GasLimit => {}
+        RuntimeBuiltin::ChainId => {}
+        RuntimeBuiltin::BaseFee => {}
+        RuntimeBuiltin::SelfBalance => {}
+        RuntimeBuiltin::BlockHash { block } => mark(block),
+        RuntimeBuiltin::BlobHash { index } => mark(index),
+        RuntimeBuiltin::BlobBaseFee => {}
+        RuntimeBuiltin::Gas => {}
+        RuntimeBuiltin::CurrentCodeRegionLen => {}
+        RuntimeBuiltin::CodeRegionOffset { region: _ } => {}
+        RuntimeBuiltin::CodeRegionLen { region: _ } => {}
+        RuntimeBuiltin::Malloc { size } => mark(size),
+        RuntimeBuiltin::Call {
+            gas,
+            addr,
+            value,
+            args_offset,
+            args_len,
+            ret_offset,
+            ret_len,
+        } => {
+            mark(gas);
+            mark(addr);
+            mark(value);
+            mark(args_offset);
+            mark(args_len);
+            mark(ret_offset);
+            mark(ret_len);
+        }
+        RuntimeBuiltin::StaticCall {
+            gas,
+            addr,
+            args_offset,
+            args_len,
+            ret_offset,
+            ret_len,
+        } => {
+            mark(gas);
+            mark(addr);
+            mark(args_offset);
+            mark(args_len);
+            mark(ret_offset);
+            mark(ret_len);
+        }
+        RuntimeBuiltin::DelegateCall {
+            gas,
+            addr,
+            args_offset,
+            args_len,
+            ret_offset,
+            ret_len,
+        } => {
+            mark(gas);
+            mark(addr);
+            mark(args_offset);
+            mark(args_len);
+            mark(ret_offset);
+            mark(ret_len);
+        }
+        RuntimeBuiltin::Create { value, offset, len } => {
+            mark(value);
+            mark(offset);
+            mark(len);
+        }
+        RuntimeBuiltin::Create2 {
+            value,
+            offset,
+            len,
+            salt,
+        } => {
+            mark(value);
+            mark(offset);
+            mark(len);
+            mark(salt);
+        }
+        RuntimeBuiltin::Log0 { offset, len } => {
+            mark(offset);
+            mark(len);
+        }
+        RuntimeBuiltin::Log1 {
+            offset,
+            len,
+            topic0,
+        } => {
+            mark(offset);
+            mark(len);
+            mark(topic0);
+        }
+        RuntimeBuiltin::Log2 {
+            offset,
+            len,
+            topic0,
+            topic1,
+        } => {
+            mark(offset);
+            mark(len);
+            mark(topic0);
+            mark(topic1);
+        }
+        RuntimeBuiltin::Log3 {
+            offset,
+            len,
+            topic0,
+            topic1,
+            topic2,
+        } => {
+            mark(offset);
+            mark(len);
+            mark(topic0);
+            mark(topic1);
+            mark(topic2);
+        }
+        RuntimeBuiltin::Log4 {
+            offset,
+            len,
+            topic0,
+            topic1,
+            topic2,
+            topic3,
+        } => {
+            mark(offset);
+            mark(len);
+            mark(topic0);
+            mark(topic1);
+            mark(topic2);
+            mark(topic3);
+        }
+        RuntimeBuiltin::CallDataSelector => {}
+        RuntimeBuiltin::MakeContractFieldRef {
+            slot: _,
+            class: _,
+            kind: _,
+        } => {}
+    }
+}
+
+/// Remove provably-dead value-carried ARRAY/ENUM aggregate assignments so an
+/// unused by-value array (for example the vestigial const-array rvalue MIR keeps
+/// when `let mut a: [u32; N] = [0; N]` is also materialized into a heap object)
+/// does not force the wasm value path to represent an aggregate it cannot carry.
+///
+/// Restricted to `Array` / `Enum` layouts on purpose: those NEVER lower on the
+/// wasm value path (`single_scalar_field` / `scalar_tuple_element_tys` reject
+/// them), so no currently-lowering kernel can contain a dead one -- this pass is
+/// therefore invisible to every existing kernel and only unblocks the new array
+/// shapes. Single-scalar-field newtypes and flattenable structs (which DO lower)
+/// are deliberately left untouched to preserve their exact emission.
+///
+/// A statement is removed only when its destination is (a) a value-carried
+/// `AggregateValue` of an array/enum layout, (b) defined by a side-effect-free
+/// expression (`Use` / `AggregateMake` / `ConstRef` / `Placeholder`), (c) not a
+/// signature parameter, and (d) referenced by nothing (per the exhaustive
+/// `collect_used_locals`). The removed local's carrier becomes `Erased` so the
+/// SSA declaration loop skips it. Iterated to a fixpoint: erasing `%a = use %b`
+/// can make `%b` dead in turn.
+fn drop_dead_pure_aggregate_values<'db>(db: &'db DriverDataBase, body: &mut RuntimeBody<'db>) {
+    fn is_pure_aggregate_def(expr: &RExpr<'_>) -> bool {
+        matches!(
+            expr,
+            RExpr::Use(_)
+                | RExpr::AggregateMake { .. }
+                | RExpr::ConstRef { .. }
+                | RExpr::Placeholder { .. }
+        )
+    }
+
+    let params: FxHashMap<RLocalId, ()> = body
+        .signature
+        .params
+        .iter()
+        .map(|param| (param.local, ()))
+        .collect();
+
+    loop {
+        let used = collect_used_locals(body);
+        let mut dead: Vec<RLocalId> = Vec::new();
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let RStmt::Assign { dst, expr } = stmt else {
+                    continue;
+                };
+                if used.contains_key(dst) || params.contains_key(dst) {
+                    continue;
+                }
+                let RuntimeCarrier::Value(RuntimeClass::AggregateValue { layout }) =
+                    body.locals[dst.as_u32() as usize].carrier
+                else {
+                    continue;
+                };
+                if !matches!(layout.data(db), Layout::Array(_) | Layout::Enum(_)) {
+                    continue;
+                }
+                if is_pure_aggregate_def(expr) {
+                    dead.push(*dst);
+                }
+            }
+        }
+        if dead.is_empty() {
+            return;
+        }
+        let dead_set: FxHashMap<RLocalId, ()> = dead.iter().map(|id| (*id, ())).collect();
+        for block in &mut body.blocks {
+            block.stmts.retain(|stmt| {
+                !matches!(stmt, RStmt::Assign { dst, .. } if dead_set.contains_key(dst))
+            });
+        }
+        for id in dead {
+            body.locals[id.as_u32() as usize].carrier = RuntimeCarrier::Erased;
+        }
+    }
+}
+
 struct PortableModuleLowerer<'db, 'a, I>
 where
     I: Isa<InstSet = NativeInstSet>,
@@ -1224,6 +1935,8 @@ where
         let mut prepared_bodies = prepare_inline_value_bodies(db, package).bodies;
         for body in prepared_bodies.values_mut() {
             reify_static_aggregate_params(db, body);
+            narrow_usize_scalars(db, body);
+            drop_dead_pure_aggregate_values(db, body);
         }
         Self {
             db,
@@ -2133,6 +2846,60 @@ where
         }
     }
 
+    /// Change 1: whether `class` is a function-local aggregate behind an object /
+    /// memory-provider reference that lowers to an `i32` linear-memory pointer.
+    /// True for `Ref{kind: Object | Provider{space: Memory}, view: Whole}` whose
+    /// pointee is a MEMORY-LOWERABLE aggregate (every scalar leaf passes the R1
+    /// scalar envelope): arrays and structs of admissible scalars qualify;
+    /// enums, u128/u256/address/f64 leaves, and nested transports fail closed
+    /// (slice 1). Such a local's SSA value IS its arena pointer; element access
+    /// uses i32 address arithmetic + typed Mload/Mstore. This deliberately does
+    /// NOT widen `ty_for_class` (the signature / flat-shape admissibility SSOT):
+    /// object-ref params/returns keep failing closed.
+    fn is_memory_lowerable_object_ref(&self, class: &RuntimeClass<'db>) -> bool {
+        let RuntimeClass::Ref {
+            pointee,
+            kind,
+            view: RefView::Whole,
+        } = class
+        else {
+            return false;
+        };
+        if !matches!(
+            kind,
+            RefKind::Object
+                | RefKind::Provider {
+                    space: AddressSpaceKind::Memory,
+                    ..
+                }
+        ) {
+            return false;
+        }
+        self.aggregate_is_memory_lowerable(pointee)
+    }
+
+    /// Whether an aggregate value's every scalar leaf passes the R1 scalar
+    /// envelope (so it can be stored/loaded through typed Mload/Mstore at i32
+    /// addresses). Structs recurse over their fields, arrays over their element;
+    /// enums (tagged union memory layout) and nested transports (ref/raw-addr
+    /// leaves) fail closed in slice 1.
+    fn aggregate_is_memory_lowerable(&self, class: &RuntimeClass<'db>) -> bool {
+        match class {
+            RuntimeClass::Scalar(scalar) => scalar_ty_r1(scalar).is_ok(),
+            RuntimeClass::AggregateValue { layout } => match layout.data(self.db) {
+                Layout::Struct(struct_layout) => struct_layout
+                    .fields
+                    .iter()
+                    .all(|field| self.aggregate_is_memory_lowerable(field)),
+                Layout::Array(array_layout) => {
+                    self.aggregate_is_memory_lowerable(&array_layout.elem)
+                }
+                Layout::Enum(_) => false,
+            },
+            RuntimeClass::Ref { .. } | RuntimeClass::RawAddr { .. } => false,
+        }
+    }
+
     fn flat_shape(&self, class: &RuntimeClass<'db>) -> Option<FlatShape> {
         self.flat_shape_visit(class, &mut HashSet::new())
     }
@@ -2240,6 +3007,13 @@ where
     /// (`aggregate_make`), passed as flattened params, and returned as flattened
     /// results.
     tuple_vars: FxHashMap<RLocalId, Vec<Variable>>,
+    /// Change 3: the lazily-created per-function out-of-bounds trap block. A
+    /// dynamic array index emits `Br(idx < len, ok, trap)`; every such check in
+    /// the function branches to this one block, whose sole instruction is
+    /// `Unreachable` (a wasm trap, the portable image of the EVM revert an OOB
+    /// index would take). Created on first use so functions without a dynamic
+    /// index emit no trap block.
+    oob_trap_block: Option<BlockId>,
 }
 
 impl<'ctx, 'db, 'a, I> PortableFunctionLowerer<'ctx, 'db, 'a, I>
@@ -2286,6 +3060,14 @@ where
                         .map(|ty| fb.declare_var(*ty))
                         .collect::<Vec<_>>();
                     tuple_vars.insert(local_id, elem_vars);
+                } else if module.is_memory_lowerable_object_ref(class) {
+                    // Change 1: a function-local aggregate behind an object /
+                    // memory-provider reference lowers to an i32 linear-memory
+                    // pointer (the arena offset the AllocObject arm mints). The
+                    // local's SSA value IS that pointer; element reads/writes go
+                    // through i32 address arithmetic + typed Mload/Mstore. SSA/phi
+                    // is free (only the pointer is carried, never the aggregate).
+                    vars.insert(local_id, fb.declare_var(Type::I32));
                 } else {
                     let ty = module.ty_for_class(class)?;
                     vars.insert(local_id, fb.declare_var(ty));
@@ -2301,6 +3083,7 @@ where
             block_map,
             vars,
             tuple_vars,
+            oob_trap_block: None,
         })
     }
 
@@ -2869,10 +3652,40 @@ where
             // exactly this shape (`load *%p`); anything needing an address, an offset,
             // a store, or an object materialization is R2 proper and stays fail-closed.
             RExpr::Load { place } => self.lower_place_read(place),
+            // Change 2: allocate a function-local aggregate in the wasm canonical
+            // arena. The value produced is the aligned i32 linear-memory pointer.
+            RExpr::AllocObject { layout } => self.lower_alloc_object(*layout),
             other => Err(LowerError::Unsupported(format!(
                 "wasm target (R1) expression `{other:?}` is not supported"
             ))),
         }
+    }
+
+    /// Change 2: `AllocObject` -> a canonical-arena allocation returning an
+    /// 8-byte-aligned i32 pointer. Size comes from MIR's target-layout SSOT
+    /// (`layout_size_bytes` under `WASM_LAYOUT`; a `[u32; N]` is `N * 8`). The
+    /// arena (`fe_cabi_alloc`) is byte-granular and not alignment-aware, so we
+    /// over-allocate by 7 and round the returned pointer up to the next 8-byte
+    /// boundary `(p + 7) & -8` (the align-up dance the canonical-lane wrappers
+    /// use). A loop that reaches this each iteration grows the arena and never
+    /// frees; `fe_cabi_reset` between top-level calls reclaims it.
+    fn lower_alloc_object(&mut self, layout: LayoutId<'db>) -> Result<ValueId, LowerError> {
+        let is = self.inst_set();
+        let size = mir::layout_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+        let size = i32::try_from(size).map_err(|_| {
+            LowerError::Unsupported(format!(
+                "wasm target: AllocObject size {size} bytes for `{layout:?}` exceeds i32"
+            ))
+        })?;
+        const ALIGN: i32 = 8;
+        let alloc_size = self.fb.make_imm_value(Immediate::I32(size + (ALIGN - 1)));
+        let raw = self
+            .fb
+            .insert_inst(MemAllocDynamic::new(is, alloc_size), Type::I32);
+        let slack = self.fb.make_imm_value(Immediate::I32(ALIGN - 1));
+        let biased = self.fb.insert_inst(Add::new(is, raw, slack), Type::I32);
+        let mask = self.fb.make_imm_value(Immediate::I32(-ALIGN));
+        Ok(self.fb.insert_inst(And::new(is, biased, mask), Type::I32))
     }
 
     /// R2.0: lower a place READ that is an identity on an already value-carried
@@ -2935,12 +3748,15 @@ where
         }
     }
 
-    /// Resolve a Wasm linear-memory scalar place behind a memory `RawAddr`.
-    /// Raw addresses are byte offsets carried
-    /// as `i32` on wasm32, not Sonatina compound pointers. Consequently field or
-    /// index address arithmetic uses checked/ordinary `i32` Add/Mul rather than
-    /// `Gep`. Struct field offsets come exclusively from MIR's target-layout
-    /// SSOT. Dynamic indexes, variants, and dereferences remain fail-closed.
+    /// Resolve a Wasm linear-memory scalar place behind a memory address: a
+    /// memory `RawAddr` / memory-provider root (struct fields only) or a
+    /// function-local object-ref root (struct fields AND array element indexes,
+    /// Change 3). Addresses are i32 byte offsets on wasm32, not Sonatina compound
+    /// pointers, so field/index arithmetic uses ordinary i32 Add/Mul rather than
+    /// `Gep`. Offsets and array strides come exclusively from MIR's target-layout
+    /// SSOT. A dynamic array index emits an `idx < len` bounds check that traps
+    /// (`Unreachable`) on failure. Variants, dereferences, and dynamic indexes on
+    /// host-region roots remain fail-closed.
     fn raw_memory_scalar_place(
         &mut self,
         place: &RuntimePlace<'db>,
@@ -2951,7 +3767,12 @@ where
         let RuntimeClass::Scalar(scalar) = resolved.result_class.clone() else {
             return Ok(None);
         };
-        let (addr_local, mut current_class) = match resolved.root_kind {
+        // `allow_index` is true only for the function-local object-ref root
+        // (Change 3a): its i32 pointer supports element addressing. The
+        // host-region roots (RawAddr / Provider-RawAddr / Ptr) stay restricted to
+        // Field-only paths in slice 1 (don't widen the host region to dynamic
+        // index yet).
+        let (addr_local, mut current_class, allow_index) = match resolved.root_kind {
             mir::ResolvedPlaceRootKind::Ref { value, class }
                 if matches!(
                     self.body.value_class(value),
@@ -2961,7 +3782,27 @@ where
                     })
                 ) =>
             {
-                (value, class)
+                (value, class, false)
+            }
+            // Change 3a: a `Ref{kind: Object}` root whose backing local carries
+            // the function-local arena i32 pointer (minted by AllocObject and
+            // declared by the Change 1 decl arm). `class` here is the
+            // dereferenced aggregate pointee (`resolve_runtime_place` sets a
+            // `Ref` root's class to the pointee), which the Field / Index path
+            // walk then projects. Restricted to the object model deliberately:
+            // element addressing through a memory-PROVIDER ref (an array param /
+            // host region) is the deferred host-region dynamic-index case and
+            // stays fail-closed in slice 1.
+            mir::ResolvedPlaceRootKind::Ref { value, class }
+                if matches!(
+                    self.body.value_class(value),
+                    Some(RuntimeClass::Ref {
+                        kind: RefKind::Object,
+                        ..
+                    })
+                ) =>
+            {
+                (value, class, true)
             }
             mir::ResolvedPlaceRootKind::Provider {
                 value,
@@ -2972,14 +3813,19 @@ where
                     },
                 class,
                 ..
-            } => (value, class),
+            } => (value, class, false),
             mir::ResolvedPlaceRootKind::Ptr {
                 addr,
                 space: AddressSpaceKind::Memory,
                 class,
-            } => (addr, class),
+            } => (addr, class, false),
             _ => return Ok(None),
         };
+        // The base pointer is materialized up front so a dynamic index can flush
+        // the pending constant offset onto it mid-walk. A field-only path emits
+        // no instructions in the loop, so this stays byte-identical to the prior
+        // struct-field lowering (one trailing Add iff a nonzero offset remains).
+        let mut addr = self.local_value(addr_local)?;
         let mut byte_offset = 0usize;
         for elem in resolved.path {
             match elem {
@@ -2998,32 +3844,131 @@ where
                         ))
                         .ok_or_else(|| {
                             LowerError::Unsupported(
-                                "wasm RawAddr struct field byte offset overflow".to_string(),
+                                "wasm memory scalar struct field byte offset overflow".to_string(),
                             )
                         })?;
                     current_class = class;
                 }
+                // Change 3b: array element addressing. Stride is MIR's SSOT
+                // (`array_elem_size_bytes`: bool/u8 pack to 1, else word-rounded).
+                // A constant index folds `k * stride` into the pending offset
+                // (bounds-checked at compile time); a dynamic index flushes the
+                // pending offset, bounds-checks `idx < len` to a lazy trap, then
+                // adds `idx * stride`.
+                mir::ResolvedPlaceElem::Index { index, class } if allow_index => {
+                    let RuntimeClass::AggregateValue { layout } = current_class else {
+                        return Err(LowerError::Internal(
+                            "resolved index projection base is not an array".to_string(),
+                        ));
+                    };
+                    let Layout::Array(array_layout) = layout.data(self.module.db) else {
+                        return Err(LowerError::Internal(
+                            "resolved index projection layout is not an array".to_string(),
+                        ));
+                    };
+                    let len = array_layout.len;
+                    let stride = mir::array_elem_size_bytes(self.module.db, layout, crate::WASM_LAYOUT);
+                    match index {
+                        IndexSource::Constant(k) => {
+                            if (k as u64) >= len {
+                                return Err(LowerError::Unsupported(format!(
+                                    "wasm array constant index {k} is out of bounds for length {len}"
+                                )));
+                            }
+                            let elem_offset = k.checked_mul(stride).ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "wasm array element byte offset overflow".to_string(),
+                                )
+                            })?;
+                            byte_offset = byte_offset.checked_add(elem_offset).ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "wasm array element byte offset overflow".to_string(),
+                                )
+                            })?;
+                        }
+                        IndexSource::Dynamic(index_local) => {
+                            addr = self.offset_addr(addr, byte_offset)?;
+                            byte_offset = 0;
+                            let is = self.inst_set();
+                            let idx = self.local_value(index_local)?;
+                            let len = i32::try_from(len).map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "wasm array length {len} exceeds i32"
+                                ))
+                            })?;
+                            let len_val = self.fb.make_imm_value(Immediate::I32(len));
+                            // Unsigned `Lt`: a narrowed `usize` index is unsigned,
+                            // so an out-of-range (or wrapped) value fails the check
+                            // and traps.
+                            let in_bounds = self.fb.insert_inst(Lt::new(is, idx, len_val), Type::I1);
+                            let trap = self.oob_trap_block();
+                            let ok = self.fb.append_block();
+                            self.fb
+                                .insert_inst_no_result(Br::new(is, in_bounds, ok, trap));
+                            self.fb.switch_to_block(ok);
+                            let stride = i32::try_from(stride).map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "wasm array element stride {stride} exceeds i32"
+                                ))
+                            })?;
+                            let stride_val = self.fb.make_imm_value(Immediate::I32(stride));
+                            let scaled =
+                                self.fb.insert_inst(Mul::new(is, idx, stride_val), Type::I32);
+                            addr = self.fb.insert_inst(Add::new(is, addr, scaled), Type::I32);
+                        }
+                    }
+                    current_class = class;
+                }
                 other => {
                     return Err(LowerError::Unsupported(format!(
-                        "wasm RawAddr scalar place projection `{other:?}` is not supported; \
-                         only struct fields have target-layout byte-offset lowering"
+                        "wasm memory scalar place projection `{other:?}` is not supported; \
+                         only struct fields and (object-ref) array indexes have \
+                         target-layout byte-offset lowering"
                     )));
                 }
             }
         }
-        let mut addr = self.local_value(addr_local)?;
-        if byte_offset != 0 {
-            let offset = i32::try_from(byte_offset).map_err(|_| {
-                LowerError::Unsupported(format!(
-                    "wasm RawAddr struct field offset {byte_offset} exceeds i32"
-                ))
-            })?;
-            let offset = self.fb.make_imm_value(Immediate::I32(offset));
-            addr = self
-                .fb
-                .insert_inst(Add::new(self.inst_set(), addr, offset), Type::I32);
-        }
+        let addr = self.offset_addr(addr, byte_offset)?;
         Ok(Some((addr, scalar_ty_r1(&scalar)?)))
+    }
+
+    /// Add a constant byte offset to a linear-memory address, emitting the `Add`
+    /// only when the offset is nonzero (so a zero-offset access stays a bare
+    /// pointer, byte-identical to the prior lowering).
+    fn offset_addr(&mut self, addr: ValueId, byte_offset: usize) -> Result<ValueId, LowerError> {
+        if byte_offset == 0 {
+            return Ok(addr);
+        }
+        let offset = i32::try_from(byte_offset).map_err(|_| {
+            LowerError::Unsupported(format!(
+                "wasm memory scalar place byte offset {byte_offset} exceeds i32"
+            ))
+        })?;
+        let offset = self.fb.make_imm_value(Immediate::I32(offset));
+        Ok(self
+            .fb
+            .insert_inst(Add::new(self.inst_set(), addr, offset), Type::I32))
+    }
+
+    /// The lazily-created per-function out-of-bounds trap block: a single block
+    /// whose sole instruction is `Unreachable` (a wasm trap). Every dynamic-index
+    /// bounds check branches here on failure. Created on first use and cached so
+    /// index-free functions emit no trap block; the builder's current block is
+    /// restored so callers continue emitting into their own block.
+    fn oob_trap_block(&mut self) -> BlockId {
+        if let Some(block) = self.oob_trap_block {
+            return block;
+        }
+        let is = self.inst_set();
+        let resume = self.fb.current_block();
+        let block = self.fb.append_block();
+        self.fb.switch_to_block(block);
+        self.fb.insert_inst_no_result(Unreachable::new(is));
+        if let Some(resume) = resume {
+            self.fb.switch_to_block(resume);
+        }
+        self.oob_trap_block = Some(block);
+        block
     }
 
     /// `AggregateMake` of a single-scalar-field newtype: the aggregate IS its one
@@ -3814,6 +4759,97 @@ pub fn staged_scalar_schedule4(x: i32) -> i32 {
             })
             .collect::<Vec<_>>();
         assert!(callees.is_empty(), "residual scalar calls: {callees:#?}");
+    }
+
+    #[test]
+    fn narrow_usize_pass_narrows_usize_but_preserves_u256() {
+        // A `usize` local (256-bit in MIR, semantic `Usize`) narrows to i32 on
+        // the wasm path; a genuine `u256` local (semantic `U256`) keeps its
+        // 256-bit repr and stays fail-closed.
+        let source = r#"
+pub fn kernel(k: u32) -> u256 {
+    let idx: usize = k as usize
+    let mut total: u256 = 0
+    if idx < 4 {
+        total = total + 1
+    }
+    total
+}
+"#;
+        let mut db = DriverDataBase::default();
+        let url = Url::parse("file:///narrow_usize_pass.fe").unwrap();
+        db.workspace()
+            .touch(&mut db, url.clone(), Some(source.to_string()));
+        let file = db.workspace().get(&db, &url).unwrap();
+        let top_mod = db.top_mod(file);
+        let diagnostics = db.run_on_top_mod(top_mod).format_diags(&db);
+        assert!(diagnostics.is_empty(), "diags:\n{diagnostics}");
+        let package =
+            mir::build_wasm_runtime_package_for_entry(&db, top_mod, "kernel").unwrap();
+        let body = package.functions(&db)[0].instance(&db).body(&db);
+
+        let is_u256_unsigned_local = |local: &RLocal| {
+            matches!(
+                &local.carrier,
+                RuntimeCarrier::Value(RuntimeClass::Scalar(ScalarClass {
+                    repr: ScalarRepr::Int {
+                        bits: 256,
+                        signed: false
+                    },
+                    ..
+                }))
+            )
+        };
+        let usize_idx = body
+            .locals
+            .iter()
+            .position(|local| {
+                is_u256_unsigned_local(local) && is_usize_semantic_ty(&db, local.semantic_ty)
+            })
+            .expect("a usize local should exist");
+        let u256_idx = body
+            .locals
+            .iter()
+            .position(|local| {
+                is_u256_unsigned_local(local)
+                    && matches!(
+                        local.semantic_ty.base_ty(&db).data(&db),
+                        TyData::TyBase(TyBase::Prim(PrimTy::U256))
+                    )
+            })
+            .expect("a u256 local should exist");
+
+        let mut narrowed = body.clone();
+        narrow_usize_scalars(&db, &mut narrowed);
+
+        assert!(
+            matches!(
+                &narrowed.locals[usize_idx].carrier,
+                RuntimeCarrier::Value(RuntimeClass::Scalar(ScalarClass {
+                    repr: ScalarRepr::Int {
+                        bits: 32,
+                        signed: false
+                    },
+                    ..
+                }))
+            ),
+            "usize local should narrow to i32; got {:?}",
+            narrowed.locals[usize_idx].carrier
+        );
+        assert!(
+            matches!(
+                &narrowed.locals[u256_idx].carrier,
+                RuntimeCarrier::Value(RuntimeClass::Scalar(ScalarClass {
+                    repr: ScalarRepr::Int {
+                        bits: 256,
+                        signed: false
+                    },
+                    ..
+                }))
+            ),
+            "genuine u256 local must stay 256-bit (fail-closed); got {:?}",
+            narrowed.locals[u256_idx].carrier
+        );
     }
 
     #[test]

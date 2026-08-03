@@ -21,6 +21,7 @@ pub use spirv_lower::{
     compile_runtime_package_spirv_render, compile_runtime_package_spirv_with_workgroup,
 };
 pub use wasm_lower::compile_runtime_package_wasm;
+pub(crate) use wasm_lower::module_emits_dynamic_alloc;
 #[cfg(feature = "sonatina-indirect-calls")]
 pub use wasm_lower::compile_runtime_package_wasm_with_guest_callbacks;
 
