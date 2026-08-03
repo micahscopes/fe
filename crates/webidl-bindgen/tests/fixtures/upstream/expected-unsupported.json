@@ -1,0 +1,16 @@
+{
+  "schema": "fe-webidl-expected-unsupported/v1",
+  "revision": "512c0b511d3c13b2421450ea7e33b80c6c8ef26c",
+  "items": [
+    {
+      "source": "html.idl:1837",
+      "construct": "WindowProxy",
+      "reason": "browsing-context proxy identity is not an ordinary resource handle"
+    },
+    {
+      "source": "html.idl:1868",
+      "construct": "named getter",
+      "reason": "named exotic object lookup is outside ordinary operation dispatch"
+    }
+  ]
+}

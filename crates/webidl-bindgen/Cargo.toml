@@ -1,0 +1,17 @@
+[package]
+name = "fe-webidl-bindgen"
+version = "0.1.0"
+edition.workspace = true
+license = "Apache-2.0"
+description = "Web IDL normalization and raw Fe/JavaScript binding generation"
+
+[dependencies]
+fe-host-abi = { path = "../host-abi" }
+fe-host-wasm-codec = { path = "../host-wasm-codec" }
+fe-compiler-protocol = { path = "../compiler-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+weedle2 = "5.0.0"
+
+[dev-dependencies]
+sha2 = "0.10"

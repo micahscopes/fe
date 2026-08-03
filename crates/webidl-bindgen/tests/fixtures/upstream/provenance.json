@@ -1,0 +1,33 @@
+{
+  "schema": "fe-webidl-upstream-provenance/v1",
+  "package": "@webref/raw-idl",
+  "version": "3.81.3",
+  "revision": "512c0b511d3c13b2421450ea7e33b80c6c8ef26c",
+  "repository": "https://github.com/w3c/webref",
+  "license": "MIT",
+  "sources": [
+    {
+      "path": "ed/idl/dom.idl",
+      "url": "https://github.com/w3c/webref/blob/512c0b511d3c13b2421450ea7e33b80c6c8ef26c/ed/idl/dom.idl",
+      "sha256": "78ec0577c30271047c1e4022a5669756d862f68e55ecaae2ea78b43aa5a601da"
+    },
+    {
+      "path": "ed/idl/html.idl",
+      "url": "https://github.com/w3c/webref/blob/512c0b511d3c13b2421450ea7e33b80c6c8ef26c/ed/idl/html.idl",
+      "sha256": "f9c1783821e89a019428e3b8281fd628e9417e5abf1935ca261ca69f0a635978"
+    }
+  ],
+  "selection": {
+    "path": "webref-3.81.3-dom-selection.webidl",
+    "sha256": "8396002b83e8ca6c99ca86866b7b5b97f39964600ff48381419438dfd8bf45a6",
+    "source_ranges": [
+      "dom.idl:5-43",
+      "dom.idl:57-76",
+      "dom.idl:209-237",
+      "dom.idl:271-309",
+      "dom.idl:326-332",
+      "dom.idl:362-405",
+      "html.idl:1835-1855"
+    ]
+  }
+}
