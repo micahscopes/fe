@@ -48,30 +48,30 @@ impl Window {
     }
 
     pub fn inner_width(own self) -> u32 {
-        window_get_inner_width(self.raw)
+        window_get_inner_width(self_: self.raw)
     }
 
     pub fn document(own self) -> Document {
-        Document { raw: window_get_document(self.raw) }
+        Document { raw: window_get_document(self_: self.raw) }
     }
 }
 
 impl Document {
     pub fn document_element(own self) -> Element {
-        Element { raw: document_get_document_element(self.raw) }
+        Element { raw: document_get_document_element(self_: self.raw) }
     }
 }
 
 impl Element {
     pub fn child_element_count(own self) -> u32 {
-        element_get_child_element_count(self.raw)
+        element_get_child_element_count(self_: self.raw)
     }
 
     pub fn hidden(own self) -> bool {
-        element_get_hidden(self.raw)
+        element_get_hidden(self_: self.raw)
     }
 
     pub fn set_hidden(own self, _ hidden: bool) {
-        element_set_hidden(self.raw, hidden)
+        element_set_hidden(self_: self.raw, value: hidden)
     }
 }
