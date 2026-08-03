@@ -2299,12 +2299,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
         concrete_inst
             .assoc_type_bindings(db)
             .iter()
-            .map(|(&name, &ty)| {
-                (
-                    name,
-                    normalize_ty(db, ty, normalization_scope, assumptions),
-                )
-            })
+            .map(|(&name, &ty)| (name, normalize_ty(db, ty, normalization_scope, assumptions)))
             .collect::<common::indexmap::IndexMap<_, _>>(),
     );
     let assumptions = PredicateListId::new(
@@ -2318,22 +2313,12 @@ pub(crate) fn resolve_runtime_call_key<'db>(
                     inst.def(db),
                     inst.args(db)
                         .iter()
-                        .map(|&arg| {
-                            normalize_ty(db, arg, normalization_scope, assumptions)
-                        })
+                        .map(|&arg| normalize_ty(db, arg, normalization_scope, assumptions))
                         .collect::<Vec<TyId<'db>>>(),
                     inst.assoc_type_bindings(db)
                         .iter()
                         .map(|(&name, &ty)| {
-                            (
-                                name,
-                                normalize_ty(
-                                    db,
-                                    ty,
-                                    normalization_scope,
-                                    assumptions,
-                                ),
-                            )
+                            (name, normalize_ty(db, ty, normalization_scope, assumptions))
                         })
                         .collect::<common::indexmap::IndexMap<_, _>>(),
                 )
@@ -2484,12 +2469,7 @@ pub(crate) fn resolve_runtime_call_key<'db>(
                 .collect::<Vec<TyId<'db>>>(),
             inst.assoc_type_bindings(db)
                 .iter()
-                .map(|(&name, &ty)| {
-                    (
-                        name,
-                        normalize_ty(db, ty, normalization_scope, assumptions),
-                    )
-                })
+                .map(|(&name, &ty)| (name, normalize_ty(db, ty, normalization_scope, assumptions)))
                 .collect::<common::indexmap::IndexMap<_, _>>(),
         )
     };
@@ -3116,9 +3096,18 @@ mod tests {
 
     #[test]
     fn f32_intrinsic_recognition_is_explicit_supported_set() {
-        assert_eq!(f32_intrinsic_kind("__f32_from_i32"), Some(F32IntrinsicKind::FromI32));
-        assert_eq!(f32_intrinsic_kind("__i32_from_f32"), Some(F32IntrinsicKind::ToI32));
-        assert_eq!(f32_intrinsic_kind("__sqrt_f32"), Some(F32IntrinsicKind::Sqrt));
+        assert_eq!(
+            f32_intrinsic_kind("__f32_from_i32"),
+            Some(F32IntrinsicKind::FromI32)
+        );
+        assert_eq!(
+            f32_intrinsic_kind("__i32_from_f32"),
+            Some(F32IntrinsicKind::ToI32)
+        );
+        assert_eq!(
+            f32_intrinsic_kind("__sqrt_f32"),
+            Some(F32IntrinsicKind::Sqrt)
+        );
 
         for unsupported in [
             "__rsqrt_f32",

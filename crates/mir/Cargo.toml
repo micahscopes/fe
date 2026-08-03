@@ -22,4 +22,5 @@ num-traits.workspace = true
 [dev-dependencies]
 camino.workspace = true
 driver.workspace = true
+hir = { workspace = true, features = ["testutils"] }
 url.workspace = true

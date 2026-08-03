@@ -58,8 +58,7 @@ use super::{
         BodyEnv, BodyStaticFacts, ContractMetadataBuiltin, F32IntrinsicKind,
         GenericNumericIntrinsicKind, InferClassCache, RuntimeBodyCx, contract_metadata_builtin,
         f32_intrinsic_kind, generic_numeric_intrinsic_kind, nonself_backing_value_place,
-        resolve_runtime_call_key, semantic_return_ty,
-        snapshot_source_place,
+        resolve_runtime_call_key, semantic_return_ty, snapshot_source_place,
     },
     consts::{
         aggregate_const_ref_class, aggregate_const_ref_region, const_scalar_for_class,
@@ -3263,12 +3262,10 @@ impl<'db> RmirEmitter<'db> {
         let ret_class = self.top_level_class_for_ty(ret_ty, AddressSpaceKind::Memory)?;
         let ret = self.alloc_runtime_temp(ret_ty, RuntimeCarrier::Value(ret_class));
         let builtin = match kind {
-            F32IntrinsicKind::FromI32 => crate::runtime::RuntimeBuiltin::F32FromI32 {
-                value: *value,
-            },
-            F32IntrinsicKind::ToI32 => crate::runtime::RuntimeBuiltin::I32FromF32 {
-                value: *value,
-            },
+            F32IntrinsicKind::FromI32 => {
+                crate::runtime::RuntimeBuiltin::F32FromI32 { value: *value }
+            }
+            F32IntrinsicKind::ToI32 => crate::runtime::RuntimeBuiltin::I32FromF32 { value: *value },
             F32IntrinsicKind::Sqrt => crate::runtime::RuntimeBuiltin::F32Sqrt { value: *value },
         };
         self.push_stmt(
@@ -5446,9 +5443,7 @@ mod tests {
 
     use crate::{
         build_test_runtime_package, build_wasm_runtime_package,
-        runtime::{
-            IntrinsicArithBinOp, RExpr, RStmt, RuntimeBuiltin, RuntimeClass, ScalarRepr,
-        },
+        runtime::{IntrinsicArithBinOp, RExpr, RStmt, RuntimeBuiltin, RuntimeClass, ScalarRepr},
     };
 
     #[test]
@@ -5495,15 +5490,10 @@ pub fn checked_i32_add(x: i32, y: i32) -> i32 {
                 RStmt::Assign {
                     expr:
                         RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
-                            op,
-                            checked,
-                            class,
-                            ..
+                            op, checked, class, ..
                         }),
                     ..
-                } if matches!(class.repr, ScalarRepr::Float { bits: 32 }) => {
-                    Some((*op, *checked))
-                }
+                } if matches!(class.repr, ScalarRepr::Float { bits: 32 }) => Some((*op, *checked)),
                 _ => None,
             })
             .collect();
@@ -5550,20 +5540,24 @@ pub fn checked_i32_add(x: i32, y: i32) -> i32 {
             .find(|function| function.symbol(&db).contains("checked_i32_add"))
             .expect("missing checked_i32_add runtime function");
         let integer_body = integer_function.instance(&db).body(&db);
-        assert!(integer_body.blocks.iter().flat_map(|block| &block.stmts).any(
-            |stmt| matches!(
-                stmt,
-                RStmt::Assign {
-                    expr: RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
-                        op: IntrinsicArithBinOp::Add,
-                        checked: true,
-                        class,
+        assert!(
+            integer_body
+                .blocks
+                .iter()
+                .flat_map(|block| &block.stmts)
+                .any(|stmt| matches!(
+                    stmt,
+                    RStmt::Assign {
+                        expr: RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
+                            op: IntrinsicArithBinOp::Add,
+                            checked: true,
+                            class,
+                            ..
+                        }),
                         ..
-                    }),
-                    ..
-                } if matches!(class.repr, ScalarRepr::Int { bits: 32, signed: true })
-            )
-        ));
+                    } if matches!(class.repr, ScalarRepr::Int { bits: 32, signed: true })
+                ))
+        );
     }
 
     #[test]

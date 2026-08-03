@@ -31,7 +31,9 @@ use crate::{
         get_or_build_runtime_instance,
     },
     runtime::code_region::{code_region_symbol, runtime_code_region_for_manual_root},
-    runtime::lower::body::{check_reachable_runtime_trait_calls_resolvable, declared_external_func},
+    runtime::lower::body::{
+        check_reachable_runtime_trait_calls_resolvable, declared_external_func,
+    },
     runtime::lower::classify::{
         RuntimeVisibleBindingPlan, runtime_effect_binding_plan, runtime_param_class,
         runtime_visible_binding_class,
@@ -686,7 +688,11 @@ fn build_wasm_runtime_package_impl<'db>(
         db,
         top_mod,
         package_roots,
-        vec![(sanitize_object_name("main"), RuntimeSectionName::Main, entry)],
+        vec![(
+            sanitize_object_name("main"),
+            RuntimeSectionName::Main,
+            entry,
+        )],
         Some("main"),
         public_export_funcs,
     )?;
@@ -767,7 +773,9 @@ fn ensure_semantic_instance_is_smir_lowerable<'db>(
         };
         return Err(LowerError::Unsupported(format!(
             "cannot lower {display} ({owner:?}) to semantic MIR because type checking left unresolved or invalid body operations: {}",
-            key.typed_body(db).smir_lowering_blocker_details(db).join("; "),
+            key.typed_body(db)
+                .smir_lowering_blocker_details(db)
+                .join("; "),
         )));
     }
     Ok(())
@@ -846,11 +854,13 @@ fn wasm_root_has_surviving_effect_param<'db>(
     if effect_bindings.is_empty() {
         return false;
     }
-    runtime_visible_binding_plans(db, semantic).iter().any(|entry| {
-        effect_bindings
-            .iter()
-            .any(|binding| same_owner_effect_binding(entry.binding, *binding))
-    })
+    runtime_visible_binding_plans(db, semantic)
+        .iter()
+        .any(|entry| {
+            effect_bindings
+                .iter()
+                .any(|binding| same_owner_effect_binding(entry.binding, *binding))
+        })
 }
 
 /// The by-value TRANSPORT class of a wasm export root's visible value param:

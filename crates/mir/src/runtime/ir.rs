@@ -409,14 +409,23 @@ impl ScalarClass<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Update)]
 pub enum ScalarRepr {
     Bool,
-    Int { bits: u16, signed: bool },
+    Int {
+        bits: u16,
+        signed: bool,
+    },
     /// An IEEE-754 floating-point scalar of the given width (`32` for `f32`).
     /// Honest per-value float typing: no backend has a float `Type` until the
     /// fork gains float insts (#4f), so every backend seam must reject this
     /// explicitly rather than fold it into an integer word.
-    Float { bits: u16 },
-    FixedBytes { len: u16 },
-    Address { bits: u16 },
+    Float {
+        bits: u16,
+    },
+    FixedBytes {
+        len: u16,
+    },
+    Address {
+        bits: u16,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]

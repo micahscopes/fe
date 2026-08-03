@@ -397,9 +397,7 @@ fn repr_coerced_scalar(repr: ScalarRepr, scalar: ConstScalar) -> Result<ConstSca
                 bytes,
             },
         ) if bits == scalar_bits => Ok(ConstScalar::Address { bits, bytes }),
-        (ScalarRepr::Float { .. }, ConstScalar::Float { bits }) => {
-            Ok(ConstScalar::Float { bits })
-        }
+        (ScalarRepr::Float { .. }, ConstScalar::Float { bits }) => Ok(ConstScalar::Float { bits }),
         (expected, actual) => Err(LowerError::Unsupported(format!(
             "const scalar `{actual:?}` does not match expected repr `{expected:?}`"
         ))),

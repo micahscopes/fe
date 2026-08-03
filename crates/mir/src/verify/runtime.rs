@@ -720,7 +720,14 @@ fn verify_builtin<'db>(
             Ok(Some(expected))
         }
         RuntimeBuiltin::F32FromI32 { value } => {
-            verify_scalar_repr(body, *value, ScalarRepr::Int { bits: 32, signed: true })?;
+            verify_scalar_repr(
+                body,
+                *value,
+                ScalarRepr::Int {
+                    bits: 32,
+                    signed: true,
+                },
+            )?;
             Ok(Some(RuntimeClass::Scalar(f32_scalar_class())))
         }
         RuntimeBuiltin::I32FromF32 { value } => {
@@ -1115,8 +1122,7 @@ mod tests {
 
     #[test]
     fn checked_f32_intrinsic_arithmetic_is_rejected() {
-        let source =
-            "pub fn checked_float_probe(a: f32, b: f32) -> f32 { a + b }\n";
+        let source = "pub fn checked_float_probe(a: f32, b: f32) -> f32 { a + b }\n";
         let mut db = DriverDataBase::default();
         let url = Url::parse("file:///verify_checked_f32.fe").unwrap();
         db.workspace()
@@ -1138,10 +1144,7 @@ mod tests {
             .flat_map(|block| &mut block.stmts)
             .find_map(|stmt| match stmt {
                 RStmt::Assign {
-                    expr:
-                        RExpr::Builtin(RuntimeBuiltin::IntrinsicArith {
-                            checked, lhs, ..
-                        }),
+                    expr: RExpr::Builtin(RuntimeBuiltin::IntrinsicArith { checked, lhs, .. }),
                     ..
                 } => {
                     assert!(!*checked, "ordinary f32 operators must start unchecked");

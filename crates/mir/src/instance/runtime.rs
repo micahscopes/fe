@@ -23,6 +23,8 @@ use crate::{
     },
 };
 
+pub use hir::hir_def::{HostResultCodec, IndirectHostResult};
+
 #[salsa::interned]
 #[derive(Debug)]
 pub struct RuntimeSyntheticInstance<'db> {
@@ -128,25 +130,27 @@ pub fn get_or_build_runtime_instance<'db>(
     RuntimeInstance::new(db, key)
 }
 
-/// The wasm import MODULE for a runtime function, from the
-/// `#[wasm_import(module = "...")]` attribute (R3.3) on its `extern` block, if
-/// present and well-formed. `None` for a locally-defined function, an
-/// attribute-less `extern`, or a synthetic instance; the wasm backend then falls
-/// back to the flat `"fe"` v0 import-module convention. Only a DECLARED-EXTERNAL
+/// The target-neutral host namespace for a runtime function, from the
+/// `#[host_import(module = "...")]` attribute on its `extern` block. `None` for
+/// a locally-defined function, an attribute-less `extern`, or a synthetic
+/// instance. Only a DECLARED-EXTERNAL
 /// (non-builtin `extern`) function can carry a module. EVM externs are recognized
 /// builtins, so `declared_external_func` returns `None` for them and this stays
 /// `None` (never consulted on the EVM path anyway).
-pub fn wasm_import_module<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> Option<String> {
+pub fn host_import_module<'db>(
+    db: &'db dyn MirDb,
+    instance: RuntimeInstance<'db>,
+) -> Option<String> {
     let RuntimeInstanceSource::Semantic(semantic) = instance.key(db).source(db) else {
         return None;
     };
     let func = declared_external_func(db, semantic)?;
     hir::hir_def::ItemKind::Func(func)
         .attrs(db)?
-        .wasm_import_module(db)
+        .host_import_module(db)
 }
 
-/// The wasm import FIELD NAME for a runtime function: a DECLARED-EXTERNAL `extern`
+/// The host operation name for a runtime function: a DECLARED-EXTERNAL `extern`
 /// function's BASE declared identifier (e.g. `gpu_buffer_create`), which is the
 /// stable name the host broker binds under the import module - "the import table IS
 /// the op set" (interop 4.1/4.2). `None` for a locally-defined or synthetic instance.
@@ -157,7 +161,7 @@ pub fn wasm_import_module<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db
 /// top-level extern (symbol already == base name) is unaffected and a std-ingot extern
 /// imports as its op name. EVM never consults this (EVM externs are recognized
 /// builtins, not declared-external).
-pub fn wasm_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> Option<String> {
+pub fn host_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> Option<String> {
     let RuntimeInstanceSource::Semantic(semantic) = instance.key(db).source(db) else {
         return None;
     };
@@ -165,57 +169,62 @@ pub fn wasm_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>)
     Some(func.name(db).to_opt()?.data(db).to_string())
 }
 
-/// Materialize a DECLARED-EXTERNAL runtime function (a non-builtin `extern`,
-/// which the wasm backend emits as a `("fe", <symbol>)` host import): its
-/// signature only, no body. Fails closed if any parameter or the return type is
-/// not representable across the v0 host-import boundary (scalar-only), naming the
-/// offending Fe type. The signature is computed exactly like any other runtime
-/// instance (`typed_body_for_bodyless_func` populates the extern's param/return
-/// types), so no extern-specific signature path is needed; only the body is
-/// empty.
-/// Whether a runtime class may cross the wasm host-import boundary. R3.2 admitted
-/// scalars only; R3.4b (Amendment 4) additionally admits the `MemPtr<B::Word>`
-/// transport class and, by the transport-newtype extension, the single-`u32`-field
-/// capability newtypes (`WebGpuRef<u32, Global>`, `KernelId`, `Pending<T>`). Each is
-/// represented by the wasm lowerer as its single word (i32 on wasm32): a `MemPtr<u32>`
-/// classifies as a memory-space `RawAddr` (a raw memory address, the class the runtime
-/// classifier assigns every host-minted region pointer); a memory-space provider
-/// reference is admitted on the same footing; and a single-scalar-field aggregate is
-/// its one field's scalar (exactly what `wasm_lower::ty_for_class` lowers it to).
-/// Everything else (object/const refs, non-memory addresses/providers, multi-field /
-/// empty aggregates, arrays, enums) stays fail-closed. EVM externs never reach this
-/// predicate (they are recognized builtins, not declared-external), so EVM lowering is
-/// untouched.
-fn is_wasm_import_boundary_class(db: &dyn MirDb, class: &RuntimeClass<'_>) -> bool {
-    matches!(
-        class,
+/// Codec-versioned indirect aggregate result metadata carried unchanged from
+/// the authored extern declaration into backend lowering.
+pub fn indirect_host_result<'db>(
+    db: &'db dyn MirDb,
+    instance: RuntimeInstance<'db>,
+) -> Option<IndirectHostResult> {
+    let RuntimeInstanceSource::Semantic(semantic) = instance.key(db).source(db) else {
+        return None;
+    };
+    let func = declared_external_func(db, semantic)?;
+    hir::hir_def::ItemKind::Func(func)
+        .attrs(db)?
+        .indirect_host_result(db)
+}
+
+/// Compatibility alias for code that still uses the Wasm-specific vocabulary.
+pub fn wasm_import_module<'db>(
+    db: &'db dyn MirDb,
+    instance: RuntimeInstance<'db>,
+) -> Option<String> {
+    host_import_module(db, instance)
+}
+
+/// Compatibility alias for code that still uses the Wasm-specific vocabulary.
+pub fn wasm_import_name<'db>(db: &'db dyn MirDb, instance: RuntimeInstance<'db>) -> Option<String> {
+    host_import_name(db, instance)
+}
+
+/// Whether a runtime class is a recursively flat product of host ABI lanes.
+/// Scalars, memory-region pointers, and structs composed solely from those
+/// values are admitted. Arrays, enums, object/const references, and non-memory
+/// providers remain fail-closed. Individual backends still decide whether they
+/// can realize a declared host import.
+fn is_host_import_boundary_class(db: &dyn MirDb, class: &RuntimeClass<'_>) -> bool {
+    match class {
         RuntimeClass::Scalar(_)
-            | RuntimeClass::RawAddr {
-                space: AddressSpaceKind::Memory,
-                ..
-            }
-            | RuntimeClass::Ref {
-                kind: RefKind::Provider {
+        | RuntimeClass::RawAddr {
+            space: AddressSpaceKind::Memory,
+            ..
+        }
+        | RuntimeClass::Ref {
+            kind:
+                RefKind::Provider {
                     space: AddressSpaceKind::Memory,
                     ..
                 },
-                ..
-            }
-    ) || is_single_scalar_field_newtype(db, class)
-}
-
-/// A single-scalar-field aggregate (a `u32` capability newtype such as `WebGpuRef`,
-/// `KernelId`, `Pending<T>`): it crosses the extern boundary WHOLE and transports as
-/// its one field's scalar word. Multi-field / empty aggregates, arrays, and enums are
-/// NOT single-scalar-field newtypes and stay fail-closed. This is the boundary-gate
-/// twin of `wasm_lower::single_scalar_field`.
-fn is_single_scalar_field_newtype(db: &dyn MirDb, class: &RuntimeClass<'_>) -> bool {
-    let RuntimeClass::AggregateValue { layout } = class else {
-        return false;
-    };
-    match layout.data(db) {
-        Layout::Struct(struct_layout) => matches!(&*struct_layout.fields, [RuntimeClass::Scalar(_)]),
-        Layout::Array(_) | Layout::Enum(_) => false,
+            ..
+        } => true,
+        RuntimeClass::AggregateValue { layout } => match layout.data(db) {
+            Layout::Struct(struct_layout) => struct_layout
+                .fields
+                .iter()
+                .all(|field| is_host_import_boundary_class(db, field)),
+            Layout::Array(_) | Layout::Enum(_) => false,
+        },
+        _ => false,
     }
 }
 
@@ -224,6 +233,20 @@ fn external_declaration_body<'db>(
     instance: RuntimeInstance<'db>,
     func: Func<'db>,
 ) -> Result<RuntimeBody<'db>, LowerError> {
+    if let Some(attrs) = hir::hir_def::ItemKind::Func(func).attrs(db)
+        && attrs.get_attr(db, "host_import").is_some()
+        && attrs.get_attr(db, "wasm_import").is_some()
+    {
+        let name = func
+            .name(db)
+            .to_opt()
+            .map(|ident| ident.data(db).to_string())
+            .unwrap_or_else(|| "<extern>".to_string());
+        return Err(LowerError::Unsupported(format!(
+            "extern host import `{name}` declares both `#[host_import]` and its \
+             `#[wasm_import]` compatibility alias"
+        )));
+    }
     let signature = instance.interface_signature(db);
     let name = func
         .name(db)
@@ -231,7 +254,7 @@ fn external_declaration_body<'db>(
         .map(|ident| ident.data(db).to_string())
         .unwrap_or_else(|| "<extern>".to_string());
     for (idx, param) in signature.params.iter().enumerate() {
-        if !is_wasm_import_boundary_class(db, &param.class) {
+        if !is_host_import_boundary_class(db, &param.class) {
             let ty = func
                 .arg_tys(db)
                 .get(idx)
@@ -239,20 +262,40 @@ fn external_declaration_body<'db>(
                 .unwrap_or_else(|| format!("{:?}", param.class));
             return Err(LowerError::Unsupported(format!(
                 "extern host import `{name}` parameter {idx} has type `{ty}`, which is not \
-                 representable across the wasm import boundary (only scalar params, \
-                 memory-region pointers, and single-u32-field capability newtypes are \
-                 supported)"
+                 representable across the flat host-import boundary (only recursively flat \
+                 scalar products and memory-region pointers are supported)"
             )));
         }
     }
+    let indirect_result = indirect_host_result(db, instance);
+    if let Some(descriptor) = indirect_result
+        && (descriptor.codec != HostResultCodec::FeHostWasm || descriptor.version != 1)
+    {
+        return Err(LowerError::Unsupported(format!(
+            "extern host import `{name}` declares an unsupported indirect host result codec"
+        )));
+    }
+    if indirect_result.is_some()
+        && signature
+            .ret
+            .as_ref()
+            .is_none_or(|ret| !matches!(ret, RuntimeClass::AggregateValue { .. }))
+    {
+        let ty = func.return_ty(db).pretty_print(db).to_string();
+        return Err(LowerError::Unsupported(format!(
+            "extern host import `{name}` declares an indirect host result, but authored return \
+             type `{ty}` is not an aggregate"
+        )));
+    }
     if let Some(ret) = &signature.ret
-        && !is_wasm_import_boundary_class(db, ret)
+        && !is_host_import_boundary_class(db, ret)
+        && indirect_result.is_none()
     {
         let ty = func.return_ty(db).pretty_print(db).to_string();
         return Err(LowerError::Unsupported(format!(
             "extern host import `{name}` return type `{ty}` is not representable across the \
-             wasm import boundary (only scalar, memory-pointer, and single-u32-field \
-             capability-newtype returns are supported)"
+             flat host-import boundary (only recursively flat scalar products and \
+             memory-region pointers are supported)"
         )));
     }
 
