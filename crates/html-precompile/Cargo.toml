@@ -1,0 +1,20 @@
+[package]
+name = "fe-html-precompile"
+version = "0.1.0"
+edition.workspace = true
+license = "Apache-2.0"
+description = "Standards-parsed HTML precompiler for Fe script elements"
+
+[dependencies]
+base64 = "0.22"
+fe-compiler-facade = { path = "../compiler-facade" }
+fe-compiler-protocol = { path = "../compiler-protocol" }
+fe-webidl-bindgen = { path = "../webidl-bindgen" }
+html5ever = "0.39.0"
+markup5ever_rcdom = "0.39.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23"
