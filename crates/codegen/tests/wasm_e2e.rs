@@ -4367,3 +4367,96 @@ fn pub_fn_reachable_as_callee_is_still_exported() {
         "`pub fn add` should be exported even though `main` calls it; got {exports:?}"
     );
 }
+
+// ----------------------------------------------------------------------------
+// Arrays rung STEP 1, Slice A: function-local `[u32; N]` array memory lowering.
+// A local array indexed by a runtime variable compiles + runs on wasm; an
+// out-of-bounds index traps; the u256-element and object-ref-signature shapes
+// stay fail-closed.
+// ----------------------------------------------------------------------------
+
+/// THE SLICE A GATE: a function-local `[u32; 8]` filled by a while loop and read
+/// at a runtime index compiles Fe -> wasm, runs under wasmtime for several `k`
+/// (== a Rust oracle), and traps on an out-of-bounds index.
+#[test]
+fn local_u32_array_runtime_index_runs_on_wasm_and_traps_out_of_bounds() {
+    let source = r#"
+pub fn probe(k: u32) -> u32 {
+    let mut a: [u32; 8] = [0; 8]
+    let mut i: u32 = 0
+    while i < 8 {
+        a[i as usize] = i * i
+        i = i + 1
+    }
+    a[k as usize]
+}
+"#;
+    let wasm = compile_to_wasm("wasm_local_u32_array.fe", source);
+
+    // The array is allocated in the canonical arena, so `MemAllocDynamic` lowers
+    // to the synthesized (not imported) `fe_cabi_alloc`: the module must stay
+    // self-contained (no function imports needed to instantiate).
+    assert!(
+        func_imports(&wasm).is_empty(),
+        "the array probe should need no host imports; got {:?}",
+        func_imports(&wasm)
+    );
+
+    let (mut store, instance) = instantiate(&wasm);
+    let probe = instance
+        .get_typed_func::<i32, i32>(&mut store, "probe")
+        .expect("`probe` export should exist");
+
+    // Rust oracle: a[i] = i*i for i in 0..8, so probe(k) == k*k for k in 0..8.
+    for k in 0..8_i32 {
+        let expected = k * k;
+        let got = probe
+            .call(&mut store, k)
+            .unwrap_or_else(|err| panic!("probe({k}) should run: {err}"));
+        assert_eq!(got, expected, "probe({k}) should be {expected}");
+    }
+
+    // Out-of-bounds indexes trap (wasm `unreachable`), the portable image of the
+    // EVM revert an OOB index takes.
+    for k in [8_i32, 9, 42, 1000] {
+        assert!(
+            probe.call(&mut store, k).is_err(),
+            "probe({k}) is out of bounds and must trap"
+        );
+    }
+}
+
+/// Fail-closed regression: a `[u256; N]` local array stays rejected (its element
+/// is outside the wasm scalar envelope), with a named backend error.
+#[test]
+fn local_u256_array_stays_fail_closed_on_wasm() {
+    let source = r#"
+pub fn probe256(k: u32) -> u256 {
+    let mut a: [u256; 4] = [0; 4]
+    a[0] = 7
+    a[k as usize]
+}
+"#;
+    let error = compile_to_wasm_err("wasm_local_u256_array.fe", source);
+    assert!(
+        error.contains("wasm target") && (error.contains("scalar") || error.contains("not lowered")),
+        "u256-element array should fail closed with a named error; got: {error}"
+    );
+}
+
+/// Fail-closed regression: an object-ref (array) in an EXPORT signature stays
+/// rejected. Change 1 only maps object-ref LOCALS to an i32 pointer; it does not
+/// widen `ty_for_class`, which remains the signature admissibility SSOT.
+#[test]
+fn object_ref_array_in_signature_stays_fail_closed_on_wasm() {
+    let source = r#"
+pub fn takes_array(a: [u32; 4]) -> u32 {
+    a[0] + a[1]
+}
+"#;
+    let error = compile_to_wasm_err("wasm_object_ref_signature.fe", source);
+    assert!(
+        error.contains("wasm target"),
+        "an array in an export signature should fail closed; got: {error}"
+    );
+}
