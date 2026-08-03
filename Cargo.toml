@@ -10,11 +10,11 @@ common = { path = "crates/common", package = "fe-common" }
 dataflow = { path = "crates/fe-dataflow", package = "fe-dataflow" }
 driver = { path = "crates/driver", package = "fe-driver" }
 fmt = { path = "crates/fmt", package = "fe-fmt" }
-hir = { path = "crates/hir", package = "fe-hir" }
+hir = { path = "crates/hir", package = "fe-hir", default-features = false }
 parser = { path = "crates/parser", package = "fe-parser" }
 test-utils = { path = "crates/test-utils", package = "fe-test-utils" }
 resolver = { path = "crates/resolver", package = "fe-resolver" }
-codegen = { path = "crates/codegen", package = "fe-codegen" }
+codegen = { path = "crates/codegen", package = "fe-codegen", default-features = false }
 fe-web = { path = "crates/fe-web" }
 semantic-indexing = { path = "crates/semantic-indexing", package = "fe-semantic-indexing" }
 language-server = { path = "crates/language-server", package = "fe-language-server" }
@@ -52,7 +52,7 @@ semver = "1.0.26"
 petgraph = "0.8"
 sonatina-ir = { git = "https://github.com/micahscopes/sonatina", rev = "43e9f3b0d60fff4f8f7006174b9f1d406a0c70f0" }
 sonatina-triple = { git = "https://github.com/micahscopes/sonatina", rev = "43e9f3b0d60fff4f8f7006174b9f1d406a0c70f0" }
-sonatina-codegen = { git = "https://github.com/micahscopes/sonatina", rev = "43e9f3b0d60fff4f8f7006174b9f1d406a0c70f0", features = ["wasm", "spirv-backend"] }
+sonatina-codegen = { git = "https://github.com/micahscopes/sonatina", rev = "43e9f3b0d60fff4f8f7006174b9f1d406a0c70f0", features = ["wasm"] }
 sonatina-verifier = { git = "https://github.com/micahscopes/sonatina", rev = "43e9f3b0d60fff4f8f7006174b9f1d406a0c70f0" }
 
 [profile.dev]

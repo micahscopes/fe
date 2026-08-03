@@ -23,3 +23,5 @@ trace_*.txt
 # insta writes these next to the accepted snapshot on a failing assertion.
 # They are review scratch, never review output.
 *.snap.new
+target-browser-wire/
+target-sonatina-overlay/
