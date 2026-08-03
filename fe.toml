@@ -14,5 +14,6 @@ members = [
   { path = "ingots/gaplay", name = "gaplay" },
   { path = "demos/sketches/qcga", name = "qcga" },
   { path = "demos/sketches/cga3d", name = "cga3d" },
+  { path = "demos/sketches/desargues", name = "desargues" },
   { path = "demos/sketches/qcga_pencil", name = "qcga_pencil" },
 ]

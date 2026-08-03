@@ -1,0 +1,69 @@
+// I-desargues (interactive controls-in-Fe): the DESARGUES CONTROLLER, compiled
+// ONLY to wasm. Pure, stateless, oracle-checkable. JavaScript never touches the
+// figure's geometric state: it forwards one pointer-drag/wheel event to
+// update_desargues and relays the returned (sweep, spin, zoom) triple, which IS
+// the actor's three uniforms verbatim (demos/sketches/desargues/src/lib.fe
+// reads them as `self.sweep` / `self.spin` / `self.zoom`).
+//
+// Horizontal drag (dx) sweeps the perspective parameter: the second triangle
+// slides along the rays from O, so the whole figure reconfigures and the axis
+// of perspectivity moves, while the three corresponding-side cross-points stay
+// collinear (the theorem). Clamped to [0.30, 1.60] to keep the figure finite
+// and on-screen. Vertical drag (dy) spins the view; unbounded is fine because
+// spin only ever feeds cos/sin in the fragment. The wheel (dzoom) zooms the
+// visible half-extent, clamped to [0.8, 5.0].
+//
+// No fixed-point trick here (unlike the clifford rotor / mandelbrot view): the
+// fragment already takes sweep/spin/zoom as plain f32, so the control fn stays
+// in f32 too, converting only the two integer pointer deltas.
+
+extern {
+    fn __f32_from_i32(_: i32) -> f32
+}
+
+const SWEEP_SENSITIVITY: f32 = 0.0025
+const SPIN_SENSITIVITY: f32 = 0.01
+const SWEEP_MIN: f32 = 0.3
+const SWEEP_MAX: f32 = 1.6
+const ZOOM_MIN: f32 = 0.8
+const ZOOM_MAX: f32 = 5.0
+const ZOOM_STEP_IN: f32 = 0.875
+const ZOOM_STEP_OUT: f32 = 1.125
+
+/// min(a, b) via one branch.
+fn min_f(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
+
+/// max(a, b) via one branch (written `a < b`, never `>`).
+fn max_f(a: f32, b: f32) -> f32 {
+    if a < b { b } else { a }
+}
+
+fn clamp_sweep(s: f32) -> f32 {
+    min_f(max_f(s, SWEEP_MIN), SWEEP_MAX)
+}
+
+fn clamp_zoom(z: f32) -> f32 {
+    min_f(max_f(z, ZOOM_MIN), ZOOM_MAX)
+}
+
+/// One wheel notch IN (dzoom < 0): shrink the visible half-extent by 1/8.
+fn zoom_in_if(z: f32, dzoom: i32) -> f32 {
+    if dzoom < 0 { z * ZOOM_STEP_IN } else { z }
+}
+
+/// One wheel notch OUT (dzoom > 0): grow the visible half-extent by 1/8.
+fn zoom_out_if(z: f32, dzoom: i32) -> f32 {
+    if 0 < dzoom { z * ZOOM_STEP_OUT } else { z }
+}
+
+pub fn update_desargues(sweep: f32, spin: f32, zoom: f32,
+                        dx: i32, dy: i32, dzoom: i32) -> (f32, f32, f32) {
+    let dxf: f32 = __f32_from_i32(dx)
+    let dyf: f32 = __f32_from_i32(dy)
+    let sweep1: f32 = clamp_sweep(sweep + dxf * SWEEP_SENSITIVITY)
+    let spin1: f32 = spin + dyf * SPIN_SENSITIVITY
+    let zoom1: f32 = clamp_zoom(zoom_out_if(zoom_in_if(zoom, dzoom), dzoom))
+    (sweep1, spin1, zoom1)
+}
