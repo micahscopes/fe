@@ -44,6 +44,9 @@ native-backend = ["sonatina-codegen/cranelift"]
 sonatina-indirect-calls = []
 
 [dev-dependencies]
+# The Schedule32 / QCGA3D demo examples stage a throwaway application ingot
+# under output/demo-tmp via a uniquely named temp dir.
+tempfile = "3"
 dir-test.workspace = true
 driver.workspace = true
 test-utils.workspace = true
