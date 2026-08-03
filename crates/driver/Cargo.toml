@@ -18,6 +18,7 @@ salsa.workspace = true
 smol_str.workspace = true
 
 common.workspace = true
+compiler-db = { path = "../compiler-db", package = "fe-compiler-db" }
 hir.workspace = true
 resolver.workspace = true
 url.workspace = true
