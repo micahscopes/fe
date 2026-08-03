@@ -132,7 +132,8 @@ impl<'db> Expr<'db> {
                 // not lowered, so no dangling `self` reference is left behind.
                 if let Some(field_ident) = ctxt.f_ctxt.actor_self_field_rewrite(&field) {
                     let path = PathId::from_ident(ctxt.f_ctxt.db(), field_ident);
-                    return ctxt.push_expr(Self::Path(Partial::Present(path)), HirOrigin::raw(&ast));
+                    return ctxt
+                        .push_expr(Self::Path(Partial::Present(path)), HirOrigin::raw(&ast));
                 }
                 let receiver = Self::push_to_body_opt(ctxt, field.receiver());
                 if let Some(hole) = field.field_hole() {

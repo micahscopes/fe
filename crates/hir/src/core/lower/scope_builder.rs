@@ -560,7 +560,8 @@ impl<'db> ScopeGraphBuilder<'db> {
 
             self.graph.add_lex_edge(assoc_node, parent_node);
             // Anon edge: the def node must never terminate a named query.
-            self.graph.add_edge(parent_node, assoc_node, EdgeKind::anon());
+            self.graph
+                .add_edge(parent_node, assoc_node, EdgeKind::anon());
 
             for (j, param) in assoc.generic_params.data(self.db).iter().enumerate() {
                 let param_scope_id = ScopeId::ImplTraitTypeParam(impl_trait, i as u16, j as u16);

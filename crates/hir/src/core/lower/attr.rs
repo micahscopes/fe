@@ -33,12 +33,20 @@ pub(super) enum AttrForm {
         allow_bare: bool,
         allowed_args: &'static [&'static str],
     },
+    /// Exactly one identifier argument, with the vocabulary intentionally
+    /// interpreted by the semantic consumer rather than closed in HIR.
+    SingleIdentArg,
     /// Exactly one arg of the shape `<key> = "<string literal>"`, e.g.
-    /// `#[wasm_import(module = "fe:host")]`. Unlike `SingleArg` (keyword-only),
+    /// `#[host_import(module = "fe:host")]`. Unlike `SingleArg` (keyword-only),
     /// this REQUIRES a string-literal value; a non-string value or the wrong key
     /// is an invalid form (R3.3).
     KeyStrArg {
         key: &'static str,
+    },
+    /// Exactly one keyed string argument with one exact protocol spelling.
+    KeyStrArgValue {
+        key: &'static str,
+        value: &'static str,
     },
 }
 
@@ -63,6 +71,13 @@ impl AttrForm {
                         .as_ref()
                         .is_some_and(|key| allowed_args.contains(&key.as_str()))
             }
+            Self::SingleIdentArg => {
+                if attr.value.is_some() || !attr.has_args || attr.args.len() != 1 {
+                    return false;
+                }
+                let arg = &attr.args[0];
+                arg.value.is_none() && arg.key.is_some()
+            }
             Self::KeyStrArg { key } => {
                 if attr.value.is_some() || !attr.has_args || attr.args.len() != 1 {
                     return false;
@@ -73,6 +88,22 @@ impl AttrForm {
                         &arg.value,
                         Some(ast::AttrArgValueKind::Lit(lit))
                             if matches!(lit.kind(), ast::LitKind::String(_))
+                    )
+            }
+            Self::KeyStrArgValue { key, value } => {
+                if attr.value.is_some() || !attr.has_args || attr.args.len() != 1 {
+                    return false;
+                }
+                let arg = &attr.args[0];
+                arg.key.as_deref() == Some(key)
+                    && matches!(
+                        &arg.value,
+                        Some(ast::AttrArgValueKind::Lit(lit))
+                            if matches!(
+                                lit.kind(),
+                                ast::LitKind::String(ref string)
+                                    if string.token().text() == format!("\"{value}\"")
+                            )
                     )
             }
         }
@@ -241,6 +272,27 @@ pub(super) fn validate_attr_rules<'db>(
     }
 }
 
+pub(super) fn validate_attr_alias_exclusive<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    attrs: Option<ast::AttrList>,
+    target: AttrTarget,
+    preferred: &'static str,
+    compatibility: &'static str,
+) {
+    if named_attr_specs(attrs.clone(), preferred).is_empty() {
+        return;
+    }
+    if let Some(spec) = named_attr_specs(attrs, compatibility).first() {
+        report_attr_misuse(
+            ctxt,
+            spec.range,
+            compatibility.to_owned(),
+            target,
+            AttrMisuseErrorKind::Duplicate,
+        );
+    }
+}
+
 pub(super) fn validate_unknown_attrs_in_restricted_context<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     attrs: Option<ast::AttrList>,
@@ -306,23 +358,26 @@ fn report_attr_misuse<'db>(
 }
 
 /// Lower a func's own attributes, PREPENDING any occurrences of `name` from an
-/// enclosing block's attribute list. Used for `#[wasm_import(...)]` on an
+/// enclosing block's attribute list. Used for `#[host_import(...)]` on an
 /// `extern` block, which has no HIR node of its own (R3.3): the attribute
 /// logically applies to each `extern fn` inside, so it is propagated onto every
 /// inner `Func` (mirroring `#[link(wasm_import_module)]`, which is per-symbol).
 /// Only the named attribute is propagated; other block-level attributes are not
 /// (they are diagnosed on the block itself). With no matching block attribute
 /// this is identical to lowering the func's own attributes alone.
-pub(super) fn lower_attrs_with_propagated_named<'db>(
+pub(super) fn lower_attrs_with_propagated_names<'db>(
     ctxt: &mut FileLowerCtxt<'db>,
     own: Option<ast::AttrList>,
     block: Option<ast::AttrList>,
-    name: &str,
+    names: &[&str],
 ) -> AttrListId<'db> {
     let mut attrs: Vec<Attr<'db>> = Vec::new();
     for attr in block.into_iter().flatten() {
-        let is_named =
-            matches!(attr.kind(), ast::AttrKind::Normal(ref normal) if normal.is_named(name));
+        let is_named = matches!(
+            attr.kind(),
+            ast::AttrKind::Normal(ref normal)
+                if names.iter().any(|name| normal.is_named(name))
+        );
         if is_named {
             attrs.push(Attr::lower_ast(ctxt, attr));
         }

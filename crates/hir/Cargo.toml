@@ -34,12 +34,15 @@ tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 common.workspace = true
 dataflow.workspace = true
 parser.workspace = true
-test-utils.workspace = true
+test-utils = { workspace = true, optional = true }
 url.workspace = true
 codespan-reporting.workspace = true
 
 [features]
-testutils = []
+# Direct `fe-hir` test invocations retain the historical integration-test
+# surface. Workspace consumers opt out through the shared dependency entry.
+default = ["testutils"]
+testutils = ["dep:test-utils"]
 
 [dev-dependencies]
 ascii_tree = "0.1"

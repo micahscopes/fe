@@ -1434,8 +1434,9 @@ impl super::Parse for TypeFnArmPatScope {
                 parser.bump();
                 Ok(())
             }
-            _ => parser
-                .error_and_recover("expected an integer literal or `_` recursive type fn arm pattern"),
+            _ => parser.error_and_recover(
+                "expected an integer literal or `_` recursive type fn arm pattern",
+            ),
         }
     }
 }

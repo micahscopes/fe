@@ -8,6 +8,53 @@ pub enum ArithmeticMode {
     Unchecked,
 }
 
+/// Target-neutral execution metadata carried by an effect trait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostExecution {
+    External,
+}
+
+/// Target-neutral placement metadata carried by an effect trait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostPlacement {
+    MainThread,
+    Worker,
+}
+
+/// Canonical host-interface meaning carried by a nominal Fe type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostType {
+    Bytes,
+    String,
+    List,
+}
+
+/// A target-neutral description of an aggregate result returned indirectly by
+/// a host import. Backends may realize this contract differently, but must not
+/// silently flatten or reinterpret it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IndirectHostResult {
+    pub codec: HostResultCodec,
+    pub version: u16,
+    pub requires_realloc: bool,
+    pub requires_post_return: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostResultCodec {
+    FeHostWasm,
+}
+
+impl IndirectHostResult {
+    pub const FE_HOST_WASM_PROTOCOL: &'static str = "fe:host-wasm-codec/v1";
+    pub const FE_HOST_WASM_V1: Self = Self {
+        codec: HostResultCodec::FeHostWasm,
+        version: 1,
+        requires_realloc: true,
+        requires_post_return: true,
+    };
+}
+
 impl ArithmeticMode {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
@@ -331,6 +378,51 @@ impl<'db> AttrListId<'db> {
         })
     }
 
+    fn single_ident_arg(self, db: &'db dyn HirDb, name: &str) -> Option<String> {
+        let attr = self.get_attr(db, name)?;
+        let [arg] = attr.args.as_slice() else {
+            return None;
+        };
+        if attr.value.is_some() || arg.has_value {
+            return None;
+        }
+        Some(arg.key.to_opt()?.as_ident(db)?.data(db).to_string())
+    }
+
+    pub fn host_execution(self, db: &'db dyn HirDb) -> Option<HostExecution> {
+        match self.single_ident_arg(db, "host_execution")?.as_str() {
+            "external" => Some(HostExecution::External),
+            _ => None,
+        }
+    }
+
+    pub fn host_placement(self, db: &'db dyn HirDb) -> Option<HostPlacement> {
+        match self.single_ident_arg(db, "host_placement")?.as_str() {
+            "main_thread" => Some(HostPlacement::MainThread),
+            "worker" => Some(HostPlacement::Worker),
+            _ => None,
+        }
+    }
+
+    /// Stable capability identity declared by a trait.
+    pub fn host_capability(self, db: &'db dyn HirDb) -> Option<String> {
+        self.single_ident_arg(db, "host_capability")
+    }
+
+    /// Capability identity selected by a nominal backend type.
+    pub fn host_capability_backend(self, db: &'db dyn HirDb) -> Option<String> {
+        self.single_ident_arg(db, "host_capability_backend")
+    }
+
+    pub fn host_type(self, db: &'db dyn HirDb) -> Option<HostType> {
+        match self.single_ident_arg(db, "host_type")?.as_str() {
+            "bytes" => Some(HostType::Bytes),
+            "string" => Some(HostType::String),
+            "list" => Some(HostType::List),
+            _ => None,
+        }
+    }
+
     pub fn arithmetic_mode(self, db: &'db dyn HirDb) -> Option<ArithmeticMode> {
         self.data(db)
             .iter()
@@ -375,18 +467,31 @@ impl<'db> AttrListId<'db> {
             .last()
     }
 
-    /// The wasm import MODULE named by an `#[wasm_import(module = "...")]`
-    /// attribute (R3.3), if present and well-formed. An `extern` block names its
-    /// host-import namespace this way (arch 4.2, precedent
-    /// `#[link(wasm_import_module)]`); the string threads to the emitted wasm
-    /// import's module field so the import lands as `(<module>, <fn name>)`
-    /// instead of the flat v0 `("fe", <fn name>)`. A missing, malformed, or empty
-    /// module string yields `None`, and the backend falls back to the `"fe"`
-    /// convention (an empty string is rejected here to match the lowering-time
-    /// `InvalidForm` diagnostic).
-    pub fn wasm_import_module(self, db: &'db dyn HirDb) -> Option<String> {
-        let module = self.get_attr(db, "wasm_import")?.str_arg(db, "module")?;
+    /// The target-neutral host namespace named by
+    /// `#[host_import(module = "...")]`. `wasm_import` remains a compatibility
+    /// alias; backends decide how (or whether) to realize this declaration.
+    pub fn host_import_module(self, db: &'db dyn HirDb) -> Option<String> {
+        let attr = self
+            .get_attr(db, "host_import")
+            .or_else(|| self.get_attr(db, "wasm_import"))?;
+        let module = attr.str_arg(db, "module")?;
         (!module.is_empty()).then_some(module)
+    }
+
+    /// The codec-versioned indirect result contract declared by an extern host
+    /// import. The accepted spelling is deliberately closed so generated
+    /// bindings cannot accidentally opt into a future codec revision.
+    pub fn indirect_host_result(self, db: &'db dyn HirDb) -> Option<IndirectHostResult> {
+        let codec = self.get_attr(db, "host_result")?.str_arg(db, "codec")?;
+        match codec.as_str() {
+            IndirectHostResult::FE_HOST_WASM_PROTOCOL => Some(IndirectHostResult::FE_HOST_WASM_V1),
+            _ => None,
+        }
+    }
+
+    /// Compatibility accessor for callers not yet migrated to the generic name.
+    pub fn wasm_import_module(self, db: &'db dyn HirDb) -> Option<String> {
+        self.host_import_module(db)
     }
 
     pub fn inline_attr(self, db: &'db dyn HirDb) -> Option<InlineAttr> {

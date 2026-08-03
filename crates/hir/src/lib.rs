@@ -12,6 +12,7 @@ pub mod diagnosable;
 pub mod projection;
 pub use core::{hir_def, lower, print, semantic, span, visitor};
 
+#[cfg(feature = "testutils")]
 pub mod test_db;
 
 pub use common::{file::File, file::Workspace, ingot::Ingot};

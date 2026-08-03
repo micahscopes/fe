@@ -4,8 +4,8 @@ use salsa::Accumulator as _;
 use super::{
     FileLowerCtxt,
     attr::{
-        AttrForm, AttrRule, AttrTarget, lower_attrs_with_propagated_named, report_unsupported_attr,
-        validate_attr_rules,
+        AttrForm, AttrRule, AttrTarget, lower_attrs_with_propagated_names, report_unsupported_attr,
+        validate_attr_alias_exclusive, validate_attr_rules,
     },
 };
 use crate::{
@@ -84,12 +84,30 @@ const UNROLL_FORM: AttrForm = AttrForm::SingleArg {
     allowed_args: &["never"],
 };
 const BARE_FORM: AttrForm = AttrForm::Bare;
-const WASM_IMPORT_FORM: AttrForm = AttrForm::KeyStrArg { key: "module" };
+const HOST_IMPORT_FORM: AttrForm = AttrForm::KeyStrArg { key: "module" };
+const HOST_RESULT_FORM: AttrForm = AttrForm::KeyStrArgValue {
+    key: "codec",
+    value: "fe:host-wasm-codec/v1",
+};
+const HOST_EXECUTION_FORM: AttrForm = AttrForm::SingleArg {
+    allow_bare: false,
+    allowed_args: &["external"],
+};
+const HOST_PLACEMENT_FORM: AttrForm = AttrForm::SingleArg {
+    allow_bare: false,
+    allowed_args: &["main_thread", "worker"],
+};
+const HOST_TYPE_FORM: AttrForm = AttrForm::SingleArg {
+    allow_bare: false,
+    allowed_args: &["bytes", "string", "list"],
+};
+const HOST_CAPABILITY_FORM: AttrForm = AttrForm::SingleIdentArg;
 
 const ARITHMETIC_EXPECTED: &str = "`#[arithmetic(checked)]` or `#[arithmetic(unchecked)]`";
 const INLINE_EXPECTED: &str = "`#[inline]`, `#[inline(always)]`, or `#[inline(never)]`";
 const MUST_USE_EXPECTED: &str = "`#[must_use]`";
-const WASM_IMPORT_EXPECTED: &str = "`#[wasm_import(module = \"...\")]`";
+const HOST_IMPORT_EXPECTED: &str = "`#[host_import(module = \"...\")]`";
+const HOST_RESULT_EXPECTED: &str = "`#[host_result(codec = \"fe:host-wasm-codec/v1\")]`";
 
 const ARITHMETIC_TARGETS: &str = "functions and modules";
 const EVENT_TARGETS: &str = "structs";
@@ -99,7 +117,11 @@ const DEFAULT_TARGETS: &str = super::derive::DEFAULT_ATTR_TARGETS;
 const MUST_USE_TARGETS: &str = "functions, structs, and enums";
 const PAYABLE_TARGETS: &str = "init blocks and recv arms";
 const INDEXED_TARGETS: &str = "event fields";
-const WASM_IMPORT_TARGETS: &str = "extern blocks";
+const HOST_IMPORT_TARGETS: &str = "extern blocks";
+const HOST_RESULT_TARGETS: &str = "extern functions";
+const HOST_TRAIT_TARGETS: &str = "traits";
+const HOST_TYPE_TARGETS: &str = "structs";
+const HOST_BACKEND_TARGETS: &str = "structs";
 
 fn target(kind: &'static str, name: Option<String>) -> AttrTarget {
     AttrTarget::new(kind, name)
@@ -121,7 +143,13 @@ fn validate_mod_attrs<'db>(
             AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
-            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
+            AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
         ],
     );
 }
@@ -138,7 +166,13 @@ pub(super) fn validate_module_inner_attrs<'db>(
             AttrRule::supported("arithmetic", ARITHMETIC_FORM, ARITHMETIC_EXPECTED),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
-            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
+            AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
         ],
     );
 }
@@ -155,6 +189,11 @@ fn validate_func_attrs<'db>(
     } else {
         AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS)
     };
+    let host_result = if kind == "extern fn" {
+        AttrRule::supported("host_result", HOST_RESULT_FORM, HOST_RESULT_EXPECTED)
+    } else {
+        AttrRule::unsupported("host_result", HOST_RESULT_TARGETS)
+    };
     validate_attr_rules(
         ctxt,
         attrs,
@@ -167,7 +206,14 @@ fn validate_func_attrs<'db>(
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
-            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
+            host_result,
+            AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
+            AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
         ],
     );
 }
@@ -187,8 +233,61 @@ fn validate_struct_attrs<'db>(
             AttrRule::supported("error", BARE_FORM, "`#[error]`"),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
-            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
             AttrRule::unsupported("default", DEFAULT_TARGETS),
+            AttrRule::supported(
+                "host_type",
+                HOST_TYPE_FORM,
+                "`#[host_type(bytes)]`, `#[host_type(string)]`, or `#[host_type(list)]`",
+            ),
+            AttrRule::supported(
+                "host_capability_backend",
+                HOST_CAPABILITY_FORM,
+                "`#[host_capability_backend(<capability>)]`",
+            ),
+            AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+        ],
+    );
+}
+
+fn validate_trait_attrs<'db>(
+    ctxt: &mut FileLowerCtxt<'db>,
+    attrs: Option<ast::AttrList>,
+    name: Option<String>,
+) {
+    validate_attr_rules(
+        ctxt,
+        attrs,
+        target("trait", name),
+        &[
+            AttrRule::supported(
+                "host_execution",
+                HOST_EXECUTION_FORM,
+                "`#[host_execution(external)]`",
+            ),
+            AttrRule::supported(
+                "host_placement",
+                HOST_PLACEMENT_FORM,
+                "`#[host_placement(main_thread)]` or `#[host_placement(worker)]`",
+            ),
+            AttrRule::supported(
+                "host_capability",
+                HOST_CAPABILITY_FORM,
+                "`#[host_capability(<capability>)]`",
+            ),
+            AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
+            AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
+            AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
+            AttrRule::unsupported("event", EVENT_TARGETS),
+            AttrRule::unsupported("error", ERROR_TARGETS),
+            AttrRule::unsupported("derive", DERIVE_TARGETS),
+            AttrRule::unsupported("must_use", MUST_USE_TARGETS),
+            AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
         ],
     );
 }
@@ -208,9 +307,15 @@ fn validate_enum_attrs<'db>(
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::supported("must_use", BARE_FORM, MUST_USE_EXPECTED),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
-            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
             // `#[default]` marks a variant, not the enum itself.
             AttrRule::unsupported("default", DEFAULT_TARGETS),
+            AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
+            AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
         ],
     );
 }
@@ -232,14 +337,20 @@ fn validate_unsupported_item_attrs<'db>(
             AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
-            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
+            AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
         ],
     );
 }
 
-/// Validate the attributes on an `extern` BLOCK. `#[wasm_import(module = "...")]`
-/// (R3.3) is the one attribute supported here; it names the wasm import module
-/// for every `extern fn` in the block. Everything else is unsupported, matching
+/// Validate attributes on an `extern` block. `host_import` names the generic
+/// host namespace for every function; `wasm_import` is its compatibility alias.
+/// Everything else is unsupported, matching
 /// `validate_unsupported_item_attrs` (which governed the extern block before
 /// this attribute existed).
 fn validate_extern_attrs<'db>(
@@ -247,20 +358,29 @@ fn validate_extern_attrs<'db>(
     attrs: Option<ast::AttrList>,
     name: Option<String>,
 ) {
+    let target = target("extern", name);
     validate_attr_rules(
         ctxt,
-        attrs,
-        target("extern", name),
+        attrs.clone(),
+        target.clone(),
         &[
-            AttrRule::supported("wasm_import", WASM_IMPORT_FORM, WASM_IMPORT_EXPECTED),
+            AttrRule::supported("host_import", HOST_IMPORT_FORM, HOST_IMPORT_EXPECTED),
+            // Compatibility alias for pre-host-ABI Fe sources.
+            AttrRule::supported("wasm_import", HOST_IMPORT_FORM, HOST_IMPORT_EXPECTED),
             AttrRule::unsupported("arithmetic", ARITHMETIC_TARGETS),
             AttrRule::unsupported("event", EVENT_TARGETS),
             AttrRule::unsupported("error", ERROR_TARGETS),
             AttrRule::unsupported("derive", DERIVE_TARGETS),
             AttrRule::unsupported("must_use", MUST_USE_TARGETS),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
+            AttrRule::unsupported("host_execution", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_placement", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_capability", HOST_TRAIT_TARGETS),
+            AttrRule::unsupported("host_type", HOST_TYPE_TARGETS),
+            AttrRule::unsupported("host_capability_backend", HOST_BACKEND_TARGETS),
         ],
     );
+    validate_attr_alias_exclusive(ctxt, attrs, target, "host_import", "wasm_import");
 }
 
 pub(super) fn validate_for_loop_attrs<'db>(
@@ -274,7 +394,8 @@ pub(super) fn validate_for_loop_attrs<'db>(
         &[
             AttrRule::supported("unroll", UNROLL_FORM, "`#[unroll]` or `#[unroll(never)]`"),
             AttrRule::unsupported("payable", PAYABLE_TARGETS),
-            AttrRule::unsupported("wasm_import", WASM_IMPORT_TARGETS),
+            AttrRule::unsupported("host_import", HOST_IMPORT_TARGETS),
+            AttrRule::unsupported("wasm_import", HOST_IMPORT_TARGETS),
         ],
     );
 }
@@ -426,10 +547,9 @@ impl<'db> ItemKind<'db> {
                 DeriveProviderScope::lower_ast(ctxt, scope);
             }
             ast::ItemKind::Trait(trait_) => {
-                validate_unsupported_item_attrs(
+                validate_trait_attrs(
                     ctxt,
                     trait_.attr_list(),
-                    "trait",
                     trait_.name().map(|name| name.text().to_string()),
                 );
                 Trait::lower_ast(ctxt, trait_);
@@ -539,11 +659,11 @@ impl<'db> Func<'db> {
         let id = ctxt.joined_id(TrackedItemVariant::Func(name));
         ctxt.enter_item_scope(id, false);
 
-        let attributes = lower_attrs_with_propagated_named(
+        let attributes = lower_attrs_with_propagated_names(
             ctxt,
             ast.attr_list(),
             extern_block_attrs,
-            "wasm_import",
+            &["host_import", "wasm_import"],
         );
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, sig.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, sig.where_clause());
@@ -755,7 +875,8 @@ impl<'db> TypeFnDef<'db> {
         let vis = super::lower_visibility(&ast);
         let generic_params = GenericParamListId::lower_ast_opt(ctxt, ast.generic_params());
         let where_clause = WhereClauseId::lower_ast_opt(ctxt, ast.where_clause());
-        let ret_kind = KindBound::lower_ast_opt(ctxt, ast.ret_kind().and_then(|rk| rk.kind_bound()));
+        let ret_kind =
+            KindBound::lower_ast_opt(ctxt, ast.ret_kind().and_then(|rk| rk.kind_bound()));
 
         let match_ = ast.body().and_then(|body| body.match_());
         let match_subject =

@@ -12,6 +12,34 @@ use fe_hir::{
 };
 
 #[test]
+fn indirect_host_result_protocol_is_exact_and_versioned() {
+    for rejected in ["canonical-memory@1", "fe:host-wasm-codec/v2"] {
+        let mut db = HirAnalysisTestDb::default();
+        let source = format!(
+            r#"
+pub enum Reply {{ Ok {{ value: u32 }} }}
+#[host_import(module = "fe:host")]
+extern {{
+    #[host_result(codec = "{rejected}")]
+    pub unsafe fn receive() -> Reply
+}}
+"#
+        );
+        let file = db.new_stand_alone("invalid_host_result_codec.fe".into(), &source);
+        let (top_mod, _) = db.top_mod(file);
+        let rendered = fe_hir::test_db::format_diagnostics(&db, &db.run_on_top_mod(top_mod));
+        assert!(
+            rendered.contains("invalid `#[host_result]` attribute form on extern fn `receive`"),
+            "protocol alias/version `{rejected}` must fail closed:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("expected `#[host_result(codec = \"fe:host-wasm-codec/v1\")]`"),
+            "{rendered}"
+        );
+    }
+}
+
+#[test]
 fn expr_valued_inline_attr_stays_invalid() {
     let mut db = HirAnalysisTestDb::default();
     let file = db.new_stand_alone(

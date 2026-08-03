@@ -7,8 +7,8 @@ const MAX_ERRORS_PER_FILE: usize = 5;
 
 // Files that are intentionally broken or contain fragments (not valid top-level Fe).
 const EXCLUDED_FILES: &[&str] = &[
-    "parse_error.fe",        // cli_output: intentional parse error
-    "quote.fe",              // exprs: `quote { .. }` is not yet in the tree-sitter grammar
+    "parse_error.fe",              // cli_output: intentional parse error
+    "quote.fe",                    // exprs: `quote { .. }` is not yet in the tree-sitter grammar
     "trait_assoc_type_generic.fe", // items: generic params on trait associated types are hand-written-parser only; tree-sitter grammar deferred
 ];
 

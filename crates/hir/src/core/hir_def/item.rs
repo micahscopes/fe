@@ -10,9 +10,9 @@ use parser::ast;
 
 use super::{
     AttrListId, Body, CompBinOp, EffectParamListId, FuncParamListId, FuncParamName,
-    GenericParamListId, HirIngot, IdentId, InlineAttr, InlineAttrErrorKind, InlineHint,
-    IntegerId, KindBound, ManualContractRootAttr, Partial, Pat, PatId, TupleTypeId, TypeBound,
-    TypeId, UseAlias, WhereClauseId,
+    GenericParamListId, HirIngot, IdentId, InlineAttr, InlineAttrErrorKind, InlineHint, IntegerId,
+    KindBound, ManualContractRootAttr, Partial, Pat, PatId, TupleTypeId, TypeBound, TypeId,
+    UseAlias, WhereClauseId,
     scope_graph::{ScopeGraph, ScopeId},
 };
 use crate::{
@@ -216,7 +216,11 @@ impl<'db> ItemKind<'db> {
     pub fn is_type(self) -> bool {
         matches!(
             self,
-            Self::Struct(_) | Self::Enum(_) | Self::Contract(_) | Self::TypeAlias(_) | Self::TypeFn(_)
+            Self::Struct(_)
+                | Self::Enum(_)
+                | Self::Contract(_)
+                | Self::TypeAlias(_)
+                | Self::TypeFn(_)
         )
     }
 
@@ -453,6 +457,14 @@ pub struct TopLevelMod<'db> {
 
 #[salsa::tracked]
 impl<'db> TopLevelMod<'db> {
+    /// Source file backing this module.
+    ///
+    /// Tooling should prefer this database identity over reconstructing module
+    /// paths or parsing import syntax.
+    pub fn source_file(self, db: &'db dyn HirDb) -> File {
+        self.file(db)
+    }
+
     pub fn span(self) -> LazyTopModSpan<'db> {
         LazyTopModSpan::new(self)
     }
