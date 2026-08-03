@@ -8,16 +8,16 @@ error[12-0002]: invalid `#[wasm_import]` attribute form on extern
   ┌─ wasm_import_attr_invalid.fe:1:1
   │
 1 │ #[wasm_import(module = 42)]
-  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `#[wasm_import(module = "...")]`
+  │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `#[host_import(module = "...")]`
 
 error[12-0002]: invalid `#[wasm_import]` attribute form on extern
   ┌─ wasm_import_attr_invalid.fe:6:1
   │
 6 │ #[wasm_import]
-  │ ^^^^^^^^^^^^^^ expected `#[wasm_import(module = "...")]`
+  │ ^^^^^^^^^^^^^^ expected `#[host_import(module = "...")]`
 
 error[12-0002]: invalid `#[wasm_import]` attribute form on extern
    ┌─ wasm_import_attr_invalid.fe:11:1
    │
 11 │ #[wasm_import(namespace = "fe:host")]
-   │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `#[wasm_import(module = "...")]`
+   │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `#[host_import(module = "...")]`
