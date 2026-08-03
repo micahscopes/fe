@@ -37,7 +37,7 @@ use std::path::Path;
 use common::InputDb;
 use driver::DriverDataBase;
 use fe_codegen::{
-    CanonicalCapability, CanonicalExecution, CanonicalFieldLayout, CanonicalInterfaceManifest,
+    CanonicalExecution, CanonicalFieldLayout, CanonicalInterfaceManifest,
     CanonicalLane, CanonicalLayout, CanonicalPlacement, CanonicalShape, WasmCompileOptions,
     WebBuildOptions, WebBundle, canonical_lane_decl_from_entry,
     compile_runtime_package_wasm_with_options,
@@ -801,7 +801,7 @@ fn lane_intents_declare_honest_placement() {
                 decl.intent
                     .capabilities
                     .iter()
-                    .any(|req| req.capability == CanonicalCapability::WebgpuDispatch),
+                    .any(|req| req.capability.as_str() == "webgpu_dispatch"),
                 "`{name}` must carry the WebGPU dispatch capability requirement"
             );
         }

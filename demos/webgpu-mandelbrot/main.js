@@ -19,8 +19,8 @@
 //
 // There is no code path that paints GREEN without a live GPU readback matching.
 
-import { runWasmGrid } from "../webgpu-keystone/wasm-runner.js";
 import { runWebGPUGrid } from "../webgpu-keystone/webgpu-runner.js";
+import { loadMandelbrotFeKernel } from "./fe-kernel-loader.js";
 
 // The one dispatch-dims choice (a runtime fact the page supplies; layout.json is
 // dispatch-free). Both are multiples of the workgroup dims (exact tiling).
@@ -116,20 +116,39 @@ function firstMismatch(a, b, width) {
   return null;
 }
 
+function executeWasmGrid(instance, exportName, width, height) {
+  const pixel = instance.exports[exportName];
+  if (typeof pixel !== "function") {
+    throw new Error(`wasm export \`${exportName}\` was not found`);
+  }
+  const grid = new Uint32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      grid[y * width + x] = pixel(x, y) >>> 0;
+    }
+  }
+  return grid;
+}
+
 async function main() {
   const ctx = $("grid-canvas").getContext("2d");
 
-  // --- Load the compiler-produced assets. --------------------------------
-  let layout, reference, feSrc, wgslSrc;
+  // --- Resolve the inert Fe data block and compiler-produced assets. -------
+  let kernel, layout, reference, feSrc, wgslSrc;
   try {
+    kernel = await loadMandelbrotFeKernel();
     [layout, reference, feSrc, wgslSrc] = await Promise.all([
       fetchJson("./gen/layout.json"),
       fetchJson("./gen/reference.json"),
-      fetchText("./gen/kernel.fe"),
+      fetchText(kernel.sourceUrl),
       fetchText("./gen/kernel.wgsl"),
     ]);
   } catch (e) {
-    setBanner("red", "Generated assets missing", `${e.message}. Run: cargo run -p fe-codegen --example gen_mandelbrot_demo`);
+    setBanner(
+      "red",
+      "Fe kernel or generated assets missing",
+      `${e.message}. Run: cargo run -p fe-codegen --example gen_mandelbrot_demo`,
+    );
     return;
   }
 
@@ -146,7 +165,7 @@ async function main() {
   setRow("row-ref", `${refHash} (0x${refHash.toString(16).padStart(8, "0")})`, "ok");
   $("ref-note").textContent =
     `reference = FNV-1a-32 of the ${reference.width}x${reference.height} grid, ` +
-    `Fe -> wasm executed under wasmtime at generation time`;
+    `Fe -> wasm executed under wasmtime at generation time; page mode = ${kernel.mode}`;
 
   setBanner("amber", "Running...", "executing the Fe grid on wasm (V8) and dispatching it on WebGPU");
 
@@ -154,7 +173,7 @@ async function main() {
   let wasmGrid = null;
   let wasmErr = null;
   try {
-    wasmGrid = await runWasmGrid(layout.wasm_export, WIDTH, HEIGHT);
+    wasmGrid = executeWasmGrid(kernel.instance, layout.wasm_export, WIDTH, HEIGHT);
     const wasmHash = fnv1a32(wasmGrid);
     setRow("row-wasm", `${WIDTH}x${HEIGHT} grid, FNV-1a-32 ${wasmHash}`, wasmHash === refHash ? "ok" : "bad");
   } catch (e) {

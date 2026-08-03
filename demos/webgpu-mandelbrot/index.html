@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Fe -> GPU image (grid_gradient_u32)</title>
+  <title>Fe multi-backend Mandelbrot</title>
   <style>
     :root {
       --bg: #0e1116; --panel: #161b22; --line: #2b333d; --fg: #e6edf3;
@@ -86,9 +86,9 @@
 </head>
 <body>
 <main>
-  <h1>Fe -> GPU image</h1>
+  <h1>Fe multi-backend Mandelbrot</h1>
   <p class="sub">
-    One Fe grid kernel, <code id="kernel-name">grid_gradient_u32</code>, one invocation per
+    One canonical Fe kernel, <code id="kernel-name">mandel_pixel_q12</code>, one invocation per
     pixel. The Fe compiler lowers it to SPIR-V-IR -> naga -> WGSL (dispatched on WebGPU) and to
     wasm (called per pixel in V8). Both grids are compared PER PIXEL in this browser, and against
     a compiler-executed reference hash. The colors below are a JS palette; every VALUE is
@@ -140,15 +140,29 @@
 
   <div class="foot">
     Provenance: these files were produced by <code>cargo run -p fe-codegen --example
-    gen_mandelbrot_demo</code>, which compiles the SSOT grid fixture through the real Fe
-    drivers and hard-fails unless every 512x512 wasm pixel equals the in-generator oracle
-    <code>x + 1024*y</code>.<br />
+    gen_mandelbrot_demo</code>, which compiles
+    <code>demos/capstones/mandelbrot/kernel.fe</code> through the real Fe drivers and
+    hard-fails unless every 512x512 wasm escape count equals the independent Q12
+    Mandelbrot oracle and the stable frame hash is <code>0x2d29649a</code>.<br />
     GREEN "Fe computed this IMAGE on your GPU" is earned only when the live GPU grid equals
     the in-browser wasm grid PER PIXEL and the GPU grid's FNV-1a-32 equals the compiled
     reference. No WebGPU shows AMBER (wasm-painted image, no GPU claim); any pixel mismatch or
     shader error shows RED.
+    <br />Current boundary: the Fe kernel supplies compute only. Host JavaScript
+    still orchestrates DOM, canvas, and WebGPU because safe generated rich Web
+    bindings are not connected yet; this page does not claim otherwise.
   </div>
 </main>
+<script
+  type="application/fe+wasm"
+  data-fe-src="./gen/kernel.wasm"
+  data-fe-source="../capstones/mandelbrot/kernel.fe"
+  data-fe-entry="mandel_pixel_q12"
+  data-fe-autostart="false"
+  data-fe-dev-worker="../fe-sandbox/fe-compiler.worker.js"
+  data-fe-manifest="./gen/kernel.manifest.json"
+></script>
+<script type="module" data-fe-bootstrap src="./gen/fe-bootstrap.js"></script>
 <script type="module" src="./main.js"></script>
 </body>
 </html>

@@ -1,0 +1,102 @@
+{
+  "protocol": "fe-capstone-evidence",
+  "version": 1,
+  "capstone": "mandelbrot-q12",
+  "source": {
+    "path": "demos/capstones/mandelbrot/kernel.fe",
+    "sha256": "dd9edf593b8477f2afeea3c2e4e51669d67a1a1e8f37782f2c43e1b124f8d871"
+  },
+  "interface": {
+    "version": 1,
+    "export": "mandel_pixel_q12",
+    "parameters": [
+      "i32",
+      "i32"
+    ],
+    "result": "u32"
+  },
+  "targets": [
+    {
+      "target": "evm",
+      "runtime": "revm",
+      "imports": [],
+      "exports": [
+        "MandelExec.run()"
+      ],
+      "artifact": null,
+      "verification": {
+        "status": "not_run",
+        "scope": "four corners and centre",
+        "command": "cargo test -p fe-codegen --test spirv_e2e mandelbrot_q12_evm_spot_check",
+        "test": "mandelbrot_q12_evm_spot_check",
+        "result": null,
+        "note": "The test adds a generated contract envelope to the unchanged canonical source; this command does not persist its EVM bytecode."
+      }
+    },
+    {
+      "target": "native",
+      "runtime": "Cranelift JIT",
+      "imports": [],
+      "exports": [
+        "mandel_pixel_q12"
+      ],
+      "artifact": null,
+      "verification": {
+        "status": "not_run",
+        "scope": "full 512x512 frame",
+        "command": "cargo test -p fe-codegen --features native-backend --test native_e2e native_mandelbrot_capstone_matches_the_full_frame_oracle",
+        "test": "native_mandelbrot_capstone_matches_the_full_frame_oracle",
+        "result": null,
+        "note": "The Native backend is an opt-in in-process JIT and has no portable artifact in this browser-oriented command."
+      }
+    },
+    {
+      "target": "wasm",
+      "runtime": "wasmtime",
+      "imports": [],
+      "exports": [
+        "mandel_pixel_q12"
+      ],
+      "artifact": {
+        "kind": "wasm-module",
+        "path": "demos/webgpu-mandelbrot/gen/kernel.wasm",
+        "bytes": 255,
+        "sha256": "f8fe356a87c87dd25fe598df8364aec23076f3a52ae771a49071850fb4dad09d"
+      },
+      "verification": {
+        "status": "verified",
+        "scope": "full 512x512 frame",
+        "command": "cargo run -p fe-codegen --example gen_mandelbrot_demo",
+        "test": "generator exhaustive oracle gate",
+        "result": "FNV-1a-32 0x2d29649a",
+        "note": null
+      }
+    },
+    {
+      "target": "webgpu",
+      "runtime": "browser WebGPU",
+      "imports": [
+        "global_invocation_id",
+        "num_workgroups",
+        "storage output"
+      ],
+      "exports": [
+        "main"
+      ],
+      "artifact": {
+        "kind": "wgsl-shader",
+        "path": "demos/webgpu-mandelbrot/gen/kernel.wgsl",
+        "bytes": 2222,
+        "sha256": "30f5abcfcc0820726125fda76820d7dc43374664370113c3aa508f695858d296"
+      },
+      "verification": {
+        "status": "validated",
+        "scope": "WGSL parse and browser-profile validation",
+        "command": "cargo run -p fe-codegen --example gen_mandelbrot_demo",
+        "test": "generator browser-profile WGSL gate",
+        "result": "naga validation with default browser capabilities",
+        "note": "This is not a live GPU execution claim. Run mandelbrot_q12_executes_on_lavapipe_browser_profile on a host with an adapter to earn one."
+      }
+    }
+  ]
+}
