@@ -1,0 +1,16 @@
+[package]
+name = "fe-browser-compiler"
+version = "0.1.0"
+edition.workspace = true
+license = "Apache-2.0"
+description = "wasm-bindgen facade for in-browser Fe compilation"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fe-compiler-facade = { path = "../compiler-facade" }
+fe-compiler-protocol = { path = "../compiler-protocol" }
+serde_json = "1"
+wasm-bindgen = "0.2"
+
