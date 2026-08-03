@@ -666,7 +666,7 @@ fn deployment_file(
     let relative = Path::new(reference);
     if !relative
         .components()
-        .all(|component| matches!(component, Component::Normal(_)))
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
     {
         return Err(VerificationError {
             context: context.to_owned(),
