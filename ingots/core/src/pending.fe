@@ -156,10 +156,11 @@ pub trait Timer<B: Backend> {
 }
 
 /// The host-event RECEIVE authority over a backend `B` (control-effects CE-7):
-/// the SAME external-completion family as `Timer`, and the `std::reactive` event
-/// source (R7a: an event occurrence is a broker-completed cell). `recv_begin`
-/// MINTS a completion cell the broker completes when a host event is posted,
-/// delivering the event's `u64` payload.
+/// the same external-completion family as `Timer`. `recv_begin` mints a
+/// completion cell the broker completes when a host message is posted,
+/// delivering the message's `u64` payload. Higher-level event libraries may
+/// adapt such messages, but an event occurrence is not itself a completion
+/// cell and no reactive API is coupled to this transport.
 ///
 /// A DISTINCT trait from `Timer` (R2's distinct-traits discipline): a clock and a
 /// message inbox are genuinely different host facilities, and the authority

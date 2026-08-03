@@ -1,0 +1,77 @@
+//! Minimal safe Web facade over generated Web IDL bindings.
+//!
+//! This module is an ordinary Fe library. The raw declarations in `web/raw.fe`
+//! are generated from `web-minimal.webidl` and use the target-neutral
+//! `#[host_import]` attribute. Neither the compiler nor this facade contains a
+//! DOM-specific lowering path.
+//!
+//! The current executable surface is intentionally small: borrowed resource
+//! tokens plus `u32` and `bool` values. Resource wrappers are consumed by each
+//! operation because generated v0 handles are not cloneable. Host code supplies
+//! the initial `raw::Window`; converting it is unsafe because only the host
+//! session can establish token provenance. Values returned by a safe operation
+//! are provenance-preserving wrappers.
+//!
+//! Owned strings, string results, callbacks, events, promises, and asynchronous
+//! operations are not exposed here. Adding a method for any of those shapes
+//! before the canonical allocator/callback ownership protocols execute would be
+//! unsound; generation or facade review must fail closed instead.
+
+use raw::{
+    document_get_document_element,
+    element_get_child_element_count,
+    element_get_hidden,
+    element_set_hidden,
+    window_get_document,
+    window_get_inner_width,
+}
+
+pub struct Window {
+    raw: raw::Window,
+}
+
+pub struct Document {
+    raw: raw::Document,
+}
+
+pub struct Element {
+    raw: raw::Element,
+}
+
+impl Window {
+    /// Admit a host-provided Window token.
+    ///
+    /// The caller must obtain `raw` from the generated adapter's resource
+    /// session. Arbitrary integers are not valid resource tokens.
+    pub unsafe fn from_raw(_ raw: own raw::Window) -> Self {
+        Self { raw }
+    }
+
+    pub fn inner_width(own self) -> u32 {
+        window_get_inner_width(self.raw)
+    }
+
+    pub fn document(own self) -> Document {
+        Document { raw: window_get_document(self.raw) }
+    }
+}
+
+impl Document {
+    pub fn document_element(own self) -> Element {
+        Element { raw: document_get_document_element(self.raw) }
+    }
+}
+
+impl Element {
+    pub fn child_element_count(own self) -> u32 {
+        element_get_child_element_count(self.raw)
+    }
+
+    pub fn hidden(own self) -> bool {
+        element_get_hidden(self.raw)
+    }
+
+    pub fn set_hidden(own self, _ hidden: bool) {
+        element_set_hidden(self.raw, hidden)
+    }
+}

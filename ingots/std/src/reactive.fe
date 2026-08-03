@@ -1,12 +1,18 @@
-//! Reactive programming in Fe (mb2 CE-8, the `std::reactive` layer).
+//! Reactive programming in Fe: an ordinary library over event subscriptions.
 //!
-//! This is the reactive layer over the completion-cell rail (`core::pending`).
-//! It honors the denotational-FRP split that is its genuine influence
-//! (Elliott, Elm): a `Signal` is a PURE sample of time, an `Event` is a
-//! discrete occurrence, and ALL effects live in one imperative shell loop over
-//! the rail. This module holds the pure half: the `Signal` algebra and its
-//! leaves. The effectful shell (`Timer`/`recv`-driven, the tick loop) is
-//! CE-7/demo follow-on work and is deliberately NOT here.
+//! A `Signal` is a pure sample of time and an `Event` is one discrete
+//! occurrence. `EventSource` is the small pull-shaped interoperability
+//! interface: a source creates a `Subscription`, each `next` consumes that
+//! subscription and returns its successor, and `cancel` consumes it finally.
+//! A browser event target, test tape, game loop, channel, or contract adapter
+//! can implement that interface without this module naming its transport.
+//!
+//! This module does not know about completion cells, blocking, a compiler
+//! lowering seam, or any particular host. An asynchronous host adapter may
+//! feed occurrences into an `EventSource`, but that adapter is below the
+//! library boundary. `Stream<S>` is the ordinary library wrapper over that
+//! source interface; imperative consumers, stream consumers, and the FRP
+//! combinators all use the same subscription mechanics.
 //!
 //! ## Purity is a type fact, not a convention (the flagship property)
 //!
@@ -29,14 +35,13 @@
 //! `core::conal::Functor::map`. The reactive layer contributes the time axis;
 //! the element algebra is already shipped one floor down.
 //!
-//! ## Scope of this slice (rudimentary on purpose)
+//! ## Scope of this slice
 //!
 //! v1 `T` is word-sized `Copy` values (the sampled-value grammar). There is no
 //! continuous-time interval reasoning, no push-pull optimization, and no
-//! dynamic-network GC: the network is static structs. `Event` reserves the seat
-//! for the discrete-occurrence type the CE-7 sources will complete (an
-//! occurrence is a broker-completed cell); it has no v1 provider. Those are the
-//! library's future, not this rung's.
+//! dynamic-network GC. `map_event`, `filter_event`, and `hold` are pure
+//! transformations of occurrences; acquisition and cancellation stay explicit
+//! at the `EventSource` boundary.
 
 use core::Fn
 
@@ -67,10 +72,7 @@ impl Signal<u32> for Const {
 }
 
 /// The piecewise-constant stepper: the behavior holding an event's last value,
-/// sampled as that held value regardless of time. The pull side of the
-/// classic push-pull split (a push-completed `Event` updates `held`; a pull
-/// `sample` reads it). In this pure slice `held` is a fixed field; the CE-7
-/// shell loop is what re-steps it on each occurrence.
+/// sampled as that held value regardless of time.
 pub struct Stepped { pub held: u32 }
 
 impl Signal<u32> for Stepped {
@@ -99,11 +101,113 @@ impl<A: Signal<u32>, B: Signal<u32>, F: Fn<(u32, u32), u32>> Signal<u32>
     }
 }
 
-/// RESERVED discrete-occurrence type (CE-8 seat, CE-7 completes it). An `Event`
-/// is a discrete occurrence in time; on the rail an occurrence IS a
-/// broker-completed cell (`Timer`/`recv`, CE-7). There is no v1 realization and
-/// NO provider: this declaration only reserves the name in `std::reactive` so
-/// nothing else claims the seat, exactly as `Complete<B>` reserves the completer
-/// authority in `core::pending`. The push half of the push-pull split lands
-/// here when the CE-7 sources arrive; the pull half is `Stepped` above.
-pub struct Event {}
+/// One discrete occurrence. `present == false` represents a poll with no
+/// occurrence; its `value` is ignored.
+pub struct Event {
+    pub present: bool,
+    pub value: u32,
+}
+
+impl Event {
+    pub fn occurrence(value: u32) -> Self {
+        Self { present: true, value }
+    }
+
+    pub fn none() -> Self {
+        Self { present: false, value: 0 }
+    }
+}
+
+/// Linear ownership of one attachment to an event source.
+///
+/// `next` must consume the old value and return the successor; `cancel`
+/// consumes the final value. Consequently a caller cannot accidentally retain
+/// two live owners of one subscription.
+pub struct Subscription {
+    cursor: u32,
+}
+
+impl Subscription {
+    pub fn new() -> Self {
+        Self { cursor: 0 }
+    }
+
+    pub fn cursor(self) -> u32 {
+        self.cursor
+    }
+
+    /// Consume this position and return `(successor, old_cursor)`.
+    pub fn advance(own self) -> (Self, u32) {
+        (Self { cursor: self.cursor + 1 }, self.cursor)
+    }
+}
+
+/// Observable cleanup result used by source-independent tests and adapters.
+pub struct Cancelled {
+    pub consumed: u32,
+}
+
+/// Generic event/subscription interoperability surface.
+///
+/// It is an ordinary Fe trait with no special lowering and no effects baked
+/// into it. A source whose acquisition is effectful can place that effect in
+/// its surrounding adapter; occurrence transformation remains pure.
+pub trait EventSource {
+    fn subscribe(self) -> Subscription
+    fn next(self, _ subscription: own Subscription) -> (Subscription, Event)
+    fn cancel(self, _ subscription: own Subscription) -> Cancelled
+}
+
+/// Host-neutral stream view of an `EventSource`.
+///
+/// This wrapper adds no runtime protocol and has no compiler treatment. It
+/// simply presents one source through stream-shaped names while preserving the
+/// source's affine subscription ownership exactly.
+pub struct Stream<S: EventSource> {
+    source: S,
+}
+
+impl<S: EventSource> Stream<S> {
+    pub fn new(source: S) -> Self {
+        Self { source }
+    }
+
+    pub fn subscribe(self) -> Subscription {
+        self.source.subscribe()
+    }
+
+    pub fn next(self, _ subscription: own Subscription) -> (Subscription, Event) {
+        self.source.next(subscription)
+    }
+
+    pub fn cancel(self, _ subscription: own Subscription) -> Cancelled {
+        self.source.cancel(subscription)
+    }
+}
+
+/// Purely transform a present occurrence, preserving absence.
+pub fn map_event<F: Fn<u32, u32>>(_ event: Event, _ f: F) -> Event {
+    if event.present {
+        Event::occurrence(value: f.call(event.value))
+    } else {
+        Event::none()
+    }
+}
+
+/// Purely retain an occurrence when `predicate` accepts its value.
+pub fn filter_event<P: Fn<u32, bool>>(_ event: Event, _ predicate: P) -> Event {
+    if event.present && predicate.call(event.value) {
+        event
+    } else {
+        Event::none()
+    }
+}
+
+/// Step a held signal from one occurrence. Absence preserves the old value.
+pub fn hold(_ current: Stepped, _ event: Event) -> Stepped {
+    if event.present {
+        Stepped { held: event.value }
+    } else {
+        current
+    }
+}

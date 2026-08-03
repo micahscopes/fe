@@ -5,6 +5,7 @@ use super::effect_ref::MemPtr
 ///
 /// This descriptor does not own its payload. Canonical browser wrappers copy
 /// returned payloads into wrapper-owned arena storage before crossing the ABI.
+#[host_type(bytes)]
 pub struct BrowserBytes {
     pub ptr: u32,
     pub len: u32,
@@ -14,7 +15,24 @@ pub struct BrowserBytes {
 ///
 /// The type carries the UTF-8 contract at the browser ABI boundary; it is not
 /// Fe's general-purpose `String<N>` type.
+#[host_type(string)]
 pub struct BrowserString {
+    pub ptr: u32,
+    pub len: u32,
+}
+
+/// Borrowed UTF-16 code units in linear memory.
+///
+/// `len` counts 16-bit code units, matching Web IDL `DOMString` transport.
+pub struct BrowserUtf16String {
+    pub ptr: u32,
+    pub len: u32,
+}
+
+/// Borrowed Latin-1 bytes in linear memory.
+///
+/// `len` counts bytes, matching Web IDL `ByteString` transport.
+pub struct BrowserLatin1String {
     pub ptr: u32,
     pub len: u32,
 }
@@ -24,6 +42,7 @@ pub struct BrowserString {
 /// Keeping the pointer as `MemPtr<u8>` preserves the backend's native
 /// raw-address carrier. The canonical wrapper copies the payload into its
 /// response arena before exposing an ordinary `BrowserBytes` descriptor.
+#[host_type(bytes)]
 pub struct AllocatedBrowserBytes {
     pub ptr: MemPtr<u8>,
     pub len: u32,
@@ -34,6 +53,7 @@ pub struct AllocatedBrowserBytes {
 /// `MAX` is part of the browser ABI contract. Canonical wrappers currently
 /// expose only `u32` and `f32` instantiations and copy returned elements into
 /// wrapper-owned arena storage before publishing the descriptor.
+#[host_type(list)]
 pub struct BrowserList<T, const MAX: usize> {
     // The typed pointer preserves Fe's memory-provider semantics while the
     // canonical wasm32 boundary carries its physical address as one i32 word.
@@ -43,14 +63,19 @@ pub struct BrowserList<T, const MAX: usize> {
 
 impl Copy for BrowserBytes {}
 impl Copy for BrowserString {}
+impl Copy for BrowserUtf16String {}
+impl Copy for BrowserLatin1String {}
 impl Copy for AllocatedBrowserBytes {}
 impl<T, const MAX: usize> Copy for BrowserList<T, MAX> {}
 
 /// Marks a canonical browser lane as host-executed.
+#[host_execution(external)]
 pub trait HostEffect {}
 
 /// Requires a canonical browser lane to reside on the browser main thread.
+#[host_placement(main_thread)]
 pub trait MainThread {}
 
 /// Requires a canonical browser lane to reside in a Worker.
+#[host_placement(worker)]
 pub trait Worker {}

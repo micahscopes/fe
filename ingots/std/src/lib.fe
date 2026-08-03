@@ -8,4 +8,5 @@ pub use worker::{self, *}
 pub use host::{self, *}
 pub use conal
 pub use reactive
+pub use web
 pub use prelude

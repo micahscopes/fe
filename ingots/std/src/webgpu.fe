@@ -36,6 +36,7 @@ pub use core::pending::{Pending, Wait, Notify, Spawn, TaskId}
 /// fused schedule that exceeds the WebGPU workgroup limit; see the
 /// `webgpu_envelope_rejection` jewel fixture. The anti-conflation matrix stays
 /// four-way non-degenerate (two GPU-shaped backends that must not conflate).
+#[host_capability_backend(webgpu_dispatch)]
 pub struct WebGpuBackend {}
 
 // ---------------------------------------------------------------------------
@@ -277,6 +278,7 @@ impl KernelId {
 /// Each op additionally demands `B: Supports<Global>` at the call site: host
 /// traffic is `Global`-class only (the 2.2 grant matrix), so a backend without the
 /// class carries no dispatch surface.
+#[host_capability(webgpu_dispatch)]
 pub trait Dispatch<B: Backend> {
     /// AMENDMENT 1: allocation is an op. The JS broker cannot be implemented
     /// op-for-op without `createBuffer`, so the capability carries it. Returns a
