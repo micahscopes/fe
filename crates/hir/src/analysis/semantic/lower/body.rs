@@ -14,8 +14,7 @@ use crate::{
             SOperand, SPlace, SStmt, SStmtKind, STerminator, STerminatorKind, SValueId,
             SemConstValue, SemOrigin, SemanticBody, SemanticCodeRegionTarget, SemanticLocalRole,
             VariantIndex, bool_const, bytes_const, float_const, int_const,
-            reify_runtime_const_for_ty,
-            runtime_size_bytes, sem_const_from_ty, unit_const,
+            reify_runtime_const_for_ty, runtime_size_bytes, sem_const_from_ty, unit_const,
         },
         ty::{
             const_ty::{

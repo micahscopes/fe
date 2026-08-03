@@ -78,7 +78,11 @@ trait Backend {
     let backend = *top_mod
         .all_traits(&db)
         .iter()
-        .find(|t| t.name(&db).to_opt().is_some_and(|i| i.data(&db) == "Backend"))
+        .find(|t| {
+            t.name(&db)
+                .to_opt()
+                .is_some_and(|i| i.data(&db) == "Backend")
+        })
         .expect("missing Backend trait");
     let inst = TraitInstId::new_simple(&db, backend, vec![]);
 
@@ -205,7 +209,11 @@ trait Backend {
     let (backend, assoc_idx, view) = top_mod
         .all_traits(&db)
         .iter()
-        .find(|t| t.name(&db).to_opt().is_some_and(|i| i.data(&db) == "Backend"))
+        .find(|t| {
+            t.name(&db)
+                .to_opt()
+                .is_some_and(|i| i.data(&db) == "Backend")
+        })
         .and_then(|&t| {
             t.assoc_types(&db)
                 .enumerate()
@@ -233,7 +241,10 @@ trait Backend {
         );
     };
 
-    assert_eq!(param.idx, 0, "trait-side GAT param must carry LOCAL index 0");
+    assert_eq!(
+        param.idx, 0,
+        "trait-side GAT param must carry LOCAL index 0"
+    );
     assert_eq!(
         param.owner,
         ScopeId::TraitType(backend, assoc_idx as u16),

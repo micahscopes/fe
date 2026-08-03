@@ -2058,10 +2058,7 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
                             // type cannot carry an unresolved symbolic app (no
                             // normalizer runs over it; layout is undefined). Keep
                             // rejecting (S2.2+ may lift the stored surface).
-                            PathRes::Ty(TyId::invalid(
-                                db,
-                                InvalidCause::SymbolicTypeFnUnsupported,
-                            ))
+                            PathRes::Ty(TyId::invalid(db, InvalidCause::SymbolicTypeFnUnsupported))
                         }
                         None => {
                             // S2.1: fn signature / where clause / body-typing
@@ -2096,10 +2093,8 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
             }
 
             ScopeId::TraitTypeParam(t, i, j) => {
-                let param = &t
-                    .assoc_ty_by_index(db, i as usize)
-                    .generic_params
-                    .data(db)[j as usize];
+                let param =
+                    &t.assoc_ty_by_index(db, i as usize).generic_params.data(db)[j as usize];
                 // Pinned rigid GAT binder: LOCAL idx `j`, owner = the assoc-type
                 // def node (`TraitType`). `foldl` gives higher-kinded
                 // application + kind checking exactly like the `GenericParam`
@@ -2116,9 +2111,9 @@ pub(crate) fn resolve_name_res_with_minter<'db>(
 
             // Anon-edged def node; never terminates a named query, so it is
             // unreachable as a name-resolution target.
-            ScopeId::ImplTraitType(..) => unreachable!(
-                "ImplTraitType is an anon-edged def node and is never name-resolved"
-            ),
+            ScopeId::ImplTraitType(..) => {
+                unreachable!("ImplTraitType is an anon-edged def node and is never name-resolved")
+            }
 
             ScopeId::TraitType(t, idx) => {
                 let trait_def = t;

@@ -1032,7 +1032,10 @@ impl<'db> TyId<'db> {
             TyBase::TypeFn(type_fn) => {
                 let params =
                     collect_generic_params(db, GenericParamOwner::TypeFn(*type_fn)).params(db);
-                params.get(args.len()).copied().and_then(|ty| ty.const_ty_ty(db))
+                params
+                    .get(args.len())
+                    .copied()
+                    .and_then(|ty| ty.const_ty_ty(db))
             }
 
             TyBase::Prim(PrimTy::Array) => {
@@ -2138,9 +2141,11 @@ impl HasKind for TyData<'_> {
                             // `k0 -> (k1 -> *)`. Behavior-identical to the old
                             // hardcoded-`*`-per-param fold for the all-`*`
                             // baseline.
-                            decl.generic_params.data(db).iter().rev().fold(
-                                Kind::Star,
-                                |acc, p| {
+                            decl.generic_params
+                                .data(db)
+                                .iter()
+                                .rev()
+                                .fold(Kind::Star, |acc, p| {
                                     let param_kind = match p {
                                         crate::hir_def::GenericParam::Type(t) => {
                                             super::ty_lower::lower_kind_in_bounds(&t.bounds)
@@ -2149,8 +2154,7 @@ impl HasKind for TyData<'_> {
                                         crate::hir_def::GenericParam::Const(_) => Kind::Star,
                                     };
                                     Kind::abs(param_kind, acc)
-                                },
-                            )
+                                })
                         }
                     }
                     None => Kind::Star,

@@ -1668,11 +1668,8 @@ impl<'db> CtfeMachine<'db> {
                     let step_budget = self.config.step_limit.saturating_sub(self.steps);
                     if recursion_budget > 0
                         && step_budget > 0
-                        && let Some(cached) = eval_concrete_const_call(
-                            self.db,
-                            instance.key(self.db),
-                            concrete_args,
-                        )
+                        && let Some(cached) =
+                            eval_concrete_const_call(self.db, instance.key(self.db), concrete_args)
                     {
                         let charged_depth = current_depth.saturating_add(cached.max_recursion);
                         let eligible_steps = self.steps.saturating_add(cached.steps);
@@ -2173,7 +2170,11 @@ impl<'db> CtfeMachine<'db> {
                     return Err(CtfeError::NotConstEvaluable { origin });
                 };
                 let a = self.expect_f32(value, origin)?;
-                Ok(CtfeConstValue::int(self.db, result_ty, BigInt::from(a as i32)))
+                Ok(CtfeConstValue::int(
+                    self.db,
+                    result_ty,
+                    BigInt::from(a as i32),
+                ))
             }
         }
     }

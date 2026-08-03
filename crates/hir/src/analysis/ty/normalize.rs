@@ -76,10 +76,7 @@ pub struct TypeNormalizer<'db> {
 /// Finishes const payloads exposed by a completed type-fn reduction without
 /// re-entering type-fn or projection normalization. Each node is visited once;
 /// only const leaves can change.
-fn normalize_staged_const_payloads<'db>(
-    db: &'db dyn HirAnalysisDb,
-    ty: TyId<'db>,
-) -> TyId<'db> {
+fn normalize_staged_const_payloads<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
     struct PayloadNormalizer;
     impl<'db> TyFolder<'db> for PayloadNormalizer {
         fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
@@ -602,7 +599,8 @@ fn max_gat_param_idx<'db>(db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> Option<u
             match ty.data(self.db) {
                 TyData::TyParam(param) if !param.is_effect() => self.record(param),
                 TyData::ConstTy(const_ty) => {
-                    if let super::const_ty::ConstTyData::TyParam(param, _) = const_ty.data(self.db) {
+                    if let super::const_ty::ConstTyData::TyParam(param, _) = const_ty.data(self.db)
+                    {
                         if !param.is_effect() {
                             self.record(param);
                         }

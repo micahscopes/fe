@@ -99,11 +99,7 @@ pub fn lib_func_matches<'db>(db: &'db dyn HirAnalysisDb, func: Func<'db>, path: 
 }
 
 /// Returns `true` if `trait_` is the library trait at the fully-qualified path.
-pub fn lib_trait_matches<'db>(
-    db: &'db dyn HirAnalysisDb,
-    trait_: Trait<'db>,
-    path: &str,
-) -> bool {
+pub fn lib_trait_matches<'db>(db: &'db dyn HirAnalysisDb, trait_: Trait<'db>, path: &str) -> bool {
     let Some((root, target_suffix)) = path.split_once("::") else {
         return false;
     };

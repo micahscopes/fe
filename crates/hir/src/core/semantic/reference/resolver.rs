@@ -12,9 +12,8 @@
 use crate::{
     analysis::HirAnalysisDb,
     hir_def::{
-        Body, Contract, Enum, Func, Impl, ImplTrait, ItemKind, Struct, Trait, TypeAlias,
-        TypeFnDef, Use,
-        scope_graph::ScopeId,
+        Body, Contract, Enum, Func, Impl, ImplTrait, ItemKind, Struct, Trait, TypeAlias, TypeFnDef,
+        Use, scope_graph::ScopeId,
     },
     span::DynLazySpan,
 };

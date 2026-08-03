@@ -731,7 +731,9 @@ mod tests {
 
     use crate::analysis::ty::adt_def::AdtRef;
     use crate::analysis::ty::const_ty::{ConstTyData, ConstTyId, EvaluatedConstTy};
-    use crate::analysis::ty::trait_resolution::{GoalSatisfiability, TraitSolveCx, is_goal_satisfiable};
+    use crate::analysis::ty::trait_resolution::{
+        GoalSatisfiability, TraitSolveCx, is_goal_satisfiable,
+    };
     use crate::analysis::ty::ty_def::{Kind, PrimTy, TyBase, TyData, TyId};
     use crate::analysis::ty::ty_lower::collect_generic_params;
     use crate::analysis::ty::type_fn::type_fn_wf;
@@ -771,7 +773,11 @@ recursive type fn G3Bad<F, const N: usize>() -> (*) {
 }
 "#;
 
-    fn find_tf<'db>(db: &'db HirAnalysisTestDb, top_mod: TopLevelMod<'db>, name: &str) -> TypeFnDef<'db> {
+    fn find_tf<'db>(
+        db: &'db HirAnalysisTestDb,
+        top_mod: TopLevelMod<'db>,
+        name: &str,
+    ) -> TypeFnDef<'db> {
         *top_mod
             .all_type_fns(db)
             .iter()
@@ -797,7 +803,12 @@ recursive type fn G3Bad<F, const N: usize>() -> (*) {
             .copied()
             .find(|s| s.name(db).to_opt().is_some_and(|i| i.data(db) == name))
             .unwrap_or_else(|| panic!("missing struct `{name}`"));
-        TyId::adt(db, AdtRef::try_from_item(ItemKind::Struct(s)).unwrap().as_adt(db))
+        TyId::adt(
+            db,
+            AdtRef::try_from_item(ItemKind::Struct(s))
+                .unwrap()
+                .as_adt(db),
+        )
     }
 
     fn usize_subject<'db>(db: &'db HirAnalysisTestDb, n: u32) -> TyId<'db> {
@@ -850,7 +861,10 @@ recursive type fn G3Bad<F, const N: usize>() -> (*) {
 
         let cx = TraitSolveCx::new(&db, top_mod.scope());
         assert!(!is_goal_satisfiable(&db, cx, goal).is_satisfied());
-        assert_eq!(strict_prove(&db, ingot, goal, empty), StrictResult::NotProven);
+        assert_eq!(
+            strict_prove(&db, ingot, goal, empty),
+            StrictResult::NotProven
+        );
     }
 
     /// ANTI-VACUITY (mandatory). A genuine multi-solution `NeedsConfirmation`: two
@@ -883,7 +897,10 @@ impl Marker for Amb {}
             "expected a multi-solution NeedsConfirmation, got {permissive:?}"
         );
         // The divergence, asserted together:
-        assert!(permissive.is_satisfied(), "permissive counts NeedsConfirmation satisfied");
+        assert!(
+            permissive.is_satisfied(),
+            "permissive counts NeedsConfirmation satisfied"
+        );
         assert_eq!(
             strict_prove(&db, ingot, goal, empty),
             StrictResult::NotProven,
@@ -901,8 +918,7 @@ impl Marker for Amb {}
         let (top_mod, _) = db.top_mod(file);
         let ingot = top_mod.scope().ingot(&db);
         let marker = marker_trait(&db, top_mod);
-        let invalid =
-            TyId::invalid(&db, crate::analysis::ty::ty_def::InvalidCause::Other);
+        let invalid = TyId::invalid(&db, crate::analysis::ty::ty_def::InvalidCause::Other);
         let goal = TraitInstId::new_simple(&db, marker, vec![invalid]);
         let empty = PredicateListId::empty_list(&db);
 
@@ -913,7 +929,10 @@ impl Marker for Amb {}
             "expected ContainsInvalid, got {permissive:?}"
         );
         assert!(permissive.is_satisfied());
-        assert_eq!(strict_prove(&db, ingot, goal, empty), StrictResult::NotProven);
+        assert_eq!(
+            strict_prove(&db, ingot, goal, empty),
+            StrictResult::NotProven
+        );
     }
 
     // ------------------------------------------------------------------
@@ -945,7 +964,10 @@ impl Marker for Amb {}
 
         let mut table = UnificationTable::new(&db);
         assert!(table.unify(o1, o1).is_ok(), "an opaque unifies with itself");
-        assert!(table.unify(o1, o2).is_err(), "distinct opaques must not unify");
+        assert!(
+            table.unify(o1, o2).is_err(),
+            "distinct opaques must not unify"
+        );
 
         let concrete = adt_ty(&db, top_mod, "Par");
         assert!(
@@ -996,9 +1018,11 @@ impl Marker for Amb {}
         let params = collect_generic_params(db, GenericParamOwner::TypeFn(tf));
         let mut args = Vec::new();
         for i in 0..n_type_params {
-            args.push(params.param_by_original_idx(db, i).unwrap_or_else(|| {
-                panic!("missing type param {i}")
-            }));
+            args.push(
+                params
+                    .param_by_original_idx(db, i)
+                    .unwrap_or_else(|| panic!("missing type param {i}")),
+            );
         }
         // The subject is the last original param.
         args.push(
@@ -1015,7 +1039,10 @@ impl Marker for Amb {}
         let file = db.new_stand_alone(Utf8PathBuf::from("induct_recog_ok.fe"), FIXTURES);
         let (top_mod, _) = db.top_mod(file);
         let rpow = find_tf(&db, top_mod, "RPow");
-        let wf = type_fn_wf(&db, rpow).data.clone().expect("RPow well-formed");
+        let wf = type_fn_wf(&db, rpow)
+            .data
+            .clone()
+            .expect("RPow well-formed");
         let marker = marker_trait(&db, top_mod);
         let goal = TraitInstId::new_simple(&db, marker, vec![symbolic_app(&db, rpow, 1)]);
         assert_eq!(minimal_class(&db, &wf, goal), MinimalClass::InClass);
@@ -1027,7 +1054,10 @@ impl Marker for Amb {}
         let file = db.new_stand_alone(Utf8PathBuf::from("induct_recog_bush.fe"), FIXTURES);
         let (top_mod, _) = db.top_mod(file);
         let bush = find_tf(&db, top_mod, "Bush");
-        let wf = type_fn_wf(&db, bush).data.clone().expect("Bush well-formed");
+        let wf = type_fn_wf(&db, bush)
+            .data
+            .clone()
+            .expect("Bush well-formed");
         let marker = marker_trait(&db, top_mod);
         let goal = TraitInstId::new_simple(&db, marker, vec![symbolic_app(&db, bush, 0)]);
         assert_eq!(
@@ -1059,11 +1089,18 @@ impl Marker for Amb {}
         let file = db.new_stand_alone(Utf8PathBuf::from("induct_recog_ground.fe"), FIXTURES);
         let (top_mod, _) = db.top_mod(file);
         let rpow = find_tf(&db, top_mod, "RPow");
-        let wf = type_fn_wf(&db, rpow).data.clone().expect("RPow well-formed");
+        let wf = type_fn_wf(&db, rpow)
+            .data
+            .clone()
+            .expect("RPow well-formed");
         let marker = marker_trait(&db, top_mod);
         let pair = adt_ty(&db, top_mod, "Pair");
         // Ground subject (3), not a bare rigid const param.
-        let app = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[pair, usize_subject(&db, 3)]);
+        let app = TyId::foldl(
+            &db,
+            TyId::type_fn(&db, rpow),
+            &[pair, usize_subject(&db, 3)],
+        );
         let goal = TraitInstId::new_simple(&db, marker, vec![app]);
         assert_eq!(
             minimal_class(&db, &wf, goal),
@@ -1077,7 +1114,10 @@ impl Marker for Amb {}
         let file = db.new_stand_alone(Utf8PathBuf::from("induct_recog_nontf.fe"), FIXTURES);
         let (top_mod, _) = db.top_mod(file);
         let rpow = find_tf(&db, top_mod, "RPow");
-        let wf = type_fn_wf(&db, rpow).data.clone().expect("RPow well-formed");
+        let wf = type_fn_wf(&db, rpow)
+            .data
+            .clone()
+            .expect("RPow well-formed");
         let marker = marker_trait(&db, top_mod);
         let goal = TraitInstId::new_simple(&db, marker, vec![adt_ty(&db, top_mod, "Pair")]);
         assert_eq!(
@@ -1092,12 +1132,19 @@ impl Marker for Amb {}
         let file = db.new_stand_alone(Utf8PathBuf::from("induct_recog_tfarg.fe"), FIXTURES);
         let (top_mod, _) = db.top_mod(file);
         let rpow = find_tf(&db, top_mod, "RPow");
-        let wf = type_fn_wf(&db, rpow).data.clone().expect("RPow well-formed");
+        let wf = type_fn_wf(&db, rpow)
+            .data
+            .clone()
+            .expect("RPow well-formed");
         let marker = marker_trait(&db, top_mod);
 
         // Forwarded type arg is itself a (hand-built, unexpanded) type-fn app.
         let pair = adt_ty(&db, top_mod, "Pair");
-        let inner = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[pair, usize_subject(&db, 2)]);
+        let inner = TyId::foldl(
+            &db,
+            TyId::type_fn(&db, rpow),
+            &[pair, usize_subject(&db, 2)],
+        );
         // Outer: RPow<inner, N> with N a bare rigid subject.
         let params = collect_generic_params(&db, GenericParamOwner::TypeFn(rpow));
         let n_param = params.param_by_original_idx(&db, 1).expect("subject");
@@ -1164,9 +1211,8 @@ recursive type fn Bush<const N: usize>() -> (*) {
     /// membership from `F: Marker` alone. This is the new proof power.
     #[test]
     fn engine_proves_constrained_rpow_without_where_bound() {
-        let rendered = constrained_diags(
-            "fn use_it<F: Marker, const N: usize>(x: Requires<RPow<F, N>>) {}",
-        );
+        let rendered =
+            constrained_diags("fn use_it<F: Marker, const N: usize>(x: Requires<RPow<F, N>>) {}");
         assert!(
             rendered.is_empty(),
             "the engine should prove `RPow<F, N>: Marker` from `F: Marker`, but got:\n{rendered}"
@@ -1195,8 +1241,10 @@ recursive type fn Bush<const N: usize>() -> (*) {
     #[test]
     fn engine_ih_is_load_bearing() {
         let mut db = HirAnalysisTestDb::default();
-        let file =
-            db.new_stand_alone(Utf8PathBuf::from("type_fn_s22b_ih.fe"), CONSTRAINED_FIXTURES);
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("type_fn_s22b_ih.fe"),
+            CONSTRAINED_FIXTURES,
+        );
         let (top_mod, _) = db.top_mod(file);
         let ingot = top_mod.scope().ingot(&db);
         let rpow = find_tf(&db, top_mod, "RPow");
@@ -1238,10 +1286,16 @@ recursive type fn Bush<const N: usize>() -> (*) {
     #[test]
     fn engine_declines_multi_self_call_shared_opaque() {
         let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s22b_bush.fe"), CONSTRAINED_FIXTURES);
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("type_fn_s22b_bush.fe"),
+            CONSTRAINED_FIXTURES,
+        );
         let (top_mod, _) = db.top_mod(file);
         let bush = find_tf(&db, top_mod, "Bush");
-        let wf = type_fn_wf(&db, bush).data.clone().expect("Bush well-formed");
+        let wf = type_fn_wf(&db, bush)
+            .data
+            .clone()
+            .expect("Bush well-formed");
         let marker = marker_trait(&db, top_mod);
         let goal = TraitInstId::new_simple(&db, marker, vec![symbolic_app(&db, bush, 0)]);
 
@@ -1277,8 +1331,10 @@ recursive type fn Bush<const N: usize>() -> (*) {
         use crate::analysis::ty::type_fn::normalize_type_fn_app;
 
         let mut db = HirAnalysisTestDb::default();
-        let file =
-            db.new_stand_alone(Utf8PathBuf::from("type_fn_s22b_xcheck.fe"), CONSTRAINED_FIXTURES);
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("type_fn_s22b_xcheck.fe"),
+            CONSTRAINED_FIXTURES,
+        );
         let (top_mod, _) = db.top_mod(file);
         let rpow = find_tf(&db, top_mod, "RPow");
         let marker = marker_trait(&db, top_mod);
@@ -1471,8 +1527,7 @@ recursive type fn LPow<F, const N: usize>() -> (*) {
     /// trait-bound diagnostic fires. Proof power rides on the real precondition.
     #[test]
     fn demo_negative_twin_arg_not_reduce_rejected() {
-        let rendered =
-            demo_diags("fn reduce_rpow<F, const N: usize>(x: Reducer<RPow<F, N>>) {}");
+        let rendered = demo_diags("fn reduce_rpow<F, const N: usize>(x: Reducer<RPow<F, N>>) {}");
         assert!(
             rendered.contains("is not satisfied") || rendered.contains("doesn't implement"),
             "without `F: Reduce` the demo must be rejected, got:\n{rendered}"
@@ -1489,8 +1544,9 @@ recursive type fn LPow<F, const N: usize>() -> (*) {
     fn demo_negative_twin_combinator_impl_removed_rejected() {
         use crate::test_db::format_diagnostics;
         let no_comp = DEMO.replace("impl<A: Reduce, B: Reduce> Reduce for Comp<A, B> {}\n", "");
-        let src =
-            format!("{no_comp}\nfn reduce_rpow<F: Reduce, const N: usize>(x: Reducer<RPow<F, N>>) {{}}\n");
+        let src = format!(
+            "{no_comp}\nfn reduce_rpow<F: Reduce, const N: usize>(x: Reducer<RPow<F, N>>) {{}}\n"
+        );
         let mut db = HirAnalysisTestDb::default();
         let file = db.new_stand_alone(Utf8PathBuf::from("type_fn_s3a_demo_nocomp.fe"), &src);
         let (top_mod, _) = db.top_mod(file);
@@ -1531,7 +1587,11 @@ recursive type fn LPow<F, const N: usize>() -> (*) {
         let pair_ty = adt_ty(&db, top_mod, "Pair");
 
         // (1) NORMALIZATION: RPow<Pair, 3> -> Comp<Comp<Comp<Par, Pair>, Pair>, Pair>.
-        let app3 = TyId::foldl(&db, TyId::type_fn(&db, rpow), &[pair_ty, usize_subject(&db, 3)]);
+        let app3 = TyId::foldl(
+            &db,
+            TyId::type_fn(&db, rpow),
+            &[pair_ty, usize_subject(&db, 3)],
+        );
         let nf3 = normalize_type_fn_app(&db, app3);
         // Assert structurally (interned-id equality) against the hand-built
         // depth-3 right-nested Comp tree — robust to pretty-print spacing.
@@ -1614,7 +1674,10 @@ recursive type fn LPow<F, const N: usize>() -> (*) {
         let cx_injected = TraitSolveCx::new(&db, rpow.scope()).with_assumptions(injected);
         match is_goal_satisfiable(&db, cx_injected, sym_goal) {
             GoalSatisfiability::Satisfied(sol) => assert!(
-                matches!(sol.value.implementor.origin(&db), ImplementorOrigin::Assumption),
+                matches!(
+                    sol.value.implementor.origin(&db),
+                    ImplementorOrigin::Assumption
+                ),
                 "the symbolic discharge must ride the Assumption route, got {:?}",
                 sol.value.implementor.origin(&db)
             ),
@@ -1753,7 +1816,11 @@ impl Backend for EvmB {
 
         let rbin = find_tf(&db, top_mod, "RBin");
         let pair = adt_ty(&db, top_mod, "Pair");
-        let arg = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[pair, usize_subject(&db, 3)]);
+        let arg = TyId::foldl(
+            &db,
+            TyId::type_fn(&db, rbin),
+            &[pair, usize_subject(&db, 3)],
+        );
         assert!(
             type_fn_app_head(&db, arg).is_some(),
             "the argument is a live ground type-fn app"
@@ -1799,15 +1866,26 @@ impl Backend for EvmB {
         let scope = top_mod.scope();
         let empty = PredicateListId::empty_list(&db);
 
-        let app = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[pair, usize_subject(&db, 3)]);
+        let app = TyId::foldl(
+            &db,
+            TyId::type_fn(&db, rbin),
+            &[pair, usize_subject(&db, 3)],
+        );
         // Hand-built NF: Comp<Comp<Comp<Par, Pair>, Pair>, Pair>.
         let c1 = TyId::foldl(&db, comp, &[par, pair]);
         let c2 = TyId::foldl(&db, comp, &[c1, pair]);
         let c3 = TyId::foldl(&db, comp, &[c2, pair]);
 
         let a = normalize_ty(&db, app, scope, empty);
-        assert_eq!(a, c3, "ground type-fn app must fold to the NF through the folder");
-        assert_eq!(normalize_ty(&db, c3, scope, empty), c3, "NF is a fixed point");
+        assert_eq!(
+            a, c3,
+            "ground type-fn app must fold to the NF through the folder"
+        );
+        assert_eq!(
+            normalize_ty(&db, c3, scope, empty),
+            c3,
+            "NF is a fixed point"
+        );
         assert_eq!(normalize_ty(&db, a, scope, empty), a, "idempotent");
     }
 
@@ -1938,7 +2016,10 @@ impl<V> Backend for WrapV<V> {
         use crate::hir_def::IdentId;
 
         let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(Utf8PathBuf::from("gat_threaded_conf.fe"), GAT_THREADED_FIXTURES);
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("gat_threaded_conf.fe"),
+            GAT_THREADED_FIXTURES,
+        );
         let (top_mod, _) = db.top_mod(file);
 
         let backend = find_trait(&db, top_mod, "Backend");
@@ -1955,7 +2036,11 @@ impl<V> Backend for WrapV<V> {
         let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
 
         // a: the engine order (fold the ground type-fn arg, then project).
-        let rbin3 = TyId::foldl(&db, TyId::type_fn(&db, rbin), &[pair, usize_subject(&db, 3)]);
+        let rbin3 = TyId::foldl(
+            &db,
+            TyId::type_fn(&db, rbin),
+            &[pair, usize_subject(&db, 3)],
+        );
         let applied = TyId::foldl(&db, head, &[rbin3]);
         let a = normalize_ty(&db, applied, scope, empty);
 
@@ -1970,16 +2055,21 @@ impl<V> Backend for WrapV<V> {
         let c = TyId::foldl(&db, store, &[c3]);
 
         assert_eq!(
-            a, c,
+            a,
+            c,
             "project-after-unfold must reach Store<NF>, got {}",
             a.pretty_print(&db)
         );
         assert_eq!(
-            b, c,
+            b,
+            c,
             "unfold-after-project must reach Store<NF>, got {}",
             b.pretty_print(&db)
         );
-        assert_eq!(a, b, "the two orders must reach the IDENTICAL interned TyId");
+        assert_eq!(
+            a, b,
+            "the two orders must reach the IDENTICAL interned TyId"
+        );
         assert!(
             collect_type_fn_heads(&db, a).is_empty(),
             "no type-fn head may survive the threaded projection"
@@ -1999,7 +2089,10 @@ impl<V> Backend for WrapV<V> {
         use crate::hir_def::IdentId;
 
         let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(Utf8PathBuf::from("gat_threaded_g2.fe"), GAT_THREADED_FIXTURES);
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("gat_threaded_g2.fe"),
+            GAT_THREADED_FIXTURES,
+        );
         let (top_mod, _) = db.top_mod(file);
 
         let backend = find_trait(&db, top_mod, "Backend");
@@ -2016,9 +2109,20 @@ impl<V> Backend for WrapV<V> {
         let b32 = normalize_ty(&db, TyId::foldl(&db, head, &[u32t]), scope, empty);
         let b8 = normalize_ty(&db, TyId::foldl(&db, head, &[u8t]), scope, empty);
 
-        assert_eq!(b32, TyId::foldl(&db, store, &[u32t]), "Buffer<u32> -> Store<u32>");
-        assert_eq!(b8, TyId::foldl(&db, store, &[u8t]), "Buffer<u8> -> Store<u8>");
-        assert_ne!(b32, b8, "distinct args must project to DISTINCT types (no conflation)");
+        assert_eq!(
+            b32,
+            TyId::foldl(&db, store, &[u32t]),
+            "Buffer<u32> -> Store<u32>"
+        );
+        assert_eq!(
+            b8,
+            TyId::foldl(&db, store, &[u8t]),
+            "Buffer<u8> -> Store<u8>"
+        );
+        assert_ne!(
+            b32, b8,
+            "distinct args must project to DISTINCT types (no conflation)"
+        );
     }
 
     /// Symbolic opacity on a THREADED projection: `EvmB::Buffer<RBin<F, N>>` with
@@ -2034,7 +2138,10 @@ impl<V> Backend for WrapV<V> {
         use crate::hir_def::IdentId;
 
         let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(Utf8PathBuf::from("gat_threaded_sym.fe"), GAT_THREADED_FIXTURES);
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("gat_threaded_sym.fe"),
+            GAT_THREADED_FIXTURES,
+        );
         let (top_mod, _) = db.top_mod(file);
 
         let backend = find_trait(&db, top_mod, "Backend");
@@ -2053,7 +2160,12 @@ impl<V> Backend for WrapV<V> {
         let inst = TraitInstId::new_simple(&db, backend, vec![evmb]);
         let head = TyId::assoc_ty(&db, inst, IdentId::new(&db, "Buffer".to_string()));
         let applied = TyId::foldl(&db, head, &[sym]);
-        let t = normalize_ty(&db, applied, top_mod.scope(), PredicateListId::empty_list(&db));
+        let t = normalize_ty(
+            &db,
+            applied,
+            top_mod.scope(),
+            PredicateListId::empty_list(&db),
+        );
 
         // Projection happened, and the opaque arg was threaded through verbatim.
         assert_eq!(
@@ -2086,7 +2198,10 @@ impl<V> Backend for WrapV<V> {
         use crate::hir_def::IdentId;
 
         let mut db = HirAnalysisTestDb::default();
-        let file = db.new_stand_alone(Utf8PathBuf::from("gat_non_capture.fe"), GAT_THREADED_FIXTURES);
+        let file = db.new_stand_alone(
+            Utf8PathBuf::from("gat_non_capture.fe"),
+            GAT_THREADED_FIXTURES,
+        );
         let (top_mod, _) = db.top_mod(file);
 
         let backend = find_trait(&db, top_mod, "Backend");
@@ -2111,7 +2226,8 @@ impl<V> Backend for WrapV<V> {
         let expected = TyId::foldl(&db, pairof, &[u, u32t]); // PairOf<U, u32>
         let captured = TyId::foldl(&db, pairof, &[u32t, u32t]); // PairOf<u32, u32>
         assert_eq!(
-            t, expected,
+            t,
+            expected,
             "the GAT param T must bind to the projection arg, leaving caller U intact; got {}",
             t.pretty_print(&db)
         );
@@ -2188,14 +2304,26 @@ impl<V> Backend for WrapV<V> {
         let inst_c = TraitInstId::new_simple(&db, backend, vec![TyId::foldl(&db, wrapv, &[u8t])]);
         let head_c = TyId::assoc_ty(&db, inst_c, buffer);
         let t_c = normalize_ty(&db, TyId::foldl(&db, head_c, &[u32t]), scope, empty);
-        assert_eq!(t_c, u8t, "concrete receiver projects to its own V (u8), never args[0]");
-        assert_ne!(t_c, u32t, "the projection arg must NOT leak into a bare-impl-param RHS");
+        assert_eq!(
+            t_c, u8t,
+            "concrete receiver projects to its own V (u8), never args[0]"
+        );
+        assert_ne!(
+            t_c, u32t,
+            "the projection arg must NOT leak into a bare-impl-param RHS"
+        );
 
         // Generic receiver: WrapV<U>::Buffer<u32> -> U (the caller param), never u32.
         let inst_g = TraitInstId::new_simple(&db, backend, vec![TyId::foldl(&db, wrapv, &[u])]);
         let head_g = TyId::assoc_ty(&db, inst_g, buffer);
         let t_g = normalize_ty(&db, TyId::foldl(&db, head_g, &[u32t]), scope, empty);
-        assert_eq!(t_g, u, "generic receiver projects to the caller param U, never args[0]");
-        assert_ne!(t_g, u32t, "the caller param must NOT be captured (the latent A3 erratum)");
+        assert_eq!(
+            t_g, u,
+            "generic receiver projects to the caller param U, never args[0]"
+        );
+        assert_ne!(
+            t_g, u32t,
+            "the caller param must NOT be captured (the latent A3 erratum)"
+        );
     }
 }

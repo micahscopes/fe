@@ -2193,12 +2193,15 @@ impl<B> Backend for Wrap<B> where B: Backend {
             if arity == 0 || spine.len() != arity {
                 return false;
             }
-            spine.iter().enumerate().all(|(j, &arg)| match arg.data(db) {
-                TyData::TyParam(param) => {
-                    param.is_assoc_ty_param() && param.owner == decl_scope && param.idx == j
-                }
-                _ => false,
-            })
+            spine
+                .iter()
+                .enumerate()
+                .all(|(j, &arg)| match arg.data(db) {
+                    TyData::TyParam(param) => {
+                        param.is_assoc_ty_param() && param.owner == decl_scope && param.idx == j
+                    }
+                    _ => false,
+                })
         }
 
         // (a) The revival fired: at least one env predicate carries an

@@ -235,45 +235,24 @@ fn semantic_callee_key_with_assumptions<'db>(
         assumptions
             .list(db)
             .iter()
-            .map(|inst| {
-                inst.normalize(
-                    db,
-                    impl_env.normalization_scope(db),
-                    assumptions,
-                )
-            })
+            .map(|inst| inst.normalize(db, impl_env.normalization_scope(db), assumptions))
             .collect::<Vec<_>>(),
     );
     let witnesses = witnesses
         .into_iter()
-        .map(|inst| {
-            inst.normalize(
-                db,
-                impl_env.normalization_scope(db),
-                assumptions,
-            )
-        })
+        .map(|inst| inst.normalize(db, impl_env.normalization_scope(db), assumptions))
         .collect::<Vec<_>>();
     let selected_implementors = selected_implementors
         .into_iter()
         .map(|(inst, implementor)| {
             (
-                inst.normalize(
-                    db,
-                    impl_env.normalization_scope(db),
-                    assumptions,
-                ),
+                inst.normalize(db, impl_env.normalization_scope(db), assumptions),
                 implementor,
             )
         })
         .collect();
-    let impl_env = ImplEnv::new(
-        db,
-        impl_env.normalization_scope(db),
-        assumptions,
-        witnesses,
-    )
-    .with_selected_implementors(selected_implementors);
+    let impl_env = ImplEnv::new(db, impl_env.normalization_scope(db), assumptions, witnesses)
+        .with_selected_implementors(selected_implementors);
 
     Some(SemanticInstanceKey::new(
         db,

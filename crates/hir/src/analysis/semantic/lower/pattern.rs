@@ -669,13 +669,17 @@ fn enum_tag_ty<'db>(db: &'db dyn HirAnalysisDb, enum_ty: TyId<'db>) -> TyId<'db>
         .as_enum(db)
         .map(|enum_| enum_.len_variants(db))
         .unwrap_or(0);
-    if variant_count <= u8::MAX as usize + 1 {
+    // Compare the largest tag rather than spelling `MAX + 1`: on wasm32,
+    // `u32::MAX as usize + 1` overflows even though every possible collection
+    // length necessarily fits a u32 tag.
+    let max_tag = variant_count.saturating_sub(1);
+    if max_tag <= u8::MAX as usize {
         TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U8)))
-    } else if variant_count <= u16::MAX as usize + 1 {
+    } else if max_tag <= u16::MAX as usize {
         TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U16)))
-    } else if variant_count <= u32::MAX as usize + 1 {
+    } else if max_tag <= u32::MAX as usize {
         TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U32)))
-    } else if variant_count <= u64::MAX as usize {
+    } else if max_tag <= u64::MAX as usize {
         TyId::new(db, TyData::TyBase(TyBase::Prim(PrimTy::U64)))
     } else {
         TyId::u256(db)

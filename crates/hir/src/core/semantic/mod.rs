@@ -4870,9 +4870,7 @@ impl<'db> ImplTrait<'db> {
         // reject, so a later gate lift cannot un-ban it. Reporting it first (and
         // withholding the implementor) also keeps the diagnostic clean: no
         // trailing symbolic-unsupported / missing-assoc noise for a banned impl.
-        if let Some(site) =
-            crate::analysis::ty::type_fn::impl_header_type_fn_site(db, self)
-        {
+        if let Some(site) = crate::analysis::ty::type_fn::impl_header_type_fn_site(db, self) {
             use crate::analysis::ty::type_fn::ImplHeaderTypeFnSite;
             let span = match site {
                 ImplHeaderTypeFnSite::SelfType => self.span().ty().into(),
@@ -5289,9 +5287,7 @@ impl<'db> TraitAssocTypeView<'db> {
     /// decls stay skipped in `extend_all_bounds`.
     pub fn has_param_guards(self, db: &'db dyn HirDb) -> bool {
         self.generic_params(db).data(db).iter().any(|p| match p {
-            GenericParam::Type(t) => {
-                t.bounds.iter().any(|b| matches!(b, TypeBound::Trait(_)))
-            }
+            GenericParam::Type(t) => t.bounds.iter().any(|b| matches!(b, TypeBound::Trait(_))),
             GenericParam::Const(_) => false,
         })
     }

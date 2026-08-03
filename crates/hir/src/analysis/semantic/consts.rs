@@ -123,10 +123,14 @@ pub enum SemConstValue<'db> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Update)]
 pub enum SemConstScalar {
     Bool(bool),
-    Int { value: BigInt },
+    Int {
+        value: BigInt,
+    },
     /// An `f32` value stored as its IEEE-754 bit pattern (raw `f32` is not
     /// `Eq`/`Hash`). Reconstruct with `f32::from_bits(bits)`.
-    Float { bits: u32 },
+    Float {
+        bits: u32,
+    },
     Bytes(Vec<u8>),
 }
 

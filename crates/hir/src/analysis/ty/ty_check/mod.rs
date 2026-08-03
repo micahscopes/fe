@@ -3721,7 +3721,10 @@ impl<'db> TypedBody<'db> {
     pub fn smir_lowering_blocker_details(&self, db: &'db dyn HirAnalysisDb) -> Vec<String> {
         let mut details = Vec::new();
         if self.result_ty.has_invalid(db) {
-            details.push(format!("invalid result type {}", self.result_ty.pretty_print(db)));
+            details.push(format!(
+                "invalid result type {}",
+                self.result_ty.pretty_print(db)
+            ));
         }
         if let Some(body) = self.body {
             for (expr, expr_data) in body.exprs(db).iter() {

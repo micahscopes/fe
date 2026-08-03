@@ -513,8 +513,11 @@ impl<'db> Trait<'db> {
             for trait_inst in assoc.bounds_on_subject(db, default_ty) {
                 match ty::trait_resolution::is_goal_satisfiable(
                     db,
-                    ty::trait_resolution::ProvisionEnv::for_scope(self.scope(), default_assumptions)
-                        .solve_cx(db),
+                    ty::trait_resolution::ProvisionEnv::for_scope(
+                        self.scope(),
+                        default_assumptions,
+                    )
+                    .solve_cx(db),
                     trait_inst,
                 ) {
                     ty::trait_resolution::GoalSatisfiability::Satisfied(_) => {}
@@ -950,7 +953,9 @@ impl<'db> ImplTrait<'db> {
         let trait_hir = implementor.trait_def(db);
 
         for (impl_idx, def) in self.types(db).iter().enumerate() {
-            let Some(name) = def.name.to_opt() else { continue };
+            let Some(name) = def.name.to_opt() else {
+                continue;
+            };
 
             let Some(decl) = trait_hir.assoc_ty(db, name) else {
                 // 6-0026: impl declares an assoc type the trait does not have.
@@ -1381,7 +1386,9 @@ impl<'db> ImplTrait<'db> {
         use ty::fold::TraitScopeSubstFolder;
         use ty::fold::TyFoldable as _;
         use ty::trait_lower::lower_impl_trait;
-        use ty::trait_resolution::{GoalSatisfiability, PredicateListId, ProvisionEnv, is_goal_satisfiable};
+        use ty::trait_resolution::{
+            GoalSatisfiability, PredicateListId, ProvisionEnv, is_goal_satisfiable,
+        };
         use ty::ty_lower::{gat_param_ty, gat_signature_conforms};
         use ty::type_fn_induct::{StrictResult, strict_prove};
 
@@ -1468,9 +1475,7 @@ impl<'db> ImplTrait<'db> {
             let decl_idx = trait_hir
                 .assoc_types(db)
                 .position(|v| v.name(db) == Some(name));
-            let arity = decl
-                .map(|d| d.generic_params.data(db).len())
-                .unwrap_or(0);
+            let arity = decl.map(|d| d.generic_params.data(db).len()).unwrap_or(0);
 
             // The impl-side def (idx = position in `impl.types`), for the remap
             // target owner + param binders. May be absent if the binding came
@@ -1524,17 +1529,17 @@ impl<'db> ImplTrait<'db> {
                     // rigids the RHS subject carries. Merged-default leg (None):
                     // no remap; subject and guard already share the trait-side
                     // rigid.
-                    let guard = if let (Some((def_idx, def)), Some(decl_idx)) = (def_lookup, decl_idx)
-                    {
-                        let mut remap = GatOwnerRemap {
-                            decl_scope: ScopeId::TraitType(trait_hir, decl_idx as u16),
-                            impl_owner: ScopeId::ImplTraitType(self, def_idx as u16),
-                            def_params: def.generic_params.data(db),
+                    let guard =
+                        if let (Some((def_idx, def)), Some(decl_idx)) = (def_lookup, decl_idx) {
+                            let mut remap = GatOwnerRemap {
+                                decl_scope: ScopeId::TraitType(trait_hir, decl_idx as u16),
+                                impl_owner: ScopeId::ImplTraitType(self, def_idx as u16),
+                                def_params: def.generic_params.data(db),
+                            };
+                            guard.fold_with(db, &mut remap)
+                        } else {
+                            guard
                         };
-                        guard.fold_with(db, &mut remap)
-                    } else {
-                        guard
-                    };
                     discharge_guards.push(guard);
                 }
             }

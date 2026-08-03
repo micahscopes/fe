@@ -461,8 +461,7 @@ impl<'db> TypeFnWfError<'db> {
                 "this type form is not allowed in a `recursive type fn` arm".into()
             }
             Self::SubjectNotDecreasing => {
-                "the subject of a recursive call must strictly decrease toward the base case"
-                    .into()
+                "the subject of a recursive call must strictly decrease toward the base case".into()
             }
             Self::SubjectMayUnderflow => "recursive type fn argument may underflow".into(),
             Self::SubjectDivZeroFixpoint => {
@@ -578,9 +577,9 @@ impl<'db> TypeFnWfError<'db> {
                  predicates and bounds on the subject are rejected"
                     .to_string(),
             ],
-            Self::MissingReturnKind => vec![
-                "add a return kind, e.g. `-> (*)` for a plain type".to_string(),
-            ],
+            Self::MissingReturnKind => {
+                vec!["add a return kind, e.g. `-> (*)` for a plain type".to_string()]
+            }
             Self::DisallowedArmConstArg => vec![
                 "use an integer literal, bare `N`, checked `N - k` / `N / k`, or one direct \
                  `const fn` call whose arguments use only those forms; nested calls and composed \

@@ -301,7 +301,8 @@ impl<'db> GeneratorNodeData<'db> {
         // `TyBase::TypeFn` would mean the ban leaked, letting coherence depend on
         // subject arithmetic (the S2.1 "gate, don't select" hazard).
         #[cfg(debug_assertions)]
-        if crate::analysis::ty::type_fn::type_fn_app_head(db, extracted_goal.self_ty(db)).is_some() {
+        if crate::analysis::ty::type_fn::type_fn_app_head(db, extracted_goal.self_ty(db)).is_some()
+        {
             for cand in cands.iter() {
                 let cand_self = cand.instantiate_identity().self_ty(db);
                 debug_assert!(
@@ -598,7 +599,11 @@ fn all_assoc_rigids_in_scope<'db>(
             }
         }
     }
-    let mut scan = Scan { db, scope, ok: true };
+    let mut scan = Scan {
+        db,
+        scope,
+        ok: true,
+    };
     inst.visit_with(&mut scan);
     scan.ok
 }
@@ -620,9 +625,7 @@ struct GatUniversalInstantiator<'db, 'a> {
 impl<'db> TyFolder<'db> for GatUniversalInstantiator<'db, '_> {
     fn fold_ty(&mut self, db: &'db dyn HirAnalysisDb, ty: TyId<'db>) -> TyId<'db> {
         match ty.data(db) {
-            TyData::TyParam(param)
-                if param.is_assoc_ty_param() && param.owner == self.scope =>
-            {
+            TyData::TyParam(param) if param.is_assoc_ty_param() && param.owner == self.scope => {
                 if let Some(&var) = self.cache.get(&param.idx) {
                     var
                 } else {

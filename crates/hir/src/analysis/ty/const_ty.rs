@@ -453,12 +453,8 @@ fn evaluate_int_const_expr_impl<'db>(
                         let exp = rhs.to_u32()?;
                         normalize(lhs.pow(exp))
                     }
-                    crate::hir_def::ArithBinOp::LShift => {
-                        normalize(lhs << rhs.to_usize()?)
-                    }
-                    crate::hir_def::ArithBinOp::RShift => {
-                        normalize(lhs >> rhs.to_usize()?)
-                    }
+                    crate::hir_def::ArithBinOp::LShift => normalize(lhs << rhs.to_usize()?),
+                    crate::hir_def::ArithBinOp::RShift => normalize(lhs >> rhs.to_usize()?),
                     crate::hir_def::ArithBinOp::BitAnd => normalize(lhs & rhs),
                     crate::hir_def::ArithBinOp::BitOr => normalize(lhs | rhs),
                     crate::hir_def::ArithBinOp::BitXor => normalize(lhs ^ rhs),

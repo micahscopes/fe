@@ -44,12 +44,17 @@ impl AnalysisPassManager {
     ) -> Vec<Box<dyn DiagnosticVoucher + 'db>> {
         let mut diags = vec![];
         for (name, pass) in self.module_passes.iter_mut() {
+            #[cfg(not(target_arch = "wasm32"))]
             let t0 = std::time::Instant::now();
             diags.extend(pass.run_on_module(db, top_mod));
+            #[cfg(not(target_arch = "wasm32"))]
             let elapsed = t0.elapsed();
+            #[cfg(not(target_arch = "wasm32"))]
             if elapsed.as_micros() > 100 {
                 tracing::debug!("[fe:timing]   pass {name}: {elapsed:?}");
             }
+            #[cfg(target_arch = "wasm32")]
+            let _ = name;
         }
         diags
     }
@@ -62,12 +67,17 @@ impl AnalysisPassManager {
         let mut diags = vec![];
         for module in tree.all_modules() {
             for (name, pass) in self.module_passes.iter_mut() {
+                #[cfg(not(target_arch = "wasm32"))]
                 let t0 = std::time::Instant::now();
                 diags.extend(pass.run_on_module(db, module));
+                #[cfg(not(target_arch = "wasm32"))]
                 let elapsed = t0.elapsed();
+                #[cfg(not(target_arch = "wasm32"))]
                 if elapsed.as_micros() > 100 {
                     tracing::debug!("[fe:timing]   pass {name}: {elapsed:?}");
                 }
+                #[cfg(target_arch = "wasm32")]
+                let _ = name;
             }
         }
         diags

@@ -51,14 +51,14 @@ pub mod provider_goal;
 pub(crate) mod scratch;
 pub mod term;
 pub mod trait_def;
-pub mod type_fn;
-pub(crate) mod type_fn_induct;
 pub mod trait_lower;
 pub mod trait_resolution; // This line was previously 'pub mod name_resolution;'
 pub mod ty_check;
 pub mod ty_def;
 pub mod ty_error;
 pub mod ty_lower;
+pub mod type_fn;
+pub(crate) mod type_fn_induct;
 pub mod unify;
 pub mod visitor;
 
@@ -112,17 +112,18 @@ fn active_target_ty_path<'db>(
     TARGET_REGISTRY
         .iter()
         .find(|(candidate, _)| Some(*candidate) == name.as_deref())
-        .or_else(|| TARGET_REGISTRY.iter().find(|(n, _)| *n == DEFAULT_TARGET_NAME))
+        .or_else(|| {
+            TARGET_REGISTRY
+                .iter()
+                .find(|(n, _)| *n == DEFAULT_TARGET_NAME)
+        })
         .map(|(_, path)| *path)
         .expect("target registry must contain the default target")
 }
 
 /// The `#[target(<name>)]` selection in scope, if any. `None` means "use the
 /// default".
-fn active_target_name<'db>(
-    db: &'db dyn HirAnalysisDb,
-    scope: ScopeId<'db>,
-) -> Option<String> {
+fn active_target_name<'db>(db: &'db dyn HirAnalysisDb, scope: ScopeId<'db>) -> Option<String> {
     // Walk enclosing modules (and finally the file's top module, which is in the
     // `parent_module` chain) for the innermost `#[target(...)]`, mirroring how
     // `arithmetic_mode` resolves the per-module arithmetic knob.
@@ -714,14 +715,13 @@ pub fn resolve_default_root_effect_ty<'db>(
     let (root_ingot, target_segments) = target_path
         .split_first()
         .expect("target registry paths are non-empty");
-    let target_ty =
-        resolve_target_ty(PathId::from_segments(db, target_path)).or_else(|| {
-            let mut relative = corelib::lib_root_path(db, scope, root_ingot);
-            for segment in target_segments {
-                relative = relative.push_str(db, segment);
-            }
-            resolve_target_ty(relative)
-        })?;
+    let target_ty = resolve_target_ty(PathId::from_segments(db, target_path)).or_else(|| {
+        let mut relative = corelib::lib_root_path(db, scope, root_ingot);
+        for segment in target_segments {
+            relative = relative.push_str(db, segment);
+        }
+        resolve_target_ty(relative)
+    })?;
 
     let target_trait = corelib::resolve_core_trait(db, scope, &["contracts", "Target"])?;
     let inst_target =

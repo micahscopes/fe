@@ -1698,8 +1698,12 @@ trait Other {
         );
 
         // Partial application: `Cont::Item<r0>`.
-        let partial =
-            TraitInstId::new(&db, show, vec![TyId::foldl(&db, head, &[r0])], IndexMap::new());
+        let partial = TraitInstId::new(
+            &db,
+            show,
+            vec![TyId::foldl(&db, head, &[r0])],
+            IndexMap::new(),
+        );
         assert!(
             sanctioned_applied_gat_assumption(&db, partial).is_none(),
             "a partially applied GAT subject must be rejected"
