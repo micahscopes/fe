@@ -1,0 +1,347 @@
+//! gaplay: a small geometric-algebra playground library over `sparse_clifford`.
+//!
+//! This ingot adds the two operators ganja.js spells `^` (meet) and `&` (join)
+//! for the projective plane PGA 2D = Cl(2,0,1), as CTFE-PLANNED sparse
+//! contractions in exactly the `sparse_clifford::SparsePlan` + derive-provider
+//! discipline the cga3d/qcga demos use for the geometric product. No compiler
+//! change: the outer (wedge) product is the SAME planning as `support_gp` with
+//! an empty metric mask, plus the reordering sign `blade_merge_sign` supplies.
+//!
+//! One kernel, two operators. The outer product of two grade-1 vectors is the
+//! antisymmetric bilinear map
+//!     out = (i0*j1 - i1*j0,  i0*j2 - i2*j0,  i1*j2 - i2*j1)
+//! over the three generators {e0, e1, e2}. In PGA 2D the LINES are grade-1
+//! vectors and the POINTS are grade-2 (the dual), and the regressive (join)
+//! product is the dual of the outer product, so the SAME kernel computes both:
+//!   - meet(line, line)  = intersection POINT (outer product on line space);
+//!   - join(point, point) = connecting LINE (outer product on the dual space).
+//! Both fall out of one planned `pga2_wedge3`.
+//!
+//! The plan is dual-gated: the survivor mask is `static_assert`ed against the
+//! hand-derived value below, and a codegen test (crates/codegen/tests/
+//! pga2d_meet_join_plan.rs) compiles this ingot to wasm and checks the planned
+//! kernel bit-for-bit against an independent hand-tabled cross product, plus
+//! the Desargues collinearity the whole demo rests on.
+
+use core::marker::Copy
+use core::num::IntDowncast
+use core::derive::{Derive, Evidence, ImplBuilder, Reflect}
+use sparse_clifford::{
+    Nat, PlanLength, SparsePlan, Term, blade_merge_sign, plan_candidate_left,
+    plan_candidate_right, plan_mask_cardinality,
+}
+
+// ---------------------------------------------------------------------------
+// The PGA-2D outer-product plan. Both operands are grade-1 over the three
+// generators e0, e1, e2, so there are 3 * 3 = 9 candidate products, numbered
+// row-major `candidate = left * 3 + right` exactly as every plan-driven
+// provider numbers them.
+// ---------------------------------------------------------------------------
+
+const LEFT_TERMS: usize = 3
+const RIGHT_TERMS: usize = 3
+const CANDIDATES: usize = LEFT_TERMS * RIGHT_TERMS
+
+/// The outer-product sign of one candidate, THROUGH the generic library fn:
+/// the two grade-1 generators e_left and e_right, wedged. 0 = annihilated
+/// (repeated generator), 1 = +1, 2 = -1. This is the ONLY place the algebra is
+/// stated; the plan mask and the provider both consume it.
+const fn wedge_pairing(_ candidate: usize) -> usize {
+    blade_merge_sign(
+        (1 as u32) << plan_candidate_left(candidate, RIGHT_TERMS).downcast_truncate(),
+        (1 as u32) << plan_candidate_right(candidate, RIGHT_TERMS).downcast_truncate(),
+    )
+}
+
+// Provider-facing helpers: the derive body may only call const fns declared in
+// its own module, so these one-liners bridge it to the library vocabulary.
+
+/// The left operand field slot (0..2) a candidate names.
+const fn wedge_left_field(_ candidate: usize) -> usize {
+    plan_candidate_left(candidate, RIGHT_TERMS)
+}
+
+/// The right operand field slot (3..5) a candidate names; the carrier packs
+/// the left vector in fields 0..2 and the right vector in fields 3..5.
+const fn wedge_right_field(_ candidate: usize) -> usize {
+    LEFT_TERMS + plan_candidate_right(candidate, RIGHT_TERMS)
+}
+
+/// Which output component (0, 1, 2 = e01, e02, e12) a surviving candidate feeds.
+/// The output blade is the generator pair {min, max}; the three pairs
+/// (0,1),(0,2),(1,2) map to 0,1,2 by `min + max - 1`.
+const fn wedge_out_slot(_ candidate: usize) -> usize {
+    let left: usize = plan_candidate_left(candidate, RIGHT_TERMS)
+    let right: usize = plan_candidate_right(candidate, RIGHT_TERMS)
+    if left < right { left + right - 1 } else { right + left - 1 }
+}
+
+/// Whether a candidate carries a -1 outer sign.
+const fn wedge_negative(_ candidate: usize) -> bool {
+    wedge_pairing(candidate) == 2
+}
+
+// ---------------------------------------------------------------------------
+// The CTFE plan: keep the six disjoint-support survivors, drop the three
+// diagonal candidates (e_i ^ e_i = 0).
+// ---------------------------------------------------------------------------
+
+const fn wedge_keep_word() -> u32 {
+    let mut candidate: usize = 0
+    let mut keep_bits: u32 = 0
+    while candidate < CANDIDATES {
+        if wedge_pairing(candidate) != 0 {
+            keep_bits = keep_bits | ((1 as u32) << candidate.downcast_truncate())
+        }
+        candidate = candidate + 1
+    }
+    keep_bits
+}
+
+const WEDGE_KEEP0: u32 = wedge_keep_word()
+
+const fn survivor_count() -> usize {
+    plan_mask_cardinality(WEDGE_KEEP0, 0, 0, 0, 0, 0, 0, 0, CANDIDATES)
+}
+
+const fn survivor_negatives() -> usize {
+    let mut candidate: usize = 0
+    let mut count: usize = 0
+    while candidate < CANDIDATES {
+        if wedge_pairing(candidate) == 2 { count = count + 1 }
+        candidate = candidate + 1
+    }
+    count
+}
+
+// The hand-derived ground truth, pinned. Survivors {1, 2, 3, 5, 6, 7}
+// (mask 2^1 + 2^2 + 2^3 + 2^5 + 2^6 + 2^7 = 238): three positive products
+// (e0^e1, e0^e2, e1^e2) and three negative (e1^e0, e2^e0, e2^e1). The three
+// diagonal candidates 0, 4, 8 annihilate.
+static_assert(WEDGE_KEEP0 == 238)
+static_assert(survivor_count() == 6)
+static_assert(survivor_negatives() == 3)
+// The candidate -> (output component, sign) routing, pinned: candidate 1
+// (e0^e1) is +e01, candidate 3 (e1^e0) is -e01, candidate 5 (e1^e2) is +e12.
+static_assert(wedge_out_slot(1) == 0)
+static_assert(!wedge_negative(1))
+static_assert(wedge_out_slot(3) == 0)
+static_assert(wedge_negative(3))
+static_assert(wedge_out_slot(2) == 1)
+static_assert(wedge_out_slot(6) == 1)
+static_assert(wedge_out_slot(5) == 2)
+static_assert(wedge_out_slot(7) == 2)
+
+type WedgePlan6 =
+    SparsePlan<WEDGE_KEEP0, 0, 0, 0, 0, 0, 0, 0, CANDIDATES, 6>
+
+fn takes_nat6(_ value: Nat<6>) {}
+fn planned_wedge_has_six_terms(value: <WedgePlan6 as PlanLength>::Out) {
+    takes_nat6(value)
+}
+
+// ---------------------------------------------------------------------------
+// The operand carrier and the generated three-component contraction.
+// Fields 0..2 are the left grade-1 vector, 3..5 the right one.
+// ---------------------------------------------------------------------------
+
+pub struct WedgeOperands {
+    pub l0: f32, pub l1: f32, pub l2: f32,
+    pub r0: f32, pub r1: f32, pub r2: f32,
+}
+impl Copy for WedgeOperands {}
+
+/// A grade-2 (or dually, grade-1) result: three coefficients.
+pub struct Bivec3 { pub c0: f32, pub c1: f32, pub c2: f32 }
+impl Copy for Bivec3 {}
+
+pub trait PlannedWedge {
+    fn w0(_ operands: WedgeOperands) -> f32
+    fn w1(_ operands: WedgeOperands) -> f32
+    fn w2(_ operands: WedgeOperands) -> f32
+}
+
+/// The provider is one CATAMORPHISM over `WedgePlan6`: it walks the six
+/// surviving `Term`s once and ROUTES each to the output component its blade
+/// names, folding `mul`/`neg`/`add` into three straight-line accumulators. It
+/// emits one scalar method per component; nothing here restates the algebra.
+struct Pga2WedgeProvider {}
+impl Derive<PlannedWedge> for Pga2WedgeProvider {
+    const fn derive<T>(ev: own Evidence<PlannedWedge<T>>) -> Evidence<PlannedWedge<T>>
+        uses (reflect: Reflect<T>, builder: mut ImplBuilder<PlannedWedge<T>>)
+    {
+        let operands = builder.arg_ref("operands")
+        let acc0 = operands
+        let acc1 = operands
+        let acc2 = operands
+        let e0 = 0
+        let e1 = 0
+        let e2 = 0
+        for nested in builder.ty<WedgePlan6>().normalized_preorder_types() {
+            if builder.same_ty(nested.constructor(), builder.ty<Term>()) {
+                let candidate: usize = 9
+                for arg in nested.generic_args() {
+                    if arg.is_const() { candidate = arg.const_value() }
+                }
+                if candidate < 9 {
+                    let left_field = wedge_left_field(candidate)
+                    let right_field = wedge_right_field(candidate)
+                    let lhs = operands
+                    let rhs = operands
+                    let index = 0
+                    for field in reflect.fields() {
+                        if index == left_field { lhs = builder.field_get(operands, field) }
+                        if index == right_field { rhs = builder.field_get(operands, field) }
+                        index = index + 1
+                    }
+                    let term = builder.mul(lhs, rhs)
+                    if wedge_negative(candidate) { term = builder.neg(term) }
+                    let slot = wedge_out_slot(candidate)
+                    if slot == 0 {
+                        if e0 == 0 { acc0 = term } else { acc0 = builder.add(acc0, term) }
+                        e0 = e0 + 1
+                    }
+                    if slot == 1 {
+                        if e1 == 0 { acc1 = term } else { acc1 = builder.add(acc1, term) }
+                        e1 = e1 + 1
+                    }
+                    if slot == 2 {
+                        if e2 == 0 { acc2 = term } else { acc2 = builder.add(acc2, term) }
+                        e2 = e2 + 1
+                    }
+                }
+            }
+        }
+        builder.emit_method("w0", acc0)
+        builder.emit_method("w1", acc1)
+        builder.emit_method("w2", acc2)
+        builder.finish()
+        ev
+    }
+}
+
+derive PlannedWedge for WedgeOperands using Pga2WedgeProvider
+
+/// The planned outer product of two grade-1 vectors, as flat f32 arithmetic.
+/// This one kernel is meet AND join (see below).
+pub fn pga2_wedge3(
+    _ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32,
+) -> Bivec3 {
+    let o = WedgeOperands { l0: l0, l1: l1, l2: l2, r0: r0, r1: r1, r2: r2 }
+    Bivec3 {
+        c0: <WedgeOperands as PlannedWedge>::w0(o),
+        c1: <WedgeOperands as PlannedWedge>::w1(o),
+        c2: <WedgeOperands as PlannedWedge>::w2(o),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PGA-2D points and lines, and the two operators over the one kernel.
+//
+// A LINE is a grade-1 vector (l0 e0 + l1 e1 + l2 e2); its zero set in the plane
+// is { (x, y) : l0 + l2*x - l1*y = 0 }. A POINT is stored in homogeneous
+// coordinates (c0 : c1 : c2), its Euclidean location (c0/c2, c1/c2). A
+// Euclidean point (x, y) embeds as (x : y : 1).
+// ---------------------------------------------------------------------------
+
+pub struct Line { pub c0: f32, pub c1: f32, pub c2: f32 }
+impl Copy for Line {}
+
+pub struct Point { pub c0: f32, pub c1: f32, pub c2: f32 }
+impl Copy for Point {}
+
+pub fn point_xy(_ x: f32, _ y: f32) -> Point { Point { c0: x, c1: y, c2: 1.0 } }
+
+pub fn point_world_x(_ p: Point) -> f32 { p.c0 / p.c2 }
+pub fn point_world_y(_ p: Point) -> f32 { p.c1 / p.c2 }
+
+/// join (ganja `&`): the LINE through two points, = outer product of the dual.
+pub fn join(_ p: Point, _ q: Point) -> Line {
+    let w = pga2_wedge3(p.c0, p.c1, p.c2, q.c0, q.c1, q.c2)
+    Line { c0: w.c0, c1: w.c1, c2: w.c2 }
+}
+
+/// meet (ganja `^`): the intersection POINT of two lines, = outer product.
+pub fn meet(_ a: Line, _ b: Line) -> Point {
+    let w = pga2_wedge3(a.c0, a.c1, a.c2, b.c0, b.c1, b.c2)
+    Point { c0: w.c0, c1: w.c1, c2: w.c2 }
+}
+
+/// Point-on-line incidence: zero exactly when the point lies on the line.
+pub fn incidence(_ p: Point, _ l: Line) -> f32 {
+    p.c0 * l.c2 - p.c1 * l.c1 + p.c2 * l.c0
+}
+
+/// Signed value of the line's field at a Euclidean sample point; zero on the
+/// line. `= incidence(point_xy(x, y), l)`.
+pub fn line_eval(_ l: Line, _ x: f32, _ y: f32) -> f32 {
+    l.c0 + l.c2 * x - l.c1 * y
+}
+
+// ---------------------------------------------------------------------------
+// The Desargues configuration, in a canonical (unrotated) frame. A fixed base
+// triangle A, B, C and a centre of perspectivity O; the second triangle's
+// vertices slide along the rays O->vertex by per-vertex scalars derived from
+// one sweep parameter (distinct factors, so the second triangle is a genuine
+// perspective image, not a similarity: its sides are not parallel to the
+// first's, so the three cross-intersections are finite and visibly move). Both
+// the demo and the codegen gate build the figure from THESE constructors, so
+// they cannot drift.
+//
+// The negative vertex coordinates are formed by runtime subtraction from zero
+// rather than negative `const` literals: a `const f32 = -0.6` initializer needs
+// CTFE negation, which the const machine does not implement (it reports
+// "expected int"). The magnitudes below are plain positive literals; the signs
+// live in the runtime constructors. The meet/join kernel itself is unaffected.
+// ---------------------------------------------------------------------------
+
+pub const DESA_OX: f32 = 0.0
+pub const DESA_OY: f32 = 0.05
+pub const DESA_AXM: f32 = 0.6
+pub const DESA_AYM: f32 = 0.4
+pub const DESA_BX: f32 = 0.7
+pub const DESA_BYM: f32 = 0.45
+pub const DESA_CX: f32 = 0.0
+pub const DESA_CY: f32 = 0.75
+pub const DESA_FB: f32 = 1.45
+pub const DESA_FC: f32 = 0.72
+
+/// The centre of perspectivity O and the three base-triangle vertices, as the
+/// ONE source of truth shared by the demo and the codegen gate.
+pub fn desa_o() -> Point { point_xy(DESA_OX, DESA_OY) }
+pub fn desa_a() -> Point { point_xy(0.0 - DESA_AXM, 0.0 - DESA_AYM) }
+pub fn desa_b() -> Point { point_xy(DESA_BX, 0.0 - DESA_BYM) }
+pub fn desa_c() -> Point { point_xy(DESA_CX, DESA_CY) }
+
+/// The second-triangle vertex along ray O->v at ray scalar t.
+pub fn desargues_image(_ v: Point, _ t: f32) -> Point {
+    let o = desa_o()
+    point_xy(o.c0 + t * (v.c0 - o.c0), o.c1 + t * (v.c1 - o.c1))
+}
+
+/// The three Desargues cross-intersections (corresponding-side meets) for a
+/// sweep value. Theorem: they are collinear (the axis of perspectivity).
+pub struct CrossPoints { pub pa: Point, pub pb: Point, pub pc: Point }
+impl Copy for CrossPoints {}
+
+pub fn desargues_cross(_ sweep: f32) -> CrossPoints {
+    let a = desa_a()
+    let b = desa_b()
+    let c = desa_c()
+    let ap = desargues_image(a, sweep)
+    let bp = desargues_image(b, sweep * DESA_FB)
+    let cp = desargues_image(c, sweep * DESA_FC)
+    CrossPoints {
+        pa: meet(join(b, c), join(bp, cp)),
+        pb: meet(join(c, a), join(cp, ap)),
+        pc: meet(join(a, b), join(ap, bp)),
+    }
+}
+
+/// The homogeneous collinearity residual of the three cross-points: the
+/// incidence of the third with the axis through the first two. Zero (up to
+/// float rounding) is Desargues' theorem.
+pub fn desargues_residual(_ sweep: f32) -> f32 {
+    let x = desargues_cross(sweep)
+    incidence(x.pc, join(x.pa, x.pb))
+}

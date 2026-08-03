@@ -1,0 +1,7 @@
+[ingot]
+name = "gaplay"
+version = "0.1.0"
+
+[dependencies]
+core = { path = "../core" }
+sparse_clifford = "../sparse_clifford"

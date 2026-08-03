@@ -307,6 +307,61 @@ static_assert(null_vector_pairing(4, 3, 3, 6) == 0)
 static_assert(null_vector_pairing(9, 3, 3, 6) == 2)
 static_assert(null_vector_pairing(15, 15, 3, 6) == 0)
 
+// ---------------------------------------------------------------------------
+// Outer (wedge) product reordering sign.
+//
+// The OUTER product keeps only DISJOINT-support blade pairs (no shared
+// generator), so it never consults a squared generator: it is
+// metric-INDEPENDENT. That makes it the same planning as `support_gp` with an
+// empty `nonzero_square_generators` mask — `support_gp(l, r, 0)` keeps a pair
+// iff `(l & r) == 0`, which is exactly the outer product's support. The only
+// thing the geometric-product support layer does NOT carry is the coefficient
+// SIGN; `blade_merge_sign` supplies it, in the same 0/1/2 convention as
+// `null_vector_pairing` (0 = annihilated, 1 = +1, 2 = -1).
+//
+// For two orthogonal basis blades given as generator bitmasks, the outer
+// product e_L ^ e_R = (-1)^inversions * e_(L | R), where `inversions` counts
+// the pairs (i in L, j in R) with i > j: the transposition parity of merging
+// two ascending generator lists into one. A shared generator (L & R != 0)
+// annihilates the pair, since e_g ^ e_g = 0.
+//
+// This is the second pairing predicate the `SparsePlan` machinery admits with
+// no compiler change: the regressive (join) product is the dual of the outer
+// product, so a single planned kernel serves both meet and join.
+pub const fn blade_merge_sign(_ left: u32, _ right: u32) -> usize {
+    if (left & right) != 0 { return 0 }
+    let mut inversions: u32 = 0
+    let mut i: u32 = 0
+    while i < 32 {
+        if ((left >> i) & 1) == 1 {
+            let mut j: u32 = 0
+            while j < i {
+                inversions = inversions + ((right >> j) & 1)
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    if (inversions & 1) == 0 { 1 } else { 2 }
+}
+
+// Grade-1 wedges over three generators {e0, e1, e2} (PGA 2D's vector space):
+// e0^e1 = +e01, e1^e0 = -e01, e0^e2 = +e02, e2^e0 = -e02, e1^e2 = +e12,
+// e2^e1 = -e12; a repeated generator annihilates.
+static_assert(blade_merge_sign(1, 2) == 1)
+static_assert(blade_merge_sign(2, 1) == 2)
+static_assert(blade_merge_sign(1, 4) == 1)
+static_assert(blade_merge_sign(4, 1) == 2)
+static_assert(blade_merge_sign(2, 4) == 1)
+static_assert(blade_merge_sign(4, 2) == 2)
+static_assert(blade_merge_sign(2, 2) == 0)
+// Higher-grade merges: e01 ^ e2 = +e012 (already sorted), e12 ^ e0 = +e012
+// (two transpositions), e2 ^ e01 = +e012, and any shared generator kills it.
+static_assert(blade_merge_sign(3, 4) == 1)
+static_assert(blade_merge_sign(6, 1) == 1)
+static_assert(blade_merge_sign(4, 3) == 1)
+static_assert(blade_merge_sign(3, 6) == 0)
+
 pub recursive type fn SparsePlan<
     const Keep0: u32, const Keep1: u32, const Keep2: u32, const Keep3: u32,
     const Keep4: u32, const Keep5: u32, const Keep6: u32, const Keep7: u32,

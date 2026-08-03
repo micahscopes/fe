@@ -1,0 +1,31 @@
+// Wasm probes for the gaplay meet/join dual-gate
+// (crates/codegen/tests/pga2d_meet_join_plan.rs). Each is a thin, positional
+// f32 export over the REAL planned kernel; the test runs them under wasmtime
+// and compares to an independent hand-tabled oracle bit-for-bit, and checks
+// the Desargues collinearity the whole demo rests on.
+
+use gaplay::{
+    desargues_cross, desargues_residual, pga2_wedge3, point_world_x, point_world_y,
+}
+
+// The planned outer-product kernel, one export per output component. This is
+// the meet/join core: `join(p, q)` and `meet(a, b)` both call `pga2_wedge3`.
+pub fn wedge_c0(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    pga2_wedge3(l0, l1, l2, r0, r1, r2).c0
+}
+pub fn wedge_c1(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    pga2_wedge3(l0, l1, l2, r0, r1, r2).c1
+}
+pub fn wedge_c2(_ l0: f32, _ l1: f32, _ l2: f32, _ r0: f32, _ r1: f32, _ r2: f32) -> f32 {
+    pga2_wedge3(l0, l1, l2, r0, r1, r2).c2
+}
+
+// The Desargues cross-points (Euclidean coordinates) and their collinearity
+// residual, built from the planned meet/join over the shared config.
+pub fn desargues_pax(_ sweep: f32) -> f32 { point_world_x(desargues_cross(sweep).pa) }
+pub fn desargues_pay(_ sweep: f32) -> f32 { point_world_y(desargues_cross(sweep).pa) }
+pub fn desargues_pbx(_ sweep: f32) -> f32 { point_world_x(desargues_cross(sweep).pb) }
+pub fn desargues_pby(_ sweep: f32) -> f32 { point_world_y(desargues_cross(sweep).pb) }
+pub fn desargues_pcx(_ sweep: f32) -> f32 { point_world_x(desargues_cross(sweep).pc) }
+pub fn desargues_pcy(_ sweep: f32) -> f32 { point_world_y(desargues_cross(sweep).pc) }
+pub fn desargues_res(_ sweep: f32) -> f32 { desargues_residual(sweep) }
