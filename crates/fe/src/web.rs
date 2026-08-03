@@ -1,16 +1,16 @@
 use std::collections::HashSet;
 
 use camino::Utf8PathBuf;
-use codegen::{resolve_web_entry, WebBuildOptions, WebBundle, WebBundleMode};
+use codegen::{WebBuildOptions, WebBundle, WebBundleMode, resolve_web_entry};
 use common::InputDb;
 use driver::{
-    cli_target::{resolve_cli_target, CliTarget},
     DriverDataBase,
+    cli_target::{CliTarget, resolve_cli_target},
 };
 use hir::hir_def::HirIngot;
 use url::Url;
 
-use crate::{dependency_diagnostics::DependencyIssues, WebCanonicalPolicy, WebMode};
+use crate::{WebCanonicalPolicy, WebMode, dependency_diagnostics::DependencyIssues};
 
 #[derive(Debug, Clone)]
 pub struct CompileRequest {
@@ -169,8 +169,9 @@ pub fn compile(request: &CompileRequest) -> Result<WebBundle, String> {
     // Derive the render entry and mode from the module's `actor` declaration when
     // not given explicitly; when supplied, they are reconciled against the
     // declaration (a mismatch errors, naming both sources).
-    let (entry, mode) = resolve_web_entry(&db, top_mod, (*entry).clone(), (*mode).map(to_bundle_mode))
-        .map_err(|error| error.to_string())?;
+    let (entry, mode) =
+        resolve_web_entry(&db, top_mod, (*entry).clone(), (*mode).map(to_bundle_mode))
+            .map_err(|error| error.to_string())?;
     let mode = from_bundle_mode(mode);
     let workgroup = validate_workgroup(mode, *workgroup)?;
 

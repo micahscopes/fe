@@ -13,6 +13,9 @@ mod test;
 mod tree;
 mod web;
 #[cfg(feature = "web-server")]
+mod web_dev;
+mod web_html;
+#[cfg(feature = "web-server")]
 mod web_serve;
 mod workspace_ingot;
 
@@ -397,7 +400,10 @@ pub enum Command {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum WebAction {
-    /// Compile one source entry to a Wasm + WebGPU bundle.
+    /// Compile one source entry to the legacy Wasm + WebGPU demo bundle.
+    ///
+    /// New standards-based sites should use `web precompile`; this command is
+    /// retained for the existing shader demos and is not the generic Web API.
     Build {
         #[command(flatten)]
         compile: WebCompileArgs,
@@ -405,7 +411,47 @@ pub enum WebAction {
         #[arg(long)]
         out: Utf8PathBuf,
     },
-    /// Compile, watch, and serve a browser bundle with isolation and opt-in live reload.
+    /// Precompile inert application/fe elements in an HTML document.
+    Precompile {
+        /// HTML entry document. Relative data-fe-src URLs resolve against it.
+        html: Utf8PathBuf,
+        /// New output directory; publication is all-or-nothing.
+        #[arg(long)]
+        out: Utf8PathBuf,
+    },
+    /// Verify a published Fe Web site without modifying it.
+    Verify {
+        /// Published HTML entry document, normally dist/index.html.
+        html: Utf8PathBuf,
+    },
+    /// Develop a standards-based HTML site containing application/fe scripts.
+    #[cfg(feature = "web-server")]
+    Dev {
+        /// HTML entry document. Relative data-fe-src URLs resolve against it.
+        html: Utf8PathBuf,
+        /// Loopback interface on which to listen.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port on which to listen. Pass 0 to select a free port.
+        #[arg(long, default_value_t = 8000)]
+        port: u16,
+        /// Source polling and rebuild debounce interval.
+        #[arg(long, default_value_t = 250)]
+        poll_ms: u64,
+        /// Compile once without watching source files.
+        #[arg(long)]
+        no_watch: bool,
+        /// Enable cross-origin isolation headers (COOP/COEP/CORP).
+        ///
+        /// This is required by browser threads and shared memory, but may block
+        /// cross-origin assets that do not opt in with CORS or CORP.
+        #[arg(long)]
+        isolation: bool,
+    },
+    /// Compile, watch, and serve the legacy fixed WebGPU demo bundle.
+    ///
+    /// Standards-based HTML sites should use `web dev`; this remains paired
+    /// with the legacy `web build` path.
     #[cfg(feature = "web-server")]
     Serve {
         #[command(flatten)]
@@ -567,6 +613,50 @@ pub fn run(opts: &Options) {
             WebAction::Build { compile, out } => {
                 if let Err(err) = web::build(&compile.request(), out) {
                     eprintln!("Error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            WebAction::Precompile { html, out } => {
+                if let Err(err) = web_html::precompile(html, out) {
+                    eprintln!("Error: {err}");
+                    std::process::exit(1);
+                }
+            }
+            WebAction::Verify { html } => {
+                match fe_html_precompile::verify_precompiled_site(html.as_std_path()) {
+                    Ok(report) => println!(
+                        "verified {} Fe module(s) and {} deployment file(s)",
+                        report.modules, report.files
+                    ),
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            #[cfg(feature = "web-server")]
+            WebAction::Dev {
+                html,
+                host,
+                port,
+                poll_ms,
+                no_watch,
+                isolation,
+            } => {
+                let config = web_dev::DevConfig {
+                    html: html.clone(),
+                    host: host.clone(),
+                    port: *port,
+                    poll_interval: std::time::Duration::from_millis(*poll_ms),
+                    watch: !*no_watch,
+                    isolation: *isolation,
+                };
+                let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+                    eprintln!("Error: failed to create web dev server runtime: {error}");
+                    std::process::exit(1);
+                });
+                if let Err(error) = runtime.block_on(web_dev::serve(config)) {
+                    eprintln!("Error: {error}");
                     std::process::exit(1);
                 }
             }
@@ -1278,6 +1368,27 @@ mod web_cli_tests {
     use super::*;
 
     #[test]
+    fn web_precompile_cli_is_the_generic_html_entrypoint() {
+        let options = Options::try_parse_from([
+            "fe",
+            "web",
+            "precompile",
+            "site/index.html",
+            "--out",
+            "dist",
+        ])
+        .unwrap();
+        let Command::Web {
+            action: WebAction::Precompile { html, out },
+        } = options.command
+        else {
+            panic!("expected standards-based web precompile");
+        };
+        assert_eq!(html, Utf8PathBuf::from("site/index.html"));
+        assert_eq!(out, Utf8PathBuf::from("dist"));
+    }
+
+    #[test]
     fn web_build_cli_requires_an_explicit_entry_and_parses_grid_shape() {
         let options = Options::try_parse_from([
             "fe",
@@ -1330,8 +1441,9 @@ mod web_cli_tests {
         // --entry and --mode are optional at parse time; when omitted the render
         // entry and mode are derived from the module's `actor` declaration at
         // compile time (see web::compile -> resolve_web_entry).
-        let derived = Options::try_parse_from(["fe", "web", "build", "kernel.fe", "--out", "bundle"])
-            .unwrap();
+        let derived =
+            Options::try_parse_from(["fe", "web", "build", "kernel.fe", "--out", "bundle"])
+                .unwrap();
         let Command::Web {
             action: WebAction::Build { compile, .. },
         } = derived.command
@@ -1479,6 +1591,45 @@ mod web_cli_tests {
         assert_eq!(port, 0);
         assert_eq!(poll_ms, 40);
         assert!(no_watch);
+    }
+
+    #[cfg(feature = "web-server")]
+    #[test]
+    fn web_dev_cli_is_loopback_by_default_and_separate_from_legacy_serve() {
+        let options =
+            Options::try_parse_from(["fe", "web", "dev", "site/index.html", "--port", "0"])
+                .unwrap();
+        let Command::Web {
+            action:
+                WebAction::Dev {
+                    html,
+                    host,
+                    port,
+                    poll_ms,
+                    no_watch,
+                    isolation,
+                },
+        } = options.command
+        else {
+            panic!("expected web dev");
+        };
+        assert_eq!(html, Utf8PathBuf::from("site/index.html"));
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, 0);
+        assert_eq!(poll_ms, 250);
+        assert!(!no_watch);
+        assert!(!isolation);
+
+        let isolated =
+            Options::try_parse_from(["fe", "web", "dev", "site/index.html", "--isolation"])
+                .unwrap();
+        let Command::Web {
+            action: WebAction::Dev { isolation, .. },
+        } = isolated.command
+        else {
+            panic!("expected isolated web dev");
+        };
+        assert!(isolation);
     }
 }
 

@@ -6,7 +6,7 @@ edition.workspace = true
 [features]
 default = ["doc-server", "web-server", "lsp"]
 doc-server = ["dep:tokio", "dep:axum"]
-web-server = ["dep:tokio", "dep:axum"]
+web-server = ["dep:tokio", "dep:axum", "dep:futures"]
 lsp = ["dep:language-server", "dep:tokio"]
 
 [dependencies]
@@ -27,11 +27,12 @@ mir.workspace = true
 cranelift-entity.workspace = true
 rustc-hash.workspace = true
 semantic-indexing.workspace = true
-codegen = { path = "../codegen", package = "fe-codegen" }
+codegen = { path = "../codegen", package = "fe-codegen", features = ["spirv-backend"] }
 contract-harness = { path = "../contract-harness", package = "fe-contract-harness" }
 solc-runner = { path = "../solc-runner", package = "fe-solc-runner" }
 # fe-web for model, assets, and static site generation
 fe-web = { path = "../fe-web" }
+fe-html-precompile = { path = "../html-precompile" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
@@ -48,8 +49,9 @@ crossbeam-channel.workspace = true
 scip = "0.6.1"
 protobuf = "=3.7.2"
 language-server = { workspace = true, optional = true }
-tokio = { version = "1.43.0", default-features = false, features = ["rt-multi-thread", "net", "macros", "fs", "time", "io-util"], optional = true }
+tokio = { version = "1.43.0", default-features = false, features = ["rt-multi-thread", "net", "macros", "fs", "time", "io-util", "sync"], optional = true }
 axum = { version = "0.8", optional = true }
+futures = { version = "0.3.31", default-features = false, features = ["std", "async-await"], optional = true }
 
 [dev-dependencies]
 dir-test.workspace = true
