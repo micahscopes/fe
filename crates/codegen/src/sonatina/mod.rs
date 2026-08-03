@@ -117,7 +117,15 @@ pub fn compile_runtime_package_wasm_with_options(
         sonatina_codegen::optim::Pipeline::size().run(&mut module);
     }
     let backend = WasmBackend::new().with_import_modules(import_modules);
-    let backend = if options.canonical_arena {
+    // Change 5 / item 6: enable the canonical arena when explicitly requested OR
+    // when the module actually allocates dynamically (a function-local
+    // `AllocObject`, a `Malloc` builtin, or a canonical lane emits
+    // `MemAllocDynamic`, whose callee `fe_cabi_alloc` the arena synthesizes). A
+    // default-options local-array module would otherwise reach the pinned
+    // translator without the allocator and fail; this mirrors the
+    // `BackendKind::Wasm` driver scan in `backend.rs`. A no-alloc module stays
+    // byte-identical to the pre-arena default, preserving the opt-in assertions.
+    let backend = if options.canonical_arena || wasm_lower::module_emits_dynamic_alloc(&module) {
         backend.with_canonical_arena()
     } else {
         backend
